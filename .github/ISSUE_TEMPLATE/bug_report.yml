@@ -1,0 +1,58 @@
+name: Bug report
+description: Something isn't working as documented.
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. The more specific you are, the faster we can fix it.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A short description of the bug. Include the exact command, MCP tool call, or SDK call you ran.
+      placeholder: |
+        I ran `trellis ingest trace --file foo.json` and got ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: Steps to reproduce, ideally a copy-pasteable shell sequence.
+      render: bash
+    validations:
+      required: true
+  - type: input
+    id: trellis-version
+    attributes:
+      label: Trellis version
+      description: Output of `trellis --version` (or git SHA if installed from source).
+    validations:
+      required: true
+  - type: input
+    id: python-version
+    attributes:
+      label: Python version
+      description: Output of `python --version`.
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS
+      placeholder: macOS 14.4 / Ubuntu 22.04 / Windows 11
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs / traceback
+      description: Paste the full error output. Use `--format json` for CLI errors when possible.
+      render: shell

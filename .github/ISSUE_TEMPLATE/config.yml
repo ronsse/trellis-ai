@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question or discussion
+    url: https://github.com/ronsse/trellis-ai/discussions
+    about: Ask questions and share ideas in GitHub Discussions.
+  - name: Security disclosure
+    url: https://github.com/ronsse/trellis-ai/security/policy
+    about: Privately report a security vulnerability — do not file a public issue.

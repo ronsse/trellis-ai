@@ -1,17 +1,18 @@
-"""Trellis tools for LangGraph agents.
+"""Trellis tools for LangGraph agents — REFERENCE TEMPLATE.
 
-Provides LangGraph-compatible tool functions that wrap the XPG SDK,
+This file is shipped as a copy-paste starting point, not as an installable
+module. Drop it into your own project (e.g. ``myproject/trellis_tools.py``)
+and import from there:
+
+    from myproject.trellis_tools import create_xpg_tools
+
+    tools = create_xpg_tools()                                 # local mode
+    tools = create_xpg_tools(base_url="http://localhost:8420") # remote mode
+    agent = create_react_agent(model, tools)
+
+Provides LangGraph-compatible tool functions that wrap the Trellis SDK,
 giving agents structured memory: traces, precedents, knowledge graph,
 and context retrieval.
-
-Usage:
-    from integrations.langgraph.tools import create_xpg_tools
-
-    tools = create_xpg_tools()  # local mode
-    tools = create_xpg_tools(base_url="http://localhost:8420")  # remote
-
-    # Add to your LangGraph agent
-    agent = create_react_agent(model, tools)
 """
 
 from __future__ import annotations

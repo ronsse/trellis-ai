@@ -30,7 +30,9 @@ Structured institutional memory for AI agents. Record traces of your work, build
 
 ## Available Tools
 
-8 macro tools, all returning token-budgeted markdown (not raw JSON):
+11 macro tools, all returning token-budgeted markdown (not raw JSON). Eight cover the most common write-and-read workflow; three more provide sectioned context for richer multi-step retrieval.
+
+**Core tools**
 
 | Tool | What It Does | Example |
 |------|-------------|---------|
@@ -42,6 +44,14 @@ Structured institutional memory for AI agents. Record traces of your work, build
 | `get_graph` | Explore entity neighborhood | `get_graph(entity_id="01JRK5N7QF", depth=2)` |
 | `record_feedback` | Record whether a task succeeded | `record_feedback(trace_id="01JRK5N7QF", success=true)` |
 | `search` | Search documents and entities | `search(query="database migration", limit=5)` |
+
+**Sectioned-context tools** (use for richer multi-step or workflow-spanning retrieval)
+
+| Tool | What It Does | Example |
+|------|-------------|---------|
+| `get_objective_context` | One pack covering domain knowledge + operational context for a whole workflow | `get_objective_context(intent="ship auth migration", domain="backend")` |
+| `get_task_context` | Pack scoped to specific entities for one step inside a workflow | `get_task_context(intent="rotate JWT keys", entity_ids=["auth-service"])` |
+| `get_sectioned_context` | Pack with caller-defined sections, per-section budgets and affinities | `get_sectioned_context(intent="...", sections=[{...}, {...}])` |
 
 ## Patterns
 

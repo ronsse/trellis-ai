@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from integrations.obsidian.vault import (
+from examples.integrations.obsidian.vault import (
     ObsidianVault,
     _extract_links,
     _extract_tags,

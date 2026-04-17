@@ -3,17 +3,27 @@ name: Publish to PyPI
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Tag or SHA to build from (must be a v* tag for hatch-vcs to derive a real version)"
+        required: true
+        default: ""
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          ref: ${{ inputs.ref || github.ref }}
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
       - run: pip install -e ".[dev]"
       - run: ruff check src/ tests/
       - run: mypy src/
@@ -29,9 +39,11 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          ref: ${{ inputs.ref || github.ref }}
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - run: pip install build
+      - run: pip install build twine
       - run: python -m build
+      - run: python -m twine check dist/*
       - uses: pypa/gh-action-pypi-publish@release/v1

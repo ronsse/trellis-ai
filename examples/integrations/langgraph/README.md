@@ -1,37 +1,41 @@
-# Trellis — LangGraph Integration
+# Trellis — LangGraph Reference Template
+
+> **Reference template — not a published package.** Copy [`tools.py`](tools.py) into your own project rather than importing from this repo. The Trellis core package (`trellis-ai`) is what's published to PyPI; integrations live here as starting points you adapt.
 
 Add structured institutional memory to LangGraph agents. Agents retrieve context before tasks, record traces of their work, and build a shared knowledge graph — so your team's agents learn from each other.
 
-## Prerequisites
+## How to use this template
 
-- Python 3.11+
-- `trellis-ai` installed (`pip install trellis-ai`)
-- `langgraph` and `langchain-core` installed
-- Stores initialized (`trellis admin init`)
-
-## Quick Start
+1. Copy `tools.py` into your project (e.g. `myproject/trellis_tools.py`).
+2. Install the dependencies it needs:
+   ```bash
+   pip install "trellis-ai" langgraph langchain-core
+   ```
+3. Initialize the store substrate once: `trellis admin init`.
+4. Import and use:
 
 ```python
 from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import create_react_agent
 
-from integrations.langgraph.tools import create_xpg_tools
+from myproject.trellis_tools import create_xpg_tools
 
-# Create XPG tools (local mode — no server needed)
+# Local mode — no Trellis API server needed
 xpg_tools = create_xpg_tools()
 
 # Or remote mode (via REST API)
 # xpg_tools = create_xpg_tools(base_url="http://localhost:8420")
 
-# Create agent with XPG tools
 model = ChatOpenAI(model="gpt-4o")
 agent = create_react_agent(model, xpg_tools)
 
-# The agent now has structured memory
 response = agent.invoke({
-    "messages": [{"role": "user", "content": "Check what we know about auth-service before making changes"}]
+    "messages": [{"role": "user",
+                  "content": "Check what we know about auth-service before making changes"}]
 })
 ```
+
+For a full runnable demo, see [`examples/langgraph_agent.py`](../../langgraph_agent.py) at the repo root.
 
 ## Available Tools
 
@@ -52,7 +56,7 @@ The core pattern for agents with institutional memory:
 ```python
 from langgraph.graph import StateGraph, MessagesState
 
-from integrations.langgraph.tools import create_xpg_tools
+from myproject.trellis_tools import create_xpg_tools
 
 xpg_tools = create_xpg_tools()
 
@@ -106,6 +110,6 @@ trellis admin serve --port 8420
 
 ## Further Reading
 
-- [Agent Guide — Operations](../../docs/agent-guide/operations.md) — Full API reference
-- [Agent Guide — Playbooks](../../docs/agent-guide/playbooks.md) — Step-by-step procedures
-- [Agent Guide — Schemas](../../docs/agent-guide/schemas.md) — Data models
+- [Agent Guide — Operations](../../../docs/agent-guide/operations.md) — Full API reference
+- [Agent Guide — Playbooks](../../../docs/agent-guide/playbooks.md) — Step-by-step procedures
+- [Agent Guide — Schemas](../../../docs/agent-guide/schemas.md) — Data models

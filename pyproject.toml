@@ -20,6 +20,7 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
@@ -66,10 +67,6 @@ cloud = [
     "pgvector>=0.3",
     "boto3>=1.34",
 ]
-langgraph = [
-    "langgraph>=0.2",
-    "langchain-core>=0.3",
-]
 llm-openai = [
     "openai>=1.0",
 ]
@@ -77,13 +74,12 @@ llm-anthropic = [
     "anthropic>=0.40",
 ]
 all = [
-    "trellis-ai[vectors,cloud,langgraph,llm-openai,llm-anthropic]",
+    "trellis-ai[vectors,cloud,llm-openai,llm-anthropic]",
 ]
 
 [project.scripts]
 trellis = "trellis_cli.main:app"
 trellis-mcp = "trellis.mcp.server:main"
-trellis-mcp-legacy = "trellis.mcp_server:main"
 trellis-api = "trellis_api.app:main"
 
 [tool.hatch.version]
@@ -92,7 +88,32 @@ fallback-version = "0.2.0"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/trellis", "src/trellis_cli", "src/trellis_workers", "src/trellis_api", "src/trellis_sdk"]
-artifacts = ["src/trellis/py.typed"]
+artifacts = [
+    "src/trellis/py.typed",
+    "src/trellis_cli/py.typed",
+    "src/trellis_sdk/py.typed",
+    "src/trellis_api/py.typed",
+    "src/trellis_workers/py.typed",
+]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+    "/tests",
+    "/docs",
+    "/examples",
+    "/skills",
+    "/scripts",
+    "/Makefile",
+    "/CHANGELOG.md",
+    "/CODE_OF_CONDUCT.md",
+    "/CONTRIBUTING.md",
+    "/RELEASING.md",
+    "/SECURITY.md",
+    "/README.md",
+    "/LICENSE",
+    "/pyproject.toml",
+]
 
 [tool.ruff]
 line-length = 88
@@ -120,7 +141,6 @@ ignore = [
 "src/trellis/stores/**/*.py" = ["S608", "S105"]  # parameterized SQL is safe; TOKEN_TRACKED is not a password
 "src/trellis/stores/registry.py" = ["PLR0911", "PLR0912"]  # many early returns in LLM builders / backend branches
 "src/trellis/mutate/executor.py" = ["PLR0911"]  # pipeline method has many return points
-"src/trellis/mcp_server.py" = ["PLR0911"]  # many return paths in tool handlers
 "src/trellis/mcp/**/*.py" = ["PLR0911"]  # many return paths in tool handlers
 "src/trellis_api/**/*.py" = ["PLR0911"]  # routes may have many return paths
 

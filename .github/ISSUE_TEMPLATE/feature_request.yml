@@ -1,0 +1,40 @@
+name: Feature request
+description: Suggest a new capability or change to existing behavior.
+labels: ["enhancement", "triage"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: Describe the use case. Skip the proposed solution — that's the next field.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What change would unblock you? Concrete API / CLI / config sketches help.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Workarounds you've tried, related projects, or other shapes of the same fix.
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Affected surface
+      multiple: true
+      options:
+        - CLI (trellis)
+        - REST API (trellis-api)
+        - MCP server (trellis-mcp)
+        - Python SDK (trellis_sdk)
+        - Workers / extractors (trellis_workers)
+        - Stores (trace / graph / vector / blob)
+        - Classification / retrieval
+        - Docs / examples / skills
+        - Other
+    validations:
+      required: true

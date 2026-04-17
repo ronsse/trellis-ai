@@ -126,7 +126,7 @@ Request/response schemas in `src/trellis_api/models.py` (Pydantic `TrellisModel`
 
 ### 2.4 MCP Server — agent-facing macro tools
 
-**Location:** `src/trellis/mcp/server.py` (new) or `src/trellis/mcp_server.py` (legacy)
+**Location:** `src/trellis/mcp/server.py`
 **Entry point:** `trellis-mcp` (register in Claude Desktop or any MCP client)
 **Audience:** Claude, other MCP-compatible LLMs
 **Design:** all tools return markdown strings (LLM-friendly), track token usage via `track_token_usage()` → event log, share a `StoreRegistry` singleton.

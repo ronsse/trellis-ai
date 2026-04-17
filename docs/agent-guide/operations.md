@@ -774,7 +774,9 @@ Start with `trellis admin serve` or `trellis-api`. Base path: `/api/v1/`.
 
 ## MCP Macro Tools
 
-Start with `trellis-mcp`. 8 tools returning token-budgeted markdown.
+Start with `trellis-mcp`. 11 tools returning token-budgeted markdown — 8 core tools plus 3 sectioned-context tools for richer pack assembly.
+
+**Core tools**
 
 | Tool | Args | Returns |
 |------|------|---------|
@@ -786,6 +788,16 @@ Start with `trellis-mcp`. 8 tools returning token-budgeted markdown.
 | `get_graph` | `entity_id`, `depth?`, `max_tokens?` | Markdown subgraph |
 | `record_feedback` | `trace_id?`, `pack_id?`, `success`, `notes?`, `helpful_item_ids?`, `unhelpful_item_ids?`, `followed_advisory_ids?` | Confirmation |
 | `search` | `query`, `limit?`, `max_tokens?` | Markdown search results |
+
+**Sectioned-context tools**
+
+| Tool | Args | Returns |
+|------|------|---------|
+| `get_objective_context` | `intent`, `domain?`, `max_tokens?`, `session_id?` | Markdown pack with fixed `Domain Knowledge` + `Operational Context` sections; designed to be called once at workflow start. |
+| `get_task_context` | `intent`, `entity_ids?`, `domain?`, `max_tokens?`, `session_id?` | Markdown pack scoped to specific entities; designed for per-step retrieval inside a workflow. |
+| `get_sectioned_context` | `intent`, `sections`, `domain?`, `max_tokens?`, `session_id?` | Markdown pack with caller-defined sections (custom affinities, content types, scopes, per-section budgets). |
+
+`session_id` lets the three sectioned tools deduplicate items returned by recent calls in the same session. Token budgets default to the values in `retrieval.budgets` (`config.yaml`); pass `max_tokens > 0` to override.
 
 All read tools track token usage in the event log for observability.
 
@@ -868,7 +880,7 @@ Or install via ClawHub:
 clawhub install trellis-ai
 ```
 
-After restarting OpenClaw, the agent has access to all 8 macro tools above. See [`integrations/openclaw/`](../../integrations/openclaw/) for the full setup guide and skill definition.
+After restarting OpenClaw, the agent has access to all 11 macro tools above. See [`examples/integrations/openclaw/`](../../examples/integrations/openclaw/) for the full setup guide and skill definition.
 
 ---
 

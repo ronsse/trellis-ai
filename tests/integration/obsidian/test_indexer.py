@@ -5,8 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from integrations.obsidian.indexer import VaultIndexer, _compute_hash, _path_to_id
-from integrations.obsidian.vault import ObsidianVault
+from examples.integrations.obsidian.indexer import (
+    VaultIndexer,
+    _compute_hash,
+    _path_to_id,
+)
+from examples.integrations.obsidian.vault import ObsidianVault
 
 from trellis.stores.document import SQLiteDocumentStore
 from trellis.stores.graph import SQLiteGraphStore

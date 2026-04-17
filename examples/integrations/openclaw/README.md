@@ -36,7 +36,7 @@ trellis admin init
 }
 ```
 
-4. Restart OpenClaw. Your agent now has 8 macro tools for structured memory.
+4. Restart OpenClaw. Your agent now has 11 macro tools for structured memory.
 
 ## Alternative: ClawHub Install
 
@@ -48,7 +48,7 @@ This installs the skill and configures the MCP server automatically.
 
 ## What Your Agent Gets
 
-8 high-level tools returning token-budgeted markdown:
+11 high-level tools returning token-budgeted markdown — 8 core tools plus 3 sectioned-context tools:
 
 | Tool | Purpose |
 |------|---------|
@@ -60,8 +60,11 @@ This installs the skill and configures the MCP server automatically.
 | `get_graph` | Explore entity neighborhood in the knowledge graph |
 | `record_feedback` | Record task success/failure for quality tracking |
 | `search` | Combined document + entity search |
+| `get_objective_context` | Workflow-level pack: domain knowledge + operational context |
+| `get_task_context` | Step-level pack scoped to specific entity ids |
+| `get_sectioned_context` | Caller-defined sections with per-section budgets and affinities |
 
-All tools accept `max_tokens` (default 2000) for context window budgeting. Responses are markdown, not raw JSON.
+All tools accept `max_tokens` (default 2000 for core tools, configurable via `retrieval.budgets` in `config.yaml` for sectioned tools). Responses are markdown, not raw JSON.
 
 ## Configuration
 
@@ -93,7 +96,7 @@ trellis admin stats
 
 ## Further Reading
 
-- [Agent Guide — Operations](../../docs/agent-guide/operations.md) — Full CLI, REST, MCP, and SDK reference
-- [Agent Guide — Playbooks](../../docs/agent-guide/playbooks.md) — Step-by-step procedures including OpenClaw setup
-- [Agent Guide — Schemas](../../docs/agent-guide/schemas.md) — All data models
-- [Agent Guide — Trace Format](../../docs/agent-guide/trace-format.md) — How to construct valid traces
+- [Agent Guide — Operations](../../../docs/agent-guide/operations.md) — Full CLI, REST, MCP, and SDK reference
+- [Agent Guide — Playbooks](../../../docs/agent-guide/playbooks.md) — Step-by-step procedures including OpenClaw setup
+- [Agent Guide — Schemas](../../../docs/agent-guide/schemas.md) — All data models
+- [Agent Guide — Trace Format](../../../docs/agent-guide/trace-format.md) — How to construct valid traces

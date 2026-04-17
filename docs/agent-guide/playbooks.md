@@ -558,7 +558,7 @@ Press Ctrl+C after confirming it starts without errors.
 }
 ```
 
-4. Restart OpenClaw. The agent now has access to 8 macro tools.
+4. Restart OpenClaw. The agent now has access to 11 macro tools (8 core + 3 sectioned-context).
 
 5. Verify the agent can use XPG tools by asking it to run:
 

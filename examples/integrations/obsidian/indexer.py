@@ -7,7 +7,7 @@ import hashlib
 import structlog
 from pydantic import Field
 
-from integrations.obsidian.vault import ObsidianVault
+from .vault import ObsidianVault
 from trellis.core.base import TrellisModel
 from trellis.stores.document import DocumentStore
 from trellis.stores.graph import GraphStore
