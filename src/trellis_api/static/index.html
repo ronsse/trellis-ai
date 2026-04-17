@@ -1,0 +1,2112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Trellis</title>
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg width='32' height='32' viewBox='0 0 192 192' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cline x1='96' y1='152' x2='48' y2='112' stroke='%236366f1' stroke-width='10' stroke-linecap='round' opacity='0.6'/%3E%3Cline x1='96' y1='152' x2='144' y2='112' stroke='%236366f1' stroke-width='10' stroke-linecap='round' opacity='0.6'/%3E%3Cline x1='48' y1='112' x2='96' y2='96' stroke='%23818cf8' stroke-width='10' stroke-linecap='round' opacity='0.7'/%3E%3Cline x1='144' y1='112' x2='96' y2='96' stroke='%23818cf8' stroke-width='10' stroke-linecap='round' opacity='0.7'/%3E%3Cline x1='96' y1='96' x2='96' y2='40' stroke='%23a5b4fc' stroke-width='10' stroke-linecap='round' opacity='0.8'/%3E%3Ccircle cx='96' cy='152' r='18' fill='%236366f1'/%3E%3Ccircle cx='48' cy='112' r='16' fill='%23818cf8'/%3E%3Ccircle cx='144' cy='112' r='16' fill='%23818cf8'/%3E%3Ccircle cx='96' cy='96' r='18' fill='%23818cf8'/%3E%3Ccircle cx='96' cy='40' r='20' fill='%23c7d2fe'/%3E%3C/svg%3E">
+    <script src="https://unpkg.com/cytoscape@3.30.4/dist/cytoscape.min.js"></script>
+    <style>
+        :root {
+            --bg: #0f1117;
+            --surface: #1a1d27;
+            --surface-2: #222532;
+            --border: #2a2d3a;
+            --text: #e1e4ed;
+            --text-dim: #8b8fa3;
+            --accent: #6366f1;
+            --accent-dim: #4f46e5;
+            --accent-glow: rgba(99, 102, 241, 0.15);
+            --success: #22c55e;
+            --warn: #f59e0b;
+            --error: #ef4444;
+            --info: #3b82f6;
+            --transition: 0.2s ease;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+        }
+
+        /* Nav */
+        nav {
+            display: flex;
+            align-items: center;
+            gap: 2rem;
+            padding: 0.75rem 1.5rem;
+            background: var(--surface);
+            border-bottom: 1px solid var(--border);
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+        nav .logo {
+            font-weight: 700;
+            font-size: 1.1rem;
+            color: var(--accent);
+        }
+        nav .nav-links { display: flex; gap: 0.25rem; }
+        nav a {
+            color: var(--text-dim);
+            text-decoration: none;
+            font-size: 0.875rem;
+            padding: 0.35rem 0.75rem;
+            border-radius: 6px;
+            transition: color var(--transition), background var(--transition);
+            cursor: pointer;
+        }
+        nav a:hover { color: var(--text); background: var(--surface-2); }
+        nav a.active { color: var(--text); background: var(--accent-glow); border: 1px solid rgba(99, 102, 241, 0.3); }
+        nav .shortcuts-hint {
+            margin-left: auto;
+            font-size: 0.7rem;
+            color: var(--text-dim);
+            opacity: 0.6;
+        }
+        nav .shortcuts-hint kbd {
+            background: var(--surface-2);
+            border: 1px solid var(--border);
+            border-radius: 3px;
+            padding: 0.1rem 0.35rem;
+            font-size: 0.65rem;
+            font-family: inherit;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 2rem auto;
+            padding: 0 1.5rem;
+        }
+
+        /* Cards */
+        .cards {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+            margin: 2rem 0;
+        }
+        .card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1.5rem;
+            transition: border-color var(--transition), box-shadow var(--transition);
+        }
+        .card:hover { border-color: var(--accent); box-shadow: 0 0 20px var(--accent-glow); }
+        .card h3 {
+            font-size: 0.75rem;
+            color: var(--text-dim);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 0.5rem;
+        }
+        .card .value { font-size: 2rem; font-weight: 700; }
+        .card .sub { font-size: 0.8rem; color: var(--text-dim); margin-top: 0.25rem; }
+
+        /* Status section */
+        .status-section {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1.5rem;
+            margin: 2rem 0;
+        }
+        .status-section h2 { font-size: 1.1rem; margin-bottom: 1rem; }
+        .status-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0.5rem 0;
+            border-bottom: 1px solid var(--border);
+            font-size: 0.9rem;
+        }
+        .status-row:last-child { border-bottom: none; }
+
+        /* Badges */
+        .badge {
+            display: inline-block;
+            padding: 0.15rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+        .badge-ok { background: #052e16; color: var(--success); }
+        .badge-warn { background: #422006; color: var(--warn); }
+        .badge-err { background: #350a0a; color: var(--error); }
+        .badge-info { background: #172554; color: var(--info); }
+        .badge-accent { background: #312e81; color: var(--accent); }
+
+        /* Loading spinner */
+        .spinner {
+            display: inline-block;
+            width: 18px;
+            height: 18px;
+            border: 2px solid var(--border);
+            border-top-color: var(--accent);
+            border-radius: 50%;
+            animation: spin 0.6s linear infinite;
+            vertical-align: middle;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .loading-state {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            justify-content: center;
+            padding: 2rem;
+            color: var(--text-dim);
+        }
+        #error { color: var(--error); text-align: center; padding: 1rem; display: none; }
+
+        /* Search & input */
+        .search-bar {
+            display: flex;
+            gap: 0.5rem;
+            margin-bottom: 1.5rem;
+            flex-wrap: wrap;
+        }
+        .search-bar input, .search-bar select {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            color: var(--text);
+            padding: 0.6rem 1rem;
+            border-radius: 6px;
+            font-size: 0.9rem;
+            outline: none;
+            transition: border-color var(--transition), box-shadow var(--transition);
+        }
+        .search-bar input:focus, .search-bar select:focus {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px var(--accent-glow);
+        }
+        .search-bar input { flex: 1; min-width: 180px; }
+        .search-bar button, button.btn {
+            background: var(--accent);
+            color: white;
+            border: none;
+            padding: 0.6rem 1.2rem;
+            border-radius: 6px;
+            font-size: 0.9rem;
+            cursor: pointer;
+            transition: background var(--transition), box-shadow var(--transition);
+            white-space: nowrap;
+        }
+        .search-bar button:hover, button.btn:hover {
+            background: var(--accent-dim);
+            box-shadow: 0 0 12px var(--accent-glow);
+        }
+        button.btn-ghost {
+            background: transparent;
+            border: 1px solid var(--border);
+            color: var(--text-dim);
+        }
+        button.btn-ghost:hover { background: var(--surface-2); color: var(--text); }
+        button.btn-sm {
+            padding: 0.3rem 0.6rem;
+            font-size: 0.78rem;
+            border-radius: 4px;
+        }
+        button.btn-icon {
+            background: transparent;
+            border: 1px solid var(--border);
+            color: var(--text-dim);
+            padding: 0.4rem 0.6rem;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.85rem;
+            transition: all var(--transition);
+            line-height: 1;
+        }
+        button.btn-icon:hover { background: var(--surface-2); color: var(--text); border-color: var(--accent); }
+        button.btn-icon.active { background: var(--accent-glow); border-color: var(--accent); color: var(--accent); }
+
+        /* Graph */
+        .graph-wrapper {
+            position: relative;
+        }
+        #cy {
+            width: 100%;
+            height: 600px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+        }
+        .graph-toolbar {
+            position: absolute;
+            top: 12px;
+            right: 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            z-index: 10;
+        }
+        .graph-toolbar button {
+            width: 34px;
+            height: 34px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            color: var(--text-dim);
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            transition: all var(--transition);
+        }
+        .graph-toolbar button:hover { background: var(--surface-2); color: var(--text); border-color: var(--accent); }
+        .graph-toolbar button[title]::after {
+            content: attr(title);
+            position: absolute;
+            right: 42px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            padding: 0.2rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.7rem;
+            white-space: nowrap;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity var(--transition);
+        }
+        .graph-toolbar button:hover[title]::after { opacity: 1; }
+        .graph-info {
+            display: flex;
+            gap: 1rem;
+            margin-top: 0.75rem;
+            font-size: 0.8rem;
+            color: var(--text-dim);
+            flex-wrap: wrap;
+        }
+        .graph-legend {
+            display: flex;
+            gap: 1rem;
+            flex-wrap: wrap;
+            margin-bottom: 1rem;
+            font-size: 0.8rem;
+        }
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 0.35rem;
+            color: var(--text-dim);
+            cursor: pointer;
+            transition: color var(--transition);
+        }
+        .legend-item:hover { color: var(--text); }
+        .legend-item.dimmed { opacity: 0.3; }
+        .legend-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            display: inline-block;
+        }
+
+        /* Node tooltip */
+        .node-tooltip {
+            position: absolute;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 0.5rem 0.75rem;
+            font-size: 0.78rem;
+            pointer-events: none;
+            z-index: 20;
+            max-width: 250px;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+            opacity: 0;
+            transition: opacity 0.15s;
+        }
+        .node-tooltip.visible { opacity: 1; }
+        .node-tooltip .tt-name { font-weight: 600; margin-bottom: 0.15rem; }
+        .node-tooltip .tt-type { color: var(--accent); font-size: 0.7rem; }
+        .node-tooltip .tt-id { color: var(--text-dim); font-size: 0.65rem; font-family: 'SF Mono', monospace; margin-top: 0.15rem; }
+        .node-tooltip .tt-edges { color: var(--text-dim); font-size: 0.7rem; margin-top: 0.15rem; }
+
+        /* Graph breadcrumbs */
+        .graph-breadcrumbs {
+            display: flex;
+            gap: 0.35rem;
+            align-items: center;
+            margin-bottom: 0.75rem;
+            font-size: 0.8rem;
+            color: var(--text-dim);
+            flex-wrap: wrap;
+            min-height: 1.5rem;
+        }
+        .breadcrumb-item {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.25rem;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 0.15rem 0.5rem;
+            cursor: pointer;
+            transition: all var(--transition);
+        }
+        .breadcrumb-item:hover { border-color: var(--accent); color: var(--text); }
+        .breadcrumb-item .bc-dot {
+            width: 6px; height: 6px;
+            border-radius: 50%;
+            display: inline-block;
+        }
+        .breadcrumb-sep { color: var(--border); }
+
+        /* Search results panel */
+        .search-results-panel {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            margin-bottom: 1rem;
+            max-height: 500px;
+            overflow-y: auto;
+            display: none;
+        }
+        .search-results-panel .srp-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0.6rem 0.75rem;
+            border-bottom: 1px solid var(--border);
+            font-size: 0.8rem;
+            color: var(--text-dim);
+            position: sticky;
+            top: 0;
+            background: var(--surface);
+            z-index: 1;
+        }
+        .search-results-panel .srp-controls {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.5rem 0.75rem;
+            border-bottom: 1px solid var(--border);
+            position: sticky;
+            top: 2rem;
+            background: var(--surface);
+            z-index: 1;
+            flex-wrap: wrap;
+        }
+        .search-results-panel .srp-close {
+            cursor: pointer;
+            color: var(--text-dim);
+            font-size: 1.1rem;
+            line-height: 1;
+            padding: 0.1rem 0.3rem;
+            border-radius: 3px;
+            transition: color var(--transition), background var(--transition);
+        }
+        .search-results-panel .srp-close:hover { color: var(--text); background: var(--surface-2); }
+        .search-results-panel .srp-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0.5rem 0.75rem;
+            border-bottom: 1px solid var(--border);
+            cursor: pointer;
+            transition: background var(--transition);
+        }
+        .search-results-panel .srp-item:last-child { border-bottom: none; }
+        .search-results-panel .srp-item:hover { background: var(--surface-2); }
+        .search-results-panel .srp-item.active { background: var(--accent-glow); }
+
+        /* Type filter chips */
+        .type-chips {
+            display: flex;
+            gap: 4px;
+            flex-wrap: wrap;
+        }
+        .type-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.25rem;
+            padding: 0.15rem 0.5rem;
+            border-radius: 12px;
+            font-size: 0.7rem;
+            font-weight: 600;
+            cursor: pointer;
+            border: 1px solid var(--border);
+            background: transparent;
+            color: var(--text-dim);
+            transition: all var(--transition);
+        }
+        .type-chip:hover { border-color: var(--text-dim); color: var(--text); }
+        .type-chip.active { background: var(--accent-glow); border-color: var(--accent); color: var(--accent); }
+        .type-chip .chip-dot {
+            width: 6px; height: 6px;
+            border-radius: 50%;
+            display: inline-block;
+        }
+        .type-chip .chip-count {
+            background: var(--surface-2);
+            border-radius: 8px;
+            padding: 0 0.3rem;
+            font-size: 0.65rem;
+            min-width: 1rem;
+            text-align: center;
+        }
+        .type-chip.active .chip-count { background: rgba(99, 102, 241, 0.3); }
+
+        /* Group header */
+        .srp-group-header {
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+            padding: 0.5rem 0.75rem 0.3rem;
+            font-size: 0.7rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-dim);
+            border-top: 1px solid var(--border);
+            position: sticky;
+            background: var(--surface);
+        }
+        .srp-group-header:first-child { border-top: none; }
+        .srp-group-header .gh-dot {
+            width: 8px; height: 8px;
+            border-radius: 50%;
+            display: inline-block;
+        }
+        .srp-group-header .gh-count {
+            margin-left: auto;
+            font-weight: 400;
+            font-size: 0.65rem;
+        }
+
+        /* Sort controls */
+        .srp-sort {
+            display: flex;
+            align-items: center;
+            gap: 0.25rem;
+            margin-left: auto;
+        }
+        .srp-sort select {
+            background: var(--bg);
+            border: 1px solid var(--border);
+            color: var(--text-dim);
+            padding: 0.15rem 0.4rem;
+            border-radius: 4px;
+            font-size: 0.7rem;
+            outline: none;
+        }
+        .srp-sort select:focus { border-color: var(--accent); }
+
+        /* Pagination */
+        .srp-pagination {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+            padding: 0.6rem 0.75rem;
+            border-top: 1px solid var(--border);
+            font-size: 0.78rem;
+            color: var(--text-dim);
+            position: sticky;
+            bottom: 0;
+            background: var(--surface);
+        }
+        .srp-pagination button {
+            background: var(--surface-2);
+            border: 1px solid var(--border);
+            color: var(--text-dim);
+            padding: 0.2rem 0.6rem;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.75rem;
+            transition: all var(--transition);
+        }
+        .srp-pagination button:hover:not(:disabled) { border-color: var(--accent); color: var(--text); }
+        .srp-pagination button:disabled { opacity: 0.3; cursor: default; }
+
+        /* View toggle */
+        .view-toggle {
+            display: flex;
+            gap: 2px;
+            background: var(--bg);
+            border-radius: 4px;
+            padding: 2px;
+        }
+        .view-toggle button {
+            background: transparent;
+            border: none;
+            color: var(--text-dim);
+            padding: 0.15rem 0.4rem;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 0.7rem;
+            transition: all var(--transition);
+        }
+        .view-toggle button:hover { color: var(--text); }
+        .view-toggle button.active { background: var(--accent-glow); color: var(--accent); }
+
+        /* Node detail panel */
+        .node-detail {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1.25rem;
+            margin-top: 1rem;
+        }
+        .node-detail h3 { font-size: 1rem; margin-bottom: 0.75rem; display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+        .node-detail .props { font-size: 0.85rem; color: var(--text-dim); }
+        .node-detail .props dt { color: var(--text); font-weight: 600; margin-top: 0.5rem; }
+        .node-detail .props dd { margin-left: 0; }
+        .node-detail .detail-actions { display: flex; gap: 0.5rem; margin-top: 1rem; flex-wrap: wrap; }
+
+        /* Tables */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.875rem;
+        }
+        th {
+            text-align: left;
+            padding: 0.6rem 0.75rem;
+            border-bottom: 2px solid var(--border);
+            color: var(--text-dim);
+            font-weight: 600;
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+        td {
+            padding: 0.6rem 0.75rem;
+            border-bottom: 1px solid var(--border);
+        }
+        tr:hover td { background: var(--surface-2); }
+        tr.clickable { cursor: pointer; }
+
+        /* Trace detail */
+        .trace-detail {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1.5rem;
+            margin-top: 1rem;
+        }
+        .trace-detail h3 {
+            font-size: 1rem;
+            margin-bottom: 1rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+        }
+        .step-list { list-style: none; position: relative; padding-left: 1.5rem; }
+        .step-list::before {
+            content: '';
+            position: absolute;
+            left: 0.45rem;
+            top: 0.5rem;
+            bottom: 0.5rem;
+            width: 2px;
+            background: var(--border);
+        }
+        .step-item {
+            position: relative;
+            padding: 0.75rem 0;
+            border-bottom: 1px solid var(--border);
+        }
+        .step-item:last-child { border-bottom: none; }
+        .step-item::before {
+            content: '';
+            position: absolute;
+            left: -1.15rem;
+            top: 1.1rem;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--accent);
+            border: 2px solid var(--bg);
+        }
+        .step-item.step-error::before { background: var(--error); }
+        .step-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        .step-name { font-weight: 600; font-size: 0.9rem; }
+        .step-type { font-size: 0.75rem; color: var(--text-dim); }
+        .step-duration { font-size: 0.75rem; color: var(--text-dim); }
+        .step-body {
+            margin-top: 0.5rem;
+            font-size: 0.8rem;
+            color: var(--text-dim);
+        }
+        .step-body pre {
+            background: var(--bg);
+            padding: 0.5rem 0.75rem;
+            border-radius: 4px;
+            overflow-x: auto;
+            margin-top: 0.25rem;
+            font-size: 0.78rem;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+
+        /* Duration bar in steps */
+        .dur-bar {
+            height: 4px;
+            border-radius: 2px;
+            margin-top: 0.35rem;
+            background: var(--border);
+            overflow: hidden;
+        }
+        .dur-bar-fill {
+            height: 100%;
+            border-radius: 2px;
+            transition: width 0.3s;
+        }
+        .dur-bar-fill.fast { background: var(--success); }
+        .dur-bar-fill.medium { background: var(--warn); }
+        .dur-bar-fill.slow { background: var(--error); }
+
+        /* Precedent cards */
+        .precedent-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+            gap: 1rem;
+        }
+        .precedent-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1.25rem;
+            transition: border-color var(--transition), box-shadow var(--transition);
+        }
+        .precedent-card:hover { border-color: var(--accent); box-shadow: 0 0 20px var(--accent-glow); }
+        .precedent-card h3 { font-size: 0.95rem; margin-bottom: 0.5rem; }
+        .precedent-card p { font-size: 0.85rem; color: var(--text-dim); line-height: 1.5; }
+        .precedent-meta {
+            display: flex;
+            gap: 0.75rem;
+            margin-top: 0.75rem;
+            font-size: 0.75rem;
+            color: var(--text-dim);
+            align-items: center;
+        }
+
+        /* Evolution bars */
+        .bar-container { display: flex; align-items: center; gap: 0.5rem; }
+        .bar-bg {
+            flex: 1;
+            height: 8px;
+            background: var(--border);
+            border-radius: 4px;
+            overflow: hidden;
+        }
+        .bar-fill {
+            height: 100%;
+            border-radius: 4px;
+            transition: width 0.3s;
+        }
+        .bar-fill.good { background: var(--success); }
+        .bar-fill.mid { background: var(--warn); }
+        .bar-fill.bad { background: var(--error); }
+        .bar-label { font-size: 0.8rem; color: var(--text-dim); min-width: 3rem; text-align: right; }
+
+        /* Section header */
+        .section-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1rem;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+        }
+        .section-header h2 { font-size: 1.2rem; }
+        .empty-state {
+            text-align: center;
+            padding: 3rem;
+            color: var(--text-dim);
+        }
+        .empty-state .icon { font-size: 2rem; margin-bottom: 0.5rem; }
+        .mono { font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace; font-size: 0.82rem; }
+        .truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 280px; display: inline-block; vertical-align: bottom; }
+
+        /* Layout selector */
+        .layout-selector {
+            display: flex;
+            gap: 2px;
+            background: var(--bg);
+            border-radius: 6px;
+            padding: 2px;
+            border: 1px solid var(--border);
+        }
+        .layout-selector button {
+            background: transparent;
+            border: none;
+            color: var(--text-dim);
+            padding: 0.3rem 0.6rem;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.75rem;
+            transition: all var(--transition);
+        }
+        .layout-selector button:hover { color: var(--text); }
+        .layout-selector button.active { background: var(--accent-glow); color: var(--accent); }
+
+        /* Cross-link */
+        .entity-link {
+            color: var(--accent);
+            cursor: pointer;
+            text-decoration: underline;
+            text-decoration-style: dotted;
+            text-underline-offset: 2px;
+        }
+        .entity-link:hover { color: var(--text); }
+
+        /* Fade-in animation */
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(8px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .fade-in { animation: fadeIn 0.25s ease-out; }
+
+        /* Scrollbar */
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: var(--bg); }
+        ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: var(--text-dim); }
+    </style>
+</head>
+<body>
+    <nav>
+        <span class="logo" style="display:flex;align-items:center;gap:0.5rem">
+            <svg width="24" height="24" viewBox="0 0 192 192" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <line x1="96" y1="152" x2="48" y2="112" stroke="#4f46e5" stroke-width="6" stroke-linecap="round" opacity="0.5"/>
+                <line x1="96" y1="152" x2="144" y2="112" stroke="#4f46e5" stroke-width="6" stroke-linecap="round" opacity="0.5"/>
+                <line x1="96" y1="152" x2="96" y2="96" stroke="#4f46e5" stroke-width="6" stroke-linecap="round" opacity="0.5"/>
+                <line x1="48" y1="112" x2="40" y2="64" stroke="#6366f1" stroke-width="6" stroke-linecap="round" opacity="0.6"/>
+                <line x1="48" y1="112" x2="96" y2="96" stroke="#6366f1" stroke-width="6" stroke-linecap="round" opacity="0.6"/>
+                <line x1="144" y1="112" x2="152" y2="64" stroke="#6366f1" stroke-width="6" stroke-linecap="round" opacity="0.6"/>
+                <line x1="144" y1="112" x2="96" y2="96" stroke="#6366f1" stroke-width="6" stroke-linecap="round" opacity="0.6"/>
+                <line x1="96" y1="96" x2="40" y2="64" stroke="#818cf8" stroke-width="6" stroke-linecap="round" opacity="0.7"/>
+                <line x1="96" y1="96" x2="152" y2="64" stroke="#818cf8" stroke-width="6" stroke-linecap="round" opacity="0.7"/>
+                <line x1="96" y1="96" x2="96" y2="40" stroke="#818cf8" stroke-width="6" stroke-linecap="round" opacity="0.7"/>
+                <line x1="40" y1="64" x2="96" y2="40" stroke="#a5b4fc" stroke-width="5" stroke-linecap="round" opacity="0.8"/>
+                <line x1="152" y1="64" x2="96" y2="40" stroke="#a5b4fc" stroke-width="5" stroke-linecap="round" opacity="0.8"/>
+                <circle cx="96" cy="152" r="14" fill="#4f46e5" opacity="0.7"/><circle cx="96" cy="152" r="8" fill="#6366f1"/>
+                <circle cx="48" cy="112" r="12" fill="#4f46e5" opacity="0.7"/><circle cx="48" cy="112" r="7" fill="#818cf8"/>
+                <circle cx="96" cy="96" r="14" fill="#4f46e5" opacity="0.6"/><circle cx="96" cy="96" r="8" fill="#818cf8"/>
+                <circle cx="144" cy="112" r="12" fill="#4f46e5" opacity="0.7"/><circle cx="144" cy="112" r="7" fill="#818cf8"/>
+                <circle cx="40" cy="64" r="11" fill="#6366f1" opacity="0.8"/><circle cx="40" cy="64" r="6" fill="#a5b4fc"/>
+                <circle cx="152" cy="64" r="11" fill="#6366f1" opacity="0.8"/><circle cx="152" cy="64" r="6" fill="#a5b4fc"/>
+                <circle cx="96" cy="40" r="16" fill="#6366f1" opacity="0.25"/>
+                <circle cx="96" cy="40" r="11" fill="#6366f1" opacity="0.8"/><circle cx="96" cy="40" r="6" fill="#c7d2fe"/>
+            </svg>
+            Trellis
+        </span>
+        <div class="nav-links">
+            <a href="#" class="active" data-view="dashboard">Dashboard</a>
+            <a href="#" data-view="evolution">Evolution</a>
+            <a href="#" data-view="graph">Graph</a>
+            <a href="#" data-view="traces">Traces</a>
+            <a href="#" data-view="precedents">Precedents</a>
+        </div>
+        <span class="shortcuts-hint"><kbd>/</kbd> Search &middot; <kbd>1</kbd>-<kbd>5</kbd> Views &middot; <kbd>Esc</kbd> Close</span>
+    </nav>
+
+    <!-- Node tooltip (shared) -->
+    <div class="node-tooltip" id="node-tooltip">
+        <div class="tt-name"></div>
+        <div class="tt-type"></div>
+        <div class="tt-id"></div>
+        <div class="tt-edges"></div>
+    </div>
+
+    <div class="container" id="app">
+        <div id="loading" class="loading-state"><span class="spinner"></span> Connecting to API...</div>
+        <div id="error"></div>
+
+        <!-- ============ Dashboard ============ -->
+        <div id="view-dashboard" style="display:none">
+            <div class="cards" id="stats-cards"></div>
+            <div class="status-section">
+                <h2>Store Health</h2>
+                <div id="health-rows"></div>
+            </div>
+        </div>
+
+        <!-- ============ Evolution ============ -->
+        <div id="view-evolution" style="display:none">
+            <div class="section-header">
+                <h2>Pack Effectiveness</h2>
+                <div class="search-bar" style="margin:0">
+                    <select id="evo-days">
+                        <option value="7">Last 7 days</option>
+                        <option value="30" selected>Last 30 days</option>
+                        <option value="90">Last 90 days</option>
+                    </select>
+                    <button onclick="loadEvolution()">Refresh</button>
+                </div>
+            </div>
+            <div class="cards" id="evo-summary"></div>
+            <div class="status-section">
+                <h2>Item Scores</h2>
+                <p style="font-size:0.8rem; color:var(--text-dim); margin-bottom:1rem;">Items ranked by success rate across context packs</p>
+                <div id="evo-items"></div>
+            </div>
+            <div class="status-section" id="evo-noise-section" style="display:none">
+                <h2>Noise Candidates</h2>
+                <p style="font-size:0.8rem; color:var(--text-dim); margin-bottom:1rem;">Items that appear frequently but correlate with failure</p>
+                <div id="evo-noise"></div>
+            </div>
+        </div>
+
+        <!-- ============ Graph Explorer ============ -->
+        <div id="view-graph" style="display:none">
+            <div class="search-bar">
+                <input type="text" id="graph-search" placeholder="Search entities (e.g. table name, service, domain)..." onkeydown="if(event.key==='Enter')searchGraph()">
+                <button onclick="searchGraph()">Search</button>
+                <input type="text" id="graph-entity-id" placeholder="Or enter entity ID..." style="max-width:280px" onkeydown="if(event.key==='Enter')loadEntity(this.value)">
+                <select id="graph-depth">
+                    <option value="1">Depth 1</option>
+                    <option value="2" selected>Depth 2</option>
+                    <option value="3">Depth 3</option>
+                </select>
+                <div class="layout-selector" id="layout-selector">
+                    <button class="active" data-layout="cose" title="Force-directed">Force</button>
+                    <button data-layout="concentric" title="Concentric rings">Rings</button>
+                    <button data-layout="breadthfirst" title="Hierarchical tree">Tree</button>
+                    <button data-layout="circle" title="Circle">Circle</button>
+                </div>
+            </div>
+            <div class="search-results-panel" id="graph-search-results">
+                <div class="srp-header">
+                    <span id="srp-count"></span>
+                    <div style="display:flex; align-items:center; gap:0.5rem;">
+                        <div class="view-toggle" id="srp-view-toggle">
+                            <button class="active" data-view="grouped" onclick="setSearchView('grouped')" title="Group by type">Grouped</button>
+                            <button data-view="flat" onclick="setSearchView('flat')" title="Flat list">List</button>
+                        </div>
+                        <span class="srp-close" onclick="closeSearchPanel()">&times;</span>
+                    </div>
+                </div>
+                <div class="srp-controls" id="srp-controls">
+                    <div class="type-chips" id="srp-type-chips"></div>
+                    <div class="srp-sort">
+                        <select id="srp-sort" onchange="reSearch()">
+                            <option value="created_at:desc">Newest first</option>
+                            <option value="created_at:asc">Oldest first</option>
+                            <option value="name:asc">Name A-Z</option>
+                            <option value="name:desc">Name Z-A</option>
+                            <option value="node_type:asc">Type A-Z</option>
+                        </select>
+                    </div>
+                </div>
+                <div id="srp-items"></div>
+                <div class="srp-pagination" id="srp-pagination" style="display:none">
+                    <button id="srp-prev" onclick="searchPage(-1)">&laquo; Prev</button>
+                    <span id="srp-page-info"></span>
+                    <button id="srp-next" onclick="searchPage(1)">Next &raquo;</button>
+                </div>
+            </div>
+            <div class="graph-legend" id="graph-legend"></div>
+            <div class="graph-breadcrumbs" id="graph-breadcrumbs"></div>
+            <div class="graph-wrapper">
+                <div id="cy"></div>
+                <div class="graph-toolbar" id="graph-toolbar">
+                    <button onclick="graphZoom(1.3)" title="Zoom in">+</button>
+                    <button onclick="graphZoom(0.7)" title="Zoom out">&minus;</button>
+                    <button onclick="graphFit()" title="Fit to view">&#x26F6;</button>
+                    <button onclick="graphCenter()" title="Center selected">&#x25CE;</button>
+                    <button onclick="graphClear()" title="Clear graph">&#x2715;</button>
+                </div>
+            </div>
+            <div class="graph-info" id="graph-info"></div>
+            <div id="node-detail" class="node-detail" style="display:none"></div>
+        </div>
+
+        <!-- ============ Traces ============ -->
+        <div id="view-traces" style="display:none">
+            <div class="search-bar">
+                <select id="trace-domain">
+                    <option value="">All domains</option>
+                </select>
+                <select id="trace-limit">
+                    <option value="20">20 traces</option>
+                    <option value="50">50 traces</option>
+                    <option value="100">100 traces</option>
+                </select>
+                <button onclick="loadTraces()">Refresh</button>
+            </div>
+            <div class="status-section" style="padding:0; overflow:hidden">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Intent</th>
+                            <th>Source</th>
+                            <th>Domain</th>
+                            <th>Agent</th>
+                            <th>Outcome</th>
+                        </tr>
+                    </thead>
+                    <tbody id="traces-body"></tbody>
+                </table>
+            </div>
+            <div id="trace-detail-container"></div>
+        </div>
+
+        <!-- ============ Precedents ============ -->
+        <div id="view-precedents" style="display:none">
+            <div class="search-bar">
+                <select id="prec-domain">
+                    <option value="">All domains</option>
+                </select>
+                <select id="prec-limit">
+                    <option value="20">20 items</option>
+                    <option value="50">50 items</option>
+                </select>
+                <button onclick="loadPrecedents()">Refresh</button>
+            </div>
+            <div id="precedents-container"></div>
+        </div>
+    </div>
+
+    <script>
+        const API = '/api/v1';
+
+        // -- Helpers --
+        async function fetchJSON(path) {
+            const res = await fetch(API + path);
+            if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+            return res.json();
+        }
+
+        function timeAgo(iso) {
+            if (!iso) return '';
+            const d = new Date(iso);
+            const now = Date.now();
+            const diff = Math.floor((now - d.getTime()) / 1000);
+            if (diff < 60) return `${diff}s ago`;
+            if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+            if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+            return `${Math.floor(diff / 86400)}d ago`;
+        }
+
+        function fmtDate(iso) {
+            if (!iso) return '';
+            return new Date(iso).toLocaleString();
+        }
+
+        function escHtml(s) {
+            if (s == null) return '';
+            const d = document.createElement('div');
+            d.textContent = String(s);
+            return d.innerHTML;
+        }
+
+        function outcomeBadge(status) {
+            if (!status) return '<span class="badge badge-info">unknown</span>';
+            const map = { success: 'badge-ok', failure: 'badge-err', partial: 'badge-warn', unknown: 'badge-info' };
+            return `<span class="badge ${map[status] || 'badge-info'}">${escHtml(status)}</span>`;
+        }
+
+        function sourceBadge(src) {
+            return `<span class="badge badge-accent">${escHtml(src || 'unknown')}</span>`;
+        }
+
+        function loadingHtml(msg) {
+            return `<div class="loading-state"><span class="spinner"></span> ${escHtml(msg || 'Loading...')}</div>`;
+        }
+
+        // -- View switching --
+        const views = ['dashboard', 'evolution', 'graph', 'traces', 'precedents'];
+        const viewLoaded = {};
+        document.querySelectorAll('nav a[data-view]').forEach(link => {
+            link.addEventListener('click', e => {
+                e.preventDefault();
+                switchView(link.dataset.view);
+            });
+        });
+
+        function switchView(name) {
+            document.querySelectorAll('nav a').forEach(a => a.classList.remove('active'));
+            const navLink = document.querySelector(`nav a[data-view="${name}"]`);
+            if (navLink) navLink.classList.add('active');
+            views.forEach(v => {
+                document.getElementById('view-' + v).style.display = v === name ? 'block' : 'none';
+            });
+            if (!viewLoaded[name]) {
+                viewLoaded[name] = true;
+                if (name === 'evolution') loadEvolution();
+                if (name === 'traces') loadTraces();
+                if (name === 'precedents') loadPrecedents();
+                if (name === 'graph') initGraph();
+            }
+            // Focus search when switching to graph
+            if (name === 'graph' && graphInitialized) {
+                setTimeout(() => document.getElementById('graph-search').focus(), 100);
+            }
+        }
+
+        // -- Keyboard shortcuts --
+        document.addEventListener('keydown', e => {
+            // Don't capture if typing in an input/select
+            if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA') {
+                if (e.key === 'Escape') e.target.blur();
+                return;
+            }
+            if (e.key === '/' || e.key === 's') {
+                e.preventDefault();
+                const currentView = views.find(v => document.getElementById('view-' + v).style.display === 'block');
+                if (currentView === 'graph') {
+                    document.getElementById('graph-search').focus();
+                } else if (currentView === 'traces') {
+                    document.getElementById('trace-domain').focus();
+                }
+            }
+            if (e.key >= '1' && e.key <= '5') {
+                switchView(views[parseInt(e.key) - 1]);
+            }
+            if (e.key === 'Escape') {
+                closeSearchPanel();
+                document.getElementById('node-detail').style.display = 'none';
+            }
+        });
+
+        // ============================================================
+        //  DASHBOARD
+        // ============================================================
+        function renderCard(title, value, sub) {
+            const div = document.createElement('div');
+            div.className = 'card fade-in';
+            div.innerHTML = `<h3>${escHtml(title)}</h3><div class="value">${escHtml(String(value))}</div><div class="sub">${escHtml(sub)}</div>`;
+            return div;
+        }
+
+        function renderStatusRow(name, ok) {
+            const div = document.createElement('div');
+            div.className = 'status-row';
+            const cls = ok ? 'badge-ok' : 'badge-err';
+            const label = ok ? 'OK' : 'DOWN';
+            div.innerHTML = `<span>${escHtml(name)}</span><span class="badge ${cls}">${label}</span>`;
+            return div;
+        }
+
+        // ============================================================
+        //  EVOLUTION
+        // ============================================================
+        async function loadEvolution() {
+            const days = document.getElementById('evo-days').value;
+            const summary = document.getElementById('evo-summary');
+            const items = document.getElementById('evo-items');
+            const noiseSection = document.getElementById('evo-noise-section');
+            const noise = document.getElementById('evo-noise');
+
+            summary.innerHTML = loadingHtml('Loading effectiveness data...');
+            items.innerHTML = '';
+
+            try {
+                const data = await fetchJSON(`/effectiveness?days=${days}`);
+
+                summary.innerHTML = '';
+                summary.appendChild(renderCard('Total Packs', data.total_packs, 'context packs assembled'));
+                summary.appendChild(renderCard('With Feedback', data.total_feedback, 'packs with feedback'));
+                summary.appendChild(renderCard('Success Rate', (data.success_rate * 100).toFixed(1) + '%', 'overall effectiveness'));
+                summary.appendChild(renderCard('Items Scored', (data.item_scores || []).length, 'unique context items'));
+
+                if (data.item_scores && data.item_scores.length > 0) {
+                    let html = '<table><thead><tr><th>Item ID</th><th>Appearances</th><th>Successes</th><th>Failures</th><th style="width:30%">Success Rate</th></tr></thead><tbody>';
+                    for (const item of data.item_scores) {
+                        const pct = (item.success_rate * 100).toFixed(1);
+                        const cls = item.success_rate >= 0.7 ? 'good' : item.success_rate >= 0.4 ? 'mid' : 'bad';
+                        html += `<tr>
+                            <td class="mono truncate" title="${escHtml(item.item_id)}">${escHtml(item.item_id)}</td>
+                            <td>${item.appearances}</td>
+                            <td>${item.successes}</td>
+                            <td>${item.failures}</td>
+                            <td><div class="bar-container"><div class="bar-bg"><div class="bar-fill ${cls}" style="width:${pct}%"></div></div><span class="bar-label">${pct}%</span></div></td>
+                        </tr>`;
+                    }
+                    html += '</tbody></table>';
+                    items.innerHTML = html;
+                } else {
+                    items.innerHTML = '<div class="empty-state"><div class="icon">&#x2191;</div><p>No item scores yet. Assemble context packs and provide feedback to see effectiveness data.</p></div>';
+                }
+
+                if (data.noise_candidates && data.noise_candidates.length > 0) {
+                    noiseSection.style.display = 'block';
+                    noise.innerHTML = data.noise_candidates.map(id =>
+                        `<div class="status-row"><span class="mono truncate" title="${escHtml(id)}">${escHtml(id)}</span><span class="badge badge-warn">noise</span></div>`
+                    ).join('');
+                } else {
+                    noiseSection.style.display = 'none';
+                }
+            } catch (err) {
+                summary.innerHTML = `<div class="empty-state"><div class="icon">&#x2191;</div><p>Could not load effectiveness data: ${escHtml(err.message)}</p></div>`;
+            }
+        }
+
+        // ============================================================
+        //  GRAPH EXPLORER
+        // ============================================================
+        const NODE_COLORS = {
+            person: '#f472b6', system: '#60a5fa', service: '#34d399', team: '#fbbf24',
+            document: '#a78bfa', concept: '#fb923c', domain: '#2dd4bf',
+            file: '#94a3b8', project: '#e879f9', tool: '#f87171',
+            default: '#6366f1'
+        };
+
+        let cy = null;
+        let graphInitialized = false;
+        let currentLayout = 'cose';
+        const graphHistory = []; // breadcrumb trail of explored entities
+        let lastSearchResults = null;
+        let selectedSearchIdx = -1;
+
+        function initGraph() {
+            if (graphInitialized) return;
+            graphInitialized = true;
+
+            // Render legend with filter toggles
+            const legend = document.getElementById('graph-legend');
+            for (const [type, color] of Object.entries(NODE_COLORS)) {
+                if (type === 'default') continue;
+                const span = document.createElement('span');
+                span.className = 'legend-item';
+                span.dataset.type = type;
+                span.innerHTML = `<span class="legend-dot" style="background:${color}"></span>${type}`;
+                span.addEventListener('click', () => toggleNodeTypeVisibility(type, span));
+                legend.appendChild(span);
+            }
+
+            // Layout selector
+            document.querySelectorAll('#layout-selector button').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    document.querySelectorAll('#layout-selector button').forEach(b => b.classList.remove('active'));
+                    btn.classList.add('active');
+                    currentLayout = btn.dataset.layout;
+                    if (cy && cy.nodes().length > 0) {
+                        runLayout(true);
+                    }
+                });
+            });
+
+            cy = cytoscape({
+                container: document.getElementById('cy'),
+                style: [
+                    {
+                        selector: 'node',
+                        style: {
+                            'label': 'data(label)',
+                            'background-color': 'data(color)',
+                            'color': '#e1e4ed',
+                            'text-valign': 'bottom',
+                            'text-margin-y': 6,
+                            'font-size': 10,
+                            'width': 'data(size)',
+                            'height': 'data(size)',
+                            'border-width': 2,
+                            'border-color': '#0f1117',
+                            'text-max-width': 100,
+                            'text-wrap': 'ellipsis',
+                            'text-outline-width': 2,
+                            'text-outline-color': '#0f1117',
+                            'transition-property': 'width, height, border-color, opacity',
+                            'transition-duration': '0.2s'
+                        }
+                    },
+                    {
+                        selector: 'node:selected',
+                        style: {
+                            'border-color': '#ffffff',
+                            'border-width': 3,
+                        }
+                    },
+                    {
+                        selector: 'node.seed',
+                        style: { 'width': 44, 'height': 44, 'font-size': 12, 'font-weight': 'bold' }
+                    },
+                    {
+                        selector: 'node.highlight',
+                        style: {
+                            'border-color': '#ffffff',
+                            'border-width': 3,
+                        }
+                    },
+                    {
+                        selector: 'node.dimmed',
+                        style: {
+                            'opacity': 0.15,
+                        }
+                    },
+                    {
+                        selector: 'edge',
+                        style: {
+                            'width': 1.5,
+                            'line-color': '#3a3d4a',
+                            'target-arrow-color': '#3a3d4a',
+                            'target-arrow-shape': 'triangle',
+                            'curve-style': 'bezier',
+                            'arrow-scale': 0.7,
+                            'label': 'data(label)',
+                            'font-size': 8,
+                            'color': '#555870',
+                            'text-rotation': 'autorotate',
+                            'text-outline-width': 1.5,
+                            'text-outline-color': '#1a1d27',
+                            'transition-property': 'line-color, target-arrow-color, width, opacity',
+                            'transition-duration': '0.2s'
+                        }
+                    },
+                    {
+                        selector: 'edge.highlight',
+                        style: {
+                            'line-color': '#6366f1',
+                            'target-arrow-color': '#6366f1',
+                            'width': 2.5,
+                        }
+                    },
+                    {
+                        selector: 'edge.dimmed',
+                        style: {
+                            'opacity': 0.1,
+                        }
+                    },
+                    {
+                        selector: 'node.hidden',
+                        style: { 'display': 'none' }
+                    },
+                    {
+                        selector: 'edge.hidden',
+                        style: { 'display': 'none' }
+                    }
+                ],
+                layout: { name: 'cose', animate: false, nodeDimensionsIncludeLabels: true },
+                minZoom: 0.15,
+                maxZoom: 4,
+                wheelSensitivity: 0.3
+            });
+
+            // Tap node -> show detail
+            cy.on('tap', 'node', function (evt) {
+                showNodeDetail(evt.target.data());
+            });
+
+            // Double-tap node -> expand neighborhood
+            cy.on('dbltap', 'node', function (evt) {
+                const id = evt.target.id();
+                loadEntity(id, true);
+            });
+
+            // Hover node -> highlight neighbors + show tooltip
+            cy.on('mouseover', 'node', function (evt) {
+                highlightNeighbors(evt.target);
+                showTooltip(evt);
+            });
+            cy.on('mouseout', 'node', function () {
+                clearHighlight();
+                hideTooltip();
+            });
+            cy.on('mousemove', 'node', function (evt) {
+                moveTooltip(evt);
+            });
+
+            // Tap background -> clear detail and highlight
+            cy.on('tap', function (evt) {
+                if (evt.target === cy) {
+                    document.getElementById('node-detail').style.display = 'none';
+                    clearHighlight();
+                }
+            });
+
+            // Auto-load a sample of entities so the graph isn't empty on first visit
+            autoLoadSample();
+        }
+
+        function highlightNeighbors(node) {
+            const neighborhood = node.neighborhood().add(node);
+            cy.elements().addClass('dimmed');
+            neighborhood.removeClass('dimmed');
+            neighborhood.edges().addClass('highlight');
+            node.addClass('highlight');
+        }
+
+        function clearHighlight() {
+            cy.elements().removeClass('dimmed').removeClass('highlight');
+        }
+
+        function showTooltip(evt) {
+            const node = evt.target;
+            const data = node.data();
+            const tt = document.getElementById('node-tooltip');
+            tt.querySelector('.tt-name').textContent = data.properties?.name || data.label || data.id;
+            tt.querySelector('.tt-type').textContent = data.node_type || '';
+            tt.querySelector('.tt-id').textContent = data.node_id || data.id;
+            const edgeCount = node.connectedEdges().length;
+            tt.querySelector('.tt-edges').textContent = `${edgeCount} connection${edgeCount !== 1 ? 's' : ''}`;
+            tt.classList.add('visible');
+            moveTooltip(evt);
+        }
+
+        function moveTooltip(evt) {
+            const tt = document.getElementById('node-tooltip');
+            const pos = evt.renderedPosition || evt.position;
+            const container = document.getElementById('cy').getBoundingClientRect();
+            tt.style.left = (container.left + pos.x + 15) + 'px';
+            tt.style.top = (container.top + pos.y - 10) + 'px';
+        }
+
+        function hideTooltip() {
+            document.getElementById('node-tooltip').classList.remove('visible');
+        }
+
+        // Graph controls
+        function graphZoom(factor) {
+            if (!cy) return;
+            cy.zoom({ level: cy.zoom() * factor, renderedPosition: { x: cy.width() / 2, y: cy.height() / 2 } });
+        }
+
+        function graphFit() {
+            if (!cy) return;
+            cy.fit(undefined, 40);
+        }
+
+        function graphCenter() {
+            if (!cy) return;
+            const selected = cy.nodes(':selected');
+            if (selected.length > 0) {
+                cy.animate({ center: { eles: selected }, duration: 300 });
+            } else {
+                graphFit();
+            }
+        }
+
+        function graphClear() {
+            if (!cy) return;
+            cy.elements().remove();
+            graphHistory.length = 0;
+            renderBreadcrumbs();
+            document.getElementById('node-detail').style.display = 'none';
+            document.getElementById('graph-info').innerHTML = '';
+        }
+
+        function runLayout(animate) {
+            if (!cy || cy.nodes().length === 0) return;
+            const opts = { nodeDimensionsIncludeLabels: true, animate: !!animate };
+            if (currentLayout === 'cose') {
+                Object.assign(opts, { name: 'cose', animationDuration: animate ? 400 : 0, nodeRepulsion: function(){ return 8000; }, idealEdgeLength: function(){ return 80; } });
+            } else if (currentLayout === 'concentric') {
+                Object.assign(opts, { name: 'concentric', concentric: function(node) { return node.degree(); }, levelWidth: function() { return 2; }, animationDuration: 400 });
+            } else if (currentLayout === 'breadthfirst') {
+                Object.assign(opts, { name: 'breadthfirst', directed: true, spacingFactor: 1.2, animationDuration: 400 });
+            } else if (currentLayout === 'circle') {
+                Object.assign(opts, { name: 'circle', animationDuration: 400 });
+            }
+            cy.layout(opts).run();
+        }
+
+        // Node type filtering
+        const hiddenTypes = new Set();
+        function toggleNodeTypeVisibility(type, legendEl) {
+            if (!cy) return;
+            if (hiddenTypes.has(type)) {
+                hiddenTypes.delete(type);
+                legendEl.classList.remove('dimmed');
+            } else {
+                hiddenTypes.add(type);
+                legendEl.classList.add('dimmed');
+            }
+            cy.nodes().forEach(n => {
+                const nt = (n.data('node_type') || '').toLowerCase();
+                if (hiddenTypes.has(nt)) {
+                    n.addClass('hidden');
+                    n.connectedEdges().addClass('hidden');
+                } else {
+                    n.removeClass('hidden');
+                    n.connectedEdges().forEach(e => {
+                        const src = e.source().data('node_type') || '';
+                        const tgt = e.target().data('node_type') || '';
+                        if (!hiddenTypes.has(src.toLowerCase()) && !hiddenTypes.has(tgt.toLowerCase())) {
+                            e.removeClass('hidden');
+                        }
+                    });
+                }
+            });
+        }
+
+        function computeNodeSize(degree) {
+            // Scale node size by number of connections: min 24, max 50
+            return Math.min(50, Math.max(24, 24 + degree * 3));
+        }
+
+        function renderBreadcrumbs() {
+            const el = document.getElementById('graph-breadcrumbs');
+            if (graphHistory.length === 0) {
+                el.innerHTML = '';
+                return;
+            }
+            el.innerHTML = graphHistory.map((h, i) => {
+                const color = NODE_COLORS[h.type] || NODE_COLORS.default;
+                const sep = i < graphHistory.length - 1 ? ' <span class="breadcrumb-sep">&#x203A;</span> ' : '';
+                return `<span class="breadcrumb-item" onclick="loadEntity('${escHtml(h.id)}')"><span class="bc-dot" style="background:${color}"></span>${escHtml(h.name)}</span>${sep}`;
+            }).join('');
+        }
+
+        function addToBreadcrumbs(entityId, name, type) {
+            // Don't add duplicates at the end
+            if (graphHistory.length > 0 && graphHistory[graphHistory.length - 1].id === entityId) return;
+            // Remove if already in history (user went back)
+            const existingIdx = graphHistory.findIndex(h => h.id === entityId);
+            if (existingIdx >= 0) {
+                graphHistory.splice(existingIdx + 1);
+            } else {
+                graphHistory.push({ id: entityId, name, type });
+                // Keep trail manageable
+                if (graphHistory.length > 10) graphHistory.shift();
+            }
+            renderBreadcrumbs();
+        }
+
+        async function autoLoadSample() {
+            try {
+                const data = await fetchJSON('/graph/search?limit=10');
+                if (!data.results || data.results.length === 0) return;
+                const firstId = data.results[0].entity_id;
+                if (firstId) await loadEntity(firstId);
+                // Also open the browse panel so user sees all entities
+                searchGraph();
+            } catch (e) {
+                // Silently ignore -- user can still search manually
+            }
+        }
+
+        // Search panel state
+        let searchViewMode = 'grouped'; // 'grouped' or 'flat'
+        let searchActiveTypeFilter = null; // null = all, or a node_type string
+        let searchCurrentOffset = 0;
+        let searchTotal = 0;
+        const SEARCH_PAGE_SIZE = 50;
+        let searchTypeCounts = {}; // { type: count }
+
+        function closeSearchPanel() {
+            document.getElementById('graph-search-results').style.display = 'none';
+            selectedSearchIdx = -1;
+        }
+
+        function setSearchView(mode) {
+            searchViewMode = mode;
+            document.querySelectorAll('#srp-view-toggle button').forEach(b => {
+                b.classList.toggle('active', b.dataset.view === mode);
+            });
+            renderSearchResults();
+        }
+
+        function getSearchSort() {
+            const val = document.getElementById('srp-sort').value;
+            const [sort, order] = val.split(':');
+            return { sort, order };
+        }
+
+        function reSearch() {
+            searchCurrentOffset = 0;
+            searchGraph();
+        }
+
+        function searchPage(dir) {
+            const newOffset = searchCurrentOffset + (dir * SEARCH_PAGE_SIZE);
+            if (newOffset < 0 || newOffset >= searchTotal) return;
+            searchCurrentOffset = newOffset;
+            searchGraph();
+        }
+
+        async function searchGraph() {
+            const q = document.getElementById('graph-search').value.trim();
+
+            const panel = document.getElementById('graph-search-results');
+            const countEl = document.getElementById('srp-count');
+            const itemsEl = document.getElementById('srp-items');
+            panel.style.display = 'block';
+            countEl.textContent = 'Searching...';
+            itemsEl.innerHTML = loadingHtml('Searching graph entities...');
+            document.getElementById('srp-pagination').style.display = 'none';
+
+            try {
+                const { sort, order } = getSearchSort();
+                let url = `/graph/search?limit=${SEARCH_PAGE_SIZE}&offset=${searchCurrentOffset}&sort=${sort}&order=${order}`;
+                if (q) url += `&q=${encodeURIComponent(q)}`;
+                if (searchActiveTypeFilter) url += `&node_type=${encodeURIComponent(searchActiveTypeFilter)}`;
+
+                const data = await fetchJSON(url);
+                lastSearchResults = data.results || [];
+                searchTotal = data.total || 0;
+
+                // Build type counts from full result set (when no type filter, fetch counts)
+                if (!searchActiveTypeFilter && searchCurrentOffset === 0) {
+                    searchTypeCounts = {};
+                    for (const r of lastSearchResults) {
+                        const t = r.node_type || 'unknown';
+                        searchTypeCounts[t] = (searchTypeCounts[t] || 0) + 1;
+                    }
+                    // If total > page size, we only have partial counts — do a supplementary count query
+                    if (searchTotal > SEARCH_PAGE_SIZE) {
+                        try {
+                            const allUrl = `/graph/search?limit=${Math.min(searchTotal, 500)}&offset=0&sort=node_type&order=asc` + (q ? `&q=${encodeURIComponent(q)}` : '');
+                            const allData = await fetchJSON(allUrl);
+                            searchTypeCounts = {};
+                            for (const r of (allData.results || [])) {
+                                const t = r.node_type || 'unknown';
+                                searchTypeCounts[t] = (searchTypeCounts[t] || 0) + 1;
+                            }
+                        } catch (e) { /* use partial counts */ }
+                    }
+                    renderTypeChips();
+                }
+
+                if (lastSearchResults.length === 0) {
+                    countEl.textContent = 'No results';
+                    itemsEl.innerHTML = '<div style="padding:1.5rem; text-align:center; color:var(--text-dim)">No entities found. Try a different term or clear filters.</div>';
+                    return;
+                }
+
+                const showing = searchActiveTypeFilter ? `${searchActiveTypeFilter} entities` : 'entities';
+                countEl.textContent = `${searchTotal} ${showing}${q ? ` matching "${q}"` : ''}`;
+
+                renderSearchResults();
+                renderPagination();
+            } catch (err) {
+                countEl.textContent = 'Error';
+                itemsEl.innerHTML = `<div style="color:var(--error); padding:1rem; text-align:center">Search failed: ${escHtml(err.message)}</div>`;
+            }
+        }
+
+        function renderTypeChips() {
+            const container = document.getElementById('srp-type-chips');
+            const types = Object.entries(searchTypeCounts).sort((a, b) => b[1] - a[1]);
+            const totalCount = Object.values(searchTypeCounts).reduce((a, b) => a + b, 0);
+
+            let html = `<span class="type-chip ${searchActiveTypeFilter === null ? 'active' : ''}" onclick="filterByType(null)">All <span class="chip-count">${totalCount}</span></span>`;
+
+            for (const [type, count] of types) {
+                const color = NODE_COLORS[type] || NODE_COLORS.default;
+                const isActive = searchActiveTypeFilter === type;
+                html += `<span class="type-chip ${isActive ? 'active' : ''}" onclick="filterByType('${escHtml(type)}')"><span class="chip-dot" style="background:${color}"></span>${escHtml(type)} <span class="chip-count">${count}</span></span>`;
+            }
+            container.innerHTML = html;
+        }
+
+        function filterByType(type) {
+            searchActiveTypeFilter = type;
+            searchCurrentOffset = 0;
+            searchGraph();
+        }
+
+        function renderSearchResults() {
+            const itemsEl = document.getElementById('srp-items');
+            if (!lastSearchResults || lastSearchResults.length === 0) {
+                itemsEl.innerHTML = '<div style="padding:1.5rem; text-align:center; color:var(--text-dim)">No results</div>';
+                return;
+            }
+
+            if (searchViewMode === 'grouped') {
+                renderGroupedResults(itemsEl);
+            } else {
+                renderFlatResults(itemsEl);
+            }
+        }
+
+        function renderGroupedResults(container) {
+            // Group by node_type
+            const groups = {};
+            for (const r of lastSearchResults) {
+                const type = r.node_type || 'unknown';
+                if (!groups[type]) groups[type] = [];
+                groups[type].push(r);
+            }
+
+            // Sort groups by count descending
+            const sortedGroups = Object.entries(groups).sort((a, b) => b[1].length - a[1].length);
+
+            let html = '';
+            for (const [type, items] of sortedGroups) {
+                const color = NODE_COLORS[type] || NODE_COLORS.default;
+                html += `<div class="srp-group-header"><span class="gh-dot" style="background:${color}"></span>${escHtml(type)} <span class="gh-count">${items.length}</span></div>`;
+                for (const r of items) {
+                    html += renderSearchItem(r);
+                }
+            }
+            container.innerHTML = html;
+        }
+
+        function renderFlatResults(container) {
+            container.innerHTML = lastSearchResults.map(r => renderSearchItem(r)).join('');
+        }
+
+        function renderSearchItem(r) {
+            const id = r.entity_id || '';
+            const name = r.name || id;
+            const type = r.node_type || '';
+            const color = NODE_COLORS[type] || NODE_COLORS.default;
+            const created = r.created_at ? timeAgo(r.created_at) : '';
+            return `<div class="srp-item" onclick="selectSearchResult('${escHtml(id)}')">
+                <span style="display:flex; align-items:center; gap:0.4rem; min-width:0">
+                    <span class="legend-dot" style="background:${color}; flex-shrink:0"></span>
+                    <strong style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis">${escHtml(name)}</strong>
+                    <span class="mono" style="color:var(--text-dim); font-size:0.7rem; flex-shrink:0">${escHtml(id).substring(0, 24)}</span>
+                </span>
+                <span style="display:flex; align-items:center; gap:0.5rem; flex-shrink:0">
+                    <span style="font-size:0.7rem; color:var(--text-dim)">${created}</span>
+                    <span class="badge badge-accent">${escHtml(type)}</span>
+                </span>
+            </div>`;
+        }
+
+        function renderPagination() {
+            const pag = document.getElementById('srp-pagination');
+            if (searchTotal <= SEARCH_PAGE_SIZE) {
+                pag.style.display = 'none';
+                return;
+            }
+            pag.style.display = 'flex';
+            const page = Math.floor(searchCurrentOffset / SEARCH_PAGE_SIZE) + 1;
+            const totalPages = Math.ceil(searchTotal / SEARCH_PAGE_SIZE);
+            document.getElementById('srp-page-info').textContent = `Page ${page} of ${totalPages}`;
+            document.getElementById('srp-prev').disabled = searchCurrentOffset === 0;
+            document.getElementById('srp-next').disabled = searchCurrentOffset + SEARCH_PAGE_SIZE >= searchTotal;
+        }
+
+        function selectSearchResult(entityId) {
+            if (!entityId) return;
+            // Highlight in panel
+            document.querySelectorAll('.srp-item').forEach(el => {
+                el.classList.remove('active');
+            });
+            event.currentTarget.classList.add('active');
+            loadEntity(entityId);
+        }
+
+        async function loadEntity(entityId, expand = false) {
+            if (!entityId) return;
+            const depth = document.getElementById('graph-depth').value;
+            const info = document.getElementById('graph-info');
+            info.innerHTML = loadingHtml('Loading entity...');
+
+            try {
+                const data = await fetchJSON(`/entities/${encodeURIComponent(entityId)}?depth=${depth}`);
+                const sub = data.subgraph || {};
+                const nodes = sub.nodes || [];
+                const edges = sub.edges || [];
+
+                // Determine entity name for breadcrumb
+                const entityNode = nodes.find(n => n.node_id === entityId) || data.entity || {};
+                const entityName = entityNode.properties?.name || entityNode.node_type || entityId.slice(-12);
+                const entityType = entityNode.node_type || entityNode.entity_type || '';
+                addToBreadcrumbs(entityId, entityName, entityType);
+
+                if (expand && cy) {
+                    // Merge into existing graph
+                    const existingIds = new Set(cy.nodes().map(n => n.id()));
+                    const newEles = [];
+                    for (const n of nodes) {
+                        if (!existingIds.has(n.node_id)) {
+                            newEles.push({
+                                group: 'nodes',
+                                data: {
+                                    id: n.node_id,
+                                    label: (n.properties && n.properties.name) || n.node_type || n.node_id.slice(-8),
+                                    color: NODE_COLORS[n.node_type] || NODE_COLORS.default,
+                                    size: 28, // will be updated after add
+                                    ...n
+                                }
+                            });
+                        }
+                    }
+                    const existingEdgeIds = new Set(cy.edges().map(e => e.id()));
+                    for (const e of edges) {
+                        const eid = e.edge_id || `${e.source_id}-${e.target_id}-${e.edge_type}`;
+                        if (!existingEdgeIds.has(eid) && (existingIds.has(e.source_id) || newEles.some(n => n.data.id === e.source_id))
+                            && (existingIds.has(e.target_id) || newEles.some(n => n.data.id === e.target_id))) {
+                            newEles.push({
+                                group: 'edges',
+                                data: {
+                                    id: eid,
+                                    source: e.source_id,
+                                    target: e.target_id,
+                                    label: (e.edge_type || '').replace(/_/g, ' '),
+                                    ...e
+                                }
+                            });
+                        }
+                    }
+                    if (newEles.length > 0) {
+                        cy.add(newEles);
+                        // Update all node sizes based on degree
+                        cy.nodes().forEach(n => {
+                            n.data('size', computeNodeSize(n.degree()));
+                        });
+                        runLayout(true);
+                    }
+                } else if (cy) {
+                    // Fresh graph
+                    cy.elements().remove();
+                    const eles = [];
+                    for (const n of nodes) {
+                        eles.push({
+                            group: 'nodes',
+                            data: {
+                                id: n.node_id,
+                                label: (n.properties && n.properties.name) || n.node_type || n.node_id.slice(-8),
+                                color: NODE_COLORS[n.node_type] || NODE_COLORS.default,
+                                size: 28,
+                                ...n
+                            },
+                            classes: n.node_id === entityId ? 'seed' : ''
+                        });
+                    }
+                    for (const e of edges) {
+                        const eid = e.edge_id || `${e.source_id}-${e.target_id}-${e.edge_type}`;
+                        eles.push({
+                            group: 'edges',
+                            data: {
+                                id: eid,
+                                source: e.source_id,
+                                target: e.target_id,
+                                label: (e.edge_type || '').replace(/_/g, ' '),
+                                ...e
+                            }
+                        });
+                    }
+                    cy.add(eles);
+                    // Size nodes by degree
+                    cy.nodes().forEach(n => {
+                        n.data('size', computeNodeSize(n.degree()));
+                    });
+                    runLayout(false);
+                    cy.fit(undefined, 40);
+                }
+
+                info.innerHTML = `<span>${nodes.length} nodes</span><span>${edges.length} edges</span><span>Seed: ${escHtml(entityName)}</span><span style="color:var(--text-dim)">Hover to highlight &middot; Double-click to expand &middot; Click background to dismiss</span>`;
+
+                // Show seed node detail
+                if (data.entity) {
+                    showNodeDetail({
+                        id: entityId,
+                        node_id: entityId,
+                        node_type: data.entity.node_type || data.entity.entity_type,
+                        properties: data.entity.properties,
+                        ...data.entity
+                    });
+                }
+            } catch (err) {
+                info.innerHTML = `<span style="color:var(--error)">Failed to load entity: ${escHtml(err.message)}</span>`;
+            }
+        }
+
+        function showNodeDetail(data) {
+            const el = document.getElementById('node-detail');
+            el.style.display = 'block';
+            el.className = 'node-detail fade-in';
+            const nodeId = data.node_id || data.id || '';
+            const nodeType = data.node_type || data.entity_type || '';
+            const name = (data.properties && data.properties.name) || nodeType;
+            const props = data.properties || {};
+            const color = NODE_COLORS[nodeType] || NODE_COLORS.default;
+
+            let propsHtml = '';
+            for (const [k, v] of Object.entries(props)) {
+                const val = typeof v === 'object' ? JSON.stringify(v, null, 2) : String(v);
+                propsHtml += `<dt>${escHtml(k)}</dt><dd>${escHtml(val)}</dd>`;
+            }
+
+            el.innerHTML = `
+                <h3>
+                    <span><span class="legend-dot" style="background:${color}; width:12px; height:12px; margin-right:0.3rem"></span>${escHtml(name)}</span>
+                    <span class="badge badge-accent">${escHtml(nodeType)}</span>
+                </h3>
+                <div style="font-size:0.8rem; color:var(--text-dim); margin-bottom:0.75rem" class="mono">${escHtml(nodeId)}</div>
+                ${propsHtml ? `<dl class="props">${propsHtml}</dl>` : '<p style="color:var(--text-dim); font-size:0.85rem">No properties</p>'}
+                <div class="detail-actions">
+                    <button class="btn btn-ghost btn-sm" onclick="loadEntity('${escHtml(nodeId)}')">Center on node</button>
+                    <button class="btn btn-ghost btn-sm" onclick="loadEntity('${escHtml(nodeId)}', true)">Expand neighbors</button>
+                    <button class="btn btn-ghost btn-sm" onclick="copyToClipboard('${escHtml(nodeId)}')">Copy ID</button>
+                </div>
+            `;
+        }
+
+        function copyToClipboard(text) {
+            navigator.clipboard.writeText(text).catch(() => {});
+        }
+
+        // Cross-view navigation: go to graph from traces
+        function navigateToEntity(entityId) {
+            switchView('graph');
+            setTimeout(() => loadEntity(entityId), 100);
+        }
+
+        // ============================================================
+        //  TRACES
+        // ============================================================
+        async function loadTraces() {
+            const domain = document.getElementById('trace-domain').value;
+            const limit = document.getElementById('trace-limit').value;
+            const body = document.getElementById('traces-body');
+            body.innerHTML = `<tr><td colspan="6">${loadingHtml('Loading traces...')}</td></tr>`;
+            document.getElementById('trace-detail-container').innerHTML = '';
+
+            try {
+                let url = `/traces?limit=${limit}`;
+                if (domain) url += `&domain=${encodeURIComponent(domain)}`;
+                const data = await fetchJSON(url);
+                const traces = data.traces || [];
+
+                if (traces.length === 0) {
+                    body.innerHTML = '<tr><td colspan="6"><div class="empty-state"><div class="icon">&#x1F4CB;</div><p>No traces found</p></div></td></tr>';
+                    return;
+                }
+
+                // Collect domains for filter
+                const domains = new Set();
+                traces.forEach(t => { if (t.domain) domains.add(t.domain); });
+                const domainSelect = document.getElementById('trace-domain');
+                const currentVal = domainSelect.value;
+                domainSelect.innerHTML = '<option value="">All domains</option>';
+                for (const d of [...domains].sort()) {
+                    domainSelect.innerHTML += `<option value="${escHtml(d)}" ${d === currentVal ? 'selected' : ''}>${escHtml(d)}</option>`;
+                }
+
+                body.innerHTML = traces.map(t => `
+                    <tr class="clickable" onclick="loadTraceDetail('${escHtml(t.trace_id)}')">
+                        <td title="${escHtml(fmtDate(t.created_at))}">${escHtml(timeAgo(t.created_at))}</td>
+                        <td class="truncate" style="max-width:350px" title="${escHtml(t.intent)}">${escHtml(t.intent)}</td>
+                        <td>${sourceBadge(t.source)}</td>
+                        <td>${t.domain ? escHtml(t.domain) : '<span style="color:var(--text-dim)">-</span>'}</td>
+                        <td class="mono" style="font-size:0.78rem">${t.agent_id ? escHtml(t.agent_id) : '<span style="color:var(--text-dim)">-</span>'}</td>
+                        <td>${outcomeBadge(t.outcome)}</td>
+                    </tr>
+                `).join('');
+            } catch (err) {
+                body.innerHTML = `<tr><td colspan="6" style="color:var(--error); text-align:center; padding:2rem">Failed to load traces: ${escHtml(err.message)}</td></tr>`;
+            }
+        }
+
+        async function loadTraceDetail(traceId) {
+            const container = document.getElementById('trace-detail-container');
+            container.innerHTML = `<div class="trace-detail">${loadingHtml('Loading trace...')}</div>`;
+
+            try {
+                const data = await fetchJSON(`/traces/${encodeURIComponent(traceId)}`);
+                const t = data.trace;
+                if (!t) { container.innerHTML = ''; return; }
+
+                const steps = t.steps || [];
+                const outcome = t.outcome || {};
+                const ctx = t.context || {};
+                const evidence = t.evidence_used || [];
+                const artifacts = t.artifacts_produced || [];
+                const feedback = t.feedback || [];
+
+                // Find max step duration for bar scaling
+                const maxDur = Math.max(1, ...steps.map(s => s.duration_ms || 0));
+
+                let stepsHtml = '';
+                if (steps.length > 0) {
+                    stepsHtml = '<ul class="step-list">';
+                    for (const s of steps) {
+                        const hasError = !!s.error;
+                        const dur = s.duration_ms != null ? `${s.duration_ms}ms` : '';
+                        const argsStr = s.args && Object.keys(s.args).length > 0 ? JSON.stringify(s.args, null, 2) : '';
+                        const resultStr = s.result && Object.keys(s.result).length > 0 ? JSON.stringify(s.result, null, 2) : '';
+
+                        // Duration bar
+                        let durBar = '';
+                        if (s.duration_ms != null) {
+                            const pct = Math.max(2, (s.duration_ms / maxDur) * 100);
+                            const cls = s.duration_ms < 100 ? 'fast' : s.duration_ms < 1000 ? 'medium' : 'slow';
+                            durBar = `<div class="dur-bar"><div class="dur-bar-fill ${cls}" style="width:${pct}%"></div></div>`;
+                        }
+
+                        stepsHtml += `
+                            <li class="step-item ${hasError ? 'step-error' : ''}">
+                                <div class="step-header">
+                                    <div><span class="step-name">${escHtml(s.name)}</span> <span class="step-type">${escHtml(s.step_type)}</span></div>
+                                    <span class="step-duration">${dur}</span>
+                                </div>
+                                ${durBar}
+                                ${hasError ? `<div class="step-body" style="color:var(--error)">${escHtml(s.error)}</div>` : ''}
+                                ${argsStr ? `<div class="step-body"><strong>Args</strong><pre>${escHtml(argsStr)}</pre></div>` : ''}
+                                ${resultStr ? `<div class="step-body"><strong>Result</strong><pre>${escHtml(resultStr)}</pre></div>` : ''}
+                            </li>`;
+                    }
+                    stepsHtml += '</ul>';
+                } else {
+                    stepsHtml = '<p style="color:var(--text-dim); font-size:0.85rem">No steps recorded</p>';
+                }
+
+                let metaHtml = '<div class="cards" style="margin:0 0 1rem 0">';
+                metaHtml += `<div class="card"><h3>Source</h3><div class="value" style="font-size:1.2rem">${sourceBadge(t.source)}</div></div>`;
+                metaHtml += `<div class="card"><h3>Outcome</h3><div class="value" style="font-size:1.2rem">${outcomeBadge(outcome.status)}</div>${outcome.summary ? `<div class="sub">${escHtml(outcome.summary)}</div>` : ''}</div>`;
+                metaHtml += `<div class="card"><h3>Steps</h3><div class="value">${steps.length}</div></div>`;
+                metaHtml += `<div class="card"><h3>Evidence</h3><div class="value">${evidence.length}</div></div>`;
+                metaHtml += `<div class="card"><h3>Artifacts</h3><div class="value">${artifacts.length}</div></div>`;
+                metaHtml += '</div>';
+
+                // Evidence links (cross-navigation to graph)
+                let evidenceHtml = '';
+                if (evidence.length > 0) {
+                    evidenceHtml = '<div style="margin-top:1rem"><h4 style="font-size:0.9rem; margin-bottom:0.5rem">Evidence Used</h4>';
+                    for (const e of evidence) {
+                        const eid = typeof e === 'string' ? e : (e.item_id || e.entity_id || JSON.stringify(e));
+                        evidenceHtml += `<div class="status-row">
+                            <span class="mono truncate entity-link" onclick="navigateToEntity('${escHtml(eid)}')" title="View in graph">${escHtml(eid)}</span>
+                        </div>`;
+                    }
+                    evidenceHtml += '</div>';
+                }
+
+                let feedbackHtml = '';
+                if (feedback.length > 0) {
+                    feedbackHtml = '<div style="margin-top:1rem"><h4 style="font-size:0.9rem; margin-bottom:0.5rem">Feedback</h4>';
+                    for (const f of feedback) {
+                        feedbackHtml += `<div class="status-row">
+                            <span>${f.label ? `<span class="badge badge-info">${escHtml(f.label)}</span> ` : ''}${f.comment ? escHtml(f.comment) : ''}</span>
+                            <span style="font-size:0.75rem; color:var(--text-dim)">${f.rating != null ? `Rating: ${f.rating}` : ''} ${escHtml(f.given_by)}</span>
+                        </div>`;
+                    }
+                    feedbackHtml += '</div>';
+                }
+
+                container.innerHTML = `
+                    <div class="trace-detail fade-in">
+                        <h3>
+                            <span>${escHtml(t.intent)}</span>
+                            <span class="mono" style="font-size:0.75rem; color:var(--text-dim)">${escHtml(t.trace_id)}</span>
+                        </h3>
+                        <div style="font-size:0.8rem; color:var(--text-dim); margin-bottom:1rem">
+                            ${ctx.domain ? `Domain: ${escHtml(ctx.domain)} &middot; ` : ''}${ctx.agent_id ? `Agent: ${escHtml(ctx.agent_id)} &middot; ` : ''}${fmtDate(ctx.started_at)}${ctx.ended_at ? ` &rarr; ${fmtDate(ctx.ended_at)}` : ''}
+                        </div>
+                        ${metaHtml}
+                        <h4 style="font-size:0.9rem; margin-bottom:0.75rem">Steps</h4>
+                        ${stepsHtml}
+                        ${evidenceHtml}
+                        ${feedbackHtml}
+                    </div>
+                `;
+            } catch (err) {
+                container.innerHTML = `<div class="trace-detail"><p style="color:var(--error)">Failed to load trace: ${escHtml(err.message)}</p></div>`;
+            }
+        }
+
+        // ============================================================
+        //  PRECEDENTS
+        // ============================================================
+        async function loadPrecedents() {
+            const domain = document.getElementById('prec-domain').value;
+            const limit = document.getElementById('prec-limit').value;
+            const container = document.getElementById('precedents-container');
+            container.innerHTML = loadingHtml('Loading precedents...');
+
+            try {
+                let url = `/precedents?limit=${limit}`;
+                if (domain) url += `&domain=${encodeURIComponent(domain)}`;
+                const data = await fetchJSON(url);
+                const items = data.precedents || [];
+
+                if (items.length === 0) {
+                    container.innerHTML = '<div class="empty-state"><div class="icon">&#x2713;</div><p>No precedents found. Promote traces to create precedents.</p></div>';
+                    return;
+                }
+
+                // Populate domain filter
+                const domains = new Set();
+                items.forEach(p => { if (p.domain) domains.add(p.domain); });
+                const domainSelect = document.getElementById('prec-domain');
+                const currentVal = domainSelect.value;
+                domainSelect.innerHTML = '<option value="">All domains</option>';
+                for (const d of [...domains].sort()) {
+                    domainSelect.innerHTML += `<option value="${escHtml(d)}" ${d === currentVal ? 'selected' : ''}>${escHtml(d)}</option>`;
+                }
+
+                container.innerHTML = `<div class="precedent-grid">${items.map(p => `
+                    <div class="precedent-card fade-in">
+                        <h3>${escHtml(p.title || 'Untitled')}</h3>
+                        <p>${escHtml(p.description || '')}</p>
+                        <div class="precedent-meta">
+                            ${p.domain ? `<span class="badge badge-accent">${escHtml(p.domain)}</span>` : ''}
+                            <span title="${escHtml(fmtDate(p.occurred_at))}">${timeAgo(p.occurred_at)}</span>
+                            ${p.entity_id ? `<span class="mono entity-link" style="font-size:0.7rem" onclick="navigateToEntity('${escHtml(p.entity_id)}')">${escHtml(p.entity_id)}</span>` : ''}
+                        </div>
+                    </div>
+                `).join('')}</div>`;
+            } catch (err) {
+                container.innerHTML = `<div class="empty-state"><p style="color:var(--error)">Failed to load precedents: ${escHtml(err.message)}</p></div>`;
+            }
+        }
+
+        // ============================================================
+        //  INIT
+        // ============================================================
+        async function init() {
+            const loading = document.getElementById('loading');
+            const error = document.getElementById('error');
+            try {
+                const [stats, health] = await Promise.all([
+                    fetchJSON('/stats'),
+                    fetchJSON('/health')
+                ]);
+
+                const cardsEl = document.getElementById('stats-cards');
+                cardsEl.appendChild(renderCard('Traces', stats.traces, 'agent work records'));
+                cardsEl.appendChild(renderCard('Documents', stats.documents, 'searchable items'));
+                cardsEl.appendChild(renderCard('Graph Nodes', stats.nodes, 'entities'));
+                cardsEl.appendChild(renderCard('Graph Edges', stats.edges, 'relationships'));
+                cardsEl.appendChild(renderCard('Events', stats.events, 'audit log entries'));
+
+                const total = (stats.traces || 0) + (stats.documents || 0) + (stats.nodes || 0);
+                if (total === 0) {
+                    const banner = document.createElement('div');
+                    banner.className = 'empty-state';
+                    banner.style.cssText = 'margin:1.5rem;padding:2rem;text-align:center;background:var(--surface);border:1px dashed var(--border);border-radius:8px;';
+                    banner.innerHTML = `
+                        <div style="font-size:2.5rem;margin-bottom:0.75rem">&#x1F331;</div>
+                        <h3 style="margin-bottom:0.5rem;color:var(--text)">Welcome to Trellis</h3>
+                        <p style="color:var(--text-dim);max-width:480px;margin:0 auto 1rem">
+                            Your knowledge graph is empty. Load sample data to explore the dashboard,
+                            graph visualization, and trace inspector.
+                        </p>
+                        <code style="display:inline-block;background:var(--surface-2);padding:0.5rem 1rem;border-radius:4px;color:var(--accent);font-size:0.9rem">
+                            trellis demo load
+                        </code>
+                        <p style="color:var(--text-dim);font-size:0.8rem;margin-top:0.75rem">
+                            Then refresh this page to see your data.
+                        </p>
+                    `;
+                    const dashboard = document.getElementById('view-dashboard');
+                    dashboard.insertBefore(banner, dashboard.firstChild);
+                }
+
+                const healthEl = document.getElementById('health-rows');
+                const checks = health.checks || {};
+                if (Object.keys(checks).length === 0) {
+                    healthEl.innerHTML = '<div style="color:var(--text-dim); padding:0.5rem 0; font-size:0.9rem">No health checks configured</div>';
+                } else {
+                    for (const [name, ok] of Object.entries(checks)) {
+                        healthEl.appendChild(renderStatusRow(name, ok));
+                    }
+                }
+
+                loading.style.display = 'none';
+                document.getElementById('view-dashboard').style.display = 'block';
+                viewLoaded['dashboard'] = true;
+            } catch (err) {
+                loading.style.display = 'none';
+                error.style.display = 'block';
+                error.textContent = 'Could not connect to API at ' + API + ' \u2014 ' + err.message;
+                document.getElementById('view-dashboard').style.display = 'block';
+                viewLoaded['dashboard'] = true;
+            }
+        }
+
+        init();
+    </script>
+</body>
+</html>

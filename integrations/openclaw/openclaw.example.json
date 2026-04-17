@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "trellis-ai": {
+      "command": "trellis-mcp",
+      "args": []
+    }
+  }
+}

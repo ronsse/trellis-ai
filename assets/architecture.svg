@@ -1,0 +1,209 @@
+<svg width="900" height="620" viewBox="0 0 900 620" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+        <linearGradient id="bgGrad" x1="0" y1="0" x2="900" y2="620">
+            <stop offset="0%" stop-color="#0f1117"/>
+            <stop offset="100%" stop-color="#131620"/>
+        </linearGradient>
+        <linearGradient id="accentGrad" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0%" stop-color="#6366f1"/>
+            <stop offset="100%" stop-color="#818cf8"/>
+        </linearGradient>
+        <filter id="glow">
+            <feGaussianBlur stdDeviation="3" result="blur"/>
+            <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+        </filter>
+    </defs>
+
+    <!-- Background -->
+    <rect width="900" height="620" fill="url(#bgGrad)" rx="12"/>
+    <!-- Subtle grid -->
+    <pattern id="grid" width="30" height="30" patternUnits="userSpaceOnUse">
+        <path d="M 30 0 L 0 0 0 30" fill="none" stroke="#1e2030" stroke-width="0.5"/>
+    </pattern>
+    <rect width="900" height="620" fill="url(#grid)" rx="12" opacity="0.5"/>
+
+    <!-- Title -->
+    <text x="450" y="38" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="18" font-weight="700" fill="#e1e4ed" letter-spacing="-0.3">Trellis Architecture</text>
+    <text x="450" y="56" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="11" fill="#8b8fa3">Structured knowledge graph for AI agents</text>
+
+    <!-- ============================================================ -->
+    <!-- ROW 1: INTERFACES (top) -->
+    <!-- ============================================================ -->
+    <text x="30" y="92" font-family="-apple-system, sans-serif" font-size="10" fill="#6366f1" font-weight="600" letter-spacing="1.5">INTERFACES</text>
+
+    <!-- CLI -->
+    <rect x="30" y="102" width="120" height="48" rx="6" fill="#1a1d27" stroke="#2a2d3a"/>
+    <text x="90" y="122" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="11" font-weight="600" fill="#e1e4ed">CLI</text>
+    <text x="90" y="138" text-anchor="middle" font-family="monospace" font-size="9" fill="#818cf8">trellis</text>
+
+    <!-- MCP Server -->
+    <rect x="170" y="102" width="120" height="48" rx="6" fill="#1a1d27" stroke="#2a2d3a"/>
+    <text x="230" y="122" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="11" font-weight="600" fill="#e1e4ed">MCP Server</text>
+    <text x="230" y="138" text-anchor="middle" font-family="monospace" font-size="9" fill="#818cf8">8 tools</text>
+
+    <!-- REST API -->
+    <rect x="310" y="102" width="120" height="48" rx="6" fill="#1a1d27" stroke="#2a2d3a"/>
+    <text x="370" y="122" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="11" font-weight="600" fill="#e1e4ed">REST API</text>
+    <text x="370" y="138" text-anchor="middle" font-family="monospace" font-size="9" fill="#818cf8">FastAPI</text>
+
+    <!-- Python SDK -->
+    <rect x="450" y="102" width="120" height="48" rx="6" fill="#1a1d27" stroke="#2a2d3a"/>
+    <text x="510" y="122" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="11" font-weight="600" fill="#e1e4ed">Python SDK</text>
+    <text x="510" y="138" text-anchor="middle" font-family="monospace" font-size="9" fill="#818cf8">local + remote</text>
+
+    <!-- Web UI -->
+    <rect x="590" y="102" width="120" height="48" rx="6" fill="#1a1d27" stroke="#2a2d3a"/>
+    <text x="650" y="122" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="11" font-weight="600" fill="#e1e4ed">Web UI</text>
+    <text x="650" y="138" text-anchor="middle" font-family="monospace" font-size="9" fill="#818cf8">Cytoscape.js</text>
+
+    <!-- Agents/Humans label -->
+    <rect x="740" y="102" width="130" height="48" rx="6" fill="#1e1535" stroke="#4f46e5" stroke-opacity="0.4"/>
+    <text x="805" y="122" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="11" font-weight="600" fill="#a5b4fc">Agents + Humans</text>
+    <text x="805" y="138" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="9" fill="#6366f1">LangGraph, Claude, etc.</text>
+
+    <!-- ============================================================ -->
+    <!-- Arrows: interfaces → core -->
+    <!-- ============================================================ -->
+    <line x1="90" y1="150" x2="90" y2="190" stroke="#2a2d3a" stroke-width="1"/>
+    <line x1="230" y1="150" x2="230" y2="190" stroke="#2a2d3a" stroke-width="1"/>
+    <line x1="370" y1="150" x2="370" y2="190" stroke="#2a2d3a" stroke-width="1"/>
+    <line x1="510" y1="150" x2="510" y2="190" stroke="#2a2d3a" stroke-width="1"/>
+    <line x1="650" y1="150" x2="650" y2="190" stroke="#2a2d3a" stroke-width="1"/>
+
+    <!-- ============================================================ -->
+    <!-- ROW 2: CORE ENGINE -->
+    <!-- ============================================================ -->
+    <text x="30" y="186" font-family="-apple-system, sans-serif" font-size="10" fill="#6366f1" font-weight="600" letter-spacing="1.5">CORE</text>
+
+    <!-- Big core box -->
+    <rect x="30" y="196" width="840" height="120" rx="8" fill="#14172280" stroke="#6366f1" stroke-opacity="0.3" stroke-dasharray="4 2"/>
+
+    <!-- Retrieval -->
+    <rect x="50" y="210" width="185" height="90" rx="6" fill="#1a1d27" stroke="#2a2d3a"/>
+    <text x="142" y="230" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="11" font-weight="600" fill="#e1e4ed">Pack Builder</text>
+    <text x="142" y="248" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="9" fill="#8b8fa3">keyword + semantic + graph</text>
+    <text x="142" y="262" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="9" fill="#8b8fa3">deduplicate + rank</text>
+    <text x="142" y="276" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="9" fill="#8b8fa3">token budget enforcement</text>
+    <rect x="57" y="286" width="48" height="8" rx="4" fill="#22c55e" opacity="0.3"/>
+    <text x="82" y="293" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="7" fill="#22c55e">RETRIEVE</text>
+
+    <!-- Mutation Pipeline -->
+    <rect x="255" y="210" width="215" height="90" rx="6" fill="#1a1d27" stroke="#2a2d3a"/>
+    <text x="362" y="230" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="11" font-weight="600" fill="#e1e4ed">Governed Mutation Pipeline</text>
+    <text x="362" y="250" text-anchor="middle" font-family="monospace" font-size="9" fill="#818cf8">validate -> policy -> idempotency</text>
+    <text x="362" y="266" text-anchor="middle" font-family="monospace" font-size="9" fill="#818cf8">     -> execute -> emit event</text>
+    <rect x="262" y="286" width="36" height="8" rx="4" fill="#f59e0b" opacity="0.3"/>
+    <text x="280" y="293" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="7" fill="#f59e0b">WRITE</text>
+
+    <!-- Classification -->
+    <rect x="490" y="210" width="185" height="90" rx="6" fill="#1a1d27" stroke="#2a2d3a"/>
+    <text x="582" y="230" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="11" font-weight="600" fill="#e1e4ed">Classification</text>
+    <text x="582" y="248" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="9" fill="#8b8fa3">4 deterministic classifiers</text>
+    <text x="582" y="262" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="9" fill="#8b8fa3">LLM fallback (async)</text>
+    <text x="582" y="276" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="9" fill="#8b8fa3">domain, type, scope, quality</text>
+    <rect x="497" y="286" width="28" height="8" rx="4" fill="#3b82f6" opacity="0.3"/>
+    <text x="511" y="293" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="7" fill="#3b82f6">TAG</text>
+
+    <!-- Workers -->
+    <rect x="695" y="210" width="155" height="90" rx="6" fill="#1a1d27" stroke="#2a2d3a"/>
+    <text x="772" y="230" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="11" font-weight="600" fill="#e1e4ed">Workers</text>
+    <text x="772" y="248" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="9" fill="#8b8fa3">enrichment</text>
+    <text x="772" y="262" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="9" fill="#8b8fa3">pattern mining</text>
+    <text x="772" y="276" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="9" fill="#8b8fa3">maintenance + ingestion</text>
+    <rect x="702" y="286" width="32" height="8" rx="4" fill="#a855f7" opacity="0.3"/>
+    <text x="718" y="293" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="7" fill="#a855f7">ASYNC</text>
+
+    <!-- ============================================================ -->
+    <!-- Arrows: core → stores -->
+    <!-- ============================================================ -->
+    <line x1="142" y1="300" x2="142" y2="370" stroke="#2a2d3a" stroke-width="1"/>
+    <line x1="362" y1="300" x2="362" y2="370" stroke="#2a2d3a" stroke-width="1"/>
+    <line x1="582" y1="300" x2="582" y2="370" stroke="#2a2d3a" stroke-width="1"/>
+    <line x1="772" y1="300" x2="772" y2="370" stroke="#2a2d3a" stroke-width="1"/>
+
+    <!-- ============================================================ -->
+    <!-- ROW 3: DATA LAYER -->
+    <!-- ============================================================ -->
+    <text x="30" y="366" font-family="-apple-system, sans-serif" font-size="10" fill="#6366f1" font-weight="600" letter-spacing="1.5">DATA LAYER</text>
+
+    <!-- Schemas box -->
+    <rect x="30" y="376" width="840" height="85" rx="8" fill="#14172280" stroke="#4f46e5" stroke-opacity="0.2" stroke-dasharray="4 2"/>
+
+    <!-- Trace Store -->
+    <rect x="50" y="390" width="125" height="56" rx="6" fill="#1a1d27" stroke="#2a2d3a"/>
+    <circle cx="68" cy="412" r="6" fill="#f59e0b" opacity="0.3"/>
+    <text x="68" y="414" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="8" fill="#f59e0b">T</text>
+    <text x="120" y="414" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="11" font-weight="600" fill="#e1e4ed">Traces</text>
+    <text x="112" y="432" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="8" fill="#8b8fa3">immutable work records</text>
+
+    <!-- Graph Store -->
+    <rect x="195" y="390" width="125" height="56" rx="6" fill="#1a1d27" stroke="#2a2d3a"/>
+    <circle cx="213" cy="412" r="6" fill="#6366f1" opacity="0.3"/>
+    <text x="213" y="414" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="8" fill="#6366f1">G</text>
+    <text x="265" y="414" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="11" font-weight="600" fill="#e1e4ed">Graph</text>
+    <text x="257" y="432" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="8" fill="#8b8fa3">SCD Type 2 temporal</text>
+
+    <!-- Document Store -->
+    <rect x="340" y="390" width="125" height="56" rx="6" fill="#1a1d27" stroke="#2a2d3a"/>
+    <circle cx="358" cy="412" r="6" fill="#22c55e" opacity="0.3"/>
+    <text x="358" y="414" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="8" fill="#22c55e">D</text>
+    <text x="410" y="414" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="11" font-weight="600" fill="#e1e4ed">Documents</text>
+    <text x="402" y="432" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="8" fill="#8b8fa3">full-text search</text>
+
+    <!-- Vector Store -->
+    <rect x="485" y="390" width="125" height="56" rx="6" fill="#1a1d27" stroke="#2a2d3a"/>
+    <circle cx="503" cy="412" r="6" fill="#3b82f6" opacity="0.3"/>
+    <text x="503" y="414" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="8" fill="#3b82f6">V</text>
+    <text x="555" y="414" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="11" font-weight="600" fill="#e1e4ed">Vectors</text>
+    <text x="547" y="432" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="8" fill="#8b8fa3">semantic similarity</text>
+
+    <!-- Event Log -->
+    <rect x="630" y="390" width="125" height="56" rx="6" fill="#1a1d27" stroke="#2a2d3a"/>
+    <circle cx="648" cy="412" r="6" fill="#a855f7" opacity="0.3"/>
+    <text x="648" y="414" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="8" fill="#a855f7">E</text>
+    <text x="700" y="414" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="11" font-weight="600" fill="#e1e4ed">Event Log</text>
+    <text x="692" y="432" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="8" fill="#8b8fa3">immutable audit trail</text>
+
+    <!-- Blob Store -->
+    <rect x="775" y="390" width="75" height="56" rx="6" fill="#1a1d27" stroke="#2a2d3a"/>
+    <circle cx="793" cy="412" r="6" fill="#ef4444" opacity="0.3"/>
+    <text x="793" y="414" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="8" fill="#ef4444">B</text>
+    <text x="820" y="414" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="11" font-weight="600" fill="#e1e4ed">Blobs</text>
+    <text x="812" y="432" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="8" fill="#8b8fa3">files</text>
+
+    <!-- ============================================================ -->
+    <!-- Arrows: data → backends -->
+    <!-- ============================================================ -->
+    <line x1="450" y1="461" x2="450" y2="500" stroke="#2a2d3a" stroke-width="1"/>
+
+    <!-- ============================================================ -->
+    <!-- ROW 4: STORAGE BACKENDS -->
+    <!-- ============================================================ -->
+    <text x="30" y="496" font-family="-apple-system, sans-serif" font-size="10" fill="#6366f1" font-weight="600" letter-spacing="1.5">BACKENDS</text>
+
+    <!-- SQLite -->
+    <rect x="120" y="506" width="160" height="48" rx="6" fill="#1a1d27" stroke="#22c55e" stroke-opacity="0.3"/>
+    <text x="200" y="527" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="11" font-weight="600" fill="#e1e4ed">SQLite</text>
+    <text x="200" y="543" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="9" fill="#22c55e">default / local dev</text>
+
+    <!-- PostgreSQL -->
+    <rect x="310" y="506" width="160" height="48" rx="6" fill="#1a1d27" stroke="#3b82f6" stroke-opacity="0.3"/>
+    <text x="390" y="527" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="11" font-weight="600" fill="#e1e4ed">PostgreSQL</text>
+    <text x="390" y="543" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="9" fill="#3b82f6">graph + pgvector</text>
+
+    <!-- S3 -->
+    <rect x="500" y="506" width="120" height="48" rx="6" fill="#1a1d27" stroke="#f59e0b" stroke-opacity="0.3"/>
+    <text x="560" y="527" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="11" font-weight="600" fill="#e1e4ed">S3</text>
+    <text x="560" y="543" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="9" fill="#f59e0b">blob storage</text>
+
+    <!-- LanceDB -->
+    <rect x="650" y="506" width="130" height="48" rx="6" fill="#1a1d27" stroke="#a855f7" stroke-opacity="0.3"/>
+    <text x="715" y="527" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="11" font-weight="600" fill="#e1e4ed">LanceDB</text>
+    <text x="715" y="543" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="9" fill="#a855f7">vector search</text>
+
+    <!-- ============================================================ -->
+    <!-- FOOTER -->
+    <!-- ============================================================ -->
+    <text x="450" y="590" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="9" fill="#4a4d5c">Pluggable backends via StoreRegistry -- config determines which backend class to instantiate at runtime</text>
+    <text x="450" y="606" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="9" fill="#3a3d4c">trellis-ai</text>
+</svg>

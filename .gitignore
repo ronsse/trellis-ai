@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+
+# Tools
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Data
+data/
+*.db
+
+# Environment
+.env
+pytest-of-*
+tmp*
