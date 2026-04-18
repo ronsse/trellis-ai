@@ -4,6 +4,12 @@ All notable changes to Trellis will be documented in this file.
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-04-17
+
+### Fixed
+
+- Publish workflow's `publish` job failed at `actions/checkout` with "repository not found" because the explicit `permissions: id-token: write` block implicitly set `contents: none`. Added `contents: read` alongside the OIDC token permission.
+
 ## [0.3.1] - 2026-04-17
 
 ### Fixed
