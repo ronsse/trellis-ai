@@ -52,8 +52,8 @@ class AsyncTrellisClient:
             import httpx  # noqa: PLC0415
 
             self._http = httpx.AsyncClient(
-                base_url=self._base_url,
-                timeout=30.0,  # type: ignore[arg-type]
+                base_url=self._base_url,  # type: ignore[arg-type]
+                timeout=30.0,
             )
         return self._http
 

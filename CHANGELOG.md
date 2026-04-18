@@ -4,6 +4,12 @@ All notable changes to Trellis will be documented in this file.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-04-17
+
+### Fixed
+
+- `mypy` error in [`src/trellis_sdk/async_client.py`](src/trellis_sdk/async_client.py) that blocked the `test` job in the publish workflow. The `type: ignore[arg-type]` was on the wrong line inside a multi-line `httpx.AsyncClient(...)` call. The initial `v0.3.0` tag never produced a PyPI artifact — this is the first actual release.
+
 ## [0.3.0] - 2026-04-17
 
 ### Breaking changes
