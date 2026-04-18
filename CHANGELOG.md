@@ -4,6 +4,8 @@ All notable changes to Trellis will be documented in this file.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-04-17
+
 ### Breaking changes
 
 - **Removed `trellis-mcp-legacy` entry point** and deleted `src/trellis/mcp_server.py`. The current MCP server lives at `src/trellis/mcp/server.py` and is exposed as `trellis-mcp`. Anyone invoking `trellis-mcp-legacy` should switch to `trellis-mcp`.
