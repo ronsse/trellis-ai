@@ -82,6 +82,7 @@ class VersionResponse(WireModel):
     wire_schema: str
     sdk_min: str
     package_version: str
+    mcp_tools_version: int = 1
     deprecations: list[DeprecationNotice] = Field(default_factory=list)
 
 

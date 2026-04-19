@@ -1141,6 +1141,10 @@ components:
             $ref: '#/components/schemas/DeprecationNotice'
           title: Deprecations
           type: array
+        mcp_tools_version:
+          default: 1
+          title: Mcp Tools Version
+          type: integer
         package_version:
           title: Package Version
           type: string

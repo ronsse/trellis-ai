@@ -42,6 +42,21 @@ WIRE_SCHEMA = SCHEMA_VERSION
 # than this are rejected by the version handshake.
 SDK_MIN = "0.1.0"
 
+# MCP tool surface version — versioned independently from API_MAJOR.
+#
+# The MCP server (``trellis.mcp``) is a separate, narrower contract:
+# ~8 agent-shaped tools consumed by LLM agents via the Model Context
+# Protocol.  It evolves on its own cadence — adding or changing a
+# tool doesn't have to move the REST API major, and moving the REST
+# API major doesn't invalidate deployed MCP clients.  Bump this when:
+#
+# * A tool is removed or renamed (breaking).
+# * A tool's arguments or return shape change in a non-additive way.
+#
+# Additive changes (new tool, new optional argument) don't require a
+# bump.  See ``docs/design/adr-mcp-contract.md``.
+MCP_TOOLS_VERSION = 1
+
 
 def api_version_string() -> str:
     """Return the conventional ``"<major>.<minor>"`` string."""
@@ -51,6 +66,7 @@ def api_version_string() -> str:
 __all__ = [
     "API_MAJOR",
     "API_MINOR",
+    "MCP_TOOLS_VERSION",
     "SDK_MIN",
     "WIRE_SCHEMA",
     "api_version_string",
