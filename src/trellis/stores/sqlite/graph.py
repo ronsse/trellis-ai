@@ -799,7 +799,7 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
                 if isinstance(value, bool):
                     conditions.append(f"json_extract(properties_json, '$.{key}') = ?")
                     params.append(1 if value else 0)
-                elif isinstance(value, (str, int, float)):
+                elif isinstance(value, str | int | float):
                     conditions.append(f"json_extract(properties_json, '$.{key}') = ?")
                     params.append(value)
                 elif value is None:

@@ -99,7 +99,7 @@ class SQLiteVectorStore(SQLiteStoreBase, VectorStore):
 
         if filters:
             for key, value in filters.items():
-                if isinstance(value, (str, int, float)):
+                if isinstance(value, str | int | float):
                     where_parts.append(f"json_extract(metadata_json, '$.{key}') = ?")
                     params.append(value)
                 elif isinstance(value, bool):

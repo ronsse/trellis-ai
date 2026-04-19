@@ -171,7 +171,7 @@ class PostgresDocumentStore(PostgresStoreBase, DocumentStore):
 
         if filters:
             for key, value in filters.items():
-                if isinstance(value, (str, int, float, bool)):
+                if isinstance(value, str | int | float | bool):
                     conditions.append("metadata->>%s = %s")
                     params.extend([key, str(value)])
 

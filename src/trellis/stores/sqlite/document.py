@@ -184,7 +184,7 @@ class SQLiteDocumentStore(SQLiteStoreBase, DocumentStore):
                         f"json_extract(d.metadata_json, '$.{key}') = ?"
                     )
                     filter_params.append(1 if value else 0)
-                elif isinstance(value, (str, int, float)):
+                elif isinstance(value, str | int | float):
                     filter_conditions.append(
                         f"json_extract(d.metadata_json, '$.{key}') = ?"
                     )
