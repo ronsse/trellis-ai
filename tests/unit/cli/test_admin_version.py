@@ -7,7 +7,12 @@ from datetime import date
 
 from typer.testing import CliRunner
 
-from trellis.api_version import API_MAJOR, API_MINOR, WIRE_SCHEMA
+from trellis.api_version import (
+    API_MAJOR,
+    API_MINOR,
+    MCP_TOOLS_VERSION,
+    WIRE_SCHEMA,
+)
 from trellis_api import deprecation
 from trellis_api.deprecation import DeprecationEntry
 from trellis_cli.main import app
@@ -28,6 +33,7 @@ class TestAdminVersion:
         assert payload["api_major"] == API_MAJOR
         assert payload["api_minor"] == API_MINOR
         assert payload["wire_schema"] == WIRE_SCHEMA
+        assert payload["mcp_tools_version"] == MCP_TOOLS_VERSION
         assert payload["deprecations"] == []
 
     def test_surfaces_registered_deprecations(self, monkeypatch):

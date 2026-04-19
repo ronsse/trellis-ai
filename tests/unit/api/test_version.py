@@ -9,7 +9,13 @@ import pytest
 from fastapi import FastAPI, Response
 from fastapi.testclient import TestClient
 
-from trellis.api_version import API_MAJOR, API_MINOR, SDK_MIN, WIRE_SCHEMA
+from trellis.api_version import (
+    API_MAJOR,
+    API_MINOR,
+    MCP_TOOLS_VERSION,
+    SDK_MIN,
+    WIRE_SCHEMA,
+)
 from trellis_api import deprecation
 from trellis_api.deprecation import (
     DeprecationEntry,
@@ -46,6 +52,7 @@ class TestVersionEndpoint:
         assert body["api_version"] == f"{API_MAJOR}.{API_MINOR}"
         assert body["wire_schema"] == WIRE_SCHEMA
         assert body["sdk_min"] == SDK_MIN
+        assert body["mcp_tools_version"] == MCP_TOOLS_VERSION
 
     def test_package_version_present(self, client):
         resp = client.get("/api/version")

@@ -307,13 +307,53 @@ Only for things that *must* run in the API process: custom store backends, custo
 - **Cache invalidation.** `_MERGED_BACKENDS_CACHE` is populated on first access and stays warm for the process lifetime. Installing a plugin wheel mid-process doesn't take effect until restart (which is the standard Python plugin model; nothing special needed).
 - **No plugin marketplace.** `pip install trellis-your-thing` is the whole distribution story. No central registry, no review process, no trust rating. Matches how Python plugins work elsewhere.
 
-### Step 6 — MCP as a separate narrower contract
+### Step 6 — MCP as a separate narrower contract — DONE (2026-04-18)
 
-MCP ≠ REST. Keep MCP the ~8 agent-shaped tools; REST stays the programmatic surface.
+MCP ≠ REST. Keep MCP the ~11 agent-shaped tools; REST stays the programmatic surface.
 
-- [ ] `mcp_tools_version` field added to `/api/version` response, versioned independently from `api_major`.
-- [ ] MCP tools import from `trellis_wire`, not `trellis.schemas.*`. Formatters (`trellis.retrieve.formatters`) either move to wire or get a wire-level wrapper.
-- [ ] Document which capabilities are MCP-only vs. REST-only vs. both.
+- [x] **`mcp_tools_version` added to `/api/version` response.** New constant `MCP_TOOLS_VERSION = 1` in [src/trellis/api_version.py](src/trellis/api_version.py) (single source of truth). Wired through [src/trellis_wire/dtos.py](src/trellis_wire/dtos.py) `VersionResponse`, [src/trellis_api/routes/version.py](src/trellis_api/routes/version.py) handshake route, and [src/trellis_cli/admin.py](src/trellis_cli/admin.py) `trellis admin version` output.
+- [x] ~~MCP tools import from `trellis_wire`, not `trellis.schemas.*`.~~ **Decision reversed after scope review.** The MCP server is deliberately in-process (imports from `StoreRegistry`, `PackBuilder`, `MutationExecutor`) for performance — direct store access instead of HTTP round-trips. MCP tools return markdown strings, not Pydantic DTOs, so there's no wire contract to defend at the return-shape level. The "narrow contract" is the tool *signatures*, not the internal types. Rationale captured in [adr-mcp-contract.md §"MCP stays in-process"](docs/design/adr-mcp-contract.md).
+- [x] **Capabilities matrix documented.** Two docs:
+    - [docs/design/adr-mcp-contract.md](docs/design/adr-mcp-contract.md) — full ADR: versioning rules, alternatives considered (mass wire-DTO purge, shared version number, MCP-over-HTTP), consequences.
+    - [docs/agent-guide/surfaces.md](docs/agent-guide/surfaces.md) — operator-facing TL;DR: "where do I call X?" + capability map covering all 18 capabilities across REST / MCP / SDK.
+
+**Verification:** `/api/version` tests + `trellis admin version` CLI tests updated for the new field. OpenAPI spec regenerated (52→60→60.7KB). Ruff + mypy clean; 127 tests across api/sdk/wire/plugins green.
+
+**Decisions captured:**
+
+- **Independent versioning.** `mcp_tools_version` bumps on MCP breaking changes (tool removed/renamed, argument or return shape non-additively changed). REST `api_major` moves don't force an MCP bump, and vice versa — MCP consumers (Claude Desktop, Cursor, custom agent hosts) have a different release cadence than programmatic REST consumers.
+- **No mass refactor of MCP imports.** The MCP server stays in-process with its existing core imports. The "narrow contract" is the 11 tool signatures — adding wire-DTO plumbing to an in-process server is pure overhead.
+- **Canonical surface per capability.** The matrix in `surfaces.md` is the source of truth; reviewers check it when adding a capability. Both-surface capabilities (trace/evidence ingest, search, packs, feedback) are kept intentionally — they serve different audiences with different presentation needs.
+
+---
+
+## Phase 1 — Status
+
+**DONE (Steps 1–6):**
+1. API version handshake + static OpenAPI in CI
+2. `trellis_wire` frozen DTOs (zero core deps)
+3. HTTP-only SDK + `trellis.testing` in-memory shim
+4. `trellis_sdk.extract` + `POST /api/v1/extract/drafts`
+5. Entry-points plugin loader (runtime extensions)
+6. MCP as separate narrower contract
+
+**What the four contracts look like in code (final):**
+
+| Contract | Where | Enforcement |
+|---|---|---|
+| Versioned REST API + OpenAPI | `/api/version` handshake, `docs/api/v1.yaml`, CI drift-check | `openapi-check` in GitHub Actions |
+| Wire DTOs (zero core deps) | `src/trellis_wire/` | Structural test AST-walks the package |
+| HTTP-only SDK (zero core deps) | `src/trellis_sdk/` + `trellis.testing` shim | Structural test AST-walks the package |
+| Client extractors | `src/trellis_sdk/extract/`, `POST /api/v1/extract/drafts` | Playbook 13, `examples/trellis_example_extractor/` |
+| Runtime plugins | `src/trellis/plugins/`, `trellis admin check-plugins` | Shadowing policy + `TRELLIS_PLUGIN_OVERRIDE` env var |
+| MCP vs REST | `mcp_tools_version`, `docs/agent-guide/surfaces.md` | Capabilities matrix, independent versioning |
+
+**Follow-ups carried forward (not Phase 1 work):**
+
+- `StoreRegistry._get()` thread-safety bug (spawned task from Step 3).
+- Response-DTO freezing (from Step 2 — needs `ingest.py` accumulator refactor).
+- Wiring the reserved plugin groups (`classifiers`, `rerankers`, `policies`, `search_strategies`) when a concrete consumer appears.
+- Schema registry for client extractor `properties` payloads (deferred until ≥3 client packages exist).
 
 ### Deliberately out of scope for Phase 1
 

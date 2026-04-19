@@ -168,6 +168,7 @@ def version(
     from trellis.api_version import (  # noqa: PLC0415
         API_MAJOR,
         API_MINOR,
+        MCP_TOOLS_VERSION,
         SDK_MIN,
         WIRE_SCHEMA,
         api_version_string,
@@ -182,6 +183,7 @@ def version(
         "wire_schema": WIRE_SCHEMA,
         "sdk_min": SDK_MIN,
         "package_version": get_version(),
+        "mcp_tools_version": MCP_TOOLS_VERSION,
         "deprecations": [
             {
                 "path": path,
@@ -205,6 +207,7 @@ def version(
     table.add_row("wire_schema", info["wire_schema"])
     table.add_row("sdk_min", info["sdk_min"])
     table.add_row("package_version", info["package_version"])
+    table.add_row("mcp_tools_version", str(info["mcp_tools_version"]))
     table.add_row("deprecations", str(len(info["deprecations"])))
     console.print(table)
     if info["deprecations"]:

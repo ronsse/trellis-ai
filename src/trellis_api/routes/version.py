@@ -18,6 +18,7 @@ from fastapi import APIRouter
 from trellis.api_version import (
     API_MAJOR,
     API_MINOR,
+    MCP_TOOLS_VERSION,
     SDK_MIN,
     WIRE_SCHEMA,
     api_version_string,
@@ -53,5 +54,6 @@ def api_version() -> VersionResponse:
         wire_schema=WIRE_SCHEMA,
         sdk_min=SDK_MIN,
         package_version=get_version(),
+        mcp_tools_version=MCP_TOOLS_VERSION,
         deprecations=deprecations,
     )
