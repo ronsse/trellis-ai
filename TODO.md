@@ -513,7 +513,7 @@ Classified by the existing `LLMFacetClassifier` pipeline when deterministic conf
 
 - [x] **`trellis analyze pack-sections`** CLI command — shipped 2026-04-15 (Sprint A). Reports per-section packs-count / avg-items / unique-items / empty-rate from `PACK_ASSEMBLED` events, flags frequently-empty sections.
 - [x] **Adoption guide**: [docs/agent-guide/tiered-context-retrieval.md](docs/agent-guide/tiered-context-retrieval.md)
-- [x] **Classification guide**: [docs/agent-guide/enriching-for-retrieval.md](docs/agent-guide/enriching-for-retrieval.md)
+- [x] **Tagging guide**: [docs/agent-guide/tagging-for-retrieval.md](docs/agent-guide/tagging-for-retrieval.md)
 - [ ] **Migration guide**: update existing `get_context` / `search` docs to reference sectioned retrieval as the recommended pattern for multi-agent workflows
 
 ### Pack Quality Evaluation Framework (interactive testing)
