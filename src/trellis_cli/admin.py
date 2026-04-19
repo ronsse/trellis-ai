@@ -70,7 +70,7 @@ def init(
 
     if config_path.exists() and not force:
         if output_format == "json":
-            console.print(
+            typer.echo(
                 json.dumps({"status": "exists", "config_dir": str(config_dir)})
             )
         else:
@@ -97,7 +97,7 @@ def init(
     config_path.write_text(config_path.read_text() + _LLM_CONFIG_TEMPLATE)
 
     if output_format == "json":
-        console.print(
+        typer.echo(
             json.dumps(
                 {
                     "status": "initialized",

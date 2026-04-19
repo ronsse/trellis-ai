@@ -221,7 +221,7 @@ def analyze_learning_observations(
     return {
         "artifact_version": _LEARNING_ARTIFACT_VERSION,
         "generated_at_utc": _utc_now(),
-        "artifacts_root": None if artifacts_root is None else str(Path(artifacts_root)),
+        "artifacts_root": None if artifacts_root is None else str(artifacts_root),
         "min_support": int(min_support),
         "observation_count": len(observations),
         "candidate_count": len(candidates),
