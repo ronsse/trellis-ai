@@ -8,5 +8,6 @@ updates through the governed mutation pipeline.
 """
 
 from trellis.ops.recording import record_outcome
+from trellis.ops.registry import ParameterRegistry
 
-__all__ = ["record_outcome"]
+__all__ = ["ParameterRegistry", "record_outcome"]
