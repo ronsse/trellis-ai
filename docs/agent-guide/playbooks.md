@@ -680,3 +680,133 @@ def test_save_memory_runs_extractor(registry, monkeypatch):
 ```
 
 Instance-level patching is the pattern Step 8B's new MCP tests use. It keeps the substitution scoped to the single `StoreRegistry` under test and does not leak into other tests sharing the class.
+
+---
+
+## Playbook 13: Building a client extractor package
+
+**When to use:** You need to feed metadata from a custom source system (Unity Catalog, dbt, OpenLineage, internal asset catalog, …) into Trellis, and the source has domain-specific types that don't fit the agent-centric core enums.
+
+**Core principle:** Client-side extraction + HTTP submission beats server-side plugins for the 80% case. Your reader lives in *your* package, with *your* dependencies, and submits drafts via `POST /api/v1/extract/drafts`. Server stays generic.
+
+### 1. Fork the skeleton
+
+```bash
+cp -r examples/trellis_example_extractor trellis_your_system
+```
+
+Files:
+
+- **`reader.py`** — the extractor. Pure function: reads your source → emits `EntityDraft` / `EdgeDraft`. No store access, no HTTP.
+- **`types.py`** — optional typed Pydantic models for your `properties` payloads. Validated client-side.
+- **`sync.py`** — the submission script. Instantiates `TrellisClient`, calls `extract()`, submits.
+
+### 2. Choose a type namespace
+
+Use `<your_system>.<resource>` for `entity_type` and `edge_kind`:
+
+```python
+ENTITY_TYPE_TABLE = "unity_catalog.table"
+ENTITY_TYPE_SCHEMA = "unity_catalog.schema"
+EDGE_KIND_CONTAINS = "unity_catalog.contains"
+EDGE_KIND_DERIVED_FROM = "unity_catalog.derived_from"
+```
+
+Core accepts any string at the storage and API layers ([CLAUDE.md](../../CLAUDE.md#store-abstraction-srctrelllissores)). Namespacing keeps domains from colliding and makes effectiveness analysis legible.
+
+### 3. Implement the extractor
+
+Conform to the `DraftExtractor` Protocol (structural — no inheritance needed):
+
+```python
+from trellis_sdk.extract import (
+    EdgeDraft,
+    EntityDraft,
+    ExtractionBatch,
+    ExtractorTier,
+)
+
+class UnityCatalogExtractor:
+    name = "trellis_unity_catalog.reader"   # used in audit trail
+    version = "0.3.1"                        # semver recommended
+    tier = ExtractorTier.DETERMINISTIC       # or HYBRID / LLM
+
+    def extract(self, uc_metadata) -> ExtractionBatch:
+        entities = [
+            EntityDraft(
+                entity_type="unity_catalog.table",
+                name=t.full_name,
+                entity_id=f"uc://{t.full_name}",  # stable ID = resolvable edges
+                properties={"columns": t.columns, "owner": t.owner},
+            )
+            for t in uc_metadata.tables
+        ]
+        edges = [...]
+        return ExtractionBatch(
+            source="unity_catalog",
+            extractor_name=self.name,
+            extractor_version=self.version,
+            tier=self.tier,
+            entities=entities,
+            edges=edges,
+            idempotency_key=f"uc-sync-{uc_metadata.snapshot_id}",
+        )
+```
+
+### 4. Submit
+
+```python
+from trellis_sdk import TrellisClient
+
+client = TrellisClient(base_url="https://trellis.prod")
+batch = UnityCatalogExtractor().extract(fetch_uc())
+result = client.submit_drafts(batch)
+print(f"{result.succeeded}/{result.entities_submitted + result.edges_submitted} succeeded")
+```
+
+### 5. Idempotency
+
+Pass a stable key so reruns dedupe:
+
+```python
+client.submit_drafts(batch, idempotency_key=f"uc-sync-{snapshot_id}")
+```
+
+Or embed it in the batch (`ExtractionBatch.idempotency_key`). The `Idempotency-Key` header wins when both are set — useful for a CI wrapper to inject a run ID without modifying the extractor.
+
+The server stamps `{key}:{i}` on each command, so per-entity deduplication survives repeated submissions at the `MutationExecutor` layer.
+
+### 6. Operational shape
+
+- **Run it as a CronJob / scheduled Action.** One sync script per source, per schedule, per environment.
+- **One idempotency key per snapshot.** Use a source-system snapshot ID (git SHA, DB timestamp, warehouse version) — not `datetime.now()`, which would dedupe nothing.
+- **Chunk large syncs.** For >10k entities, split into batches and submit sequentially. The response includes `executed` / `succeeded` counts per batch.
+- **Typed exceptions.** `TrellisRateLimitError` exposes `retry_after_seconds`; `TrellisAPIError` has `status_code` + `body`. Wrap `submit_drafts()` with your retry policy.
+
+### 7. Testing
+
+Use `trellis.testing.in_memory_client` to test your extractor end-to-end without running a server:
+
+```python
+from pathlib import Path
+from trellis.testing import in_memory_client
+
+def test_extractor_roundtrip(tmp_path):
+    with in_memory_client(tmp_path / "stores") as client:
+        batch = UnityCatalogExtractor().extract(fixture_metadata())
+        result = client.submit_drafts(batch)
+        assert result.succeeded == result.entities_submitted + result.edges_submitted
+```
+
+### 8. When to upgrade to a server plugin instead
+
+Stay client-side unless you need:
+
+- A custom store backend (your entities need a different storage model than SQLite/Postgres).
+- A custom classifier that reads stored state to decide tags.
+- A policy gate that evaluates cross-entity rules.
+
+Those run in the API process — they're the plugin-loader path from Step 5 (tracked in [TODO.md](../../TODO.md)), not this playbook.
+
+See [examples/trellis_example_extractor/](../../examples/trellis_example_extractor/) for a complete working skeleton.
+

@@ -440,6 +440,137 @@ components:
       - sunset_on
       title: DeprecationNotice
       type: object
+    DraftSubmissionRequest:
+      additionalProperties: false
+      description: 'HTTP body wrapper for ``POST /api/v1/extract/drafts``.
+
+
+        Carries the batch plus per-request knobs (strategy, override of
+
+        ``requested_by``).  Most fields live on the batch itself; this
+
+        wrapper only adds what''s request-scoped.'
+      properties:
+        batch:
+          $ref: '#/components/schemas/ExtractionBatch'
+        requested_by:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Requested By
+        strategy:
+          $ref: '#/components/schemas/BatchStrategy'
+          default: continue_on_error
+      required:
+      - batch
+      title: DraftSubmissionRequest
+      type: object
+    DraftSubmissionResult:
+      additionalProperties: false
+      description: 'Response for ``POST /api/v1/extract/drafts``.
+
+
+        Mirrors the structure of
+
+        :class:`trellis_wire.BatchCommandResponse` so callers can reuse
+
+        existing batch-result handling, with the addition of batch-level
+
+        metadata that identifies the submission end-to-end.'
+      properties:
+        batch_id:
+          title: Batch Id
+          type: string
+        duplicates:
+          default: 0
+          title: Duplicates
+          type: integer
+        edges_submitted:
+          default: 0
+          title: Edges Submitted
+          type: integer
+        entities_submitted:
+          default: 0
+          title: Entities Submitted
+          type: integer
+        executed:
+          default: 0
+          title: Executed
+          type: integer
+        extractor:
+          title: Extractor
+          type: string
+        failed:
+          default: 0
+          title: Failed
+          type: integer
+        idempotency_key:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Idempotency Key
+        rejected:
+          default: 0
+          title: Rejected
+          type: integer
+        results:
+          items:
+            $ref: '#/components/schemas/CommandResponse'
+          title: Results
+          type: array
+        status:
+          default: ok
+          title: Status
+          type: string
+        strategy:
+          title: Strategy
+          type: string
+        succeeded:
+          default: 0
+          title: Succeeded
+          type: integer
+      required:
+      - batch_id
+      - extractor
+      - strategy
+      title: DraftSubmissionResult
+      type: object
+    EdgeDraft:
+      additionalProperties: false
+      description: 'An edge candidate submitted by a client extractor.
+
+
+        ``source_id`` / ``target_id`` may reference either final entity
+
+        IDs or draft-local IDs produced in the same batch — the server
+
+        resolves draft-local references before issuing commands.'
+      properties:
+        confidence:
+          default: 1.0
+          maximum: 1.0
+          minimum: 0.0
+          title: Confidence
+          type: number
+        edge_kind:
+          title: Edge Kind
+          type: string
+        properties:
+          additionalProperties: true
+          title: Properties
+          type: object
+        source_id:
+          title: Source Id
+          type: string
+        target_id:
+          title: Target Id
+          type: string
+      required:
+      - source_id
+      - target_id
+      - edge_kind
+      title: EdgeDraft
+      type: object
     Enforcement:
       enum:
       - enforce
@@ -471,6 +602,133 @@ components:
       - name
       title: EntityCreateRequest
       type: object
+    EntityDraft:
+      additionalProperties: false
+      description: 'An entity candidate submitted by a client extractor.
+
+
+        Mirrors :class:`trellis.schemas.extraction.EntityDraft` but
+
+        without the ``generation_spec`` field (curated-node provenance
+
+        goes through ``/api/v1/entities`` with an explicit curation
+
+        flow; extraction drafts are machine-generated).
+
+
+        ``properties`` is an escape hatch for domain-specific fields
+
+        (Unity Catalog column schemas, dbt config blocks, etc.) —
+
+        validated opaquely at the wire level.  A future schema registry
+
+        (deferred; see [TODO.md](../../TODO.md)) may add per-namespace
+
+        typed validation; for now, clients own the shape.'
+      properties:
+        confidence:
+          default: 1.0
+          maximum: 1.0
+          minimum: 0.0
+          title: Confidence
+          type: number
+        entity_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Entity Id
+        entity_type:
+          title: Entity Type
+          type: string
+        name:
+          title: Name
+          type: string
+        node_role:
+          $ref: '#/components/schemas/NodeRole'
+          default: semantic
+        properties:
+          additionalProperties: true
+          title: Properties
+          type: object
+      required:
+      - entity_type
+      - name
+      title: EntityDraft
+      type: object
+    ExtractionBatch:
+      additionalProperties: false
+      description: 'One unit of submission from a client extractor.
+
+
+        ``idempotency_key`` is the primary deduplication signal — the
+
+        server records it on the audit trail and a repeat submission
+
+        with the same key is a no-op.  Typical pattern: combine the
+
+        extractor name with a source snapshot identifier, e.g.
+
+        ``"unity_catalog-sync-2026-04-17T14:22:00Z"``.
+
+
+        ``extractor_name`` / ``extractor_version`` feed the audit
+
+        trail''s ``requested_by`` field as ``f"{name}@{version}"`` so
+
+        downstream effectiveness analysis can attribute drafts to a
+
+        specific client release.'
+      properties:
+        edges:
+          items:
+            $ref: '#/components/schemas/EdgeDraft'
+          title: Edges
+          type: array
+        entities:
+          items:
+            $ref: '#/components/schemas/EntityDraft'
+          title: Entities
+          type: array
+        extractor_name:
+          title: Extractor Name
+          type: string
+        extractor_version:
+          title: Extractor Version
+          type: string
+        idempotency_key:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Idempotency Key
+        source:
+          title: Source
+          type: string
+        tier:
+          $ref: '#/components/schemas/ExtractorTier'
+          default: deterministic
+      required:
+      - source
+      - extractor_name
+      - extractor_version
+      title: ExtractionBatch
+      type: object
+    ExtractorTier:
+      description: 'Cost tier declared by an extractor when submitting drafts.
+
+
+        Used for audit telemetry and effectiveness analysis.  The server
+
+        trusts the client''s self-reported tier — it''s a honesty signal,
+
+        not an enforcement mechanism.  Wire-level duplicate of
+
+        :class:`trellis.extract.base.ExtractorTier`.'
+      enum:
+      - deterministic
+      - hybrid
+      - llm
+      title: ExtractorTier
+      type: string
     FeedbackRequest:
       additionalProperties: false
       description: Request to record feedback on a target.
@@ -1254,6 +1512,52 @@ paths:
       summary: Ingest Evidence
       tags:
       - ingest
+  /api/v1/extract/drafts:
+    post:
+      description: 'Submit a client-extracted draft batch for governed ingestion.
+
+
+        The ``Idempotency-Key`` header overrides
+
+        ``req.batch.idempotency_key`` when both are set — the header is
+
+        closer to the transport layer and more visible on the client
+
+        side, so it wins.  When neither is present the submission is
+
+        still processed, but without deduplication.'
+      operationId: submit_drafts_api_v1_extract_drafts_post
+      parameters:
+      - in: header
+        name: Idempotency-Key
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Idempotency-Key
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DraftSubmissionRequest'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DraftSubmissionResult'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: Submit Drafts
+      tags:
+      - extract
   /api/v1/feedback:
     post:
       description: Record feedback on a trace or precedent.

@@ -46,6 +46,7 @@ def create_app() -> FastAPI:
     from trellis_api.routes import (  # noqa: PLC0415
         admin,
         curate,
+        extract,
         ingest,
         mutations,
         policies,
@@ -74,6 +75,7 @@ def create_app() -> FastAPI:
     app.include_router(curate.router, prefix="/api/v1", tags=["curate"])
     app.include_router(mutations.router, prefix="/api/v1", tags=["mutations"])
     app.include_router(policies.router, prefix="/api/v1", tags=["policies"])
+    app.include_router(extract.router, prefix="/api/v1", tags=["extract"])
 
     # Serve the UI at /ui (static files bundled in the package)
     if _STATIC_DIR.is_dir():
