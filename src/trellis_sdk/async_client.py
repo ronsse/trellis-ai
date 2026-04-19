@@ -30,6 +30,12 @@ from trellis_sdk._http import (
     check_handshake,
     raise_for_status,
 )
+from trellis_wire import (
+    BatchStrategy,
+    DraftSubmissionRequest,
+    DraftSubmissionResult,
+    ExtractionBatch,
+)
 
 if TYPE_CHECKING:
     from types import TracebackType
@@ -341,6 +347,41 @@ class AsyncTrellisClient:
         }
         resp = await self._request("POST", "/api/v1/links", json=payload)
         return cast("str", resp.json()["edge_id"])
+
+    # -- Extract (client-side extractor contract) --
+
+    async def submit_drafts(
+        self,
+        batch: ExtractionBatch,
+        *,
+        strategy: BatchStrategy = BatchStrategy.CONTINUE_ON_ERROR,
+        requested_by: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> DraftSubmissionResult:
+        """Async variant of :meth:`TrellisClient.submit_drafts`.
+
+        Uses the bounded concurrency semaphore like any other request.
+        See the sync docstring for semantics of ``idempotency_key`` +
+        ``requested_by``.
+        """
+        await self._ensure_handshake()
+        body = DraftSubmissionRequest(
+            batch=batch,
+            strategy=strategy,
+            requested_by=requested_by,
+        )
+        headers: dict[str, str] = {}
+        effective_key = idempotency_key or batch.idempotency_key
+        if effective_key:
+            headers["Idempotency-Key"] = effective_key
+        async with self._semaphore:
+            resp = await self._http.post(
+                "/api/v1/extract/drafts",
+                json=body.model_dump(mode="json"),
+                headers=headers,
+            )
+        raise_for_status(resp, request_path="/api/v1/extract/drafts")
+        return DraftSubmissionResult.model_validate(resp.json())
 
     # -- Lifecycle --
 

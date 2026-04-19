@@ -19,6 +19,7 @@ import trellis_api.app as api_app_module
 from trellis_api.routes import (
     admin,
     curate,
+    extract,
     ingest,
     mutations,
     policies,
@@ -53,6 +54,7 @@ def _build_app(registry: StoreRegistry) -> FastAPI:
     app.include_router(curate.router, prefix="/api/v1", tags=["curate"])
     app.include_router(mutations.router, prefix="/api/v1", tags=["mutations"])
     app.include_router(policies.router, prefix="/api/v1", tags=["policies"])
+    app.include_router(extract.router, prefix="/api/v1", tags=["extract"])
 
     # Wire the registry the routes pull from via get_registry().
     api_app_module._registry = registry

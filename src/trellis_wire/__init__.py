@@ -52,6 +52,14 @@ from trellis_wire.dtos import (
     VersionResponse,
 )
 from trellis_wire.enums import BatchStrategy, NodeRole
+from trellis_wire.extract import (
+    DraftSubmissionRequest,
+    DraftSubmissionResult,
+    EdgeDraft,
+    EntityDraft,
+    ExtractionBatch,
+    ExtractorTier,
+)
 
 __all__ = [
     # Base
@@ -93,4 +101,11 @@ __all__ = [
     # Admin
     "HealthResponse",
     "StatsResponse",
+    # Extract (client-side extractor contract)
+    "DraftSubmissionRequest",
+    "DraftSubmissionResult",
+    "EdgeDraft",
+    "EntityDraft",
+    "ExtractionBatch",
+    "ExtractorTier",
 ]

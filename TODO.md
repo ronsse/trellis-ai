@@ -260,16 +260,27 @@ Drop dual-mode. Single code path for all clients.
 - Response DTO freezing (from Step 2 carry-over) still deferred.
 - Skills module still has utility — if clients want to build their own, they can import `trellis_sdk._format` directly (private but stable).
 
-### Step 4 — `trellis_sdk.extract` module + `POST /api/v1/extract/drafts`
+### Step 4 — `trellis_sdk.extract` module + `POST /api/v1/extract/drafts` — DONE (2026-04-18)
 
 Client-side extractor contract. Unity Catalog, dbt, etc. live in their own packages and submit drafts over HTTP.
 
-- [ ] New module `src/trellis_sdk/extract/` exporting `EntityDraft`, `EdgeDraft`, `ExtractionBatch`, `DraftExtractor` Protocol, `ExtractorTier` enum. DTOs mirror [src/trellis/schemas/extraction.py](src/trellis/schemas/extraction.py) but live in `trellis_wire`.
-- [ ] `TrellisClient.submit_drafts(batch, *, strategy, requested_by)` hits new route `POST /api/v1/extract/drafts` with `Idempotency-Key` header.
-- [ ] Server route translates wire drafts → core `EntityDraft`/`EdgeDraft`, runs through existing [result_to_batch](src/trellis/extract/commands.py) + `MutationExecutor`. Zero new mutation logic; just a new entry point.
-- [ ] Audit trail captures `extractor_name@version` in `requested_by` and `ExtractionProvenance`.
-- [ ] Example client package under `examples/trellis_example_extractor/` — skeleton a client team can fork. Demonstrates namespaced types (`example.widget`, `example.contains`), idempotency keys, batch chunking for large syncs.
-- [ ] Playbook: "Building a client extractor package" in `docs/agent-guide/playbooks.md`.
+- [x] **Wire DTOs:** [src/trellis_wire/extract.py](src/trellis_wire/extract.py) ships `ExtractorTier`, `EntityDraft`, `EdgeDraft`, `ExtractionBatch`, `DraftSubmissionRequest`, `DraftSubmissionResult`. Request DTOs frozen per the Step 2 convention. `generation_spec` deliberately omitted from wire `EntityDraft` — curated-node provenance flows through a dedicated curation path, not extraction.
+- [x] **SDK surface:** [src/trellis_sdk/extract/__init__.py](src/trellis_sdk/extract/__init__.py) re-exports the wire DTOs plus a `DraftExtractor` Protocol (structural — no inheritance required). Client packages depend on `trellis_sdk` alone and get everything transitively.
+- [x] **Client method:** `TrellisClient.submit_drafts(batch, *, strategy, requested_by, idempotency_key)` and async variant. Sends `Idempotency-Key` header when set; header wins over `batch.idempotency_key` when both are present.
+- [x] **Server route:** [src/trellis_api/routes/extract.py](src/trellis_api/routes/extract.py) at `POST /api/v1/extract/drafts`. Wire batch → core `ExtractionResult` (via new translator in [src/trellis/wire/translate.py](src/trellis/wire/translate.py)) → `result_to_batch` → `MutationExecutor`. Zero new mutation logic; same bridge the CLI ingest commands and MCP `save_memory` use. Audit trail records `f"{extractor_name}@{extractor_version}"` in `requested_by` and `provenance.source_hint = batch.source`.
+- [x] **Idempotency stamping:** server stamps `{key}:{i}` on every command in the batch so per-entity dedup survives replays at the executor layer.
+- [x] **Draft translators:** `entity_draft_to_core`, `edge_draft_to_core`, `extraction_batch_to_core_result` in `trellis.wire.translate`. Three translators cover the wire → core direction; reverse direction not needed yet (responses don't include draft payloads).
+- [x] **Testing shim updated:** [src/trellis/testing/inmemory.py](src/trellis/testing/inmemory.py) wires the new router into `_build_app` so the extract route is reachable from in-process tests.
+- [x] **Example client package:** [examples/trellis_example_extractor/](examples/trellis_example_extractor/) with `reader.py`, `types.py`, `sync.py`, `README.md`. Demonstrates namespaced types (`example.widget`, `example.contains`), `idempotency_key` derived from a snapshot ID, and two submission modes (real server vs. in-memory shim). `PYTHONPATH=src python -m examples.trellis_example_extractor.sync` runs end-to-end against an in-memory fixture and prints the submission report.
+- [x] **Playbook:** "Playbook 13: Building a client extractor package" in [docs/agent-guide/playbooks.md](docs/agent-guide/playbooks.md) — fork instructions, namespace-choice guidance, the 8-step shape (types → extractor → submit → idempotency → operational shape → testing → when to graduate to a server plugin).
+- [x] **OpenAPI spec updated:** `docs/api/v1.yaml` now includes the `/api/v1/extract/drafts` route + 6 new schemas. Grew from 52KB → 60KB.
+
+**Tests:** 35 new tests across three files (`tests/unit/wire/test_extract.py` — 13; `tests/unit/sdk/test_extract.py` — 7; `tests/unit/api/test_extract_route.py` — 15). Full boundary suite is 136 green (was 101 after Step 3). SDK isolation test still passes — `trellis_sdk.extract` only depends on `trellis_wire`.
+
+**Decisions captured:**
+- **Chose a new route (`/extract/drafts`) over reusing `/ingest/bulk`.** The new route captures extractor identity + version in the audit trail automatically via `source_hint` + `requested_by`; `/ingest/bulk` would require the caller to wire that up by convention. Small duplication, clean telemetry — the right call per the original plan.
+- **Schema registry deferred.** `properties: dict[str, Any]` stays as the escape hatch for domain-specific fields. Revisit once ≥3 client extractor packages exist and the patterns are visible.
+- **No reverse (core → wire) draft translator yet.** Responses don't return draft payloads; if a future `GET /api/v1/extract/batches/{id}` surfaces submitted drafts, add the reverse translator then.
 
 ### Step 5 — Entry-points plugin loader (runtime extensions)
 

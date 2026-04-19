@@ -17,6 +17,9 @@ functions.
 from trellis.wire.translate import (
     batch_strategy_to_core,
     batch_strategy_to_wire,
+    edge_draft_to_core,
+    entity_draft_to_core,
+    extraction_batch_to_core_result,
     node_role_to_core,
     node_role_to_wire,
 )
@@ -24,6 +27,9 @@ from trellis.wire.translate import (
 __all__ = [
     "batch_strategy_to_core",
     "batch_strategy_to_wire",
+    "edge_draft_to_core",
+    "entity_draft_to_core",
+    "extraction_batch_to_core_result",
     "node_role_to_core",
     "node_role_to_wire",
 ]

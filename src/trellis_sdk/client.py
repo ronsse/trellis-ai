@@ -27,6 +27,12 @@ from trellis_sdk._http import (
     check_handshake,
     raise_for_status,
 )
+from trellis_wire import (
+    BatchStrategy,
+    DraftSubmissionRequest,
+    DraftSubmissionResult,
+    ExtractionBatch,
+)
 
 if TYPE_CHECKING:
     from types import TracebackType
@@ -333,6 +339,49 @@ class TrellisClient:
         }
         resp = self._request("POST", "/api/v1/links", json=payload)
         return cast("str", resp.json()["edge_id"])
+
+    # -- Extract (client-side extractor contract) --
+
+    def submit_drafts(
+        self,
+        batch: ExtractionBatch,
+        *,
+        strategy: BatchStrategy = BatchStrategy.CONTINUE_ON_ERROR,
+        requested_by: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> DraftSubmissionResult:
+        """Submit a client-extracted :class:`ExtractionBatch` to the server.
+
+        The batch flows through the same governed mutation pipeline
+        as server-side extractors — ``MutationExecutor`` handles
+        validation, policy checks, idempotency, and audit logging.
+
+        ``idempotency_key`` wins over ``batch.idempotency_key`` when
+        both are set; the header is closer to the transport layer.
+        The server stamps ``{key}:{i}`` on each command so per-entity
+        deduplication survives repeated submissions.
+
+        ``requested_by`` defaults to ``f"{extractor_name}@{extractor_version}"``
+        for attribution; pass a custom value (e.g. a CI run ID) to
+        override.
+        """
+        self._ensure_handshake()
+        body = DraftSubmissionRequest(
+            batch=batch,
+            strategy=strategy,
+            requested_by=requested_by,
+        )
+        headers: dict[str, str] = {}
+        effective_key = idempotency_key or batch.idempotency_key
+        if effective_key:
+            headers["Idempotency-Key"] = effective_key
+        resp = self._http.post(
+            "/api/v1/extract/drafts",
+            json=body.model_dump(mode="json"),
+            headers=headers,
+        )
+        raise_for_status(resp, request_path="/api/v1/extract/drafts")
+        return DraftSubmissionResult.model_validate(resp.json())
 
     # -- Lifecycle --
 
