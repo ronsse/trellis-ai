@@ -16,18 +16,23 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
 from trellis.core.base import TrellisModel
+from trellis.schemas.parameters import ParameterScope
 from trellis.stores.advisory_store import AdvisoryStore
 from trellis.stores.base.document import DocumentStore
 from trellis.stores.base.event_log import EventLog, EventType
 
+if TYPE_CHECKING:
+    from trellis.ops.registry import ParameterRegistry
+
 logger = structlog.get_logger(__name__)
 
-# Thresholds for classification
+# Thresholds for classification.  Still the canonical defaults — the
+# ``registry`` parameter on each function can override them per scope.
 _SUCCESS_RATING_THRESHOLD = 0.5
 _NOISE_RATE_THRESHOLD = 0.3
 
@@ -35,6 +40,22 @@ _NOISE_RATE_THRESHOLD = 0.3
 _ADVISORY_MIN_PRESENTATIONS = 3
 _ADVISORY_SUPPRESS_CONFIDENCE = 0.1
 _CONFIDENCE_BLEND_WEIGHT = 0.3  # how much observed fitness influences confidence
+
+# Component IDs used when resolving registry overrides.
+_ITEMS_COMPONENT = "retrieve.effectiveness.items"
+_ADVISORY_COMPONENT = "retrieve.effectiveness.advisory"
+
+
+def _resolve_param(
+    registry: ParameterRegistry | None,
+    component_id: str,
+    key: str,
+    default: Any,
+) -> Any:
+    """Read ``key`` from ``registry`` for the given component, else ``default``."""
+    if registry is None:
+        return default
+    return registry.get(ParameterScope(component_id=component_id), key, default)
 
 
 class EffectivenessReport(TrellisModel):
@@ -52,6 +73,7 @@ def analyze_effectiveness(
     *,
     days: int = 30,
     min_appearances: int = 2,
+    registry: ParameterRegistry | None = None,
 ) -> EffectivenessReport:
     """Analyze which injected context items correlate with task success.
 
@@ -62,10 +84,23 @@ def analyze_effectiveness(
         event_log: The event log to query.
         days: How many days of history to analyze.
         min_appearances: Minimum times an item must appear to be scored.
+        registry: Optional parameter registry.  When provided, overrides
+            the success-rating and noise-rate thresholds from the active
+            parameter snapshot.
 
     Returns:
         EffectivenessReport with per-item success rates and noise candidates.
     """
+    success_threshold = _resolve_param(
+        registry,
+        _ITEMS_COMPONENT,
+        "success_rating_threshold",
+        _SUCCESS_RATING_THRESHOLD,
+    )
+    noise_threshold = _resolve_param(
+        registry, _ITEMS_COMPONENT, "noise_rate_threshold", _NOISE_RATE_THRESHOLD
+    )
+
     since = datetime.now(tz=UTC) - timedelta(days=days)
 
     # Get all pack assembly events
@@ -96,7 +131,7 @@ def analyze_effectiveness(
         if pack_id and pack_id in pack_items:
             rating = event.payload.get("rating", 0.0)
             pack_feedback[pack_id] = event.payload.get(
-                "success", rating >= _SUCCESS_RATING_THRESHOLD
+                "success", rating >= success_threshold
             )
 
     # Calculate per-item success rates
@@ -137,7 +172,7 @@ def analyze_effectiveness(
         )
 
         # Flag items that appear frequently but correlate with failure
-        if rate < _NOISE_RATE_THRESHOLD and count >= min_appearances:
+        if rate < noise_threshold and count >= min_appearances:
             noise_candidates.append(item_id)
 
     item_scores.sort(key=lambda x: x["success_rate"], reverse=True)
@@ -162,6 +197,7 @@ def run_effectiveness_feedback(
     *,
     days: int = 30,
     min_appearances: int = 2,
+    registry: ParameterRegistry | None = None,
 ) -> EffectivenessReport:
     """Analyse effectiveness **and** apply noise tags in one call.
 
@@ -178,7 +214,10 @@ def run_effectiveness_feedback(
     from trellis.classify.feedback import apply_noise_tags  # noqa: PLC0415
 
     report = analyze_effectiveness(
-        event_log, days=days, min_appearances=min_appearances
+        event_log,
+        days=days,
+        min_appearances=min_appearances,
+        registry=registry,
     )
 
     if report.noise_candidates:
@@ -226,12 +265,13 @@ class AdvisoryEffectivenessReport(TrellisModel):
     advisories_suppressed: list[str]
 
 
-def analyze_advisory_effectiveness(
+def analyze_advisory_effectiveness(  # noqa: PLR0912 — registry resolution adds one branch beyond the limit, but the logic is a straight-line analysis pipeline
     event_log: EventLog,
     advisory_store: AdvisoryStore,  # noqa: ARG001 — kept for API symmetry with run_advisory_fitness_loop
     *,
     days: int = 30,
-    min_presentations: int = _ADVISORY_MIN_PRESENTATIONS,
+    min_presentations: int | None = None,
+    registry: ParameterRegistry | None = None,
 ) -> AdvisoryEffectivenessReport:
     """Analyze how advisories correlate with pack outcomes.
 
@@ -249,6 +289,20 @@ def analyze_advisory_effectiveness(
     Returns:
         AdvisoryEffectivenessReport with per-advisory fitness scores.
     """
+    success_threshold = _resolve_param(
+        registry,
+        _ADVISORY_COMPONENT,
+        "success_rating_threshold",
+        _SUCCESS_RATING_THRESHOLD,
+    )
+    if min_presentations is None:
+        min_presentations = _resolve_param(
+            registry,
+            _ADVISORY_COMPONENT,
+            "min_presentations",
+            _ADVISORY_MIN_PRESENTATIONS,
+        )
+
     since = datetime.now(tz=UTC) - timedelta(days=days)
 
     pack_events = event_log.get_events(
@@ -276,7 +330,7 @@ def analyze_advisory_effectiveness(
         if pack_id and pack_id in pack_advisories:
             rating = event.payload.get("rating", 0.0)
             pack_feedback[pack_id] = event.payload.get(
-                "success", rating >= _SUCCESS_RATING_THRESHOLD
+                "success", rating >= success_threshold
             )
 
     # Count per-advisory outcomes
@@ -348,9 +402,10 @@ def run_advisory_fitness_loop(
     advisory_store: AdvisoryStore,
     *,
     days: int = 30,
-    min_presentations: int = _ADVISORY_MIN_PRESENTATIONS,
-    suppress_below: float = _ADVISORY_SUPPRESS_CONFIDENCE,
-    blend_weight: float = _CONFIDENCE_BLEND_WEIGHT,
+    min_presentations: int | None = None,
+    suppress_below: float | None = None,
+    blend_weight: float | None = None,
+    registry: ParameterRegistry | None = None,
 ) -> AdvisoryEffectivenessReport:
     """Analyze advisory effectiveness and adjust confidence accordingly.
 
@@ -384,11 +439,34 @@ def run_advisory_fitness_loop(
         AdvisoryEffectivenessReport including lists of boosted and
         suppressed advisory IDs.
     """
+    if min_presentations is None:
+        min_presentations = _resolve_param(
+            registry,
+            _ADVISORY_COMPONENT,
+            "min_presentations",
+            _ADVISORY_MIN_PRESENTATIONS,
+        )
+    if suppress_below is None:
+        suppress_below = _resolve_param(
+            registry,
+            _ADVISORY_COMPONENT,
+            "suppress_confidence",
+            _ADVISORY_SUPPRESS_CONFIDENCE,
+        )
+    if blend_weight is None:
+        blend_weight = _resolve_param(
+            registry,
+            _ADVISORY_COMPONENT,
+            "blend_weight",
+            _CONFIDENCE_BLEND_WEIGHT,
+        )
+
     report = analyze_advisory_effectiveness(
         event_log,
         advisory_store,
         days=days,
         min_presentations=min_presentations,
+        registry=registry,
     )
 
     boosted: list[str] = []

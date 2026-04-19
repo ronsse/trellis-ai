@@ -23,10 +23,18 @@ import re
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+from trellis.schemas.parameters import ParameterScope
+
+if TYPE_CHECKING:
+    from trellis.ops.registry import ParameterRegistry
 
 _LEARNING_ARTIFACT_VERSION = "1.0"
 _DEFAULT_MIN_SUPPORT = 2
+
+# Component id used when resolving registry overrides for promotion/noise thresholds.
+_SCORING_COMPONENT = "learning.scoring"
 
 _INTENT_FAMILY_KEYWORDS: tuple[tuple[tuple[str, ...], str], ...] = (
     (("analyze", "profile", "explore"), "source_analysis"),
@@ -136,6 +144,7 @@ def analyze_learning_observations(
     observations: Sequence[Mapping[str, Any]],
     min_support: int = _DEFAULT_MIN_SUPPORT,
     artifacts_root: str | Path | None = None,
+    registry: ParameterRegistry | None = None,
 ) -> dict[str, Any]:
     candidate_map: dict[tuple[str, str], dict[str, Any]] = {}
 
@@ -172,6 +181,7 @@ def analyze_learning_observations(
             item_type=str(metrics.get("item_type", "")).strip(),
             success_rate=success_rate,
             retry_rate=retry_rate,
+            registry=registry,
         )
         if recommendation_type is None:
             continue
@@ -394,15 +404,33 @@ def _recommend_learning_action(
     item_type: str,
     success_rate: float,
     retry_rate: float,
+    registry: ParameterRegistry | None = None,
 ) -> str | None:
-    if (
-        success_rate >= _PROMOTE_SUCCESS_THRESHOLD
-        and retry_rate <= _PROMOTE_RETRY_THRESHOLD
-    ):
+    scope = ParameterScope(component_id=_SCORING_COMPONENT)
+    if registry is None:
+        promote_success = _PROMOTE_SUCCESS_THRESHOLD
+        promote_retry = _PROMOTE_RETRY_THRESHOLD
+        noise_success = _NOISE_SUCCESS_THRESHOLD
+        noise_retry = _NOISE_RETRY_THRESHOLD
+    else:
+        promote_success = registry.get(
+            scope, "promote_success_threshold", _PROMOTE_SUCCESS_THRESHOLD
+        )
+        promote_retry = registry.get(
+            scope, "promote_retry_threshold", _PROMOTE_RETRY_THRESHOLD
+        )
+        noise_success = registry.get(
+            scope, "noise_success_threshold", _NOISE_SUCCESS_THRESHOLD
+        )
+        noise_retry = registry.get(
+            scope, "noise_retry_threshold", _NOISE_RETRY_THRESHOLD
+        )
+
+    if success_rate >= promote_success and retry_rate <= promote_retry:
         if item_type == "precedent":
             return "promote_precedent"
         return "promote_guidance"
-    if success_rate <= _NOISE_SUCCESS_THRESHOLD or retry_rate >= _NOISE_RETRY_THRESHOLD:
+    if success_rate <= noise_success or retry_rate >= noise_retry:
         return "investigate_noise"
     return None
 
