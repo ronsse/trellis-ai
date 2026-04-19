@@ -13,7 +13,10 @@ from trellis.stores.base import (
     DocumentStore,
     EventLog,
     GraphStore,
+    OutcomeStore,
+    ParameterStore,
     TraceStore,
+    TunerStateStore,
     VectorStore,
 )
 
@@ -85,6 +88,15 @@ _BUILTIN_BACKENDS: dict[str, dict[str, dict[str, tuple[str, str]]]] = {
                 "PostgresEventLog",
             ),
         },
+    },
+    "outcome": {
+        "sqlite": ("trellis.stores.sqlite.outcome", "SQLiteOutcomeStore"),
+    },
+    "parameter": {
+        "sqlite": ("trellis.stores.sqlite.parameter", "SQLiteParameterStore"),
+    },
+    "tuner_state": {
+        "sqlite": ("trellis.stores.sqlite.tuner_state", "SQLiteTunerStateStore"),
     },
 }
 
@@ -712,6 +724,9 @@ class StoreRegistry:
                 "graph": "graph.db",
                 "vector": "vectors.db",
                 "event_log": "events.db",
+                "outcome": "outcomes.db",
+                "parameter": "parameters.db",
+                "tuner_state": "tuner_state.db",
             }
             params["db_path"] = self._stores_dir / db_names[store_type]
 
@@ -827,6 +842,18 @@ class StoreRegistry:
     def blob_store(self) -> BlobStore:
         _warn_flat_property("blob_store")
         return self._get("blob")  # type: ignore[no-any-return]
+
+    @property
+    def outcome_store(self) -> OutcomeStore:
+        return self._get("outcome")  # type: ignore[no-any-return]
+
+    @property
+    def parameter_store(self) -> ParameterStore:
+        return self._get("parameter")  # type: ignore[no-any-return]
+
+    @property
+    def tuner_state_store(self) -> TunerStateStore:
+        return self._get("tuner_state")  # type: ignore[no-any-return]
 
     @property
     def embedding_fn(self) -> Callable[[str], list[float]] | None:

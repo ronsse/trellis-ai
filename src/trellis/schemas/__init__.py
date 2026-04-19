@@ -28,6 +28,12 @@ from trellis.schemas.extraction import (
     ExtractionResult,
 )
 from trellis.schemas.graph import Edge
+from trellis.schemas.outcome import (
+    INTENT_FAMILIES,
+    PHASES,
+    ComponentOutcome,
+    OutcomeEvent,
+)
 from trellis.schemas.pack import (
     BudgetStep,
     Pack,
@@ -38,6 +44,11 @@ from trellis.schemas.pack import (
     RetrievalReport,
     SectionedPack,
     SectionRequest,
+)
+from trellis.schemas.parameters import (
+    ParameterProposal,
+    ParameterScope,
+    ParameterSet,
 )
 from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
 from trellis.schemas.precedent import Precedent
@@ -53,12 +64,15 @@ from trellis.schemas.trace import (
 from trellis.schemas.trace_builder import TracePayloadBuilder
 
 __all__ = [
+    "INTENT_FAMILIES",
+    "PHASES",
     "Advisory",
     "AdvisoryCategory",
     "AdvisoryEvidence",
     "ArtifactRef",
     "AttachmentRef",
     "BudgetStep",
+    "ComponentOutcome",
     "ContentTags",
     "DataClassification",
     "Edge",
@@ -81,11 +95,15 @@ __all__ = [
     "LifecycleState",
     "NodeRole",
     "Outcome",
+    "OutcomeEvent",
     "OutcomeStatus",
     "Pack",
     "PackBudget",
     "PackItem",
     "PackSection",
+    "ParameterProposal",
+    "ParameterScope",
+    "ParameterSet",
     "Policy",
     "PolicyRule",
     "PolicyScope",
