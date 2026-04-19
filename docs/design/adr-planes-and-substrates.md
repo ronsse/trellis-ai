@@ -4,9 +4,11 @@
 **Date:** 2026-04-18
 **Deciders:** Trellis core
 **Related:**
+- [`./adr-terminology.md`](./adr-terminology.md) — canonical meanings of "plane", "substrate" vs "backend", and related terms
 - [`./adr-llm-client-abstraction.md`](./adr-llm-client-abstraction.md) — Precedent for "Protocol in core, implementations optional"
 - [`./adr-deferred-cognition.md`](./adr-deferred-cognition.md) — One-way bridge between write path and enrichment
-- [`../../src/trellis/stores/registry.py`](../../src/trellis/stores/registry.py) — `StoreRegistry`, late-binding backend table
+- [`./adr-plugin-contract.md`](./adr-plugin-contract.md) — Entry-point plugin loader that merges with `_BUILTIN_BACKENDS` per plane
+- [`../../src/trellis/stores/registry.py`](../../src/trellis/stores/registry.py) — `StoreRegistry`, plane-keyed backend table
 - [`../../src/trellis/stores/base/`](../../src/trellis/stores/base/) — Store ABCs
 - [`../../src/trellis/mutate/`](../../src/trellis/mutate/) — Governed mutation pipeline (the sanctioned bridge)
 - [`../../TODO.md`](../../TODO.md) — Graphiti comparison section citing Kuzu as a missing backend
