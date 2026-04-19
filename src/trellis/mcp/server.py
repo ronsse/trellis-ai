@@ -15,6 +15,7 @@ from trellis.retrieve.formatters import (
     format_subgraph_as_markdown,
 )
 from trellis.retrieve.pack_builder import PackBuilder
+from trellis.retrieve.rerankers import RRFReranker
 from trellis.retrieve.strategies import build_strategies
 from trellis.retrieve.token_tracker import estimate_tokens, track_token_usage
 from trellis.schemas.pack import SectionRequest
@@ -57,6 +58,7 @@ def _build_pack_builder(registry: StoreRegistry) -> PackBuilder:
         strategies=build_strategies(registry),
         event_log=registry.event_log,
         advisory_store=advisory_store,
+        reranker=RRFReranker(),
     )
 
 
