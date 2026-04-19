@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# STATUS: PREVIEW — examples are in flux while parallel work lands.
+# Expect breaking changes before the next minor release.
+#
 # Batch-ingest a directory of trace JSON files through the CLI.
 #
 # Each file in the directory should be a single valid trace JSON

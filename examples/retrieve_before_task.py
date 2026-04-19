@@ -1,5 +1,8 @@
 """The canonical retrieve -> act -> record loop.
 
+STATUS: PREVIEW — examples are in flux while parallel work lands. Expect
+breaking changes before the next minor release.
+
 This is the pattern Trellis exists to enable: every non-trivial task starts
 by pulling relevant prior art into context, and ends by recording what
 happened so future tasks can do the same.

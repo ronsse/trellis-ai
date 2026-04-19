@@ -2,9 +2,12 @@
 name: link-evidence
 description: When you discover a durable fact (an API contract, a config value, a service ownership, a non-obvious gotcha), store it in Trellis as a memory and connect it to the relevant entity in the knowledge graph. This makes the fact retrievable from any future task that touches the same area.
 version: 1.0.0
+status: preview
 ---
 
 # Link Evidence
+
+> **Status: preview.** Tool signatures are in flux while parallel work lands. Expect revisions before the next minor release.
 
 retrieve-before-task pulls knowledge; record-after-task captures process. This skill captures **discrete facts** — the kind of thing you'd otherwise jot in a comment, then lose track of.
 

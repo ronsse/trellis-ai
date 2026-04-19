@@ -1,6 +1,6 @@
 # Trellis — Obsidian Reference Template
 
-> **Reference template — not a published package.** Copy [`vault.py`](vault.py) and [`indexer.py`](indexer.py) into your own project rather than importing from this repo. The Trellis core package (`trellis-ai`) is what's published to PyPI; integrations live here as starting points you adapt.
+> **Status: preview — reference template, not a published package.** Copy [`vault.py`](vault.py) and [`indexer.py`](indexer.py) into your own project rather than importing from this repo. The SDK and stores are being reshaped in parallel; expect signatures to shift before the next minor release.
 
 Index an Obsidian vault into Trellis so notes become first-class evidence in retrieval. Wiki-links become graph edges, frontmatter tags carry through to retrieval filters, and content lands in the document store for keyword + semantic search.
 

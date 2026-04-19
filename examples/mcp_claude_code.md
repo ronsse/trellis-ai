@@ -1,5 +1,7 @@
 # Using Trellis from Claude Code (MCP)
 
+> **Status: preview.** This walkthrough is in flux while parallel work lands. Tool names, signatures, and setup commands may change before the next minor release.
+
 End-to-end walkthrough of installing the Trellis MCP server in Claude Code and using its eleven macro tools in real prompts.
 
 ## Setup (one command)

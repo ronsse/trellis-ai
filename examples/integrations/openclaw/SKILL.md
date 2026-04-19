@@ -2,6 +2,7 @@
 name: trellis-ai
 description: Structured institutional memory for AI agents — traces, precedents, knowledge graph, temporal versioning, and governed mutations. Complements built-in memory with structured knowledge.
 version: 1.0.0
+status: preview
 homepage: https://github.com/ronsse/trellis-ai
 metadata:
   openclaw:
@@ -10,6 +11,8 @@ metadata:
 ---
 
 # Trellis
+
+> **Status: preview.** Tool signatures and prompts are in flux while parallel work lands. Expect revisions before the next minor release.
 
 Structured institutional memory for AI agents. Record traces of your work, build a shared knowledge graph, and retrieve context packs before starting new tasks.
 

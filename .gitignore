@@ -22,3 +22,8 @@ data/
 .env
 pytest-of-*
 tmp*
+
+# Claude Code — shared project settings.json is committed; per-user
+# overrides and worktree scratch live here and should not be.
+.claude/settings.local.json
+.claude/worktrees/

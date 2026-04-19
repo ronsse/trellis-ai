@@ -1,5 +1,7 @@
 # Trellis Skill Templates
 
+> **Status: preview.** These skills are in flux while parallel work lands. The `SKILL.md` content is intentionally slim so drift stays manageable, but expect minor revisions to prompts and tool-call shapes before the next minor release.
+
 Drop-in skill files for Claude Code (and other agent frameworks that follow the `SKILL.md` convention). Each skill is a self-contained directory with a `SKILL.md` describing when and how the agent should use it.
 
 ## What's here

@@ -5,24 +5,42 @@ Thanks for your interest in contributing! This guide covers the essentials.
 ## Development Setup
 
 ```bash
-# Clone and install with dev dependencies
+# Clone and install dev deps + register git hooks in one shot
 git clone https://github.com/ronsse/trellis-ai.git
 cd trellis-ai
-uv pip install -e ".[dev]"
+make setup
 
 # Initialize stores (needed for integration-style tests)
 trellis admin init
 ```
 
+`make setup` does two things: installs `[dev]` extras and registers the pre-commit git hook. After that, every `git commit` runs ruff format, ruff lint, mypy, and a handful of safety checks locally — catching anything CI would flag before the push round-trip. See [`.pre-commit-config.yaml`](.pre-commit-config.yaml) for the full list.
+
+### Hooks reference
+
+| `make` target | What it does |
+|---|---|
+| `make setup` | First-time: install `[dev]` + register hooks. Idempotent. |
+| `make hooks` | Register (or re-register) the pre-commit git hook. |
+| `make hooks-run` | Run every hook across the whole repo (not just staged files). |
+| `make fix` | Auto-fix what ruff can, surface what it can't. |
+
+### For agent contributors (Claude Code, etc.)
+
+The repo ships a project-scoped `.claude/settings.json` with a `PostToolUse` hook that auto-formats Python files after any Edit/Write tool call ([scripts/claude_postedit_lint.py](scripts/claude_postedit_lint.py)). No setup required — just open the repo in Claude Code and the hook activates automatically. Per-user overrides go in `.claude/settings.local.json` (gitignored).
+
+If you're contributing via another agent, point it at `make fix` after any edit to get the same behavior.
+
 ## Quality Checks
 
-Run all checks before submitting a PR:
+The pre-commit hook catches most issues at commit time. If you want to run the checks manually before opening a PR:
 
 ```bash
 make format      # Auto-format with ruff
 make lint        # Lint check
 make typecheck   # mypy strict type checking
 make test        # Full test suite
+make check       # All of the above
 ```
 
 Or run them individually:

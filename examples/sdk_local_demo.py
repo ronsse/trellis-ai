@@ -1,5 +1,8 @@
 """SDK in-memory demo: ingest a trace, search, assemble a context pack.
 
+STATUS: PREVIEW — examples are in flux while parallel work lands. Expect
+breaking changes before the next minor release.
+
 The SDK is HTTP-only as of the Step 3 refactor — the old "local mode"
 that opened SQLite stores directly through ``StoreRegistry`` is gone.
 

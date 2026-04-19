@@ -1,4 +1,8 @@
-"""Vault indexer — indexes Obsidian notes into Trellis stores."""
+"""Vault indexer — indexes Obsidian notes into Trellis stores.
+
+STATUS: PREVIEW — reference template, in flux while parallel SDK/store work
+lands. Copy into your own project rather than depending on this path.
+"""
 
 from __future__ import annotations
 

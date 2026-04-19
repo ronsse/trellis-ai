@@ -1,5 +1,8 @@
 """Trellis tools for LangGraph agents — REFERENCE TEMPLATE.
 
+STATUS: PREVIEW — in flux while parallel SDK/store work lands. Expect
+breaking changes to the tool signatures before the next minor release.
+
 This file is shipped as a copy-paste starting point, not as an installable
 module. Drop it into your own project (e.g. ``myproject/trellis_tools.py``)
 and import from there:

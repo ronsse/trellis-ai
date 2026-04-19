@@ -1,6 +1,9 @@
 """Define a custom extractor that turns a domain-specific JSON source into
 EntityDraft + EdgeDraft records.
 
+STATUS: PREVIEW — examples are in flux while parallel work lands. Expect
+breaking changes before the next minor release.
+
 Extractors are *pure* — they never touch a store. The dispatcher (or your
 own wrapper code) routes their drafts through MutationExecutor for governed
 creation. This keeps extraction testable in isolation and enforces the

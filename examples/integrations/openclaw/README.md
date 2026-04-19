@@ -1,5 +1,7 @@
 # Trellis — OpenClaw Integration
 
+> **Status: preview.** Setup instructions are in flux while parallel work lands. Tool names/signatures may change before the next minor release.
+
 Add structured institutional memory to your OpenClaw agents. Trellis provides traces, precedents, a knowledge graph, temporal versioning, and governed mutations — complementing OpenClaw's built-in memory with structured knowledge.
 
 ## Prerequisites

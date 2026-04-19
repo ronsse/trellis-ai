@@ -1,3 +1,17 @@
+# Pre-commit hooks — run on every `git commit`.
+#
+# First-time setup (after cloning the repo):
+#     make install-dev        # installs [dev] deps AND registers the hook
+# Or manually:
+#     pip install pre-commit
+#     pre-commit install
+#
+# Manual run across the whole repo (hooks normally only scan staged files):
+#     pre-commit run --all-files
+#
+# The same ruff + mypy commands also run in CI (see .github/workflows/).
+# Catching issues locally avoids round-trip failures on push.
+
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.15.8
@@ -21,4 +35,12 @@ repos:
     rev: v5.0.0
     hooks:
       - id: trailing-whitespace
+      - id: end-of-file-fixer
       - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=500]
+      - id: detect-private-key
+      - id: mixed-line-ending
+        args: [--fix=lf]
