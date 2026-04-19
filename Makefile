@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help install install-dev lint format typecheck test check clean build publish-check verify-wheel
+.PHONY: help install install-dev lint format typecheck test check clean build publish-check verify-wheel openapi openapi-check
 
 help: ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-15s\033[0m %s\n", $$1, $$2}'
@@ -43,3 +43,13 @@ verify-wheel: build ## Build and inspect wheel contents (sanity-check before tag
 
 publish-check: build ## Build and run twine check on the artifacts
 	python -m twine check dist/*
+
+openapi: ## Regenerate docs/api/v1.yaml from the live FastAPI app
+	python scripts/generate_openapi.py
+
+openapi-check: ## Verify docs/api/v1.yaml matches the live FastAPI app (CI)
+	@python scripts/generate_openapi.py > /dev/null
+	@git diff --exit-code docs/api/v1.yaml \
+		|| (echo ""; \
+		    echo "docs/api/v1.yaml is out of date. Run 'make openapi' and commit the diff."; \
+		    exit 1)

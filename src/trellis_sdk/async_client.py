@@ -1,104 +1,160 @@
-"""Async Trellis SDK client -- works locally or via HTTP."""
+"""Asynchronous Trellis SDK client — HTTP only with bounded concurrency.
+
+Like :class:`TrellisClient`, the async variant is HTTP-only after the
+Step 3 refactor.  It adds two concurrency primitives the sync client
+doesn't need:
+
+* A bounded :class:`asyncio.Semaphore` that caps in-flight requests
+  per client instance.  Default ``max_concurrency=16`` is a reasonable
+  ceiling for a single agent; bump explicitly when fanning out.
+* Typed ``429`` / ``Retry-After`` surfacing via
+  :class:`trellis_sdk.exceptions.TrellisRateLimitError` so callers
+  can implement their own backoff policy.
+
+See :func:`trellis.testing.in_memory_async_client` for an
+ASGI-transport fixture that drops the network entirely in tests.
+"""
 
 from __future__ import annotations
 
 import asyncio
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
+import httpx
 import structlog
+
+from trellis_sdk._format import format_sectioned_pack_as_markdown
+from trellis_sdk._http import (
+    SDK_API_MAJOR,
+    SDK_API_MINOR,
+    check_handshake,
+    raise_for_status,
+)
+
+if TYPE_CHECKING:
+    from types import TracebackType
 
 logger = structlog.get_logger(__name__)
 
 _HTTP_NOT_FOUND = 404
+_DEFAULT_TIMEOUT_SECONDS = 30.0
+_DEFAULT_MAX_CONCURRENCY = 16
 
 
 class AsyncTrellisClient:
-    """Async client for interacting with the Trellis.
+    """Async HTTP client for the Trellis REST API.
 
-    Mirrors :class:`TrellisClient` with ``async def`` methods.
-
-    Works in two modes:
-
-    - **Remote mode**: When ``base_url`` is provided, uses
-      ``httpx.AsyncClient`` to call the REST API.
-    - **Local mode**: When no ``base_url``, delegates to a synchronous
-      ``TrellisClient`` running store calls via ``asyncio.to_thread``.
-
-    Supports ``async with`` for resource cleanup::
+    Example::
 
         async with AsyncTrellisClient("http://localhost:8420") as client:
-            trace_id = await client.ingest_trace(trace)
+            await client.ingest_trace(trace)
+
+    ``max_concurrency`` bounds how many requests can be in flight
+    from a single client instance.  Raise it for parallel fan-out
+    workloads; lower it to be gentle on shared infrastructure.
     """
 
-    def __init__(self, base_url: str | None = None) -> None:
-        self._base_url = base_url.rstrip("/") if base_url else None
-        self._http: Any = None  # lazy httpx.AsyncClient
-        self._sync: Any = None  # lazy TrellisClient (for local mode)
-        self._local_lock = asyncio.Lock()  # serialise local store access
+    def __init__(
+        self,
+        base_url: str | None = None,
+        *,
+        http: httpx.AsyncClient | None = None,
+        timeout: float = _DEFAULT_TIMEOUT_SECONDS,
+        max_concurrency: int = _DEFAULT_MAX_CONCURRENCY,
+        verify_version: bool = True,
+    ) -> None:
+        if base_url is None and http is None:
+            msg = (
+                "AsyncTrellisClient requires either base_url= or http=. "
+                "In-process mode was removed in Step 3 — use "
+                "trellis.testing.in_memory_async_client() for test fixtures."
+            )
+            raise ValueError(msg)
+        if http is not None and base_url is not None:
+            msg = "Pass base_url OR http, not both."
+            raise ValueError(msg)
+
+        self._owns_http = http is None
+        if http is not None:
+            self._http = http
+        else:
+            self._http = httpx.AsyncClient(
+                base_url=cast("str", base_url).rstrip("/"),
+                timeout=timeout,
+            )
+        self._verify_version = verify_version
+        self._handshake_done = False
+        self._handshake_lock = asyncio.Lock()
+        self._semaphore = asyncio.Semaphore(max(1, max_concurrency))
+        self._max_concurrency = max_concurrency
 
     # -- Context manager --
 
     async def __aenter__(self) -> AsyncTrellisClient:
         return self
 
-    async def __aexit__(self, *exc: object) -> None:
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
         await self.close()
+
+    # -- Introspection --
+
+    @property
+    def max_concurrency(self) -> int:
+        """The upper bound on in-flight requests from this client."""
+        return self._max_concurrency
 
     # -- Internals --
 
-    def _get_http(self) -> Any:
-        """Get or create an async httpx client."""
-        if self._http is None:
-            import httpx  # noqa: PLC0415
-
-            self._http = httpx.AsyncClient(
-                base_url=self._base_url,  # type: ignore[arg-type]
-                timeout=30.0,
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        json: Any = None,
+        params: dict[str, Any] | None = None,
+    ) -> httpx.Response:
+        await self._ensure_handshake()
+        async with self._semaphore:
+            resp = await self._http.request(
+                method, path, json=json, params=params
             )
-        return self._http
+        raise_for_status(resp, request_path=path)
+        return resp
 
-    def _get_sync(self) -> Any:
-        """Get or create a sync TrellisClient for local-mode delegation."""
-        if self._sync is None:
-            from trellis_sdk.client import TrellisClient  # noqa: PLC0415
-
-            self._sync = TrellisClient()
-        return self._sync
-
-    @property
-    def is_remote(self) -> bool:
-        """Whether this client connects to a remote API."""
-        return self._base_url is not None
-
-    async def _local(self, method_name: str, *args: Any, **kwargs: Any) -> Any:
-        """Call a method on the underlying sync client, serialised via lock.
-
-        SQLite connections are not safe to share across threads, so all
-        local-mode calls go through a single lock + ``to_thread``.
-        """
-        async with self._local_lock:
-            fn = getattr(self._get_sync(), method_name)
-            return await asyncio.to_thread(fn, *args, **kwargs)
+    async def _ensure_handshake(self) -> None:
+        if self._handshake_done or not self._verify_version:
+            return
+        async with self._handshake_lock:
+            if self._handshake_done:
+                return
+            try:
+                resp = await self._http.get("/api/version")
+            except httpx.HTTPError:
+                return
+            if resp.status_code != 200:  # noqa: PLR2004
+                return
+            check_handshake(resp.json())
+            self._handshake_done = True
+            logger.debug(
+                "sdk_async_handshake_ok",
+                sdk_api_major=SDK_API_MAJOR,
+                sdk_api_minor=SDK_API_MINOR,
+            )
 
     # -- Ingest --
 
     async def ingest_trace(self, trace: dict[str, Any]) -> str:
-        """Ingest a trace. Returns the trace_id."""
-        if self.is_remote:
-            resp = await self._get_http().post("/api/v1/traces", json=trace)
-            resp.raise_for_status()
-            return cast("str", resp.json()["trace_id"])
-
-        return await self._local("ingest_trace", trace)  # type: ignore[no-any-return]
+        resp = await self._request("POST", "/api/v1/traces", json=trace)
+        return cast("str", resp.json()["trace_id"])
 
     async def ingest_evidence(self, evidence: dict[str, Any]) -> str:
-        """Ingest evidence. Returns the evidence_id."""
-        if self.is_remote:
-            resp = await self._get_http().post("/api/v1/evidence", json=evidence)
-            resp.raise_for_status()
-            return cast("str", resp.json()["evidence_id"])
-
-        return await self._local("ingest_evidence", evidence)  # type: ignore[no-any-return]
+        resp = await self._request("POST", "/api/v1/evidence", json=evidence)
+        return cast("str", resp.json()["evidence_id"])
 
     # -- Retrieve --
 
@@ -109,30 +165,21 @@ class AsyncTrellisClient:
         domain: str | None = None,
         limit: int = 20,
     ) -> list[dict[str, Any]]:
-        """Search documents. Returns list of result dicts."""
-        if self.is_remote:
-            params: dict[str, Any] = {"q": query, "limit": limit}
-            if domain:
-                params["domain"] = domain
-            resp = await self._get_http().get("/api/v1/search", params=params)
-            resp.raise_for_status()
-            data: dict[str, Any] = resp.json()
-            return cast("list[dict[str, Any]]", data.get("results", []))
-
-        return await self._local(  # type: ignore[no-any-return]
-            "search", query, domain=domain, limit=limit
-        )
+        params: dict[str, Any] = {"q": query, "limit": limit}
+        if domain:
+            params["domain"] = domain
+        resp = await self._request("GET", "/api/v1/search", params=params)
+        return cast("list[dict[str, Any]]", resp.json().get("results", []))
 
     async def get_trace(self, trace_id: str) -> dict[str, Any] | None:
-        """Get a trace by ID."""
-        if self.is_remote:
-            resp = await self._get_http().get(f"/api/v1/traces/{trace_id}")
-            if resp.status_code == _HTTP_NOT_FOUND:
-                return None
-            resp.raise_for_status()
-            return cast("dict[str, Any] | None", resp.json().get("trace"))
-
-        return await self._local("get_trace", trace_id)  # type: ignore[no-any-return]
+        await self._ensure_handshake()
+        path = f"/api/v1/traces/{trace_id}"
+        async with self._semaphore:
+            resp = await self._http.get(path)
+        if resp.status_code == _HTTP_NOT_FOUND:
+            return None
+        raise_for_status(resp, request_path=path)
+        return cast("dict[str, Any] | None", resp.json().get("trace"))
 
     async def list_traces(
         self,
@@ -140,19 +187,11 @@ class AsyncTrellisClient:
         domain: str | None = None,
         limit: int = 20,
     ) -> list[dict[str, Any]]:
-        """List recent traces."""
-        if self.is_remote:
-            params: dict[str, Any] = {"limit": limit}
-            if domain:
-                params["domain"] = domain
-            resp = await self._get_http().get("/api/v1/traces", params=params)
-            resp.raise_for_status()
-            data: dict[str, Any] = resp.json()
-            return cast("list[dict[str, Any]]", data.get("traces", []))
-
-        return await self._local(  # type: ignore[no-any-return]
-            "list_traces", domain=domain, limit=limit
-        )
+        params: dict[str, Any] = {"limit": limit}
+        if domain:
+            params["domain"] = domain
+        resp = await self._request("GET", "/api/v1/traces", params=params)
+        return cast("list[dict[str, Any]]", resp.json().get("traces", []))
 
     async def assemble_pack(
         self,
@@ -163,29 +202,15 @@ class AsyncTrellisClient:
         max_items: int = 50,
         max_tokens: int = 8000,
     ) -> dict[str, Any]:
-        """Assemble a context pack. Returns pack dict."""
-        if self.is_remote:
-            resp = await self._get_http().post(
-                "/api/v1/packs",
-                json={
-                    "intent": intent,
-                    "domain": domain,
-                    "agent_id": agent_id,
-                    "max_items": max_items,
-                    "max_tokens": max_tokens,
-                },
-            )
-            resp.raise_for_status()
-            return cast("dict[str, Any]", resp.json())
-
-        return await self._local(  # type: ignore[no-any-return]
-            "assemble_pack",
-            intent,
-            domain=domain,
-            agent_id=agent_id,
-            max_items=max_items,
-            max_tokens=max_tokens,
-        )
+        payload = {
+            "intent": intent,
+            "domain": domain,
+            "agent_id": agent_id,
+            "max_items": max_items,
+            "max_tokens": max_tokens,
+        }
+        resp = await self._request("POST", "/api/v1/packs", json=payload)
+        return cast("dict[str, Any]", resp.json())
 
     async def assemble_sectioned_pack(
         self,
@@ -195,38 +220,16 @@ class AsyncTrellisClient:
         domain: str | None = None,
         agent_id: str | None = None,
     ) -> dict[str, Any]:
-        """Assemble a sectioned pack with independently budgeted sections."""
-        if self.is_remote:
-            try:
-                resp = await self._get_http().post(
-                    "/api/v1/packs/sectioned",
-                    json={
-                        "intent": intent,
-                        "sections": sections,
-                        "domain": domain,
-                        "agent_id": agent_id,
-                    },
-                )
-                resp.raise_for_status()
-                return cast("dict[str, Any]", resp.json())
-            except Exception:
-                logger.warning(
-                    "sectioned_pack_remote_failed",
-                    intent=intent,
-                    msg="falling back to flat pack",
-                )
-                flat = await self.assemble_pack(
-                    intent, domain=domain, agent_id=agent_id
-                )
-                return cast("dict[str, Any]", flat)
-
-        return await self._local(  # type: ignore[no-any-return]
-            "assemble_sectioned_pack",
-            intent,
-            sections,
-            domain=domain,
-            agent_id=agent_id,
+        payload = {
+            "intent": intent,
+            "sections": sections,
+            "domain": domain,
+            "agent_id": agent_id,
+        }
+        resp = await self._request(
+            "POST", "/api/v1/packs/sectioned", json=payload
         )
+        return cast("dict[str, Any]", resp.json())
 
     async def get_objective_context(
         self,
@@ -235,18 +238,30 @@ class AsyncTrellisClient:
         domain: str | None = None,
         max_tokens: int = 4000,
     ) -> str:
-        """Get objective-level context formatted as markdown."""
-        if self.is_remote:
-            # Assemble a pack remotely and return its rendered markdown.
-            pack = await self.assemble_pack(
-                intent, domain=domain, max_tokens=max_tokens
-            )
-            return cast("str", pack.get("markdown", ""))
-
-        return await self._local(  # type: ignore[no-any-return]
-            "get_objective_context",
+        sections = [
+            {
+                "name": "domain_knowledge",
+                "retrieval_affinities": ["governance", "ownership", "conventions"],
+                "content_types": ["document", "entity"],
+                "scopes": ["domain"],
+                "max_tokens": max_tokens // 2,
+                "max_items": 15,
+            },
+            {
+                "name": "operational",
+                "retrieval_affinities": ["execution_trace", "incident", "runbook"],
+                "content_types": ["trace", "evidence"],
+                "scopes": ["operational"],
+                "max_tokens": max_tokens // 2,
+                "max_items": 10,
+            },
+        ]
+        pack = await self.assemble_sectioned_pack(
+            intent, sections, domain=domain, agent_id="objective"
+        )
+        return format_sectioned_pack_as_markdown(
+            pack.get("sections", []),
             intent,
-            domain=domain,
             max_tokens=max_tokens,
         )
 
@@ -258,33 +273,44 @@ class AsyncTrellisClient:
         domain: str | None = None,
         max_tokens: int = 4000,
     ) -> str:
-        """Get task-level context formatted as markdown."""
-        if self.is_remote:
-            pack = await self.assemble_pack(
-                intent, domain=domain, max_tokens=max_tokens
-            )
-            return cast("str", pack.get("markdown", ""))
-
-        return await self._local(  # type: ignore[no-any-return]
-            "get_task_context",
+        sections: list[dict[str, Any]] = [
+            {
+                "name": "technical_pattern",
+                "retrieval_affinities": ["schema", "code_pattern", "sql_template"],
+                "content_types": ["document", "code"],
+                "scopes": ["technical"],
+                "entity_ids": entity_ids or [],
+                "max_tokens": max_tokens // 2,
+                "max_items": 15,
+            },
+            {
+                "name": "reference",
+                "retrieval_affinities": ["example", "prior_output", "test_case"],
+                "content_types": ["document", "evidence"],
+                "scopes": ["reference"],
+                "entity_ids": entity_ids or [],
+                "max_tokens": max_tokens // 2,
+                "max_items": 10,
+            },
+        ]
+        pack = await self.assemble_sectioned_pack(
+            intent, sections, domain=domain, agent_id="task"
+        )
+        return format_sectioned_pack_as_markdown(
+            pack.get("sections", []),
             intent,
-            entity_ids=entity_ids,
-            domain=domain,
             max_tokens=max_tokens,
         )
 
     async def get_entity(self, entity_id: str) -> dict[str, Any] | None:
-        """Get an entity by ID."""
-        if self.is_remote:
-            resp = await self._get_http().get(f"/api/v1/entities/{entity_id}")
-            if resp.status_code == _HTTP_NOT_FOUND:
-                return None
-            resp.raise_for_status()
-            return cast("dict[str, Any] | None", resp.json().get("entity"))
-
-        return await self._local(  # type: ignore[no-any-return]
-            "get_entity", entity_id
-        )
+        await self._ensure_handshake()
+        path = f"/api/v1/entities/{entity_id}"
+        async with self._semaphore:
+            resp = await self._http.get(path)
+        if resp.status_code == _HTTP_NOT_FOUND:
+            return None
+        raise_for_status(resp, request_path=path)
+        return cast("dict[str, Any] | None", resp.json().get("entity"))
 
     # -- Curate --
 
@@ -294,25 +320,13 @@ class AsyncTrellisClient:
         entity_type: str = "concept",
         properties: dict[str, Any] | None = None,
     ) -> str:
-        """Create an entity. Returns the node_id."""
-        if self.is_remote:
-            resp = await self._get_http().post(
-                "/api/v1/entities",
-                json={
-                    "entity_type": entity_type,
-                    "name": name,
-                    "properties": properties or {},
-                },
-            )
-            resp.raise_for_status()
-            return cast("str", resp.json()["node_id"])
-
-        return await self._local(  # type: ignore[no-any-return]
-            "create_entity",
-            name,
-            entity_type=entity_type,
-            properties=properties,
-        )
+        payload = {
+            "entity_type": entity_type,
+            "name": name,
+            "properties": properties or {},
+        }
+        resp = await self._request("POST", "/api/v1/entities", json=payload)
+        return cast("str", resp.json()["node_id"])
 
     async def create_link(
         self,
@@ -320,33 +334,16 @@ class AsyncTrellisClient:
         target_id: str,
         edge_kind: str = "entity_related_to",
     ) -> str:
-        """Create a link between entities. Returns the edge_id."""
-        if self.is_remote:
-            resp = await self._get_http().post(
-                "/api/v1/links",
-                json={
-                    "source_id": source_id,
-                    "target_id": target_id,
-                    "edge_kind": edge_kind,
-                },
-            )
-            resp.raise_for_status()
-            return cast("str", resp.json()["edge_id"])
-
-        return await self._local(  # type: ignore[no-any-return]
-            "create_link",
-            source_id,
-            target_id,
-            edge_kind=edge_kind,
-        )
+        payload = {
+            "source_id": source_id,
+            "target_id": target_id,
+            "edge_kind": edge_kind,
+        }
+        resp = await self._request("POST", "/api/v1/links", json=payload)
+        return cast("str", resp.json()["edge_id"])
 
     # -- Lifecycle --
 
     async def close(self) -> None:
-        """Close any open connections."""
-        if self._http is not None:
+        if self._owns_http:
             await self._http.aclose()
-            self._http = None
-        if self._sync is not None:
-            self._sync.close()
-            self._sync = None

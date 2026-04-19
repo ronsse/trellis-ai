@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
 
+from trellis.testing import in_memory_client
 from trellis_sdk.client import TrellisClient
 from trellis_sdk.skills import (
     get_context_for_task,
@@ -20,28 +20,22 @@ from trellis_sdk.skills import (
 
 @pytest.fixture
 def client(tmp_path: Path):
-    os.environ["TRELLIS_CONFIG_DIR"] = str(tmp_path / "config")
-    os.environ["TRELLIS_DATA_DIR"] = str(tmp_path / "data")
-    (tmp_path / "data" / "stores").mkdir(parents=True)
-    c = TrellisClient()
-    yield c
-    c.close()
-    del os.environ["TRELLIS_DATA_DIR"]
-    del os.environ["TRELLIS_CONFIG_DIR"]
+    with in_memory_client(tmp_path / "stores") as c:
+        yield c
 
 
-def test_get_context_for_task_empty(client):
+def test_get_context_for_task_empty(client: TrellisClient):
     result = get_context_for_task(client, "test intent")
     assert isinstance(result, str)
     assert "test intent" in result.lower() or "no relevant" in result.lower()
 
 
-def test_get_latest_successful_trace_none(client):
+def test_get_latest_successful_trace_none(client: TrellisClient):
     result = get_latest_successful_trace(client, "deploy")
     assert "No successful traces" in result
 
 
-def test_save_trace_and_extract_lessons(client):
+def test_save_trace_and_extract_lessons(client: TrellisClient):
     trace = {
         "source": "agent",
         "intent": "deploy service",
@@ -54,12 +48,12 @@ def test_save_trace_and_extract_lessons(client):
     assert "deploy service" in result
 
 
-def test_get_recent_activity_empty(client):
+def test_get_recent_activity_empty(client: TrellisClient):
     result = get_recent_activity(client)
-    assert "No recent activity" in result
+    assert "No recent activity" in result or "No traces" in result
 
 
-def test_get_recent_activity_with_traces(client):
+def test_get_recent_activity_with_traces(client: TrellisClient):
     trace = {
         "source": "agent",
         "intent": "test activity",
@@ -75,12 +69,8 @@ def test_get_recent_activity_with_traces(client):
 def test_get_objective_context_for_workflow_empty(client: TrellisClient) -> None:
     result = get_objective_context_for_workflow(client, "build GGR pipeline")
     assert isinstance(result, str)
-    assert (
-        "GGR pipeline" in result
-        or "Context" in result
-        or "no relevant" in result.lower()
-        or result != ""
-    )
+    # Either the intent is echoed, or a "no results" shape is rendered.
+    assert result != ""
 
 
 def test_get_task_context_for_step_empty(client: TrellisClient) -> None:

@@ -50,6 +50,7 @@ def create_app() -> FastAPI:
         mutations,
         policies,
         retrieve,
+        version,
     )
 
     app = FastAPI(
@@ -62,6 +63,10 @@ def create_app() -> FastAPI:
     @app.get("/", include_in_schema=False)
     async def root_redirect() -> RedirectResponse:
         return RedirectResponse(url="/ui/", status_code=307)
+
+    # Version handshake — unversioned, mounted at /api/version (no prefix).
+    # Deliberately outside /api/v1 because it describes which major is running.
+    app.include_router(version.router, tags=["version"])
 
     app.include_router(admin.router, prefix="/api/v1", tags=["admin"])
     app.include_router(ingest.router, prefix="/api/v1", tags=["ingest"])

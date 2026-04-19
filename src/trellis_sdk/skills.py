@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from trellis.retrieve.formatters import (
+from trellis_sdk._format import (
     format_pack_as_markdown,
     format_traces_as_markdown,
 )

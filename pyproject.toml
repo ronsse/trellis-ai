@@ -87,13 +87,14 @@ source = "vcs"
 fallback-version = "0.2.0"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/trellis", "src/trellis_cli", "src/trellis_workers", "src/trellis_api", "src/trellis_sdk"]
+packages = ["src/trellis", "src/trellis_cli", "src/trellis_workers", "src/trellis_api", "src/trellis_sdk", "src/trellis_wire"]
 artifacts = [
     "src/trellis/py.typed",
     "src/trellis_cli/py.typed",
     "src/trellis_sdk/py.typed",
     "src/trellis_api/py.typed",
     "src/trellis_workers/py.typed",
+    "src/trellis_wire/py.typed",
 ]
 
 [tool.hatch.build.targets.sdist]

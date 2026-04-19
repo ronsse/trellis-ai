@@ -153,6 +153,75 @@ def health(
 
 
 @admin_app.command()
+def version(
+    output_format: str = typer.Option(
+        "text", "--format", help="Output format: text or json"
+    ),
+) -> None:
+    """Print API / wire-schema / SDK version info.
+
+    Mirrors the ``GET /api/version`` handshake endpoint so operators
+    can see what a deployed server is advertising without an HTTP
+    round-trip.  Pulls from :mod:`trellis.api_version` — the single
+    source of truth shared by the CLI and the API.
+    """
+    from trellis.api_version import (  # noqa: PLC0415
+        API_MAJOR,
+        API_MINOR,
+        SDK_MIN,
+        WIRE_SCHEMA,
+        api_version_string,
+    )
+    from trellis.core.base import get_version  # noqa: PLC0415
+    from trellis_api.deprecation import ROUTE_DEPRECATIONS  # noqa: PLC0415
+
+    info: dict[str, Any] = {
+        "api_major": API_MAJOR,
+        "api_minor": API_MINOR,
+        "api_version": api_version_string(),
+        "wire_schema": WIRE_SCHEMA,
+        "sdk_min": SDK_MIN,
+        "package_version": get_version(),
+        "deprecations": [
+            {
+                "path": path,
+                "deprecated_since": entry.deprecated_since.isoformat(),
+                "sunset_on": entry.sunset_on.isoformat(),
+                "replacement": entry.replacement,
+                "reason": entry.reason,
+            }
+            for path, entry in ROUTE_DEPRECATIONS.items()
+        ],
+    }
+
+    if output_format == "json":
+        typer.echo(json.dumps(info, indent=2))
+        return
+
+    table = Table(title="Trellis API Version")
+    table.add_column("Field", style="cyan")
+    table.add_column("Value")
+    table.add_row("api_version", info["api_version"])
+    table.add_row("wire_schema", info["wire_schema"])
+    table.add_row("sdk_min", info["sdk_min"])
+    table.add_row("package_version", info["package_version"])
+    table.add_row("deprecations", str(len(info["deprecations"])))
+    console.print(table)
+    if info["deprecations"]:
+        dep_table = Table(title="Deprecated routes")
+        dep_table.add_column("Path", style="yellow")
+        dep_table.add_column("Sunset on")
+        dep_table.add_column("Replacement")
+        for d in info["deprecations"]:
+            dep_table.add_row(
+                d["path"],
+                d["sunset_on"],
+                d["replacement"] or "-",
+            )
+        console.print(dep_table)
+
+
+@admin_app.command()
 def serve(
     host: str = typer.Option("0.0.0.0", help="Host to bind"),  # noqa: S104
     port: int = typer.Option(8420, help="Port to bind"),
