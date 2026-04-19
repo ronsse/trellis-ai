@@ -393,6 +393,276 @@ When picking this back up:
 
 ---
 
+## Feedback-Driven Parameter Tuning — Plan & Status
+
+Started 2026-04-19 on branch `claude/hybrid-search-retrieval-Pk6qs`. The
+goal is a governed parameter-tuning system that lets Trellis adjust the
+weights inside its own retrieval / tagging / advisory components based
+on observed agent outcomes, with per-`(domain, intent_family,
+tool_name)` granularity and a governed promotion pipeline (validate →
+canary → promote). Section renamed 2026-04-20 to align with
+[`adr-terminology.md`](docs/design/adr-terminology.md) — "self-learning"
+is explicitly **not** a project term; the existing "feedback loop"
+(EventLog-authoritative + JSONL) informs this tuning loop, which adds
+the governed parameter-mutation layer on top.
+
+The work is split into 7 PRs sequenced by conflict risk (additive
+first). PRs 1, 2, 3, 4, 5 have shipped; **PR 2b, PR 6, and PR 7+
+remain.** This section captures the locked decisions plus the detailed
+spec for each remaining PR so a future session can resume cleanly.
+
+### Locked design decisions
+
+These were settled at the start of the sprint and ground every PR.
+Don't relitigate without surfacing the trade-off explicitly.
+
+1. **Two stores split** — agent-facing knowledge (`Trace`, `Entity`,
+   `Document`, `Vector`, `EventLog`) stays where it is. New ops-tier
+   data (`OutcomeEvent`, `ParameterSet`, `ParameterProposal`) lives in
+   dedicated stores so high-volume tuning telemetry never pollutes the
+   knowledge graph.
+2. **EventLog is audit-tier only.** Raw `OutcomeEvents` do **not** flow
+   through `EventLog.emit`. Curated governance events (`PARAMS_UPDATED`,
+   `TUNER_PROPOSAL_CREATED`, `CANARY_COMPLETED`, `PRECEDENT_PROMOTED`)
+   continue to land there.
+3. **Storage layout** — SQLite uses three new files in `stores_dir`:
+   `outcomes.db`, `parameters.db`, `tuner_state.db`. Postgres (future)
+   uses a dedicated `trellis_ops` schema.
+4. **Dimensions taxonomy.**
+   - **Learning axes** (cells the tuner can specialise on): `domain`,
+     `intent_family`, `tool_name`, `phase` (with `agent_role` deferred
+     to v2).
+   - **Identity axes**: `component_id`, `params_version`.
+   - **Audit axes**: `agent_id`, `run_id`, `session_id`, `pack_id`,
+     `trace_id`, `occurred_at`, `recorded_at`.
+   - **Policy-assigned**: `cohort` = hash(`run_id`+`component_id`),
+     `segment`.
+5. **Precedence chain for parameter resolution** (narrowest first,
+   then back off):
+   - `(component_id, domain, intent_family, tool_name)`
+   - → `(component_id, domain, intent_family)`
+   - → `(component_id, domain)`
+   - → `(component_id, intent_family)`
+   - → `(component_id)`
+
+   `domain` is single-valued per call; multi-domain items back off to
+   the wider cell. Custom (non-catalog) `intent_family` strings are
+   accepted, learned in isolation, and back off past the intent axis on
+   cold-start.
+6. **Intent-family catalog (10 entries, extensible verbs):** `discover`,
+   `lookup`, `verify`, `diagnose`, `plan`, `implement`, `review`,
+   `summarize`, `compare`, `classify`. Defined in
+   `trellis.schemas.outcome.INTENT_FAMILIES`. Custom strings allowed.
+7. **Phase catalog (7 entries):** `ingest`, `enrich`, `extract`,
+   `retrieve`, `assemble`, `advise`, `feedback`. Defined in
+   `trellis.schemas.outcome.PHASES`. Note `enrich` (not `classify`) so
+   the phase name doesn't collide with `intent_family="classify"`.
+8. **Trellis internals also emit outcomes.** Internal LLM-driven
+   classifiers/extractors record `OutcomeEvents` with
+   `agent_role="trellis.<component>"`. Dual-emission patterns (outer
+   pack + inner classifier) link via `run_id`.
+9. **Cutoff rule** — *consumed by agents/packs = knowledge tier;
+   consumed by Trellis to self-improve = ops tier.*
+10. **Naming collision fix** — the call-level outcome type is
+    `ComponentOutcome` (not `Outcome`); `trellis.schemas.trace.Outcome`
+    already exists for trace-level outcomes.
+11. **Parameter mutations go through `MutationExecutor`** — validate →
+    policy gate (min sample=5, min effect=0.15) → idempotency →
+    execute → emit `PARAMS_UPDATED` event. Tuners propose; the executor
+    promotes.
+12. **Canary before promote.** Deterministic cohort hash assigns
+    canary vs control. Fitness gate must pass before promotion.
+13. **Precedence + caching live in `ParameterRegistry`**, a thin facade
+    over `ParameterStore`. When constructed with `store=None` (or when
+    resolve fails), the registry returns the caller's hardcoded default
+    — making every call-site migration behaviour-preserving.
+14. **Migration discipline** — every constant migration must keep the
+    hardcoded default as the fallback. No silent value changes; any
+    semantic change ships as a separate, explicit commit.
+
+### Shipped PRs (1–5, on `claude/hybrid-search-retrieval-Pk6qs`)
+
+| # | Commit | Surface area |
+|---|--------|--------------|
+| 1 | `66665dc` | Ops foundation: `OutcomeEvent` + `ComponentOutcome`, `ParameterSet`/`Scope`/`Proposal` schemas, `OutcomeStore` / `ParameterStore` / `TunerStateStore` ABCs + SQLite impls wired into `StoreRegistry`, `record_outcome()` helper. 49 tests. |
+| 2 | `c989bbe` | `ParameterRegistry` runtime facade with precedence-chain resolve + caching + `invalidate(scope=None)`. 13 tests. |
+| 3 | `50cc815` | Migrated `retrieve.effectiveness` (`analyze_effectiveness`, `analyze_advisory_effectiveness`, `run_effectiveness_feedback`, `run_advisory_fitness_loop`) and `learning.scoring` (`_recommend_learning_action` via `analyze_learning_observations`) to honour `ParameterRegistry`. Component ids: `retrieve.effectiveness.items`, `retrieve.effectiveness.advisory`, `learning.scoring`. 5 tests. |
+| 4 | `5a67ebc` | `RRFReranker()` wired as default in MCP server `_build_pack_builder`, REST `/api/v1/packs` route, and SDK `assemble_pack` / `assemble_sectioned_pack`. SDK local-mode now calls `build_strategies(registry)` so `SemanticSearch` auto-enables when `embeddings:` config provides a vector store + embedding fn. |
+| 5 | `2260a59` | `record_feedback(..., outcome_store=..., component_id=...)` dual-emits an `OutcomeEvent` alongside the existing JSONL append + `FEEDBACK_RECORDED` event. Field mapping documented in commit message. 7 tests. |
+
+PR 4 (`classify` → `enrich` phase rename) was a no-op — the `PHASES`
+catalog already shipped with `"enrich"` in PR 1, and a repo-wide grep
+turned up zero existing `phase="classify"` references.
+
+Totals at end-of-sprint: **+2775 lines, 78 new tests, 1339 total unit
+tests passing**, lint + mypy clean.
+
+### PR 2b — Migrate rerankers + strategies.py constants (NEXT UP)
+
+Behaviour-preserving migration of the remaining hardcoded constants
+to `ParameterRegistry`. Defaults stay as the fallback; no semantic
+change. Pattern is the same as the effectiveness/scoring migrations
+in commit `50cc815` — see those diffs for the exact shape.
+
+**Files to touch:**
+
+- `src/trellis/retrieve/rerankers/rrf.py` — `k=60` (constructor arg).
+  Component id: `retrieve.rerankers.RRFReranker`. Resolve via
+  registry at construction in a new factory or lazily in `__init__`.
+- `src/trellis/retrieve/rerankers/mmr.py` — `lambda_param=0.7`,
+  `shingle_size=3`. Component id: `retrieve.rerankers.MMRReranker`.
+- `src/trellis/retrieve/strategies.py` — six constants:
+  - `DEFAULT_RECENCY_HALF_LIFE_DAYS = 30.0` (line 21)
+  - `RECENCY_FLOOR = 0.3` (line 26)
+  - importance multiplier `base * (1.0 + importance)` (line 52) —
+    consider exposing the `1.0` baseline as a parameter.
+  - `domain_match_boost = 1.3` (line 266) — currently inline literal.
+  - `curated_boost = 1.3` (lines 205, 270) — already a constructor
+    arg on `GraphSearch`.
+  - `description_boost = 1.2` (line 277) — currently inline literal.
+  - position decay step `0.05` (line 262) — currently inline literal.
+
+  Component ids: `retrieve.strategies.KeywordSearch`,
+  `retrieve.strategies.SemanticSearch`,
+  `retrieve.strategies.GraphSearch`.
+
+**Wiring approach:**
+
+- Add an optional `registry: ParameterRegistry | None = None`
+  parameter to `build_strategies()` in `src/trellis/retrieve/strategies.py`.
+  Add a parallel `build_rerankers(kind, registry, scope)` factory in
+  `src/trellis/retrieve/rerankers/__init__.py` (or wherever the
+  defaults move).
+- Each strategy constructor pulls overrides via the registry inside
+  `__init__`. When `registry is None`, the existing module-level
+  constants are used unchanged.
+- Update the three call sites that build strategies (MCP
+  `_build_pack_builder`, REST `/api/v1/packs`, SDK `_get_registry`)
+  to pass `registry=ParameterRegistry(store_registry.parameter_store)`.
+
+**Tests to add:**
+
+- `tests/unit/retrieve/test_strategies_registry.py` — defaults
+  preserved; registry override changes recency half-life / boosts.
+- `tests/unit/retrieve/rerankers/test_registry.py` — RRF `k` and MMR
+  `lambda_param` honour registry overrides.
+
+**Acceptance:**
+
+- `pytest tests/unit/ -q` shows the same 1339+ tests passing.
+- All registry-resolved values fall through to the documented
+  hardcoded defaults when no `ParameterStore` snapshot exists.
+- No diff in pack output for the existing
+  `tests/unit/retrieve/test_pack_builder.py` golden cases.
+
+### PR 6 — `RuleTuner` + `trellis metrics` CLI
+
+The first concrete tuner, plus the operator surface area for reading
+out per-cell aggregates and proposed parameter changes.
+
+**`RuleTuner` (`src/trellis/learning/tuners/rule_tuner.py`):**
+
+- Reads `OutcomeEvent`s from `OutcomeStore.query(...)` since the last
+  cursor stored in `TunerStateStore.get_cursor("rule_tuner")`.
+- Aggregates per learning-axis cell `(component_id, domain,
+  intent_family, tool_name)`: count, success_rate, mean latency,
+  optionally `metrics["precision"]` etc.
+- Applies a small fixed rule set, e.g. *if `success_rate < 0.4` and
+  `count >= 30`, propose halving the recency boost*. Rules live in
+  configuration so they're tweakable without code changes.
+- Emits `ParameterProposal` records via
+  `TunerStateStore.put_proposal(...)` — does **not** mutate
+  `ParameterStore` directly.
+- A separate `promote_proposals()` step consumes proposals through
+  `MutationExecutor`: validate (schema) → policy gate (min sample=5,
+  min effect=0.15, configurable) → idempotency (proposal_id) → execute
+  (`ParameterStore.put`) → emit `PARAMS_UPDATED` event. Calls
+  `ParameterRegistry.invalidate(scope)` on success so the next
+  `get(...)` re-resolves.
+- Cohort assignment: deterministic `hash(run_id + component_id) % 100`
+  — first decile is canary unless overridden. Canary fitness gate is
+  a follow-up step.
+
+**Schemas / types already in place from PR 1:** `ParameterProposal`,
+`ParameterScope`, `ParameterSet`. No new schemas should be needed for
+the rule-based tuner.
+
+**`trellis metrics` CLI (`src/trellis_cli/metrics.py`):**
+
+- Subcommands:
+  - `trellis metrics outcomes [--component-id ...] [--domain ...]
+    [--intent ...] [--phase ...] [--days N] [--format json|table]` —
+    pretty-print aggregate stats per cell.
+  - `trellis metrics proposals [--tuner ...] [--status ...]
+    [--format json]` — list pending / canary / promoted proposals
+    with sample size + effect size.
+  - `trellis metrics versions <component_id> [--scope ...]
+    [--format json]` — list `ParameterSet` snapshots and which is
+    active.
+  - `trellis metrics promote <proposal_id>` — dry-run by default;
+    `--commit` actually routes the proposal through the mutation
+    pipeline.
+- All commands honour `--format json` per the CLAUDE.md hard rule
+  (machine output via JSON, never parse the human format).
+
+**Deprecate** `trellis analyze advisory-effectiveness` and
+`trellis analyze pack-sections` *only after* the new `trellis
+metrics outcomes` covers their reporting needs. Until then, both
+coexist; the deprecation note ships in a separate commit.
+
+**Tests:**
+
+- `tests/unit/learning/test_rule_tuner.py` — proposal generation,
+  cursor advancement, idempotency on re-runs.
+- `tests/unit/learning/test_promotion.py` — full round-trip:
+  outcomes → proposal → policy gate → `ParameterStore.put` →
+  `EventLog.emit`. Use `MutationExecutor` with mocked policy gate.
+- `tests/unit/cli/test_metrics_cli.py` — JSON output stable across
+  runs; `--format table` doesn't break with empty stores.
+
+### PR 7+ — Speculative features
+
+Each is independent and can land in any order once PR 6 ships.
+
+- **Discovery endpoint** (`POST /api/v1/discover` + matching MCP
+  tool) — keyword-only fast path that surfaces curated entities,
+  domains, and graph anchor points without LLM cost. Use case: the
+  client-discovery flow we discussed (an agent landing in an unknown
+  codebase needs structural anchors before it can ask focused
+  questions).
+- **LLM query rewrite** — gated by `EnrichmentService`; when the raw
+  intent looks ambiguous (no domain match, no keyword overlap with
+  recent traces), expand into 2–3 alternative phrasings and union
+  the results. Records its own `OutcomeEvent` so the tuner can learn
+  when expansion helps vs. hurts.
+- **Cross-encoder rerank** — wire `CrossEncoderClient` (already a
+  protocol in `trellis.llm`, currently unused) as an optional
+  `Reranker` after RRF. Slow but high-precision; should run only on
+  the top-k items after RRF/MMR.
+- **`BanditTuner`** — Thompson-sampling alternative to `RuleTuner`.
+  Same proposal/promotion plumbing; different exploration strategy.
+  Defer until we have enough outcome volume to warrant the
+  complexity (see ADR if/when written).
+
+### Picking this back up
+
+1. `git checkout claude/hybrid-search-retrieval-Pk6qs && git pull`.
+2. Re-read **Locked design decisions** above. Don't relitigate; if
+   a decision needs to change, surface the trade-off explicitly and
+   amend the list.
+3. Confirm baseline: `make lint && make typecheck && pytest
+   tests/unit/ -q` should report 1339+ passed, 8 skipped.
+4. Start PR 2b. Pattern is the same as commit `50cc815` — read those
+   diffs first; the migration is mechanical once you internalise
+   the `_resolve_param` helper shape.
+5. `pytest tests/unit/retrieve/ tests/unit/ops/ -q` after each
+   migration step confirms behaviour preservation.
+6. PR 6 is the next big block; consider whether to stage the
+   `RuleTuner` implementation and the CLI as separate commits to
+   keep diffs reviewable.
+
+---
+
 ## In Progress
 
 ### PyPI Publishing
