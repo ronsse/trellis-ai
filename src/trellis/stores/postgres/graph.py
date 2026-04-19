@@ -689,7 +689,7 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
         complex_filters: dict[str, Any] = {}
         if properties:
             for key, value in properties.items():
-                if isinstance(value, (str, int, float, bool)):
+                if isinstance(value, str | int | float | bool):
                     conditions.append("properties->>%s = %s")
                     params.extend([key, str(value)])
                 elif value is None:

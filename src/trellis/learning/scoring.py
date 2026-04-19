@@ -144,7 +144,7 @@ def analyze_learning_observations(
             str(observation.get("intent_family", "")).strip() or "general_context"
         )
         items = observation.get("items", [])
-        if not isinstance(items, Sequence) or isinstance(items, (str, bytes)):
+        if not isinstance(items, Sequence) or isinstance(items, str | bytes):
             items = []
         for item in items:
             if isinstance(item, Mapping):
@@ -280,7 +280,7 @@ def prepare_learning_promotions(
         and str(candidate.get("candidate_id", "")).strip()
     }
     decisions = decisions_payload.get("decisions", [])
-    if not isinstance(decisions, Sequence) or isinstance(decisions, (str, bytes)):
+    if not isinstance(decisions, Sequence) or isinstance(decisions, str | bytes):
         decisions = []
 
     results: list[dict[str, Any]] = []
