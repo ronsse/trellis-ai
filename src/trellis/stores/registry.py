@@ -29,39 +29,265 @@ _UNSET: Any = object()  # sentinel for lazy embedding_fn init
 # malformed, so we treat them as opaque.
 _MIN_SAFE_KEY_LEN = 4
 
-# Cache of merged (built-in + plugin) backend maps.  Populated lazily on
+# Cache of merged (built-in + plugin) backend maps. Populated lazily on
 # first access so that installing a plugin wheel into an already-running
-# process doesn't require a restart.  Keyed by store_type ("trace", ...).
+# process doesn't require a restart. Keyed by store_type ("trace", ...).
 _MERGED_BACKENDS_CACHE: dict[str, dict[str, tuple[str, str]]] = {}
 
-# Backend name -> (module_path, class_name)
-_BUILTIN_BACKENDS: dict[str, dict[str, tuple[str, str]]] = {
-    "trace": {
-        "sqlite": ("trellis.stores.sqlite.trace", "SQLiteTraceStore"),
-        "postgres": ("trellis.stores.postgres.trace", "PostgresTraceStore"),
+# Plane taxonomy — see docs/design/adr-planes-and-substrates.md.
+#
+# The Knowledge Plane holds shared, agent-readable state populated by
+# client systems through the governed mutation pipeline. The Operational
+# Plane holds Trellis-internal state (audit, execution traces) that
+# client code never populates directly. Cross-plane data only flows
+# through the two sanctioned bridges documented in the ADR:
+# MutationExecutor (Knowledge writes emit to EventLog) and the
+# effectiveness feedback loop (EventLog informs DocumentStore tags).
+_PLANE_OF: dict[str, str] = {
+    "graph": "knowledge",
+    "vector": "knowledge",
+    "document": "knowledge",
+    "blob": "knowledge",
+    "trace": "operational",
+    "event_log": "operational",
+}
+
+# Backend registry keyed as plane -> store_type -> backend_name ->
+# (module_path, class_name). The plane-outer shape makes it structurally
+# visible which stores belong to which plane; code paths that should
+# only touch one plane can constrain themselves to its sub-dict. The
+# plugin loader (see adr-plugin-contract.md) merges entry-point
+# backends on top of this table per store_type at lookup time — see
+# _get_merged_backends.
+_BUILTIN_BACKENDS: dict[str, dict[str, dict[str, tuple[str, str]]]] = {
+    "knowledge": {
+        "graph": {
+            "sqlite": ("trellis.stores.sqlite.graph", "SQLiteGraphStore"),
+            "postgres": ("trellis.stores.postgres.graph", "PostgresGraphStore"),
+        },
+        "vector": {
+            "sqlite": ("trellis.stores.sqlite.vector", "SQLiteVectorStore"),
+            "pgvector": ("trellis.stores.pgvector.store", "PgVectorStore"),
+            "lancedb": ("trellis.stores.lancedb.store", "LanceVectorStore"),
+        },
+        "document": {
+            "sqlite": ("trellis.stores.sqlite.document", "SQLiteDocumentStore"),
+            "postgres": (
+                "trellis.stores.postgres.document",
+                "PostgresDocumentStore",
+            ),
+        },
+        "blob": {
+            "local": ("trellis.stores.local.blob", "LocalBlobStore"),
+            "s3": ("trellis.stores.s3.blob", "S3BlobStore"),
+        },
     },
-    "document": {
-        "sqlite": ("trellis.stores.sqlite.document", "SQLiteDocumentStore"),
-        "postgres": ("trellis.stores.postgres.document", "PostgresDocumentStore"),
-    },
-    "graph": {
-        "sqlite": ("trellis.stores.sqlite.graph", "SQLiteGraphStore"),
-        "postgres": ("trellis.stores.postgres.graph", "PostgresGraphStore"),
-    },
-    "vector": {
-        "sqlite": ("trellis.stores.sqlite.vector", "SQLiteVectorStore"),
-        "pgvector": ("trellis.stores.pgvector.store", "PgVectorStore"),
-        "lancedb": ("trellis.stores.lancedb.store", "LanceVectorStore"),
-    },
-    "event_log": {
-        "sqlite": ("trellis.stores.sqlite.event_log", "SQLiteEventLog"),
-        "postgres": ("trellis.stores.postgres.event_log", "PostgresEventLog"),
-    },
-    "blob": {
-        "local": ("trellis.stores.local.blob", "LocalBlobStore"),
-        "s3": ("trellis.stores.s3.blob", "S3BlobStore"),
+    "operational": {
+        "trace": {
+            "sqlite": ("trellis.stores.sqlite.trace", "SQLiteTraceStore"),
+            "postgres": ("trellis.stores.postgres.trace", "PostgresTraceStore"),
+        },
+        "event_log": {
+            "sqlite": ("trellis.stores.sqlite.event_log", "SQLiteEventLog"),
+            "postgres": (
+                "trellis.stores.postgres.event_log",
+                "PostgresEventLog",
+            ),
+        },
     },
 }
+
+# Environment variable names per plane for Postgres DSN resolution.
+# The legacy ``TRELLIS_PG_DSN`` is honored as a fallback for one release
+# (deprecation surfaced via a structlog warning on first use).
+_PLANE_PG_DSN_ENV: dict[str, str] = {
+    "knowledge": "TRELLIS_KNOWLEDGE_PG_DSN",
+    "operational": "TRELLIS_OPERATIONAL_PG_DSN",
+}
+_LEGACY_PG_DSN_ENV = "TRELLIS_PG_DSN"
+
+# One-shot guards so deprecation signals fire once per process rather
+# than on every store access. Tests reset via ``_reset_deprecation_guards``.
+_LEGACY_PG_DSN_WARNED: set[str] = set()
+_FLAT_PROPERTY_WARNED: set[str] = set()
+_FLAT_CONFIG_WARNED: bool = False
+
+
+def _reset_deprecation_guards() -> None:
+    """Reset one-shot deprecation guards (tests only)."""
+    global _FLAT_CONFIG_WARNED  # noqa: PLW0603
+    _LEGACY_PG_DSN_WARNED.clear()
+    _FLAT_PROPERTY_WARNED.clear()
+    _FLAT_CONFIG_WARNED = False
+
+
+def _warn_flat_property(name: str) -> None:
+    """Emit a one-shot deprecation signal for a flat ``StoreRegistry`` property.
+
+    Flat properties (``registry.graph_store`` etc.) are retained for one
+    release as aliases that delegate to the plane-namespaced form. Both
+    a ``DeprecationWarning`` and a structlog ``warning`` are emitted on
+    first access per property so tooling that filters one channel still
+    sees the other.
+    """
+    import warnings  # noqa: PLC0415
+
+    if name in _FLAT_PROPERTY_WARNED:
+        return
+    _FLAT_PROPERTY_WARNED.add(name)
+
+    # Property names map to store_type keys by stripping the trailing
+    # "_store" suffix where present (``graph_store`` -> ``graph``);
+    # ``event_log`` is already the canonical key.
+    store_type = name.removesuffix("_store")
+    plane = _PLANE_OF.get(store_type)
+    namespaced = f"registry.{plane}.{name}" if plane else f"registry.<plane>.{name}"
+    message = (
+        f"StoreRegistry.{name} is deprecated and will be removed in a "
+        f"future release; use {namespaced} instead. "
+        "See docs/design/adr-planes-and-substrates.md."
+    )
+    warnings.warn(message, DeprecationWarning, stacklevel=3)
+    logger.warning(
+        "store_registry_flat_property_deprecated",
+        property=name,
+        replacement=namespaced,
+    )
+
+
+def _extract_store_config(
+    data: dict[str, Any], config_source: str
+) -> dict[str, Any]:
+    """Flatten the YAML store config into the internal ``{store_type: cfg}`` shape.
+
+    Accepts both the plane-split shape (``knowledge:`` / ``operational:``
+    blocks, preferred) and the legacy flat ``stores:`` block. When both
+    are present the plane-split wins. Emits a one-shot structlog
+    ``warning`` when the flat shape is in use so operators see an
+    actionable migration pointer.
+
+    The internal representation stays flat (``{"graph": {...}, ...}``)
+    because ``_instantiate`` resolves the plane from ``_PLANE_OF`` at
+    lookup time. This keeps the rest of the registry untouched and lets
+    both config shapes land at the same internal structure.
+    """
+    global _FLAT_CONFIG_WARNED  # noqa: PLW0603
+
+    knowledge_cfg = data.get("knowledge")
+    operational_cfg = data.get("operational")
+    flat_cfg = data.get("stores")
+
+    if knowledge_cfg is not None or operational_cfg is not None:
+        merged: dict[str, Any] = {}
+        for plane_name, plane_cfg in (
+            ("knowledge", knowledge_cfg),
+            ("operational", operational_cfg),
+        ):
+            if not plane_cfg:
+                continue
+            if not isinstance(plane_cfg, dict):
+                logger.warning(
+                    "registry_config_plane_not_mapping",
+                    plane=plane_name,
+                    source=config_source,
+                )
+                continue
+            for store_type, store_cfg in plane_cfg.items():
+                expected_plane = _PLANE_OF.get(store_type)
+                if expected_plane is None:
+                    logger.warning(
+                        "registry_config_unknown_store_type",
+                        store_type=store_type,
+                        plane=plane_name,
+                        source=config_source,
+                    )
+                    continue
+                if expected_plane != plane_name:
+                    logger.warning(
+                        "registry_config_store_in_wrong_plane",
+                        store_type=store_type,
+                        declared_plane=plane_name,
+                        expected_plane=expected_plane,
+                        source=config_source,
+                    )
+                    continue
+                merged[store_type] = store_cfg
+        if flat_cfg:
+            logger.warning(
+                "registry_config_flat_and_planes_both_present",
+                source=config_source,
+                message=(
+                    "Both 'stores:' (legacy) and plane blocks "
+                    "('knowledge:'/'operational:') are present; the "
+                    "plane blocks win and 'stores:' is ignored. "
+                    "Remove 'stores:' to silence this warning."
+                ),
+            )
+        return merged
+
+    if flat_cfg:
+        if not _FLAT_CONFIG_WARNED:
+            _FLAT_CONFIG_WARNED = True
+            logger.warning(
+                "registry_config_flat_shape_deprecated",
+                source=config_source,
+                message=(
+                    "The flat 'stores:' config block is deprecated; "
+                    "split into 'knowledge:' and 'operational:' blocks. "
+                    "Run `trellis admin migrate-config` to rewrite "
+                    "automatically. See "
+                    "docs/design/adr-planes-and-substrates.md."
+                ),
+            )
+        if isinstance(flat_cfg, dict):
+            return flat_cfg
+        logger.warning(
+            "registry_config_stores_not_mapping",
+            source=config_source,
+        )
+
+    return {}
+
+
+def _resolve_plane_pg_dsn(store_type: str) -> str | None:
+    """Resolve a Postgres DSN for ``store_type`` via its plane's env var.
+
+    Precedence:
+
+    1. ``TRELLIS_{PLANE}_PG_DSN`` (preferred, per ADR planes-and-substrates).
+    2. Legacy ``TRELLIS_PG_DSN`` (deprecation warning on first use per plane).
+    3. ``None`` — caller raises with a helpful message.
+    """
+    import os  # noqa: PLC0415
+
+    plane = _PLANE_OF.get(store_type)
+    if plane is None:
+        # Unknown store type — caller will raise on the lookup anyway;
+        # fall back to the legacy env var for maximum compatibility.
+        return os.environ.get(_LEGACY_PG_DSN_ENV)
+
+    plane_env = _PLANE_PG_DSN_ENV[plane]
+    dsn = os.environ.get(plane_env)
+    if dsn:
+        return dsn
+
+    legacy = os.environ.get(_LEGACY_PG_DSN_ENV)
+    if legacy:
+        if plane not in _LEGACY_PG_DSN_WARNED:
+            _LEGACY_PG_DSN_WARNED.add(plane)
+            logger.warning(
+                "trellis_pg_dsn_legacy_fallback",
+                plane=plane,
+                replacement=plane_env,
+                message=(
+                    "TRELLIS_PG_DSN is deprecated; set "
+                    f"{plane_env} for the {plane} plane. "
+                    "See docs/design/adr-planes-and-substrates.md."
+                ),
+            )
+        return legacy
+
+    return None
 
 
 def _get_merged_backends(store_type: str) -> dict[str, tuple[str, str]]:
@@ -76,7 +302,11 @@ def _get_merged_backends(store_type: str) -> dict[str, tuple[str, str]]:
     if store_type in _MERGED_BACKENDS_CACHE:
         return _MERGED_BACKENDS_CACHE[store_type]
 
-    builtins = _BUILTIN_BACKENDS.get(store_type, {})
+    plane = _PLANE_OF.get(store_type)
+    if plane is None:
+        # Unknown store_type — return empty; caller surfaces the error.
+        return {}
+    builtins = _BUILTIN_BACKENDS.get(plane, {}).get(store_type, {})
     try:
         from trellis.plugins import GROUP_STORES, merge_with_builtins  # noqa: PLC0415
     except Exception:
@@ -279,6 +509,58 @@ def _build_openai_embedding_fn(
     return _embed
 
 
+class _KnowledgePlane:
+    """Namespaced accessor for the four Knowledge-Plane stores.
+
+    Knowledge stores hold shared, agent-readable state populated by
+    client systems. See docs/design/adr-planes-and-substrates.md §2.1.
+    """
+
+    __slots__ = ("_registry",)
+
+    def __init__(self, registry: StoreRegistry) -> None:
+        self._registry = registry
+
+    @property
+    def graph_store(self) -> GraphStore:
+        return self._registry._get("graph")  # type: ignore[no-any-return]
+
+    @property
+    def vector_store(self) -> VectorStore:
+        return self._registry._get("vector")  # type: ignore[no-any-return]
+
+    @property
+    def document_store(self) -> DocumentStore:
+        return self._registry._get("document")  # type: ignore[no-any-return]
+
+    @property
+    def blob_store(self) -> BlobStore:
+        return self._registry._get("blob")  # type: ignore[no-any-return]
+
+
+class _OperationalPlane:
+    """Namespaced accessor for the two Operational-Plane stores.
+
+    Operational stores hold Trellis-internal state (execution traces,
+    the mutation audit log). Client code never populates these directly;
+    they are written by the governed mutation pipeline and read by
+    admin/debug surfaces. See docs/design/adr-planes-and-substrates.md §2.1.
+    """
+
+    __slots__ = ("_registry",)
+
+    def __init__(self, registry: StoreRegistry) -> None:
+        self._registry = registry
+
+    @property
+    def trace_store(self) -> TraceStore:
+        return self._registry._get("trace")  # type: ignore[no-any-return]
+
+    @property
+    def event_log(self) -> EventLog:
+        return self._registry._get("event_log")  # type: ignore[no-any-return]
+
+
 class StoreRegistry:
     """Lazily instantiates and caches store backends based on configuration."""
 
@@ -299,6 +581,8 @@ class StoreRegistry:
         self._cache: dict[str, Any] = {}
         self._embedding_fn_cache: Callable[[str], list[float]] | None = _UNSET
         self._budget_config_cache: Any = _UNSET
+        self._knowledge = _KnowledgePlane(self)
+        self._operational = _OperationalPlane(self)
 
     @property
     def stores_dir(self) -> Path | None:
@@ -311,7 +595,31 @@ class StoreRegistry:
         config_dir: Path | None = None,
         data_dir: Path | None = None,
     ) -> StoreRegistry:
-        """Create a registry from XPG config directory."""
+        """Create a registry from XPG config directory.
+
+        Accepts two config shapes for the store section:
+
+        **Plane-split (preferred)** — per ADR planes-and-substrates::
+
+            knowledge:
+              graph: { backend: kuzu }
+              vector: { backend: kuzu }
+              document: { backend: sqlite }
+              blob: { backend: local }
+            operational:
+              trace: { backend: sqlite }
+              event_log: { backend: sqlite }
+
+        **Flat (legacy)** — still accepted for one release with a
+        deprecation warning logged once per process::
+
+            stores:
+              graph: { backend: sqlite }
+              ...
+
+        When both are present, the plane-split blocks win and the flat
+        block is ignored (with a distinct warning).
+        """
         import os  # noqa: PLC0415
 
         if config_dir is None:
@@ -334,7 +642,7 @@ class StoreRegistry:
                 import yaml  # noqa: PLC0415
 
                 data = yaml.safe_load(config_path.read_text()) or {}
-                store_config = data.get("stores", {})
+                store_config = _extract_store_config(data, str(config_path))
                 embedding_config = data.get("embeddings", {})
                 retrieval_config = data.get("retrieval", {})
                 llm_config = data.get("llm", {})
@@ -371,6 +679,11 @@ class StoreRegistry:
     def _instantiate(self, store_type: str) -> Any:
         """Create a store instance from config."""
         backend, params = self._resolve_backend(store_type)
+
+        plane = _PLANE_OF.get(store_type)
+        if plane is None:
+            msg = f"Unknown store type '{store_type}'"
+            raise ValueError(msg)
 
         registry = _get_merged_backends(store_type)
         if backend not in registry:
@@ -420,28 +733,19 @@ class StoreRegistry:
                 raise ValueError(msg)
             params["root_dir"] = self._stores_dir / "blobs"
 
-        # For postgres backends, default DSN from env
-        if backend == "postgres" and "dsn" not in params:
-            import os  # noqa: PLC0415
-
-            dsn = os.environ.get("TRELLIS_PG_DSN")
+        # For postgres / pgvector backends, default DSN from env.
+        # Plane-aware resolution: TRELLIS_KNOWLEDGE_PG_DSN or
+        # TRELLIS_OPERATIONAL_PG_DSN preferred; TRELLIS_PG_DSN is a
+        # legacy fallback that emits a deprecation warning once per plane.
+        if backend in {"postgres", "pgvector"} and "dsn" not in params:
+            dsn = _resolve_plane_pg_dsn(store_type)
             if not dsn:
+                plane = _PLANE_OF.get(store_type, "<unknown>")
+                plane_env = _PLANE_PG_DSN_ENV.get(plane, "TRELLIS_*_PG_DSN")
                 msg = (
-                    "dsn must be set for postgres backends"
-                    " (config or TRELLIS_PG_DSN env var)"
-                )
-                raise ValueError(msg)
-            params["dsn"] = dsn
-
-        # For pgvector backend, default DSN from env
-        if backend == "pgvector" and "dsn" not in params:
-            import os  # noqa: PLC0415
-
-            dsn = os.environ.get("TRELLIS_PG_DSN")
-            if not dsn:
-                msg = (
-                    "dsn must be set for pgvector backend"
-                    " (config or TRELLIS_PG_DSN env var)"
+                    f"dsn must be set for {backend} backend"
+                    f" (config or {plane_env} env var;"
+                    f" TRELLIS_PG_DSN accepted as legacy fallback)"
                 )
                 raise ValueError(msg)
             params["dsn"] = dsn
@@ -468,27 +772,61 @@ class StoreRegistry:
         return self._cache[store_type]
 
     @property
+    def knowledge(self) -> _KnowledgePlane:
+        """Knowledge-Plane stores (graph, vector, document, blob).
+
+        Populated by client systems via the governed mutation pipeline;
+        read by agent-facing surfaces. See
+        docs/design/adr-planes-and-substrates.md §2.1.
+        """
+        return self._knowledge
+
+    @property
+    def operational(self) -> _OperationalPlane:
+        """Operational-Plane stores (trace, event_log).
+
+        Internal to Trellis — never populated by client systems
+        directly. Written by the mutation pipeline as a side effect of
+        Knowledge writes; read by admin/debug surfaces and the
+        effectiveness feedback loop. See
+        docs/design/adr-planes-and-substrates.md §2.1.
+        """
+        return self._operational
+
+    # -- Deprecated flat aliases --------------------------------------
+    # Retained for one release to keep downstream code working during
+    # the plane split. Access emits a one-shot ``DeprecationWarning``
+    # plus a structlog ``warning`` pointing at the namespaced form.
+    # See docs/design/adr-planes-and-substrates.md §2.7.
+
+    @property
     def trace_store(self) -> TraceStore:
+        _warn_flat_property("trace_store")
         return self._get("trace")  # type: ignore[no-any-return]
 
     @property
     def document_store(self) -> DocumentStore:
+        _warn_flat_property("document_store")
         return self._get("document")  # type: ignore[no-any-return]
 
     @property
     def graph_store(self) -> GraphStore:
+        _warn_flat_property("graph_store")
         return self._get("graph")  # type: ignore[no-any-return]
 
     @property
     def vector_store(self) -> VectorStore:
+        _warn_flat_property("vector_store")
         return self._get("vector")  # type: ignore[no-any-return]
 
     @property
     def event_log(self) -> EventLog:
+        _warn_flat_property("event_log")
         return self._get("event_log")  # type: ignore[no-any-return]
 
     @property
     def blob_store(self) -> BlobStore:
+        _warn_flat_property("blob_store")
         return self._get("blob")  # type: ignore[no-any-return]
 
     @property

@@ -97,7 +97,10 @@ def init(
     config_path.write_text(config_path.read_text() + _LLM_CONFIG_TEMPLATE)
 
     if output_format == "json":
-        console.print(
+        # Plain ``print`` (not ``console.print``) so Rich's terminal
+        # width soft-wrap never splits the JSON across lines — long
+        # Windows paths can push the payload past 80 chars.
+        print(
             json.dumps(
                 {
                     "status": "initialized",
@@ -110,6 +113,216 @@ def init(
         console.print("[green]Initialized Trellis[/green]")
         console.print(f"  Config: {config_path}")
         console.print(f"  Data:   {actual_data_dir}")
+
+
+def _load_config_for_migration(
+    config_path: Path, output_format: str
+) -> dict[str, Any]:
+    """Load + validate config for migration; exit nonzero on failure."""
+    import yaml  # noqa: PLC0415
+
+    if not config_path.exists():
+        _report_migrate(
+            output_format,
+            status="missing",
+            message=f"No config found at {config_path}",
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        raw = config_path.read_text()
+        data = yaml.safe_load(raw) or {}
+    except Exception as exc:
+        _report_migrate(
+            output_format,
+            status="error",
+            message=f"Failed to parse {config_path}: {exc}",
+        )
+        raise typer.Exit(code=1) from exc
+
+    if not isinstance(data, dict):
+        _report_migrate(
+            output_format,
+            status="error",
+            message="config.yaml root is not a mapping",
+        )
+        raise typer.Exit(code=1)
+
+    return data
+
+
+def _partition_stores_by_plane(
+    flat: dict[str, Any], output_format: str
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Split a flat ``stores:`` block into (knowledge, operational).
+
+    Exits nonzero if unknown store types are present.
+    """
+    from trellis.stores.registry import _PLANE_OF  # noqa: PLC0415
+
+    knowledge: dict[str, Any] = {}
+    operational: dict[str, Any] = {}
+    unknown: list[str] = []
+    for store_type, store_cfg in flat.items():
+        plane = _PLANE_OF.get(store_type)
+        if plane == "knowledge":
+            knowledge[store_type] = store_cfg
+        elif plane == "operational":
+            operational[store_type] = store_cfg
+        else:
+            unknown.append(store_type)
+
+    if unknown:
+        _report_migrate(
+            output_format,
+            status="error",
+            message=f"Unknown store types in 'stores:' block: {unknown}",
+        )
+        raise typer.Exit(code=1)
+
+    return knowledge, operational
+
+
+def _build_migrated_config(
+    data: dict[str, Any],
+    knowledge: dict[str, Any],
+    operational: dict[str, Any],
+) -> dict[str, Any]:
+    """Rebuild config dict with planes replacing ``stores:`` — preserves key order."""
+    migrated: dict[str, Any] = {}
+    for key, value in data.items():
+        if key == "stores":
+            if knowledge:
+                migrated["knowledge"] = knowledge
+            if operational:
+                migrated["operational"] = operational
+        else:
+            migrated[key] = value
+    return migrated
+
+
+@admin_app.command("migrate-config")
+def migrate_config(
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Preview changes without writing"
+    ),
+    force: bool = typer.Option(
+        False, "--force", help="Overwrite without creating a backup"
+    ),
+    output_format: str = typer.Option(
+        "text", "--format", help="Output format: text or json"
+    ),
+) -> None:
+    """Migrate a legacy flat ``stores:`` config to the plane-split shape.
+
+    Rewrites ``~/.trellis/config.yaml`` so the ``stores:`` block is
+    replaced by ``knowledge:`` (graph, vector, document, blob) and
+    ``operational:`` (trace, event_log) blocks. A timestamped backup
+    is written to ``config.yaml.bak.<ts>`` unless ``--force`` is used.
+
+    See docs/design/adr-planes-and-substrates.md.
+    """
+    from datetime import UTC, datetime  # noqa: PLC0415
+
+    import yaml  # noqa: PLC0415
+
+    config_path = get_config_dir() / "config.yaml"
+    data = _load_config_for_migration(config_path, output_format)
+
+    flat = data.get("stores")
+    has_planes = "knowledge" in data or "operational" in data
+
+    if not flat and has_planes:
+        _report_migrate(
+            output_format,
+            status="already-migrated",
+            message="config.yaml already uses plane-split shape",
+        )
+        return
+
+    if not flat:
+        _report_migrate(
+            output_format,
+            status="nothing-to-do",
+            message="No 'stores:' block found",
+        )
+        return
+
+    if not isinstance(flat, dict):
+        _report_migrate(
+            output_format,
+            status="error",
+            message="'stores:' block is not a mapping",
+        )
+        raise typer.Exit(code=1)
+
+    knowledge, operational = _partition_stores_by_plane(flat, output_format)
+    migrated = _build_migrated_config(data, knowledge, operational)
+    new_text = yaml.safe_dump(migrated, sort_keys=False)
+
+    if dry_run:
+        _report_migrate(
+            output_format,
+            status="dry-run",
+            message="Would rewrite config.yaml",
+            diff_preview=new_text,
+            backup_path=None,
+        )
+        return
+
+    backup_path: Path | None = None
+    if not force:
+        ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        backup_path = config_path.with_name(f"config.yaml.bak.{ts}")
+        shutil.copy2(config_path, backup_path)
+
+    config_path.write_text(new_text)
+
+    _report_migrate(
+        output_format,
+        status="migrated",
+        message=f"Rewrote {config_path}",
+        backup_path=str(backup_path) if backup_path else None,
+    )
+
+
+def _report_migrate(
+    output_format: str,
+    *,
+    status: str,
+    message: str,
+    backup_path: str | None = None,
+    diff_preview: str | None = None,
+) -> None:
+    """Emit migrate-config output in text or json."""
+    if output_format == "json":
+        payload: dict[str, Any] = {"status": status, "message": message}
+        if backup_path is not None:
+            payload["backup"] = backup_path
+        if diff_preview is not None:
+            payload["preview"] = diff_preview
+        # Plain ``print`` (not ``console.print``) so Rich's terminal-
+        # width soft-wrap never splits the JSON across lines. Machine
+        # consumers expect single-line JSON per the project rule in
+        # CLAUDE.md (`parse JSON output, not human-readable text`).
+        print(json.dumps(payload))
+        return
+
+    colors = {
+        "migrated": "green",
+        "already-migrated": "cyan",
+        "nothing-to-do": "cyan",
+        "dry-run": "yellow",
+        "missing": "red",
+        "error": "red",
+    }
+    color = colors.get(status, "white")
+    console.print(f"[{color}]{status}[/{color}] {message}")
+    if backup_path:
+        console.print(f"  Backup: {backup_path}")
+    if diff_preview:
+        console.print("\n[dim]--- Preview ---[/dim]")
+        console.print(diff_preview)
 
 
 @admin_app.command()
