@@ -1,7 +1,14 @@
 """Trellis schemas."""
 
 from trellis.schemas.advisory import Advisory, AdvisoryCategory, AdvisoryEvidence
-from trellis.schemas.classification import ContentTags, RetrievalAffinity
+from trellis.schemas.classification import (
+    ContentTags,
+    DataClassification,
+    Lifecycle,
+    LifecycleState,
+    RetrievalAffinity,
+    Sensitivity,
+)
 from trellis.schemas.entity import Entity, EntityAlias, EntitySource, GenerationSpec
 from trellis.schemas.enums import (
     EdgeKind,
@@ -53,6 +60,7 @@ __all__ = [
     "AttachmentRef",
     "BudgetStep",
     "ContentTags",
+    "DataClassification",
     "Edge",
     "EdgeDraft",
     "EdgeKind",
@@ -69,6 +77,8 @@ __all__ = [
     "ExtractionResult",
     "Feedback",
     "GenerationSpec",
+    "Lifecycle",
+    "LifecycleState",
     "NodeRole",
     "Outcome",
     "OutcomeStatus",
@@ -86,6 +96,7 @@ __all__ = [
     "RetrievalReport",
     "SectionedPack",
     "SectionRequest",
+    "Sensitivity",
     "Trace",
     "TraceContext",
     "TracePayloadBuilder",

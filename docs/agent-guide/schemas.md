@@ -305,6 +305,53 @@ Classification tags attached to any stored item. Four orthogonal facets for pre-
 
 ContentTags are embedded in metadata/properties JSON on documents, entities, traces, and evidence. Use `tag_filters` on `PackBuilder.build()` or `content_tags` key in store `search()` filters.
 
+### Reserved namespaces
+
+Certain keys in `custom` and values in `domain` are reserved — the schema validator rejects them with an instructive error pointing to the correct destination. See [adr-tag-vocabulary-split.md](../design/adr-tag-vocabulary-split.md) for the full decision record and per-namespace definitions.
+
+| Reserved name | Goes in | Answers |
+|---|---|---|
+| `sensitivity` | `DataClassification.sensitivity` | Who may see this content |
+| `regulatory` | `DataClassification.regulatory_tags` | What compliance frameworks govern it |
+| `jurisdiction` | `DataClassification.jurisdiction` | Where it applies / where the viewer must be |
+| `lifecycle` | `Lifecycle.state` | Temporal validity state |
+| `authority` | (derived from graph position) | Canonical vs. community provenance |
+| `retention` | `Policy` with `PolicyType.RETENTION` | How long to keep |
+| `redaction` | `Policy` with `PolicyType.REDACTION` | Field-level masking rules |
+
+Both the bare form (`"sensitivity"`) and the namespaced form (`"sensitivity:pii"`) are rejected. Substring matches (`"sensitivity-aware"`) are allowed — reservation applies to `name` and `name:*` only.
+
+`DataClassification` and `Lifecycle` are defined as first-class schemas but are **not required** in the current phase. Consumers can populate them explicitly; no classifier produces them by default and no policy gate enforces them yet. See [adr-tag-vocabulary-split.md](../design/adr-tag-vocabulary-split.md) for the phased rollout.
+
+---
+
+## DataClassification
+
+Access-policy-relevant classification. Separate from `ContentTags` because sensitivity and regulatory tags gate *access* and *compliance*, not retrieval ranking.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `sensitivity` | `string` | No | `"internal"` | One of `public`, `internal`, `confidential`, `restricted` |
+| `regulatory_tags` | `list[string]` | No | `[]` | Open list: `pii`, `phi`, `pci`, `gdpr`, `hipaa`, `export-controlled`, custom values |
+| `jurisdiction` | `list[string]` | No | `[]` | ISO country/region codes where content applies |
+| `classified_by` | `list[string]` | No | `[]` | Audit trail |
+| `classification_version` | `string` | No | `"1"` | Schema version |
+
+---
+
+## Lifecycle
+
+Temporal validity state of content. Separate from `ContentTags.signal_quality` because quality captures "retrieve at all" while lifecycle captures "is this current / deprecated / superseded".
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `state` | `string` | No | `"current"` | One of `draft`, `current`, `deprecated`, `superseded`, `archived` |
+| `valid_from` | `datetime` or `null` | No | `null` | When content became valid |
+| `valid_until` | `datetime` or `null` | No | `null` | When content expires |
+| `superseded_by` | `string` or `null` | No | `null` | Replacement node/item ID |
+| `deprecation_reason` | `string` or `null` | No | `null` | Free text |
+| `classification_version` | `string` | No | `"1"` | Schema version |
+
 ---
 
 ## EntityAlias
