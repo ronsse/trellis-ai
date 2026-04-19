@@ -754,7 +754,7 @@ class StoreRegistry:
                 masked_key=masked,
                 source="plugin",
             )
-            return embedder_plugin
+            return embedder_plugin  # type: ignore[no-any-return]
         logger.debug("embedder_client_unknown_provider", provider=provider)
         return None
 
