@@ -924,3 +924,92 @@ def check_extractors(
         _print_check_extractors_report(report)
     if report["exit_code"] != 0:
         raise typer.Exit(code=report["exit_code"])
+
+
+@admin_app.command("check-plugins")
+def check_plugins(
+    output_format: str = typer.Option(
+        "text", "--format", help="Output format: text or json"
+    ),
+) -> None:
+    """Report discovered plugins (entry-point extensions) and their status.
+
+    Walks every known entry-point group (``trellis.stores.*``,
+    ``trellis.llm.providers``, ``trellis.extractors``,
+    ``trellis.classifiers``, ``trellis.rerankers``,
+    ``trellis.policies``, ``trellis.search_strategies``,
+    ``trellis.llm.embedders``) and reports each plugin's status:
+
+    * ``LOADED`` — plugin imported cleanly; will be available at
+      runtime.
+    * ``SHADOWED`` — plugin uses the same name as a built-in; the
+      built-in wins unless ``TRELLIS_PLUGIN_OVERRIDE=1`` is set.
+    * ``BLOCKED`` — plugin is declared but the module or class
+      couldn't be imported.  Silent in prod — this is the case the
+      probe most wants to catch.
+
+    Exit codes: ``0`` clean, ``1`` shadowing only, ``2`` any blocked.
+    """
+    from trellis.plugins import collect_plugin_report  # noqa: PLC0415
+
+    report = collect_plugin_report()
+    if output_format == "json":
+        payload = {
+            "loaded": report.loaded_count,
+            "blocked": report.blocked_count,
+            "shadowed": report.shadowed_count,
+            "exit_code": report.exit_code,
+            "groups_checked": report.groups_checked,
+            "plugins": [p.to_dict() for p in report.plugins],
+        }
+        typer.echo(json.dumps(payload, indent=2))
+    else:
+        _print_check_plugins_report(report)
+    if report.exit_code != 0:
+        raise typer.Exit(code=report.exit_code)
+
+
+def _print_check_plugins_report(report: Any) -> None:
+    """Pretty-print a :class:`trellis.plugins.PluginReport`."""
+    summary = Table(title="Trellis Plugins")
+    summary.add_column("Metric", style="cyan")
+    summary.add_column("Count")
+    summary.add_row("Groups checked", str(len(report.groups_checked)))
+    summary.add_row("Loaded", f"[green]{report.loaded_count}[/green]")
+    summary.add_row("Shadowed", f"[yellow]{report.shadowed_count}[/yellow]")
+    summary.add_row("Blocked", f"[red]{report.blocked_count}[/red]")
+    console.print(summary)
+
+    if not report.plugins:
+        console.print(
+            "\n[dim]No plugins discovered.  This is expected for a "
+            "stock install; see docs/design/adr-plugin-contract.md for "
+            "the contract.[/dim]"
+        )
+        return
+
+    table = Table(title="Discovered plugins")
+    table.add_column("Group", style="cyan")
+    table.add_column("Name")
+    table.add_column("Target")
+    table.add_column("Package")
+    table.add_column("Status")
+    table.add_column("Reason")
+    for p in report.plugins:
+        status_color = {
+            "LOADED": "green",
+            "SHADOWED": "yellow",
+            "BLOCKED": "red",
+        }.get(p.status, "white")
+        dist = p.distribution or "-"
+        if p.distribution_version:
+            dist = f"{dist} {p.distribution_version}"
+        table.add_row(
+            p.group,
+            p.name,
+            p.value,
+            dist,
+            f"[{status_color}]{p.status}[/{status_color}]",
+            p.reason or "-",
+        )
+    console.print(table)

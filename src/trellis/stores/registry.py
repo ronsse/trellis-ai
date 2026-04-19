@@ -29,6 +29,11 @@ _UNSET: Any = object()  # sentinel for lazy embedding_fn init
 # malformed, so we treat them as opaque.
 _MIN_SAFE_KEY_LEN = 4
 
+# Cache of merged (built-in + plugin) backend maps.  Populated lazily on
+# first access so that installing a plugin wheel into an already-running
+# process doesn't require a restart.  Keyed by store_type ("trace", ...).
+_MERGED_BACKENDS_CACHE: dict[str, dict[str, tuple[str, str]]] = {}
+
 # Backend name -> (module_path, class_name)
 _BUILTIN_BACKENDS: dict[str, dict[str, tuple[str, str]]] = {
     "trace": {
@@ -57,6 +62,136 @@ _BUILTIN_BACKENDS: dict[str, dict[str, tuple[str, str]]] = {
         "s3": ("trellis.stores.s3.blob", "S3BlobStore"),
     },
 }
+
+
+def _get_merged_backends(store_type: str) -> dict[str, tuple[str, str]]:
+    """Return built-in backends for ``store_type`` merged with plugins.
+
+    Imports :mod:`trellis.plugins` lazily to avoid pulling the
+    plugin loader into the import graph for callers that don't need
+    it (e.g. tests that stub ``_BUILTIN_BACKENDS`` directly).  The
+    merged map is cached per store_type — re-running discovery on
+    every ``_instantiate`` call would be wasteful.
+    """
+    if store_type in _MERGED_BACKENDS_CACHE:
+        return _MERGED_BACKENDS_CACHE[store_type]
+
+    builtins = _BUILTIN_BACKENDS.get(store_type, {})
+    try:
+        from trellis.plugins import GROUP_STORES, merge_with_builtins  # noqa: PLC0415
+    except Exception:
+        logger.debug("plugin_loader_unavailable", store_type=store_type)
+        _MERGED_BACKENDS_CACHE[store_type] = dict(builtins)
+        return _MERGED_BACKENDS_CACHE[store_type]
+
+    merged, _ = merge_with_builtins(
+        f"{GROUP_STORES}.{store_type}",
+        builtins,
+    )
+    _MERGED_BACKENDS_CACHE[store_type] = merged
+    return merged
+
+
+def _reset_backend_cache() -> None:
+    """Test helper — clear the merged-backends cache.
+
+    Exposed for tests that install mock entry points mid-run; real
+    callers rely on first-access caching and don't need to reset.
+    """
+    _MERGED_BACKENDS_CACHE.clear()
+
+
+def _try_llm_provider_plugin(
+    *,
+    provider: str,
+    api_key: str,
+    base_url: str | None,
+    model: str | None,
+) -> Any | None:
+    """Resolve an :class:`LLMClient` from the ``trellis.llm.providers``
+    entry-point group.
+
+    Plugins advertise a factory that accepts the same keyword args
+    the built-in providers do: ``api_key``, ``base_url``,
+    ``default_model``.  Anything else is the plugin's concern.
+
+    Returns ``None`` — never raises — when the plugin is missing,
+    malformed, or can't be instantiated.  The ``build_llm_client``
+    caller logs the unknown-provider path; this helper stays quiet
+    unless something actually went wrong during plugin load.
+    """
+    try:
+        from trellis.plugins import (  # noqa: PLC0415
+            GROUP_LLM_PROVIDERS,
+            discover,
+            load_class,
+        )
+    except Exception:
+        return None
+
+    for spec in discover(GROUP_LLM_PROVIDERS):
+        if spec.name != provider:
+            continue
+        factory = load_class(spec)
+        if factory is None:
+            return None
+        try:
+            return factory(
+                api_key=api_key,
+                base_url=base_url,
+                default_model=model,
+            )
+        except Exception:
+            logger.exception(
+                "llm_provider_plugin_init_failed",
+                provider=provider,
+                plugin=spec.value,
+            )
+            return None
+    return None
+
+
+def _try_llm_embedder_plugin(
+    *,
+    provider: str,
+    api_key: str,
+    base_url: str | None,
+    model: str | None,
+) -> Any | None:
+    """Plugin path for :class:`EmbedderClient`.
+
+    Same contract as :func:`_try_llm_provider_plugin` against the
+    ``trellis.llm.embedders`` group.
+    """
+    try:
+        from trellis.plugins import (  # noqa: PLC0415
+            GROUP_LLM_EMBEDDERS,
+            discover,
+            load_class,
+        )
+    except Exception:
+        return None
+
+    for spec in discover(GROUP_LLM_EMBEDDERS):
+        if spec.name != provider:
+            continue
+        factory = load_class(spec)
+        if factory is None:
+            return None
+        try:
+            return factory(
+                api_key=api_key,
+                base_url=base_url,
+                default_model=model,
+            )
+        except Exception:
+            logger.exception(
+                "llm_embedder_plugin_init_failed",
+                provider=provider,
+                plugin=spec.value,
+            )
+            return None
+    return None
 
 
 def _import_callable(dotted_path: str) -> Callable[[str], list[float]] | None:
@@ -242,7 +377,7 @@ class StoreRegistry:
         """Create a store instance from config."""
         backend, params = self._resolve_backend(store_type)
 
-        registry = _BUILTIN_BACKENDS.get(store_type, {})
+        registry = _get_merged_backends(store_type)
         if backend not in registry:
             msg = f"Unknown backend '{backend}' for store type '{store_type}'"
             raise ValueError(msg)
@@ -511,8 +646,21 @@ class StoreRegistry:
                 return None
 
         else:
-            logger.debug("llm_client_unknown_provider", provider=provider)
-            return None
+            # Unknown built-in — try the plugin path.  Entry points
+            # under ``trellis.llm.providers`` let third-party packages
+            # contribute custom providers (Bedrock, Vertex, vLLM-native,
+            # etc.) without touching core.  See
+            # ``docs/design/adr-plugin-contract.md``.
+            built = _try_llm_provider_plugin(
+                provider=provider,
+                api_key=api_key,
+                base_url=base_url,
+                model=model,
+            )
+            if built is None:
+                logger.debug("llm_client_unknown_provider", provider=provider)
+                return None
+            chosen_model = model  # plugin owns its default
 
         logger.info(
             "llm_client_built",
@@ -591,6 +739,22 @@ class StoreRegistry:
             )
             return embedder
 
+        # Unknown built-in — try plugin path.
+        embedder_plugin = _try_llm_embedder_plugin(
+            provider=provider,
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+        )
+        if embedder_plugin is not None:
+            logger.info(
+                "embedder_client_built",
+                provider=provider,
+                model=model,
+                masked_key=masked,
+                source="plugin",
+            )
+            return embedder_plugin
         logger.debug("embedder_client_unknown_provider", provider=provider)
         return None
 
