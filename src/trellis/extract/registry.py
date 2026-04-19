@@ -10,10 +10,11 @@ packages advertise extractors declaratively for zero-config discovery.
 
 from __future__ import annotations
 
-from importlib.metadata import entry_points
 from typing import TYPE_CHECKING
 
 import structlog
+
+from trellis.plugins import GROUP_EXTRACTORS, discover, load_class
 
 if TYPE_CHECKING:
     from trellis.extract.base import Extractor, ExtractorTier
@@ -77,23 +78,27 @@ class ExtractorRegistry:
         """All registered extractors at the given tier."""
         return [e for e in self._by_name.values() if e.tier == tier]
 
-    def load_entry_points(self, group: str = "trellis.extractors") -> int:
+    def load_entry_points(self, group: str = GROUP_EXTRACTORS) -> int:
         """Load extractors advertised via Python entry points.
 
         Each entry point must resolve to either an :class:`Extractor`
-        instance or a zero-arg callable returning one.  Returns the number
-        of extractors successfully loaded.  Failures are logged but do not
-        raise — a broken third-party package should not take down the
-        registry.
+        instance or a zero-arg callable returning one.  Routes through
+        the central :mod:`trellis.plugins` loader so logging,
+        malformed-value handling, and the
+        ``TRELLIS_PLUGIN_OVERRIDE`` env var behave uniformly across
+        every registry.  Returns the number of extractors
+        successfully loaded.
         """
         loaded = 0
-        for ep in entry_points(group=group):
+        for spec in discover(group):
+            target = load_class(spec)
+            if target is None:
+                continue
             try:
-                obj = ep.load()
-                extractor = obj() if callable(obj) else obj
+                extractor = target() if callable(target) else target
                 self.register(extractor)
             except Exception:
-                logger.exception("extractor_entry_point_load_failed", name=ep.name)
+                logger.exception("extractor_plugin_init_failed", name=spec.name)
                 continue
             else:
                 loaded += 1

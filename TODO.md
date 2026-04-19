@@ -282,25 +282,30 @@ Client-side extractor contract. Unity Catalog, dbt, etc. live in their own packa
 - **Schema registry deferred.** `properties: dict[str, Any]` stays as the escape hatch for domain-specific fields. Revisit once ≥3 client extractor packages exist and the patterns are visible.
 - **No reverse (core → wire) draft translator yet.** Responses don't return draft payloads; if a future `GET /api/v1/extract/batches/{id}` surfaces submitted drafts, add the reverse translator then.
 
-### Step 5 — Entry-points plugin loader (runtime extensions)
+### Step 5 — Entry-points plugin loader (runtime extensions) — DONE (2026-04-18)
 
-Only for things that *must* run in the API process: custom store backends, classifiers, rerankers, policy gates, search strategies.
+Only for things that *must* run in the API process: custom store backends, custom LLM providers/embedders, and (reserved) classifiers, rerankers, policy gates, search strategies.
 
-- [ ] `trellis.plugins.discover(group) -> dict[name, (module, class)]` helper using `importlib.metadata.entry_points`. One function, used by all registries.
-- [ ] Extend [StoreRegistry._BUILTIN_BACKENDS](src/trellis/stores/registry.py) with discovered plugins, merged at init. Plugin shadowing of a built-in logs a warning and built-in wins (override via `TRELLIS_PLUGIN_OVERRIDE=1`).
-- [ ] Mirror pattern in `ExtractorRegistry`, `ClassifierPipeline`, reranker/policy/strategy registries.
-- [ ] Entry-point groups defined and documented:
-    - `trellis.stores.{trace,document,graph,vector,event_log,blob}`
-    - `trellis.extractors`
-    - `trellis.classifiers`
-    - `trellis.rerankers`
-    - `trellis.policies`
-    - `trellis.search_strategies`
-    - `trellis.llm.providers` — `LLMClient` implementations (e.g. `trellis-llm-bedrock`, `trellis-llm-vertex`, `trellis-llm-vllm-native`). Config selects by name: `llm.provider: bedrock`. **Note:** OpenAI-compatible OSS servers (Ollama, vLLM, LiteLLM, LM Studio, TGI) already work today by pointing the built-in `openai` provider at a local `base_url` — no plugin needed. This group is for wire protocols the OpenAI SDK can't speak.
-    - `trellis.llm.embedders` — `EmbedderClient` implementations (same rationale; e.g. `trellis-embed-instructor`, `trellis-embed-cohere`).
-- [ ] `trellis admin check-plugins [--format json]` — lists discovered plugins, status (LOADED / BLOCKED / SHADOWED), reason on failure. Exit codes 0/1/2 matching `check-extractors`.
-- [ ] Plugin authors declare a supported `trellis-abi` version in their package metadata; loader warns on mismatch. (Actual enforcement: defer — use `py.typed` + Protocol contracts as the real guarantee for now.)
-- [ ] ADR: [`docs/design/adr-plugin-contract.md`](docs/design/adr-plugin-contract.md) — covers groups, ABI policy, shadowing rules, deprecation process.
+- [x] **`trellis.plugins` package** — [src/trellis/plugins/](src/trellis/plugins/) with `loader.py` (discovery + merge), `diagnostic.py` (status report), `__init__.py` (public surface). Four public helpers: `discover(group)`, `load_class(spec)`, `merge_with_builtins(group, builtins)`, `collect_plugin_report()`. One implementation, consumed by every registry that wants plugins.
+- [x] **StoreRegistry plugin hook** — `_get_merged_backends()` in [src/trellis/stores/registry.py](src/trellis/stores/registry.py) merges `_BUILTIN_BACKENDS` with `trellis.stores.{type}` entry points on first access. Cached per store_type. Shadowing policy: built-in wins by default; `TRELLIS_PLUGIN_OVERRIDE=1` (accepts `1`/`true`/`yes`/`on`) lets plugins override — explicit, never silent.
+- [x] **LLM provider/embedder hooks** — `_try_llm_provider_plugin` and `_try_llm_embedder_plugin` in `registry.py` route through `trellis.llm.providers` and `trellis.llm.embedders` entry points. Unknown built-in providers fall through to plugin resolution. Plugins use the same factory signature as built-ins (`api_key=, base_url=, default_model=`) so Config parity is maintained.
+- [x] **ExtractorRegistry alignment** — [src/trellis/extract/registry.py](src/trellis/extract/registry.py) `load_entry_points` now routes through the central `discover()` + `load_class()` helpers instead of calling `importlib.metadata.entry_points` directly. Uniform logging and error handling.
+- [x] **Entry-point groups defined + documented:**
+    - `trellis.stores.{trace,document,graph,vector,event_log,blob}` — wired via `StoreRegistry`
+    - `trellis.llm.providers`, `trellis.llm.embedders` — wired via `StoreRegistry.build_llm_client` / `build_embedder_client`
+    - `trellis.extractors` — wired via `ExtractorRegistry`
+    - `trellis.classifiers`, `trellis.rerankers`, `trellis.policies`, `trellis.search_strategies` — **reserved**: discovered by `check-plugins` but not yet consumed by a registry (no `ClassifierRegistry` etc. exists to hook into). Wire them when a real plugin author appears — don't pay the consumer-wiring cost speculatively. Decision captured in the ADR.
+- [x] **`trellis admin check-plugins [--format json]`** — [src/trellis_cli/admin.py](src/trellis_cli/admin.py). Walks every group, imports each advertised class, reports `LOADED` / `SHADOWED` / `BLOCKED` with reasons. Exit codes `0` clean, `1` shadowing only, `2` any blocked — matches the `check-extractors` convention.
+- [x] **ABI policy:** no declared `trellis-abi` version. Protocol/ABC contracts are the ABI, enforced by `py.typed` + plugin CI typechecking. Revisit only if contract drift escapes into production. Decision captured in ADR §"ABI stability".
+- [x] **ADR:** [docs/design/adr-plugin-contract.md](docs/design/adr-plugin-contract.md) — groups table, shadowing policy, override env var, ABI decision, alternatives considered (config-driven dotted paths, Protocol-only) and why they were rejected.
+
+**Tests:** 38 new tests across [tests/unit/plugins/](tests/unit/plugins/) (loader — 21, diagnostic — 7, registry integration — 5) and [tests/unit/cli/test_admin_plugins.py](tests/unit/cli/test_admin_plugins.py) — 5. Full unit suite is 1375 green (1 pre-existing Windows-path failure in `test_scoring.py` is unchanged). Ruff + mypy clean.
+
+**Decisions captured:**
+
+- **Reserved vs. wired groups.** Four groups (`classifiers`, `rerankers`, `policies`, `search_strategies`) are discovered + reported but not consumed. Their consumer registries (`ClassifierPipeline`, PackBuilder reranker param, executor policy gates, PackBuilder strategies) take inline lists today — wiring plugin loading requires changing the consumer APIs. Deferring keeps scope tight; `check-plugins` still surfaces them so operators can experiment.
+- **Cache invalidation.** `_MERGED_BACKENDS_CACHE` is populated on first access and stays warm for the process lifetime. Installing a plugin wheel mid-process doesn't take effect until restart (which is the standard Python plugin model; nothing special needed).
+- **No plugin marketplace.** `pip install trellis-your-thing` is the whole distribution story. No central registry, no review process, no trust rating. Matches how Python plugins work elsewhere.
 
 ### Step 6 — MCP as a separate narrower contract
 
