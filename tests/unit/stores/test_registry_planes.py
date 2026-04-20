@@ -41,6 +41,9 @@ def test_plane_of_covers_all_known_stores() -> None:
         "blob": "knowledge",
         "trace": "operational",
         "event_log": "operational",
+        "outcome": "operational",
+        "parameter": "operational",
+        "tuner_state": "operational",
     }
 
 

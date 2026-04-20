@@ -88,15 +88,22 @@ _BUILTIN_BACKENDS: dict[str, dict[str, dict[str, tuple[str, str]]]] = {
                 "PostgresEventLog",
             ),
         },
-    },
-    "outcome": {
-        "sqlite": ("trellis.stores.sqlite.outcome", "SQLiteOutcomeStore"),
-    },
-    "parameter": {
-        "sqlite": ("trellis.stores.sqlite.parameter", "SQLiteParameterStore"),
-    },
-    "tuner_state": {
-        "sqlite": ("trellis.stores.sqlite.tuner_state", "SQLiteTunerStateStore"),
+        # Feedback-driven parameter-tuning stores (operational plane by
+        # the planes-and-substrates ADR cutoff: "consumed by Trellis to
+        # self-improve").  SQLite-only for now; Postgres implementations
+        # follow when the loop lands in production.
+        "outcome": {
+            "sqlite": ("trellis.stores.sqlite.outcome", "SQLiteOutcomeStore"),
+        },
+        "parameter": {
+            "sqlite": ("trellis.stores.sqlite.parameter", "SQLiteParameterStore"),
+        },
+        "tuner_state": {
+            "sqlite": (
+                "trellis.stores.sqlite.tuner_state",
+                "SQLiteTunerStateStore",
+            ),
+        },
     },
 }
 
@@ -572,6 +579,21 @@ class _OperationalPlane:
     def event_log(self) -> EventLog:
         return self._registry._get("event_log")  # type: ignore[no-any-return]
 
+    @property
+    def outcome_store(self) -> OutcomeStore:
+        """High-volume per-call signal log for feedback-driven parameter tuning."""
+        return self._registry._get("outcome")  # type: ignore[no-any-return]
+
+    @property
+    def parameter_store(self) -> ParameterStore:
+        """Versioned parameter snapshots keyed by learning-axis scope."""
+        return self._registry._get("parameter")  # type: ignore[no-any-return]
+
+    @property
+    def tuner_state_store(self) -> TunerStateStore:
+        """Working state (proposals, cursors) for tuner components."""
+        return self._registry._get("tuner_state")  # type: ignore[no-any-return]
+
 
 class StoreRegistry:
     """Lazily instantiates and caches store backends based on configuration."""
@@ -842,18 +864,6 @@ class StoreRegistry:
     def blob_store(self) -> BlobStore:
         _warn_flat_property("blob_store")
         return self._get("blob")  # type: ignore[no-any-return]
-
-    @property
-    def outcome_store(self) -> OutcomeStore:
-        return self._get("outcome")  # type: ignore[no-any-return]
-
-    @property
-    def parameter_store(self) -> ParameterStore:
-        return self._get("parameter")  # type: ignore[no-any-return]
-
-    @property
-    def tuner_state_store(self) -> TunerStateStore:
-        return self._get("tuner_state")  # type: ignore[no-any-return]
 
     @property
     def embedding_fn(self) -> Callable[[str], list[float]] | None:
