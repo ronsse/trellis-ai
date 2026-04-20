@@ -624,6 +624,29 @@ coexist; the deprecation note ships in a separate commit.
 
 Each is independent and can land in any order once PR 6 ships.
 
+- **SurrealDB substrate — tuner-knob audit** (investigation task, not
+  code). When the Knowledge-Plane graph+vector substrate lands on
+  SurrealDB (or whichever candidate succeeds Kuzu per the
+  planes-and-substrates ADR amendment), audit which tuner knobs
+  become redundant vs. which new substrate-exposed knobs want to be
+  surfaced through `ParameterRegistry`. Specifically map:
+  - Fusion layer — does the substrate's native hybrid query make
+    `RRFReranker(k=...)` redundant? If yes, default-off RRF and
+    expose substrate weights instead.
+  - Per-strategy top-k — currently `limit_per_strategy=20` on
+    `PackBuilder.build(...)`; with a unified substrate this becomes
+    `top_n_vector` / `top_n_ft` on one query.
+  - Distance metric (`cosine` / `euclidean` / `manhattan`), HNSW
+    `ef` — expose as `ParameterSet` values under
+    `component_id="retrieve.strategies.<SubstrateHybrid>"`.
+  - Unchanged layers (expected): recency decay, importance /
+    domain / curated / description boosts, MMR diversity, session
+    dedup, budget enforcement, effectiveness / advisory thresholds,
+    learning promote / noise thresholds, all of PR 6's RuleTuner
+    surface.
+  Deliverable: a short design note listing the knob-by-knob impact
+  so the substrate swap and the tuner integration don't collide.
+
 - **Discovery endpoint** (`POST /api/v1/discover` + matching MCP
   tool) — keyword-only fast path that surfaces curated entities,
   domains, and graph anchor points without LLM cost. Use case: the
