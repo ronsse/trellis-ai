@@ -123,11 +123,12 @@ class AsyncTrellisClient:
         *,
         json: Any = None,
         params: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
     ) -> httpx.Response:
         await self._ensure_handshake()
         async with self._semaphore:
             resp = await self._http.request(
-                method, path, json=json, params=params
+                method, path, json=json, params=params, headers=headers
             )
         raise_for_status(resp, request_path=path)
         return resp
@@ -364,7 +365,6 @@ class AsyncTrellisClient:
         See the sync docstring for semantics of ``idempotency_key`` +
         ``requested_by``.
         """
-        await self._ensure_handshake()
         body = DraftSubmissionRequest(
             batch=batch,
             strategy=strategy,
@@ -374,13 +374,12 @@ class AsyncTrellisClient:
         effective_key = idempotency_key or batch.idempotency_key
         if effective_key:
             headers["Idempotency-Key"] = effective_key
-        async with self._semaphore:
-            resp = await self._http.post(
-                "/api/v1/extract/drafts",
-                json=body.model_dump(mode="json"),
-                headers=headers,
-            )
-        raise_for_status(resp, request_path="/api/v1/extract/drafts")
+        resp = await self._request(
+            "POST",
+            "/api/v1/extract/drafts",
+            json=body.model_dump(mode="json"),
+            headers=headers or None,
+        )
         return DraftSubmissionResult.model_validate(resp.json())
 
     # -- Lifecycle --

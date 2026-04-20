@@ -108,9 +108,12 @@ class TrellisClient:
         *,
         json: Any = None,
         params: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
     ) -> httpx.Response:
         self._ensure_handshake()
-        resp = self._http.request(method, path, json=json, params=params)
+        resp = self._http.request(
+            method, path, json=json, params=params, headers=headers
+        )
         raise_for_status(resp, request_path=path)
         return resp
 
@@ -365,7 +368,6 @@ class TrellisClient:
         for attribution; pass a custom value (e.g. a CI run ID) to
         override.
         """
-        self._ensure_handshake()
         body = DraftSubmissionRequest(
             batch=batch,
             strategy=strategy,
@@ -375,12 +377,12 @@ class TrellisClient:
         effective_key = idempotency_key or batch.idempotency_key
         if effective_key:
             headers["Idempotency-Key"] = effective_key
-        resp = self._http.post(
+        resp = self._request(
+            "POST",
             "/api/v1/extract/drafts",
             json=body.model_dump(mode="json"),
-            headers=headers,
+            headers=headers or None,
         )
-        raise_for_status(resp, request_path="/api/v1/extract/drafts")
         return DraftSubmissionResult.model_validate(resp.json())
 
     # -- Lifecycle --
