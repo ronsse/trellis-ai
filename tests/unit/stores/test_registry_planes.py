@@ -74,6 +74,7 @@ def test_operational_namespace_has_expected_properties(tmp_path: Path) -> None:
 
 
 def test_knowledge_namespace_has_expected_properties(tmp_path: Path) -> None:
+    pytest.importorskip("numpy")  # SQLiteVectorStore requires [vectors]
     registry = StoreRegistry(stores_dir=tmp_path / "stores")
     plane = registry.knowledge
     from trellis.stores.base import (
@@ -130,6 +131,7 @@ def test_event_log_flat_property_names_its_plane(tmp_path: Path) -> None:
 
 def test_all_six_flat_properties_have_deprecation(tmp_path: Path) -> None:
     """Every legacy flat property must emit exactly one DeprecationWarning."""
+    pytest.importorskip("numpy")  # iterating all six hits SQLiteVectorStore
     registry = StoreRegistry(stores_dir=tmp_path / "stores")
     names = [
         "graph_store",
@@ -144,14 +146,12 @@ def test_all_six_flat_properties_have_deprecation(tmp_path: Path) -> None:
         for name in names:
             getattr(registry, name)
     dep_messages = [
-        str(w.message)
-        for w in caught
-        if issubclass(w.category, DeprecationWarning)
+        str(w.message) for w in caught if issubclass(w.category, DeprecationWarning)
     ]
     for name in names:
-        assert any(
-            f"StoreRegistry.{name}" in m for m in dep_messages
-        ), f"missing warning for {name}"
+        assert any(f"StoreRegistry.{name}" in m for m in dep_messages), (
+            f"missing warning for {name}"
+        )
 
 
 # -- Config extraction: plane-split -------------------------------------

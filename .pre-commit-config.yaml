@@ -1,7 +1,7 @@
 # Pre-commit hooks — run on every `git commit`.
 #
 # First-time setup (after cloning the repo):
-#     make install-dev        # installs [dev] deps AND registers the hook
+#     make setup              # installs [dev,vectors] deps AND registers the hook
 # Or manually:
 #     pip install pre-commit
 #     pre-commit install

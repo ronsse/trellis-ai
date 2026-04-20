@@ -14,13 +14,13 @@ make setup
 trellis admin init
 ```
 
-`make setup` does two things: installs `[dev]` extras and registers the pre-commit git hook. After that, every `git commit` runs ruff format, ruff lint, mypy, and a handful of safety checks locally — catching anything CI would flag before the push round-trip. See [`.pre-commit-config.yaml`](.pre-commit-config.yaml) for the full list.
+`make setup` does two things: installs `[dev,vectors]` extras (mirrors CI, so the default SQLiteVectorStore tests run locally) and registers the pre-commit git hook. After that, every `git commit` runs ruff format, ruff lint, mypy, and a handful of safety checks locally — catching anything CI would flag before the push round-trip. See [`.pre-commit-config.yaml`](.pre-commit-config.yaml) for the full list.
 
 ### Hooks reference
 
 | `make` target | What it does |
 |---|---|
-| `make setup` | First-time: install `[dev]` + register hooks. Idempotent. |
+| `make setup` | First-time: install `[dev,vectors]` + register hooks. Idempotent. |
 | `make hooks` | Register (or re-register) the pre-commit git hook. |
 | `make hooks-run` | Run every hook across the whole repo (not just staged files). |
 | `make fix` | Auto-fix what ruff can, surface what it can't. |
