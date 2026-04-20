@@ -16,6 +16,7 @@ from trellis.core.ids import generate_ulid
 from trellis.stores.base.graph import (
     GraphStore,
     check_node_role_immutable,
+    validate_document_ids,
     validate_node_role_args,
 )
 from trellis.stores.sqlite.base import SQLiteStoreBase
@@ -62,6 +63,12 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
         # may have been a no-op against a v2 database that predates v3.
         self._migrate_add_node_role()
 
+        # v3 → v4 additive migration: document_ids_json (Phase 4 of
+        # ADR planes-and-substrates). Same idempotent pattern —
+        # pre-existing rows leave the column NULL which reads back as
+        # an empty list.
+        self._migrate_add_document_ids()
+
     def _create_v2_schema(self) -> None:
         """Create temporal (v2/v3) schema from scratch."""
         self._conn.executescript("""
@@ -71,6 +78,7 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
                 node_type TEXT NOT NULL,
                 node_role TEXT NOT NULL DEFAULT 'semantic',
                 generation_spec_json TEXT DEFAULT NULL,
+                document_ids_json TEXT DEFAULT NULL,
                 properties_json TEXT NOT NULL DEFAULT '{}',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
@@ -123,6 +131,7 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
                 node_type TEXT NOT NULL,
                 node_role TEXT NOT NULL DEFAULT 'semantic',
                 generation_spec_json TEXT DEFAULT NULL,
+                document_ids_json TEXT DEFAULT NULL,
                 properties_json TEXT NOT NULL DEFAULT '{}',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
@@ -216,6 +225,24 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
             )
             self._conn.commit()
 
+    def _migrate_add_document_ids(self) -> None:
+        """Additive migration: ensure nodes table has document_ids_json.
+
+        Introduced in v4 for ADR planes-and-substrates §2.4 (first-class
+        graph↔document link). Idempotent — skips if the column already
+        exists. Pre-existing rows keep the column NULL which the read
+        path surfaces as an empty ``list[str]``.
+        """
+        col_cursor = self._conn.execute("PRAGMA table_info(nodes)")
+        col_names = {row["name"] for row in col_cursor.fetchall()}
+        if "document_ids_json" in col_names:
+            return
+        logger.info("migrating_graph_schema_add_document_ids_json")
+        self._conn.execute(
+            "ALTER TABLE nodes ADD COLUMN document_ids_json TEXT DEFAULT NULL"
+        )
+        self._conn.commit()
+
     def _create_alias_schema(self) -> None:
         self._conn.executescript("""
             CREATE TABLE IF NOT EXISTS entity_aliases (
@@ -298,9 +325,11 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
         *,
         node_role: str = "semantic",
         generation_spec: dict[str, Any] | None = None,
+        document_ids: list[str] | None = None,
         commit: bool = True,
     ) -> str:
         validate_node_role_args(node_role, generation_spec)
+        validate_document_ids(document_ids)
 
         if node_id is None:
             node_id = generate_ulid()
@@ -310,6 +339,9 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
         properties_json = json.dumps(properties)
         generation_spec_json = (
             json.dumps(generation_spec) if generation_spec is not None else None
+        )
+        document_ids_json = (
+            json.dumps(document_ids) if document_ids is not None else None
         )
 
         existing = self.get_node(node_id)
@@ -329,9 +361,10 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
                 """
                 INSERT INTO nodes
                     (version_id, node_id, node_type, node_role,
-                     generation_spec_json, properties_json,
-                     created_at, updated_at, valid_from, valid_to)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                     generation_spec_json, document_ids_json,
+                     properties_json, created_at, updated_at,
+                     valid_from, valid_to)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
                 """,
                 (
                     version_id,
@@ -339,6 +372,7 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
                     node_type,
                     node_role,
                     generation_spec_json,
+                    document_ids_json,
                     properties_json,
                     existing["created_at"],
                     now_iso,
@@ -351,9 +385,10 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
                 """
                 INSERT INTO nodes
                     (version_id, node_id, node_type, node_role,
-                     generation_spec_json, properties_json,
-                     created_at, updated_at, valid_from, valid_to)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                     generation_spec_json, document_ids_json,
+                     properties_json, created_at, updated_at,
+                     valid_from, valid_to)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
                 """,
                 (
                     version_id,
@@ -361,6 +396,7 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
                     node_type,
                     node_role,
                     generation_spec_json,
+                    document_ids_json,
                     properties_json,
                     now_iso,
                     now_iso,
@@ -714,6 +750,7 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
             n.node_type,
             n.node_role,
             n.generation_spec_json,
+            n.document_ids_json,
             n.properties_json,
             n.created_at,
             n.updated_at,
@@ -892,20 +929,27 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
 
     @staticmethod
     def _node_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
-        # node_role / generation_spec_json are v3 additive columns; older
-        # in-memory row objects (from tests constructing rows manually)
-        # may not carry them, so tolerate their absence.
+        # node_role / generation_spec_json are v3 additive columns;
+        # document_ids_json is a v4 additive column (Phase 4 of ADR
+        # planes-and-substrates). Older in-memory row objects (from
+        # tests constructing rows manually) may not carry them, so
+        # tolerate their absence.
         row_keys = set(row.keys())
         node_role = row["node_role"] if "node_role" in row_keys else "semantic"
         gen_spec_raw = (
             row["generation_spec_json"] if "generation_spec_json" in row_keys else None
         )
         generation_spec = json.loads(gen_spec_raw) if gen_spec_raw else None
+        doc_ids_raw = (
+            row["document_ids_json"] if "document_ids_json" in row_keys else None
+        )
+        document_ids = json.loads(doc_ids_raw) if doc_ids_raw else []
         return {
             "node_id": row["node_id"],
             "node_type": row["node_type"],
             "node_role": node_role,
             "generation_spec": generation_spec,
+            "document_ids": document_ids,
             "properties": json.loads(row["properties_json"]),
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],

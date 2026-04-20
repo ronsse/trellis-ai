@@ -40,6 +40,48 @@ def validate_node_role_args(
         raise ValueError(msg)
 
 
+def validate_document_ids(document_ids: list[str] | None) -> None:
+    """Enforce ``document_ids`` invariants at the store boundary.
+
+    ``document_ids`` is the Phase-4 cross-plane link introduced by
+    ADR planes-and-substrates: an entity node may reference the
+    ``DocumentStore`` rows that sourced it, so graph traversal can
+    materialize original content without a separate FTS hop. See
+    ``docs/design/adr-planes-and-substrates.md`` §2.4.
+
+    Rules:
+
+    * ``None`` is valid and means "no link" — equivalent to an
+      empty list on the read side.
+    * Each element must be a non-empty string.
+    * No duplicate entries — reject rather than silently dedup so
+      callers notice the mistake.
+
+    Raises:
+        ValueError: on any rule violation.
+    """
+    if document_ids is None:
+        return
+    if not isinstance(document_ids, list):
+        msg = (
+            f"document_ids must be a list of strings or None, "
+            f"got {type(document_ids).__name__}"
+        )
+        raise TypeError(msg)
+    seen: set[str] = set()
+    for i, doc_id in enumerate(document_ids):
+        if not isinstance(doc_id, str) or not doc_id:
+            msg = (
+                f"document_ids[{i}] must be a non-empty string, "
+                f"got {doc_id!r}"
+            )
+            raise ValueError(msg)
+        if doc_id in seen:
+            msg = f"document_ids contains duplicate entry {doc_id!r}"
+            raise ValueError(msg)
+        seen.add(doc_id)
+
+
 def check_node_role_immutable(
     node_id: str,
     existing: dict[str, Any],
@@ -80,6 +122,7 @@ class GraphStore(ABC):
         *,
         node_role: str = "semantic",
         generation_spec: dict[str, Any] | None = None,
+        document_ids: list[str] | None = None,
         commit: bool = True,
     ) -> str:
         """Insert or update a node.
@@ -101,14 +144,22 @@ class GraphStore(ABC):
                 structural/semantic nodes. Captures the generator name,
                 version, inputs, and parameters so the node can be
                 regenerated or audited.
+            document_ids: Optional list of ``DocumentStore`` IDs that
+                sourced this entity. Introduced by Phase 4 of ADR
+                planes-and-substrates as the first-class graph↔document
+                link. ``None`` means "no link" and is equivalent to an
+                empty list on the read side. When set, each element must
+                be a non-empty string with no duplicates.
             commit: When ``False`` the caller is responsible for committing
                 the surrounding transaction.
 
         Raises:
             ValueError: If ``node_role`` is invalid, if a curated node is
                 missing ``generation_spec``, if ``generation_spec`` is set
-                on a non-curated node, or if ``node_role`` would change
-                between versions of an existing node.
+                on a non-curated node, if ``node_role`` would change
+                between versions of an existing node, or if
+                ``document_ids`` contains duplicates or non-string entries.
+            TypeError: If ``document_ids`` is provided but not a list.
 
         Returns:
             The node ID.
@@ -129,8 +180,11 @@ class GraphStore(ABC):
                    version.
 
         Returns:
-            Node dict ``{node_id, node_type, properties, created_at,
-            updated_at, valid_from, valid_to}`` or ``None``.
+            Node dict ``{node_id, node_type, node_role, generation_spec,
+            document_ids, properties, created_at, updated_at,
+            valid_from, valid_to}`` or ``None``. ``document_ids`` is
+            always a ``list[str]`` (possibly empty) so consumers can
+            iterate unconditionally.
         """
 
     @abstractmethod
