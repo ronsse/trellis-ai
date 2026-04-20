@@ -12,6 +12,7 @@ from trellis_cli.ingest import ingest_app
 from trellis_cli.metrics import metrics_app
 from trellis_cli.policy import policy_app
 from trellis_cli.retrieve import retrieve_app
+from trellis_cli.serve import serve_app
 
 app = typer.Typer(
     name="trellis",
@@ -36,6 +37,7 @@ app.add_typer(
 app.add_typer(policy_app, name="policy", help="Manage governance policies")
 app.add_typer(demo_app, name="demo", help="Demo data and exploration")
 app.add_typer(worker_app, name="worker")
+app.add_typer(serve_app, name="serve", help="Run the Trellis REST API + UI")
 
 
 if __name__ == "__main__":

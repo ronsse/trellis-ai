@@ -47,6 +47,7 @@ def create_app() -> FastAPI:
         admin,
         curate,
         extract,
+        health,
         ingest,
         mutations,
         policies,
@@ -69,6 +70,9 @@ def create_app() -> FastAPI:
     # Deliberately outside /api/v1 because it describes which major is running.
     app.include_router(version.router, tags=["version"])
 
+    # Liveness/readiness probes — unversioned, deployment plumbing.
+    app.include_router(health.router, tags=["health"])
+
     app.include_router(admin.router, prefix="/api/v1", tags=["admin"])
     app.include_router(ingest.router, prefix="/api/v1", tags=["ingest"])
     app.include_router(retrieve.router, prefix="/api/v1", tags=["retrieve"])
@@ -84,12 +88,25 @@ def create_app() -> FastAPI:
     return app
 
 
-def main() -> None:
-    """Run the API server."""
+DEFAULT_HOST = "0.0.0.0"  # noqa: S104 — bind-all is correct for containers
+DEFAULT_PORT = 8420
+
+
+def main(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> None:
+    """Run the API server.
+
+    Host/port default to a container-friendly bind. The ``trellis serve``
+    CLI subcommand is the preferred entrypoint — it exposes
+    ``--host``/``--port``/``--config-dir`` flags and configures structured
+    logging before the server starts.
+    """
     import uvicorn  # noqa: PLC0415
 
+    from trellis_api.logging import configure_logging  # noqa: PLC0415
+
+    configure_logging()
     app = create_app()
-    uvicorn.run(app, host="0.0.0.0", port=8420)  # noqa: S104
+    uvicorn.run(app, host=host, port=port)
 
 
 if __name__ == "__main__":
