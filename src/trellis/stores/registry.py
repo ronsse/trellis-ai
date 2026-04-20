@@ -101,35 +101,33 @@ def _reset_backend_cache() -> None:
     _MERGED_BACKENDS_CACHE.clear()
 
 
-def _try_llm_provider_plugin(
+def _try_llm_plugin(
     *,
+    group: str,
     provider: str,
     api_key: str,
     base_url: str | None,
     model: str | None,
+    failure_event: str,
 ) -> Any | None:
-    """Resolve an :class:`LLMClient` from the ``trellis.llm.providers``
-    entry-point group.
+    """Resolve an LLM client / embedder from a plugin entry-point group.
 
     Plugins advertise a factory that accepts the same keyword args
     the built-in providers do: ``api_key``, ``base_url``,
-    ``default_model``.  Anything else is the plugin's concern.
+    ``default_model``. Anything else is the plugin's concern.
 
     Returns ``None`` — never raises — when the plugin is missing,
-    malformed, or can't be instantiated.  The ``build_llm_client``
-    caller logs the unknown-provider path; this helper stays quiet
-    unless something actually went wrong during plugin load.
+    malformed, or can't be instantiated. The caller is responsible
+    for logging the unknown-provider path; this helper only logs
+    when a plugin *was* found but failed to instantiate
+    (``failure_event``).
     """
     try:
-        from trellis.plugins import (  # noqa: PLC0415
-            GROUP_LLM_PROVIDERS,
-            discover,
-            load_class,
-        )
+        from trellis.plugins import discover, load_class  # noqa: PLC0415
     except Exception:
         return None
 
-    for spec in discover(GROUP_LLM_PROVIDERS):
+    for spec in discover(group):
         if spec.name != provider:
             continue
         factory = load_class(spec)
@@ -143,12 +141,32 @@ def _try_llm_provider_plugin(
             )
         except Exception:
             logger.exception(
-                "llm_provider_plugin_init_failed",
+                failure_event,
                 provider=provider,
                 plugin=spec.value,
             )
             return None
     return None
+
+
+def _try_llm_provider_plugin(
+    *,
+    provider: str,
+    api_key: str,
+    base_url: str | None,
+    model: str | None,
+) -> Any | None:
+    """Plugin path for :class:`LLMClient` via the ``trellis.llm.providers`` group."""
+    from trellis.plugins import GROUP_LLM_PROVIDERS  # noqa: PLC0415
+
+    return _try_llm_plugin(
+        group=GROUP_LLM_PROVIDERS,
+        provider=provider,
+        api_key=api_key,
+        base_url=base_url,
+        model=model,
+        failure_event="llm_provider_plugin_init_failed",
+    )
 
 
 def _try_llm_embedder_plugin(
@@ -158,40 +176,17 @@ def _try_llm_embedder_plugin(
     base_url: str | None,
     model: str | None,
 ) -> Any | None:
-    """Plugin path for :class:`EmbedderClient`.
+    """Plugin path for :class:`EmbedderClient` via ``trellis.llm.embedders``."""
+    from trellis.plugins import GROUP_LLM_EMBEDDERS  # noqa: PLC0415
 
-    Same contract as :func:`_try_llm_provider_plugin` against the
-    ``trellis.llm.embedders`` group.
-    """
-    try:
-        from trellis.plugins import (  # noqa: PLC0415
-            GROUP_LLM_EMBEDDERS,
-            discover,
-            load_class,
-        )
-    except Exception:
-        return None
-
-    for spec in discover(GROUP_LLM_EMBEDDERS):
-        if spec.name != provider:
-            continue
-        factory = load_class(spec)
-        if factory is None:
-            return None
-        try:
-            return factory(
-                api_key=api_key,
-                base_url=base_url,
-                default_model=model,
-            )
-        except Exception:
-            logger.exception(
-                "llm_embedder_plugin_init_failed",
-                provider=provider,
-                plugin=spec.value,
-            )
-            return None
-    return None
+    return _try_llm_plugin(
+        group=GROUP_LLM_EMBEDDERS,
+        provider=provider,
+        api_key=api_key,
+        base_url=base_url,
+        model=model,
+        failure_event="llm_embedder_plugin_init_failed",
+    )
 
 
 def _import_callable(dotted_path: str) -> Callable[[str], list[float]] | None:
