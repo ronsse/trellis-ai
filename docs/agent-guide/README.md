@@ -12,7 +12,7 @@ Operational reference for AI agents interacting with the Trellis. These document
 | [operations.md](operations.md) | Full CLI, REST API, MCP, SDK, and Python mutation API reference |
 | [playbooks.md](playbooks.md) | Step-by-step operational procedures for common agent tasks |
 | [tiered-context-retrieval.md](tiered-context-retrieval.md) | Sectioned pack assembly for multi-agent workflows |
-| [enriching-for-retrieval.md](enriching-for-retrieval.md) | How to write knowledge base content that classifies well |
+| [tagging-for-retrieval.md](tagging-for-retrieval.md) | How to write knowledge base content so the tagging pipeline lands it in the right retrieval tier |
 
 ## Integration Layers
 

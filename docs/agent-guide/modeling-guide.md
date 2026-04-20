@@ -545,7 +545,7 @@ See the `trellis curate` CLI namespace in [operations.md](operations.md) (when i
 - [schemas.md](schemas.md) — field-by-field reference for `Node`, `Edge`, `NodeRole`, `GenerationSpec`
 - [operations.md](operations.md) — CLI commands including `trellis admin graph-health` and `trellis curate`
 - [playbooks.md](playbooks.md) — step-by-step procedures for common ingestion patterns
-- [enriching-for-retrieval.md](enriching-for-retrieval.md) — how `ContentTags` and `retrieval_affinity` interact with `node_role`
+- [tagging-for-retrieval.md](tagging-for-retrieval.md) — how `ContentTags` and `retrieval_affinity` interact with `node_role`
 - [tiered-context-retrieval.md](tiered-context-retrieval.md) — how sectioned pack assembly uses `node_role` to filter and boost content
 
 ---
