@@ -233,6 +233,23 @@ Prerequisite for clean Step 3/4. Translation layer at the API edge, not in every
 
 **Verification:** 17 new wire parity tests pass; full `tests/unit/api/ + tests/unit/sdk/ + tests/unit/wire/` suites (83 tests) green; ruff + mypy clean on all new scope; OpenAPI spec regenerates identically (the one `test_delete_policy` flake and 5 Windows-path integration failures all confirmed pre-existing on `main`).
 
+### Planes Phase 4 — Graph ↔ document link — SCHEMA DONE (2026-04-18; Kuzu parts deferred 2026-04-19)
+
+Schema + contract change shipped on SQLite and Postgres:
+
+- New `document_ids: list[str] | None = None` parameter on `GraphStore.upsert_node()`.
+- `validate_document_ids()` helper in `src/trellis/stores/base/graph.py` (non-empty strings, no duplicates, `None`/empty-list both valid, each element checked).
+- Two backends carry the column: SQLite (`document_ids_json TEXT` with idempotent `_migrate_add_document_ids` ALTER TABLE), Postgres (`document_ids JSONB` via `CREATE TABLE IF NOT EXISTS` + `ALTER TABLE ADD COLUMN IF NOT EXISTS`). Kuzu parts from the original Phase 4 commit (`1c656fb`) were dropped when the Kuzu substrate pick was deferred — the successor substrate will pick up the `document_ids_json` column as part of its initial schema.
+- Read path returns `document_ids: list[str]` on every `get_node` / `get_nodes_bulk` / `query` / `get_node_history` / `get_subgraph` result — always a list, empty when absent, so consumers can iterate unconditionally.
+- Graceful degrade for pre-migration rows: NULL column reads as `[]`.
+- `tests/unit/stores/test_document_ids.py` exercises the validator, roundtrip, SCD preservation, bulk read, query projection, validation at the backend boundary, and backfill degrade. Kuzu-parametrized cases will land with the successor substrate.
+
+**Follow-up PRs** (separated to keep this diff surgical and avoid touching agent-facing code while other sessions are active):
+
+- [ ] **Populate `document_ids` on ingestion.** When `/api/v1/evidence` or a worker extractor derives a graph entity from a `DocumentStore` row, call `upsert_node(..., document_ids=[evidence.doc_id])`. Sites: `src/trellis_api/routes/ingest.py`, `src/trellis/mutate/handlers.py`, relevant extractors in `trellis_workers`.
+- [ ] **Consume `document_ids` in retrieval.** `PackBuilder` gains a "materialize documents from graph nodes" step — after graph traversal, bulk-fetch the referenced docs from `DocumentStore` and merge into the pack. Avoids the parallel-paths gap (vector → entity, FTS → document, graph → entity) documented in the ADR §1. Site: `src/trellis/retrieve/`.
+- [ ] **Integration test**: evidence ingested → entity extracted → graph node has `document_ids` → pack materializes source content via graph traversal alone.
+
 ### Step 3 — HTTP-only SDK + `trellis.testing` in-memory shim — DONE (2026-04-18)
 
 Drop dual-mode. Single code path for all clients.
