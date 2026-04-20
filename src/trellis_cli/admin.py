@@ -70,7 +70,10 @@ def init(
 
     if config_path.exists() and not force:
         if output_format == "json":
-            console.print(
+            # Plain ``print`` (not ``console.print``) so Rich's terminal-
+            # width soft-wrap never splits the JSON across lines — long
+            # config paths can push the payload past 80 chars.
+            print(
                 json.dumps({"status": "exists", "config_dir": str(config_dir)})
             )
         else:
@@ -354,7 +357,11 @@ def health(
         checks[sf] = (stores_dir / sf).exists()
 
     if output_format == "json":
-        console.print(json.dumps(checks))
+        # Plain ``print`` (not ``console.print``) so Rich's terminal-
+        # width soft-wrap never splits the JSON across lines. Machine
+        # consumers expect single-line JSON per the project rule in
+        # CLAUDE.md (`parse JSON output, not human-readable text`).
+        print(json.dumps(checks))
     else:
         table = Table(title="Trellis Health")
         table.add_column("Component", style="cyan")
@@ -476,7 +483,11 @@ def stats(
     counts["events"] = get_event_log().count()
 
     if output_format == "json":
-        console.print(json.dumps({"status": "ok", **counts}))
+        # Plain ``print`` (not ``console.print``) so Rich's terminal-
+        # width soft-wrap never splits the JSON across lines. Machine
+        # consumers expect single-line JSON per the project rule in
+        # CLAUDE.md (`parse JSON output, not human-readable text`).
+        print(json.dumps({"status": "ok", **counts}))
     else:
         table = Table(title="Store Statistics")
         table.add_column("Store", style="cyan")
