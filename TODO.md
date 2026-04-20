@@ -1634,3 +1634,41 @@ The suggested execution order for this section, front-loaded by ROI:
 - [ ] CrewAI integration (`integrations/crewai/`)
 - [ ] AutoGen integration (`integrations/autogen/`)
 - [ ] Contribute integration PRs upstream to each framework's repo
+
+## Branch Convergence Follow-ups (2026-04-19)
+
+Captured during the pre-merge simplify + review pass on the 6-PR branch convergence batch (chore/ruff-up038, client-boundary-step4, terminology-adr, tag-vocabulary-split-phase-0, planes-phase-a-adr, planes-phase-c-doclink). **None are merge blockers** — fix-now items landed with their source PRs; items below were labeled "follow-up" or "no action now" by the reviewers. Grouped by source PR so they can be picked up individually.
+
+### From PR 1 — Client Boundary Phase 1
+- [ ] **Collapse 6× `# type: ignore[no-any-return]` on `StoreRegistry` store-type property accessors** (`src/trellis/stores/registry.py:477,481,485,489,493,497`) with a typed generic overload on `_get`. Would also let us drop the similar ignore at the embedder-plugin return path.
+- [ ] **Add `Depends(get_executor)` helper in `src/trellis_api/deps.py`** so `src/trellis_api/routes/extract.py:71-73` (and `curate.py:28-29`, `mutations.py:37-38`, `ingest.py:189-190`) stop rebuilding `create_curate_handlers(registry)` + `MutationExecutor(...)` per request. Pre-existing pattern; extract.py joins it.
+- [ ] **Expose a read-only `StoreRegistry.builtin_backend_names()` view** so `src/trellis/plugins/diagnostic.py:40-50` doesn't hand-copy `_BUILTIN_STORE_NAMES` / `_BUILTIN_LLM_PROVIDER_NAMES` / `_BUILTIN_LLM_EMBEDDER_NAMES`. Prevents silent drift. The comment at `diagnostic.py:37-39` currently justifies the duplication as a layering trade-off — acceptable but fixable.
+- [ ] **Cache `discover()` results in the LLM plugin path** (`src/trellis/stores/registry.py:_try_llm_plugin`) for consistency with `_get_merged_backends`. Low-impact since `build_llm_client` is typically called once at config time.
+
+### From PR 3 — Tag-Vocabulary Phase 0
+- [ ] **Trim `_format_reservation_error` + `_NAMESPACE_GUIDANCE` dict** in `src/trellis/schemas/classification.py:54-88` to a single f-string with inline dict lookup (~35 lines → ~10). Also drop the `_ReservedField = Literal["custom key", "domain value"]` alias — it's over-engineered for two call sites with verbatim strings.
+- [ ] **Drop TOCTOU `path.exists()` pre-check** in `scripts/claude_postedit_lint.py:40`. Operate directly; `ruff` gives a clear error when the file is missing.
+
+### From PR 4 — Planes-Phase-A
+- [ ] **`Literal["knowledge", "operational"]` (or `StrEnum`) for plane names.** Currently raw strings flow through `_PLANE_OF`, `_PLANE_PG_DSN_ENV`, `_extract_store_config`, and the `migrate-config` CLI. A typed alias would give mypy teeth on `_PLANE_OF.get(...)` callers. Also lets us delete the `"<unknown>"` sentinel branches that still appear in a few error messages.
+- [ ] **Share a common base between `_KnowledgePlane` / `_OperationalPlane`** (`src/trellis/stores/registry.py:512-561`). The two classes are copy-paste forwarders to `self._registry._get(...)`. Trade-off: a dynamic `_PlaneAccessor` using `__getattr__` saves ~40 lines but loses static `.graph_store` autocomplete. Minimum fix: share a tiny `_PlaneBase` with the constructor + private `_registry` attribute.
+- [ ] **Collapse flat-property deprecation into a descriptor or decorator** (`src/trellis/stores/registry.py:802-830`). Six near-identical properties all call `_warn_flat_property("X"); return self._get("x")`; a single `_DeprecatedFlatProperty(store_type)` descriptor would replace them and eliminate the `removesuffix("_store")` ceremony in `_warn_flat_property`.
+- [ ] **Normalize `_FLAT_CONFIG_WARNED` to match the other one-shot guards** (`src/trellis/stores/registry.py:115, 174, 229-230`). It uses a module-level `bool` with `global` statements, while `_LEGACY_PG_DSN_WARNED` and `_FLAT_PROPERTY_WARNED` are `set`s (no `global` needed). Change it to a single-element set or a list for consistency.
+- [ ] **Parametrize migrate-config tests** (`tests/unit/cli/test_admin_migrate_config.py:69-99`). `creates_backup_by_default`, `force_skips_backup`, `dry_run_does_not_write` share identical setup and differ only in flags. `@pytest.mark.parametrize` with `(flags, expect_backup, expect_write)` saves ~45 lines.
+- [ ] **Consolidate registry plane tests** (`tests/unit/stores/test_registry_planes.py:95-154`). `test_flat_property_emits_deprecation_warning`, `test_flat_property_warning_is_one_shot`, and `test_event_log_flat_property_names_its_plane` are all covered by `test_all_six_flat_properties_have_deprecation` once extended with one-shot and plane-name assertions.
+
+### From PR 6 — Planes-Phase-C (document_ids)
+- [ ] **Reject whitespace-only strings in `validate_document_ids`** (`src/trellis/stores/base/graph.py:76`). Currently `bool("   ")` is `True`, so `"   "` passes; add `.strip()` check to match the spirit of "non-empty".
+- [ ] **Defend SQLite read-path against a stored `"null"` string** (`src/trellis/stores/sqlite/graph.py:944`). `json.loads(raw) if raw else []` treats `"null"` as truthy, then `json.loads("null")` returns `None` and leaks upward. Use `json.loads(raw) or []`.
+- [ ] **Add a `get_node_history()` test for pre-migration rows** returning `document_ids: []` — analogous to `TestSQLiteBackfillGracefulDegrade` but covering the history path, which the current suite misses.
+
+### Substrate (post-Kuzu-archive)
+- [ ] **Write `docs/design/adr-blessed-substrate-selection.md`** evaluating SurrealDB, DuckDB + DuckPGQ + VSS, FalkorDB, Dgraph, Neo4j Community against the blessed-substrate criteria in `adr-planes-and-substrates.md` §2.3. Pick a successor. Supersedes the 2026-04-19 amendment on the planes ADR.
+- [ ] **Spike SurrealDB as the Knowledge Plane graph+vector substrate.** Prototype `SurrealStore(GraphStore, VectorStore)` against a spike branch. Goals: validate embedded mode (`rocksdb://` or `surrealkv://`), dual-ABC conformance, single-query graph+vector retrieval. Non-goal: DocumentStore migration (keep separate until the spike finishes).
+- [ ] **If SurrealDB is picked:** update `adr-planes-and-substrates.md` §2.2 / §2.3 with the substrate decision, register in `_BUILTIN_BACKENDS`, add `[surrealdb]` optional extra in `pyproject.toml`, port the `KuzuStore` tests (412 lines) to the SurrealDB backend.
+- [ ] **Evaluate consolidating `DocumentStore` onto the same backend** once the graph+vector substrate stabilizes. The value is reduced operational surface (one DB to back up / tune / authorize); the risk is FTS quality (SQLite FTS5 vs SurrealDB FTS vs Postgres `tsvector`).
+- [ ] **Assess downstream license implications of BSL-1.1** if we pick SurrealDB. The delayed-Apache-2.0 model is fine for Trellis-as-a-library, but confirm no friction for consumers shipping products that embed Trellis.
+
+### Branch convergence housekeeping
+- [ ] **Migrate the 17 internal callers** from flat `registry.graph_store` etc. to `registry.knowledge.graph_store` / `registry.operational.trace_store`. Phase-2 deprecation warnings currently flag each site; the migration was deferred per the Phase 2 commit message to minimize merge-conflict surface during this convergence batch.
+- [ ] **Fix the 6 Windows path portability test failures** (`tests/integration/obsidian/test_{indexer,vault}.py`, `tests/unit/cli/test_admin.py::test_init_json_format`, `tests/unit/learning/test_scoring.py::test_artifacts_root_stored`). Root cause: `pathlib` emits `\` on Windows; assertions + JSON emission assume `/`. Linux CI is green; these fail only on local Windows development.
