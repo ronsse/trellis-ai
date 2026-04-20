@@ -7,6 +7,7 @@ from typing import Any
 import structlog
 from fastmcp import FastMCP
 
+from trellis.ops import ParameterRegistry
 from trellis.retrieve.formatters import (
     format_advisories_as_markdown,
     format_lessons_as_markdown,
@@ -15,7 +16,7 @@ from trellis.retrieve.formatters import (
     format_subgraph_as_markdown,
 )
 from trellis.retrieve.pack_builder import PackBuilder
-from trellis.retrieve.rerankers import RRFReranker
+from trellis.retrieve.rerankers import build_reranker
 from trellis.retrieve.strategies import build_strategies
 from trellis.retrieve.token_tracker import estimate_tokens, track_token_usage
 from trellis.schemas.pack import SectionRequest
@@ -54,11 +55,12 @@ def _build_pack_builder(registry: StoreRegistry) -> PackBuilder:
         adv_path = stores_dir / "advisories.json"
         if adv_path.exists():
             advisory_store = AdvisoryStore(adv_path)
+    param_registry = ParameterRegistry(registry.operational.parameter_store)
     return PackBuilder(
-        strategies=build_strategies(registry),
-        event_log=registry.event_log,
+        strategies=build_strategies(registry, parameter_registry=param_registry),
+        event_log=registry.operational.event_log,
         advisory_store=advisory_store,
-        reranker=RRFReranker(),
+        reranker=build_reranker("rrf", parameter_registry=param_registry),
     )
 
 
