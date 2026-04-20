@@ -1,5 +1,13 @@
 # TODO — Growth & Adoption
 
+## Cloud deployment — POC follow-ups
+
+- [ ] **Docker + compose smoke test** — once Docker is available on the dev host, run `docker compose up --build` and verify `/healthz`, `/readyz`, `/api/version`, `/ui/`, plus `trellis demo load` against the containerized API. Proves the Postgres+pgvector path works under the same Dockerfile ECS will use. Runbook: `docs/deployment/local-compose.md`.
+- [ ] **Uvicorn log unification** — uvicorn's access logs (`INFO: 127.0.0.1:... "GET /healthz"`) bypass structlog and land as plain text, so CloudWatch sees two log shapes per container. Wire `uvicorn` / `uvicorn.access` loggers into the same JSON renderer used by `trellis_api.logging.configure_logging()`. Non-blocker for POC.
+- [ ] **Fail-fast config validation on startup** — extend `StoreRegistry.from_config_dir` (or add a pre-flight step in `trellis serve`) to surface missing DSNs / unreachable S3 buckets / embedding-dim mismatches before uvicorn accepts a listener. Today a malformed config only fails on first store access.
+- [ ] **End-to-end AWS deployment dry-run** — provision RDS + S3 + ECS in a sandbox account per `docs/deployment/aws-ecs.md`, push the image, boot the task, confirm green. Catches IAM / VPC endpoint / Secrets Manager wiring gaps the compose stack can't see.
+- [ ] **Native API-key auth (Phase 1.5)** — deferred until the VPN-only assumption breaks. Design: `TRELLIS_AUTH_MODE=off|optional|required` env toggle, Bearer tokens validated against a new `trellis_api_keys` table, scopes `read`/`write`/`admin`, wired via FastAPI `Depends` on router includes. `/api/version`, `/healthz`, `/readyz`, `/ui` stay public.
+
 ## Recently Completed (2026-04-13 → 2026-04-15)
 
 The dual-loop evolution sprint landed Phases 1–4 plus follow-ons. Items previously open under Tiered Retrieval, Graph Modeling, and Advisory work are now live:
