@@ -1,5 +1,8 @@
 """LangGraph ReAct agent with Trellis tools.
 
+STATUS: PREVIEW — examples are in flux while parallel work lands. Expect
+breaking changes before the next minor release.
+
 The Trellis tools give the agent five ways to use shared institutional
 memory: get_context (before acting), search (targeted lookup), save_trace
 (after success), save_knowledge (when discovering entities), and

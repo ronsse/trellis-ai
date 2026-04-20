@@ -1,6 +1,6 @@
 # Trellis — LangGraph Reference Template
 
-> **Reference template — not a published package.** Copy [`tools.py`](tools.py) into your own project rather than importing from this repo. The Trellis core package (`trellis-ai`) is what's published to PyPI; integrations live here as starting points you adapt.
+> **Status: preview — reference template, not a published package.** Copy [`tools.py`](tools.py) into your own project rather than importing from this repo. The SDK and stores are being reshaped in parallel; expect tool signatures to shift before the next minor release.
 
 Add structured institutional memory to LangGraph agents. Agents retrieve context before tasks, record traces of their work, and build a shared knowledge graph — so your team's agents learn from each other.
 

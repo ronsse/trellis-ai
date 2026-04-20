@@ -1,4 +1,8 @@
-"""Obsidian vault interface for Trellis."""
+"""Obsidian vault interface for Trellis.
+
+STATUS: PREVIEW — reference template, in flux while parallel SDK/store work
+lands. Copy into your own project rather than depending on this path.
+"""
 
 from __future__ import annotations
 

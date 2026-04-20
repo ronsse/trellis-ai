@@ -1,16 +1,29 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help install install-dev lint format typecheck test check clean build publish-check verify-wheel openapi openapi-check
+.PHONY: help setup install install-dev lint format typecheck test check clean build publish-check verify-wheel hooks hooks-run fix openapi openapi-check
 
 help: ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-15s\033[0m %s\n", $$1, $$2}'
+
+setup: install-dev hooks ## One-shot first-time setup: install [dev] deps + register git hooks
+	@echo "Setup complete. You can now run: make check"
 
 install: ## Install package
 	uv pip install -e .
 
 install-dev: ## Install package with dev dependencies
 	uv pip install -e ".[dev]"
-	python -m pre_commit install
+
+hooks: ## Install pre-commit git hooks (safe to re-run)
+	python -m pre_commit install --install-hooks
+	@echo "Hooks registered. They run automatically on `git commit`."
+
+hooks-run: ## Run pre-commit across the whole repo (not just staged files)
+	python -m pre_commit run --all-files
+
+fix: ## Auto-fix everything pre-commit can fix (ruff format + ruff --fix + whitespace)
+	python -m pre_commit run --all-files || true
+	@echo "Any remaining failures above need manual attention."
 
 lint: ## Run linting
 	ruff check src/ tests/

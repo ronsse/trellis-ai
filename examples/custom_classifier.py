@@ -1,5 +1,8 @@
 """Define a domain-specific classifier that tags content at ingest time.
 
+STATUS: PREVIEW — examples are in flux while parallel work lands. Expect
+breaking changes before the next minor release.
+
 Classifiers conform to the Classifier Protocol (`trellis.classify.protocol`)
 — any object with `name`, `allowed_modes`, and `classify()` qualifies. The
 ClassifierPipeline merges results from all registered classifiers into the

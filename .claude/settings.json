@@ -1,0 +1,16 @@
+{
+  "_comment": "Project-scoped Claude Code settings. Checked into git so every contributor and every agent gets the same hooks. Per-user overrides live in .claude/settings.local.json (not committed).",
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python scripts/claude_postedit_lint.py"
+          }
+        ]
+      }
+    ]
+  }
+}

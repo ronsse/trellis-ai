@@ -2,9 +2,12 @@
 name: record-after-task
 description: After completing meaningful work, write a structured trace to Trellis with steps + outcome, then record success/failure feedback. This is what makes future runs of retrieve-before-task useful — without it, the institutional memory is empty.
 version: 1.0.0
+status: preview
 ---
 
 # Record After Task
+
+> **Status: preview.** Tool signatures are in flux while parallel work lands. Expect revisions before the next minor release.
 
 The retrieve-before-task skill is only useful if there's something to retrieve. This skill closes the loop: once you finish meaningful work, save a structured trace so future agents (and future-you) inherit the result.
 

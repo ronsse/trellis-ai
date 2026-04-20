@@ -2,9 +2,12 @@
 name: retrieve-before-task
 description: Pull a token-budgeted context pack from Trellis (prior traces, precedents, evidence, knowledge graph) before starting non-trivial work. Use whenever the task is more than a one-line tweak — investigations, refactors, new features, debugging, design decisions.
 version: 1.0.0
+status: preview
 ---
 
 # Retrieve Before Task
+
+> **Status: preview.** Tool signatures are in flux while parallel work lands. Expect revisions before the next minor release.
 
 Before doing real work, check what's already known. Trellis is a shared experience store — past agents and humans have left traces, precedents, and graph knowledge that you should not re-derive from scratch.
 
