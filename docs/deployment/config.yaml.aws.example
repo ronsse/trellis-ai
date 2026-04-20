@@ -1,0 +1,46 @@
+# Trellis production config — AWS (ECS + RDS PostgreSQL + S3).
+#
+# Place on disk (or inject via a volume mount) at the path pointed to by
+# TRELLIS_CONFIG_DIR, named "config.yaml". DSNs and the S3 bucket name are
+# read from env vars so secrets stay out of this file — inject them from
+# AWS Secrets Manager / SSM Parameter Store into the ECS task definition.
+#
+# Required env vars for this config:
+#   TRELLIS_KNOWLEDGE_PG_DSN    postgresql://user:pass@<rds-endpoint>:5432/trellis_knowledge
+#   TRELLIS_OPERATIONAL_PG_DSN  postgresql://user:pass@<rds-endpoint>:5432/trellis_operational
+#   TRELLIS_S3_BUCKET           my-trellis-blobs
+#   AWS_REGION                  us-east-1  (plus standard AWS creds via task role)
+#
+# Optional (unlock LLM enrichment + memory extraction):
+#   TRELLIS_ENABLE_MEMORY_EXTRACTION=1
+#   OPENAI_API_KEY              sk-...   (from Secrets Manager)
+
+knowledge:
+  graph:
+    backend: postgres
+  vector:
+    backend: pgvector
+  document:
+    backend: postgres
+  blob:
+    backend: s3
+    # bucket defaulted from TRELLIS_S3_BUCKET; uncomment to pin explicitly
+    # bucket: my-trellis-blobs
+    # region: us-east-1
+
+operational:
+  trace:
+    backend: postgres
+  event_log:
+    backend: postgres
+
+# LLM block — commented out until you provision an OpenAI key in Secrets
+# Manager and wire it to the ECS task. Uncomment to enable enrichment.
+#
+# llm:
+#   provider: openai
+#   api_key_env: OPENAI_API_KEY
+#   model: gpt-4o-mini
+#   embedding:
+#     provider: openai
+#     model: text-embedding-3-small

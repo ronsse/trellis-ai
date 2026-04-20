@@ -1,0 +1,47 @@
+# VCS / editor
+.git
+.github
+.gitignore
+.vscode
+.idea
+.claude
+
+# Python cruft
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+htmlcov
+*.egg-info
+build
+dist
+
+# Virtual envs
+.venv
+venv
+env
+
+# Local data
+.trellis
+data
+*.db
+*.db-journal
+*.sqlite*
+
+# Docs / examples not needed in the runtime image
+docs
+examples
+tests
+scripts
+*.md
+!README.md
+!LICENSE
+
+# Dev tooling
+Makefile
+.pre-commit-config.yaml
+.editorconfig

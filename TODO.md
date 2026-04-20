@@ -1,5 +1,13 @@
 # TODO — Growth & Adoption
 
+## Cloud deployment — POC follow-ups
+
+- [ ] **Docker + compose smoke test** — once Docker is available on the dev host, run `docker compose up --build` and verify `/healthz`, `/readyz`, `/api/version`, `/ui/`, plus `trellis demo load` against the containerized API. Proves the Postgres+pgvector path works under the same Dockerfile ECS will use. Runbook: `docs/deployment/local-compose.md`.
+- [ ] **Uvicorn log unification** — uvicorn's access logs (`INFO: 127.0.0.1:... "GET /healthz"`) bypass structlog and land as plain text, so CloudWatch sees two log shapes per container. Wire `uvicorn` / `uvicorn.access` loggers into the same JSON renderer used by `trellis_api.logging.configure_logging()`. Non-blocker for POC.
+- [ ] **Fail-fast config validation on startup** — extend `StoreRegistry.from_config_dir` (or add a pre-flight step in `trellis serve`) to surface missing DSNs / unreachable S3 buckets / embedding-dim mismatches before uvicorn accepts a listener. Today a malformed config only fails on first store access.
+- [ ] **End-to-end AWS deployment dry-run** — provision RDS + S3 + ECS in a sandbox account per `docs/deployment/aws-ecs.md`, push the image, boot the task, confirm green. Catches IAM / VPC endpoint / Secrets Manager wiring gaps the compose stack can't see.
+- [ ] **Native API-key auth (Phase 1.5)** — deferred until the VPN-only assumption breaks. Design: `TRELLIS_AUTH_MODE=off|optional|required` env toggle, Bearer tokens validated against a new `trellis_api_keys` table, scopes `read`/`write`/`admin`, wired via FastAPI `Depends` on router includes. `/api/version`, `/healthz`, `/readyz`, `/ui` stay public.
+
 ## Recently Completed (2026-04-13 → 2026-04-15)
 
 The dual-loop evolution sprint landed Phases 1–4 plus follow-ons. Items previously open under Tiered Retrieval, Graph Modeling, and Advisory work are now live:
@@ -1960,7 +1968,10 @@ Captured during the pre-merge simplify + review pass on the 6-PR branch converge
 - [ ] **Spike SurrealDB as the Knowledge Plane graph+vector substrate.** Prototype `SurrealStore(GraphStore, VectorStore)` against a spike branch. Goals: validate embedded mode (`rocksdb://` or `surrealkv://`), dual-ABC conformance, single-query graph+vector retrieval. Non-goal: DocumentStore migration (keep separate until the spike finishes).
 - [ ] **If SurrealDB is picked:** update `adr-planes-and-substrates.md` §2.2 / §2.3 with the substrate decision, register in `_BUILTIN_BACKENDS`, add `[surrealdb]` optional extra in `pyproject.toml`, port the `KuzuStore` tests (412 lines) to the SurrealDB backend.
 - [ ] **Evaluate consolidating `DocumentStore` onto the same backend** once the graph+vector substrate stabilizes. The value is reduced operational surface (one DB to back up / tune / authorize); the risk is FTS quality (SQLite FTS5 vs SurrealDB FTS vs Postgres `tsvector`).
-- [ ] **Assess downstream license implications of BSL-1.1** if we pick SurrealDB. The delayed-Apache-2.0 model is fine for Trellis-as-a-library, but confirm no friction for consumers shipping products that embed Trellis.
+- [x] **Assess downstream license implications of BSL-1.1** — *Resolved 2026-04-20.* SurrealDB 3.0 is BSL 1.1 (LICENSE last updated 2025-12-17), Change Date 2030-01-01 → auto-converts to Apache 2.0. Python SDK `surrealdb.py` is Apache-2.0. The Additional Use Grant forbids only offerings "that enable third parties to create, manage, or control schemas or tables" — i.e. competing DBaaS/Supabase-style products. Trellis consumers embedding SurrealDB as a hidden storage backend (users never see SurrealQL) are **allowed**: internal SaaS, self-hosted bundles, and embedded-mode agent products all pass. Required posture if SurrealDB is picked:
+  - Gate behind `[surrealdb]` optional extra so non-adopters never pull BSL code.
+  - Document the DBaaS carve-out in the backend-selection ADR (one sentence: "Don't pick SurrealDB if you're building a multi-tenant DBaaS where tenants author their own schemas").
+  - Keep Postgres+pgvector as the default blessed production substrate; SurrealDB is an opt-in alternative for teams who want unified graph+vector with embedded mode.
 
 ### Branch convergence housekeeping
 - [ ] **Migrate the 17 internal callers** from flat `registry.graph_store` etc. to `registry.knowledge.graph_store` / `registry.operational.trace_store`. Phase-2 deprecation warnings currently flag each site; the migration was deferred per the Phase 2 commit message to minimize merge-conflict surface during this convergence batch.

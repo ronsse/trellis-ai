@@ -1,0 +1,28 @@
+# Trellis config for the local docker-compose stack.
+#
+# Mounted read-only into the api container at /etc/trellis/config.yaml.
+# Mirrors the production AWS config except that blobs land on a local
+# volume instead of S3 — every other backend path matches ECS+RDS so
+# this compose stack is a faithful offline rehearsal of the cloud setup.
+#
+# DSNs come from env vars injected by docker-compose.yml:
+#   TRELLIS_KNOWLEDGE_PG_DSN
+#   TRELLIS_OPERATIONAL_PG_DSN
+
+knowledge:
+  graph:
+    backend: postgres
+  vector:
+    backend: pgvector
+  document:
+    backend: postgres
+  blob:
+    backend: local
+    # root_dir left unset → defaults to <stores_dir>/blobs, which lives
+    # under the /var/lib/trellis volume mount in the container.
+
+operational:
+  trace:
+    backend: postgres
+  event_log:
+    backend: postgres
