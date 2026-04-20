@@ -23,10 +23,19 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Final
+from datetime import datetime
+from typing import TYPE_CHECKING, Final
+
+import structlog
 
 from trellis.schemas.outcome import OutcomeEvent
 from trellis.schemas.parameters import ParameterProposal, ParameterScope
+
+if TYPE_CHECKING:
+    from trellis.stores.base.outcome import OutcomeStore
+    from trellis.stores.base.tuner_state import TunerStateStore
+
+logger = structlog.get_logger(__name__)
 
 # ---------------------------------------------------------------------------
 # Aggregation
@@ -343,3 +352,141 @@ DEFAULT_RULES: Final[tuple[TuningRule, ...]] = (
         ),
     ),
 )
+
+
+# ---------------------------------------------------------------------------
+# Orchestrator
+# ---------------------------------------------------------------------------
+
+
+#: Statuses that indicate a proposal has moved past the tuner's reach.
+#: The tuner refuses to overwrite these on re-run — only ``"pending"``
+#: proposals are eligible to be refreshed with new sample sizes.
+_TERMINAL_STATUSES: Final = frozenset({"canary", "promoted", "rejected"})
+
+
+class RuleTuner:
+    """Drives one tuning pass: read outcomes, aggregate, propose, persist.
+
+    Reads from an :class:`~trellis.stores.base.outcome.OutcomeStore`,
+    persists proposals to a
+    :class:`~trellis.stores.base.tuner_state.TunerStateStore`, and
+    tracks a per-tuner cursor so future runs can start from the
+    newest event seen.
+
+    Idempotency comes from two layers:
+
+    * ``proposal_id`` is deterministic (see
+      :func:`_deterministic_proposal_id`) — re-running over the same
+      window produces the same ids.
+    * Proposals in a terminal status (``canary`` / ``promoted`` /
+      ``rejected``) are **never overwritten** by ``run()`` even if the
+      deterministic id matches, so a downstream promotion decision
+      can't be silently reverted by a later tuner pass.
+
+    Args:
+        outcome_store: Signal source.
+        tuner_state_store: Proposal + cursor storage.
+        tuner_name: Logical name stored on proposals and cursor.
+        rules: Rule set; defaults to :data:`DEFAULT_RULES`.
+        batch_limit: Per-call ``OutcomeStore.query(limit=...)`` cap.
+    """
+
+    def __init__(
+        self,
+        outcome_store: OutcomeStore,
+        tuner_state_store: TunerStateStore,
+        *,
+        tuner_name: str = "rule_tuner",
+        rules: Sequence[TuningRule] = DEFAULT_RULES,
+        batch_limit: int = 5000,
+    ) -> None:
+        self._outcomes = outcome_store
+        self._state = tuner_state_store
+        self._tuner_name = tuner_name
+        self._rules: tuple[TuningRule, ...] = tuple(rules)
+        self._batch_limit = batch_limit
+
+    # -- accessors -----------------------------------------------------------
+
+    @property
+    def tuner_name(self) -> str:
+        return self._tuner_name
+
+    @property
+    def rules(self) -> tuple[TuningRule, ...]:
+        return self._rules
+
+    # -- main pass -----------------------------------------------------------
+
+    def run(
+        self,
+        *,
+        since: datetime | None = None,
+        until: datetime | None = None,
+    ) -> list[ParameterProposal]:
+        """Run one tuning pass.
+
+        Args:
+            since: Lower bound (inclusive) on event time. When ``None``,
+                the stored cursor (if any) is used; otherwise the full
+                history.
+            until: Optional upper bound (inclusive). Defaults to "now"
+                at the store level when unset.
+
+        Returns the list of proposals that were created or updated
+        this run — excludes proposals that matched an existing
+        terminal-status record.
+        """
+        effective_since = since
+        if effective_since is None:
+            raw_cursor = self._state.get_cursor(self._tuner_name)
+            if raw_cursor:
+                try:
+                    effective_since = datetime.fromisoformat(raw_cursor)
+                except ValueError:
+                    logger.warning(
+                        "rule_tuner.cursor_parse_failed",
+                        tuner=self._tuner_name,
+                        cursor=raw_cursor,
+                    )
+
+        outcomes = self._outcomes.query(
+            since=effective_since,
+            until=until,
+            limit=self._batch_limit,
+        )
+        if not outcomes:
+            logger.debug(
+                "rule_tuner.no_outcomes",
+                tuner=self._tuner_name,
+                since=effective_since.isoformat() if effective_since else None,
+            )
+            return []
+
+        aggregates = aggregate_outcomes(outcomes)
+        proposals = apply_rules(aggregates, self._rules, tuner=self._tuner_name)
+
+        persisted: list[ParameterProposal] = []
+        skipped_terminal = 0
+        for proposal in proposals:
+            existing = self._state.get_proposal(proposal.proposal_id)
+            if existing is not None and existing.status in _TERMINAL_STATUSES:
+                skipped_terminal += 1
+                continue
+            self._state.put_proposal(proposal)
+            persisted.append(proposal)
+
+        latest = max(o.occurred_at for o in outcomes)
+        self._state.set_cursor(self._tuner_name, latest.isoformat())
+
+        logger.info(
+            "rule_tuner.run_complete",
+            tuner=self._tuner_name,
+            outcomes_scanned=len(outcomes),
+            aggregates=len(aggregates),
+            proposals_persisted=len(persisted),
+            proposals_skipped_terminal=skipped_terminal,
+            cursor=latest.isoformat(),
+        )
+        return persisted

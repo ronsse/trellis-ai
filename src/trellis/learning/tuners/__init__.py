@@ -10,6 +10,7 @@ cursor, aggregate per learning-axis cell, apply a rule set, and emit
 from trellis.learning.tuners.rule_tuner import (
     DEFAULT_RULES,
     AggregatedOutcomes,
+    RuleTuner,
     TuningRule,
     aggregate_outcomes,
     apply_rules,
@@ -18,6 +19,7 @@ from trellis.learning.tuners.rule_tuner import (
 __all__ = [
     "DEFAULT_RULES",
     "AggregatedOutcomes",
+    "RuleTuner",
     "TuningRule",
     "aggregate_outcomes",
     "apply_rules",
