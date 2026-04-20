@@ -1,0 +1,54 @@
+# Local all-in-one Trellis stack — offline rehearsal of the AWS ECS + RDS
+# deployment. Exercises the same Postgres + pgvector code paths that ECS
+# will hit, so if this works end-to-end the cloud deployment is mostly
+# infrastructure provisioning.
+#
+# Usage:
+#   docker compose up --build
+#   curl http://localhost:8420/healthz     # {"status":"ok"}
+#   curl http://localhost:8420/readyz      # {"status":"ready"} once Postgres is up
+#   curl http://localhost:8420/api/version
+#   open  http://localhost:8420/ui/
+#
+# Reset state: `docker compose down -v` (the -v drops volumes).
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: trellis
+      POSTGRES_PASSWORD: trellis
+      POSTGRES_DB: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./deploy/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trellis -d trellis_knowledge"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      TRELLIS_LOG_FORMAT: json
+      TRELLIS_CONFIG_DIR: /etc/trellis
+      TRELLIS_DATA_DIR: /var/lib/trellis
+      TRELLIS_KNOWLEDGE_PG_DSN: postgresql://trellis:trellis@postgres:5432/trellis_knowledge
+      TRELLIS_OPERATIONAL_PG_DSN: postgresql://trellis:trellis@postgres:5432/trellis_operational
+    ports:
+      - "8420:8420"
+    volumes:
+      - ./deploy/config.compose.yaml:/etc/trellis/config.yaml:ro
+      - trellis-data:/var/lib/trellis
+
+volumes:
+  postgres-data:
+  trellis-data:
