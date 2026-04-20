@@ -15,8 +15,23 @@ Reranking for Reordering Documents and Producing Summaries", SIGIR 1998.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from trellis.retrieve.rerankers.base import Reranker
 from trellis.schemas.pack import PackItem
+from trellis.schemas.parameters import ParameterScope
+
+if TYPE_CHECKING:
+    from trellis.ops.registry import ParameterRegistry
+
+#: Default trade-off between relevance and diversity. 1.0 = pure
+#: relevance (no diversity), 0.0 = pure diversity. 0.7 balances both.
+DEFAULT_MMR_LAMBDA = 0.7
+
+#: Default word n-gram size used for shingle-based similarity.
+DEFAULT_MMR_SHINGLE_SIZE = 3
+
+_COMPONENT_ID = "retrieve.rerankers.MMRReranker"
 
 
 def _word_shingles(text: str, n: int = 3) -> set[str]:
@@ -47,9 +62,14 @@ class MMRReranker(Reranker):
     def __init__(
         self,
         *,
-        lambda_param: float = 0.7,
-        shingle_size: int = 3,
+        lambda_param: float = DEFAULT_MMR_LAMBDA,
+        shingle_size: int = DEFAULT_MMR_SHINGLE_SIZE,
+        registry: ParameterRegistry | None = None,
     ) -> None:
+        if registry is not None:
+            scope = ParameterScope(component_id=_COMPONENT_ID)
+            lambda_param = registry.get(scope, "lambda_param", lambda_param)
+            shingle_size = registry.get(scope, "shingle_size", shingle_size)
         self._lambda = lambda_param
         self._shingle_size = shingle_size
 

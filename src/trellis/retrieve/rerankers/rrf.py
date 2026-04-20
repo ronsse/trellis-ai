@@ -15,8 +15,19 @@ Condorcet and individual Rank Learning Methods", SIGIR 2009.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from trellis.retrieve.rerankers.base import Reranker
 from trellis.schemas.pack import PackItem
+from trellis.schemas.parameters import ParameterScope
+
+if TYPE_CHECKING:
+    from trellis.ops.registry import ParameterRegistry
+
+#: Default RRF smoothing constant. Standard value from Cormack et al.
+DEFAULT_RRF_K = 60
+
+_COMPONENT_ID = "retrieve.rerankers.RRFReranker"
 
 
 class RRFReranker(Reranker):
@@ -25,9 +36,19 @@ class RRFReranker(Reranker):
     Args:
         k: Smoothing constant (default 60, standard RRF value).
             Higher values dampen the influence of top-ranked items.
+        registry: Optional :class:`ParameterRegistry` to resolve ``k``
+            at construction time. Scope is component-only; RRF is a
+            cross-strategy fusion layer with no natural domain axis.
     """
 
-    def __init__(self, *, k: int = 60) -> None:
+    def __init__(
+        self,
+        *,
+        k: int = DEFAULT_RRF_K,
+        registry: ParameterRegistry | None = None,
+    ) -> None:
+        if registry is not None:
+            k = registry.get(ParameterScope(component_id=_COMPONENT_ID), "k", k)
         self._k = k
 
     @property
