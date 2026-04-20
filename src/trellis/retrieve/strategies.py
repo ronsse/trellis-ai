@@ -9,8 +9,10 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from trellis.schemas.pack import PackItem
+from trellis.schemas.parameters import ParameterScope
 
 if TYPE_CHECKING:
+    from trellis.ops.registry import ParameterRegistry
     from trellis.stores.registry import StoreRegistry
 
 logger = structlog.get_logger()
@@ -24,6 +26,42 @@ DEFAULT_RECENCY_HALF_LIFE_DAYS = 30.0
 #: fraction of its original relevance. Prevents high-importance archival
 #: content from being suppressed entirely.
 RECENCY_FLOOR = 0.3
+
+#: Default scoring boosts inside :class:`GraphSearch`. Exposed as
+#: module-level constants so they can be resolved through
+#: :class:`ParameterRegistry` with these values as fallback defaults.
+GRAPH_DOMAIN_MATCH_BOOST = 1.3
+GRAPH_CURATED_BOOST = 1.3
+GRAPH_DESCRIPTION_BOOST = 1.2
+GRAPH_POSITION_DECAY_STEP = 0.05
+
+# Component ids used when resolving registry overrides. Each SearchStrategy
+# has its own scope so per-domain tuning stays isolated.
+_KEYWORD_COMPONENT = "retrieve.strategies.KeywordSearch"
+_SEMANTIC_COMPONENT = "retrieve.strategies.SemanticSearch"
+_GRAPH_COMPONENT = "retrieve.strategies.GraphSearch"
+
+
+def _resolve_param(
+    registry: ParameterRegistry | None,
+    component_id: str,
+    domain: str | None,
+    key: str,
+    default: Any,
+) -> Any:
+    """Resolve a scoring param via registry, or fall back to ``default``.
+
+    Scope is ``(component_id, domain)`` — per-(intent_family, tool_name)
+    tuning is deferred to a follow-up when strategies gain intent-family
+    awareness.
+    """
+    if registry is None:
+        return default
+    return registry.get(
+        ParameterScope(component_id=component_id, domain=domain),
+        key,
+        default,
+    )
 
 
 class SearchStrategy(ABC):
@@ -94,9 +132,11 @@ class KeywordSearch(SearchStrategy):
         document_store: Any,
         *,
         recency_half_life_days: float = DEFAULT_RECENCY_HALF_LIFE_DAYS,
+        registry: ParameterRegistry | None = None,
     ) -> None:
         self._store = document_store
         self._recency_half_life_days = recency_half_life_days
+        self._registry = registry
 
     @property
     def name(self) -> str:
@@ -109,6 +149,21 @@ class KeywordSearch(SearchStrategy):
         limit: int = 20,
         filters: dict[str, Any] | None = None,
     ) -> list[PackItem]:
+        domain = (filters or {}).get("domain")
+        half_life = _resolve_param(
+            self._registry,
+            _KEYWORD_COMPONENT,
+            domain,
+            "recency_half_life_days",
+            self._recency_half_life_days,
+        )
+        floor = _resolve_param(
+            self._registry,
+            _KEYWORD_COMPONENT,
+            domain,
+            "recency_floor",
+            RECENCY_FLOOR,
+        )
         results = self._store.search(query, limit=limit, filters=filters)
         items = []
         for doc in results:
@@ -118,7 +173,8 @@ class KeywordSearch(SearchStrategy):
             score = _apply_recency_decay(
                 score,
                 doc.get("updated_at") or doc.get("created_at"),
-                half_life_days=self._recency_half_life_days,
+                half_life_days=half_life,
+                floor=floor,
             )
             items.append(
                 PackItem(
@@ -141,10 +197,12 @@ class SemanticSearch(SearchStrategy):
         embedding_fn: Any = None,
         *,
         recency_half_life_days: float = DEFAULT_RECENCY_HALF_LIFE_DAYS,
+        registry: ParameterRegistry | None = None,
     ) -> None:
         self._store = vector_store
         self._embedding_fn = embedding_fn  # callable(str) -> list[float]
         self._recency_half_life_days = recency_half_life_days
+        self._registry = registry
 
     @property
     def name(self) -> str:
@@ -161,6 +219,21 @@ class SemanticSearch(SearchStrategy):
             logger.warning("semantic_search_no_embedding_fn")
             return []
 
+        domain = (filters or {}).get("domain")
+        half_life = _resolve_param(
+            self._registry,
+            _SEMANTIC_COMPONENT,
+            domain,
+            "recency_half_life_days",
+            self._recency_half_life_days,
+        )
+        floor = _resolve_param(
+            self._registry,
+            _SEMANTIC_COMPONENT,
+            domain,
+            "recency_floor",
+            RECENCY_FLOOR,
+        )
         query_vector = self._embedding_fn(query)
         results = self._store.query(query_vector, top_k=limit, filters=filters)
         items = []
@@ -171,7 +244,8 @@ class SemanticSearch(SearchStrategy):
             score = _apply_recency_decay(
                 score,
                 metadata.get("updated_at") or metadata.get("created_at"),
-                half_life_days=self._recency_half_life_days,
+                half_life_days=half_life,
+                floor=floor,
             )
             items.append(
                 PackItem(
@@ -202,12 +276,14 @@ class GraphSearch(SearchStrategy):
         self,
         graph_store: Any,
         *,
-        curated_boost: float = 1.3,
+        curated_boost: float = GRAPH_CURATED_BOOST,
         recency_half_life_days: float = DEFAULT_RECENCY_HALF_LIFE_DAYS,
+        registry: ParameterRegistry | None = None,
     ) -> None:
         self._store = graph_store
         self._curated_boost = curated_boost
         self._recency_half_life_days = recency_half_life_days
+        self._registry = registry
 
     @property
     def name(self) -> str:
@@ -252,6 +328,50 @@ class GraphSearch(SearchStrategy):
         if not include_structural:
             nodes = [n for n in nodes if n.get("node_role") != "structural"]
 
+        # Resolve all tuneable scoring params once per .search() call.
+        domain_match_boost = _resolve_param(
+            self._registry,
+            _GRAPH_COMPONENT,
+            request_domain,
+            "domain_match_boost",
+            GRAPH_DOMAIN_MATCH_BOOST,
+        )
+        curated_boost = _resolve_param(
+            self._registry,
+            _GRAPH_COMPONENT,
+            request_domain,
+            "curated_boost",
+            self._curated_boost,
+        )
+        description_boost = _resolve_param(
+            self._registry,
+            _GRAPH_COMPONENT,
+            request_domain,
+            "description_boost",
+            GRAPH_DESCRIPTION_BOOST,
+        )
+        position_decay_step = _resolve_param(
+            self._registry,
+            _GRAPH_COMPONENT,
+            request_domain,
+            "position_decay_step",
+            GRAPH_POSITION_DECAY_STEP,
+        )
+        half_life = _resolve_param(
+            self._registry,
+            _GRAPH_COMPONENT,
+            request_domain,
+            "recency_half_life_days",
+            self._recency_half_life_days,
+        )
+        floor = _resolve_param(
+            self._registry,
+            _GRAPH_COMPONENT,
+            request_domain,
+            "recency_floor",
+            RECENCY_FLOOR,
+        )
+
         items = []
         for i, node in enumerate(nodes[:limit]):
             props = node.get("properties", {})
@@ -259,28 +379,29 @@ class GraphSearch(SearchStrategy):
             node_role_val = node.get("node_role") or "semantic"
 
             # Base score from position (decays)
-            base_score = max(0.0, 1.0 - (i * 0.05))
+            base_score = max(0.0, 1.0 - (i * position_decay_step))
 
             # Domain match boost: nodes matching requested domain score higher
             if request_domain and props.get("domain") == request_domain:
-                base_score *= 1.3
+                base_score *= domain_match_boost
 
             # Curated nodes are pre-digested synthesis — boost them.
             if node_role_val == "curated":
-                base_score *= self._curated_boost
+                base_score *= curated_boost
 
             # Importance boost
             score = _apply_importance(base_score, props)
 
             # Prefer entities with descriptions — they carry more context
             if props.get("description") or props.get("comment"):
-                score *= 1.2
+                score *= description_boost
 
             # Recency decay — older nodes score progressively lower
             score = _apply_recency_decay(
                 score,
                 node.get("updated_at") or node.get("created_at"),
-                half_life_days=self._recency_half_life_days,
+                half_life_days=half_life,
+                floor=floor,
             )
 
             excerpt = props.get(
@@ -316,6 +437,8 @@ class GraphSearch(SearchStrategy):
 def build_strategies(
     registry: StoreRegistry,
     embedding_fn: Any | None = None,
+    *,
+    parameter_registry: ParameterRegistry | None = None,
 ) -> list[SearchStrategy]:
     """Build the standard strategy list from a registry.
 
@@ -328,16 +451,26 @@ def build_strategies(
             *None*, the helper checks ``registry.embedding_fn`` (which reads
             the ``embeddings`` config section).  If neither source provides
             one, SemanticSearch is skipped.
+        parameter_registry: Optional :class:`ParameterRegistry` that
+            strategies consult at call-time for per-(component, domain)
+            scoring overrides.  When ``None`` the module-level defaults
+            apply unchanged.
     """
     strategies: list[SearchStrategy] = [
-        KeywordSearch(registry.document_store),
-        GraphSearch(registry.graph_store),
+        KeywordSearch(registry.knowledge.document_store, registry=parameter_registry),
+        GraphSearch(registry.knowledge.graph_store, registry=parameter_registry),
     ]
 
     fn = embedding_fn or getattr(registry, "embedding_fn", None)
     if fn is not None:
         try:
-            strategies.append(SemanticSearch(registry.vector_store, fn))
+            strategies.append(
+                SemanticSearch(
+                    registry.knowledge.vector_store,
+                    fn,
+                    registry=parameter_registry,
+                )
+            )
             logger.info("semantic_search_enabled")
         except Exception:
             logger.warning("semantic_search_init_failed", exc_info=True)
