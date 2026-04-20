@@ -15,6 +15,24 @@
 
 ---
 
+## Amendment — 2026-04-19 — blessed-local-substrate choice deferred
+
+This ADR was drafted on 2026-04-18 and named **Kuzu** as the blessed local unified graph+vector substrate for the Knowledge Plane (§2.2, §2.3). Between drafting and implementation, the upstream Kuzu project was [archived on 2025-10-10 following Apple's acquisition of Kuzu Inc.](https://github.com/kuzudb/kuzu) and is no longer accepting new development or releases.
+
+**The plane-partitioning decision (§2.1) and the blessed-substrate *principle* (§2.2 general, §2.5 sanctioned bridges, §2.6 config schema, §2.7 registry namespacing) remain in force.** Only the *specific pick* of a blessed local graph+vector substrate is deferred.
+
+**Interim position (active guidance):**
+
+- Local dev / `trellis admin init` default: `SQLiteGraphStore` (graph) + `SQLiteVectorStore` (vector). Two stores, separate instances. Pack assembly already runs search strategies independently and dedupes at the end (see [`src/trellis/retrieve/pack_builder.py`](../../src/trellis/retrieve/pack_builder.py)), so no "fusion step" is owed by the interim pick — the unified-substrate goal is about *future* simplification, not undoing current code.
+- Production: Postgres (`PostgresGraphStore`) + `pgvector` (`PgVectorStore`). Same two-store shape; pgvector is mature and supported.
+- Unified graph+vector backends remain **opt-in alternatives** that a deployment can select via config; the plane-nested `_BUILTIN_BACKENDS` table and the dual-inheritance pattern (a single backend class satisfying both `GraphStore` and `VectorStore`) are ready for one to be blessed later.
+
+**Follow-up:** a separate ADR will evaluate candidates (SurrealDB, DuckDB + PGQ/VSS, FalkorDB, Dgraph, Neo4j Community) against the blessed-substrate criteria and pick the successor. Until then, §2.2's "Local (blessed)" and "Production (blessed)" cells for `GraphStore` and `VectorStore` should be read as **TBD**, and §2.3 as historical rationale for why a unified substrate was desirable — not as a current recommendation to use Kuzu.
+
+The remaining Kuzu mentions in §§2.3, 2.6, Consequences, and Migration Plan are preserved as the original drafting context and should be re-read with this amendment in mind.
+
+---
+
 ## 1. Context
 
 ### What exists today
@@ -79,8 +97,8 @@ This mirrors the existing classifier tier precedent (`DETERMINISTIC > HYBRID > L
 
 | Plane | Store | Local (blessed) | Production (blessed) | Opt-in alternatives |
 |---|---|---|---|---|
-| Knowledge | `GraphStore` | **Kuzu** (new) | Kuzu, ArangoDB, or Postgres+pgvector | Neo4j, FalkorDB, SQLite (dev only) |
-| Knowledge | `VectorStore` | **Kuzu** (new, shared instance with Graph) | Same backend as Graph when supported; else pgvector | LanceDB, SQLite (dev only) |
+| Knowledge | `GraphStore` | **TBD** (see Amendment) — interim: SQLite | **TBD** (see Amendment) — interim: Postgres | Unified-substrate candidates pending evaluation |
+| Knowledge | `VectorStore` | **TBD** (see Amendment) — interim: SQLite | **TBD** (see Amendment) — interim: pgvector | LanceDB, unified-substrate candidates pending evaluation |
 | Knowledge | `DocumentStore` | SQLite (FTS5) | Postgres (tsvector) | — |
 | Knowledge | `BlobStore` | Local filesystem | S3 (incl. Supabase Storage) | — |
 | Operational | `TraceStore` | SQLite | Postgres (separate instance) | — |
@@ -88,16 +106,18 @@ This mirrors the existing classifier tier precedent (`DETERMINISTIC > HYBRID > L
 
 Trace and EventLog live on their own database — not because they can't share with Document, but because sharing makes the plane boundary ambiguous and couples retention/backup policies that should be independent.
 
-### 2.3 Kuzu as the blessed Knowledge graph+vector substrate
+### 2.3 Blessed Knowledge graph+vector substrate — deferred (see Amendment)
 
-Kuzu is:
+> **Superseded by the 2026-04-19 Amendment.** The original text of this section argued for Kuzu as the blessed local substrate. The upstream project was archived in October 2025; the specific substrate pick is deferred to a follow-up ADR. The *criteria* used below still apply to the evaluation of a successor.
 
-- **Fully OSS** (MIT), aligned with the project's open-source posture.
-- **Embedded** — `pip install kuzu`, no daemon, no server, single-directory storage. Same operational profile as SQLite.
-- **Natively graph+vector** — HNSW vector indexes on node properties, columnar storage, Cypher query language.
-- **Already noted in the backlog** as the gap that prevents Trellis from matching Graphiti's embedded single-store story ([TODO.md §Graphiti comparison](../../TODO.md)).
+A blessed local graph+vector substrate should be:
 
-Kuzu satisfies **both** `GraphStore` and `VectorStore` ABCs with a single instance. The registry returns the same object for `knowledge.graph` and `knowledge.vector` when both are configured to `backend: kuzu`. This closes the transactional-coherence gap without requiring multiple-inheritance or a new combined ABC.
+- **Fully OSS** with a permissive license, aligned with the project's open-source posture.
+- **Embedded** — installable via `pip`, no daemon, no server, single-directory storage. Same operational profile as SQLite.
+- **Natively graph+vector** — graph traversal and vector similarity (HNSW or equivalent) in a single backend, so `GraphStore` and `VectorStore` ABCs can be satisfied by one instance through dual inheritance.
+- **Actively maintained** with a healthy contributor base.
+
+The registry's plane-nested `_BUILTIN_BACKENDS` table already supports registering one class under both `knowledge.graph` and `knowledge.vector`; the `_find_shared_instance` / `_init_params_fingerprint` logic in [`src/trellis/stores/registry.py`](../../src/trellis/stores/registry.py) caches a single instance across both keys when they resolve to the same backend + params. Landing a blessed substrate later is a backend-class addition, not an architectural change.
 
 ### 2.4 Graph ↔ Document link
 
