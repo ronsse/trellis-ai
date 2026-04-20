@@ -65,6 +65,13 @@ class EventType(StrEnum):
     # Token tracking
     TOKEN_TRACKED = "token.tracked"
 
+    # Feedback-driven parameter tuning — audit trail of governance
+    # decisions on ParameterStore snapshots (not raw OutcomeEvents;
+    # those live in the Operational-Plane OutcomeStore).
+    PARAMS_UPDATED = "parameters.updated"
+    TUNER_PROPOSAL_CREATED = "tuner.proposal_created"
+    TUNER_PROPOSAL_REJECTED = "tuner.proposal_rejected"
+
 
 class Event(VersionedModel):
     """An immutable event record."""
