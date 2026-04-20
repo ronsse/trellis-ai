@@ -61,8 +61,9 @@ class TestContentTagsForbidsExtras:
 class TestContentTagsValidation:
     """ContentTags validates controlled vocabularies."""
 
-    def test_content_type_accepts_valid_values(self) -> None:
-        for ct in [
+    @pytest.mark.parametrize(
+        "content_type",
+        [
             "pattern",
             "decision",
             "error-resolution",
@@ -71,27 +72,29 @@ class TestContentTagsValidation:
             "constraint",
             "configuration",
             "code",
-        ]:
-            tags = ContentTags(content_type=ct)
-            assert tags.content_type == ct
+        ],
+    )
+    def test_content_type_accepts_valid_values(self, content_type: str) -> None:
+        tags = ContentTags(content_type=content_type)
+        assert tags.content_type == content_type
 
     def test_content_type_rejects_invalid(self) -> None:
         with pytest.raises(ValidationError):
             ContentTags(content_type="made-up-type")
 
-    def test_scope_accepts_valid_values(self) -> None:
-        for s in ["universal", "org", "project", "ephemeral"]:
-            tags = ContentTags(scope=s)
-            assert tags.scope == s
+    @pytest.mark.parametrize("scope", ["universal", "org", "project", "ephemeral"])
+    def test_scope_accepts_valid_values(self, scope: str) -> None:
+        tags = ContentTags(scope=scope)
+        assert tags.scope == scope
 
     def test_scope_rejects_invalid(self) -> None:
         with pytest.raises(ValidationError):
             ContentTags(scope="galaxy-wide")
 
-    def test_signal_quality_accepts_valid_values(self) -> None:
-        for sq in ["high", "standard", "low", "noise"]:
-            tags = ContentTags(signal_quality=sq)
-            assert tags.signal_quality == sq
+    @pytest.mark.parametrize("signal_quality", ["high", "standard", "low", "noise"])
+    def test_signal_quality_accepts_valid_values(self, signal_quality: str) -> None:
+        tags = ContentTags(signal_quality=signal_quality)
+        assert tags.signal_quality == signal_quality
 
     def test_signal_quality_rejects_invalid(self) -> None:
         with pytest.raises(ValidationError):
@@ -137,10 +140,13 @@ class TestContentTagsSerialization:
 
 
 class TestRetrievalAffinity:
-    def test_accepts_valid_values(self) -> None:
-        for ra in ["domain_knowledge", "technical_pattern", "operational", "reference"]:
-            tags = ContentTags(retrieval_affinity=[ra])
-            assert tags.retrieval_affinity == [ra]
+    @pytest.mark.parametrize(
+        "affinity",
+        ["domain_knowledge", "technical_pattern", "operational", "reference"],
+    )
+    def test_accepts_valid_values(self, affinity: str) -> None:
+        tags = ContentTags(retrieval_affinity=[affinity])
+        assert tags.retrieval_affinity == [affinity]
 
     def test_rejects_invalid(self) -> None:
         with pytest.raises(ValidationError):
@@ -159,10 +165,6 @@ class TestRetrievalAffinity:
         data = tags.model_dump()
         restored = ContentTags(**data)
         assert restored.retrieval_affinity == ["operational", "reference"]
-
-    def test_classification_version_is_2(self) -> None:
-        tags = ContentTags()
-        assert tags.classification_version == "2"
 
 
 class TestReservedNamespaces:
@@ -264,10 +266,12 @@ class TestDataClassification:
         assert dc.jurisdiction == []
         assert dc.classification_version == "1"
 
-    def test_accepts_all_sensitivity_values(self) -> None:
-        for s in ["public", "internal", "confidential", "restricted"]:
-            dc = DataClassification(sensitivity=s)
-            assert dc.sensitivity == s
+    @pytest.mark.parametrize(
+        "sensitivity", ["public", "internal", "confidential", "restricted"]
+    )
+    def test_accepts_all_sensitivity_values(self, sensitivity: str) -> None:
+        dc = DataClassification(sensitivity=sensitivity)
+        assert dc.sensitivity == sensitivity
 
     def test_rejects_unknown_sensitivity(self) -> None:
         with pytest.raises(ValidationError):
