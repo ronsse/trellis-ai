@@ -70,7 +70,7 @@ class ObsidianVault:
         links = _extract_links(content)
 
         return ObsidianNote(
-            path=str(full_path.relative_to(self.vault_path)),
+            path=full_path.relative_to(self.vault_path).as_posix(),
             title=title,
             content=body,
             frontmatter=frontmatter,
@@ -158,7 +158,7 @@ class ObsidianVault:
             return []
         paths = base.rglob("*.md") if recursive else base.glob("*.md")
         return [
-            str(p.relative_to(self.vault_path))
+            p.relative_to(self.vault_path).as_posix()
             for p in paths
             if not p.name.startswith(".")
         ]
