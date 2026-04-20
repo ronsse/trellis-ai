@@ -34,24 +34,6 @@ _MIN_SAFE_KEY_LEN = 4
 # process doesn't require a restart. Keyed by store_type ("trace", ...).
 _MERGED_BACKENDS_CACHE: dict[str, dict[str, tuple[str, str]]] = {}
 
-# Plane taxonomy — see docs/design/adr-planes-and-substrates.md.
-#
-# The Knowledge Plane holds shared, agent-readable state populated by
-# client systems through the governed mutation pipeline. The Operational
-# Plane holds Trellis-internal state (audit, execution traces) that
-# client code never populates directly. Cross-plane data only flows
-# through the two sanctioned bridges documented in the ADR:
-# MutationExecutor (Knowledge writes emit to EventLog) and the
-# effectiveness feedback loop (EventLog informs DocumentStore tags).
-_PLANE_OF: dict[str, str] = {
-    "graph": "knowledge",
-    "vector": "knowledge",
-    "document": "knowledge",
-    "blob": "knowledge",
-    "trace": "operational",
-    "event_log": "operational",
-}
-
 # Backend registry keyed as plane -> store_type -> backend_name ->
 # (module_path, class_name). The plane-outer shape makes it structurally
 # visible which stores belong to which plane; code paths that should
@@ -59,6 +41,15 @@ _PLANE_OF: dict[str, str] = {
 # plugin loader (see adr-plugin-contract.md) merges entry-point
 # backends on top of this table per store_type at lookup time — see
 # _get_merged_backends.
+#
+# See docs/design/adr-planes-and-substrates.md for the plane taxonomy:
+# Knowledge Plane = shared agent-readable state populated by client
+# systems through the governed mutation pipeline; Operational Plane =
+# Trellis-internal state (audit, execution traces) never populated by
+# client code. Cross-plane data only flows through the two sanctioned
+# bridges documented in the ADR: MutationExecutor (Knowledge writes
+# emit to EventLog) and the effectiveness feedback loop (EventLog
+# informs DocumentStore tags).
 _BUILTIN_BACKENDS: dict[str, dict[str, dict[str, tuple[str, str]]]] = {
     "knowledge": {
         "graph": {
@@ -95,6 +86,15 @@ _BUILTIN_BACKENDS: dict[str, dict[str, dict[str, tuple[str, str]]]] = {
             ),
         },
     },
+}
+
+# Derived from _BUILTIN_BACKENDS — single source of truth for plane
+# membership. Do not hand-edit; add a store_type under the appropriate
+# plane above.
+_PLANE_OF: dict[str, str] = {
+    store_type: plane
+    for plane, store_types in _BUILTIN_BACKENDS.items()
+    for store_type in store_types
 }
 
 # Environment variable names per plane for Postgres DSN resolution.
@@ -740,7 +740,6 @@ class StoreRegistry:
         if backend in {"postgres", "pgvector"} and "dsn" not in params:
             dsn = _resolve_plane_pg_dsn(store_type)
             if not dsn:
-                plane = _PLANE_OF.get(store_type, "<unknown>")
                 plane_env = _PLANE_PG_DSN_ENV.get(plane, "TRELLIS_*_PG_DSN")
                 msg = (
                     f"dsn must be set for {backend} backend"
