@@ -6,9 +6,10 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
 
+from trellis.ops import ParameterRegistry
 from trellis.retrieve.pack_builder import PackBuilder
 from trellis.retrieve.precedents import list_precedents as _list_precedents
-from trellis.retrieve.rerankers import RRFReranker
+from trellis.retrieve.rerankers import build_reranker
 from trellis.retrieve.strategies import build_strategies
 from trellis.schemas.pack import PackBudget
 from trellis_api.app import get_registry
@@ -37,10 +38,11 @@ def assemble_pack(req: PackRequest) -> PackResponse:
     """Assemble a context pack."""
     registry = get_registry()
 
+    param_registry = ParameterRegistry(registry.operational.parameter_store)
     builder = PackBuilder(
-        strategies=build_strategies(registry),
-        event_log=registry.event_log,
-        reranker=RRFReranker(),
+        strategies=build_strategies(registry, parameter_registry=param_registry),
+        event_log=registry.operational.event_log,
+        reranker=build_reranker("rrf", parameter_registry=param_registry),
     )
 
     budget = PackBudget(max_items=req.max_items, max_tokens=req.max_tokens)
