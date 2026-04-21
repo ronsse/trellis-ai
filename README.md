@@ -11,11 +11,11 @@
 [![Python](https://img.shields.io/pypi/pyversions/trellis-ai.svg)](https://pypi.org/project/trellis-ai/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/ronsse/trellis-ai/blob/main/LICENSE)
 
-**Shared context substrate for AI agents. Retrieval that learns what's useful. Runs local or cloud.**
+**Shared context substrate for AI agents that improves retrieval from outcomes, not prompts. Runs local or cloud.**
 
-Trellis is the layer that sits between your agents and the context they need to do work. Agents write **immutable traces** of what they did, read **token-budgeted context packs** before starting new tasks, and the system **tunes retrieval from feedback** — low-signal items get suppressed, high-signal patterns get promoted to reusable precedents. Multiple agents share the same substrate, so institutional knowledge compounds instead of evaporating at the end of each session.
+Trellis is the layer that sits between your agents and the context they need to do work. Agents write **immutable traces** of what they did and read **token-budgeted context packs** before starting new tasks. Feedback is attributed back to the **exact items** that were served — so low-signal items get suppressed, advisory confidence sharpens, and scoring weights are tuned under **statistical governance** (proposals only land when sample size and effect size pass a threshold). As tagging and extraction rules stabilize, LLM calls recede in favor of deterministic paths: the LLM bootstraps the signal, deterministic retrieval inherits it.
 
-Not a vector DB, not per-conversation "memory" — it's the **cross-agent knowledge layer** that gives a team of agents a shared past.
+Multiple agents share the same substrate, so institutional knowledge compounds instead of evaporating at the end of each session. Not a vector DB, not per-conversation "memory" — it's the **cross-agent knowledge layer** that gives a team of agents a shared past.
 
 ## Quickstart — 60 seconds
 
@@ -72,9 +72,9 @@ flowchart TB
     subgraph Backends["Pluggable backends"]
         direction LR
         SQ["SQLite<br/>default / local"]
-        PG["Postgres<br/>+ pgvector"]
+        PG["Postgres + pgvector<br/>blessed cloud"]
         S3["S3<br/>blob storage"]
-        LA["LanceDB<br/>vector ANN"]
+        LA["LanceDB / SurrealDB<br/>alternates"]
     end
 
     Users --> CLI & MCP & REST & SDK & UI
@@ -128,6 +128,18 @@ flowchart TB
 - **Precedents** — distilled patterns promoted from successful (and failed) traces.
 - **Events** — a full audit log of every mutation, for observability and effectiveness analysis.
 
+## How Trellis improves
+
+Most "agent memory" systems attribute feedback to a session or a user. Trellis attributes it to the **exact items that were served**. Every assembled pack carries a `pack_id` plus per-item refs; when the agent reports success or failure, a `FEEDBACK_RECORDED` event joins cleanly back to the specific items, advisories, and strategies that produced the pack.
+
+Three mechanisms build on that attribution:
+
+- **Noise suppression.** Items whose post-hoc success rate drops below a threshold get tagged `signal_quality="noise"` and are excluded from future packs by default. This happens via the EventLog-authoritative loop (`run_effectiveness_feedback`) — no manual review required.
+- **Governed parameter promotion.** Retrieval scoring weights (recency half-life, domain boosts, position decay) are tunable per `(component, domain)` cell. Observed outcomes propose parameter changes; `promote_proposal` only applies them when sample size and effect size clear a statistical gate (defaults: 5 samples, 15% effect). This is the stair-step — each cycle can sharpen retrieval, but only on evidence strong enough to survive the gate.
+- **LLM bootstraps, deterministic inherits.** Classification runs four deterministic classifiers inline; the LLM only fires when confidence is below threshold. Extraction routes `DETERMINISTIC > HYBRID > LLM`, with LLM as an opt-in fallback (`allow_llm_fallback=False` by default). As rules and tags stabilize, the cost curve drops — the LLM did the bootstrapping, and deterministic paths inherit the signal.
+
+Packs are assembled **fresh on every call** today — nothing is pregenerated or cached — so every improvement (new noise tags, new parameter snapshots, new precedents) applies immediately to the next retrieval. Session-aware dedup prevents the same items from being re-served to the same agent within a 60-minute window.
+
 ## How the feedback loop works
 
 ```mermaid
@@ -140,7 +152,7 @@ flowchart TB
     Pack["Context Pack Builder<br/>keyword + semantic + graph<br/>dedupe → rerank → token-budget"]
     Work["Agent does work<br/>emits trace + feedback"]
     Mut["Governed Write Pipeline<br/>validate → policy → idempotency<br/>→ classify → execute → emit event"]
-    Store["Pluggable Storage<br/>SQLite · Postgres · S3<br/>pgvector · LanceDB"]
+    Store["Pluggable Storage<br/>SQLite · Postgres + pgvector · S3<br/>LanceDB / SurrealDB (alternates)"]
 
     subgraph Workers["Background workers — analyze & curate"]
         direction TB
@@ -195,9 +207,9 @@ Packs carry `pack_id` and per-item refs; when the agent reports success or failu
 Requires Python 3.11+.
 
 ```bash
-pip install trellis-ai                    # core (SQLite everywhere)
-pip install "trellis-ai[cloud]"           # + Postgres, pgvector, S3
-pip install "trellis-ai[vectors]"         # + LanceDB (local ANN)
+pip install trellis-ai                    # core (SQLite everywhere — local default)
+pip install "trellis-ai[cloud]"           # + Postgres, pgvector, S3 (blessed cloud default)
+pip install "trellis-ai[vectors]"         # + LanceDB (alternate local ANN)
 pip install "trellis-ai[llm-openai]"      # + OpenAI for enrichment & extraction
 pip install "trellis-ai[llm-anthropic]"   # + Anthropic
 pip install "trellis-ai[all]"             # everything
@@ -263,7 +275,7 @@ context = get_context_for_task(client, "implement retry logic", domain="backend"
 
 ## Planes & substrates
 
-Trellis separates **agent-facing** stores from **Trellis-internal** stores. Each plane has a blessed default backend ("substrate"); other backends are opt-in.
+Trellis separates **agent-facing** stores from **Trellis-internal** stores. Each plane has a blessed default backend ("substrate"); other backends are opt-in. **Backends are pluggable** — SQLite is the local default, pgvector is the current blessed cloud default, and alternates (LanceDB today, SurrealDB coming next) are first-class options wired via config.
 
 ```mermaid
 flowchart LR
@@ -281,12 +293,13 @@ flowchart LR
         EL["Event log<br/>mutation audit trail"]
     end
 
-    subgraph Substrates["Substrates (blessed defaults)"]
+    subgraph Substrates["Substrates"]
         direction TB
         SQ["SQLite — local default"]
-        PG["Postgres / pgvector — cloud"]
-        LA["LanceDB — local ANN"]
+        PG["Postgres + pgvector<br/>blessed cloud default"]
         S3["S3 — blobs in cloud"]
+        LA["LanceDB — alternate<br/>(local ANN)"]
+        SD["SurrealDB — coming next"]
     end
 
     G --- SQ
@@ -294,32 +307,38 @@ flowchart LR
     V --- SQ
     TR --- SQ
     EL --- SQ
-    G -.-> PG
-    D -.-> PG
-    V -.-> PG
-    V -.-> LA
     B --- SQ
+    G --- PG
+    D --- PG
+    V --- PG
+    TR --- PG
+    EL --- PG
     B -.-> S3
+    V -.-> LA
+    G -.-> SD
+    V -.-> SD
 
     classDef knowledge fill:#0b3d2e,stroke:#34d399,color:#e5e7eb;
     classDef ops fill:#3b1c36,stroke:#f472b6,color:#e5e7eb;
     classDef sub fill:#1f2937,stroke:#60a5fa,color:#e5e7eb;
+    classDef alt fill:#1f2937,stroke:#9ca3af,color:#9ca3af,stroke-dasharray: 5 5;
     class G,D,V,B knowledge;
     class TR,EL ops;
-    class SQ,PG,LA,S3 sub;
+    class SQ,PG,S3 sub;
+    class LA,SD alt;
 ```
 
-Solid lines are defaults (SQLite everywhere); dotted lines are cloud/alternate substrates wired via `~/.config/trellis/config.yaml`.
+Solid lines are blessed defaults (SQLite locally, Postgres + pgvector in cloud); dotted lines are alternate/exploratory substrates wired via `~/.config/trellis/config.yaml`. Choosing pgvector collocates keyword, semantic, and graph retrieval in a single Postgres transaction — one DSN, one consistency story.
 
 ## Storage — local or cloud
 
-Backends are wired from `~/.config/trellis/config.yaml`. SQLite is the default everywhere.
+Backends are wired from `~/.config/trellis/config.yaml`. SQLite is the local default; **Postgres + pgvector is the blessed cloud default**, chosen so keyword, semantic, and graph retrieval share one transactional store. LanceDB remains an alternate for vector-heavy local workloads; **SurrealDB integration is the next substrate on the roadmap**.
 
-| Store | Default | Cloud options |
-|-------|---------|---------------|
-| Trace / Document / Graph / Event Log | `sqlite` | `postgres` |
-| Vector | `sqlite` | `pgvector`, `lancedb` |
-| Blob | `local` | `s3` |
+| Store | Local default | Cloud default | Alternates |
+|-------|---------------|---------------|------------|
+| Trace / Document / Graph / Event Log | `sqlite` | `postgres` | — |
+| Vector | `sqlite` | `pgvector` | `lancedb` (local ANN) |
+| Blob | `local` | `s3` | — |
 
 ```yaml
 stores:
@@ -327,7 +346,8 @@ stores:
     backend: postgres
     dsn: postgresql://user:pass@host/db
   vector:
-    backend: lancedb
+    backend: pgvector
+    dsn: postgresql://user:pass@host/db
   blob:
     backend: s3
     bucket: trellis-artifacts

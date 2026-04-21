@@ -834,6 +834,13 @@ Classified by the existing `LLMFacetClassifier` pipeline when deterministic conf
 - [x] **Tagging guide**: [docs/agent-guide/tagging-for-retrieval.md](docs/agent-guide/tagging-for-retrieval.md)
 - [ ] **Migration guide**: update existing `get_context` / `search` docs to reference sectioned retrieval as the recommended pattern for multi-agent workflows
 
+### Pack Composition — Open Explorations (2026-04-20)
+
+Surfaced while refining README messaging. Two gaps between the current `PackBuilder` and the "curated from prior runs + live discovery, weighted" mental model.
+
+- [ ] **Explore: flow promoted precedents into main packs.** Today promoted precedents live as `PRECEDENT_PROMOTED` events reached via `get_lessons` — they are **not** merged into `PackBuilder.build()` candidates. Before wiring this in, establish a baseline: for the last N sessions with feedback, how often did the relevant precedent actually exist? How often would injecting top-K precedents into the candidate pool have displaced a higher-scoring discovered item vs. added real signal? If the hit rate is low, the feature is costume jewelry; if it's meaningful, design a `PrecedentSearch` strategy (own `strategy_source`, RRF'd alongside keyword/semantic/graph, per-strategy budget). Decision gate: baseline analysis first, implementation second.
+- [ ] **Explore: call-time strategy weights.** `PackBuilder` currently fuses keyword/semantic/graph via fixed-weight RRF ([rerankers/rrf.py](src/trellis/retrieve/rerankers/rrf.py)). An agent cannot say "lean on graph for this structural intent" or "lean on semantic for this conceptual intent" per-call. Scope: add optional `strategy_weights: dict[str, float] | None` to `PackBuilder.build()` and the MCP / SDK / REST surfaces, plumb through to a weighted-RRF variant, emit weights in `PACK_ASSEMBLED` for effectiveness attribution so the tuning loop can learn when different mixes win. Small change, potentially high leverage — but confirm via effectiveness analysis on existing sessions that strategy-source wins actually cluster by intent type before adding the surface.
+
 ### Pack Quality Evaluation Framework (interactive testing)
 
 Generic pack evaluation that works on synthetic scenarios *and* real event log data. Extends the existing `effectiveness.py` / `token_usage.py` pattern with richer scoring dimensions.
