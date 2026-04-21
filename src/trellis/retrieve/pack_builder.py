@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import structlog
 
+from trellis.classify.dedup.minhash import MinHashIndex
 from trellis.core.base import utc_now
 from trellis.core.hashing import estimate_tokens
 from trellis.retrieve.rerankers.base import Reranker
@@ -33,6 +35,38 @@ logger = structlog.get_logger()
 DEFAULT_SESSION_DEDUP_WINDOW_MINUTES = 60
 
 
+@dataclass(frozen=True)
+class SemanticDedupConfig:
+    """Configuration for MinHash/LSH-based fuzzy dedup in :class:`PackBuilder`.
+
+    Catches near-duplicate pack items that survived exact ``item_id`` dedup
+    (e.g., the same excerpt indexed twice under mirrored entity ids, or
+    almost-identical content from different source systems). Closes Gap 3.2.
+
+    The infrastructure — :class:`~trellis.classify.dedup.minhash.MinHashIndex`
+    — already exists and is wired into ``save_memory``; enabling it in
+    PackBuilder is a wire-up, not new logic.
+
+    Threshold selection guidance:
+
+    * ``0.90+`` — very strict (typo / casing / punctuation only). Use for
+      short excerpts where the risk of false positives is high.
+    * ``0.80-0.90`` — standard. Good default for pack excerpts.
+    * ``0.70-0.80`` — loose. Catches reworded content; higher false-positive
+      risk on short text.
+
+    ``min_shingles`` is an entropy filter — items with fewer shingles than
+    this are never compared (protects against false matches on trivial
+    text like "see above" or "TBD").
+    """
+
+    threshold: float = 0.85
+    num_perm: int = 128
+    num_bands: int = 16
+    shingle_size: int = 3
+    min_shingles: int = 5
+
+
 class PackBuilder:
     """Assembles retrieval packs by running search strategies and applying budgets.
 
@@ -48,11 +82,14 @@ class PackBuilder:
         event_log: EventLog | None = None,
         advisory_store: AdvisoryStore | None = None,
         reranker: Reranker | None = None,
+        semantic_dedup: SemanticDedupConfig | None = None,
     ) -> None:
         self._strategies = strategies or []
         self._event_log = event_log
         self._advisory_store = advisory_store
         self._reranker = reranker
+        #: Fuzzy-dedup config. ``None`` disables (exact ``item_id`` dedup only).
+        self._semantic_dedup = semantic_dedup
 
     def add_strategy(self, strategy: SearchStrategy) -> None:
         """Add a search strategy."""
@@ -128,6 +165,15 @@ class PackBuilder:
         # Deduplicate by item_id (keep highest relevance_score)
         deduped, dedup_rejected = self._deduplicate_tracked(all_items)
         rejected.extend(dedup_rejected)
+
+        # Fuzzy/semantic dedup (Gap 3.2): near-duplicates that survived exact
+        # item_id dedup (mirrored schemas, cross-system clones) are collapsed
+        # here via MinHash/LSH. Skipped when config is None.
+        if self._semantic_dedup is not None:
+            deduped, semantic_rejected = self._semantic_dedup_tracked(
+                deduped, self._semantic_dedup
+            )
+            rejected.extend(semantic_rejected)
 
         # Defense-in-depth: drop any item whose metadata marks it structural,
         # even if it slipped past a strategy-level filter (e.g., a keyword
@@ -291,6 +337,12 @@ class PackBuilder:
         # 2. Deduplicate
         deduped = self._deduplicate(all_items)
 
+        # 2a. Fuzzy/semantic dedup (Gap 3.2). Rejected items are discarded
+        # for the sectioned path because each section builds its own report
+        # later; the shared pool just needs to be collapsed.
+        if self._semantic_dedup is not None:
+            deduped, _ = self._semantic_dedup_tracked(deduped, self._semantic_dedup)
+
         # 3. Defense-in-depth structural filter.
         if not include_structural:
             deduped = [
@@ -431,6 +483,7 @@ class PackBuilder:
                 ],
                 "advisory_ids": [a.advisory_id for a in pack.advisories],
                 "reranker": self._reranker.name if self._reranker else None,
+                "semantic_dedup_enabled": self._semantic_dedup is not None,
             },
         )
 
@@ -486,6 +539,10 @@ class PackBuilder:
                 ],
                 "advisory_ids": [a.advisory_id for a in pack.advisories],
                 "reranker": self._reranker.name if self._reranker else None,
+                "semantic_dedup_enabled": self._semantic_dedup is not None,
+                "semantic_dedup_rejected": sum(
+                    1 for r in report.rejected_items if r.reason == "semantic_dedup"
+                ),
             },
         )
 
@@ -577,6 +634,69 @@ class PackBuilder:
             if existing is None or item.relevance_score > existing.relevance_score:
                 seen[item.item_id] = item
         return list(seen.values())
+
+    @staticmethod
+    def _semantic_dedup_tracked(
+        items: list[PackItem],
+        config: SemanticDedupConfig,
+    ) -> tuple[list[PackItem], list[RejectedItem]]:
+        """Collapse near-duplicates via MinHash/LSH.
+
+        Processes items in descending ``relevance_score`` order so the
+        winner of a duplicate cluster is always the highest-scoring one.
+        Subsequent items that match an already-kept one above threshold
+        are rejected with ``reason="semantic_dedup"``.
+
+        Items below the entropy threshold (``min_shingles``) are kept
+        unchanged — MinHash can't meaningfully compare them, and
+        erroneously dropping short excerpts ("see README", citation
+        stubs) would be worse than letting them through. Matches the
+        same conservative posture used in ``save_memory``.
+        """
+        # A single item cannot duplicate itself; skip the index build.
+        min_items_for_comparison = 2
+        if len(items) < min_items_for_comparison:
+            return list(items), []
+
+        index = MinHashIndex(
+            num_perm=config.num_perm,
+            num_bands=config.num_bands,
+            threshold=config.threshold,
+            shingle_size=config.shingle_size,
+            min_shingles=config.min_shingles,
+        )
+
+        ordered = sorted(items, key=lambda i: i.relevance_score, reverse=True)
+        kept: list[PackItem] = []
+        rejected: list[RejectedItem] = []
+
+        for item in ordered:
+            excerpt = item.excerpt or ""
+            match = index.find_duplicate(excerpt)
+            if match is not None:
+                matched_id, similarity = match
+                rejected.append(
+                    RejectedItem(
+                        item_id=item.item_id,
+                        item_type=item.item_type,
+                        relevance_score=item.relevance_score,
+                        reason="semantic_dedup",
+                        strategy_source=item.strategy_source,
+                    )
+                )
+                logger.debug(
+                    "semantic_dedup_match",
+                    rejected_id=item.item_id,
+                    matched_id=matched_id,
+                    similarity=round(similarity, 3),
+                )
+                continue
+            # add() returns False when entropy-filtered; keep the item
+            # either way — we just can't index it for future comparisons.
+            index.add(item.item_id, excerpt)
+            kept.append(item)
+
+        return kept, rejected
 
     def _deduplicate_tracked(
         self, items: list[PackItem]

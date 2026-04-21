@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
@@ -17,12 +18,16 @@ def apply_noise_tags(
 ) -> int:
     """Update signal_quality to ``"noise"`` for items flagged by effectiveness analysis.
 
+    Also stamps ``classified_at`` so the refreshed tag set is visible to
+    staleness-based retrieval logic (Gap 1.1).
+
     Returns the number of items updated.
     """
     if not noise_candidates:
         return 0
 
     updated = 0
+    stamp = datetime.now(UTC).isoformat()
     for item_id in noise_candidates:
         doc = document_store.get(item_id)
         if doc is None:
@@ -32,6 +37,7 @@ def apply_noise_tags(
         metadata: dict[str, Any] = doc.get("metadata", {})
         content_tags = metadata.setdefault("content_tags", {})
         content_tags["signal_quality"] = "noise"
+        content_tags["classified_at"] = stamp
 
         document_store.put(item_id, doc["content"], metadata)
         updated += 1

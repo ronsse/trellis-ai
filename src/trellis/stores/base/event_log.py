@@ -51,6 +51,17 @@ class EventType(StrEnum):
     # Feedback
     FEEDBACK_RECORDED = "feedback.recorded"
 
+    # Advisory lifecycle (soft-suppression + restore — see Gap 2.1)
+    ADVISORY_SUPPRESSED = "advisory.suppressed"
+    ADVISORY_RESTORED = "advisory.restored"
+    # Advisory fitness drift — regime shift vs. gradual update (Gap 2.4).
+    # Smoothed confidence updates mask fast shifts; this event surfaces
+    # them so operators can review before the smoothing absorbs them.
+    ADVISORY_DRIFT_DETECTED = "advisory.drift_detected"
+
+    # Classification refresh (stale-tag reclassification — see Gap 1.1)
+    TAGS_REFRESHED = "tags.refreshed"
+
     # Memory (save_memory MCP tool / unstructured observation ingestion)
     MEMORY_STORED = "memory.stored"
 

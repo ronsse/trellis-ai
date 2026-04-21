@@ -124,3 +124,128 @@ class TestAdvisoryStore:
         store.put(updated)
         assert len(store.list()) == 1
         assert store.get(adv.advisory_id).confidence == 0.9  # type: ignore[union-attr]
+
+
+class TestAdvisorySuppressionLifecycle:
+    """Gap 2.1 — soft suppression is reversible, filter-aware, and audited."""
+
+    def test_new_advisory_is_active(self, tmp_path: Path) -> None:
+        from trellis.schemas.advisory import AdvisoryStatus
+
+        store = AdvisoryStore(tmp_path / "a.json")
+        adv = store.put(_advisory())
+        assert adv.status == AdvisoryStatus.ACTIVE
+        assert adv.suppressed_at is None
+        assert adv.suppression_reason is None
+
+    def test_suppress_flips_status_and_stamps_metadata(self, tmp_path: Path) -> None:
+        from trellis.schemas.advisory import AdvisoryStatus
+
+        store = AdvisoryStore(tmp_path / "a.json")
+        adv = store.put(_advisory())
+
+        updated = store.suppress(adv.advisory_id, reason="fitness below threshold")
+
+        assert updated is not None
+        assert updated.status == AdvisoryStatus.SUPPRESSED
+        assert updated.suppressed_at is not None
+        assert updated.suppression_reason == "fitness below threshold"
+
+    def test_suppress_unknown_id_returns_none(self, tmp_path: Path) -> None:
+        store = AdvisoryStore(tmp_path / "a.json")
+        assert store.suppress("does-not-exist") is None
+
+    def test_suppress_is_idempotent(self, tmp_path: Path) -> None:
+        store = AdvisoryStore(tmp_path / "a.json")
+        adv = store.put(_advisory())
+        first = store.suppress(adv.advisory_id, reason="r1")
+        second = store.suppress(adv.advisory_id, reason="r2")
+
+        # Idempotent: second call returns the existing record unchanged.
+        assert first is not None
+        assert second is not None
+        assert second.suppressed_at == first.suppressed_at
+        assert second.suppression_reason == "r1"
+
+    def test_list_excludes_suppressed_by_default(self, tmp_path: Path) -> None:
+        store = AdvisoryStore(tmp_path / "a.json")
+        keep = store.put(_advisory(scope="keep"))
+        drop = store.put(_advisory(scope="drop"))
+        store.suppress(drop.advisory_id)
+
+        visible = store.list()
+        assert [a.advisory_id for a in visible] == [keep.advisory_id]
+
+    def test_list_include_suppressed_shows_all(self, tmp_path: Path) -> None:
+        store = AdvisoryStore(tmp_path / "a.json")
+        a = store.put(_advisory(scope="s1"))
+        b = store.put(_advisory(scope="s2"))
+        store.suppress(b.advisory_id)
+
+        all_advisories = store.list(include_suppressed=True)
+        ids = {adv.advisory_id for adv in all_advisories}
+        assert ids == {a.advisory_id, b.advisory_id}
+
+    def test_get_returns_suppressed_advisory(self, tmp_path: Path) -> None:
+        from trellis.schemas.advisory import AdvisoryStatus
+
+        store = AdvisoryStore(tmp_path / "a.json")
+        adv = store.put(_advisory())
+        store.suppress(adv.advisory_id)
+
+        # get() is status-agnostic so the fitness loop can still evaluate
+        # suppressed advisories and so the UI can show suppression history.
+        retrieved = store.get(adv.advisory_id)
+        assert retrieved is not None
+        assert retrieved.status == AdvisoryStatus.SUPPRESSED
+
+    def test_restore_flips_status_and_clears_metadata(self, tmp_path: Path) -> None:
+        from trellis.schemas.advisory import AdvisoryStatus
+
+        store = AdvisoryStore(tmp_path / "a.json")
+        adv = store.put(_advisory())
+        store.suppress(adv.advisory_id, reason="low lift")
+
+        restored = store.restore(adv.advisory_id)
+        assert restored is not None
+        assert restored.status == AdvisoryStatus.ACTIVE
+        assert restored.suppressed_at is None
+        assert restored.suppression_reason is None
+
+        # And it's visible to default list() again.
+        assert restored.advisory_id in [a.advisory_id for a in store.list()]
+
+    def test_restore_is_idempotent(self, tmp_path: Path) -> None:
+        store = AdvisoryStore(tmp_path / "a.json")
+        adv = store.put(_advisory())
+        # Restoring an already-active advisory is a no-op.
+        assert store.restore(adv.advisory_id) is not None
+        # Round-trip suppress→restore→restore.
+        store.suppress(adv.advisory_id)
+        store.restore(adv.advisory_id)
+        assert store.restore(adv.advisory_id) is not None
+
+    def test_restore_unknown_id_returns_none(self, tmp_path: Path) -> None:
+        store = AdvisoryStore(tmp_path / "a.json")
+        assert store.restore("does-not-exist") is None
+
+    def test_suppression_survives_reload(self, tmp_path: Path) -> None:
+        from trellis.schemas.advisory import AdvisoryStatus
+
+        path = tmp_path / "a.json"
+        store1 = AdvisoryStore(path)
+        adv = store1.put(_advisory(scope="persist-suppressed"))
+        store1.suppress(adv.advisory_id, reason="persisted reason")
+
+        store2 = AdvisoryStore(path)
+        reloaded = store2.get(adv.advisory_id)
+        assert reloaded is not None
+        assert reloaded.status == AdvisoryStatus.SUPPRESSED
+        assert reloaded.suppression_reason == "persisted reason"
+
+    def test_remove_still_hard_deletes(self, tmp_path: Path) -> None:
+        """remove() is preserved for admin cleanup — distinct from suppress()."""
+        store = AdvisoryStore(tmp_path / "a.json")
+        adv = store.put(_advisory())
+        assert store.remove(adv.advisory_id) is True
+        assert store.get(adv.advisory_id) is None

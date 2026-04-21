@@ -142,6 +142,141 @@ class TestMutationExecutor:
         assert result.status == CommandStatus.SUCCESS
 
 
+class TestIdempotencyCacheEviction:
+    """Gap 4.1 — FIFO eviction replaces silent .clear(); loud warning when
+    eviction happens without an event_log backstop."""
+
+    def test_rejects_zero_cache_size(self) -> None:
+        import pytest
+
+        with pytest.raises(ValueError, match="idempotency_cache_size must be >= 1"):
+            MutationExecutor(idempotency_cache_size=0)
+
+    def test_fifo_eviction_drops_oldest_key(self) -> None:
+        executor = MutationExecutor(
+            handlers={Operation.ENTITY_CREATE: _handler()},
+            idempotency_cache_size=3,
+        )
+        for i in range(3):
+            executor.execute(_cmd(idempotency_key=f"k{i}"))
+        # Fourth key evicts k0 (the oldest)
+        executor.execute(_cmd(idempotency_key="k3"))
+
+        cache = executor._seen_idempotency_keys
+        assert list(cache.keys()) == ["k1", "k2", "k3"]
+        assert executor._idempotency_evictions == 1
+
+    def test_recent_keys_still_detected_as_duplicates_after_eviction(self) -> None:
+        executor = MutationExecutor(
+            handlers={Operation.ENTITY_CREATE: _handler()},
+            idempotency_cache_size=2,
+        )
+        executor.execute(_cmd(idempotency_key="old"))
+        executor.execute(_cmd(idempotency_key="mid"))
+        # Evicts "old"
+        executor.execute(_cmd(idempotency_key="new"))
+
+        # "mid" and "new" should still be detected as duplicates
+        mid_result = executor.execute(_cmd(idempotency_key="mid"))
+        new_result = executor.execute(_cmd(idempotency_key="new"))
+        assert mid_result.status == CommandStatus.DUPLICATE
+        assert new_result.status == CommandStatus.DUPLICATE
+
+    def test_hot_key_refreshed_on_duplicate_hit(self) -> None:
+        """move_to_end() keeps re-seen keys warm so they aren't evicted
+        before truly-cold keys."""
+        executor = MutationExecutor(
+            handlers={Operation.ENTITY_CREATE: _handler()},
+            idempotency_cache_size=2,
+        )
+        executor.execute(_cmd(idempotency_key="a"))
+        executor.execute(_cmd(idempotency_key="b"))
+        # Re-hit "a" — it becomes the newest; "b" is now oldest.
+        executor.execute(_cmd(idempotency_key="a"))
+        # Insert "c" — evicts "b", keeps "a".
+        executor.execute(_cmd(idempotency_key="c"))
+
+        assert list(executor._seen_idempotency_keys.keys()) == ["a", "c"]
+
+    def test_eviction_without_event_log_emits_warning(self, monkeypatch) -> None:
+        from trellis.mutate import executor as executor_module
+
+        warn_calls: list[tuple[str, dict]] = []
+
+        def _capture(event: str, **kw: object) -> None:
+            warn_calls.append((event, kw))
+
+        monkeypatch.setattr(executor_module.logger, "warning", _capture)
+
+        executor = MutationExecutor(
+            handlers={Operation.ENTITY_CREATE: _handler()},
+            idempotency_cache_size=2,
+        )
+        executor.execute(_cmd(idempotency_key="k0"))
+        executor.execute(_cmd(idempotency_key="k1"))
+        executor.execute(_cmd(idempotency_key="k2"))  # evicts k0
+
+        events = [e for e, _ in warn_calls]
+        assert "idempotency_cache_evicted_without_event_log" in events
+        payload = next(
+            kw for e, kw in warn_calls
+            if e == "idempotency_cache_evicted_without_event_log"
+        )
+        assert payload["evicted_key"] == "k0"
+        assert payload["cache_size"] == 2
+        assert payload["total_evictions"] == 1
+
+    def test_eviction_with_event_log_no_warning(self, monkeypatch) -> None:
+        """With event_log attached, eviction is safe (persisted check is
+        authoritative) — no warning should fire."""
+        from trellis.mutate import executor as executor_module
+
+        warn_calls: list[tuple[str, dict]] = []
+
+        def _capture(event: str, **kw: object) -> None:
+            warn_calls.append((event, kw))
+
+        monkeypatch.setattr(executor_module.logger, "warning", _capture)
+
+        event_log = MagicMock()
+        event_log.has_idempotency_key.return_value = False
+        executor = MutationExecutor(
+            event_log=event_log,
+            handlers={Operation.ENTITY_CREATE: _handler()},
+            idempotency_cache_size=2,
+        )
+        executor.execute(_cmd(idempotency_key="k0"))
+        executor.execute(_cmd(idempotency_key="k1"))
+        executor.execute(_cmd(idempotency_key="k2"))  # evicts k0, silently OK
+
+        assert not any(
+            e == "idempotency_cache_evicted_without_event_log" for e, _ in warn_calls
+        )
+        assert executor._idempotency_evictions == 1
+
+    def test_evicted_key_caught_via_persisted_event_log(self) -> None:
+        """The real safety property: once a key has been evicted from the
+        in-memory cache, a retry of that command is still rejected because
+        the event log has persisted it."""
+        event_log = MagicMock()
+        # Return True only for the evicted key, simulating that it was
+        # persisted to the event log when originally executed.
+        event_log.has_idempotency_key.side_effect = lambda k: k == "evicted"
+        executor = MutationExecutor(
+            event_log=event_log,
+            handlers={Operation.ENTITY_CREATE: _handler()},
+            idempotency_cache_size=2,
+        )
+        executor.execute(_cmd(idempotency_key="evicted"))
+        executor.execute(_cmd(idempotency_key="fresh1"))
+        executor.execute(_cmd(idempotency_key="fresh2"))  # evicts "evicted"
+
+        # Retry of the evicted key — persisted check must catch it
+        result = executor.execute(_cmd(idempotency_key="evicted"))
+        assert result.status == CommandStatus.DUPLICATE
+        assert "persisted" in result.message
+
+
 class TestBatchExecution:
     def test_batch_sequential(self) -> None:
         handler = _handler()

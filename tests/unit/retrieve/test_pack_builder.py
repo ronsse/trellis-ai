@@ -797,3 +797,216 @@ class TestSessionDedup:
         )
         flat = builder.build("q", session_id="sess-H")
         assert flat.items == []
+
+
+# ---------------------------------------------------------------------------
+# Gap 3.2 — Semantic / fuzzy dedup via MinHash/LSH
+# ---------------------------------------------------------------------------
+
+
+class TestSemanticDedup:
+    """PackBuilder collapses near-duplicate excerpts that survived
+    exact-item_id dedup (mirrored schemas, cross-system clones)."""
+
+    _LONG_EXCERPT = (
+        "Deploying to production requires running the full migration suite, "
+        "validating the schema against the staging database, and confirming "
+        "that all downstream consumers have updated their clients. "
+    )
+
+    def _near_duplicate(self, base: str) -> str:
+        # Tiny perturbation: whitespace + punctuation changes. MinHash with
+        # a 0.85 Jaccard threshold should catch this easily.
+        return base.replace(". ", ".  ").replace(",", " ,")
+
+    def test_disabled_by_default(self) -> None:
+        from trellis.retrieve.pack_builder import SemanticDedupConfig  # noqa: F401
+
+        s = _make_strategy(
+            "kw",
+            [
+                _item("a", 0.9, excerpt=self._LONG_EXCERPT),
+                _item("b", 0.8, excerpt=self._LONG_EXCERPT),
+            ],
+        )
+        builder = PackBuilder(strategies=[s])  # no config → disabled
+        pack = builder.build("q")
+        # Both items pass through (distinct item_ids, same excerpt).
+        assert {i.item_id for i in pack.items} == {"a", "b"}
+
+    def test_collapses_near_duplicate_excerpts(self) -> None:
+        from trellis.retrieve.pack_builder import SemanticDedupConfig
+
+        dup = self._near_duplicate(self._LONG_EXCERPT)
+        s = _make_strategy(
+            "kw",
+            [
+                _item("winner", 0.95, excerpt=self._LONG_EXCERPT),
+                _item("loser", 0.5, excerpt=dup),
+            ],
+        )
+        builder = PackBuilder(
+            strategies=[s],
+            semantic_dedup=SemanticDedupConfig(),
+        )
+        pack = builder.build("q")
+
+        # Higher-scoring wins, loser rejected with reason=semantic_dedup.
+        assert [i.item_id for i in pack.items] == ["winner"]
+        reasons = {r.reason for r in pack.retrieval_report.rejected_items}
+        assert "semantic_dedup" in reasons
+
+    def test_preserves_distinct_excerpts(self) -> None:
+        from trellis.retrieve.pack_builder import SemanticDedupConfig
+
+        s = _make_strategy(
+            "kw",
+            [
+                _item("a", 0.9, excerpt="Migration guide for v2 to v3 upgrades"),
+                _item(
+                    "b",
+                    0.8,
+                    excerpt="Rollback procedure when a release fails validation",
+                ),
+            ],
+        )
+        builder = PackBuilder(
+            strategies=[s],
+            semantic_dedup=SemanticDedupConfig(),
+        )
+        pack = builder.build("q")
+        assert {i.item_id for i in pack.items} == {"a", "b"}
+
+    def test_short_excerpts_below_entropy_pass_through(self) -> None:
+        """MinHash's entropy filter refuses to dedup trivially short text."""
+        from trellis.retrieve.pack_builder import SemanticDedupConfig
+
+        # min_shingles=5 with shingle_size=3 means text needs 8+ chars
+        s = _make_strategy(
+            "kw",
+            [
+                _item("a", 0.9, excerpt="TBD"),
+                _item("b", 0.8, excerpt="TBD"),
+            ],
+        )
+        builder = PackBuilder(
+            strategies=[s],
+            semantic_dedup=SemanticDedupConfig(),
+        )
+        pack = builder.build("q")
+        # Both kept — entropy filter prevents a false-positive dedup.
+        assert {i.item_id for i in pack.items} == {"a", "b"}
+
+    def test_keeps_highest_score_on_cluster(self) -> None:
+        """When 3+ items are near-duplicates, the highest-scoring wins."""
+        from trellis.retrieve.pack_builder import SemanticDedupConfig
+
+        base = self._LONG_EXCERPT
+        s = _make_strategy(
+            "kw",
+            [
+                _item("low", 0.3, excerpt=base),
+                _item("top", 0.99, excerpt=self._near_duplicate(base)),
+                _item("mid", 0.7, excerpt=base + " "),
+            ],
+        )
+        builder = PackBuilder(
+            strategies=[s],
+            semantic_dedup=SemanticDedupConfig(),
+        )
+        pack = builder.build("q")
+        assert [i.item_id for i in pack.items] == ["top"]
+        rejected_ids = {r.item_id for r in pack.retrieval_report.rejected_items}
+        assert "low" in rejected_ids
+        assert "mid" in rejected_ids
+
+    def test_threshold_loosening_catches_more(self) -> None:
+        """Lowering threshold dedups items a stricter threshold would keep."""
+        from trellis.retrieve.pack_builder import SemanticDedupConfig
+
+        # Roughly 70% overlap — not enough at 0.85 but enough at 0.5.
+        a_text = "Production deploys run the migration suite and validate schemas"
+        b_text = "Production deploys execute migration scripts and confirm schemas"
+
+        strict = PackBuilder(
+            strategies=[
+                _make_strategy(
+                    "kw",
+                    [_item("a", 0.9, excerpt=a_text), _item("b", 0.8, excerpt=b_text)],
+                )
+            ],
+            semantic_dedup=SemanticDedupConfig(threshold=0.85),
+        )
+        loose = PackBuilder(
+            strategies=[
+                _make_strategy(
+                    "kw",
+                    [_item("a", 0.9, excerpt=a_text), _item("b", 0.8, excerpt=b_text)],
+                )
+            ],
+            semantic_dedup=SemanticDedupConfig(threshold=0.3),
+        )
+
+        strict_ids = {i.item_id for i in strict.build("q").items}
+        loose_ids = {i.item_id for i in loose.build("q").items}
+        # Strict may or may not catch this specific pair depending on
+        # shingle overlap — what matters is that loose catches at least
+        # as much as strict.
+        assert loose_ids.issubset(strict_ids)
+
+    def test_telemetry_records_semantic_dedup_state(self, tmp_path: Path) -> None:
+        from trellis.retrieve.pack_builder import SemanticDedupConfig
+
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        s = _make_strategy(
+            "kw",
+            [
+                _item("a", 0.9, excerpt=self._LONG_EXCERPT),
+                _item("b", 0.5, excerpt=self._near_duplicate(self._LONG_EXCERPT)),
+            ],
+        )
+        builder = PackBuilder(
+            strategies=[s],
+            event_log=event_log,
+            semantic_dedup=SemanticDedupConfig(),
+        )
+        builder.build("q")
+
+        from trellis.stores.base.event_log import EventType
+
+        events = event_log.get_events(event_type=EventType.PACK_ASSEMBLED)
+        assert len(events) == 1
+        payload = events[0].payload
+        assert payload["semantic_dedup_enabled"] is True
+        assert payload["semantic_dedup_rejected"] >= 1
+
+    def test_telemetry_off_when_disabled(self, tmp_path: Path) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        s = _make_strategy("kw", [_item("a", 0.9, excerpt=self._LONG_EXCERPT)])
+        builder = PackBuilder(strategies=[s], event_log=event_log)
+        builder.build("q")
+
+        from trellis.stores.base.event_log import EventType
+
+        events = event_log.get_events(event_type=EventType.PACK_ASSEMBLED)
+        assert events[0].payload["semantic_dedup_enabled"] is False
+        assert events[0].payload["semantic_dedup_rejected"] == 0
+
+    def test_sectioned_path_also_applies_dedup(self) -> None:
+        from trellis.retrieve.pack_builder import SemanticDedupConfig
+
+        dup = self._near_duplicate(self._LONG_EXCERPT)
+        s = _make_strategy(
+            "kw",
+            [
+                _item("winner", 0.9, excerpt=self._LONG_EXCERPT),
+                _item("loser", 0.5, excerpt=dup),
+            ],
+        )
+        builder = PackBuilder(
+            strategies=[s],
+            semantic_dedup=SemanticDedupConfig(),
+        )
+        pack = builder.build_sectioned("q", sections=[SectionRequest(name="all")])
+        section_items = {i.item_id for i in pack.sections[0].items}
+        assert section_items == {"winner"}

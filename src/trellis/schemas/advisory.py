@@ -8,6 +8,7 @@ based on past successes and failures.
 
 from __future__ import annotations
 
+from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
@@ -25,6 +26,28 @@ class AdvisoryCategory(StrEnum):
     ENTITY = "entity"  # "Entity X in 80% of successful traces"
     ANTI_PATTERN = "anti_pattern"  # "Skipping validation → 3x failure rate"
     QUERY = "query"  # "Include 'deployment' in your context query"
+
+
+class AdvisoryStatus(StrEnum):
+    """Lifecycle state of an advisory.
+
+    ``SUPPRESSED`` is a reversible soft-delete: the advisory stays in
+    the store (so later evidence can restore it) but is filtered out
+    of retrieval by default. Prior to the 2.1 fix, advisories were
+    hard-deleted on fitness-loop suppression and unrecoverable.
+    """
+
+    ACTIVE = "active"
+    SUPPRESSED = "suppressed"
+
+
+class DriftPattern(StrEnum):
+    """Pattern classification emitted on ``AdvisoryDriftAlert`` (Gap 2.4)."""
+
+    #: Recent success_rate dropped materially vs. the full window.
+    REGIME_SHIFT_DECLINE = "regime_shift_decline"
+    #: Recent lift and full lift have opposite signs, with non-trivial magnitude.
+    LIFT_SIGN_FLIP = "lift_sign_flip"
 
 
 class AdvisoryEvidence(VersionedModel):
@@ -53,3 +76,6 @@ class Advisory(TimestampedModel, VersionedModel):
     scope: str  # domain, intent pattern, or entity type
     entity_id: str | None = None  # for ENTITY advisories
     metadata: dict[str, Any] = Field(default_factory=dict)
+    status: AdvisoryStatus = AdvisoryStatus.ACTIVE
+    suppressed_at: datetime | None = None
+    suppression_reason: str | None = None

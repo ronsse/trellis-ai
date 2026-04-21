@@ -115,6 +115,13 @@ class ContentTags(TrellisModel):
     custom: dict[str, list[str]] = Field(default_factory=dict)
     classified_by: list[str] = Field(default_factory=list)
     classification_version: str = "2"
+    #: When this tag set was last (re)computed. Populated by classifiers via
+    #: :meth:`MergedClassification.to_content_tags` and by reclassification
+    #: passes (see :mod:`trellis.classify.refresh`). Closes Gap 1.1: without
+    #: a stamp, retrieval can't tell a stale ingest-time tag from a fresh
+    #: re-evaluation. ``None`` means "never stamped" (legacy items pre-1.1
+    #: fix or hand-edited metadata).
+    classified_at: datetime | None = None
 
     @model_validator(mode="after")
     def _reject_reserved_namespaces(self) -> ContentTags:
