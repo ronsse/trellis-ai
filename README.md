@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/trellis-logo.svg" alt="Trellis" width="420">
+</p>
+
 # Trellis
 
 [![Tests](https://github.com/ronsse/trellis-ai/actions/workflows/tests.yml/badge.svg)](https://github.com/ronsse/trellis-ai/actions/workflows/tests.yml)
@@ -33,36 +37,90 @@ trellis retrieve pack --intent "deploy staging for user-api"   # assembled conte
 
 Every CLI command supports `--format json` for machine output.
 
+## Architecture at a glance
+
+```mermaid
+flowchart TB
+    subgraph Interfaces["Interfaces"]
+        direction LR
+        CLI["CLI<br/>trellis"]
+        MCP["MCP Server<br/>11 tools"]
+        REST["REST API<br/>FastAPI"]
+        SDK["Python SDK<br/>local + remote"]
+        UI["Web UI<br/>Cytoscape.js"]
+        Users["Agents + Humans<br/>Claude, LangGraph, …"]
+    end
+
+    subgraph Core["Core engine"]
+        direction LR
+        PB["Pack Builder<br/>keyword + semantic + graph<br/>dedupe · rank · token budget"]
+        GP["Governed Mutation Pipeline<br/>validate → policy → idempotency<br/>→ execute → emit event"]
+        CL["Classification<br/>4 deterministic classifiers<br/>LLM fallback (async)"]
+        WK["Workers<br/>enrichment · pattern mining<br/>maintenance · ingestion"]
+    end
+
+    subgraph Data["Data layer"]
+        direction LR
+        TR["Traces<br/>immutable"]
+        GR["Graph<br/>SCD Type 2"]
+        DO["Documents<br/>full-text"]
+        VE["Vectors<br/>semantic"]
+        EL["Event Log<br/>audit"]
+        BL["Blobs<br/>files"]
+    end
+
+    subgraph Backends["Pluggable backends"]
+        direction LR
+        SQ["SQLite<br/>default / local"]
+        PG["Postgres<br/>+ pgvector"]
+        S3["S3<br/>blob storage"]
+        LA["LanceDB<br/>vector ANN"]
+    end
+
+    Users --> CLI & MCP & REST & SDK & UI
+    Interfaces --> Core
+    Core --> Data
+    Data --> Backends
+
+    classDef iface fill:#1f2937,stroke:#60a5fa,color:#e5e7eb;
+    classDef core fill:#0b3d2e,stroke:#34d399,color:#e5e7eb;
+    classDef data fill:#3b2f1c,stroke:#fbbf24,color:#e5e7eb;
+    classDef back fill:#3b1c36,stroke:#f472b6,color:#e5e7eb;
+    class CLI,MCP,REST,SDK,UI,Users iface;
+    class PB,GP,CL,WK core;
+    class TR,GR,DO,VE,EL,BL data;
+    class SQ,PG,S3,LA back;
+```
+
 ## What's in the substrate
 
+```mermaid
+flowchart TB
+    subgraph Graph["Entity graph (temporally versioned)"]
+        direction LR
+        A["service: auth-api"] -- depends_on --> B["service: user-db"]
+        A -- part_of --> C["team: platform"]
+    end
+
+    T["trace: 'Added rate limiting to auth-api'<br/>• researched existing patterns<br/>• tool_call edit_file gateway.py<br/>• tool_call run_tests (42 passed)<br/>• outcome: success"]
+    E["evidence: 'RFC — API guidelines'<br/>uri: s3://…"]
+    P["precedent: 'Rate limiting pattern<br/>for API gateways'<br/>confidence: 0.85<br/>applies_to: [auth, payments]"]
+
+    A -- touched_entity --> T
+    T -- used_evidence --> E
+    T -- promoted_to_precedent --> P
+
+    classDef entity fill:#1f2937,stroke:#60a5fa,stroke-width:1px,color:#e5e7eb;
+    classDef trace fill:#0b3d2e,stroke:#34d399,stroke-width:1px,color:#e5e7eb;
+    classDef evidence fill:#3b2f1c,stroke:#fbbf24,stroke-width:1px,color:#e5e7eb;
+    classDef precedent fill:#3b1c36,stroke:#f472b6,stroke-width:1px,color:#e5e7eb;
+    class A,B,C entity;
+    class T trace;
+    class E evidence;
+    class P precedent;
 ```
-  ┌─────────────────────────────────────────────────────────────────────┐
-  │                          TRELLIS                                     │
-  │                                                                     │
-  │  ┌───────────┐  depends_on   ┌───────────┐  part_of  ┌─────────┐  │
-  │  │  service:  │──────────────▶│  service:  │─────────▶│  team:  │  │
-  │  │  auth-api  │              │  user-db   │          │ platform │  │
-  │  └─────┬─────┘              └───────────┘          └─────────┘  │
-  │        │ touched_entity                                          │
-  │  ┌─────▼──────────────────────────────────────┐                  │
-  │  │  trace: "Added rate limiting to auth-api"  │                  │
-  │  │  ├─ step: researched existing patterns     │                  │
-  │  │  ├─ step: tool_call edit_file gateway.py   │                  │
-  │  │  ├─ step: tool_call run_tests (42 passed)  │                  │
-  │  │  └─ outcome: success                       │                  │
-  │  └─────┬──────────────────────┬───────────────┘                  │
-  │        │ used_evidence        │ promoted_to_precedent            │
-  │  ┌─────▼─────────┐    ┌──────▼──────────────────────────┐       │
-  │  │  evidence:    │    │  precedent: "Rate limiting      │       │
-  │  │  "RFC: API    │    │  pattern for API gateways"      │       │
-  │  │   guidelines" │    │  confidence: 0.85               │       │
-  │  │  uri: s3://…  │    │  applies_to: [auth, payments]   │       │
-  │  └───────────────┘    └─────────────────────────────────┘       │
-  │                                                                     │
-  │  Every node carries temporal versions (valid_from / valid_to)      │
-  │  — query any past state with as_of                                 │
-  └─────────────────────────────────────────────────────────────────────┘
-```
+
+> Every node carries `valid_from` / `valid_to` — query any past state with `as_of`.
 
 - **Traces** — what agents did: steps, tool calls, reasoning, outcomes. Immutable.
 - **Entities + edges** — the graph of services, teams, tools, datasets, and how they relate. Temporally versioned.
@@ -72,44 +130,62 @@ Every CLI command supports `--format json` for machine output.
 
 ## How the feedback loop works
 
+```mermaid
+flowchart TB
+    subgraph Agents["Agents — read & write"]
+        direction LR
+        IF["CLI • MCP • REST • Python SDK"]
+    end
+
+    Pack["Context Pack Builder<br/>keyword + semantic + graph<br/>dedupe → rerank → token-budget"]
+    Work["Agent does work<br/>emits trace + feedback"]
+    Mut["Governed Write Pipeline<br/>validate → policy → idempotency<br/>→ classify → execute → emit event"]
+    Store["Pluggable Storage<br/>SQLite · Postgres · S3<br/>pgvector · LanceDB"]
+
+    subgraph Workers["Background workers — analyze & curate"]
+        direction TB
+        W["Effectiveness analysis<br/>• noise tagging<br/>• advisory fitness<br/>• precedent promotion<br/>• extraction-tier graduation"]
+    end
+
+    IF --> Pack
+    Pack -- "markdown context" --> Work
+    Work --> Mut
+    Mut --> Store
+    Store --> W
+    W -. "tags, advisories, precedents" .-> Pack
+
+    classDef iface fill:#1f2937,stroke:#60a5fa,color:#e5e7eb;
+    classDef core fill:#0b3d2e,stroke:#34d399,color:#e5e7eb;
+    classDef store fill:#3b2f1c,stroke:#fbbf24,color:#e5e7eb;
+    classDef worker fill:#3b1c36,stroke:#f472b6,color:#e5e7eb;
+    class IF iface;
+    class Pack,Work,Mut core;
+    class Store store;
+    class W worker;
 ```
-  AGENTS                                 BACKGROUND WORKERS
-  read & write                           analyze & curate
-       │                                          │
-       │  ┌──────────────────────────┐            │
-       ├──│ CLI (trellis)            │            │
-       ├──│ MCP (macro tools)        │            │
-       ├──│ REST API (FastAPI)       │            │
-       ├──│ Python SDK (TrellisClient)│           │
-       │  └────────────┬─────────────┘            │
-       │               │                          │
-       │               ▼                          │
-       │  ┌──────────────────────────┐            │
-       │  │   Context Pack Builder   │            │
-       │  │  keyword + semantic +    │◀──────────┬┘
-       │  │  graph search, dedupe,   │           │
-       │  │  rerank, token-budget    │           │
-       │  └────────────┬─────────────┘           │
-       │               │ markdown context        │
-       │               ▼                         │
-       │  ┌──────────────────────────┐ ┌────────┴──────────────┐
-       │  │  Agent does work, emits  │ │ Effectiveness analysis │
-       │  │  trace + feedback        │ │  • noise tagging       │
-       │  └────────────┬─────────────┘ │  • advisory fitness    │
-       │               │               │  • precedent promotion │
-       │               ▼               │  • extraction tier     │
-       │  ┌──────────────────────────┐ │    graduation          │
-       │  │ Governed Write Pipeline  │ └───────────────────────┘
-       │  │ validate → policy check  │
-       │  │ → idempotency → classify │
-       │  │ → execute → emit event   │
-       │  └────────────┬─────────────┘
-       │               ▼
-       │  ┌──────────────────────────┐
-       │  │    Pluggable Storage     │
-       │  │ SQLite │ Postgres │ S3   │
-       │  │ pgvector │ LanceDB       │
-       │  └──────────────────────────┘
+
+### How a trace flows through Trellis
+
+```mermaid
+flowchart LR
+    A["Agent<br/>does work"] --> I["Ingest<br/>validate schema"]
+    I --> PG["Policy Gate<br/>check rules"]
+    PG --> CL["Classify<br/>tag 4 facets"]
+    CL --> EX["Execute<br/>write to stores"]
+    EX --> EV["Emit event<br/>append to log"]
+
+    EV -. feedback .-> W["Workers<br/>effectiveness · noise<br/>precedent promotion"]
+    W -. tags, advisories .-> PBx["Pack Builder<br/>assembles next pack"]
+    PBx --> A2["Agent<br/>next task"]
+
+    classDef agent fill:#1f2937,stroke:#60a5fa,color:#e5e7eb;
+    classDef write fill:#3b2f1c,stroke:#fbbf24,color:#e5e7eb;
+    classDef read fill:#0b3d2e,stroke:#34d399,color:#e5e7eb;
+    classDef worker fill:#3b1c36,stroke:#f472b6,color:#e5e7eb;
+    class A,A2 agent;
+    class I,PG,CL,EX,EV write;
+    class PBx read;
+    class W worker;
 ```
 
 Packs carry `pack_id` and per-item refs; when the agent reports success or failure, feedback is attributed back to the exact items that were in the pack. Background workers aggregate that feedback into **noise tags** (so low-signal items drop out of future packs) and **advisory confidence adjustments** (so learned rules get sharper). Successful traces can be promoted to precedents, which then seed future packs for similar tasks.
@@ -184,6 +260,56 @@ from trellis_sdk.skills import get_context_for_task
 
 context = get_context_for_task(client, "implement retry logic", domain="backend")
 ```
+
+## Planes & substrates
+
+Trellis separates **agent-facing** stores from **Trellis-internal** stores. Each plane has a blessed default backend ("substrate"); other backends are opt-in.
+
+```mermaid
+flowchart LR
+    subgraph Knowledge["Knowledge Plane — agent-facing"]
+        direction TB
+        G["Graph<br/>entities + edges"]
+        D["Documents<br/>full-text"]
+        V["Vectors<br/>semantic similarity"]
+        B["Blobs<br/>files & artifacts"]
+    end
+
+    subgraph Operational["Operational Plane — Trellis-internal"]
+        direction TB
+        TR["Trace store<br/>immutable work records"]
+        EL["Event log<br/>mutation audit trail"]
+    end
+
+    subgraph Substrates["Substrates (blessed defaults)"]
+        direction TB
+        SQ["SQLite — local default"]
+        PG["Postgres / pgvector — cloud"]
+        LA["LanceDB — local ANN"]
+        S3["S3 — blobs in cloud"]
+    end
+
+    G --- SQ
+    D --- SQ
+    V --- SQ
+    TR --- SQ
+    EL --- SQ
+    G -.-> PG
+    D -.-> PG
+    V -.-> PG
+    V -.-> LA
+    B --- SQ
+    B -.-> S3
+
+    classDef knowledge fill:#0b3d2e,stroke:#34d399,color:#e5e7eb;
+    classDef ops fill:#3b1c36,stroke:#f472b6,color:#e5e7eb;
+    classDef sub fill:#1f2937,stroke:#60a5fa,color:#e5e7eb;
+    class G,D,V,B knowledge;
+    class TR,EL ops;
+    class SQ,PG,LA,S3 sub;
+```
+
+Solid lines are defaults (SQLite everywhere); dotted lines are cloud/alternate substrates wired via `~/.config/trellis/config.yaml`.
 
 ## Storage — local or cloud
 
