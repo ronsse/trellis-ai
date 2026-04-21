@@ -39,9 +39,58 @@ Every CLI command supports `--format json` for machine output.
 
 ## Architecture at a glance
 
-<p align="center">
-  <img src="assets/architecture.svg" alt="Trellis architecture — interfaces, core modules, data layer, pluggable backends" width="880">
-</p>
+```mermaid
+flowchart TB
+    subgraph Interfaces["Interfaces"]
+        direction LR
+        CLI["CLI<br/>trellis"]
+        MCP["MCP Server<br/>11 tools"]
+        REST["REST API<br/>FastAPI"]
+        SDK["Python SDK<br/>local + remote"]
+        UI["Web UI<br/>Cytoscape.js"]
+        Users["Agents + Humans<br/>Claude, LangGraph, …"]
+    end
+
+    subgraph Core["Core engine"]
+        direction LR
+        PB["Pack Builder<br/>keyword + semantic + graph<br/>dedupe · rank · token budget"]
+        GP["Governed Mutation Pipeline<br/>validate → policy → idempotency<br/>→ execute → emit event"]
+        CL["Classification<br/>4 deterministic classifiers<br/>LLM fallback (async)"]
+        WK["Workers<br/>enrichment · pattern mining<br/>maintenance · ingestion"]
+    end
+
+    subgraph Data["Data layer"]
+        direction LR
+        TR["Traces<br/>immutable"]
+        GR["Graph<br/>SCD Type 2"]
+        DO["Documents<br/>full-text"]
+        VE["Vectors<br/>semantic"]
+        EL["Event Log<br/>audit"]
+        BL["Blobs<br/>files"]
+    end
+
+    subgraph Backends["Pluggable backends"]
+        direction LR
+        SQ["SQLite<br/>default / local"]
+        PG["Postgres<br/>+ pgvector"]
+        S3["S3<br/>blob storage"]
+        LA["LanceDB<br/>vector ANN"]
+    end
+
+    Users --> CLI & MCP & REST & SDK & UI
+    Interfaces --> Core
+    Core --> Data
+    Data --> Backends
+
+    classDef iface fill:#1f2937,stroke:#60a5fa,color:#e5e7eb;
+    classDef core fill:#0b3d2e,stroke:#34d399,color:#e5e7eb;
+    classDef data fill:#3b2f1c,stroke:#fbbf24,color:#e5e7eb;
+    classDef back fill:#3b1c36,stroke:#f472b6,color:#e5e7eb;
+    class CLI,MCP,REST,SDK,UI,Users iface;
+    class PB,GP,CL,WK core;
+    class TR,GR,DO,VE,EL,BL data;
+    class SQ,PG,S3,LA back;
+```
 
 ## What's in the substrate
 
@@ -115,9 +164,29 @@ flowchart TB
     class W worker;
 ```
 
-<p align="center">
-  <img src="assets/data-flow.svg" alt="How a trace flows through Trellis — write path and read path" width="880">
-</p>
+### How a trace flows through Trellis
+
+```mermaid
+flowchart LR
+    A["Agent<br/>does work"] --> I["Ingest<br/>validate schema"]
+    I --> PG["Policy Gate<br/>check rules"]
+    PG --> CL["Classify<br/>tag 4 facets"]
+    CL --> EX["Execute<br/>write to stores"]
+    EX --> EV["Emit event<br/>append to log"]
+
+    EV -. feedback .-> W["Workers<br/>effectiveness · noise<br/>precedent promotion"]
+    W -. tags, advisories .-> PBx["Pack Builder<br/>assembles next pack"]
+    PBx --> A2["Agent<br/>next task"]
+
+    classDef agent fill:#1f2937,stroke:#60a5fa,color:#e5e7eb;
+    classDef write fill:#3b2f1c,stroke:#fbbf24,color:#e5e7eb;
+    classDef read fill:#0b3d2e,stroke:#34d399,color:#e5e7eb;
+    classDef worker fill:#3b1c36,stroke:#f472b6,color:#e5e7eb;
+    class A,A2 agent;
+    class I,PG,CL,EX,EV write;
+    class PBx read;
+    class W worker;
+```
 
 Packs carry `pack_id` and per-item refs; when the agent reports success or failure, feedback is attributed back to the exact items that were in the pack. Background workers aggregate that feedback into **noise tags** (so low-signal items drop out of future packs) and **advisory confidence adjustments** (so learned rules get sharper). Successful traces can be promoted to precedents, which then seed future packs for similar tasks.
 
