@@ -10,6 +10,7 @@ from trellis.feedback import (
     PackFeedback,
     compute_item_effectiveness,
     load_feedback_log,
+    reconcile_feedback_log_to_event_log,
     record_feedback,
 )
 
@@ -92,8 +93,9 @@ class TestPackFeedbackFrozen:
 
     def test_is_hashable(self):
         # Frozen dataclasses with list/dict fields are not hashable by default,
-        # but we confirm equality works when timestamps are pinned.
+        # but we confirm equality works when timestamps and feedback_ids are pinned.
         ts = "2026-04-13T00:00:00+00:00"
+        fid = "fb_01KABCDEF0000000000000000"
         fb = PackFeedback(
             run_id="run-1",
             phase="p",
@@ -101,6 +103,7 @@ class TestPackFeedbackFrozen:
             outcome="success",
             items_served=["a"],
             timestamp_utc=ts,
+            feedback_id=fid,
         )
         fb2 = PackFeedback(
             run_id="run-1",
@@ -109,6 +112,7 @@ class TestPackFeedbackFrozen:
             outcome="success",
             items_served=["a"],
             timestamp_utc=ts,
+            feedback_id=fid,
         )
         assert fb == fb2
 
@@ -131,15 +135,16 @@ class TestJsonlRoundtrip:
 
     def test_record_creates_file(self, tmp_path: Path):
         fb = self._make_fb()
-        log_path = record_feedback(fb, log_dir=tmp_path)
-        assert log_path.exists()
-        assert log_path.name == "pack_feedback.jsonl"
+        result = record_feedback(fb, log_dir=tmp_path)
+        assert result.log_path.exists()
+        assert result.log_path.name == "pack_feedback.jsonl"
+        assert result.feedback_id == fb.feedback_id
 
     def test_record_creates_parent_dirs(self, tmp_path: Path):
         nested = tmp_path / "a" / "b" / "c"
         fb = self._make_fb()
-        log_path = record_feedback(fb, log_dir=nested)
-        assert log_path.exists()
+        result = record_feedback(fb, log_dir=nested)
+        assert result.log_path.exists()
 
     def test_single_roundtrip(self, tmp_path: Path):
         fb = self._make_fb(
@@ -404,7 +409,11 @@ class TestToEventPayload:
 
 
 class _CapturingEventLog:
-    """Minimal EventLog stand-in for tests — records emit() calls."""
+    """Minimal EventLog stand-in for tests — records emit() calls.
+
+    Also implements ``get_events`` so record_feedback's idempotency
+    check (``_feedback_id_in_event_log``) can scan prior payloads.
+    """
 
     def __init__(self) -> None:
         self.events: list[dict] = []
@@ -429,6 +438,15 @@ class _CapturingEventLog:
                 "metadata": metadata or {},
             }
         )
+
+    def get_events(self, *, event_type=None, limit: int = 100, **_ignored):
+        from types import SimpleNamespace
+
+        matches = [
+            e for e in self.events
+            if event_type is None or e["event_type"] == event_type
+        ]
+        return [SimpleNamespace(payload=e["payload"]) for e in matches[:limit]]
 
 
 class TestRecordFeedbackEventLogBridge:
@@ -485,12 +503,210 @@ class TestRecordFeedbackEventLogBridge:
                 msg = "eventlog down"
                 raise RuntimeError(msg)
 
-        path = record_feedback(
+        result = record_feedback(
             self._feedback(),
             log_dir=tmp_path,
             event_log=BrokenEventLog(),
             pack_id="p",
         )
-        assert path.exists()
+        assert result.log_path.exists()
         # JSONL file received the write despite the event-log failure
-        assert path.read_text(encoding="utf-8").strip() != ""
+        assert result.log_path.read_text(encoding="utf-8").strip() != ""
+        # Emission failure is now visible to the caller via the result —
+        # the silent-divergence gap (2.3) is closed for in-process callers.
+        assert result.event_log_emitted is False
+        assert result.event_log_error is not None
+        assert not result.event_log_in_sync
+
+
+# ---------------------------------------------------------------------------
+# Gap 2.3 — JSONL ↔ EventLog divergence / double-count / reconciliation
+# ---------------------------------------------------------------------------
+
+
+class TestFeedbackIdIdempotency:
+    """feedback_id prevents double-counting on replay."""
+
+    def _fb(self) -> PackFeedback:
+        return PackFeedback(
+            run_id="run-dup",
+            phase="p",
+            intent="i",
+            outcome="success",
+            items_served=["a"],
+        )
+
+    def test_feedback_id_is_auto_generated(self):
+        fb = self._fb()
+        assert fb.feedback_id.startswith("fb_")
+        assert len(fb.feedback_id) > len("fb_")
+
+    def test_feedback_id_in_event_payload(self):
+        fb = self._fb()
+        payload = fb.to_event_payload()
+        assert payload["feedback_id"] == fb.feedback_id
+
+    def test_same_feedback_recorded_twice_emits_once(self, tmp_path: Path):
+        """Replay protection: if the exact same PackFeedback object is
+        recorded again (same feedback_id), the second EventLog emit is
+        skipped — duplicate-detection bridges the two sources."""
+        captured = _CapturingEventLog()
+        fb = self._fb()
+
+        r1 = record_feedback(fb, log_dir=tmp_path, event_log=captured)
+        r2 = record_feedback(fb, log_dir=tmp_path, event_log=captured)
+
+        assert r1.event_log_emitted is True
+        assert r1.event_log_skipped_as_duplicate is False
+        assert r2.event_log_emitted is False
+        assert r2.event_log_skipped_as_duplicate is True
+        assert r2.event_log_in_sync  # still counts as in-sync
+        assert len(captured.events) == 1
+        # JSONL appends are not deduped — the file is the audit trail.
+        loaded = load_feedback_log(tmp_path)
+        assert len(loaded) == 2
+        assert loaded[0].feedback_id == loaded[1].feedback_id
+
+    def test_distinct_feedback_ids_both_emit(self, tmp_path: Path):
+        captured = _CapturingEventLog()
+        fb1 = self._fb()
+        fb2 = self._fb()  # fresh feedback_id
+        assert fb1.feedback_id != fb2.feedback_id
+
+        record_feedback(fb1, log_dir=tmp_path, event_log=captured)
+        record_feedback(fb2, log_dir=tmp_path, event_log=captured)
+
+        assert len(captured.events) == 2
+
+
+class TestFeedbackReconciliation:
+    """reconcile_feedback_log_to_event_log backfills the EventLog from
+    the JSONL file — closes divergence when an earlier emit failed or
+    a file-only capture is being promoted."""
+
+    def _fb(self, run_id: str = "r") -> PackFeedback:
+        return PackFeedback(
+            run_id=run_id,
+            phase="p",
+            intent="i",
+            outcome="success",
+            items_served=["a"],
+        )
+
+    def test_reconcile_emits_missing_entries(self, tmp_path: Path):
+        # Phase 1: write JSONL without an event log (divergence).
+        fb1 = self._fb("r1")
+        fb2 = self._fb("r2")
+        record_feedback(fb1, log_dir=tmp_path)
+        record_feedback(fb2, log_dir=tmp_path)
+
+        # Phase 2: reconcile into a fresh event log.
+        captured = _CapturingEventLog()
+        result = reconcile_feedback_log_to_event_log(tmp_path, captured)
+
+        assert result.scanned == 2
+        assert result.already_present == 0
+        assert result.emitted == 2
+        assert result.failed == 0
+        emitted_ids = {e["payload"]["feedback_id"] for e in captured.events}
+        assert emitted_ids == {fb1.feedback_id, fb2.feedback_id}
+
+    def test_reconcile_is_idempotent(self, tmp_path: Path):
+        """Running reconcile twice must not double-emit."""
+        fb = self._fb()
+        record_feedback(fb, log_dir=tmp_path)
+
+        captured = _CapturingEventLog()
+        first = reconcile_feedback_log_to_event_log(tmp_path, captured)
+        second = reconcile_feedback_log_to_event_log(tmp_path, captured)
+
+        assert first.emitted == 1
+        assert second.emitted == 0
+        assert second.already_present == 1
+        assert len(captured.events) == 1
+
+    def test_reconcile_skips_entries_already_in_event_log(self, tmp_path: Path):
+        """If an entry was already emitted (e.g., live path succeeded),
+        reconciliation doesn't re-emit."""
+        captured = _CapturingEventLog()
+        fb_live = self._fb("live")
+        fb_only_file = self._fb("only_file")
+
+        # First was emitted live. Second never was (imagine event_log was down).
+        record_feedback(fb_live, log_dir=tmp_path, event_log=captured)
+        record_feedback(fb_only_file, log_dir=tmp_path)  # no event_log
+
+        result = reconcile_feedback_log_to_event_log(tmp_path, captured)
+
+        assert result.scanned == 2
+        assert result.already_present == 1
+        assert result.emitted == 1
+        assert len(captured.events) == 2
+
+    def test_reconcile_tracks_failures(self, tmp_path: Path):
+        fb = self._fb()
+        record_feedback(fb, log_dir=tmp_path)
+
+        class BrokenEventLog:
+            def emit(self, *args, **kwargs):
+                msg = "persistent outage"
+                raise RuntimeError(msg)
+
+            def get_events(self, **_ignored):
+                return []
+
+        result = reconcile_feedback_log_to_event_log(tmp_path, BrokenEventLog())  # type: ignore[arg-type]
+        assert result.scanned == 1
+        assert result.emitted == 0
+        assert result.failed == 1
+        assert result.missing_feedback_ids == [fb.feedback_id]
+
+    def test_reconcile_empty_log_is_noop(self, tmp_path: Path):
+        captured = _CapturingEventLog()
+        result = reconcile_feedback_log_to_event_log(tmp_path, captured)
+        assert result.scanned == 0
+        assert result.emitted == 0
+        assert result.already_present == 0
+        assert len(captured.events) == 0
+
+    def test_reconcile_applies_pack_id_lookup(self, tmp_path: Path):
+        fb = self._fb()
+        record_feedback(fb, log_dir=tmp_path)
+
+        captured = _CapturingEventLog()
+        reconcile_feedback_log_to_event_log(
+            tmp_path,
+            captured,
+            pack_id_lookup={fb.feedback_id: "pack-xyz"},
+        )
+
+        assert captured.events[0]["entity_id"] == "pack-xyz"
+        assert captured.events[0]["entity_type"] == "pack"
+        assert captured.events[0]["payload"]["pack_id"] == "pack-xyz"
+
+
+class TestLoadFeedbackLogBackwardCompat:
+    """Pre-feedback_id JSONL rows get synthesized ids on load so they
+    remain reconcilable (not matchable to an original event, but not a
+    parse error either)."""
+
+    def test_load_pre_feedback_id_rows(self, tmp_path: Path):
+        import json
+
+        log_path = tmp_path / "pack_feedback.jsonl"
+        log_path.write_text(
+            json.dumps({
+                "run_id": "legacy",
+                "phase": "p",
+                "intent": "i",
+                "outcome": "success",
+                "items_served": ["a"],
+            }) + "\n",
+            encoding="utf-8",
+        )
+
+        loaded = load_feedback_log(tmp_path)
+        assert len(loaded) == 1
+        # Fresh ULID was minted since the file row had no feedback_id.
+        assert loaded[0].feedback_id.startswith("fb_")
+        assert loaded[0].run_id == "legacy"

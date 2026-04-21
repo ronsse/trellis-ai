@@ -1,6 +1,6 @@
 """Retrieval system for Trellis pack assembly."""
 
-from trellis.retrieve.pack_builder import PackBuilder
+from trellis.retrieve.pack_builder import PackBuilder, SemanticDedupConfig
 from trellis.retrieve.strategies import (
     GraphSearch,
     KeywordSearch,
@@ -14,6 +14,7 @@ __all__ = [
     "KeywordSearch",
     "PackBuilder",
     "SearchStrategy",
+    "SemanticDedupConfig",
     "SemanticSearch",
     "TierMapper",
 ]

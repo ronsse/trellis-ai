@@ -8,6 +8,8 @@ from typing import Any
 
 import structlog
 
+from trellis.core.ids import generate_prefixed_id
+
 logger = structlog.get_logger(__name__)
 
 
@@ -18,6 +20,11 @@ class PackFeedback:
     Captures which pack items were served, which the agent actually
     referenced, and the phase outcome so signals can be aggregated
     to tune retrieval ranking.
+
+    ``feedback_id`` is a stable ULID minted at construction time. It is
+    the idempotency key that bridges the JSONL append-log and the
+    ``FEEDBACK_RECORDED`` EventLog entry, so a record or replay cannot
+    double-count the same feedback in either source.
     """
 
     run_id: str
@@ -33,6 +40,7 @@ class PackFeedback:
     timestamp_utc: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     agent_id: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    feedback_id: str = field(default_factory=lambda: generate_prefixed_id("fb"))
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a plain dict (suitable for JSON serialization)."""
@@ -64,6 +72,7 @@ class PackFeedback:
                 ``entity_id`` when emitting.
         """
         payload: dict[str, Any] = {
+            "feedback_id": self.feedback_id,
             "run_id": self.run_id,
             "phase": self.phase,
             "intent": self.intent,

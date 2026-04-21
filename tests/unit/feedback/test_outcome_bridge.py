@@ -109,13 +109,17 @@ def test_outcome_failure_is_non_fatal(tmp_path: Path):
             msg = "ops store down"
             raise RuntimeError(msg)
 
-    path = record_feedback(
+    result = record_feedback(
         _feedback(),
         log_dir=tmp_path,
         outcome_store=BrokenOutcomeStore(),  # type: ignore[arg-type]
     )
-    assert path.exists()
-    assert path.read_text(encoding="utf-8").strip() != ""
+    assert result.log_path.exists()
+    assert result.log_path.read_text(encoding="utf-8").strip() != ""
+    # Note: ``record_outcome`` (in trellis.ops) swallows store errors
+    # internally and still returns an event, so outcome_emitted stays
+    # True here. File durability is what this test protects — divergence
+    # between outcome_store and JSONL is covered by ops-side tests.
 
 
 def test_dual_emit_event_and_outcome(
@@ -127,6 +131,10 @@ def test_dual_emit_event_and_outcome(
     class CapturingEventLog:
         def emit(self, *args, **kwargs):
             captured_events.append((args, kwargs))
+
+        def get_events(self, **_ignored):
+            # No prior events; idempotency check is a no-op.
+            return []
 
     record_feedback(
         _feedback(),

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -25,6 +25,68 @@ logger = structlog.get_logger(__name__)
 _DEFAULT_COMPONENT_ID = "retrieve.pack_builder.PackBuilder"
 
 
+@dataclass(frozen=True)
+class FeedbackRecordResult:
+    """Outcome of a :func:`record_feedback` call.
+
+    The JSONL append is always attempted and is the durability
+    guarantee; ``log_path`` is populated even when downstream emissions
+    fail. ``event_log_emitted`` / ``outcome_emitted`` tell callers
+    whether the bridged sinks actually received the signal, so a
+    retry or reconciliation can be scheduled without scanning logs.
+
+    The error fields surface the last exception caught so callers can
+    distinguish "sink not configured" (``*_error is None``) from
+    "sink failed" (``*_error is not None``). Emissions still fail
+    soft; callers opt into strict mode by checking these fields.
+    """
+
+    log_path: Path
+    feedback_id: str
+    event_log_emitted: bool = False
+    outcome_emitted: bool = False
+    event_log_error: Exception | None = None
+    outcome_error: Exception | None = None
+    event_log_skipped_as_duplicate: bool = False
+
+    @property
+    def event_log_in_sync(self) -> bool:
+        """True when the EventLog has a matching feedback entry.
+
+        Either we emitted successfully this call, or a prior call /
+        reconciliation already persisted it (duplicate-skip path).
+        """
+        return self.event_log_emitted or self.event_log_skipped_as_duplicate
+
+
+@dataclass
+class ReconcileResult:
+    """Outcome of :func:`reconcile_feedback_log_to_event_log`."""
+
+    scanned: int = 0
+    already_present: int = 0
+    emitted: int = 0
+    failed: int = 0
+    missing_feedback_ids: list[str] = field(default_factory=list)
+
+
+def _feedback_id_in_event_log(event_log: EventLog, feedback_id: str) -> bool:
+    """Return True when the EventLog already has a FEEDBACK_RECORDED event
+    with this ``feedback_id`` in its payload.
+
+    Scans the most recent FEEDBACK_RECORDED events. Uses a generous
+    default limit — feedback volume is bounded by agent activity, not
+    backend traffic — and short-circuits on first match. Backends that
+    need sub-linear lookup can add a dedicated index; this is
+    correctness-first, not performance-first.
+    """
+    events = event_log.get_events(
+        event_type=EventType.FEEDBACK_RECORDED,
+        limit=10_000,
+    )
+    return any(e.payload.get("feedback_id") == feedback_id for e in events)
+
+
 def record_feedback(
     feedback: PackFeedback,
     *,
@@ -33,7 +95,7 @@ def record_feedback(
     outcome_store: OutcomeStore | None = None,
     pack_id: str | None = None,
     component_id: str = _DEFAULT_COMPONENT_ID,
-) -> Path:
+) -> FeedbackRecordResult:
     """Append a feedback signal to the JSONL log.
 
     Creates the log directory and file if they don't exist.  When
@@ -48,6 +110,14 @@ def record_feedback(
     outcome emission bridge the feedback into the governed analytics
     and ops paths respectively.  Both emissions fail soft — log-only,
     never raise — since the file write is the durability guarantee.
+
+    ``feedback.feedback_id`` is used as the idempotency key against the
+    EventLog: if a prior call or replay already emitted this feedback_id,
+    the event emission is skipped and the result reports
+    ``event_log_skipped_as_duplicate=True``. The JSONL append is still
+    performed (it is the authoritative file record). Callers who want
+    the JSONL file itself to be de-duplicated should check by
+    ``feedback_id`` before calling.
 
     Args:
         feedback: The feedback signal to record.
@@ -68,7 +138,9 @@ def record_feedback(
             :class:`OutcomeEvent`.  Defaults to the PackBuilder.
 
     Returns:
-        Path to the log file.
+        :class:`FeedbackRecordResult` carrying the log path,
+        ``feedback_id``, per-sink emission status, and any captured
+        errors.
     """
     log_path = Path(log_dir) / "pack_feedback.jsonl"
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -77,22 +149,39 @@ def record_feedback(
     with log_path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(entry, default=str) + "\n")
 
+    event_log_emitted = False
+    event_log_skipped_as_duplicate = False
+    event_log_error: Exception | None = None
     if event_log is not None:
         try:
-            event_log.emit(
-                EventType.FEEDBACK_RECORDED,
-                source="feedback.record",
-                entity_id=pack_id,
-                entity_type="pack" if pack_id else None,
-                payload=feedback.to_event_payload(pack_id=pack_id),
-            )
-        except Exception:
+            if _feedback_id_in_event_log(event_log, feedback.feedback_id):
+                event_log_skipped_as_duplicate = True
+                logger.debug(
+                    "feedback_event_skipped_duplicate",
+                    feedback_id=feedback.feedback_id,
+                    run_id=feedback.run_id,
+                    pack_id=pack_id,
+                )
+            else:
+                event_log.emit(
+                    EventType.FEEDBACK_RECORDED,
+                    source="feedback.record",
+                    entity_id=pack_id,
+                    entity_type="pack" if pack_id else None,
+                    payload=feedback.to_event_payload(pack_id=pack_id),
+                )
+                event_log_emitted = True
+        except Exception as exc:
+            event_log_error = exc
             logger.exception(
                 "feedback_event_emit_failed",
                 run_id=feedback.run_id,
                 pack_id=pack_id,
+                feedback_id=feedback.feedback_id,
             )
 
+    outcome_emitted = False
+    outcome_error: Exception | None = None
     if outcome_store is not None:
         try:
             _emit_outcome(
@@ -101,24 +190,105 @@ def record_feedback(
                 pack_id=pack_id,
                 component_id=component_id,
             )
-        except Exception:
+            outcome_emitted = True
+        except Exception as exc:
+            outcome_error = exc
             logger.exception(
                 "feedback_outcome_emit_failed",
                 run_id=feedback.run_id,
                 pack_id=pack_id,
+                feedback_id=feedback.feedback_id,
             )
 
     logger.debug(
         "feedback_recorded",
+        feedback_id=feedback.feedback_id,
         run_id=feedback.run_id,
         phase=feedback.phase,
         outcome=feedback.outcome,
         items_served=len(feedback.items_served),
         log_path=str(log_path),
-        event_log_emitted=event_log is not None,
-        outcome_emitted=outcome_store is not None,
+        event_log_emitted=event_log_emitted,
+        event_log_skipped_as_duplicate=event_log_skipped_as_duplicate,
+        outcome_emitted=outcome_emitted,
     )
-    return log_path
+    return FeedbackRecordResult(
+        log_path=log_path,
+        feedback_id=feedback.feedback_id,
+        event_log_emitted=event_log_emitted,
+        outcome_emitted=outcome_emitted,
+        event_log_error=event_log_error,
+        outcome_error=outcome_error,
+        event_log_skipped_as_duplicate=event_log_skipped_as_duplicate,
+    )
+
+
+def reconcile_feedback_log_to_event_log(
+    log_dir: Path | str,
+    event_log: EventLog,
+    *,
+    pack_id_lookup: dict[str, str] | None = None,
+) -> ReconcileResult:
+    """Emit any JSONL feedback entries missing from the EventLog.
+
+    Closes the divergence path where JSONL was written but the
+    ``FEEDBACK_RECORDED`` event was not (sink unavailable, process
+    crashed between writes, file-only capture being promoted into the
+    governed pipeline, etc.).
+
+    Safe to run repeatedly: each JSONL row is matched against the
+    EventLog by ``feedback_id``; entries that are already present are
+    left alone.
+
+    Args:
+        log_dir: Directory containing ``pack_feedback.jsonl``.
+        event_log: EventLog to backfill.
+        pack_id_lookup: Optional ``feedback_id -> pack_id`` map for
+            entries that carry a pack association. ``pack_id`` is not
+            stored in ``PackFeedback`` itself, so reconciliation can
+            only restore it when the caller provides this mapping
+            (otherwise the emitted event has ``entity_id=None``).
+
+    Returns:
+        :class:`ReconcileResult` with counts and the list of
+        ``feedback_id``s that failed to emit.
+    """
+    signals = load_feedback_log(log_dir)
+    result = ReconcileResult(scanned=len(signals))
+    lookup = pack_id_lookup or {}
+
+    for fb in signals:
+        if _feedback_id_in_event_log(event_log, fb.feedback_id):
+            result.already_present += 1
+            continue
+        pack_id = lookup.get(fb.feedback_id)
+        try:
+            event_log.emit(
+                EventType.FEEDBACK_RECORDED,
+                source="feedback.reconcile",
+                entity_id=pack_id,
+                entity_type="pack" if pack_id else None,
+                payload=fb.to_event_payload(pack_id=pack_id),
+            )
+            result.emitted += 1
+        except Exception:
+            result.failed += 1
+            result.missing_feedback_ids.append(fb.feedback_id)
+            logger.exception(
+                "feedback_reconcile_emit_failed",
+                feedback_id=fb.feedback_id,
+                run_id=fb.run_id,
+            )
+
+    logger.info(
+        "feedback_reconcile_completed",
+        log_dir=str(log_dir),
+        scanned=result.scanned,
+        already_present=result.already_present,
+        emitted=result.emitted,
+        failed=result.failed,
+    )
+    return result
 
 
 def _parse_timestamp(raw: str) -> datetime | None:
@@ -151,6 +321,7 @@ def _emit_outcome(
     metadata: dict[str, object] = {
         "pack_outcome": feedback.outcome,
         "intent": feedback.intent,
+        "feedback_id": feedback.feedback_id,
     }
     if feedback.relevance_scores:
         metadata["relevance_scores"] = dict(feedback.relevance_scores)
@@ -194,21 +365,25 @@ def load_feedback_log(log_dir: Path | str) -> list[PackFeedback]:
             if not stripped:
                 continue
             data = json.loads(stripped)
-            signals.append(
-                PackFeedback(
-                    run_id=data["run_id"],
-                    phase=data["phase"],
-                    intent=data["intent"],
-                    outcome=data["outcome"],
-                    items_served=data.get("items_served", []),
-                    items_referenced=data.get("items_referenced", []),
-                    relevance_scores=data.get("relevance_scores", {}),
-                    intent_family=data.get("intent_family", ""),
-                    timestamp_utc=data.get("timestamp_utc", ""),
-                    agent_id=data.get("agent_id"),
-                    metadata=data.get("metadata", {}),
-                )
-            )
+            kwargs: dict[str, object] = {
+                "run_id": data["run_id"],
+                "phase": data["phase"],
+                "intent": data["intent"],
+                "outcome": data["outcome"],
+                "items_served": data.get("items_served", []),
+                "items_referenced": data.get("items_referenced", []),
+                "relevance_scores": data.get("relevance_scores", {}),
+                "intent_family": data.get("intent_family", ""),
+                "timestamp_utc": data.get("timestamp_utc", ""),
+                "agent_id": data.get("agent_id"),
+                "metadata": data.get("metadata", {}),
+            }
+            # Older JSONL rows pre-date feedback_id; only pass through when
+            # present so the dataclass default (fresh ULID) doesn't stomp
+            # an existing id and break reconciliation idempotency.
+            if data.get("feedback_id"):
+                kwargs["feedback_id"] = data["feedback_id"]
+            signals.append(PackFeedback(**kwargs))  # type: ignore[arg-type]
 
     logger.debug("feedback_log_loaded", count=len(signals), log_path=str(log_path))
     return signals

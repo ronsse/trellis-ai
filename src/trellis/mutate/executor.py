@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from typing import Protocol
 
 import structlog
@@ -17,6 +18,8 @@ from trellis.mutate.commands import (
 from trellis.stores.event_log import EventLog, EventType
 
 logger = structlog.get_logger()
+
+DEFAULT_IDEMPOTENCY_CACHE_SIZE = 10_000
 
 
 class PolicyGate(Protocol):
@@ -59,14 +62,24 @@ class MutationExecutor:
         policy_gate: PolicyGate | None = None,
         event_log: EventLog | None = None,
         handlers: dict[str, CommandHandler] | None = None,
+        idempotency_cache_size: int = DEFAULT_IDEMPOTENCY_CACHE_SIZE,
     ) -> None:
+        if idempotency_cache_size < 1:
+            msg = "idempotency_cache_size must be >= 1"
+            raise ValueError(msg)
         self._registry = registry or OperationRegistry()
         self._policy_gate = policy_gate
         self._event_log = event_log
         self._handlers: dict[str, CommandHandler] = handlers or {}
-        # In-memory cache of seen idempotency keys. When event_log is available,
-        # also checked against persisted events for cross-restart deduplication.
-        self._seen_idempotency_keys: set[str] = set()
+        self._idempotency_cache_size = idempotency_cache_size
+        # FIFO-bounded cache of seen idempotency keys. OrderedDict preserves
+        # insertion order; overflow evicts the oldest key via popitem(last=False).
+        # When event_log is attached, evicted keys are still rejected via
+        # event_log.has_idempotency_key() (authoritative, cross-restart).
+        # Without event_log, evicted keys become silently accepted duplicates —
+        # a warning is logged on each eviction so operators can attach one.
+        self._seen_idempotency_keys: OrderedDict[str, None] = OrderedDict()
+        self._idempotency_evictions = 0
 
     def register_handler(self, operation: str, handler: CommandHandler) -> None:
         """Register a handler for an operation."""
@@ -104,6 +117,8 @@ class MutationExecutor:
         # Stage 3: Idempotency Check
         if command.idempotency_key:
             if command.idempotency_key in self._seen_idempotency_keys:
+                # Refresh recency so hot keys aren't evicted ahead of cold ones.
+                self._seen_idempotency_keys.move_to_end(command.idempotency_key)
                 log.info("duplicate_command", key=command.idempotency_key)
                 return CommandResult(
                     command_id=command.command_id,
@@ -115,7 +130,7 @@ class MutationExecutor:
             if self._event_log is not None and self._event_log.has_idempotency_key(
                 command.idempotency_key,
             ):
-                self._seen_idempotency_keys.add(command.idempotency_key)
+                self._record_idempotency_key(command.idempotency_key)
                 log.info("duplicate_command_persisted", key=command.idempotency_key)
                 return CommandResult(
                     command_id=command.command_id,
@@ -123,11 +138,7 @@ class MutationExecutor:
                     operation=command.operation,
                     message=f"Duplicate command (persisted): {command.idempotency_key}",
                 )
-            # Bound the in-memory cache to avoid unbounded growth
-            _max_cache_size = 10_000
-            if len(self._seen_idempotency_keys) > _max_cache_size:
-                self._seen_idempotency_keys.clear()
-            self._seen_idempotency_keys.add(command.idempotency_key)
+            self._record_idempotency_key(command.idempotency_key)
 
         # Stage 4: Execute
         handler = self._handlers.get(command.operation)
@@ -209,6 +220,32 @@ class MutationExecutor:
             duplicates=sum(1 for r in results if r.status == CommandStatus.DUPLICATE),
         )
         return results
+
+    def _record_idempotency_key(self, key: str) -> None:
+        """Insert a key into the FIFO cache, evicting the oldest if full.
+
+        When the cache is full and no event_log is configured, evicted keys
+        become silently-acceptable duplicates — we warn on each such eviction
+        so operators can raise the cache size or attach a persistent event log.
+        With an event_log attached, the persistent has_idempotency_key() check
+        is authoritative and eviction is a pure hot-path optimization.
+        """
+        while len(self._seen_idempotency_keys) >= self._idempotency_cache_size:
+            evicted_key, _ = self._seen_idempotency_keys.popitem(last=False)
+            self._idempotency_evictions += 1
+            if self._event_log is None:
+                logger.warning(
+                    "idempotency_cache_evicted_without_event_log",
+                    evicted_key=evicted_key,
+                    cache_size=self._idempotency_cache_size,
+                    total_evictions=self._idempotency_evictions,
+                    hint=(
+                        "Attach an EventLog to MutationExecutor for durable "
+                        "idempotency across cache evictions, or raise "
+                        "idempotency_cache_size."
+                    ),
+                )
+        self._seen_idempotency_keys[key] = None
 
     def _emit(self, command: Command, status: CommandStatus, message: str) -> None:
         """Emit an event to the event log if available."""

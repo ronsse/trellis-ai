@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import structlog
 
-from trellis.schemas.advisory import Advisory
+from trellis.schemas.advisory import Advisory, AdvisoryStatus
 
 logger = structlog.get_logger(__name__)
 
@@ -39,12 +40,21 @@ class AdvisoryStore:
         *,
         scope: str | None = None,
         min_confidence: float = 0.0,
+        include_suppressed: bool = False,
     ) -> list[Advisory]:
         """Return advisories, optionally filtered by scope and confidence.
+
+        Suppressed advisories are excluded by default — they stay in the
+        store so the fitness loop can restore them when evidence warrants
+        (see :meth:`restore`), but retrieval callers only see active ones.
+        Pass ``include_suppressed=True`` to inspect the full set (tools,
+        audits, fitness-loop scoring).
 
         Results are ordered by confidence descending.
         """
         result = list(self._advisories.values())
+        if not include_suppressed:
+            result = [a for a in result if a.status == AdvisoryStatus.ACTIVE]
         if scope is not None:
             result = [a for a in result if a.scope == scope]
         if min_confidence > 0.0:
@@ -53,7 +63,12 @@ class AdvisoryStore:
         return result
 
     def get(self, advisory_id: str) -> Advisory | None:
-        """Get an advisory by ID."""
+        """Get an advisory by ID.
+
+        Returns the advisory regardless of status — suppressed advisories
+        remain retrievable by ID so the fitness loop can evaluate them
+        and the UI can surface suppression history.
+        """
         return self._advisories.get(advisory_id)
 
     def put(self, advisory: Advisory) -> Advisory:
@@ -71,8 +86,77 @@ class AdvisoryStore:
         logger.info("advisories_stored", count=len(advisories))
         return len(advisories)
 
+    def suppress(
+        self,
+        advisory_id: str,
+        *,
+        reason: str | None = None,
+    ) -> Advisory | None:
+        """Soft-suppress an advisory: flip status, stamp metadata, persist.
+
+        Returns the updated advisory, or ``None`` if the id is unknown.
+        Idempotent — suppressing an already-suppressed advisory is a
+        no-op and returns the existing record without updating
+        ``suppressed_at``.
+
+        Unlike :meth:`remove`, the advisory is preserved so it can be
+        restored via :meth:`restore` if later evidence warrants.
+        """
+        advisory = self._advisories.get(advisory_id)
+        if advisory is None:
+            return None
+        if advisory.status == AdvisoryStatus.SUPPRESSED:
+            return advisory
+        updated = advisory.model_copy(
+            update={
+                "status": AdvisoryStatus.SUPPRESSED,
+                "suppressed_at": datetime.now(UTC),
+                "suppression_reason": reason,
+                "updated_at": datetime.now(UTC),
+            }
+        )
+        self._advisories[advisory_id] = updated
+        self._save()
+        logger.info(
+            "advisory_suppressed",
+            advisory_id=advisory_id,
+            reason=reason,
+        )
+        return updated
+
+    def restore(self, advisory_id: str) -> Advisory | None:
+        """Restore a suppressed advisory to active status.
+
+        Returns the updated advisory, or ``None`` if the id is unknown.
+        Idempotent — restoring an already-active advisory is a no-op.
+        Clears ``suppressed_at`` and ``suppression_reason``.
+        """
+        advisory = self._advisories.get(advisory_id)
+        if advisory is None:
+            return None
+        if advisory.status == AdvisoryStatus.ACTIVE:
+            return advisory
+        updated = advisory.model_copy(
+            update={
+                "status": AdvisoryStatus.ACTIVE,
+                "suppressed_at": None,
+                "suppression_reason": None,
+                "updated_at": datetime.now(UTC),
+            }
+        )
+        self._advisories[advisory_id] = updated
+        self._save()
+        logger.info("advisory_restored", advisory_id=advisory_id)
+        return updated
+
     def remove(self, advisory_id: str) -> bool:
-        """Remove an advisory by ID.  Returns ``True`` if found."""
+        """Hard-delete an advisory by ID.  Returns ``True`` if found.
+
+        This is the irreversible path and is intended for manual
+        cleanup (admin commands, broken-state recovery). The fitness
+        loop should use :meth:`suppress` instead so the record remains
+        available for later restoration.
+        """
         if advisory_id not in self._advisories:
             return False
         del self._advisories[advisory_id]

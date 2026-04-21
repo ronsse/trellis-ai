@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 from trellis.schemas.classification import ContentTags, RetrievalAffinity
@@ -71,6 +72,7 @@ class MergedClassification:
                 cast("RetrievalAffinity", v) for v in retrieval_affinity_values
             ],
             classified_by=self.classified_by,
+            classified_at=datetime.now(UTC),
         )
 
 
