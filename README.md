@@ -37,6 +37,12 @@ trellis retrieve pack --intent "deploy staging for user-api"   # assembled conte
 
 Every CLI command supports `--format json` for machine output.
 
+## Architecture at a glance
+
+<p align="center">
+  <img src="assets/architecture.svg" alt="Trellis architecture — interfaces, core modules, data layer, pluggable backends" width="880">
+</p>
+
 ## What's in the substrate
 
 ```mermaid
@@ -108,6 +114,10 @@ flowchart TB
     class Store store;
     class W worker;
 ```
+
+<p align="center">
+  <img src="assets/data-flow.svg" alt="How a trace flows through Trellis — write path and read path" width="880">
+</p>
 
 Packs carry `pack_id` and per-item refs; when the agent reports success or failure, feedback is attributed back to the exact items that were in the pack. Background workers aggregate that feedback into **noise tags** (so low-signal items drop out of future packs) and **advisory confidence adjustments** (so learned rules get sharper). Successful traces can be promoted to precedents, which then seed future packs for similar tasks.
 
@@ -181,6 +191,56 @@ from trellis_sdk.skills import get_context_for_task
 
 context = get_context_for_task(client, "implement retry logic", domain="backend")
 ```
+
+## Planes & substrates
+
+Trellis separates **agent-facing** stores from **Trellis-internal** stores. Each plane has a blessed default backend ("substrate"); other backends are opt-in.
+
+```mermaid
+flowchart LR
+    subgraph Knowledge["Knowledge Plane — agent-facing"]
+        direction TB
+        G["Graph<br/>entities + edges"]
+        D["Documents<br/>full-text"]
+        V["Vectors<br/>semantic similarity"]
+        B["Blobs<br/>files & artifacts"]
+    end
+
+    subgraph Operational["Operational Plane — Trellis-internal"]
+        direction TB
+        TR["Trace store<br/>immutable work records"]
+        EL["Event log<br/>mutation audit trail"]
+    end
+
+    subgraph Substrates["Substrates (blessed defaults)"]
+        direction TB
+        SQ["SQLite — local default"]
+        PG["Postgres / pgvector — cloud"]
+        LA["LanceDB — local ANN"]
+        S3["S3 — blobs in cloud"]
+    end
+
+    G --- SQ
+    D --- SQ
+    V --- SQ
+    TR --- SQ
+    EL --- SQ
+    G -.-> PG
+    D -.-> PG
+    V -.-> PG
+    V -.-> LA
+    B --- SQ
+    B -.-> S3
+
+    classDef knowledge fill:#0b3d2e,stroke:#34d399,color:#e5e7eb;
+    classDef ops fill:#3b1c36,stroke:#f472b6,color:#e5e7eb;
+    classDef sub fill:#1f2937,stroke:#60a5fa,color:#e5e7eb;
+    class G,D,V,B knowledge;
+    class TR,EL ops;
+    class SQ,PG,LA,S3 sub;
+```
+
+Solid lines are defaults (SQLite everywhere); dotted lines are cloud/alternate substrates wired via `~/.config/trellis/config.yaml`.
 
 ## Storage — local or cloud
 
