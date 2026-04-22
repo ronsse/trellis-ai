@@ -1001,8 +1001,8 @@ Built a project-specific pack analysis in `fd-data-architecture-poc/src/fd_poc/t
 
 ##### P3: Learning Loop Integration
 
-- [ ] **Feedback-driven dimension calibration** — correlate quality dimension scores with `FEEDBACK_RECORDED` outcomes to learn which dimensions actually predict task success. If `noise_ratio` doesn't correlate with failure, reduce its weight. If `breadth` strongly predicts success, boost it.
-
+- [ ] **Dimension predictiveness validation (prereq for calibration)** — before auto-tuning weights, prove each dimension actually separates successful from failed packs. Add `trellis analyze dimension-predictiveness` that joins `PACK_ASSEMBLED` (with quality scores, once P2 emits them) against `FEEDBACK_RECORDED`, computes per-dimension correlation / AUC / point-biserial against `PackFeedback.success`, and reports which dimensions are signal vs noise. Output feeds the profile-weight conversation: dimensions with |r| < 0.1 across ≥100 packs are candidates for weight reduction. Pure analytics — no auto-mutation of profiles.
+- [ ] **Feedback-driven dimension calibration** — once predictiveness is validated, auto-adjust `EvaluationProfile` weights from the same correlations. If `noise_ratio` doesn't correlate with failure, reduce its weight. If `breadth` strongly predicts success, boost it. Gated behind a `--apply` flag and a `ParameterSet` promotion through `MutationExecutor` (same path as other tuned parameters). Depends on P2 live gating emitting `PACK_QUALITY_SCORED` events.
 - [ ] **Automatic scenario generation from traces** — mine `PACK_ASSEMBLED` + `FEEDBACK_RECORDED` event pairs to auto-generate `EvaluationScenario` fixtures. Successful traces become ground-truth scenarios; failed traces become regression tests.
 
 #### Relationship to Existing Infrastructure

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import typer
 from rich.console import Console
@@ -13,6 +14,13 @@ from trellis.retrieve.effectiveness import (
     analyze_effectiveness,
     run_advisory_fitness_loop,
     run_effectiveness_feedback,
+)
+from trellis.retrieve.evaluate import (
+    BUILTIN_PROFILES,
+    EvaluationProfile,
+    EvaluationScenario,
+    QualityReport,
+    evaluate_pack,
 )
 from trellis.retrieve.pack_sections import analyze_pack_sections
 from trellis.retrieve.token_usage import analyze_token_usage
@@ -492,3 +500,200 @@ def pack_sections(
         )
         for name in report.empty_section_flags:
             console.print(f"  ! {name}")
+
+
+# ---------------------------------------------------------------------------
+# Pack Quality Evaluation (scenario mode)
+# ---------------------------------------------------------------------------
+
+
+_MISSING_COVERAGE_PREVIEW = 8
+
+
+def _load_scenarios(path: Path) -> list[EvaluationScenario]:
+    """Parse a YAML fixture file into a list of EvaluationScenario.
+
+    Accepts either a top-level list of scenario dicts or a dict with a
+    top-level ``scenarios:`` key holding the list.
+    """
+    import yaml  # noqa: PLC0415
+
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if isinstance(raw, dict) and "scenarios" in raw:
+        raw = raw["scenarios"]
+    if not isinstance(raw, list):
+        msg = f"{path}: expected a list of scenarios or a top-level 'scenarios' key"
+        raise typer.BadParameter(msg)
+    scenarios: list[EvaluationScenario] = []
+    for idx, entry in enumerate(raw):
+        if not isinstance(entry, dict):
+            msg = f"{path}: scenarios[{idx}] is not a mapping"
+            raise typer.BadParameter(msg)
+        scenarios.append(EvaluationScenario(**entry))
+    return scenarios
+
+
+def _resolve_profile(profile_name: str | None) -> EvaluationProfile | None:
+    if profile_name is None:
+        return None
+    try:
+        return BUILTIN_PROFILES[profile_name]
+    except KeyError as exc:
+        names = ", ".join(sorted(BUILTIN_PROFILES))
+        msg = f"unknown profile {profile_name!r}; choose from: {names}"
+        raise typer.BadParameter(msg) from exc
+
+
+def _assemble_pack_for_scenario(scenario: EvaluationScenario) -> object:
+    """Build a Pack for a scenario by running PackBuilder against live stores.
+
+    Imported inline to keep the CLI module light and avoid pulling
+    PackBuilder's strategy graph into non-quality commands.
+    """
+    from trellis.ops import ParameterRegistry  # noqa: PLC0415
+    from trellis.retrieve.pack_builder import PackBuilder  # noqa: PLC0415
+    from trellis.retrieve.rerankers import build_reranker  # noqa: PLC0415
+    from trellis.retrieve.strategies import build_strategies  # noqa: PLC0415
+    from trellis_cli.stores import _get_registry  # noqa: PLC0415
+
+    registry = _get_registry()
+    param_registry = ParameterRegistry(registry.operational.parameter_store)
+    builder = PackBuilder(
+        strategies=build_strategies(registry, parameter_registry=param_registry),
+        event_log=registry.operational.event_log,
+        reranker=build_reranker("rrf", parameter_registry=param_registry),
+    )
+    filters: dict[str, object] | None = (
+        {"domain": scenario.domain} if scenario.domain else None
+    )
+    return builder.build(
+        intent=scenario.intent,
+        domain=scenario.domain,
+        filters=filters,
+    )
+
+
+@analyze_app.command("pack-quality")
+def pack_quality(
+    scenarios_path: Path = typer.Option(  # noqa: B008 - typer option default
+        ...,
+        "--scenarios",
+        "-s",
+        help="YAML file defining EvaluationScenario fixtures.",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+    profile_name: str | None = typer.Option(
+        None,
+        "--profile",
+        help=(
+            "Named weight profile to aggregate dimensions. "
+            "One of: code_generation, domain_context. "
+            "Omit for a simple mean across dimensions."
+        ),
+    ),
+    assemble: bool = typer.Option(
+        True,
+        "--assemble/--no-assemble",
+        help=(
+            "Assemble a live pack per scenario via PackBuilder and score it. "
+            "Set --no-assemble to validate scenario parsing only."
+        ),
+    ),
+    output_format: str = typer.Option("text", "--format", help="Output format"),
+) -> None:
+    """Score packs against declared scenarios across 5 quality dimensions.
+
+    Scenario mode only: loads ``EvaluationScenario`` fixtures, assembles
+    packs via ``PackBuilder``, and scores each on completeness, relevance,
+    noise, breadth, and efficiency. Event-log mode (joining to
+    ``PACK_ASSEMBLED`` events) is tracked as follow-up work.
+    """
+    scenarios = _load_scenarios(scenarios_path)
+    profile = _resolve_profile(profile_name)
+
+    if not assemble:
+        if output_format == "json":
+            console.print(
+                json.dumps(
+                    {"scenarios": [s.model_dump() for s in scenarios]},
+                    default=str,
+                )
+            )
+        else:
+            console.print(
+                f"[green]Parsed {len(scenarios)} scenario(s).[/green]"
+            )
+            for s in scenarios:
+                console.print(f"  - {s.name}: {s.intent[:60]}")
+        return
+
+    reports: list[QualityReport] = []
+    for scenario in scenarios:
+        pack = _assemble_pack_for_scenario(scenario)
+        report = evaluate_pack(pack, scenario, profile=profile)  # type: ignore[arg-type]
+        reports.append(report)
+
+    if output_format == "json":
+        console.print(
+            json.dumps(
+                {"reports": [r.model_dump() for r in reports]},
+                default=str,
+            )
+        )
+        return
+
+    console.print(
+        f"[bold]Pack Quality Report[/bold] "
+        f"(profile: {profile.name if profile else 'mean'})"
+    )
+    table = Table(title="Quality Scores by Scenario")
+    table.add_column("Scenario", style="cyan")
+    table.add_column("Complete", justify="right")
+    table.add_column("Relevance", justify="right")
+    table.add_column("Noise", justify="right")
+    table.add_column("Breadth", justify="right")
+    table.add_column("Efficiency", justify="right")
+    table.add_column("Weighted", justify="right", style="bold")
+
+    for report in reports:
+        dims = report.dimensions
+        weighted_style = (
+            "green"
+            if report.weighted_score >= _RATE_GREEN
+            else "yellow"
+            if report.weighted_score >= _RATE_YELLOW
+            else "red"
+        )
+        table.add_row(
+            report.scenario_name,
+            f"{dims.get('completeness', 0.0):.2f}",
+            f"{dims.get('relevance', 0.0):.2f}",
+            f"{dims.get('noise', 0.0):.2f}",
+            f"{dims.get('breadth', 0.0):.2f}",
+            f"{dims.get('efficiency', 0.0):.2f}",
+            f"[{weighted_style}]{report.weighted_score:.2f}[/{weighted_style}]",
+        )
+    console.print(table)
+
+    for report in reports:
+        if not (report.missing_coverage or report.findings):
+            continue
+        console.print()
+        console.print(f"[bold]{report.scenario_name}[/bold]")
+        if report.missing_coverage:
+            preview = ", ".join(
+                report.missing_coverage[:_MISSING_COVERAGE_PREVIEW]
+            )
+            more = (
+                ""
+                if len(report.missing_coverage) <= _MISSING_COVERAGE_PREVIEW
+                else (
+                    f" (+{len(report.missing_coverage) - _MISSING_COVERAGE_PREVIEW} more)"
+                )
+            )
+            console.print(f"  [yellow]missing coverage:[/yellow] {preview}{more}")
+        for finding in report.findings:
+            console.print(f"  [dim]- {finding}[/dim]")
