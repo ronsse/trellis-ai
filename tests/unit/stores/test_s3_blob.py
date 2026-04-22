@@ -204,3 +204,119 @@ class TestGetUri:
 class TestClose:
     def test_close_does_not_raise(self, store):
         store.close()
+
+
+# ---------------------------------------------------------------------------
+# Gap 4.4 — TTL + GC sweep
+# ---------------------------------------------------------------------------
+
+
+class TestTTL:
+    def test_put_stores_expires_at_in_metadata(self, store, mock_client):
+        from datetime import UTC, datetime, timedelta
+
+        from trellis.stores.base.blob import BLOB_EXPIRES_AT_KEY
+
+        expires = datetime(2026, 5, 1, tzinfo=UTC) + timedelta(days=1)
+        store.put("k.bin", b"x", expires_at=expires)
+        call_kwargs = mock_client.put_object.call_args[1]
+        assert call_kwargs["Metadata"][BLOB_EXPIRES_AT_KEY] == expires.isoformat()
+
+    def test_put_merges_metadata_and_expires_at(self, store, mock_client):
+        from datetime import UTC, datetime
+
+        from trellis.stores.base.blob import BLOB_EXPIRES_AT_KEY
+
+        expires = datetime(2026, 5, 1, tzinfo=UTC)
+        store.put(
+            "k.bin",
+            b"x",
+            metadata={"author": "agent"},
+            expires_at=expires,
+        )
+        md = mock_client.put_object.call_args[1]["Metadata"]
+        assert md["author"] == "agent"
+        assert md[BLOB_EXPIRES_AT_KEY] == expires.isoformat()
+
+
+class TestSweepExpired:
+    def _paginator(self, mock_client, keys):
+        paginator = MagicMock()
+        mock_client.get_paginator.return_value = paginator
+        paginator.paginate.return_value = [
+            {"Contents": [{"Key": f"blobs/{k}"} for k in keys]}
+        ]
+        return paginator
+
+    def _head_response(self, expires_at_iso: str | None) -> dict:
+        md = {}
+        from trellis.stores.base.blob import BLOB_EXPIRES_AT_KEY
+
+        if expires_at_iso is not None:
+            md[BLOB_EXPIRES_AT_KEY] = expires_at_iso
+        return {"Metadata": md}
+
+    def test_sweeps_expired_blobs(self, store, mock_client):
+        from datetime import UTC, datetime, timedelta
+
+        past = (datetime.now(UTC) - timedelta(days=1)).isoformat()
+        future = (datetime.now(UTC) + timedelta(days=1)).isoformat()
+
+        # list_keys returns sorted: a.bin < b.bin < c.bin — match the
+        # head_object side_effect order to those sorted keys.
+        self._paginator(mock_client, ["a.bin", "b.bin", "c.bin"])
+        mock_client.head_object.side_effect = [
+            self._head_response(past),     # a.bin — expired
+            self._head_response(future),   # b.bin — not expired
+            self._head_response(None),     # c.bin — no TTL
+        ]
+        report = store.sweep_expired()
+        assert report.swept == 1
+        assert report.skipped_not_yet_expired == 1
+        assert report.skipped_no_ttl == 1
+        mock_client.delete_object.assert_called_once_with(
+            Bucket="test-bucket", Key="blobs/a.bin"
+        )
+
+    def test_dry_run_does_not_delete(self, store, mock_client):
+        from datetime import UTC, datetime, timedelta
+
+        past = (datetime.now(UTC) - timedelta(days=1)).isoformat()
+        self._paginator(mock_client, ["old.bin"])
+        mock_client.head_object.return_value = self._head_response(past)
+
+        report = store.sweep_expired(dry_run=True)
+        assert report.swept == 1
+        assert report.dry_run is True
+        mock_client.delete_object.assert_not_called()
+
+    def test_malformed_ttl_counts_as_error(self, store, mock_client):
+        self._paginator(mock_client, ["broken.bin"])
+        mock_client.head_object.return_value = self._head_response("not-a-date")
+        report = store.sweep_expired()
+        assert report.errors == 1
+        assert report.swept == 0
+        mock_client.delete_object.assert_not_called()
+
+    def test_emits_event_when_event_log_provided(
+        self, store, mock_client, tmp_path
+    ):
+        from datetime import UTC, datetime, timedelta
+
+        from trellis.stores.base.event_log import EventType
+        from trellis.stores.sqlite.event_log import SQLiteEventLog
+
+        past = (datetime.now(UTC) - timedelta(days=1)).isoformat()
+        self._paginator(mock_client, ["old.bin"])
+        mock_client.head_object.return_value = self._head_response(past)
+
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        try:
+            store.sweep_expired(event_log=event_log)
+            events = event_log.get_events(event_type=EventType.BLOB_GC_SWEPT)
+            assert len(events) == 1
+            payload = events[0].payload
+            assert payload["swept"] == 1
+            assert payload["bucket"] == "test-bucket"
+        finally:
+            event_log.close()

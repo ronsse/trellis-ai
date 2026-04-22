@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import time
+from datetime import datetime
 from typing import Any
 
 import structlog
 
-from trellis.stores.base.blob import BlobStore
+from trellis.core.base import utc_now
+from trellis.schemas.blob import BlobGCReport
+from trellis.stores.base.blob import BLOB_EXPIRES_AT_KEY, BlobStore
+from trellis.stores.base.event_log import EventLog, EventType
 
 logger = structlog.get_logger(__name__)
 
@@ -73,6 +78,8 @@ class S3BlobStore(BlobStore):
         key: str,
         data: bytes,
         metadata: dict[str, Any] | None = None,
+        *,
+        expires_at: datetime | None = None,
     ) -> str:
         full_key = self._full_key(key)
         kwargs: dict[str, Any] = {
@@ -80,8 +87,13 @@ class S3BlobStore(BlobStore):
             "Key": full_key,
             "Body": data,
         }
-        if metadata:
-            kwargs["Metadata"] = {k: str(v) for k, v in metadata.items()}
+        merged: dict[str, Any] | None = None
+        if metadata or expires_at is not None:
+            merged = dict(metadata or {})
+            if expires_at is not None:
+                merged[BLOB_EXPIRES_AT_KEY] = expires_at.isoformat()
+        if merged:
+            kwargs["Metadata"] = {k: str(v) for k, v in merged.items()}
         self._client.put_object(**kwargs)
         logger.debug("blob_stored", key=key, bucket=self._bucket)
         return self.get_uri(key)
@@ -137,6 +149,96 @@ class S3BlobStore(BlobStore):
 
     def get_uri(self, key: str) -> str:
         return f"s3://{self._bucket}/{self._full_key(key)}"
+
+    def sweep_expired(
+        self,
+        before: datetime | None = None,
+        *,
+        prefix: str = "",
+        dry_run: bool = False,
+        event_log: EventLog | None = None,
+    ) -> BlobGCReport:
+        """Time-based GC sweep.
+
+        S3 also supports bucket-level lifecycle rules which are usually
+        the right knob for coarse retention; this sweep is for deployments
+        that need shorter TTLs or ship without infrastructure-level
+        policies configured. Walks ``list_keys(prefix)``, calls
+        ``head_object`` on each, and deletes those whose
+        :data:`BLOB_EXPIRES_AT_KEY` metadata is strictly in the past.
+        """
+        cutoff = before or utc_now()
+        start_ns = time.monotonic_ns()
+        swept = 0
+        skipped_no_ttl = 0
+        skipped_not_yet_expired = 0
+        errors = 0
+
+        for key in self.list_keys(prefix=prefix):
+            try:
+                head = self._client.head_object(
+                    Bucket=self._bucket,
+                    Key=self._full_key(key),
+                )
+            except ClientError:
+                errors += 1
+                logger.exception("blob_head_failed", key=key)
+                continue
+            raw = (head.get("Metadata") or {}).get(BLOB_EXPIRES_AT_KEY)
+            if raw is None:
+                skipped_no_ttl += 1
+                continue
+            try:
+                expires_at = datetime.fromisoformat(raw)
+            except (TypeError, ValueError):
+                errors += 1
+                logger.warning(
+                    "blob_expires_at_parse_failed", key=key, value=raw
+                )
+                continue
+            if expires_at >= cutoff:
+                skipped_not_yet_expired += 1
+                continue
+            swept += 1
+            if not dry_run:
+                try:
+                    self._client.delete_object(
+                        Bucket=self._bucket,
+                        Key=self._full_key(key),
+                    )
+                except ClientError:
+                    errors += 1
+                    swept -= 1
+                    logger.exception("blob_delete_failed", key=key)
+
+        report = BlobGCReport(
+            before=cutoff,
+            swept=swept,
+            skipped_no_ttl=skipped_no_ttl,
+            skipped_not_yet_expired=skipped_not_yet_expired,
+            errors=errors,
+            dry_run=dry_run,
+            duration_ms=max((time.monotonic_ns() - start_ns) // 1_000_000, 0),
+        )
+        logger.info(
+            "blob_gc_swept",
+            before=cutoff.isoformat(),
+            bucket=self._bucket,
+            dry_run=dry_run,
+            swept=swept,
+            skipped_no_ttl=skipped_no_ttl,
+            skipped_not_yet_expired=skipped_not_yet_expired,
+            errors=errors,
+            duration_ms=report.duration_ms,
+        )
+        if event_log is not None:
+            event_log.emit(
+                EventType.BLOB_GC_SWEPT,
+                source="blob_store",
+                payload=report.model_dump(mode="json")
+                | {"bucket": self._bucket, "prefix": prefix},
+            )
+        return report
 
     def close(self) -> None:
         logger.info("s3_blob_store_closed", bucket=self._bucket)

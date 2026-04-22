@@ -29,6 +29,11 @@ from trellis.extract.json_rules import (
 from trellis.extract.llm import LLMExtractor
 from trellis.extract.registry import ExtractorRegistry
 from trellis.extract.save_memory import build_save_memory_extractor
+from trellis.extract.telemetry import (
+    ExtractorFallbackReport,
+    SourceFallbackStats,
+    analyze_extractor_fallbacks,
+)
 
 __all__ = [
     "AliasMatchExtractor",
@@ -39,6 +44,7 @@ __all__ = [
     "ExtractionDispatcher",
     "ExtractionRuleBundle",
     "Extractor",
+    "ExtractorFallbackReport",
     "ExtractorRegistry",
     "ExtractorTier",
     "HybridJSONExtractor",
@@ -46,5 +52,7 @@ __all__ = [
     "LLMExtractor",
     "NoExtractorAvailableError",
     "ResidueSelector",
+    "SourceFallbackStats",
+    "analyze_extractor_fallbacks",
     "build_save_memory_extractor",
 ]

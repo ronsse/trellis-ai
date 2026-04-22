@@ -314,6 +314,48 @@ class TestPostgresGraphStore:
             ("dbt", "model.project.orders"),
         }
 
+    def test_compact_versions_drops_old_closed_rows(self, store) -> None:
+        """Gap 4.2 — Postgres SCD2 retention."""
+        from datetime import UTC, datetime, timedelta
+
+        store.upsert_node("n1", "person", {"v": 1})
+        store.upsert_node("n1", "person", {"v": 2})
+        # Backdate the closed row's valid_to.
+        ten_days_ago = datetime.now(UTC) - timedelta(days=10)
+        with store.conn.cursor() as cur:
+            cur.execute(
+                "UPDATE nodes SET valid_to = %s WHERE valid_to IS NOT NULL",
+                (ten_days_ago,),
+            )
+        store.conn.commit()
+
+        report = store.compact_versions(datetime.now(UTC) - timedelta(days=5))
+        assert report.nodes_compacted == 1
+        assert report.dry_run is False
+        assert store.get_node("n1") is not None
+        assert len(store.get_node_history("n1")) == 1
+
+    def test_compact_versions_dry_run(self, store) -> None:
+        from datetime import UTC, datetime, timedelta
+
+        store.upsert_node("n1", "person", {"v": 1})
+        store.upsert_node("n1", "person", {"v": 2})
+        ten_days_ago = datetime.now(UTC) - timedelta(days=10)
+        with store.conn.cursor() as cur:
+            cur.execute(
+                "UPDATE nodes SET valid_to = %s WHERE valid_to IS NOT NULL",
+                (ten_days_ago,),
+            )
+        store.conn.commit()
+
+        report = store.compact_versions(
+            datetime.now(UTC) - timedelta(days=5), dry_run=True
+        )
+        assert report.dry_run is True
+        assert report.nodes_compacted == 1
+        # Dry run did not delete the row.
+        assert len(store.get_node_history("n1")) == 2
+
 
 # ======================================================================
 # EventLog

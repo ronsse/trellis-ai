@@ -1225,9 +1225,7 @@ class TestAdvisoryDriftDetection:
         )
         assert report.advisories_drifting == []
 
-    def test_fitness_loop_emits_drift_detected_event(
-        self, event_log, advisory_store
-    ):
+    def test_fitness_loop_emits_drift_detected_event(self, event_log, advisory_store):
         """run_advisory_fitness_loop emits ADVISORY_DRIFT_DETECTED per alert."""
         adv = _make_advisory("adv_emit", confidence=0.5)
         advisory_store.put(adv)

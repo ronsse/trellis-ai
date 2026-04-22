@@ -875,6 +875,4 @@ def _emit_advisory_event(
     }
     if reason is not None:
         payload["reason"] = reason
-    _emit_fitness_event(
-        event_log, event_type, advisory_id=advisory_id, payload=payload
-    )
+    _emit_fitness_event(event_log, event_type, advisory_id=advisory_id, payload=payload)

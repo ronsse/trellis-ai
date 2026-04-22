@@ -12,6 +12,12 @@ from trellis.learning.tuners.promotion import (
     PromotionResult,
     promote_proposal,
 )
+from trellis.learning.tuners.rollback import (
+    PostPromotionPolicy,
+    PostPromotionReport,
+    monitor_post_promotion,
+    run_post_promotion_sweep,
+)
 from trellis.learning.tuners.rule_tuner import (
     DEFAULT_RULES,
     AggregatedOutcomes,
@@ -24,11 +30,15 @@ from trellis.learning.tuners.rule_tuner import (
 __all__ = [
     "DEFAULT_RULES",
     "AggregatedOutcomes",
+    "PostPromotionPolicy",
+    "PostPromotionReport",
     "PromotionPolicy",
     "PromotionResult",
     "RuleTuner",
     "TuningRule",
     "aggregate_outcomes",
     "apply_rules",
+    "monitor_post_promotion",
     "promote_proposal",
+    "run_post_promotion_sweep",
 ]
