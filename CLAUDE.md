@@ -119,3 +119,4 @@ Detailed operational reference lives in `docs/agent-guide/`:
 | [schemas.md](docs/agent-guide/schemas.md) | All Pydantic schemas with fields, types, and examples |
 | [operations.md](docs/agent-guide/operations.md) | Full CLI, REST API, MCP, and Python mutation API reference |
 | [playbooks.md](docs/agent-guide/playbooks.md) | Step-by-step procedures for common tasks |
+| [pack-quality-evaluation.md](docs/agent-guide/pack-quality-evaluation.md) | Assembly-time pack scoring (5 dimensions), profiles, scenario fixtures, optional `PackBuilder(evaluator=...)` hook |

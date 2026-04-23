@@ -26,13 +26,19 @@ deliberately out of scope here — see the Pack Quality P3 entry in ``TODO.md``.
 
 from __future__ import annotations
 
-from typing import Any, Protocol, runtime_checkable
+import math
+from collections import defaultdict
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import structlog
 from pydantic import Field, model_validator
 
 from trellis.core.base import TrellisModel
 from trellis.schemas.pack import Pack, PackItem
+
+if TYPE_CHECKING:
+    from trellis.stores.base.event_log import EventLog
 
 logger = structlog.get_logger(__name__)
 
@@ -189,15 +195,11 @@ class CompletenessScorer:
             return 1.0
         excerpts = [_item_excerpt_lower(i) for i in pack.items]
         hits = sum(
-            1
-            for kw in required
-            if any(kw.lower() in excerpt for excerpt in excerpts)
+            1 for kw in required if any(kw.lower() in excerpt for excerpt in excerpts)
         )
         return hits / len(required)
 
-    def missing(
-        self, pack: Pack, scenario: EvaluationScenario
-    ) -> list[str]:
+    def missing(self, pack: Pack, scenario: EvaluationScenario) -> list[str]:
         excerpts = [_item_excerpt_lower(i) for i in pack.items]
         return [
             kw
@@ -264,9 +266,7 @@ class BreadthScorer:
         expected = scenario.expected_categories
         if not expected:
             return 1.0
-        present = {
-            ct for item in pack.items if (ct := _item_content_type(item))
-        }
+        present = {ct for item in pack.items if (ct := _item_content_type(item))}
         hits = sum(1 for category in expected if category in present)
         return hits / len(expected)
 
@@ -374,9 +374,7 @@ def evaluate_pack(
         scores[dim.name] = max(0.0, min(1.0, raw))
 
     if profile is not None:
-        covered = {
-            name: scores[name] for name in profile.weights if name in scores
-        }
+        covered = {name: scores[name] for name in profile.weights if name in scores}
         if covered:
             weighted = sum(
                 profile.weights[name] * value for name, value in covered.items()
@@ -386,9 +384,7 @@ def evaluate_pack(
         else:
             weighted_score = 0.0
     else:
-        weighted_score = (
-            sum(scores.values()) / len(scores) if scores else 0.0
-        )
+        weighted_score = sum(scores.values()) / len(scores) if scores else 0.0
 
     missing_coverage: list[str] = []
     for dim in dims:
@@ -426,9 +422,7 @@ def _build_findings(
     findings: list[str] = []
     if missing_coverage:
         preview = ", ".join(missing_coverage[:_MIN_COVERAGE_PREVIEW])
-        suffix = (
-            "" if len(missing_coverage) <= _MIN_COVERAGE_PREVIEW else " ..."
-        )
+        suffix = "" if len(missing_coverage) <= _MIN_COVERAGE_PREVIEW else " ..."
         findings.append(
             f"completeness: {len(missing_coverage)} required keyword(s) "
             f"missing ({preview}{suffix})"
@@ -459,6 +453,251 @@ def _build_findings(
     return findings
 
 
+# ---------------------------------------------------------------------------
+# Dimension predictiveness — do KPIs actually predict task success?
+# ---------------------------------------------------------------------------
+#
+# Joins PACK_QUALITY_SCORED events (emitted by PackBuilder when an evaluator
+# is wired) against FEEDBACK_RECORDED events to answer: "for each quality
+# dimension, does a higher score correlate with task success?"
+#
+# This is the prerequisite for auto-calibration of profile weights (P3 in
+# TODO.md). Before auto-tuning, we must demonstrate which dimensions are
+# actually signal — a dimension with |r| < 0.1 across a meaningful sample is
+# a candidate for weight reduction; strong positive correlation justifies
+# boosting. The analysis is read-only: no mutation of profiles, scorers, or
+# classification state.
+
+#: Minimum samples (matched pack_id across both event types) before the
+#: correlation is reported as meaningful. Below this the dimension is still
+#: reported but flagged ``INSUFFICIENT_DATA``.
+_PREDICTIVENESS_MIN_SAMPLES = 20
+
+#: Correlation magnitude thresholds. These are deliberately coarse — we are
+#: separating signal from noise, not doing precise effect-size estimation.
+_NOISE_CORRELATION_THRESHOLD = 0.1
+_MODERATE_CORRELATION_THRESHOLD = 0.3
+_STRONG_CORRELATION_THRESHOLD = 0.5
+
+_PREDICTIVENESS_EVENT_LIMIT = 5000
+
+#: Minimum observations for Pearson correlation to be mathematically defined.
+_PEARSON_MIN_SAMPLES = 2
+
+
+class DimensionPredictiveness(TrellisModel):
+    """Predictiveness of a single quality dimension against success feedback."""
+
+    dimension: str
+    sample_count: int
+    correlation: float | None  # None when undefined (zero variance, <2 samples)
+    mean_score_on_success: float | None
+    mean_score_on_failure: float | None
+    signal_classification: str  # strong | moderate | weak | noise | insufficient_data
+
+
+class DimensionPredictivenessReport(TrellisModel):
+    """Report on which dimensions predict task success."""
+
+    total_packs_scored: int
+    total_matched_feedback: int
+    overall_success_rate: float
+    dimensions: list[DimensionPredictiveness] = Field(default_factory=list)
+    weighted_score_predictiveness: DimensionPredictiveness | None = None
+    notes: list[str] = Field(default_factory=list)
+
+
+def _pearson(xs: list[float], ys: list[float]) -> float | None:
+    """Pearson correlation between two equal-length lists.
+
+    Returns ``None`` when correlation is undefined — fewer than 2 samples
+    or zero variance in either variable. For a binary ``ys`` (success/fail),
+    this is the point-biserial correlation.
+    """
+    n = len(xs)
+    if n < _PEARSON_MIN_SAMPLES or len(ys) != n:
+        return None
+    mean_x = sum(xs) / n
+    mean_y = sum(ys) / n
+    var_x = sum((x - mean_x) ** 2 for x in xs)
+    var_y = sum((y - mean_y) ** 2 for y in ys)
+    if var_x == 0.0 or var_y == 0.0:
+        return None
+    cov = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys, strict=False))
+    return cov / math.sqrt(var_x * var_y)
+
+
+def _classify_signal(correlation: float | None, sample_count: int) -> str:
+    if sample_count < _PREDICTIVENESS_MIN_SAMPLES:
+        return "insufficient_data"
+    if correlation is None:
+        return "insufficient_data"
+    magnitude = abs(correlation)
+    if magnitude >= _STRONG_CORRELATION_THRESHOLD:
+        return "strong"
+    if magnitude >= _MODERATE_CORRELATION_THRESHOLD:
+        return "moderate"
+    if magnitude >= _NOISE_CORRELATION_THRESHOLD:
+        return "weak"
+    return "noise"
+
+
+def analyze_dimension_predictiveness(  # noqa: PLR0912, PLR0915
+    event_log: EventLog,
+    *,
+    days: int = 30,
+    success_threshold: float = 0.5,
+) -> DimensionPredictivenessReport:
+    """Correlate quality-dimension scores with task success.
+
+    Joins :attr:`PACK_QUALITY_SCORED` events with :attr:`FEEDBACK_RECORDED`
+    events by ``pack_id``. For each dimension observed, computes the Pearson
+    correlation between dimension score and success (0/1) — mathematically
+    equivalent to the point-biserial correlation.
+
+    Signal classification:
+
+    * ``strong`` — ``|r| >= 0.5``
+    * ``moderate`` — ``|r| >= 0.3``
+    * ``weak`` — ``|r| >= 0.1``
+    * ``noise`` — ``|r| < 0.1`` (candidate for weight reduction)
+    * ``insufficient_data`` — fewer than the minimum sample count, or undefined
+
+    The report is read-only — no mutation of profiles, scorers, or
+    classification state. Auto-calibration of profile weights is separate
+    P3 work that depends on this analysis as its substrate.
+    """
+    from trellis.stores.base.event_log import EventType  # noqa: PLC0415
+
+    since = datetime.now(tz=UTC) - timedelta(days=days)
+    quality_events = event_log.get_events(
+        event_type=EventType.PACK_QUALITY_SCORED,
+        since=since,
+        limit=_PREDICTIVENESS_EVENT_LIMIT,
+    )
+    feedback_events = event_log.get_events(
+        event_type=EventType.FEEDBACK_RECORDED,
+        since=since,
+        limit=_PREDICTIVENESS_EVENT_LIMIT,
+    )
+
+    #: pack_id -> {dimension -> score, "_weighted": score}
+    pack_scores: dict[str, dict[str, float]] = {}
+    for event in quality_events:
+        pack_id = event.payload.get("pack_id") or event.entity_id
+        if not pack_id:
+            continue
+        dims = event.payload.get("dimensions") or {}
+        if not isinstance(dims, dict):
+            continue
+        record: dict[str, float] = {}
+        for name, value in dims.items():
+            if isinstance(value, int | float):
+                record[str(name)] = float(value)
+        weighted = event.payload.get("weighted_score")
+        if isinstance(weighted, int | float):
+            record["_weighted"] = float(weighted)
+        if record:
+            pack_scores[pack_id] = record
+
+    #: pack_id -> success_bool. Latest feedback wins when duplicated.
+    pack_success: dict[str, bool] = {}
+    for event in feedback_events:
+        pack_id = event.payload.get("pack_id") or event.entity_id
+        if not pack_id or pack_id not in pack_scores:
+            continue
+        explicit = event.payload.get("success")
+        if isinstance(explicit, bool):
+            pack_success[pack_id] = explicit
+            continue
+        rating = event.payload.get("rating")
+        if isinstance(rating, int | float):
+            pack_success[pack_id] = bool(rating >= success_threshold)
+
+    matched_ids = list(pack_success.keys())
+    matched_feedback = len(matched_ids)
+
+    per_dim_xs: dict[str, list[float]] = defaultdict(list)
+    per_dim_ys: dict[str, list[float]] = defaultdict(list)
+    for pack_id in matched_ids:
+        y = 1.0 if pack_success[pack_id] else 0.0
+        for name, score in pack_scores[pack_id].items():
+            per_dim_xs[name].append(score)
+            per_dim_ys[name].append(y)
+
+    successes = sum(1 for pid in matched_ids if pack_success[pid])
+    overall_success_rate = successes / matched_feedback if matched_feedback > 0 else 0.0
+
+    dimensions: list[DimensionPredictiveness] = []
+    weighted_entry: DimensionPredictiveness | None = None
+    for name in sorted(per_dim_xs):
+        xs = per_dim_xs[name]
+        ys = per_dim_ys[name]
+        r = _pearson(xs, ys)
+        n_success = sum(1 for y in ys if y > 0.5)  # noqa: PLR2004
+        n_failure = len(ys) - n_success
+        mean_success = (
+            sum(x for x, y in zip(xs, ys, strict=False) if y > 0.5) / n_success  # noqa: PLR2004
+            if n_success > 0
+            else None
+        )
+        mean_failure = (
+            sum(x for x, y in zip(xs, ys, strict=False) if y <= 0.5) / n_failure  # noqa: PLR2004
+            if n_failure > 0
+            else None
+        )
+        entry = DimensionPredictiveness(
+            dimension=name if name != "_weighted" else "weighted_score",
+            sample_count=len(xs),
+            correlation=r,
+            mean_score_on_success=mean_success,
+            mean_score_on_failure=mean_failure,
+            signal_classification=_classify_signal(r, len(xs)),
+        )
+        if name == "_weighted":
+            weighted_entry = entry
+        else:
+            dimensions.append(entry)
+
+    notes: list[str] = []
+    if matched_feedback == 0:
+        notes.append(
+            "No packs have both PACK_QUALITY_SCORED and FEEDBACK_RECORDED "
+            "events in this window. Wire a PackBuilder evaluator and collect "
+            "feedback via record_feedback before this report becomes useful."
+        )
+    elif matched_feedback < _PREDICTIVENESS_MIN_SAMPLES:
+        notes.append(
+            f"Only {matched_feedback} matched pack(s) in this window — "
+            f"below the {_PREDICTIVENESS_MIN_SAMPLES}-sample threshold for "
+            f"reliable correlation. All dimensions will report as "
+            f"insufficient_data."
+        )
+    noise_dims = [d.dimension for d in dimensions if d.signal_classification == "noise"]
+    if noise_dims:
+        notes.append(
+            "Dimensions classified as noise (|r| < 0.1) are candidates for "
+            f"weight reduction in profiles: {', '.join(noise_dims)}."
+        )
+
+    report = DimensionPredictivenessReport(
+        total_packs_scored=len(pack_scores),
+        total_matched_feedback=matched_feedback,
+        overall_success_rate=overall_success_rate,
+        dimensions=dimensions,
+        weighted_score_predictiveness=weighted_entry,
+        notes=notes,
+    )
+    logger.info(
+        "dimension_predictiveness_analyzed",
+        days=days,
+        packs_scored=len(pack_scores),
+        matched_feedback=matched_feedback,
+        success_rate=overall_success_rate,
+    )
+    return report
+
+
 __all__ = [
     "BUILTIN_PROFILES",
     "BreadthScorer",
@@ -466,6 +705,8 @@ __all__ = [
     "CompletenessScorer",
     "DEFAULT_DIMENSIONS",
     "DOMAIN_CONTEXT_PROFILE",
+    "DimensionPredictiveness",
+    "DimensionPredictivenessReport",
     "EfficiencyScorer",
     "EvaluationProfile",
     "EvaluationScenario",
@@ -473,5 +714,6 @@ __all__ = [
     "QualityDimension",
     "QualityReport",
     "RelevanceScorer",
+    "analyze_dimension_predictiveness",
     "evaluate_pack",
 ]

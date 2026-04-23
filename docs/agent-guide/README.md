@@ -13,6 +13,7 @@ Operational reference for AI agents interacting with the Trellis. These document
 | [playbooks.md](playbooks.md) | Step-by-step operational procedures for common agent tasks |
 | [tiered-context-retrieval.md](tiered-context-retrieval.md) | Sectioned pack assembly for multi-agent workflows |
 | [tagging-for-retrieval.md](tagging-for-retrieval.md) | How to write knowledge base content so the tagging pipeline lands it in the right retrieval tier |
+| [pack-quality-evaluation.md](pack-quality-evaluation.md) | Assembly-time pack scoring — five dimensions, built-in profiles, scenario fixtures, optional `PackBuilder` hook |
 
 ## Integration Layers
 

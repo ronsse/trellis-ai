@@ -291,3 +291,228 @@ class TestNodeRole:
         roles = {n["node_id"]: n["node_role"] for n in sg["nodes"]}
         assert roles["a"] == "semantic"
         assert roles["col"] == "structural"
+
+
+class TestCompactVersions:
+    """Gap 4.2 — SCD2 retention for hot nodes/edges/aliases."""
+
+    def _close_old_versions(self, store, table: str, valid_to_iso: str) -> None:
+        """Backdate every closed row's ``valid_to`` in *table* for testing.
+
+        Upserts alone don't let us pick a ``valid_to`` — the store stamps
+        it with ``utc_now()``. Tests need deterministic values, so we
+        rewrite them after the fact with raw SQL. This is the same
+        pattern other SCD2-aware tests use when they need time control.
+        """
+        store._conn.execute(
+            f"UPDATE {table} SET valid_to = ? WHERE valid_to IS NOT NULL",  # noqa: S608
+            (valid_to_iso,),
+        )
+        store._conn.commit()
+
+    def test_compacts_closed_rows_before_cutoff(self, graph_store):
+        from datetime import UTC, datetime, timedelta
+
+        # Two updates → one current row + one closed row.
+        graph_store.upsert_node("n1", "service", {"v": 1})
+        graph_store.upsert_node("n1", "service", {"v": 2})
+        # Backdate the closed version to 10 days ago.
+        ten_days_ago = (datetime.now(UTC) - timedelta(days=10)).isoformat()
+        self._close_old_versions(graph_store, "nodes", ten_days_ago)
+
+        cutoff = datetime.now(UTC) - timedelta(days=5)
+        report = graph_store.compact_versions(cutoff)
+
+        assert report.nodes_compacted == 1
+        assert report.edges_compacted == 0
+        assert report.aliases_compacted == 0
+        assert report.total_compacted == 1
+        assert report.dry_run is False
+        # Current row still reachable.
+        current = graph_store.get_node("n1")
+        assert current is not None
+        assert current["properties"]["v"] == 2
+        # History no longer has the old version.
+        history = graph_store.get_node_history("n1")
+        assert len(history) == 1
+        assert history[0]["valid_to"] is None
+
+    def test_preserves_current_rows(self, graph_store):
+        from datetime import UTC, datetime, timedelta
+
+        # Single current row only; no closed rows exist.
+        graph_store.upsert_node("n1", "service", {"v": 1})
+        future = datetime.now(UTC) + timedelta(days=365)
+        report = graph_store.compact_versions(future)
+        assert report.nodes_compacted == 0
+        assert graph_store.get_node("n1") is not None
+
+    def test_dry_run_reports_without_deleting(self, graph_store):
+        from datetime import UTC, datetime, timedelta
+
+        graph_store.upsert_node("n1", "service", {"v": 1})
+        graph_store.upsert_node("n1", "service", {"v": 2})
+        ten_days_ago = (datetime.now(UTC) - timedelta(days=10)).isoformat()
+        self._close_old_versions(graph_store, "nodes", ten_days_ago)
+
+        cutoff = datetime.now(UTC) - timedelta(days=5)
+        report = graph_store.compact_versions(cutoff, dry_run=True)
+        assert report.dry_run is True
+        assert report.nodes_compacted == 1
+        # History still intact — dry-run is read-only.
+        assert len(graph_store.get_node_history("n1")) == 2
+
+    def test_skips_rows_at_or_after_cutoff(self, graph_store):
+        from datetime import UTC, datetime, timedelta
+
+        graph_store.upsert_node("n1", "service", {"v": 1})
+        graph_store.upsert_node("n1", "service", {"v": 2})
+        # Closed version is only 1 day old.
+        one_day_ago = (datetime.now(UTC) - timedelta(days=1)).isoformat()
+        self._close_old_versions(graph_store, "nodes", one_day_ago)
+
+        cutoff = datetime.now(UTC) - timedelta(days=5)
+        report = graph_store.compact_versions(cutoff)
+        assert report.nodes_compacted == 0
+        assert len(graph_store.get_node_history("n1")) == 2
+
+    def test_compacts_edges_and_aliases(self, graph_store):
+        from datetime import UTC, datetime, timedelta
+
+        graph_store.upsert_node("a", "service", {})
+        graph_store.upsert_node("b", "service", {})
+        # Create + replace an edge (replacement closes the prior version).
+        graph_store.upsert_edge("a", "b", "depends_on", {"w": 1})
+        graph_store.upsert_edge("a", "b", "depends_on", {"w": 2})
+        # Create + replace an alias.
+        graph_store.upsert_alias("a", "systemX", "raw-1", raw_name="old")
+        graph_store.upsert_alias("a", "systemX", "raw-1", raw_name="new")
+
+        ten_days_ago = (datetime.now(UTC) - timedelta(days=10)).isoformat()
+        self._close_old_versions(graph_store, "edges", ten_days_ago)
+        self._close_old_versions(graph_store, "entity_aliases", ten_days_ago)
+
+        report = graph_store.compact_versions(
+            datetime.now(UTC) - timedelta(days=5)
+        )
+        assert report.edges_compacted == 1
+        assert report.aliases_compacted == 1
+        assert report.total_compacted == 2
+
+    def test_valid_to_range_reflects_compacted_rows(self, graph_store):
+        from datetime import UTC, datetime, timedelta
+
+        graph_store.upsert_node("n1", "service", {"v": 1})
+        graph_store.upsert_node("n1", "service", {"v": 2})
+        graph_store.upsert_node("n2", "service", {"v": 1})
+        graph_store.upsert_node("n2", "service", {"v": 2})
+
+        # Make the two closed rows land at distinct valid_to values.
+        oldest = (datetime.now(UTC) - timedelta(days=30)).isoformat()
+        newest = (datetime.now(UTC) - timedelta(days=10)).isoformat()
+        graph_store._conn.execute(
+            "UPDATE nodes SET valid_to = ? "
+            "WHERE node_id = ? AND valid_to IS NOT NULL",
+            (oldest, "n1"),
+        )
+        graph_store._conn.execute(
+            "UPDATE nodes SET valid_to = ? "
+            "WHERE node_id = ? AND valid_to IS NOT NULL",
+            (newest, "n2"),
+        )
+        graph_store._conn.commit()
+
+        report = graph_store.compact_versions(
+            datetime.now(UTC) - timedelta(days=5)
+        )
+        assert report.nodes_compacted == 2
+        assert report.oldest_compacted_valid_to is not None
+        assert report.newest_compacted_valid_to is not None
+        assert report.oldest_compacted_valid_to < report.newest_compacted_valid_to
+
+    def test_emits_event_when_event_log_provided(self, graph_store, tmp_path: Path):
+        from datetime import UTC, datetime, timedelta
+
+        from trellis.stores.base.event_log import EventType
+        from trellis.stores.sqlite.event_log import SQLiteEventLog
+
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        try:
+            graph_store.upsert_node("n1", "service", {"v": 1})
+            graph_store.upsert_node("n1", "service", {"v": 2})
+            ten_days_ago = (
+                datetime.now(UTC) - timedelta(days=10)
+            ).isoformat()
+            self._close_old_versions(graph_store, "nodes", ten_days_ago)
+
+            graph_store.compact_versions(
+                datetime.now(UTC) - timedelta(days=5),
+                event_log=event_log,
+            )
+            events = event_log.get_events(
+                event_type=EventType.GRAPH_VERSIONS_COMPACTED, limit=10
+            )
+            assert len(events) == 1
+            payload = events[0].payload
+            assert payload["nodes_compacted"] == 1
+            assert payload["dry_run"] is False
+            assert "before" in payload
+        finally:
+            event_log.close()
+
+    def test_dry_run_still_emits_event(self, graph_store, tmp_path: Path):
+        from datetime import UTC, datetime, timedelta
+
+        from trellis.stores.base.event_log import EventType
+        from trellis.stores.sqlite.event_log import SQLiteEventLog
+
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        try:
+            graph_store.upsert_node("n1", "service", {"v": 1})
+            graph_store.upsert_node("n1", "service", {"v": 2})
+            ten_days_ago = (
+                datetime.now(UTC) - timedelta(days=10)
+            ).isoformat()
+            self._close_old_versions(graph_store, "nodes", ten_days_ago)
+
+            graph_store.compact_versions(
+                datetime.now(UTC) - timedelta(days=5),
+                dry_run=True,
+                event_log=event_log,
+            )
+            events = event_log.get_events(
+                event_type=EventType.GRAPH_VERSIONS_COMPACTED, limit=10
+            )
+            assert len(events) == 1
+            assert events[0].payload["dry_run"] is True
+        finally:
+            event_log.close()
+
+    def test_base_class_raises_not_implemented(self):
+        # Stand-in for backends that haven't opted into compaction.
+        from datetime import UTC, datetime
+
+        from trellis.stores.base.graph import GraphStore
+
+        class _StubStore(GraphStore):
+            # Fill out just enough of the ABC to instantiate.
+            def upsert_node(self, *a, **k): ...  # type: ignore[override]
+            def get_node(self, *a, **k): ...  # type: ignore[override]
+            def get_nodes_bulk(self, *a, **k): ...  # type: ignore[override]
+            def upsert_alias(self, *a, **k): ...  # type: ignore[override]
+            def resolve_alias(self, *a, **k): ...  # type: ignore[override]
+            def get_aliases(self, *a, **k): ...  # type: ignore[override]
+            def upsert_edge(self, *a, **k): ...  # type: ignore[override]
+            def get_edges(self, *a, **k): ...  # type: ignore[override]
+            def get_subgraph(self, *a, **k): ...  # type: ignore[override]
+            def query(self, *a, **k): ...  # type: ignore[override]
+            def get_node_history(self, *a, **k): ...  # type: ignore[override]
+            def delete_node(self, *a, **k): ...  # type: ignore[override]
+            def delete_edge(self, *a, **k): ...  # type: ignore[override]
+            def count_nodes(self): ...  # type: ignore[override]
+            def count_edges(self): ...  # type: ignore[override]
+            def close(self): ...  # type: ignore[override]
+
+        store = _StubStore()
+        with pytest.raises(NotImplementedError, match="compact_versions"):
+            store.compact_versions(datetime.now(UTC))

@@ -1010,3 +1010,316 @@ class TestSemanticDedup:
         pack = builder.build_sectioned("q", sections=[SectionRequest(name="all")])
         section_items = {i.item_id for i in pack.sections[0].items}
         assert section_items == {"winner"}
+
+
+class TestEvaluatorHook:
+    """Optional pack-quality evaluator hook on PackBuilder."""
+
+    def test_no_evaluator_is_default(self) -> None:
+        s = _make_strategy("s", [_item("a", 0.5)])
+        builder = PackBuilder(strategies=[s])
+        pack = builder.build("q")
+        assert "quality_report" not in pack.metadata
+
+    def test_evaluator_result_attaches_to_pack_metadata(self) -> None:
+        from trellis.retrieve.evaluate import (
+            EvaluationScenario,
+            evaluate_pack,
+        )
+        from trellis.schemas.pack import Pack
+
+        def evaluator(pack: Pack):
+            return evaluate_pack(
+                pack,
+                EvaluationScenario(
+                    name="fixture",
+                    intent=pack.intent,
+                    required_coverage=["widget"],
+                ),
+            )
+
+        s = _make_strategy("s", [_item("a", 0.6, excerpt="widget guide")])
+        builder = PackBuilder(strategies=[s], evaluator=evaluator)
+        pack = builder.build("q")
+        quality = pack.metadata["quality_report"]
+        assert quality["scenario_name"] == "fixture"
+        assert quality["dimensions"]["completeness"] == 1.0
+
+    def test_evaluator_returning_none_leaves_metadata_unchanged(self) -> None:
+        s = _make_strategy("s", [_item("a", 0.5)])
+        builder = PackBuilder(strategies=[s], evaluator=lambda _pack: None)
+        pack = builder.build("q")
+        assert "quality_report" not in pack.metadata
+
+    def test_evaluator_exception_is_swallowed(self) -> None:
+        def boom(_pack):
+            msg = "evaluator blew up"
+            raise RuntimeError(msg)
+
+        s = _make_strategy("s", [_item("a", 0.5)])
+        builder = PackBuilder(strategies=[s], evaluator=boom)
+        pack = builder.build("q")
+        assert "quality_report" not in pack.metadata
+        assert len(pack.items) == 1
+
+    def test_evaluator_emits_pack_quality_scored_event(self, tmp_path) -> None:
+        from trellis.retrieve.evaluate import (
+            EvaluationScenario,
+            evaluate_pack,
+        )
+        from trellis.stores.base.event_log import EventType
+        from trellis.stores.sqlite.event_log import SQLiteEventLog
+
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        try:
+
+            def evaluator(pack):
+                return evaluate_pack(
+                    pack,
+                    EvaluationScenario(
+                        name="fx",
+                        intent=pack.intent,
+                        required_coverage=["widget"],
+                    ),
+                )
+
+            s = _make_strategy("s", [_item("a", 0.5, excerpt="widget")])
+            builder = PackBuilder(
+                strategies=[s], evaluator=evaluator, event_log=event_log
+            )
+            pack = builder.build("q")
+            events = event_log.get_events(
+                event_type=EventType.PACK_QUALITY_SCORED, limit=10
+            )
+            assert len(events) == 1
+            payload = events[0].payload
+            assert payload["pack_id"] == pack.pack_id
+            assert payload["scenario_name"] == "fx"
+            assert payload["dimensions"]["completeness"] == 1.0
+            assert "weighted_score" in payload
+        finally:
+            event_log.close()
+
+    def test_no_event_when_evaluator_returns_none(self, tmp_path) -> None:
+        from trellis.stores.base.event_log import EventType
+        from trellis.stores.sqlite.event_log import SQLiteEventLog
+
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        try:
+            s = _make_strategy("s", [_item("a", 0.5)])
+            builder = PackBuilder(
+                strategies=[s],
+                evaluator=lambda _p: None,
+                event_log=event_log,
+            )
+            builder.build("q")
+            events = event_log.get_events(
+                event_type=EventType.PACK_QUALITY_SCORED, limit=10
+            )
+            assert events == []
+        finally:
+            event_log.close()
+
+
+class _FixedTokenCounter:
+    """Test fixture: reports a constant token count per call."""
+
+    def __init__(self, value: int, name: str = "fixed") -> None:
+        self._value = value
+        self.name = name
+
+    def count(self, _text: str) -> int:
+        return self._value
+
+
+class _MultiplierTokenCounter:
+    """Test fixture: scales the heuristic by a multiplier."""
+
+    def __init__(self, multiplier: float, name: str = "multiplier") -> None:
+        self._multiplier = multiplier
+        self.name = name
+
+    def count(self, text: str) -> int:
+        return int((len(text) // 4 + 1) * self._multiplier)
+
+
+class TestPackBuilderTokenBudget:
+    """Gap 3.1 — pluggable token counter + safety margin + validator telemetry."""
+
+    def test_default_counter_preserves_prior_behavior(self) -> None:
+        items = [_item(f"d{i}", 1.0 - i * 0.01, excerpt="x" * 100) for i in range(20)]
+        s = _make_strategy("kw", items)
+        builder = PackBuilder(strategies=[s])
+        pack = builder.build("q", budget=PackBudget(max_items=50, max_tokens=100))
+        # Each item is 26 tokens (100//4+1), so 3 fit in a budget of 100.
+        assert len(pack.items) == 3
+
+    def test_custom_counter_used_for_budget(self) -> None:
+        items = [_item(f"d{i}", 1.0 - i * 0.01, excerpt="x" * 100) for i in range(20)]
+        s = _make_strategy("kw", items)
+        # With a counter that reports 10 tokens per item, 10 items fit in 100.
+        builder = PackBuilder(
+            strategies=[s], token_counter=_FixedTokenCounter(10)
+        )
+        pack = builder.build("q", budget=PackBudget(max_items=50, max_tokens=100))
+        assert len(pack.items) == 10
+
+    def test_safety_margin_shrinks_effective_budget(self) -> None:
+        items = [_item(f"d{i}", 1.0 - i * 0.01, excerpt="x" * 100) for i in range(20)]
+        s = _make_strategy("kw", items)
+        # 20% margin on 100 tokens → effective 80. Fixed counter 10 → 8 fit.
+        builder = PackBuilder(
+            strategies=[s],
+            token_counter=_FixedTokenCounter(10),
+            token_budget_safety_margin=0.2,
+        )
+        pack = builder.build("q", budget=PackBudget(max_items=50, max_tokens=100))
+        assert len(pack.items) == 8
+
+    def test_invalid_safety_margin_raises(self) -> None:
+        with pytest.raises(ValueError, match="safety_margin"):
+            PackBuilder(token_budget_safety_margin=1.0)
+        with pytest.raises(ValueError, match="safety_margin"):
+            PackBuilder(token_budget_safety_margin=-0.1)
+
+    def test_telemetry_emits_counter_name_and_margin(self, tmp_path: Path) -> None:
+        from trellis.stores.base.event_log import EventType
+        from trellis.stores.sqlite.event_log import SQLiteEventLog
+
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        try:
+            s = _make_strategy("kw", [_item("a", 0.9, excerpt="x" * 100)])
+            builder = PackBuilder(
+                strategies=[s],
+                event_log=event_log,
+                token_counter=_FixedTokenCounter(10, name="fixed_10"),
+                token_budget_safety_margin=0.1,
+            )
+            builder.build("q", budget=PackBudget(max_items=10, max_tokens=100))
+            events = event_log.get_events(
+                event_type=EventType.PACK_ASSEMBLED, limit=10
+            )
+            assert len(events) == 1
+            payload = events[0].payload
+            assert payload["token_counter"] == "fixed_10"  # noqa: S105
+            assert payload["token_budget_safety_margin"] == 0.1
+            # 100 * 0.1 = 10 reserved, effective 90.
+            assert payload["token_budget_effective"] == 90
+            # One selected item, counter returns 10.
+            assert payload["token_total_estimated"] == 10
+        finally:
+            event_log.close()
+
+    def test_validator_emits_delta_when_set(self, tmp_path: Path) -> None:
+        from trellis.stores.base.event_log import EventType
+        from trellis.stores.sqlite.event_log import SQLiteEventLog
+
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        try:
+            # Primary counter under-counts (5 per item); validator reports 8.
+            s = _make_strategy(
+                "kw",
+                [_item(f"d{i}", 1.0 - i * 0.01, excerpt="x" * 100) for i in range(3)],
+            )
+            builder = PackBuilder(
+                strategies=[s],
+                event_log=event_log,
+                token_counter=_FixedTokenCounter(5, name="under"),
+                token_budget_validator=_FixedTokenCounter(8, name="real"),
+            )
+            builder.build("q", budget=PackBudget(max_items=10, max_tokens=100))
+            events = event_log.get_events(
+                event_type=EventType.PACK_ASSEMBLED, limit=10
+            )
+            payload = events[0].payload
+            assert payload["token_counter"] == "under"  # noqa: S105
+            assert payload["token_counter_validator"] == "real"  # noqa: S105
+            # 3 items selected → estimated 15, validated 24.
+            assert payload["token_total_estimated"] == 15
+            assert payload["token_total_validated"] == 24
+            assert payload["token_count_delta"] == 9
+            assert payload["token_count_delta_pct"] == pytest.approx(0.6)
+        finally:
+            event_log.close()
+
+    def test_validator_failure_does_not_break_assembly(self, tmp_path: Path) -> None:
+        from trellis.stores.base.event_log import EventType
+        from trellis.stores.sqlite.event_log import SQLiteEventLog
+
+        class _BrokenValidator:
+            name = "broken"
+
+            def count(self, _text: str) -> int:
+                msg = "tokenizer exploded"
+                raise RuntimeError(msg)
+
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        try:
+            s = _make_strategy("kw", [_item("a", 0.9, excerpt="x" * 100)])
+            builder = PackBuilder(
+                strategies=[s],
+                event_log=event_log,
+                token_budget_validator=_BrokenValidator(),
+            )
+            pack = builder.build(
+                "q", budget=PackBudget(max_items=10, max_tokens=100)
+            )
+            assert len(pack.items) == 1
+            events = event_log.get_events(
+                event_type=EventType.PACK_ASSEMBLED, limit=10
+            )
+            payload = events[0].payload
+            # Validator fields absent, but primary telemetry still landed.
+            assert "token_total_validated" not in payload
+            assert payload["token_counter"] == "heuristic_4cpt"  # noqa: S105
+        finally:
+            event_log.close()
+
+    def test_effective_budget_floor_of_one(self) -> None:
+        # 99% margin on a small budget would round to zero; we floor at 1.
+        builder = PackBuilder(token_budget_safety_margin=0.99)
+        assert builder._effective_token_budget(2) == 1
+
+    def test_annotate_uses_custom_counter(self) -> None:
+        items = [_item("a", 0.9, excerpt="x" * 100)]
+        s = _make_strategy("kw", items)
+        builder = PackBuilder(
+            strategies=[s], token_counter=_FixedTokenCounter(42, name="fx")
+        )
+        pack = builder.build("q", budget=PackBudget(max_items=5, max_tokens=1000))
+        assert pack.items[0].estimated_tokens == 42
+
+    def test_sectioned_telemetry_includes_token_fields(self, tmp_path: Path) -> None:
+        from trellis.stores.base.event_log import EventType
+        from trellis.stores.sqlite.event_log import SQLiteEventLog
+
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        try:
+            s = _make_strategy(
+                "kw", [_item(f"d{i}", 1.0 - i * 0.01) for i in range(3)]
+            )
+            builder = PackBuilder(
+                strategies=[s],
+                event_log=event_log,
+                token_counter=_MultiplierTokenCounter(1.0, name="mx"),
+                token_budget_safety_margin=0.1,
+            )
+            builder.build_sectioned(
+                "q",
+                sections=[
+                    SectionRequest(name="a", max_items=5, max_tokens=200),
+                    SectionRequest(name="b", max_items=5, max_tokens=300),
+                ],
+            )
+            events = event_log.get_events(
+                event_type=EventType.PACK_ASSEMBLED, limit=10
+            )
+            assert len(events) == 1
+            payload = events[0].payload
+            assert payload["token_counter"] == "mx"  # noqa: S105
+            assert payload["token_budget_safety_margin"] == 0.1
+            # Aggregate max_tokens across sections = 500, effective = 450.
+            assert payload["token_budget_effective"] == 450
+            assert "token_total_estimated" in payload
+        finally:
+            event_log.close()

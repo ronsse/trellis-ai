@@ -41,12 +41,29 @@ class EventType(StrEnum):
 
     # Pack
     PACK_ASSEMBLED = "pack.assembled"
+    #: Optional assembly-time quality score emitted by
+    #: :class:`~trellis.retrieve.pack_builder.PackBuilder` when an evaluator
+    #: hook returns a :class:`~trellis.retrieve.evaluate.QualityReport`. Joins
+    #: to :attr:`FEEDBACK_RECORDED` via ``pack_id`` so downstream analysis can
+    #: correlate per-dimension scores with task success. Never fires when no
+    #: evaluator is configured — zero noise for consumers who don't opt in.
+    PACK_QUALITY_SCORED = "pack.quality_scored"
 
     # Graph
     LINK_CREATED = "link.created"
     LINK_REMOVED = "link.removed"
     LABEL_ADDED = "label.added"
     LABEL_REMOVED = "label.removed"
+    #: Emitted by :meth:`GraphStore.compact_versions` — records the cutoff,
+    #: per-table drop counts, and the ``valid_to`` range of the compacted
+    #: rows. Closes Gap 4.2 by giving operators an audit trail for SCD2
+    #: retention runs without preserving the rows themselves.
+    GRAPH_VERSIONS_COMPACTED = "graph.versions_compacted"
+    #: Emitted by :meth:`BlobStore.sweep_expired` — records the cutoff
+    #: and per-bucket counts of deleted / skipped / errored blobs.
+    #: Closes Gap 4.4 by giving operators an audit trail for blob TTL
+    #: retention runs. Dry runs emit the event with ``dry_run=True``.
+    BLOB_GC_SWEPT = "blob.gc_swept"
 
     # Feedback
     FEEDBACK_RECORDED = "feedback.recorded"
@@ -67,6 +84,14 @@ class EventType(StrEnum):
 
     # Extraction (tiered extraction pipeline — raw input -> entity/edge drafts)
     EXTRACTION_DISPATCHED = "extraction.dispatched"
+    #: Emitted when the :class:`~trellis.extract.dispatcher.ExtractionDispatcher`
+    #: selects an extractor below the natural priority order (``prefer_tier``
+    #: override) or when the chosen extractor produces an empty draft set
+    #: ("silent failure"). Closes Gap 4.3 by giving graduation tracking
+    #: (LLM → Hybrid → Deterministic as domains stabilize) an observable
+    #: substrate — without this event, patterns like "rules always return
+    #: empty for this source; LLM always runs" are invisible.
+    EXTRACTOR_FALLBACK = "extractor.fallback"
 
     # System
     SYSTEM_INITIALIZED = "system.initialized"
@@ -82,6 +107,13 @@ class EventType(StrEnum):
     PARAMS_UPDATED = "parameters.updated"
     TUNER_PROPOSAL_CREATED = "tuner.proposal_created"
     TUNER_PROPOSAL_REJECTED = "tuner.proposal_rejected"
+    #: Emitted when post-promotion monitoring detects a significant drop in
+    #: success rate for a recently-promoted ``params_version`` vs. the
+    #: baseline it replaced. Signal-only by default — auto-demotion is a
+    #: separate opt-in (see :class:`PostPromotionPolicy.auto_demote`) so
+    #: noisy outcomes can't silently unwind deliberate promotions.
+    #: Closes Gap 2.2.
+    PARAMETERS_DEGRADED = "parameters.degraded"
 
 
 class Event(VersionedModel):

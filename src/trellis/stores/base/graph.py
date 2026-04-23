@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from trellis.schemas.graph import CompactionReport
+    from trellis.stores.base.event_log import EventLog
 
 VALID_NODE_ROLES = frozenset({"structural", "semantic", "curated"})
 
@@ -338,3 +342,46 @@ class GraphStore(ABC):
     @abstractmethod
     def close(self) -> None:
         """Release resources."""
+
+    def compact_versions(
+        self,
+        before: datetime,
+        *,
+        dry_run: bool = False,
+        event_log: EventLog | None = None,
+    ) -> CompactionReport:
+        """Drop closed SCD Type 2 rows whose ``valid_to < before``.
+
+        Closes Gap 4.2 — retention policy for temporal versioning. Rows
+        with ``valid_to IS NULL`` (the current state) are *never* touched;
+        only closed historical rows are eligible. This is safe because
+        ``as_of`` reads for times at or after ``before`` don't hit the
+        dropped rows, and ``get_node_history`` is explicitly best-effort
+        after compaction (callers who need full history must compact
+        less aggressively or archive separately — archive-to-blob is
+        deliberately deferred to a future gap).
+
+        Args:
+            before: Cutoff timestamp. Rows with ``valid_to < before`` are
+                dropped. Must be timezone-aware.
+            dry_run: When ``True``, return counts of rows that *would* be
+                dropped without modifying the store. The returned report
+                still carries the valid_to range so operators can verify
+                the impact before committing.
+            event_log: Optional audit destination. When provided, a
+                :attr:`~trellis.stores.base.event_log.EventType.GRAPH_VERSIONS_COMPACTED`
+                event is emitted with the report payload. Dry runs emit
+                the event with ``dry_run=True`` in the payload so previews
+                are observable too.
+
+        Returns:
+            :class:`~trellis.schemas.graph.CompactionReport` with per-table
+            drop counts, ``valid_to`` range, and run metadata.
+
+        Raises:
+            NotImplementedError: For backends that have not opted into
+                compaction. Backends implement by subclassing and
+                overriding.
+        """
+        msg = f"{type(self).__name__} does not implement compact_versions"
+        raise NotImplementedError(msg)

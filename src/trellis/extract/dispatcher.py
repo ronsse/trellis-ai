@@ -41,6 +41,12 @@ _TIER_PRIORITY: list[ExtractorTier] = [
     ExtractorTier.LLM,
 ]
 
+#: Reasons surfaced on ``EXTRACTOR_FALLBACK`` events. Kept as string
+#: constants rather than an enum to match the open-string convention used
+#: by rejection-reason fields elsewhere (pack rejected items, etc.).
+FALLBACK_REASON_PREFER_TIER = "prefer_tier_override"
+FALLBACK_REASON_EMPTY_RESULT = "empty_result"
+
 
 class ExtractionDispatcher:
     """Routes raw input to the right :class:`Extractor`.
@@ -72,11 +78,23 @@ class ExtractionDispatcher:
         candidates are registered but ``allow_llm_fallback=False``).
         """
         ctx = context or ExtractionContext()
-        extractor = self._select(source_hint, ctx)
+        extractor, natural_tier = self._select(source_hint, ctx)
         if extractor is None:
             raise NoExtractorAvailableError(
                 source_hint=source_hint,
                 reason=self._no_match_reason(source_hint, ctx),
+            )
+
+        # Fallback signal #1: ``prefer_tier`` forced a selection below the
+        # natural priority order. Fire before running so we also capture
+        # cases where the chosen extractor raises.
+        if natural_tier is not None and extractor.tier != natural_tier:
+            self._emit_fallback(
+                source_hint=source_hint,
+                chosen_extractor=extractor.name,
+                chosen_tier=extractor.tier.value,
+                skipped_tier=natural_tier.value,
+                reason=FALLBACK_REASON_PREFER_TIER,
             )
 
         result = await extractor.extract(
@@ -84,6 +102,19 @@ class ExtractionDispatcher:
             source_hint=source_hint,
             context=ctx,
         )
+
+        # Fallback signal #2: the chosen extractor produced no drafts.
+        # Not a real retry (dispatcher doesn't do that today), but a strong
+        # graduation-tracking signal — "deterministic silently failed for
+        # this source_hint" is exactly the pattern graduation wants to spot.
+        if not result.entities and not result.edges:
+            self._emit_fallback(
+                source_hint=source_hint,
+                chosen_extractor=extractor.name,
+                chosen_tier=extractor.tier.value,
+                skipped_tier=None,
+                reason=FALLBACK_REASON_EMPTY_RESULT,
+            )
 
         self._emit(result, source_hint=source_hint)
         return result
@@ -96,19 +127,30 @@ class ExtractionDispatcher:
         self,
         source_hint: str | None,
         ctx: ExtractionContext,
-    ) -> Extractor | None:
+    ) -> tuple[Extractor | None, ExtractorTier | None]:
+        """Pick an extractor and report the natural-priority tier.
+
+        Returns ``(chosen_extractor, natural_tier)``. ``natural_tier`` is the
+        tier that *would* have been selected under default priority ordering
+        with the current ``allow_llm_fallback`` gate — i.e. the highest-
+        priority tier among candidates, ignoring ``prefer_tier``. Callers
+        compare ``chosen_extractor.tier`` against ``natural_tier`` to detect
+        a ``prefer_tier`` override for fallback telemetry.
+        """
         candidates = self._registry.candidates_for(source_hint)
         if not candidates:
-            return None
+            return None, None
+
+        natural_tier = self._natural_tier(candidates, ctx)
 
         # Explicit tier preference short-circuits the priority order.
         if ctx.prefer_tier is not None:
             if ctx.prefer_tier == ExtractorTier.LLM and not ctx.allow_llm_fallback:
-                return None
+                return None, natural_tier
             for candidate in candidates:
                 if candidate.tier == ctx.prefer_tier:
-                    return candidate
-            return None
+                    return candidate, natural_tier
+            return None, natural_tier
 
         # Normal priority-ordered selection.
         for tier in _TIER_PRIORITY:
@@ -116,7 +158,20 @@ class ExtractionDispatcher:
                 continue
             for candidate in candidates:
                 if candidate.tier == tier:
-                    return candidate
+                    return candidate, natural_tier
+        return None, natural_tier
+
+    @staticmethod
+    def _natural_tier(
+        candidates: list[Extractor],
+        ctx: ExtractionContext,
+    ) -> ExtractorTier | None:
+        """Highest-priority tier among candidates respecting the LLM gate."""
+        for tier in _TIER_PRIORITY:
+            if tier == ExtractorTier.LLM and not ctx.allow_llm_fallback:
+                continue
+            if any(c.tier == tier for c in candidates):
+                return tier
         return None
 
     def _no_match_reason(
@@ -162,3 +217,34 @@ class ExtractionDispatcher:
                 "overall_confidence": result.overall_confidence,
             },
         )
+
+    def _emit_fallback(
+        self,
+        *,
+        source_hint: str | None,
+        chosen_extractor: str,
+        chosen_tier: str,
+        skipped_tier: str | None,
+        reason: str,
+    ) -> None:
+        """Fire EXTRACTOR_FALLBACK with a small payload. Fail-soft."""
+        if self._event_log is None:
+            return
+        try:
+            self._event_log.emit(
+                EventType.EXTRACTOR_FALLBACK,
+                source="extraction_dispatcher",
+                payload={
+                    "source_hint": source_hint,
+                    "chosen_extractor": chosen_extractor,
+                    "chosen_tier": chosen_tier,
+                    "skipped_tier": skipped_tier,
+                    "reason": reason,
+                },
+            )
+        except Exception:
+            logger.exception(
+                "extractor_fallback_emit_failed",
+                source_hint=source_hint,
+                reason=reason,
+            )

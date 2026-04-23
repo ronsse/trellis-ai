@@ -9,6 +9,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from trellis.extract.telemetry import analyze_extractor_fallbacks
 from trellis.retrieve.advisory_generator import AdvisoryGenerator
 from trellis.retrieve.effectiveness import (
     analyze_effectiveness,
@@ -20,9 +21,11 @@ from trellis.retrieve.evaluate import (
     EvaluationProfile,
     EvaluationScenario,
     QualityReport,
+    analyze_dimension_predictiveness,
     evaluate_pack,
 )
 from trellis.retrieve.pack_sections import analyze_pack_sections
+from trellis.retrieve.telemetry import analyze_pack_telemetry
 from trellis.retrieve.token_usage import analyze_token_usage
 from trellis.stores.advisory_store import AdvisoryStore
 from trellis_cli.stores import get_document_store, get_event_log
@@ -33,6 +36,10 @@ console = Console()
 # Display thresholds for rate coloring
 _RATE_GREEN = 0.7
 _RATE_YELLOW = 0.4
+
+# Extractor-fallback display thresholds (inverted — high rate = bad)
+_FALLBACK_RATE_RED = 0.5
+_FALLBACK_RATE_YELLOW = 0.2
 
 
 @analyze_app.command("context-effectiveness")
@@ -623,9 +630,7 @@ def pack_quality(
                 )
             )
         else:
-            console.print(
-                f"[green]Parsed {len(scenarios)} scenario(s).[/green]"
-            )
+            console.print(f"[green]Parsed {len(scenarios)} scenario(s).[/green]")
             for s in scenarios:
                 console.print(f"  - {s.name}: {s.intent[:60]}")
         return
@@ -684,16 +689,299 @@ def pack_quality(
         console.print()
         console.print(f"[bold]{report.scenario_name}[/bold]")
         if report.missing_coverage:
-            preview = ", ".join(
-                report.missing_coverage[:_MISSING_COVERAGE_PREVIEW]
-            )
-            more = (
-                ""
-                if len(report.missing_coverage) <= _MISSING_COVERAGE_PREVIEW
-                else (
-                    f" (+{len(report.missing_coverage) - _MISSING_COVERAGE_PREVIEW} more)"
-                )
-            )
+            cap = _MISSING_COVERAGE_PREVIEW
+            preview = ", ".join(report.missing_coverage[:cap])
+            extra = len(report.missing_coverage) - cap
+            more = "" if extra <= 0 else f" (+{extra} more)"
             console.print(f"  [yellow]missing coverage:[/yellow] {preview}{more}")
         for finding in report.findings:
             console.print(f"  [dim]- {finding}[/dim]")
+
+
+# ---------------------------------------------------------------------------
+# Dimension Predictiveness (Pack Quality P3 — validation before calibration)
+# ---------------------------------------------------------------------------
+
+
+_SIGNAL_STYLES: dict[str, str] = {
+    "strong": "green",
+    "moderate": "green",
+    "weak": "yellow",
+    "noise": "red",
+    "insufficient_data": "dim",
+}
+
+
+def _format_optional_float(value: float | None, fmt: str = "{:+.2f}") -> str:
+    return "-" if value is None else fmt.format(value)
+
+
+@analyze_app.command("dimension-predictiveness")
+def dimension_predictiveness(
+    days: int = typer.Option(30, help="Days of history to analyze"),
+    success_threshold: float = typer.Option(
+        0.5, help="Rating threshold to consider a pack successful"
+    ),
+    output_format: str = typer.Option("text", "--format", help="Output format"),
+) -> None:
+    """Validate which quality dimensions actually predict task success.
+
+    Joins ``PACK_QUALITY_SCORED`` events (emitted when a ``PackBuilder``
+    evaluator is wired) with ``FEEDBACK_RECORDED`` events by ``pack_id``
+    and reports per-dimension point-biserial correlation.
+
+    Read-only analytics. No mutation of profiles, scorers, or classifier
+    state — auto-calibration of profile weights is separate P3 work that
+    depends on this report as its substrate.
+    """
+    event_log = get_event_log()
+    report = analyze_dimension_predictiveness(
+        event_log,
+        days=days,
+        success_threshold=success_threshold,
+    )
+
+    if output_format == "json":
+        console.print(json.dumps(report.model_dump(), default=str))
+        return
+
+    console.print(f"[bold]Dimension Predictiveness Report[/bold] (last {days} days)")
+    console.print(f"  Packs scored: {report.total_packs_scored}")
+    console.print(f"  Matched feedback: {report.total_matched_feedback}")
+    console.print(f"  Overall success rate: {report.overall_success_rate:.1%}")
+
+    if not report.dimensions and report.weighted_score_predictiveness is None:
+        console.print()
+        console.print(
+            "[dim]No dimensions observed. Wire a PackBuilder evaluator "
+            "(see docs/agent-guide/pack-quality-evaluation.md) and record "
+            "feedback before this report becomes useful.[/dim]"
+        )
+        for note in report.notes:
+            console.print(f"  [dim]- {note}[/dim]")
+        return
+
+    console.print()
+    table = Table(title="Per-Dimension Predictiveness")
+    table.add_column("Dimension", style="cyan")
+    table.add_column("Samples", justify="right")
+    table.add_column("Correlation", justify="right")
+    table.add_column("Mean|success", justify="right")
+    table.add_column("Mean|failure", justify="right")
+    table.add_column("Signal")
+
+    rows = list(report.dimensions)
+    if report.weighted_score_predictiveness is not None:
+        rows.append(report.weighted_score_predictiveness)
+
+    for entry in rows:
+        style = _SIGNAL_STYLES.get(entry.signal_classification, "dim")
+        table.add_row(
+            entry.dimension,
+            str(entry.sample_count),
+            _format_optional_float(entry.correlation),
+            _format_optional_float(entry.mean_score_on_success, "{:.2f}"),
+            _format_optional_float(entry.mean_score_on_failure, "{:.2f}"),
+            f"[{style}]{entry.signal_classification}[/{style}]",
+        )
+    console.print(table)
+
+    if report.notes:
+        console.print()
+        for note in report.notes:
+            console.print(f"  [dim]- {note}[/dim]")
+
+
+# ---------------------------------------------------------------------------
+# Pack Telemetry (Gap 3.4 — close-the-loop consumption of PACK_ASSEMBLED)
+# ---------------------------------------------------------------------------
+
+
+@analyze_app.command("pack-telemetry")
+def pack_telemetry(
+    days: int = typer.Option(7, help="Days of history to analyze"),
+    output_format: str = typer.Option("text", "--format", help="Output format"),
+) -> None:
+    """Aggregate rejection / budget / strategy signals from PACK_ASSEMBLED.
+
+    Operator surface for the telemetry that ``PackBuilder`` already emits.
+    Highlights budget saturation rates, rejection-reason distribution, and
+    per-strategy yield so tuning decisions (budget raise, filter audit,
+    strategy retire) can be made from data rather than intuition.
+    """
+    event_log = get_event_log()
+    report = analyze_pack_telemetry(event_log, days=days)
+
+    if output_format == "json":
+        console.print(json.dumps(report.model_dump()))
+        return
+
+    console.print(f"[bold]Pack Telemetry Report[/bold] (last {days} days)")
+    console.print(f"  Packs assembled: {report.total_packs}")
+    if report.total_packs == 0:
+        console.print()
+        for note in report.notes:
+            console.print(f"  [dim]- {note}[/dim]")
+        return
+
+    console.print(
+        f"  Mean items/pack: {report.mean_items_per_pack:.1f} | "
+        f"Mean rejected/pack: {report.mean_rejected_per_pack:.1f}"
+    )
+
+    def _rate_style(rate: float) -> str:
+        if rate >= _RATE_GREEN:
+            return "red"
+        if rate >= _RATE_YELLOW:
+            return "yellow"
+        return "green"
+
+    console.print()
+    budget_table = Table(title="Budget Saturation")
+    budget_table.add_column("Signal", style="cyan")
+    budget_table.add_column("Hit rate", justify="right")
+    for label, rate in [
+        ("max_items", report.max_items_hit_rate),
+        ("token_budget", report.max_tokens_hit_rate),
+        ("any budget", report.any_budget_hit_rate),
+    ]:
+        style = _rate_style(rate)
+        budget_table.add_row(label, f"[{style}]{rate:.1%}[/{style}]")
+    console.print(budget_table)
+
+    if report.rejection_reason_counts:
+        console.print()
+        rej_table = Table(title="Rejection Reasons")
+        rej_table.add_column("Reason", style="cyan")
+        rej_table.add_column("Count", justify="right")
+        rej_table.add_column("Share", justify="right")
+        sorted_reasons = sorted(
+            report.rejection_reason_counts.items(),
+            key=lambda kv: kv[1],
+            reverse=True,
+        )
+        for reason, count in sorted_reasons:
+            share = report.rejection_reason_rates.get(reason, 0.0)
+            rej_table.add_row(reason, str(count), f"{share:.1%}")
+        console.print(rej_table)
+
+    if report.strategy_contributions:
+        console.print()
+        strat_table = Table(title="Strategy Contribution")
+        strat_table.add_column("Strategy", style="cyan")
+        strat_table.add_column("Injected", justify="right")
+        strat_table.add_column("Rejected", justify="right")
+        strat_table.add_column("Yield", justify="right")
+        strat_table.add_column("Top rejections")
+        for entry in report.strategy_contributions:
+            yield_style = (
+                "green"
+                if entry.yield_rate >= _RATE_GREEN
+                else "yellow"
+                if entry.yield_rate >= _RATE_YELLOW
+                else "red"
+            )
+            top = ", ".join(f"{r}:{c}" for r, c in entry.top_rejection_reasons)
+            strat_table.add_row(
+                entry.strategy,
+                str(entry.injected),
+                str(entry.rejected),
+                f"[{yield_style}]{entry.yield_rate:.1%}[/{yield_style}]",
+                top,
+            )
+        console.print(strat_table)
+
+    if report.findings:
+        console.print()
+        console.print("[bold]Findings[/bold]")
+        for finding in report.findings:
+            console.print(f"  [yellow]- {finding}[/yellow]")
+
+
+# ---------------------------------------------------------------------------
+# Extractor Fallbacks (Gap 4.3 — graduation tracking substrate)
+# ---------------------------------------------------------------------------
+
+
+@analyze_app.command("extractor-fallbacks")
+def extractor_fallbacks(
+    days: int = typer.Option(30, help="Days of history to analyze"),
+    output_format: str = typer.Option("text", "--format", help="Output format"),
+) -> None:
+    """Summarize extractor fallback telemetry per source_hint.
+
+    Reads ``EXTRACTOR_FALLBACK`` + ``EXTRACTION_DISPATCHED`` events emitted
+    by :class:`~trellis.extract.dispatcher.ExtractionDispatcher` and reports
+    overall fallback rate, reason distribution, and per-source aggregates.
+    Read-only — surfaces candidates for graduation (``empty_result``
+    dominates) or audit (``prefer_tier_override`` dominates).
+    """
+    event_log = get_event_log()
+    report = analyze_extractor_fallbacks(event_log, days=days)
+
+    if output_format == "json":
+        console.print(json.dumps(report.model_dump()))
+        return
+
+    console.print(f"[bold]Extractor Fallback Report[/bold] (last {days} days)")
+    console.print(f"  Total dispatches: {report.total_dispatches}")
+    console.print(f"  Total fallbacks: {report.total_fallbacks}")
+    console.print(f"  Overall fallback rate: {report.overall_fallback_rate:.1%}")
+
+    if report.total_dispatches == 0:
+        console.print()
+        for note in report.notes:
+            console.print(f"  [dim]- {note}[/dim]")
+        return
+
+    if report.reason_counts:
+        console.print()
+        reason_table = Table(title="Fallback Reasons")
+        reason_table.add_column("Reason", style="cyan")
+        reason_table.add_column("Count", justify="right")
+        for reason, count in sorted(
+            report.reason_counts.items(), key=lambda kv: kv[1], reverse=True
+        ):
+            reason_table.add_row(reason, str(count))
+        console.print(reason_table)
+
+    if report.per_source:
+        console.print()
+        source_table = Table(title="Per-Source Fallback Rates")
+        source_table.add_column("source_hint", style="cyan")
+        source_table.add_column("Dispatches", justify="right")
+        source_table.add_column("Fallbacks", justify="right")
+        source_table.add_column("Rate", justify="right")
+        source_table.add_column("Top reasons")
+        for stats in sorted(
+            report.per_source,
+            key=lambda s: s.fallback_rate,
+            reverse=True,
+        ):
+            rate_style = (
+                "red"
+                if stats.fallback_rate >= _FALLBACK_RATE_RED
+                else "yellow"
+                if stats.fallback_rate >= _FALLBACK_RATE_YELLOW
+                else "green"
+            )
+            top_reasons = ", ".join(
+                f"{r}:{c}"
+                for r, c in sorted(
+                    stats.reasons.items(), key=lambda kv: kv[1], reverse=True
+                )[:3]
+            )
+            source_table.add_row(
+                stats.source_hint,
+                str(stats.total_dispatches),
+                str(stats.fallback_events),
+                f"[{rate_style}]{stats.fallback_rate:.1%}[/{rate_style}]",
+                top_reasons,
+            )
+        console.print(source_table)
+
+    if report.findings:
+        console.print()
+        console.print("[bold]Findings[/bold]")
+        for finding in report.findings:
+            console.print(f"  [yellow]- {finding}[/yellow]")

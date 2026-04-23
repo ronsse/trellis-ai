@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -10,10 +11,11 @@ import structlog
 
 from trellis.classify.dedup.minhash import MinHashIndex
 from trellis.core.base import utc_now
-from trellis.core.hashing import estimate_tokens
+from trellis.retrieve.evaluate import QualityReport
 from trellis.retrieve.rerankers.base import Reranker
 from trellis.retrieve.strategies import SearchStrategy
 from trellis.retrieve.tier_mapping import TierMapper
+from trellis.retrieve.token_counting import DEFAULT_TOKEN_COUNTER, TokenCounter
 from trellis.schemas.pack import (
     BudgetStep,
     Pack,
@@ -33,6 +35,13 @@ logger = structlog.get_logger()
 #: Default window for session-aware dedup. When a ``session_id`` is
 #: supplied, items served in prior packs within this window are excluded.
 DEFAULT_SESSION_DEDUP_WINDOW_MINUTES = 60
+
+#: Signature for an optional assembly-time pack evaluator. Consumers own the
+#: scenario-resolution logic (e.g., lookup by ``agent_id`` + ``intent``) and
+#: return a :class:`QualityReport` when the pack should be scored, or ``None``
+#: to skip. See :mod:`trellis.retrieve.evaluate` for scorer building blocks
+#: and ``docs/agent-guide/pack-quality-evaluation.md`` for usage.
+PackEvaluator = Callable[[Pack], "QualityReport | None"]
 
 
 @dataclass(frozen=True)
@@ -83,6 +92,10 @@ class PackBuilder:
         advisory_store: AdvisoryStore | None = None,
         reranker: Reranker | None = None,
         semantic_dedup: SemanticDedupConfig | None = None,
+        evaluator: PackEvaluator | None = None,
+        token_counter: TokenCounter | None = None,
+        token_budget_safety_margin: float = 0.0,
+        token_budget_validator: TokenCounter | None = None,
     ) -> None:
         self._strategies = strategies or []
         self._event_log = event_log
@@ -90,6 +103,35 @@ class PackBuilder:
         self._reranker = reranker
         #: Fuzzy-dedup config. ``None`` disables (exact ``item_id`` dedup only).
         self._semantic_dedup = semantic_dedup
+        #: Optional assembly-time evaluator. When set, :meth:`build` runs the
+        #: callable after pack assembly and, if it returns a
+        #: :class:`QualityReport`, attaches it under
+        #: ``pack.metadata["quality_report"]``. Exceptions are logged and
+        #: swallowed — evaluation must never fail pack assembly.
+        self._evaluator = evaluator
+        #: Counter used to estimate tokens for budget enforcement and
+        #: per-item annotation. Defaults to the 4-chars-per-token heuristic
+        #: — plug in an accurate tokenizer (tiktoken, anthropic) to close
+        #: boundary drift (Gap 3.1).
+        self._token_counter: TokenCounter = token_counter or DEFAULT_TOKEN_COUNTER
+        if not 0.0 <= token_budget_safety_margin < 1.0:
+            msg = (
+                "token_budget_safety_margin must be in [0.0, 1.0); "
+                f"got {token_budget_safety_margin!r}"
+            )
+            raise ValueError(msg)
+        #: Fractional headroom subtracted from ``max_tokens`` before the
+        #: greedy budget walk. Guards against under-counting estimators
+        #: overflowing the real context window. ``0.0`` preserves prior
+        #: behavior. Recommended: ``0.05-0.10`` when using the heuristic
+        #: counter against a real LLM window.
+        self._token_budget_safety_margin = token_budget_safety_margin
+        #: Optional second-pass counter invoked after pack assembly for
+        #: post-hoc validation. When set, the real token total plus the
+        #: delta vs. the estimator is included in ``PACK_ASSEMBLED``
+        #: telemetry so drift is observable even when the estimator is
+        #: the heuristic.
+        self._token_budget_validator = token_budget_validator
 
     def add_strategy(self, strategy: SearchStrategy) -> None:
         """Add a search strategy."""
@@ -276,6 +318,9 @@ class PackBuilder:
             assembled_at=utc_now(),
         )
 
+        # Optional assembly-time quality evaluation (fail-soft).
+        self._attach_quality_report(pack)
+
         # Emit telemetry event
         if self._event_log is not None:
             self._emit_telemetry(pack)
@@ -461,6 +506,19 @@ class PackBuilder:
 
     def _emit_sectioned_telemetry(self, pack: SectionedPack) -> None:
         """Emit telemetry event for a sectioned pack."""
+        per_item_estimates = [
+            item.estimated_tokens or self._token_counter.count(item.excerpt)
+            for section in pack.sections
+            for item in section.items
+        ]
+        total_budget = sum(section.budget.max_tokens for section in pack.sections)
+        token_budget_fields = self._build_token_budget_payload(
+            total_budget,
+            excerpts=lambda: [
+                item.excerpt for section in pack.sections for item in section.items
+            ],
+            per_item_estimates=per_item_estimates,
+        )
         self._event_log.emit(  # type: ignore[union-attr]
             EventType.PACK_ASSEMBLED,
             source="pack_builder",
@@ -484,12 +542,72 @@ class PackBuilder:
                 "advisory_ids": [a.advisory_id for a in pack.advisories],
                 "reranker": self._reranker.name if self._reranker else None,
                 "semantic_dedup_enabled": self._semantic_dedup is not None,
+                **token_budget_fields,
             },
         )
+
+    def _attach_quality_report(self, pack: Pack) -> None:
+        """Run the optional evaluator and attach its report to the pack.
+
+        Fail-soft: exceptions are logged and swallowed. An evaluator must
+        never block pack assembly. When the evaluator returns ``None`` the
+        pack is left untouched — consumers decide per-pack whether to score.
+
+        When an ``event_log`` is configured and the evaluator returned a
+        report, a :attr:`~EventType.PACK_QUALITY_SCORED` event is emitted
+        with ``pack_id`` as the join key to ``PACK_ASSEMBLED`` and
+        ``FEEDBACK_RECORDED``.
+        """
+        if self._evaluator is None:
+            return
+        try:
+            report = self._evaluator(pack)
+        except Exception:
+            logger.exception("pack_evaluator_failed", pack_id=pack.pack_id)
+            return
+        if report is None:
+            return
+        pack.metadata["quality_report"] = report.model_dump(mode="json")
+        logger.debug(
+            "pack_quality_attached",
+            pack_id=pack.pack_id,
+            weighted_score=report.weighted_score,
+            profile=report.profile_name,
+        )
+        if self._event_log is not None:
+            try:
+                self._event_log.emit(
+                    EventType.PACK_QUALITY_SCORED,
+                    source="pack_builder",
+                    entity_id=pack.pack_id,
+                    entity_type="pack",
+                    payload={
+                        "pack_id": pack.pack_id,
+                        "intent": pack.intent,
+                        "domain": pack.domain,
+                        "agent_id": pack.agent_id,
+                        "session_id": pack.session_id,
+                        "scenario_name": report.scenario_name,
+                        "profile_name": report.profile_name,
+                        "dimensions": report.dimensions,
+                        "weighted_score": report.weighted_score,
+                        "missing_coverage_count": len(report.missing_coverage),
+                        "findings_count": len(report.findings),
+                    },
+                )
+            except Exception:
+                logger.exception("pack_quality_event_emit_failed", pack_id=pack.pack_id)
 
     def _emit_telemetry(self, pack: Pack) -> None:
         """Emit a ContextRetrievalEvent for observability."""
         report = pack.retrieval_report
+        token_budget_fields = self._build_token_budget_payload(
+            pack.budget.max_tokens,
+            excerpts=lambda: [item.excerpt for item in pack.items],
+            per_item_estimates=[
+                b.item_tokens for b in report.budget_trace if b.included
+            ],
+        )
         self._event_log.emit(  # type: ignore[union-attr]
             EventType.PACK_ASSEMBLED,
             source="pack_builder",
@@ -543,8 +661,62 @@ class PackBuilder:
                 "semantic_dedup_rejected": sum(
                     1 for r in report.rejected_items if r.reason == "semantic_dedup"
                 ),
+                **token_budget_fields,
             },
         )
+
+    def _build_token_budget_payload(
+        self,
+        max_tokens: int,
+        *,
+        excerpts: Callable[[], list[str]],
+        per_item_estimates: list[int],
+    ) -> dict[str, Any]:
+        """Token-budget telemetry fields shared across flat/sectioned packs.
+
+        Exposes the counter identity, the margin, the effective budget,
+        and the pack's total estimated tokens. When a ``token_budget_validator``
+        is configured, runs a second-pass count and adds the real total
+        plus the delta (absolute + percent) so downstream analysis can
+        track estimator drift — directly addressing the "no post-hoc
+        validation" half of Gap 3.1.
+
+        ``excerpts`` is passed as a thunk so callers don't materialize a
+        potentially-large list on the pack-assembly hot path when no
+        validator is configured (the default case).
+        """
+        payload: dict[str, Any] = {
+            "token_counter": self._token_counter.name,
+            "token_budget_safety_margin": self._token_budget_safety_margin,
+            "token_budget_effective": self._effective_token_budget(max_tokens),
+            "token_total_estimated": sum(per_item_estimates),
+        }
+        if self._token_budget_validator is not None:
+            try:
+                validated_per_item = [
+                    self._token_budget_validator.count(text) for text in excerpts()
+                ]
+                validated_total = sum(validated_per_item)
+                payload["token_counter_validator"] = self._token_budget_validator.name
+                payload["token_total_validated"] = validated_total
+                delta = validated_total - payload["token_total_estimated"]
+                payload["token_count_delta"] = delta
+                payload["token_count_delta_pct"] = (
+                    delta / payload["token_total_estimated"]
+                    if payload["token_total_estimated"] > 0
+                    else 0.0
+                )
+                if validated_total > max_tokens:
+                    logger.warning(
+                        "token_budget_overrun_detected",
+                        validator=self._token_budget_validator.name,
+                        validated_total=validated_total,
+                        budget_max_tokens=max_tokens,
+                        delta=delta,
+                    )
+            except Exception:
+                logger.exception("token_budget_validator_failed")
+        return payload
 
     def _recently_served_item_ids(
         self,
@@ -733,15 +905,34 @@ class PackBuilder:
                 )
         return list(seen.values()), rejected
 
+    def _effective_token_budget(self, max_tokens: int) -> int:
+        """Apply the safety margin to ``max_tokens``.
+
+        Subtracts ``ceil(max_tokens * safety_margin)`` so the greedy walk
+        leaves headroom for tokenizer under-counting. Always returns at
+        least 1 to avoid pathological zero-budget behavior on small
+        budgets.
+        """
+        if self._token_budget_safety_margin <= 0.0:
+            return max_tokens
+        reserved = int(max_tokens * self._token_budget_safety_margin + 0.5)
+        effective = max_tokens - reserved
+        return max(effective, 1)
+
     def _apply_token_budget(
         self, items: list[PackItem], max_tokens: int
     ) -> list[PackItem]:
-        """Trim items to fit within token budget (estimated at ~4 chars per token)."""
+        """Trim items to fit within token budget.
+
+        Uses :attr:`_token_counter` (default: 4-chars-per-token heuristic)
+        and applies :attr:`_token_budget_safety_margin` to the budget.
+        """
+        effective = self._effective_token_budget(max_tokens)
         result: list[PackItem] = []
         total_tokens = 0
         for item in items:
-            item_tokens = estimate_tokens(item.excerpt)
-            if total_tokens + item_tokens > max_tokens:
+            item_tokens = self._token_counter.count(item.excerpt)
+            if total_tokens + item_tokens > effective:
                 break
             result.append(item)
             total_tokens += item_tokens
@@ -751,6 +942,7 @@ class PackBuilder:
         self, items: list[PackItem], max_tokens: int
     ) -> tuple[list[PackItem], list[RejectedItem], list[BudgetStep]]:
         """Trim items to fit token budget, tracking rejections."""
+        effective = self._effective_token_budget(max_tokens)
         result: list[PackItem] = []
         rejected: list[RejectedItem] = []
         budget_trace: list[BudgetStep] = []
@@ -758,8 +950,8 @@ class PackBuilder:
         budget_exceeded = False
 
         for item in items:
-            item_tokens = estimate_tokens(item.excerpt)
-            if not budget_exceeded and total_tokens + item_tokens <= max_tokens:
+            item_tokens = self._token_counter.count(item.excerpt)
+            if not budget_exceeded and total_tokens + item_tokens <= effective:
                 result.append(item)
                 total_tokens += item_tokens
                 budget_trace.append(
@@ -817,7 +1009,7 @@ class PackBuilder:
         """Attach deterministic observability fields to selected items."""
         annotated: list[PackItem] = []
         for index, item in enumerate(items, start=1):
-            estimated_tokens = estimate_tokens(item.excerpt)
+            estimated_tokens = self._token_counter.count(item.excerpt)
             update: dict[str, Any] = {
                 "included": True,
                 "rank": index,

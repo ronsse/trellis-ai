@@ -11,7 +11,11 @@ from trellis.extract.base import ExtractorTier, NoExtractorAvailableError
 from trellis.extract.context import ExtractionContext
 from trellis.extract.dispatcher import ExtractionDispatcher
 from trellis.extract.registry import ExtractorRegistry
-from trellis.schemas.extraction import ExtractionProvenance, ExtractionResult
+from trellis.schemas.extraction import (
+    EntityDraft,
+    ExtractionProvenance,
+    ExtractionResult,
+)
 from trellis.stores.event_log import EventType, SQLiteEventLog
 
 
@@ -38,8 +42,12 @@ def _make_extractor(
             source_hint: str | None = None,
             context: ExtractionContext | None = None,
         ) -> ExtractionResult:
+            draft_entities = [
+                EntityDraft(entity_type="stub", name=f"{name}-{i}")
+                for i in range(entities)
+            ]
             return ExtractionResult(
-                entities=[],
+                entities=draft_entities,
                 edges=[],
                 extractor_used=self.name,
                 tier=self.tier.value,
@@ -187,3 +195,95 @@ class TestTelemetry:
         with pytest.raises(NoExtractorAvailableError):
             await d.dispatch({}, source_hint="s")
         assert event_log.count(event_type=EventType.EXTRACTION_DISPATCHED) == 0
+
+
+class TestFallbackTelemetry:
+    """EXTRACTOR_FALLBACK event emission (Gap 4.3)."""
+
+    async def test_no_fallback_on_natural_priority(
+        self, event_log: SQLiteEventLog
+    ) -> None:
+        reg = ExtractorRegistry()
+        reg.register(
+            _make_extractor("det", ExtractorTier.DETERMINISTIC, ["s"], entities=1)
+        )
+        reg.register(_make_extractor("llm", ExtractorTier.LLM, ["s"], entities=1))
+        d = ExtractionDispatcher(reg, event_log=event_log)
+        await d.dispatch(
+            {},
+            source_hint="s",
+            context=ExtractionContext(allow_llm_fallback=True),
+        )
+        # det was at natural priority tier → no fallback
+        assert event_log.count(event_type=EventType.EXTRACTOR_FALLBACK) == 0
+
+    async def test_prefer_tier_override_emits_fallback(
+        self, event_log: SQLiteEventLog
+    ) -> None:
+        reg = ExtractorRegistry()
+        reg.register(
+            _make_extractor("det", ExtractorTier.DETERMINISTIC, ["s"], entities=1)
+        )
+        reg.register(_make_extractor("llm", ExtractorTier.LLM, ["s"], entities=1))
+        d = ExtractionDispatcher(reg, event_log=event_log)
+        await d.dispatch(
+            {},
+            source_hint="s",
+            context=ExtractionContext(
+                allow_llm_fallback=True,
+                prefer_tier=ExtractorTier.LLM,
+            ),
+        )
+        events = event_log.get_events(event_type=EventType.EXTRACTOR_FALLBACK, limit=10)
+        assert len(events) == 1
+        payload = events[0].payload
+        assert payload["reason"] == "prefer_tier_override"
+        assert payload["chosen_tier"] == "llm"
+        assert payload["skipped_tier"] == "deterministic"
+        assert payload["chosen_extractor"] == "llm"
+        assert payload["source_hint"] == "s"
+
+    async def test_empty_result_emits_fallback(self, event_log: SQLiteEventLog) -> None:
+        reg = ExtractorRegistry()
+        reg.register(
+            _make_extractor("det", ExtractorTier.DETERMINISTIC, ["s"], entities=0)
+        )
+        d = ExtractionDispatcher(reg, event_log=event_log)
+        await d.dispatch({}, source_hint="s")
+        events = event_log.get_events(event_type=EventType.EXTRACTOR_FALLBACK, limit=10)
+        assert len(events) == 1
+        payload = events[0].payload
+        assert payload["reason"] == "empty_result"
+        assert payload["chosen_tier"] == "deterministic"
+        assert payload["skipped_tier"] is None
+
+    async def test_no_event_log_swallows_fallback(self) -> None:
+        reg = ExtractorRegistry()
+        reg.register(
+            _make_extractor("det", ExtractorTier.DETERMINISTIC, ["s"], entities=0)
+        )
+        d = ExtractionDispatcher(reg)  # no event_log
+        # Should not raise
+        result = await d.dispatch({}, source_hint="s")
+        assert result.extractor_used == "det"
+
+    async def test_prefer_tier_and_empty_result_both_emit(
+        self, event_log: SQLiteEventLog
+    ) -> None:
+        reg = ExtractorRegistry()
+        reg.register(
+            _make_extractor("det", ExtractorTier.DETERMINISTIC, ["s"], entities=1)
+        )
+        reg.register(_make_extractor("llm", ExtractorTier.LLM, ["s"], entities=0))
+        d = ExtractionDispatcher(reg, event_log=event_log)
+        await d.dispatch(
+            {},
+            source_hint="s",
+            context=ExtractionContext(
+                allow_llm_fallback=True,
+                prefer_tier=ExtractorTier.LLM,
+            ),
+        )
+        events = event_log.get_events(event_type=EventType.EXTRACTOR_FALLBACK, limit=10)
+        reasons = sorted(e.payload["reason"] for e in events)
+        assert reasons == ["empty_result", "prefer_tier_override"]

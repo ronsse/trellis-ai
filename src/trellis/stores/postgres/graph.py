@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime
 from typing import Any
 
@@ -10,6 +11,8 @@ import structlog
 
 from trellis.core.base import utc_now
 from trellis.core.ids import generate_ulid
+from trellis.schemas.graph import CompactionReport
+from trellis.stores.base.event_log import EventLog, EventType
 from trellis.stores.base.graph import (
     GraphStore,
     check_node_role_immutable,
@@ -783,6 +786,79 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
             row = cur.fetchone()
         assert row is not None
         return int(row[0])
+
+    # ------------------------------------------------------------------
+    # Compaction (Gap 4.2 — SCD2 retention)
+    # ------------------------------------------------------------------
+
+    _COMPACTABLE_TABLES = ("nodes", "edges", "entity_aliases")
+
+    def compact_versions(
+        self,
+        before: datetime,
+        *,
+        dry_run: bool = False,
+        event_log: EventLog | None = None,
+    ) -> CompactionReport:
+        start_ns = time.monotonic_ns()
+        counts: dict[str, int] = {}
+        range_valid_to: list[datetime] = []
+
+        try:
+            with self.conn.cursor() as cur:
+                for table in self._COMPACTABLE_TABLES:
+                    cur.execute(
+                        f"SELECT COUNT(*) AS cnt, "
+                        f"MIN(valid_to) AS oldest, MAX(valid_to) AS newest "
+                        f"FROM {table} "
+                        f"WHERE valid_to IS NOT NULL AND valid_to < %s",
+                        (before,),
+                    )
+                    row = cur.fetchone()
+                    count = int(row[0]) if row is not None else 0
+                    counts[table] = count
+                    if count > 0 and row is not None:
+                        if row[1] is not None:
+                            range_valid_to.append(row[1])
+                        if row[2] is not None:
+                            range_valid_to.append(row[2])
+                    if count > 0 and not dry_run:
+                        cur.execute(
+                            f"DELETE FROM {table} "
+                            f"WHERE valid_to IS NOT NULL AND valid_to < %s",
+                            (before,),
+                        )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+
+        report = CompactionReport(
+            before=before,
+            nodes_compacted=counts.get("nodes", 0),
+            edges_compacted=counts.get("edges", 0),
+            aliases_compacted=counts.get("entity_aliases", 0),
+            oldest_compacted_valid_to=min(range_valid_to) if range_valid_to else None,
+            newest_compacted_valid_to=max(range_valid_to) if range_valid_to else None,
+            dry_run=dry_run,
+            duration_ms=max((time.monotonic_ns() - start_ns) // 1_000_000, 0),
+        )
+        logger.info(
+            "graph_versions_compacted",
+            before=before.isoformat(),
+            dry_run=dry_run,
+            nodes=report.nodes_compacted,
+            edges=report.edges_compacted,
+            aliases=report.aliases_compacted,
+            duration_ms=report.duration_ms,
+        )
+        if event_log is not None:
+            event_log.emit(
+                EventType.GRAPH_VERSIONS_COMPACTED,
+                source="graph_store",
+                payload=report.model_dump(mode="json"),
+            )
+        return report
 
     # ------------------------------------------------------------------
     # Lifecycle
