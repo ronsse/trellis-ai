@@ -1,6 +1,6 @@
 # Implementation Roadmap
 
-**Last updated:** 2026-04-25 (evening — A.1, B.1, B.2 landed)
+**Last updated:** 2026-04-25 (evening — A.1, B.1, B.2, E.2, E.3 landed)
 **Purpose:** Single-page hand-off for any agent (fresh or returning) picking up Trellis implementation work. Self-contained. Read this top-to-bottom before touching code.
 
 ---
@@ -26,6 +26,8 @@
 | `pytest tests/unit/schemas/test_well_known.py` | 85 | 0 | Phase 0 (41) + Phase 1/2 helpers (44 — alignment URIs, alias inverse, query expansion). |
 | `pytest tests/unit/extract/` | 147 | 0 | All 139 prior + 8 new Phase 1 canonicalisation tests in `TestCanonicalNameEmission`. |
 | `pytest tests/unit/retrieve/test_strategies.py` | 37 | 0 | All 32 prior + 5 new Phase 2 cross-bucket tests in `TestGraphSearchCanonicalBucketing`. |
+| `pytest tests/unit/api/test_logging.py` | 15 | 0 | E.2 — uvicorn ↔ structlog bridge: handler wiring, JSON / console rendering, level honoring. |
+| `pytest tests/unit/stores/test_registry_validation.py` | 9 | 0 | E.3 — `StoreRegistry.validate()` fail-fast: happy paths, missing DSN aggregation, error rendering. |
 
 ### Live test credentials — `.env` is the source of truth
 
@@ -63,6 +65,8 @@ After loading, `pytest tests/unit/stores/test_neo4j_*.py` runs the live suites a
 | Live-tested 110 Neo4j tests against AuraDB Free | one fixture fix (DB env var); no production code changes needed |
 | **A.1** — End-to-end Neo4j integration suite (6 tests) | `tests/integration/conftest.py`, `tests/integration/test_neo4j_e2e.py`. Covers ENTITY_CREATE / LINK_CREATE through MutationExecutor, audit-event emission, JSONRulesExtractor → drafts → batch → graph rows, PackBuilder against Neo4j-backed graph, and SemanticSearch through the shape #2 vector store. Test-only changes; no production code touched. |
 | **B.1 + B.2** — Graph ontology Phase 1 + 2 (canonical names in extractors + alias-bucketing in retrieval) | `src/trellis/schemas/well_known.py`, `src/trellis/extract/json_rules.py`, `src/trellis/extract/llm.py`, `src/trellis/retrieve/strategies.py` + ~150 lines of new tests. Canonicalises every emitted draft, stamps `schema_alignment` URIs on canonical types, and routes alias-expanding `GraphSearch` queries through the canonical DSL `in` filter so a query for `"Person"` buckets alongside legacy `"person"` rows. |
+| **E.2** — Uvicorn log unification | `src/trellis_api/logging.py`. `configure_logging` now installs a `structlog.stdlib.ProcessorFormatter` on the root handler and clears uvicorn's per-logger handlers so `uvicorn`, `uvicorn.error`, and `uvicorn.access` all render through the shared structlog processor chain. Stdlib `extra={...}` kwargs are promoted via `ExtraAdder`. JSON-mode containers see exactly one log shape per line. |
+| **E.3** — Fail-fast config validation | `src/trellis/stores/registry.py` — new `RegistryValidationError` + `StoreRegistry.validate()` walks every (or a subset of) store_type, instantiates each, and aggregates errors into one multi-line message so an operator sees every misconfiguration at once. `src/trellis_api/app.py` lifespan calls `validate()` after construction so missing DSNs, unset S3 buckets, and plugin-import failures crash startup before uvicorn accepts requests. |
 
 ADRs to read for full context:
 
@@ -211,21 +215,19 @@ Phase 0 (reserved-namespace validator + schema definitions) was landed in earlie
 
 **Gating:** Docker available on the dev host. **Currently not installed.**
 
-#### E.2 — Uvicorn log unification
+#### E.2 — Uvicorn log unification ✅ landed 2026-04-25
 
-**Scope:** wire `uvicorn` / `uvicorn.access` loggers into `trellis_api.logging.configure_logging()`'s JSON renderer so CloudWatch sees one log shape per container. Non-blocker for POC.
+**What landed:** `configure_logging` in `src/trellis_api/logging.py` now factors the structlog processor chain into a `shared_processors` list reused by both the structlog `configure(...)` call and a `structlog.stdlib.ProcessorFormatter`. The formatter is attached to the root handler; `uvicorn`, `uvicorn.error`, and `uvicorn.access` have their own handlers cleared and `propagate=True` so every line flows through the shared bridge. Stdlib `extra={...}` kwargs are surfaced via `ExtraAdder` in `foreign_pre_chain`. Container log drivers now see exactly one shape per line in JSON mode.
 
-**Estimated size:** ~30 lines + tests.
+**Files touched:** 1 source file (~60 lines including the new `_UVICORN_LOGGERS` constant + bridge setup), 15 new tests in `tests/unit/api/test_logging.py` covering wiring, JSON / console rendering, level honoring, and shape parity between bridged and native lines.
 
-**Gating:** none — ready to start.
+#### E.3 — Fail-fast config validation on startup ✅ landed 2026-04-25
 
-#### E.3 — Fail-fast config validation on startup
+**What landed:** New `RegistryValidationError` (carries the full `(store_type, exception)` list so a programmatic consumer can introspect) plus `StoreRegistry.validate(*, store_types=None)` in `src/trellis/stores/registry.py`. `validate()` walks every store_type the registry knows about (or a caller-supplied subset), forces a side-effecting `_instantiate` call per store, and accumulates exceptions into a single aggregate so an operator sees every misconfiguration at once rather than fixing them serially across deploy attempts. Successful stores stay warm in the cache so post-validation access is free. The `app.py` lifespan calls `validate()` after `from_config_dir()` so missing DSNs, unset S3 buckets, and plugin import failures crash uvicorn before it accepts requests.
 
-**Scope:** extend `StoreRegistry.from_config_dir` (or add a pre-flight in `trellis serve`) to surface missing DSNs / unreachable S3 buckets / embedding-dim mismatches before uvicorn accepts a listener. Today a malformed config only fails on first store access.
+**Deliberately skipped:** explicit "ping" validation for backends that connect lazily (Neo4j Bolt, S3 boto3 client). Adding it requires a per-backend round-trip, which raises real cost and the false-positive surface (transient network blips, IAM role bootstrap delays) without a current incident to motivate. Logged in the docstring as the natural next step.
 
-**Estimated size:** ~80 lines + tests.
-
-**Gating:** none — ready to start.
+**Files touched:** `src/trellis/stores/registry.py` (+90 lines), `src/trellis_api/app.py` (+1 call + 5 lines of docstring), `tests/unit/stores/test_registry_validation.py` (new file, 9 tests covering happy paths, partial failures, error rendering).
 
 #### E.4 — End-to-end AWS deployment dry-run
 
@@ -249,7 +251,7 @@ If picking up cold, work the list top-down. Each item's gating is satisfied by t
 |---|---|---|---|
 | 1 | **A.1** End-to-end Neo4j integration test | ✅ Landed 2026-04-25 | Validates the integration the ADRs assume works. Closes the loop on the AuraDB live tests. |
 | 2 | **B.1 + B.2** Ontology Phase 1 + 2 (extractor canonical names + retrieval bucketing) | ✅ Landed 2026-04-25 | Small, well-scoped, no gating delays. Makes agent-facing graph queries less fragile. |
-| 3 | **E.2 + E.3** Uvicorn log unification + fail-fast config validation | Ready | Operational hygiene before the AWS dry-run. ~110 lines combined. |
+| 3 | **E.2 + E.3** Uvicorn log unification + fail-fast config validation | ✅ Landed 2026-04-25 | Operational hygiene before the AWS dry-run. ~110 lines combined. |
 | 4 | **A.2** pgvector + Postgres live tests | Ready when Postgres available | Drift surface validated for the second cloud backend. |
 | 5 | **E.1 + E.4** Docker compose smoke test + AWS dry-run | Need infra access | Ships the deployment story end-to-end. |
 | 6 | **B.3** Provenance columns | Wait for signal | Real cost; speculative without a consumer. |
