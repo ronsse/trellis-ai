@@ -115,7 +115,7 @@ Each item is something that, if missing the first time a stranger runs against N
 * **Estimate:** ~300 lines combined.
 * **Risk of leaving it:** every new user repeats the "wait, what's the database name on AuraDB" discovery we already paid for once.
 
-### 2.3 Migration tool: `trellis admin migrate-graph`
+### 2.3 Migration tool: `trellis admin migrate-graph` ✅ landed 2026-04-26
 
 * **State today:** Switching backends today means starting fresh — no data migration path between SQLite, Postgres, and Neo4j graph stores. That makes Postgres feel like a deliberate downgrade from Neo4j rather than a real alternative.
 * **Done when:**
