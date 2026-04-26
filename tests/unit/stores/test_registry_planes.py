@@ -237,6 +237,81 @@ def test_extract_config_empty_returns_empty() -> None:
     assert _extract_store_config({}, "<test>") == {}
 
 
+# -- Constructor accepts both shapes ------------------------------------
+
+
+def test_constructor_normalises_plane_split_dict() -> None:
+    """Direct ``StoreRegistry(config=...)`` must honour plane-split shape.
+
+    Regression: prior to the fix, plane-split dicts were stored as-is
+    and ``_resolve_backend`` did ``self._config.get(store_type)`` against
+    a wrapped dict. Every lookup missed and silently fell back to
+    SQLite — even when callers explicitly requested neo4j or postgres.
+    """
+    registry = StoreRegistry(
+        config={
+            "knowledge": {
+                "graph": {"backend": "neo4j", "uri": "bolt://example:7687"},
+                "vector": {"backend": "neo4j", "uri": "bolt://example:7687"},
+            },
+            "operational": {
+                "trace": {"backend": "postgres"},
+            },
+        }
+    )
+    backend, params = registry._resolve_backend("graph")
+    assert backend == "neo4j"
+    assert params["uri"] == "bolt://example:7687"
+
+    backend, _ = registry._resolve_backend("trace")
+    assert backend == "postgres"
+
+
+def test_constructor_accepts_already_flat_dict() -> None:
+    """Existing callers that pass flat ``{store_type: cfg}`` keep working."""
+    registry = StoreRegistry(
+        config={
+            "graph": {"backend": "sqlite"},
+            "trace": {"backend": "sqlite"},
+        }
+    )
+    backend, _ = registry._resolve_backend("graph")
+    assert backend == "sqlite"
+
+
+def test_constructor_normalises_legacy_flat_wrapped_dict() -> None:
+    """The deprecated ``stores:`` wrapper still works via the constructor."""
+    registry = StoreRegistry(
+        config={"stores": {"graph": {"backend": "postgres"}}}
+    )
+    backend, _ = registry._resolve_backend("graph")
+    assert backend == "postgres"
+
+
+def test_constructor_empty_config_uses_defaults() -> None:
+    """No config at all = SQLite defaults; behaviour preserved."""
+    registry = StoreRegistry()
+    backend, _ = registry._resolve_backend("graph")
+    assert backend == "sqlite"
+
+
+def test_constructor_drops_store_in_wrong_plane() -> None:
+    """Plane-split with a misplaced store should drop it (existing behaviour)."""
+    registry = StoreRegistry(
+        config={
+            "knowledge": {
+                "graph": {"backend": "postgres"},
+                "trace": {"backend": "postgres"},  # wrong plane
+            },
+        }
+    )
+    backend, _ = registry._resolve_backend("graph")
+    assert backend == "postgres"
+    # Misplaced trace was dropped; resolves to default SQLite.
+    backend, _ = registry._resolve_backend("trace")
+    assert backend == "sqlite"
+
+
 # -- DSN resolution ------------------------------------------------------
 
 

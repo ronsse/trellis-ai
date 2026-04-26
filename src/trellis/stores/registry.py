@@ -629,7 +629,19 @@ class StoreRegistry:
         retrieval_config: dict[str, Any] | None = None,
         llm_config: dict[str, Any] | None = None,
     ) -> None:
-        self._config = config or {}
+        # Accept three input shapes equivalently:
+        #   * plane-split  ``{"knowledge": {...}, "operational": {...}}``
+        #   * legacy flat-wrapped  ``{"stores": {...}}``
+        #   * already-flat  ``{"graph": {...}, ...}``
+        # The first two get normalised to the third before storing.
+        # Without this, plane-split callers silently fell back to SQLite
+        # because ``_resolve_backend`` does ``self._config.get(store_type)``
+        # at lookup time and never sees through the plane wrapper.
+        raw_config = config or {}
+        if any(k in raw_config for k in ("knowledge", "operational", "stores")):
+            self._config = _extract_store_config(raw_config, "constructor")
+        else:
+            self._config = raw_config
         self._stores_dir = stores_dir
         self._embedding_config = embedding_config or {}
         self._retrieval_config = retrieval_config or {}
