@@ -78,7 +78,7 @@ Each item is something that, if missing the first time a stranger runs against N
 * **Estimate:** ~60 lines.
 * **Risk of leaving it:** production index rebuild → race on first query → opaque "no such vector schema index" error. Same failure mode the e2e suite already hit.
 
-### 1.5 Concurrent-write race documentation (Community edition only)
+### 1.5 Concurrent-write race documentation (Community edition only) ✅ landed 2026-04-25 (with Phase 2.2)
 
 * **State today:** Documented in `stores/neo4j/graph.py:11-17` but unmitigated. Neo4j Community Edition does not support partial uniqueness constraints (`UNIQUE ... WHERE valid_to IS NULL`). The "at most one current version per node_id" invariant is enforced by the close-then-insert transaction rather than by the database. Under concurrent writers on Community, a second writer can observe a stale "no current" state and create a duplicate current row.
 * **Done when** (pick one of two options based on what's cheap and clear):
@@ -105,7 +105,7 @@ Each item is something that, if missing the first time a stranger runs against N
 * **Estimate:** ~200 lines.
 * **Risk of leaving it:** users guess at the config shape from ADR prose. Some get it wrong, give up, and try a different tool.
 
-### 2.2 Local + cloud onboarding docs
+### 2.2 Local + cloud onboarding docs ✅ landed 2026-04-25
 
 * **State today:** `.env.example` has the Docker one-liner as a comment; `docs/deployment/aws-ecs.md` exists for the API runtime. Nothing dedicated for Neo4j onboarding. A user pip-installing the `[neo4j]` extra has no doc to follow.
 * **Done when:**
