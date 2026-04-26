@@ -79,7 +79,6 @@ class SQLiteVectorStore(SQLiteStoreBase, VectorStore):
             (item_id, blob, dimensions, meta_json),
         )
         self._conn.commit()
-        logger.debug("vector_upserted", item_id=item_id, dimensions=dimensions)
 
     def query(
         self,
