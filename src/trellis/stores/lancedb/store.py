@@ -141,7 +141,6 @@ class LanceVectorStore(VectorStore):
             .when_not_matched_insert_all()
             .execute(data)
         )
-        logger.debug("vector_upserted", item_id=item_id, dimensions=dimensions)
 
     def query(
         self,

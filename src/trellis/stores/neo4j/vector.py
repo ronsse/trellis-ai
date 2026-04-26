@@ -146,7 +146,6 @@ class Neo4jVectorStore(VectorStore):
                 "version. Create the node via GraphStore.upsert_node first."
             )
             raise ValueError(msg)
-        logger.debug("vector_upserted", item_id=item_id, dimensions=len(vector))
 
     def query(
         self,

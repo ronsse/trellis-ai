@@ -126,7 +126,6 @@ class PgVectorStore(VectorStore):
                 (item_id, _format_vector(vector), meta_json),
             )
         self.conn.commit()
-        logger.debug("vector_upserted", item_id=item_id, dimensions=len(vector))
 
     def query(
         self,

@@ -245,12 +245,6 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
                 )
 
         self.conn.commit()
-        logger.debug(
-            "node_upserted",
-            node_id=node_id,
-            node_type=node_type,
-            node_role=node_role,
-        )
         return node_id
 
     def get_node(
@@ -515,13 +509,6 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
                 )
 
         self.conn.commit()
-        logger.debug(
-            "edge_upserted",
-            edge_id=edge_id,
-            source=source_id,
-            target=target_id,
-            type=edge_type,
-        )
         return edge_id
 
     def get_edges(

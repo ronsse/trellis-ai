@@ -219,9 +219,6 @@ class Neo4jGraphStore(GraphStore):
                     cypher, node_id=node_id, now=now, new_props=new_props
                 ).consume()
             )
-        logger.debug(
-            "node_upserted", node_id=node_id, node_type=node_type, node_role=node_role
-        )
         return node_id
 
     def get_node(
@@ -439,13 +436,6 @@ class Neo4jGraphStore(GraphStore):
                 f"{target_id!r} has no current version"
             )
             raise ValueError(msg)
-        logger.debug(
-            "edge_upserted",
-            edge_id=edge_id,
-            source=source_id,
-            target=target_id,
-            type=edge_type,
-        )
         return edge_id
 
     def _find_current_edge(
