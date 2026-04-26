@@ -1277,6 +1277,25 @@ class StoreRegistry:
         registry afterwards. Failures in any single ``close()`` are
         logged and skipped so a misbehaving backend cannot block
         cleanup of the rest.
+
+        Idempotent — second + later calls find empty caches and no-op.
+        Safe to call from a shutdown handler that may fire twice.
+
+        Lifecycle:
+
+        * The FastAPI lifespan in :mod:`trellis_api.app` calls
+          ``close()`` automatically on uvicorn shutdown.
+        * Direct ``StoreRegistry`` callers (CLI subcommands, tests, SDK
+          local mode) should use the context-manager form to get the
+          same guarantee::
+
+              with StoreRegistry.from_config_dir() as registry:
+                  ...
+
+          Without the ``with`` block, file descriptors and Neo4j
+          connection pools live until process exit. That's fine for
+          short-lived CLI invocations but leaks across long-running
+          processes that hold a registry without an explicit close.
         """
         for store in self._cache.values():
             try:
@@ -1290,3 +1309,16 @@ class StoreRegistry:
             except Exception:
                 logger.warning("neo4j_driver_close_failed", uri=key[0], user=key[1])
         self._neo4j_drivers.clear()
+
+    def __enter__(self) -> StoreRegistry:
+        """Enable use as a context manager — see :meth:`close` for the guarantee."""
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: object,
+    ) -> None:
+        """Close on context-manager exit, even when an exception escapes the body."""
+        self.close()
