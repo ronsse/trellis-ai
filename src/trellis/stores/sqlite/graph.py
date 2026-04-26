@@ -411,6 +411,30 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
             self._conn.commit()
         return node_id
 
+    def upsert_nodes_bulk(self, nodes: list[dict[str, Any]]) -> list[str]:
+        # In-process backend: no network round-trip cost, so a simple
+        # loop over ``upsert_node`` is the correct implementation. The
+        # bulk method exists for API symmetry; Neo4j is the backend
+        # that benefits from its own UNWIND-batched override.
+        #
+        # Run every per-row validator up-front so the ABC's
+        # validation-atomicity contract holds: invalid input is rejected
+        # before any row is written. Mid-batch IO failures during the
+        # subsequent loop can still leave a partial commit (per-row
+        # ``commit=True``); see the ABC docstring.
+        self._pre_validate_nodes_bulk(nodes)
+        return [
+            self.upsert_node(
+                node_id=spec.get("node_id"),
+                node_type=spec["node_type"],
+                properties=spec.get("properties") or {},
+                node_role=spec.get("node_role", "semantic"),
+                generation_spec=spec.get("generation_spec"),
+                document_ids=spec.get("document_ids"),
+            )
+            for spec in nodes
+        ]
+
     def get_node(
         self,
         node_id: str,
@@ -642,6 +666,46 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
         if commit:
             self._conn.commit()
         return edge_id
+
+    def upsert_edges_bulk(self, edges: list[dict[str, Any]]) -> list[str]:
+        # Pre-validate required keys + endpoint existence. SQLite's
+        # single-row ``upsert_edge`` doesn't validate endpoints (it
+        # happily inserts dangling edges); the bulk method tightens
+        # that contract so callers can rely on it across backends.
+        for i, spec in enumerate(edges):
+            for key in ("source_id", "target_id", "edge_type"):
+                if key not in spec or spec[key] is None:
+                    msg = f"upsert_edges_bulk[{i}]: missing required key {key!r}"
+                    raise ValueError(msg)
+        self._pre_validate_edges_bulk(edges)
+        unique_endpoints = {spec["source_id"] for spec in edges} | {
+            spec["target_id"] for spec in edges
+        }
+        existing = {
+            row["node_id"] for row in self.get_nodes_bulk(list(unique_endpoints))
+        }
+        for i, spec in enumerate(edges):
+            if spec["source_id"] not in existing:
+                msg = (
+                    f"upsert_edges_bulk[{i}]: source "
+                    f"{spec['source_id']!r} has no current version"
+                )
+                raise ValueError(msg)
+            if spec["target_id"] not in existing:
+                msg = (
+                    f"upsert_edges_bulk[{i}]: target "
+                    f"{spec['target_id']!r} has no current version"
+                )
+                raise ValueError(msg)
+        return [
+            self.upsert_edge(
+                source_id=spec["source_id"],
+                target_id=spec["target_id"],
+                edge_type=spec["edge_type"],
+                properties=spec.get("properties"),
+            )
+            for spec in edges
+        ]
 
     def get_edges(
         self,

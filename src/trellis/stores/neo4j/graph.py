@@ -226,6 +226,123 @@ class Neo4jGraphStore(Neo4jSessionRunner, GraphStore):
         self._run_write(cypher, node_id=node_id, now=now, new_props=new_props)
         return node_id
 
+    def upsert_nodes_bulk(
+        self,
+        nodes: list[dict[str, Any]],
+    ) -> list[str]:
+        if not nodes:
+            return []
+
+        # Pass 1 — Python-side validation + ID assignment. Done before
+        # any I/O so a bad row in the middle of a 5K-node load doesn't
+        # leave half the batch written.
+        node_ids: list[str] = []
+        for i, spec in enumerate(nodes):
+            try:
+                node_role = spec.get("node_role", "semantic")
+                generation_spec = spec.get("generation_spec")
+                document_ids = spec.get("document_ids")
+                validate_node_role_args(node_role, generation_spec)
+                validate_document_ids(document_ids)
+            except (ValueError, TypeError) as exc:
+                msg = f"upsert_nodes_bulk[{i}]: {exc}"
+                raise type(exc)(msg) from exc
+            node_ids.append(spec.get("node_id") or generate_ulid())
+
+        # Round trip 1 — fetch existing current rows so we can carry
+        # ``created_at`` forward and enforce role immutability per row.
+        existing = self._fetch_current_nodes_bulk(node_ids)
+
+        # Validate role immutability now that we know which inputs hit
+        # an existing row. Same error contract as ``upsert_node``.
+        for i, (spec, nid) in enumerate(zip(nodes, node_ids, strict=True)):
+            prior = existing.get(nid)
+            if prior is None:
+                continue
+            try:
+                check_node_role_immutable(nid, prior, spec.get("node_role", "semantic"))
+            except ValueError as exc:
+                msg = f"upsert_nodes_bulk[{i}]: {exc}"
+                raise ValueError(msg) from exc
+
+        # Build the row payloads (mirrors ``upsert_node``'s ``new_props``).
+        now = _iso(utc_now())
+        rows: list[dict[str, Any]] = []
+        for spec, nid in zip(nodes, node_ids, strict=True):
+            prior = existing.get(nid)
+            created_at = prior["created_at"] if prior is not None else now
+            generation_spec = spec.get("generation_spec")
+            document_ids = spec.get("document_ids")
+            rows.append(
+                {
+                    "node_id": nid,
+                    "props": {
+                        "node_id": nid,
+                        "version_id": generate_ulid(),
+                        "node_type": spec["node_type"],
+                        "node_role": spec.get("node_role", "semantic"),
+                        "generation_spec_json": (
+                            json.dumps(generation_spec)
+                            if generation_spec is not None
+                            else None
+                        ),
+                        "document_ids_json": (
+                            json.dumps(document_ids)
+                            if document_ids is not None
+                            else None
+                        ),
+                        "properties_json": json.dumps(spec.get("properties") or {}),
+                        "created_at": created_at,
+                        "updated_at": now,
+                        "valid_from": now,
+                        "valid_to": None,
+                    },
+                }
+            )
+
+        # Round trip 2 — close existing current rows and create new
+        # versions in a single UNWIND. The ``OPTIONAL MATCH old`` runs
+        # per row; the ``WITH row`` carries the row through after the
+        # close so the ``CREATE`` happens regardless of whether a prior
+        # version existed.
+        cypher = """
+        UNWIND $rows AS row
+        OPTIONAL MATCH (old:Node {node_id: row.node_id})
+          WHERE old.valid_to IS NULL
+        SET old.valid_to = row.props.valid_from
+        WITH row
+        CREATE (n:Node)
+        SET n = row.props
+        """
+        with self._driver.session(database=self._database) as session:
+            session.execute_write(lambda tx: tx.run(cypher, rows=rows).consume())
+
+        logger.debug("nodes_upserted_bulk", count=len(node_ids))
+        return node_ids
+
+    def _fetch_current_nodes_bulk(
+        self, node_ids: list[str]
+    ) -> dict[str, dict[str, Any]]:
+        """Single round trip: load all current rows for ``node_ids``.
+
+        Returns a ``{node_id: row_dict}`` map for the subset that
+        currently exists. Missing IDs are absent from the map.
+        """
+        if not node_ids:
+            return {}
+        cypher = (
+            "MATCH (n:Node) WHERE n.node_id IN $ids AND n.valid_to IS NULL RETURN n"
+        )
+        with self._driver.session(database=self._database) as session:
+            records = session.execute_read(
+                lambda tx: list(tx.run(cypher, ids=node_ids))
+            )
+        out: dict[str, dict[str, Any]] = {}
+        for r in records:
+            row = _node_props_to_dict(dict(r["n"]))
+            out[row["node_id"]] = row
+        return out
+
     def get_node(
         self,
         node_id: str,
@@ -416,6 +533,159 @@ class Neo4jGraphStore(Neo4jSessionRunner, GraphStore):
             )
             raise ValueError(msg)
         return edge_id
+
+    def upsert_edges_bulk(
+        self,
+        edges: list[dict[str, Any]],
+    ) -> list[str]:
+        if not edges:
+            return []
+
+        # Pass 1 — Python-side validation. The single-row method has no
+        # explicit validators (other than the implicit MATCH inside the
+        # Cypher), but we want clear errors before any I/O. Within-batch
+        # duplicate triplets are rejected because the bulk pre-fetch
+        # only sees the prior edge once — duplicates would all auto-
+        # assign their own edge_id and create distinct current versions
+        # for one logical edge.
+        for i, spec in enumerate(edges):
+            for key in ("source_id", "target_id", "edge_type"):
+                if key not in spec or spec[key] is None:
+                    msg = f"upsert_edges_bulk[{i}]: missing required key {key!r}"
+                    raise ValueError(msg)
+        self._pre_validate_edges_bulk(edges)
+
+        # Round trip 1 — validate that every source + target has a
+        # current version. Done up front so a bad row gets a precise
+        # error pointing at its index, not a silent drop in the UNWIND.
+        endpoint_ids = sorted(
+            {spec["source_id"] for spec in edges}
+            | {spec["target_id"] for spec in edges}
+        )
+        valid_endpoints = self._fetch_current_node_id_set(endpoint_ids)
+        for i, spec in enumerate(edges):
+            if spec["source_id"] not in valid_endpoints:
+                msg = (
+                    f"upsert_edges_bulk[{i}]: source "
+                    f"{spec['source_id']!r} has no current version"
+                )
+                raise ValueError(msg)
+            if spec["target_id"] not in valid_endpoints:
+                msg = (
+                    f"upsert_edges_bulk[{i}]: target "
+                    f"{spec['target_id']!r} has no current version"
+                )
+                raise ValueError(msg)
+
+        # Round trip 2 — fetch existing current edges keyed by
+        # (source, target, edge_type) so we can carry edge_id +
+        # created_at forward, matching the per-row contract.
+        existing = self._fetch_current_edges_bulk(
+            [
+                (spec["source_id"], spec["target_id"], spec["edge_type"])
+                for spec in edges
+            ]
+        )
+
+        now = _iso(utc_now())
+        edge_ids: list[str] = []
+        rows: list[dict[str, Any]] = []
+        for spec in edges:
+            triplet = (spec["source_id"], spec["target_id"], spec["edge_type"])
+            prior = existing.get(triplet)
+            if prior is not None:
+                edge_id = str(prior["edge_id"])
+                created_at = prior["created_at"]
+            else:
+                edge_id = generate_ulid()
+                created_at = now
+            edge_ids.append(edge_id)
+            rows.append(
+                {
+                    "source_id": spec["source_id"],
+                    "target_id": spec["target_id"],
+                    "edge_type": spec["edge_type"],
+                    "props": {
+                        "edge_id": edge_id,
+                        "version_id": generate_ulid(),
+                        "source_id": spec["source_id"],
+                        "target_id": spec["target_id"],
+                        "edge_type": spec["edge_type"],
+                        "properties_json": json.dumps(spec.get("properties") or {}),
+                        "created_at": created_at,
+                        "valid_from": now,
+                        "valid_to": None,
+                    },
+                }
+            )
+
+        # Round trip 3 — close existing current edges and create new
+        # versions in one UNWIND. Endpoints validated above.
+        cypher = """
+        UNWIND $rows AS row
+        MATCH (s:Node {node_id: row.source_id}) WHERE s.valid_to IS NULL
+        MATCH (t:Node {node_id: row.target_id}) WHERE t.valid_to IS NULL
+        WITH s, t, row
+        OPTIONAL MATCH (s)-[old:EDGE {edge_type: row.edge_type}]->(t)
+          WHERE old.valid_to IS NULL
+        SET old.valid_to = row.props.valid_from
+        WITH s, t, row
+        CREATE (s)-[new:EDGE]->(t)
+        SET new = row.props
+        """
+        with self._driver.session(database=self._database) as session:
+            session.execute_write(lambda tx: tx.run(cypher, rows=rows).consume())
+
+        logger.debug("edges_upserted_bulk", count=len(edge_ids))
+        return edge_ids
+
+    def _fetch_current_node_id_set(self, node_ids: list[str]) -> set[str]:
+        """Round-trip helper: which of these IDs have a current version?"""
+        if not node_ids:
+            return set()
+        cypher = (
+            "MATCH (n:Node) WHERE n.node_id IN $ids AND n.valid_to IS NULL "
+            "RETURN n.node_id AS node_id"
+        )
+        with self._driver.session(database=self._database) as session:
+            records = session.execute_read(
+                lambda tx: list(tx.run(cypher, ids=node_ids))
+            )
+        return {r["node_id"] for r in records}
+
+    def _fetch_current_edges_bulk(
+        self, triplets: list[tuple[str, str, str]]
+    ) -> dict[tuple[str, str, str], dict[str, Any]]:
+        """Round-trip helper: load current edges for ``(s, t, type)`` triplets.
+
+        Returns a map keyed by triplet for entries that currently exist.
+        """
+        if not triplets:
+            return {}
+        # Encode triplets as dicts so the driver can ship them as
+        # parameters; tuples aren't natively serialisable.
+        params = [
+            {"source_id": s, "target_id": t, "edge_type": k} for s, t, k in triplets
+        ]
+        cypher = """
+        UNWIND $triplets AS t
+        MATCH (s:Node {node_id: t.source_id}) WHERE s.valid_to IS NULL
+        MATCH (s)-[r:EDGE {edge_type: t.edge_type}]->
+              (target:Node {node_id: t.target_id})
+        WHERE target.valid_to IS NULL AND r.valid_to IS NULL
+        RETURN t.source_id AS source_id, t.target_id AS target_id,
+               t.edge_type AS edge_type, r.edge_id AS edge_id,
+               r.created_at AS created_at
+        """
+        with self._driver.session(database=self._database) as session:
+            records = session.execute_read(
+                lambda tx: list(tx.run(cypher, triplets=params))
+            )
+        out: dict[tuple[str, str, str], dict[str, Any]] = {}
+        for r in records:
+            key = (r["source_id"], r["target_id"], r["edge_type"])
+            out[key] = {"edge_id": r["edge_id"], "created_at": r["created_at"]}
+        return out
 
     def _find_current_edge(
         self, source_id: str, target_id: str, edge_type: str

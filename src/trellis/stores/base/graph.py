@@ -80,10 +80,7 @@ def validate_document_ids(document_ids: list[str] | None) -> None:
     seen: set[str] = set()
     for i, doc_id in enumerate(document_ids):
         if not isinstance(doc_id, str) or not doc_id:
-            msg = (
-                f"document_ids[{i}] must be a non-empty string, "
-                f"got {doc_id!r}"
-            )
+            msg = f"document_ids[{i}] must be a non-empty string, got {doc_id!r}"
             raise ValueError(msg)
         if doc_id in seen:
             msg = f"document_ids contains duplicate entry {doc_id!r}"
@@ -172,6 +169,90 @@ class GraphStore(ABC):
 
         Returns:
             The node ID.
+        """
+
+    @abstractmethod
+    def upsert_nodes_bulk(
+        self,
+        nodes: list[dict[str, Any]],
+    ) -> list[str]:
+        """Bulk variant of :meth:`upsert_node`.
+
+        Each entry in ``nodes`` is a dict with the same keys
+        ``upsert_node`` accepts as kwargs:
+
+        - ``node_id`` (``str | None``) — auto-generated when ``None``.
+        - ``node_type`` (``str``, required).
+        - ``properties`` (``dict``, required).
+        - ``node_role`` (``str``, optional; default ``"semantic"``).
+        - ``generation_spec`` (``dict | None``, optional).
+        - ``document_ids`` (``list[str] | None``, optional).
+
+        Semantics match :meth:`upsert_node`: each row's existing current
+        version is closed (``valid_to`` set) before the new version is
+        inserted, ``created_at`` is carried forward when an entry
+        updates an existing node, and role immutability is enforced.
+
+        **Atomicity guarantee.** Every per-row validator
+        (:func:`validate_node_role_args`, :func:`validate_document_ids`,
+        :func:`check_node_role_immutable`) runs against every row
+        *before any write*. If any row fails validation, no rows are
+        written. Pass-through implementations should call
+        :meth:`_pre_validate_nodes_bulk` to honor this contract.
+        Backends with single-statement bulk paths (Neo4j) extend the
+        guarantee to write-time failures via a single transaction;
+        pass-through backends (SQLite, Postgres) loop over
+        :meth:`upsert_node` after pre-validation, so a mid-batch IO
+        failure can leave a partial commit. Callers needing strict
+        write-time atomicity should drive the bulk call inside their
+        own transaction.
+
+        On backends with network round-trip cost (Neo4j), implementations
+        SHOULD consolidate the work into a small constant number of
+        round trips per batch — typically one fetch of existing rows
+        plus one UNWIND-style upsert. On in-process backends a simple
+        loop over :meth:`upsert_node` is acceptable.
+
+        Args:
+            nodes: List of node-spec dicts. Order is preserved in the
+                returned ID list.
+
+        Raises:
+            ValueError / TypeError: with the same conditions as
+                :meth:`upsert_node`. Errors mention the offending list
+                index so callers can map them back.
+
+        Returns:
+            List of node IDs in the same order as the input.
+        """
+
+    @abstractmethod
+    def upsert_edges_bulk(
+        self,
+        edges: list[dict[str, Any]],
+    ) -> list[str]:
+        """Bulk variant of :meth:`upsert_edge`.
+
+        Each entry in ``edges`` is a dict with the same keys
+        ``upsert_edge`` accepts:
+
+        - ``source_id`` (``str``, required).
+        - ``target_id`` (``str``, required).
+        - ``edge_type`` (``str``, required).
+        - ``properties`` (``dict | None``, optional).
+
+        Same SCD-2 semantics as :meth:`upsert_edge`: an existing
+        current edge between ``(source_id, target_id, edge_type)`` is
+        closed before the new version is inserted, and ``created_at``
+        is carried forward.
+
+        Round-trip-cost guidance is the same as
+        :meth:`upsert_nodes_bulk`. Endpoints must already be current
+        nodes; otherwise :class:`ValueError` is raised mentioning the
+        offending list index.
+
+        Returns:
+            List of edge IDs in the same order as the input.
         """
 
     @abstractmethod
@@ -392,12 +473,106 @@ class GraphStore(ABC):
         raise NotImplementedError(msg)
 
     # ------------------------------------------------------------------
+    # Bulk-input pre-validation
+    # ------------------------------------------------------------------
+
+    def _pre_validate_nodes_bulk(self, nodes: list[dict[str, Any]]) -> None:
+        """Run every per-row validator against ``nodes`` before any write.
+
+        Pass-through bulk implementations (SQLite, Postgres) loop over
+        :meth:`upsert_node` after this call. Without it, validators that
+        live inside :meth:`upsert_node` (``validate_node_role_args``,
+        ``validate_document_ids``, ``check_node_role_immutable``) would
+        only fire mid-loop — by which point earlier rows have already
+        been committed. Calling this helper up-front honors the ABC's
+        atomicity-of-validation contract.
+
+        Backends with a single-statement bulk path (Neo4j) inline the
+        same validation in their own pre-pass and don't need this
+        helper — using it would require a redundant
+        :meth:`get_nodes_bulk` round trip.
+
+        Errors are tagged with the offending row index so callers can
+        map them back to input.
+        """
+        if not nodes:
+            return
+        for i, spec in enumerate(nodes):
+            if "node_type" not in spec:
+                msg = f"upsert_nodes_bulk[{i}]: missing required key 'node_type'"
+                raise ValueError(msg)
+            try:
+                validate_node_role_args(
+                    spec.get("node_role", "semantic"),
+                    spec.get("generation_spec"),
+                )
+                validate_document_ids(spec.get("document_ids"))
+            except (ValueError, TypeError) as exc:
+                msg = f"upsert_nodes_bulk[{i}]: {exc}"
+                raise type(exc)(msg) from exc
+
+        # Role immutability requires an existing-row lookup. Only rows
+        # with an explicit node_id can collide; auto-assigned IDs are
+        # always fresh.
+        explicit_ids = [
+            spec["node_id"] for spec in nodes if spec.get("node_id") is not None
+        ]
+        if not explicit_ids:
+            return
+        existing = {row["node_id"]: row for row in self.get_nodes_bulk(explicit_ids)}
+        for i, spec in enumerate(nodes):
+            nid = spec.get("node_id")
+            if nid is None or nid not in existing:
+                continue
+            try:
+                check_node_role_immutable(
+                    nid, existing[nid], spec.get("node_role", "semantic")
+                )
+            except ValueError as exc:
+                msg = f"upsert_nodes_bulk[{i}]: {exc}"
+                raise ValueError(msg) from exc
+
+    @staticmethod
+    def _pre_validate_edges_bulk(edges: list[dict[str, Any]]) -> None:
+        """Reject within-batch duplicate ``(source_id, target_id, edge_type)``
+        triplets before any write.
+
+        Sequential per-row callers retain per-call last-write-wins (the
+        second call sees the first as prior and reuses its ``edge_id``).
+        Bulk paths can't make that guarantee: the Neo4j UNWIND fetches
+        existing edges once before the writes, so two input rows for
+        the same triplet both miss the prior-edge lookup, both auto-
+        assign their own ``edge_id``, and you end up with two distinct
+        current versions for one logical edge.
+
+        Reject up-front rather than ship divergent semantics. Errors
+        are tagged with the offending row index (the second occurrence)
+        so callers can map them back to input.
+        """
+        seen: set[tuple[str, str, str]] = set()
+        for i, spec in enumerate(edges):
+            triplet = (
+                spec.get("source_id"),
+                spec.get("target_id"),
+                spec.get("edge_type"),
+            )
+            if any(v is None for v in triplet):
+                continue
+            if triplet in seen:
+                msg = (
+                    f"upsert_edges_bulk[{i}]: duplicate (source_id, target_id, "
+                    f"edge_type)={triplet!r} in batch; deduplicate before "
+                    "calling — bulk paths can't preserve sequential "
+                    "last-write-wins semantics across all backends"
+                )
+                raise ValueError(msg)
+            seen.add(triplet)  # type: ignore[arg-type]
+
+    # ------------------------------------------------------------------
     # Canonical query DSL — Phase 1 of adr-canonical-graph-layer.md
     # ------------------------------------------------------------------
 
-    def execute_node_query(
-        self, query: NodeQuery
-    ) -> list[dict[str, Any]]:
+    def execute_node_query(self, query: NodeQuery) -> list[dict[str, Any]]:
         """Execute a typed :class:`NodeQuery` against the store.
 
         Default routes through the legacy :meth:`query` method by
@@ -444,9 +619,7 @@ class GraphStore(ABC):
             as_of=query.as_of,
         )
 
-    def execute_subgraph_query(
-        self, query: SubgraphQuery
-    ) -> SubgraphResult:
+    def execute_subgraph_query(self, query: SubgraphQuery) -> SubgraphResult:
         """Execute a typed :class:`SubgraphQuery` against the store.
 
         Default routes through the legacy :meth:`get_subgraph` method.
@@ -459,9 +632,7 @@ class GraphStore(ABC):
         )
 
         edge_types: list[str] | None = (
-            list(query.edge_type_filter)
-            if query.edge_type_filter is not None
-            else None
+            list(query.edge_type_filter) if query.edge_type_filter is not None else None
         )
         result = self.get_subgraph(
             seed_ids=list(query.seed_ids),
