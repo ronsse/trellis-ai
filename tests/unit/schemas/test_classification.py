@@ -139,6 +139,35 @@ class TestContentTagsSerialization:
         assert "signal_quality" in data  # has default, not None
 
 
+class TestContentTagsClassifiedMode:
+    """``classified_mode`` records which pipeline mode produced the tags
+    (Gap 1.2)."""
+
+    def test_default_is_none(self) -> None:
+        """Legacy items / hand-edited metadata have no stamped mode."""
+        tags = ContentTags()
+        assert tags.classified_mode is None
+
+    @pytest.mark.parametrize("mode", ["ingestion", "enrichment"])
+    def test_accepts_valid_modes(self, mode: str) -> None:
+        tags = ContentTags(classified_mode=mode)
+        assert tags.classified_mode == mode
+
+    def test_rejects_invalid_mode(self) -> None:
+        with pytest.raises(ValidationError):
+            ContentTags(classified_mode="hybrid")
+
+    def test_round_trips_through_json(self) -> None:
+        tags = ContentTags(
+            domain=["api"],
+            classified_mode="enrichment",
+            classified_by=["det", "llm"],
+        )
+        restored = ContentTags.model_validate_json(tags.model_dump_json())
+        assert restored.classified_mode == "enrichment"
+        assert restored == tags
+
+
 class TestRetrievalAffinity:
     @pytest.mark.parametrize(
         "affinity",

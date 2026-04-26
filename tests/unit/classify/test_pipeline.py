@@ -329,3 +329,74 @@ class TestPipelineIdempotency:
         assert r1.tags == r2.tags
         assert r1.min_confidence == r2.min_confidence
         assert r1.classified_by == r2.classified_by
+
+
+class TestPipelineModeStamping:
+    """Each classify() call stamps its mode on the result and on
+    derived ContentTags. Closes Gap 1.2."""
+
+    def test_ingestion_mode_stamped_on_merged_result(self) -> None:
+        c = StubClassifier("det", tags={"domain": ["api"]}, confidence=0.9)
+        pipeline = ClassifierPipeline(classifiers=[c])
+
+        result = pipeline.classify("content")
+
+        assert result.mode == "ingestion"
+
+    def test_enrichment_mode_stamped_on_merged_result(self) -> None:
+        det = StubClassifier("det", tags={"domain": ["api"]}, confidence=0.9)
+        llm = StubClassifier("llm", tags={})
+        pipeline = ClassifierPipeline(
+            classifiers=[det], llm_classifier=llm, llm_threshold=0.7
+        )
+
+        result = pipeline.classify("content")
+
+        # Mode reflects the pipeline's configuration, not whether the LLM
+        # actually fired on this call.
+        assert result.mode == "enrichment"
+
+    def test_enrichment_mode_stamped_even_when_llm_skipped(self) -> None:
+        """When LLM is configured but skipped (high deterministic confidence),
+        the result still carries mode='enrichment' — the pipeline is in
+        enrichment mode regardless of which path fired."""
+        det = StubClassifier("det", tags={"domain": ["api"]}, confidence=0.95)
+        llm = StubClassifier("llm", tags={"scope": ["org"]}, confidence=0.8)
+        pipeline = ClassifierPipeline(
+            classifiers=[det], llm_classifier=llm, llm_threshold=0.7
+        )
+
+        result = pipeline.classify("content")
+
+        assert "llm" not in result.classified_by
+        assert result.mode == "enrichment"
+
+    def test_to_content_tags_propagates_ingestion_mode(self) -> None:
+        c = StubClassifier("det", tags={"domain": ["api"]}, confidence=0.9)
+        pipeline = ClassifierPipeline(classifiers=[c])
+
+        tags = pipeline.classify("content").to_content_tags()
+
+        assert tags.classified_mode == "ingestion"
+
+    def test_to_content_tags_propagates_enrichment_mode(self) -> None:
+        det = StubClassifier("det", tags={"domain": ["api"]}, confidence=0.5)
+        llm = StubClassifier("llm", tags={"scope": ["org"]}, confidence=0.8)
+        pipeline = ClassifierPipeline(
+            classifiers=[det], llm_classifier=llm, llm_threshold=0.7
+        )
+
+        tags = pipeline.classify("content").to_content_tags()
+
+        assert tags.classified_mode == "enrichment"
+
+    def test_default_constructed_merged_classification_has_no_mode(self) -> None:
+        """A bare MergedClassification (no pipeline) carries mode=None.
+        Production code always goes through the pipeline; this is a test
+        only path."""
+        from trellis.classify.protocol import MergedClassification
+
+        empty = MergedClassification()
+        assert empty.mode is None
+        # to_content_tags also produces a None mode in this case.
+        assert empty.to_content_tags().classified_mode is None
