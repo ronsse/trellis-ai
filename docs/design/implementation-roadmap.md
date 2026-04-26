@@ -1,9 +1,11 @@
 # Implementation Roadmap
 
-**Last updated:** 2026-04-25 (late evening — A.1, A.2, B.1, B.2, E.2, E.3 landed; main consolidated; Neo4j hardening plan opened)
+**Last updated:** 2026-04-26 (Neo4j hardening Phase 1 + 2 complete; evaluation-strategy plan opened)
 **Purpose:** Single-page hand-off for any agent (fresh or returning) picking up Trellis implementation work. Self-contained. Read this top-to-bottom before touching code.
 
-> **Picking up Neo4j-specific work?** [`plan-neo4j-hardening.md`](./plan-neo4j-hardening.md) is the active plan for making Neo4j a credible blessed default for both local and cloud (Phase 1 = lifecycle / validate / vector-index hardening; Phase 2 = combined-plane config + onboarding docs + migration tool). Read it instead of jumping straight into this doc.
+> **Picking up evaluation work?** [`plan-evaluation-strategy.md`](./plan-evaluation-strategy.md) is the active plan for building the workload signal that unblocks Phase 3 of Neo4j hardening (and other gated items in `TODO.md`). Read it instead of jumping straight into this doc.
+>
+> **Picking up Neo4j-specific work?** [`plan-neo4j-hardening.md`](./plan-neo4j-hardening.md) — Phase 1 (driver lifecycle / validate / vector-index hardening / Community-race docs) and Phase 2 (combined-plane config / onboarding docs / migrate-graph) are complete. Phase 3 items remain deferred until the evaluation plan generates the signal that justifies them.
 
 ---
 
