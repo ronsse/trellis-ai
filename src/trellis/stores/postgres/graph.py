@@ -248,17 +248,16 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
         return node_id
 
     def upsert_nodes_bulk(self, nodes: list[dict[str, Any]]) -> list[str]:
-        # In-process backend: a simple loop over ``upsert_node`` is the
-        # correct implementation. Bulk method exists for API symmetry;
-        # Neo4j is the backend that benefits from its own UNWIND override.
+        # Network round trips per call but no UNWIND-style batching —
+        # a simple loop over ``upsert_node`` is the pass-through impl.
+        # Neo4j gets its own UNWIND override.
         #
-        # Pre-validate required keys so missing-key errors surface as
-        # ValueError (with the offending index) instead of KeyError
-        # mid-loop. The per-row method handles role-immutability.
-        for i, spec in enumerate(nodes):
-            if "node_type" not in spec:
-                msg = f"upsert_nodes_bulk[{i}]: missing required key 'node_type'"
-                raise ValueError(msg)
+        # Run every per-row validator up-front so the ABC's
+        # validation-atomicity contract holds: invalid input is rejected
+        # before any row is written. Mid-batch IO failures during the
+        # subsequent loop can still leave a partial commit (per-row
+        # auto-commit on the underlying psycopg connection).
+        self._pre_validate_nodes_bulk(nodes)
         return [
             self.upsert_node(
                 node_id=spec.get("node_id"),

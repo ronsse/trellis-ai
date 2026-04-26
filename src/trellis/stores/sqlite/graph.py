@@ -417,14 +417,12 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
         # bulk method exists for API symmetry; Neo4j is the backend
         # that benefits from its own UNWIND-batched override.
         #
-        # Pre-validate required keys so missing-key errors surface as
-        # ValueError (with the offending index) instead of KeyError
-        # mid-loop. The per-row method handles role-immutability +
-        # role-arg validation; pass-through is best-effort atomic.
-        for i, spec in enumerate(nodes):
-            if "node_type" not in spec:
-                msg = f"upsert_nodes_bulk[{i}]: missing required key 'node_type'"
-                raise ValueError(msg)
+        # Run every per-row validator up-front so the ABC's
+        # validation-atomicity contract holds: invalid input is rejected
+        # before any row is written. Mid-batch IO failures during the
+        # subsequent loop can still leave a partial commit (per-row
+        # ``commit=True``); see the ABC docstring.
+        self._pre_validate_nodes_bulk(nodes)
         return [
             self.upsert_node(
                 node_id=spec.get("node_id"),

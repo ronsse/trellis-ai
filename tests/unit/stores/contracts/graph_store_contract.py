@@ -283,6 +283,63 @@ class GraphStoreContractTests:
                 ]
             )
 
+    def test_upsert_nodes_bulk_atomic_validation_no_partial_writes(
+        self, store: GraphStore
+    ) -> None:
+        """When a row mid-batch fails per-row validation
+        (``validate_node_role_args``, ``validate_document_ids``,
+        ``check_node_role_immutable``), no rows from the batch are
+        written. Honors the ABC's atomicity-of-validation contract.
+        """
+        # Row 0 is fine; row 1 has an invalid node_role → should reject
+        # the whole batch before row 0 lands.
+        before = store.count_nodes()
+        with pytest.raises(ValueError, match=r"upsert_nodes_bulk\[1\]"):
+            store.upsert_nodes_bulk(
+                [
+                    {
+                        "node_id": "ok-row-0",
+                        "node_type": "service",
+                        "properties": {},
+                    },
+                    {
+                        "node_id": "bad-row-1",
+                        "node_type": "service",
+                        "properties": {},
+                        "node_role": "nonsense",
+                    },
+                ]
+            )
+        assert store.count_nodes() == before
+        assert store.get_node("ok-row-0") is None
+
+    def test_upsert_nodes_bulk_atomic_role_immutability_check(
+        self, store: GraphStore
+    ) -> None:
+        """Mid-batch role-immutability conflict rejects the whole batch
+        without writing earlier rows."""
+        store.upsert_node("existing", "service", {}, node_role="semantic")
+        _sleep_for_ordering()
+        before = store.count_nodes()
+        with pytest.raises(ValueError, match=r"upsert_nodes_bulk\[1\]"):
+            store.upsert_nodes_bulk(
+                [
+                    {
+                        "node_id": "fresh-row-0",
+                        "node_type": "service",
+                        "properties": {},
+                    },
+                    {
+                        "node_id": "existing",
+                        "node_type": "service",
+                        "properties": {},
+                        "node_role": "structural",
+                    },
+                ]
+            )
+        assert store.count_nodes() == before
+        assert store.get_node("fresh-row-0") is None
+
     # ------------------------------------------------------------------
     # edges
     # ------------------------------------------------------------------

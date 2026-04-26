@@ -192,8 +192,20 @@ class GraphStore(ABC):
         version is closed (``valid_to`` set) before the new version is
         inserted, ``created_at`` is carried forward when an entry
         updates an existing node, and role immutability is enforced.
-        Validation runs against every row before any write — if any
-        row is invalid, no rows are written.
+
+        **Atomicity guarantee.** Every per-row validator
+        (:func:`validate_node_role_args`, :func:`validate_document_ids`,
+        :func:`check_node_role_immutable`) runs against every row
+        *before any write*. If any row fails validation, no rows are
+        written. Pass-through implementations should call
+        :meth:`_pre_validate_nodes_bulk` to honor this contract.
+        Backends with single-statement bulk paths (Neo4j) extend the
+        guarantee to write-time failures via a single transaction;
+        pass-through backends (SQLite, Postgres) loop over
+        :meth:`upsert_node` after pre-validation, so a mid-batch IO
+        failure can leave a partial commit. Callers needing strict
+        write-time atomicity should drive the bulk call inside their
+        own transaction.
 
         On backends with network round-trip cost (Neo4j), implementations
         SHOULD consolidate the work into a small constant number of
@@ -459,6 +471,66 @@ class GraphStore(ABC):
         """
         msg = f"{type(self).__name__} does not implement compact_versions"
         raise NotImplementedError(msg)
+
+    # ------------------------------------------------------------------
+    # Bulk-input pre-validation
+    # ------------------------------------------------------------------
+
+    def _pre_validate_nodes_bulk(self, nodes: list[dict[str, Any]]) -> None:
+        """Run every per-row validator against ``nodes`` before any write.
+
+        Pass-through bulk implementations (SQLite, Postgres) loop over
+        :meth:`upsert_node` after this call. Without it, validators that
+        live inside :meth:`upsert_node` (``validate_node_role_args``,
+        ``validate_document_ids``, ``check_node_role_immutable``) would
+        only fire mid-loop — by which point earlier rows have already
+        been committed. Calling this helper up-front honors the ABC's
+        atomicity-of-validation contract.
+
+        Backends with a single-statement bulk path (Neo4j) inline the
+        same validation in their own pre-pass and don't need this
+        helper — using it would require a redundant
+        :meth:`get_nodes_bulk` round trip.
+
+        Errors are tagged with the offending row index so callers can
+        map them back to input.
+        """
+        if not nodes:
+            return
+        for i, spec in enumerate(nodes):
+            if "node_type" not in spec:
+                msg = f"upsert_nodes_bulk[{i}]: missing required key 'node_type'"
+                raise ValueError(msg)
+            try:
+                validate_node_role_args(
+                    spec.get("node_role", "semantic"),
+                    spec.get("generation_spec"),
+                )
+                validate_document_ids(spec.get("document_ids"))
+            except (ValueError, TypeError) as exc:
+                msg = f"upsert_nodes_bulk[{i}]: {exc}"
+                raise type(exc)(msg) from exc
+
+        # Role immutability requires an existing-row lookup. Only rows
+        # with an explicit node_id can collide; auto-assigned IDs are
+        # always fresh.
+        explicit_ids = [
+            spec["node_id"] for spec in nodes if spec.get("node_id") is not None
+        ]
+        if not explicit_ids:
+            return
+        existing = {row["node_id"]: row for row in self.get_nodes_bulk(explicit_ids)}
+        for i, spec in enumerate(nodes):
+            nid = spec.get("node_id")
+            if nid is None or nid not in existing:
+                continue
+            try:
+                check_node_role_immutable(
+                    nid, existing[nid], spec.get("node_role", "semantic")
+                )
+            except ValueError as exc:
+                msg = f"upsert_nodes_bulk[{i}]: {exc}"
+                raise ValueError(msg) from exc
 
     # ------------------------------------------------------------------
     # Canonical query DSL — Phase 1 of adr-canonical-graph-layer.md
