@@ -149,6 +149,23 @@ _PLANE_PG_DSN_ENV: dict[str, str] = {
 }
 _LEGACY_PG_DSN_ENV = "TRELLIS_PG_DSN"
 
+# Operator-controlled toggle for the connectivity-ping branch in
+# :meth:`StoreRegistry.validate`. Read at validate-time, not import-time,
+# so a process can flip the env var between runs without reload.
+_VALIDATE_CONNECTIVITY_ENV = "TRELLIS_VALIDATE_CONNECTIVITY"
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+
+def _resolve_connectivity_check(explicit: bool | None) -> bool:
+    """Return the effective connectivity-check flag for a validate() call."""
+    if explicit is not None:
+        return explicit
+    import os  # noqa: PLC0415
+
+    raw = os.environ.get(_VALIDATE_CONNECTIVITY_ENV, "").strip().lower()
+    return raw in _TRUTHY
+
+
 # One-shot guards so deprecation signals fire once per process rather
 # than on every store access. Tests reset via ``_reset_deprecation_guards``.
 _LEGACY_PG_DSN_WARNED: set[str] = set()
@@ -914,6 +931,7 @@ class StoreRegistry:
         self,
         *,
         store_types: Iterable[str] | None = None,
+        check_connectivity: bool | None = None,
     ) -> None:
         """Eagerly instantiate every store so misconfigurations fail at startup.
 
@@ -931,11 +949,30 @@ class StoreRegistry:
         playing whack-a-mole one store at a time. The aggregate is
         raised as :class:`RegistryValidationError`.
 
-        Backends that connect lazily (Neo4j Bolt, S3 boto client)
-        won't surface unreachable-server errors here — only the
-        ``__init__`` cost. A separate ``ping`` step would catch those
-        but requires a live network round-trip per backend; deferred
-        until a deployment incident asks for it.
+        Connectivity checks
+        -------------------
+
+        When ``check_connectivity=True``, additionally performs a Bolt
+        round-trip per cached Neo4j driver via
+        :func:`trellis.stores.neo4j.base.verify_connectivity`. Failures
+        (``ServiceUnavailable``, ``AuthError``, etc.) are added to the
+        same aggregate so the operator sees both config errors and
+        unreachable-backend errors in one shot. ``store_type`` for each
+        connectivity error is reported as ``"neo4j-driver:<uri>"``.
+
+        Default (``check_connectivity=None``): respect the
+        ``TRELLIS_VALIDATE_CONNECTIVITY`` env var (truthy values
+        ``1`` / ``true`` / ``yes`` enable). Off otherwise. The env-var
+        path lets dev keep fast restarts while production turns it on
+        without code changes. Pass ``True`` / ``False`` explicitly to
+        override the env var.
+
+        Connectivity checks for *other* lazily-connecting backends (S3
+        boto client, psycopg pools that defer connect) are not
+        implemented here — Neo4j is the blessed graph backend so it
+        gets the explicit check; the others connect on first use and
+        surface errors there. Add a similar wrapper in this method
+        when a deployment incident motivates it.
         """
         targets: list[str] = (
             list(store_types) if store_types is not None else list(_PLANE_OF.keys())
@@ -954,12 +991,40 @@ class StoreRegistry:
                     store_type=store_type,
                     error=str(exc),
                 )
+
+        if _resolve_connectivity_check(check_connectivity):
+            errors.extend(self._check_neo4j_connectivity())
+
         if errors:
             raise RegistryValidationError(errors)
         logger.info(
             "store_registry_validated",
             store_count=len(targets),
         )
+
+    def _check_neo4j_connectivity(self) -> list[tuple[str, Exception]]:
+        """Ping every cached Neo4j driver. Returns ``(label, exc)`` per failure."""
+        if not self._neo4j_drivers:
+            return []
+        from trellis.stores.neo4j.base import (  # noqa: PLC0415
+            verify_connectivity,
+        )
+
+        failures: list[tuple[str, Exception]] = []
+        for (uri, user), driver in self._neo4j_drivers.items():
+            label = f"neo4j-driver:{uri}"
+            try:
+                verify_connectivity(driver)
+                logger.debug("neo4j_connectivity_ok", uri=uri, user=user)
+            except Exception as exc:
+                failures.append((label, exc))
+                logger.warning(
+                    "neo4j_connectivity_check_failed",
+                    uri=uri,
+                    user=user,
+                    error=str(exc),
+                )
+        return failures
 
     @property
     def knowledge(self) -> _KnowledgePlane:
