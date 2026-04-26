@@ -188,18 +188,17 @@ class Neo4jGraphStore(Neo4jSessionRunner, GraphStore):
         if node_id is None:
             node_id = generate_ulid()
 
-        existing = self.get_node(node_id)
-        if existing:
-            check_node_role_immutable(node_id, existing, node_role)
-            created_at = existing["created_at"]
-        else:
-            created_at = None  # filled in by Cypher to $now
-
+        # One Cypher round trip: ``OPTIONAL MATCH`` finds an existing
+        # current row (if any), the WHERE filters out role-immutability
+        # conflicts so the CREATE only runs when the write is legal,
+        # ``coalesce`` carries ``created_at`` forward across versions.
+        # Previously this path made a separate ``get_node`` call to
+        # fetch the prior version — measured at ~50% of total upsert
+        # latency on AuraDB Free.
         now = _iso(utc_now())
-        version_id = generate_ulid()
         new_props = {
             "node_id": node_id,
-            "version_id": version_id,
+            "version_id": generate_ulid(),
             "node_type": node_type,
             "node_role": node_role,
             "generation_spec_json": json.dumps(generation_spec)
@@ -209,7 +208,8 @@ class Neo4jGraphStore(Neo4jSessionRunner, GraphStore):
             if document_ids is not None
             else None,
             "properties_json": json.dumps(properties or {}),
-            "created_at": created_at or now,
+            # ``created_at`` is set in Cypher via coalesce so we don't
+            # need to know the prior value here.
             "updated_at": now,
             "valid_from": now,
             "valid_to": None,
@@ -217,13 +217,37 @@ class Neo4jGraphStore(Neo4jSessionRunner, GraphStore):
 
         cypher = """
         OPTIONAL MATCH (old:Node {node_id: $node_id}) WHERE old.valid_to IS NULL
+        WITH old, old.node_role AS prior_role
+        WHERE prior_role IS NULL OR prior_role = $node_role
         SET old.valid_to = $now
-        WITH count(old) AS _closed
+        WITH old, coalesce(old.created_at, $now) AS created_at_carry
         CREATE (n:Node)
         SET n = $new_props
+        SET n.created_at = created_at_carry
         RETURN n.node_id AS node_id
         """
-        self._run_write(cypher, node_id=node_id, now=now, new_props=new_props)
+        record = self._run_write_single(
+            cypher,
+            node_id=node_id,
+            now=now,
+            node_role=node_role,
+            new_props=new_props,
+        )
+        if record is None:
+            # WHERE filtered the write — almost certainly a role-
+            # immutability conflict. Re-fetch the prior version and
+            # raise the same error the per-row pre-check used to. One
+            # extra round trip on the rare error path; happy path
+            # stays at one.
+            existing = self.get_node(node_id)
+            if existing is not None:
+                check_node_role_immutable(node_id, existing, node_role)
+            msg = (
+                f"Cannot upsert node {node_id!r}: write was rejected "
+                "but no prior version was found. The node may have "
+                "been deleted concurrently."
+            )
+            raise ValueError(msg)
         return node_id
 
     def upsert_nodes_bulk(
@@ -481,27 +505,20 @@ class Neo4jGraphStore(Neo4jSessionRunner, GraphStore):
         *,
         commit: bool = True,  # noqa: ARG002
     ) -> str:
+        # One Cypher round trip: endpoint MATCH + existing-edge
+        # OPTIONAL MATCH + close-old + create-new in a single query.
+        # ``coalesce`` carries ``edge_id`` and ``created_at`` forward
+        # from any current version. Previously this path made a
+        # separate ``_find_current_edge`` call (~50% of total upsert
+        # latency on AuraDB Free).
         now = _iso(utc_now())
-        properties_json = json.dumps(properties or {})
-
-        # Find an existing current edge so we carry its edge_id + created_at
-        existing = self._find_current_edge(source_id, target_id, edge_type)
-        if existing:
-            edge_id = str(existing["edge_id"])
-            created_at = existing["created_at"]
-        else:
-            edge_id = generate_ulid()
-            created_at = now
-
-        version_id = generate_ulid()
-        new_props = {
-            "edge_id": edge_id,
-            "version_id": version_id,
+        candidate_edge_id = generate_ulid()
+        base_props = {
+            "version_id": generate_ulid(),
             "source_id": source_id,
             "target_id": target_id,
             "edge_type": edge_type,
-            "properties_json": properties_json,
-            "created_at": created_at,
+            "properties_json": json.dumps(properties or {}),
             "valid_from": now,
             "valid_to": None,
         }
@@ -509,13 +526,17 @@ class Neo4jGraphStore(Neo4jSessionRunner, GraphStore):
         cypher = """
         MATCH (s:Node {node_id: $source_id}) WHERE s.valid_to IS NULL
         MATCH (t:Node {node_id: $target_id}) WHERE t.valid_to IS NULL
-        WITH s, t
         OPTIONAL MATCH (s)-[old:EDGE {edge_type: $edge_type}]->(t)
           WHERE old.valid_to IS NULL
+        WITH s, t, old,
+             coalesce(old.edge_id, $candidate_edge_id) AS edge_id_carry,
+             coalesce(old.created_at, $now) AS created_at_carry
         SET old.valid_to = $now
-        WITH s, t, count(old) AS _closed
+        WITH s, t, edge_id_carry, created_at_carry
         CREATE (s)-[new:EDGE]->(t)
-        SET new = $new_props
+        SET new = $base_props
+        SET new.edge_id = edge_id_carry
+        SET new.created_at = created_at_carry
         RETURN new.edge_id AS edge_id
         """
         record = self._run_write_single(
@@ -524,7 +545,8 @@ class Neo4jGraphStore(Neo4jSessionRunner, GraphStore):
             target_id=target_id,
             edge_type=edge_type,
             now=now,
-            new_props=new_props,
+            candidate_edge_id=candidate_edge_id,
+            base_props=base_props,
         )
         if record is None:
             msg = (
@@ -532,7 +554,7 @@ class Neo4jGraphStore(Neo4jSessionRunner, GraphStore):
                 f"{target_id!r} has no current version"
             )
             raise ValueError(msg)
-        return edge_id
+        return str(record["edge_id"])
 
     def upsert_edges_bulk(
         self,
