@@ -677,6 +677,7 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
                 if key not in spec or spec[key] is None:
                     msg = f"upsert_edges_bulk[{i}]: missing required key {key!r}"
                     raise ValueError(msg)
+        self._pre_validate_edges_bulk(edges)
         unique_endpoints = {spec["source_id"] for spec in edges} | {
             spec["target_id"] for spec in edges
         }

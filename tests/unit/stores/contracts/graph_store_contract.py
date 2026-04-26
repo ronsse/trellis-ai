@@ -457,6 +457,26 @@ class GraphStoreContractTests:
                 [{"source_id": "a", "target_id": "b"}]  # missing edge_type
             )
 
+    def test_upsert_edges_bulk_rejects_duplicate_triplets(
+        self, store: GraphStore
+    ) -> None:
+        """Within-batch duplicate ``(source_id, target_id, edge_type)``
+        triplets are rejected. Bulk paths can't preserve sequential
+        last-write-wins (Neo4j UNWIND would create N distinct current
+        versions for the same logical edge); reject up-front rather
+        than ship divergent semantics."""
+        store.upsert_node("a", "service", {})
+        store.upsert_node("b", "service", {})
+        before = store.count_edges()
+        with pytest.raises(ValueError, match=r"upsert_edges_bulk\[1\].*duplicate"):
+            store.upsert_edges_bulk(
+                [
+                    {"source_id": "a", "target_id": "b", "edge_type": "calls"},
+                    {"source_id": "a", "target_id": "b", "edge_type": "calls"},
+                ]
+            )
+        assert store.count_edges() == before
+
     # ------------------------------------------------------------------
     # subgraph traversal
     # ------------------------------------------------------------------

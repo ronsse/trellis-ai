@@ -543,12 +543,17 @@ class Neo4jGraphStore(Neo4jSessionRunner, GraphStore):
 
         # Pass 1 — Python-side validation. The single-row method has no
         # explicit validators (other than the implicit MATCH inside the
-        # Cypher), but we want clear errors before any I/O.
+        # Cypher), but we want clear errors before any I/O. Within-batch
+        # duplicate triplets are rejected because the bulk pre-fetch
+        # only sees the prior edge once — duplicates would all auto-
+        # assign their own edge_id and create distinct current versions
+        # for one logical edge.
         for i, spec in enumerate(edges):
             for key in ("source_id", "target_id", "edge_type"):
                 if key not in spec or spec[key] is None:
                     msg = f"upsert_edges_bulk[{i}]: missing required key {key!r}"
                     raise ValueError(msg)
+        self._pre_validate_edges_bulk(edges)
 
         # Round trip 1 — validate that every source + target has a
         # current version. Done up front so a bad row gets a precise

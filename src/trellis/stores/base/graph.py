@@ -532,6 +532,42 @@ class GraphStore(ABC):
                 msg = f"upsert_nodes_bulk[{i}]: {exc}"
                 raise ValueError(msg) from exc
 
+    @staticmethod
+    def _pre_validate_edges_bulk(edges: list[dict[str, Any]]) -> None:
+        """Reject within-batch duplicate ``(source_id, target_id, edge_type)``
+        triplets before any write.
+
+        Sequential per-row callers retain per-call last-write-wins (the
+        second call sees the first as prior and reuses its ``edge_id``).
+        Bulk paths can't make that guarantee: the Neo4j UNWIND fetches
+        existing edges once before the writes, so two input rows for
+        the same triplet both miss the prior-edge lookup, both auto-
+        assign their own ``edge_id``, and you end up with two distinct
+        current versions for one logical edge.
+
+        Reject up-front rather than ship divergent semantics. Errors
+        are tagged with the offending row index (the second occurrence)
+        so callers can map them back to input.
+        """
+        seen: set[tuple[str, str, str]] = set()
+        for i, spec in enumerate(edges):
+            triplet = (
+                spec.get("source_id"),
+                spec.get("target_id"),
+                spec.get("edge_type"),
+            )
+            if any(v is None for v in triplet):
+                continue
+            if triplet in seen:
+                msg = (
+                    f"upsert_edges_bulk[{i}]: duplicate (source_id, target_id, "
+                    f"edge_type)={triplet!r} in batch; deduplicate before "
+                    "calling — bulk paths can't preserve sequential "
+                    "last-write-wins semantics across all backends"
+                )
+                raise ValueError(msg)
+            seen.add(triplet)  # type: ignore[arg-type]
+
     # ------------------------------------------------------------------
     # Canonical query DSL — Phase 1 of adr-canonical-graph-layer.md
     # ------------------------------------------------------------------
