@@ -36,7 +36,11 @@ from trellis.stores.base.graph import (
     validate_document_ids,
     validate_node_role_args,
 )
-from trellis.stores.neo4j.base import build_driver, check_driver_installed
+from trellis.stores.neo4j.base import (
+    DriverConfig,
+    build_driver,
+    check_driver_installed,
+)
 
 if TYPE_CHECKING:
     from neo4j import Driver, ManagedTransaction
@@ -120,8 +124,7 @@ _SCHEMA_STATEMENTS = (
     "CREATE INDEX node_role_idx IF NOT EXISTS FOR (n:Node) ON (n.node_role)",
     "CREATE INDEX node_valid_idx IF NOT EXISTS "
     "FOR (n:Node) ON (n.valid_from, n.valid_to)",
-    "CREATE INDEX alias_entity_idx IF NOT EXISTS "
-    "FOR (a:Alias) ON (a.entity_id)",
+    "CREATE INDEX alias_entity_idx IF NOT EXISTS FOR (a:Alias) ON (a.entity_id)",
     "CREATE INDEX alias_lookup_idx IF NOT EXISTS "
     "FOR (a:Alias) ON (a.source_system, a.raw_id)",
     "CREATE INDEX edge_id_idx IF NOT EXISTS FOR ()-[r:EDGE]-() ON (r.edge_id)",
@@ -139,11 +142,31 @@ class Neo4jGraphStore(GraphStore):
         uri: str,
         *,
         user: str = "neo4j",
-        password: str,
+        password: str | None = None,
         database: str = "neo4j",
+        driver: Driver | None = None,
+        driver_config: DriverConfig | None = None,
     ) -> None:
+        # Driver lifecycle: when ``driver`` is injected, the caller (typically
+        # ``StoreRegistry`` sharing one driver across the graph + vector pair)
+        # owns it and ``close()`` is a no-op. Otherwise we build our own from
+        # ``driver_config`` and own it. Mixing the two is a programming error.
         check_driver_installed()
-        self._driver: Driver = build_driver(uri, user, password)
+        if driver is not None:
+            if password is not None or driver_config is not None:
+                msg = (
+                    "Pass either ``driver`` (caller-owned) or "
+                    "``password`` + ``driver_config`` (store-owned), not both."
+                )
+                raise ValueError(msg)
+            self._driver = driver
+            self._owns_driver = False
+        else:
+            if password is None:
+                msg = "password is required when ``driver`` is not provided"
+                raise ValueError(msg)
+            self._driver = build_driver(uri, user, password, config=driver_config)
+            self._owns_driver = True
         self._database = database
         self._init_schema()
         logger.info("neo4j_graph_store_initialized", uri=uri, database=database)
@@ -256,8 +279,7 @@ class Neo4jGraphStore(GraphStore):
 
     def get_node_history(self, node_id: str) -> list[dict[str, Any]]:
         cypher = (
-            "MATCH (n:Node {node_id: $node_id}) "
-            "RETURN n ORDER BY n.valid_from DESC"
+            "MATCH (n:Node {node_id: $node_id}) RETURN n ORDER BY n.valid_from DESC"
         )
         with self._driver.session(database=self._database) as session:
             records = session.execute_read(
@@ -367,9 +389,7 @@ class Neo4jGraphStore(GraphStore):
             "RETURN a ORDER BY a.source_system, a.raw_id"
         )
         with self._driver.session(database=self._database) as session:
-            records = session.execute_read(
-                lambda tx: list(tx.run(cypher, **params))
-            )
+            records = session.execute_read(lambda tx: list(tx.run(cypher, **params)))
         return [_alias_props_to_dict(dict(r["a"])) for r in records]
 
     # ------------------------------------------------------------------
@@ -498,9 +518,7 @@ class Neo4jGraphStore(GraphStore):
 
         cypher = f"MATCH {pattern} WHERE {where} {type_clause} RETURN r"
         with self._driver.session(database=self._database) as session:
-            records = session.execute_read(
-                lambda tx: list(tx.run(cypher, **params))
-            )
+            records = session.execute_read(lambda tx: list(tx.run(cypher, **params)))
         return [_edge_props_to_dict(dict(r["r"])) for r in records]
 
     # ------------------------------------------------------------------
@@ -523,9 +541,7 @@ class Neo4jGraphStore(GraphStore):
         node_where, temporal_params = _temporal_where(as_of, "n")
         edge_where, _ = _temporal_where(as_of, "r")
 
-        edge_type_clause = (
-            "AND ($edge_types IS NULL OR r.edge_type IN $edge_types)"
-        )
+        edge_type_clause = "AND ($edge_types IS NULL OR r.edge_type IN $edge_types)"
 
         # Step 1 — reachable node ids via variable-length match. The
         # bounds of `*M..N` must be literal Cypher, so we inline `depth`
@@ -615,15 +631,14 @@ class Neo4jGraphStore(GraphStore):
         # by filtering client-side, matching how query handles nested
         # filters in the Postgres backend.
         cypher = (
-            "MATCH (n:Node) WHERE " + " AND ".join(conditions)
+            "MATCH (n:Node) WHERE "
+            + " AND ".join(conditions)
             + " RETURN n ORDER BY n.created_at DESC LIMIT $limit"
         )
         params["limit"] = limit * 4 if properties else limit
 
         with self._driver.session(database=self._database) as session:
-            records = session.execute_read(
-                lambda tx: list(tx.run(cypher, **params))
-            )
+            records = session.execute_read(lambda tx: list(tx.run(cypher, **params)))
 
         results: list[dict[str, Any]] = []
         for r in records:
@@ -695,9 +710,7 @@ class Neo4jGraphStore(GraphStore):
         return int(record["cnt"]) if record else 0
 
     def count_edges(self) -> int:
-        cypher = (
-            "MATCH ()-[r:EDGE]->() WHERE r.valid_to IS NULL RETURN count(r) AS cnt"
-        )
+        cypher = "MATCH ()-[r:EDGE]->() WHERE r.valid_to IS NULL RETURN count(r) AS cnt"
         with self._driver.session(database=self._database) as session:
             record = session.execute_read(lambda tx: tx.run(cypher).single())
         return int(record["cnt"]) if record else 0
@@ -719,9 +732,7 @@ class Neo4jGraphStore(GraphStore):
         decoding the JSON. Same approach the legacy ``query()`` method
         uses; semantics match.
         """
-        cypher_parts, cypher_params, py_predicates = (
-            self._compile_node_query(query)
-        )
+        cypher_parts, cypher_params, py_predicates = self._compile_node_query(query)
         cypher = (
             "MATCH (n:Node) WHERE "
             + " AND ".join(cypher_parts)
@@ -756,9 +767,7 @@ class Neo4jGraphStore(GraphStore):
         py_predicates: list[Any] = []
         for i, clause in enumerate(query.filters):
             if clause.field.startswith("properties."):
-                py_predicates.append(
-                    self._compile_property_predicate(clause)
-                )
+                py_predicates.append(self._compile_property_predicate(clause))
                 continue
             frag, params = self._compile_top_level_clause(clause, i)
             cypher_parts.append(frag)
@@ -766,9 +775,7 @@ class Neo4jGraphStore(GraphStore):
         return cypher_parts, cypher_params, py_predicates
 
     @staticmethod
-    def _compile_top_level_clause(
-        clause: Any, idx: int
-    ) -> tuple[str, dict[str, Any]]:
+    def _compile_top_level_clause(clause: Any, idx: int) -> tuple[str, dict[str, Any]]:
         column = clause.field
         if column not in {"node_type", "node_role", "node_id"}:
             msg = f"Unsupported DSL field path: {clause.field!r}"
@@ -803,10 +810,7 @@ class Neo4jGraphStore(GraphStore):
     def _temporal_filter_cypher(as_of: datetime | None) -> str:
         if as_of is None:
             return "n.valid_to IS NULL"
-        return (
-            "n.valid_from <= $as_of AND "
-            "(n.valid_to IS NULL OR n.valid_to > $as_of)"
-        )
+        return "n.valid_from <= $as_of AND (n.valid_to IS NULL OR n.valid_to > $as_of)"
 
     # ------------------------------------------------------------------
     # Compaction
@@ -872,9 +876,7 @@ class Neo4jGraphStore(GraphStore):
                 ) -> tuple[int, str | None, str | None]:
                     return _count_and_range(tx, q)
 
-                def _delete(
-                    tx: ManagedTransaction, q: str = delete_q
-                ) -> None:
+                def _delete(tx: ManagedTransaction, q: str = delete_q) -> None:
                     tx.run(q, before=before_iso).consume()
 
                 cnt, lo, hi = session.execute_read(_count)
@@ -928,5 +930,8 @@ class Neo4jGraphStore(GraphStore):
     # ------------------------------------------------------------------
 
     def close(self) -> None:
-        self._driver.close()
-        logger.info("neo4j_graph_store_closed")
+        if self._owns_driver:
+            self._driver.close()
+            logger.info("neo4j_graph_store_closed")
+        else:
+            logger.debug("neo4j_graph_store_close_noop_injected_driver")
