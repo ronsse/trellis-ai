@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -31,6 +31,28 @@ _UNSET: Any = object()  # sentinel for lazy embedding_fn init
 # trailing characters. Very short strings are either placeholders or
 # malformed, so we treat them as opaque.
 _MIN_SAFE_KEY_LEN = 4
+
+
+class RegistryValidationError(Exception):
+    """Aggregate failure raised by :meth:`StoreRegistry.validate`.
+
+    Carries the per-store ``(store_type, exception)`` pairs so an
+    operator looking at a startup crash can see every problem at once
+    rather than fixing them serially across deploy attempts. The
+    rendered message is multi-line and intentionally verbose — startup
+    output is the right place for that.
+    """
+
+    def __init__(self, errors: list[tuple[str, Exception]]) -> None:
+        self.errors = errors
+        formatted = "\n".join(
+            f"  - {store_type}: {type(exc).__name__}: {exc}"
+            for store_type, exc in errors
+        )
+        super().__init__(
+            f"StoreRegistry validation failed for {len(errors)} store(s):\n{formatted}"
+        )
+
 
 # Cache of merged (built-in + plugin) backend maps. Populated lazily on
 # first access so that installing a plugin wheel into an already-running
@@ -176,9 +198,7 @@ def _warn_flat_property(name: str) -> None:
     )
 
 
-def _extract_store_config(
-    data: dict[str, Any], config_source: str
-) -> dict[str, Any]:
+def _extract_store_config(data: dict[str, Any], config_source: str) -> dict[str, Any]:
     """Flatten the YAML store config into the internal ``{store_type: cfg}`` shape.
 
     Accepts both the plane-split shape (``knowledge:`` / ``operational:``
@@ -808,6 +828,57 @@ class StoreRegistry:
         if store_type not in self._cache:
             self._cache[store_type] = self._instantiate(store_type)
         return self._cache[store_type]
+
+    def validate(
+        self,
+        *,
+        store_types: Iterable[str] | None = None,
+    ) -> None:
+        """Eagerly instantiate every store so misconfigurations fail at startup.
+
+        Walks each entry in *store_types* (default: every store_type the
+        registry knows about) and forces a side-effecting
+        :meth:`_instantiate` call so latent config errors — missing
+        Postgres DSN, unset ``TRELLIS_S3_BUCKET``, missing
+        ``stores_dir`` for sqlite, plugin import failures — surface here
+        rather than on first request. Successful stores stay warm in
+        the cache, so post-validation access is free.
+
+        Errors are accumulated across all stores rather than raised on
+        the first failure: an operator deploying a fresh stack benefits
+        more from seeing every misconfiguration at once than from
+        playing whack-a-mole one store at a time. The aggregate is
+        raised as :class:`RegistryValidationError`.
+
+        Backends that connect lazily (Neo4j Bolt, S3 boto client)
+        won't surface unreachable-server errors here — only the
+        ``__init__`` cost. A separate ``ping`` step would catch those
+        but requires a live network round-trip per backend; deferred
+        until a deployment incident asks for it.
+        """
+        targets: list[str] = (
+            list(store_types) if store_types is not None else list(_PLANE_OF.keys())
+        )
+        errors: list[tuple[str, Exception]] = []
+        for store_type in targets:
+            try:
+                self._get(store_type)
+            except Exception as exc:
+                # Catch every exception type so a misbehaving plugin
+                # backend (e.g. raising a custom Error subclass on
+                # missing config) doesn't bypass the aggregate.
+                errors.append((store_type, exc))
+                logger.warning(
+                    "store_registry_validation_failed",
+                    store_type=store_type,
+                    error=str(exc),
+                )
+        if errors:
+            raise RegistryValidationError(errors)
+        logger.info(
+            "store_registry_validated",
+            store_count=len(targets),
+        )
 
     @property
     def knowledge(self) -> _KnowledgePlane:
