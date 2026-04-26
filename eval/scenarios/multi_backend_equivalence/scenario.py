@@ -47,32 +47,47 @@ class _BackendHandle:
 
 
 def _ingest(handle: _BackendHandle, graph: GeneratedGraph) -> float:
-    """Write nodes + edges + embeddings into a backend; return seconds."""
+    """Write nodes + edges + embeddings into a backend; return seconds.
+
+    Uses ``upsert_nodes_bulk`` / ``upsert_edges_bulk`` so the cross-
+    backend comparison isn't dominated by per-row network round trips
+    on Neo4j. The vector store doesn't have a bulk method yet — its
+    upsert path is already 1 round trip per row, so the marginal cost
+    is small at 50 embeddings (default).
+    """
     start = time.perf_counter()
     knowledge = handle.registry.knowledge
     graph_store = knowledge.graph_store
     vector_store = knowledge.vector_store
 
+    graph_store.upsert_nodes_bulk(
+        [
+            {
+                "node_id": n.node_id,
+                "node_type": n.node_type,
+                "properties": n.properties,
+            }
+            for n in graph.nodes
+        ]
+    )
     for node in graph.nodes:
-        graph_store.upsert_node(
-            node_id=node.node_id,
-            node_type=node.node_type,
-            properties=node.properties,
-        )
         if node.embedding is not None:
             vector_store.upsert(
                 item_id=node.node_id,
                 vector=node.embedding,
                 metadata={"node_type": node.node_type},
             )
-
-    for edge in graph.edges:
-        graph_store.upsert_edge(
-            source_id=edge.source_id,
-            target_id=edge.target_id,
-            edge_type=edge.edge_type,
-            properties=edge.properties,
-        )
+    graph_store.upsert_edges_bulk(
+        [
+            {
+                "source_id": e.source_id,
+                "target_id": e.target_id,
+                "edge_type": e.edge_type,
+                "properties": e.properties,
+            }
+            for e in graph.edges
+        ]
+    )
 
     return time.perf_counter() - start
 
