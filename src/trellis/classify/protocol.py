@@ -9,7 +9,12 @@ from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 from trellis.schemas.classification import ContentTags, RetrievalAffinity
 
 if TYPE_CHECKING:
-    from trellis.schemas.classification import ContentType, Scope, SignalQuality
+    from trellis.schemas.classification import (
+        ClassifierMode,
+        ContentType,
+        Scope,
+        SignalQuality,
+    )
 
 
 @dataclass
@@ -43,6 +48,12 @@ class MergedClassification:
     confidence_per_facet: dict[str, float] = field(default_factory=dict)
     results: list[ClassificationResult] = field(default_factory=list)
     classified_by: list[str] = field(default_factory=list)
+    #: Which pipeline mode produced this result — set by
+    #: :class:`~trellis.classify.pipeline.ClassifierPipeline` on every call.
+    #: ``None`` only on default-constructed instances in tests; production
+    #: code always carries a value. Propagated to
+    #: :attr:`ContentTags.classified_mode` via :meth:`to_content_tags`.
+    mode: ClassifierMode | None = None
 
     @property
     def min_confidence(self) -> float:
@@ -73,6 +84,7 @@ class MergedClassification:
             ],
             classified_by=self.classified_by,
             classified_at=datetime.now(UTC),
+            classified_mode=self.mode,
         )
 
 

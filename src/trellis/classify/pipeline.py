@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, cast
+
 import structlog
 
 from trellis.classify.protocol import (
@@ -11,6 +13,9 @@ from trellis.classify.protocol import (
     Classifier,
     MergedClassification,
 )
+
+if TYPE_CHECKING:
+    from trellis.schemas.classification import ClassifierMode
 
 logger = structlog.get_logger(__name__)
 
@@ -39,9 +44,12 @@ class ClassifierPipeline:
         self._classifiers = self._validate_classifiers(classifiers, active)
 
     @property
-    def mode(self) -> str:
+    def mode(self) -> ClassifierMode:
         """Return ``'enrichment'`` if LLM is configured, else ``'ingestion'``."""
-        return "enrichment" if self._llm_classifier else "ingestion"
+        return cast(
+            "ClassifierMode",
+            "enrichment" if self._llm_classifier else "ingestion",
+        )
 
     @staticmethod
     def _validate_classifiers(
@@ -80,6 +88,7 @@ class ClassifierPipeline:
                 confidence=llm_result.confidence,
             )
 
+        merged.mode = self.mode
         return merged
 
     def _merge(self, results: list[ClassificationResult]) -> MergedClassification:

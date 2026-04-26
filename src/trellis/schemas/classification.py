@@ -39,6 +39,8 @@ RetrievalAffinity = Literal[
     "reference",
 ]
 
+ClassifierMode = Literal["ingestion", "enrichment"]
+
 RESERVED_NAMESPACES: frozenset[str] = frozenset(
     {
         "sensitivity",
@@ -78,9 +80,7 @@ def _reserved_name_for(value: str) -> str | None:
     return value if value in RESERVED_NAMESPACES else None
 
 
-def _format_reservation_error(
-    value: str, reserved: str, field: _ReservedField
-) -> str:
+def _format_reservation_error(value: str, reserved: str, field: _ReservedField) -> str:
     guidance = _NAMESPACE_GUIDANCE[reserved]
     return (
         f"{field}={value!r} uses reserved namespace {reserved!r}. "
@@ -122,15 +122,22 @@ class ContentTags(TrellisModel):
     #: re-evaluation. ``None`` means "never stamped" (legacy items pre-1.1
     #: fix or hand-edited metadata).
     classified_at: datetime | None = None
+    #: Which pipeline mode produced this tag set — ``"ingestion"`` (deterministic
+    #: classifiers only) or ``"enrichment"`` (deterministic + LLM fallback).
+    #: Populated by :meth:`MergedClassification.to_content_tags`. Closes Gap 1.2:
+    #: without it, callers can't tell whether a stored tag set came from a
+    #: deterministic-only pass or an LLM-augmented one, so reclassification
+    #: comparisons (and audit of cross-mode drift) are impossible. ``None``
+    #: means "never stamped" — same legacy / hand-edit story as
+    #: :attr:`classified_at`.
+    classified_mode: ClassifierMode | None = None
 
     @model_validator(mode="after")
     def _reject_reserved_namespaces(self) -> ContentTags:
         for key in self.custom:
             reserved = _reserved_name_for(key)
             if reserved is not None:
-                raise ValueError(
-                    _format_reservation_error(key, reserved, "custom key")
-                )
+                raise ValueError(_format_reservation_error(key, reserved, "custom key"))
         for value in self.domain:
             reserved = _reserved_name_for(value)
             if reserved is not None:
