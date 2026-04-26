@@ -92,7 +92,7 @@ Each item is something that, if missing the first time a stranger runs against N
 
 ## 4. Phase 2 — Postgres as a real alternative ("we still offer Postgres" must be true, not theoretical)
 
-### 2.1 Combined-plane config example
+### 2.1 Combined-plane config example ✅ landed 2026-04-25
 
 * **State today:** [`adr-planes-and-substrates.md`](./adr-planes-and-substrates.md) names "Knowledge plane = Neo4j, Operational plane = Postgres" as the recommended cloud shape but no validated example config exists. Users reading the README cannot copy-paste a starting config.
 * **Done when:**

@@ -1,0 +1,173 @@
+# Trellis recommended configurations — three blessed deployment shapes.
+#
+# Pick ONE of the three blocks below and copy it to your config.yaml at
+# the path TRELLIS_CONFIG_DIR points at (default ~/.trellis/config.yaml).
+# All three put Neo4j on the Knowledge Plane (the blessed graph backend
+# per docs/design/plan-neo4j-hardening.md). The Operational Plane
+# choice is what changes — pick by deployment context.
+#
+# References
+#   docs/deployment/neo4j-local.md   — Step-by-step for the local block
+#   docs/deployment/neo4j-auradb.md  — Step-by-step for the cloud block
+#   docs/deployment/aws-ecs.md       — ECS-specific deployment notes
+#   docs/design/adr-planes-and-substrates.md — Why the planes split
+
+# ===========================================================================
+# 1. LOCAL DEFAULT — Neo4j (Docker) + SQLite operational
+# ===========================================================================
+# The blessed local-development shape. Knowledge Plane talks to a Neo4j
+# container (`docker run neo4j:5 ...` per neo4j-local.md). Operational
+# Plane stays on SQLite — no second managed service needed for traces,
+# events, and parameter tuning.
+#
+# Required env vars:
+#   TRELLIS_NEO4J_URI=bolt://localhost:7687
+#   TRELLIS_NEO4J_USER=neo4j
+#   TRELLIS_NEO4J_PASSWORD=test1234        # whatever you set NEO4J_AUTH to
+#
+# Optional:
+#   TRELLIS_VALIDATE_CONNECTIVITY=1        # ping Neo4j on startup
+#
+# knowledge:
+#   graph:
+#     backend: neo4j
+#     uri: ${TRELLIS_NEO4J_URI}
+#     user: ${TRELLIS_NEO4J_USER}
+#     password: ${TRELLIS_NEO4J_PASSWORD}
+#   vector:
+#     backend: neo4j
+#     uri: ${TRELLIS_NEO4J_URI}
+#     user: ${TRELLIS_NEO4J_USER}
+#     password: ${TRELLIS_NEO4J_PASSWORD}
+#     dimensions: 1536
+#   document:
+#     backend: sqlite
+#   blob:
+#     backend: local
+# operational:
+#   trace:
+#     backend: sqlite
+#   event_log:
+#     backend: sqlite
+#   outcome:
+#     backend: sqlite
+#   parameter:
+#     backend: sqlite
+#   tuner_state:
+#     backend: sqlite
+
+# ===========================================================================
+# 2. CLOUD DEFAULT — Neo4j AuraDB + Postgres operational
+# ===========================================================================
+# The blessed managed-cloud shape. Knowledge Plane on AuraDB, Operational
+# Plane on Postgres (Neon for the cheapest managed option, or RDS / Cloud
+# SQL for production). Both planes hosted, both managed, no self-hosted
+# infrastructure.
+#
+# AuraDB Free gotcha: the user and database fields are the instance ID,
+# not the canonical "neo4j". AuraDB Pro restores the conventional names.
+# See docs/deployment/neo4j-auradb.md §Step 2.
+#
+# Required env vars:
+#   TRELLIS_NEO4J_URI=neo4j+s://<instance_id>.databases.neo4j.io
+#   TRELLIS_NEO4J_USER=<instance_id>           # AuraDB Free; "neo4j" on Pro
+#   TRELLIS_NEO4J_PASSWORD=<from console>
+#   TRELLIS_NEO4J_DATABASE=<instance_id>       # AuraDB Free; "neo4j" on Pro
+#   TRELLIS_OPERATIONAL_PG_DSN=postgresql://user:pass@host/db?sslmode=require
+#
+# Optional:
+#   TRELLIS_VALIDATE_CONNECTIVITY=1
+#
+# knowledge:
+#   graph:
+#     backend: neo4j
+#     uri: ${TRELLIS_NEO4J_URI}
+#     user: ${TRELLIS_NEO4J_USER}
+#     password: ${TRELLIS_NEO4J_PASSWORD}
+#     database: ${TRELLIS_NEO4J_DATABASE}
+#   vector:
+#     backend: neo4j
+#     uri: ${TRELLIS_NEO4J_URI}
+#     user: ${TRELLIS_NEO4J_USER}
+#     password: ${TRELLIS_NEO4J_PASSWORD}
+#     database: ${TRELLIS_NEO4J_DATABASE}
+#     dimensions: 1536
+#   document:
+#     backend: postgres   # uses TRELLIS_KNOWLEDGE_PG_DSN if set; falls back to operational DSN
+#   blob:
+#     backend: s3
+#     # bucket: from TRELLIS_S3_BUCKET
+# operational:
+#   trace:
+#     backend: postgres   # uses TRELLIS_OPERATIONAL_PG_DSN
+#   event_log:
+#     backend: postgres
+#   outcome:
+#     backend: sqlite     # postgres backend pending — see implementation-roadmap
+#   parameter:
+#     backend: sqlite     # postgres backend pending
+#   tuner_state:
+#     backend: sqlite     # postgres backend pending
+
+# ===========================================================================
+# 3. POSTGRES-ONLY ALTERNATIVE — Postgres + pgvector for everything
+# ===========================================================================
+# Supported alternative for users who want to consolidate on one engine.
+# NOT the blessed shape — the canonical graph layer ADR favors a real
+# graph database for Knowledge, and the open-source Postgres GraphStore
+# implementation lacks the SCD-2 ergonomics + canonical DSL Phase 2
+# compiler that Neo4j gets. Pick this only if running an additional
+# managed Neo4j is genuinely off the table.
+#
+# Required env vars:
+#   TRELLIS_KNOWLEDGE_PG_DSN=postgresql://user:pass@host/trellis_knowledge?sslmode=require
+#   TRELLIS_OPERATIONAL_PG_DSN=postgresql://user:pass@host/trellis_operational?sslmode=require
+#
+# knowledge:
+#   graph:
+#     backend: postgres
+#   vector:
+#     backend: pgvector
+#     dimensions: 1536
+#   document:
+#     backend: postgres
+#   blob:
+#     backend: s3   # or "local" for dev — there's no postgres blob backend
+# operational:
+#   trace:
+#     backend: postgres
+#   event_log:
+#     backend: postgres
+#   outcome:
+#     backend: sqlite
+#   parameter:
+#     backend: sqlite
+#   tuner_state:
+#     backend: sqlite
+
+# ===========================================================================
+# Notes that apply to all three shapes
+# ===========================================================================
+#
+# Driver tuning (Neo4j blocks): override DriverConfig defaults via the
+# `driver_config` block under each Neo4j store entry. The graph + vector
+# pair against the same (uri, user) shares one driver, so the first
+# store's driver_config wins. Defaults are production-safe (30s connect
+# timeout, 100-connection pool, keep-alive on).
+#
+# Connectivity check: set TRELLIS_VALIDATE_CONNECTIVITY=1 in any
+# environment to make StoreRegistry.validate() ping each Neo4j driver
+# at startup. Off by default (fast dev restarts), opt-in for production.
+#
+# LLM enrichment: optional across all three. Add a `llm:` block when
+# you've provisioned credentials and want LLMFacetClassifier or the
+# memory-extraction pipeline. Off by default — Trellis is fully
+# functional without it.
+#
+# llm:
+#   provider: openai
+#   api_key_env: OPENAI_API_KEY
+#   model: gpt-4o-mini
+#   embedding:
+#     provider: openai
+#     model: text-embedding-3-small
