@@ -37,6 +37,7 @@ from trellis.stores.neo4j.base import (
     DriverConfig,
     build_driver,
     check_driver_installed,
+    wait_for_vector_index_online,
 )
 
 if TYPE_CHECKING:
@@ -68,6 +69,7 @@ class Neo4jVectorStore(VectorStore):
         index_name: str = "trellis_node_embeddings",
         driver: Driver | None = None,
         driver_config: DriverConfig | None = None,
+        index_wait_timeout: float = 30.0,
     ) -> None:
         # See ``Neo4jGraphStore.__init__`` for the driver-ownership contract.
         check_driver_installed()
@@ -100,6 +102,7 @@ class Neo4jVectorStore(VectorStore):
         self._dimensions = dimensions
         self._similarity = similarity
         self._index = index_name
+        self._index_wait_timeout = index_wait_timeout
         self._init_schema()
         logger.info(
             "neo4j_vector_store_initialized",
@@ -127,6 +130,18 @@ class Neo4jVectorStore(VectorStore):
         )
         with self._driver.session(database=self._database) as session:
             session.run(index)
+        # AuraDB provisions vector indexes asynchronously. Block until
+        # ONLINE so the first query after init doesn't race the
+        # population background job. The 30s default covers AuraDB Free
+        # comfortably; tighten via ``index_wait_timeout`` for tests
+        # that already share a persistent index, or to fail fast on a
+        # known-broken cluster.
+        wait_for_vector_index_online(
+            self._driver,
+            database=self._database,
+            index_name=self._index,
+            timeout=self._index_wait_timeout,
+        )
 
     # ------------------------------------------------------------------
     # Public API
