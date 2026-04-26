@@ -116,3 +116,21 @@ def build_driver(
         keep_alive=cfg.keep_alive,
         user_agent=cfg.user_agent,
     )
+
+
+def verify_connectivity(driver: Driver) -> None:
+    """Perform a Bolt round-trip to confirm the driver can reach the server.
+
+    Wraps ``Driver.verify_connectivity()`` — the official driver builtin
+    that probes the server with a ``RESET`` and raises if the
+    connection can't be established. Used by
+    :meth:`StoreRegistry.validate` when ``check_connectivity=True`` so
+    operators see "Neo4j unreachable" at startup rather than as an
+    opaque Bolt error on the first request.
+
+    Raises whatever the driver raises (``ServiceUnavailable``,
+    ``AuthError``, etc.) — caller is expected to wrap the failure into
+    a higher-level aggregate (typically
+    :class:`RegistryValidationError`).
+    """
+    driver.verify_connectivity()
