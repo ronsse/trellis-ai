@@ -149,12 +149,15 @@ class LanceVectorStore(VectorStore):
         # LanceDB's merge_insert accepts a list — we can write the
         # whole batch in one call rather than looping. Validate
         # everything Python-side first so a bad row in the middle
-        # doesn't leave a half-written batch on disk.
+        # doesn't leave a half-written batch on disk. Within-batch
+        # duplicate item_ids are rejected because merge_insert's
+        # behavior with duplicate source keys is implementation-defined.
         for i, spec in enumerate(items):
             for key in ("item_id", "vector"):
                 if key not in spec or spec[key] is None:
                     msg = f"upsert_bulk[{i}]: missing required key {key!r}"
                     raise ValueError(msg)
+        self._pre_validate_bulk_item_ids(items)
 
         dimensions = len(items[0]["vector"])
         for i, spec in enumerate(items):
@@ -180,9 +183,7 @@ class LanceVectorStore(VectorStore):
             .when_not_matched_insert_all()
             .execute(data)
         )
-        logger.debug(
-            "vectors_upserted_bulk", count=len(items), dimensions=dimensions
-        )
+        logger.debug("vectors_upserted_bulk", count=len(items), dimensions=dimensions)
 
     def query(
         self,

@@ -154,7 +154,10 @@ class Neo4jVectorStore(Neo4jSessionRunner, VectorStore):
 
         # Pass 1 — Python-side validation. Catches dimension mismatches
         # and missing keys before any I/O so a bad row in the middle of
-        # a 1K-vector batch doesn't leave half written.
+        # a 1K-vector batch doesn't leave half written. Within-batch
+        # duplicate item_ids are rejected because UNWIND would fire SET
+        # twice non-deterministically (last-write-wins by Neo4j
+        # iteration order).
         rows: list[dict[str, Any]] = []
         for i, spec in enumerate(items):
             for key in ("item_id", "vector"):
@@ -175,6 +178,7 @@ class Neo4jVectorStore(Neo4jSessionRunner, VectorStore):
                     "meta_json": json.dumps(spec.get("metadata") or {}),
                 }
             )
+        self._pre_validate_bulk_item_ids(items)
 
         # One round trip — UNWIND attaches every row to its current
         # node. Rows whose node has no current version (or doesn't
@@ -189,9 +193,7 @@ class Neo4jVectorStore(Neo4jSessionRunner, VectorStore):
         RETURN n.node_id AS node_id
         """
         with self._driver.session(database=self._database) as session:
-            records = session.execute_write(
-                lambda tx: list(tx.run(cypher, rows=rows))
-            )
+            records = session.execute_write(lambda tx: list(tx.run(cypher, rows=rows)))
 
         if len(records) != len(rows):
             written = {r["node_id"] for r in records}

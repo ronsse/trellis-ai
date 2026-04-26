@@ -70,9 +70,7 @@ class VectorStoreContractTests:
     # Upsert + get round-trip
     # ------------------------------------------------------------------
 
-    def test_upsert_then_get_roundtrips_vector(
-        self, store: VectorStore
-    ) -> None:
+    def test_upsert_then_get_roundtrips_vector(self, store: VectorStore) -> None:
         store.upsert("a", _vec(0.1, 0.2, 0.3), metadata={"kind": "doc"})
         result = store.get("a")
         assert result is not None
@@ -92,18 +90,14 @@ class VectorStoreContractTests:
         assert result is not None
         assert result["metadata"] == {}
 
-    def test_upsert_replace_overwrites_metadata(
-        self, store: VectorStore
-    ) -> None:
+    def test_upsert_replace_overwrites_metadata(self, store: VectorStore) -> None:
         store.upsert("a", _vec(1, 0, 0), metadata={"v": 1})
         store.upsert("a", _vec(1, 0, 0), metadata={"v": 2})
         result = store.get("a")
         assert result is not None
         assert result["metadata"] == {"v": 2}
 
-    def test_upsert_replace_overwrites_vector(
-        self, store: VectorStore
-    ) -> None:
+    def test_upsert_replace_overwrites_vector(self, store: VectorStore) -> None:
         store.upsert("a", _vec(1, 0, 0))
         store.upsert("a", _vec(0, 1, 0))
         result = store.get("a")
@@ -111,9 +105,7 @@ class VectorStoreContractTests:
         for got, want in zip(result["vector"], _vec(0, 1, 0), strict=False):
             assert abs(got - want) < 1e-5
 
-    def test_upsert_replace_keeps_count_at_one(
-        self, store: VectorStore
-    ) -> None:
+    def test_upsert_replace_keeps_count_at_one(self, store: VectorStore) -> None:
         store.upsert("a", _vec(1, 0, 0))
         store.upsert("a", _vec(0, 1, 0))
         assert store.count() == 1
@@ -122,18 +114,14 @@ class VectorStoreContractTests:
     # Metadata round-trip
     # ------------------------------------------------------------------
 
-    def test_metadata_roundtrips_str_int_float_bool(
-        self, store: VectorStore
-    ) -> None:
+    def test_metadata_roundtrips_str_int_float_bool(self, store: VectorStore) -> None:
         meta = {"name": "auth", "tier": 1, "weight": 0.5, "active": True}
         store.upsert("a", _vec(1, 0, 0), metadata=meta)
         result = store.get("a")
         assert result is not None
         assert result["metadata"] == meta
 
-    def test_metadata_roundtrips_nested_structures(
-        self, store: VectorStore
-    ) -> None:
+    def test_metadata_roundtrips_nested_structures(self, store: VectorStore) -> None:
         meta = {"tags": ["a", "b"], "nested": {"x": 1}}
         store.upsert("a", _vec(1, 0, 0), metadata=meta)
         result = store.get("a")
@@ -160,9 +148,7 @@ class VectorStoreContractTests:
         assert store.count() == 1
 
     def test_count_tracks_multiple_upserts(self, store: VectorStore) -> None:
-        for i, v in enumerate(
-            [_vec(1, 0, 0), _vec(0, 1, 0), _vec(0, 0, 1)]
-        ):
+        for i, v in enumerate([_vec(1, 0, 0), _vec(0, 1, 0), _vec(0, 0, 1)]):
             store.upsert(f"v{i}", v)
         assert store.count() == 3
 
@@ -170,9 +156,7 @@ class VectorStoreContractTests:
     # Query — ordering and top_k
     # ------------------------------------------------------------------
 
-    def test_query_orders_by_similarity_descending(
-        self, store: VectorStore
-    ) -> None:
+    def test_query_orders_by_similarity_descending(self, store: VectorStore) -> None:
         store.upsert("right", _vec(1, 0, 0))
         store.upsert("up", _vec(0, 1, 0))
         store.upsert("near_right", _vec(0.9, 0.1, 0))
@@ -219,30 +203,20 @@ class VectorStoreContractTests:
     def test_query_filter_by_str_metadata(self, store: VectorStore) -> None:
         store.upsert("a", _vec(1, 0, 0), metadata={"kind": "doc"})
         store.upsert("b", _vec(0.9, 0.1, 0), metadata={"kind": "code"})
-        results = store.query(
-            _vec(1, 0, 0), top_k=10, filters={"kind": "code"}
-        )
+        results = store.query(_vec(1, 0, 0), top_k=10, filters={"kind": "code"})
         assert len(results) == 1
         assert results[0]["item_id"] == "b"
 
     def test_query_filter_by_int_metadata(self, store: VectorStore) -> None:
         store.upsert("a", _vec(1, 0, 0), metadata={"tier": 1})
         store.upsert("b", _vec(0.9, 0.1, 0), metadata={"tier": 2})
-        results = store.query(
-            _vec(1, 0, 0), top_k=10, filters={"tier": 2}
-        )
+        results = store.query(_vec(1, 0, 0), top_k=10, filters={"tier": 2})
         assert len(results) == 1
         assert results[0]["item_id"] == "b"
 
-    def test_query_filter_with_multiple_keys_is_and(
-        self, store: VectorStore
-    ) -> None:
-        store.upsert(
-            "a", _vec(1, 0, 0), metadata={"kind": "doc", "team": "platform"}
-        )
-        store.upsert(
-            "b", _vec(0.9, 0.1, 0), metadata={"kind": "doc", "team": "growth"}
-        )
+    def test_query_filter_with_multiple_keys_is_and(self, store: VectorStore) -> None:
+        store.upsert("a", _vec(1, 0, 0), metadata={"kind": "doc", "team": "platform"})
+        store.upsert("b", _vec(0.9, 0.1, 0), metadata={"kind": "doc", "team": "growth"})
         results = store.query(
             _vec(1, 0, 0),
             top_k=10,
@@ -251,13 +225,9 @@ class VectorStoreContractTests:
         assert len(results) == 1
         assert results[0]["item_id"] == "a"
 
-    def test_query_filter_no_match_returns_empty(
-        self, store: VectorStore
-    ) -> None:
+    def test_query_filter_no_match_returns_empty(self, store: VectorStore) -> None:
         store.upsert("a", _vec(1, 0, 0), metadata={"kind": "doc"})
-        results = store.query(
-            _vec(1, 0, 0), top_k=10, filters={"kind": "nothing"}
-        )
+        results = store.query(_vec(1, 0, 0), top_k=10, filters={"kind": "nothing"})
         assert results == []
 
     def test_query_filter_on_unknown_key_returns_empty(
@@ -266,9 +236,7 @@ class VectorStoreContractTests:
         # Filter key not present on any item -> no item satisfies the
         # filter -> empty list.
         store.upsert("a", _vec(1, 0, 0), metadata={"kind": "doc"})
-        results = store.query(
-            _vec(1, 0, 0), top_k=10, filters={"absent_key": "x"}
-        )
+        results = store.query(_vec(1, 0, 0), top_k=10, filters={"absent_key": "x"})
         assert results == []
 
     # ------------------------------------------------------------------
@@ -325,9 +293,7 @@ class VectorStoreContractTests:
         with pytest.raises(ValueError, match="item_id"):
             store.upsert_bulk([{"vector": _vec(1, 0, 0)}])
 
-    def test_upsert_bulk_results_visible_to_query(
-        self, store: VectorStore
-    ) -> None:
+    def test_upsert_bulk_results_visible_to_query(self, store: VectorStore) -> None:
         store.upsert_bulk(
             [
                 {"item_id": "right", "vector": _vec(1, 0, 0)},
@@ -337,3 +303,18 @@ class VectorStoreContractTests:
         results = store.query(_vec(1, 0, 0), top_k=2)
         assert len(results) == 2
         assert results[0]["item_id"] == "right"
+
+    def test_upsert_bulk_rejects_duplicate_item_ids(self, store: VectorStore) -> None:
+        """Within-batch duplicate ``item_id`` rejected — last-write-wins
+        is non-deterministic across backends (Neo4j UNWIND, LanceDB
+        merge_insert), so the contract requires de-dup before the call."""
+        before = store.count()
+        with pytest.raises(ValueError, match=r"upsert_bulk\[1\].*duplicate"):
+            store.upsert_bulk(
+                [
+                    {"item_id": "dup", "vector": _vec(1, 0, 0)},
+                    {"item_id": "dup", "vector": _vec(0, 1, 0)},
+                ]
+            )
+        assert store.count() == before
+        assert store.get("dup") is None

@@ -86,12 +86,14 @@ class SQLiteVectorStore(SQLiteStoreBase, VectorStore):
         # Neo4j is the backend that benefits from the UNWIND override.
         # Pre-validate keys so missing-key errors surface as
         # ValueError (with the offending index) instead of KeyError
-        # mid-loop.
+        # mid-loop. Then reject within-batch duplicate item_ids so the
+        # contract matches the network-bound backends.
         for i, spec in enumerate(items):
             for key in ("item_id", "vector"):
                 if key not in spec or spec[key] is None:
                     msg = f"upsert_bulk[{i}]: missing required key {key!r}"
                     raise ValueError(msg)
+        self._pre_validate_bulk_item_ids(items)
         for spec in items:
             self.upsert(
                 item_id=spec["item_id"],
