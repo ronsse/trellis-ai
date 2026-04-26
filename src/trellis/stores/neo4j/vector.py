@@ -33,7 +33,11 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from trellis.stores.base.vector import VectorStore
-from trellis.stores.neo4j.base import build_driver, check_driver_installed
+from trellis.stores.neo4j.base import (
+    Neo4jSessionRunner,
+    build_driver,
+    check_driver_installed,
+)
 
 if TYPE_CHECKING:
     from neo4j import Driver
@@ -44,7 +48,7 @@ _VALID_SIMILARITY = frozenset({"cosine", "euclidean"})
 _OVER_FETCH_MULT = 10
 
 
-class Neo4jVectorStore(VectorStore):
+class Neo4jVectorStore(Neo4jSessionRunner, VectorStore):
     """Vectors as optional properties on the graph store's ``:Node`` rows.
 
     See module docstring for the data model. The HNSW index is created
@@ -131,15 +135,12 @@ class Neo4jVectorStore(VectorStore):
             "SET n.embedding = $vector, n.vector_metadata_json = $meta_json "
             "RETURN n.node_id AS node_id"
         )
-        with self._driver.session(database=self._database) as session:
-            record = session.execute_write(
-                lambda tx: tx.run(
-                    cypher,
-                    item_id=item_id,
-                    vector=vector,
-                    meta_json=meta_json,
-                ).single()
-            )
+        record = self._run_write_single(
+            cypher,
+            item_id=item_id,
+            vector=vector,
+            meta_json=meta_json,
+        )
         if record is None:
             msg = (
                 f"Cannot attach vector: node {item_id!r} has no current "
@@ -171,12 +172,9 @@ class Neo4jVectorStore(VectorStore):
             "RETURN node.node_id AS item_id, score, "
             "       node.vector_metadata_json AS metadata_json"
         )
-        with self._driver.session(database=self._database) as session:
-            records = session.execute_read(
-                lambda tx: list(
-                    tx.run(cypher, index=self._index, k=fetch_k, vector=vector)
-                )
-            )
+        records = self._run_read_list(
+            cypher, index=self._index, k=fetch_k, vector=vector
+        )
 
         results: list[dict[str, Any]] = []
         for r in records:
@@ -201,10 +199,7 @@ class Neo4jVectorStore(VectorStore):
             "RETURN n.embedding AS embedding, "
             "       n.vector_metadata_json AS metadata_json"
         )
-        with self._driver.session(database=self._database) as session:
-            record = session.execute_read(
-                lambda tx: tx.run(cypher, item_id=item_id).single()
-            )
+        record = self._run_read_single(cypher, item_id=item_id)
         if record is None:
             return None
         vec = list(record["embedding"])
@@ -246,8 +241,7 @@ class Neo4jVectorStore(VectorStore):
             "WHERE n.valid_to IS NULL AND n.embedding IS NOT NULL "
             "RETURN count(n) AS cnt"
         )
-        with self._driver.session(database=self._database) as session:
-            record = session.execute_read(lambda tx: tx.run(cypher).single())
+        record = self._run_read_single(cypher)
         return int(record["cnt"]) if record else 0
 
     def close(self) -> None:
