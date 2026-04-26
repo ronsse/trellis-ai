@@ -247,6 +247,30 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
         self.conn.commit()
         return node_id
 
+    def upsert_nodes_bulk(self, nodes: list[dict[str, Any]]) -> list[str]:
+        # In-process backend: a simple loop over ``upsert_node`` is the
+        # correct implementation. Bulk method exists for API symmetry;
+        # Neo4j is the backend that benefits from its own UNWIND override.
+        #
+        # Pre-validate required keys so missing-key errors surface as
+        # ValueError (with the offending index) instead of KeyError
+        # mid-loop. The per-row method handles role-immutability.
+        for i, spec in enumerate(nodes):
+            if "node_type" not in spec:
+                msg = f"upsert_nodes_bulk[{i}]: missing required key 'node_type'"
+                raise ValueError(msg)
+        return [
+            self.upsert_node(
+                node_id=spec.get("node_id"),
+                node_type=spec["node_type"],
+                properties=spec.get("properties") or {},
+                node_role=spec.get("node_role", "semantic"),
+                generation_spec=spec.get("generation_spec"),
+                document_ids=spec.get("document_ids"),
+            )
+            for spec in nodes
+        ]
+
     def get_node(
         self,
         node_id: str,
@@ -510,6 +534,44 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
 
         self.conn.commit()
         return edge_id
+
+    def upsert_edges_bulk(self, edges: list[dict[str, Any]]) -> list[str]:
+        # Pre-validate keys + endpoint existence so the bulk contract is
+        # consistent with Neo4j's, even though the single-row Postgres
+        # ``upsert_edge`` is permissive about dangling endpoints.
+        for i, spec in enumerate(edges):
+            for key in ("source_id", "target_id", "edge_type"):
+                if key not in spec or spec[key] is None:
+                    msg = f"upsert_edges_bulk[{i}]: missing required key {key!r}"
+                    raise ValueError(msg)
+        unique_endpoints = {spec["source_id"] for spec in edges} | {
+            spec["target_id"] for spec in edges
+        }
+        existing = {
+            row["node_id"] for row in self.get_nodes_bulk(list(unique_endpoints))
+        }
+        for i, spec in enumerate(edges):
+            if spec["source_id"] not in existing:
+                msg = (
+                    f"upsert_edges_bulk[{i}]: source "
+                    f"{spec['source_id']!r} has no current version"
+                )
+                raise ValueError(msg)
+            if spec["target_id"] not in existing:
+                msg = (
+                    f"upsert_edges_bulk[{i}]: target "
+                    f"{spec['target_id']!r} has no current version"
+                )
+                raise ValueError(msg)
+        return [
+            self.upsert_edge(
+                source_id=spec["source_id"],
+                target_id=spec["target_id"],
+                edge_type=spec["edge_type"],
+                properties=spec.get("properties"),
+            )
+            for spec in edges
+        ]
 
     def get_edges(
         self,

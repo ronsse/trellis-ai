@@ -59,9 +59,7 @@ class GraphStoreContractTests:
     # upsert_node / get_node — basic CRUD
     # ------------------------------------------------------------------
 
-    def test_upsert_node_returns_id_when_id_omitted(
-        self, store: GraphStore
-    ) -> None:
+    def test_upsert_node_returns_id_when_id_omitted(self, store: GraphStore) -> None:
         nid = store.upsert_node(None, "service", {"name": "auth"})
         assert isinstance(nid, str)
         assert nid
@@ -89,9 +87,7 @@ class GraphStoreContractTests:
         assert node is not None
         assert node["node_role"] == "semantic"
 
-    def test_get_node_includes_document_ids_as_list(
-        self, store: GraphStore
-    ) -> None:
+    def test_get_node_includes_document_ids_as_list(self, store: GraphStore) -> None:
         # Contract: document_ids is always a list (possibly empty), never None,
         # so consumers can iterate unconditionally.
         store.upsert_node("n1", "service", {})
@@ -103,9 +99,7 @@ class GraphStoreContractTests:
     # SCD Type 2 versioning
     # ------------------------------------------------------------------
 
-    def test_update_node_returns_latest_version(
-        self, store: GraphStore
-    ) -> None:
+    def test_update_node_returns_latest_version(self, store: GraphStore) -> None:
         store.upsert_node("n1", "service", {"v": 1})
         _sleep_for_ordering()
         store.upsert_node("n1", "service", {"v": 2})
@@ -131,9 +125,7 @@ class GraphStoreContractTests:
         assert len(history) == 3
         assert [h["properties"]["v"] for h in history] == [3, 2, 1]
 
-    def test_history_marks_only_latest_as_current(
-        self, store: GraphStore
-    ) -> None:
+    def test_history_marks_only_latest_as_current(self, store: GraphStore) -> None:
         store.upsert_node("n1", "service", {"v": 1})
         _sleep_for_ordering()
         store.upsert_node("n1", "service", {"v": 2})
@@ -179,15 +171,11 @@ class GraphStoreContractTests:
         assert len(results) == 2
         assert {r["node_id"] for r in results} == {"a", "c"}
 
-    def test_query_returns_empty_for_unknown_type(
-        self, store: GraphStore
-    ) -> None:
+    def test_query_returns_empty_for_unknown_type(self, store: GraphStore) -> None:
         store.upsert_node("a", "service", {})
         assert store.query(node_type="ghost_type") == []
 
-    def test_query_filters_by_scalar_property_eq(
-        self, store: GraphStore
-    ) -> None:
+    def test_query_filters_by_scalar_property_eq(self, store: GraphStore) -> None:
         store.upsert_node("a", "service", {"team": "platform"})
         store.upsert_node("b", "service", {"team": "growth"})
         results = store.query(node_type="service", properties={"team": "platform"})
@@ -204,9 +192,7 @@ class GraphStoreContractTests:
     # bulk read
     # ------------------------------------------------------------------
 
-    def test_get_nodes_bulk_returns_requested_nodes(
-        self, store: GraphStore
-    ) -> None:
+    def test_get_nodes_bulk_returns_requested_nodes(self, store: GraphStore) -> None:
         store.upsert_node("a", "service", {})
         store.upsert_node("b", "service", {})
         store.upsert_node("c", "service", {})
@@ -217,6 +203,85 @@ class GraphStoreContractTests:
         store.upsert_node("a", "service", {})
         results = store.get_nodes_bulk(["a", "ghost"])
         assert {r["node_id"] for r in results} == {"a"}
+
+    # ------------------------------------------------------------------
+    # bulk write — nodes
+    # ------------------------------------------------------------------
+
+    def test_upsert_nodes_bulk_creates_all_rows(self, store: GraphStore) -> None:
+        ids = store.upsert_nodes_bulk(
+            [
+                {"node_id": "a", "node_type": "service", "properties": {"v": 1}},
+                {"node_id": "b", "node_type": "service", "properties": {"v": 2}},
+                {"node_id": "c", "node_type": "service", "properties": {"v": 3}},
+            ]
+        )
+        assert ids == ["a", "b", "c"]
+        assert store.get_node("a") is not None
+        assert store.get_node("b")["properties"]["v"] == 2
+        assert store.get_node("c") is not None
+
+    def test_upsert_nodes_bulk_empty_list_is_noop(self, store: GraphStore) -> None:
+        assert store.upsert_nodes_bulk([]) == []
+
+    def test_upsert_nodes_bulk_assigns_ids_when_missing(
+        self, store: GraphStore
+    ) -> None:
+        ids = store.upsert_nodes_bulk(
+            [
+                {"node_type": "service", "properties": {}},
+                {"node_type": "service", "properties": {}},
+            ]
+        )
+        assert len(ids) == 2
+        assert all(isinstance(i, str) and i for i in ids)
+        assert ids[0] != ids[1]
+
+    def test_upsert_nodes_bulk_updates_existing_creates_new_version(
+        self, store: GraphStore
+    ) -> None:
+        """Bulk update of an existing node closes the old version + creates new."""
+        store.upsert_node("n1", "service", {"v": 1})
+        _sleep_for_ordering()
+        store.upsert_nodes_bulk(
+            [{"node_id": "n1", "node_type": "service", "properties": {"v": 2}}]
+        )
+        node = store.get_node("n1")
+        assert node is not None
+        assert node["properties"]["v"] == 2
+        history = store.get_node_history("n1")
+        assert len(history) == 2
+
+    def test_upsert_nodes_bulk_validates_role_immutability(
+        self, store: GraphStore
+    ) -> None:
+        """Role change between versions still raises in bulk mode."""
+        store.upsert_node("n1", "service", {}, node_role="semantic")
+        _sleep_for_ordering()
+        with pytest.raises(ValueError, match="role"):
+            store.upsert_nodes_bulk(
+                [
+                    {
+                        "node_id": "n1",
+                        "node_type": "service",
+                        "properties": {},
+                        "node_role": "structural",
+                    }
+                ]
+            )
+
+    def test_upsert_nodes_bulk_rejects_invalid_role(self, store: GraphStore) -> None:
+        with pytest.raises(ValueError):
+            store.upsert_nodes_bulk(
+                [
+                    {
+                        "node_id": "n1",
+                        "node_type": "service",
+                        "properties": {},
+                        "node_role": "nonsense",
+                    }
+                ]
+            )
 
     # ------------------------------------------------------------------
     # edges
@@ -245,9 +310,7 @@ class GraphStoreContractTests:
         assert len(edges) == 1
         assert edges[0]["source_id"] == "a"
 
-    def test_get_edges_both_returns_in_and_out(
-        self, store: GraphStore
-    ) -> None:
+    def test_get_edges_both_returns_in_and_out(self, store: GraphStore) -> None:
         store.upsert_node("a", "service", {})
         store.upsert_node("b", "service", {})
         store.upsert_node("c", "service", {})
@@ -264,6 +327,78 @@ class GraphStoreContractTests:
         edges = store.get_edges("a", direction="outgoing", edge_type="calls")
         assert len(edges) == 1
         assert edges[0]["edge_type"] == "calls"
+
+    # ------------------------------------------------------------------
+    # bulk write — edges
+    # ------------------------------------------------------------------
+
+    def test_upsert_edges_bulk_creates_all_edges(self, store: GraphStore) -> None:
+        store.upsert_nodes_bulk(
+            [
+                {"node_id": "a", "node_type": "service", "properties": {}},
+                {"node_id": "b", "node_type": "service", "properties": {}},
+                {"node_id": "c", "node_type": "service", "properties": {}},
+            ]
+        )
+        ids = store.upsert_edges_bulk(
+            [
+                {"source_id": "a", "target_id": "b", "edge_type": "depends_on"},
+                {"source_id": "b", "target_id": "c", "edge_type": "depends_on"},
+            ]
+        )
+        assert len(ids) == 2
+        assert all(isinstance(i, str) and i for i in ids)
+        assert len(store.get_edges("a", direction="outgoing")) == 1
+        assert len(store.get_edges("b", direction="both")) == 2
+
+    def test_upsert_edges_bulk_empty_list_is_noop(self, store: GraphStore) -> None:
+        assert store.upsert_edges_bulk([]) == []
+
+    def test_upsert_edges_bulk_raises_for_missing_endpoint(
+        self, store: GraphStore
+    ) -> None:
+        store.upsert_node("a", "service", {})
+        # No "b" node exists; bulk should refuse with an index-bearing error.
+        with pytest.raises(ValueError, match="0"):
+            store.upsert_edges_bulk(
+                [
+                    {
+                        "source_id": "a",
+                        "target_id": "b",  # missing
+                        "edge_type": "depends_on",
+                    },
+                ]
+            )
+
+    def test_upsert_edges_bulk_updates_existing_creates_new_version(
+        self, store: GraphStore
+    ) -> None:
+        store.upsert_node("a", "service", {})
+        store.upsert_node("b", "service", {})
+        store.upsert_edge("a", "b", "depends_on", {"v": 1})
+        _sleep_for_ordering()
+        store.upsert_edges_bulk(
+            [
+                {
+                    "source_id": "a",
+                    "target_id": "b",
+                    "edge_type": "depends_on",
+                    "properties": {"v": 2},
+                }
+            ]
+        )
+        # Only one current edge between a→b of this type — the latest.
+        edges = store.get_edges("a", direction="outgoing", edge_type="depends_on")
+        assert len(edges) == 1
+        assert edges[0]["properties"]["v"] == 2
+
+    def test_upsert_edges_bulk_rejects_missing_keys(self, store: GraphStore) -> None:
+        store.upsert_node("a", "service", {})
+        store.upsert_node("b", "service", {})
+        with pytest.raises(ValueError, match="edge_type"):
+            store.upsert_edges_bulk(
+                [{"source_id": "a", "target_id": "b"}]  # missing edge_type
+            )
 
     # ------------------------------------------------------------------
     # subgraph traversal
@@ -319,9 +454,7 @@ class GraphStoreContractTests:
         assert resolved is not None
         assert resolved["entity_id"] == "ent_auth"
 
-    def test_resolve_alias_returns_none_for_missing(
-        self, store: GraphStore
-    ) -> None:
+    def test_resolve_alias_returns_none_for_missing(self, store: GraphStore) -> None:
         assert store.resolve_alias("github", "missing") is None
 
     def test_get_aliases_lists_all_for_entity(self, store: GraphStore) -> None:
@@ -335,16 +468,12 @@ class GraphStoreContractTests:
     # deletion
     # ------------------------------------------------------------------
 
-    def test_delete_node_returns_true_when_existed(
-        self, store: GraphStore
-    ) -> None:
+    def test_delete_node_returns_true_when_existed(self, store: GraphStore) -> None:
         store.upsert_node("n1", "service", {})
         assert store.delete_node("n1") is True
         assert store.get_node("n1") is None
 
-    def test_delete_node_returns_false_for_missing(
-        self, store: GraphStore
-    ) -> None:
+    def test_delete_node_returns_false_for_missing(self, store: GraphStore) -> None:
         assert store.delete_node("ghost") is False
 
     def test_delete_node_cascades_to_edges(self, store: GraphStore) -> None:
@@ -362,18 +491,14 @@ class GraphStoreContractTests:
     # counts
     # ------------------------------------------------------------------
 
-    def test_count_nodes_only_counts_current_versions(
-        self, store: GraphStore
-    ) -> None:
+    def test_count_nodes_only_counts_current_versions(self, store: GraphStore) -> None:
         store.upsert_node("a", "service", {"v": 1})
         _sleep_for_ordering()
         store.upsert_node("a", "service", {"v": 2})  # new version, old closed
         store.upsert_node("b", "service", {})
         assert store.count_nodes() == 2
 
-    def test_count_edges_only_counts_current_versions(
-        self, store: GraphStore
-    ) -> None:
+    def test_count_edges_only_counts_current_versions(self, store: GraphStore) -> None:
         store.upsert_node("a", "service", {})
         store.upsert_node("b", "service", {})
         store.upsert_edge("a", "b", "depends_on")
@@ -389,15 +514,11 @@ class GraphStoreContractTests:
         assert node is not None
         assert node["node_role"] == "structural"
 
-    def test_curated_role_requires_generation_spec(
-        self, store: GraphStore
-    ) -> None:
+    def test_curated_role_requires_generation_spec(self, store: GraphStore) -> None:
         with pytest.raises(ValueError, match="generation_spec"):
             store.upsert_node("c", "concept", {}, node_role="curated")
 
-    def test_curated_role_round_trip_with_spec(
-        self, store: GraphStore
-    ) -> None:
+    def test_curated_role_round_trip_with_spec(self, store: GraphStore) -> None:
         spec = {
             "generator_name": "louvain",
             "generator_version": "1.0.0",
@@ -412,9 +533,7 @@ class GraphStoreContractTests:
         assert node["node_role"] == "curated"
         assert node["generation_spec"] == spec
 
-    def test_generation_spec_forbidden_on_non_curated(
-        self, store: GraphStore
-    ) -> None:
+    def test_generation_spec_forbidden_on_non_curated(self, store: GraphStore) -> None:
         with pytest.raises(ValueError, match="generation_spec"):
             store.upsert_node(
                 "n", "service", {}, generation_spec={"generator_name": "x"}
@@ -424,9 +543,7 @@ class GraphStoreContractTests:
         with pytest.raises(ValueError, match="node_role"):
             store.upsert_node("n", "service", {}, node_role="bogus")
 
-    def test_node_role_immutable_across_versions(
-        self, store: GraphStore
-    ) -> None:
+    def test_node_role_immutable_across_versions(self, store: GraphStore) -> None:
         store.upsert_node("n", "service", {}, node_role="structural")
         _sleep_for_ordering()
         with pytest.raises(ValueError, match="node_role"):
@@ -442,25 +559,17 @@ class GraphStoreContractTests:
         assert node is not None
         assert node["document_ids"] == ["doc_1", "doc_2"]
 
-    def test_document_ids_none_yields_empty_list(
-        self, store: GraphStore
-    ) -> None:
+    def test_document_ids_none_yields_empty_list(self, store: GraphStore) -> None:
         store.upsert_node("n", "service", {})
         node = store.get_node("n")
         assert node is not None
         assert node["document_ids"] == []
 
-    def test_document_ids_duplicates_rejected(
-        self, store: GraphStore
-    ) -> None:
+    def test_document_ids_duplicates_rejected(self, store: GraphStore) -> None:
         with pytest.raises(ValueError, match="duplicate"):
-            store.upsert_node(
-                "n", "service", {}, document_ids=["doc_1", "doc_1"]
-            )
+            store.upsert_node("n", "service", {}, document_ids=["doc_1", "doc_1"])
 
-    def test_document_ids_empty_string_rejected(
-        self, store: GraphStore
-    ) -> None:
+    def test_document_ids_empty_string_rejected(self, store: GraphStore) -> None:
         with pytest.raises(ValueError, match="non-empty"):
             store.upsert_node("n", "service", {}, document_ids=[""])
 
@@ -515,9 +624,7 @@ class GraphStoreContractTests:
     # Canonical DSL — execute_node_query / execute_subgraph_query
     # ------------------------------------------------------------------
 
-    def test_execute_node_query_eq_node_type(
-        self, store: GraphStore
-    ) -> None:
+    def test_execute_node_query_eq_node_type(self, store: GraphStore) -> None:
         from trellis.stores.base.graph_query import (
             FilterClause,
             NodeQuery,
@@ -526,15 +633,11 @@ class GraphStoreContractTests:
         store.upsert_node("a", "service", {})
         store.upsert_node("b", "person", {})
         results = store.execute_node_query(
-            NodeQuery(
-                filters=(FilterClause("node_type", "eq", "service"),)
-            )
+            NodeQuery(filters=(FilterClause("node_type", "eq", "service"),))
         )
         assert {r["node_id"] for r in results} == {"a"}
 
-    def test_execute_node_query_eq_property(
-        self, store: GraphStore
-    ) -> None:
+    def test_execute_node_query_eq_property(self, store: GraphStore) -> None:
         from trellis.stores.base.graph_query import (
             FilterClause,
             NodeQuery,
@@ -552,9 +655,7 @@ class GraphStoreContractTests:
         )
         assert {r["node_id"] for r in results} == {"a"}
 
-    def test_execute_node_query_empty_filters(
-        self, store: GraphStore
-    ) -> None:
+    def test_execute_node_query_empty_filters(self, store: GraphStore) -> None:
         from trellis.stores.base.graph_query import NodeQuery
 
         store.upsert_node("a", "service", {})
@@ -562,9 +663,7 @@ class GraphStoreContractTests:
         results = store.execute_node_query(NodeQuery(limit=10))
         assert {r["node_id"] for r in results} >= {"a", "b"}
 
-    def test_execute_node_query_respects_limit(
-        self, store: GraphStore
-    ) -> None:
+    def test_execute_node_query_respects_limit(self, store: GraphStore) -> None:
         from trellis.stores.base.graph_query import NodeQuery
 
         for i in range(5):
@@ -572,9 +671,7 @@ class GraphStoreContractTests:
         results = store.execute_node_query(NodeQuery(limit=2))
         assert len(results) == 2
 
-    def test_execute_subgraph_query_round_trip(
-        self, store: GraphStore
-    ) -> None:
+    def test_execute_subgraph_query_round_trip(self, store: GraphStore) -> None:
         from trellis.stores.base.graph_query import SubgraphQuery
 
         store.upsert_node("a", "service", {})
@@ -582,15 +679,11 @@ class GraphStoreContractTests:
         store.upsert_node("c", "service", {})
         store.upsert_edge("a", "b", "depends_on")
         store.upsert_edge("b", "c", "depends_on")
-        result = store.execute_subgraph_query(
-            SubgraphQuery(seed_ids=("a",), depth=2)
-        )
+        result = store.execute_subgraph_query(SubgraphQuery(seed_ids=("a",), depth=2))
         ids = {n["node_id"] for n in result.nodes}
         assert ids == {"a", "b", "c"}
 
-    def test_execute_subgraph_query_edge_type_filter(
-        self, store: GraphStore
-    ) -> None:
+    def test_execute_subgraph_query_edge_type_filter(self, store: GraphStore) -> None:
         from trellis.stores.base.graph_query import SubgraphQuery
 
         store.upsert_node("a", "service", {})
@@ -599,9 +692,7 @@ class GraphStoreContractTests:
         store.upsert_edge("a", "b", "depends_on")
         store.upsert_edge("a", "c", "calls")
         result = store.execute_subgraph_query(
-            SubgraphQuery(
-                seed_ids=("a",), depth=1, edge_type_filter=("depends_on",)
-            )
+            SubgraphQuery(seed_ids=("a",), depth=1, edge_type_filter=("depends_on",))
         )
         ids = {n["node_id"] for n in result.nodes}
         assert "b" in ids
@@ -611,9 +702,7 @@ class GraphStoreContractTests:
     # DSL — `in` operator (Phase 2 compiler required)
     # ------------------------------------------------------------------
 
-    def test_execute_node_query_in_node_type(
-        self, store: GraphStore
-    ) -> None:
+    def test_execute_node_query_in_node_type(self, store: GraphStore) -> None:
         from trellis.stores.base.graph_query import (
             FilterClause,
             NodeQuery,
@@ -623,17 +712,11 @@ class GraphStoreContractTests:
         store.upsert_node("b", "person", {})
         store.upsert_node("c", "team", {})
         results = store.execute_node_query(
-            NodeQuery(
-                filters=(
-                    FilterClause("node_type", "in", ("service", "person")),
-                )
-            )
+            NodeQuery(filters=(FilterClause("node_type", "in", ("service", "person")),))
         )
         assert {r["node_id"] for r in results} == {"a", "b"}
 
-    def test_execute_node_query_in_property(
-        self, store: GraphStore
-    ) -> None:
+    def test_execute_node_query_in_property(self, store: GraphStore) -> None:
         from trellis.stores.base.graph_query import (
             FilterClause,
             NodeQuery,
@@ -644,11 +727,7 @@ class GraphStoreContractTests:
         store.upsert_node("c", "service", {"team": "data"})
         results = store.execute_node_query(
             NodeQuery(
-                filters=(
-                    FilterClause(
-                        "properties.team", "in", ("platform", "data")
-                    ),
-                )
+                filters=(FilterClause("properties.team", "in", ("platform", "data")),)
             )
         )
         assert {r["node_id"] for r in results} == {"a", "c"}
@@ -657,9 +736,7 @@ class GraphStoreContractTests:
     # DSL — `exists` operator (Phase 2 compiler required)
     # ------------------------------------------------------------------
 
-    def test_execute_node_query_exists_property(
-        self, store: GraphStore
-    ) -> None:
+    def test_execute_node_query_exists_property(self, store: GraphStore) -> None:
         from trellis.stores.base.graph_query import (
             FilterClause,
             NodeQuery,
@@ -668,11 +745,7 @@ class GraphStoreContractTests:
         store.upsert_node("a", "service", {"deprecated_at": "2026-01-01"})
         store.upsert_node("b", "service", {})
         results = store.execute_node_query(
-            NodeQuery(
-                filters=(
-                    FilterClause("properties.deprecated_at", "exists"),
-                )
-            )
+            NodeQuery(filters=(FilterClause("properties.deprecated_at", "exists"),))
         )
         assert {r["node_id"] for r in results} == {"a"}
 

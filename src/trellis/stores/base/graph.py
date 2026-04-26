@@ -80,10 +80,7 @@ def validate_document_ids(document_ids: list[str] | None) -> None:
     seen: set[str] = set()
     for i, doc_id in enumerate(document_ids):
         if not isinstance(doc_id, str) or not doc_id:
-            msg = (
-                f"document_ids[{i}] must be a non-empty string, "
-                f"got {doc_id!r}"
-            )
+            msg = f"document_ids[{i}] must be a non-empty string, got {doc_id!r}"
             raise ValueError(msg)
         if doc_id in seen:
             msg = f"document_ids contains duplicate entry {doc_id!r}"
@@ -172,6 +169,78 @@ class GraphStore(ABC):
 
         Returns:
             The node ID.
+        """
+
+    @abstractmethod
+    def upsert_nodes_bulk(
+        self,
+        nodes: list[dict[str, Any]],
+    ) -> list[str]:
+        """Bulk variant of :meth:`upsert_node`.
+
+        Each entry in ``nodes`` is a dict with the same keys
+        ``upsert_node`` accepts as kwargs:
+
+        - ``node_id`` (``str | None``) — auto-generated when ``None``.
+        - ``node_type`` (``str``, required).
+        - ``properties`` (``dict``, required).
+        - ``node_role`` (``str``, optional; default ``"semantic"``).
+        - ``generation_spec`` (``dict | None``, optional).
+        - ``document_ids`` (``list[str] | None``, optional).
+
+        Semantics match :meth:`upsert_node`: each row's existing current
+        version is closed (``valid_to`` set) before the new version is
+        inserted, ``created_at`` is carried forward when an entry
+        updates an existing node, and role immutability is enforced.
+        Validation runs against every row before any write — if any
+        row is invalid, no rows are written.
+
+        On backends with network round-trip cost (Neo4j), implementations
+        SHOULD consolidate the work into a small constant number of
+        round trips per batch — typically one fetch of existing rows
+        plus one UNWIND-style upsert. On in-process backends a simple
+        loop over :meth:`upsert_node` is acceptable.
+
+        Args:
+            nodes: List of node-spec dicts. Order is preserved in the
+                returned ID list.
+
+        Raises:
+            ValueError / TypeError: with the same conditions as
+                :meth:`upsert_node`. Errors mention the offending list
+                index so callers can map them back.
+
+        Returns:
+            List of node IDs in the same order as the input.
+        """
+
+    @abstractmethod
+    def upsert_edges_bulk(
+        self,
+        edges: list[dict[str, Any]],
+    ) -> list[str]:
+        """Bulk variant of :meth:`upsert_edge`.
+
+        Each entry in ``edges`` is a dict with the same keys
+        ``upsert_edge`` accepts:
+
+        - ``source_id`` (``str``, required).
+        - ``target_id`` (``str``, required).
+        - ``edge_type`` (``str``, required).
+        - ``properties`` (``dict | None``, optional).
+
+        Same SCD-2 semantics as :meth:`upsert_edge`: an existing
+        current edge between ``(source_id, target_id, edge_type)`` is
+        closed before the new version is inserted, and ``created_at``
+        is carried forward.
+
+        Round-trip-cost guidance is the same as
+        :meth:`upsert_nodes_bulk`. Endpoints must already be current
+        nodes; otherwise :class:`ValueError` is raised mentioning the
+        offending list index.
+
+        Returns:
+            List of edge IDs in the same order as the input.
         """
 
     @abstractmethod
@@ -395,9 +464,7 @@ class GraphStore(ABC):
     # Canonical query DSL — Phase 1 of adr-canonical-graph-layer.md
     # ------------------------------------------------------------------
 
-    def execute_node_query(
-        self, query: NodeQuery
-    ) -> list[dict[str, Any]]:
+    def execute_node_query(self, query: NodeQuery) -> list[dict[str, Any]]:
         """Execute a typed :class:`NodeQuery` against the store.
 
         Default routes through the legacy :meth:`query` method by
@@ -444,9 +511,7 @@ class GraphStore(ABC):
             as_of=query.as_of,
         )
 
-    def execute_subgraph_query(
-        self, query: SubgraphQuery
-    ) -> SubgraphResult:
+    def execute_subgraph_query(self, query: SubgraphQuery) -> SubgraphResult:
         """Execute a typed :class:`SubgraphQuery` against the store.
 
         Default routes through the legacy :meth:`get_subgraph` method.
@@ -459,9 +524,7 @@ class GraphStore(ABC):
         )
 
         edge_types: list[str] | None = (
-            list(query.edge_type_filter)
-            if query.edge_type_filter is not None
-            else None
+            list(query.edge_type_filter) if query.edge_type_filter is not None else None
         )
         result = self.get_subgraph(
             seed_ids=list(query.seed_ids),

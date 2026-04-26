@@ -392,9 +392,7 @@ class TestCompactVersions:
         self._close_old_versions(graph_store, "edges", ten_days_ago)
         self._close_old_versions(graph_store, "entity_aliases", ten_days_ago)
 
-        report = graph_store.compact_versions(
-            datetime.now(UTC) - timedelta(days=5)
-        )
+        report = graph_store.compact_versions(datetime.now(UTC) - timedelta(days=5))
         assert report.edges_compacted == 1
         assert report.aliases_compacted == 1
         assert report.total_compacted == 2
@@ -411,20 +409,16 @@ class TestCompactVersions:
         oldest = (datetime.now(UTC) - timedelta(days=30)).isoformat()
         newest = (datetime.now(UTC) - timedelta(days=10)).isoformat()
         graph_store._conn.execute(
-            "UPDATE nodes SET valid_to = ? "
-            "WHERE node_id = ? AND valid_to IS NOT NULL",
+            "UPDATE nodes SET valid_to = ? WHERE node_id = ? AND valid_to IS NOT NULL",
             (oldest, "n1"),
         )
         graph_store._conn.execute(
-            "UPDATE nodes SET valid_to = ? "
-            "WHERE node_id = ? AND valid_to IS NOT NULL",
+            "UPDATE nodes SET valid_to = ? WHERE node_id = ? AND valid_to IS NOT NULL",
             (newest, "n2"),
         )
         graph_store._conn.commit()
 
-        report = graph_store.compact_versions(
-            datetime.now(UTC) - timedelta(days=5)
-        )
+        report = graph_store.compact_versions(datetime.now(UTC) - timedelta(days=5))
         assert report.nodes_compacted == 2
         assert report.oldest_compacted_valid_to is not None
         assert report.newest_compacted_valid_to is not None
@@ -440,9 +434,7 @@ class TestCompactVersions:
         try:
             graph_store.upsert_node("n1", "service", {"v": 1})
             graph_store.upsert_node("n1", "service", {"v": 2})
-            ten_days_ago = (
-                datetime.now(UTC) - timedelta(days=10)
-            ).isoformat()
+            ten_days_ago = (datetime.now(UTC) - timedelta(days=10)).isoformat()
             self._close_old_versions(graph_store, "nodes", ten_days_ago)
 
             graph_store.compact_versions(
@@ -470,9 +462,7 @@ class TestCompactVersions:
         try:
             graph_store.upsert_node("n1", "service", {"v": 1})
             graph_store.upsert_node("n1", "service", {"v": 2})
-            ten_days_ago = (
-                datetime.now(UTC) - timedelta(days=10)
-            ).isoformat()
+            ten_days_ago = (datetime.now(UTC) - timedelta(days=10)).isoformat()
             self._close_old_versions(graph_store, "nodes", ten_days_ago)
 
             graph_store.compact_versions(
@@ -497,12 +487,14 @@ class TestCompactVersions:
         class _StubStore(GraphStore):
             # Fill out just enough of the ABC to instantiate.
             def upsert_node(self, *a, **k): ...  # type: ignore[override]
+            def upsert_nodes_bulk(self, *a, **k): ...  # type: ignore[override]
             def get_node(self, *a, **k): ...  # type: ignore[override]
             def get_nodes_bulk(self, *a, **k): ...  # type: ignore[override]
             def upsert_alias(self, *a, **k): ...  # type: ignore[override]
             def resolve_alias(self, *a, **k): ...  # type: ignore[override]
             def get_aliases(self, *a, **k): ...  # type: ignore[override]
             def upsert_edge(self, *a, **k): ...  # type: ignore[override]
+            def upsert_edges_bulk(self, *a, **k): ...  # type: ignore[override]
             def get_edges(self, *a, **k): ...  # type: ignore[override]
             def get_subgraph(self, *a, **k): ...  # type: ignore[override]
             def query(self, *a, **k): ...  # type: ignore[override]
