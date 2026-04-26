@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+> **Picking up implementation work?** Read [`docs/design/implementation-roadmap.md`](docs/design/implementation-roadmap.md) first — it's the live, single-page hand-off doc with the state of the project, recommended execution order across all open ADR phases, and the live-test credential format for the AuraDB instance.
+
 ## What This Is
 
 A structured experience store for AI agents. Agents record traces of their work, build a shared knowledge graph of entities and evidence, and retrieve context packs before starting new tasks. The system provides governed mutations, immutable audit logging, and policy-based access control.
@@ -66,11 +68,22 @@ Every write flows through `MutationExecutor` in 5 stages: validate → policy ch
 
 Six ABCs in `stores/base/`: TraceStore, DocumentStore, GraphStore, VectorStore, EventLog, BlobStore. `StoreRegistry` uses `importlib` for late-binding dynamic module loading — config determines which backend class to instantiate at runtime.
 
+**Contract test suites** in `tests/unit/stores/contracts/` define the shared semantics every backend must honour. New `GraphStore` backends subclass `GraphStoreContractTests` (49 tests covering CRUD, SCD-2, `as_of`, query, subgraph, aliases, deletion, counts, role validation, document_ids, temporal reads); new `VectorStore` backends subclass `VectorStoreContractTests` (25 tests covering CRUD, metadata round-trip, similarity ordering, top_k, metadata filters). See [`docs/design/adr-canonical-graph-layer.md`](docs/design/adr-canonical-graph-layer.md) for the rationale and the deliberate deviation for `Neo4jVectorStore` (shape #2 — vectors are properties on graph nodes, not an independent store). The contract suites are the authoritative spec — prose docstrings on the ABCs are not.
+
 | Store | Default | Cloud |
 |-------|---------|-------|
-| Trace/Document/Graph/EventLog | `sqlite` | `postgres` (`TRELLIS_PG_DSN`) |
-| Vector | `sqlite` | `pgvector` or `lancedb` |
+| Trace/Document/EventLog | `sqlite` | `postgres` (`TRELLIS_PG_DSN`) |
+| Graph | `sqlite` | `postgres` or `neo4j` (Bolt URI + credentials) |
+| Vector | `sqlite` | `pgvector`, `lancedb`, or `neo4j` (HNSW on `:Node.embedding`) |
 | Blob | `local` | `s3` (`TRELLIS_S3_BUCKET`) |
+
+The Neo4j vector store attaches embeddings as an *optional* property on the
+graph store's `(:Node)` rows (shape #2) — same database, same nodes, no
+parallel `:VectorItem` label. This means the vector store's `item_id` is the
+graph store's `node_id`, embeddings are skipped by the index when absent
+(zero cost on structural nodes), and updating a node creates a new version
+without inheriting the prior embedding (callers must re-embed). Requires
+the `[neo4j]` optional extra and Neo4j 5.11+.
 
 GraphStore implements SCD Type 2 temporal versioning (`valid_from`/`valid_to`) for time-travel queries via `as_of` parameter. Use `get_node_history()` for full audit trail.
 

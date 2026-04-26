@@ -58,6 +58,12 @@ from trellis.schemas.extraction import (
     ExtractionProvenance,
     ExtractionResult,
 )
+from trellis.schemas.well_known import (
+    canonicalize_edge_kind,
+    canonicalize_entity_type,
+    schema_alignment_for_edge_kind,
+    schema_alignment_for_entity_type,
+)
 
 if TYPE_CHECKING:
     from trellis.extract.context import ExtractionContext
@@ -194,6 +200,13 @@ class JSONRulesExtractor:
         rule: EntityRule,
         raw_input: Any,
     ) -> list[_EntityMatch]:
+        # ADR Phase 1: emit canonical PascalCase entity types so retrieval
+        # buckets agent-readable names and downstream RDF/JSON-LD export
+        # has a stable join key. Open-string types (no canonical alias)
+        # pass through unchanged — the rule author wins. Schema alignment
+        # is populated only when a standards URI exists.
+        canonical_type = canonicalize_entity_type(rule.entity_type)
+        alignment = schema_alignment_for_entity_type(canonical_type)
         matches: list[_EntityMatch] = []
         for item, trail in _walk(raw_input, rule.path):
             if not isinstance(item, dict):
@@ -209,9 +222,11 @@ class JSONRulesExtractor:
                 value = _get_field(item, source_field)
                 if value is not None:
                     properties[target_prop] = value
+            if alignment is not None:
+                properties.setdefault("schema_alignment", alignment)
             draft = EntityDraft(
                 entity_id=str(id_value),
-                entity_type=rule.entity_type,
+                entity_type=canonical_type,
                 name=str(name_value) if name_value is not None else str(id_value),
                 properties=properties,
                 node_role=rule.node_role,
@@ -235,6 +250,9 @@ class JSONRulesExtractor:
 
         target_ids = {str(m.id_value) for m in target_matches}
 
+        canonical_kind = canonicalize_edge_kind(rule.edge_kind)
+        edge_props = _edge_alignment_properties(canonical_kind)
+
         edges: list[EdgeDraft] = []
         for match in source_matches:
             if match.draft.entity_id is None:
@@ -251,7 +269,8 @@ class JSONRulesExtractor:
                     EdgeDraft(
                         source_id=match.draft.entity_id,
                         target_id=target_id,
-                        edge_kind=rule.edge_kind,
+                        edge_kind=canonical_kind,
+                        properties=dict(edge_props),
                         confidence=rule.confidence,
                     )
                 )
@@ -274,6 +293,9 @@ class JSONRulesExtractor:
             id(m.raw): m for m in target_matches
         }
 
+        canonical_kind = canonicalize_edge_kind(rule.edge_kind)
+        edge_props = _edge_alignment_properties(canonical_kind)
+
         edges: list[EdgeDraft] = []
         for match in source_matches:
             if match.draft.entity_id is None:
@@ -290,7 +312,8 @@ class JSONRulesExtractor:
                     EdgeDraft(
                         source_id=match.draft.entity_id,
                         target_id=target_match.draft.entity_id,
-                        edge_kind=rule.edge_kind,
+                        edge_kind=canonical_kind,
+                        properties=dict(edge_props),
                         confidence=rule.confidence,
                     )
                 )
@@ -301,6 +324,21 @@ class JSONRulesExtractor:
 # ----------------------------------------------------------------------
 # Internal match carrier + path helpers
 # ----------------------------------------------------------------------
+
+
+def _edge_alignment_properties(canonical_kind: str) -> dict[str, Any]:
+    """Build the property dict carrying ``schema_alignment`` for an edge.
+
+    Returns an empty dict when the canonical kind has no standards URI
+    (Trellis-specific verbs like ``dependsOn`` / ``attachedTo`` and any
+    open-string kind). Empty dicts are intentional rather than ``None``
+    so callers can ``dict(...)``-copy unconditionally without a branch
+    on every match.
+    """
+    alignment = schema_alignment_for_edge_kind(canonical_kind)
+    if alignment is None:
+        return {}
+    return {"schema_alignment": alignment}
 
 
 @dataclass(frozen=True, slots=True)

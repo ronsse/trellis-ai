@@ -110,6 +110,61 @@ contracts are the ABI.  Revisit only if:
 See [TODO.md — Phase 1, Step 5](../../TODO.md) for the deferred-ABI
 decision.
 
+### Contract test suites — the runtime spec
+
+For `GraphStore` and `VectorStore` plugin backends, the parameterized
+contract test suites in
+[`tests/unit/stores/contracts/`](../../tests/unit/stores/contracts/)
+are the **authoritative behavioural specification**. The Protocol /
+ABC method signatures pin types; the contract suites pin semantics
+(operator support in filters, `as_of` time-travel, role validation,
+SCD-2 close-then-insert, etc.).
+
+Plugin authors are expected to:
+
+1. Subclass `GraphStoreContractTests` / `VectorStoreContractTests` in
+   their own test suite, providing a `store` fixture that yields a
+   fresh instance.
+2. Run the suite in their plugin's CI. Failures indicate contract
+   drift; fix the implementation rather than skipping the test.
+3. For backends that legitimately deviate from the contract (e.g.,
+   the in-tree `Neo4jVectorStore` shape #2 where embeddings live as
+   properties on graph nodes), document the deviation in the plugin
+   README and ship per-backend tests instead. The exclusion is
+   structural, not aspirational — these backends are not in the
+   "drop-in vector store" category.
+
+### Required: implement the canonical DSL
+
+`GraphStore` plugin backends **must** implement the canonical query
+DSL — not just the legacy `query()` / `get_subgraph()` methods.
+Specifically:
+
+* **Override** `execute_node_query(NodeQuery)` and
+  `execute_subgraph_query(SubgraphQuery)` on the backend class.
+* **Support** the full Phase 1 operator surface (`eq` / `in` /
+  `exists`) on top-level columns (`node_type`, `node_role`,
+  `node_id`) and on `properties.<key>` paths.
+* **Pass** the `test_execute_*` cases in `GraphStoreContractTests`.
+
+The `GraphStore` ABC ships a default `execute_node_query`
+implementation that routes through `query()`, but this default only
+handles `eq` on a narrow field set and raises `NotImplementedError`
+on `in` / `exists`. That default exists so the in-tree backends had
+a migration path during Phase 1 — it is **not** a sanctioned plugin
+implementation. New plugins that rely on the default fail the
+contract suite immediately.
+
+The contract is enforced mechanically: every contract test for the
+DSL is parameterized over the plugin's `store` fixture, so a missing
+or incomplete compiler shows up as a red CI run, not a deferred
+review comment.
+
+See [`adr-canonical-graph-layer.md`](./adr-canonical-graph-layer.md)
+for the DSL design (`FilterClause` / `NodeQuery` / `SubgraphQuery`),
+the per-backend compilers in core (SQLite / Postgres / Neo4j) for
+reference implementations, and the deviations recorded so far.
+
 ### Diagnostic
 
 `trellis admin check-plugins [--format json]` walks every known

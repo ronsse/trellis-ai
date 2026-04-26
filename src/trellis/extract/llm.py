@@ -40,6 +40,12 @@ from trellis.schemas.extraction import (
     ExtractionProvenance,
     ExtractionResult,
 )
+from trellis.schemas.well_known import (
+    canonicalize_edge_kind,
+    canonicalize_entity_type,
+    schema_alignment_for_edge_kind,
+    schema_alignment_for_entity_type,
+)
 
 if TYPE_CHECKING:
     from trellis.extract.context import ExtractionContext
@@ -305,9 +311,18 @@ def _entity_draft_from_raw(raw: dict[str, Any]) -> EntityDraft | None:
 
     confidence = _clamp_confidence(raw.get("confidence"))
 
+    # ADR Phase 1: collapse legacy spellings the LLM may emit ("person",
+    # "system") onto canonical PascalCase, and stamp the schema_alignment
+    # URI when one exists. Open-string types pass through untouched so
+    # domain-specific extractors aren't rewritten silently.
+    canonical_type = canonicalize_entity_type(entity_type)
+    alignment = schema_alignment_for_entity_type(canonical_type)
+    if alignment is not None:
+        properties = {**properties, "schema_alignment": alignment}
+
     return EntityDraft(
         entity_id=entity_id,
-        entity_type=entity_type,
+        entity_type=canonical_type,
         name=name,
         properties=properties,
         node_role=NodeRole.SEMANTIC,
@@ -325,10 +340,17 @@ def _edge_draft_from_raw(raw: dict[str, Any]) -> EdgeDraft | None:
 
     confidence = _clamp_confidence(raw.get("confidence"))
 
+    canonical_kind = canonicalize_edge_kind(edge_kind)  # type: ignore[arg-type]
+    alignment = schema_alignment_for_edge_kind(canonical_kind)
+    properties: dict[str, Any] = (
+        {"schema_alignment": alignment} if alignment is not None else {}
+    )
+
     return EdgeDraft(
         source_id=source_id,  # type: ignore[arg-type]
         target_id=target_id,  # type: ignore[arg-type]
-        edge_kind=edge_kind,  # type: ignore[arg-type]
+        edge_kind=canonical_kind,
+        properties=properties,
         confidence=confidence,
     )
 

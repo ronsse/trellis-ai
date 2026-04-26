@@ -73,8 +73,11 @@ llm-openai = [
 llm-anthropic = [
     "anthropic>=0.40",
 ]
+neo4j = [
+    "neo4j>=5.20",
+]
 all = [
-    "trellis-ai[vectors,cloud,llm-openai,llm-anthropic]",
+    "trellis-ai[vectors,cloud,neo4j,llm-openai,llm-anthropic]",
 ]
 
 [project.scripts]
@@ -166,6 +169,7 @@ module = [
     "fastapi", "fastapi.*",
     "openai", "openai.*",
     "anthropic", "anthropic.*",
+    "neo4j", "neo4j.*",
 ]
 ignore_missing_imports = true
 
@@ -174,3 +178,7 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 addopts = "-v --tb=short"
 pythonpath = ["src", "."]
+markers = [
+    "postgres: requires a running Postgres instance (set TRELLIS_TEST_PG_DSN)",
+    "neo4j: requires a running Neo4j instance (set TRELLIS_TEST_NEO4J_URI)",
+]

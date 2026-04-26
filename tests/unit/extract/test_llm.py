@@ -129,11 +129,23 @@ class TestHappyPath:
         assert len(result.entities) == 2
         assert result.entities[0].entity_id == "alice"
         assert result.entities[0].name == "Alice"
-        assert result.entities[0].properties == {"team": "platform"}
+        # ADR Phase 1: legacy ``entity_type="person"`` is canonicalised
+        # to ``Person`` and stamped with the schema_alignment URI.
+        assert result.entities[0].entity_type == "Person"
+        assert result.entities[0].properties == {
+            "team": "platform",
+            "schema_alignment": "schema.org/Person",
+        }
         assert result.entities[0].node_role == NodeRole.SEMANTIC
+        # Open-string types (``"pipeline"``) pass through unchanged.
+        assert result.entities[1].entity_type == "pipeline"
+        assert result.entities[1].properties == {}
         assert result.entities[1].entity_id is None  # null in JSON → None
         assert len(result.edges) == 1
+        # Open-string edge kind is preserved verbatim — no canonical alias
+        # exists for ``"deployed"``.
         assert result.edges[0].edge_kind == "deployed"
+        assert result.edges[0].properties == {}
         assert result.llm_calls == 1
         assert result.tokens_used == 150
         assert 0.7 <= result.overall_confidence <= 0.9

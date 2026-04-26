@@ -539,3 +539,223 @@ class TestResultMetadata:
         assert result.provenance.source_hint == "uc"
         assert result.llm_calls == 0
         assert result.tokens_used == 0
+
+
+# ---------------------------------------------------------------------------
+# ADR Phase 1 — canonical name emission + schema_alignment
+# ---------------------------------------------------------------------------
+
+
+class TestCanonicalNameEmission:
+    """JSONRulesExtractor must collapse legacy aliases and stamp URIs."""
+
+    async def test_legacy_entity_alias_emits_canonical(self) -> None:
+        rules = ExtractionRuleBundle(
+            entity_rules=[
+                EntityRule(
+                    name="people",
+                    path=["people", "*"],
+                    entity_type="person",  # legacy alias
+                    id_field="id",
+                    name_field="name",
+                ),
+            ],
+        )
+        ext = JSONRulesExtractor("hr", rules, supported_sources=["hr"])
+        raw = {"people": [{"id": "alice", "name": "Alice"}]}
+        result = await ext.extract(raw)
+        assert result.entities[0].entity_type == "Person"
+        assert result.entities[0].properties == {
+            "schema_alignment": "schema.org/Person",
+        }
+
+    async def test_canonical_entity_passes_through_with_alignment(self) -> None:
+        rules = ExtractionRuleBundle(
+            entity_rules=[
+                EntityRule(
+                    name="orgs",
+                    path=["orgs", "*"],
+                    entity_type="Organization",
+                    id_field="id",
+                ),
+            ],
+        )
+        ext = JSONRulesExtractor("crm", rules, supported_sources=["crm"])
+        result = await ext.extract({"orgs": [{"id": "acme"}]})
+        assert result.entities[0].entity_type == "Organization"
+        assert result.entities[0].properties == {
+            "schema_alignment": "schema.org/Organization",
+        }
+
+    async def test_open_string_entity_type_unchanged(self) -> None:
+        # Domain-specific types (no alias, not canonical) MUST pass
+        # through verbatim with no fabricated schema_alignment.
+        rules = ExtractionRuleBundle(
+            entity_rules=[
+                EntityRule(
+                    name="models",
+                    path=["models", "*"],
+                    entity_type="dbt_model",
+                    id_field="id",
+                ),
+            ],
+        )
+        ext = JSONRulesExtractor("dbt", rules, supported_sources=["dbt"])
+        result = await ext.extract({"models": [{"id": "m1"}]})
+        assert result.entities[0].entity_type == "dbt_model"
+        assert "schema_alignment" not in result.entities[0].properties
+
+    async def test_property_fields_coexist_with_alignment(self) -> None:
+        rules = ExtractionRuleBundle(
+            entity_rules=[
+                EntityRule(
+                    name="services",
+                    path=["services", "*"],
+                    entity_type="service",  # → SoftwareApplication
+                    id_field="id",
+                    property_fields={"team": "team"},
+                ),
+            ],
+        )
+        ext = JSONRulesExtractor("svc", rules, supported_sources=["svc"])
+        raw = {"services": [{"id": "auth", "team": "platform"}]}
+        result = await ext.extract(raw)
+        assert result.entities[0].entity_type == "SoftwareApplication"
+        assert result.entities[0].properties == {
+            "team": "platform",
+            "schema_alignment": "schema.org/SoftwareApplication",
+        }
+
+    async def test_user_property_named_schema_alignment_wins(self) -> None:
+        # If a rule deliberately maps a property to ``schema_alignment``
+        # the user value must NOT be silently overridden by the
+        # auto-populated URI. Treat the user as authoritative.
+        rules = ExtractionRuleBundle(
+            entity_rules=[
+                EntityRule(
+                    name="people",
+                    path=["people", "*"],
+                    entity_type="person",
+                    id_field="id",
+                    property_fields={"schema_alignment": "alignment"},
+                ),
+            ],
+        )
+        ext = JSONRulesExtractor("hr", rules, supported_sources=["hr"])
+        raw = {"people": [{"id": "alice", "alignment": "custom://my-uri"}]}
+        result = await ext.extract(raw)
+        assert result.entities[0].properties["schema_alignment"] == "custom://my-uri"
+
+    async def test_legacy_edge_alias_emits_canonical(self) -> None:
+        rules = ExtractionRuleBundle(
+            entity_rules=[
+                EntityRule(
+                    name="trace",
+                    path=["traces", "*"],
+                    entity_type="Activity",
+                    id_field="id",
+                ),
+                EntityRule(
+                    name="evidence",
+                    path=["evidence", "*"],
+                    entity_type="CreativeWork",
+                    id_field="id",
+                ),
+            ],
+            edge_rules=[
+                EdgeRule(
+                    name="uses",
+                    source_rule="trace",
+                    target_rule="evidence",
+                    edge_kind="trace_used_evidence",  # legacy alias
+                    source_field="evidence_ids",
+                ),
+            ],
+        )
+        ext = JSONRulesExtractor("ag", rules, supported_sources=["ag"])
+        raw = {
+            "traces": [{"id": "t1", "evidence_ids": ["e1"]}],
+            "evidence": [{"id": "e1"}],
+        }
+        result = await ext.extract(raw)
+        assert len(result.edges) == 1
+        assert result.edges[0].edge_kind == "used"
+        assert result.edges[0].properties == {"schema_alignment": "prov:used"}
+
+    async def test_open_string_edge_kind_unchanged(self) -> None:
+        rules = ExtractionRuleBundle(
+            entity_rules=[
+                EntityRule(
+                    name="a",
+                    path=["a", "*"],
+                    entity_type="x",
+                    id_field="id",
+                ),
+                EntityRule(
+                    name="b",
+                    path=["b", "*"],
+                    entity_type="x",
+                    id_field="id",
+                ),
+            ],
+            edge_rules=[
+                EdgeRule(
+                    name="custom",
+                    source_rule="a",
+                    target_rule="b",
+                    edge_kind="emits_metric",  # open string
+                    source_field="ref",
+                ),
+            ],
+        )
+        ext = JSONRulesExtractor("dom", rules, supported_sources=["dom"])
+        raw = {
+            "a": [{"id": "a1", "ref": "b1"}],
+            "b": [{"id": "b1"}],
+        }
+        result = await ext.extract(raw)
+        assert result.edges[0].edge_kind == "emits_metric"
+        # No fabricated alignment for open-string verbs.
+        assert result.edges[0].properties == {}
+
+    async def test_ancestor_edge_kind_canonicalised(self) -> None:
+        rules = ExtractionRuleBundle(
+            entity_rules=[
+                EntityRule(
+                    name="parent",
+                    path=["tables", "*"],
+                    entity_type="Dataset",
+                    id_field="name",
+                ),
+                EntityRule(
+                    name="child",
+                    path=["tables", "*", "columns", "*"],
+                    entity_type="Dataset",
+                    id_field="id",
+                ),
+            ],
+            edge_rules=[
+                EdgeRule(
+                    name="enclosure",
+                    source_rule="child",
+                    target_rule="parent",
+                    edge_kind="entity_part_of",  # legacy → partOf
+                    via_ancestor=True,
+                ),
+            ],
+        )
+        ext = JSONRulesExtractor("uc", rules, supported_sources=["uc"])
+        raw = {
+            "tables": [
+                {
+                    "name": "t1",
+                    "columns": [{"id": "t1.c1"}],
+                },
+            ],
+        }
+        result = await ext.extract(raw)
+        assert len(result.edges) == 1
+        assert result.edges[0].edge_kind == "partOf"
+        assert result.edges[0].properties == {
+            "schema_alignment": "schema.org/isPartOf",
+        }
