@@ -148,6 +148,66 @@ class Neo4jVectorStore(Neo4jSessionRunner, VectorStore):
             )
             raise ValueError(msg)
 
+    def upsert_bulk(self, items: list[dict[str, Any]]) -> None:
+        if not items:
+            return
+
+        # Pass 1 — Python-side validation. Catches dimension mismatches
+        # and missing keys before any I/O so a bad row in the middle of
+        # a 1K-vector batch doesn't leave half written. Within-batch
+        # duplicate item_ids are rejected because UNWIND would fire SET
+        # twice non-deterministically (last-write-wins by Neo4j
+        # iteration order).
+        rows: list[dict[str, Any]] = []
+        for i, spec in enumerate(items):
+            for key in ("item_id", "vector"):
+                if key not in spec or spec[key] is None:
+                    msg = f"upsert_bulk[{i}]: missing required key {key!r}"
+                    raise ValueError(msg)
+            vector = spec["vector"]
+            if len(vector) != self._dimensions:
+                msg = (
+                    f"upsert_bulk[{i}]: vector has {len(vector)} dimensions "
+                    f"but store was configured for {self._dimensions}"
+                )
+                raise ValueError(msg)
+            rows.append(
+                {
+                    "item_id": spec["item_id"],
+                    "vector": vector,
+                    "meta_json": json.dumps(spec.get("metadata") or {}),
+                }
+            )
+        self._pre_validate_bulk_item_ids(items)
+
+        # One round trip — UNWIND attaches every row to its current
+        # node. Rows whose node has no current version (or doesn't
+        # exist) are silently dropped by the MATCH; we count returned
+        # rows after to detect and raise on missing endpoints. Mirrors
+        # the single-row :meth:`upsert` error message.
+        cypher = """
+        UNWIND $rows AS row
+        MATCH (n:Node {node_id: row.item_id}) WHERE n.valid_to IS NULL
+        SET n.embedding = row.vector,
+            n.vector_metadata_json = row.meta_json
+        RETURN n.node_id AS node_id
+        """
+        with self._driver.session(database=self._database) as session:
+            records = session.execute_write(lambda tx: list(tx.run(cypher, rows=rows)))
+
+        if len(records) != len(rows):
+            written = {r["node_id"] for r in records}
+            for i, spec in enumerate(items):
+                if spec["item_id"] not in written:
+                    msg = (
+                        f"upsert_bulk[{i}]: cannot attach vector — node "
+                        f"{spec['item_id']!r} has no current version. "
+                        "Create the node via GraphStore.upsert_node first."
+                    )
+                    raise ValueError(msg)
+
+        logger.debug("vectors_upserted_bulk", count=len(rows))
+
     def query(
         self,
         vector: list[float],
