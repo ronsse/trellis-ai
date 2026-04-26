@@ -758,20 +758,29 @@ Result of executing a command through the mutation pipeline.
 
 The graph store accepts **any string** for entity types. The values below are well-known types used by the core agent tools. Domain-specific integrations (data platforms, infrastructure, etc.) should define their own types in their own package — they do not need to be added here.
 
-| Value | Description |
-|-------|-------------|
-| `person` | Human individual |
-| `system` | Software system |
-| `service` | Microservice or API |
-| `team` | Team or group |
-| `document` | Document or specification |
-| `concept` | Abstract concept |
-| `domain` | Business domain |
-| `file` | File or path |
-| `project` | Project |
-| `tool` | Tool or utility |
+> **New code: prefer the canonical name.** As of 2026-04, well-known defaults align with [schema.org](https://schema.org/) and [PROV-O](https://www.w3.org/TR/prov-o/). The lowercase legacy values keep working forever as aliases — see [`adr-graph-ontology.md`](../design/adr-graph-ontology.md) for the decision and [`src/trellis/schemas/well_known.py`](../../src/trellis/schemas/well_known.py) for the constants and `canonicalize_entity_type()` helper.
 
-Examples of domain-specific types (not exhaustive): `uc_table`, `uc_schema`, `uc_column`, `dbt_model`, `dbt_source`, `pipeline`, `job`, `notebook`.
+| Canonical | Legacy alias(es) | Source | Description |
+|-----------|------------------|--------|-------------|
+| `Person` | `person` | schema.org | Human individual |
+| `Organization` | — | schema.org | Company, vendor, regulator (no legacy equivalent) |
+| `Team` | `team` | schema.org (subset of Organization) | Internal team or group |
+| `SoftwareApplication` | `system`, `service`, `tool` | schema.org | Service, system, application, or tool |
+| `Dataset` | — | schema.org | Tables, views, files-as-data, embeddings, model artifacts |
+| `CreativeWork` | `document` | schema.org | Document, article, ADR, runbook, knowledge-base entry |
+| `Product` | — | schema.org | Sellable / catalog product |
+| `Event` | — | schema.org | Incident, deployment, meeting, business event |
+| `Place` | — | schema.org | Physical or virtual location |
+| `File` | `file` | schema.org `MediaObject` | Generic file where `Dataset` / `CreativeWork` doesn't fit |
+| `Project` | `project` | (Trellis-specific) | Project or initiative |
+| `Concept` | `concept` | (Trellis-specific) | Abstract concept |
+| `Agent` | — | PROV-O | Anything that *acts* (human user, automated agent, system actor) |
+| `Activity` | — | PROV-O | Unit of work — a trace, task, or workflow run as a graph node |
+| — | `domain` | (dropped from defaults) | Removed because it collides with `ContentTags.domain`. Existing data using `entity_type="domain"` keeps working as an open string. |
+
+Use `canonicalize_entity_type("person") -> "Person"` to normalize legacy values when bucketing across the alias boundary.
+
+Examples of domain-specific types (not exhaustive): `uc_table`, `uc_schema`, `uc_column`, `dbt_model`, `dbt_source`, `pipeline`, `job`, `notebook`. These pass through `canonicalize_entity_type` unchanged.
 
 ### NodeRole
 
@@ -817,21 +826,24 @@ Role an entity plays in the graph. Used by retrieval to decide which nodes parti
 
 The graph store accepts **any string** for edge types. The values below are well-known types used by the core agent tools. Domain-specific integrations should define their own edge types as needed.
 
-| Value | Description |
-|-------|-------------|
-| `trace_used_evidence` | Trace consumed this evidence |
-| `trace_produced_artifact` | Trace created this artifact |
-| `trace_touched_entity` | Trace interacted with this entity |
-| `trace_promoted_to_precedent` | Trace was promoted to this precedent |
-| `entity_related_to` | General entity relationship |
-| `entity_part_of` | Entity is a component of another |
-| `entity_depends_on` | Entity depends on another |
-| `evidence_attached_to` | Evidence is attached to a target |
-| `evidence_supports` | Evidence supports a claim |
-| `precedent_applies_to` | Precedent applies to a domain or entity |
-| `precedent_derived_from` | Precedent was derived from a source |
+> **New code: prefer the canonical name.** Well-known defaults align with [PROV-O](https://www.w3.org/TR/prov-o/) verbs. Legacy snake_case values stay as permanent aliases — see [`adr-graph-ontology.md`](../design/adr-graph-ontology.md) and `canonicalize_edge_kind()` in [`src/trellis/schemas/well_known.py`](../../src/trellis/schemas/well_known.py).
 
-Examples of domain-specific edge types: `reads_from`, `writes_to`, `materializes_to`, `defined_in`, `owned_by`.
+| Canonical | Legacy alias(es) | Source | Description |
+|-----------|------------------|--------|-------------|
+| `used` | `trace_used_evidence` | PROV-O `prov:used` | Activity (trace) consumed an Entity (evidence) as input |
+| `wasGeneratedBy` | `trace_produced_artifact` | PROV-O `prov:wasGeneratedBy` | Entity was created by an Activity |
+| `wasInformedBy` | `trace_touched_entity` | PROV-O `prov:wasInformedBy` | Activity's outcome was influenced by another entity / trace |
+| `wasDerivedFrom` | `trace_promoted_to_precedent`, `precedent_derived_from` | PROV-O `prov:wasDerivedFrom` | Entity is derived from another (precedents, summaries, generated nodes) |
+| `wasAttributedTo` | — | PROV-O `prov:wasAttributedTo` | Entity is attributable to a responsible Agent (author, owner) |
+| `wasAssociatedWith` | — | PROV-O `prov:wasAssociatedWith` | Activity was associated with an Agent (the agent that ran the trace) |
+| `partOf` | `entity_part_of` | schema.org / SKOS | Compositional containment |
+| `dependsOn` | `entity_depends_on` | (universal) | Functional dependency |
+| `relatedTo` | `entity_related_to` | SKOS / schema.org | Catch-all symmetric relationship |
+| `attachedTo` | `evidence_attached_to` | (Trellis-specific) | Evidence row bound to an entity row |
+| `supports` | `evidence_supports` | (Trellis-specific) | Evidence backs a claim epistemically |
+| `appliesTo` | `precedent_applies_to` | (Trellis-specific) | Precedent applies to a class of situations |
+
+Examples of domain-specific edge types: `reads_from`, `writes_to`, `materializes_to`, `defined_in`, `owned_by`. These pass through `canonicalize_edge_kind` unchanged.
 
 ### Operation
 

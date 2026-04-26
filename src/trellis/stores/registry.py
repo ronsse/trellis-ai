@@ -58,11 +58,13 @@ _BUILTIN_BACKENDS: dict[str, dict[str, dict[str, tuple[str, str]]]] = {
         "graph": {
             "sqlite": ("trellis.stores.sqlite.graph", "SQLiteGraphStore"),
             "postgres": ("trellis.stores.postgres.graph", "PostgresGraphStore"),
+            "neo4j": ("trellis.stores.neo4j.graph", "Neo4jGraphStore"),
         },
         "vector": {
             "sqlite": ("trellis.stores.sqlite.vector", "SQLiteVectorStore"),
             "pgvector": ("trellis.stores.pgvector.store", "PgVectorStore"),
             "lancedb": ("trellis.stores.lancedb.store", "LanceVectorStore"),
+            "neo4j": ("trellis.stores.neo4j.vector", "Neo4jVectorStore"),
         },
         "document": {
             "sqlite": ("trellis.stores.sqlite.document", "SQLiteDocumentStore"),

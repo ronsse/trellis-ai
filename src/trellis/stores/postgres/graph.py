@@ -788,6 +788,91 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
         return int(row[0])
 
     # ------------------------------------------------------------------
+    # Canonical DSL — Phase 2 compiler
+    # ------------------------------------------------------------------
+
+    def execute_node_query(self, query: Any) -> list[dict[str, Any]]:
+        """Compile :class:`NodeQuery` to a Postgres SELECT.
+
+        Supports the full Phase 1 operator surface (``eq`` / ``in`` /
+        ``exists``) on:
+
+        * ``node_type`` / ``node_role`` (column comparison)
+        * ``properties.<key>`` (via JSONB ``->>`` path extractor)
+        """
+        sql, params = self._compile_node_query(query)
+        with self.conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+        return [self._node_row_to_dict(row) for row in rows]
+
+    def _compile_node_query(self, query: Any) -> tuple[str, list[Any]]:
+        """Pure compile step — returns (sql, params). No I/O."""
+        where_parts: list[str] = [self._temporal_filter(query.as_of)]
+        params: list[Any] = list(self._temporal_params(query.as_of))
+        for clause in query.filters:
+            frag, p = self._compile_clause_postgres(clause)
+            where_parts.append(frag)
+            params.extend(p)
+        sql = (
+            "SELECT * FROM nodes WHERE "
+            + " AND ".join(where_parts)
+            + " ORDER BY created_at DESC LIMIT %s"
+        )
+        params.append(query.limit)
+        return sql, params
+
+    @staticmethod
+    def _compile_clause_postgres(clause: Any) -> tuple[str, list[Any]]:
+        """Translate one :class:`FilterClause` to a Postgres WHERE fragment.
+
+        Top-level columns (``node_type`` / ``node_role`` / ``node_id``)
+        compile to direct ``=`` / ``IN`` / ``IS NOT NULL`` predicates.
+
+        ``properties.<key>`` paths use the JSONB containment operator
+        (``@>``) for ``eq`` / ``in`` so the comparison is *type-aware*
+        — ``properties->>'tier' = '1'`` would compare the TEXT
+        rendering, which silently reinterprets ints, floats and bools.
+        Containment matches the full JSON value at the path.
+        ``exists`` uses the JSONB key-existence operator (``?``).
+        """
+        if clause.field.startswith("properties."):
+            return PostgresGraphStore._compile_properties_clause(clause)
+        column = PostgresGraphStore._field_to_column(clause.field)
+        if clause.op == "eq":
+            return f"{column} = %s", [clause.value]
+        if clause.op == "in":
+            placeholders = ", ".join("%s" for _ in clause.value)
+            return f"{column} IN ({placeholders})", list(clause.value)
+        if clause.op == "exists":
+            return f"{column} IS NOT NULL", []
+        msg = f"Unknown filter op {clause.op!r}"
+        raise ValueError(msg)
+
+    @staticmethod
+    def _compile_properties_clause(clause: Any) -> tuple[str, list[Any]]:
+        key = clause.field.split(".", 1)[1]
+        if clause.op == "eq":
+            return "properties @> %s::jsonb", [json.dumps({key: clause.value})]
+        if clause.op == "in":
+            ors = " OR ".join("properties @> %s::jsonb" for _ in clause.value)
+            return (
+                f"({ors})",
+                [json.dumps({key: v}) for v in clause.value],
+            )
+        if clause.op == "exists":
+            return "properties ? %s", [key]
+        msg = f"Unknown filter op {clause.op!r}"
+        raise ValueError(msg)
+
+    @staticmethod
+    def _field_to_column(field: str) -> str:
+        if field in {"node_type", "node_role", "node_id"}:
+            return field
+        msg = f"Unsupported DSL field path: {field!r}"
+        raise ValueError(msg)
+
+    # ------------------------------------------------------------------
     # Compaction (Gap 4.2 — SCD2 retention)
     # ------------------------------------------------------------------
 

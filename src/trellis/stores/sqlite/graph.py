@@ -923,6 +923,73 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
         return int(row["cnt"])
 
     # ------------------------------------------------------------------
+    # Canonical DSL — Phase 2 compiler
+    # ------------------------------------------------------------------
+
+    def execute_node_query(self, query: Any) -> list[dict[str, Any]]:
+        """Compile :class:`NodeQuery` to a SQLite SELECT.
+
+        Supports the full Phase 1 operator surface (``eq`` / ``in`` /
+        ``exists``) on:
+
+        * ``node_type`` (column comparison)
+        * ``node_role`` (column comparison)
+        * ``properties.<key>`` (via ``json_extract``)
+        """
+        sql, params = self._compile_node_query(query)
+        cursor = self._conn.execute(sql, params)
+        return [self._node_row_to_dict(row) for row in cursor.fetchall()]
+
+    def _compile_node_query(self, query: Any) -> tuple[str, list[Any]]:
+        """Pure compile step — returns (sql, params). No I/O.
+
+        Exposed so it's unit-testable without a live store.
+        """
+        where_parts: list[str] = [self._temporal_filter(query.as_of)]
+        params: list[Any] = list(self._temporal_params(query.as_of))
+        for clause in query.filters:
+            frag, p = self._compile_clause_sqlite(clause)
+            where_parts.append(frag)
+            params.extend(p)
+        sql = (
+            "SELECT * FROM nodes WHERE "
+            + " AND ".join(where_parts)
+            + " ORDER BY created_at DESC LIMIT ?"
+        )
+        params.append(query.limit)
+        return sql, params
+
+    @staticmethod
+    def _compile_clause_sqlite(clause: Any) -> tuple[str, list[Any]]:
+        """Translate one :class:`FilterClause` to a SQLite WHERE fragment."""
+        column = SQLiteGraphStore._field_to_sql_expr(clause.field)
+        if clause.op == "eq":
+            return f"{column} = ?", [clause.value]
+        if clause.op == "in":
+            placeholders = ", ".join("?" for _ in clause.value)
+            return f"{column} IN ({placeholders})", list(clause.value)
+        if clause.op == "exists":
+            return f"{column} IS NOT NULL", []
+        msg = f"Unknown filter op {clause.op!r}"
+        raise ValueError(msg)
+
+    @staticmethod
+    def _field_to_sql_expr(field: str) -> str:
+        """Map a DSL field path to a SQLite column / ``json_extract`` expression."""
+        if field in {"node_type", "node_role", "node_id"}:
+            return field
+        if field.startswith("properties."):
+            key = field.split(".", 1)[1]
+            # SQLite identifier-quoting on JSON path keys is unnecessary
+            # because keys come from agents and are constrained to JSON;
+            # parameter binding doesn't apply to json paths in
+            # json_extract — but the path string itself is constructed
+            # from the DSL so it's not user input.
+            return f"json_extract(properties_json, '$.{key}')"
+        msg = f"Unsupported DSL field path: {field!r}"
+        raise ValueError(msg)
+
+    # ------------------------------------------------------------------
     # Compaction (Gap 4.2 — SCD2 retention)
     # ------------------------------------------------------------------
 

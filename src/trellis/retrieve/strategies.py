@@ -10,6 +10,11 @@ import structlog
 
 from trellis.schemas.pack import PackItem
 from trellis.schemas.parameters import ParameterScope
+from trellis.schemas.well_known import (
+    canonicalize_entity_type,
+    expand_entity_type_query,
+)
+from trellis.stores.base.graph_query import FilterClause, NodeQuery
 
 if TYPE_CHECKING:
     from trellis.ops.registry import ParameterRegistry
@@ -289,6 +294,65 @@ class GraphSearch(SearchStrategy):
     def name(self) -> str:
         return "graph"
 
+    def _query_nodes(
+        self,
+        *,
+        node_type: str | None,
+        properties: dict[str, Any] | None,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        """Run a node query, expanding ``node_type`` to include legacy aliases.
+
+        ADR Phase 2 (graph-ontology): a query for ``"Person"`` must
+        bucket alongside legacy ``"person"`` rows during the migration
+        period. We expand the requested type via
+        :func:`~trellis.schemas.well_known.expand_entity_type_query`
+        and, when the expansion yields more than one value, route
+        through the canonical DSL with an ``in`` clause. Single-value
+        types (open-string or canonicals with no aliases) keep using
+        the legacy ``query`` path so backends that haven't shipped a
+        DSL compiler yet still work.
+        """
+        # ``self._store`` is typed ``Any`` (graph store backends share
+        # an open ABC), so we annotate locally to keep the ``Any`` taint
+        # from leaking into ``GraphSearch.search``'s caller chain.
+        rows: list[dict[str, Any]]
+        if node_type is None:
+            rows = self._store.query(
+                node_type=None,
+                properties=properties,
+                limit=limit,
+            )
+            return rows
+
+        expanded = expand_entity_type_query(node_type)
+        if len(expanded) == 1:
+            # No alias fan-out — the legacy single-string filter is
+            # sufficient and avoids the DSL hop.
+            rows = self._store.query(
+                node_type=expanded[0],
+                properties=properties,
+                limit=limit,
+            )
+            return rows
+
+        # Multi-value expansion routes through the DSL so backends
+        # compile a single ``node_type IN (...)`` query rather than
+        # forcing N round-trips. All shipped backends (sqlite,
+        # postgres, neo4j) implement Phase 2 of the canonical-graph-
+        # layer ADR.
+        clauses: list[FilterClause] = [
+            FilterClause(field="node_type", op="in", value=tuple(expanded)),
+        ]
+        for key, value in (properties or {}).items():
+            clauses.append(
+                FilterClause(field=f"properties.{key}", op="eq", value=value)
+            )
+        rows = self._store.execute_node_query(
+            NodeQuery(filters=tuple(clauses), limit=limit),
+        )
+        return rows
+
     def search(
         self,
         query: str,  # noqa: ARG002
@@ -318,7 +382,7 @@ class GraphSearch(SearchStrategy):
                 query_props["domain"] = request_domain
             # Over-fetch 4x to leave room for structural filtering before
             # slicing to the caller's limit.
-            nodes = self._store.query(
+            nodes = self._query_nodes(
                 node_type=node_type,
                 properties=query_props or None,
                 limit=limit * 4,
@@ -408,6 +472,10 @@ class GraphSearch(SearchStrategy):
                 "description",
                 props.get("name", props.get("title", "")),
             )
+            # ADR Phase 2: stamp the canonical bucket key alongside the
+            # raw stored type so downstream group-by analytics don't
+            # need to call canonicalize themselves.
+            canonical_type = canonicalize_entity_type(node_type_val)
             items.append(
                 PackItem(
                     item_id=node["node_id"],
@@ -417,6 +485,7 @@ class GraphSearch(SearchStrategy):
                     metadata={
                         "source_strategy": "graph",
                         "node_type": node_type_val,
+                        "node_type_canonical": canonical_type,
                         "node_role": node_role_val,
                         **{
                             k: v

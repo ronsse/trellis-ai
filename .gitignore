@@ -18,12 +18,17 @@ venv/
 data/
 *.db
 
-# Environment
+# Environment — gitignore every .env variant; .env.example stays committed
+# as the credential template.
 .env
+.env.*
+!.env.example
 pytest-of-*
 tmp*
 
 # Claude Code — shared project settings.json is committed; per-user
-# overrides and worktree scratch live here and should not be.
+# overrides, scheduled-task locks, and worktree scratch live here
+# and should not be.
 .claude/settings.local.json
 .claude/worktrees/
+.claude/scheduled_tasks.lock

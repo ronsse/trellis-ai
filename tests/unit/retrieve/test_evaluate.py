@@ -282,7 +282,7 @@ class TestEfficiencyScorer:
 
 class TestEvaluationProfile:
     def test_weights_must_sum_to_one(self) -> None:
-        with pytest.raises(ValueError, match="sum to 1.0"):
+        with pytest.raises(ValueError, match=r"sum to 1\.0"):
             EvaluationProfile(name="bad", weights={"a": 0.3, "b": 0.3})
 
     def test_weights_cannot_be_empty(self) -> None:

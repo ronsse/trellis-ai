@@ -6,8 +6,10 @@
 **Related:**
 - [`./adr-tag-vocabulary-split.md`](./adr-tag-vocabulary-split.md) — splits `ContentTags` into retrieval-shaping tags + `DataClassification` policy schema
 - [`./adr-planes-and-substrates.md`](./adr-planes-and-substrates.md) — introduces Knowledge / Operational planes and blessed substrates
+- [`./adr-graph-ontology.md`](./adr-graph-ontology.md) — aligns `EntityType` / `EdgeKind` well-known defaults with schema.org + PROV-O (canonical names live in `well_known.py`)
 - [`../../src/trellis/classify/`](../../src/trellis/classify/) — the tagging pipeline module
 - [`../../src/trellis/schemas/classification.py`](../../src/trellis/schemas/classification.py) — `ContentTags`, and (per the tag-vocabulary ADR) `DataClassification` / `Lifecycle`
+- [`../../src/trellis/schemas/well_known.py`](../../src/trellis/schemas/well_known.py) — canonical entity-type and edge-kind constants + `canonicalize_*` helpers
 - [`../../src/trellis/stores/registry.py`](../../src/trellis/stores/registry.py) — `_BUILTIN_BACKENDS` table
 - [`../../CLAUDE.md`](../../CLAUDE.md) — project guide that indexes into this ADR
 
@@ -84,7 +86,20 @@ The word **"enrichment" in this project means pipeline-mode + its LLM worker cla
 
 A substrate is *a* backend, but not every backend is blessed as the substrate for its plane. Substrate answers "what you get with zero configuration"; backend answers "what is registered in the table".
 
-### 2.5 Feedback loop
+### 2.5 Graph ontology — entity types and edge kinds
+
+| Term | Meaning |
+|---|---|
+| **Canonical name** | The schema.org / PROV-O–aligned form of an entity type or edge kind (e.g., `Person`, `SoftwareApplication`, `wasGeneratedBy`). Lives as a constant in [`schemas/well_known.py`](../../src/trellis/schemas/well_known.py). The form new code should emit. |
+| **Legacy alias** | The lowercase / snake_case form on the original `EntityType` / `EdgeKind` enums (e.g., `person`, `system`, `trace_used_evidence`). Permanent — never removed, never repurposed. Resolves to a canonical via `canonicalize_entity_type` / `canonicalize_edge_kind`. |
+| **Well-known default** | A canonical name defined in `well_known.py`. Trellis ships these as the recommended starting vocabulary; **type strings remain open** at the storage and API layers. Domain extensions (data platforms, infrastructure, etc.) define their own types in their own packages. |
+| **Open-string type** | Any entity-type or edge-kind value that is neither a canonical name nor a registered legacy alias. Passes through `canonicalize_*` unchanged. Fully supported by storage and retrieval. |
+
+The pair (canonical, alias) is **bijective by design**: every alias resolves to exactly one canonical, and no string is both. Multiple aliases may collapse onto the same canonical (e.g., `system` / `service` / `tool` all map to `SoftwareApplication`). Drift guards live in [`tests/unit/schemas/test_well_known.py`](../../tests/unit/schemas/test_well_known.py).
+
+The single deliberate exception: the legacy `entity_type="domain"` is **not** aliased — it has been dropped from the canonical defaults because it collides with `ContentTags.domain` (the classification facet). Existing data using `entity_type="domain"` keeps working as an open-string type; new code should not emit it.
+
+### 2.6 Feedback loop
 
 | Term | Meaning |
 |---|---|

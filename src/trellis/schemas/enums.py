@@ -41,6 +41,21 @@ class NodeRole(StrEnum):
 
 
 class EntityType(StrEnum):
+    """Legacy entity-type registry — kept for back-compat.
+
+    New code should prefer the canonical schema.org-aligned constants in
+    :mod:`trellis.schemas.well_known` (``Person``, ``Organization``,
+    ``SoftwareApplication``, ``Dataset``, ``CreativeWork``, ``Product``,
+    ``Event``, ``Place``, plus PROV-O's ``Agent`` and ``Activity``). The
+    lowercase values here remain permanent aliases — every value in
+    this enum maps to a canonical via
+    :func:`trellis.schemas.well_known.canonicalize_entity_type`, except
+    ``DOMAIN`` which is intentionally dropped from the canonical
+    defaults (collides with ``ContentTags.domain``).
+
+    See ``docs/design/adr-graph-ontology.md`` for the full decision.
+    """
+
     PERSON = "person"
     SYSTEM = "system"
     SERVICE = "service"
@@ -76,6 +91,19 @@ class Enforcement(StrEnum):
 
 
 class EdgeKind(StrEnum):
+    """Legacy edge-kind registry — kept for back-compat.
+
+    New code should prefer the canonical PROV-O verbs in
+    :mod:`trellis.schemas.well_known` (``used``, ``wasGeneratedBy``,
+    ``wasInformedBy``, ``wasDerivedFrom``, ``wasAttributedTo``,
+    ``wasAssociatedWith``, plus ``partOf`` / ``dependsOn`` / ``relatedTo``
+    and the Trellis-specific ``attachedTo`` / ``supports`` /
+    ``appliesTo``). Every value in this enum maps to a canonical via
+    :func:`trellis.schemas.well_known.canonicalize_edge_kind`.
+
+    See ``docs/design/adr-graph-ontology.md`` for the full decision.
+    """
+
     # Trace relationships
     TRACE_USED_EVIDENCE = "trace_used_evidence"
     TRACE_PRODUCED_ARTIFACT = "trace_produced_artifact"

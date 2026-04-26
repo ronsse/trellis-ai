@@ -9,6 +9,11 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from trellis.schemas.graph import CompactionReport
     from trellis.stores.base.event_log import EventLog
+    from trellis.stores.base.graph_query import (
+        NodeQuery,
+        SubgraphQuery,
+        SubgraphResult,
+    )
 
 VALID_NODE_ROLES = frozenset({"structural", "semantic", "curated"})
 
@@ -385,3 +390,86 @@ class GraphStore(ABC):
         """
         msg = f"{type(self).__name__} does not implement compact_versions"
         raise NotImplementedError(msg)
+
+    # ------------------------------------------------------------------
+    # Canonical query DSL — Phase 1 of adr-canonical-graph-layer.md
+    # ------------------------------------------------------------------
+
+    def execute_node_query(
+        self, query: NodeQuery
+    ) -> list[dict[str, Any]]:
+        """Execute a typed :class:`NodeQuery` against the store.
+
+        Default routes through the legacy :meth:`query` method by
+        decomposing the DSL filters into the shapes that method
+        accepts (``node_type`` filter, scalar property eq filters).
+        Backends that ship a Phase 2 compiler override this method to
+        translate the full DSL to native dialect.
+
+        Limitations of the default routing (these surface as
+        :class:`NotImplementedError` until a backend compiler ships):
+
+        * ``in`` and ``exists`` operators on any field
+        * ``eq`` on field paths other than ``node_type`` or
+          ``properties.<key>``
+
+        Backends that override this method are responsible for
+        honouring the full Phase 1 operator surface
+        (``eq`` / ``in`` / ``exists``) — that's the contract the
+        canonical-graph-layer ADR sells.
+        """
+        node_type = None
+        properties: dict[str, Any] = {}
+        for clause in query.filters:
+            if clause.op == "eq" and clause.field == "node_type":
+                if not isinstance(clause.value, str):
+                    msg = "node_type eq value must be a string"
+                    raise TypeError(msg)
+                node_type = clause.value
+            elif clause.op == "eq" and clause.field.startswith("properties."):
+                key = clause.field.split(".", 1)[1]
+                properties[key] = clause.value
+            else:
+                msg = (
+                    f"{type(self).__name__}.execute_node_query default "
+                    f"routing does not support clause "
+                    f"{clause!r}; backend must override "
+                    "execute_node_query with a compiler"
+                )
+                raise NotImplementedError(msg)
+        return self.query(
+            node_type=node_type,
+            properties=properties or None,
+            limit=query.limit,
+            as_of=query.as_of,
+        )
+
+    def execute_subgraph_query(
+        self, query: SubgraphQuery
+    ) -> SubgraphResult:
+        """Execute a typed :class:`SubgraphQuery` against the store.
+
+        Default routes through the legacy :meth:`get_subgraph` method.
+        Backends that ship a Phase 2 compiler override this method to
+        emit native traversal queries (recursive CTE on Postgres /
+        SQLite, variable-length path on Neo4j).
+        """
+        from trellis.stores.base.graph_query import (  # noqa: PLC0415
+            SubgraphResult,
+        )
+
+        edge_types: list[str] | None = (
+            list(query.edge_type_filter)
+            if query.edge_type_filter is not None
+            else None
+        )
+        result = self.get_subgraph(
+            seed_ids=list(query.seed_ids),
+            depth=query.depth,
+            edge_types=edge_types,
+            as_of=query.as_of,
+        )
+        return SubgraphResult(
+            nodes=list(result.get("nodes", [])),
+            edges=list(result.get("edges", [])),
+        )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -246,13 +247,19 @@ class TestGraphSearch:
             ],
             "edges": [],
         }
-        store.query.return_value = [
+        person_rows = [
             {
                 "node_id": "n3",
                 "node_type": "person",
                 "properties": {"name": "Alice"},
             },
         ]
+        # GraphSearch routes alias-expanding queries through the canonical
+        # DSL (execute_node_query) and direct queries through query().
+        # Mirror the row set on both so the test doesn't care which path
+        # the strategy picked.
+        store.query.return_value = person_rows
+        store.execute_node_query.return_value = person_rows
         return store
 
     def test_subgraph_search_with_seed_ids(
@@ -354,3 +361,128 @@ class TestGraphSearchNodeRole:
         # Same base score (1.0 and 0.95), but curated at slot 1 gets * 1.3
         # which puts it above the semantic node at slot 0.
         assert by_id["cluster"].relevance_score > by_id["svc"].relevance_score
+
+
+# ---------------------------------------------------------------------------
+# ADR Phase 2 — canonical / legacy bucketing on retrieval
+# ---------------------------------------------------------------------------
+
+
+class TestGraphSearchCanonicalBucketing:
+    """A query for ``"Person"`` must match both ``Person`` and ``person`` rows."""
+
+    def _stub_store(self, *, dsl_rows: list[dict[str, Any]]) -> MagicMock:
+        store = MagicMock()
+        # Direct .query() must NOT be reached when alias-expansion fans
+        # out — assert by failing loudly if it is.
+        store.query.side_effect = AssertionError(
+            "GraphSearch should route alias-expanding queries through "
+            "execute_node_query, not query()"
+        )
+        store.execute_node_query.return_value = dsl_rows
+        return store
+
+    def test_canonical_query_routes_through_dsl_with_aliases(self) -> None:
+        from trellis.stores.base.graph_query import FilterClause, NodeQuery
+
+        rows = [
+            {
+                "node_id": "alice",
+                "node_type": "Person",
+                "properties": {"name": "Alice"},
+            },
+            {
+                "node_id": "bob",
+                "node_type": "person",
+                "properties": {"name": "Bob"},
+            },
+        ]
+        store = self._stub_store(dsl_rows=rows)
+        items = GraphSearch(store).search("", filters={"node_type": "Person"})
+
+        # Both rows surface; the canonical bucket key on the metadata
+        # collapses them so downstream group-by is unambiguous.
+        assert {i.item_id for i in items} == {"alice", "bob"}
+        assert all(i.metadata["node_type_canonical"] == "Person" for i in items)
+        # Raw stored type preserved for debugging / display.
+        by_id = {i.item_id: i for i in items}
+        assert by_id["alice"].metadata["node_type"] == "Person"
+        assert by_id["bob"].metadata["node_type"] == "person"
+
+        # Verify the strategy compiled an ``in`` clause with the
+        # expanded alias set — not a plain eq filter.
+        store.execute_node_query.assert_called_once()
+        ((node_query,), _) = store.execute_node_query.call_args
+        assert isinstance(node_query, NodeQuery)
+        node_type_clauses = [c for c in node_query.filters if c.field == "node_type"]
+        assert len(node_type_clauses) == 1
+        clause = node_type_clauses[0]
+        assert clause == FilterClause(
+            field="node_type", op="in", value=("Person", "person")
+        )
+
+    def test_legacy_alias_query_buckets_with_canonical(self) -> None:
+        # Symmetric case: a caller still using ``"person"`` should also
+        # see the canonical ``"Person"`` rows under the same bucket.
+        rows = [
+            {
+                "node_id": "alice",
+                "node_type": "Person",
+                "properties": {"name": "Alice"},
+            },
+        ]
+        store = self._stub_store(dsl_rows=rows)
+        items = GraphSearch(store).search("", filters={"node_type": "person"})
+        assert items[0].metadata["node_type_canonical"] == "Person"
+
+    def test_open_string_type_skips_dsl(self) -> None:
+        # Open-string types have no aliases to expand. Stay on the
+        # legacy ``query`` path so backends that haven't shipped the
+        # DSL compiler still work.
+        store = MagicMock()
+        store.query.return_value = [
+            {
+                "node_id": "m1",
+                "node_type": "dbt_model",
+                "properties": {"name": "users"},
+            },
+        ]
+        store.execute_node_query.side_effect = AssertionError(
+            "open-string node_type must not trigger the DSL hop"
+        )
+        items = GraphSearch(store).search("", filters={"node_type": "dbt_model"})
+        assert items[0].item_id == "m1"
+        # Open-string canonical is the value itself.
+        assert items[0].metadata["node_type_canonical"] == "dbt_model"
+        store.query.assert_called_once()
+        kwargs = store.query.call_args.kwargs
+        assert kwargs["node_type"] == "dbt_model"
+
+    def test_canonical_only_no_aliases_skips_dsl(self) -> None:
+        # ``Organization`` is canonical with no legacy alias mapping
+        # to it — a single-element expansion. Stay on the simple path.
+        store = MagicMock()
+        store.query.return_value = [
+            {
+                "node_id": "acme",
+                "node_type": "Organization",
+                "properties": {"name": "Acme"},
+            },
+        ]
+        store.execute_node_query.side_effect = AssertionError(
+            "single-bucket canonical must not trigger the DSL hop"
+        )
+        items = GraphSearch(store).search("", filters={"node_type": "Organization"})
+        assert items[0].item_id == "acme"
+        assert items[0].metadata["node_type_canonical"] == "Organization"
+        kwargs = store.query.call_args.kwargs
+        assert kwargs["node_type"] == "Organization"
+
+    def test_no_node_type_filter_uses_query_path(self) -> None:
+        store = MagicMock()
+        store.query.return_value = []
+        store.execute_node_query.side_effect = AssertionError(
+            "calls without node_type must not trigger the DSL hop"
+        )
+        GraphSearch(store).search("", filters={})
+        store.query.assert_called_once()
