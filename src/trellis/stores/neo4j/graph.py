@@ -36,7 +36,11 @@ from trellis.stores.base.graph import (
     validate_document_ids,
     validate_node_role_args,
 )
-from trellis.stores.neo4j.base import build_driver, check_driver_installed
+from trellis.stores.neo4j.base import (
+    Neo4jSessionRunner,
+    build_driver,
+    check_driver_installed,
+)
 
 if TYPE_CHECKING:
     from neo4j import Driver, ManagedTransaction
@@ -60,7 +64,14 @@ def _temporal_where(as_of: datetime | None, var: str) -> tuple[str, dict[str, An
 
 
 def _node_props_to_dict(props: dict[str, Any]) -> dict[str, Any]:
-    """Convert a Neo4j :Node's raw properties into the GraphStore dict shape."""
+    """Convert a Neo4j :Node's raw properties into the GraphStore dict shape.
+
+    ``properties_json``, ``generation_spec_json``, and ``document_ids_json``
+    are stored as JSON strings because Neo4j forbids nested-map values on
+    properties. Each read pays a ``json.loads`` per nested field; each
+    write pays a ``json.dumps``. Cheap individually but worth being aware
+    of on hot paths — changing the schema is not worth it.
+    """
     return {
         "node_id": props["node_id"],
         "node_type": props["node_type"],
@@ -120,8 +131,7 @@ _SCHEMA_STATEMENTS = (
     "CREATE INDEX node_role_idx IF NOT EXISTS FOR (n:Node) ON (n.node_role)",
     "CREATE INDEX node_valid_idx IF NOT EXISTS "
     "FOR (n:Node) ON (n.valid_from, n.valid_to)",
-    "CREATE INDEX alias_entity_idx IF NOT EXISTS "
-    "FOR (a:Alias) ON (a.entity_id)",
+    "CREATE INDEX alias_entity_idx IF NOT EXISTS FOR (a:Alias) ON (a.entity_id)",
     "CREATE INDEX alias_lookup_idx IF NOT EXISTS "
     "FOR (a:Alias) ON (a.source_system, a.raw_id)",
     "CREATE INDEX edge_id_idx IF NOT EXISTS FOR ()-[r:EDGE]-() ON (r.edge_id)",
@@ -131,7 +141,7 @@ _SCHEMA_STATEMENTS = (
 )
 
 
-class Neo4jGraphStore(GraphStore):
+class Neo4jGraphStore(Neo4jSessionRunner, GraphStore):
     """Neo4j-backed graph store. See module docstring for the data model."""
 
     def __init__(
@@ -213,12 +223,7 @@ class Neo4jGraphStore(GraphStore):
         SET n = $new_props
         RETURN n.node_id AS node_id
         """
-        with self._driver.session(database=self._database) as session:
-            session.execute_write(
-                lambda tx: tx.run(
-                    cypher, node_id=node_id, now=now, new_props=new_props
-                ).consume()
-            )
+        self._run_write(cypher, node_id=node_id, now=now, new_props=new_props)
         return node_id
 
     def get_node(
@@ -228,10 +233,7 @@ class Neo4jGraphStore(GraphStore):
     ) -> dict[str, Any] | None:
         where, params = _temporal_where(as_of, "n")
         cypher = f"MATCH (n:Node {{node_id: $node_id}}) WHERE {where} RETURN n"
-        with self._driver.session(database=self._database) as session:
-            record = session.execute_read(
-                lambda tx: tx.run(cypher, node_id=node_id, **params).single()
-            )
+        record = self._run_read_single(cypher, node_id=node_id, **params)
         if record is None:
             return None
         return _node_props_to_dict(dict(record["n"]))
@@ -245,21 +247,14 @@ class Neo4jGraphStore(GraphStore):
             return []
         where, params = _temporal_where(as_of, "n")
         cypher = f"MATCH (n:Node) WHERE n.node_id IN $ids AND {where} RETURN n"
-        with self._driver.session(database=self._database) as session:
-            records = session.execute_read(
-                lambda tx: list(tx.run(cypher, ids=node_ids, **params))
-            )
+        records = self._run_read_list(cypher, ids=node_ids, **params)
         return [_node_props_to_dict(dict(r["n"])) for r in records]
 
     def get_node_history(self, node_id: str) -> list[dict[str, Any]]:
         cypher = (
-            "MATCH (n:Node {node_id: $node_id}) "
-            "RETURN n ORDER BY n.valid_from DESC"
+            "MATCH (n:Node {node_id: $node_id}) RETURN n ORDER BY n.valid_from DESC"
         )
-        with self._driver.session(database=self._database) as session:
-            records = session.execute_read(
-                lambda tx: list(tx.run(cypher, node_id=node_id))
-            )
+        records = self._run_read_list(cypher, node_id=node_id)
         return [_node_props_to_dict(dict(r["n"])) for r in records]
 
     # ------------------------------------------------------------------
@@ -310,12 +305,7 @@ class Neo4jGraphStore(GraphStore):
         SET a = $new_props
         RETURN a.alias_id AS alias_id
         """
-        with self._driver.session(database=self._database) as session:
-            session.execute_write(
-                lambda tx: tx.run(
-                    cypher, alias_id=alias_id, now=now, new_props=new_props
-                ).consume()
-            )
+        self._run_write(cypher, alias_id=alias_id, now=now, new_props=new_props)
         logger.debug(
             "alias_upserted",
             alias_id=alias_id,
@@ -336,12 +326,7 @@ class Neo4jGraphStore(GraphStore):
             "MATCH (a:Alias {source_system: $src, raw_id: $rid}) "
             f"WHERE {where} RETURN a"
         )
-        with self._driver.session(database=self._database) as session:
-            record = session.execute_read(
-                lambda tx: tx.run(
-                    cypher, src=source_system, rid=raw_id, **params
-                ).single()
-            )
+        record = self._run_read_single(cypher, src=source_system, rid=raw_id, **params)
         if record is None:
             return None
         return _alias_props_to_dict(dict(record["a"]))
@@ -363,10 +348,7 @@ class Neo4jGraphStore(GraphStore):
             f"WHERE {where} {src_clause} "
             "RETURN a ORDER BY a.source_system, a.raw_id"
         )
-        with self._driver.session(database=self._database) as session:
-            records = session.execute_read(
-                lambda tx: list(tx.run(cypher, **params))
-            )
+        records = self._run_read_list(cypher, **params)
         return [_alias_props_to_dict(dict(r["a"])) for r in records]
 
     # ------------------------------------------------------------------
@@ -419,17 +401,14 @@ class Neo4jGraphStore(GraphStore):
         SET new = $new_props
         RETURN new.edge_id AS edge_id
         """
-        with self._driver.session(database=self._database) as session:
-            record = session.execute_write(
-                lambda tx: tx.run(
-                    cypher,
-                    source_id=source_id,
-                    target_id=target_id,
-                    edge_type=edge_type,
-                    now=now,
-                    new_props=new_props,
-                ).single()
-            )
+        record = self._run_write_single(
+            cypher,
+            source_id=source_id,
+            target_id=target_id,
+            edge_type=edge_type,
+            now=now,
+            new_props=new_props,
+        )
         if record is None:
             msg = (
                 f"Cannot upsert edge: source {source_id!r} or target "
@@ -448,15 +427,12 @@ class Neo4jGraphStore(GraphStore):
         RETURN r
         LIMIT 1
         """
-        with self._driver.session(database=self._database) as session:
-            record = session.execute_read(
-                lambda tx: tx.run(
-                    cypher,
-                    source_id=source_id,
-                    target_id=target_id,
-                    edge_type=edge_type,
-                ).single()
-            )
+        record = self._run_read_single(
+            cypher,
+            source_id=source_id,
+            target_id=target_id,
+            edge_type=edge_type,
+        )
         if record is None:
             return None
         return _edge_props_to_dict(dict(record["r"]))
@@ -487,10 +463,7 @@ class Neo4jGraphStore(GraphStore):
             pattern = "(n:Node {node_id: $node_id})-[r:EDGE]-()"
 
         cypher = f"MATCH {pattern} WHERE {where} {type_clause} RETURN r"
-        with self._driver.session(database=self._database) as session:
-            records = session.execute_read(
-                lambda tx: list(tx.run(cypher, **params))
-            )
+        records = self._run_read_list(cypher, **params)
         return [_edge_props_to_dict(dict(r["r"])) for r in records]
 
     # ------------------------------------------------------------------
@@ -513,9 +486,7 @@ class Neo4jGraphStore(GraphStore):
         node_where, temporal_params = _temporal_where(as_of, "n")
         edge_where, _ = _temporal_where(as_of, "r")
 
-        edge_type_clause = (
-            "AND ($edge_types IS NULL OR r.edge_type IN $edge_types)"
-        )
+        edge_type_clause = "AND ($edge_types IS NULL OR r.edge_type IN $edge_types)"
 
         # Step 1 — reachable node ids via variable-length match. The
         # bounds of `*M..N` must be literal Cypher, so we inline `depth`
@@ -540,10 +511,7 @@ class Neo4jGraphStore(GraphStore):
                 "edge_types": edge_types,
                 **temporal_params,
             }
-            with self._driver.session(database=self._database) as session:
-                record = session.execute_read(
-                    lambda tx: tx.run(reach_cypher, **params).single()
-                )
+            record = self._run_read_single(reach_cypher, **params)
             raw_ids = record["ids"] if record else []
             reachable = list({i for i in raw_ids if i is not None})
 
@@ -561,17 +529,12 @@ class Neo4jGraphStore(GraphStore):
             f"AND {edge_where} {edge_type_clause} "
             "RETURN r"
         )
-        with self._driver.session(database=self._database) as session:
-            records = session.execute_read(
-                lambda tx: list(
-                    tx.run(
-                        edge_cypher,
-                        ids=reachable,
-                        edge_types=edge_types,
-                        **temporal_params,
-                    )
-                )
-            )
+        records = self._run_read_list(
+            edge_cypher,
+            ids=reachable,
+            edge_types=edge_types,
+            **temporal_params,
+        )
         edges = [_edge_props_to_dict(dict(r["r"])) for r in records]
 
         logger.debug(
@@ -605,15 +568,13 @@ class Neo4jGraphStore(GraphStore):
         # by filtering client-side, matching how query handles nested
         # filters in the Postgres backend.
         cypher = (
-            "MATCH (n:Node) WHERE " + " AND ".join(conditions)
+            "MATCH (n:Node) WHERE "
+            + " AND ".join(conditions)
             + " RETURN n ORDER BY n.created_at DESC LIMIT $limit"
         )
         params["limit"] = limit * 4 if properties else limit
 
-        with self._driver.session(database=self._database) as session:
-            records = session.execute_read(
-                lambda tx: list(tx.run(cypher, **params))
-            )
+        records = self._run_read_list(cypher, **params)
 
         results: list[dict[str, Any]] = []
         for r in records:
@@ -680,16 +641,12 @@ class Neo4jGraphStore(GraphStore):
             "MATCH (n:Node) WHERE n.valid_to IS NULL "
             "RETURN count(DISTINCT n.node_id) AS cnt"
         )
-        with self._driver.session(database=self._database) as session:
-            record = session.execute_read(lambda tx: tx.run(cypher).single())
+        record = self._run_read_single(cypher)
         return int(record["cnt"]) if record else 0
 
     def count_edges(self) -> int:
-        cypher = (
-            "MATCH ()-[r:EDGE]->() WHERE r.valid_to IS NULL RETURN count(r) AS cnt"
-        )
-        with self._driver.session(database=self._database) as session:
-            record = session.execute_read(lambda tx: tx.run(cypher).single())
+        cypher = "MATCH ()-[r:EDGE]->() WHERE r.valid_to IS NULL RETURN count(r) AS cnt"
+        record = self._run_read_single(cypher)
         return int(record["cnt"]) if record else 0
 
     # ------------------------------------------------------------------
@@ -709,9 +666,7 @@ class Neo4jGraphStore(GraphStore):
         decoding the JSON. Same approach the legacy ``query()`` method
         uses; semantics match.
         """
-        cypher_parts, cypher_params, py_predicates = (
-            self._compile_node_query(query)
-        )
+        cypher_parts, cypher_params, py_predicates = self._compile_node_query(query)
         cypher = (
             "MATCH (n:Node) WHERE "
             + " AND ".join(cypher_parts)
@@ -722,10 +677,7 @@ class Neo4jGraphStore(GraphStore):
         fetch_limit = query.limit * 10 if py_predicates else query.limit
         cypher += f" LIMIT {int(fetch_limit)}"
 
-        with self._driver.session(database=self._database) as session:
-            records = session.execute_read(
-                lambda tx: list(tx.run(cypher, **cypher_params))
-            )
+        records = self._run_read_list(cypher, **cypher_params)
         results: list[dict[str, Any]] = []
         for r in records:
             row = _node_props_to_dict(dict(r["n"]))
@@ -746,9 +698,7 @@ class Neo4jGraphStore(GraphStore):
         py_predicates: list[Any] = []
         for i, clause in enumerate(query.filters):
             if clause.field.startswith("properties."):
-                py_predicates.append(
-                    self._compile_property_predicate(clause)
-                )
+                py_predicates.append(self._compile_property_predicate(clause))
                 continue
             frag, params = self._compile_top_level_clause(clause, i)
             cypher_parts.append(frag)
@@ -756,9 +706,7 @@ class Neo4jGraphStore(GraphStore):
         return cypher_parts, cypher_params, py_predicates
 
     @staticmethod
-    def _compile_top_level_clause(
-        clause: Any, idx: int
-    ) -> tuple[str, dict[str, Any]]:
+    def _compile_top_level_clause(clause: Any, idx: int) -> tuple[str, dict[str, Any]]:
         column = clause.field
         if column not in {"node_type", "node_role", "node_id"}:
             msg = f"Unsupported DSL field path: {clause.field!r}"
@@ -793,10 +741,7 @@ class Neo4jGraphStore(GraphStore):
     def _temporal_filter_cypher(as_of: datetime | None) -> str:
         if as_of is None:
             return "n.valid_to IS NULL"
-        return (
-            "n.valid_from <= $as_of AND "
-            "(n.valid_to IS NULL OR n.valid_to > $as_of)"
-        )
+        return "n.valid_from <= $as_of AND (n.valid_to IS NULL OR n.valid_to > $as_of)"
 
     # ------------------------------------------------------------------
     # Compaction
@@ -862,9 +807,7 @@ class Neo4jGraphStore(GraphStore):
                 ) -> tuple[int, str | None, str | None]:
                     return _count_and_range(tx, q)
 
-                def _delete(
-                    tx: ManagedTransaction, q: str = delete_q
-                ) -> None:
+                def _delete(tx: ManagedTransaction, q: str = delete_q) -> None:
                     tx.run(q, before=before_iso).consume()
 
                 cnt, lo, hi = session.execute_read(_count)
