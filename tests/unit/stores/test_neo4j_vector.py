@@ -94,6 +94,68 @@ class TestUpsert:
             vector.upsert("ghost", _vec(1, 0, 0))
 
 
+class TestUpsertBulk:
+    def test_attaches_embeddings_to_existing_nodes(self, stores):
+        graph, vector = stores
+        _make_node(graph, "a")
+        _make_node(graph, "b")
+        _make_node(graph, "c")
+        vector.upsert_bulk(
+            [
+                {"item_id": "a", "vector": _vec(1, 0, 0)},
+                {"item_id": "b", "vector": _vec(0, 1, 0)},
+                {"item_id": "c", "vector": _vec(0, 0, 1)},
+            ]
+        )
+        assert vector.count() == 3
+
+    def test_empty_list_is_noop(self, stores):
+        _, vector = stores
+        vector.upsert_bulk([])
+        assert vector.count() == 0
+
+    def test_replace_overrides_metadata(self, stores):
+        graph, vector = stores
+        _make_node(graph, "a")
+        vector.upsert("a", _vec(1, 0, 0), metadata={"v": 1})
+        vector.upsert_bulk(
+            [{"item_id": "a", "vector": _vec(0, 1, 0), "metadata": {"v": 2}}]
+        )
+        result = vector.get("a")
+        assert result is not None
+        assert result["metadata"]["v"] == 2
+
+    def test_dimension_mismatch_raises_with_index(self, stores):
+        graph, vector = stores
+        _make_node(graph, "a")
+        _make_node(graph, "b")
+        with pytest.raises(ValueError, match=r"upsert_bulk\[1\]"):
+            vector.upsert_bulk(
+                [
+                    {"item_id": "a", "vector": _vec(1, 0, 0)},
+                    {"item_id": "b", "vector": [1.0, 0.0]},  # wrong dim
+                ]
+            )
+
+    def test_missing_required_key_raises_with_index(self, stores):
+        _, vector = stores
+        with pytest.raises(ValueError, match=r"upsert_bulk\[0\]"):
+            vector.upsert_bulk([{"item_id": "a"}])
+
+    def test_missing_node_raises_with_index(self, stores):
+        graph, vector = stores
+        _make_node(graph, "a")
+        with pytest.raises(
+            ValueError, match=r"upsert_bulk\[1\].*no current version"
+        ):
+            vector.upsert_bulk(
+                [
+                    {"item_id": "a", "vector": _vec(1, 0, 0)},
+                    {"item_id": "ghost", "vector": _vec(0, 1, 0)},
+                ]
+            )
+
+
 # ---------------------------------------------------------------------------
 # Get / delete / count
 # ---------------------------------------------------------------------------

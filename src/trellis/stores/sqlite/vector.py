@@ -80,6 +80,25 @@ class SQLiteVectorStore(SQLiteStoreBase, VectorStore):
         )
         self._conn.commit()
 
+    def upsert_bulk(self, items: list[dict[str, Any]]) -> None:
+        # In-process backend: a simple loop is the correct
+        # implementation. The bulk method exists for API symmetry;
+        # Neo4j is the backend that benefits from the UNWIND override.
+        # Pre-validate keys so missing-key errors surface as
+        # ValueError (with the offending index) instead of KeyError
+        # mid-loop.
+        for i, spec in enumerate(items):
+            for key in ("item_id", "vector"):
+                if key not in spec or spec[key] is None:
+                    msg = f"upsert_bulk[{i}]: missing required key {key!r}"
+                    raise ValueError(msg)
+        for spec in items:
+            self.upsert(
+                item_id=spec["item_id"],
+                vector=spec["vector"],
+                metadata=spec.get("metadata"),
+            )
+
     def query(
         self,
         vector: list[float],

@@ -31,6 +31,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import pytest
+
 if TYPE_CHECKING:
     from trellis.stores.base.vector import VectorStore
 
@@ -268,3 +270,70 @@ class VectorStoreContractTests:
             _vec(1, 0, 0), top_k=10, filters={"absent_key": "x"}
         )
         assert results == []
+
+    # ------------------------------------------------------------------
+    # bulk upsert
+    # ------------------------------------------------------------------
+
+    def test_upsert_bulk_writes_all_rows(self, store: VectorStore) -> None:
+        store.upsert_bulk(
+            [
+                {"item_id": "a", "vector": _vec(1, 0, 0)},
+                {"item_id": "b", "vector": _vec(0, 1, 0)},
+                {"item_id": "c", "vector": _vec(0, 0, 1)},
+            ]
+        )
+        assert store.count() == 3
+        assert store.get("a") is not None
+        assert store.get("b") is not None
+        assert store.get("c") is not None
+
+    def test_upsert_bulk_empty_list_is_noop(self, store: VectorStore) -> None:
+        store.upsert_bulk([])
+        assert store.count() == 0
+
+    def test_upsert_bulk_round_trips_metadata(self, store: VectorStore) -> None:
+        store.upsert_bulk(
+            [
+                {
+                    "item_id": "a",
+                    "vector": _vec(1, 0, 0),
+                    "metadata": {"kind": "doc", "tier": 1},
+                }
+            ]
+        )
+        item = store.get("a")
+        assert item is not None
+        assert item["metadata"] == {"kind": "doc", "tier": 1}
+
+    def test_upsert_bulk_replaces_existing_row(self, store: VectorStore) -> None:
+        store.upsert("a", _vec(1, 0, 0), metadata={"v": 1})
+        store.upsert_bulk(
+            [{"item_id": "a", "vector": _vec(0, 1, 0), "metadata": {"v": 2}}]
+        )
+        assert store.count() == 1
+        item = store.get("a")
+        assert item is not None
+        assert item["metadata"] == {"v": 2}
+
+    def test_upsert_bulk_rejects_missing_required_keys(
+        self, store: VectorStore
+    ) -> None:
+        with pytest.raises(ValueError, match="vector"):
+            store.upsert_bulk([{"item_id": "a"}])
+
+        with pytest.raises(ValueError, match="item_id"):
+            store.upsert_bulk([{"vector": _vec(1, 0, 0)}])
+
+    def test_upsert_bulk_results_visible_to_query(
+        self, store: VectorStore
+    ) -> None:
+        store.upsert_bulk(
+            [
+                {"item_id": "right", "vector": _vec(1, 0, 0)},
+                {"item_id": "up", "vector": _vec(0, 1, 0)},
+            ]
+        )
+        results = store.query(_vec(1, 0, 0), top_k=2)
+        assert len(results) == 2
+        assert results[0]["item_id"] == "right"
