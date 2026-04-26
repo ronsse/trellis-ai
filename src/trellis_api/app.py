@@ -28,9 +28,16 @@ def get_registry() -> StoreRegistry:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:  # noqa: ARG001
-    """Initialize and tear down the StoreRegistry."""
+    """Initialize, validate, and tear down the StoreRegistry.
+
+    Validation runs eagerly so misconfigurations (missing DSN, unset
+    S3 bucket, plugin import failure) crash uvicorn before it accepts
+    its first request, rather than 500ing the first call to a broken
+    store. See ``StoreRegistry.validate`` for the contract.
+    """
     global _registry  # noqa: PLW0603
     _registry = StoreRegistry.from_config_dir()
+    _registry.validate()
     logger.info("api_stores_initialized")
     yield
     _registry.close()
