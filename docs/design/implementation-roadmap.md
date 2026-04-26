@@ -1,6 +1,6 @@
 # Implementation Roadmap
 
-**Last updated:** 2026-04-25 (evening — A.1, B.1, B.2, E.2, E.3 landed)
+**Last updated:** 2026-04-25 (late evening — A.1, A.2, B.1, B.2, E.2, E.3 landed)
 **Purpose:** Single-page hand-off for any agent (fresh or returning) picking up Trellis implementation work. Self-contained. Read this top-to-bottom before touching code.
 
 ---
@@ -21,7 +21,8 @@
 |---|---|---|---|
 | `pytest tests/unit/` | 653 | 118 | Default. SQLite + LanceDB live; Postgres / Neo4j / pgvector skip cleanly. |
 | `+ TRELLIS_TEST_NEO4J_*` set | +110 | -54 | 33 graph + 19 vector + 58 contract. Validated against AuraDB Free 2026-04-25. |
-| `+ TRELLIS_TEST_PG_DSN` set | +unknown | — | Untested in this thread. Should run cleanly per the contract. |
+| `+ TRELLIS_TEST_PG_DSN` set | +44 | -28 | A.2: 14 PG store + 13 pgvector store + 11 PG-graph contract + 25 pgvector contract = 63 PG-gated tests, all green against Neon free tier 2026-04-25. |
+| Full unit suite, all extras + both env vars set | 2347 | 0 | Smoke baseline after A.2: zero skips, zero failures across SQLite / LanceDB / Neo4j / Postgres / pgvector / OpenAI / Anthropic / FastAPI / FastMCP. |
 | `pytest tests/integration/test_neo4j_e2e.py` (env loaded) | 6 | 0 | A.1 e2e: ENTITY_CREATE / LINK_CREATE / audit-events / JSON extractor → Neo4j / PackBuilder→graph / SemanticSearch→shape #2 vector. Skips cleanly otherwise. |
 | `pytest tests/unit/schemas/test_well_known.py` | 85 | 0 | Phase 0 (41) + Phase 1/2 helpers (44 — alignment URIs, alias inverse, query expansion). |
 | `pytest tests/unit/extract/` | 147 | 0 | All 139 prior + 8 new Phase 1 canonicalisation tests in `TestCanonicalNameEmission`. |
@@ -49,7 +50,11 @@ Get-Content .env | ForEach-Object {
 
 After loading, `pytest tests/unit/stores/test_neo4j_*.py` runs the live suites against whatever Neo4j / Postgres instance the file points at. Without `.env` loaded, the env-gated suites skip cleanly.
 
-**Provisioned for the project:** a free-tier Neo4j AuraDB instance at `cfc3411f.databases.neo4j.io`. **Leave it running.** The password is in `.env`, *not* in this doc — agents working on the codebase load it via `source .env` rather than handling the credential manually.
+**Provisioned for the project:**
+* Free-tier Neo4j AuraDB instance at `cfc3411f.databases.neo4j.io`. **Leave it running.**
+* Free-tier Neon Postgres project at `ep-lively-sun-an9d71ul.c-6.us-east-1.aws.neon.tech` (db `neondb`, role `neondb_owner`). pgvector 0.8.0 enabled on the default database 2026-04-25. **Leave it running.**
+
+Both passwords are in `.env`, *not* in this doc — agents working on the codebase load them via `source .env` rather than handling the credentials manually.
 
 **AuraDB-specific gotcha already caught:** the database name is the instance ID, not the canonical `"neo4j"`. Production users on AuraDB must pass `database=<instance_id>` to `Neo4jGraphStore` / `Neo4jVectorStore`. Test fixtures honour `TRELLIS_TEST_NEO4J_DATABASE` (default `"neo4j"`).
 
@@ -67,6 +72,7 @@ After loading, `pytest tests/unit/stores/test_neo4j_*.py` runs the live suites a
 | **B.1 + B.2** — Graph ontology Phase 1 + 2 (canonical names in extractors + alias-bucketing in retrieval) | `src/trellis/schemas/well_known.py`, `src/trellis/extract/json_rules.py`, `src/trellis/extract/llm.py`, `src/trellis/retrieve/strategies.py` + ~150 lines of new tests. Canonicalises every emitted draft, stamps `schema_alignment` URIs on canonical types, and routes alias-expanding `GraphSearch` queries through the canonical DSL `in` filter so a query for `"Person"` buckets alongside legacy `"person"` rows. |
 | **E.2** — Uvicorn log unification | `src/trellis_api/logging.py`. `configure_logging` now installs a `structlog.stdlib.ProcessorFormatter` on the root handler and clears uvicorn's per-logger handlers so `uvicorn`, `uvicorn.error`, and `uvicorn.access` all render through the shared structlog processor chain. Stdlib `extra={...}` kwargs are promoted via `ExtraAdder`. JSON-mode containers see exactly one log shape per line. |
 | **E.3** — Fail-fast config validation | `src/trellis/stores/registry.py` — new `RegistryValidationError` + `StoreRegistry.validate()` walks every (or a subset of) store_type, instantiates each, and aggregates errors into one multi-line message so an operator sees every misconfiguration at once. `src/trellis_api/app.py` lifespan calls `validate()` after construction so missing DSNs, unset S3 buckets, and plugin-import failures crash startup before uvicorn accepts requests. |
+| **A.2** — pgvector + Postgres live tests against Neon | `src/trellis/stores/pgvector/store.py` (latent two-bug fix surfaced by first live run), `tests/unit/stores/test_postgres_stores.py` (stale `Trace(...)` fixtures missing the now-required `context` field). Provisioned a Neon free-tier project (pgvector 0.8.0) and ran the full PG-gated suite: 14 PG store + 13 pgvector store + 11 PG-graph contract + 25 pgvector contract = 63 tests, all green. |
 
 ADRs to read for full context:
 
@@ -105,15 +111,23 @@ Each entry below is **fully scoped**: scope, files to touch, contract for "done"
 * `tests/integration/conftest.py` (~160 lines) — `registry` + `executor` fixtures, Neo4j wipe helper, vector-index constants.
 * `tests/integration/test_neo4j_e2e.py` (~330 lines) — 6 tests covering the four bullet points above plus an event-log audit assertion.
 
-#### A.2 — pgvector + Postgres live test
+#### A.2 — pgvector + Postgres live test ✅ landed 2026-04-25
 
-**Scope:** spin up Postgres locally (or against an existing instance), run the pgvector + Postgres contract subclasses + the Postgres graph tests. Same shape as the AuraDB run.
+**What landed:** Provisioned a Neon free-tier Postgres project (pgvector 0.8.0 preinstalled), enabled `vector` on the default database, set `TRELLIS_TEST_PG_DSN` in `.env`, and ran the full PG-gated test suite. With the env var set, `pytest tests/unit/stores/contracts/` reports **166 passed / 0 Postgres skips** (the 2 remaining skips are LanceDB / Neo4j *optional dep* skips — unrelated). The four PG-gated suites are 100% green: 14 PG store + 13 pgvector store + 11 PG-graph contract + 25 pgvector contract = 63 tests.
 
-**Files to touch:** none — the env-gated subclasses already exist.
+**Drift surfaced + fixed (2 bugs that had been latent since pgvector was first written):**
 
-**Done when:** `pytest tests/unit/stores/contracts/ -v` reports 0 skips with `TRELLIS_TEST_PG_DSN` set.
+1. `PgVectorStore.upsert/query` passed Python `list` values into `INSERT ... %s::vector`. `pgvector.psycopg.register_vector` only registers a Dumper for `numpy.ndarray`, so plain lists were sent as Postgres `smallint[]` arrays and the cast to `vector` failed with `cannot cast type smallint[] to vector`. Fix: format the vector as the pgvector text literal `'[1.0,0.0,0.0]'` before binding, so the explicit `::vector` cast does text→vector. New `_format_vector()` helper at module scope keeps it in one place.
+2. `PgVectorStore.query` built params as `[vec, vec, top_k]` and inserted filter JSONs at index `-1`. With one filter, the resulting list `[vec, vec, json, top_k]` did not match the SQL placeholder order — the `ORDER BY embedding <=> %s::vector` placeholder received the JSON instead of a vector. Fix: build params positionally as `[vec, *filter_params, vec, top_k]` so the order is unambiguous.
 
-**Gating:** access to a Postgres instance with pgvector extension installed. **Not yet attempted in this codebase.**
+**Trace test fixtures updated:** `tests/unit/stores/test_postgres_stores.py::TestPostgresTraceStore._make_trace` was constructing `Trace(...)` without the now-required `context: TraceContext` field — a stale fixture that had never been live-run. Added `context=TraceContext(agent_id="agent-1", domain="platform")` to match the SQLite trace tests.
+
+**Files touched:**
+* `src/trellis/stores/pgvector/store.py` — +12 lines (`_format_vector` helper + 3 call-site updates) + reordered `params` construction in `query()`
+* `tests/unit/stores/test_postgres_stores.py` — +2 lines on the trace fixture
+* `.env` — added `TRELLIS_TEST_PG_DSN`
+
+**Gotcha logged:** Neon ships pgvector binaries preinstalled but the extension is *not* enabled on a fresh database. Run `CREATE EXTENSION IF NOT EXISTS vector;` once via the Neon SQL Editor or via psycopg before pointing tests at the DSN.
 
 ---
 
@@ -252,7 +266,7 @@ If picking up cold, work the list top-down. Each item's gating is satisfied by t
 | 1 | **A.1** End-to-end Neo4j integration test | ✅ Landed 2026-04-25 | Validates the integration the ADRs assume works. Closes the loop on the AuraDB live tests. |
 | 2 | **B.1 + B.2** Ontology Phase 1 + 2 (extractor canonical names + retrieval bucketing) | ✅ Landed 2026-04-25 | Small, well-scoped, no gating delays. Makes agent-facing graph queries less fragile. |
 | 3 | **E.2 + E.3** Uvicorn log unification + fail-fast config validation | ✅ Landed 2026-04-25 | Operational hygiene before the AWS dry-run. ~110 lines combined. |
-| 4 | **A.2** pgvector + Postgres live tests | Ready when Postgres available | Drift surface validated for the second cloud backend. |
+| 4 | **A.2** pgvector + Postgres live tests | ✅ Landed 2026-04-25 | Drift surface validated for the second cloud backend; Neon free tier provisioned. |
 | 5 | **E.1 + E.4** Docker compose smoke test + AWS dry-run | Need infra access | Ships the deployment story end-to-end. |
 | 6 | **B.3** Provenance columns | Wait for signal | Real cost; speculative without a consumer. |
 | 7 | **C.1** Vector DSL Phase 4 | Wait for signal | No drift surfaced; speculative. |
@@ -272,8 +286,9 @@ Read in order:
 
 Before writing code:
 
-* Run `pytest tests/unit/ -q` → confirm 653 passing baseline.
+* Run `pytest tests/unit/ -q` → confirm 653 passing baseline (no env vars, default backends only). With `.env` loaded *and* the full extras installed (`uv pip install -e ".[dev,cloud,vectors,neo4j,llm-openai,llm-anthropic]"`), the same command should report **2347 passed / 0 skipped**.
 * If you're touching Neo4j: `set -a && source .env && set +a` then run `pytest tests/unit/stores/test_neo4j_*.py tests/unit/stores/contracts/test_neo4j_graph_contract.py -q` to confirm 110 live-tests still pass against AuraDB. If `.env` is missing, ask the user — credentials are in their local copy.
+* If you're touching Postgres or pgvector: same `.env` load, then `pytest tests/unit/stores/test_postgres_stores.py tests/unit/stores/test_pgvector.py tests/unit/stores/contracts/test_postgres_graph_contract.py tests/unit/stores/contracts/test_pgvector_contract.py -q` should report 63 passed / 0 skipped against Neon.
 * Read [`adr-terminology.md`](./adr-terminology.md) §2 if any term feels ambiguous.
 
 When picking up a phase:
@@ -331,6 +346,8 @@ src/trellis/stores/base/graph.py        # execute_node_query / execute_subgraph_
 src/trellis/stores/sqlite/graph.py      # Phase 2 compiler
 src/trellis/stores/postgres/graph.py    # Phase 2 compiler (JSONB containment)
 src/trellis/stores/neo4j/graph.py       # Phase 2 compiler (Cypher + Python-side property filters)
+src/trellis/stores/pgvector/store.py    # A.2 — list→vector adapter + param-order fix
+tests/unit/stores/test_postgres_stores.py  # A.2 — TraceContext field on _make_trace
 docs/agent-guide/schemas.md             # canonical name tables
 docs/design/adr-terminology.md          # §2.5 graph ontology
 docs/design/adr-plugin-contract.md      # contract test suite + DSL requirement
