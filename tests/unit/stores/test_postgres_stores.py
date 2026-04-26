@@ -59,12 +59,13 @@ class TestPostgresTraceStore:
         s.close()
 
     def _make_trace(self) -> Trace:  # noqa: F821
-        from trellis.schemas.trace import Trace
+        from trellis.schemas.trace import Trace, TraceContext
 
         return Trace(
             source="human",
             intent="test intent",
             steps=[],
+            context=TraceContext(agent_id="agent-1", domain="platform"),
         )
 
     def test_append_and_get(self, store) -> None:

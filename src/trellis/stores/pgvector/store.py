@@ -26,6 +26,14 @@ except ImportError:
     HAS_PGVECTOR = False
 
 
+def _format_vector(vec: list[float]) -> str:
+    # pgvector's psycopg dumper only adapts numpy.ndarray; a plain Python list
+    # gets sent as a Postgres array (e.g. smallint[]) and the ::vector cast
+    # then fails with "cannot cast smallint[] to vector". Formatting as the
+    # vector text literal lets the cast succeed without pulling in numpy.
+    return "[" + ",".join(repr(float(x)) for x in vec) + "]"
+
+
 class PgVectorStore(VectorStore):
     """PostgreSQL + pgvector backed vector store with HNSW indexing.
 
@@ -115,7 +123,7 @@ class PgVectorStore(VectorStore):
                 DO UPDATE SET embedding  = EXCLUDED.embedding,
                               metadata   = EXCLUDED.metadata
                 """,
-                (item_id, vector, meta_json),
+                (item_id, _format_vector(vector), meta_json),
             )
         self.conn.commit()
         logger.debug("vector_upserted", item_id=item_id, dimensions=len(vector))
@@ -127,12 +135,11 @@ class PgVectorStore(VectorStore):
         filters: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         where_clauses: list[str] = []
-        params: list[Any] = [vector, vector, top_k]
-
+        filter_params: list[Any] = []
         if filters:
             for key, value in filters.items():
                 where_clauses.append("metadata @> %s::jsonb")
-                params.insert(-1, json.dumps({key: value}))
+                filter_params.append(json.dumps({key: value}))
 
         where_sql = ""
         if where_clauses:
@@ -147,6 +154,11 @@ class PgVectorStore(VectorStore):
             ORDER BY embedding <=> %s::vector
             LIMIT %s
         """
+
+        formatted = _format_vector(vector)
+        # Param order must match placeholder order: SELECT vector, then filter
+        # JSONs (in WHERE), then ORDER BY vector, then LIMIT.
+        params: list[Any] = [formatted, *filter_params, formatted, top_k]
 
         with self.conn.cursor() as cur:
             cur.execute(sql, params)
