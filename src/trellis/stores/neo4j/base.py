@@ -57,8 +57,15 @@ class Neo4jSessionRunner:
         with self._driver.session(database=self._database) as session:
             return session.execute_read(lambda tx: tx.run(cypher, **params).single())
 
-    def _run_read_list(self, cypher: str, **params: Any) -> list[Any]:
-        """Run a read transaction and return all rows as a list."""
+    def _run_read_list(self, cypher: str, **params: Any) -> Any:
+        """Run a read transaction and return all rows as a list.
+
+        Returns ``Any`` rather than ``list[Any]`` because the ``neo4j``
+        package is an optional extra — without it installed, mypy types
+        ``Driver`` and ``Session`` as ``Any`` and ``warn_return_any``
+        flags ``list[Any]`` annotations on values that flow through
+        them. Callers iterate the result, so the precise type is moot.
+        """
         with self._driver.session(database=self._database) as session:
             return session.execute_read(lambda tx: list(tx.run(cypher, **params)))
 
