@@ -1,7 +1,9 @@
 # Implementation Roadmap
 
-**Last updated:** 2026-04-25 (late evening — A.1, A.2, B.1, B.2, E.2, E.3 landed)
+**Last updated:** 2026-04-25 (late evening — A.1, A.2, B.1, B.2, E.2, E.3 landed; main consolidated; Neo4j hardening plan opened)
 **Purpose:** Single-page hand-off for any agent (fresh or returning) picking up Trellis implementation work. Self-contained. Read this top-to-bottom before touching code.
+
+> **Picking up Neo4j-specific work?** [`plan-neo4j-hardening.md`](./plan-neo4j-hardening.md) is the active plan for making Neo4j a credible blessed default for both local and cloud (Phase 1 = lifecycle / validate / vector-index hardening; Phase 2 = combined-plane config + onboarding docs + migration tool). Read it instead of jumping straight into this doc.
 
 ---
 
