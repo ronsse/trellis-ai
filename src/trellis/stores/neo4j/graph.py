@@ -458,13 +458,6 @@ class Neo4jGraphStore(Neo4jSessionRunner, GraphStore):
         RETURN a.alias_id AS alias_id
         """
         self._run_write(cypher, alias_id=alias_id, now=now, new_props=new_props)
-        logger.debug(
-            "alias_upserted",
-            alias_id=alias_id,
-            entity_id=entity_id,
-            source_system=source_system,
-            raw_id=raw_id,
-        )
         return alias_id
 
     def resolve_alias(
@@ -581,11 +574,9 @@ class Neo4jGraphStore(Neo4jSessionRunner, GraphStore):
         # only sees the prior edge once per query — duplicates would
         # all coalesce to a fresh ``candidate_edge_id`` and create
         # distinct current versions for one logical edge.
-        for i, spec in enumerate(edges):
-            for key in ("source_id", "target_id", "edge_type"):
-                if key not in spec or spec[key] is None:
-                    msg = f"upsert_edges_bulk[{i}]: missing required key {key!r}"
-                    raise ValueError(msg)
+        self._validate_bulk_required_keys(
+            edges, ("source_id", "target_id", "edge_type"), "upsert_edges_bulk"
+        )
         self._pre_validate_edges_bulk(edges)
 
         # Pre-generate candidate edge_ids so coalesce in Cypher can pick
