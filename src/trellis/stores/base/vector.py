@@ -60,6 +60,26 @@ class VectorStore(ABC):
                 two rows in the batch share an ``item_id``.
         """
 
+    @staticmethod
+    def _validate_bulk_required_keys(
+        items: list[dict[str, Any]],
+        required_keys: tuple[str, ...],
+        method_name: str,
+    ) -> None:
+        """Raise ``ValueError`` on the first row missing any required key.
+
+        A key is "missing" if it's absent OR present with ``None`` —
+        bulk callers must ship every required field with a real value
+        since downstream writes have NOT NULL constraints. Errors are
+        tagged with the offending row index so callers can map them
+        back to input.
+        """
+        for i, spec in enumerate(items):
+            for key in required_keys:
+                if key not in spec or spec[key] is None:
+                    msg = f"{method_name}[{i}]: missing required key {key!r}"
+                    raise ValueError(msg)
+
     def _pre_validate_bulk_item_ids(self, items: list[dict[str, Any]]) -> None:
         """Reject duplicate ``item_id`` values in a bulk batch.
 

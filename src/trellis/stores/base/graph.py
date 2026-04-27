@@ -476,6 +476,26 @@ class GraphStore(ABC):
     # Bulk-input pre-validation
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _validate_bulk_required_keys(
+        items: list[dict[str, Any]],
+        required_keys: tuple[str, ...],
+        method_name: str,
+    ) -> None:
+        """Raise ``ValueError`` on the first row missing any required key.
+
+        A key is "missing" if it's absent OR present with ``None`` —
+        bulk callers must ship every required field with a real value
+        since downstream writes have NOT NULL constraints. Errors are
+        tagged with the offending row index so callers can map them
+        back to input.
+        """
+        for i, spec in enumerate(items):
+            for key in required_keys:
+                if key not in spec or spec[key] is None:
+                    msg = f"{method_name}[{i}]: missing required key {key!r}"
+                    raise ValueError(msg)
+
     def _pre_validate_nodes_bulk(self, nodes: list[dict[str, Any]]) -> None:
         """Run every per-row validator against ``nodes`` before any write.
 
@@ -497,10 +517,10 @@ class GraphStore(ABC):
         """
         if not nodes:
             return
+        self._validate_bulk_required_keys(
+            nodes, ("node_type",), "upsert_nodes_bulk"
+        )
         for i, spec in enumerate(nodes):
-            if "node_type" not in spec:
-                msg = f"upsert_nodes_bulk[{i}]: missing required key 'node_type'"
-                raise ValueError(msg)
             try:
                 validate_node_role_args(
                     spec.get("node_role", "semantic"),

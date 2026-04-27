@@ -531,13 +531,6 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
             ),
         )
         self._conn.commit()
-        logger.debug(
-            "alias_upserted",
-            alias_id=alias_id,
-            entity_id=entity_id,
-            source_system=source_system,
-            raw_id=raw_id,
-        )
         return str(alias_id)
 
     def resolve_alias(
@@ -672,11 +665,9 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
         # single-row ``upsert_edge`` doesn't validate endpoints (it
         # happily inserts dangling edges); the bulk method tightens
         # that contract so callers can rely on it across backends.
-        for i, spec in enumerate(edges):
-            for key in ("source_id", "target_id", "edge_type"):
-                if key not in spec or spec[key] is None:
-                    msg = f"upsert_edges_bulk[{i}]: missing required key {key!r}"
-                    raise ValueError(msg)
+        self._validate_bulk_required_keys(
+            edges, ("source_id", "target_id", "edge_type"), "upsert_edges_bulk"
+        )
         self._pre_validate_edges_bulk(edges)
         unique_endpoints = {spec["source_id"] for spec in edges} | {
             spec["target_id"] for spec in edges
