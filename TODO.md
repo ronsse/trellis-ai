@@ -15,6 +15,38 @@
   - **Phase 3** — `adr-plugin-contract.md` extended with "Required: implement the canonical DSL" subsection. Plugin backends must override `execute_*` and pass DSL contract tests; default ABC routing is migration-only.
   - **Validation:** SQLite passes 49/49 graph + 25/25 vector contracts. LanceDB passes 25/25 vector. Postgres, Neo4j, pgvector subclasses ready and skip cleanly until env vars set. Total `pytest tests/unit/stores/ tests/unit/schemas/`: **653 passed, 118 skipped, mypy clean across 213 files.**
 
+## Real-data validation sequence — next blocker for "agent-improvement" data (2026-04-26)
+
+**Goal:** produce evidence that the system actually behaves well on realistic-shaped workloads. Today every test is a unit test or a small integration test; nothing demonstrates the self-learning loop converging on a controlled corpus, and nothing measures retrieval quality at scale. Closing that gap is the next foundation-level prerequisite before any "this got X% better" claim — and it's also what generates the data needed to talk publicly about the project's benefits.
+
+**Plan docs (still on the eval branch — not yet merged into `main`):**
+* [`docs/design/plan-evaluation-strategy.md`](https://github.com/ronsse/trellis-ai/blob/eval/use-bulk-upsert/docs/design/plan-evaluation-strategy.md) — full strategy: directory layout, scenario menu, what each one measures, how it ties back to the Phase-3 deferred items in the hardening plan.
+* [`docs/design/plan-neo4j-hardening.md`](https://github.com/ronsse/trellis-ai/blob/eval/use-bulk-upsert/docs/design/plan-neo4j-hardening.md) §5 — the Phase-3 deferred items the eval scenarios will inform. Most of them will turn out to not be needed once 5.3 produces real numbers — don't pre-build any of them.
+
+These docs land with PR #29 below and become the authoritative reference. Until then they're only readable on the `eval/use-bulk-upsert` branch.
+
+**The "dataset":** there is no committed dataset binary by design. The eval framework uses **two deterministic seeded synthetic generators** that live on the eval branch — [`eval/generators/graph_generator.py`](https://github.com/ronsse/trellis-ai/blob/eval/use-bulk-upsert/eval/generators/graph_generator.py) (used by 5.1 + 5.3) and [`eval/generators/trace_generator.py`](https://github.com/ronsse/trellis-ai/blob/eval/use-bulk-upsert/eval/generators/trace_generator.py) (used by 5.2). Same seed → byte-identical output. Small fixtures commit to `eval/datasets/` if and when they're needed; large corpora are always generated, never committed. That decision is locked in §3 of the strategy doc; revisit only if a design partner wants to run eval against captured production traces.
+
+### Land in this order — eval framework + scenarios (all unmerged, all written)
+
+- [ ] **#29 — Eval Phase 1: harness skeleton.** [`eval/runner.py`](https://github.com/ronsse/trellis-ai/pull/29) + `_example` scenario + `pyproject.toml` exclusion of `eval/` from sdist + smoke test in `tests/unit/eval/`. Unblocks every later scenario PR. ~1 day to review/rebase against post-#41/#44 main.
+- [ ] **#30 — Scenario 5.1 multi-backend equivalence.** Same input → SQLite + Postgres + Neo4j → diff results. Validates that the canonical DSL Phase-2 compilers don't drift between backends in practice. First moment with real evidence the "blessed Neo4j" claim doesn't hide silent drift from Postgres-alternative users.
+- [ ] **#31 — Scenario 5.2 synthetic traces e2e.** First retrieval-quality numbers on synthetic-but-realistic data. Three domains (software engineering, data pipeline ops, customer support); deterministic ground-truth labels per trace.
+- [ ] **#32 — Scenario 5.3 populated-graph performance.** 10-50K node graph, p50/p95/p99 latency per query type per backend, recall@10 vs brute-force baseline, EXPLAIN/PROFILE plans on slowest queries. Generates the workload signal that informs the Phase-3 deferred list.
+- [ ] **#36 — Switch eval ingest to `upsert_*_bulk`.** Trivial after #34/#37 landed; depends on #29-32. ~50 LOC.
+
+### Then write — scenario 5.4 (the "agent improvement" curve)
+
+- [ ] **Scenario 5.4 — agent loop convergence (NOT WRITTEN, ~3 days, ~800 LOC per the strategy doc).** Synthetic agent runs N rounds of: ask for context → use it (deterministic success/failure based on whether ground-truth entities are in the pack) → record feedback. Track per-round: pack quality score, fraction of useful items, advisory generation + suppression events, parameter changes from the rule tuner. Plot score-over-rounds. **This is the scenario that produces the curve you can show people** — it's the first end-to-end exercise of the dual-loop feedback system on a controlled corpus where ground truth is known by construction. Without it, the "self-learning" claim has no evidence behind it; with it, you have a chart. Depends on #31's generators landing first.
+
+### Smaller foundation gaps surfaced 2026-04-26
+
+These are loose ends from the audit that ran with this section. None block the eval sequence above, but each is worth tracking so it doesn't get lost:
+
+- [ ] **`Operation.TRACE_INGEST` exists in the registry but has no handler.** Noted in `implementation-roadmap.md` A.1's gotcha list. Traces still go straight to `TraceStore.append` rather than flowing through `MutationExecutor`. Loose end — production data flow uses `ENTITY_CREATE` / `LINK_CREATE` instead, which works, so this isn't blocking — but it's a lie in the operation registry that will trip somebody eventually.
+- [ ] **No eval scenario exercises a real LLM yet.** `EnrichmentService` and the OpenAI/Anthropic providers have unit tests with mocked responses, but no end-to-end run with a live API has been measured for cost or quality on a synthetic corpus. To say anything credible about benefits, this needs to happen at least once. Budget ~$10-50 for 100 agent rounds depending on model. Lands naturally as part of running 5.4 against a real provider.
+- [ ] **No baseline / regression discipline yet.** Eval plan §7.1 explicitly defers committed baselines and regression gates until after 5.1-5.4 are usable manually — that's the right call (codifying earlier locks in the wrong shape). But for a "this got X% better" story we need this layer. Pick it up after 5.4 has run cleanly at least three times so we have variance bounds to set thresholds against.
+
 ## Cloud deployment — POC follow-ups
 
 - [ ] **Docker + compose smoke test** — once Docker is available on the dev host, run `docker compose up --build` and verify `/healthz`, `/readyz`, `/api/version`, `/ui/`, plus `trellis demo load` against the containerized API. Proves the Postgres+pgvector path works under the same Dockerfile ECS will use. Runbook: `docs/deployment/local-compose.md`.
