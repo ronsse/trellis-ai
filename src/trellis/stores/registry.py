@@ -1213,10 +1213,43 @@ class StoreRegistry:
         return None
 
     def close(self) -> None:
-        """Close all cached stores."""
+        """Close all cached stores.
+
+        Idempotent — second + later calls find an empty cache and no-op.
+        Safe to call from a shutdown handler that may fire twice.
+        Failures in any single ``close()`` are logged and skipped so a
+        misbehaving backend cannot block cleanup of the rest.
+
+        Lifecycle:
+
+        * The FastAPI lifespan in :mod:`trellis_api.app` calls
+          ``close()`` automatically on uvicorn shutdown.
+        * Direct callers (CLI subcommands, tests, SDK local mode) should
+          use the context-manager form to get the same guarantee::
+
+              with StoreRegistry.from_config_dir() as registry:
+                  ...
+
+          Without the ``with`` block, file descriptors live until
+          process exit. Fine for short-lived CLI invocations; leaks
+          across long-running processes that hold a registry.
+        """
         for store in self._cache.values():
             try:
                 store.close()
             except Exception:
                 logger.warning("store_close_failed", store=type(store).__name__)
         self._cache.clear()
+
+    def __enter__(self) -> StoreRegistry:
+        """Enable use as a context manager — see :meth:`close`."""
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: object,
+    ) -> None:
+        """Close on context-manager exit, even when an exception escapes the body."""
+        self.close()
