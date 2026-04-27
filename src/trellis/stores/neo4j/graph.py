@@ -447,13 +447,6 @@ class Neo4jGraphStore(Neo4jSessionRunner, GraphStore):
         RETURN a.alias_id AS alias_id
         """
         self._run_write(cypher, alias_id=alias_id, now=now, new_props=new_props)
-        logger.debug(
-            "alias_upserted",
-            alias_id=alias_id,
-            entity_id=entity_id,
-            source_system=source_system,
-            raw_id=raw_id,
-        )
         return alias_id
 
     def resolve_alias(

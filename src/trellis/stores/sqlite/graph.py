@@ -531,13 +531,6 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
             ),
         )
         self._conn.commit()
-        logger.debug(
-            "alias_upserted",
-            alias_id=alias_id,
-            entity_id=entity_id,
-            source_system=source_system,
-            raw_id=raw_id,
-        )
         return str(alias_id)
 
     def resolve_alias(
