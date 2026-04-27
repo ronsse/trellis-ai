@@ -6,6 +6,8 @@ from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
+from trellis.stores.base._bulk_validation import validate_bulk_required_keys
+
 if TYPE_CHECKING:
     from trellis.schemas.graph import CompactionReport
     from trellis.stores.base.event_log import EventLog
@@ -497,10 +499,8 @@ class GraphStore(ABC):
         """
         if not nodes:
             return
+        validate_bulk_required_keys(nodes, ("node_type",), "upsert_nodes_bulk")
         for i, spec in enumerate(nodes):
-            if "node_type" not in spec:
-                msg = f"upsert_nodes_bulk[{i}]: missing required key 'node_type'"
-                raise ValueError(msg)
             try:
                 validate_node_role_args(
                     spec.get("node_role", "semantic"),

@@ -7,6 +7,7 @@ from typing import Any
 
 import structlog
 
+from trellis.stores.base._bulk_validation import validate_bulk_required_keys
 from trellis.stores.base.vector import VectorStore
 
 logger = structlog.get_logger(__name__)
@@ -134,11 +135,7 @@ class PgVectorStore(VectorStore):
         # fields surface as ValueError-with-index instead of KeyError
         # mid-loop, then rejects within-batch duplicate item_ids so
         # the contract matches the network-bound backends.
-        for i, spec in enumerate(items):
-            for key in ("item_id", "vector"):
-                if key not in spec or spec[key] is None:
-                    msg = f"upsert_bulk[{i}]: missing required key {key!r}"
-                    raise ValueError(msg)
+        validate_bulk_required_keys(items, ("item_id", "vector"), "upsert_bulk")
         self._pre_validate_bulk_item_ids(items)
         for spec in items:
             self.upsert(

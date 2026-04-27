@@ -29,6 +29,7 @@ import structlog
 from trellis.core.base import utc_now
 from trellis.core.ids import generate_ulid
 from trellis.schemas.graph import CompactionReport
+from trellis.stores.base._bulk_validation import validate_bulk_required_keys
 from trellis.stores.base.event_log import EventLog, EventType
 from trellis.stores.base.graph import (
     GraphStore,
@@ -570,11 +571,9 @@ class Neo4jGraphStore(Neo4jSessionRunner, GraphStore):
         # only sees the prior edge once — duplicates would all auto-
         # assign their own edge_id and create distinct current versions
         # for one logical edge.
-        for i, spec in enumerate(edges):
-            for key in ("source_id", "target_id", "edge_type"):
-                if key not in spec or spec[key] is None:
-                    msg = f"upsert_edges_bulk[{i}]: missing required key {key!r}"
-                    raise ValueError(msg)
+        validate_bulk_required_keys(
+            edges, ("source_id", "target_id", "edge_type"), "upsert_edges_bulk"
+        )
         self._pre_validate_edges_bulk(edges)
 
         # Round trip 1 — validate that every source + target has a

@@ -8,6 +8,7 @@ from typing import Any
 
 import structlog
 
+from trellis.stores.base._bulk_validation import validate_bulk_required_keys
 from trellis.stores.base.vector import VectorStore
 
 logger = structlog.get_logger(__name__)
@@ -152,11 +153,7 @@ class LanceVectorStore(VectorStore):
         # doesn't leave a half-written batch on disk. Within-batch
         # duplicate item_ids are rejected because merge_insert's
         # behavior with duplicate source keys is implementation-defined.
-        for i, spec in enumerate(items):
-            for key in ("item_id", "vector"):
-                if key not in spec or spec[key] is None:
-                    msg = f"upsert_bulk[{i}]: missing required key {key!r}"
-                    raise ValueError(msg)
+        validate_bulk_required_keys(items, ("item_id", "vector"), "upsert_bulk")
         self._pre_validate_bulk_item_ids(items)
 
         dimensions = len(items[0]["vector"])

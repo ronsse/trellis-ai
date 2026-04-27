@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from trellis.stores.base._bulk_validation import validate_bulk_required_keys
 from trellis.stores.base.vector import VectorStore
 from trellis.stores.neo4j.base import (
     Neo4jSessionRunner,
@@ -158,12 +159,9 @@ class Neo4jVectorStore(Neo4jSessionRunner, VectorStore):
         # duplicate item_ids are rejected because UNWIND would fire SET
         # twice non-deterministically (last-write-wins by Neo4j
         # iteration order).
+        validate_bulk_required_keys(items, ("item_id", "vector"), "upsert_bulk")
         rows: list[dict[str, Any]] = []
         for i, spec in enumerate(items):
-            for key in ("item_id", "vector"):
-                if key not in spec or spec[key] is None:
-                    msg = f"upsert_bulk[{i}]: missing required key {key!r}"
-                    raise ValueError(msg)
             vector = spec["vector"]
             if len(vector) != self._dimensions:
                 msg = (

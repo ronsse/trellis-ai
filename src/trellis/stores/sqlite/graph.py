@@ -15,6 +15,7 @@ import structlog
 from trellis.core.base import utc_now
 from trellis.core.ids import generate_ulid
 from trellis.schemas.graph import CompactionReport
+from trellis.stores.base._bulk_validation import validate_bulk_required_keys
 from trellis.stores.base.event_log import EventLog, EventType
 from trellis.stores.base.graph import (
     GraphStore,
@@ -672,11 +673,9 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
         # single-row ``upsert_edge`` doesn't validate endpoints (it
         # happily inserts dangling edges); the bulk method tightens
         # that contract so callers can rely on it across backends.
-        for i, spec in enumerate(edges):
-            for key in ("source_id", "target_id", "edge_type"):
-                if key not in spec or spec[key] is None:
-                    msg = f"upsert_edges_bulk[{i}]: missing required key {key!r}"
-                    raise ValueError(msg)
+        validate_bulk_required_keys(
+            edges, ("source_id", "target_id", "edge_type"), "upsert_edges_bulk"
+        )
         self._pre_validate_edges_bulk(edges)
         unique_endpoints = {spec["source_id"] for spec in edges} | {
             spec["target_id"] for spec in edges
