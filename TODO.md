@@ -19,11 +19,11 @@
 
 **Goal:** produce evidence that the system actually behaves well on realistic-shaped workloads. Today every test is a unit test or a small integration test; nothing demonstrates the self-learning loop converging on a controlled corpus, and nothing measures retrieval quality at scale. Closing that gap is the next foundation-level prerequisite before any "this got X% better" claim — and it's also what generates the data needed to talk publicly about the project's benefits.
 
-**Plan docs (still on the eval branch — not yet merged into `main`):**
-* [`docs/design/plan-evaluation-strategy.md`](https://github.com/ronsse/trellis-ai/blob/eval/use-bulk-upsert/docs/design/plan-evaluation-strategy.md) — full strategy: directory layout, scenario menu, what each one measures, how it ties back to the Phase-3 deferred items in the hardening plan.
-* [`docs/design/plan-neo4j-hardening.md`](https://github.com/ronsse/trellis-ai/blob/eval/use-bulk-upsert/docs/design/plan-neo4j-hardening.md) §5 — the Phase-3 deferred items the eval scenarios will inform. Most of them will turn out to not be needed once 5.3 produces real numbers — don't pre-build any of them.
+**Plan docs (now on main):**
+* [`docs/design/plan-evaluation-strategy.md`](docs/design/plan-evaluation-strategy.md) — full strategy: directory layout, scenario menu, what each one measures, how it ties back to the Phase-3 deferred items in the hardening plan.
+* [`docs/design/plan-neo4j-hardening.md`](docs/design/plan-neo4j-hardening.md) §5 — Phase-3 deferred items the eval scenarios will inform. Most will turn out to not be needed once 5.3 produces real numbers — don't pre-build any.
 
-These docs land with PR #29 below and become the authoritative reference. Until then they're only readable on the `eval/use-bulk-upsert` branch.
+See "Deferred from the Neo4j hardening series" below for what we deliberately did NOT land from Phase 1+2 and what each defer costs in practice.
 
 **The "dataset":** there is no committed dataset binary by design. The eval framework uses **two deterministic seeded synthetic generators** that live on the eval branch — [`eval/generators/graph_generator.py`](https://github.com/ronsse/trellis-ai/blob/eval/use-bulk-upsert/eval/generators/graph_generator.py) (used by 5.1 + 5.3) and [`eval/generators/trace_generator.py`](https://github.com/ronsse/trellis-ai/blob/eval/use-bulk-upsert/eval/generators/trace_generator.py) (used by 5.2). Same seed → byte-identical output. Small fixtures commit to `eval/datasets/` if and when they're needed; large corpora are always generated, never committed. That decision is locked in §3 of the strategy doc; revisit only if a design partner wants to run eval against captured production traces.
 
@@ -46,6 +46,25 @@ These are loose ends from the audit that ran with this section. None block the e
 - [ ] **`Operation.TRACE_INGEST` exists in the registry but has no handler.** Noted in `implementation-roadmap.md` A.1's gotcha list. Traces still go straight to `TraceStore.append` rather than flowing through `MutationExecutor`. Loose end — production data flow uses `ENTITY_CREATE` / `LINK_CREATE` instead, which works, so this isn't blocking — but it's a lie in the operation registry that will trip somebody eventually.
 - [ ] **No eval scenario exercises a real LLM yet.** `EnrichmentService` and the OpenAI/Anthropic providers have unit tests with mocked responses, but no end-to-end run with a live API has been measured for cost or quality on a synthetic corpus. To say anything credible about benefits, this needs to happen at least once. Budget ~$10-50 for 100 agent rounds depending on model. Lands naturally as part of running 5.4 against a real provider.
 - [ ] **No baseline / regression discipline yet.** Eval plan §7.1 explicitly defers committed baselines and regression gates until after 5.1-5.4 are usable manually — that's the right call (codifying earlier locks in the wrong shape). But for a "this got X% better" story we need this layer. Pick it up after 5.4 has run cleanly at least three times so we have variance bounds to set thresholds against.
+
+## Deferred from the Neo4j hardening series — low priority until signal (2026-04-27)
+
+The hardening plan ([`plan-neo4j-hardening.md`](docs/design/plan-neo4j-hardening.md)) was written as a 7-PR series before the Neo4j round-trip / bulk-method work landed on main. By the time we tried to merge it the diffs were heavily stale (each PR conflicting with `Neo4jSessionRunner`, the bulk methods, and the simplified bulk helpers). We landed only the two items the eval harness actually needed:
+
+- **Phase 1.2 — `StoreRegistry.__enter__` / `__exit__`** (PR #46). Required by the eval runner.
+- **Phase 1.4 — vector-index ONLINE-wait after CREATE** (PR #47). Real production correctness fix; the A.1 e2e suite already paid the cost of working around this race.
+
+The remaining items below are deliberately deferred. **Each is real work the design covered, but none is blocking POC use.** Pick any of them up only when an actual production incident or design partner asks. The original PRs (#21, #23, #25, #26, #27) were closed but their branches + diffs remain accessible if/when the signal fires.
+
+- [ ] **Phase 1.1 — Driver lifecycle: `DriverConfig` + registry-side driver sharing.** Original PR #21 (closed). Today's main builds a fresh Neo4j `Driver` per store with no kwargs (no connect timeout, no pool size config). What's lost without this:
+  - **No connect timeout** — calls hang indefinitely on bad network instead of failing in 30s. **Highest "real" cost of any deferred item.** Easy to mitigate with `TRELLIS_TEST_NEO4J_URI` set to a reachable instance; bites in prod when AuraDB has a network blip.
+  - 2 connection pools instead of 1 when graph + vector point at the same Neo4j instance (each store builds its own driver). Doubles connection count.
+- [ ] **Phase 1.3 — Opt-in `validate()` Neo4j connectivity ping.** Original PR #23 (closed). Depends on Phase 1.1's driver cache. Without it, a misconfigured Neo4j surfaces on the first request rather than at startup. The lifespan still calls `validate()` for config errors; this would extend it to include network reachability behind a `TRELLIS_VALIDATE_CONNECTIVITY=1` env var.
+- [ ] **Phase 1.5 + 2.2 — `docs/deployment/neo4j-{local,auradb}.md`.** Original PR #25 (closed, ~330 doc lines). No Neo4j deployment docs on main today; operators deploy by reading the source. Defer until an external operator asks.
+- [ ] **Phase 2.1 — `docs/deployment/recommended-config.yaml`.** Original PR #26 (closed). Three blessed config shapes (local Neo4j+SQLite / cloud AuraDB+Postgres / Postgres-only). Some other docs already reference this file; cross-references are 404 until landed. Defer.
+- [ ] **Phase 2.3 — `trellis admin migrate-graph` CLI + `src/trellis/migrate/` package.** Original PR #27 (closed). Backend-agnostic graph migration via the public `GraphStore` API. Useful tool but no current consumer; defer until cross-backend migration is actually requested.
+
+The hardening plan ([`plan-neo4j-hardening.md`](docs/design/plan-neo4j-hardening.md)) on main remains the design reference — it documents what each item does and why. Re-extraction from the closed-PR branches is a single-day job per item when the signal fires.
 
 ## Cloud deployment — POC follow-ups
 
