@@ -19,7 +19,7 @@ from typing import Any
 import structlog
 
 from eval.generators.graph_generator import GeneratedGraph, generate_graph
-from eval.runner import Finding, ScenarioReport
+from eval.runner import Finding, ScenarioReport, ScenarioStatus
 from trellis.stores.registry import StoreRegistry
 
 logger = structlog.get_logger(__name__)
@@ -199,12 +199,17 @@ def _diff_pair(
     return findings, metrics
 
 
-def _build_backends(stack: ExitStack, sqlite_dir: Path) -> list[_BackendHandle]:
+def _build_backends(
+    stack: ExitStack, tmp_dir: Path, *, embedding_dim: int
+) -> list[_BackendHandle]:
     """Construct every backend handle the env can reach.
 
-    SQLite is always available (writes under ``sqlite_dir``). Postgres
+    SQLite is always available (writes under ``tmp_dir``). Postgres
     and Neo4j are only attempted if their credentials env vars are
-    present.
+    present. Construction failures are logged and treated as "backend
+    skipped" — these backends are env-gated optional, so any failure
+    (network, config, missing extra) drops out cleanly rather than
+    aborting the whole scenario.
     """
     handles: list[_BackendHandle] = []
 
@@ -221,7 +226,7 @@ def _build_backends(stack: ExitStack, sqlite_dir: Path) -> list[_BackendHandle]:
         },
     }
     sqlite_reg = stack.enter_context(
-        StoreRegistry(config=sqlite_config, stores_dir=sqlite_dir)
+        StoreRegistry(config=sqlite_config, stores_dir=tmp_dir)
     )
     handles.append(_BackendHandle(name="sqlite", registry=sqlite_reg))
 
@@ -235,7 +240,7 @@ def _build_backends(stack: ExitStack, sqlite_dir: Path) -> list[_BackendHandle]:
                 "vector": {
                     "backend": "pgvector",
                     "dsn": pg_dsn,
-                    "dimensions": DEFAULT_EMBEDDING_DIM,
+                    "dimensions": embedding_dim,
                 },
                 "document": {"backend": "sqlite"},
                 "blob": {"backend": "local"},
@@ -247,7 +252,7 @@ def _build_backends(stack: ExitStack, sqlite_dir: Path) -> list[_BackendHandle]:
         }
         try:
             pg_reg = stack.enter_context(
-                StoreRegistry(config=pg_config, stores_dir=sqlite_dir / "pg")
+                StoreRegistry(config=pg_config, stores_dir=tmp_dir / "pg")
             )
             handles.append(_BackendHandle(name="postgres", registry=pg_reg))
         except Exception as exc:
@@ -270,7 +275,7 @@ def _build_backends(stack: ExitStack, sqlite_dir: Path) -> list[_BackendHandle]:
                     "uri": neo4j_uri,
                     "user": neo4j_user,
                     "password": neo4j_password,
-                    "dimensions": DEFAULT_EMBEDDING_DIM,
+                    "dimensions": embedding_dim,
                 },
                 "document": {"backend": "sqlite"},
                 "blob": {"backend": "local"},
@@ -282,7 +287,7 @@ def _build_backends(stack: ExitStack, sqlite_dir: Path) -> list[_BackendHandle]:
         }
         try:
             neo4j_reg = stack.enter_context(
-                StoreRegistry(config=neo4j_config, stores_dir=sqlite_dir / "neo4j")
+                StoreRegistry(config=neo4j_config, stores_dir=tmp_dir / "neo4j")
             )
             handles.append(_BackendHandle(name="neo4j", registry=neo4j_reg))
         except Exception as exc:
@@ -323,8 +328,8 @@ def run(
     }
 
     with ExitStack() as stack:
-        sqlite_dir = Path(stack.enter_context(tempfile.TemporaryDirectory()))
-        handles = _build_backends(stack, sqlite_dir)
+        tmp_dir = Path(stack.enter_context(tempfile.TemporaryDirectory()))
+        handles = _build_backends(stack, tmp_dir, embedding_dim=embedding_dim)
 
         configured_backends = sorted(h.name for h in handles)
         metrics["backends_compared"] = float(len(handles))
@@ -368,6 +373,7 @@ def run(
 
     failed = any(f.severity == "fail" for f in findings)
     regressed = any(f.severity == "warn" for f in findings)
+    status: ScenarioStatus
     if failed:
         status = "fail"
     elif regressed:
@@ -375,17 +381,20 @@ def run(
     else:
         status = "pass"
 
-    decision = (
-        "Confirms (or denies) cross-backend equivalence on the canonical "
-        "DSL. Unblocks plan §5.1 deferred items: vector DSL Phase 4 "
-        "(canonical translation layer) and EXPLAIN-validated query plan "
-        "baseline. If status==pass with all three backends compared, "
-        "promote the relevant Phase 3 items to active. If status==fail, "
-        "the offending backend has a contract bug — fix before scaling."
-        if len(handles) >= MIN_BACKENDS_FOR_DIFF
-        else "Single-backend run only — re-run with TRELLIS_KNOWLEDGE_PG_DSN "
-        "and TRELLIS_NEO4J_URI set to get a real equivalence signal."
-    )
+    if len(handles) >= MIN_BACKENDS_FOR_DIFF:
+        decision = (
+            "Confirms (or denies) cross-backend equivalence on the canonical "
+            "DSL. Unblocks plan §5.1 deferred items: vector DSL Phase 4 "
+            "(canonical translation layer) and EXPLAIN-validated query plan "
+            "baseline. If status==pass with all three backends compared, "
+            "promote the relevant Phase 3 items to active. If status==fail, "
+            "the offending backend has a contract bug — fix before scaling."
+        )
+    else:
+        decision = (
+            "Single-backend run only — re-run with TRELLIS_KNOWLEDGE_PG_DSN "
+            "and TRELLIS_NEO4J_URI set to get a real equivalence signal."
+        )
 
     return ScenarioReport(
         name="multi_backend_equivalence",
