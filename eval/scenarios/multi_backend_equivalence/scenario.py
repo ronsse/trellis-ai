@@ -281,22 +281,28 @@ def _build_backends(
     neo4j_uri = os.environ.get("TRELLIS_NEO4J_URI")
     neo4j_user = os.environ.get("TRELLIS_NEO4J_USER")
     neo4j_password = os.environ.get("TRELLIS_NEO4J_PASSWORD")
+    neo4j_database = os.environ.get("TRELLIS_NEO4J_DATABASE")
     if neo4j_uri and neo4j_user and neo4j_password:
+        neo4j_graph: dict[str, Any] = {
+            "backend": "neo4j",
+            "uri": neo4j_uri,
+            "user": neo4j_user,
+            "password": neo4j_password,
+        }
+        neo4j_vector: dict[str, Any] = {
+            "backend": "neo4j",
+            "uri": neo4j_uri,
+            "user": neo4j_user,
+            "password": neo4j_password,
+            "dimensions": embedding_dim,
+        }
+        if neo4j_database:
+            neo4j_graph["database"] = neo4j_database
+            neo4j_vector["database"] = neo4j_database
         neo4j_config = {
             "knowledge": {
-                "graph": {
-                    "backend": "neo4j",
-                    "uri": neo4j_uri,
-                    "user": neo4j_user,
-                    "password": neo4j_password,
-                },
-                "vector": {
-                    "backend": "neo4j",
-                    "uri": neo4j_uri,
-                    "user": neo4j_user,
-                    "password": neo4j_password,
-                    "dimensions": embedding_dim,
-                },
+                "graph": neo4j_graph,
+                "vector": neo4j_vector,
                 "document": {"backend": "sqlite"},
                 "blob": {"backend": "local"},
             },
