@@ -135,19 +135,97 @@ Each item is something that, if missing the first time a stranger runs against N
 
 Do not pre-build any of these. Each lands cleanly when its signal arrives.
 
-| Item | Gate |
-|---|---|
-| HNSW vector-index params (`M`, `efConstruction`) tuning | Recall or latency complaint on real workload |
-| `upsert_node` UNWIND-based bulk path | N>1 ingest pattern observed in production traces |
-| EXPLAIN-validated query plan baseline | Slow query reported, OR populated graph with >100K nodes |
-| Self-hosted Neo4j HA / clustering runbook | Self-hosted Pro/Enterprise user asks |
-| Concurrent-write race active mitigation (Community) | Self-hosted Community user reports a duplicate row (1.5 Option A is the holding answer) |
-| Backup/restore docs (self-hosted) | Self-hosted user asks; AuraDB users have managed backups |
-| Provenance fields as first-class edge columns ([roadmap B.3](./implementation-roadmap.md)) | Policy or retrieval consumer wants to gate on these |
-| Vector DSL Phase 4 ([roadmap C.1](./implementation-roadmap.md)) | Vector contract drift surfaces, OR plugin author asks for strongly-typed vector filters |
-| Graph compaction automation ([TODO.md exploratory item](../../TODO.md)) | `as_of` query latency degradation observed |
-| Bookmark management for read-after-write consistency in Neo4j clusters | Multi-instance Neo4j deployment with consistency complaints |
-| Tracing / metrics emission (Prometheus, OTel) on Neo4j queries | Operator asks for query observability beyond structlog |
+> **Live-data run on 2026-04-27 fired three signals.** See §5.1 below for the
+> measured numbers and the now-actionable items.
+
+| Item | Gate | State |
+|---|---|---|
+| HNSW vector-index params (`M`, `efConstruction`) tuning | Recall or latency complaint on real workload | **🔥 Fired 2026-04-27** — recall@10 = 0.36 on AuraDB Free, default index params + quantization=on. See §5.1. |
+| `upsert_node` / `upsert_nodes_bulk` raw-UNWIND fast path | N>1 ingest pattern observed in production traces | **🔥 Fired 2026-04-27** — `upsert_nodes_bulk` ingests at ~47 nodes/sec on AuraDB Free with SCD-2 close-then-create cost; the loader's raw-UNWIND path on the same instance gets 3281 nodes/sec (~70× faster). See §5.1. |
+| `db.index.vector.queryNodes` → `SEARCH` migration | AuraDB / Neo4j 5.x emits deprecation warnings | **🔥 Fired 2026-04-27** — `Neo4jVectorStore.query()` calls a deprecated procedure; emitted on every vector query. See §5.1. |
+| EXPLAIN-validated query plan baseline | Slow query reported, OR populated graph with >100K nodes | Not fired — current latencies (subgraph p50 = 254ms on AuraDB Free) are dominated by network round-trip, not query plan |
+| Self-hosted Neo4j HA / clustering runbook | Self-hosted Pro/Enterprise user asks | Not fired |
+| Concurrent-write race active mitigation (Community) | Self-hosted Community user reports a duplicate row (1.5 Option A is the holding answer) | Not fired |
+| Backup/restore docs (self-hosted) | Self-hosted user asks; AuraDB users have managed backups | Not fired |
+| Provenance fields as first-class edge columns ([roadmap B.3](./implementation-roadmap.md)) | Policy or retrieval consumer wants to gate on these | Not fired |
+| Vector DSL Phase 4 ([roadmap C.1](./implementation-roadmap.md)) | Vector contract drift surfaces, OR plugin author asks for strongly-typed vector filters | Not fired |
+| Graph compaction automation ([TODO.md exploratory item](../../TODO.md)) | `as_of` query latency degradation observed | Not fired |
+| Bookmark management for read-after-write consistency in Neo4j clusters | Multi-instance Neo4j deployment with consistency complaints | Not fired |
+| Tracing / metrics emission (Prometheus, OTel) on Neo4j queries | Operator asks for query observability beyond structlog | Not fired |
+
+### 5.1 Live-data run signal — 2026-04-27
+
+First run of `eval/scenarios/populated_graph_performance` against AuraDB Free,
+1K nodes / 4K edges / 200 embeddings at dim=16. Status: `regress` (3 warn-level
+findings, all threshold-driven). The full report is in `eval/reports/` on the
+machine that ran it — the directory is gitignored (per
+[`plan-evaluation-strategy.md`](./plan-evaluation-strategy.md) §7.1, committed
+baselines are deferred until the scenarios have run cleanly several times).
+The numbers below are inlined here so this doc is self-contained.
+
+| Operation | SQLite (local) p50 / p95 / p99 (ms) | Neo4j (AuraDB Free) p50 / p95 / p99 (ms) |
+|---|---|---|
+| Entity lookup | 0.1 / 0.1 / 0.2 | 80.3 / 98.9 / 141.5 |
+| Type query | 1.6 / 1.9 / 1.9 | 89.9 / 111.7 / 119.2 |
+| Subgraph depth=2 | 2.7 / 3.0 / 3.0 | 254.0 / 317.0 / 351.2 |
+| Vector top-10 | 1.6 / 2.3 / 2.7 | 85.4 / 97.7 / 101.3 |
+| **Vector recall@10 (vs brute-force)** | **1.00** | **0.36** ⚠ |
+| Ingest nodes/sec (`upsert_nodes_bulk`) | 21.3 ⚠ | 46.6 ⚠ |
+| Ingest nodes/sec (raw UNWIND, loader script) | n/a | 3281 |
+
+**(a) HNSW recall = 0.36 on AuraDB Free.** AuraDB provisions vector indexes
+with `M=16, efConstruction=100, quantization=enabled` by default. With 200
+dim=16 embeddings, quantization-on collapses recall. Likely fixes:
+
+* Disable quantization for low-dim vectors: `OPTIONS {indexConfig: { 'vector.quantization.enabled': false }}`.
+* Pass tuned `M` / `efConstruction` (e.g., `M=32, efConstruction=200`) when
+  the producer asks for higher-recall behaviour.
+* Expose both as `Neo4jVectorStore` constructor kwargs flowing from registry
+  config — the existing API already accepts `index_name` / `dimensions`.
+
+**(b) `upsert_nodes_bulk` SCD-2 cost.** On the same AuraDB instance, the
+governed `upsert_nodes_bulk` path runs at ~47 nodes/sec; the loader's raw
+UNWIND path runs at ~3281 nodes/sec. The 70× gap is the role-immutability
+pre-fetch + close-old-version round trip + per-batch JSON property
+serialisation. Real fix surfaces:
+
+* A `bulk_load=True` mode that skips the close-old-version branch when the
+  caller asserts the rows are new (loader-shape workloads).
+* Or: batch the pre-fetch + write into a single Cypher with an
+  `OPTIONAL MATCH`-driven coalesce (already done for edges in PR #44 follow-
+  ups; nodes still pay 2 round trips per batch because of role validation).
+
+**(c) `db.index.vector.queryNodes` deprecation.**
+[`Neo4jVectorStore.query()`](../../src/trellis/stores/neo4j/vector.py) calls
+this procedure on every read. AuraDB emits a `DEPRECATION` notification:
+
+> warn: feature deprecated with replacement. db.index.vector.queryNodes is
+> deprecated. It is replaced by SEARCH.
+
+Migrate to the `SEARCH` clause on a future-compat PR. This is correctness in
+the long run — Neo4j removes deprecated procedures eventually — and at minimum
+should suppress the spam in test runs (the warning fires once per call, which
+on scenario 5.3's vector query mix means dozens of duplicate WARNING lines per
+report).
+
+### 5.2 Eval framework gaps surfaced (2026-04-27)
+
+Tracked here so they're not lost — none block the live-data programme but each
+should land before the next scheduled eval run:
+
+* **Eval scenarios didn't honor `TRELLIS_NEO4J_DATABASE`** → fixed in
+  [PR #56](https://github.com/ronsse/trellis-ai/pull/56).
+* **pgvector dim mismatch on the shared Neon instance.** Existing column is
+  `vector(3)` (provisioned by an earlier contract test); scenarios default to
+  `dim=16`. pgvector does not auto-migrate. Workarounds: align scenario
+  defaults to dim=3 (matches the unit-test fixture), or drop+recreate the
+  column. No PR yet.
+* **Single vector index per `(:Node, embedding)` on AuraDB.** Unit tests own
+  `trellis_test_node_embeddings` (dim=3); scenario 5.1 wants
+  `trellis_node_embeddings` (dim=16). Neo4j silently no-ops the colliding
+  CREATE; the ONLINE-wait then times out. The loader script handles this by
+  dropping the test index. Document the cohabitation rule in
+  [`docs/deployment/neo4j-auradb.md`](../deployment/neo4j-auradb.md).
 
 ---
 
