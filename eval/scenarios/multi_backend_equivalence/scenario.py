@@ -54,6 +54,13 @@ def _ingest(handle: _BackendHandle, graph: GeneratedGraph) -> float:
     on Neo4j. The vector store doesn't have a bulk method yet — its
     upsert path is already 1 round trip per row, so the marginal cost
     is small at 50 embeddings (default).
+
+    Edges are deduplicated by ``(source_id, target_id, edge_type)``
+    before the bulk call: the generator emits with-replacement, but the
+    bulk contract forbids in-batch duplicates because backends can't
+    preserve last-write-wins ordering across a single UNWIND. Last
+    occurrence wins, matching what the per-row ``upsert_edge`` loop
+    used to produce.
     """
     start = time.perf_counter()
     knowledge = handle.registry.knowledge
@@ -77,17 +84,15 @@ def _ingest(handle: _BackendHandle, graph: GeneratedGraph) -> float:
                 vector=node.embedding,
                 metadata={"node_type": node.node_type},
             )
-    graph_store.upsert_edges_bulk(
-        [
-            {
-                "source_id": e.source_id,
-                "target_id": e.target_id,
-                "edge_type": e.edge_type,
-                "properties": e.properties,
-            }
-            for e in graph.edges
-        ]
-    )
+    deduped_edges: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for e in graph.edges:
+        deduped_edges[(e.source_id, e.target_id, e.edge_type)] = {
+            "source_id": e.source_id,
+            "target_id": e.target_id,
+            "edge_type": e.edge_type,
+            "properties": e.properties,
+        }
+    graph_store.upsert_edges_bulk(list(deduped_edges.values()))
 
     return time.perf_counter() - start
 
