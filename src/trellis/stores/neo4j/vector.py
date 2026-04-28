@@ -69,10 +69,22 @@ class Neo4jVectorStore(Neo4jSessionRunner, VectorStore):
         similarity: str = "cosine",
         index_name: str = "trellis_node_embeddings",
         index_wait_timeout: float = 30.0,
+        m: int = 16,
+        ef_construction: int = 100,
+        quantization: bool = False,
         driver: Driver | None = None,
         driver_config: DriverConfig | None = None,
     ) -> None:
         # See ``Neo4jGraphStore.__init__`` for the driver-ownership contract.
+        #
+        # HNSW knobs (``m`` / ``ef_construction`` / ``quantization``) only
+        # apply when this store creates the index. ``CREATE VECTOR INDEX
+        # IF NOT EXISTS`` is a no-op against an existing index, so swapping
+        # values on an existing index requires a manual ``DROP INDEX``
+        # first. The chosen defaults err on correctness: ``quantization
+        # =False`` because AuraDB's quantization=true default collapses
+        # recall on low-dimensional vectors (recall@10 = 0.36 measured on
+        # dim=16 vectors against AuraDB Free, 2026-04-27).
         check_driver_installed()
         if similarity not in _VALID_SIMILARITY:
             msg = (
@@ -82,6 +94,12 @@ class Neo4jVectorStore(Neo4jSessionRunner, VectorStore):
             raise ValueError(msg)
         if dimensions <= 0:
             msg = f"dimensions must be > 0, got {dimensions}"
+            raise ValueError(msg)
+        if m <= 0:
+            msg = f"m must be > 0, got {m}"
+            raise ValueError(msg)
+        if ef_construction <= 0:
+            msg = f"ef_construction must be > 0, got {ef_construction}"
             raise ValueError(msg)
 
         if driver is not None:
@@ -104,12 +122,18 @@ class Neo4jVectorStore(Neo4jSessionRunner, VectorStore):
         self._similarity = similarity
         self._index = index_name
         self._index_wait_timeout = index_wait_timeout
+        self._m = m
+        self._ef_construction = ef_construction
+        self._quantization = quantization
         self._init_schema()
         logger.info(
             "neo4j_vector_store_initialized",
             dimensions=dimensions,
             similarity=similarity,
             index_name=index_name,
+            m=m,
+            ef_construction=ef_construction,
+            quantization=quantization,
         )
 
     # ------------------------------------------------------------------
@@ -119,14 +143,17 @@ class Neo4jVectorStore(Neo4jSessionRunner, VectorStore):
     def _init_schema(self) -> None:
         # The VECTOR INDEX DDL doesn't accept bound parameters for the
         # index name or options map — they must be Cypher literals.
-        # All three inputs are validated in ``__init__`` so inlining
-        # is safe.
+        # All inputs are validated in ``__init__`` so inlining is safe.
+        quantization_literal = "true" if self._quantization else "false"
         index = (
             f"CREATE VECTOR INDEX {self._index} IF NOT EXISTS "
             "FOR (n:Node) ON n.embedding "
             "OPTIONS {indexConfig: {"
             f"  `vector.dimensions`: {self._dimensions}, "
-            f"  `vector.similarity_function`: '{self._similarity}'"
+            f"  `vector.similarity_function`: '{self._similarity}', "
+            f"  `vector.hnsw.m`: {self._m}, "
+            f"  `vector.hnsw.ef_construction`: {self._ef_construction}, "
+            f"  `vector.quantization.enabled`: {quantization_literal}"
             "}}"
         )
         with self._driver.session(database=self._database) as session:

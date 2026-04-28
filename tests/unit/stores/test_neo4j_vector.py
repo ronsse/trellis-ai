@@ -294,3 +294,21 @@ class TestConstructorValidation:
 
         with pytest.raises(ValueError, match="dimensions"):
             Neo4jVectorStore(URI, user=USER, password=PASSWORD, dimensions=0)
+
+    def test_zero_m_rejected(self):
+        from trellis.stores.neo4j.vector import Neo4jVectorStore
+
+        with pytest.raises(ValueError, match=r"^m must be > 0"):
+            Neo4jVectorStore(URI, user=USER, password=PASSWORD, dimensions=3, m=0)
+
+    def test_zero_ef_construction_rejected(self):
+        from trellis.stores.neo4j.vector import Neo4jVectorStore
+
+        with pytest.raises(ValueError, match="ef_construction"):
+            Neo4jVectorStore(
+                URI,
+                user=USER,
+                password=PASSWORD,
+                dimensions=3,
+                ef_construction=0,
+            )
