@@ -149,32 +149,48 @@ def _recall_at_k(brute: list[str], approx: list[str], k: int) -> float:
 
 
 def _ingest(handle: _BackendHandle, graph: GeneratedGraph) -> float:
-    """Same shape as scenario 5.1's ingest. Returns wall seconds."""
+    """Same shape as scenario 5.1's ingest. Returns wall seconds.
+
+    Uses ``upsert_nodes_bulk`` / ``upsert_edges_bulk`` so the
+    populated-graph throughput measurement reflects realistic bulk
+    ingest, not the per-row network-bound floor that this scenario was
+    originally designed to surface as a Phase 3 deferred item.
+
+    Edges are deduplicated before the bulk call (same reason as
+    scenario 5.1: the generator emits with-replacement, but the bulk
+    contract forbids in-batch duplicates).
+    """
     start = time.perf_counter()
     knowledge = handle.registry.knowledge
     graph_store = knowledge.graph_store
     vector_store = knowledge.vector_store
 
+    graph_store.upsert_nodes_bulk(
+        [
+            {
+                "node_id": n.node_id,
+                "node_type": n.node_type,
+                "properties": n.properties,
+            }
+            for n in graph.nodes
+        ]
+    )
     for node in graph.nodes:
-        graph_store.upsert_node(
-            node_id=node.node_id,
-            node_type=node.node_type,
-            properties=node.properties,
-        )
         if node.embedding is not None:
             vector_store.upsert(
                 item_id=node.node_id,
                 vector=node.embedding,
                 metadata={"node_type": node.node_type},
             )
-
-    for edge in graph.edges:
-        graph_store.upsert_edge(
-            source_id=edge.source_id,
-            target_id=edge.target_id,
-            edge_type=edge.edge_type,
-            properties=edge.properties,
-        )
+    deduped_edges: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for e in graph.edges:
+        deduped_edges[(e.source_id, e.target_id, e.edge_type)] = {
+            "source_id": e.source_id,
+            "target_id": e.target_id,
+            "edge_type": e.edge_type,
+            "properties": e.properties,
+        }
+    graph_store.upsert_edges_bulk(list(deduped_edges.values()))
 
     return time.perf_counter() - start
 
