@@ -230,10 +230,10 @@ def wait_for_vector_index_online(
     AuraDB (and self-hosted Neo4j on slow disks) provisions vector
     indexes asynchronously: ``CREATE VECTOR INDEX`` returns immediately,
     but the index isn't queryable until its background population
-    completes. The first ``db.index.vector.queryNodes`` call against an
-    unfinished index fails with "no such vector schema index" — the
-    same race the A.1 e2e suite already worked around by reusing a
-    persistent index.
+    completes. The first ``SEARCH ... IN VECTOR INDEX`` (or the legacy
+    ``db.index.vector.queryNodes``) call against an unfinished index
+    fails with "no such vector schema index" — the same race the A.1
+    e2e suite already worked around by reusing a persistent index.
 
     Call this after ``CREATE VECTOR INDEX`` to surface the transition
     cleanly. Raises :class:`VectorIndexNotOnlineError` on timeout, with

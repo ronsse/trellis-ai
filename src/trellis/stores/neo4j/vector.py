@@ -1,4 +1,12 @@
-"""Neo4jVectorStore — Neo4j 5.11+ HNSW vectors as optional properties on :Node.
+"""Neo4jVectorStore — Neo4j 2025.06+ HNSW vectors as optional properties on :Node.
+
+Minimum version is **Neo4j 2025.06** (Cypher 25), driven by the SEARCH
+clause used in :meth:`Neo4jVectorStore.query`. The deprecated
+``db.index.vector.queryNodes`` procedure that older versions used emits
+a ``DEPRECATION`` notification on every call against AuraDB and will
+eventually be removed. AuraDB always runs the latest engine; self-
+hosted Docker users on the ``neo4j:5`` tag should upgrade to a
+``neo4j:2025`` (or newer) image.
 
 Shape #2 of the design discussion: vectors live as an ``embedding``
 property directly on the ``(:Node)`` rows that the
@@ -255,16 +263,31 @@ class Neo4jVectorStore(Neo4jSessionRunner, VectorStore):
         # versions the index might still return — query filters those
         # out via valid_to IS NULL.
         fetch_k = top_k * _OVER_FETCH_MULT if filters else top_k * 2
+        # Cypher 25 SEARCH clause replaces the deprecated
+        # ``db.index.vector.queryNodes`` procedure. The index name must
+        # be a Cypher literal — bound parameters are not accepted on the
+        # ``VECTOR INDEX`` reference. ``self._index`` is validated at
+        # construction time, so inlining is safe (same rule the CREATE
+        # DDL in ``_init_schema`` follows).
+        #
+        # ``valid_to IS NULL`` lives in the post-SEARCH WHERE rather
+        # than the index-WHERE because the vector index only honours
+        # properties explicitly registered as additional filter
+        # properties at CREATE time — empirically confirmed against
+        # AuraDB 2026-04-27. Pushing the filter down would require
+        # reissuing CREATE VECTOR INDEX with ``additionalFilterProperties``,
+        # which is a separate optimisation gated on its own evidence.
         cypher = (
-            "CALL db.index.vector.queryNodes($index, $k, $vector) "
-            "YIELD node, score "
-            "WHERE node.valid_to IS NULL "
-            "RETURN node.node_id AS item_id, score, "
-            "       node.vector_metadata_json AS metadata_json"
+            f"MATCH (n:Node) "
+            f"SEARCH n IN ( "
+            f"  VECTOR INDEX {self._index} FOR $vector "
+            f"  LIMIT $k "
+            f") SCORE AS score "
+            f"WHERE n.valid_to IS NULL "
+            f"RETURN n.node_id AS item_id, score, "
+            f"       n.vector_metadata_json AS metadata_json"
         )
-        records = self._run_read_list(
-            cypher, index=self._index, k=fetch_k, vector=vector
-        )
+        records = self._run_read_list(cypher, k=fetch_k, vector=vector)
 
         results: list[dict[str, Any]] = []
         for r in records:
