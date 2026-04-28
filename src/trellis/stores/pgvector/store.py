@@ -101,7 +101,49 @@ class PgVectorStore(VectorStore):
                     ON vectors USING hnsw (embedding vector_cosine_ops)
                 """
             )
+            # pgvector columns carry a fixed dimension. ``CREATE TABLE
+            # IF NOT EXISTS`` is a no-op against an existing table, so a
+            # caller that constructs the store with a different
+            # ``dimensions`` value than the column was provisioned with
+            # will silently inherit the old dim and crash on the first
+            # ``upsert`` with ``DataException: expected N dimensions,
+            # not M``. Fail fast at construction with an actionable
+            # message instead. ``format_type(atttypid, atttypmod)``
+            # returns the column's full pgvector type literal
+            # (``vector(3)`` etc.) which we parse for the dim.
+            cur.execute(
+                """
+                SELECT format_type(atttypid, atttypmod)
+                FROM pg_attribute
+                WHERE attrelid = 'vectors'::regclass
+                  AND attname = 'embedding'
+                  AND NOT attisdropped
+                """
+            )
+            row = cur.fetchone()
         self.conn.commit()
+        if row is None:
+            return
+        existing_type = str(row[0])
+        # Format is ``vector(N)``; pull N out and compare. If parsing
+        # fails (unexpected format from a future pgvector release),
+        # skip the check rather than block construction.
+        try:
+            existing_dim = int(existing_type.split("(", 1)[1].rstrip(")"))
+        except (IndexError, ValueError):
+            return
+        if existing_dim != self._dimensions:
+            msg = (
+                f"pgvector ``vectors.embedding`` column was provisioned at "
+                f"dimensions={existing_dim} but this store was constructed "
+                f"with dimensions={self._dimensions}. pgvector columns "
+                f"carry a fixed dim and CREATE TABLE IF NOT EXISTS is a "
+                f"no-op against the existing table. Either pass "
+                f"dimensions={existing_dim} to match what's there, or "
+                f"DROP TABLE vectors and let this store recreate it at "
+                f"dimensions={self._dimensions} (destroys existing data)."
+            )
+            raise ValueError(msg)
 
     # ------------------------------------------------------------------
     # Public API

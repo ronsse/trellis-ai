@@ -191,6 +191,53 @@ automatically when the backend supports it. Tracked in the hardening
 plan as Phase 1.5 Option B; deferred until a real concurrent-writer
 deployment asks for it.
 
+## Vector index cohabitation — single index per `(:Node, embedding)`
+
+Neo4j only allows **one vector index per `(label, property)` pair**. On a
+single AuraDB instance, that means the unit-test suite, the eval
+scenarios, and a production-shaped load can't all create their own
+named vector indexes against `(:Node).embedding` — the second `CREATE
+VECTOR INDEX <other-name> IF NOT EXISTS` is silently a no-op (the slot
+is taken), and the subsequent ONLINE-wait will time out at 30s waiting
+for an index that will never appear.
+
+How Trellis handles this:
+
+* **Production deployments** use the default index name
+  `trellis_node_embeddings` and the dimension that matches the embedder
+  (e.g. 1536 for OpenAI ada-002). Set this via the registry config and
+  leave it alone.
+* **Unit tests** ([`tests/unit/stores/test_neo4j_vector.py`](../../tests/unit/stores/test_neo4j_vector.py))
+  share a persistent index named `trellis_test_node_embeddings` at
+  `dim=3` so the suite doesn't pay the AuraDB async-provisioning cost
+  on every run.
+* **Eval scenarios** ([`eval/scenarios/`](../../eval/)) and the
+  [`scripts/load_eval_dataset_to_aura.py`](../../scripts/load_eval_dataset_to_aura.py)
+  loader use the production default name (`trellis_node_embeddings`)
+  but at the eval-default dim (16). The loader **drops the test index
+  first** so the eval slot is free; running the loader therefore
+  invalidates the unit-test fixture until a unit test recreates it.
+
+Practical implication: if you run the eval loader against the same
+AuraDB instance the unit tests use, the next unit-test run will
+recreate `trellis_test_node_embeddings` from scratch — the fixture's
+`CREATE VECTOR INDEX IF NOT EXISTS` succeeds because the slot is
+empty, but the first vector test pays AuraDB's async-provisioning
+wait (~30s on Free).
+
+To avoid this churn on a shared instance, give eval and unit tests
+**separate AuraDB instances** (a second AuraDB Free instance is free)
+or run eval against a Docker self-hosted Neo4j and reserve AuraDB for
+unit tests + production.
+
+The same constraint applies to the column on the
+[`pgvector` backend](../../src/trellis/stores/pgvector/store.py): the
+`embedding` column carries a fixed dimension, and `CREATE TABLE IF NOT
+EXISTS` is a no-op against an existing table. The store now fail-fast
+detects a dimension mismatch at construction time and raises with an
+actionable message; same operational rule applies — keep eval and
+unit-test corpora at the same dim, or use separate databases.
+
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |
@@ -199,7 +246,9 @@ deployment asks for it.
 | `Database '<x>' does not exist` | Wrong `database` value | AuraDB Free database name == instance ID; Pro uses `neo4j` |
 | `ServiceUnavailable` after instance pause | AuraDB Free auto-pauses idle instances | Resume from console; first request after resume can take ~30s |
 | `no such vector schema index` on first query | Async index provisioning race | Phase 1.4's `wait_for_vector_index_online` handles this — make sure you're on the latest release |
+| `VectorIndexNotOnlineError` after CREATE that should have run | Second CREATE silently no-op'd against existing index on `(:Node).embedding` | Drop the existing index first, then create the one you want — or use the existing name |
 | Slow first query of the day | Cold cache after pause | Expected on Free; one-time per session |
+| pgvector `expected N dimensions, not M` on upsert | Existing `vectors.embedding` column dim ≠ store's `dimensions=` kwarg | The store now fails fast at construction with this hint; pass the matching dim or DROP TABLE vectors |
 
 ## Next steps
 
