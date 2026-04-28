@@ -412,28 +412,86 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
         return node_id
 
     def upsert_nodes_bulk(self, nodes: list[dict[str, Any]]) -> list[str]:
-        # In-process backend: no network round-trip cost, so a simple
-        # loop over ``upsert_node`` is the correct implementation. The
-        # bulk method exists for API symmetry; Neo4j is the backend
-        # that benefits from its own UNWIND-batched override.
+        # ``executemany`` + a single commit, branched on whether any row
+        # in the batch already has a current version. The previous
+        # implementation looped ``upsert_node`` with ``commit=True`` per
+        # row — every row paid for its own ``get_node`` SELECT, its own
+        # INSERT, and an fsync at commit time. Measured under scenario
+        # 5.3 on a populated graph: that loop ran at ~32 nodes/sec, the
+        # slowest of the three backends after Neo4j landed its own bulk
+        # fast path. With this rewrite both branches are a single
+        # ``executemany`` plus one commit per call.
         #
-        # Run every per-row validator up-front so the ABC's
-        # validation-atomicity contract holds: invalid input is rejected
-        # before any row is written. Mid-batch IO failures during the
-        # subsequent loop can still leave a partial commit (per-row
-        # ``commit=True``); see the ABC docstring.
+        # Atomicity-of-validation contract: ``_pre_validate_nodes_bulk``
+        # runs all per-row validators (including role immutability via a
+        # bulk ``get_nodes_bulk`` round trip) before any write touches
+        # the DB. A bad row anywhere in the batch raises before commit.
+        if not nodes:
+            return []
         self._pre_validate_nodes_bulk(nodes)
-        return [
-            self.upsert_node(
-                node_id=spec.get("node_id"),
-                node_type=spec["node_type"],
-                properties=spec.get("properties") or {},
-                node_role=spec.get("node_role", "semantic"),
-                generation_spec=spec.get("generation_spec"),
-                document_ids=spec.get("document_ids"),
+
+        node_ids: list[str] = [spec.get("node_id") or generate_ulid() for spec in nodes]
+
+        # Pull existing current rows once. The pre-validator already did
+        # this for role-immutability, but it discards the result; one
+        # extra in-process SELECT against an indexed column is cheaper
+        # than threading the data through the base class's API.
+        existing = {row["node_id"]: row for row in self.get_nodes_bulk(node_ids)}
+        now = utc_now()
+        now_iso = now.isoformat()
+
+        # Build INSERT rows — one tuple per node. ``created_at`` carries
+        # forward from the prior version when one exists, mirroring the
+        # single-row method's behaviour.
+        insert_rows: list[tuple[Any, ...]] = []
+        for spec, nid in zip(nodes, node_ids, strict=True):
+            prior = existing.get(nid)
+            created_at = prior["created_at"] if prior else now_iso
+            generation_spec = spec.get("generation_spec")
+            document_ids = spec.get("document_ids")
+            insert_rows.append(
+                (
+                    generate_ulid(),
+                    nid,
+                    spec["node_type"],
+                    spec.get("node_role", "semantic"),
+                    (
+                        json.dumps(generation_spec)
+                        if generation_spec is not None
+                        else None
+                    ),
+                    json.dumps(document_ids) if document_ids is not None else None,
+                    json.dumps(spec.get("properties") or {}),
+                    created_at,
+                    now_iso,
+                    now_iso,
+                )
             )
-            for spec in nodes
-        ]
+
+        # Close any prior current versions in one shot. ``IN`` against
+        # the (indexed) ``node_id`` column is a single statement; the
+        # subset of nodes without prior versions is a no-op.
+        if existing:
+            placeholders = ",".join("?" for _ in existing)
+            self._conn.execute(
+                f"UPDATE nodes SET valid_to = ? "
+                f"WHERE node_id IN ({placeholders}) AND valid_to IS NULL",
+                (now_iso, *existing.keys()),
+            )
+
+        self._conn.executemany(
+            """
+            INSERT INTO nodes
+                (version_id, node_id, node_type, node_role,
+                 generation_spec_json, document_ids_json,
+                 properties_json, created_at, updated_at,
+                 valid_from, valid_to)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+            """,
+            insert_rows,
+        )
+        self._conn.commit()
+        return node_ids
 
     def get_node(
         self,
@@ -661,42 +719,111 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
         return edge_id
 
     def upsert_edges_bulk(self, edges: list[dict[str, Any]]) -> list[str]:
-        # Pre-validate required keys + endpoint existence. SQLite's
-        # single-row ``upsert_edge`` doesn't validate endpoints (it
-        # happily inserts dangling edges); the bulk method tightens
-        # that contract so callers can rely on it across backends.
+        # ``executemany`` + a single commit, branched on whether any
+        # row in the batch already has a current version. Same shape
+        # as ``upsert_nodes_bulk`` for the same reason — looping
+        # ``upsert_edge`` with ``commit=True`` per row paid for an
+        # fsync per edge, dominating ingest cost in scenario 5.3.
+        #
+        # SQLite's single-row ``upsert_edge`` doesn't validate
+        # endpoints; the bulk method tightens that contract so
+        # callers can rely on it across backends.
         self._validate_bulk_required_keys(
             edges, ("source_id", "target_id", "edge_type"), "upsert_edges_bulk"
         )
         self._pre_validate_edges_bulk(edges)
+        if not edges:
+            return []
+
         unique_endpoints = {spec["source_id"] for spec in edges} | {
             spec["target_id"] for spec in edges
         }
-        existing = {
+        existing_nodes = {
             row["node_id"] for row in self.get_nodes_bulk(list(unique_endpoints))
         }
         for i, spec in enumerate(edges):
-            if spec["source_id"] not in existing:
+            if spec["source_id"] not in existing_nodes:
                 msg = (
                     f"upsert_edges_bulk[{i}]: source "
                     f"{spec['source_id']!r} has no current version"
                 )
                 raise ValueError(msg)
-            if spec["target_id"] not in existing:
+            if spec["target_id"] not in existing_nodes:
                 msg = (
                     f"upsert_edges_bulk[{i}]: target "
                     f"{spec['target_id']!r} has no current version"
                 )
                 raise ValueError(msg)
-        return [
-            self.upsert_edge(
-                source_id=spec["source_id"],
-                target_id=spec["target_id"],
-                edge_type=spec["edge_type"],
-                properties=spec.get("properties"),
+
+        # Pull existing current edges for the (source, target, type)
+        # triplets in this batch in one shot. The single-row method
+        # uses three-column equality; the bulk path replicates that by
+        # encoding the triplet as a delimited key client-side after
+        # one bulk fetch keyed on ``source_id IN (...)``. Choosing
+        # source_id over (source, target) for the IN clause keeps the
+        # query simple — the indexed ``edges_lookup_idx`` covers it
+        # and post-filtering in Python is cheap at this scale.
+        sources = {spec["source_id"] for spec in edges}
+        placeholders = ",".join("?" for _ in sources)
+        cursor = self._conn.execute(
+            f"""
+            SELECT edge_id, source_id, target_id, edge_type, created_at
+            FROM edges
+            WHERE source_id IN ({placeholders}) AND valid_to IS NULL
+            """,
+            list(sources),
+        )
+        existing_edges: dict[tuple[str, str, str], dict[str, Any]] = {}
+        for row in cursor.fetchall():
+            key = (row["source_id"], row["target_id"], row["edge_type"])
+            existing_edges[key] = dict(row)
+
+        now_iso = utc_now().isoformat()
+        edge_ids: list[str] = []
+        insert_rows: list[tuple[Any, ...]] = []
+        for spec in edges:
+            key = (spec["source_id"], spec["target_id"], spec["edge_type"])
+            prior = existing_edges.get(key)
+            if prior is not None:
+                edge_id = str(prior["edge_id"])
+                created_at = prior["created_at"]
+            else:
+                edge_id = generate_ulid()
+                created_at = now_iso
+            edge_ids.append(edge_id)
+            insert_rows.append(
+                (
+                    generate_ulid(),
+                    edge_id,
+                    spec["source_id"],
+                    spec["target_id"],
+                    spec["edge_type"],
+                    json.dumps(spec.get("properties") or {}),
+                    created_at,
+                    now_iso,
+                )
             )
-            for spec in edges
-        ]
+
+        # Close any prior current edges in one shot. ``IN`` against
+        # the indexed ``edge_id`` column for the subset we found.
+        if existing_edges:
+            edge_id_placeholders = ",".join("?" for _ in existing_edges)
+            self._conn.execute(
+                f"UPDATE edges SET valid_to = ? "
+                f"WHERE edge_id IN ({edge_id_placeholders}) AND valid_to IS NULL",
+                (now_iso, *(prior["edge_id"] for prior in existing_edges.values())),
+            )
+        self._conn.executemany(
+            """
+            INSERT INTO edges
+                (version_id, edge_id, source_id, target_id, edge_type,
+                 properties_json, created_at, valid_from, valid_to)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
+            """,
+            insert_rows,
+        )
+        self._conn.commit()
+        return edge_ids
 
     def get_edges(
         self,
