@@ -175,13 +175,22 @@ def _ingest(handle: _BackendHandle, graph: GeneratedGraph) -> float:
             for n in graph.nodes
         ]
     )
-    for node in graph.nodes:
-        if node.embedding is not None:
-            vector_store.upsert(
-                item_id=node.node_id,
-                vector=node.embedding,
-                metadata={"node_type": node.node_type},
-            )
+    # ``upsert_bulk`` so the throughput metric isn't dominated by the
+    # per-row network round trip (200 embeddings x ~70ms baseline on
+    # AuraDB Free = ~14s alone). Without this the scenario keeps
+    # reporting the deferred-item warning even after the underlying
+    # bulk-ingest paths land their fast path.
+    vector_rows = [
+        {
+            "item_id": n.node_id,
+            "vector": n.embedding,
+            "metadata": {"node_type": n.node_type},
+        }
+        for n in graph.nodes
+        if n.embedding is not None
+    ]
+    if vector_rows:
+        vector_store.upsert_bulk(vector_rows)
     deduped_edges: dict[tuple[str, str, str], dict[str, Any]] = {}
     for e in graph.edges:
         deduped_edges[(e.source_id, e.target_id, e.edge_type)] = {
