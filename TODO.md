@@ -23,17 +23,15 @@
 * [`docs/design/plan-evaluation-strategy.md`](docs/design/plan-evaluation-strategy.md) — full strategy: directory layout, scenario menu, what each one measures, how it ties back to the Phase-3 deferred items in the hardening plan.
 * [`docs/design/plan-neo4j-hardening.md`](docs/design/plan-neo4j-hardening.md) §5 — Phase-3 deferred items the eval scenarios will inform. Most will turn out to not be needed once 5.3 produces real numbers — don't pre-build any.
 
-See "Deferred from the Neo4j hardening series" below for what we deliberately did NOT land from Phase 1+2 and what each defer costs in practice.
+**The "dataset":** there is no committed dataset binary by design. The eval framework uses **two deterministic seeded synthetic generators** committed in [`eval/generators/`](eval/generators/) — `graph_generator.py` (used by 5.1 + 5.3) and `trace_generator.py` (used by 5.2). Same seed → byte-identical output. Small fixtures commit to `eval/datasets/` if and when they're needed; large corpora are always generated, never committed. That decision is locked in §3 of the strategy doc; revisit only if a design partner wants to run eval against captured production traces.
 
-**The "dataset":** there is no committed dataset binary by design. The eval framework uses **two deterministic seeded synthetic generators** that live on the eval branch — [`eval/generators/graph_generator.py`](https://github.com/ronsse/trellis-ai/blob/eval/use-bulk-upsert/eval/generators/graph_generator.py) (used by 5.1 + 5.3) and [`eval/generators/trace_generator.py`](https://github.com/ronsse/trellis-ai/blob/eval/use-bulk-upsert/eval/generators/trace_generator.py) (used by 5.2). Same seed → byte-identical output. Small fixtures commit to `eval/datasets/` if and when they're needed; large corpora are always generated, never committed. That decision is locked in §3 of the strategy doc; revisit only if a design partner wants to run eval against captured production traces.
+### Eval framework + scenarios — all landed 2026-04-27
 
-### Land in this order — eval framework + scenarios (all unmerged, all written)
-
-- [ ] **#29 — Eval Phase 1: harness skeleton.** [`eval/runner.py`](https://github.com/ronsse/trellis-ai/pull/29) + `_example` scenario + `pyproject.toml` exclusion of `eval/` from sdist + smoke test in `tests/unit/eval/`. Unblocks every later scenario PR. ~1 day to review/rebase against post-#41/#44 main.
-- [ ] **#30 — Scenario 5.1 multi-backend equivalence.** Same input → SQLite + Postgres + Neo4j → diff results. Validates that the canonical DSL Phase-2 compilers don't drift between backends in practice. First moment with real evidence the "blessed Neo4j" claim doesn't hide silent drift from Postgres-alternative users.
-- [ ] **#31 — Scenario 5.2 synthetic traces e2e.** First retrieval-quality numbers on synthetic-but-realistic data. Three domains (software engineering, data pipeline ops, customer support); deterministic ground-truth labels per trace.
-- [ ] **#32 — Scenario 5.3 populated-graph performance.** 10-50K node graph, p50/p95/p99 latency per query type per backend, recall@10 vs brute-force baseline, EXPLAIN/PROFILE plans on slowest queries. Generates the workload signal that informs the Phase-3 deferred list.
-- [ ] **#36 — Switch eval ingest to `upsert_*_bulk`.** Trivial after #34/#37 landed; depends on #29-32. ~50 LOC.
+- [x] **#29 — Eval Phase 1: harness skeleton.** [`eval/runner.py`](eval/runner.py) + `_example` scenario + `pyproject.toml` exclusion of `eval/` from sdist + smoke test in `tests/unit/eval/`.
+- [x] **#30 — Scenario 5.1 multi-backend equivalence.** Same input → SQLite + Postgres + Neo4j → diff results. Validates that the canonical DSL Phase-2 compilers don't drift between backends in practice.
+- [x] **#31 — Scenario 5.2 synthetic traces e2e.** First retrieval-quality numbers on synthetic-but-realistic data. Three domains (software engineering, data pipeline ops, customer support); deterministic ground-truth labels per trace.
+- [x] **#32 — Scenario 5.3 populated-graph performance.** Default 1K node graph (kwargs scale up), p50/p95/p99 latency per query type per backend, recall@10 vs brute-force baseline. Threshold-driven warnings gate Phase-3 unblock items (HNSW tuning fires when recall < 0.95; UNWIND bulk path fires when ingest throughput < 100 nodes/sec).
+- [x] **#36 — Switch eval ingest to `upsert_*_bulk`.** Done; both 5.1 and 5.3 now use bulk upserts so cross-backend comparisons aren't dominated by per-row Neo4j round trips.
 
 ### Then write — scenario 5.4 (the "agent improvement" curve)
 
@@ -47,24 +45,17 @@ These are loose ends from the audit that ran with this section. None block the e
 - [ ] **No eval scenario exercises a real LLM yet.** `EnrichmentService` and the OpenAI/Anthropic providers have unit tests with mocked responses, but no end-to-end run with a live API has been measured for cost or quality on a synthetic corpus. To say anything credible about benefits, this needs to happen at least once. Budget ~$10-50 for 100 agent rounds depending on model. Lands naturally as part of running 5.4 against a real provider.
 - [ ] **No baseline / regression discipline yet.** Eval plan §7.1 explicitly defers committed baselines and regression gates until after 5.1-5.4 are usable manually — that's the right call (codifying earlier locks in the wrong shape). But for a "this got X% better" story we need this layer. Pick it up after 5.4 has run cleanly at least three times so we have variance bounds to set thresholds against.
 
-## Deferred from the Neo4j hardening series — low priority until signal (2026-04-27)
+## Neo4j hardening series — all landed 2026-04-27
 
-The hardening plan ([`plan-neo4j-hardening.md`](docs/design/plan-neo4j-hardening.md)) was written as a 7-PR series before the Neo4j round-trip / bulk-method work landed on main. By the time we tried to merge it the diffs were heavily stale (each PR conflicting with `Neo4jSessionRunner`, the bulk methods, and the simplified bulk helpers). We landed only the two items the eval harness actually needed:
+The hardening plan ([`plan-neo4j-hardening.md`](docs/design/plan-neo4j-hardening.md)) was originally written as a 7-PR series. The first wave (#20-#27) ran into stale diffs against the post-`Neo4jSessionRunner` / post-bulk-methods architecture and was closed. The cleanup pass on 2026-04-27 re-landed every item against current main:
 
-- **Phase 1.2 — `StoreRegistry.__enter__` / `__exit__`** (PR #46). Required by the eval runner.
-- **Phase 1.4 — vector-index ONLINE-wait after CREATE** (PR #47). Real production correctness fix; the A.1 e2e suite already paid the cost of working around this race.
-
-The remaining items below are deliberately deferred. **Each is real work the design covered, but none is blocking POC use.** Pick any of them up only when an actual production incident or design partner asks. The original PRs (#21, #23, #25, #26, #27) were closed but their branches + diffs remain accessible if/when the signal fires.
-
-- [ ] **Phase 1.1 — Driver lifecycle: `DriverConfig` + registry-side driver sharing.** Original PR #21 (closed). Today's main builds a fresh Neo4j `Driver` per store with no kwargs (no connect timeout, no pool size config). What's lost without this:
-  - **No connect timeout** — calls hang indefinitely on bad network instead of failing in 30s. **Highest "real" cost of any deferred item.** Easy to mitigate with `TRELLIS_TEST_NEO4J_URI` set to a reachable instance; bites in prod when AuraDB has a network blip.
-  - 2 connection pools instead of 1 when graph + vector point at the same Neo4j instance (each store builds its own driver). Doubles connection count.
-- [ ] **Phase 1.3 — Opt-in `validate()` Neo4j connectivity ping.** Original PR #23 (closed). Depends on Phase 1.1's driver cache. Without it, a misconfigured Neo4j surfaces on the first request rather than at startup. The lifespan still calls `validate()` for config errors; this would extend it to include network reachability behind a `TRELLIS_VALIDATE_CONNECTIVITY=1` env var.
-- [ ] **Phase 1.5 + 2.2 — `docs/deployment/neo4j-{local,auradb}.md`.** Original PR #25 (closed, ~330 doc lines). No Neo4j deployment docs on main today; operators deploy by reading the source. Defer until an external operator asks.
-- [ ] **Phase 2.1 — `docs/deployment/recommended-config.yaml`.** Original PR #26 (closed). Three blessed config shapes (local Neo4j+SQLite / cloud AuraDB+Postgres / Postgres-only). Some other docs already reference this file; cross-references are 404 until landed. Defer.
-- [ ] **Phase 2.3 — `trellis admin migrate-graph` CLI + `src/trellis/migrate/` package.** Original PR #27 (closed). Backend-agnostic graph migration via the public `GraphStore` API. Useful tool but no current consumer; defer until cross-backend migration is actually requested.
-
-The hardening plan ([`plan-neo4j-hardening.md`](docs/design/plan-neo4j-hardening.md)) on main remains the design reference — it documents what each item does and why. Re-extraction from the closed-PR branches is a single-day job per item when the signal fires.
+- [x] **Phase 1.1 — `DriverConfig` + registry-side driver sharing** (PR #51). Production-safe driver kwargs: 30s connect timeout, pool size 100, 30s retry, keep-alive. `StoreRegistry` caches one driver per `(uri, user)` so graph + vector against the same Neo4j instance share one pool. Closes the highest-cost deferred item — calls no longer hang indefinitely on bad network.
+- [x] **Phase 1.2 — `StoreRegistry.__enter__` / `__exit__`** (PR #46). Required by the eval runner.
+- [x] **Phase 1.3 — Opt-in `validate()` Neo4j connectivity ping** (PR #52). `TRELLIS_VALIDATE_CONNECTIVITY=1` gates a per-cached-driver Bolt ping during `validate()`; failures aggregate alongside config errors in `RegistryValidationError`. Off in dev (fast restarts), on in production via env config.
+- [x] **Phase 1.4 — Vector-index ONLINE-wait after CREATE** (PR #47). Real production correctness fix; the A.1 e2e suite already paid the cost of working around this race.
+- [x] **Phase 1.5 + 2.2 — `docs/deployment/neo4j-{local,auradb}.md`** (PR #49). Local Docker + AuraDB onboarding walkthroughs, AuraDB name-is-instance-id callout, multi-writer NODE KEY constraint, troubleshooting matrices.
+- [x] **Phase 2.1 — `docs/deployment/recommended-config.yaml`** (PR #53). Three blessed shapes — local Neo4j+SQLite / cloud AuraDB+Postgres / Postgres-only — with smoke test pinning the per-block backend contract.
+- [x] **Phase 2.3 — `trellis admin migrate-graph` CLI + `src/trellis/migrate/` package** (PR #50). Backend-agnostic graph migration via the public `GraphStore` API. SQLite ↔ Postgres ↔ Neo4j without per-backend branches; idempotent on retry.
 
 ## Cloud deployment — POC follow-ups
 
