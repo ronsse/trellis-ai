@@ -77,9 +77,7 @@ def _load_dotenv(path: Path) -> None:
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, value = line.partition("=")
-        os.environ.setdefault(
-            key.strip(), value.strip().strip('"').strip("'")
-        )
+        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
 
 
 def _resolve_neo4j_creds() -> tuple[str, str, str, str]:
@@ -106,9 +104,7 @@ def _wipe_and_drop_test_index(session: Session) -> dict[str, int]:
     """Detach-delete every node and drop the leftover test vector index."""
     counts = {
         "nodes": session.run("MATCH (n) RETURN count(n) AS c").single()[0],
-        "edges": session.run(
-            "MATCH ()-[r]->() RETURN count(r) AS c"
-        ).single()[0],
+        "edges": session.run("MATCH ()-[r]->() RETURN count(r) AS c").single()[0],
         "indexes_dropped": 0,
     }
     session.run("MATCH (n) DETACH DELETE n").consume()
@@ -121,9 +117,7 @@ def _wipe_and_drop_test_index(session: Session) -> dict[str, int]:
     return counts
 
 
-def _ensure_vector_index(
-    session: Session, *, name: str, dimensions: int
-) -> None:
+def _ensure_vector_index(session: Session, *, name: str, dimensions: int) -> None:
     """Create the vector index up front so embeddings get indexed as we write.
 
     Mirrors what ``Neo4jVectorStore._init_schema`` would do — we replicate
@@ -140,16 +134,10 @@ def _ensure_vector_index(
     ).consume()
 
 
-def _verify_post_load(
-    session: Session, *, vector_index_name: str
-) -> dict[str, object]:
+def _verify_post_load(session: Session, *, vector_index_name: str) -> dict[str, object]:
     out: dict[str, object] = {
-        "total_nodes": session.run(
-            "MATCH (n) RETURN count(n) AS c"
-        ).single()[0],
-        "total_edges": session.run(
-            "MATCH ()-[r]->() RETURN count(r) AS c"
-        ).single()[0],
+        "total_nodes": session.run("MATCH (n) RETURN count(n) AS c").single()[0],
+        "total_edges": session.run("MATCH ()-[r]->() RETURN count(r) AS c").single()[0],
         "nodes_with_embedding": session.run(
             "MATCH (n) WHERE n.embedding IS NOT NULL RETURN count(n) AS c"
         ).single()[0],
@@ -197,9 +185,7 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
-def _bulk_upsert_nodes(
-    session: Session, batch: Iterable[dict[str, Any]]
-) -> int:
+def _bulk_upsert_nodes(session: Session, batch: Iterable[dict[str, Any]]) -> int:
     """Single round trip: CREATE every node in ``batch`` as a current SCD-2 row.
 
     Skips the OPTIONAL MATCH / version-close branch the per-row path
@@ -220,9 +206,7 @@ def _bulk_upsert_nodes(
     return len(rows)
 
 
-def _bulk_upsert_vectors(
-    session: Session, batch: Iterable[dict[str, Any]]
-) -> int:
+def _bulk_upsert_vectors(session: Session, batch: Iterable[dict[str, Any]]) -> int:
     """Attach embeddings to existing current node versions."""
     cypher = """
     UNWIND $rows AS row
@@ -238,9 +222,7 @@ def _bulk_upsert_vectors(
     return len(rows)
 
 
-def _bulk_upsert_edges(
-    session: Session, batch: Iterable[dict[str, Any]]
-) -> int:
+def _bulk_upsert_edges(session: Session, batch: Iterable[dict[str, Any]]) -> int:
     """Single round trip: MATCH endpoints + CREATE :EDGE per row."""
     cypher = """
     UNWIND $rows AS row
@@ -321,8 +303,7 @@ def _ingest(
 
     # Phase 1: nodes ------------------------------------------------------
     node_rows = [
-        _node_to_row(n.node_id, n.node_type, n.properties, now_iso)
-        for n in graph.nodes
+        _node_to_row(n.node_id, n.node_type, n.properties, now_iso) for n in graph.nodes
     ]
     print(f"\nIngesting {len(node_rows)} nodes (batch={batch_size})...")
     t0 = time.perf_counter()
@@ -331,10 +312,7 @@ def _ingest(
         written += _bulk_upsert_nodes(session, batch)
         if batch_idx % PROGRESS_BATCHES == 0:
             elapsed = time.perf_counter() - t0
-            print(
-                f"  {written}/{len(node_rows)} nodes "
-                f"— {written / elapsed:.0f}/sec"
-            )
+            print(f"  {written}/{len(node_rows)} nodes — {written / elapsed:.0f}/sec")
     node_seconds = time.perf_counter() - t0
 
     # Phase 2: vectors ----------------------------------------------------
@@ -366,10 +344,7 @@ def _ingest(
         written += _bulk_upsert_edges(session, batch)
         if batch_idx % PROGRESS_BATCHES == 0:
             elapsed = time.perf_counter() - t1
-            print(
-                f"  {written}/{len(edge_rows)} edges "
-                f"— {written / elapsed:.0f}/sec"
-            )
+            print(f"  {written}/{len(edge_rows)} edges — {written / elapsed:.0f}/sec")
     edge_seconds = time.perf_counter() - t1
 
     return node_seconds, edge_seconds
@@ -444,9 +419,7 @@ def main() -> int:
             dimensions=args.embedding_dim,
         )
 
-        node_seconds, edge_seconds = _ingest(
-            session, graph, batch_size=args.batch_size
-        )
+        node_seconds, edge_seconds = _ingest(session, graph, batch_size=args.batch_size)
 
         print("\nIngest summary:")
         if node_seconds > 0:
@@ -461,9 +434,7 @@ def main() -> int:
             )
 
         print("\nVerifying load against AuraDB...")
-        verify = _verify_post_load(
-            session, vector_index_name="trellis_node_embeddings"
-        )
+        verify = _verify_post_load(session, vector_index_name="trellis_node_embeddings")
         for k, v in verify.items():
             print(f"  {k}: {v}")
 

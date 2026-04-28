@@ -33,7 +33,7 @@ from eval.generators.graph_generator import (
     GeneratedNode,
     generate_graph,
 )
-from eval.runner import Finding, ScenarioReport
+from eval.runner import Finding, ScenarioReport, ScenarioStatus
 from trellis.stores.registry import StoreRegistry
 
 logger = structlog.get_logger(__name__)
@@ -470,7 +470,7 @@ def run(
 
     regressed = any(f.severity == "warn" for f in findings)
     failed = any(f.severity == "fail" for f in findings)
-    status = "fail" if failed else ("regress" if regressed else "pass")
+    status: ScenarioStatus = "fail" if failed else ("regress" if regressed else "pass")
 
     decision = (
         "Per-backend latency percentiles + recall@k baseline are now "
