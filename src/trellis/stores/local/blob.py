@@ -118,9 +118,7 @@ class LocalBlobStore(BlobStore):
                 expires_at = datetime.fromisoformat(raw)
             except (TypeError, ValueError):
                 errors += 1
-                logger.warning(
-                    "blob_expires_at_parse_failed", key=key, value=raw
-                )
+                logger.warning("blob_expires_at_parse_failed", key=key, value=raw)
                 continue
             if expires_at >= cutoff:
                 skipped_not_yet_expired += 1

@@ -233,9 +233,7 @@ class AsyncTrellisClient:
             "domain": domain,
             "agent_id": agent_id,
         }
-        resp = await self._request(
-            "POST", "/api/v1/packs/sectioned", json=payload
-        )
+        resp = await self._request("POST", "/api/v1/packs/sectioned", json=payload)
         return cast("dict[str, Any]", resp.json())
 
     async def get_objective_context(

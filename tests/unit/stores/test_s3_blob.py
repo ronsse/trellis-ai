@@ -266,9 +266,9 @@ class TestSweepExpired:
         # head_object side_effect order to those sorted keys.
         self._paginator(mock_client, ["a.bin", "b.bin", "c.bin"])
         mock_client.head_object.side_effect = [
-            self._head_response(past),     # a.bin — expired
-            self._head_response(future),   # b.bin — not expired
-            self._head_response(None),     # c.bin — no TTL
+            self._head_response(past),  # a.bin — expired
+            self._head_response(future),  # b.bin — not expired
+            self._head_response(None),  # c.bin — no TTL
         ]
         report = store.sweep_expired()
         assert report.swept == 1
@@ -298,9 +298,7 @@ class TestSweepExpired:
         assert report.swept == 0
         mock_client.delete_object.assert_not_called()
 
-    def test_emits_event_when_event_log_provided(
-        self, store, mock_client, tmp_path
-    ):
+    def test_emits_event_when_event_log_provided(self, store, mock_client, tmp_path):
         from datetime import UTC, datetime, timedelta
 
         from trellis.stores.base.event_log import EventType

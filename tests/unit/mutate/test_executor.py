@@ -219,7 +219,8 @@ class TestIdempotencyCacheEviction:
         events = [e for e, _ in warn_calls]
         assert "idempotency_cache_evicted_without_event_log" in events
         payload = next(
-            kw for e, kw in warn_calls
+            kw
+            for e, kw in warn_calls
             if e == "idempotency_cache_evicted_without_event_log"
         )
         assert payload["evicted_key"] == "k0"

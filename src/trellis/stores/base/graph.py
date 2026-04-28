@@ -517,9 +517,7 @@ class GraphStore(ABC):
         """
         if not nodes:
             return
-        self._validate_bulk_required_keys(
-            nodes, ("node_type",), "upsert_nodes_bulk"
-        )
+        self._validate_bulk_required_keys(nodes, ("node_type",), "upsert_nodes_bulk")
         for i, spec in enumerate(nodes):
             try:
                 validate_node_role_args(

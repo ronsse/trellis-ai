@@ -33,9 +33,7 @@ class TrellisAPIError(TrellisError):
         self.body = body
         self.request_path = request_path
         prefix = (
-            f"[{status_code} on {request_path}]"
-            if request_path
-            else f"[{status_code}]"
+            f"[{status_code} on {request_path}]" if request_path else f"[{status_code}]"
         )
         super().__init__(f"{prefix} {message}")
 

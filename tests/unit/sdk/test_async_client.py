@@ -96,18 +96,14 @@ class TestAsyncConcurrency:
             }
             for i in range(5)
         ]
-        results = await asyncio.gather(
-            *(client.ingest_trace(t) for t in traces)
-        )
+        results = await asyncio.gather(*(client.ingest_trace(t) for t in traces))
         assert len(results) == 5
         assert all(r is not None for r in results)
 
         all_traces = await client.list_traces(limit=10)
         assert len(all_traces) == 5
 
-    async def test_serial_reads_under_concurrency_cap(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_serial_reads_under_concurrency_cap(self, tmp_path: Path) -> None:
         """Serial reads work fine with ``max_concurrency=1``.
 
         We don't test heavy-concurrent SQLite reads through the
@@ -120,9 +116,7 @@ class TestAsyncConcurrency:
         """
         from trellis.testing import in_memory_async_client
 
-        async with in_memory_async_client(
-            tmp_path / "stores", max_concurrency=1
-        ) as c:
+        async with in_memory_async_client(tmp_path / "stores", max_concurrency=1) as c:
             trace = {
                 "source": "agent",
                 "intent": "serial read target",
@@ -131,9 +125,7 @@ class TestAsyncConcurrency:
             }
             trace_id = await c.ingest_trace(trace)
             # Serial under max_concurrency=1, but exercised via gather.
-            results = await asyncio.gather(
-                *(c.get_trace(trace_id) for _ in range(4))
-            )
+            results = await asyncio.gather(*(c.get_trace(trace_id) for _ in range(4)))
             assert all(r is not None for r in results)
             assert all(r["intent"] == "serial read target" for r in results)
 
@@ -150,7 +142,5 @@ class TestAsyncConcurrency:
         ``StoreRegistry`` cache and aren't a fit for the in-memory
         shim.
         """
-        async with in_memory_async_client(
-            tmp_path / "stores", max_concurrency=3
-        ) as c:
+        async with in_memory_async_client(tmp_path / "stores", max_concurrency=3) as c:
             assert c.max_concurrency == 3

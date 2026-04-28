@@ -118,9 +118,7 @@ def test_resolve_missing_returns_none(store: SQLiteParameterStore):
 
 def test_resolve_intent_without_domain(store: SQLiteParameterStore):
     store.put(_set(intent_family="plan", values={"v": 5}))
-    result = store.resolve(
-        ParameterScope(component_id="c", intent_family="plan")
-    )
+    result = store.resolve(ParameterScope(component_id="c", intent_family="plan"))
     assert result is not None
     assert result.values == {"v": 5}
 

@@ -53,9 +53,7 @@ class FilterClause:
 
     field: str
     op: FilterOp
-    value: str | int | float | bool | tuple[
-        str | int | float | bool, ...
-    ] | None = None
+    value: str | int | float | bool | tuple[str | int | float | bool, ...] | None = None
 
     def __post_init__(self) -> None:
         if self.op == "in" and not isinstance(self.value, tuple):

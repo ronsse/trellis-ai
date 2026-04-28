@@ -115,9 +115,7 @@ def test_outcome_event_roundtrip():
         domain="d",
         intent_family="plan",
         phase="retrieve",
-        outcome=ComponentOutcome(
-            success=True, latency_ms=10.0, metrics={"p": 0.9}
-        ),
+        outcome=ComponentOutcome(success=True, latency_ms=10.0, metrics={"p": 0.9}),
     )
     dumped = original.model_dump(mode="json")
     restored = OutcomeEvent.model_validate(dumped)

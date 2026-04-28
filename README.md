@@ -209,6 +209,7 @@ Requires Python 3.11+.
 ```bash
 pip install trellis-ai                    # core (SQLite everywhere — local default)
 pip install "trellis-ai[cloud]"           # + Postgres, pgvector, S3 (blessed cloud default)
+pip install "trellis-ai[neo4j]"           # + Neo4j driver (graph + vector via Bolt / AuraDB)
 pip install "trellis-ai[vectors]"         # + LanceDB (alternate local ANN)
 pip install "trellis-ai[llm-openai]"      # + OpenAI for enrichment & extraction
 pip install "trellis-ai[llm-anthropic]"   # + Anthropic
@@ -225,6 +226,9 @@ trellis retrieve pack --intent "..." --domain backend --max-tokens 2000
 trellis curate promote TRACE_ID --title "..." --description "..."
 trellis analyze context-effectiveness
 trellis admin check-extractors       # readiness diagnostic for tiered extraction
+trellis admin migrate-graph \
+  --from-config sqlite.yaml \
+  --to-config aura.yaml      # backend-agnostic graph migration (SQLite↔Postgres↔Neo4j)
 ```
 
 **REST API** — `trellis admin serve` or `trellis-api`. OpenAPI at `/docs`, UI at `/`.
@@ -297,6 +301,7 @@ flowchart LR
         direction TB
         SQ["SQLite — local default"]
         PG["Postgres + pgvector<br/>blessed cloud default"]
+        N4["Neo4j + AuraDB<br/>graph-native cloud"]
         S3["S3 — blobs in cloud"]
         LA["LanceDB — alternate<br/>(local ANN)"]
         SD["SurrealDB — coming next"]
@@ -313,6 +318,8 @@ flowchart LR
     V --- PG
     TR --- PG
     EL --- PG
+    G -.-> N4
+    V -.-> N4
     B -.-> S3
     V -.-> LA
     G -.-> SD
@@ -325,20 +332,23 @@ flowchart LR
     class G,D,V,B knowledge;
     class TR,EL ops;
     class SQ,PG,S3 sub;
-    class LA,SD alt;
+    class N4,LA,SD alt;
 ```
 
-Solid lines are blessed defaults (SQLite locally, Postgres + pgvector in cloud); dotted lines are alternate/exploratory substrates wired via `~/.config/trellis/config.yaml`. Choosing pgvector collocates keyword, semantic, and graph retrieval in a single Postgres transaction — one DSN, one consistency story.
+Solid lines are blessed defaults (SQLite locally, Postgres + pgvector in cloud); dotted lines are alternate/exploratory substrates wired via `~/.config/trellis/config.yaml`. Choosing pgvector collocates keyword, semantic, and graph retrieval in a single Postgres transaction — one DSN, one consistency story. **Neo4j (and AuraDB)** is supported as a graph-native alternative for graph + vector when you want Cypher-native traversal or are already on a managed Neo4j instance.
 
 ## Storage — local or cloud
 
-Backends are wired from `~/.config/trellis/config.yaml`. SQLite is the local default; **Postgres + pgvector is the blessed cloud default**, chosen so keyword, semantic, and graph retrieval share one transactional store. LanceDB remains an alternate for vector-heavy local workloads; **SurrealDB integration is the next substrate on the roadmap**.
+Backends are wired from `~/.config/trellis/config.yaml`. SQLite is the local default; **Postgres + pgvector is the blessed cloud default**, chosen so keyword, semantic, and graph retrieval share one transactional store. **Neo4j / AuraDB** is a first-class graph-native alternative for graph + vector — see [`docs/deployment/neo4j-local.md`](docs/deployment/neo4j-local.md) and [`docs/deployment/neo4j-auradb.md`](docs/deployment/neo4j-auradb.md). LanceDB remains an alternate for vector-heavy local workloads; **SurrealDB integration is the next substrate on the roadmap**.
 
 | Store | Local default | Cloud default | Alternates |
 |-------|---------------|---------------|------------|
-| Trace / Document / Graph / Event Log | `sqlite` | `postgres` | — |
-| Vector | `sqlite` | `pgvector` | `lancedb` (local ANN) |
+| Trace / Document / Event Log | `sqlite` | `postgres` | — |
+| Graph | `sqlite` | `postgres` | `neo4j` (Bolt / AuraDB) |
+| Vector | `sqlite` | `pgvector` | `neo4j` (HNSW on `:Node`), `lancedb` (local ANN) |
 | Blob | `local` | `s3` | — |
+
+For copy-paste config, see [`docs/deployment/recommended-config.yaml`](docs/deployment/recommended-config.yaml) — three blessed shapes (local Neo4j+SQLite, cloud AuraDB+Postgres, Postgres-only). Set `TRELLIS_VALIDATE_CONNECTIVITY=1` in production to fail-fast at startup if Neo4j is unreachable.
 
 ```yaml
 stores:
@@ -388,8 +398,9 @@ git clone https://github.com/ronsse/trellis-ai.git
 cd trellis-ai
 uv pip install -e ".[dev]"
 
-pytest tests/unit/                # unit tests (~1300)
+pytest tests/unit/                # unit tests (~2300)
 pytest -m postgres                # postgres integration tests
+pytest -m neo4j                   # neo4j integration tests (set TRELLIS_TEST_NEO4J_URI)
 ruff check src/ tests/            # lint
 mypy src/                         # type check
 ```

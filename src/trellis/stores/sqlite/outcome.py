@@ -169,9 +169,7 @@ class SQLiteOutcomeStore(SQLiteStoreBase, OutcomeStore):
             until=until,
         )
         where = " AND ".join(clauses) if clauses else "1=1"
-        sql = (
-            f"SELECT * FROM outcomes WHERE {where} ORDER BY occurred_at ASC LIMIT ?"
-        )
+        sql = f"SELECT * FROM outcomes WHERE {where} ORDER BY occurred_at ASC LIMIT ?"
         params.append(limit)
 
         cur = self._conn.cursor()

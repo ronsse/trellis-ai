@@ -153,9 +153,7 @@ class TestMigrateConfig:
         assert result.exit_code == 0
         assert "nothing-to-do" in result.stdout or "No" in result.stdout
 
-    def test_json_output(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_json_output(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         config_dir = tmp_path / "config"
         monkeypatch.setenv("TRELLIS_CONFIG_DIR", str(config_dir))
         _write_config(
@@ -163,9 +161,7 @@ class TestMigrateConfig:
             {"stores": {"graph": {"backend": "sqlite"}}},
         )
 
-        result = runner.invoke(
-            app, ["admin", "migrate-config", "--format", "json"]
-        )
+        result = runner.invoke(app, ["admin", "migrate-config", "--format", "json"])
         assert result.exit_code == 0
         data = json.loads(result.stdout.strip())
         assert data["status"] == "migrated"
