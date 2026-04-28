@@ -58,7 +58,7 @@ Each item is something that, if missing the first time a stranger runs against N
 * **Estimate:** ~50 lines.
 * **Risk of leaving it:** file-descriptor leaks across uvicorn restarts; AuraDB connection-quota exhaustion on Pro tier.
 
-### 1.3 `validate()` pings Neo4j on startup
+### 1.3 `validate()` pings Neo4j on startup ✅ landed 2026-04-27
 
 * **State today:** E.3's [`StoreRegistry.validate()`](../../src/trellis/stores/registry.py) deliberately punts on per-backend ping — the docstring at line 853 acknowledges it. So if Neo4j is unreachable, uvicorn starts cleanly and the *first request* fails with a Bolt error.
 * **Done when:**
