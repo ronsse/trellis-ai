@@ -89,6 +89,10 @@ trellis-api = "trellis_api.app:main"
 source = "vcs"
 fallback-version = "0.2.0"
 
+# Wheel + sdist are whitelist-only. Anything not listed below is excluded
+# by construction — including the repo-root `eval/` harness, which is
+# in-repo for iteration speed but never shipped to PyPI consumers. See
+# docs/design/plan-evaluation-strategy.md §3-§4.
 [tool.hatch.build.targets.wheel]
 packages = ["src/trellis", "src/trellis_cli", "src/trellis_workers", "src/trellis_api", "src/trellis_sdk", "src/trellis_wire"]
 artifacts = [
