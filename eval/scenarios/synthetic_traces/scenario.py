@@ -25,7 +25,7 @@ from eval.generators.trace_generator import (
     GeneratedTrace,
     generate_corpus,
 )
-from eval.runner import Finding, ScenarioReport
+from eval.runner import Finding, ScenarioReport, ScenarioStatus
 from trellis.retrieve.evaluate import (
     BUILTIN_PROFILES,
     EvaluationScenario,
@@ -206,6 +206,7 @@ def run(
         metrics[f"aggregate.{dim}_mean"] = round(statistics.fmean(values), 4)
 
     aggregate_mean = metrics.get("aggregate.weighted_score_mean", 0.0)
+    status: ScenarioStatus
     if aggregate_mean < WEIGHTED_REGRESS_THRESHOLD:
         findings.append(
             Finding(
