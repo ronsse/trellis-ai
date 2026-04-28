@@ -33,6 +33,22 @@
 - [x] **#32 — Scenario 5.3 populated-graph performance.** Default 1K node graph (kwargs scale up), p50/p95/p99 latency per query type per backend, recall@10 vs brute-force baseline. Threshold-driven warnings gate Phase-3 unblock items (HNSW tuning fires when recall < 0.95; UNWIND bulk path fires when ingest throughput < 100 nodes/sec).
 - [x] **#36 — Switch eval ingest to `upsert_*_bulk`.** Done; both 5.1 and 5.3 now use bulk upserts so cross-backend comparisons aren't dominated by per-row Neo4j round trips.
 
+### First live-data eval run — 2026-04-27
+
+Loaded the deterministic eval dataset (5K nodes / 20K edges / 1K embeddings, dim=16) into AuraDB Free via [`scripts/load_eval_dataset_to_aura.py`](scripts/load_eval_dataset_to_aura.py), then ran scenario 5.3 against the live populated graph. Status: `regress` — three Phase-3 deferred items got threshold-fired. Numbers + decision recommendations live in [`docs/design/plan-neo4j-hardening.md`](docs/design/plan-neo4j-hardening.md) §5.1. (Per [§7.1 of the eval strategy](docs/design/plan-evaluation-strategy.md), `eval/reports/` is gitignored — committed baselines are deferred until 5.1-5.4 have run cleanly several times.)
+
+**Now-actionable Phase 3 items (gated work that just got unblocked):**
+
+- [ ] **HNSW vector-index params + quantization config** ([plan-neo4j-hardening.md §5.1(a)](docs/design/plan-neo4j-hardening.md)). AuraDB Free recall@10 = 0.36 vs SQLite 1.00. AuraDB defaults `vector.quantization.enabled=true` which collapses recall on low-dim vectors. Add `quantization`, `m`, `ef_construction` kwargs to [`Neo4jVectorStore`](src/trellis/stores/neo4j/vector.py) and flow them through registry config.
+- [ ] **`upsert_nodes_bulk` raw-UNWIND fast path** ([plan-neo4j-hardening.md §5.1(b)](docs/design/plan-neo4j-hardening.md)). Governed bulk path = ~47 nodes/sec on AuraDB Free; raw UNWIND in the loader = ~3281 nodes/sec on the same instance. The 70× gap is SCD-2 close-old-version + role-immutability pre-fetch overhead. Either add a `bulk_load=True` mode that skips the close-version branch when callers assert rows are new, or fold the role pre-fetch into the UNWIND coalesce (already done for edges in PR #44 follow-ups).
+- [ ] **`db.index.vector.queryNodes` → `SEARCH` migration** ([plan-neo4j-hardening.md §5.1(c)](docs/design/plan-neo4j-hardening.md)). [`Neo4jVectorStore.query()`](src/trellis/stores/neo4j/vector.py) calls a procedure AuraDB has marked deprecated. Migrate to the `SEARCH` clause; this is future-compat correctness *and* suppresses dozens of duplicate WARNING lines per scenario run.
+
+**Eval framework gaps surfaced — to land before the next scheduled run:**
+
+- [x] **Eval scenarios didn't honor `TRELLIS_NEO4J_DATABASE`** — first run against AuraDB crashed with `DatabaseNotFound` because scenarios passed uri/user/password but defaulted database to `"neo4j"`. AuraDB names the database after the instance ID. Fixed in [PR #56](https://github.com/ronsse/trellis-ai/pull/56).
+- [ ] **pgvector dim mismatch on the shared Neon test DB.** Existing `embedding` column is `vector(3)` (provisioned by an earlier contract test); scenarios default to dim=16. pgvector does not auto-migrate. Either align scenario `embedding_dim` default to 3, or drop+recreate the column.
+- [ ] **Single vector index per `(:Node, embedding)` on AuraDB.** Unit-test fixtures own `trellis_test_node_embeddings` (dim=3); scenario 5.1 wants `trellis_node_embeddings` (dim=16). Neo4j silently no-ops the colliding CREATE; the ONLINE-wait then times out at 30s. The loader script handles this by dropping the test index. Document the cohabitation rule in [`docs/deployment/neo4j-auradb.md`](docs/deployment/neo4j-auradb.md).
+
 ### Then write — scenario 5.4 (the "agent improvement" curve)
 
 - [ ] **Scenario 5.4 — agent loop convergence (NOT WRITTEN, ~3 days, ~800 LOC per the strategy doc).** Synthetic agent runs N rounds of: ask for context → use it (deterministic success/failure based on whether ground-truth entities are in the pack) → record feedback. Track per-round: pack quality score, fraction of useful items, advisory generation + suppression events, parameter changes from the rule tuner. Plot score-over-rounds. **This is the scenario that produces the curve you can show people** — it's the first end-to-end exercise of the dual-loop feedback system on a controlled corpus where ground truth is known by construction. Without it, the "self-learning" claim has no evidence behind it; with it, you have a chart. Depends on #31's generators landing first.
