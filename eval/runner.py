@@ -32,7 +32,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal
 
 import structlog
 
@@ -43,6 +43,9 @@ logger = structlog.get_logger(__name__)
 
 SCENARIOS_PACKAGE = "eval.scenarios"
 REPORTS_DIR = Path(__file__).parent / "reports"
+
+Severity = Literal["info", "warn", "fail"]
+ScenarioStatus = Literal["pass", "fail", "regress", "skip"]
 
 
 # ---------------------------------------------------------------------------
@@ -58,7 +61,7 @@ class Finding:
     something a human should review, ``fail`` for a hard regression.
     """
 
-    severity: str
+    severity: Severity
     message: str
     detail: dict[str, Any] = field(default_factory=dict)
 
@@ -90,7 +93,7 @@ class ScenarioReport:
     """
 
     name: str
-    status: str
+    status: ScenarioStatus
     metrics: dict[str, float] = field(default_factory=dict)
     findings: list[Finding] = field(default_factory=list)
     decision: str = ""
@@ -98,13 +101,6 @@ class ScenarioReport:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
-
-
-@runtime_checkable
-class ScenarioModule(Protocol):
-    """Shape every scenario module must satisfy."""
-
-    def run(self, registry: StoreRegistry) -> ScenarioReport: ...
 
 
 # ---------------------------------------------------------------------------
@@ -174,9 +170,9 @@ def run_scenario(name: str, registry: StoreRegistry) -> ScenarioReport:
             duration_seconds=elapsed,
         )
 
-    elapsed = (datetime.now(UTC) - started).total_seconds()
-    if report.duration_seconds == 0.0:
-        report.duration_seconds = elapsed
+    report.duration_seconds = (
+        report.duration_seconds or (datetime.now(UTC) - started).total_seconds()
+    )
     return report
 
 
@@ -199,7 +195,7 @@ def write_report(
     """Write JSON + Markdown reports; return ``(json_path, md_path)``."""
     out_dir = out_dir or REPORTS_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S_%fZ")
 
     json_path = out_dir / f"report-{timestamp}.json"
     md_path = out_dir / f"report-{timestamp}.md"
@@ -225,7 +221,7 @@ def _render_markdown(reports: list[ScenarioReport], timestamp: str) -> str:
             lines.append("")
         if r.metrics:
             lines.append("### Metrics")
-            lines.extend(f"- `{k}`: {r.metrics[k]}" for k in sorted(r.metrics))
+            lines.extend(f"- `{k}`: {v}" for k, v in sorted(r.metrics.items()))
             lines.append("")
         if r.findings:
             lines.append("### Findings")

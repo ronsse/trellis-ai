@@ -18,9 +18,8 @@ uv pip install -e ".[dev]"
 ```
 
 If a scenario targets a particular backend (Postgres, Neo4j, pgvector,
-LanceDB) install the matching extra too — see
-[`recommended-config.yaml`](../../recommended-config.yaml) for the
-blessed shapes.
+LanceDB) install the matching extra too — see the deployment docs
+under [`docs/deployment/`](../deployment/) for backend-specific setup.
 
 ## Quickstart
 

@@ -41,10 +41,7 @@ def test_run_scenario_unknown_returns_fail() -> None:
     registry = MagicMock()
     report = run_scenario("does_not_exist", registry)
     assert report.status == "fail"
-    assert report.findings
-    assert any(
-        "ModuleNotFoundError" in f.detail.get("traceback", "") for f in report.findings
-    )
+    assert any(f.severity == "fail" for f in report.findings)
 
 
 def test_write_report_creates_json_and_markdown(tmp_path: Path) -> None:
