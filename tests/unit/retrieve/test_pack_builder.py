@@ -1158,9 +1158,7 @@ class TestPackBuilderTokenBudget:
         items = [_item(f"d{i}", 1.0 - i * 0.01, excerpt="x" * 100) for i in range(20)]
         s = _make_strategy("kw", items)
         # With a counter that reports 10 tokens per item, 10 items fit in 100.
-        builder = PackBuilder(
-            strategies=[s], token_counter=_FixedTokenCounter(10)
-        )
+        builder = PackBuilder(strategies=[s], token_counter=_FixedTokenCounter(10))
         pack = builder.build("q", budget=PackBudget(max_items=50, max_tokens=100))
         assert len(pack.items) == 10
 
@@ -1196,9 +1194,7 @@ class TestPackBuilderTokenBudget:
                 token_budget_safety_margin=0.1,
             )
             builder.build("q", budget=PackBudget(max_items=10, max_tokens=100))
-            events = event_log.get_events(
-                event_type=EventType.PACK_ASSEMBLED, limit=10
-            )
+            events = event_log.get_events(event_type=EventType.PACK_ASSEMBLED, limit=10)
             assert len(events) == 1
             payload = events[0].payload
             assert payload["token_counter"] == "fixed_10"  # noqa: S105
@@ -1228,9 +1224,7 @@ class TestPackBuilderTokenBudget:
                 token_budget_validator=_FixedTokenCounter(8, name="real"),
             )
             builder.build("q", budget=PackBudget(max_items=10, max_tokens=100))
-            events = event_log.get_events(
-                event_type=EventType.PACK_ASSEMBLED, limit=10
-            )
+            events = event_log.get_events(event_type=EventType.PACK_ASSEMBLED, limit=10)
             payload = events[0].payload
             assert payload["token_counter"] == "under"  # noqa: S105
             assert payload["token_counter_validator"] == "real"  # noqa: S105
@@ -1261,13 +1255,9 @@ class TestPackBuilderTokenBudget:
                 event_log=event_log,
                 token_budget_validator=_BrokenValidator(),
             )
-            pack = builder.build(
-                "q", budget=PackBudget(max_items=10, max_tokens=100)
-            )
+            pack = builder.build("q", budget=PackBudget(max_items=10, max_tokens=100))
             assert len(pack.items) == 1
-            events = event_log.get_events(
-                event_type=EventType.PACK_ASSEMBLED, limit=10
-            )
+            events = event_log.get_events(event_type=EventType.PACK_ASSEMBLED, limit=10)
             payload = events[0].payload
             # Validator fields absent, but primary telemetry still landed.
             assert "token_total_validated" not in payload
@@ -1295,9 +1285,7 @@ class TestPackBuilderTokenBudget:
 
         event_log = SQLiteEventLog(tmp_path / "events.db")
         try:
-            s = _make_strategy(
-                "kw", [_item(f"d{i}", 1.0 - i * 0.01) for i in range(3)]
-            )
+            s = _make_strategy("kw", [_item(f"d{i}", 1.0 - i * 0.01) for i in range(3)])
             builder = PackBuilder(
                 strategies=[s],
                 event_log=event_log,
@@ -1311,9 +1299,7 @@ class TestPackBuilderTokenBudget:
                     SectionRequest(name="b", max_items=5, max_tokens=300),
                 ],
             )
-            events = event_log.get_events(
-                event_type=EventType.PACK_ASSEMBLED, limit=10
-            )
+            events = event_log.get_events(event_type=EventType.PACK_ASSEMBLED, limit=10)
             assert len(events) == 1
             payload = events[0].payload
             assert payload["token_counter"] == "mx"  # noqa: S105

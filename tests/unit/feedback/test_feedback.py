@@ -443,7 +443,8 @@ class _CapturingEventLog:
         from types import SimpleNamespace
 
         matches = [
-            e for e in self.events
+            e
+            for e in self.events
             if event_type is None or e["event_type"] == event_type
         ]
         return [SimpleNamespace(payload=e["payload"]) for e in matches[:limit]]
@@ -695,13 +696,16 @@ class TestLoadFeedbackLogBackwardCompat:
 
         log_path = tmp_path / "pack_feedback.jsonl"
         log_path.write_text(
-            json.dumps({
-                "run_id": "legacy",
-                "phase": "p",
-                "intent": "i",
-                "outcome": "success",
-                "items_served": ["a"],
-            }) + "\n",
+            json.dumps(
+                {
+                    "run_id": "legacy",
+                    "phase": "p",
+                    "intent": "i",
+                    "outcome": "success",
+                    "items_served": ["a"],
+                }
+            )
+            + "\n",
             encoding="utf-8",
         )
 

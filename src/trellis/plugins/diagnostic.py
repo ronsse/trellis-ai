@@ -182,9 +182,7 @@ def collect_plugin_report() -> PluginReport:
     # Store backends — per-type subgroups.
     for group in store_backend_groups():
         report.groups_checked.append(group)
-        report.plugins.extend(
-            _check_one(group, _BUILTIN_STORE_NAMES.get(group, set()))
-        )
+        report.plugins.extend(_check_one(group, _BUILTIN_STORE_NAMES.get(group, set())))
 
     # LLM providers + embedders.
     report.groups_checked.append(GROUP_LLM_PROVIDERS)

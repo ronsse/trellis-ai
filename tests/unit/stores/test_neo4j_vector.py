@@ -34,9 +34,7 @@ def stores():
     from trellis.stores.neo4j.graph import Neo4jGraphStore
     from trellis.stores.neo4j.vector import Neo4jVectorStore
 
-    graph = Neo4jGraphStore(
-        URI, user=USER, password=PASSWORD, database=DATABASE
-    )
+    graph = Neo4jGraphStore(URI, user=USER, password=PASSWORD, database=DATABASE)
     vector = Neo4jVectorStore(
         URI,
         user=USER,
@@ -145,9 +143,7 @@ class TestUpsertBulk:
     def test_missing_node_raises_with_index(self, stores):
         graph, vector = stores
         _make_node(graph, "a")
-        with pytest.raises(
-            ValueError, match=r"upsert_bulk\[1\].*no current version"
-        ):
+        with pytest.raises(ValueError, match=r"upsert_bulk\[1\].*no current version"):
             vector.upsert_bulk(
                 [
                     {"item_id": "a", "vector": _vec(1, 0, 0)},
@@ -252,9 +248,7 @@ class TestQuery:
         _make_node(graph, "b")
         vector.upsert("a", _vec(1, 0, 0), metadata={"kind": "doc"})
         vector.upsert("b", _vec(0.9, 0.1, 0), metadata={"kind": "code"})
-        results = vector.query(
-            _vec(1, 0, 0), top_k=10, filters={"kind": "code"}
-        )
+        results = vector.query(_vec(1, 0, 0), top_k=10, filters={"kind": "code"})
         assert len(results) == 1
         assert results[0]["item_id"] == "b"
 

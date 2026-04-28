@@ -281,9 +281,7 @@ def test_constructor_accepts_already_flat_dict() -> None:
 
 def test_constructor_normalises_legacy_flat_wrapped_dict() -> None:
     """The deprecated ``stores:`` wrapper still works via the constructor."""
-    registry = StoreRegistry(
-        config={"stores": {"graph": {"backend": "postgres"}}}
-    )
+    registry = StoreRegistry(config={"stores": {"graph": {"backend": "postgres"}}})
     backend, _ = registry._resolve_backend("graph")
     assert backend == "postgres"
 

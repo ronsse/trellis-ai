@@ -173,9 +173,7 @@ def monitor_post_promotion(  # noqa: PLR0911 — verdict space is flat by design
             reason="params_version not found in parameter_store",
         )
 
-    promotion_event, baseline_version = _load_promotion_event(
-        event_log, params_version
-    )
+    promotion_event, baseline_version = _load_promotion_event(event_log, params_version)
     if promotion_event is None:
         return PostPromotionReport(
             params_version=params_version,

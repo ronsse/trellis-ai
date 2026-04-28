@@ -123,10 +123,7 @@ class SQLiteTunerStateStore(SQLiteStoreBase, TunerStateStore):
             clauses.append("status = ?")
             params.append(status)
         where = " AND ".join(clauses) if clauses else "1=1"
-        sql = (
-            f"SELECT * FROM proposals WHERE {where} "
-            "ORDER BY created_at DESC LIMIT ?"
-        )
+        sql = f"SELECT * FROM proposals WHERE {where} ORDER BY created_at DESC LIMIT ?"
         params.append(limit)
         cur = self._conn.cursor()
         cur.execute(sql, params)
@@ -152,8 +149,7 @@ class SQLiteTunerStateStore(SQLiteStoreBase, TunerStateStore):
             )
         else:
             cur.execute(
-                "UPDATE proposals SET status = ?, updated_at = ? "
-                "WHERE proposal_id = ?",
+                "UPDATE proposals SET status = ?, updated_at = ? WHERE proposal_id = ?",
                 (status, now, proposal_id),
             )
         self._conn.commit()

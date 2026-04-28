@@ -47,9 +47,7 @@ def graph_store():
     """Fresh Neo4jGraphStore with a cleaned database per test."""
     from trellis.stores.neo4j.graph import Neo4jGraphStore
 
-    store = Neo4jGraphStore(
-        URI, user=USER, password=PASSWORD, database=DATABASE
-    )
+    store = Neo4jGraphStore(URI, user=USER, password=PASSWORD, database=DATABASE)
     # Wipe all data the store might have created in a prior run.
     with store._driver.session(database=store._database) as session:
         session.run("MATCH (n) WHERE n:Node OR n:Alias DETACH DELETE n")
@@ -61,8 +59,7 @@ def _backdate_closed(store, label: str, valid_to_iso: str) -> None:
     """Rewrite every closed row's ``valid_to`` on ``label`` for test control."""
     with store._driver.session(database=store._database) as session:
         session.run(
-            f"MATCH (n:{label}) WHERE n.valid_to IS NOT NULL "
-            "SET n.valid_to = $vt",
+            f"MATCH (n:{label}) WHERE n.valid_to IS NOT NULL SET n.valid_to = $vt",
             vt=valid_to_iso,
         )
 
@@ -70,8 +67,7 @@ def _backdate_closed(store, label: str, valid_to_iso: str) -> None:
 def _backdate_closed_edges(store, valid_to_iso: str) -> None:
     with store._driver.session(database=store._database) as session:
         session.run(
-            "MATCH ()-[r:EDGE]->() WHERE r.valid_to IS NOT NULL "
-            "SET r.valid_to = $vt",
+            "MATCH ()-[r:EDGE]->() WHERE r.valid_to IS NOT NULL SET r.valid_to = $vt",
             vt=valid_to_iso,
         )
 
@@ -326,9 +322,7 @@ class TestNodeRole:
     def test_role_is_immutable(self, graph_store):
         graph_store.upsert_node("n1", "service", {})
         with pytest.raises(ValueError, match="Cannot change node_role"):
-            graph_store.upsert_node(
-                "n1", "service", {}, node_role="structural"
-            )
+            graph_store.upsert_node("n1", "service", {}, node_role="structural")
 
     def test_document_ids_round_trip(self, graph_store):
         graph_store.upsert_node(
@@ -424,8 +418,6 @@ class TestCompactVersions:
         _backdate_closed_edges(graph_store, ten_days_ago)
         _backdate_closed(graph_store, "Alias", ten_days_ago)
 
-        report = graph_store.compact_versions(
-            datetime.now(UTC) - timedelta(days=5)
-        )
+        report = graph_store.compact_versions(datetime.now(UTC) - timedelta(days=5))
         assert report.edges_compacted == 1
         assert report.aliases_compacted == 1

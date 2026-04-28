@@ -114,9 +114,7 @@ class TestDocumentIdsRoundTrip:
     def test_explicit_empty_list_returns_empty_list(
         self, graph_store: GraphStore
     ) -> None:
-        node_id = graph_store.upsert_node(
-            None, "Entity", {}, document_ids=[]
-        )
+        node_id = graph_store.upsert_node(None, "Entity", {}, document_ids=[])
         got = graph_store.get_node(node_id)
         assert got is not None
         assert got["document_ids"] == []
@@ -160,13 +158,9 @@ class TestDocumentIdsRoundTrip:
         self, graph_store: GraphStore
     ) -> None:
         with pytest.raises(ValueError, match="duplicate entry"):
-            graph_store.upsert_node(
-                None, "E", {}, document_ids=["dup", "dup"]
-            )
+            graph_store.upsert_node(None, "E", {}, document_ids=["dup", "dup"])
         with pytest.raises(ValueError, match="non-empty string"):
-            graph_store.upsert_node(
-                None, "E", {}, document_ids=["valid", ""]
-            )
+            graph_store.upsert_node(None, "E", {}, document_ids=["valid", ""])
 
 
 # -- Backfill / migration graceful degradation ----------------------------
@@ -175,9 +169,7 @@ class TestDocumentIdsRoundTrip:
 class TestSQLiteBackfillGracefulDegrade:
     """Pre-existing rows without document_ids_json must still read as []."""
 
-    def test_pre_existing_null_column_reads_as_empty(
-        self, tmp_path: Path
-    ) -> None:
+    def test_pre_existing_null_column_reads_as_empty(self, tmp_path: Path) -> None:
 
         # Simulate a v3 database created before Phase 4 by manually
         # inserting a row with NULL document_ids_json.

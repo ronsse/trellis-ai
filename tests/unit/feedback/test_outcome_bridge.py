@@ -122,9 +122,7 @@ def test_outcome_failure_is_non_fatal(tmp_path: Path):
     # between outcome_store and JSONL is covered by ops-side tests.
 
 
-def test_dual_emit_event_and_outcome(
-    tmp_path: Path, outcome_store: SQLiteOutcomeStore
-):
+def test_dual_emit_event_and_outcome(tmp_path: Path, outcome_store: SQLiteOutcomeStore):
     """When both sinks are passed, each receives its own record."""
     captured_events: list[object] = []
 

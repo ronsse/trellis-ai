@@ -377,9 +377,7 @@ class Neo4jGraphStore(Neo4jSessionRunner, GraphStore):
         return node_ids
 
     @staticmethod
-    def _fetch_current_node_roles(
-        session: Any, node_ids: list[str]
-    ) -> dict[str, str]:
+    def _fetch_current_node_roles(session: Any, node_ids: list[str]) -> dict[str, str]:
         """Single round trip on ``session``: ``{node_id: node_role}`` for
         the subset of ``node_ids`` that currently exists.
 
@@ -394,9 +392,7 @@ class Neo4jGraphStore(Neo4jSessionRunner, GraphStore):
             "MATCH (n:Node) WHERE n.node_id IN $ids AND n.valid_to IS NULL "
             "RETURN n.node_id AS node_id, n.node_role AS node_role"
         )
-        records = session.execute_read(
-            lambda tx: list(tx.run(cypher, ids=node_ids))
-        )
+        records = session.execute_read(lambda tx: list(tx.run(cypher, ids=node_ids)))
         return {r["node_id"]: r["node_role"] for r in records}
 
     def get_node(
@@ -644,9 +640,7 @@ class Neo4jGraphStore(Neo4jSessionRunner, GraphStore):
                 {spec["source_id"] for spec in edges}
                 | {spec["target_id"] for spec in edges}
             )
-            valid_endpoints = self._fetch_current_node_id_set(
-                session, endpoint_ids
-            )
+            valid_endpoints = self._fetch_current_node_id_set(session, endpoint_ids)
             for i, spec in enumerate(edges):
                 if spec["source_id"] not in valid_endpoints:
                     msg = (
@@ -683,9 +677,7 @@ class Neo4jGraphStore(Neo4jSessionRunner, GraphStore):
             SET new.created_at = created_at_carry
             RETURN row.row_index AS row_index, edge_id_carry AS edge_id
             """
-            records = session.execute_write(
-                lambda tx: list(tx.run(cypher, rows=rows))
-            )
+            records = session.execute_write(lambda tx: list(tx.run(cypher, rows=rows)))
 
         # UNWIND iteration order isn't guaranteed; reorder by
         # ``row_index`` so the returned IDs line up with the input list.
@@ -695,9 +687,7 @@ class Neo4jGraphStore(Neo4jSessionRunner, GraphStore):
         return edge_ids
 
     @staticmethod
-    def _fetch_current_node_id_set(
-        session: Any, node_ids: list[str]
-    ) -> set[str]:
+    def _fetch_current_node_id_set(session: Any, node_ids: list[str]) -> set[str]:
         """Round-trip helper on ``session``: which of these IDs have a
         current version?"""
         if not node_ids:
@@ -706,9 +696,7 @@ class Neo4jGraphStore(Neo4jSessionRunner, GraphStore):
             "MATCH (n:Node) WHERE n.node_id IN $ids AND n.valid_to IS NULL "
             "RETURN n.node_id AS node_id"
         )
-        records = session.execute_read(
-            lambda tx: list(tx.run(cypher, ids=node_ids))
-        )
+        records = session.execute_read(lambda tx: list(tx.run(cypher, ids=node_ids)))
         return {r["node_id"] for r in records}
 
     def get_edges(

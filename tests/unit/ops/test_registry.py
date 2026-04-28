@@ -91,9 +91,7 @@ def test_invalidate_all(store: SQLiteParameterStore):
 
 def test_get_values_returns_full_dict(store: SQLiteParameterStore):
     scope = ParameterScope(component_id="c")
-    store.put(
-        ParameterSet(scope=scope, values={"a": 1, "b": "hi", "c": True})
-    )
+    store.put(ParameterSet(scope=scope, values={"a": 1, "b": "hi", "c": True}))
     reg = ParameterRegistry(store)
     values = reg.get_values(scope)
     assert values == {"a": 1, "b": "hi", "c": True}

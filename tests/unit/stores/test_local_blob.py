@@ -46,9 +46,7 @@ class TestPutGet:
 
 
 class TestTTL:
-    def test_put_stores_expires_at_in_meta(
-        self, store: LocalBlobStore, tmp_path: Path
-    ):
+    def test_put_stores_expires_at_in_meta(self, store: LocalBlobStore, tmp_path: Path):
         expires = datetime.now(UTC) + timedelta(days=1)
         store.put("file.bin", b"x", expires_at=expires)
         meta = json.loads((tmp_path / "blobs" / ".meta" / "file.bin.json").read_text())
@@ -118,15 +116,11 @@ class TestSweepExpired:
         assert store.get("docs/a.bin") is None
         assert store.get("uploads/b.bin") == b"b"
 
-    def test_malformed_ttl_counts_as_error(
-        self, store: LocalBlobStore, tmp_path: Path
-    ):
+    def test_malformed_ttl_counts_as_error(self, store: LocalBlobStore, tmp_path: Path):
         # Seed a blob + meta file with an invalid ISO timestamp.
         store.put("broken.bin", b"x", metadata={"author": "agent"})
         meta_path = tmp_path / "blobs" / ".meta" / "broken.bin.json"
-        meta_path.write_text(
-            json.dumps({BLOB_EXPIRES_AT_KEY: "not-a-timestamp"})
-        )
+        meta_path.write_text(json.dumps({BLOB_EXPIRES_AT_KEY: "not-a-timestamp"}))
         report = store.sweep_expired()
         assert report.errors == 1
         assert report.swept == 0
@@ -149,9 +143,7 @@ class TestSweepExpired:
         finally:
             event_log.close()
 
-    def test_dry_run_still_emits_event(
-        self, store: LocalBlobStore, tmp_path: Path
-    ):
+    def test_dry_run_still_emits_event(self, store: LocalBlobStore, tmp_path: Path):
         past = datetime.now(UTC) - timedelta(days=1)
         store.put("old.bin", b"x", expires_at=past)
         event_log = SQLiteEventLog(tmp_path / "events.db")
