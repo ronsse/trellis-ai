@@ -135,14 +135,14 @@ Each item is something that, if missing the first time a stranger runs against N
 
 Do not pre-build any of these. Each lands cleanly when its signal arrives.
 
-> **Live-data run on 2026-04-27 fired three signals.** See §5.1 below for the
-> measured numbers and the now-actionable items.
+> **Live-data run on 2026-04-27 fired three signals.** All three landed
+> the same day in PRs #58, #59, #60. See §5.1 for the before/after numbers.
 
 | Item | Gate | State |
 |---|---|---|
-| HNSW vector-index params (`M`, `efConstruction`) tuning | Recall or latency complaint on real workload | **🔥 Fired 2026-04-27** — recall@10 = 0.36 on AuraDB Free, default index params + quantization=on. See §5.1. |
-| `upsert_node` / `upsert_nodes_bulk` raw-UNWIND fast path | N>1 ingest pattern observed in production traces | **🔥 Fired 2026-04-27** — `upsert_nodes_bulk` ingests at ~47 nodes/sec on AuraDB Free with SCD-2 close-then-create cost; the loader's raw-UNWIND path on the same instance gets 3281 nodes/sec (~70× faster). See §5.1. |
-| `db.index.vector.queryNodes` → `SEARCH` migration | AuraDB / Neo4j 5.x emits deprecation warnings | **🔥 Fired 2026-04-27** — `Neo4jVectorStore.query()` calls a deprecated procedure; emitted on every vector query. See §5.1. |
+| HNSW vector-index params (`M`, `efConstruction`) tuning | Recall or latency complaint on real workload | ✅ **Landed 2026-04-27 ([PR #58](https://github.com/ronsse/trellis-ai/pull/58))** — `m` / `ef_construction` / `quantization` kwargs on `Neo4jVectorStore`, `quantization=False` default. recall@10: 0.36 → 1.00. |
+| `upsert_node` / `upsert_nodes_bulk` raw-UNWIND fast path | N>1 ingest pattern observed in production traces | ✅ **Landed 2026-04-27 ([PR #60](https://github.com/ronsse/trellis-ai/pull/60))** — branches the write Cypher: empty pre-fetch ⇒ CREATE-only UNWIND. Standalone 5K bulk: 45 → 3643 nodes/sec. |
+| `db.index.vector.queryNodes` → `SEARCH` migration | AuraDB / Neo4j 5.x emits deprecation warnings | ✅ **Landed 2026-04-27 ([PR #59](https://github.com/ronsse/trellis-ai/pull/59))** — Cypher 25 SEARCH clause; bumps minimum Neo4j to 2025.06. Live deprecation notifications: many → 0. |
 | EXPLAIN-validated query plan baseline | Slow query reported, OR populated graph with >100K nodes | Not fired — current latencies (subgraph p50 = 254ms on AuraDB Free) are dominated by network round-trip, not query plan |
 | Self-hosted Neo4j HA / clustering runbook | Self-hosted Pro/Enterprise user asks | Not fired |
 | Concurrent-write race active mitigation (Community) | Self-hosted Community user reports a duplicate row (1.5 Option A is the holding answer) | Not fired |
@@ -173,40 +173,66 @@ The numbers below are inlined here so this doc is self-contained.
 | Ingest nodes/sec (`upsert_nodes_bulk`) | 21.3 ⚠ | 46.6 ⚠ |
 | Ingest nodes/sec (raw UNWIND, loader script) | n/a | 3281 |
 
-**(a) HNSW recall = 0.36 on AuraDB Free.** AuraDB provisions vector indexes
-with `M=16, efConstruction=100, quantization=enabled` by default. With 200
-dim=16 embeddings, quantization-on collapses recall. Likely fixes:
+**(a) HNSW recall — diagnosis + fix.** AuraDB provisions vector indexes with
+`M=16, efConstruction=100, quantization=enabled` by default. With 200 dim=16
+embeddings, quantization-on collapsed recall to 0.36. PR #58 added `m` /
+`ef_construction` / `quantization` constructor kwargs on `Neo4jVectorStore`,
+flows them into the `OPTIONS` map of `CREATE VECTOR INDEX`, and ships
+`quantization=False` as the Trellis default. Re-running scenario 5.3 against
+a freshly-rebuilt index produced `vector_recall_at_10.neo4j: 1.0`.
 
-* Disable quantization for low-dim vectors: `OPTIONS {indexConfig: { 'vector.quantization.enabled': false }}`.
-* Pass tuned `M` / `efConstruction` (e.g., `M=32, efConstruction=200`) when
-  the producer asks for higher-recall behaviour.
-* Expose both as `Neo4jVectorStore` constructor kwargs flowing from registry
-  config — the existing API already accepts `index_name` / `dimensions`.
+**(b) `upsert_nodes_bulk` SCD-2 cost — diagnosis + fix.** The governed bulk
+path was running `OPTIONAL MATCH` per row inside the UNWIND even when the
+batch had no overlap with existing data — paying for an indexed lookup,
+a `valid_to` filter, and a coalesce on every row of every batch. PR #60
+branches the write Cypher: when the role-immutability pre-fetch returns no
+overlapping rows, the write becomes a CREATE-only UNWIND that matches the
+loader script's shape. Standalone live measurement on AuraDB Free:
 
-**(b) `upsert_nodes_bulk` SCD-2 cost.** On the same AuraDB instance, the
-governed `upsert_nodes_bulk` path runs at ~47 nodes/sec; the loader's raw
-UNWIND path runs at ~3281 nodes/sec. The 70× gap is the role-immutability
-pre-fetch + close-old-version round trip + per-batch JSON property
-serialisation. Real fix surfaces:
+| | Before | After |
+|---|---|---|
+| Fresh 1K-node bulk | ~45 nodes/sec | 2136 nodes/sec |
+| Fresh 5K-node bulk | n/a | 3643 nodes/sec |
+| Overlap 1K bulk (slow path) | ~45 nodes/sec | 1893 nodes/sec |
+| Loader's raw UNWIND (no governance) | 3281 nodes/sec | — |
 
-* A `bulk_load=True` mode that skips the close-old-version branch when the
-  caller asserts the rows are new (loader-shape workloads).
-* Or: batch the pre-fetch + write into a single Cypher with an
-  `OPTIONAL MATCH`-driven coalesce (already done for edges in PR #44 follow-
-  ups; nodes still pay 2 round trips per batch because of role validation).
+The cold path (when overlap exists) is also faster because `created_at` was
+moved into `row.props` so both branches collapse to fewer SETs per row.
 
-**(c) `db.index.vector.queryNodes` deprecation.**
-[`Neo4jVectorStore.query()`](../../src/trellis/stores/neo4j/vector.py) calls
-this procedure on every read. AuraDB emits a `DEPRECATION` notification:
+**(c) `db.index.vector.queryNodes` deprecation — diagnosis + fix.** PR #59
+migrated `Neo4jVectorStore.query()` to the Cypher 25 SEARCH clause:
 
-> warn: feature deprecated with replacement. db.index.vector.queryNodes is
-> deprecated. It is replaced by SEARCH.
+```cypher
+MATCH (n:Node)
+SEARCH n IN ( VECTOR INDEX <name> FOR $vector LIMIT $k ) SCORE AS score
+WHERE n.valid_to IS NULL
+RETURN n.node_id AS item_id, score, n.vector_metadata_json AS metadata_json
+```
 
-Migrate to the `SEARCH` clause on a future-compat PR. This is correctness in
-the long run — Neo4j removes deprecated procedures eventually — and at minimum
-should suppress the spam in test runs (the warning fires once per call, which
-on scenario 5.3's vector query mix means dozens of duplicate WARNING lines per
-report).
+Live runs after the migration emit zero `DEPRECATION` notifications
+(was: one per query). Bumps the minimum Neo4j version to **2025.06**
+(Cypher 25 introduction). AuraDB always runs the latest engine; self-
+hosted Docker users on the `neo4j:5` tag should upgrade to `neo4j:2025`
+or newer.
+
+### 5.1.1 Closed-loop signal — re-run on 2026-04-27 (post-fixes)
+
+Same scenario, same dataset, same AuraDB Free instance after PRs #58–#60
+landed. The ingest path also got an unrelated improvement: the scenario's
+`_ingest()` now uses `vector_store.upsert_bulk` instead of a 200-row Python
+loop, removing ~14s of network-bound floor that was masking the bulk-path
+gains. Status: **`regress` (only because of an unrelated SQLite warn).**
+
+| Metric | First run | Re-run |
+|---|---|---|
+| `vector_recall_at_10.neo4j` | 0.36 ⚠ | **1.00** ✅ |
+| `ingest_nodes_per_sec.neo4j` | 46.6 ⚠ | **219.86** ✅ |
+| Deprecation notifications during run | many | **0** ✅ |
+| `vector_topk.neo4j.p50_ms` | 85.4 | 80.9 |
+
+The remaining warn is `ingest_nodes_per_sec.sqlite: 32.4` — SQLite's
+`upsert_nodes_bulk` is a per-row Python loop and could use its own
+fast-path. That's a separate plan item, not Neo4j hardening.
 
 ### 5.2 Eval framework gaps surfaced (2026-04-27)
 

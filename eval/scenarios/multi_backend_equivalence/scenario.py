@@ -49,11 +49,9 @@ class _BackendHandle:
 def _ingest(handle: _BackendHandle, graph: GeneratedGraph) -> float:
     """Write nodes + edges + embeddings into a backend; return seconds.
 
-    Uses ``upsert_nodes_bulk`` / ``upsert_edges_bulk`` so the cross-
-    backend comparison isn't dominated by per-row network round trips
-    on Neo4j. The vector store doesn't have a bulk method yet — its
-    upsert path is already 1 round trip per row, so the marginal cost
-    is small at 50 embeddings (default).
+    Uses ``upsert_nodes_bulk`` / ``upsert_edges_bulk`` /
+    ``vector_store.upsert_bulk`` so the cross-backend comparison
+    isn't dominated by per-row network round trips on Neo4j.
 
     Edges are deduplicated by ``(source_id, target_id, edge_type)``
     before the bulk call: the generator emits with-replacement, but the
@@ -77,13 +75,17 @@ def _ingest(handle: _BackendHandle, graph: GeneratedGraph) -> float:
             for n in graph.nodes
         ]
     )
-    for node in graph.nodes:
-        if node.embedding is not None:
-            vector_store.upsert(
-                item_id=node.node_id,
-                vector=node.embedding,
-                metadata={"node_type": node.node_type},
-            )
+    vector_rows = [
+        {
+            "item_id": n.node_id,
+            "vector": n.embedding,
+            "metadata": {"node_type": n.node_type},
+        }
+        for n in graph.nodes
+        if n.embedding is not None
+    ]
+    if vector_rows:
+        vector_store.upsert_bulk(vector_rows)
     deduped_edges: dict[tuple[str, str, str], dict[str, Any]] = {}
     for e in graph.edges:
         deduped_edges[(e.source_id, e.target_id, e.edge_type)] = {
