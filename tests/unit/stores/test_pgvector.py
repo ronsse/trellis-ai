@@ -110,3 +110,34 @@ class TestCount:
         store.upsert("a", _vec(1, 0, 0))
         store.upsert("b", _vec(0, 1, 0))
         assert store.count() == 2
+
+
+class TestDimMismatchFailsFast:
+    """``CREATE TABLE IF NOT EXISTS`` is a no-op against an existing
+    table, so a caller that constructs the store with a different
+    ``dimensions`` value than the column was provisioned with would
+    silently inherit the old dim and crash on the first upsert. The
+    store now detects this at construction and raises with an
+    actionable message.
+
+    Relies on the ``store`` fixture (dimensions=3) running first to
+    provision the column at dim=3; if the table doesn't exist yet the
+    mismatch check is silently skipped.
+    """
+
+    def test_matching_dim_succeeds(self, store):
+        from trellis.stores.pgvector.store import PgVectorStore
+
+        # The fixture constructed at dim=3; constructing again at dim=3
+        # is a no-op against the existing column and must not raise.
+        s2 = PgVectorStore(dsn=DSN, dimensions=3)
+        try:
+            assert s2._dimensions == 3
+        finally:
+            s2.close()
+
+    def test_mismatched_dim_raises_with_hint(self, store):
+        from trellis.stores.pgvector.store import PgVectorStore
+
+        with pytest.raises(ValueError, match="dimensions=3"):
+            PgVectorStore(dsn=DSN, dimensions=16)
