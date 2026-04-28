@@ -36,13 +36,14 @@ Anything beyond that bar is gated on a workload signal we don't have. This plan 
 
 Each item is something that, if missing the first time a stranger runs against Neo4j, looks like negligence — not a missing feature.
 
-### 1.1 Driver lifecycle done right
+### 1.1 Driver lifecycle done right ✅ landed 2026-04-27
 
 * **State today:** `build_driver(uri, user, password)` in [`stores/neo4j/base.py:35`](../../src/trellis/stores/neo4j/base.py) constructs a bare driver with zero kwargs. No `connection_timeout`, no `max_connection_pool_size`, no `keep_alive`, no `max_transaction_retry_time`. AuraDB Free is forgiving; production over flaky networks is not.
 * **Also today:** `Neo4jGraphStore` and `Neo4jVectorStore` each call `build_driver` independently — same URI/user/password, two connection pools. The base.py comment justifies it ("driver pools internally") but you're paying 2× pool cost when both stores point at the same instance.
 * **Done when:**
     * Constructor kwargs flow through to driver: `connection_timeout`, `max_connection_pool_size`, `keep_alive`, `max_transaction_retry_time` — with sane production defaults.
     * Driver caching by `(uri, user, database)` tuple in `base.py`, OR `StoreRegistry` owns and injects the driver. Same instance, one pool.
+* **Landed:** `DriverConfig` (frozen dataclass) added to `stores/neo4j/base.py` with production-safe defaults (30s connect timeout, 100 pool size, 30s retry time, keep-alive on, `trellis-ai` user agent). `build_driver` accepts an optional `config=DriverConfig | None`. `Neo4jGraphStore` and `Neo4jVectorStore` now accept either `password + driver_config` (build + own a driver) or `driver` (caller-injected, `close()` is a no-op); mixing the two raises `ValueError`. `StoreRegistry` caches one driver per `(uri, user)` and injects it into both stores so a graph + vector pair shares one connection pool. `StoreRegistry.close()` closes shared drivers after stores. Registry honours `driver_config` as a `DriverConfig`, dict, or omitted (defaults).
 * **Files:** `src/trellis/stores/neo4j/base.py`, `graph.py`, `vector.py`. Possibly `stores/registry.py` if registry takes ownership.
 * **Estimate:** ~150 lines.
 * **Risk of leaving it:** orphaned pools, file-descriptor pressure on AuraDB Pro, opaque "connection refused" errors on transient network blips.

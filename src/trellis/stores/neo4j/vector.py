@@ -34,6 +34,7 @@ import structlog
 
 from trellis.stores.base.vector import VectorStore
 from trellis.stores.neo4j.base import (
+    DriverConfig,
     Neo4jSessionRunner,
     build_driver,
     check_driver_installed,
@@ -62,13 +63,16 @@ class Neo4jVectorStore(Neo4jSessionRunner, VectorStore):
         uri: str,
         *,
         user: str = "neo4j",
-        password: str,
+        password: str | None = None,
         database: str = "neo4j",
         dimensions: int = 1536,
         similarity: str = "cosine",
         index_name: str = "trellis_node_embeddings",
         index_wait_timeout: float = 30.0,
+        driver: Driver | None = None,
+        driver_config: DriverConfig | None = None,
     ) -> None:
+        # See ``Neo4jGraphStore.__init__`` for the driver-ownership contract.
         check_driver_installed()
         if similarity not in _VALID_SIMILARITY:
             msg = (
@@ -80,7 +84,21 @@ class Neo4jVectorStore(Neo4jSessionRunner, VectorStore):
             msg = f"dimensions must be > 0, got {dimensions}"
             raise ValueError(msg)
 
-        self._driver: Driver = build_driver(uri, user, password)
+        if driver is not None:
+            if password is not None or driver_config is not None:
+                msg = (
+                    "Pass either ``driver`` (caller-owned) or "
+                    "``password`` + ``driver_config`` (store-owned), not both."
+                )
+                raise ValueError(msg)
+            self._driver: Driver = driver
+            self._owns_driver = False
+        else:
+            if password is None:
+                msg = "password is required when ``driver`` is not provided"
+                raise ValueError(msg)
+            self._driver = build_driver(uri, user, password, config=driver_config)
+            self._owns_driver = True
         self._database = database
         self._dimensions = dimensions
         self._similarity = similarity
@@ -317,5 +335,8 @@ class Neo4jVectorStore(Neo4jSessionRunner, VectorStore):
         return int(record["cnt"]) if record else 0
 
     def close(self) -> None:
-        self._driver.close()
-        logger.info("neo4j_vector_store_closed")
+        if self._owns_driver:
+            self._driver.close()
+            logger.info("neo4j_vector_store_closed")
+        else:
+            logger.debug("neo4j_vector_store_close_noop_injected_driver")
