@@ -323,9 +323,12 @@ class Neo4jGraphStore(Neo4jSessionRunner, GraphStore):
                     raise ValueError(msg) from exc
 
             # Build the row payloads (mirrors ``upsert_node``'s
-            # ``new_props``). ``created_at`` is set in Cypher via
-            # coalesce against the existing row, matching the single-
-            # row method.
+            # ``new_props``). ``created_at`` is included in Python so
+            # the hot path can land each row with one ``SET n =
+            # row.props``. The cold path overrides ``created_at`` via
+            # a follow-up ``SET n.created_at = created_at_carry``
+            # (the coalesce result is what's correct when a prior row
+            # exists).
             rows: list[dict[str, Any]] = []
             for spec, nid in zip(nodes, node_ids, strict=True):
                 generation_spec = spec.get("generation_spec")
@@ -349,6 +352,7 @@ class Neo4jGraphStore(Neo4jSessionRunner, GraphStore):
                                 else None
                             ),
                             "properties_json": json.dumps(spec.get("properties") or {}),
+                            "created_at": now,
                             "updated_at": now,
                             "valid_from": now,
                             "valid_to": None,
@@ -356,22 +360,65 @@ class Neo4jGraphStore(Neo4jSessionRunner, GraphStore):
                     }
                 )
 
-            # Round trip 2 — close existing current rows and create new
-            # versions in a single UNWIND. ``coalesce`` carries
-            # ``created_at`` forward across versions, matching the
-            # single-row method's pattern.
-            cypher = """
-            UNWIND $rows AS row
-            OPTIONAL MATCH (old:Node {node_id: row.node_id})
-              WHERE old.valid_to IS NULL
-            WITH row, old, coalesce(old.created_at, row.props.valid_from)
-                 AS created_at_carry
-            SET old.valid_to = row.props.valid_from
-            WITH row, created_at_carry
-            CREATE (n:Node)
-            SET n = row.props
-            SET n.created_at = created_at_carry
-            """
+            # Round trip 2 — write. Two Cypher shapes depending on
+            # whether the pre-fetch found any prior current rows:
+            #
+            # * Hot path (no prior rows for any of these node_ids) —
+            #   issue a CREATE-only UNWIND. Skips the per-row
+            #   ``OPTIONAL MATCH`` index lookup, the ``valid_to``
+            #   filter, the no-op ``SET old.valid_to``, and the
+            #   ``coalesce`` on ``created_at``. Measured on AuraDB
+            #   Free 2026-04-27: the OPTIONAL MATCH version ingested
+            #   at ~45 nodes/sec; the loader script's CREATE-only
+            #   UNWIND on the same instance ran at ~3281 nodes/sec
+            #   (~70x faster). This branch closes the gap for the
+            #   common bulk-load shape (fresh corpus, no overlap
+            #   with what's already in the graph) without changing
+            #   public API.
+            #
+            # * Cold path (one or more rows have a prior current
+            #   row) — full OPTIONAL MATCH version that carries
+            #   ``created_at`` forward and closes the prior version,
+            #   preserving SCD-2 semantics for re-ingest of an
+            #   existing node.
+            #
+            # ``created_at`` is set in both shapes to the row's
+            # ``valid_from`` (== ``now``); the cold path's coalesce
+            # against ``old.created_at`` is what diverges. Skipping
+            # it in the hot path is safe because ``existing_roles``
+            # told us no prior current row exists for any of these
+            # node_ids.
+            #
+            # Race window: between the pre-fetch and the CREATE-only
+            # write, a concurrent writer could create a current row
+            # for one of these node_ids. The hot path would then
+            # produce a duplicate current version. This matches the
+            # already-documented Community-edition concurrent-write
+            # race (``stores/neo4j/graph.py`` module docstring) — no
+            # regression for the documented single-writer assumption.
+            if existing_roles:
+                cypher = """
+                UNWIND $rows AS row
+                OPTIONAL MATCH (old:Node {node_id: row.node_id})
+                  WHERE old.valid_to IS NULL
+                WITH row, old, coalesce(old.created_at, row.props.valid_from)
+                     AS created_at_carry
+                SET old.valid_to = row.props.valid_from
+                WITH row, created_at_carry
+                CREATE (n:Node)
+                SET n = row.props
+                SET n.created_at = created_at_carry
+                """
+            else:
+                # ``created_at`` is set in Python as part of
+                # ``row.props`` for the hot path so a single
+                # ``SET n = row.props`` lands every property in one
+                # write. Matches the loader script's UNWIND shape.
+                cypher = """
+                UNWIND $rows AS row
+                CREATE (n:Node)
+                SET n = row.props
+                """
             session.execute_write(lambda tx: tx.run(cypher, rows=rows).consume())
 
         return node_ids
