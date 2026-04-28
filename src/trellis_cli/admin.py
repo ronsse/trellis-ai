@@ -73,9 +73,7 @@ def init(
             # Plain ``print`` (not ``console.print``) so Rich's terminal-
             # width soft-wrap never splits the JSON across lines — long
             # config paths can push the payload past 80 chars.
-            print(
-                json.dumps({"status": "exists", "config_dir": str(config_dir)})
-            )
+            print(json.dumps({"status": "exists", "config_dir": str(config_dir)}))
         else:
             console.print(
                 f"[yellow]Config already exists at {config_path}."
@@ -118,9 +116,7 @@ def init(
         console.print(f"  Data:   {actual_data_dir}")
 
 
-def _load_config_for_migration(
-    config_path: Path, output_format: str
-) -> dict[str, Any]:
+def _load_config_for_migration(config_path: Path, output_format: str) -> dict[str, Any]:
     """Load + validate config for migration; exit nonzero on failure."""
     import yaml  # noqa: PLC0415
 
@@ -1240,3 +1236,138 @@ def _print_check_plugins_report(report: Any) -> None:
             p.reason or "-",
         )
     console.print(table)
+
+
+def _load_graph_store_from_yaml(path: Path) -> Any:
+    """Build a ``GraphStore`` from a single-block YAML config file.
+
+    The file must contain a ``graph:`` block with ``backend`` plus
+    backend-specific kwargs (``uri``, ``user``, ``password`` for Neo4j;
+    ``dsn`` for Postgres; ``db_path`` for SQLite). Used by
+    ``migrate-graph`` so the source and destination can be specified
+    independently of the operator's main config.
+    """
+    import yaml  # noqa: PLC0415
+
+    from trellis.stores.registry import StoreRegistry  # noqa: PLC0415
+
+    if not path.exists():
+        console.print(f"[red]Config file not found: {path}[/red]")
+        raise typer.Exit(code=1)
+
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError as exc:
+        console.print(f"[red]Invalid YAML in {path}: {exc}[/red]")
+        raise typer.Exit(code=1) from exc
+
+    graph_block = data.get("graph")
+    if not isinstance(graph_block, dict) or "backend" not in graph_block:
+        console.print(
+            f"[red]{path} must contain a 'graph:' block with a 'backend' key[/red]"
+        )
+        raise typer.Exit(code=1)
+
+    config: dict[str, Any] = {"graph": graph_block}
+    # SQLite backend needs stores_dir for default db_path resolution.
+    stores_dir: Path | None = None
+    if graph_block.get("backend") == "sqlite" and "db_path" not in graph_block:
+        stores_dir = path.parent / "migrate-stores"
+    registry = StoreRegistry(config=config, stores_dir=stores_dir)
+    return registry, registry.knowledge.graph_store
+
+
+@admin_app.command("migrate-graph")
+def migrate_graph(
+    from_config: Path = typer.Option(  # noqa: B008
+        ...,
+        "--from-config",
+        "-f",
+        help="YAML file with a single 'graph:' block describing the source store.",
+    ),
+    to_config: Path = typer.Option(  # noqa: B008
+        ...,
+        "--to-config",
+        "-t",
+        help="YAML file with a single 'graph:' block describing the destination store.",
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Walk and count, don't write to the destination."
+    ),
+    max_nodes: int = typer.Option(
+        100_000,
+        "--max-nodes",
+        help="Safety cap. Source graphs above this need paginated iteration.",
+    ),
+    output_format: str = typer.Option(
+        "text", "--format", help="Output format: text or json"
+    ),
+) -> None:
+    """Copy current graph data (nodes + edges + aliases) between backends.
+
+    POC scope: current versions only, in-memory snapshot up to
+    ``--max-nodes``. Idempotent on retry — a destination that already
+    has a row with the same ``node_id`` (or alias source/raw_id) is
+    skipped, not overwritten.
+
+    Both ``--from-config`` and ``--to-config`` accept a YAML file with
+    a single ``graph:`` block matching the shape used in
+    ``docs/deployment/recommended-config.yaml``. Example for migrating
+    SQLite (default install) to a Neo4j AuraDB instance::
+
+        # /tmp/from.yaml
+        graph:
+          backend: sqlite
+          db_path: ~/.trellis/data/stores/graph.db
+
+        # /tmp/to.yaml
+        graph:
+          backend: neo4j
+          uri: neo4j+s://abcd1234.databases.neo4j.io
+          user: abcd1234
+          password: <from console>
+          database: abcd1234
+
+        trellis admin migrate-graph -f /tmp/from.yaml -t /tmp/to.yaml --dry-run
+    """
+    from trellis.migrate import (  # noqa: PLC0415
+        GraphMigrator,
+        MigrationCapacityExceededError,
+    )
+
+    src_registry, src_store = _load_graph_store_from_yaml(from_config)
+    dst_registry, dst_store = _load_graph_store_from_yaml(to_config)
+
+    try:
+        migrator = GraphMigrator(src_store, dst_store, max_nodes=max_nodes)
+        try:
+            report = migrator.run(dry_run=dry_run)
+        except MigrationCapacityExceededError as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(code=1) from exc
+    finally:
+        # Close in dest-first order so the source connection survives if
+        # the dest close blows up — diagnostics may need to re-read source.
+        dst_registry.close()
+        src_registry.close()
+
+    if output_format == "json":
+        from dataclasses import asdict  # noqa: PLC0415
+
+        # Errors are list[tuple] which json doesn't serialize directly.
+        payload = asdict(report)
+        payload["errors"] = [
+            {"target": target, "message": msg} for target, msg in payload["errors"]
+        ]
+        console.print(json.dumps(payload, indent=2))
+    else:
+        if report.dry_run:
+            console.print(f"[yellow]{report.summary()}[/yellow]")
+        else:
+            console.print(f"[green]{report.summary()}[/green]")
+        if report.errors:
+            console.print()
+            console.print("[red]Errors:[/red]")
+            for target, msg in report.errors:
+                console.print(f"  [red]{target}[/red]: {msg}")
+            raise typer.Exit(code=1)
