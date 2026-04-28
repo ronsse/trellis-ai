@@ -649,6 +649,11 @@ class StoreRegistry:
         self._cache: dict[str, Any] = {}
         self._embedding_fn_cache: Callable[[str], list[float]] | None = _UNSET
         self._budget_config_cache: Any = _UNSET
+        # Shared Neo4j drivers: one ``Driver`` per ``(uri, user)`` so a
+        # graph + vector pair pointing at the same instance reuses one
+        # connection pool. Closed by :meth:`close` after individual
+        # stores have closed (a no-op for stores with injected drivers).
+        self._neo4j_drivers: dict[tuple[str, str], Any] = {}
         self._knowledge = _KnowledgePlane(self)
         self._operational = _OperationalPlane(self)
 
@@ -820,6 +825,15 @@ class StoreRegistry:
                 raise ValueError(msg)
             params["dsn"] = dsn
 
+        # For neo4j backend, share one driver per (uri, user) across the
+        # graph + vector store pair. Params can carry a ``driver_config``
+        # mapping (or DriverConfig instance) plus the connection trio;
+        # the resolved driver is injected so individual stores skip their
+        # own build_driver() call. The registry keeps the driver and
+        # closes it in :meth:`close` after stores have finished.
+        if backend == "neo4j" and "driver" not in params:
+            params = self._inject_neo4j_driver(params)
+
         # For s3 backend, default bucket from env
         if backend == "s3" and "bucket" not in params:
             import os  # noqa: PLC0415
@@ -835,6 +849,61 @@ class StoreRegistry:
 
         logger.info("store_instantiated", store_type=store_type, backend=backend)
         return cls(**params)
+
+    def _inject_neo4j_driver(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Resolve a shared Neo4j driver for ``params`` and inject it.
+
+        Returns a new ``params`` dict with ``password`` + ``driver_config``
+        stripped (those go into the driver) and ``driver`` added. The
+        returned driver is cached on the registry under ``(uri, user)``
+        and closed by :meth:`close`.
+
+        Idempotent for the same ``(uri, user)`` — second + later calls
+        return the same driver instance even if the second store passes
+        a different ``driver_config`` (the first config wins; this is
+        expected since both stores share one connection pool).
+        """
+        from trellis.stores.neo4j.base import (  # noqa: PLC0415
+            DriverConfig,
+            build_driver,
+        )
+
+        if "uri" not in params:
+            msg = "neo4j backend requires 'uri' in config or env"
+            raise ValueError(msg)
+        uri = params["uri"]
+        user = params.get("user", "neo4j")
+        key = (uri, user)
+
+        new_params = {k: v for k, v in params.items() if k != "driver_config"}
+        if key in self._neo4j_drivers:
+            new_params.pop("password", None)
+            new_params["driver"] = self._neo4j_drivers[key]
+            return new_params
+
+        if "password" not in params:
+            msg = "neo4j backend requires 'password' in config"
+            raise ValueError(msg)
+
+        raw_cfg = params.get("driver_config")
+        if raw_cfg is None:
+            cfg: DriverConfig | None = None
+        elif isinstance(raw_cfg, DriverConfig):
+            cfg = raw_cfg
+        elif isinstance(raw_cfg, dict):
+            cfg = DriverConfig(**raw_cfg)
+        else:
+            msg = (
+                "driver_config must be a DriverConfig, a dict, or omitted; "
+                f"got {type(raw_cfg).__name__}"
+            )
+            raise TypeError(msg)
+
+        driver = build_driver(uri, user, params["password"], config=cfg)
+        self._neo4j_drivers[key] = driver
+        new_params.pop("password")
+        new_params["driver"] = driver
+        return new_params
 
     def _get(self, store_type: str) -> Any:
         if store_type not in self._cache:
@@ -1213,12 +1282,17 @@ class StoreRegistry:
         return None
 
     def close(self) -> None:
-        """Close all cached stores.
+        """Close all cached stores and shared resources.
 
         Idempotent — second + later calls find an empty cache and no-op.
         Safe to call from a shutdown handler that may fire twice.
         Failures in any single ``close()`` are logged and skipped so a
         misbehaving backend cannot block cleanup of the rest.
+
+        Stores are closed first; for Neo4j stores with an injected
+        driver, ``close()`` is a no-op and the driver is closed by the
+        registry afterwards. This avoids racing the registry's shutdown
+        sweep with a store's individual ``close()`` call.
 
         Lifecycle:
 
@@ -1240,6 +1314,12 @@ class StoreRegistry:
             except Exception:
                 logger.warning("store_close_failed", store=type(store).__name__)
         self._cache.clear()
+        for key, driver in self._neo4j_drivers.items():
+            try:
+                driver.close()
+            except Exception:
+                logger.warning("neo4j_driver_close_failed", uri=key[0], user=key[1])
+        self._neo4j_drivers.clear()
 
     def __enter__(self) -> StoreRegistry:
         """Enable use as a context manager — see :meth:`close`."""

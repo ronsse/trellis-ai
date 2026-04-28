@@ -37,6 +37,7 @@ from trellis.stores.base.graph import (
     validate_node_role_args,
 )
 from trellis.stores.neo4j.base import (
+    DriverConfig,
     Neo4jSessionRunner,
     build_driver,
     check_driver_installed,
@@ -149,11 +150,31 @@ class Neo4jGraphStore(Neo4jSessionRunner, GraphStore):
         uri: str,
         *,
         user: str = "neo4j",
-        password: str,
+        password: str | None = None,
         database: str = "neo4j",
+        driver: Driver | None = None,
+        driver_config: DriverConfig | None = None,
     ) -> None:
+        # Driver lifecycle: when ``driver`` is injected, the caller (typically
+        # ``StoreRegistry`` sharing one driver across the graph + vector pair)
+        # owns it and ``close()`` is a no-op. Otherwise we build our own from
+        # ``driver_config`` and own it. Mixing the two is a programming error.
         check_driver_installed()
-        self._driver: Driver = build_driver(uri, user, password)
+        if driver is not None:
+            if password is not None or driver_config is not None:
+                msg = (
+                    "Pass either ``driver`` (caller-owned) or "
+                    "``password`` + ``driver_config`` (store-owned), not both."
+                )
+                raise ValueError(msg)
+            self._driver: Driver = driver
+            self._owns_driver = False
+        else:
+            if password is None:
+                msg = "password is required when ``driver`` is not provided"
+                raise ValueError(msg)
+            self._driver = build_driver(uri, user, password, config=driver_config)
+            self._owns_driver = True
         self._database = database
         self._init_schema()
         logger.info("neo4j_graph_store_initialized", uri=uri, database=database)
@@ -1114,5 +1135,8 @@ class Neo4jGraphStore(Neo4jSessionRunner, GraphStore):
     # ------------------------------------------------------------------
 
     def close(self) -> None:
-        self._driver.close()
-        logger.info("neo4j_graph_store_closed")
+        if self._owns_driver:
+            self._driver.close()
+            logger.info("neo4j_graph_store_closed")
+        else:
+            logger.debug("neo4j_graph_store_close_noop_injected_driver")
