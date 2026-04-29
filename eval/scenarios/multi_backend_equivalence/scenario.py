@@ -8,16 +8,20 @@ variables. Multi-backend scenarios are inherently special-cased.
 
 from __future__ import annotations
 
-import os
 import tempfile
 import time
 from contextlib import ExitStack
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import structlog
 
+from eval._backends import (
+    BackendHandle,
+    get_neo4j_config,
+    get_postgres_dsn,
+    register_handle,
+)
 from eval._live_wipe import wipe_live_state
 from eval.generators.graph_generator import GeneratedGraph, generate_graph
 from eval.runner import Finding, ScenarioReport, ScenarioStatus
@@ -48,13 +52,7 @@ RECALL_REGRESS_THRESHOLD = 0.9
 MIN_BACKENDS_FOR_DIFF = 2
 
 
-@dataclass
-class _BackendHandle:
-    name: str
-    registry: StoreRegistry
-
-
-def _ingest(handle: _BackendHandle, graph: GeneratedGraph) -> float:
+def _ingest(handle: BackendHandle, graph: GeneratedGraph) -> float:
     """Write nodes + edges + embeddings into a backend; return seconds.
 
     Uses ``upsert_nodes_bulk`` / ``upsert_edges_bulk`` /
@@ -108,7 +106,7 @@ def _ingest(handle: _BackendHandle, graph: GeneratedGraph) -> float:
 
 
 def _query_results(
-    handle: _BackendHandle,
+    handle: BackendHandle,
     graph: GeneratedGraph,
     *,
     vector_top_k: int,
@@ -229,9 +227,15 @@ def _diff_pair(
     return findings, metrics
 
 
+_SQLITE_OPERATIONAL = {
+    "trace": {"backend": "sqlite"},
+    "event_log": {"backend": "sqlite"},
+}
+
+
 def _build_backends(
     stack: ExitStack, tmp_dir: Path, *, embedding_dim: int
-) -> list[_BackendHandle]:
+) -> list[BackendHandle]:
     """Construct every backend handle the env can reach.
 
     SQLite is always available (writes under ``tmp_dir``). Postgres
@@ -241,93 +245,64 @@ def _build_backends(
     (network, config, missing extra) drops out cleanly rather than
     aborting the whole scenario.
     """
-    handles: list[_BackendHandle] = []
+    handles: list[BackendHandle] = []
 
-    sqlite_config = {
-        "knowledge": {
-            "graph": {"backend": "sqlite"},
-            "vector": {"backend": "sqlite"},
-            "document": {"backend": "sqlite"},
-            "blob": {"backend": "local"},
+    register_handle(
+        stack,
+        handles,
+        name="sqlite",
+        config={
+            "knowledge": {
+                "graph": {"backend": "sqlite"},
+                "vector": {"backend": "sqlite"},
+                "document": {"backend": "sqlite"},
+                "blob": {"backend": "local"},
+            },
+            "operational": _SQLITE_OPERATIONAL,
         },
-        "operational": {
-            "trace": {"backend": "sqlite"},
-            "event_log": {"backend": "sqlite"},
-        },
-    }
-    sqlite_reg = stack.enter_context(
-        StoreRegistry(config=sqlite_config, stores_dir=tmp_dir)
+        stores_dir=tmp_dir,
     )
-    handles.append(_BackendHandle(name="sqlite", registry=sqlite_reg))
 
-    pg_dsn = os.environ.get("TRELLIS_KNOWLEDGE_PG_DSN") or os.environ.get(
-        "TRELLIS_PG_DSN"
-    )
+    pg_dsn = get_postgres_dsn()
     if pg_dsn:
-        pg_config = {
-            "knowledge": {
-                "graph": {"backend": "postgres", "dsn": pg_dsn},
-                "vector": {
-                    "backend": "pgvector",
-                    "dsn": pg_dsn,
-                    "dimensions": embedding_dim,
+        register_handle(
+            stack,
+            handles,
+            name="postgres",
+            config={
+                "knowledge": {
+                    "graph": {"backend": "postgres", "dsn": pg_dsn},
+                    "vector": {
+                        "backend": "pgvector",
+                        "dsn": pg_dsn,
+                        "dimensions": embedding_dim,
+                    },
+                    "document": {"backend": "sqlite"},
+                    "blob": {"backend": "local"},
                 },
-                "document": {"backend": "sqlite"},
-                "blob": {"backend": "local"},
+                "operational": _SQLITE_OPERATIONAL,
             },
-            "operational": {
-                "trace": {"backend": "sqlite"},
-                "event_log": {"backend": "sqlite"},
-            },
-        }
-        try:
-            pg_reg = stack.enter_context(
-                StoreRegistry(config=pg_config, stores_dir=tmp_dir / "pg")
-            )
-            handles.append(_BackendHandle(name="postgres", registry=pg_reg))
-        except Exception as exc:
-            logger.warning("eval.postgres_unavailable", error=str(exc))
+            stores_dir=tmp_dir / "pg",
+        )
 
-    neo4j_uri = os.environ.get("TRELLIS_NEO4J_URI")
-    neo4j_user = os.environ.get("TRELLIS_NEO4J_USER")
-    neo4j_password = os.environ.get("TRELLIS_NEO4J_PASSWORD")
-    neo4j_database = os.environ.get("TRELLIS_NEO4J_DATABASE")
-    if neo4j_uri and neo4j_user and neo4j_password:
-        neo4j_graph: dict[str, Any] = {
-            "backend": "neo4j",
-            "uri": neo4j_uri,
-            "user": neo4j_user,
-            "password": neo4j_password,
-        }
-        neo4j_vector: dict[str, Any] = {
-            "backend": "neo4j",
-            "uri": neo4j_uri,
-            "user": neo4j_user,
-            "password": neo4j_password,
-            "dimensions": embedding_dim,
-        }
-        if neo4j_database:
-            neo4j_graph["database"] = neo4j_database
-            neo4j_vector["database"] = neo4j_database
-        neo4j_config = {
-            "knowledge": {
-                "graph": neo4j_graph,
-                "vector": neo4j_vector,
-                "document": {"backend": "sqlite"},
-                "blob": {"backend": "local"},
+    neo4j_graph = get_neo4j_config()
+    neo4j_vector = get_neo4j_config(dimensions=embedding_dim)
+    if neo4j_graph and neo4j_vector:
+        register_handle(
+            stack,
+            handles,
+            name="neo4j",
+            config={
+                "knowledge": {
+                    "graph": neo4j_graph,
+                    "vector": neo4j_vector,
+                    "document": {"backend": "sqlite"},
+                    "blob": {"backend": "local"},
+                },
+                "operational": _SQLITE_OPERATIONAL,
             },
-            "operational": {
-                "trace": {"backend": "sqlite"},
-                "event_log": {"backend": "sqlite"},
-            },
-        }
-        try:
-            neo4j_reg = stack.enter_context(
-                StoreRegistry(config=neo4j_config, stores_dir=tmp_dir / "neo4j")
-            )
-            handles.append(_BackendHandle(name="neo4j", registry=neo4j_reg))
-        except Exception as exc:
-            logger.warning("eval.neo4j_unavailable", error=str(exc))
+            stores_dir=tmp_dir / "neo4j",
+        )
 
     return handles
 

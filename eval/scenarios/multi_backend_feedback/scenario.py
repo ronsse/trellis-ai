@@ -1,9 +1,9 @@
 """Multi-backend feedback-loop equivalence scenario.
 
 Runs the same convergence loop scenario 5.4 measures against multiple
-backend combinations and diffs the loop outputs. Closes plan §5.5.2
-row 3: same EventLog-driven effectiveness + advisory fitness loop, on
-SQLite vs Postgres vs Neo4j-knowledge + Postgres-operational.
+backend combinations and diffs the loop outputs — same EventLog-driven
+effectiveness + advisory fitness loop, on SQLite vs Postgres vs
+Neo4j-knowledge + Postgres-operational.
 
 What "equivalence" means here:
 
@@ -40,16 +40,20 @@ Surfaced findings:
 from __future__ import annotations
 
 import math
-import os
 import tempfile
 import time
 from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import structlog
 
+from eval._backends import (
+    BackendHandle,
+    get_neo4j_config,
+    get_postgres_dsn,
+    register_handle,
+)
 from eval._live_wipe import wipe_live_state
 from eval.runner import Finding, ScenarioReport, ScenarioStatus
 from eval.scenarios.agent_loop_convergence.scenario import (
@@ -98,13 +102,20 @@ _TOLERANCE_MATCH_KEYS: tuple[str, ...] = (
 MIN_BACKENDS_FOR_DIFF = 2
 
 
-@dataclass
-class _BackendHandle:
-    name: str
-    registry: StoreRegistry
+# vector + document pinned to SQLite on every Postgres / Neo4j handle:
+# the feedback loop reads neither, so pinning them keeps any
+# cross-backend diff attributable to the path under test (event_log +
+# trace + graph). Also dodges the pgvector fixed-dimension constraint
+# when the test DB has a vectors table from a prior run at a
+# different dim.
+_NON_FEEDBACK_KNOWLEDGE = {
+    "vector": {"backend": "sqlite"},
+    "document": {"backend": "sqlite"},
+    "blob": {"backend": "local"},
+}
 
 
-def _build_backends(stack: ExitStack, tmp_dir: Path) -> list[_BackendHandle]:
+def _build_backends(stack: ExitStack, tmp_dir: Path) -> list[BackendHandle]:
     """Construct every backend handle the env can reach.
 
     SQLite is always available. Postgres requires
@@ -115,104 +126,63 @@ def _build_backends(stack: ExitStack, tmp_dir: Path) -> list[_BackendHandle]:
     operational stores — Postgres creds are required for the Neo4j
     handle to be built.
 
-    ``document_store`` is held at SQLite across every handle on
-    purpose: the feedback loop reads from ``EventLog``, not the
-    document store, and SQLite document_store keeps ``KeywordSearch``
-    deterministic so any cross-backend diff is attributable to the
-    feedback path under test.
-
     Each handle gets its own ``stores_dir`` subdirectory so the
     ``AdvisoryStore`` JSON file the scenario creates doesn't collide.
     """
-    handles: list[_BackendHandle] = []
+    handles: list[BackendHandle] = []
 
-    sqlite_dir = tmp_dir / "sqlite"
-    sqlite_dir.mkdir(parents=True, exist_ok=True)
-    sqlite_config = {
-        "knowledge": {
-            "graph": {"backend": "sqlite"},
-            "vector": {"backend": "sqlite"},
-            "document": {"backend": "sqlite"},
-            "blob": {"backend": "local"},
+    register_handle(
+        stack,
+        handles,
+        name="sqlite",
+        config={
+            "knowledge": {
+                "graph": {"backend": "sqlite"},
+                **_NON_FEEDBACK_KNOWLEDGE,
+            },
+            "operational": {
+                "trace": {"backend": "sqlite"},
+                "event_log": {"backend": "sqlite"},
+            },
         },
-        "operational": {
-            "trace": {"backend": "sqlite"},
-            "event_log": {"backend": "sqlite"},
-        },
+        stores_dir=tmp_dir / "sqlite",
+    )
+
+    pg_dsn = get_postgres_dsn()
+    pg_operational = {
+        "trace": {"backend": "postgres", "dsn": pg_dsn},
+        "event_log": {"backend": "postgres", "dsn": pg_dsn},
     }
-    sqlite_reg = stack.enter_context(
-        StoreRegistry(config=sqlite_config, stores_dir=sqlite_dir)
-    )
-    handles.append(_BackendHandle(name="sqlite", registry=sqlite_reg))
-
-    pg_dsn = os.environ.get("TRELLIS_KNOWLEDGE_PG_DSN") or os.environ.get(
-        "TRELLIS_PG_DSN"
-    )
     if pg_dsn:
-        pg_dir = tmp_dir / "postgres"
-        pg_dir.mkdir(parents=True, exist_ok=True)
-        pg_config: dict[str, Any] = {
-            "knowledge": {
-                "graph": {"backend": "postgres", "dsn": pg_dsn},
-                # vector + document held at SQLite — the feedback loop
-                # reads neither, so pinning them keeps the cross-backend
-                # diff attributable to the path under test (event_log +
-                # trace + graph). It also dodges the pgvector
-                # fixed-dimension constraint when the test DB has a
-                # vectors table from a prior run at a different dim.
-                "vector": {"backend": "sqlite"},
-                "document": {"backend": "sqlite"},
-                "blob": {"backend": "local"},
+        register_handle(
+            stack,
+            handles,
+            name="postgres",
+            config={
+                "knowledge": {
+                    "graph": {"backend": "postgres", "dsn": pg_dsn},
+                    **_NON_FEEDBACK_KNOWLEDGE,
+                },
+                "operational": pg_operational,
             },
-            "operational": {
-                "trace": {"backend": "postgres", "dsn": pg_dsn},
-                "event_log": {"backend": "postgres", "dsn": pg_dsn},
-            },
-        }
-        try:
-            pg_reg = stack.enter_context(
-                StoreRegistry(config=pg_config, stores_dir=pg_dir)
-            )
-            handles.append(_BackendHandle(name="postgres", registry=pg_reg))
-        except Exception as exc:  # pragma: no cover — defensive
-            logger.warning("eval.postgres_unavailable", error=str(exc))
+            stores_dir=tmp_dir / "postgres",
+        )
 
-    neo4j_uri = os.environ.get("TRELLIS_NEO4J_URI")
-    neo4j_user = os.environ.get("TRELLIS_NEO4J_USER")
-    neo4j_password = os.environ.get("TRELLIS_NEO4J_PASSWORD")
-    neo4j_database = os.environ.get("TRELLIS_NEO4J_DATABASE")
-    if neo4j_uri and neo4j_user and neo4j_password and pg_dsn:
-        neo4j_dir = tmp_dir / "neo4j"
-        neo4j_dir.mkdir(parents=True, exist_ok=True)
-        neo4j_graph: dict[str, Any] = {
-            "backend": "neo4j",
-            "uri": neo4j_uri,
-            "user": neo4j_user,
-            "password": neo4j_password,
-        }
-        if neo4j_database:
-            neo4j_graph["database"] = neo4j_database
-        neo4j_config: dict[str, Any] = {
-            "knowledge": {
-                "graph": neo4j_graph,
-                # Same reasoning as the postgres handle — vector +
-                # document held at SQLite to isolate the feedback path.
-                "vector": {"backend": "sqlite"},
-                "document": {"backend": "sqlite"},
-                "blob": {"backend": "local"},
+    neo4j_graph = get_neo4j_config()
+    if neo4j_graph and pg_dsn:
+        register_handle(
+            stack,
+            handles,
+            name="neo4j_op_postgres",
+            config={
+                "knowledge": {
+                    "graph": neo4j_graph,
+                    **_NON_FEEDBACK_KNOWLEDGE,
+                },
+                "operational": pg_operational,
             },
-            "operational": {
-                "trace": {"backend": "postgres", "dsn": pg_dsn},
-                "event_log": {"backend": "postgres", "dsn": pg_dsn},
-            },
-        }
-        try:
-            neo4j_reg = stack.enter_context(
-                StoreRegistry(config=neo4j_config, stores_dir=neo4j_dir)
-            )
-            handles.append(_BackendHandle(name="neo4j_op_postgres", registry=neo4j_reg))
-        except Exception as exc:  # pragma: no cover — defensive
-            logger.warning("eval.neo4j_unavailable", error=str(exc))
+            stores_dir=tmp_dir / "neo4j",
+        )
 
     return handles
 
@@ -225,7 +195,7 @@ class _BackendRun:
 
 
 def _run_against_backend(
-    handle: _BackendHandle,
+    handle: BackendHandle,
     *,
     seed: int,
     rounds: int,
@@ -411,11 +381,11 @@ def run(
 
     if len(configured) >= MIN_BACKENDS_FOR_DIFF:
         decision = (
-            "Closes plan §5.5.2 row 3. ``loops.*`` counters matching "
-            "across SQLite / Postgres / Neo4j-op-Postgres confirms the "
-            "EventLog query layer (``get_events`` ordering + limit) "
-            "is equivalent across backends. Drift here = a real bug "
-            "in the offending backend's EventLog implementation."
+            "``loops.*`` counters matching across SQLite / Postgres / "
+            "Neo4j-op-Postgres confirms the EventLog query layer "
+            "(``get_events`` ordering + limit) is equivalent across "
+            "backends. Drift here = a real bug in the offending "
+            "backend's EventLog implementation."
         )
     else:
         decision = (

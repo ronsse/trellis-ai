@@ -693,19 +693,19 @@ def run(
         status = "pass"
 
     decision = (
-        "Per-round weighted scores + first-vs-last-quarter delta are now "
-        "produced. Plan §5.4 deferred items become actionable based on "
+        "Per-round weighted scores + first-vs-last-quarter delta are "
+        "produced. Three downstream signals become actionable based on "
         "the suppression / restoration counts and the delta sign:\n"
         "  * advisory fitness loop validation — if "
         "advisories_suppressed_total > 0 with no regressions, the "
         "suppression / restoration semantics work on this controlled "
         "corpus.\n"
-        "  * WorkflowEngine tier escalation — track failure rate over "
+        "  * confidence-gate escalation — track failure rate over "
         "rounds; sustained low coverage signals confidence-gate failure "
         "patterns worth escalating.\n"
-        "  * Enrichment event-loop wiring — this scenario *is* the "
-        "sustained-volume workload; pin a baseline of "
-        "convergence.weighted_delta and watch for drift."
+        "  * sustained-volume baseline — this scenario produces the "
+        "workload pattern an enrichment loop would consume; pin a "
+        "baseline of convergence.weighted_delta and watch for drift."
     )
 
     return ScenarioReport(

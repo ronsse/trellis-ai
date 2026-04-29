@@ -32,9 +32,12 @@ def wipe_live_state(registry: StoreRegistry) -> None:
     because TRUNCATE errors against a missing table — registry stores
     are lazy and only construct on first access.
 
-    For each store, dispatches by ``isinstance`` rather than handle
-    name so the same helper covers 5.1's ``"neo4j"`` handle and 5.5's
-    ``"neo4j_op_postgres"`` handle without per-scenario branching.
+    Dispatch is by ``type(store).__name__`` rather than ``isinstance``
+    so this module never imports the optional ``[postgres]`` /
+    ``[neo4j]`` extras — eval's import graph stays minimal regardless
+    of which backends the runtime has installed. Same helper covers
+    5.1's ``"neo4j"`` handle and 5.5's ``"neo4j_op_postgres"`` handle
+    without per-scenario branching.
     """
     knowledge = registry.knowledge
     operational = registry.operational
