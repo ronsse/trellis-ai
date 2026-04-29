@@ -152,9 +152,8 @@ def _join_one(
             or pack_payload.get("intent_family")
             or ""
         ),
-        "outcome": feedback_payload.get("outcome") or (
-            "success" if feedback_payload.get("success") else "failure"
-        ),
+        "outcome": feedback_payload.get("outcome")
+        or ("success" if feedback_payload.get("success") else "failure"),
         "phase": feedback_payload.get("phase") or "",
         "items": items,
     }

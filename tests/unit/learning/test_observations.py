@@ -116,9 +116,7 @@ class TestBuildLearningObservations:
     def test_empty_event_log_returns_empty(self, event_log) -> None:
         assert build_learning_observations_from_event_log(event_log) == []
 
-    def test_pack_without_feedback_skipped(
-        self, event_log, tmp_path: Path
-    ) -> None:
+    def test_pack_without_feedback_skipped(self, event_log, tmp_path: Path) -> None:
         """A PACK_ASSEMBLED with no matching FEEDBACK_RECORDED has no
         outcome to attribute and must be excluded."""
         _emit_pack_assembled(
@@ -131,9 +129,7 @@ class TestBuildLearningObservations:
         observations = build_learning_observations_from_event_log(event_log)
         assert observations == []
 
-    def test_feedback_without_pack_skipped(
-        self, event_log, tmp_path: Path
-    ) -> None:
+    def test_feedback_without_pack_skipped(self, event_log, tmp_path: Path) -> None:
         """FEEDBACK_RECORDED whose pack_id has no matching pack event
         must be excluded — the bridge has nothing to attribute the
         outcome to."""
@@ -219,9 +215,7 @@ class TestBuildLearningObservations:
         observations = build_learning_observations_from_event_log(event_log)
         assert observations[0]["items"][0]["source_strategy"] == "graph"
 
-    def test_window_bounds_filter_old_events(
-        self, event_log, tmp_path: Path
-    ) -> None:
+    def test_window_bounds_filter_old_events(self, event_log, tmp_path: Path) -> None:
         """``days`` window must filter; old events outside the window
         are dropped from both PACK_ASSEMBLED + FEEDBACK_RECORDED scans."""
         _emit_pack_assembled(
@@ -248,9 +242,7 @@ class TestBuildLearningObservations:
         # matches expectation by passing a guaranteed-empty window.
         # SQLite ms-resolution timestamps make the boundary tight; a
         # negative-effective window is the safest pin.
-        observations = build_learning_observations_from_event_log(
-            event_log, days=-1
-        )
+        observations = build_learning_observations_from_event_log(event_log, days=-1)
         assert observations == []
 
 
@@ -299,9 +291,7 @@ class TestPromoteChain:
         observations = build_learning_observations_from_event_log(event_log)
         assert len(observations) == 4
 
-        report = analyze_learning_observations(
-            observations=observations, min_support=2
-        )
+        report = analyze_learning_observations(observations=observations, min_support=2)
         assert report["candidate_count"] == 1
         candidate = report["candidates"][0]
         assert candidate["item_id"] == "guidance:strong"
@@ -322,9 +312,7 @@ class TestPromoteChain:
                 pack_id=pack_id,
                 domain="data",
                 intent="generate sql",
-                items=[
-                    {"item_id": "prec:winning", "item_type": "precedent"}
-                ],
+                items=[{"item_id": "prec:winning", "item_type": "precedent"}],
             )
             _record(
                 event_log,
@@ -339,14 +327,10 @@ class TestPromoteChain:
             )
 
         observations = build_learning_observations_from_event_log(event_log)
-        report = analyze_learning_observations(
-            observations=observations, min_support=2
-        )
+        report = analyze_learning_observations(observations=observations, min_support=2)
         assert report["candidates"][0]["recommendation_type"] == "promote_precedent"
 
-    def test_consistent_failure_flags_noise(
-        self, event_log, tmp_path: Path
-    ) -> None:
+    def test_consistent_failure_flags_noise(self, event_log, tmp_path: Path) -> None:
         """Items in repeatedly failing packs surface as
         ``investigate_noise`` candidates."""
         for n in range(4):
@@ -371,9 +355,7 @@ class TestPromoteChain:
             )
 
         observations = build_learning_observations_from_event_log(event_log)
-        report = analyze_learning_observations(
-            observations=observations, min_support=2
-        )
+        report = analyze_learning_observations(observations=observations, min_support=2)
         assert report["candidates"][0]["recommendation_type"] == "investigate_noise"
 
     def test_full_promote_chain_round_trips_to_entity_payload(
@@ -409,9 +391,7 @@ class TestPromoteChain:
             )
 
         observations = build_learning_observations_from_event_log(event_log)
-        report = analyze_learning_observations(
-            observations=observations, min_support=2
-        )
+        report = analyze_learning_observations(observations=observations, min_support=2)
         assert report["candidate_count"] == 1
         candidate = report["candidates"][0]
 
