@@ -4,7 +4,7 @@ All notable changes to Trellis will be documented in this file.
 
 ## [Unreleased]
 
-## [0.5.0] - 2026-04-29
+## [0.5.1] - 2026-04-29
 
 ### Added
 
