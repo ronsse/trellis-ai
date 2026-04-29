@@ -1,5 +1,6 @@
 """Learning module for Trellis — intent-family scoring and promotion."""
 
+from trellis.learning.observations import build_learning_observations_from_event_log
 from trellis.learning.scoring import (
     analyze_learning_observations,
     build_learning_promotion_payloads,
@@ -10,6 +11,7 @@ from trellis.learning.scoring import (
 
 __all__ = [
     "analyze_learning_observations",
+    "build_learning_observations_from_event_log",
     "build_learning_promotion_payloads",
     "normalize_intent_family",
     "prepare_learning_promotions",

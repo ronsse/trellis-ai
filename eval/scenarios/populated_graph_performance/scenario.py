@@ -3,20 +3,12 @@
 Reuses the deterministic graph generator from scenario 5.1, ingests
 into every reachable backend, runs a timed query mix, and records
 percentile latencies plus vector recall@k against a brute-force
-baseline.
-
-The backend-probe + ingest pattern is similar to scenario 5.1
-(`multi_backend_equivalence`); the duplication is intentional at this
-stage. The "Eval Phase 1-3 revisit after live-data run" memory note
-will pull common helpers up into ``eval/metrics/`` once both scenarios
-have been run against real data and we know what shape the
-abstraction wants.
+baseline. Shares ``eval/_backends.py`` helpers with scenario 5.1.
 """
 
 from __future__ import annotations
 
 import math
-import os
 import statistics
 import tempfile
 import time
@@ -28,6 +20,13 @@ from typing import Any
 
 import structlog
 
+from eval._backends import (
+    BackendHandle,
+    get_neo4j_config,
+    get_postgres_dsn,
+    register_handle,
+)
+from eval._live_wipe import wipe_live_state
 from eval.generators.graph_generator import (
     GeneratedGraph,
     GeneratedNode,
@@ -44,7 +43,10 @@ logger = structlog.get_logger(__name__)
 DEFAULT_NODE_COUNT = 1_000
 DEFAULT_EDGE_COUNT = 4_000
 DEFAULT_EMBEDDING_COUNT = 200
-DEFAULT_EMBEDDING_DIM = 16
+# Aligned with the pgvector contract suite's ``DIMS=3`` so eval
+# scenarios cohabit with unit tests on the shared Neon DB. See the
+# matching note on ``DEFAULT_EMBEDDING_DIM`` in scenario 5.1.
+DEFAULT_EMBEDDING_DIM = 3
 DEFAULT_VECTOR_TOP_K = 10
 DEFAULT_INGEST_THROUGHPUT_FLOOR = 100.0  # nodes / sec
 DEFAULT_RECALL_FLOOR = 0.95
@@ -56,12 +58,6 @@ class QueryMixCounts:
     type_queries: int = 10
     subgraph_traversals: int = 10
     vector_searches: int = 10
-
-
-@dataclass
-class _BackendHandle:
-    name: str
-    registry: StoreRegistry
 
 
 @dataclass
@@ -148,7 +144,7 @@ def _recall_at_k(brute: list[str], approx: list[str], k: int) -> float:
 # ---------------------------------------------------------------------------
 
 
-def _ingest(handle: _BackendHandle, graph: GeneratedGraph) -> float:
+def _ingest(handle: BackendHandle, graph: GeneratedGraph) -> float:
     """Same shape as scenario 5.1's ingest. Returns wall seconds.
 
     Uses ``upsert_nodes_bulk`` / ``upsert_edges_bulk`` so the
@@ -205,7 +201,7 @@ def _ingest(handle: _BackendHandle, graph: GeneratedGraph) -> float:
 
 
 def _measure(
-    handle: _BackendHandle,
+    handle: BackendHandle,
     graph: GeneratedGraph,
     counts: QueryMixCounts,
     *,
@@ -290,104 +286,77 @@ def _measure(
 # ---------------------------------------------------------------------------
 
 
+_SQLITE_OPERATIONAL = {
+    "trace": {"backend": "sqlite"},
+    "event_log": {"backend": "sqlite"},
+}
+
+
 def _build_backends(
     stack: ExitStack,
     sqlite_dir: Path,
     *,
     embedding_dim: int,
-) -> list[_BackendHandle]:
-    """Same probe-and-skip pattern as scenario 5.1.
+) -> list[BackendHandle]:
+    """Same probe-and-skip pattern as scenario 5.1, sharing eval/_backends.py."""
+    handles: list[BackendHandle] = []
 
-    Duplicated intentionally; the live-data revisit will lift it into a
-    shared helper once the right shape is known.
-    """
-    handles: list[_BackendHandle] = []
-
-    sqlite_config = {
-        "knowledge": {
-            "graph": {"backend": "sqlite"},
-            "vector": {"backend": "sqlite"},
-            "document": {"backend": "sqlite"},
-            "blob": {"backend": "local"},
+    register_handle(
+        stack,
+        handles,
+        name="sqlite",
+        config={
+            "knowledge": {
+                "graph": {"backend": "sqlite"},
+                "vector": {"backend": "sqlite"},
+                "document": {"backend": "sqlite"},
+                "blob": {"backend": "local"},
+            },
+            "operational": _SQLITE_OPERATIONAL,
         },
-        "operational": {
-            "trace": {"backend": "sqlite"},
-            "event_log": {"backend": "sqlite"},
-        },
-    }
-    sqlite_reg = stack.enter_context(
-        StoreRegistry(config=sqlite_config, stores_dir=sqlite_dir)
+        stores_dir=sqlite_dir,
     )
-    handles.append(_BackendHandle(name="sqlite", registry=sqlite_reg))
 
-    pg_dsn = os.environ.get("TRELLIS_KNOWLEDGE_PG_DSN") or os.environ.get(
-        "TRELLIS_PG_DSN"
-    )
+    pg_dsn = get_postgres_dsn()
     if pg_dsn:
-        pg_config = {
-            "knowledge": {
-                "graph": {"backend": "postgres", "dsn": pg_dsn},
-                "vector": {
-                    "backend": "pgvector",
-                    "dsn": pg_dsn,
-                    "dimensions": embedding_dim,
+        register_handle(
+            stack,
+            handles,
+            name="postgres",
+            config={
+                "knowledge": {
+                    "graph": {"backend": "postgres", "dsn": pg_dsn},
+                    "vector": {
+                        "backend": "pgvector",
+                        "dsn": pg_dsn,
+                        "dimensions": embedding_dim,
+                    },
+                    "document": {"backend": "sqlite"},
+                    "blob": {"backend": "local"},
                 },
-                "document": {"backend": "sqlite"},
-                "blob": {"backend": "local"},
+                "operational": _SQLITE_OPERATIONAL,
             },
-            "operational": {
-                "trace": {"backend": "sqlite"},
-                "event_log": {"backend": "sqlite"},
-            },
-        }
-        try:
-            pg_reg = stack.enter_context(
-                StoreRegistry(config=pg_config, stores_dir=sqlite_dir / "pg")
-            )
-            handles.append(_BackendHandle(name="postgres", registry=pg_reg))
-        except Exception as exc:
-            logger.warning("eval.postgres_unavailable", error=str(exc))
+            stores_dir=sqlite_dir / "pg",
+        )
 
-    neo4j_uri = os.environ.get("TRELLIS_NEO4J_URI")
-    neo4j_user = os.environ.get("TRELLIS_NEO4J_USER")
-    neo4j_password = os.environ.get("TRELLIS_NEO4J_PASSWORD")
-    neo4j_database = os.environ.get("TRELLIS_NEO4J_DATABASE")
-    if neo4j_uri and neo4j_user and neo4j_password:
-        neo4j_graph: dict[str, Any] = {
-            "backend": "neo4j",
-            "uri": neo4j_uri,
-            "user": neo4j_user,
-            "password": neo4j_password,
-        }
-        neo4j_vector: dict[str, Any] = {
-            "backend": "neo4j",
-            "uri": neo4j_uri,
-            "user": neo4j_user,
-            "password": neo4j_password,
-            "dimensions": embedding_dim,
-        }
-        if neo4j_database:
-            neo4j_graph["database"] = neo4j_database
-            neo4j_vector["database"] = neo4j_database
-        neo4j_config = {
-            "knowledge": {
-                "graph": neo4j_graph,
-                "vector": neo4j_vector,
-                "document": {"backend": "sqlite"},
-                "blob": {"backend": "local"},
+    neo4j_graph = get_neo4j_config()
+    neo4j_vector = get_neo4j_config(dimensions=embedding_dim)
+    if neo4j_graph and neo4j_vector:
+        register_handle(
+            stack,
+            handles,
+            name="neo4j",
+            config={
+                "knowledge": {
+                    "graph": neo4j_graph,
+                    "vector": neo4j_vector,
+                    "document": {"backend": "sqlite"},
+                    "blob": {"backend": "local"},
+                },
+                "operational": _SQLITE_OPERATIONAL,
             },
-            "operational": {
-                "trace": {"backend": "sqlite"},
-                "event_log": {"backend": "sqlite"},
-            },
-        }
-        try:
-            neo4j_reg = stack.enter_context(
-                StoreRegistry(config=neo4j_config, stores_dir=sqlite_dir / "neo4j")
-            )
-            handles.append(_BackendHandle(name="neo4j", registry=neo4j_reg))
-        except Exception as exc:
-            logger.warning("eval.neo4j_unavailable", error=str(exc))
+            stores_dir=sqlite_dir / "neo4j",
+        )
 
     return handles
 
@@ -452,6 +421,11 @@ def run(
         )
 
         for handle in handles:
+            # Stale rows from prior runs inflate latency + index size on
+            # PG and Neo4j; wipe before each handle's run so throughput
+            # measurements aren't biased by accumulated state. Same
+            # hygiene pattern as scenarios 5.1 and 5.5.
+            wipe_live_state(handle.registry)
             ingest_seconds = _ingest(handle, graph)
             throughput = (
                 len(graph.nodes) / ingest_seconds

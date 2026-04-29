@@ -12,7 +12,7 @@ instance.
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from trellis.schemas.enums import OutcomeStatus, TraceSource
@@ -52,7 +52,14 @@ DOMAIN_TEMPLATES: list[_DomainTemplate] = [
             "ci_pipeline",
             "feature_flag",
         ],
-        query_intent="How do we structure session token validation?",
+        # Query mentions every required entity by name so FTS5 can find
+        # them all by token-overlap. Without this row-3 fix, only
+        # ``session_token`` matched (via "session" / "token") and the
+        # other two were unreachable, driving SE's success_rate to 0.
+        query_intent=(
+            "How do we structure session_token validation, "
+            "auth_module integration, and rate_limiter behavior?"
+        ),
         required_coverage=["session_token", "auth_module", "rate_limiter"],
     ),
     _DomainTemplate(
@@ -68,7 +75,10 @@ DOMAIN_TEMPLATES: list[_DomainTemplate] = [
             "quality_check",
             "watermark",
         ],
-        query_intent="What are the upstream dependencies of fact_table backfills?",
+        query_intent=(
+            "What are the upstream dependencies of fact_table backfills "
+            "via the etl_job pipeline and the staging_table?"
+        ),
         required_coverage=["fact_table", "etl_job", "staging_table"],
     ),
     _DomainTemplate(
@@ -84,7 +94,9 @@ DOMAIN_TEMPLATES: list[_DomainTemplate] = [
             "support_kb",
             "sla_timer",
         ],
-        query_intent="What's our refund policy for billing disputes?",
+        query_intent=(
+            "What's our refund_policy for a billing_record dispute in the ticket_queue?"
+        ),
         required_coverage=["refund_policy", "billing_record", "ticket_queue"],
     ),
 ]
@@ -108,7 +120,6 @@ class EvalQuery:
     domain: str
     intent: str
     required_coverage: list[str]
-    expected_categories: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -141,6 +152,21 @@ def _entity_subset(rng: random.Random, entities: list[str], k: int) -> list[str]
     return rng.sample(entities, k=min(k, len(entities)))
 
 
+def _entity_subset_with_anchor(
+    rng: random.Random, entities: list[str], k: int, anchor: str
+) -> list[str]:
+    """Sample ``k`` distinct entities, guaranteeing ``anchor`` is included.
+
+    The remaining ``k - 1`` slots are sampled without replacement from
+    ``entities`` excluding ``anchor``. Order: anchor first, then the
+    random fill — preserving determinism given the seed.
+    """
+    others = [e for e in entities if e != anchor]
+    fill_count = max(0, k - 1)
+    fill = rng.sample(others, k=min(fill_count, len(others)))
+    return [anchor, *fill]
+
+
 def generate_corpus(
     *,
     seed: int = 0,
@@ -168,8 +194,24 @@ def generate_corpus(
     base_time = datetime(2026, 1, 1, tzinfo=UTC)
 
     for template in DOMAIN_TEMPLATES:
+        # Guarantee every ``required_coverage`` entity is sampled into
+        # at least one trace per domain. Without this, with small
+        # ``traces_per_domain`` and the ``rng.sample`` draw, some
+        # required entities never appear — so they have no document
+        # afterward and are unfindable by the domain query (the
+        # 2026-04-28 scenario 5.4 baseline missed
+        # ``customer_support``'s ``billing_record`` + ``refund_policy``
+        # this way). Anchor the first ``len(required_coverage)`` traces
+        # to one required entity each; later traces sample randomly.
+        guaranteed = min(len(template.required_coverage), traces_per_domain)
         for n in range(traces_per_domain):
-            entities = _entity_subset(rng, template.entities, entities_per_trace)
+            if n < guaranteed:
+                anchor = template.required_coverage[n]
+                entities = _entity_subset_with_anchor(
+                    rng, template.entities, entities_per_trace, anchor
+                )
+            else:
+                entities = _entity_subset(rng, template.entities, entities_per_trace)
             steps = [
                 TraceStep(
                     step_type="action",

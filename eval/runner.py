@@ -204,8 +204,14 @@ def write_report(
         "generated_at": timestamp,
         "scenarios": [r.to_dict() for r in reports],
     }
-    json_path.write_text(json.dumps(payload, indent=2, sort_keys=True))
-    md_path.write_text(_render_markdown(reports, timestamp))
+    # Force UTF-8 — on Windows ``write_text`` defaults to ``cp1252``,
+    # which can't encode characters like ``→`` that scenarios may emit
+    # in findings or decision text. Reports are machine artifacts; UTF-8
+    # is the only sane wire format.
+    json_path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
+    )
+    md_path.write_text(_render_markdown(reports, timestamp), encoding="utf-8")
     return json_path, md_path
 
 
