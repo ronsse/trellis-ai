@@ -136,6 +136,164 @@ def test_noise_candidates(event_log):
     assert "item-noise" in report.noise_candidates
 
 
+class TestUsageRateNoiseFlagging:
+    """Per-item ``helpful_item_ids`` drives noise tagging when present.
+
+    Closes the §5.5.1 row 1 finding from
+    ``docs/design/plan-evaluation-strategy.md``: the old pack-level
+    ``success_rate`` heuristic flagged required entities as noise when
+    they appeared in low-coverage packs that failed for unrelated
+    reasons. The fix uses the agent's positive per-item signal
+    (``helpful_item_ids``) when the corpus carries it, with
+    success-rate fallback for back-compat.
+    """
+
+    def test_helpful_distinguishes_required_from_distractor(self, event_log):
+        """Required item (referenced) and distractor (not referenced) in the
+        same failing packs: only the distractor is flagged."""
+        # 3 packs, all fail at the pack level (success=False).
+        # Both items are served in every pack, but the agent only ever
+        # references item-required.
+        for i in range(3):
+            pack_id = f"pack-{i}"
+            event_log.emit(
+                EventType.PACK_ASSEMBLED,
+                source="test",
+                entity_id=pack_id,
+                entity_type="pack",
+                payload={"injected_item_ids": ["item-required", "item-distractor"]},
+            )
+            event_log.emit(
+                EventType.FEEDBACK_RECORDED,
+                source="test",
+                entity_id=pack_id,
+                entity_type="pack",
+                payload={
+                    "pack_id": pack_id,
+                    "success": False,
+                    "helpful_item_ids": ["item-required"],
+                },
+            )
+
+        report = analyze_effectiveness(event_log, days=30, min_appearances=2)
+
+        scores_by_id = {s["item_id"]: s for s in report.item_scores}
+        assert scores_by_id["item-required"]["usage_rate"] == 1.0
+        assert scores_by_id["item-required"]["referenced_count"] == 3
+        assert scores_by_id["item-distractor"]["usage_rate"] == 0.0
+        assert scores_by_id["item-distractor"]["referenced_count"] == 0
+
+        # Old logic would flag both (success_rate=0.0); new logic flags
+        # only the distractor.
+        assert "item-required" not in report.noise_candidates
+        assert "item-distractor" in report.noise_candidates
+
+    def test_back_compat_falls_back_to_success_rate(self, event_log):
+        """Older events without ``helpful_item_ids`` still get a noise
+        list via the original success-rate heuristic."""
+        for i in range(3):
+            pack_id = f"pack-{i}"
+            event_log.emit(
+                EventType.PACK_ASSEMBLED,
+                source="test",
+                entity_id=pack_id,
+                entity_type="pack",
+                payload={"injected_item_ids": ["item-noise"]},
+            )
+            event_log.emit(
+                EventType.FEEDBACK_RECORDED,
+                source="test",
+                entity_id=pack_id,
+                entity_type="pack",
+                # No helpful_item_ids — the back-compat path.
+                payload={"pack_id": pack_id, "success": False},
+            )
+
+        report = analyze_effectiveness(event_log, days=30, min_appearances=2)
+        assert "item-noise" in report.noise_candidates
+
+    def test_no_corpus_signal_falls_back(self, event_log):
+        """When every helpful_item_ids is empty, treat it as no signal
+        and fall back to success_rate — otherwise an agent that never
+        marks references would have all items flagged."""
+        for i in range(3):
+            pack_id = f"pack-{i}"
+            event_log.emit(
+                EventType.PACK_ASSEMBLED,
+                source="test",
+                entity_id=pack_id,
+                entity_type="pack",
+                payload={"injected_item_ids": ["item-good"]},
+            )
+            event_log.emit(
+                EventType.FEEDBACK_RECORDED,
+                source="test",
+                entity_id=pack_id,
+                entity_type="pack",
+                # All packs succeeded; key is present but empty across
+                # the corpus.
+                payload={
+                    "pack_id": pack_id,
+                    "success": True,
+                    "helpful_item_ids": [],
+                },
+            )
+
+        report = analyze_effectiveness(event_log, days=30, min_appearances=2)
+        # success_rate=1.0 → not flagged
+        assert "item-good" not in report.noise_candidates
+
+    def test_item_scores_include_usage_fields(self, event_log):
+        """``usage_rate`` and ``referenced_count`` show up alongside
+        ``success_rate`` in every item score row."""
+        event_log.emit(
+            EventType.PACK_ASSEMBLED,
+            source="test",
+            entity_id="pack-1",
+            entity_type="pack",
+            payload={"injected_item_ids": ["item-a", "item-b"]},
+        )
+        event_log.emit(
+            EventType.FEEDBACK_RECORDED,
+            source="test",
+            entity_id="pack-1",
+            entity_type="pack",
+            payload={
+                "pack_id": "pack-1",
+                "success": True,
+                "helpful_item_ids": ["item-a"],
+            },
+        )
+        event_log.emit(
+            EventType.PACK_ASSEMBLED,
+            source="test",
+            entity_id="pack-2",
+            entity_type="pack",
+            payload={"injected_item_ids": ["item-a", "item-b"]},
+        )
+        event_log.emit(
+            EventType.FEEDBACK_RECORDED,
+            source="test",
+            entity_id="pack-2",
+            entity_type="pack",
+            payload={
+                "pack_id": "pack-2",
+                "success": True,
+                "helpful_item_ids": ["item-a"],
+            },
+        )
+
+        report = analyze_effectiveness(event_log, days=30, min_appearances=1)
+        rows = {s["item_id"]: s for s in report.item_scores}
+        assert rows["item-a"]["usage_rate"] == 1.0
+        assert rows["item-a"]["referenced_count"] == 2
+        assert rows["item-b"]["usage_rate"] == 0.0
+        assert rows["item-b"]["referenced_count"] == 0
+        # success_rate column is still produced unchanged
+        assert rows["item-a"]["success_rate"] == 1.0
+        assert rows["item-b"]["success_rate"] == 1.0
+
+
 def test_to_dict(event_log):
     report = analyze_effectiveness(event_log, days=30)
     d = report.model_dump()

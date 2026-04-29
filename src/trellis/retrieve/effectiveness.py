@@ -119,6 +119,85 @@ def _lift_vs_baseline(
     return rate, baseline, rate - baseline
 
 
+def _score_items(
+    *,
+    pack_items: dict[str, list[str]],
+    pack_feedback: dict[str, bool],
+    pack_helpful: dict[str, set[str]],
+    min_appearances: int,
+    noise_threshold: float,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Aggregate per-item counts and produce ``(item_scores, noise_candidates)``.
+
+    Extracted from :func:`analyze_effectiveness` so the entry point
+    stays under the per-function complexity budget. ``pack_helpful`` is
+    keyed only for packs whose feedback explicitly carried a
+    ``helpful_item_ids`` payload — its emptiness across the corpus is
+    what gates the back-compat fallback.
+    """
+    item_successes: dict[str, int] = defaultdict(int)
+    item_failures: dict[str, int] = defaultdict(int)
+    item_appearances: dict[str, int] = defaultdict(int)
+    item_referenced: dict[str, int] = defaultdict(int)
+
+    for pack_id, items in pack_items.items():
+        if pack_id not in pack_feedback:
+            continue
+        success = pack_feedback[pack_id]
+        helpful = pack_helpful.get(pack_id, set())
+        for item_id in items:
+            item_appearances[item_id] += 1
+            if item_id in helpful:
+                item_referenced[item_id] += 1
+            if success:
+                item_successes[item_id] += 1
+            else:
+                item_failures[item_id] += 1
+
+    # ``usage_signal_present`` gates the new contrastive noise path.
+    # When at least one item across the corpus was referenced, we trust
+    # the agent's positive labels (helpful_item_ids) over the pack-level
+    # rate. Otherwise — older events with no helpful_item_ids, or
+    # corpora where the agent never marks references — fall back to the
+    # original success-rate flagging so back-compat consumers still get
+    # a noise list.
+    usage_signal_present = any(item_referenced.values())
+
+    item_scores: list[dict[str, Any]] = []
+    noise_candidates: list[str] = []
+    for item_id, count in item_appearances.items():
+        if count < min_appearances:
+            continue
+        successes = item_successes[item_id]
+        failures = item_failures[item_id]
+        success_rate = successes / count if count > 0 else 0.0
+        referenced = item_referenced[item_id]
+        usage_rate = referenced / count if count > 0 else 0.0
+
+        item_scores.append(
+            {
+                "item_id": item_id,
+                "appearances": count,
+                "successes": successes,
+                "failures": failures,
+                "success_rate": round(success_rate, 3),
+                "referenced_count": referenced,
+                "usage_rate": round(usage_rate, 3),
+            }
+        )
+
+        # Flag noise: usage-first when the corpus carries the signal,
+        # success-rate fallback otherwise.
+        if usage_signal_present:
+            if usage_rate < noise_threshold:
+                noise_candidates.append(item_id)
+        elif success_rate < noise_threshold:
+            noise_candidates.append(item_id)
+
+    item_scores.sort(key=lambda x: x["success_rate"], reverse=True)
+    return item_scores, noise_candidates
+
+
 class EffectivenessReport(TrellisModel):
     """Report on context pack effectiveness."""
 
@@ -139,18 +218,41 @@ def analyze_effectiveness(
     """Analyze which injected context items correlate with task success.
 
     Joins PACK_ASSEMBLED events with FEEDBACK_RECORDED events to compute
-    per-item success rates.
+    per-item *usage* rates (and pack-level success rates as fallback).
+
+    **Noise flagging — usage-first, success-rate fallback.**
+
+    The agent's per-item positive signal lives in
+    ``FEEDBACK_RECORDED.payload.helpful_item_ids`` (the items the agent
+    actually referenced, populated by
+    :meth:`PackFeedback.to_event_payload`). When the corpus has any
+    helpful-item signal at all, items are flagged as noise via
+    ``usage_rate = referenced / appearances``: an item the agent was
+    served but rarely used is the strong "noise" signal. When no
+    helpful-item signal exists (older corpora that only emitted
+    pack-level ``success`` / ``rating``), this function falls back to
+    the original ``success_rate`` heuristic so back-compat callers and
+    fixture-driven tests still produce a noise list.
+
+    The pack-level ``success_rate`` heuristic was the original Phase 1
+    implementation. It misclassified required entities as noise when
+    they appeared in low-coverage packs that failed for unrelated
+    reasons — see plan-evaluation-strategy.md §5.5.1 row 1 for the
+    failure case scenario 5.4 surfaced (weighted-delta -0.136 on the
+    2026-04-28 baseline).
 
     Args:
         event_log: The event log to query.
         days: How many days of history to analyze.
         min_appearances: Minimum times an item must appear to be scored.
-        registry: Optional parameter registry.  When provided, overrides
+        registry: Optional parameter registry. When provided, overrides
             the success-rating and noise-rate thresholds from the active
             parameter snapshot.
 
     Returns:
-        EffectivenessReport with per-item success rates and noise candidates.
+        :class:`EffectivenessReport` with per-item ``success_rate``,
+        ``usage_rate``, ``referenced_count`` (each item_score row), and
+        the resolved ``noise_candidates`` list.
     """
     success_threshold = _resolve_param(
         registry,
@@ -185,58 +287,32 @@ def analyze_effectiveness(
         if pack_id:
             pack_items[pack_id] = event.payload.get("injected_item_ids", [])
 
-    # Build pack_id -> feedback mapping
+    # Build pack_id -> feedback mapping. ``pack_helpful`` is keyed only
+    # for packs whose feedback event explicitly carried a
+    # ``helpful_item_ids`` payload — that distinction lets us detect the
+    # back-compat case where older events used ``rating`` / ``success``
+    # alone.
     pack_feedback: dict[str, bool] = {}
+    pack_helpful: dict[str, set[str]] = {}
     for event in feedback_events:
         pack_id = event.payload.get("pack_id") or event.entity_id
-        if pack_id and pack_id in pack_items:
-            rating = event.payload.get("rating", 0.0)
-            pack_feedback[pack_id] = event.payload.get(
-                "success", rating >= success_threshold
-            )
-
-    # Calculate per-item success rates
-    item_successes: dict[str, int] = defaultdict(int)
-    item_failures: dict[str, int] = defaultdict(int)
-    item_appearances: dict[str, int] = defaultdict(int)
-
-    for pack_id, items in pack_items.items():
-        if pack_id not in pack_feedback:
+        if not pack_id or pack_id not in pack_items:
             continue
-        success = pack_feedback[pack_id]
-        for item_id in items:
-            item_appearances[item_id] += 1
-            if success:
-                item_successes[item_id] += 1
-            else:
-                item_failures[item_id] += 1
-
-    # Build scored items list
-    item_scores: list[dict[str, Any]] = []
-    noise_candidates: list[str] = []
-
-    for item_id, count in item_appearances.items():
-        if count < min_appearances:
-            continue
-        successes = item_successes[item_id]
-        failures = item_failures[item_id]
-        rate = successes / count if count > 0 else 0.0
-
-        item_scores.append(
-            {
-                "item_id": item_id,
-                "appearances": count,
-                "successes": successes,
-                "failures": failures,
-                "success_rate": round(rate, 3),
-            }
+        rating = event.payload.get("rating", 0.0)
+        pack_feedback[pack_id] = event.payload.get(
+            "success", rating >= success_threshold
         )
+        helpful_raw = event.payload.get("helpful_item_ids")
+        if helpful_raw is not None:
+            pack_helpful[pack_id] = set(helpful_raw)
 
-        # Flag items that appear frequently but correlate with failure
-        if rate < noise_threshold and count >= min_appearances:
-            noise_candidates.append(item_id)
-
-    item_scores.sort(key=lambda x: x["success_rate"], reverse=True)
+    item_scores, noise_candidates = _score_items(
+        pack_items=pack_items,
+        pack_feedback=pack_feedback,
+        pack_helpful=pack_helpful,
+        min_appearances=min_appearances,
+        noise_threshold=noise_threshold,
+    )
 
     # Overall success rate
     total_feedback = len(pack_feedback)

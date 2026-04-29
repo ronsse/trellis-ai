@@ -28,6 +28,7 @@ from typing import Any
 
 import structlog
 
+from eval._live_wipe import wipe_live_state
 from eval.generators.graph_generator import (
     GeneratedGraph,
     GeneratedNode,
@@ -44,7 +45,10 @@ logger = structlog.get_logger(__name__)
 DEFAULT_NODE_COUNT = 1_000
 DEFAULT_EDGE_COUNT = 4_000
 DEFAULT_EMBEDDING_COUNT = 200
-DEFAULT_EMBEDDING_DIM = 16
+# Aligned with the pgvector contract suite's ``DIMS=3`` so eval
+# scenarios cohabit with unit tests on the shared Neon DB. See the
+# matching note on ``DEFAULT_EMBEDDING_DIM`` in scenario 5.1.
+DEFAULT_EMBEDDING_DIM = 3
 DEFAULT_VECTOR_TOP_K = 10
 DEFAULT_INGEST_THROUGHPUT_FLOOR = 100.0  # nodes / sec
 DEFAULT_RECALL_FLOOR = 0.95
@@ -452,6 +456,11 @@ def run(
         )
 
         for handle in handles:
+            # Stale rows from prior runs inflate latency + index size on
+            # PG and Neo4j; wipe before each handle's run so throughput
+            # measurements aren't biased by accumulated state. Same
+            # hygiene pattern as scenarios 5.1 and 5.5.
+            wipe_live_state(handle.registry)
             ingest_seconds = _ingest(handle, graph)
             throughput = (
                 len(graph.nodes) / ingest_seconds

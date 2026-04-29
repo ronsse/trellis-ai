@@ -18,6 +18,7 @@ from typing import Any
 
 import structlog
 
+from eval._live_wipe import wipe_live_state
 from eval.generators.graph_generator import GeneratedGraph, generate_graph
 from eval.runner import Finding, ScenarioReport, ScenarioStatus
 from trellis.stores.registry import StoreRegistry
@@ -34,7 +35,14 @@ logger = structlog.get_logger(__name__)
 DEFAULT_NODE_COUNT = 200
 DEFAULT_EDGE_COUNT = 800
 DEFAULT_EMBEDDING_COUNT = 50
-DEFAULT_EMBEDDING_DIM = 16
+# Aligned with the pgvector contract suite's ``DIMS=3``
+# (``tests/unit/stores/contracts/vector_store_contract.py``). The Neon
+# test DB has a single ``vectors`` table shared between unit tests and
+# eval scenarios; ``CREATE TABLE IF NOT EXISTS`` is a no-op against
+# the existing column dim, so all consumers must agree. Cosine
+# similarity at dim=3 is enough to surface cross-backend equivalence
+# drift — vector quality is not what 5.1 measures.
+DEFAULT_EMBEDDING_DIM = 3
 DEFAULT_VECTOR_TOP_K = 10
 RECALL_REGRESS_THRESHOLD = 0.9
 MIN_BACKENDS_FOR_DIFF = 2
@@ -377,6 +385,12 @@ def run(
 
         results: dict[str, dict[str, Any]] = {}
         for handle in handles:
+            # Live PG + Neo4j persist between runs; without a wipe,
+            # leftover rows from prior eval runs leak in and corrupt
+            # the cross-backend id-set diffs. Live-data revisit
+            # 2026-04-29 surfaced 19 stale "entity"-typed rows in PG +
+            # AuraDB that broke the type-query equivalence at 1K nodes.
+            wipe_live_state(handle.registry)
             ingest_seconds = _ingest(handle, graph)
             metrics[f"ingest_seconds.{handle.name}"] = round(ingest_seconds, 4)
             results[handle.name] = _query_results(

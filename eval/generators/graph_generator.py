@@ -88,7 +88,7 @@ def generate_graph(
     node_count: int = 1000,
     edge_count: int = 5000,
     embedding_count: int = 200,
-    embedding_dim: int = 16,
+    embedding_dim: int = 3,
     seed_node_count: int = 5,
 ) -> GeneratedGraph:
     """Build a deterministic synthetic graph.
