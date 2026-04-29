@@ -524,6 +524,34 @@ def _convergence_stats(rounds: list[_RoundResult]) -> _ConvergenceStats:
 # ---------------------------------------------------------------------------
 
 
+def _validate_run_kwargs(
+    *,
+    rounds: int,
+    feedback_batch_size: int,
+    regime_shift_round: int | None,
+    regime_shift_replacement_count: int,
+) -> None:
+    """Reject contradictory kwarg combinations at the boundary."""
+    if rounds <= 0:
+        msg = "rounds must be positive"
+        raise ValueError(msg)
+    if feedback_batch_size <= 0:
+        msg = "feedback_batch_size must be positive"
+        raise ValueError(msg)
+    if regime_shift_round is not None and regime_shift_round < 0:
+        msg = "regime_shift_round must be non-negative when set"
+        raise ValueError(msg)
+    if regime_shift_round is not None and regime_shift_replacement_count <= 0:
+        # 0 silently no-ops the swap (post-shift required_coverage equals
+        # pre-shift) so a caller setting regime_shift_round=N expects
+        # the demo behaviour and gets baseline. Reject explicitly.
+        msg = (
+            "regime_shift_replacement_count must be positive when "
+            "regime_shift_round is set"
+        )
+        raise ValueError(msg)
+
+
 def run(
     registry: StoreRegistry,
     *,
@@ -551,15 +579,12 @@ def run(
     corpus. Default kwargs leave both off so the convergence baseline
     is unchanged.
     """
-    if rounds <= 0:
-        msg = "rounds must be positive"
-        raise ValueError(msg)
-    if feedback_batch_size <= 0:
-        msg = "feedback_batch_size must be positive"
-        raise ValueError(msg)
-    if regime_shift_round is not None and regime_shift_round < 0:
-        msg = "regime_shift_round must be non-negative when set"
-        raise ValueError(msg)
+    _validate_run_kwargs(
+        rounds=rounds,
+        feedback_batch_size=feedback_batch_size,
+        regime_shift_round=regime_shift_round,
+        regime_shift_replacement_count=regime_shift_replacement_count,
+    )
 
     corpus = generate_corpus(
         seed=seed,
@@ -650,9 +675,11 @@ def run(
     finally:
         feedback_dir_holder.cleanup()
 
-    # Always run one final loop pass so the closing rounds' feedback is
-    # reflected in the suppression / restoration counts even if rounds
-    # is not a multiple of feedback_batch_size.
+    # When ``rounds`` is not a multiple of ``feedback_batch_size``, the
+    # main-loop's modulo gate misses the closing rounds' feedback. Fire
+    # one extra pass so those rounds still flow through the
+    # effectiveness + advisory loops. When rounds IS a multiple, the
+    # in-loop pass already covered them — no extra work needed.
     if rounds % feedback_batch_size != 0:
         _run_periodic_loops(
             registry=registry,

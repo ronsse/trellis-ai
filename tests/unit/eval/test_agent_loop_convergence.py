@@ -306,3 +306,170 @@ def test_distractors_dont_overlap_with_required_coverage() -> None:
         doc_id for docs in _DISTRACTOR_DOCS.values() for doc_id, _ in docs
     }
     assert real_doc_ids.isdisjoint(distractor_ids)
+
+
+def test_regime_shift_replacement_count_must_be_positive(
+    sqlite_registry: StoreRegistry,
+) -> None:
+    """Setting ``regime_shift_round`` with a 0 (or negative) replacement
+    count is a contradictory caller intent — the scenario would silently
+    behave like the baseline. Reject explicitly so a typo'd kwarg
+    surfaces at the boundary."""
+    with pytest.raises(
+        ValueError, match="regime_shift_replacement_count must be positive"
+    ):
+        run(sqlite_registry, regime_shift_round=5, regime_shift_replacement_count=0)
+    with pytest.raises(
+        ValueError, match="regime_shift_replacement_count must be positive"
+    ):
+        run(sqlite_registry, regime_shift_round=5, regime_shift_replacement_count=-1)
+
+
+# ---------------------------------------------------------------------------
+# Direct unit tests for the convergence math layer
+# ---------------------------------------------------------------------------
+#
+# ``_quarter_means`` and ``_convergence_stats`` are only exercised
+# indirectly by the integration tests above. A refactor that swaps
+# slice indices, removes the ``max(1, ...)`` guard, or changes the
+# fewer-than-4-samples fallback would still pass the integration suite
+# while silently changing the math. Pin the contract directly.
+
+
+class TestQuarterMeans:
+    """Pin :func:`_quarter_means` against adversarial inputs."""
+
+    def test_empty_returns_zeros(self) -> None:
+        from eval.scenarios.agent_loop_convergence.scenario import _quarter_means
+
+        assert _quarter_means([]) == (0.0, 0.0)
+
+    def test_single_value_collapses_to_full_mean(self) -> None:
+        """Below the four-sample threshold, both quarters fall back to
+        the full-sample mean — so the resulting delta is zero, not a
+        misleadingly large first-vs-last swing."""
+        from eval.scenarios.agent_loop_convergence.scenario import _quarter_means
+
+        first, last = _quarter_means([0.7])
+        assert first == last == 0.7
+
+    def test_two_and_three_values_collapse_to_full_mean(self) -> None:
+        from eval.scenarios.agent_loop_convergence.scenario import _quarter_means
+
+        for values in ([0.2, 0.6], [0.0, 0.5, 1.0]):
+            first, last = _quarter_means(values)
+            assert first == last == sum(values) / len(values)
+
+    def test_four_values_window_one_picks_endpoints(self) -> None:
+        """At exactly four samples, ``window = 1`` so the first quarter
+        is values[0] and the last is values[3]."""
+        from eval.scenarios.agent_loop_convergence.scenario import _quarter_means
+
+        first, last = _quarter_means([0.1, 0.2, 0.3, 0.9])
+        assert first == 0.1
+        assert last == 0.9
+
+    def test_eight_values_window_two_means(self) -> None:
+        """At eight samples, ``window = 2`` so the first quarter averages
+        the first two values and the last quarter averages the last two."""
+        from eval.scenarios.agent_loop_convergence.scenario import _quarter_means
+
+        values = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
+        first, last = _quarter_means(values)
+        assert first == pytest.approx((0.1 + 0.2) / 2)
+        assert last == pytest.approx((0.7 + 0.8) / 2)
+
+    def test_quarters_never_overlap_at_supported_sizes(self) -> None:
+        """For any N >= 4, the first and last quarters must be disjoint
+        slices — otherwise ``last - first`` mixes the same samples and
+        silently inflates / deflates the delta."""
+        from eval.scenarios.agent_loop_convergence.scenario import _quarter_means
+
+        for n in (4, 5, 6, 7, 8, 12, 30, 100):
+            values = [float(i) for i in range(n)]
+            first, last = _quarter_means(values)
+            # First quarter should average the small end, last the large
+            # end. Equality would mean the slices overlapped or aliased.
+            assert first < last, f"quarters overlap at N={n}: first={first} last={last}"
+
+
+class TestConvergenceStats:
+    """Pin :func:`_convergence_stats` against adversarial round shapes."""
+
+    def _make_round(
+        self,
+        *,
+        round_index: int = 0,
+        items_served: int = 5,
+        items_referenced: int = 3,
+        weighted_score: float = 0.5,
+        success: bool = True,
+        coverage_fraction: float = 1.0,
+    ):
+        from eval.scenarios.agent_loop_convergence.scenario import _RoundResult
+
+        return _RoundResult(
+            round_index=round_index,
+            domain="x",
+            pack_id=f"p{round_index}",
+            items_served=items_served,
+            items_referenced=items_referenced,
+            coverage_fraction=coverage_fraction,
+            weighted_score=weighted_score,
+            success=success,
+        )
+
+    def test_empty_rounds_return_zero_deltas(self) -> None:
+        from eval.scenarios.agent_loop_convergence.scenario import _convergence_stats
+
+        stats = _convergence_stats([])
+        assert stats.weighted_delta == 0.0
+        assert stats.useful_delta == 0.0
+
+    def test_zero_items_served_treated_as_zero_useful(self) -> None:
+        """A round with no items served has no useful fraction to
+        compute. The math must guard against ZeroDivisionError, treating
+        such rounds as 0.0 useful."""
+        from eval.scenarios.agent_loop_convergence.scenario import _convergence_stats
+
+        rounds = [self._make_round(items_served=0, items_referenced=0)]
+        stats = _convergence_stats(rounds)
+        assert stats.useful_first_quarter_mean == 0.0
+        assert stats.useful_last_quarter_mean == 0.0
+
+    def test_monotonic_improvement_produces_positive_deltas(self) -> None:
+        """A run that improves over time should yield positive deltas
+        on both useful and weighted dimensions."""
+        from eval.scenarios.agent_loop_convergence.scenario import _convergence_stats
+
+        rounds = [
+            self._make_round(
+                round_index=i,
+                items_served=10,
+                items_referenced=i,
+                weighted_score=i / 8.0,
+            )
+            for i in range(8)
+        ]
+        stats = _convergence_stats(rounds)
+        assert stats.useful_delta > 0
+        assert stats.weighted_delta > 0
+
+    def test_monotonic_regression_produces_negative_deltas(self) -> None:
+        """A run where useful-fraction drops over time should yield a
+        negative ``useful_delta`` — exactly what the regress gate
+        catches."""
+        from eval.scenarios.agent_loop_convergence.scenario import _convergence_stats
+
+        rounds = [
+            self._make_round(
+                round_index=i,
+                items_served=10,
+                items_referenced=8 - i,
+                weighted_score=(8 - i) / 8.0,
+            )
+            for i in range(8)
+        ]
+        stats = _convergence_stats(rounds)
+        assert stats.useful_delta < 0
+        assert stats.weighted_delta < 0

@@ -103,11 +103,20 @@ run(
 
 Mechanism: at round `regime_shift_round`, the agent stops grading
 against `required_coverage[0..N]` and grades against unreachable
-placeholders instead. Coverage drops, post-shift packs fail, and
-advisories formed pre-shift see their pack-level success_rate
-collapse → confidence blends down → at least one suppression fires.
-Measured outcome on the default `seed=0, rounds=30, shift=15` run:
-3 anti-pattern advisories suppressed.
+placeholders instead. Coverage drops, post-shift packs fail, and the
+fitness loop runs against the post-shift evidence, blending each
+advisory's confidence down toward its observed lift.
+
+**Suppression on the current corpus is unit-test-only.** The pre-fix
+demo (before §5.5.1 row 3) saw 3 suppressions on a corpus where
+per-domain success rates were skewed; the row-3 fix levels per-domain
+rates to 1.0, which makes pre-shift packs uniformly successful and
+prevents anti-pattern advisories from forming organically. The test
+`test_regime_shift_disrupts_useful_fraction` verifies the disruption
+reaches the fitness loop (`advisory_runs >= 1`, `round_success_rate <
+1.0`) but does not assert a non-zero suppression count. The
+suppression branch is unit-tested directly in
+`tests/unit/retrieve/test_effectiveness.py::test_suppresses_failing_advisory`.
 
 **Restoration is not exercised in this mode.** Once an advisory is
 suppressed it leaves PackBuilder delivery, so no new presentations
