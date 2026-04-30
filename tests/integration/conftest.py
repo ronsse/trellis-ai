@@ -33,16 +33,17 @@ pytestmark = [
 ]
 
 
-#: Vector index reused across the integration and unit suites.
+#: Vector index name matching the production default on AuraDB.
 #:
 #: Neo4j allows only one vector index per ``(label, property)`` pair, so
 #: a second index on ``(:Node, embedding)`` under a different name is
 #: silently rejected (``CREATE ... IF NOT EXISTS`` returns success but
-#: never appears in ``SHOW INDEXES``). The integration suite therefore
-#: shares the unit suite's existing index instead of fighting it.
-#: Dimensions must match the existing index — the unit suite created
-#: it at 3 and that's what AuraDB has on disk today.
-INTEGRATION_VECTOR_INDEX = "trellis_test_node_embeddings"
+#: never appears in ``SHOW INDEXES``). The shared AuraDB instance was
+#: provisioned with the production-default name ``trellis_node_embeddings``,
+#: and an outside-in test of the deployment shape should exercise the
+#: same name production uses anyway. Dimensions must match the existing
+#: index — provisioned at 3 and that's what AuraDB has on disk today.
+INTEGRATION_VECTOR_INDEX = "trellis_node_embeddings"
 INTEGRATION_VECTOR_DIMS = 3
 
 
