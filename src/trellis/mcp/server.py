@@ -1211,6 +1211,42 @@ def get_sectioned_context(
 # ---------------------------------------------------------------------------
 
 
+def _configure_mcp_logging() -> None:
+    """Route structlog output to stderr so it can't corrupt JSON-RPC.
+
+    The MCP server speaks JSON-RPC over stdio: stdout is reserved for
+    protocol frames. structlog's default ``PrintLoggerFactory`` writes
+    to ``sys.stdout``, which means the very first store-init log line
+    breaks the client's parser. Pinning the factory to ``sys.stderr``
+    keeps logs visible to operators while leaving stdout exclusively
+    for protocol traffic.
+
+    Honours ``TRELLIS_LOG_LEVEL`` so operators can tune verbosity the
+    same way they would for the API. Defaults to INFO.
+    """
+    import logging  # noqa: PLC0415
+    import os  # noqa: PLC0415
+    import sys  # noqa: PLC0415
+
+    level_name = os.environ.get("TRELLIS_LOG_LEVEL", "INFO").strip().upper()
+    level = getattr(logging, level_name, logging.INFO)
+
+    structlog.configure(
+        processors=[
+            structlog.contextvars.merge_contextvars,
+            structlog.processors.add_log_level,
+            structlog.processors.TimeStamper(fmt="iso", utc=True),
+            structlog.processors.StackInfoRenderer(),
+            structlog.processors.format_exc_info,
+            structlog.dev.ConsoleRenderer(),
+        ],
+        wrapper_class=structlog.make_filtering_bound_logger(level),
+        logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
+        cache_logger_on_first_use=True,
+    )
+
+
 def main() -> None:
     """Run the Macro Tools MCP server."""
+    _configure_mcp_logging()
     mcp.run()
