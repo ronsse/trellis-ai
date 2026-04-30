@@ -53,6 +53,7 @@ def wipe_live_state(registry: StoreRegistry) -> None:
 
     _wipe_postgres_event_log(operational.event_log)
     _wipe_postgres_trace_store(operational.trace_store)
+    _wipe_postgres_document_store(knowledge.document_store)
     _wipe_postgres_graph_store(knowledge.graph_store)
     _wipe_postgres_vector_store(knowledge.vector_store)
     _wipe_neo4j_graph_store(knowledge.graph_store)
@@ -73,6 +74,12 @@ def _wipe_postgres_trace_store(store: object) -> None:
     if type(store).__name__ != "PostgresTraceStore":
         return
     _truncate_postgres(store, ["traces"], cascade=False)
+
+
+def _wipe_postgres_document_store(store: object) -> None:
+    if type(store).__name__ != "PostgresDocumentStore":
+        return
+    _truncate_postgres(store, ["documents"], cascade=False)
 
 
 def _wipe_postgres_graph_store(store: object) -> None:

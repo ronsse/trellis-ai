@@ -1,0 +1,353 @@
+"""Shared ``live_api_server`` fixture for outside-in surface tests.
+
+Spawns ``uvicorn trellis_api.app:create_app --factory`` as a subprocess
+against a tmp config dir wired to live Neon Postgres (operational
+plane) + AuraDB Neo4j (knowledge plane). The fixture wipes persistent
+state via ``eval._live_wipe.wipe_live_state`` before yielding so each
+test starts from an empty graph + clean tables. SQLite stores under
+``tmp_path`` naturally start clean per test.
+
+Imported into both ``tests/integration/api/conftest.py`` and
+``tests/integration/sdk/conftest.py`` so the API smoke matrix and the
+SDK live round-trip suite share a single fixture definition. Each
+conftest re-exports the symbol via ``from tests.integration._live_server
+import live_api_server``; pytest registers any ``@pytest.fixture``
+function it finds in a conftest module's namespace.
+
+Skipped when ``TRELLIS_TEST_NEO4J_URI`` *or* ``TRELLIS_TEST_PG_DSN``
+isn't set — the cloud-default deployment shape needs both. Mirrors the
+gating in ``tests/integration/test_neo4j_e2e.py``.
+"""
+
+from __future__ import annotations
+
+import os
+import shutil
+import socket
+import subprocess
+import sys
+import time
+from collections.abc import Iterator
+from pathlib import Path
+
+import httpx
+import pytest
+
+NEO4J_URI = os.environ.get("TRELLIS_TEST_NEO4J_URI", "")
+NEO4J_USER = os.environ.get("TRELLIS_TEST_NEO4J_USER", "neo4j")
+NEO4J_PASSWORD = os.environ.get("TRELLIS_TEST_NEO4J_PASSWORD", "")
+NEO4J_DATABASE = os.environ.get("TRELLIS_TEST_NEO4J_DATABASE", "neo4j")
+PG_DSN = os.environ.get("TRELLIS_TEST_PG_DSN", "")
+
+# Use the production-default vector index name. AuraDB allows only one
+# vector index per (label, property), so a `_test`-suffixed name would
+# silently fail to provision when the production index is already there
+# — and the production-default is what an outside-in test of the
+# deployment shape should exercise anyway.
+INTEGRATION_VECTOR_DIMS = 3
+
+# AuraDB cold-start can take ~20s on the free tier; padded a little so
+# transient slowdowns don't flake the suite. If a healthz never comes
+# back inside this window, something is genuinely wrong with the spawn.
+_HEALTHZ_TIMEOUT_SECONDS = 30.0
+_HEALTHZ_POLL_INTERVAL_SECONDS = 0.25
+_TEARDOWN_TIMEOUT_SECONDS = 5.0
+
+
+def free_port() -> int:
+    """Allocate an unused TCP port the OS doesn't immediately reuse.
+
+    Closes the socket *before* returning so uvicorn can bind. There's a
+    tiny TOCTOU window here, but for a single-process test suite on
+    localhost the collision rate is effectively zero — the alternative
+    (passing port 0 to uvicorn and parsing its stdout for the chosen
+    port) trades a known small risk for noisy log scraping.
+    """
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def write_cloud_config(config_dir: Path) -> None:
+    """Write a config.yaml in the cloud-default deployment shape.
+
+    Mirrors block #2 of ``docs/deployment/recommended-config.yaml``:
+    Neo4j on the Knowledge Plane (graph + vector shape #2), Postgres
+    on the Operational Plane. Neo4j credentials are baked into the
+    YAML literally; Postgres DSNs come from
+    ``TRELLIS_KNOWLEDGE_PG_DSN`` / ``TRELLIS_OPERATIONAL_PG_DSN`` set
+    on the subprocess env (registry's plane-aware DSN resolver picks
+    them up).
+    """
+    import yaml  # noqa: PLC0415
+
+    config = {
+        "knowledge": {
+            "graph": {
+                "backend": "neo4j",
+                "uri": NEO4J_URI,
+                "user": NEO4J_USER,
+                "password": NEO4J_PASSWORD,
+                "database": NEO4J_DATABASE,
+            },
+            "vector": {
+                "backend": "neo4j",
+                "uri": NEO4J_URI,
+                "user": NEO4J_USER,
+                "password": NEO4J_PASSWORD,
+                "database": NEO4J_DATABASE,
+                "dimensions": INTEGRATION_VECTOR_DIMS,
+            },
+            "document": {"backend": "postgres"},
+            "blob": {"backend": "local"},
+        },
+        "operational": {
+            "trace": {"backend": "postgres"},
+            "event_log": {"backend": "postgres"},
+        },
+    }
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.yaml").write_text(yaml.safe_dump(config))
+
+
+def wipe_live_state_for_config(config_dir: Path, env: dict[str, str]) -> None:
+    """Truncate Neon + AuraDB state via the eval wipe orchestrator.
+
+    Built using the same ``StoreRegistry.from_config_dir`` path the
+    uvicorn lifespan will run, so any wiring bug surfaces here rather
+    than after uvicorn boots. The registry is closed before yielding
+    to release the connection — uvicorn opens its own.
+    """
+    from eval._live_wipe import wipe_live_state  # noqa: PLC0415
+    from trellis.stores.registry import StoreRegistry  # noqa: PLC0415
+
+    # Restore the env so plane-aware DSN resolution sees the test DSNs.
+    saved = {k: os.environ.get(k) for k in env}
+    try:
+        os.environ.update(env)
+        registry = StoreRegistry.from_config_dir(config_dir=config_dir)
+        try:
+            wipe_live_state(registry)
+        finally:
+            registry.close()
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+def spawn_uvicorn(env: dict[str, str], port: int) -> subprocess.Popen[bytes]:
+    """Spawn ``uvicorn trellis_api.app:create_app --factory`` on ``port``.
+
+    Bound to 127.0.0.1 (not 0.0.0.0) so the test never accidentally
+    accepts connections off the loopback. ``--factory`` tells uvicorn
+    to call ``create_app()`` rather than import an app instance, which
+    matches how production launches via ``trellis_api.app.main``.
+    """
+    return subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "uvicorn",
+            "trellis_api.app:create_app",
+            "--factory",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(port),
+            "--log-level",
+            "warning",
+        ],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+
+def wait_for_healthz(
+    proc: subprocess.Popen[bytes],
+    base_url: str,
+) -> None:
+    """Block until ``/healthz`` returns 200 or the process exits.
+
+    Fail-loud on early process exit (validation crashes, import errors)
+    so the operator sees the captured uvicorn output. Falls back to a
+    timeout error if the process is alive but unresponsive — both
+    failure modes are real bugs we want surfaced, not flakes to retry.
+    """
+    deadline = time.monotonic() + _HEALTHZ_TIMEOUT_SECONDS
+    last_err: BaseException | None = None
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            stdout, stderr = proc.communicate()
+            raise RuntimeError(
+                "uvicorn exited with code "
+                f"{proc.returncode} before serving /healthz:\n"
+                f"stdout: {stdout.decode(errors='replace')}\n"
+                f"stderr: {stderr.decode(errors='replace')}"
+            )
+        try:
+            resp = httpx.get(f"{base_url}/healthz", timeout=2.0)
+            if resp.status_code == 200:
+                return
+        except httpx.HTTPError as exc:
+            last_err = exc
+        time.sleep(_HEALTHZ_POLL_INTERVAL_SECONDS)
+
+    # Timed out — terminate the hung process and surface its captured
+    # output so the operator can see why startup stalled (validate()
+    # crash, port collision, import error, etc.).
+    proc.terminate()
+    try:
+        stdout, stderr = proc.communicate(timeout=_TEARDOWN_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        stdout, stderr = proc.communicate(timeout=_TEARDOWN_TIMEOUT_SECONDS)
+    raise RuntimeError(
+        f"uvicorn never responded to /healthz within "
+        f"{_HEALTHZ_TIMEOUT_SECONDS}s (last error: {last_err}):\n"
+        f"stdout: {stdout.decode(errors='replace')}\n"
+        f"stderr: {stderr.decode(errors='replace')}"
+    )
+
+
+def terminate_subprocess(proc: subprocess.Popen[bytes]) -> None:
+    """SIGTERM uvicorn, escalate to SIGKILL if it hangs.
+
+    Windows ``Popen.terminate`` calls TerminateProcess which is closer
+    to SIGKILL semantics than POSIX SIGTERM, but uvicorn's signal
+    handlers run identically on both platforms.
+    """
+    if proc.poll() is not None:
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=_TEARDOWN_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=_TEARDOWN_TIMEOUT_SECONDS)
+
+
+def find_console_script(name: str, *, install_hint: str) -> str:
+    """Resolve an installed console script by name.
+
+    Resolution order: sibling of ``sys.executable`` (the venv's
+    ``Scripts/`` or ``bin/`` directory) first, then ``shutil.which``.
+    Tests using this prefer the venv's binary over a system-wide
+    install, so a stale shim on ``PATH`` can't shadow the wheel
+    under test. ``pytest.skip`` if neither path turns up the binary.
+    """
+    py_dir = Path(sys.executable).parent
+    for candidate in (py_dir / f"{name}.exe", py_dir / name):
+        if candidate.is_file():
+            return str(candidate)
+
+    fallback = shutil.which(name)
+    if fallback is not None:
+        return fallback
+
+    pytest.skip(
+        f"{name} console script not found next to the test runner's "
+        f"python or on PATH — {install_hint}"
+    )
+
+
+def initialize_trellis_stores(
+    env: dict[str, str],
+    trellis_bin: str,
+    *,
+    timeout_seconds: float = 30.0,
+) -> None:
+    """Run ``trellis admin init --format json`` to bootstrap stores.
+
+    The CLI registry exits non-zero if ``stores_dir`` doesn't exist,
+    so any subprocess that touches stores needs this first. Asserts
+    exit 0 with both streams in the failure message so a broken init
+    surfaces immediately rather than as a downstream NoneType error.
+    """
+    result = subprocess.run(
+        [trellis_bin, "admin", "init", "--format", "json"],
+        env=env,
+        capture_output=True,
+        timeout=timeout_seconds,
+    )
+    assert result.returncode == 0, (
+        f"`trellis admin init` failed (exit {result.returncode}):\n"
+        f"stdout: {result.stdout.decode(errors='replace')}\n"
+        f"stderr: {result.stderr.decode(errors='replace')}"
+    )
+
+
+def build_subprocess_env(config_dir: Path, data_dir: Path) -> dict[str, str]:
+    """Build the env dict used for any subprocess that imports trellis.
+
+    Includes ``TRELLIS_CONFIG_DIR`` / ``TRELLIS_DATA_DIR`` so the
+    subprocess's ``StoreRegistry.from_config_dir`` finds the right
+    YAML, plane-aware ``TRELLIS_KNOWLEDGE_PG_DSN`` /
+    ``TRELLIS_OPERATIONAL_PG_DSN`` for Postgres-backed stores, and
+    ``PYTHONPATH`` to expose ``src/`` because pytest's
+    ``pythonpath = ["src", "."]`` only affects the test-driver
+    process — subprocesses inherit the parent shell's env, not
+    pytest's path manipulation.
+    """
+    repo_root = Path(__file__).resolve().parents[2]
+    src_dir = repo_root / "src"
+    existing_pythonpath = os.environ.get("PYTHONPATH", "")
+    pythonpath_entries = [str(src_dir), str(repo_root)]
+    if existing_pythonpath:
+        pythonpath_entries.append(existing_pythonpath)
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "TRELLIS_CONFIG_DIR": str(config_dir),
+            "TRELLIS_DATA_DIR": str(data_dir),
+            "TRELLIS_KNOWLEDGE_PG_DSN": PG_DSN,
+            "TRELLIS_OPERATIONAL_PG_DSN": PG_DSN,
+            "PYTHONPATH": os.pathsep.join(pythonpath_entries),
+        }
+    )
+    return env
+
+
+@pytest.fixture
+def live_api_server(tmp_path: Path) -> Iterator[str]:
+    """Spawn uvicorn against live Neon + AuraDB; yield the base URL.
+
+    Skipped when the live-infra env vars aren't set. Wipes persistent
+    state in Neon + AuraDB before yielding so each test starts from a
+    known-empty graph + tables — SQLite tmp_path stores naturally
+    start clean. Yields only the base URL: the tests are pure HTTP
+    black-box, no in-process registry handle.
+    """
+    if not NEO4J_URI or not PG_DSN:
+        pytest.skip(
+            "TRELLIS_TEST_NEO4J_URI and TRELLIS_TEST_PG_DSN must be set "
+            "for live API tests"
+        )
+
+    config_dir = tmp_path / ".trellis"
+    data_dir = tmp_path / "data"
+    write_cloud_config(config_dir)
+    subprocess_env = build_subprocess_env(config_dir, data_dir)
+
+    wipe_live_state_for_config(
+        config_dir,
+        env={
+            "TRELLIS_CONFIG_DIR": str(config_dir),
+            "TRELLIS_DATA_DIR": str(data_dir),
+            "TRELLIS_KNOWLEDGE_PG_DSN": PG_DSN,
+            "TRELLIS_OPERATIONAL_PG_DSN": PG_DSN,
+        },
+    )
+
+    port = free_port()
+    base_url = f"http://127.0.0.1:{port}"
+    proc = spawn_uvicorn(subprocess_env, port)
+    try:
+        wait_for_healthz(proc, base_url)
+        yield base_url
+    finally:
+        terminate_subprocess(proc)
