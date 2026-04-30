@@ -171,7 +171,32 @@ class PostgresDocumentStore(PostgresStoreBase, DocumentStore):
 
         if filters:
             for key, value in filters.items():
-                if isinstance(value, str | int | float | bool):
+                if key == "content_tags" and isinstance(value, dict):
+                    # Mirror the SQLite path's ``content_tags`` semantics
+                    # so PackBuilder's ``signal_quality`` allowlist (the
+                    # default ``[high, standard, low]`` filter that
+                    # excludes noise) actually filters here. Without
+                    # this, ``apply_noise_tags`` updates a doc's
+                    # metadata but the next pack still includes it.
+                    for facet, allowed in value.items():
+                        allowed_list = (
+                            list(allowed) if isinstance(allowed, list) else [allowed]
+                        )
+                        if not allowed_list:
+                            continue
+                        placeholders = ", ".join(["%s"] * len(allowed_list))
+                        # ``metadata -> 'content_tags' ->> facet`` reads
+                        # the JSON path as text. NULL (facet missing)
+                        # is falsy under ``IN (...)`` and would exclude
+                        # un-tagged items, so an explicit IS NULL OR
+                        # branch keeps default-pass semantics — items
+                        # without the facet tag are kept.
+                        conditions.append(
+                            "(metadata -> 'content_tags' ->> %s IS NULL "
+                            f"OR metadata -> 'content_tags' ->> %s IN ({placeholders}))"
+                        )
+                        params.extend([facet, facet, *allowed_list])
+                elif isinstance(value, str | int | float | bool):
                     conditions.append("metadata->>%s = %s")
                     params.extend([key, str(value)])
 
