@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -95,8 +96,12 @@ def create_app() -> FastAPI:
     return app
 
 
-DEFAULT_HOST = "0.0.0.0"  # noqa: S104 — bind-all is correct for containers
-DEFAULT_PORT = 8420
+#: Default bind address. Loopback-only by default so a fresh install
+#: doesn't expose the unauthenticated API on the network. Container
+#: deployments that need to listen on the pod IP set
+#: ``TRELLIS_API_HOST=0.0.0.0`` (or pass ``--host``) explicitly.
+DEFAULT_HOST = os.environ.get("TRELLIS_API_HOST", "127.0.0.1")
+DEFAULT_PORT = int(os.environ.get("TRELLIS_API_PORT", "8420"))
 
 
 def main(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> None:

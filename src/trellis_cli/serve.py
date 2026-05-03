@@ -27,7 +27,12 @@ def serve(
     host: str = typer.Option(
         DEFAULT_HOST,
         "--host",
-        help="Bind address (default 0.0.0.0 — container-friendly).",
+        help=(
+            "Bind address. Defaults to 127.0.0.1 (loopback-only) so the "
+            "unauthenticated API isn't exposed on a fresh install. Set "
+            "TRELLIS_API_HOST=0.0.0.0 (or pass --host 0.0.0.0) for "
+            "container deployments that need to listen on the pod IP."
+        ),
     ),
     port: int = typer.Option(
         DEFAULT_PORT,

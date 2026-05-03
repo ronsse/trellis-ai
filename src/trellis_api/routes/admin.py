@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-import subprocess
-import sys
 from typing import Any
 
 import structlog
 from fastapi import APIRouter, Query
-from pydantic import BaseModel, Field
 
 from trellis.retrieve.advisory_generator import AdvisoryGenerator
 from trellis.retrieve.effectiveness import (
@@ -161,103 +158,3 @@ def reset_vectors() -> dict[str, Any]:
     else:
         dims = vector_store._dimensions
         return {"status": "ok", "message": f"Recreated with {dims}D"}
-
-
-# -- Self-update --
-
-_REPO_URL = "git+https://github.com/ronsse/trellis-ai.git"
-
-
-class SelfUpdateRequest(BaseModel):
-    """Request body for self-update."""
-
-    ref: str = Field("main", description="Git ref to install (branch, tag, or commit)")
-    restart: bool = Field(
-        True, description="Restart the trellis-api systemd service after install"
-    )
-    restart_delay_secs: int = Field(
-        2, ge=1, le=30, description="Seconds to wait before restart"
-    )
-
-
-class SelfUpdateResponse(BaseModel):
-    """Response from self-update."""
-
-    status: str
-    pip_output: str
-    ref: str
-    restart_scheduled: bool
-
-
-@router.post("/self-update", response_model=SelfUpdateResponse)
-def self_update(
-    req: SelfUpdateRequest | None = None,
-) -> SelfUpdateResponse:
-    """Upgrade the trellis-ai package from git and restart."""
-    if req is None:
-        req = SelfUpdateRequest(
-            ref="main",
-            restart=True,
-            restart_delay_secs=2,
-        )
-
-    install_url = f"{_REPO_URL}@{req.ref}"
-    logger.info("self_update_started", ref=req.ref, restart=req.restart)
-
-    pip_result = subprocess.run(  # noqa: S603
-        [
-            sys.executable,
-            "-m",
-            "pip",
-            "install",
-            "--upgrade",
-            "--force-reinstall",
-            "--no-deps",
-            "--no-cache-dir",
-            install_url,
-        ],
-        capture_output=True,
-        text=True,
-        timeout=120,
-        check=False,
-    )
-
-    pip_output = pip_result.stdout + pip_result.stderr
-    if pip_result.returncode != 0:
-        logger.error("self_update_pip_failed", output=pip_output)
-        return SelfUpdateResponse(
-            status="pip_failed",
-            pip_output=pip_output,
-            ref=req.ref,
-            restart_scheduled=False,
-        )
-
-    logger.info("self_update_pip_ok", ref=req.ref)
-
-    restart_scheduled = False
-    if req.restart:
-        # Schedule a delayed restart so the HTTP response is sent first.
-        # systemd-run creates a transient timer that fires once.
-        try:
-            subprocess.Popen(  # noqa: S603
-                [  # noqa: S607
-                    "systemd-run",
-                    f"--on-active={req.restart_delay_secs}",
-                    "systemctl",
-                    "restart",
-                    "trellis-api",
-                ],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            restart_scheduled = True
-            logger.info("self_update_restart_scheduled", delay=req.restart_delay_secs)
-        except Exception:
-            logger.exception("self_update_restart_failed")
-
-    return SelfUpdateResponse(
-        status="ok",
-        pip_output=pip_output,
-        ref=req.ref,
-        restart_scheduled=restart_scheduled,
-    )
