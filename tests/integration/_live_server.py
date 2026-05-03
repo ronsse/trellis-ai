@@ -79,7 +79,7 @@ def write_cloud_config(config_dir: Path) -> None:
     on the subprocess env (registry's plane-aware DSN resolver picks
     them up).
     """
-    import yaml  # noqa: PLC0415
+    import yaml
 
     config = {
         "knowledge": {
@@ -118,8 +118,9 @@ def wipe_live_state_for_config(config_dir: Path, env: dict[str, str]) -> None:
     than after uvicorn boots. The registry is closed before yielding
     to release the connection — uvicorn opens its own.
     """
-    from eval._live_wipe import wipe_live_state  # noqa: PLC0415
-    from trellis.stores.registry import StoreRegistry  # noqa: PLC0415
+    from eval._live_wipe import wipe_live_state
+
+    from trellis.stores.registry import StoreRegistry
 
     # Restore the env so plane-aware DSN resolution sees the test DSNs.
     saved = {k: os.environ.get(k) for k in env}
@@ -163,7 +164,7 @@ def spawn_uvicorn(
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_handle = log_path.open("wb")
     try:
-        return subprocess.Popen(
+        return subprocess.Popen(  # noqa: S603 — argv is built from sys.executable + literals
             [
                 sys.executable,
                 "-m",
@@ -212,11 +213,11 @@ def wait_for_healthz(
     last_err: BaseException | None = None
     while time.monotonic() < deadline:
         if proc.poll() is not None:
-            raise RuntimeError(
-                "uvicorn exited with code "
-                f"{proc.returncode} before serving /healthz:\n"
-                f"log: {_read_log(log_path)}"
+            msg = (
+                f"uvicorn exited with code {proc.returncode} before "
+                f"serving /healthz:\nlog: {_read_log(log_path)}"
             )
+            raise RuntimeError(msg)
         try:
             resp = httpx.get(f"{base_url}/healthz", timeout=2.0)
             if resp.status_code == 200:
@@ -234,11 +235,12 @@ def wait_for_healthz(
     except subprocess.TimeoutExpired:
         proc.kill()
         proc.wait(timeout=_TEARDOWN_TIMEOUT_SECONDS)
-    raise RuntimeError(
+    msg = (
         f"uvicorn never responded to /healthz within "
         f"{_HEALTHZ_TIMEOUT_SECONDS}s (last error: {last_err}):\n"
         f"log: {_read_log(log_path)}"
     )
+    raise RuntimeError(msg)
 
 
 def terminate_subprocess(proc: subprocess.Popen[bytes]) -> None:
@@ -295,11 +297,12 @@ def initialize_trellis_stores(
     exit 0 with both streams in the failure message so a broken init
     surfaces immediately rather than as a downstream NoneType error.
     """
-    result = subprocess.run(
+    result = subprocess.run(  # noqa: S603 — argv is a known console-script + literals
         [trellis_bin, "admin", "init", "--format", "json"],
         env=env,
         capture_output=True,
         timeout=timeout_seconds,
+        check=False,
     )
     assert result.returncode == 0, (
         f"`trellis admin init` failed (exit {result.returncode}):\n"

@@ -48,7 +48,7 @@ def test_serve_boots_and_responds_to_healthz(
     port = _free_port()
     base_url = f"http://127.0.0.1:{port}"
 
-    proc = subprocess.Popen(
+    proc = subprocess.Popen(  # noqa: S603 — argv is the resolved console-script + literals
         [
             trellis_bin,
             "serve",

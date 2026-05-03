@@ -103,7 +103,7 @@ async def test_async_max_concurrency_property(live_api_server: str) -> None:
 async def test_async_client_constructed_with_injected_http(
     live_api_server: str,
 ) -> None:
-    """``http=httpx.AsyncClient`` injection: SDK doesn't close transport it doesn't own."""
+    """``http=httpx.AsyncClient`` injection: SDK doesn't close transport it doesn't own."""  # noqa: E501
     async with httpx.AsyncClient(
         base_url=live_api_server,
         timeout=15.0,

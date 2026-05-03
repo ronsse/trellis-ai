@@ -20,8 +20,7 @@ isn't set. Run with::
 
 from __future__ import annotations
 
-import httpx
-
+import httpx  # noqa: TC002 — used at runtime in test fixtures' type hints
 
 # ── Unversioned: deployment plumbing + version handshake ──────────────
 
@@ -139,7 +138,6 @@ def test_get_entity_returns_neo4j_row(client: httpx.Client) -> None:
 
     resp = client.get("/api/v1/entities/smoke:getentity")
     assert resp.status_code == 200, resp.text
-    body = resp.json()
     # Field naming: routes/retrieve.py wraps the graph row, the entity_id
     # we passed in must be reachable somewhere in the body.
     assert "smoke:getentity" in resp.text

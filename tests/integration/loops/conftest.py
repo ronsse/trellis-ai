@@ -81,8 +81,7 @@ async def loop_env(tmp_path: Path) -> AsyncIterator[LoopEnvironment]:
     """
     if not NEO4J_URI or not PG_DSN:
         pytest.skip(
-            "TRELLIS_TEST_NEO4J_URI and TRELLIS_TEST_PG_DSN must be set "
-            "for loop tests"
+            "TRELLIS_TEST_NEO4J_URI and TRELLIS_TEST_PG_DSN must be set for loop tests"
         )
 
     mcp_bin = find_console_script(
