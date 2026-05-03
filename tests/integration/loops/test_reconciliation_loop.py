@@ -162,7 +162,7 @@ async def test_reconciliation_loop(loop_env: LoopEnvironment) -> None:
         loop_env.config_dir, loop_env.data_dir, feedback.feedback_id
     ), "feedback_id leaked into EventLog before reconciliation"
 
-    # ── Reconcile JSONL → EventLog ───────────────────────────────
+    # ── Reconcile + idempotency rerun (one shared registry) ──────
     pack_id = pack_1["pack_id"]
     pack_id_lookup = {feedback.feedback_id: pack_id}
     with _live_registry(loop_env.config_dir, loop_env.data_dir) as registry:
@@ -171,18 +171,15 @@ async def test_reconciliation_loop(loop_env: LoopEnvironment) -> None:
             registry.operational.event_log,
             pack_id_lookup=pack_id_lookup,
         )
-    assert first.scanned == 1, first
-    assert first.emitted == 1, first
-    assert first.already_present == 0, first
-    assert first.failed == 0, first
-
-    # ── Idempotency: rerun reconcile, all rows already present ───
-    with _live_registry(loop_env.config_dir, loop_env.data_dir) as registry:
         second = reconcile_feedback_log_to_event_log(
             log_dir,
             registry.operational.event_log,
             pack_id_lookup=pack_id_lookup,
         )
+    assert first.scanned == 1, first
+    assert first.emitted == 1, first
+    assert first.already_present == 0, first
+    assert first.failed == 0, first
     assert second.scanned == 1, second
     assert second.emitted == 0, second
     assert second.already_present == 1, second
