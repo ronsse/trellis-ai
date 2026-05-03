@@ -8,7 +8,7 @@ from typing import Any
 
 import structlog
 
-from trellis.stores.base.event_log import Event, EventLog, EventType
+from trellis.stores.base.event_log import Event, EventLog, EventOrder, EventType
 from trellis.stores.postgres.base import PostgresStoreBase
 
 logger = structlog.get_logger(__name__)
@@ -109,6 +109,7 @@ class PostgresEventLog(PostgresStoreBase, EventLog):
         since: datetime | None = None,
         until: datetime | None = None,
         limit: int = 100,
+        order: EventOrder = "asc",
     ) -> list[Event]:
         clauses: list[str] = []
         params: list[Any] = []
@@ -130,7 +131,11 @@ class PostgresEventLog(PostgresStoreBase, EventLog):
             params.append(until)
 
         where = " AND ".join(clauses) if clauses else "1=1"
-        sql = f"SELECT * FROM events WHERE {where} ORDER BY occurred_at ASC LIMIT %s"
+        direction = "DESC" if order == "desc" else "ASC"
+        sql = (
+            f"SELECT * FROM events WHERE {where} "
+            f"ORDER BY occurred_at {direction} LIMIT %s"
+        )
         params.append(limit)
 
         with self.conn.cursor() as cur:

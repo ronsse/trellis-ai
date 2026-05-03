@@ -15,12 +15,24 @@ def list_precedents(
 ) -> list[dict[str, Any]]:
     """Query PRECEDENT_PROMOTED events, optionally filtered by domain.
 
-    Returns a list of dicts with event_id, entity_id, title, description,
-    domain, and occurred_at.
+    Returns a list of dicts (newest precedent first) with event_id,
+    entity_id, title, description, domain, and occurred_at. The
+    underlying ``get_events`` call uses ``order="desc"`` so the
+    ``limit`` cap shows the most recently promoted precedents — with
+    the default ``order="asc"`` the listing would show the *oldest*
+    precedents and miss any new ones once the table grows past
+    ``limit`` rows.
+
+    Note: when ``domain`` is set the post-filter applies *after*
+    truncation, so a small ``limit`` combined with a domain filter
+    can return fewer than ``limit`` rows even if more matches exist.
+    Callers needing strict per-domain pagination should add a
+    backend-side ``domain`` predicate.
     """
     events = event_log.get_events(
         event_type=EventType.PRECEDENT_PROMOTED,
         limit=limit,
+        order="desc",
     )
 
     if domain:
