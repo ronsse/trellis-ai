@@ -218,6 +218,10 @@ class PostgresDocumentStore(PostgresStoreBase, DocumentStore):
         with self.conn.cursor() as cur:
             cur.execute(sql, all_params)
             rows = cur.fetchall()
+        # Close the implicit transaction so subsequent calls on this
+        # connection don't pile up in "idle in transaction" state — the
+        # H2.2 advisory loop hangs on the 3rd /packs call without this.
+        self.conn.commit()
 
         return [self._row_to_dict(row, include_rank=True) for row in rows]
 

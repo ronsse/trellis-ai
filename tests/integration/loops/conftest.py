@@ -23,7 +23,6 @@ isn't set — same gating as the API + SDK suites.
 
 from __future__ import annotations
 
-import os
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -57,11 +56,17 @@ class LoopEnvironment:
     subprocess. Both processes share the same ``config_dir`` (and
     therefore the same Neon + AuraDB backend), so an event one writes
     is visible to the other.
+
+    ``data_dir`` is the SQLite/JSON-store root the subprocesses point
+    at via ``TRELLIS_DATA_DIR`` — exposed so loop tests can reach into
+    file-backed stores (advisory JSON, parameter overrides) without
+    re-deriving the path.
     """
 
     api_url: str
     mcp: Client
     config_dir: Path
+    data_dir: Path
 
 
 @pytest_asyncio.fixture
@@ -76,8 +81,7 @@ async def loop_env(tmp_path: Path) -> AsyncIterator[LoopEnvironment]:
     """
     if not NEO4J_URI or not PG_DSN:
         pytest.skip(
-            "TRELLIS_TEST_NEO4J_URI and TRELLIS_TEST_PG_DSN must be set "
-            "for loop tests"
+            "TRELLIS_TEST_NEO4J_URI and TRELLIS_TEST_PG_DSN must be set for loop tests"
         )
 
     mcp_bin = find_console_script(
@@ -103,10 +107,11 @@ async def loop_env(tmp_path: Path) -> AsyncIterator[LoopEnvironment]:
 
     port = free_port()
     api_url = f"http://127.0.0.1:{port}"
-    api_proc = spawn_uvicorn(subprocess_env, port)
+    log_path = tmp_path / "uvicorn.log"
+    api_proc = spawn_uvicorn(subprocess_env, port, log_path=log_path)
 
     try:
-        wait_for_healthz(api_proc, api_url)
+        wait_for_healthz(api_proc, api_url, log_path=log_path)
 
         transport = StdioTransport(
             command=mcp_bin,
@@ -118,6 +123,7 @@ async def loop_env(tmp_path: Path) -> AsyncIterator[LoopEnvironment]:
                 api_url=api_url,
                 mcp=mcp_client,
                 config_dir=config_dir,
+                data_dir=data_dir,
             )
     finally:
         terminate_subprocess(api_proc)
@@ -137,7 +143,7 @@ def seed_distractor_corpus(
         "loop:doc:helpful-3",
         "loop:doc:helpful-4",
     ),
-    intent_token: str = "noisedemote",
+    intent_token: str = "noisedemote",  # noqa: S107 — token marker, not a credential
 ) -> tuple[str, list[str]]:
     """Seed a 5-document corpus with one designated distractor.
 

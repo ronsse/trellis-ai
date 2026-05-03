@@ -26,7 +26,8 @@ from typing import TYPE_CHECKING
 import pytest
 
 if TYPE_CHECKING:
-    from typing import Any, Callable
+    from collections.abc import Callable
+    from typing import Any
 
 
 CliRunner = "Callable[[list[str], dict[str, str]], tuple[Any, dict[str, Any]]]"
@@ -36,7 +37,7 @@ CliRunner = "Callable[[list[str], dict[str, str]], tuple[Any, dict[str, Any]]]"
 
 
 def test_admin_init_emits_initialized_status(
-    cli_runner: "Callable[..., Any]",
+    cli_runner: Callable[..., Any],
     cli_env: dict[str, str],
 ) -> None:
     """``trellis admin init --format json`` returns ``status=initialized``."""
@@ -47,18 +48,20 @@ def test_admin_init_emits_initialized_status(
 
 
 def test_admin_health_after_init(
-    cli_runner: "Callable[..., Any]",
+    cli_runner: Callable[..., Any],
     initialized_cli_env: dict[str, str],
 ) -> None:
     """``admin health`` reports config + data + stores dirs as present."""
-    _, payload = cli_runner(["admin", "health", "--format", "json"], initialized_cli_env)
+    _, payload = cli_runner(
+        ["admin", "health", "--format", "json"], initialized_cli_env
+    )
     assert payload["config"] is True
     assert payload["data_dir"] is True
     assert payload["stores_dir"] is True
 
 
 def test_admin_stats_returns_zero_counts_on_fresh_init(
-    cli_runner: "Callable[..., Any]",
+    cli_runner: Callable[..., Any],
     initialized_cli_env: dict[str, str],
 ) -> None:
     """A freshly initialized registry has zero of every store kind.
@@ -73,7 +76,7 @@ def test_admin_stats_returns_zero_counts_on_fresh_init(
 
 
 def test_admin_version_returns_handshake_fields(
-    cli_runner: "Callable[..., Any]",
+    cli_runner: Callable[..., Any],
     cli_env: dict[str, str],
 ) -> None:
     """``admin version`` mirrors the ``GET /api/version`` handshake.
@@ -89,7 +92,7 @@ def test_admin_version_returns_handshake_fields(
 
 
 def test_admin_graph_health_on_empty_graph(
-    cli_runner: "Callable[..., Any]",
+    cli_runner: Callable[..., Any],
     initialized_cli_env: dict[str, str],
 ) -> None:
     """``admin graph-health`` returns ``status=empty`` on a fresh registry."""
@@ -104,7 +107,7 @@ def test_admin_graph_health_on_empty_graph(
 
 
 def test_retrieve_search_empty_corpus(
-    cli_runner: "Callable[..., Any]",
+    cli_runner: Callable[..., Any],
     initialized_cli_env: dict[str, str],
 ) -> None:
     """``retrieve search`` against an empty document store returns no results."""
@@ -119,7 +122,7 @@ def test_retrieve_search_empty_corpus(
 
 
 def test_retrieve_traces_empty_after_init(
-    cli_runner: "Callable[..., Any]",
+    cli_runner: Callable[..., Any],
     initialized_cli_env: dict[str, str],
 ) -> None:
     """``retrieve traces`` returns an empty list on a fresh registry."""
@@ -132,7 +135,7 @@ def test_retrieve_traces_empty_after_init(
 
 
 def test_retrieve_precedents_empty_after_init(
-    cli_runner: "Callable[..., Any]",
+    cli_runner: Callable[..., Any],
     initialized_cli_env: dict[str, str],
 ) -> None:
     """``retrieve precedents`` returns no items on a fresh registry."""
@@ -159,7 +162,7 @@ def test_retrieve_precedents_empty_after_init(
     strict=True,
 )
 def test_analyze_extractor_fallbacks_on_empty_event_log(
-    cli_runner: "Callable[..., Any]",
+    cli_runner: Callable[..., Any],
     initialized_cli_env: dict[str, str],
 ) -> None:
     """``analyze extractor-fallbacks`` returns a parseable report on no events."""
@@ -173,7 +176,7 @@ def test_analyze_extractor_fallbacks_on_empty_event_log(
 
 
 def test_metrics_outcomes_empty_on_fresh_registry(
-    cli_runner: "Callable[..., Any]",
+    cli_runner: Callable[..., Any],
     initialized_cli_env: dict[str, str],
 ) -> None:
     """``metrics outcomes --format json`` returns a parseable empty report."""

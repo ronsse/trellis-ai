@@ -62,19 +62,17 @@ def _result_text(result: object) -> str:
 # ── Tool inventory ────────────────────────────────────────────────────
 
 
-async def test_lists_eleven_tools(mcp_session: "Client") -> None:
+async def test_lists_eleven_tools(mcp_session: Client) -> None:
     """The server advertises all 11 macro tools through the protocol."""
     tools = await mcp_session.list_tools()
     names = {t.name for t in tools}
-    assert _EXPECTED_TOOLS.issubset(names), (
-        f"Missing tools: {_EXPECTED_TOOLS - names}"
-    )
+    assert _EXPECTED_TOOLS.issubset(names), f"Missing tools: {_EXPECTED_TOOLS - names}"
 
 
 # ── Save tools ────────────────────────────────────────────────────────
 
 
-async def test_save_knowledge_creates_entity(mcp_session: "Client") -> None:
+async def test_save_knowledge_creates_entity(mcp_session: Client) -> None:
     """``save_knowledge`` creates an entity and reports its id + name."""
     result = await mcp_session.call_tool(
         "save_knowledge",
@@ -89,7 +87,7 @@ async def test_save_knowledge_creates_entity(mcp_session: "Client") -> None:
     assert "mcp-test-platform-team" in text
 
 
-async def test_save_memory_stores_document(mcp_session: "Client") -> None:
+async def test_save_memory_stores_document(mcp_session: Client) -> None:
     """``save_memory`` returns ``Memory saved: <doc_id>`` on first store."""
     result = await mcp_session.call_tool(
         "save_memory",
@@ -102,7 +100,7 @@ async def test_save_memory_stores_document(mcp_session: "Client") -> None:
     assert "Memory saved:" in text
 
 
-async def test_save_memory_dedups_on_repeat(mcp_session: "Client") -> None:
+async def test_save_memory_dedups_on_repeat(mcp_session: Client) -> None:
     """A second ``save_memory`` with identical content hits the dedup path."""
     payload = {
         "content": "MCP dedup probe — content identical across calls.",
@@ -113,13 +111,13 @@ async def test_save_memory_dedups_on_repeat(mcp_session: "Client") -> None:
 
     second = _result_text(await mcp_session.call_tool("save_memory", payload))
     # Either exact (content_hash match) or fuzzy (MinHash) dedup must fire.
-    assert (
-        "already exists" in second.lower() or "duplicate" in second.lower()
-    ), f"second save_memory did not dedup: {second!r}"
+    assert "already exists" in second.lower() or "duplicate" in second.lower(), (
+        f"second save_memory did not dedup: {second!r}"
+    )
 
 
 async def test_save_experience_validates_trace_json(
-    mcp_session: "Client",
+    mcp_session: Client,
 ) -> None:
     """``save_experience`` rejects malformed trace JSON with a clear error.
 
@@ -140,7 +138,7 @@ async def test_save_experience_validates_trace_json(
 # ── Read tools ────────────────────────────────────────────────────────
 
 
-async def test_get_context_returns_markdown(mcp_session: "Client") -> None:
+async def test_get_context_returns_markdown(mcp_session: Client) -> None:
     """``get_context`` returns markdown — empty corpus is fine."""
     result = await mcp_session.call_tool(
         "get_context",
@@ -153,7 +151,7 @@ async def test_get_context_returns_markdown(mcp_session: "Client") -> None:
     assert "mcp-live-context" in text or "No context found" in text
 
 
-async def test_search_returns_markdown(mcp_session: "Client") -> None:
+async def test_search_returns_markdown(mcp_session: Client) -> None:
     """``search`` returns markdown for a known term, even when empty."""
     result = await mcp_session.call_tool(
         "search",
@@ -164,7 +162,7 @@ async def test_search_returns_markdown(mcp_session: "Client") -> None:
     assert "mcp-live-search-token" in text or "No results" in text
 
 
-async def test_get_lessons_returns_markdown(mcp_session: "Client") -> None:
+async def test_get_lessons_returns_markdown(mcp_session: Client) -> None:
     """``get_lessons`` returns markdown (possibly empty list) on fresh registry."""
     result = await mcp_session.call_tool(
         "get_lessons",
@@ -174,7 +172,7 @@ async def test_get_lessons_returns_markdown(mcp_session: "Client") -> None:
     assert isinstance(text, str)
 
 
-async def test_get_graph_reports_missing_entity(mcp_session: "Client") -> None:
+async def test_get_graph_reports_missing_entity(mcp_session: Client) -> None:
     """``get_graph`` emits a clear ``Entity not found`` for an unknown id."""
     result = await mcp_session.call_tool(
         "get_graph",
@@ -186,7 +184,7 @@ async def test_get_graph_reports_missing_entity(mcp_session: "Client") -> None:
 
 
 async def test_get_graph_round_trip_after_save_knowledge(
-    mcp_session: "Client",
+    mcp_session: Client,
 ) -> None:
     """Save an entity via ``save_knowledge`` then read it back via ``get_graph``."""
     save_result = await mcp_session.call_tool(
@@ -216,7 +214,7 @@ async def test_get_graph_round_trip_after_save_knowledge(
 
 
 async def test_get_objective_context_returns_markdown(
-    mcp_session: "Client",
+    mcp_session: Client,
 ) -> None:
     """``get_objective_context`` round-trips through PackBuilder + EventLog."""
     result = await mcp_session.call_tool(
@@ -230,7 +228,7 @@ async def test_get_objective_context_returns_markdown(
 
 
 async def test_get_task_context_returns_markdown(
-    mcp_session: "Client",
+    mcp_session: Client,
 ) -> None:
     """``get_task_context`` returns a sectioned-pack markdown payload."""
     result = await mcp_session.call_tool(
@@ -243,7 +241,7 @@ async def test_get_task_context_returns_markdown(
 
 
 async def test_get_sectioned_context_with_custom_sections(
-    mcp_session: "Client",
+    mcp_session: Client,
 ) -> None:
     """``get_sectioned_context`` honours caller-supplied section configs."""
     result = await mcp_session.call_tool(
@@ -267,7 +265,7 @@ async def test_get_sectioned_context_with_custom_sections(
 
 
 async def test_get_sectioned_context_rejects_empty_sections(
-    mcp_session: "Client",
+    mcp_session: Client,
 ) -> None:
     """Empty ``sections`` list is rejected at the tool layer with a clear error."""
     result = await mcp_session.call_tool(
@@ -282,7 +280,7 @@ async def test_get_sectioned_context_rejects_empty_sections(
 # ── Feedback ──────────────────────────────────────────────────────────
 
 
-async def test_record_feedback_writes_event(mcp_session: "Client") -> None:
+async def test_record_feedback_writes_event(mcp_session: Client) -> None:
     """``record_feedback`` emits a FEEDBACK_RECORDED event for a given pack_id."""
     result = await mcp_session.call_tool(
         "record_feedback",
@@ -298,7 +296,7 @@ async def test_record_feedback_writes_event(mcp_session: "Client") -> None:
     assert "positive" in text
 
 
-async def test_record_feedback_requires_target(mcp_session: "Client") -> None:
+async def test_record_feedback_requires_target(mcp_session: Client) -> None:
     """Calling ``record_feedback`` without trace_id or pack_id returns an error."""
     result = await mcp_session.call_tool(
         "record_feedback",

@@ -30,7 +30,7 @@ from tests.integration._live_server import live_api_server  # noqa: F401
 
 
 @pytest.fixture
-def client(live_api_server: str) -> Iterator[httpx.Client]:
+def client(live_api_server: str) -> Iterator[httpx.Client]:  # noqa: F811 — pytest fixture name shadows the imported fixture symbol on purpose
     """An httpx.Client bound to the live uvicorn base URL.
 
     Pure black-box wrapper — tests should not import any

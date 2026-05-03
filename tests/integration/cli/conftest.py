@@ -31,7 +31,6 @@ from tests.integration._live_server import (
     initialize_trellis_stores,
 )
 
-
 _SUBCMD_TIMEOUT_SECONDS = 60.0
 
 # structlog console-renderer prefix — looks like
@@ -45,7 +44,9 @@ _STRUCTLOG_LINE_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\s+\[\w+\s
 
 @pytest.fixture(scope="session")
 def trellis_bin() -> str:
-    return find_console_script("trellis", install_hint="install with `pip install -e .`")
+    return find_console_script(
+        "trellis", install_hint="install with `pip install -e .`"
+    )
 
 
 @pytest.fixture
@@ -114,11 +115,12 @@ def run_cli(
     subcommand must honour. Failures dump both streams so the
     operator sees what went wrong.
     """
-    completed = subprocess.run(
+    completed = subprocess.run(  # noqa: S603 — argv is the resolved console-script + caller-supplied args
         [bin_path, *args],
         env=env,
         capture_output=True,
         timeout=_SUBCMD_TIMEOUT_SECONDS,
+        check=False,
     )
     stdout = completed.stdout.decode(errors="replace")
     stderr = completed.stderr.decode(errors="replace")
@@ -139,18 +141,17 @@ def run_cli(
 
 
 @pytest.fixture
-def cli_runner(trellis_bin: str) -> Iterator[
-    "object",
-]:
+def cli_runner(trellis_bin: str) -> Iterator[object,]:
     """Bind ``run_cli`` to the resolved ``trellis_bin`` for ergonomics.
 
     Tests can call ``cli_runner(args, env=...)`` instead of repeating
     the binary path on every invocation.
     """
+
     def _runner(
         args: list[str],
         env: dict[str, str],
     ) -> tuple[subprocess.CompletedProcess[bytes], dict[str, object]]:
         return run_cli(trellis_bin, args, env)
 
-    yield _runner
+    return _runner

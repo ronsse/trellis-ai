@@ -12,6 +12,7 @@ from trellis.retrieve.precedents import list_precedents as _list_precedents
 from trellis.retrieve.rerankers import build_reranker
 from trellis.retrieve.strategies import build_strategies
 from trellis.schemas.pack import PackBudget
+from trellis.stores.advisory_store import AdvisoryStore
 from trellis_api.app import get_registry
 from trellis_api.models import PackRequest, PackResponse
 
@@ -39,9 +40,20 @@ def assemble_pack(req: PackRequest) -> PackResponse:
     registry = get_registry()
 
     param_registry = ParameterRegistry(registry.operational.parameter_store)
+    # Mirror the MCP server's lazy advisory wiring: load from the
+    # registry's stores_dir if a generated advisories.json exists.
+    # PackBuilder filters by ``_ADVISORY_MIN_CONFIDENCE`` and pack
+    # domain scope, so passing the store unconditionally is safe.
+    advisory_store: AdvisoryStore | None = None
+    stores_dir = registry.stores_dir
+    if stores_dir is not None:
+        adv_path = stores_dir / "advisories.json"
+        if adv_path.exists():
+            advisory_store = AdvisoryStore(adv_path)
     builder = PackBuilder(
         strategies=build_strategies(registry, parameter_registry=param_registry),
         event_log=registry.operational.event_log,
+        advisory_store=advisory_store,
         reranker=build_reranker("rrf", parameter_registry=param_registry),
     )
 
@@ -66,6 +78,7 @@ def assemble_pack(req: PackRequest) -> PackResponse:
         agent_id=pack.agent_id,
         count=len(pack.items),
         items=[item.model_dump() for item in pack.items],
+        advisories=[a.model_dump(mode="json") for a in pack.advisories],
         retrieval_report=pack.retrieval_report.model_dump(),
     )
 

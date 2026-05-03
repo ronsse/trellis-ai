@@ -876,6 +876,12 @@ components:
       additionalProperties: false
       description: Response containing an assembled context pack.
       properties:
+        advisories:
+          items:
+            additionalProperties: true
+            type: object
+          title: Advisories
+          type: array
         agent_id:
           anyOf:
           - type: string
