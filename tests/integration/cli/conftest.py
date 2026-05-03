@@ -17,9 +17,7 @@ so contributors without ``.env`` can run the full suite.
 
 from __future__ import annotations
 
-import json
 import os
-import re
 import subprocess
 from collections.abc import Iterator
 from pathlib import Path
@@ -27,19 +25,11 @@ from pathlib import Path
 import pytest
 
 from tests.integration._live_server import (
+    CLI_SUBCMD_TIMEOUT_SECONDS,
     find_console_script,
     initialize_trellis_stores,
+    run_cli,
 )
-
-_SUBCMD_TIMEOUT_SECONDS = 60.0
-
-# structlog console-renderer prefix — looks like
-# ``2026-04-29 16:05:10 [info     ] event_name           key=value``.
-# CLI commands currently route structlog to stdout instead of stderr,
-# so the JSON payload on stdout is preceded by these log lines. The
-# parser in ``run_cli`` strips them. Tracked as a follow-up to clean
-# up at the CLI logging layer; once that lands this regex can go away.
-_STRUCTLOG_LINE_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\s+\[\w+\s*\]")
 
 
 @pytest.fixture(scope="session")
@@ -84,60 +74,9 @@ def initialized_cli_env(
 ) -> dict[str, str]:
     """Run ``trellis admin init`` once so subsequent commands have stores."""
     initialize_trellis_stores(
-        cli_env, trellis_bin, timeout_seconds=_SUBCMD_TIMEOUT_SECONDS
+        cli_env, trellis_bin, timeout_seconds=CLI_SUBCMD_TIMEOUT_SECONDS
     )
     return cli_env
-
-
-def _strip_structlog_lines(stdout: str) -> str:
-    """Drop structlog log lines so the remaining stdout parses as JSON.
-
-    See ``_STRUCTLOG_LINE_RE`` for the prefix shape. CLI subcommands
-    that emit a JSON payload do so as one chunk after any preceding
-    log noise; stripping the noise leaves the payload intact whether
-    it's compact (one line) or pretty-printed (multi-line).
-    """
-    return "\n".join(
-        line for line in stdout.splitlines() if not _STRUCTLOG_LINE_RE.match(line)
-    )
-
-
-def run_cli(
-    bin_path: str,
-    args: list[str],
-    env: dict[str, str],
-) -> tuple[subprocess.CompletedProcess[bytes], dict[str, object]]:
-    """Run a CLI subcommand and parse stdout as JSON.
-
-    Returns ``(completed, parsed_json)``. Asserts exit 0 and that
-    stdout (after stripping structlog console-renderer lines) is
-    decodable JSON — these are the contract every ``--format json``
-    subcommand must honour. Failures dump both streams so the
-    operator sees what went wrong.
-    """
-    completed = subprocess.run(  # noqa: S603 — argv is the resolved console-script + caller-supplied args
-        [bin_path, *args],
-        env=env,
-        capture_output=True,
-        timeout=_SUBCMD_TIMEOUT_SECONDS,
-        check=False,
-    )
-    stdout = completed.stdout.decode(errors="replace")
-    stderr = completed.stderr.decode(errors="replace")
-    assert completed.returncode == 0, (
-        f"CLI exited {completed.returncode} for {args}:\n"
-        f"stdout: {stdout}\nstderr: {stderr}"
-    )
-    payload = _strip_structlog_lines(stdout).strip()
-    try:
-        parsed = json.loads(payload)
-    except json.JSONDecodeError as exc:
-        msg = (
-            f"CLI {args} did not emit valid JSON on stdout:\n"
-            f"stdout: {stdout!r}\nstderr: {stderr!r}\nerror: {exc}"
-        )
-        raise AssertionError(msg) from exc
-    return completed, parsed
 
 
 @pytest.fixture
