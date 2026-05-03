@@ -309,7 +309,7 @@ def prepare_learning_promotions(
             continue
 
         recommendation_type = str(candidate.get("recommendation_type", "")).strip()
-        if recommendation_type not in {"promote_precedent", "promote_guidance"}:
+        if recommendation_type not in PROMOTE_RECOMMENDATIONS:
             results.append(
                 {
                     "candidate_id": candidate_id,
@@ -398,6 +398,14 @@ _PROMOTE_RETRY_THRESHOLD = 0.25
 _NOISE_SUCCESS_THRESHOLD = 0.4
 _NOISE_RETRY_THRESHOLD = 0.5
 
+#: Recommendation values that flow through ``prepare_learning_promotions``
+#: into ENTITY_CREATE payloads. The CLI surface checks the candidate's
+#: ``recommendation_type`` against this set to decide whether to surface
+#: the candidate as promotable in displays / filters.
+PROMOTE_RECOMMENDATIONS: frozenset[str] = frozenset(
+    {"promote_precedent", "promote_guidance"}
+)
+
 
 def _recommend_learning_action(
     *,
@@ -479,6 +487,7 @@ def _utc_now() -> str:
 
 
 __all__ = [
+    "PROMOTE_RECOMMENDATIONS",
     "analyze_learning_observations",
     "build_learning_promotion_payloads",
     "normalize_intent_family",

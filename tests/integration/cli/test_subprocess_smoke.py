@@ -22,13 +22,13 @@ the CLI surface.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
     from typing import Any
 
 
@@ -194,13 +194,7 @@ def test_analyze_learning_candidates_writes_artifacts_on_empty_log(
     initialized_cli_env: dict[str, str],
     tmp_path: Path,
 ) -> None:
-    """``analyze learning-candidates`` writes both review files even with zero events.
-
-    The H2.3 operator surface guarantees: even on a cold install with
-    no graded packs, both artifact files exist after a run. Operators
-    inspecting the directory need a clear "no candidates" signal
-    rather than a missing file.
-    """
+    """``analyze learning-candidates`` writes both review files on an empty log."""
     review_dir = tmp_path / "learning_review"
     _, payload = cli_runner(
         [
@@ -217,8 +211,8 @@ def test_analyze_learning_candidates_writes_artifacts_on_empty_log(
     assert payload["observation_count"] == 0
     assert payload["candidate_count"] == 0
     assert payload["candidates"] == []
-    assert (review_dir / "intent_learning_candidates.json").exists()
-    assert (review_dir / "promotion_decisions.template.json").exists()
+    assert Path(payload["candidates_path"]).exists()
+    assert Path(payload["decisions_template_path"]).exists()
 
 
 def test_curate_promote_learning_dry_run_no_approvals(
@@ -226,13 +220,7 @@ def test_curate_promote_learning_dry_run_no_approvals(
     initialized_cli_env: dict[str, str],
     tmp_path: Path,
 ) -> None:
-    """``curate promote-learning --dry-run`` returns parseable JSON with no approvals.
-
-    Mirrors the operator workflow for "I ran learning-candidates,
-    haven't filled in approvals yet, want to verify the planner
-    parses my files" — the canonical first try at the promote
-    command.
-    """
+    """``curate promote-learning --dry-run`` parses cleanly with nothing approved."""
     candidates_path = tmp_path / "candidates.json"
     decisions_path = tmp_path / "decisions.json"
     candidates_path.write_text(

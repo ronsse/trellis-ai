@@ -276,8 +276,6 @@ class TestCuratePromoteLearning:
         assert data["dry_run"] is True
         assert data["approved_count"] == 1
         assert data["ready_count"] == 1
-        # Dry run reports the prepared payloads but never reaches the
-        # mutation pipeline; "promoted_count" is intentionally absent.
         assert "promoted_count" not in data
 
     def test_promotes_approved_candidate(self, tmp_path: Path) -> None:
@@ -304,8 +302,6 @@ class TestCuratePromoteLearning:
         result_entry = data["results"][0]
         assert result_entry["status"] == "promoted"
         assert result_entry["node_id"]
-        # Document-only loops produce empty edge lists; assert the
-        # field exists even when empty so callers can rely on shape.
         assert result_entry["edges"] == []
 
     def test_no_approvals_is_a_no_op(self, tmp_path: Path) -> None:

@@ -31,16 +31,8 @@ def _reset_registry() -> None:
 def _get_registry() -> StoreRegistry:
     """Get or create a cached StoreRegistry singleton from CLI config.
 
-    Delegates to :meth:`StoreRegistry.from_config_dir` so cloud-shape
-    plane-split YAML works the same as the legacy flat shape — both
-    routes the registry already supports. The previous implementation
-    routed through ``TrellisConfig`` (which forbids extra fields per
-    project convention) and silently rejected plane-split YAML; that
-    blocked the CLI surface in any cloud deployment.
-
-    Stores-dir existence is still gated so a typo'd ``trellis admin
-    init`` surfaces early instead of as a NoneType deeper in the
-    stack.
+    Delegates to :meth:`StoreRegistry.from_config_dir` so plane-split
+    cloud YAML and the legacy flat shape both work.
     """
     global _registry  # noqa: PLW0603
     if _registry is None:

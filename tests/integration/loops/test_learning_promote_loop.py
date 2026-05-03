@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -44,7 +43,9 @@ from tests.integration._live_server import (
     PG_DSN,
     build_subprocess_env,
     find_console_script,
+    run_cli,
 )
+from trellis.learning import PROMOTE_RECOMMENDATIONS
 from trellis.stores.registry import StoreRegistry
 
 if TYPE_CHECKING:
@@ -67,11 +68,6 @@ _DOMAIN = "learning-promote"
 _PACK_ROUNDS = 3
 _PACK_FETCH_LIMIT = 10
 _PACK_TOKEN_BUDGET = 2000
-
-#: CLI subprocess timeout. The promote step does a graph mutation
-#: against AuraDB and one of the two analyze runs scans the live
-#: EventLog — both well under 60s on the loop-test backend.
-_CLI_TIMEOUT_SECONDS = 60.0
 
 
 @contextmanager
@@ -105,49 +101,6 @@ def _live_registry(config_dir: Path, data_dir: Path) -> Iterator[StoreRegistry]:
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
-
-
-def _parse_cli_json(stdout: str) -> dict[str, Any]:
-    """Extract the JSON payload from a ``trellis ... --format json`` run.
-
-    The CLI emits structlog console-renderer lines on stdout (a
-    deferred CLI-hygiene fix routes them to stderr; tracked
-    elsewhere). The JSON payload is always the last non-empty line.
-    Walking from the bottom and json-parsing each line lets the
-    helper survive whichever side of that fix lands first.
-    """
-    for raw in reversed(stdout.splitlines()):
-        line = raw.strip()
-        if not line:
-            continue
-        try:
-            return json.loads(line)
-        except json.JSONDecodeError:
-            continue
-    msg = f"no JSON line found in CLI stdout:\n{stdout!r}"
-    raise AssertionError(msg)
-
-
-def _run_trellis_cli(
-    bin_path: str,
-    args: list[str],
-    env: dict[str, str],
-) -> dict[str, Any]:
-    """Run ``trellis <args>`` as a subprocess and return the parsed JSON payload."""
-    completed = subprocess.run(  # noqa: S603 — argv is the resolved console-script + literals
-        [bin_path, *args],
-        env=env,
-        capture_output=True,
-        timeout=_CLI_TIMEOUT_SECONDS,
-        check=False,
-    )
-    stdout = completed.stdout.decode(errors="replace")
-    stderr = completed.stderr.decode(errors="replace")
-    assert completed.returncode == 0, (
-        f"`trellis {' '.join(args)}` exited {completed.returncode}:\n"
-        f"stdout: {stdout}\nstderr: {stderr}"
-    )
-    return _parse_cli_json(stdout)
 
 
 def _seed_helpful_doc(api_url: str) -> None:
@@ -214,8 +167,13 @@ def _score_via_cli(
     subprocess_env: dict[str, str],
     review_dir: Path,
 ) -> dict[str, Any]:
-    """Run ``trellis analyze learning-candidates`` and return the helpful candidate."""
-    payload = _run_trellis_cli(
+    """Run ``trellis analyze learning-candidates`` and return the JSON payload.
+
+    The caller reads ``candidates_path`` / ``decisions_template_path``
+    from the payload to feed the next step; the test never has to know
+    the artifact filenames.
+    """
+    _, payload = run_cli(
         trellis_bin,
         [
             "analyze",
@@ -243,19 +201,11 @@ def _score_via_cli(
         f"helpful doc {_HELPFUL_DOC_ID!r} missing from candidates: "
         f"{[c['item_id'] for c in payload['candidates']]}"
     )
-    # success_rate=1.0 + retry_rate=0.0 over min_support=2 should clear
-    # the promote thresholds (0.75 / 0.25); item_type comes back as
-    # "document" so the recommendation is ``promote_guidance`` rather
-    # than ``promote_precedent`` — both are accepted by the curate
-    # surface.
-    assert helpful["recommendation_type"] in {
-        "promote_precedent",
-        "promote_guidance",
-    }, helpful
+    assert helpful["recommendation_type"] in PROMOTE_RECOMMENDATIONS, helpful
     assert helpful["metrics"]["times_served"] >= _PACK_ROUNDS
     assert helpful["metrics"]["success_rate"] == pytest.approx(1.0)
     assert helpful["metrics"]["retry_rate"] == pytest.approx(0.0)
-    return helpful
+    return payload
 
 
 def _auto_approve(decisions_path: Path, candidate_id: str) -> None:
@@ -279,12 +229,11 @@ def _auto_approve(decisions_path: Path, candidate_id: str) -> None:
 def _promote_via_cli(
     trellis_bin: str,
     subprocess_env: dict[str, str],
-    review_dir: Path,
+    candidates_path: Path,
+    decisions_path: Path,
 ) -> str:
     """Run ``trellis curate promote-learning`` and return the created node_id."""
-    candidates_path = review_dir / "intent_learning_candidates.json"
-    decisions_path = review_dir / "promotion_decisions.template.json"
-    payload = _run_trellis_cli(
+    _, payload = run_cli(
         trellis_bin,
         [
             "curate",
@@ -340,10 +289,14 @@ async def test_learning_promote_loop(loop_env: LoopEnvironment) -> None:
     await _run_graded_pack_rounds(loop_env)
 
     review_dir = loop_env.data_dir / "learning_review"
-    helpful_candidate = _score_via_cli(trellis_bin, subprocess_env, review_dir)
-    _auto_approve(
-        review_dir / "promotion_decisions.template.json",
-        helpful_candidate["candidate_id"],
+    score_payload = _score_via_cli(trellis_bin, subprocess_env, review_dir)
+    candidates_path = Path(score_payload["candidates_path"])
+    decisions_path = Path(score_payload["decisions_template_path"])
+    helpful_candidate = next(
+        c for c in score_payload["candidates"] if c["item_id"] == _HELPFUL_DOC_ID
     )
-    node_id = _promote_via_cli(trellis_bin, subprocess_env, review_dir)
+    _auto_approve(decisions_path, helpful_candidate["candidate_id"])
+    node_id = _promote_via_cli(
+        trellis_bin, subprocess_env, candidates_path, decisions_path
+    )
     _verify_precedent_in_graph(loop_env, node_id, helpful_candidate)

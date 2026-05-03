@@ -231,13 +231,7 @@ def _submit_promotion(
     entity_payload: dict[str, Any],
     edge_payloads: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """Submit a single approved promotion through the governed pipeline.
-
-    Returns a status dict the caller folds into the per-decision report.
-    Keeps the entity create + edge creates in a single sequence so a
-    failed entity short-circuits the edges (orphaned edges would be
-    rejected by the link handler anyway, but failing fast is clearer).
-    """
+    """Submit one approved promotion. A failed entity short-circuits the edges."""
     entity_cmd = Command(
         operation=Operation.ENTITY_CREATE,
         args={
@@ -363,7 +357,7 @@ def promote_learning(
                         "dry_run": False,
                         "approved_count": plan["approved_count"],
                         "promoted_count": 0,
-                        "results": plan["results"],
+                        "results": [],
                     }
                 )
             )

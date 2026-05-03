@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from trellis.learning import PROMOTE_RECOMMENDATIONS
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 from trellis_cli.main import app
@@ -203,12 +204,7 @@ class TestLearningCandidates:
         item_id: str = "lc:doc:helpful",
         rounds: int = 3,
     ) -> None:
-        """Emit ``rounds`` PACK_ASSEMBLED + matching FEEDBACK_RECORDED pairs.
-
-        Each pair declares ``item_id`` as both served and helpful, with
-        outcome=success — enough to clear the default
-        promote_success_threshold=0.75 and meet min_support=2.
-        """
+        """Emit ``rounds`` graded packs marking ``item_id`` as helpful + successful."""
         event_log = registry.event_log
         for i in range(rounds):
             pack_id = f"lc-pack-{i}"
@@ -263,11 +259,8 @@ class TestLearningCandidates:
         assert data["observation_count"] == 0
         assert data["candidate_count"] == 0
         assert data["candidates"] == []
-        # Both artifact files are written even when there's nothing to
-        # review — operators inspecting the dir need a clear "no
-        # candidates" signal rather than a missing file.
-        assert (out_dir / "intent_learning_candidates.json").exists()
-        assert (out_dir / "promotion_decisions.template.json").exists()
+        assert Path(data["candidates_path"]).exists()
+        assert Path(data["decisions_template_path"]).exists()
 
     def test_promote_signal_surfaces_candidate(
         self, tmp_path: Path, temp_stores: StoreRegistry
@@ -290,14 +283,9 @@ class TestLearningCandidates:
         assert data["candidate_count"] == 1, data
         candidate = data["candidates"][0]
         assert candidate["item_id"] == "lc:doc:helpful"
-        assert candidate["recommendation_type"] in {
-            "promote_precedent",
-            "promote_guidance",
-        }
-        # The decisions template lists the candidate with approved=False
-        # so the operator only has to flip the flag.
+        assert candidate["recommendation_type"] in PROMOTE_RECOMMENDATIONS
         decisions = json.loads(
-            (out_dir / "promotion_decisions.template.json").read_text(encoding="utf-8")
+            Path(data["decisions_template_path"]).read_text(encoding="utf-8")
         )
         ids = {d["candidate_id"] for d in decisions["decisions"]}
         assert candidate["candidate_id"] in ids
@@ -305,8 +293,6 @@ class TestLearningCandidates:
     def test_min_support_filters(
         self, tmp_path: Path, temp_stores: StoreRegistry
     ) -> None:
-        # One round is below default min_support=2; raising the
-        # threshold past the support count must drop the candidate.
         self._seed_promote_signal(temp_stores, rounds=1)
         out_dir = tmp_path / "review"
         result = runner.invoke(
