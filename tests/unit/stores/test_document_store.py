@@ -206,15 +206,7 @@ def test_search_without_content_tags_still_works(
 def test_search_untagged_doc_passes_signal_quality_filter(
     doc_store: SQLiteDocumentStore,
 ) -> None:
-    """Untagged docs survive PackBuilder's default ``signal_quality`` allowlist.
-
-    PackBuilder applies ``signal_quality=[high, standard, low]`` to every
-    ``tag_filters`` request to exclude noise. Strict ``IN`` would also
-    exclude items missing the facet — i.e. silently filter out anything
-    that bypassed the classifier — which contradicts the user's intent.
-    Default-pass semantics (``IS NULL OR …``) keep untagged items in
-    the result set, matching the Postgres backend.
-    """
+    """Untagged docs survive a scalar ``signal_quality`` allowlist (default-pass)."""
     doc_store.put(
         None,
         "tagged high-signal reference",
@@ -229,7 +221,7 @@ def test_search_untagged_doc_passes_signal_quality_filter(
             "content_tags": {"signal_quality": "noise"},
         },
     )
-    doc_store.put(None, "untagged reference doc")  # no content_tags at all
+    doc_store.put(None, "untagged reference doc")
 
     results = doc_store.search(
         "reference",

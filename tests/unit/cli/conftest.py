@@ -15,14 +15,9 @@ def _reset_cli_registry() -> None:
 
 @pytest.fixture(autouse=True)
 def _suppress_structlog(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Suppress structlog output during CLI tests.
+    """Silence structlog during CliRunner tests via ``TRELLIS_LOG_LEVEL=CRITICAL``.
 
-    CliRunner merges stderr into ``result.output``, so even though
-    ``trellis_cli.main._configure_cli_logging`` routes structlog to
-    stderr in production, in-process unit tests still see log lines
-    interleaved with JSON payloads. Pinning ``TRELLIS_LOG_LEVEL`` to
-    CRITICAL makes the callback configure a no-op filter, silencing
-    everything below CRITICAL — the env var is the supported tuning
-    knob for the same purpose.
+    CliRunner merges stderr into ``result.output`` regardless of where
+    the logger writes, so the env-var tuning knob is the cleanest mute.
     """
     monkeypatch.setenv("TRELLIS_LOG_LEVEL", "CRITICAL")

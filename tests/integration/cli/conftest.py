@@ -90,7 +90,7 @@ def run_cli(
     Returns ``(completed, parsed_json)``. Asserts exit 0 and that
     stdout is decodable JSON — these are the contract every
     ``--format json`` subcommand must honour. structlog logs are
-    routed to stderr by ``trellis_cli.main._configure_cli_logging``,
+    routed to stderr by ``trellis.logging.configure_stderr_logging``,
     so stdout is the payload alone. Failures dump both streams.
     """
     completed = subprocess.run(  # noqa: S603 — argv is the resolved console-script + caller-supplied args
