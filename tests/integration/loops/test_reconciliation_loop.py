@@ -46,7 +46,7 @@ from trellis.feedback import (
     reconcile_feedback_log_to_event_log,
     record_feedback,
 )
-from trellis.stores.base.event_log import EventType
+from trellis.feedback.recording import _feedback_id_in_event_log
 from trellis.stores.registry import StoreRegistry
 
 if TYPE_CHECKING:
@@ -98,20 +98,6 @@ def _live_registry(config_dir: Path, data_dir: Path) -> Iterator[StoreRegistry]:
                 os.environ[k] = v
 
 
-def _feedback_event_present(
-    config_dir: Path,
-    data_dir: Path,
-    feedback_id: str,
-) -> bool:
-    """True when the live EventLog has a FEEDBACK_RECORDED with this id."""
-    with _live_registry(config_dir, data_dir) as registry:
-        events = registry.operational.event_log.get_events(
-            event_type=EventType.FEEDBACK_RECORDED,
-            limit=1000,
-        )
-        return any(e.payload.get("feedback_id") == feedback_id for e in events)
-
-
 async def test_reconciliation_loop(loop_env: LoopEnvironment) -> None:
     """JSONL-only feedback → reconcile → drives apply-noise-tags downstream."""
     if not NEO4J_URI or not PG_DSN:  # paranoia — loop_env already gates this
@@ -157,23 +143,27 @@ async def test_reconciliation_loop(loop_env: LoopEnvironment) -> None:
     assert record_result.outcome_emitted is False, record_result
     assert record_result.log_path.exists()
 
-    # ── Confirm divergence: EventLog has no matching event yet ───
-    assert not _feedback_event_present(
-        loop_env.config_dir, loop_env.data_dir, feedback.feedback_id
-    ), "feedback_id leaked into EventLog before reconciliation"
-
-    # ── Reconcile + idempotency rerun (one shared registry) ──────
+    # ── Confirm divergence + reconcile + idempotency rerun ───────
+    # All three EventLog touches share one registry so the divergence
+    # pre-check, the backfill, and the idempotency rerun cost a single
+    # connect/teardown cycle. Reusing the production
+    # ``_feedback_id_in_event_log`` helper means the pre-check uses the
+    # same scan limit + match logic the reconciler enforces internally.
     pack_id = pack_1["pack_id"]
     pack_id_lookup = {feedback.feedback_id: pack_id}
     with _live_registry(loop_env.config_dir, loop_env.data_dir) as registry:
+        event_log = registry.operational.event_log
+        assert not _feedback_id_in_event_log(event_log, feedback.feedback_id), (
+            "feedback_id leaked into EventLog before reconciliation"
+        )
         first = reconcile_feedback_log_to_event_log(
             log_dir,
-            registry.operational.event_log,
+            event_log,
             pack_id_lookup=pack_id_lookup,
         )
         second = reconcile_feedback_log_to_event_log(
             log_dir,
-            registry.operational.event_log,
+            event_log,
             pack_id_lookup=pack_id_lookup,
         )
     assert first.scanned == 1, first
