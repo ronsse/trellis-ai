@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import structlog
 import typer
 
@@ -17,7 +15,7 @@ from trellis.stores.base import (
     TunerStateStore,
 )
 from trellis.stores.registry import StoreRegistry
-from trellis_cli.config import TrellisConfig, get_data_dir
+from trellis_cli.config import get_config_dir, get_data_dir
 
 logger = structlog.get_logger(__name__)
 
@@ -31,11 +29,23 @@ def _reset_registry() -> None:
 
 
 def _get_registry() -> StoreRegistry:
-    """Get or create a cached StoreRegistry singleton from CLI config."""
+    """Get or create a cached StoreRegistry singleton from CLI config.
+
+    Delegates to :meth:`StoreRegistry.from_config_dir` so cloud-shape
+    plane-split YAML works the same as the legacy flat shape — both
+    routes the registry already supports. The previous implementation
+    routed through ``TrellisConfig`` (which forbids extra fields per
+    project convention) and silently rejected plane-split YAML; that
+    blocked the CLI surface in any cloud deployment.
+
+    Stores-dir existence is still gated so a typo'd ``trellis admin
+    init`` surfaces early instead of as a NoneType deeper in the
+    stack.
+    """
     global _registry  # noqa: PLW0603
     if _registry is None:
-        config = TrellisConfig.load()
-        data_dir = Path(config.data_dir) if config.data_dir else get_data_dir()
+        config_dir = get_config_dir()
+        data_dir = get_data_dir()
         stores_dir = data_dir / "stores"
         if not stores_dir.exists():
             from rich.console import Console  # noqa: PLC0415
@@ -44,7 +54,10 @@ def _get_registry() -> StoreRegistry:
                 "[red]Stores not initialized. Run 'trellis admin init' first.[/red]"
             )
             raise typer.Exit(code=1)
-        _registry = StoreRegistry(stores_dir=stores_dir)
+        _registry = StoreRegistry.from_config_dir(
+            config_dir=config_dir,
+            data_dir=data_dir,
+        )
     return _registry
 
 

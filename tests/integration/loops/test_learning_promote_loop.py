@@ -4,28 +4,24 @@ Proves the EventLog-authoritative promote half of the dual-loop closes
 end-to-end at the public surface:
 
     seed corpus → run packs with successful feedback (3 rounds) →
-    bridge events to learning observations → analyze →
-    write review artifacts → auto-approve a candidate →
-    prepare_learning_promotions → submit entity via
-    POST /api/v1/entities → verify precedent node in the graph
+    trellis analyze learning-candidates → operator approves a row →
+    trellis curate promote-learning → verify precedent in graph
 
-Like the other loops in this directory, ingest + retrieval + entity
-creation flow through REST, per-item feedback through the MCP
-``record_feedback`` tool (today's REST surface doesn't accept
-``helpful_item_ids``). Steps the system has no public surface for yet
-— the EventLog-to-observations bridge, scorer, artifact writer,
-decisions approval, and promotion preparation — run as direct Python
-in the test process. ``trellis.learning.observations`` documents this
-gap explicitly: the JSONL-only ``pack_feedback.jsonl`` bridge is
-deferred because the file alone doesn't carry the per-item
-``item_type`` / ``source_strategy`` details ``learning.scoring``
-needs.
+Like the other loops in this directory, ingest + retrieval flow
+through REST and per-item feedback through the MCP ``record_feedback``
+tool. The score-and-approve and promotion steps run as **CLI
+subprocesses** — the same ``trellis analyze learning-candidates`` and
+``trellis curate promote-learning`` operators will use in production
+— so the loop is genuinely outside-in: every step crosses a process
+boundary and uses a public surface.
 
-The test process opens its own ``StoreRegistry`` against the same
-Postgres + Neo4j backends the spawned subprocesses write to
-(``loop_env.config_dir`` is the cloud-config YAML; env vars are set
-transiently so plane-aware DSN resolution finds the DSNs that
-``build_subprocess_env`` gave the subprocesses).
+Two pieces still cross a tier boundary that has no public CLI surface:
+
+* The pre-flight Postgres-only state wipe done by ``loop_env``.
+* The post-promotion graph-store assertion (verifying the precedent
+  node landed) — opens its own ``StoreRegistry`` against the same
+  cloud config so it reads the same Neo4j the spawned API server
+  wrote to.
 
 Skipped when ``TRELLIS_TEST_NEO4J_URI`` or ``TRELLIS_TEST_PG_DSN``
 is unset — same gating as the rest of the loop suite.
@@ -35,6 +31,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -42,12 +39,11 @@ from typing import TYPE_CHECKING, Any
 import httpx
 import pytest
 
-from tests.integration._live_server import NEO4J_URI, PG_DSN
-from trellis.learning import (
-    analyze_learning_observations,
-    build_learning_observations_from_event_log,
-    prepare_learning_promotions,
-    write_learning_review_artifacts,
+from tests.integration._live_server import (
+    NEO4J_URI,
+    PG_DSN,
+    build_subprocess_env,
+    find_console_script,
 )
 from trellis.stores.registry import StoreRegistry
 
@@ -72,6 +68,11 @@ _PACK_ROUNDS = 3
 _PACK_FETCH_LIMIT = 10
 _PACK_TOKEN_BUDGET = 2000
 
+#: CLI subprocess timeout. The promote step does a graph mutation
+#: against AuraDB and one of the two analyze runs scans the live
+#: EventLog — both well under 60s on the loop-test backend.
+_CLI_TIMEOUT_SECONDS = 60.0
+
 
 @contextmanager
 def _live_registry(config_dir: Path, data_dir: Path) -> Iterator[StoreRegistry]:
@@ -81,10 +82,8 @@ def _live_registry(config_dir: Path, data_dir: Path) -> Iterator[StoreRegistry]:
     plane-aware DSN resolution reads ``TRELLIS_KNOWLEDGE_PG_DSN`` /
     ``TRELLIS_OPERATIONAL_PG_DSN`` from the process env, so we set
     them just for the registry's lifetime and restore on exit. The
-    test process and the spawned subprocesses end up reading and
-    writing the same Postgres tables and Neo4j database. The Neo4j
-    credentials live in the cloud-config YAML, so they don't need an
-    env-var bridge.
+    Neo4j credentials live in the cloud-config YAML, so they don't
+    need an env-var bridge.
     """
     env_overrides = {
         "TRELLIS_CONFIG_DIR": str(config_dir),
@@ -106,6 +105,49 @@ def _live_registry(config_dir: Path, data_dir: Path) -> Iterator[StoreRegistry]:
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
+
+
+def _parse_cli_json(stdout: str) -> dict[str, Any]:
+    """Extract the JSON payload from a ``trellis ... --format json`` run.
+
+    The CLI emits structlog console-renderer lines on stdout (a
+    deferred CLI-hygiene fix routes them to stderr; tracked
+    elsewhere). The JSON payload is always the last non-empty line.
+    Walking from the bottom and json-parsing each line lets the
+    helper survive whichever side of that fix lands first.
+    """
+    for raw in reversed(stdout.splitlines()):
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            return json.loads(line)
+        except json.JSONDecodeError:
+            continue
+    msg = f"no JSON line found in CLI stdout:\n{stdout!r}"
+    raise AssertionError(msg)
+
+
+def _run_trellis_cli(
+    bin_path: str,
+    args: list[str],
+    env: dict[str, str],
+) -> dict[str, Any]:
+    """Run ``trellis <args>`` as a subprocess and return the parsed JSON payload."""
+    completed = subprocess.run(  # noqa: S603 — argv is the resolved console-script + literals
+        [bin_path, *args],
+        env=env,
+        capture_output=True,
+        timeout=_CLI_TIMEOUT_SECONDS,
+        check=False,
+    )
+    stdout = completed.stdout.decode(errors="replace")
+    stderr = completed.stderr.decode(errors="replace")
+    assert completed.returncode == 0, (
+        f"`trellis {' '.join(args)}` exited {completed.returncode}:\n"
+        f"stdout: {stdout}\nstderr: {stderr}"
+    )
+    return _parse_cli_json(stdout)
 
 
 def _seed_helpful_doc(api_url: str) -> None:
@@ -167,130 +209,103 @@ async def _run_graded_pack_rounds(loop_env: LoopEnvironment) -> None:
             assert "Feedback recorded" in feedback_text, feedback_text
 
 
-def _score_observations(loop_env: LoopEnvironment) -> tuple[dict, dict]:
-    """Bridge events → observations → score → return ``(report, helpful_candidate)``."""
-    with _live_registry(loop_env.config_dir, loop_env.data_dir) as registry:
-        observations = build_learning_observations_from_event_log(
-            registry.operational.event_log, days=7
-        )
-
-    assert len(observations) >= _PACK_ROUNDS, (
+def _score_via_cli(
+    trellis_bin: str,
+    subprocess_env: dict[str, str],
+    review_dir: Path,
+) -> dict[str, Any]:
+    """Run ``trellis analyze learning-candidates`` and return the helpful candidate."""
+    payload = _run_trellis_cli(
+        trellis_bin,
+        [
+            "analyze",
+            "learning-candidates",
+            "--output-dir",
+            str(review_dir),
+            "--days",
+            "7",
+            "--format",
+            "json",
+        ],
+        subprocess_env,
+    )
+    assert payload["status"] == "ok", payload
+    assert payload["observation_count"] >= _PACK_ROUNDS, (
         f"expected ≥{_PACK_ROUNDS} observations after {_PACK_ROUNDS} graded "
-        f"packs; got {len(observations)}: {observations}"
+        f"packs; got {payload['observation_count']}"
     )
-
-    report = analyze_learning_observations(observations=observations)
-    assert report["candidate_count"] >= 1, (
-        f"scorer produced no candidates from {len(observations)} observations: {report}"
-    )
-    helpful_candidate = next(
-        (c for c in report["candidates"] if c["item_id"] == _HELPFUL_DOC_ID),
+    assert payload["candidate_count"] >= 1, f"scorer produced no candidates: {payload}"
+    helpful = next(
+        (c for c in payload["candidates"] if c["item_id"] == _HELPFUL_DOC_ID),
         None,
     )
-    assert helpful_candidate is not None, (
-        f"helpful doc {_HELPFUL_DOC_ID!r} missing from candidates "
-        f"{[c['item_id'] for c in report['candidates']]}"
+    assert helpful is not None, (
+        f"helpful doc {_HELPFUL_DOC_ID!r} missing from candidates: "
+        f"{[c['item_id'] for c in payload['candidates']]}"
     )
     # success_rate=1.0 + retry_rate=0.0 over min_support=2 should clear
     # the promote thresholds (0.75 / 0.25); item_type comes back as
     # "document" so the recommendation is ``promote_guidance`` rather
-    # than ``promote_precedent`` — both are accepted by
-    # ``prepare_learning_promotions``.
-    assert helpful_candidate["recommendation_type"] in {
+    # than ``promote_precedent`` — both are accepted by the curate
+    # surface.
+    assert helpful["recommendation_type"] in {
         "promote_precedent",
         "promote_guidance",
-    }, helpful_candidate
-    assert helpful_candidate["metrics"]["times_served"] >= _PACK_ROUNDS
-    assert helpful_candidate["metrics"]["success_rate"] == pytest.approx(1.0)
-    assert helpful_candidate["metrics"]["retry_rate"] == pytest.approx(0.0)
-    return report, helpful_candidate
+    }, helpful
+    assert helpful["metrics"]["times_served"] >= _PACK_ROUNDS
+    assert helpful["metrics"]["success_rate"] == pytest.approx(1.0)
+    assert helpful["metrics"]["retry_rate"] == pytest.approx(0.0)
+    return helpful
 
 
-def _approve_and_prepare_promotion(
-    report: dict,
-    helpful_candidate: dict,
-    artifacts_dir: Path,
-) -> tuple[dict, list[dict]]:
-    """Write artifacts, auto-approve the candidate, prepare promotion payloads."""
-    paths = write_learning_review_artifacts(report=report, output_dir=artifacts_dir)
-    candidates_path = Path(paths["candidates_path"])
-    decisions_path = Path(paths["decisions_template_path"])
-    assert candidates_path.exists()
-    assert decisions_path.exists()
-
+def _auto_approve(decisions_path: Path, candidate_id: str) -> None:
+    """Mark the candidate as approved in the decisions template, in place."""
     decisions = json.loads(decisions_path.read_text(encoding="utf-8"))
-    candidate_id = helpful_candidate["candidate_id"]
-    approved_count = 0
+    approved = 0
     for decision in decisions["decisions"]:
         if decision["candidate_id"] == candidate_id:
             decision["approved"] = True
-            decision["promotion_name"] = (
-                decision.get("promotion_name") or helpful_candidate["precedent_name"]
-            )
             decision["rationale"] = "H2.3 loop-test auto-approval"
-            approved_count += 1
-    assert approved_count == 1, (
-        f"candidate {candidate_id} not in decisions template: {decisions}"
+            approved += 1
+    assert approved == 1, (
+        f"candidate {candidate_id} not found in decisions template: {decisions}"
     )
     decisions_path.write_text(
         json.dumps(decisions, indent=2, sort_keys=True),
         encoding="utf-8",
     )
 
-    candidates_payload = json.loads(candidates_path.read_text(encoding="utf-8"))
-    decisions_payload = json.loads(decisions_path.read_text(encoding="utf-8"))
-    promotion = prepare_learning_promotions(
-        candidates_payload=candidates_payload,
-        decisions_payload=decisions_payload,
-    )
-    assert promotion["approved_count"] == 1, promotion
-    ready = [r for r in promotion["results"] if r["status"] == "ready"]
-    assert len(ready) == 1, f"expected exactly one ready promotion: {promotion}"
-    return ready[0]["entity_payload"], ready[0]["edge_payloads"]
 
-
-def _submit_promotion(
-    api_url: str,
-    entity_payload: dict,
-    edge_payloads: list[dict],
+def _promote_via_cli(
+    trellis_bin: str,
+    subprocess_env: dict[str, str],
+    review_dir: Path,
 ) -> str:
-    """Submit the entity (and any edges) via REST. Returns the created ``node_id``.
-
-    Today's PACK_ASSEMBLED telemetry doesn't stamp ``target_entity_ids``
-    in its payload, so document-only loops produce candidates with
-    empty ``target_entity_ids`` and zero edges. The empty-edges path
-    is still exercised below so a future pack-builder change that
-    starts populating the field doesn't silently break the link half
-    of the loop.
-    """
-    with httpx.Client(base_url=api_url, timeout=30.0) as client:
-        ent_resp = client.post(
-            "/api/v1/entities",
-            json={
-                "entity_type": entity_payload["entity_type"],
-                "entity_id": entity_payload["entity_id"],
-                "name": entity_payload["name"],
-                "properties": entity_payload["properties"],
-            },
-        )
-        assert ent_resp.status_code == 200, ent_resp.text
-        ent_body = ent_resp.json()
-        assert ent_body["status"] == "ok", ent_body
-        node_id = ent_body["node_id"]
-        assert node_id, ent_body
-
-        for edge in edge_payloads:
-            link_resp = client.post(
-                "/api/v1/links",
-                json={
-                    "source_id": edge["source_id"],
-                    "target_id": edge["target_id"],
-                    "edge_kind": edge["edge_kind"],
-                    "properties": edge.get("properties") or {},
-                },
-            )
-            assert link_resp.status_code == 200, link_resp.text
-    return node_id
+    """Run ``trellis curate promote-learning`` and return the created node_id."""
+    candidates_path = review_dir / "intent_learning_candidates.json"
+    decisions_path = review_dir / "promotion_decisions.template.json"
+    payload = _run_trellis_cli(
+        trellis_bin,
+        [
+            "curate",
+            "promote-learning",
+            "--candidates",
+            str(candidates_path),
+            "--decisions",
+            str(decisions_path),
+            "--format",
+            "json",
+        ],
+        subprocess_env,
+    )
+    assert payload["status"] == "ok", payload
+    assert payload["dry_run"] is False
+    assert payload["promoted_count"] == 1, payload
+    assert len(payload["results"]) == 1, payload
+    result = payload["results"][0]
+    assert result["status"] == "promoted", result
+    assert result["node_id"], result
+    return result["node_id"]
 
 
 def _verify_precedent_in_graph(
@@ -312,17 +327,23 @@ def _verify_precedent_in_graph(
 
 
 async def test_learning_promote_loop(loop_env: LoopEnvironment) -> None:
-    """Successful feedback → learning candidate → approved → graph precedent."""
+    """Feedback → CLI score → operator approval → CLI promote → graph precedent."""
     if not NEO4J_URI or not PG_DSN:  # paranoia — loop_env already gates this
         pytest.skip("live infra creds missing")
+
+    trellis_bin = find_console_script(
+        "trellis", install_hint="install with `pip install -e .`"
+    )
+    subprocess_env = build_subprocess_env(loop_env.config_dir, loop_env.data_dir)
 
     _seed_helpful_doc(loop_env.api_url)
     await _run_graded_pack_rounds(loop_env)
 
-    report, helpful_candidate = _score_observations(loop_env)
-    artifacts_dir = loop_env.data_dir / "learning_review"
-    entity_payload, edge_payloads = _approve_and_prepare_promotion(
-        report, helpful_candidate, artifacts_dir
+    review_dir = loop_env.data_dir / "learning_review"
+    helpful_candidate = _score_via_cli(trellis_bin, subprocess_env, review_dir)
+    _auto_approve(
+        review_dir / "promotion_decisions.template.json",
+        helpful_candidate["candidate_id"],
     )
-    node_id = _submit_promotion(loop_env.api_url, entity_payload, edge_payloads)
+    node_id = _promote_via_cli(trellis_bin, subprocess_env, review_dir)
     _verify_precedent_in_graph(loop_env, node_id, helpful_candidate)
