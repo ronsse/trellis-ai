@@ -30,8 +30,6 @@ is unset — same gating as the rest of the loop suite.
 from __future__ import annotations
 
 import json
-import os
-from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -45,62 +43,21 @@ from tests.integration._live_server import (
     find_console_script,
     run_cli,
 )
+from tests.integration.loops.conftest import live_registry
 from trellis.learning import PROMOTE_RECOMMENDATIONS
-from trellis.stores.registry import StoreRegistry
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
-
     from tests.integration.loops.conftest import LoopEnvironment
 
 pytestmark = pytest.mark.asyncio
 
-# Single-token marker so Postgres FTS retrieves the seeded document
-# for every pack round; multi-token intents tokenize to terms that
-# aren't in the doc content. The noise-demote loop's docstring
-# documents the same caveat.
-_INTENT = "learnpromote"
+_INTENT = "learnpromote"  # single-token; see conftest module docstring
 _HELPFUL_DOC_ID = "lp:doc:helpful"
 _DOMAIN = "learning-promote"
 
 # Default ``min_support`` is 2; running 3 rounds gives one observation
 # of headroom over the floor and avoids brittle exact-match assertions.
 _PACK_ROUNDS = 3
-_PACK_FETCH_LIMIT = 10
-_PACK_TOKEN_BUDGET = 2000
-
-
-@contextmanager
-def _live_registry(config_dir: Path, data_dir: Path) -> Iterator[StoreRegistry]:
-    """Yield a ``StoreRegistry`` pointing at the loop-test backends.
-
-    Mirrors the env-var dance ``wipe_live_state_for_config`` performs:
-    plane-aware DSN resolution reads ``TRELLIS_KNOWLEDGE_PG_DSN`` /
-    ``TRELLIS_OPERATIONAL_PG_DSN`` from the process env, so we set
-    them just for the registry's lifetime and restore on exit. The
-    Neo4j credentials live in the cloud-config YAML, so they don't
-    need an env-var bridge.
-    """
-    env_overrides = {
-        "TRELLIS_CONFIG_DIR": str(config_dir),
-        "TRELLIS_DATA_DIR": str(data_dir),
-        "TRELLIS_KNOWLEDGE_PG_DSN": PG_DSN or "",
-        "TRELLIS_OPERATIONAL_PG_DSN": PG_DSN or "",
-    }
-    saved = {k: os.environ.get(k) for k in env_overrides}
-    try:
-        os.environ.update(env_overrides)
-        registry = StoreRegistry.from_config_dir(config_dir=config_dir)
-        try:
-            yield registry
-        finally:
-            registry.close()
-    finally:
-        for k, v in saved.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
 
 
 def _seed_helpful_doc(api_url: str) -> None:
@@ -124,22 +81,28 @@ def _seed_helpful_doc(api_url: str) -> None:
 
 
 def _build_pack_or_skip(client: httpx.Client) -> dict:
-    """Assemble one pack via REST and assert the helpful doc is in it."""
+    """Assemble one pack via REST and assert the helpful doc is in it.
+
+    Inlines the POST rather than calling ``conftest.build_pack`` so the
+    three pack rounds in :func:`_run_graded_pack_rounds` reuse a single
+    httpx connection. ``max_items=10`` / ``max_tokens=2000`` match
+    ``build_pack``'s defaults.
+    """
     resp = client.post(
         "/api/v1/packs",
         json={
             "intent": _INTENT,
             "domain": _DOMAIN,
-            "max_items": _PACK_FETCH_LIMIT,
-            "max_tokens": _PACK_TOKEN_BUDGET,
+            "max_items": 10,
+            "max_tokens": 2000,
         },
     )
     assert resp.status_code == 200, resp.text
     pack = resp.json()
-    item_ids = {item["item_id"] for item in pack["items"]}
-    assert _HELPFUL_DOC_ID in item_ids, (
+    served = {item["item_id"] for item in pack["items"]}
+    assert _HELPFUL_DOC_ID in served, (
         f"helpful doc must appear in every pack to accumulate "
-        f"times_served; got {sorted(item_ids)}"
+        f"times_served; got {sorted(served)}"
     )
     return pack
 
@@ -263,7 +226,7 @@ def _verify_precedent_in_graph(
     helpful_candidate: dict,
 ) -> None:
     """Open a fresh registry and assert the precedent landed in the graph store."""
-    with _live_registry(loop_env.config_dir, loop_env.data_dir) as registry:
+    with live_registry(loop_env.config_dir, loop_env.data_dir) as registry:
         node = registry.knowledge.graph_store.get_node(node_id)
     assert node is not None, (
         f"promoted precedent node_id={node_id} not found in graph store"

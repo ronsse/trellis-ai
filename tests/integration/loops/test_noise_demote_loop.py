@@ -26,6 +26,7 @@ import pytest
 from tests.integration.loops.conftest import (
     LoopEnvironment,
     build_pack,
+    item_ids,
     seed_distractor_corpus,
     trigger_apply_noise_tags,
 )
@@ -33,32 +34,15 @@ from tests.integration.loops.conftest import (
 pytestmark = pytest.mark.asyncio
 
 
-# Single-token intent matches the seeded corpus' shared marker via
-# Postgres full-text search. Multi-token queries like
-# ``"noise-demote-loop probe"`` tokenize to terms that aren't present
-# in the content and end up retrieving nothing.
-_INTENT = "noisedemote"
-_PACK_FETCH_LIMIT = 10
-_PACK_TOKEN_BUDGET = 2000
-
-
-def _item_ids(pack: dict) -> set[str]:
-    """Pull ``item_id`` out of every entry in a pack response body."""
-    return {item["item_id"] for item in pack["items"]}
+_INTENT = "noisedemote"  # single-token; see conftest module docstring
 
 
 async def test_noise_demote_loop(loop_env: LoopEnvironment) -> None:
     """Per-item feedback marks an unhelpful doc as noise; next pack drops it."""
     distractor_id, helpful_ids = seed_distractor_corpus(loop_env.api_url)
 
-    pack_1 = build_pack(
-        loop_env.api_url,
-        intent=_INTENT,
-        max_items=_PACK_FETCH_LIMIT,
-        max_tokens=_PACK_TOKEN_BUDGET,
-        tag_filters={},
-    )
-    pack_1_items = _item_ids(pack_1)
+    pack_1 = build_pack(loop_env.api_url, intent=_INTENT, tag_filters={})
+    pack_1_items = item_ids(pack_1)
     assert distractor_id in pack_1_items, (
         f"the loop's value depends on the distractor showing up in pack 1; "
         f"got items={sorted(pack_1_items)}"
@@ -98,16 +82,10 @@ async def test_noise_demote_loop(loop_env: LoopEnvironment) -> None:
         f"distractor {distractor_id!r} not in noise list: {sorted(noise_ids)}"
     )
 
-    pack_2 = build_pack(
-        loop_env.api_url,
-        intent=_INTENT,
-        max_items=_PACK_FETCH_LIMIT,
-        max_tokens=_PACK_TOKEN_BUDGET,
-        # Empty dict opts in to the default ``signal_quality`` filter,
-        # which is what excludes the just-tagged noise document.
-        tag_filters={},
-    )
-    pack_2_items = _item_ids(pack_2)
+    # Empty ``tag_filters`` dict opts in to the default ``signal_quality``
+    # filter, which excludes the just-tagged noise document.
+    pack_2 = build_pack(loop_env.api_url, intent=_INTENT, tag_filters={})
+    pack_2_items = item_ids(pack_2)
     assert pack_2["pack_id"] != pack_1["pack_id"], (
         "second pack must be a fresh assembly, not a cached re-issue"
     )
