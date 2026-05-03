@@ -94,6 +94,35 @@ def test_limit(event_log: SQLiteEventLog):
     assert len(events) == 3
 
 
+def test_order_asc_returns_oldest_first(event_log: SQLiteEventLog):
+    """Default order is ASC — chronological consumption for analytics."""
+    for i in range(5):
+        event_log.emit(EventType.TRACE_INGESTED, f"src-{i}")
+    events = event_log.get_events()
+    assert [e.source for e in events] == [f"src-{i}" for i in range(5)]
+
+
+def test_order_desc_returns_most_recent_first(event_log: SQLiteEventLog):
+    """``order='desc'`` flips ordering so duplicate-checks see recent rows."""
+    for i in range(5):
+        event_log.emit(EventType.TRACE_INGESTED, f"src-{i}")
+    events = event_log.get_events(order="desc")
+    assert [e.source for e in events] == [f"src-{i}" for i in reversed(range(5))]
+
+
+def test_order_desc_truncation_keeps_recent_end(event_log: SQLiteEventLog):
+    """With ``limit`` smaller than the row count, ``order='desc'`` keeps
+    the most recent N rows; ``order='asc'`` keeps the oldest N rows."""
+    for i in range(10):
+        event_log.emit(EventType.TRACE_INGESTED, f"src-{i}")
+
+    asc_truncated = event_log.get_events(limit=3)
+    assert [e.source for e in asc_truncated] == ["src-0", "src-1", "src-2"]
+
+    desc_truncated = event_log.get_events(limit=3, order="desc")
+    assert [e.source for e in desc_truncated] == ["src-9", "src-8", "src-7"]
+
+
 def test_payload_preserved(event_log: SQLiteEventLog):
     event_log.emit(
         EventType.MUTATION_EXECUTED,

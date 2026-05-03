@@ -300,7 +300,7 @@ Identified during the landscape comparison; carried forward to the recommendatio
 | `DocumentStore` | `document.py` | `put(doc_id, content, metadata)`, `search(query, limit, filters)`, `get_by_hash(content_hash)` |
 | `GraphStore` | `graph.py` | `upsert_node(node_id, node_type, properties, node_role, generation_spec)`, `get_node(node_id, as_of)`, `get_node_history(node_id)`, `get_subgraph(seed_ids, depth, edge_types, as_of)`, `query(node_type, properties, limit, as_of)`, `upsert_edge`, `get_edges`, `delete_node`, `delete_edge`, `upsert_alias`, `resolve_alias` |
 | `VectorStore` | `vector.py` | `upsert(item_id, vector, metadata)`, `query(vector, top_k, filters)` |
-| `EventLog` | `event_log.py` | `append(event)`, `get_events(event_type, entity_id, source, since, until)`, `has_idempotency_key(key)` |
+| `EventLog` | `event_log.py` | `append(event)`, `get_events(event_type, entity_id, source, since, until, limit, order)`, `has_idempotency_key(key)` |
 | `BlobStore` | `blob.py` | `put(key, data, metadata)`, `get_uri(key)` |
 
 **StoreRegistry** (`registry.py`):
