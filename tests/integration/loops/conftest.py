@@ -17,13 +17,23 @@ is to drive feedback through the MCP client and everything else
 through REST. Both are real public surfaces; both are spawned against
 the same live Neon + AuraDB backend so they observe the same events.
 
+**Single-token intents.** Loop tests use single-token ``_INTENT``
+markers (e.g. ``"reconcile"``, ``"learnpromote"``) rather than
+human-readable phrases. Postgres FTS tokenizes a multi-word intent
+into terms that all have to appear in document content — so a probe
+like ``"noise demote loop"`` retrieves nothing once the seeded docs
+only contain a single shared token. Each loop test re-uses this
+convention; no need to re-explain at every call site.
+
 Skipped when ``TRELLIS_TEST_NEO4J_URI`` *or* ``TRELLIS_TEST_PG_DSN``
 isn't set — same gating as the API + SDK suites.
 """
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+import os
+from collections.abc import AsyncIterator, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -45,6 +55,7 @@ from tests.integration._live_server import (
     wipe_live_state_for_config,
     write_cloud_config,
 )
+from trellis.stores.registry import StoreRegistry
 
 
 @dataclass(frozen=True)
@@ -235,3 +246,41 @@ def trigger_apply_noise_tags(api_url: str, *, days: int = 30) -> dict:
         )
         assert resp.status_code == 200, resp.text
         return resp.json()
+
+
+def item_ids(pack: dict) -> set[str]:
+    """Pull ``item_id`` out of every entry in a pack response body."""
+    return {item["item_id"] for item in pack["items"]}
+
+
+@contextmanager
+def live_registry(config_dir: Path, data_dir: Path) -> Iterator[StoreRegistry]:
+    """Yield a ``StoreRegistry`` pointing at the loop-test backends.
+
+    Mirrors the env-var dance ``wipe_live_state_for_config`` performs:
+    plane-aware DSN resolution reads ``TRELLIS_KNOWLEDGE_PG_DSN`` /
+    ``TRELLIS_OPERATIONAL_PG_DSN`` from the process env, so we set
+    them just for the registry's lifetime and restore on exit. The
+    Neo4j credentials live in the cloud-config YAML, so they don't
+    need an env-var bridge.
+    """
+    env_overrides = {
+        "TRELLIS_CONFIG_DIR": str(config_dir),
+        "TRELLIS_DATA_DIR": str(data_dir),
+        "TRELLIS_KNOWLEDGE_PG_DSN": PG_DSN or "",
+        "TRELLIS_OPERATIONAL_PG_DSN": PG_DSN or "",
+    }
+    saved = {k: os.environ.get(k) for k in env_overrides}
+    try:
+        os.environ.update(env_overrides)
+        registry = StoreRegistry.from_config_dir(config_dir=config_dir)
+        try:
+            yield registry
+        finally:
+            registry.close()
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v

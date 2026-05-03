@@ -29,8 +29,6 @@ is unset — same gating as the rest of the loop suite.
 
 from __future__ import annotations
 
-import os
-from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 import pytest
@@ -38,6 +36,8 @@ import pytest
 from tests.integration._live_server import NEO4J_URI, PG_DSN
 from tests.integration.loops.conftest import (
     build_pack,
+    item_ids,
+    live_registry,
     seed_distractor_corpus,
     trigger_apply_noise_tags,
 )
@@ -47,55 +47,13 @@ from trellis.feedback import (
     record_feedback,
 )
 from trellis.feedback.recording import _feedback_id_in_event_log
-from trellis.stores.registry import StoreRegistry
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
-    from pathlib import Path
-
     from tests.integration.loops.conftest import LoopEnvironment
 
 pytestmark = pytest.mark.asyncio
 
-# Single-token marker matches the noise-demote loop's caveat: Postgres
-# FTS tokenizes multi-word intents to terms that have to all be
-# present in document content, which would empty the result set.
-_INTENT = "reconcile"
-_PACK_FETCH_LIMIT = 10
-_PACK_TOKEN_BUDGET = 2000
-
-
-@contextmanager
-def _live_registry(config_dir: Path, data_dir: Path) -> Iterator[StoreRegistry]:
-    """Yield a ``StoreRegistry`` pointing at the loop-test backends.
-
-    Mirrors the env-var dance ``wipe_live_state_for_config`` performs:
-    plane-aware DSN resolution reads ``TRELLIS_KNOWLEDGE_PG_DSN`` /
-    ``TRELLIS_OPERATIONAL_PG_DSN`` from the process env, so we set
-    them just for the registry's lifetime and restore on exit. The
-    Neo4j credentials live in the cloud-config YAML, so they don't
-    need an env-var bridge.
-    """
-    env_overrides = {
-        "TRELLIS_CONFIG_DIR": str(config_dir),
-        "TRELLIS_DATA_DIR": str(data_dir),
-        "TRELLIS_KNOWLEDGE_PG_DSN": PG_DSN or "",
-        "TRELLIS_OPERATIONAL_PG_DSN": PG_DSN or "",
-    }
-    saved = {k: os.environ.get(k) for k in env_overrides}
-    try:
-        os.environ.update(env_overrides)
-        registry = StoreRegistry.from_config_dir(config_dir=config_dir)
-        try:
-            yield registry
-        finally:
-            registry.close()
-    finally:
-        for k, v in saved.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
+_INTENT = "reconcile"  # single-token; see conftest module docstring
 
 
 async def test_reconciliation_loop(loop_env: LoopEnvironment) -> None:
@@ -106,14 +64,8 @@ async def test_reconciliation_loop(loop_env: LoopEnvironment) -> None:
     distractor_id, helpful_ids = seed_distractor_corpus(
         loop_env.api_url, intent_token=_INTENT
     )
-    pack_1 = build_pack(
-        loop_env.api_url,
-        intent=_INTENT,
-        max_items=_PACK_FETCH_LIMIT,
-        max_tokens=_PACK_TOKEN_BUDGET,
-        tag_filters={},
-    )
-    pack_1_set = {item["item_id"] for item in pack_1["items"]}
+    pack_1 = build_pack(loop_env.api_url, intent=_INTENT, tag_filters={})
+    pack_1_set = item_ids(pack_1)
     helpful_in_pack = sorted(pack_1_set.intersection(helpful_ids))
     assert distractor_id in pack_1_set, (
         f"distractor must be in pack 1 to drive the noise tag downstream; "
@@ -147,7 +99,7 @@ async def test_reconciliation_loop(loop_env: LoopEnvironment) -> None:
     # same scan limit + match logic the reconciler enforces internally.
     pack_id = pack_1["pack_id"]
     pack_id_lookup = {feedback.feedback_id: pack_id}
-    with _live_registry(loop_env.config_dir, loop_env.data_dir) as registry:
+    with live_registry(loop_env.config_dir, loop_env.data_dir) as registry:
         event_log = registry.operational.event_log
         assert not _feedback_id_in_event_log(event_log, feedback.feedback_id), (
             "feedback_id leaked into EventLog before reconciliation"
@@ -182,14 +134,8 @@ async def test_reconciliation_loop(loop_env: LoopEnvironment) -> None:
         f"{distractor_id!r} into the noise list: report={report}"
     )
 
-    pack_2 = build_pack(
-        loop_env.api_url,
-        intent=_INTENT,
-        max_items=_PACK_FETCH_LIMIT,
-        max_tokens=_PACK_TOKEN_BUDGET,
-        tag_filters={},
-    )
-    pack_2_items = {item["item_id"] for item in pack_2["items"]}
+    pack_2 = build_pack(loop_env.api_url, intent=_INTENT, tag_filters={})
+    pack_2_items = item_ids(pack_2)
     assert pack_2["pack_id"] != pack_1["pack_id"], (
         "second pack must be a fresh assembly, not a cached re-issue"
     )
