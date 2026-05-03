@@ -442,7 +442,13 @@ def version(
 
 @admin_app.command()
 def serve(
-    host: str = typer.Option("0.0.0.0", help="Host to bind"),  # noqa: S104
+    host: str = typer.Option(
+        "127.0.0.1",
+        help=(
+            "Bind address. Loopback by default; set TRELLIS_API_HOST=0.0.0.0 "
+            "or pass --host 0.0.0.0 for container deployments."
+        ),
+    ),
     port: int = typer.Option(8420, help="Port to bind"),
 ) -> None:
     """Start the XPG REST API server."""
