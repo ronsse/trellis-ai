@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import subprocess
 from collections.abc import Iterator
 from pathlib import Path
@@ -32,14 +31,6 @@ from tests.integration._live_server import (
 )
 
 _SUBCMD_TIMEOUT_SECONDS = 60.0
-
-# structlog console-renderer prefix — looks like
-# ``2026-04-29 16:05:10 [info     ] event_name           key=value``.
-# CLI commands currently route structlog to stdout instead of stderr,
-# so the JSON payload on stdout is preceded by these log lines. The
-# parser in ``run_cli`` strips them. Tracked as a follow-up to clean
-# up at the CLI logging layer; once that lands this regex can go away.
-_STRUCTLOG_LINE_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\s+\[\w+\s*\]")
 
 
 @pytest.fixture(scope="session")
@@ -89,19 +80,6 @@ def initialized_cli_env(
     return cli_env
 
 
-def _strip_structlog_lines(stdout: str) -> str:
-    """Drop structlog log lines so the remaining stdout parses as JSON.
-
-    See ``_STRUCTLOG_LINE_RE`` for the prefix shape. CLI subcommands
-    that emit a JSON payload do so as one chunk after any preceding
-    log noise; stripping the noise leaves the payload intact whether
-    it's compact (one line) or pretty-printed (multi-line).
-    """
-    return "\n".join(
-        line for line in stdout.splitlines() if not _STRUCTLOG_LINE_RE.match(line)
-    )
-
-
 def run_cli(
     bin_path: str,
     args: list[str],
@@ -110,10 +88,10 @@ def run_cli(
     """Run a CLI subcommand and parse stdout as JSON.
 
     Returns ``(completed, parsed_json)``. Asserts exit 0 and that
-    stdout (after stripping structlog console-renderer lines) is
-    decodable JSON — these are the contract every ``--format json``
-    subcommand must honour. Failures dump both streams so the
-    operator sees what went wrong.
+    stdout is decodable JSON — these are the contract every
+    ``--format json`` subcommand must honour. structlog logs are
+    routed to stderr by ``trellis_cli.main._configure_cli_logging``,
+    so stdout is the payload alone. Failures dump both streams.
     """
     completed = subprocess.run(  # noqa: S603 — argv is the resolved console-script + caller-supplied args
         [bin_path, *args],
@@ -128,9 +106,8 @@ def run_cli(
         f"CLI exited {completed.returncode} for {args}:\n"
         f"stdout: {stdout}\nstderr: {stderr}"
     )
-    payload = _strip_structlog_lines(stdout).strip()
     try:
-        parsed = json.loads(payload)
+        parsed = json.loads(stdout.strip())
     except json.JSONDecodeError as exc:
         msg = (
             f"CLI {args} did not emit valid JSON on stdout:\n"

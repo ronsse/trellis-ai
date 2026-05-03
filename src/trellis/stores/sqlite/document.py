@@ -28,6 +28,14 @@ def _build_tag_conditions(
       we check if *any* of the filter values appears in that array.
     - **scalar facet** (e.g. ``content_type``, ``signal_quality``): the item's
       stored value is a string; we check ``IN (?, ?, …)``.
+
+    Both shapes use default-pass semantics: items missing the facet pass
+    the filter (``IS NULL OR …``). PackBuilder applies a default
+    ``signal_quality=[high, standard, low]`` allowlist whenever any
+    ``tag_filters`` is supplied, and a strict-only check would silently
+    drop un-classified items even when the caller never asked to filter
+    them. Mirrors the equivalent branch in
+    ``src/trellis/stores/postgres/document.py``.
     """
     conditions: list[str] = []
     params: list[Any] = []
@@ -39,17 +47,26 @@ def _build_tag_conditions(
         json_path = f"$.content_tags.{facet}"
         if facet in list_facets:
             # Array facets: check if any filter value is in the JSON array.
+            # ``json_each`` over a missing/NULL path yields zero rows, so
+            # the ``EXISTS`` would falsely reject untagged items — the
+            # explicit ``IS NULL`` prefix restores default-pass.
             sub_parts = " OR ".join("je.value = ?" for _ in values)
             conditions.append(
-                f"EXISTS (SELECT 1 FROM json_each(d.metadata_json, '{json_path}') je"
-                f" WHERE {sub_parts})"
+                f"(json_extract(d.metadata_json, '{json_path}') IS NULL"
+                f" OR EXISTS (SELECT 1 FROM json_each(d.metadata_json,"
+                f" '{json_path}') je WHERE {sub_parts}))"
             )
             params.extend(values)
         else:
-            # For scalar facets: simple IN check.
+            # Scalar facets: ``json_extract`` returns NULL when the path
+            # is absent, and ``NULL IN (...)`` is NULL (treated as false
+            # by ``WHERE``). Adding an explicit ``IS NULL OR`` keeps
+            # untagged items in the result set.
             placeholders = ", ".join("?" for _ in values)
             conditions.append(
-                f"json_extract(d.metadata_json, '{json_path}') IN ({placeholders})"
+                f"(json_extract(d.metadata_json, '{json_path}') IS NULL"
+                f" OR json_extract(d.metadata_json, '{json_path}')"
+                f" IN ({placeholders}))"
             )
             params.extend(values)
 

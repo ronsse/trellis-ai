@@ -6,7 +6,7 @@ subprocess against a per-test ``tmp_path`` config dir, asserts exit
 subcommand must honour:
 
   - exit 0 on success
-  - JSON payload on stdout (after structlog log lines are filtered)
+  - JSON payload on stdout (structlog logs are routed to stderr)
   - load-bearing fields are present in the payload
 
 This is the layer that catches problems ``CliRunner`` can't see —
@@ -22,8 +22,6 @@ the CLI surface.
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-
-import pytest
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -150,17 +148,6 @@ def test_retrieve_precedents_empty_after_init(
 # ── analyze + metrics ─────────────────────────────────────────────────
 
 
-@pytest.mark.xfail(
-    reason=(
-        "analyze extractor-fallbacks emits JSON via console.print, which "
-        "soft-wraps long strings at the terminal width. The wrap injects "
-        "literal \\r\\n inside string values, producing invalid JSON. "
-        "Tracked as a CLI hygiene follow-up — when the fix lands, swap "
-        "console.print for plain print in src/trellis_cli/analyze.py and "
-        "remove this xfail."
-    ),
-    strict=True,
-)
 def test_analyze_extractor_fallbacks_on_empty_event_log(
     cli_runner: Callable[..., Any],
     initialized_cli_env: dict[str, str],

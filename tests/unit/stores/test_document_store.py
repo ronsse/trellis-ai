@@ -203,6 +203,74 @@ def test_search_without_content_tags_still_works(
     assert len(results) == 1
 
 
+def test_search_untagged_doc_passes_signal_quality_filter(
+    doc_store: SQLiteDocumentStore,
+) -> None:
+    """Untagged docs survive PackBuilder's default ``signal_quality`` allowlist.
+
+    PackBuilder applies ``signal_quality=[high, standard, low]`` to every
+    ``tag_filters`` request to exclude noise. Strict ``IN`` would also
+    exclude items missing the facet — i.e. silently filter out anything
+    that bypassed the classifier — which contradicts the user's intent.
+    Default-pass semantics (``IS NULL OR …``) keep untagged items in
+    the result set, matching the Postgres backend.
+    """
+    doc_store.put(
+        None,
+        "tagged high-signal reference",
+        {
+            "content_tags": {"signal_quality": "high"},
+        },
+    )
+    doc_store.put(
+        None,
+        "tagged noise filler",
+        {
+            "content_tags": {"signal_quality": "noise"},
+        },
+    )
+    doc_store.put(None, "untagged reference doc")  # no content_tags at all
+
+    results = doc_store.search(
+        "reference",
+        filters={"content_tags": {"signal_quality": ["high", "standard", "low"]}},
+    )
+    contents = {r["content"] for r in results}
+    assert "tagged high-signal reference" in contents
+    assert "untagged reference doc" in contents
+    assert "tagged noise filler" not in contents
+
+
+def test_search_untagged_doc_passes_domain_filter(
+    doc_store: SQLiteDocumentStore,
+) -> None:
+    """List facets honour the same default-pass rule as scalar facets."""
+    doc_store.put(
+        None,
+        "matching domain doc",
+        {
+            "content_tags": {"domain": ["data-pipeline"]},
+        },
+    )
+    doc_store.put(
+        None,
+        "wrong domain doc",
+        {
+            "content_tags": {"domain": ["infrastructure"]},
+        },
+    )
+    doc_store.put(None, "untagged domain doc")
+
+    results = doc_store.search(
+        "doc",
+        filters={"content_tags": {"domain": ["data-pipeline"]}},
+    )
+    contents = {r["content"] for r in results}
+    assert "matching domain doc" in contents
+    assert "untagged domain doc" in contents
+    assert "wrong domain doc" not in contents
+
+
 def test_update_preserves_created_at(doc_store: SQLiteDocumentStore) -> None:
     doc_store.put("d1", "v1")
     doc1 = doc_store.get("d1")
