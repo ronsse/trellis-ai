@@ -103,7 +103,6 @@ async def test_reconciliation_loop(loop_env: LoopEnvironment) -> None:
     if not NEO4J_URI or not PG_DSN:  # paranoia — loop_env already gates this
         pytest.skip("live infra creds missing")
 
-    # ── Seed corpus + pack 1 ─────────────────────────────────────
     distractor_id, helpful_ids = seed_distractor_corpus(
         loop_env.api_url, intent_token=_INTENT
     )
@@ -114,8 +113,7 @@ async def test_reconciliation_loop(loop_env: LoopEnvironment) -> None:
         max_tokens=_PACK_TOKEN_BUDGET,
         tag_filters={},
     )
-    pack_1_items = [item["item_id"] for item in pack_1["items"]]
-    pack_1_set = set(pack_1_items)
+    pack_1_set = {item["item_id"] for item in pack_1["items"]}
     helpful_in_pack = sorted(pack_1_set.intersection(helpful_ids))
     assert distractor_id in pack_1_set, (
         f"distractor must be in pack 1 to drive the noise tag downstream; "
@@ -127,14 +125,13 @@ async def test_reconciliation_loop(loop_env: LoopEnvironment) -> None:
         "won't have a contrastive signal"
     )
 
-    # ── Write JSONL feedback ONLY (event_log=None) ───────────────
     log_dir = loop_env.data_dir / "feedback_log"
     feedback = PackFeedback(
         run_id="reconcile-test-run",
         phase="execute",
         intent=_INTENT,
         outcome="success",
-        items_served=pack_1_items,
+        items_served=sorted(pack_1_set),
         items_referenced=helpful_in_pack,  # distractor deliberately omitted
         intent_family="general_context",
     )
@@ -143,7 +140,6 @@ async def test_reconciliation_loop(loop_env: LoopEnvironment) -> None:
     assert record_result.outcome_emitted is False, record_result
     assert record_result.log_path.exists()
 
-    # ── Confirm divergence + reconcile + idempotency rerun ───────
     # All three EventLog touches share one registry so the divergence
     # pre-check, the backfill, and the idempotency rerun cost a single
     # connect/teardown cycle. Reusing the production
@@ -174,11 +170,10 @@ async def test_reconciliation_loop(loop_env: LoopEnvironment) -> None:
     assert second.emitted == 0, second
     assert second.already_present == 1, second
 
-    # ── Reconciled event drives apply-noise-tags downstream ──────
-    # The reconciled FEEDBACK_RECORDED must look indistinguishable
-    # from a live emission to ``analyze_effectiveness``: distractor
-    # was served but never referenced, so usage-rate flagging picks
-    # it as noise.
+    # The reconciled FEEDBACK_RECORDED must look indistinguishable from
+    # a live emission to ``analyze_effectiveness``: distractor was
+    # served but never referenced, so usage-rate flagging picks it as
+    # noise.
     report = trigger_apply_noise_tags(loop_env.api_url)
     assert report["status"] == "ok"
     noise_ids = set(report.get("noise_candidates", []))
@@ -187,7 +182,6 @@ async def test_reconciliation_loop(loop_env: LoopEnvironment) -> None:
         f"{distractor_id!r} into the noise list: report={report}"
     )
 
-    # ── Pack 2: distractor must be excluded by signal_quality ────
     pack_2 = build_pack(
         loop_env.api_url,
         intent=_INTENT,
