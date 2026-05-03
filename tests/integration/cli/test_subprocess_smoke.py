@@ -172,3 +172,36 @@ def test_metrics_outcomes_empty_on_fresh_registry(
     )
     assert payload["outcomes_scanned"] == 0
     assert payload["cells"] == []
+
+
+# ── structlog routing contract ────────────────────────────────────────
+
+
+def test_structlog_routes_to_stderr_not_stdout(
+    cli_runner: Callable[..., Any],
+    initialized_cli_env: dict[str, str],
+) -> None:
+    """Structlog log lines land on stderr, never on stdout.
+
+    Pins the ``configure_stderr_logging`` callback contract directly
+    so a future regression that drops the callback would fail this
+    test outright (rather than only failing transitively when stdout
+    json-decode breaks). ``admin stats`` is the simplest command that
+    forces store init, which emits ``store_instantiated`` /
+    ``store_initialized`` log lines for every backing store.
+    """
+    completed, payload = cli_runner(
+        ["admin", "stats", "--format", "json"], initialized_cli_env
+    )
+    assert payload["status"] == "ok"
+    stderr = completed.stderr.decode(errors="replace")
+    assert "store_instantiated" in stderr, (
+        f"expected structlog event ``store_instantiated`` on stderr; "
+        f"got stderr={stderr!r}"
+    )
+    # Belt-and-braces: nothing that looks like a structlog timestamp
+    # should ever appear on stdout. ``cli_runner`` already json-decodes
+    # stdout, but assert the renderer prefix is absent so the contract
+    # holds even if a future test changes the parsing path.
+    stdout = completed.stdout.decode(errors="replace")
+    assert "[info" not in stdout, f"structlog leaked onto stdout: {stdout!r}"

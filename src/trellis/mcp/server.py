@@ -7,6 +7,7 @@ from typing import Any
 import structlog
 from fastmcp import FastMCP
 
+from trellis.logging import configure_stderr_logging
 from trellis.ops import ParameterRegistry
 from trellis.retrieve.formatters import (
     format_advisories_as_markdown,
@@ -1213,8 +1214,6 @@ def get_sectioned_context(
 
 def main() -> None:
     """Run the Macro Tools MCP server."""
-    from trellis.logging import configure_stderr_logging  # noqa: PLC0415
-
     # MCP speaks JSON-RPC over stdio; stdout is reserved for protocol frames.
     configure_stderr_logging()
     mcp.run()
