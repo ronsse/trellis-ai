@@ -241,7 +241,7 @@ def _submit_promotion(
             "properties": dict(entity_payload.get("properties") or {}),
         },
         target_type="entity",
-        requested_by="cli.promote-learning",
+        requested_by="cli",
     )
     entity_result = executor.execute(entity_cmd)
     if entity_result.status != CommandStatus.SUCCESS:
@@ -263,7 +263,7 @@ def _submit_promotion(
             },
             target_id=edge["source_id"],
             target_type="entity",
-            requested_by="cli.promote-learning",
+            requested_by="cli",
         )
         edge_result = executor.execute(edge_cmd)
         edge_outcomes.append(
