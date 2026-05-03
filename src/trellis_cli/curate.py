@@ -231,14 +231,20 @@ def _submit_promotion(
     entity_payload: dict[str, Any],
     edge_payloads: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """Submit one approved promotion. A failed entity short-circuits the edges."""
+    """Submit one approved promotion. A failed entity short-circuits the edges.
+
+    ``entity_payload`` and ``edge_payloads`` come from
+    :func:`trellis.learning.scoring.build_learning_promotion_payloads`,
+    which always sets ``entity_id`` and a non-empty ``properties`` dict
+    on both — this function trusts that contract rather than re-guarding.
+    """
     entity_cmd = Command(
         operation=Operation.ENTITY_CREATE,
         args={
             "entity_type": entity_payload["entity_type"],
-            "entity_id": entity_payload.get("entity_id"),
+            "entity_id": entity_payload["entity_id"],
             "name": entity_payload["name"],
-            "properties": dict(entity_payload.get("properties") or {}),
+            "properties": dict(entity_payload["properties"]),
         },
         target_type="entity",
         requested_by="cli",
@@ -259,7 +265,7 @@ def _submit_promotion(
                 "source_id": edge["source_id"],
                 "target_id": edge["target_id"],
                 "edge_kind": edge["edge_kind"],
-                "properties": dict(edge.get("properties") or {}),
+                "properties": dict(edge["properties"]),
             },
             target_id=edge["source_id"],
             target_type="entity",
@@ -356,6 +362,7 @@ def promote_learning(
                         "status": "ok",
                         "dry_run": False,
                         "approved_count": plan["approved_count"],
+                        "ready_count": 0,
                         "promoted_count": 0,
                         "results": [],
                     }
@@ -400,6 +407,7 @@ def promote_learning(
                     "status": "ok",
                     "dry_run": False,
                     "approved_count": plan["approved_count"],
+                    "ready_count": len(ready),
                     "promoted_count": promoted_count,
                     "results": submission_results,
                 }

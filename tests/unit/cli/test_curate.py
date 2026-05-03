@@ -4,10 +4,19 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 from typer.testing import CliRunner
 
+from trellis.mutate.commands import (
+    Command,
+    CommandResult,
+    CommandStatus,
+    Operation,
+)
+from trellis.mutate.executor import MutationExecutor
+from trellis_cli.curate import _submit_promotion
 from trellis_cli.main import app
 
 runner = CliRunner()
@@ -297,6 +306,7 @@ class TestCuratePromoteLearning:
         data = json.loads(result.stdout.strip())
         assert data["dry_run"] is False
         assert data["approved_count"] == 1
+        assert data["ready_count"] == 1
         assert data["promoted_count"] == 1
         assert len(data["results"]) == 1
         result_entry = data["results"][0]
@@ -322,8 +332,115 @@ class TestCuratePromoteLearning:
         assert result.exit_code == 0, result.output
         data = json.loads(result.stdout.strip())
         assert data["approved_count"] == 0
+        assert data["ready_count"] == 0
         assert data["promoted_count"] == 0
         assert data["results"] == []
+
+
+class TestSubmitPromotion:
+    """Direct unit tests for the _submit_promotion helper.
+
+    These exercise branches that are awkward to reach through the CLI
+    runner (entity create rejected, edge create after a successful
+    entity) without standing up the full mutation pipeline.
+    """
+
+    @staticmethod
+    def _entity_payload() -> dict:
+        return {
+            "entity_type": "precedent",
+            "entity_id": "precedent://learning/test",
+            "name": "Test precedent",
+            "properties": {"description": "test"},
+        }
+
+    @staticmethod
+    def _edge_payload(target_id: str = "doc:target-1") -> dict:
+        return {
+            "source_id": "precedent://learning/test",
+            "target_id": target_id,
+            "edge_kind": "precedent_applies_to",
+            "properties": {"source_of_truth": "reviewed_promotion"},
+        }
+
+    def test_entity_failure_short_circuits_edges(self) -> None:
+        executor = MagicMock(spec=MutationExecutor)
+        executor.execute.return_value = CommandResult(
+            command_id="cmd-1",
+            status=CommandStatus.REJECTED,
+            operation=Operation.ENTITY_CREATE,
+            message="entity_type 'precedent' not registered",
+        )
+
+        outcome = _submit_promotion(
+            executor,
+            self._entity_payload(),
+            [self._edge_payload("doc:t1"), self._edge_payload("doc:t2")],
+        )
+
+        assert outcome["status"] == "entity_failed"
+        assert outcome["entity_status"] == CommandStatus.REJECTED.value
+        assert outcome["message"] == "entity_type 'precedent' not registered"
+        # Single execute() call — edges must NOT have been attempted.
+        assert executor.execute.call_count == 1
+        submitted_op = executor.execute.call_args.args[0].operation
+        assert submitted_op == Operation.ENTITY_CREATE
+
+    def test_entity_success_then_edges_submitted(self) -> None:
+        executor = MagicMock(spec=MutationExecutor)
+        executor.execute.side_effect = [
+            CommandResult(
+                command_id="cmd-1",
+                status=CommandStatus.SUCCESS,
+                operation=Operation.ENTITY_CREATE,
+                created_id="precedent://learning/test",
+            ),
+            CommandResult(
+                command_id="cmd-2",
+                status=CommandStatus.SUCCESS,
+                operation=Operation.LINK_CREATE,
+            ),
+            CommandResult(
+                command_id="cmd-3",
+                status=CommandStatus.FAILED,
+                operation=Operation.LINK_CREATE,
+                message="target not found",
+            ),
+        ]
+
+        outcome = _submit_promotion(
+            executor,
+            self._entity_payload(),
+            [self._edge_payload("doc:t1"), self._edge_payload("doc:t2")],
+        )
+
+        assert outcome["status"] == "promoted"
+        assert outcome["node_id"] == "precedent://learning/test"
+        assert [e["target_id"] for e in outcome["edges"]] == ["doc:t1", "doc:t2"]
+        assert outcome["edges"][0]["status"] == CommandStatus.SUCCESS.value
+        assert outcome["edges"][1]["status"] == CommandStatus.FAILED.value
+        assert executor.execute.call_count == 3
+
+    def test_passes_payload_fields_into_command_args(self) -> None:
+        executor = MagicMock(spec=MutationExecutor)
+        executor.execute.return_value = CommandResult(
+            command_id="cmd-1",
+            status=CommandStatus.SUCCESS,
+            operation=Operation.ENTITY_CREATE,
+            created_id="precedent://learning/test",
+        )
+
+        _submit_promotion(executor, self._entity_payload(), [])
+
+        submitted: Command = executor.execute.call_args.args[0]
+        assert submitted.operation == Operation.ENTITY_CREATE
+        assert submitted.requested_by == "cli"
+        assert submitted.args["entity_type"] == "precedent"
+        assert submitted.args["entity_id"] == "precedent://learning/test"
+        # properties are copied, not aliased — caller mutation can't leak in.
+        properties = submitted.args["properties"]
+        assert properties == {"description": "test"}
+        assert properties is not self._entity_payload()["properties"]
 
 
 class TestCurateHelp:
