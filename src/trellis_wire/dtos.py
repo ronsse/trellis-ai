@@ -129,6 +129,7 @@ class PackResponse(WireModel):
     agent_id: str | None = None
     count: int
     items: list[dict[str, Any]]
+    advisories: list[dict[str, Any]] = Field(default_factory=list)
     retrieval_report: dict[str, Any] | None = None
 
 

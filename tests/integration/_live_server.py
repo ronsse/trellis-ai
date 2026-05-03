@@ -138,37 +138,68 @@ def wipe_live_state_for_config(config_dir: Path, env: dict[str, str]) -> None:
                 os.environ[k] = v
 
 
-def spawn_uvicorn(env: dict[str, str], port: int) -> subprocess.Popen[bytes]:
+def spawn_uvicorn(
+    env: dict[str, str],
+    port: int,
+    *,
+    log_path: Path,
+) -> subprocess.Popen[bytes]:
     """Spawn ``uvicorn trellis_api.app:create_app --factory`` on ``port``.
 
     Bound to 127.0.0.1 (not 0.0.0.0) so the test never accidentally
     accepts connections off the loopback. ``--factory`` tells uvicorn
     to call ``create_app()`` rather than import an app instance, which
     matches how production launches via ``trellis_api.app.main``.
+
+    **Critical**: stdout + stderr go to ``log_path``, not
+    ``subprocess.PIPE``. Using PIPE without a draining thread causes a
+    Windows OS-pipe-buffer deadlock — once trellis's structlog writes
+    fill ~8KB of buffer (about three /packs calls), the next
+    ``print(..., flush=True)`` inside :class:`structlog.PrintLogger`
+    blocks forever waiting for the parent to read. Writing to a file
+    keeps the diagnostic available (``wait_for_healthz`` reads it on
+    failure) without ever blocking the writer.
     """
-    return subprocess.Popen(
-        [
-            sys.executable,
-            "-m",
-            "uvicorn",
-            "trellis_api.app:create_app",
-            "--factory",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            str(port),
-            "--log-level",
-            "warning",
-        ],
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_handle = log_path.open("wb")
+    try:
+        return subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "uvicorn",
+                "trellis_api.app:create_app",
+                "--factory",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(port),
+                "--log-level",
+                "warning",
+            ],
+            env=env,
+            stdout=log_handle,
+            stderr=log_handle,
+        )
+    finally:
+        # The OS-level fd is duped into the child; closing the Python
+        # handle here is fine and avoids a leaked file object.
+        log_handle.close()
+
+
+def _read_log(log_path: Path) -> str:
+    """Best-effort read of a uvicorn log file for error reporting."""
+    try:
+        return log_path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return f"(could not read {log_path}: {exc})"
 
 
 def wait_for_healthz(
     proc: subprocess.Popen[bytes],
     base_url: str,
+    *,
+    log_path: Path,
 ) -> None:
     """Block until ``/healthz`` returns 200 or the process exits.
 
@@ -181,12 +212,10 @@ def wait_for_healthz(
     last_err: BaseException | None = None
     while time.monotonic() < deadline:
         if proc.poll() is not None:
-            stdout, stderr = proc.communicate()
             raise RuntimeError(
                 "uvicorn exited with code "
                 f"{proc.returncode} before serving /healthz:\n"
-                f"stdout: {stdout.decode(errors='replace')}\n"
-                f"stderr: {stderr.decode(errors='replace')}"
+                f"log: {_read_log(log_path)}"
             )
         try:
             resp = httpx.get(f"{base_url}/healthz", timeout=2.0)
@@ -201,15 +230,14 @@ def wait_for_healthz(
     # crash, port collision, import error, etc.).
     proc.terminate()
     try:
-        stdout, stderr = proc.communicate(timeout=_TEARDOWN_TIMEOUT_SECONDS)
+        proc.wait(timeout=_TEARDOWN_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired:
         proc.kill()
-        stdout, stderr = proc.communicate(timeout=_TEARDOWN_TIMEOUT_SECONDS)
+        proc.wait(timeout=_TEARDOWN_TIMEOUT_SECONDS)
     raise RuntimeError(
         f"uvicorn never responded to /healthz within "
         f"{_HEALTHZ_TIMEOUT_SECONDS}s (last error: {last_err}):\n"
-        f"stdout: {stdout.decode(errors='replace')}\n"
-        f"stderr: {stderr.decode(errors='replace')}"
+        f"log: {_read_log(log_path)}"
     )
 
 
@@ -345,9 +373,10 @@ def live_api_server(tmp_path: Path) -> Iterator[str]:
 
     port = free_port()
     base_url = f"http://127.0.0.1:{port}"
-    proc = spawn_uvicorn(subprocess_env, port)
+    log_path = tmp_path / "uvicorn.log"
+    proc = spawn_uvicorn(subprocess_env, port, log_path=log_path)
     try:
-        wait_for_healthz(proc, base_url)
+        wait_for_healthz(proc, base_url, log_path=log_path)
         yield base_url
     finally:
         terminate_subprocess(proc)
