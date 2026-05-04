@@ -257,7 +257,7 @@ def _run_memory_extraction(
         if not result.entities and not result.edges:
             return
 
-        batch = result_to_batch(result, requested_by="save_memory_extractor")
+        batch = result_to_batch(result, requested_by="mcp:save_memory")
         executor = MutationExecutor(
             event_log=registry.event_log,
             handlers=create_curate_handlers(registry),

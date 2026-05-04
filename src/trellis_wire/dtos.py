@@ -142,7 +142,7 @@ class PromoteRequest(WireRequestModel):
     trace_id: str
     title: str
     description: str
-    requested_by: str = "api"
+    requested_by: str = "api:promote"
 
 
 class LinkRequest(WireRequestModel):
@@ -201,7 +201,7 @@ class BatchCommandRequest(WireRequestModel):
 
     commands: list[BatchCommandItem]
     strategy: str = "stop_on_error"
-    requested_by: str = "api"
+    requested_by: str = "api:mutations"
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -280,7 +280,7 @@ class BulkIngestRequest(WireRequestModel):
     edges: list[BulkEdgeItem] = Field(default_factory=list)
     aliases: list[BulkAliasItem] = Field(default_factory=list)
     strategy: BatchStrategy = BatchStrategy.CONTINUE_ON_ERROR
-    requested_by: str = "api"
+    requested_by: str = "api:bulk-ingest"
 
 
 class BulkItemResult(WireModel):

@@ -55,7 +55,9 @@ def promote(
     trace_id: str = typer.Argument(..., help="Trace ID to promote to precedent"),
     title: str = typer.Option(..., help="Precedent title"),
     description: str = typer.Option(..., help="Precedent description"),
-    requested_by: str = typer.Option("cli", "--by", help="Who is promoting"),
+    requested_by: str = typer.Option(
+        "cli:promote", "--by", help="Audit-trail identifier for the caller."
+    ),
     output_format: str = typer.Option("text", "--format", help="Output format"),
 ) -> None:
     """Promote a trace to a precedent."""
@@ -86,7 +88,7 @@ def link(
         },
         target_id=source_id,
         target_type="entity",
-        requested_by="cli",
+        requested_by="cli:link",
     )
     registry = _get_registry()
     handlers = create_curate_handlers(registry)
@@ -128,7 +130,7 @@ def label(
         operation=Operation.LABEL_ADD,
         args={"target_id": target_id, "label": label_value},
         target_id=target_id,
-        requested_by="cli",
+        requested_by="cli:label",
     )
     _execute_command(cmd, output_format)
 
@@ -174,7 +176,7 @@ def entity(
             "properties": props,
         },
         target_type="entity",
-        requested_by="cli",
+        requested_by="cli:entity",
     )
     registry = _get_registry()
     handlers = create_curate_handlers(registry)
@@ -216,7 +218,7 @@ def feedback(
         operation=Operation.FEEDBACK_RECORD,
         args=args,
         target_id=target_id,
-        requested_by="cli",
+        requested_by="cli:feedback",
     )
     _execute_command(cmd, output_format)
 
@@ -247,7 +249,7 @@ def _submit_promotion(
             "properties": dict(entity_payload["properties"]),
         },
         target_type="entity",
-        requested_by="cli",
+        requested_by="cli:promote-learning",
     )
     entity_result = executor.execute(entity_cmd)
     if entity_result.status != CommandStatus.SUCCESS:
@@ -269,7 +271,7 @@ def _submit_promotion(
             },
             target_id=edge["source_id"],
             target_type="entity",
-            requested_by="cli",
+            requested_by="cli:promote-learning",
         )
         edge_result = executor.execute(edge_cmd)
         edge_outcomes.append(

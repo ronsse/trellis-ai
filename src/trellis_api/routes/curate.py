@@ -69,7 +69,7 @@ def create_link(req: LinkRequest) -> dict[str, Any]:
         },
         target_id=req.source_id,
         target_type="entity",
-        requested_by="api",
+        requested_by="api:link",
     )
     response = _execute_command(cmd)
     return {
@@ -94,7 +94,7 @@ def create_entity(req: EntityCreateRequest) -> dict[str, Any]:
         operation=Operation.ENTITY_CREATE,
         args=args,
         target_type="entity",
-        requested_by="api",
+        requested_by="api:entity",
     )
     response = _execute_command(cmd)
     return {
@@ -135,7 +135,7 @@ def record_feedback(req: FeedbackRequest) -> CommandResponse:
         operation=Operation.FEEDBACK_RECORD,
         args=args,
         target_id=req.target_id,
-        requested_by="api",
+        requested_by="api:feedback",
     )
     return _execute_command(cmd)
 
