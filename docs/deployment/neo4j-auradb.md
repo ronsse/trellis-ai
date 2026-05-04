@@ -254,6 +254,8 @@ unit-test corpora at the same dim, or use separate databases.
 
 * For local dev on the same backend shape:
   [`neo4j-local.md`](./neo4j-local.md)
+* For self-hosted cloud (Helm / k8s / VM) instead of managed:
+  [`neo4j-self-hosted-cloud.md`](./neo4j-self-hosted-cloud.md)
 * For the recommended-config side-by-side (local / cloud /
   Postgres-only): [`recommended-config.yaml`](./recommended-config.yaml)
 * For the design rationale: [`../design/plan-neo4j-hardening.md`](../design/plan-neo4j-hardening.md)

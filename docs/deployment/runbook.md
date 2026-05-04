@@ -7,9 +7,10 @@ and how to schedule the three closed feedback loops.
 
 Pairs with the infrastructure-specific guides in this folder
 ([aws-ecs.md](aws-ecs.md), [local-compose.md](local-compose.md),
-[neo4j-local.md](neo4j-local.md), [neo4j-auradb.md](neo4j-auradb.md))
-— those describe *where* Trellis runs; this one describes *how* to
-operate it once it's running.
+[neo4j-local.md](neo4j-local.md),
+[neo4j-self-hosted-cloud.md](neo4j-self-hosted-cloud.md),
+[neo4j-auradb.md](neo4j-auradb.md)) — those describe *where* Trellis
+runs; this one describes *how* to operate it once it's running.
 
 ## Environment variables
 
