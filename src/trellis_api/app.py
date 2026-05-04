@@ -19,6 +19,7 @@ from trellis_api.middleware import (
     request_id_middleware,
     unhandled_exception_handler,
 )
+from trellis_api.observability import install_observability
 
 logger = structlog.get_logger(__name__)
 
@@ -84,6 +85,12 @@ def create_app() -> FastAPI:
     # Translate uncaught exceptions into a structured 500 envelope so
     # responses don't leak internal types or stack frames.
     app.add_exception_handler(Exception, unhandled_exception_handler)
+
+    # OpenTelemetry + Prometheus — no-op when the ``observability``
+    # extra isn't installed or ``TRELLIS_DISABLE_OBSERVABILITY`` is set.
+    # The /metrics endpoint mounted by the Prometheus instrumentator is
+    # deliberately unauthenticated for orchestrator scrape jobs.
+    install_observability(app)
 
     @app.get("/", include_in_schema=False)
     async def root_redirect() -> RedirectResponse:
