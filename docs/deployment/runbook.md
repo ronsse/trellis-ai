@@ -383,7 +383,21 @@ needs a human in the loop to review candidates before promotion.
 
 ## Validating a deployment
 
-After the API comes up but before sending real traffic:
+The single-command path:
+
+```bash
+trellis admin smoke-test --url http://localhost:8420 \
+  --api-key "$TRELLIS_API_KEY" --format json
+```
+
+`smoke-test` exits 0 only when every check passes; non-zero on any
+failure. Suitable for a k8s init-container hook or a deploy-pipeline
+gate. The `--url` and `--api-key` flags both fall back to env vars
+(`TRELLIS_API_HOST` / `TRELLIS_API_PORT` / `TRELLIS_API_KEY`), so a
+locally-deployed instance with the env loaded just needs `trellis
+admin smoke-test` with no arguments.
+
+The five checks it runs, equivalent to running these manually:
 
 ```bash
 # 1. Liveness — should always return 200
@@ -399,7 +413,9 @@ curl -fsS -o /dev/null -w "%{http_code}\n" \
   -H "X-API-Key: $TRELLIS_API_KEY" \
   http://localhost:8420/api/v1/advisories
 
-# 4. Metrics — should return Prometheus-format text
+# 4. Metrics — should return Prometheus-format text (404 means the
+#    [observability] extra isn't installed; smoke-test reports this
+#    as INFO rather than FAIL)
 curl -fsS http://localhost:8420/metrics | head
 ```
 
