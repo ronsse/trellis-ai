@@ -185,6 +185,7 @@ trellis admin init
 
 ## Next steps
 
-* For cloud deployment with the same blessed shape: [`neo4j-auradb.md`](./neo4j-auradb.md)
+* For managed cloud deployment: [`neo4j-auradb.md`](./neo4j-auradb.md)
+* For self-hosted cloud deployment (Helm / k8s / VM): [`neo4j-self-hosted-cloud.md`](./neo4j-self-hosted-cloud.md)
 * For the full recommended config (Postgres operational plane optional): [`recommended-config.yaml`](./recommended-config.yaml)
 * For the design rationale (why Neo4j is the blessed graph backend): [`../design/plan-neo4j-hardening.md`](../design/plan-neo4j-hardening.md)
