@@ -76,8 +76,22 @@ llm-anthropic = [
 neo4j = [
     "neo4j>=5.20",
 ]
+observability = [
+    # OpenTelemetry SDK + auto-instrumentations for FastAPI, psycopg,
+    # and Neo4j. The SDK is no-op until ``OTEL_EXPORTER_OTLP_ENDPOINT``
+    # (or another exporter env) is set, so the dependency is safe to
+    # have installed in dev / CI without burning telemetry quota.
+    "opentelemetry-api>=1.27",
+    "opentelemetry-sdk>=1.27",
+    "opentelemetry-exporter-otlp>=1.27",
+    "opentelemetry-instrumentation-fastapi>=0.48b0",
+    "opentelemetry-instrumentation-psycopg>=0.48b0",
+    # Prometheus scrape endpoint at /metrics — request latency
+    # histograms + per-route counters out of the box.
+    "prometheus-fastapi-instrumentator>=7.0",
+]
 all = [
-    "trellis-ai[vectors,cloud,neo4j,llm-openai,llm-anthropic]",
+    "trellis-ai[vectors,cloud,neo4j,llm-openai,llm-anthropic,observability]",
 ]
 
 [project.scripts]
