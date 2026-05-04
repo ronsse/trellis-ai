@@ -21,6 +21,7 @@ from trellis.stores.base.graph import (
     check_node_role_immutable,
     validate_document_ids,
     validate_node_role_args,
+    validate_subgraph_depth,
 )
 from trellis.stores.postgres.base import PostgresStoreBase
 
@@ -792,6 +793,7 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
         edge_types: list[str] | None = None,
         as_of: datetime | None = None,
     ) -> dict[str, Any]:
+        validate_subgraph_depth(depth)
         if not seed_ids:
             return {"nodes": [], "edges": []}
 

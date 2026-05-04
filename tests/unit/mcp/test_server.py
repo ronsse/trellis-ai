@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 from pathlib import Path
@@ -612,3 +613,94 @@ class TestSessionAwareGetContext:
         # Without session_id, both calls return content
         assert "No context found" not in first
         assert "No context found" not in second
+
+
+# ---------------------------------------------------------------------------
+# Shutdown handling
+# ---------------------------------------------------------------------------
+
+
+class TestMainShutdown:
+    """``main()`` must close the cached registry on exit, even if mcp.run raises.
+
+    Regression guard for the Postgres-pool / Neo4j-driver leak that
+    used to happen on stdio EOF: the cached :class:`StoreRegistry`
+    held connections open until the process was reaped.
+    """
+
+    def _drain_registry(self) -> None:
+        """Reset module-level state so each test starts clean."""
+        if server_mod._registry is not None:
+            with contextlib.suppress(Exception):
+                server_mod._registry.close()
+        server_mod._registry = None
+
+    def test_main_closes_registry_on_clean_exit(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._drain_registry()
+        registry = StoreRegistry(stores_dir=tmp_path / "stores2")
+        registry.stores_dir.mkdir(parents=True)
+        # Touch a store so close() has something to do.
+        registry.document_store.put("doc1", "shutdown probe")
+        server_mod._registry = registry
+        close_calls: list[int] = []
+        original_close = registry.close
+
+        def _tracking_close() -> None:
+            close_calls.append(1)
+            original_close()
+
+        monkeypatch.setattr(registry, "close", _tracking_close)
+        monkeypatch.setattr(server_mod.mcp, "run", lambda: None)
+        # _configure_mcp_logging mutates global structlog config — keep
+        # the conftest CRITICAL filter by stubbing it out here.
+        monkeypatch.setattr(server_mod, "_configure_mcp_logging", lambda: None)
+
+        server_mod.main()
+
+        assert close_calls == [1]
+        assert server_mod._registry is None
+
+    def test_main_closes_registry_when_run_raises(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._drain_registry()
+        registry = StoreRegistry(stores_dir=tmp_path / "stores3")
+        registry.stores_dir.mkdir(parents=True)
+        server_mod._registry = registry
+        close_calls: list[int] = []
+        original_close = registry.close
+
+        def _tracking_close() -> None:
+            close_calls.append(1)
+            original_close()
+
+        def _boom() -> None:
+            msg = "simulated mcp.run failure"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(registry, "close", _tracking_close)
+        monkeypatch.setattr(server_mod.mcp, "run", _boom)
+        monkeypatch.setattr(server_mod, "_configure_mcp_logging", lambda: None)
+
+        with pytest.raises(RuntimeError, match="simulated"):
+            server_mod.main()
+
+        assert close_calls == [1]
+        assert server_mod._registry is None
+
+    def test_main_no_registry_constructed_no_close(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If no tool ever called ``_get_registry()``, finally must no-op."""
+        self._drain_registry()
+        # No registry constructed; the autouse _temp_registry fixture
+        # already nulled it out via teardown, but be explicit.
+        assert server_mod._registry is None
+        monkeypatch.setattr(server_mod.mcp, "run", lambda: None)
+        monkeypatch.setattr(server_mod, "_configure_mcp_logging", lambda: None)
+
+        # Should not raise.
+        server_mod.main()
+        assert server_mod._registry is None

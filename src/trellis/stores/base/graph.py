@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import os
 from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
+
+import structlog
 
 if TYPE_CHECKING:
     from trellis.schemas.graph import CompactionReport
@@ -15,7 +18,69 @@ if TYPE_CHECKING:
         SubgraphResult,
     )
 
+_logger = structlog.get_logger(__name__)
+
 VALID_NODE_ROLES = frozenset({"structural", "semantic", "curated"})
+
+
+def _resolve_max_subgraph_depth() -> int:
+    """Resolve the subgraph depth cap from env, falling back to the default.
+
+    Honors ``TRELLIS_GRAPH_MAX_SUBGRAPH_DEPTH``. Invalid (non-integer
+    or non-positive) values are logged and the default is used —
+    silently swallowing a typo would leave operators wondering why
+    their override has no effect.
+    """
+    raw = os.environ.get("TRELLIS_GRAPH_MAX_SUBGRAPH_DEPTH")
+    if raw is None or not raw.strip():
+        return 6
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        _logger.warning(
+            "trellis_graph_max_subgraph_depth_invalid",
+            raw=raw,
+            fallback=6,
+        )
+        return 6
+    if value < 1:
+        _logger.warning(
+            "trellis_graph_max_subgraph_depth_non_positive",
+            raw=raw,
+            fallback=6,
+        )
+        return 6
+    return value
+
+
+#: Maximum recursion depth for :meth:`GraphStore.get_subgraph`. Protects
+#: against DoS-class queries — at average degree 5, depth=10 explores
+#: ~10M paths on a 1M-node graph before edge-type filtering even runs.
+#: Tunable via ``TRELLIS_GRAPH_MAX_SUBGRAPH_DEPTH`` at process start.
+MAX_SUBGRAPH_DEPTH: int = _resolve_max_subgraph_depth()
+
+
+def validate_subgraph_depth(depth: int) -> None:
+    """Validate ``depth`` against the configured upper bound.
+
+    Called by every :meth:`GraphStore.get_subgraph` implementation
+    before the backend-specific query runs. Centralising the check
+    keeps the policy consistent across Postgres / SQLite / Neo4j.
+
+    Raises:
+        ValueError: If ``depth`` is negative or exceeds
+            :data:`MAX_SUBGRAPH_DEPTH`.
+    """
+    if depth < 0:
+        msg = f"depth must be >= 0, got {depth}"
+        raise ValueError(msg)
+    if depth > MAX_SUBGRAPH_DEPTH:
+        msg = (
+            f"depth={depth} exceeds MAX_SUBGRAPH_DEPTH={MAX_SUBGRAPH_DEPTH}; "
+            f"pass a smaller depth or raise the env var "
+            f"TRELLIS_GRAPH_MAX_SUBGRAPH_DEPTH"
+        )
+        raise ValueError(msg)
 
 
 def validate_node_role_args(

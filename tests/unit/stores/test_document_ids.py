@@ -170,7 +170,6 @@ class TestSQLiteBackfillGracefulDegrade:
     """Pre-existing rows without document_ids_json must still read as []."""
 
     def test_pre_existing_null_column_reads_as_empty(self, tmp_path: Path) -> None:
-
         # Simulate a v3 database created before Phase 4 by manually
         # inserting a row with NULL document_ids_json.
         store = SQLiteGraphStore(tmp_path / "g.db")
