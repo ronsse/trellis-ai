@@ -520,6 +520,23 @@ class GraphStoreContractTests:
         assert "b" in ids
         assert "c" not in ids
 
+    def test_subgraph_rejects_depth_above_cap(self, store: GraphStore) -> None:
+        """Backend must reject depths above MAX_SUBGRAPH_DEPTH.
+
+        Protects against DoS-class recursive CTE / variable-length-path
+        queries. The cap is centralised in
+        :data:`trellis.stores.base.graph.MAX_SUBGRAPH_DEPTH` and tunable
+        via ``TRELLIS_GRAPH_MAX_SUBGRAPH_DEPTH``.
+        """
+        store.upsert_node("x", "service", {})
+        with pytest.raises(ValueError, match="MAX_SUBGRAPH_DEPTH"):
+            store.get_subgraph(["x"], depth=100)
+
+    def test_subgraph_rejects_negative_depth(self, store: GraphStore) -> None:
+        store.upsert_node("x", "service", {})
+        with pytest.raises(ValueError, match="depth"):
+            store.get_subgraph(["x"], depth=-1)
+
     # ------------------------------------------------------------------
     # aliases
     # ------------------------------------------------------------------

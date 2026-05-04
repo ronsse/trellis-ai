@@ -1246,7 +1246,72 @@ def _configure_mcp_logging() -> None:
     )
 
 
+def _install_shutdown_signal_handlers() -> None:
+    """Install best-effort signal handlers that trigger graceful shutdown.
+
+    The natural shutdown path for an MCP stdio server is the parent
+    process closing stdin (EOF) — :func:`fastmcp.FastMCP.run` returns
+    and the ``finally`` block in :func:`main` closes the registry.
+    These handlers are belt-and-braces for the case where the parent
+    sends a signal instead of (or in addition to) closing stdio.
+
+    The handler does NOT call ``sys.exit()`` — exiting from a signal
+    handler can corrupt stdout if MCP is mid-write. It just logs and
+    re-raises ``KeyboardInterrupt`` for SIGINT (matching the default
+    behavior, so :meth:`mcp.run` unwinds and the ``finally`` runs) or
+    swallows the SIGTERM (the parent will follow with stdin close).
+
+    Platform notes:
+
+    * On POSIX, both SIGTERM and SIGINT are supported.
+    * On Windows, SIGTERM is not deliverable to a Python process in
+      the same way; we still call :func:`signal.signal` for it but
+      tolerate the platform-specific ``AttributeError`` /
+      ``ValueError`` if it raises.
+    """
+    import signal  # noqa: PLC0415
+
+    def _handler(signum: int, _frame: Any) -> None:
+        logger.info("mcp_server_shutdown_signal", signal=signum)
+        # SIGINT — re-raise as KeyboardInterrupt so mcp.run() unwinds
+        # and the finally clause in main() closes the registry. SIGTERM
+        # (and unknown signals) — return; the parent typically follows
+        # with stdin close which is the natural EOF shutdown path.
+        if signum == signal.SIGINT:
+            raise KeyboardInterrupt
+
+    for sig_name in ("SIGTERM", "SIGINT"):
+        sig = getattr(signal, sig_name, None)
+        if sig is None:
+            continue
+        try:
+            signal.signal(sig, _handler)
+        except (AttributeError, ValueError, OSError):
+            # ValueError: signal only works in main thread / not supported
+            # OSError: same on some platforms
+            # AttributeError: defensive, in case of platform stubbing
+            logger.debug("mcp_server_signal_unsupported", signal=sig_name)
+
+
 def main() -> None:
-    """Run the Macro Tools MCP server."""
+    """Run the Macro Tools MCP server.
+
+    Wraps :meth:`mcp.run` in ``try`` / ``finally`` so the cached
+    :class:`StoreRegistry` is closed on shutdown. Without this, the
+    Postgres connection pool and the Neo4j driver leak until the
+    process dies — fine for short-lived stdio sessions, a slow
+    resource leak in long-running deployments.
+    """
     _configure_mcp_logging()
-    mcp.run()
+    _install_shutdown_signal_handlers()
+    try:
+        mcp.run()
+    finally:
+        global _registry  # noqa: PLW0603
+        if _registry is not None:
+            logger.info("mcp_server_shutting_down")
+            try:
+                _registry.close()
+            except Exception:
+                logger.exception("mcp_server_registry_close_failed")
+            _registry = None
