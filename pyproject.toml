@@ -180,6 +180,7 @@ module = [
     "lancedb", "lancedb.*",
     "pyarrow", "pyarrow.*",
     "psycopg", "psycopg.*",
+    "psycopg_pool", "psycopg_pool.*",
     "pgvector", "pgvector.*",
     "boto3", "boto3.*",
     "botocore", "botocore.*",
@@ -188,6 +189,8 @@ module = [
     "openai", "openai.*",
     "anthropic", "anthropic.*",
     "neo4j", "neo4j.*",
+    "opentelemetry", "opentelemetry.*",
+    "prometheus_fastapi_instrumentator", "prometheus_fastapi_instrumentator.*",
 ]
 ignore_missing_imports = true
 
