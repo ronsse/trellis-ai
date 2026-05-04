@@ -48,7 +48,7 @@ components:
           title: Metadata
           type: object
         requested_by:
-          default: api
+          default: api:mutations
           title: Requested By
           type: string
         strategy:
@@ -295,7 +295,7 @@ components:
           title: Entities
           type: array
         requested_by:
-          default: api
+          default: api:bulk-ingest
           title: Requested By
           type: string
         strategy:
@@ -997,7 +997,7 @@ components:
           title: Description
           type: string
         requested_by:
-          default: api
+          default: api:promote
           title: Requested By
           type: string
         title:

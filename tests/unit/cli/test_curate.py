@@ -434,7 +434,7 @@ class TestSubmitPromotion:
 
         submitted: Command = executor.execute.call_args.args[0]
         assert submitted.operation == Operation.ENTITY_CREATE
-        assert submitted.requested_by == "cli"
+        assert submitted.requested_by == "cli:promote-learning"
         assert submitted.args["entity_type"] == "precedent"
         assert submitted.args["entity_id"] == "precedent://learning/test"
         # properties are copied, not aliased — caller mutation can't leak in.

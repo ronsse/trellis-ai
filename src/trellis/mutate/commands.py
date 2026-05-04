@@ -59,7 +59,16 @@ class BatchStrategy(StrEnum):
 
 
 class Command(VersionedModel):
-    """A mutation command submitted to the pipeline."""
+    """A mutation command submitted to the pipeline.
+
+    ``requested_by`` is the audit-trail identifier for whoever submitted
+    the command. Convention is ``<surface>:<verb>`` where surface is one
+    of ``cli`` / ``api`` / ``mcp`` / ``worker`` and verb is the entry
+    point (e.g. ``cli:link``, ``api:bulk-ingest``, ``mcp:save_memory``,
+    ``worker:dbt-extract``). The ``"unknown"`` default is a safety
+    fallback that should never appear in production events — every call
+    site is expected to stamp its own identity.
+    """
 
     command_id: str = Field(default_factory=generate_ulid)
     operation: Operation
@@ -87,7 +96,11 @@ class CommandResult(VersionedModel):
 
 
 class CommandBatch(VersionedModel):
-    """A batch of commands to execute."""
+    """A batch of commands to execute.
+
+    ``requested_by`` follows the same ``<surface>:<verb>`` convention
+    as :class:`Command` — see its docstring.
+    """
 
     batch_id: str = Field(default_factory=generate_ulid)
     commands: list[Command]
