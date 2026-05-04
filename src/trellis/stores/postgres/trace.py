@@ -43,11 +43,10 @@ class PostgresTraceStore(PostgresStoreBase, TraceStore):
     # ------------------------------------------------------------------
 
     def _init_schema(self) -> None:
-        with self.conn.cursor() as cur:
+        with self._conn() as conn, conn.cursor() as cur:
             cur.execute(_CREATE_TABLE)
             for idx_sql in _CREATE_INDEXES:
                 cur.execute(idx_sql)
-        self.conn.commit()
 
     # ------------------------------------------------------------------
     # Append
@@ -61,7 +60,7 @@ class PostgresTraceStore(PostgresStoreBase, TraceStore):
         outcome_status = trace.outcome.status.value if trace.outcome else None
 
         try:
-            with self.conn.cursor() as cur:
+            with self._conn() as conn, conn.cursor() as cur:
                 cur.execute(
                     """
                     INSERT INTO traces
@@ -80,9 +79,7 @@ class PostgresTraceStore(PostgresStoreBase, TraceStore):
                         trace.created_at,
                     ),
                 )
-            self.conn.commit()
         except psycopg.errors.UniqueViolation as exc:
-            self.conn.rollback()
             msg = f"Trace {trace.trace_id} already exists"
             raise StoreError(msg) from exc
 
@@ -94,7 +91,7 @@ class PostgresTraceStore(PostgresStoreBase, TraceStore):
     # ------------------------------------------------------------------
 
     def get(self, trace_id: str) -> Trace | None:
-        with self.conn.cursor() as cur:
+        with self._conn() as conn, conn.cursor() as cur:
             cur.execute(
                 "SELECT trace_json FROM traces WHERE trace_id = %s",
                 (trace_id,),
@@ -148,7 +145,7 @@ class PostgresTraceStore(PostgresStoreBase, TraceStore):
         params.append(limit)
 
         sql = f"SELECT trace_json FROM traces {where} ORDER BY created_at DESC LIMIT %s"
-        with self.conn.cursor() as cur:
+        with self._conn() as conn, conn.cursor() as cur:
             cur.execute(sql, params)
             rows = cur.fetchall()
 
@@ -180,7 +177,7 @@ class PostgresTraceStore(PostgresStoreBase, TraceStore):
         if conditions:
             where = "WHERE " + " AND ".join(conditions)
 
-        with self.conn.cursor() as cur:
+        with self._conn() as conn, conn.cursor() as cur:
             cur.execute(f"SELECT COUNT(*) FROM traces {where}", params)
             row = cur.fetchone()
         assert row is not None

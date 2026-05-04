@@ -5,9 +5,12 @@ from __future__ import annotations
 import json
 import time
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
+
+if TYPE_CHECKING:
+    import psycopg
 
 from trellis.core.base import utc_now
 from trellis.core.ids import generate_ulid
@@ -124,7 +127,7 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
     # ------------------------------------------------------------------
 
     def _init_schema(self) -> None:
-        with self.conn.cursor() as cur:
+        with self._conn() as conn, conn.cursor() as cur:
             cur.execute(_CREATE_NODES)
             # Additive v3 migration: pick up node_role / generation_spec on
             # databases that were created against an older schema.
@@ -134,7 +137,6 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
             cur.execute(_CREATE_ENTITY_ALIASES)
             for idx_sql in _CREATE_INDEXES:
                 cur.execute(idx_sql)
-        self.conn.commit()
 
     # ------------------------------------------------------------------
     # Temporal helpers
@@ -186,66 +188,98 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
             json.dumps(document_ids) if document_ids is not None else None
         )
 
-        existing = self.get_node(node_id)
-        if existing:
-            check_node_role_immutable(node_id, existing, node_role)
-            with self.conn.cursor() as cur:
-                # Close current version
-                cur.execute(
-                    "UPDATE nodes SET valid_to = %s"
-                    " WHERE node_id = %s AND valid_to IS NULL",
-                    (now, node_id),
-                )
-                # Insert new version
+        # Hold one pooled connection across the read+write so the
+        # SELECT-then-UPDATE-then-INSERT sees a consistent snapshot.
+        # Without this, under concurrent upserts of the same node_id
+        # two callers could each read "no current version" and both
+        # INSERT — leaving two rows with valid_to=NULL.
+        with self._conn() as conn:
+            existing = self._fetch_current_node_for_update(conn, node_id)
+            if existing:
+                check_node_role_immutable(node_id, existing, node_role)
+                created_at = existing["created_at"]
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE nodes SET valid_to = %s"
+                        " WHERE node_id = %s AND valid_to IS NULL",
+                        (now, node_id),
+                    )
+                    version_id = generate_ulid()
+                    cur.execute(
+                        """
+                        INSERT INTO nodes
+                            (version_id, node_id, node_type, node_role,
+                             generation_spec, document_ids, properties,
+                             created_at, updated_at, valid_from, valid_to)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULL)
+                        """,
+                        (
+                            version_id,
+                            node_id,
+                            node_type,
+                            node_role,
+                            generation_spec_json,
+                            document_ids_json,
+                            properties_json,
+                            created_at,
+                            now,
+                            now,
+                        ),
+                    )
+            else:
                 version_id = generate_ulid()
-                cur.execute(
-                    """
-                    INSERT INTO nodes
-                        (version_id, node_id, node_type, node_role,
-                         generation_spec, document_ids, properties,
-                         created_at, updated_at, valid_from, valid_to)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULL)
-                    """,
-                    (
-                        version_id,
-                        node_id,
-                        node_type,
-                        node_role,
-                        generation_spec_json,
-                        document_ids_json,
-                        properties_json,
-                        existing["created_at"],
-                        now,
-                        now,
-                    ),
-                )
-        else:
-            version_id = generate_ulid()
-            with self.conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO nodes
-                        (version_id, node_id, node_type, node_role,
-                         generation_spec, document_ids, properties,
-                         created_at, updated_at, valid_from, valid_to)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULL)
-                    """,
-                    (
-                        version_id,
-                        node_id,
-                        node_type,
-                        node_role,
-                        generation_spec_json,
-                        document_ids_json,
-                        properties_json,
-                        now,
-                        now,
-                        now,
-                    ),
-                )
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO nodes
+                            (version_id, node_id, node_type, node_role,
+                             generation_spec, document_ids, properties,
+                             created_at, updated_at, valid_from, valid_to)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULL)
+                        """,
+                        (
+                            version_id,
+                            node_id,
+                            node_type,
+                            node_role,
+                            generation_spec_json,
+                            document_ids_json,
+                            properties_json,
+                            now,
+                            now,
+                            now,
+                        ),
+                    )
 
-        self.conn.commit()
         return node_id
+
+    def _fetch_current_node_for_update(
+        self, conn: psycopg.Connection, node_id: str
+    ) -> dict[str, Any] | None:
+        """Read the current (valid_to IS NULL) node row on ``conn``, with
+        ``FOR UPDATE`` so a concurrent upsert blocks until this txn commits.
+
+        Used inside ``upsert_node``'s pooled-connection block so the
+        read+write happen atomically against a row lock — without this
+        two concurrent upserts of the same node_id could each see "no
+        current version" and both INSERT.
+        """
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT version_id, node_id, node_type, node_role,
+                       generation_spec, document_ids, properties,
+                       created_at, updated_at, valid_from, valid_to
+                FROM nodes
+                WHERE node_id = %s AND valid_to IS NULL
+                FOR UPDATE
+                """,
+                (node_id,),
+            )
+            row = cur.fetchone()
+        if row is None:
+            return None
+        return self._node_row_to_dict(row)
 
     def upsert_nodes_bulk(self, nodes: list[dict[str, Any]]) -> list[str]:
         # ``executemany`` + a single commit, mirroring the SQLite bulk
@@ -298,7 +332,7 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
                 )
             )
 
-        with self.conn.cursor() as cur:
+        with self._conn() as conn, conn.cursor() as cur:
             if existing:
                 cur.execute(
                     "UPDATE nodes SET valid_to = %s "
@@ -315,7 +349,6 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
                 """,
                 insert_rows,
             )
-        self.conn.commit()
         return node_ids
 
     def get_node(
@@ -325,7 +358,7 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
     ) -> dict[str, Any] | None:
         temporal = self._temporal_filter(as_of)
         params: list[Any] = [node_id, *self._temporal_params(as_of)]
-        with self.conn.cursor() as cur:
+        with self._conn() as conn, conn.cursor() as cur:
             cur.execute(
                 f"""
                 SELECT version_id, node_id, node_type, node_role,
@@ -351,7 +384,7 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
         # Use ANY(%s) for list-based IN queries
         temporal = self._temporal_filter(as_of)
         params: list[Any] = [node_ids, *self._temporal_params(as_of)]
-        with self.conn.cursor() as cur:
+        with self._conn() as conn, conn.cursor() as cur:
             cur.execute(
                 f"""
                 SELECT version_id, node_id, node_type, node_role,
@@ -366,7 +399,7 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
         return [self._node_row_to_dict(row) for row in rows]
 
     def get_node_history(self, node_id: str) -> list[dict[str, Any]]:
-        with self.conn.cursor() as cur:
+        with self._conn() as conn, conn.cursor() as cur:
             cur.execute(
                 """
                 SELECT version_id, node_id, node_type, node_role,
@@ -397,46 +430,76 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
     ) -> str:
         now = utc_now()
 
-        existing = self.resolve_alias(source_system, raw_id)
-        if existing:
-            alias_id = existing["alias_id"]
-            created_at = existing["created_at"]
-            with self.conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE entity_aliases SET valid_to = %s"
-                    " WHERE alias_id = %s AND valid_to IS NULL",
-                    (now, alias_id),
-                )
-        else:
-            alias_id = generate_ulid()
-            created_at = now
+        # Hold one connection across the resolve+update+insert so the
+        # SCD-2 close-and-reinsert is transactionally consistent.
+        with self._conn() as conn:
+            existing = self._resolve_alias_for_update(conn, source_system, raw_id)
+            if existing:
+                alias_id = existing["alias_id"]
+                created_at = existing["created_at"]
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE entity_aliases SET valid_to = %s"
+                        " WHERE alias_id = %s AND valid_to IS NULL",
+                        (now, alias_id),
+                    )
+            else:
+                alias_id = generate_ulid()
+                created_at = now
 
-        version_id = generate_ulid()
-        with self.conn.cursor() as cur:
+            version_id = generate_ulid()
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO entity_aliases
+                        (version_id, alias_id, entity_id, source_system,
+                         raw_id, raw_name, match_confidence, is_primary,
+                         created_at, updated_at, valid_from, valid_to)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULL)
+                    """,
+                    (
+                        version_id,
+                        alias_id,
+                        entity_id,
+                        source_system,
+                        raw_id,
+                        raw_name,
+                        match_confidence,
+                        is_primary,
+                        created_at,
+                        now,
+                        now,
+                    ),
+                )
+        return str(alias_id)
+
+    def _resolve_alias_for_update(
+        self,
+        conn: psycopg.Connection,
+        source_system: str,
+        raw_id: str,
+    ) -> dict[str, Any] | None:
+        """Read the current alias row on ``conn`` with ``FOR UPDATE``.
+
+        See ``_fetch_current_node_for_update`` for the row-lock rationale.
+        """
+        with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO entity_aliases
-                    (version_id, alias_id, entity_id, source_system,
-                     raw_id, raw_name, match_confidence, is_primary,
-                     created_at, updated_at, valid_from, valid_to)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULL)
+                SELECT version_id, alias_id, entity_id,
+                       source_system, raw_id, raw_name,
+                       match_confidence, is_primary,
+                       created_at, updated_at, valid_from, valid_to
+                FROM entity_aliases
+                WHERE source_system = %s AND raw_id = %s AND valid_to IS NULL
+                FOR UPDATE
                 """,
-                (
-                    version_id,
-                    alias_id,
-                    entity_id,
-                    source_system,
-                    raw_id,
-                    raw_name,
-                    match_confidence,
-                    is_primary,
-                    created_at,
-                    now,
-                    now,
-                ),
+                (source_system, raw_id),
             )
-        self.conn.commit()
-        return str(alias_id)
+            row = cur.fetchone()
+        if row is None:
+            return None
+        return self._alias_row_to_dict(row)
 
     def resolve_alias(
         self,
@@ -446,7 +509,7 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
     ) -> dict[str, Any] | None:
         temporal = self._temporal_filter(as_of)
         params: list[Any] = [source_system, raw_id, *self._temporal_params(as_of)]
-        with self.conn.cursor() as cur:
+        with self._conn() as conn, conn.cursor() as cur:
             cur.execute(
                 f"""
                 SELECT version_id, alias_id, entity_id,
@@ -477,7 +540,7 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
         conditions.append(self._temporal_filter(as_of))
         params.extend(self._temporal_params(as_of))
         where_clause = " AND ".join(conditions)
-        with self.conn.cursor() as cur:
+        with self._conn() as conn, conn.cursor() as cur:
             cur.execute(
                 f"""
                 SELECT version_id, alias_id, entity_id,
@@ -506,73 +569,76 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
         *,
         commit: bool = True,  # noqa: ARG002
     ) -> str:
-        with self.conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT edge_id FROM edges
-                WHERE source_id = %s AND target_id = %s AND edge_type = %s
-                  AND valid_to IS NULL
-                """,
-                (source_id, target_id, edge_type),
-            )
-            row = cur.fetchone()
-
         now = utc_now()
         properties_json = json.dumps(properties or {})
 
-        if row:
-            edge_id: str = row[0]
-            with self.conn.cursor() as cur:
-                # Close current version
-                cur.execute(
-                    "UPDATE edges SET valid_to = %s"
-                    " WHERE edge_id = %s AND valid_to IS NULL",
-                    (now, edge_id),
-                )
-                # Insert new version
-                version_id = generate_ulid()
+        # Single connection for the read+write so the SCD-2 close-and-
+        # reinsert is transactional. ``FOR UPDATE`` row-locks any current
+        # version, blocking concurrent upserts of the same edge tuple
+        # until this txn commits.
+        with self._conn() as conn:
+            with conn.cursor() as cur:
                 cur.execute(
                     """
-                    INSERT INTO edges
-                        (version_id, edge_id, source_id, target_id, edge_type,
-                         properties, created_at, valid_from, valid_to)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NULL)
+                    SELECT edge_id FROM edges
+                    WHERE source_id = %s AND target_id = %s AND edge_type = %s
+                      AND valid_to IS NULL
+                    FOR UPDATE
                     """,
-                    (
-                        version_id,
-                        edge_id,
-                        source_id,
-                        target_id,
-                        edge_type,
-                        properties_json,
-                        now,
-                        now,
-                    ),
+                    (source_id, target_id, edge_type),
                 )
-        else:
-            edge_id = generate_ulid()
-            version_id = generate_ulid()
-            with self.conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO edges
-                        (version_id, edge_id, source_id, target_id, edge_type,
-                         properties, created_at, valid_from, valid_to)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NULL)
-                    """,
-                    (
-                        version_id,
-                        edge_id,
-                        source_id,
-                        target_id,
-                        edge_type,
-                        properties_json,
-                        now,
-                        now,
-                    ),
-                )
+                row = cur.fetchone()
 
-        self.conn.commit()
+            if row:
+                edge_id: str = row[0]
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE edges SET valid_to = %s"
+                        " WHERE edge_id = %s AND valid_to IS NULL",
+                        (now, edge_id),
+                    )
+                    version_id = generate_ulid()
+                    cur.execute(
+                        """
+                        INSERT INTO edges
+                            (version_id, edge_id, source_id, target_id, edge_type,
+                             properties, created_at, valid_from, valid_to)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NULL)
+                        """,
+                        (
+                            version_id,
+                            edge_id,
+                            source_id,
+                            target_id,
+                            edge_type,
+                            properties_json,
+                            now,
+                            now,
+                        ),
+                    )
+            else:
+                edge_id = generate_ulid()
+                version_id = generate_ulid()
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO edges
+                            (version_id, edge_id, source_id, target_id, edge_type,
+                             properties, created_at, valid_from, valid_to)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NULL)
+                        """,
+                        (
+                            version_id,
+                            edge_id,
+                            source_id,
+                            target_id,
+                            edge_type,
+                            properties_json,
+                            now,
+                            now,
+                        ),
+                    )
+
         return edge_id
 
     def upsert_edges_bulk(self, edges: list[dict[str, Any]]) -> list[str]:
@@ -613,62 +679,67 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
         # triplet is cheap at this scale. ``_pre_validate_edges_bulk``
         # already rejected in-batch duplicate triplets.
         sources = {spec["source_id"] for spec in edges}
-        with self.conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT edge_id, source_id, target_id, edge_type, created_at
-                FROM edges
-                WHERE source_id = ANY(%s) AND valid_to IS NULL
-                """,
-                (list(sources),),
-            )
-            existing_edges: dict[tuple[str, str, str], tuple[Any, ...]] = {
-                (r[1], r[2], r[3]): r for r in cur.fetchall()
-            }
-
-        now = utc_now()
-        edge_ids: list[str] = []
-        insert_rows: list[tuple[Any, ...]] = []
-        for spec in edges:
-            key = (spec["source_id"], spec["target_id"], spec["edge_type"])
-            prior = existing_edges.get(key)
-            if prior is not None:
-                edge_id = str(prior[0])
-                created_at = prior[4]
-            else:
-                edge_id = generate_ulid()
-                created_at = now
-            edge_ids.append(edge_id)
-            insert_rows.append(
-                (
-                    generate_ulid(),
-                    edge_id,
-                    spec["source_id"],
-                    spec["target_id"],
-                    spec["edge_type"],
-                    json.dumps(spec.get("properties") or {}),
-                    created_at,
-                    now,
-                )
-            )
-
-        with self.conn.cursor() as cur:
-            if existing_edges:
+        # Single connection for the bulk pre-fetch + UPDATE + INSERT so
+        # the SCD-2 close-and-reinsert is transactional across all edges
+        # in this batch. (Concurrent batches against overlapping source
+        # nodes still race — that's the same window the single-row path
+        # closes via FOR UPDATE; bulk callers accept it for throughput.)
+        with self._conn() as conn:
+            with conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE edges SET valid_to = %s "
-                    "WHERE edge_id = ANY(%s) AND valid_to IS NULL",
-                    (now, [str(prior[0]) for prior in existing_edges.values()]),
+                    """
+                    SELECT edge_id, source_id, target_id, edge_type, created_at
+                    FROM edges
+                    WHERE source_id = ANY(%s) AND valid_to IS NULL
+                    """,
+                    (list(sources),),
                 )
-            cur.executemany(
-                """
-                INSERT INTO edges
-                    (version_id, edge_id, source_id, target_id, edge_type,
-                     properties, created_at, valid_from, valid_to)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NULL)
-                """,
-                insert_rows,
-            )
-        self.conn.commit()
+                existing_edges: dict[tuple[str, str, str], tuple[Any, ...]] = {
+                    (r[1], r[2], r[3]): r for r in cur.fetchall()
+                }
+
+            now = utc_now()
+            edge_ids: list[str] = []
+            insert_rows: list[tuple[Any, ...]] = []
+            for spec in edges:
+                key = (spec["source_id"], spec["target_id"], spec["edge_type"])
+                prior = existing_edges.get(key)
+                if prior is not None:
+                    edge_id = str(prior[0])
+                    created_at = prior[4]
+                else:
+                    edge_id = generate_ulid()
+                    created_at = now
+                edge_ids.append(edge_id)
+                insert_rows.append(
+                    (
+                        generate_ulid(),
+                        edge_id,
+                        spec["source_id"],
+                        spec["target_id"],
+                        spec["edge_type"],
+                        json.dumps(spec.get("properties") or {}),
+                        created_at,
+                        now,
+                    )
+                )
+
+            with conn.cursor() as cur:
+                if existing_edges:
+                    cur.execute(
+                        "UPDATE edges SET valid_to = %s "
+                        "WHERE edge_id = ANY(%s) AND valid_to IS NULL",
+                        (now, [str(prior[0]) for prior in existing_edges.values()]),
+                    )
+                cur.executemany(
+                    """
+                    INSERT INTO edges
+                        (version_id, edge_id, source_id, target_id, edge_type,
+                         properties, created_at, valid_from, valid_to)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NULL)
+                    """,
+                    insert_rows,
+                )
         return edge_ids
 
     def get_edges(
@@ -698,7 +769,7 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
         where_clause = f"({where_clause}) AND {temporal}"
         params.extend(self._temporal_params(as_of))
 
-        with self.conn.cursor() as cur:
+        with self._conn() as conn, conn.cursor() as cur:
             cur.execute(
                 f"""
                 SELECT version_id, edge_id, source_id, target_id, edge_type,
@@ -786,39 +857,45 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
             depth,
             *node_temporal_params,  # final JOIN temporal
         ]
-        with self.conn.cursor() as cur:
-            cur.execute(query, params)
-            node_rows = cur.fetchall()
+        # Hold one connection across both fetches so the node + edge
+        # snapshot is consistent (no rows added between the two reads).
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, params)
+                node_rows = cur.fetchall()
 
-        collected_nodes: list[dict[str, Any]] = []
-        node_id_set: set[str] = set()
-        for row in node_rows:
-            node_id_set.add(row[1])  # node_id is index 1
-            collected_nodes.append(self._node_row_to_dict(row))
+            collected_nodes: list[dict[str, Any]] = []
+            node_id_set: set[str] = set()
+            for row in node_rows:
+                node_id_set.add(row[1])  # node_id is index 1
+                collected_nodes.append(self._node_row_to_dict(row))
 
-        # Fetch edges between collected nodes
-        collected_edges: list[dict[str, Any]] = []
-        if node_id_set:
-            node_list = list(node_id_set)
-            edge_temporal_frag = self._temporal_filter(as_of)
+            collected_edges: list[dict[str, Any]] = []
+            if node_id_set:
+                node_list = list(node_id_set)
+                edge_temporal_frag = self._temporal_filter(as_of)
 
-            edge_query = f"""
-            SELECT version_id, edge_id, source_id, target_id, edge_type,
-                   properties, created_at, valid_from, valid_to
-            FROM edges
-            WHERE source_id = ANY(%s)
-              AND target_id = ANY(%s)
-              AND {edge_temporal_frag}
-            """
-            eq_params: list[Any] = [node_list, node_list, *self._temporal_params(as_of)]
-            if edge_types:
-                edge_query += " AND edge_type = ANY(%s)"
-                eq_params.append(edge_types)
+                edge_query = f"""
+                SELECT version_id, edge_id, source_id, target_id, edge_type,
+                       properties, created_at, valid_from, valid_to
+                FROM edges
+                WHERE source_id = ANY(%s)
+                  AND target_id = ANY(%s)
+                  AND {edge_temporal_frag}
+                """
+                eq_params: list[Any] = [
+                    node_list,
+                    node_list,
+                    *self._temporal_params(as_of),
+                ]
+                if edge_types:
+                    edge_query += " AND edge_type = ANY(%s)"
+                    eq_params.append(edge_types)
 
-            with self.conn.cursor() as cur:
-                cur.execute(edge_query, eq_params)
-                edge_rows = cur.fetchall()
-            collected_edges = [self._edge_row_to_dict(row) for row in edge_rows]
+                with conn.cursor() as cur:
+                    cur.execute(edge_query, eq_params)
+                    edge_rows = cur.fetchall()
+                collected_edges = [self._edge_row_to_dict(row) for row in edge_rows]
 
         logger.debug(
             "subgraph_fetched",
@@ -864,7 +941,7 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
         where_clause = " AND ".join(conditions)
         params.append(limit)
 
-        with self.conn.cursor() as cur:
+        with self._conn() as conn, conn.cursor() as cur:
             cur.execute(
                 f"""
                 SELECT version_id, node_id, node_type, node_role,
@@ -894,7 +971,7 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
     # ------------------------------------------------------------------
 
     def delete_node(self, node_id: str) -> bool:
-        with self.conn.cursor() as cur:
+        with self._conn() as conn, conn.cursor() as cur:
             cur.execute(
                 "DELETE FROM edges WHERE source_id = %s OR target_id = %s",
                 (node_id, node_id),
@@ -902,16 +979,14 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
             cur.execute("DELETE FROM entity_aliases WHERE entity_id = %s", (node_id,))
             cur.execute("DELETE FROM nodes WHERE node_id = %s", (node_id,))
             deleted = bool(cur.rowcount > 0)
-        self.conn.commit()
         if deleted:
             logger.debug("node_deleted", node_id=node_id)
         return deleted
 
     def delete_edge(self, edge_id: str) -> bool:
-        with self.conn.cursor() as cur:
+        with self._conn() as conn, conn.cursor() as cur:
             cur.execute("DELETE FROM edges WHERE edge_id = %s", (edge_id,))
             deleted = bool(cur.rowcount > 0)
-        self.conn.commit()
         if deleted:
             logger.debug("edge_deleted", edge_id=edge_id)
         return deleted
@@ -921,14 +996,14 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
     # ------------------------------------------------------------------
 
     def count_nodes(self) -> int:
-        with self.conn.cursor() as cur:
+        with self._conn() as conn, conn.cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM nodes WHERE valid_to IS NULL")
             row = cur.fetchone()
         assert row is not None
         return int(row[0])
 
     def count_edges(self) -> int:
-        with self.conn.cursor() as cur:
+        with self._conn() as conn, conn.cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM edges WHERE valid_to IS NULL")
             row = cur.fetchone()
         assert row is not None
@@ -948,7 +1023,7 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
         * ``properties.<key>`` (via JSONB ``->>`` path extractor)
         """
         sql, params = self._compile_node_query(query)
-        with self.conn.cursor() as cur:
+        with self._conn() as conn, conn.cursor() as cur:
             cur.execute(sql, params)
             rows = cur.fetchall()
         return [self._node_row_to_dict(row) for row in rows]
@@ -1036,34 +1111,29 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
         counts: dict[str, int] = {}
         range_valid_to: list[datetime] = []
 
-        try:
-            with self.conn.cursor() as cur:
-                for table in self._COMPACTABLE_TABLES:
+        with self._conn() as conn, conn.cursor() as cur:
+            for table in self._COMPACTABLE_TABLES:
+                cur.execute(
+                    f"SELECT COUNT(*) AS cnt, "
+                    f"MIN(valid_to) AS oldest, MAX(valid_to) AS newest "
+                    f"FROM {table} "
+                    f"WHERE valid_to IS NOT NULL AND valid_to < %s",
+                    (before,),
+                )
+                row = cur.fetchone()
+                count = int(row[0]) if row is not None else 0
+                counts[table] = count
+                if count > 0 and row is not None:
+                    if row[1] is not None:
+                        range_valid_to.append(row[1])
+                    if row[2] is not None:
+                        range_valid_to.append(row[2])
+                if count > 0 and not dry_run:
                     cur.execute(
-                        f"SELECT COUNT(*) AS cnt, "
-                        f"MIN(valid_to) AS oldest, MAX(valid_to) AS newest "
-                        f"FROM {table} "
+                        f"DELETE FROM {table} "
                         f"WHERE valid_to IS NOT NULL AND valid_to < %s",
                         (before,),
                     )
-                    row = cur.fetchone()
-                    count = int(row[0]) if row is not None else 0
-                    counts[table] = count
-                    if count > 0 and row is not None:
-                        if row[1] is not None:
-                            range_valid_to.append(row[1])
-                        if row[2] is not None:
-                            range_valid_to.append(row[2])
-                    if count > 0 and not dry_run:
-                        cur.execute(
-                            f"DELETE FROM {table} "
-                            f"WHERE valid_to IS NOT NULL AND valid_to < %s",
-                            (before,),
-                        )
-            self.conn.commit()
-        except Exception:
-            self.conn.rollback()
-            raise
 
         report = CompactionReport(
             before=before,

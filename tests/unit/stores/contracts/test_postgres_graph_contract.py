@@ -30,8 +30,7 @@ class TestPostgresGraphContract(GraphStoreContractTests):
 
         s = PostgresGraphStore(dsn=DSN)
         # Each contract test starts from an empty graph.
-        with s.conn.cursor() as cur:
+        with s._conn() as conn, conn.cursor() as cur:
             cur.execute("TRUNCATE TABLE nodes, edges, entity_aliases")
-        s.conn.commit()
         yield s
         s.close()

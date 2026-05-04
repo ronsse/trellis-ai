@@ -8,11 +8,12 @@ from typing import Any
 import structlog
 
 from trellis.stores.base.vector import VectorStore
+from trellis.stores.postgres.base import PostgresStoreBase
 
 logger = structlog.get_logger(__name__)
 
 try:
-    import psycopg
+    import psycopg  # noqa: F401
 
     HAS_PSYCOPG = True
 except ImportError:
@@ -34,7 +35,7 @@ def _format_vector(vec: list[float]) -> str:
     return "[" + ",".join(repr(float(x)) for x in vec) + "]"
 
 
-class PgVectorStore(VectorStore):
+class PgVectorStore(PostgresStoreBase, VectorStore):
     """PostgreSQL + pgvector backed vector store with HNSW indexing.
 
     Parameters
@@ -59,31 +60,19 @@ class PgVectorStore(VectorStore):
             )
             raise ImportError(msg)
 
-        self._dsn = dsn
         self._dimensions = dimensions
-        self._conn = psycopg.connect(dsn, autocommit=False)
-        register_vector(self._conn)
-        self._init_schema()
-        logger.info(
-            "pgvector_store_initialized",
-            dimensions=dimensions,
-        )
-
-    @property
-    def conn(self) -> psycopg.Connection:
-        """Return the connection, reconnecting if it was closed."""
-        if self._conn.closed:
-            logger.warning("pgvector_reconnecting_closed_connection")
-            self._conn = psycopg.connect(self._dsn, autocommit=False)
-            register_vector(self._conn)
-        return self._conn
+        # ``register_vector`` adapts the ``vector`` type so psycopg can
+        # round-trip Python lists / numpy arrays without our own casts.
+        # Each pooled connection needs the adapter registered, hence the
+        # ``on_connect`` hook.
+        super().__init__(dsn, on_connect=register_vector)
 
     # ------------------------------------------------------------------
     # Schema
     # ------------------------------------------------------------------
 
     def _init_schema(self) -> None:
-        with self.conn.cursor() as cur:
+        with self._conn() as conn, conn.cursor() as cur:
             cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
             cur.execute(
                 f"""
@@ -121,7 +110,6 @@ class PgVectorStore(VectorStore):
                 """
             )
             row = cur.fetchone()
-        self.conn.commit()
         if row is None:
             return
         existing_type = str(row[0])
@@ -156,7 +144,7 @@ class PgVectorStore(VectorStore):
         metadata: dict[str, Any] | None = None,
     ) -> None:
         meta_json = json.dumps(metadata or {})
-        with self.conn.cursor() as cur:
+        with self._conn() as conn, conn.cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO vectors (item_id, embedding, metadata)
@@ -167,7 +155,6 @@ class PgVectorStore(VectorStore):
                 """,
                 (item_id, _format_vector(vector), meta_json),
             )
-        self.conn.commit()
 
     def upsert_bulk(self, items: list[dict[str, Any]]) -> None:
         # Network-bound but no UNWIND-style batching here — simple
@@ -217,7 +204,7 @@ class PgVectorStore(VectorStore):
         # JSONs (in WHERE), then ORDER BY vector, then LIMIT.
         params: list[Any] = [formatted, *filter_params, formatted, top_k]
 
-        with self.conn.cursor() as cur:
+        with self._conn() as conn, conn.cursor() as cur:
             cur.execute(sql, params)
             rows = cur.fetchall()
 
@@ -231,7 +218,7 @@ class PgVectorStore(VectorStore):
         ]
 
     def get(self, item_id: str) -> dict[str, Any] | None:
-        with self.conn.cursor() as cur:
+        with self._conn() as conn, conn.cursor() as cur:
             cur.execute(
                 """
                 SELECT item_id, embedding, metadata
@@ -254,21 +241,15 @@ class PgVectorStore(VectorStore):
         }
 
     def delete(self, item_id: str) -> bool:
-        with self.conn.cursor() as cur:
+        with self._conn() as conn, conn.cursor() as cur:
             cur.execute(
                 "DELETE FROM vectors WHERE item_id = %s",
                 (item_id,),
             )
-            deleted = bool(cur.rowcount > 0)
-        self.conn.commit()
-        return deleted
+            return bool(cur.rowcount > 0)
 
     def count(self) -> int:
-        with self.conn.cursor() as cur:
+        with self._conn() as conn, conn.cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM vectors")
             row = cur.fetchone()
         return int(row[0]) if row else 0
-
-    def close(self) -> None:
-        self._conn.close()
-        logger.info("pgvector_store_closed")
