@@ -8,11 +8,12 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import structlog
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from trellis.stores.registry import StoreRegistry
+from trellis_api.auth import require_api_key, warn_if_unauthenticated
 
 logger = structlog.get_logger(__name__)
 
@@ -39,6 +40,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:  # noqa: ARG001
     global _registry  # noqa: PLW0603
     _registry = StoreRegistry.from_config_dir()
     _registry.validate()
+    warn_if_unauthenticated()
     logger.info("api_stores_initialized")
     yield
     _registry.close()
@@ -76,20 +78,44 @@ def create_app() -> FastAPI:
 
     # Version handshake — unversioned, mounted at /api/version (no prefix).
     # Deliberately outside /api/v1 because it describes which major is running.
+    # Stays unauthenticated so clients can probe compatibility before
+    # they have a key.
     app.include_router(version.router, tags=["version"])
 
-    # Liveness/readiness probes — unversioned, deployment plumbing.
+    # Liveness/readiness probes — unversioned, deployment plumbing. Must
+    # stay unauthenticated so orchestrator probes (k8s, ALB, etc.) work
+    # without holding the API secret.
     app.include_router(health.router, tags=["health"])
 
-    app.include_router(admin.router, prefix="/api/v1", tags=["admin"])
-    app.include_router(ingest.router, prefix="/api/v1", tags=["ingest"])
-    app.include_router(retrieve.router, prefix="/api/v1", tags=["retrieve"])
-    app.include_router(curate.router, prefix="/api/v1", tags=["curate"])
-    app.include_router(mutations.router, prefix="/api/v1", tags=["mutations"])
-    app.include_router(policies.router, prefix="/api/v1", tags=["policies"])
-    app.include_router(extract.router, prefix="/api/v1", tags=["extract"])
+    # Every ``/api/v1`` router gates on the API key when ``TRELLIS_API_KEY``
+    # is set. When the env var is unset the dependency is a no-op so dev /
+    # CI workflows stay frictionless.
+    auth = [Depends(require_api_key)]
+    app.include_router(
+        admin.router, prefix="/api/v1", tags=["admin"], dependencies=auth
+    )
+    app.include_router(
+        ingest.router, prefix="/api/v1", tags=["ingest"], dependencies=auth
+    )
+    app.include_router(
+        retrieve.router, prefix="/api/v1", tags=["retrieve"], dependencies=auth
+    )
+    app.include_router(
+        curate.router, prefix="/api/v1", tags=["curate"], dependencies=auth
+    )
+    app.include_router(
+        mutations.router, prefix="/api/v1", tags=["mutations"], dependencies=auth
+    )
+    app.include_router(
+        policies.router, prefix="/api/v1", tags=["policies"], dependencies=auth
+    )
+    app.include_router(
+        extract.router, prefix="/api/v1", tags=["extract"], dependencies=auth
+    )
 
-    # Serve the UI at /ui (static files bundled in the package)
+    # Static UI at /ui — stays unauthenticated; the UI calls /api/v1
+    # routes which are gated, so the secret only flows through the
+    # browser's fetch headers (operator-managed page).
     if _STATIC_DIR.is_dir():
         app.mount("/ui", StaticFiles(directory=str(_STATIC_DIR), html=True), name="ui")
 
