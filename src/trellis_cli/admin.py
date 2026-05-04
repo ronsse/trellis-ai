@@ -7,6 +7,7 @@ import os
 import shutil
 import time
 from collections import Counter, defaultdict
+from http import HTTPStatus
 from pathlib import Path
 from typing import Any
 
@@ -1411,9 +1412,12 @@ def _check_healthz(client: httpx.Client) -> dict[str, Any]:
         response = client.get("/healthz")
     except httpx.HTTPError as exc:
         return _record_check("healthz", "fail", started, error=str(exc))
-    if response.status_code != 200:
+    if response.status_code != HTTPStatus.OK:
         return _record_check(
-            "healthz", "fail", started, error=f"expected 200, got {response.status_code}"
+            "healthz",
+            "fail",
+            started,
+            error=f"expected 200, got {response.status_code}",
         )
     return _record_check("healthz", "pass", started)
 
@@ -1426,7 +1430,7 @@ def _check_readyz(client: httpx.Client) -> dict[str, Any]:
         return _record_check("readyz", "fail", started, error=str(exc))
     body = _safe_json(response)
     backends = body.get("backends") if isinstance(body, dict) else None
-    if response.status_code != 200:
+    if response.status_code != HTTPStatus.OK:
         return _record_check(
             "readyz",
             "fail",
@@ -1443,7 +1447,7 @@ def _check_auth_rejects_missing(client: httpx.Client) -> dict[str, Any]:
         response = client.get(_SMOKE_AUTH_PROBE_PATH)
     except httpx.HTTPError as exc:
         return _record_check("auth_rejects_missing", "fail", started, error=str(exc))
-    if response.status_code != 401:
+    if response.status_code != HTTPStatus.UNAUTHORIZED:
         return _record_check(
             "auth_rejects_missing",
             "fail",
@@ -1461,7 +1465,7 @@ def _check_auth_accepts_valid(client: httpx.Client, api_key: str) -> dict[str, A
         )
     except httpx.HTTPError as exc:
         return _record_check("auth_accepts_valid", "fail", started, error=str(exc))
-    if response.status_code != 200:
+    if response.status_code != HTTPStatus.OK:
         return _record_check(
             "auth_accepts_valid",
             "fail",
@@ -1479,16 +1483,19 @@ def _check_metrics(client: httpx.Client) -> dict[str, Any]:
         return _record_check("metrics", "fail", started, error=str(exc))
     # 404 means the [observability] extra isn't installed — that's a
     # legitimate deploy choice, not a smoke-test failure. Treat as info.
-    if response.status_code == 404:
+    if response.status_code == HTTPStatus.NOT_FOUND:
         return _record_check(
             "metrics",
             "info",
             started,
             note="not wired (install trellis-ai[observability] to enable)",
         )
-    if response.status_code != 200:
+    if response.status_code != HTTPStatus.OK:
         return _record_check(
-            "metrics", "fail", started, error=f"expected 200, got {response.status_code}"
+            "metrics",
+            "fail",
+            started,
+            error=f"expected 200, got {response.status_code}",
         )
     # Prometheus exposition format starts every metric with a # HELP
     # comment; bail if the body doesn't look like one.

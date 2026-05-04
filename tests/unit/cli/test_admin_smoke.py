@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import httpx
-import pytest
 from typer.testing import CliRunner
 
 from trellis_cli import admin as admin_module
 from trellis_cli.main import app
+
+if TYPE_CHECKING:
+    import pytest
 
 runner = CliRunner()
 
@@ -20,7 +23,40 @@ runner = CliRunner()
 # ---------------------------------------------------------------------------
 
 
-def _healthy_handler(api_key: str | None = "secret") -> Callable[[httpx.Request], httpx.Response]:
+_READYZ_OK_BODY = {
+    "status": "ready",
+    "backends": {
+        "event_log": {"status": "ok", "latency_ms": 4.21},
+        "graph_store": {"status": "ok", "latency_ms": 12.30},
+        "vector_store": {"status": "ok", "latency_ms": 3.05},
+        "document_store": {"status": "ok", "latency_ms": 2.81},
+    },
+}
+
+_METRICS_PROMETHEUS_BODY = (
+    "# HELP http_requests_total Total HTTP requests\n"
+    "http_requests_total 1\n"
+)
+
+
+def _advisories_response(
+    request: httpx.Request, api_key: str | None
+) -> httpx.Response:
+    """Mirror ``require_api_key`` in ``trellis_api.auth``."""
+    if api_key is None:
+        return httpx.Response(200, json={"advisories": []})
+    if request.headers.get("X-API-Key") == api_key:
+        return httpx.Response(200, json={"advisories": []})
+    return httpx.Response(
+        401,
+        json={"detail": "missing or invalid X-API-Key"},
+        headers={"WWW-Authenticate": "ApiKey"},
+    )
+
+
+def _healthy_handler(
+    api_key: str | None = "secret",
+) -> Callable[[httpx.Request], httpx.Response]:
     """Build a MockTransport handler simulating a healthy deployment.
 
     Mirrors the actual route shapes: ``/readyz`` returns the same per-backend
@@ -28,42 +64,19 @@ def _healthy_handler(api_key: str | None = "secret") -> Callable[[httpx.Request]
     rejects requests without ``X-API-Key`` (when ``api_key`` is set) the way
     ``require_api_key`` in ``trellis_api.auth`` does.
     """
+    routes = {
+        "/healthz": lambda _r: httpx.Response(200, json={"status": "ok"}),
+        "/readyz": lambda _r: httpx.Response(200, json=_READYZ_OK_BODY),
+        "/api/v1/advisories": lambda r: _advisories_response(r, api_key),
+        "/metrics": lambda _r: httpx.Response(
+            200,
+            text=_METRICS_PROMETHEUS_BODY,
+            headers={"content-type": "text/plain; version=0.0.4"},
+        ),
+    }
 
     def handler(request: httpx.Request) -> httpx.Response:
-        path = request.url.path
-        if path == "/healthz":
-            return httpx.Response(200, json={"status": "ok"})
-        if path == "/readyz":
-            return httpx.Response(
-                200,
-                json={
-                    "status": "ready",
-                    "backends": {
-                        "event_log": {"status": "ok", "latency_ms": 4.21},
-                        "graph_store": {"status": "ok", "latency_ms": 12.30},
-                        "vector_store": {"status": "ok", "latency_ms": 3.05},
-                        "document_store": {"status": "ok", "latency_ms": 2.81},
-                    },
-                },
-            )
-        if path == "/api/v1/advisories":
-            if api_key is None:
-                # Auth not enforced on the server; every request gets through.
-                return httpx.Response(200, json={"advisories": []})
-            if request.headers.get("X-API-Key") == api_key:
-                return httpx.Response(200, json={"advisories": []})
-            return httpx.Response(
-                401,
-                json={"detail": "missing or invalid X-API-Key"},
-                headers={"WWW-Authenticate": "ApiKey"},
-            )
-        if path == "/metrics":
-            return httpx.Response(
-                200,
-                text="# HELP http_requests_total Total HTTP requests\nhttp_requests_total 1\n",
-                headers={"content-type": "text/plain; version=0.0.4"},
-            )
-        return httpx.Response(404)
+        return routes.get(request.url.path, lambda _r: httpx.Response(404))(request)
 
     return handler
 
@@ -244,7 +257,8 @@ class TestSmokeTestFailures:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
-            raise httpx.ConnectError(f"connection refused: {request.url}")
+            message = f"connection refused: {request.url}"
+            raise httpx.ConnectError(message)
 
         _patch_client(monkeypatch, handler)
 
