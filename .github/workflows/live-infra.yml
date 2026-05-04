@@ -1,30 +1,34 @@
 name: Live infrastructure tests
 
-# Runs the integration suites that hit live cloud backends — Neo4j
-# AuraDB and Neon Postgres — so connection-pool, middleware, and
-# wipe-helper regressions surface in CI rather than during deploy
-# validation. Skipped automatically on PRs from forks (no secret
-# access). Triggered:
+# Runs the integration suites that hit live cloud backends (Neo4j +
+# Postgres) so connection-pool, middleware, and wipe-helper
+# regressions surface in CI rather than during deploy validation.
+# Triggered:
 #
-#   * daily at 06:00 UTC — keeps AuraDB Free warm (it pauses after
-#     ~3 days idle) and gives the signal real meaning. Downgrade to
-#     weekly later if compute cost matters.
+#   * on push to main — every merge runs the live suite, catching
+#     anything that slipped through PR review. Code changes are when
+#     regressions land; that's when we want the signal.
 #   * on workflow_dispatch — operators can run on demand from the
 #     Actions tab before a deploy.
 #
-# Required repo secrets (set under Settings → Secrets and variables →
-# Actions). Without these the job will skip cleanly because the test
-# fixtures themselves gate on these env vars:
+# No periodic schedule. Live infra doesn't drift on its own; if there
+# are no merges there are no regressions to catch.
 #
-#   * TRELLIS_TEST_NEO4J_URI         neo4j+s://<instance>.databases.neo4j.io
-#   * TRELLIS_TEST_NEO4J_USER        AuraDB user (instance ID for AuraDB)
-#   * TRELLIS_TEST_NEO4J_PASSWORD    AuraDB password
-#   * TRELLIS_TEST_NEO4J_DATABASE    instance ID for AuraDB; "neo4j" for self-hosted
-#   * TRELLIS_TEST_PG_DSN            postgresql://... (Neon DSN)
+# Required repo secrets (set under Settings → Secrets and variables →
+# Actions). Without these the job runs but every test skips cleanly
+# because the test fixtures themselves gate on these env vars:
+#
+#   * TRELLIS_TEST_NEO4J_URI         bolt:// or neo4j+s:// URI
+#   * TRELLIS_TEST_NEO4J_USER        Neo4j user
+#   * TRELLIS_TEST_NEO4J_PASSWORD    Neo4j password
+#   * TRELLIS_TEST_NEO4J_DATABASE    database name (provider-specific —
+#                                    e.g. AuraDB uses the instance ID,
+#                                    self-hosted defaults to "neo4j")
+#   * TRELLIS_TEST_PG_DSN            postgresql:// DSN
 
 on:
-  schedule:
-    - cron: "0 6 * * *"
+  push:
+    branches: [main]
   workflow_dispatch:
 
 # Serialize runs against shared live infra — wipe_live_state in the

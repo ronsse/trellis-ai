@@ -7,12 +7,13 @@ and how to schedule the three closed feedback loops.
 
 Pairs with the infrastructure-specific guides in this folder
 ([aws-ecs.md](aws-ecs.md), [local-compose.md](local-compose.md),
-[neo4j-auradb.md](neo4j-auradb.md)) — those describe *where* Trellis
-runs; this one describes *how* to operate it once it's running.
+[neo4j-local.md](neo4j-local.md), [neo4j-auradb.md](neo4j-auradb.md))
+— those describe *where* Trellis runs; this one describes *how* to
+operate it once it's running.
 
 ## Environment variables
 
-The minimum set to bring up the API against Postgres + AuraDB:
+The minimum set to bring up the API against Postgres + Neo4j:
 
 | Variable                       | Required? | Purpose                                                                  |
 |--------------------------------|-----------|--------------------------------------------------------------------------|
@@ -31,7 +32,7 @@ Backend-specific:
 | `TRELLIS_NEO4J_URI`            | Graph backend = Neo4j.                   |
 | `TRELLIS_NEO4J_USER`           | Graph backend = Neo4j.                   |
 | `TRELLIS_NEO4J_PASSWORD`       | Graph backend = Neo4j.                   |
-| `TRELLIS_NEO4J_DATABASE`       | AuraDB: set to the instance ID, not `neo4j`. |
+| `TRELLIS_NEO4J_DATABASE`       | Database name. Self-hosted defaults to `neo4j`. AuraDB-specific: set to the instance ID. |
 | `OPENAI_API_KEY`               | Running EnrichmentService or LLM-tier extractors. |
 | `ANTHROPIC_API_KEY`            | Same — alternative provider.             |
 
@@ -182,8 +183,8 @@ Every Postgres-backed store (`PostgresTraceStore`,
 **per-store, per-process** — five stores × N processes = the
 connection budget you need to provision against on the Postgres side.
 
-Defaults are sized for one uvicorn worker against AuraDB-Free-class
-Postgres:
+Defaults are sized for one uvicorn worker against a small managed
+Postgres (a few GB RAM, ~100 max connections at the DB):
 
 ```
 TRELLIS_PG_POOL_MIN_SIZE=2     # idle connections per store
