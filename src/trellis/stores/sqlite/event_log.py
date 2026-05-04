@@ -106,6 +106,7 @@ class SQLiteEventLog(SQLiteStoreBase, EventLog):
         until: datetime | None = None,
         limit: int = 100,
         order: EventOrder = "asc",
+        payload_filters: dict[str, str] | None = None,
     ) -> list[Event]:
         """Query events with filters."""
         clauses: list[str] = []
@@ -126,6 +127,16 @@ class SQLiteEventLog(SQLiteStoreBase, EventLog):
         if until is not None:
             clauses.append("occurred_at <= ?")
             params.append(until.isoformat())
+        if payload_filters:
+            for key, value in payload_filters.items():
+                # Build the JSON path with concatenation so the key is a
+                # bound parameter, not interpolated SQL — this keeps the
+                # caller-supplied key safe from injection. Stored as TEXT
+                # under ``payload_json``; ``json_extract`` returns the
+                # underlying scalar so plain string comparison matches
+                # JSON string values.
+                clauses.append("json_extract(payload_json, '$.' || ?) = ?")
+                params.extend([key, value])
 
         where = " AND ".join(clauses) if clauses else "1=1"
         direction = "DESC" if order == "desc" else "ASC"

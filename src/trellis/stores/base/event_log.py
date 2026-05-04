@@ -157,6 +157,7 @@ class EventLog(ABC):
         until: datetime | None = None,
         limit: int = 100,
         order: EventOrder = "asc",
+        payload_filters: dict[str, str] | None = None,
     ) -> list[Event]:
         """Query events with filters.
 
@@ -165,6 +166,16 @@ class EventLog(ABC):
         analytics aggregators; ``"desc"`` returns the most recent events
         first so duplicate-check / latest-N lookups can short-circuit
         without missing recent rows.
+
+        ``payload_filters`` maps payload-key to expected string value;
+        predicates are AND-ed and pushed into the backend SQL so the
+        ``limit`` cap applies *after* the filter. This is the SQL-side
+        equivalent of post-fetch ``e.payload.get(K) == V`` and matters
+        when the unfiltered window would pull megabytes of JSON only to
+        keep a few rows. Backends compare against the textual JSON value
+        (``payload->>K`` on Postgres, ``json_extract(payload, '$.K')`` on
+        SQLite), so callers comparing against ints / bools must coerce
+        to ``str`` at the call site.
         """
 
     @abstractmethod

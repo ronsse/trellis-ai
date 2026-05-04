@@ -74,25 +74,21 @@ def _feedback_id_in_event_log(event_log: EventLog, feedback_id: str) -> bool:
     """Return True when the EventLog already has a FEEDBACK_RECORDED event
     with this ``feedback_id`` in its payload.
 
-    Scans the **most recent** FEEDBACK_RECORDED events first
-    (``order="desc"``) so the duplicate-check + reconcile-already-present
-    short-circuit can hit on a recently-emitted feedback without being
-    truncated by the ``limit`` cap. Without ``order="desc"`` the default
-    ``ORDER BY occurred_at ASC`` would scan the *oldest* 10K events —
-    on a long-running EventLog that means the recent end of the log
-    isn't even fetched.
-
-    The 10K cap is generous because feedback volume is bounded by agent
-    activity, not backend traffic; backends that need sub-linear lookup
-    can add a JSON-key index on ``payload->>'feedback_id'``. This is
-    correctness-first, not performance-first.
+    Pushes the ``feedback_id`` predicate into the backend via
+    ``payload_filters`` so the lookup is a SQL ``WHERE`` against
+    ``payload->>'feedback_id'`` (Postgres) / ``json_extract`` (SQLite),
+    not a Python scan over the most-recent 10K events. ``limit=1`` is
+    enough — the predicate identifies the row, ``order="desc"`` is
+    retained for backends that don't honour limit-with-predicate
+    semantics deterministically.
     """
     events = event_log.get_events(
         event_type=EventType.FEEDBACK_RECORDED,
-        limit=10_000,
+        limit=1,
         order="desc",
+        payload_filters={"feedback_id": feedback_id},
     )
-    return any(e.payload.get("feedback_id") == feedback_id for e in events)
+    return bool(events)
 
 
 def record_feedback(

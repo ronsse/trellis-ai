@@ -128,6 +128,7 @@ class PostgresEventLog(PostgresStoreBase, EventLog):
         until: datetime | None = None,
         limit: int = 100,
         order: EventOrder = "asc",
+        payload_filters: dict[str, str] | None = None,
     ) -> list[Event]:
         clauses: list[str] = []
         params: list[Any] = []
@@ -147,6 +148,13 @@ class PostgresEventLog(PostgresStoreBase, EventLog):
         if until is not None:
             clauses.append("occurred_at <= %s")
             params.append(until)
+        if payload_filters:
+            for key, value in payload_filters.items():
+                # ``payload->>'k' = 'v'`` returns TEXT; callers comparing
+                # ints / bools must coerce to str. JSONB makes this
+                # GIN-indexable but no index is required for correctness.
+                clauses.append("payload->>%s = %s")
+                params.extend([key, value])
 
         where = " AND ".join(clauses) if clauses else "1=1"
         direction = "DESC" if order == "desc" else "ASC"
