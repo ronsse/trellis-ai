@@ -3,7 +3,7 @@
 The cross-cutting reference for running Trellis in production: every
 env var the API and CLI honour, what the probes return and how to
 read them, how to scrape `/metrics`, how to size the Postgres pool,
-and how to schedule the four closed feedback loops.
+and how to schedule the three closed feedback loops.
 
 Pairs with the infrastructure-specific guides in this folder
 ([aws-ecs.md](aws-ecs.md), [local-compose.md](local-compose.md),
@@ -204,17 +204,16 @@ Each pool logs `pg_pool_opened` with its actual `min_size` /
 
 ## Closed feedback loops
 
-Trellis runs four cooperating loops on top of the EventLog. Three
-have CLI / REST surfaces; one is currently programmatic-only (see
-"Operational gap" below). All four are idempotent and safe to schedule
-on independent cadences.
+Trellis runs three cooperating loops on top of the EventLog. All
+three are idempotent and safe to schedule on independent cadences.
+Reconciliation is a separate **recovery operation**, not a steady-state
+loop — see [Recovery operations](#recovery-operations) below.
 
 | Loop                | Surface                                              | Suggested cadence       |
 |---------------------|------------------------------------------------------|-------------------------|
 | Advisory generation | `trellis analyze generate-advisories` / `POST /api/v1/advisories/generate` | Hourly                  |
 | Noise demote        | `POST /api/v1/effectiveness/apply-noise-tags`  | Daily                   |
 | Learning promote    | `trellis analyze learning-candidates` + `trellis curate promote-learning` | Weekly (human-gated)   |
-| Reconciliation      | `trellis.feedback.recording.reconcile_feedback_log_to_event_log` (Python) | Hourly, or after sink failures |
 
 ### 1. Advisory generation
 
@@ -267,15 +266,32 @@ trellis curate promote-learning \
 
 `--dry-run` prints the planned mutations without executing them.
 
-### 4. Reconciliation
+## Recovery operations
 
-Closes the divergence path where JSONL feedback was written but the
-`FEEDBACK_RECORDED` event was not (sink unavailable, process crashed
-between writes, file-only capture being promoted into the governed
-pipeline). Idempotent — already-emitted entries are skipped.
+### Feedback reconciliation
 
-**Operational gap.** As of this writing, this loop has *no CLI
-wrapper* — operators must invoke it programmatically:
+Trellis writes feedback to two paths: a `pack_feedback.jsonl` file on
+disk (file-based capture) and the `FEEDBACK_RECORDED` event in the
+EventLog (governed mutation pipeline). On a healthy system both writes
+succeed and stay in lockstep. If the EventLog write fails (transient
+backend outage, process crash between writes), the JSONL has the row
+but the EventLog does not — analytics that read from the EventLog miss
+it.
+
+`reconcile_feedback_log_to_event_log` closes that gap. It is **not** a
+scheduled loop — running it against a healthy system scans the JSONL
+and emits zero events because every entry is `already_present`. Run it
+**when monitoring shows drift**, not on a cron.
+
+Signals that you need to run reconciliation:
+
+* Persistent gap between the JSONL row count and the
+  `FEEDBACK_RECORDED` event count for the same time window
+* Logs showing repeated EventLog write failures during a recent outage
+* Imported a JSONL feedback log from another instance and want to
+  promote those rows into the governed pipeline
+
+Invocation is currently programmatic — no CLI / REST wrapper:
 
 ```python
 from pathlib import Path
@@ -290,8 +306,9 @@ result = reconcile_feedback_log_to_event_log(
 print(result)  # ReconcileResult(scanned=N, already_present=N, emitted=N, failed=N)
 ```
 
-A `trellis curate reconcile-feedback` CLI wrapper would close this gap
-— tracked as a follow-up.
+If you find yourself running this often, the right fix is to harden
+the underlying EventLog sink (retry policy, failover, monitoring) —
+not to wrap reconciliation in a recurring schedule.
 
 ## Scheduling the loops
 
