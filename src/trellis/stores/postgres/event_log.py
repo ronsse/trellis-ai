@@ -32,6 +32,26 @@ _CREATE_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type)",
     "CREATE INDEX IF NOT EXISTS idx_events_entity ON events(entity_id)",
     "CREATE INDEX IF NOT EXISTS idx_events_source ON events(source)",
+    # Composite index for ``get_events(event_type=X, order="desc", limit=N)``.
+    # Lets Postgres serve a recency-ordered slice of a single event type as an
+    # index range scan with no sort step.
+    "CREATE INDEX IF NOT EXISTS idx_events_type_occurred_desc "
+    "ON events(event_type, occurred_at DESC)",
+    # Composite index for entity-history lookups
+    # (``get_events(entity_id=X)`` ordered by recency).
+    "CREATE INDEX IF NOT EXISTS idx_events_entity_occurred_desc "
+    "ON events(entity_id, occurred_at DESC)",
+    # Partial expression index for ``_feedback_id_in_event_log`` — turns the
+    # 10K-row scan it currently does into an O(log N) JSON-key probe.
+    "CREATE INDEX IF NOT EXISTS idx_events_feedback_id "
+    "ON events ((payload->>'feedback_id')) "
+    "WHERE event_type = 'feedback.recorded'",
+    # Partial expression index for ``has_idempotency_key``. Targets the
+    # ``WHERE event_type = 'mutation.executed' AND payload->>'idempotency_key' = %s``
+    # query the mutation pipeline runs on every command.
+    "CREATE INDEX IF NOT EXISTS idx_events_idempotency_key "
+    "ON events ((payload->>'idempotency_key')) "
+    "WHERE event_type = 'mutation.executed'",
 ]
 
 

@@ -433,6 +433,42 @@ class TestPostgresEventLog:
         events = store.get_events(event_type=EventType.SYSTEM_INITIALIZED)
         assert len(events) == 1
 
+    def test_init_schema_is_idempotent(self, store) -> None:
+        """Re-running ``_init_schema`` must be a no-op: existing deployments
+        pick up newly-added indices on next process start without a separate
+        migration script.
+        """
+        store._init_schema()
+        store._init_schema()
+
+    def test_explain_uses_type_occurred_desc_index(self, store) -> None:
+        """``get_events(event_type=X, order="desc", limit=N)`` must be served
+        by the composite ``(event_type, occurred_at DESC)`` index.
+        """
+        with store._conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "EXPLAIN SELECT * FROM events "
+                "WHERE event_type = 'feedback.recorded' "
+                "ORDER BY occurred_at DESC LIMIT 10"
+            )
+            plan_lines = cur.fetchall()
+        plan_text = "\n".join(row[0] for row in plan_lines)
+        assert "idx_events_type_occurred_desc" in plan_text, plan_text
+
+    def test_explain_uses_idempotency_key_index(self, store) -> None:
+        """``has_idempotency_key`` must be served by the partial JSON
+        expression index on ``payload->>'idempotency_key'``.
+        """
+        with store._conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "EXPLAIN SELECT 1 FROM events "
+                "WHERE event_type = 'mutation.executed' "
+                "AND payload->>'idempotency_key' = 'k1' LIMIT 1"
+            )
+            plan_lines = cur.fetchall()
+        plan_text = "\n".join(row[0] for row in plan_lines)
+        assert "idx_events_idempotency_key" in plan_text, plan_text
+
 
 # ======================================================================
 # Connection pool — concurrent throughput
