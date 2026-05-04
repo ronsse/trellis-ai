@@ -58,12 +58,46 @@ class TestHealthz:
 
 
 class TestReadyz:
-    def test_ready_when_registry_initialized(self, client_ready):
+    def test_ready_when_all_backends_probe_clean(self, client_ready):
         resp = client_ready.get("/readyz")
         assert resp.status_code == 200
-        assert resp.json() == {"status": "ready"}
+        body = resp.json()
+        assert body["status"] == "ready"
+        # Every cloud-backend an agent's request depends on must be probed.
+        assert set(body["backends"].keys()) == {
+            "event_log",
+            "graph_store",
+            "vector_store",
+            "document_store",
+        }
+        for name, backend in body["backends"].items():
+            assert backend["status"] == "ok", (name, backend)
+            assert "latency_ms" in backend
 
     def test_initializing_when_registry_absent(self, client_unready):
         resp = client_unready.get("/readyz")
         assert resp.status_code == 503
         assert resp.json() == {"status": "initializing"}
+
+    def test_degraded_when_a_backend_throws(
+        self, client_ready, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A failing backend flips overall status to 503 + lets ops see
+        which one is down without grepping logs."""
+        registry = app_module._registry
+        assert registry is not None
+
+        def _broken_count() -> int:
+            msg = "vector backend unreachable"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(registry.knowledge.vector_store, "count", _broken_count)
+
+        resp = client_ready.get("/readyz")
+        assert resp.status_code == 503
+        body = resp.json()
+        assert body["status"] == "degraded"
+        assert body["backends"]["vector_store"]["status"] == "degraded"
+        assert "vector backend unreachable" in body["backends"]["vector_store"]["error"]
+        # Other backends still report individually.
+        assert body["backends"]["event_log"]["status"] == "ok"
