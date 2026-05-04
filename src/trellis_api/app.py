@@ -11,9 +11,14 @@ import structlog
 from fastapi import Depends, FastAPI
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from trellis.stores.registry import StoreRegistry
 from trellis_api.auth import require_api_key, warn_if_unauthenticated
+from trellis_api.middleware import (
+    request_id_middleware,
+    unhandled_exception_handler,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -71,6 +76,14 @@ def create_app() -> FastAPI:
         version="0.2.0",
         lifespan=lifespan,
     )
+
+    # Request-ID correlation — runs before everything so health,
+    # version, and /api/v1 routes all log with the same request_id.
+    app.add_middleware(BaseHTTPMiddleware, dispatch=request_id_middleware)
+
+    # Translate uncaught exceptions into a structured 500 envelope so
+    # responses don't leak internal types or stack frames.
+    app.add_exception_handler(Exception, unhandled_exception_handler)
 
     @app.get("/", include_in_schema=False)
     async def root_redirect() -> RedirectResponse:
