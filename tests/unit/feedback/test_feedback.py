@@ -445,6 +445,7 @@ class _CapturingEventLog:
         event_type=None,
         limit: int = 100,
         order: str = "asc",
+        payload_filters: dict[str, str] | None = None,
         **_ignored,
     ):
         from types import SimpleNamespace
@@ -454,6 +455,14 @@ class _CapturingEventLog:
             for e in self.events
             if event_type is None or e["event_type"] == event_type
         ]
+        if payload_filters:
+            matches = [
+                e
+                for e in matches
+                if all(
+                    str(e["payload"].get(k)) == v for k, v in payload_filters.items()
+                )
+            ]
         if order == "desc":
             matches.reverse()
         return [SimpleNamespace(payload=e["payload"]) for e in matches[:limit]]

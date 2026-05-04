@@ -469,6 +469,59 @@ class TestPostgresEventLog:
         plan_text = "\n".join(row[0] for row in plan_lines)
         assert "idx_events_idempotency_key" in plan_text, plan_text
 
+    def test_payload_filters_pushdown(self, store) -> None:
+        """``payload_filters`` is rendered as ``payload->>'k' = 'v'``."""
+        from trellis.stores.base.event_log import EventType
+
+        store.emit(
+            EventType.PRECEDENT_PROMOTED,
+            source="test",
+            payload={"domain": "billing", "title": "match"},
+        )
+        store.emit(
+            EventType.PRECEDENT_PROMOTED,
+            source="test",
+            payload={"domain": "shipping", "title": "skip"},
+        )
+        events = store.get_events(payload_filters={"domain": "billing"})
+        assert len(events) == 1
+        assert events[0].payload["title"] == "match"
+
+    def test_payload_filters_multiple_keys_anded(self, store) -> None:
+        """Multiple payload-filter entries AND together in SQL."""
+        from trellis.stores.base.event_log import EventType
+
+        store.emit(
+            EventType.PRECEDENT_PROMOTED,
+            source="test",
+            payload={"domain": "billing", "tier": "gold", "title": "match"},
+        )
+        store.emit(
+            EventType.PRECEDENT_PROMOTED,
+            source="test",
+            payload={"domain": "billing", "tier": "silver"},
+        )
+        events = store.get_events(payload_filters={"domain": "billing", "tier": "gold"})
+        assert len(events) == 1
+        assert events[0].payload["title"] == "match"
+
+    def test_payload_filters_empty_or_none_is_noop(self, store) -> None:
+        from trellis.stores.base.event_log import EventType
+
+        store.emit(EventType.PRECEDENT_PROMOTED, source="a", payload={"domain": "x"})
+        store.emit(EventType.PRECEDENT_PROMOTED, source="b", payload={"domain": "y"})
+
+        baseline = store.get_events(event_type=EventType.PRECEDENT_PROMOTED)
+        none_filtered = store.get_events(
+            event_type=EventType.PRECEDENT_PROMOTED, payload_filters=None
+        )
+        empty_filtered = store.get_events(
+            event_type=EventType.PRECEDENT_PROMOTED, payload_filters={}
+        )
+        assert len(baseline) == 2
+        assert [e.event_id for e in none_filtered] == [e.event_id for e in baseline]
+        assert [e.event_id for e in empty_filtered] == [e.event_id for e in baseline]
+
 
 # ======================================================================
 # Connection pool — concurrent throughput
