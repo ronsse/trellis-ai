@@ -43,18 +43,17 @@ class PostgresEventLog(PostgresStoreBase, EventLog):
     # ------------------------------------------------------------------
 
     def _init_schema(self) -> None:
-        with self.conn.cursor() as cur:
+        with self._conn() as conn, conn.cursor() as cur:
             cur.execute(_CREATE_TABLE)
             for idx_sql in _CREATE_INDEXES:
                 cur.execute(idx_sql)
-        self.conn.commit()
 
     # ------------------------------------------------------------------
     # Append
     # ------------------------------------------------------------------
 
     def append(self, event: Event) -> None:
-        with self.conn.cursor() as cur:
+        with self._conn() as conn, conn.cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO events
@@ -75,7 +74,6 @@ class PostgresEventLog(PostgresStoreBase, EventLog):
                     event.schema_version,
                 ),
             )
-        self.conn.commit()
         logger.debug(
             "event_log.appended",
             event_id=event.event_id,
@@ -88,7 +86,7 @@ class PostgresEventLog(PostgresStoreBase, EventLog):
 
     def has_idempotency_key(self, key: str) -> bool:
         """Efficient single-row check for an idempotency key."""
-        with self.conn.cursor() as cur:
+        with self._conn() as conn, conn.cursor() as cur:
             cur.execute(
                 "SELECT 1 FROM events WHERE event_type = %s "
                 "AND payload->>'idempotency_key' = %s LIMIT 1",
@@ -138,7 +136,7 @@ class PostgresEventLog(PostgresStoreBase, EventLog):
         )
         params.append(limit)
 
-        with self.conn.cursor() as cur:
+        with self._conn() as conn, conn.cursor() as cur:
             cur.execute(sql, params)
             rows = cur.fetchall()
         return [self._row_to_event(row) for row in rows]
@@ -166,7 +164,7 @@ class PostgresEventLog(PostgresStoreBase, EventLog):
         where = " AND ".join(clauses) if clauses else "1=1"
         sql = f"SELECT COUNT(*) FROM events WHERE {where}"
 
-        with self.conn.cursor() as cur:
+        with self._conn() as conn, conn.cursor() as cur:
             cur.execute(sql, params)
             row = cur.fetchone()
         return int(row[0]) if row else 0

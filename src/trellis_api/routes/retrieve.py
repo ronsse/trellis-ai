@@ -213,24 +213,27 @@ def _search_entities_postgres(
     }.get(sort, "created_at")
     sort_dir = "ASC" if order.lower() == "asc" else "DESC"
 
-    # Count total
+    # Hold one pooled connection across the count + page reads so the
+    # paginated UI sees a consistent snapshot — without this, a node
+    # written between the two queries shifts every subsequent page.
     count_params = list(params)
-    with store.conn.cursor() as cur:  # type: ignore[attr-defined]
-        cur.execute(
-            f"SELECT COUNT(*) FROM nodes WHERE {where}",  # noqa: S608
-            count_params,
-        )
-        total = cur.fetchone()[0]
-
     params.extend([limit, offset])
-    with store.conn.cursor() as cur:  # type: ignore[attr-defined]
-        cur.execute(
-            f"SELECT node_id, node_type, properties, created_at"  # noqa: S608
-            f" FROM nodes WHERE {where}"
-            f" ORDER BY {sort_col} {sort_dir} LIMIT %s OFFSET %s",
-            params,
-        )
-        rows = cur.fetchall()
+    with store._conn() as conn:  # type: ignore[attr-defined]
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT COUNT(*) FROM nodes WHERE {where}",  # noqa: S608
+                count_params,
+            )
+            total = cur.fetchone()[0]
+
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT node_id, node_type, properties, created_at"  # noqa: S608
+                f" FROM nodes WHERE {where}"
+                f" ORDER BY {sort_col} {sort_dir} LIMIT %s OFFSET %s",
+                params,
+            )
+            rows = cur.fetchall()
 
     results = [
         {

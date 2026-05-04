@@ -47,13 +47,12 @@ class PostgresDocumentStore(PostgresStoreBase, DocumentStore):
     # ------------------------------------------------------------------
 
     def _init_schema(self) -> None:
-        with self.conn.cursor() as cur:
+        with self._conn() as conn, conn.cursor() as cur:
             cur.execute(_CREATE_TABLE)
             for idx_sql in _CREATE_INDEXES:
                 cur.execute(idx_sql)
             # Migrate existing tables: upgrade tsv column to include metadata
             self._migrate_tsv_weights(cur)
-        self.conn.commit()
 
     def _migrate_tsv_weights(self, cur: Any) -> None:
         """Upgrade tsv column to weighted search if it only indexes content.
@@ -110,7 +109,7 @@ class PostgresDocumentStore(PostgresStoreBase, DocumentStore):
         metadata_json = json.dumps(metadata)
         chash = _content_hash(content)
 
-        with self.conn.cursor() as cur:
+        with self._conn() as conn, conn.cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO documents
@@ -124,12 +123,11 @@ class PostgresDocumentStore(PostgresStoreBase, DocumentStore):
                 """,
                 (doc_id, content, chash, metadata_json, now, now),
             )
-        self.conn.commit()
         logger.debug("document_stored", doc_id=doc_id)
         return doc_id
 
     def get(self, doc_id: str) -> dict[str, Any] | None:
-        with self.conn.cursor() as cur:
+        with self._conn() as conn, conn.cursor() as cur:
             cur.execute(
                 """
                 SELECT doc_id, content, content_hash, metadata,
@@ -144,10 +142,9 @@ class PostgresDocumentStore(PostgresStoreBase, DocumentStore):
         return self._row_to_dict(row)
 
     def delete(self, doc_id: str) -> bool:
-        with self.conn.cursor() as cur:
+        with self._conn() as conn, conn.cursor() as cur:
             cur.execute("DELETE FROM documents WHERE doc_id = %s", (doc_id,))
             deleted = bool(cur.rowcount > 0)
-        self.conn.commit()
         if deleted:
             logger.debug("document_deleted", doc_id=doc_id)
         return deleted
@@ -215,13 +212,9 @@ class PostgresDocumentStore(PostgresStoreBase, DocumentStore):
         # The first %s in the SELECT is the ranking query param
         all_params: list[Any] = [query, *params]
 
-        with self.conn.cursor() as cur:
+        with self._conn() as conn, conn.cursor() as cur:
             cur.execute(sql, all_params)
             rows = cur.fetchall()
-        # Close the implicit transaction so subsequent calls on this
-        # connection don't pile up in "idle in transaction" state — the
-        # H2.2 advisory loop hangs on the 3rd /packs call without this.
-        self.conn.commit()
 
         return [self._row_to_dict(row, include_rank=True) for row in rows]
 
@@ -235,7 +228,7 @@ class PostgresDocumentStore(PostgresStoreBase, DocumentStore):
         limit: int = 50,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
-        with self.conn.cursor() as cur:
+        with self._conn() as conn, conn.cursor() as cur:
             cur.execute(
                 """
                 SELECT doc_id, content, content_hash, metadata,
@@ -250,7 +243,7 @@ class PostgresDocumentStore(PostgresStoreBase, DocumentStore):
         return [self._row_to_dict(row) for row in rows]
 
     def count(self) -> int:
-        with self.conn.cursor() as cur:
+        with self._conn() as conn, conn.cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM documents")
             row = cur.fetchone()
         assert row is not None
@@ -261,7 +254,7 @@ class PostgresDocumentStore(PostgresStoreBase, DocumentStore):
     # ------------------------------------------------------------------
 
     def get_by_hash(self, content_hash: str) -> dict[str, Any] | None:
-        with self.conn.cursor() as cur:
+        with self._conn() as conn, conn.cursor() as cur:
             cur.execute(
                 """
                 SELECT doc_id, content, content_hash, metadata,

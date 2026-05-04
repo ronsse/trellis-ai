@@ -323,12 +323,11 @@ class TestPostgresGraphStore:
         store.upsert_node("n1", "person", {"v": 2})
         # Backdate the closed row's valid_to.
         ten_days_ago = datetime.now(UTC) - timedelta(days=10)
-        with store.conn.cursor() as cur:
+        with store._conn() as conn, conn.cursor() as cur:
             cur.execute(
                 "UPDATE nodes SET valid_to = %s WHERE valid_to IS NOT NULL",
                 (ten_days_ago,),
             )
-        store.conn.commit()
 
         report = store.compact_versions(datetime.now(UTC) - timedelta(days=5))
         assert report.nodes_compacted == 1
@@ -342,12 +341,11 @@ class TestPostgresGraphStore:
         store.upsert_node("n1", "person", {"v": 1})
         store.upsert_node("n1", "person", {"v": 2})
         ten_days_ago = datetime.now(UTC) - timedelta(days=10)
-        with store.conn.cursor() as cur:
+        with store._conn() as conn, conn.cursor() as cur:
             cur.execute(
                 "UPDATE nodes SET valid_to = %s WHERE valid_to IS NOT NULL",
                 (ten_days_ago,),
             )
-        store.conn.commit()
 
         report = store.compact_versions(
             datetime.now(UTC) - timedelta(days=5), dry_run=True
@@ -434,3 +432,73 @@ class TestPostgresEventLog:
 
         events = store.get_events(event_type=EventType.SYSTEM_INITIALIZED)
         assert len(events) == 1
+
+
+# ======================================================================
+# Connection pool — concurrent throughput
+# ======================================================================
+
+
+class TestPostgresConnectionPool:
+    """Smoke tests for the ``PostgresStoreBase`` connection pool.
+
+    The pre-pool implementation held one ``psycopg.Connection`` per
+    store and serialised every query through it; FastAPI's thread-pool
+    handlers blocked on each other under load. These tests prove the
+    pool gives concurrent threads real parallelism without deadlocks
+    or "another command is already in progress" errors.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _setup(self) -> None:
+        assert PG_DSN is not None
+        _clean_tables(PG_DSN)
+
+    def test_concurrent_writes_do_not_deadlock(self) -> None:
+        """8 threads writing distinct events finish without errors."""
+        import concurrent.futures
+
+        from trellis.stores.base.event_log import EventType
+        from trellis.stores.postgres.event_log import PostgresEventLog
+
+        store = PostgresEventLog(PG_DSN)
+        try:
+            n_threads = 8
+            writes_per_thread = 25
+
+            def worker(worker_id: int) -> int:
+                for i in range(writes_per_thread):
+                    store.emit(
+                        EventType.TRACE_INGESTED,
+                        source="pool-smoke",
+                        entity_id=f"w{worker_id}-i{i}",
+                        payload={"worker": worker_id, "i": i},
+                    )
+                return writes_per_thread
+
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=n_threads
+            ) as pool_executor:
+                results = list(pool_executor.map(worker, range(n_threads)))
+
+            assert sum(results) == n_threads * writes_per_thread
+            assert store.count(event_type=EventType.TRACE_INGESTED) == (
+                n_threads * writes_per_thread
+            )
+        finally:
+            store.close()
+
+    def test_pool_respects_max_size_env_var(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``TRELLIS_PG_POOL_MAX_SIZE`` flows into the pool config."""
+        from trellis.stores.postgres.event_log import PostgresEventLog
+
+        monkeypatch.setenv("TRELLIS_PG_POOL_MIN_SIZE", "1")
+        monkeypatch.setenv("TRELLIS_PG_POOL_MAX_SIZE", "3")
+        store = PostgresEventLog(PG_DSN)
+        try:
+            assert store._pool.max_size == 3
+            assert store._pool.min_size == 1
+        finally:
+            store.close()

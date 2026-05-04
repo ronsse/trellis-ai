@@ -138,21 +138,18 @@ def reset_vectors() -> dict[str, Any]:
         return {"status": "error", "message": "Vector store not configured"}
 
     try:
-        # SQLite vector store exposes a plain sqlite3 connection at `_conn`
-        # whose Cursor does not support the context-manager protocol; pgvector
-        # exposes an auto-reconnecting `.conn` property with psycopg cursors.
-        if hasattr(vector_store, "conn"):
-            with vector_store.conn.cursor() as cur:
+        # PgVectorStore exposes the pooled-connection helper ``_conn``
+        # inherited from ``PostgresStoreBase``; SQLite's vector store
+        # uses a plain ``sqlite3.Connection`` at ``_conn`` whose
+        # ``execute`` runs SQL directly. Detect by attribute capability,
+        # not type, so the route stays backend-agnostic.
+        if hasattr(vector_store, "_pool"):
+            with vector_store._conn() as conn, conn.cursor() as cur:
                 cur.execute("DROP TABLE IF EXISTS vectors")
-            vector_store.conn.commit()
         else:
             vector_store._conn.execute("DROP TABLE IF EXISTS vectors")
             vector_store._conn.commit()
         vector_store._init_schema()
-        if hasattr(vector_store, "conn"):
-            vector_store.conn.commit()
-        else:
-            vector_store._conn.commit()
     except Exception as exc:
         return {"status": "error", "message": str(exc)}
     else:
