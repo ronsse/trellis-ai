@@ -2007,13 +2007,13 @@ Graphiti is a **1-D specialist** (conversational memory with temporal facts, hea
 
 #### Badges (README, top of file, first thing a visitor sees)
 
-- [ ] **CI status badge** — `[![CI](https://github.com/OWNER/trellis-ai/actions/workflows/ci.yml/badge.svg)](...)`. Already have `ci.yml` — just needs the badge Markdown added to README. **5 minutes.**
+- [x] **CI status badge** — DONE. Tests / Lint / Type Check badges live at the top of `README.md` (the project never had a single `ci.yml`; it shipped pre-split into `lint.yml` / `tests.yml` / `typecheck.yml`).
 
-- [ ] **Ruff lint badge** — either reuse the CI badge (if CI runs lint) or add a dedicated `lint` workflow with its own badge. Graphiti has a dedicated `lint.yml` workflow → dedicated badge. We should do the same: split `ci.yml` into `lint.yml`, `typecheck.yml`, `tests.yml` so each gets its own badge and its own green checkmark. Graphiti's pattern in `.github/workflows/lint.yml` is the template. **30 minutes.**
+- [x] **Ruff lint badge** — DONE. `[![Lint](...)]` in README; backed by `.github/workflows/lint.yml`.
 
-- [ ] **Type-check badge** — `[![Type Check](https://github.com/OWNER/trellis-ai/actions/workflows/typecheck.yml/badge.svg)](...)`. Requires splitting the `ci.yml` typecheck job into its own workflow. **15 minutes.**
+- [x] **Type-check badge** — DONE. `[![Type Check](...)]` in README; backed by `.github/workflows/typecheck.yml`.
 
-- [ ] **Test status badge (with matrix)** — badge per Python version (3.11, 3.12, 3.13) or one aggregate badge. Prefer one aggregate; matrix badges are visually noisy. **10 minutes** after the split.
+- [x] **Test status badge (with matrix)** — DONE (aggregate). Single `[![Tests](...)]` badge; underlying `tests.yml` runs the 3.11/3.12/3.13 matrix.
 
 - [ ] **Coverage badge** — requires setting up coverage reporting. Options:
   - **Codecov** (`codecov.io`, free for open source) — standard, widely trusted badge, integrates via GitHub Action. Add `pytest --cov=src --cov-report=xml` to test workflow, upload via `codecov/codecov-action@v4`, add badge.
@@ -2021,11 +2021,11 @@ Graphiti is a **1-D specialist** (conversational memory with temporal facts, hea
   - **No coverage badge** — if coverage is currently low or uneven, ship the badge after improving coverage. Do not ship a badge showing 40%.
   - Decision gate: measure current coverage first (`pytest --cov=src`), decide based on result. Target ≥80% before shipping the badge. **1-2 hours** including workflow changes.
 
-- [ ] **PyPI version badge** — `[![PyPI](https://img.shields.io/pypi/v/trellis-ai.svg)](https://pypi.org/project/trellis-ai/)`. Gated on actually publishing to PyPI (already in the "In Progress — PyPI Publishing" section). **5 minutes** after publish.
+- [x] **PyPI version badge** — DONE. `[![PyPI](...)]` in README; auto-renders the latest published version.
 
-- [ ] **Python versions supported badge** — `[![Python](https://img.shields.io/pypi/pyversions/trellis-ai.svg)]`. Auto-renders from PyPI classifiers. **5 minutes** after publish.
+- [x] **Python versions supported badge** — DONE. `[![Python](...)]` in README; auto-renders from PyPI classifiers.
 
-- [ ] **License badge** — `[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)`. **2 minutes.**
+- [x] **License badge** — DONE. `[![License: MIT](...)]` in README.
 
 - [ ] **Downloads badge** — `[![Downloads](https://static.pepy.tech/badge/trellis-ai/month)](https://pepy.tech/project/trellis-ai)`. Gated on PyPI publish, shows momentum. Only add once downloads are non-embarrassing (e.g., after first announcement push). **5 minutes** when ready.
 
@@ -2035,15 +2035,15 @@ Graphiti is a **1-D specialist** (conversational memory with temporal facts, hea
 
 #### Workflow file hygiene
 
-- [ ] **Split `ci.yml` into per-concern workflows** — `lint.yml`, `typecheck.yml`, `tests.yml`. Each gets its own badge. Pattern from Graphiti: one workflow per concern, clear naming, each workflow has a single `name:` matching the badge. This also makes CI faster because failures in one concern don't block the others.
+- [x] **Split `ci.yml` into per-concern workflows** — DONE. `.github/workflows/{lint,tests,typecheck}.yml` each carry their own `name:` matching the README badges; failures in one concern don't block the others.
 
-- [ ] **Add database integration test workflow** — Graphiti has `database_integration_tests.yml` that spins up Neo4j and FalkorDB in containers via `services:` in the workflow. We should do the same for PostgreSQL + pgvector to ensure the production backend is actually tested in CI, not just mocked. Currently our CI only exercises SQLite. Reference: `graphiti/.github/workflows/database_integration_tests.yml`.
+- [x] **Add database integration test workflow** — DONE. `.github/workflows/live-infra.yml` runs the full Neo4j (AuraDB) + Postgres + pgvector live suite on every push to main and on `workflow_dispatch`. Skips cleanly when secrets are absent.
 
-- [ ] **Claude Code review workflow** — Graphiti has `.github/workflows/claude-code-review.yml` and `claude.yml` for AI-assisted PR review. We already have these (checked in). Confirm they're configured correctly and mention in CONTRIBUTING.md as a signal that AI-assisted development is first-class here.
+- [x] **Claude Code review workflow** — `claude.yml` checked in; mentioned in CONTRIBUTING.md.
 
-- [ ] **CodeQL scanning** — Graphiti has `codeql.yml` for security scanning. Add ours. GitHub provides a one-click setup via the Security tab. **5 minutes** (no code needed).
+- [x] **CodeQL scanning** — DONE. `.github/workflows/codeql.yml` runs the `security-extended` query suite on push, PR, and a weekly Monday cron.
 
-- [ ] **Release workflow** — `release.yml` that builds and publishes to PyPI on tag push. Already in the PyPI Publishing TODO; just make sure it lands before the first release.
+- [x] **Release workflow** — DONE. `.github/workflows/publish.yml` triggers on `v*` tags; OIDC-based trusted-publisher setup.
 
 #### README polish
 
@@ -2061,13 +2061,13 @@ Graphiti is a **1-D specialist** (conversational memory with temporal facts, hea
 
 - [ ] **"Used by" or "Adopters" section** — even if it's just "used internally at [company]" or "built for [project]", showing that *someone* runs this in production is a credibility signal. Gated on having users willing to be named.
 
-- [ ] **CONTRIBUTING.md** — Graphiti has one; we should too. Topics: how to run tests, how to add a new store backend, how to extend the classification pipeline, how AI-assisted development works (reference to CLAUDE.md), PR process. Should be short (≤200 lines) and actionable.
+- [x] **CONTRIBUTING.md** — DONE. Lives at repo root.
 
-- [ ] **Code of Conduct** — Graphiti has `CODE_OF_CONDUCT.md`. Adopt the Contributor Covenant. **5 minutes** (standard template).
+- [x] **Code of Conduct** — DONE. `CODE_OF_CONDUCT.md` at repo root.
 
-- [ ] **Security policy** — Graphiti has `SECURITY.md`. Ours should explain: supported versions, how to report a vulnerability (private channel), expected response time. **15 minutes** (template).
+- [x] **Security policy** — DONE. `SECURITY.md` at repo root.
 
-- [ ] **Changelog** — Graphiti has implicit changelog via releases. We should have `CHANGELOG.md` in Keep-a-Changelog format, updated on every release. Gated on the first release.
+- [x] **Changelog** — DONE. `CHANGELOG.md` in Keep-a-Changelog format with entries through v0.5.1 + v0.5.2 + an `[Unreleased]` `### Deprecated` block landed in PR #95.
 
 #### Documentation polish
 
@@ -2084,15 +2084,15 @@ Graphiti is a **1-D specialist** (conversational memory with temporal facts, hea
   3. Phase 3: evaluate switching mypy → pyright (pyright is faster, has better error messages, and is what Graphiti uses — community signal that it's the modern default for new projects)
   4. Each phase is its own PR so contributors see incremental rigor
 
-- [ ] **`py.typed` marker file** — ships typed stubs with the package so downstream users get type checking. Graphiti has this. One-line file in `src/trellis/py.typed` + `include` directive in `pyproject.toml`. **5 minutes.**
+- [x] **`py.typed` marker file** — DONE. Ships on all six packages: `src/trellis/`, `src/trellis_cli/`, `src/trellis_sdk/`, `src/trellis_api/`, `src/trellis_workers/`, `src/trellis_wire/`. Listed under `[tool.hatch.build.targets.wheel] include` in `pyproject.toml`.
 
-- [ ] **`Makefile` parity with Graphiti** — Graphiti has `make install`, `make format`, `make lint`, `make test`, `make check`. We have similar targets in our existing Makefile; confirm they all work and add `make check` as the aggregate (format + lint + typecheck + test) if not present.
+- [x] **`Makefile` parity with Graphiti** — DONE. `make {format,lint,typecheck,test}` plus `make check` aggregate (lint + typecheck + test).
 
 #### Community & visibility
 
 - [ ] **Discord or GitHub Discussions** — Graphiti has a Discord. GitHub Discussions is zero-setup and lives inside the repo. Enable Discussions and pin a welcome thread before any external announcement. **5 minutes.**
 
-- [ ] **GitHub topics / tags** — add topics to the repo settings: `ai-agents`, `knowledge-graph`, `agent-memory`, `mcp`, `llm-memory`, `rag`, `temporal-graph`, `llm-tools`. Improves GitHub search discoverability. **2 minutes.**
+- [x] **GitHub topics / tags** — DONE. Repo carries 17 topics covering the proposed set (with `agent-memory` standing in for `llm-memory` and `retrieval-augmented-generation` for `rag`).
 
 - [ ] **Submit to awesome-* lists** — already in the Discoverability TODO. Key targets: `awesome-mcp-servers`, `awesome-llm-apps`, `awesome-agents`, `awesome-ai-agents`. Each one is a 1-2 line PR.
 
@@ -2108,37 +2108,37 @@ Graphiti is a **1-D specialist** (conversational memory with temporal facts, hea
 
 The suggested execution order for this section, front-loaded by ROI:
 
-1. **Immediate (before any public announcement), ~4 hours total:**
-   - Split `ci.yml` into lint/typecheck/tests workflows + add badges
-   - Add license badge, Python versions badge (after PyPI publish)
-   - Add `py.typed` marker
-   - Enable GitHub Discussions
-   - Add GitHub topics
-   - Tighten README hero tagline
+1. **Immediate (before any public announcement)** — ✅ done modulo Discussions + tagline:
+   - ✅ Split workflows into lint/typecheck/tests + badges
+   - ✅ License badge, Python versions badge
+   - ✅ `py.typed` marker (all six packages)
+   - ✅ GitHub topics (17 topics covering the proposed set)
+   - ⏳ Enable GitHub Discussions (repo settings — no code)
+   - ⏳ Tighten README hero tagline (judgement call; current tagline is the bold line under the title)
 
 2. **Before first external announcement (HN/blog), ~1 day total:**
-   - CONTRIBUTING.md + Code of Conduct + SECURITY.md
-   - Coverage measurement + optional Codecov integration (only ship badge if ≥80%)
-   - README "how does this compare to X?" section
-   - Quickstart tightening (5-line install + 60-second first-run)
-   - Rendered architecture diagram alongside the ASCII one
-   - Demo GIF (from Demo & Content section)
+   - ✅ CONTRIBUTING.md + Code of Conduct + SECURITY.md
+   - ⏳ Coverage measurement + optional Codecov integration (only ship badge if ≥80%)
+   - ⏳ README "how does this compare to X?" section
+   - ⏳ Quickstart tightening (5-line install + 60-second first-run)
+   - ⏳ Rendered architecture diagram alongside the ASCII one
+   - ⏳ Demo GIF (from Demo & Content section)
 
 3. **Before v1.0 release, ~2-3 days:**
-   - Database integration test workflow (Postgres + pgvector in CI)
-   - Type-check strictness phase 1 (schemas/mutate/stores)
-   - Design philosophy blog post
-   - Graphiti comparison doc (`docs/research/graphiti-comparison.md`)
-   - CHANGELOG.md
-   - Release workflow (PyPI auto-publish on tag)
+   - ✅ Database integration test workflow (`live-infra.yml` covers Neo4j + Postgres + pgvector)
+   - ⏳ Type-check strictness phase 1 (schemas/mutate/stores)
+   - ⏳ Design philosophy blog post
+   - ⏳ Graphiti comparison doc (`docs/research/graphiti-comparison.md`)
+   - ✅ CHANGELOG.md
+   - ✅ Release workflow (`publish.yml` triggers on `v*` tags via OIDC)
 
 4. **Post-v1.0, ongoing:**
-   - Coverage improvement to ≥80%
-   - Type-check strictness phases 2 and 3
-   - Comparison blog post
-   - mkdocs-material docs site
-   - Submit to awesome-* lists
-   - Conference submissions
+   - ⏳ Coverage improvement to ≥80%
+   - ⏳ Type-check strictness phases 2 and 3
+   - ⏳ Comparison blog post
+   - ⏳ mkdocs-material docs site
+   - ⏳ Submit to awesome-* lists
+   - ⏳ Conference submissions
    - Downloads badge, stars badge (once numbers are non-embarrassing)
 
 ### More Framework Integrations
