@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import shutil
 import socket
 import subprocess
@@ -287,14 +286,6 @@ def find_console_script(name: str, *, install_hint: str) -> str:
     )
 
 
-# structlog's default ConsoleRenderer prefixes every line with an
-# ISO-ish timestamp + ``[level    ]``. CLI subcommands route logs to
-# stdout (until the structlog->stderr fix lands; tracked separately),
-# so JSON-mode payloads are preceded by these log lines on stdout.
-# ``run_cli`` strips them before parsing — once stdout is logs-free
-# the regex matches nothing and the helper still works.
-_STRUCTLOG_LINE_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\s+\[\w+\s*\]")
-
 CLI_SUBCMD_TIMEOUT_SECONDS = 60.0
 
 
@@ -307,8 +298,7 @@ def run_cli(
 ) -> tuple[subprocess.CompletedProcess[bytes], dict[str, Any]]:
     """Run ``trellis <args>`` as a subprocess and parse its JSON stdout.
 
-    Asserts exit 0; strips structlog console-renderer lines from
-    stdout; JSON-decodes what remains. Failures dump both streams.
+    Asserts exit 0 and JSON-decodes stdout. Failures dump both streams.
     """
     completed = subprocess.run(  # noqa: S603 — argv is a resolved console-script + caller args
         [bin_path, *args],
@@ -323,11 +313,8 @@ def run_cli(
         f"CLI exited {completed.returncode} for {args}:\n"
         f"stdout: {stdout}\nstderr: {stderr}"
     )
-    payload = "\n".join(
-        line for line in stdout.splitlines() if not _STRUCTLOG_LINE_RE.match(line)
-    ).strip()
     try:
-        parsed = json.loads(payload)
+        parsed = json.loads(stdout.strip())
     except json.JSONDecodeError as exc:
         msg = (
             f"CLI {args} did not emit valid JSON on stdout:\n"
