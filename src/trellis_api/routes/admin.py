@@ -133,7 +133,7 @@ def list_advisories(
 def reset_vectors() -> dict[str, Any]:
     """Drop and recreate the vectors table with current configured dimensions."""
     registry = get_registry()
-    vector_store = getattr(registry, "vector_store", None)
+    vector_store = getattr(registry.knowledge, "vector_store", None)
     if vector_store is None:
         return {"status": "error", "message": "Vector store not configured"}
 

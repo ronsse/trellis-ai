@@ -87,7 +87,7 @@ def upsert_vectors(body: dict[str, Any]) -> dict[str, Any]:
         raise HTTPException(status_code=422, detail="'vectors' must be a list")
 
     registry = get_registry()
-    vector_store = getattr(registry, "vector_store", None)
+    vector_store = getattr(registry.knowledge, "vector_store", None)
     if vector_store is None:
         raise HTTPException(status_code=501, detail="Vector store not configured")
 
