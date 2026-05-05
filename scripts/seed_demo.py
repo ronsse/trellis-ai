@@ -1102,10 +1102,10 @@ def main() -> None:
             stores_dir.mkdir(parents=True, exist_ok=True)
             registry = StoreRegistry.from_config_dir()
 
-    graph = registry.graph_store
-    trace_store = registry.trace_store
-    doc_store = registry.document_store
-    event_log = registry.event_log
+    graph = registry.knowledge.graph_store
+    trace_store = registry.operational.trace_store
+    doc_store = registry.knowledge.document_store
+    event_log = registry.operational.event_log
 
     # 1. Graph nodes
     print("Seeding graph nodes...")
