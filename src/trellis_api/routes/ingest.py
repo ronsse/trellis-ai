@@ -45,7 +45,7 @@ def ingest_trace(body: dict[str, Any]) -> IngestResponse:
 
     registry = get_registry()
     try:
-        trace_id = registry.trace_store.append(trace)
+        trace_id = registry.operational.trace_store.append(trace)
     except StoreError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -61,7 +61,7 @@ def ingest_evidence(body: dict[str, Any]) -> IngestResponse:
         raise HTTPException(status_code=422, detail=f"Invalid evidence: {exc}") from exc
 
     registry = get_registry()
-    registry.document_store.put(
+    registry.knowledge.document_store.put(
         doc_id=evidence.evidence_id,
         content=evidence.content or "",
         metadata={
@@ -187,7 +187,9 @@ def ingest_bulk(req: BulkIngestRequest) -> BulkIngestResponse:
     """
     registry = get_registry()
     handlers = create_curate_handlers(registry)
-    executor = MutationExecutor(event_log=registry.event_log, handlers=handlers)
+    executor = MutationExecutor(
+        event_log=registry.operational.event_log, handlers=handlers
+    )
 
     response = BulkIngestResponse(
         batch_id=generate_ulid(),
@@ -269,7 +271,7 @@ def ingest_bulk(req: BulkIngestRequest) -> BulkIngestResponse:
             )
             continue
         try:
-            alias_id = registry.graph_store.upsert_alias(
+            alias_id = registry.knowledge.graph_store.upsert_alias(
                 entity_id=alias.entity_id,
                 source_system=alias.source_system,
                 raw_id=alias.raw_id,

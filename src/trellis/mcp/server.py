@@ -200,7 +200,7 @@ def _build_alias_resolver(registry: StoreRegistry) -> Any:
     production implementation will want an indexed lookup — but fine
     for the feature-flagged Phase 2 rollout.
     """
-    graph_store = registry.graph_store
+    graph_store = registry.knowledge.graph_store
 
     def resolve(alias: str) -> list[str]:
         target = alias.lower()
@@ -260,7 +260,7 @@ def _run_memory_extraction(
 
         batch = result_to_batch(result, requested_by="mcp:save_memory")
         executor = MutationExecutor(
-            event_log=registry.event_log,
+            event_log=registry.operational.event_log,
             handlers=create_curate_handlers(registry),
         )
         executor.execute_batch(batch)
@@ -282,7 +282,7 @@ def _get_minhash_index(registry: StoreRegistry) -> Any:
 
         _minhash_index = MinHashIndex()
         # Seed the index from existing documents (up to a reasonable limit).
-        docs = registry.document_store.search("", limit=500)
+        docs = registry.knowledge.document_store.search("", limit=500)
         for doc in docs:
             _minhash_index.add(doc["doc_id"], doc.get("content", ""))
         logger.debug("minhash_index_initialized", size=_minhash_index.size)
@@ -328,7 +328,9 @@ def get_context(  # noqa: PLR0912, PLR0915
         filters: dict[str, Any] = {}
         if domain:
             filters["domain"] = domain
-        doc_results = registry.document_store.search(intent, limit=10, filters=filters)
+        doc_results = registry.knowledge.document_store.search(
+            intent, limit=10, filters=filters
+        )
         items.extend(
             {
                 "item_id": doc["doc_id"],
@@ -343,7 +345,7 @@ def get_context(  # noqa: PLR0912, PLR0915
 
     # Search graph
     try:
-        nodes = registry.graph_store.query(limit=20)
+        nodes = registry.knowledge.graph_store.query(limit=20)
         q_lower = intent.lower()
         for node in nodes:
             props = node.get("properties", {})
@@ -364,7 +366,7 @@ def get_context(  # noqa: PLR0912, PLR0915
 
     # Recent traces
     try:
-        traces = registry.trace_store.query(domain=domain, limit=5)
+        traces = registry.operational.trace_store.query(domain=domain, limit=5)
         items.extend(
             {
                 "item_id": t.trace_id,
@@ -386,7 +388,7 @@ def get_context(  # noqa: PLR0912, PLR0915
             since = datetime.now(UTC) - timedelta(
                 minutes=60,  # matches DEFAULT_SESSION_DEDUP_WINDOW_MINUTES
             )
-            events = registry.event_log.get_events(
+            events = registry.operational.event_log.get_events(
                 event_type=EventType.PACK_ASSEMBLED,
                 since=since,
                 limit=200,
@@ -423,7 +425,7 @@ def get_context(  # noqa: PLR0912, PLR0915
     # dedup against it. Mirrors PackBuilder's PACK_ASSEMBLED telemetry.
     if session_id:
         try:
-            registry.event_log.emit(
+            registry.operational.event_log.emit(
                 EventType.PACK_ASSEMBLED,
                 source="get_context",
                 entity_type="pack",
@@ -440,7 +442,7 @@ def get_context(  # noqa: PLR0912, PLR0915
 
     try:
         track_token_usage(
-            registry.event_log,
+            registry.operational.event_log,
             layer="mcp",
             operation="get_context",
             response_tokens=estimate_tokens(result),
@@ -473,7 +475,7 @@ def save_experience(trace_json: str) -> str:
 
     try:
         registry = _get_registry()
-        trace_id = registry.trace_store.append(trace)
+        trace_id = registry.operational.trace_store.append(trace)
     except Exception as exc:
         return f"Error: Failed to store trace — {exc}"
 
@@ -511,7 +513,7 @@ def save_knowledge(
     props["name"] = name
 
     registry = _get_registry()
-    node_id = registry.graph_store.upsert_node(
+    node_id = registry.knowledge.graph_store.upsert_node(
         node_id=None,
         node_type=entity_type,
         properties=props,
@@ -520,12 +522,12 @@ def save_knowledge(
     result = f"Entity created: {node_id} ({entity_type}: {name})"
 
     if relates_to:
-        if registry.graph_store.get_node(relates_to) is None:
+        if registry.knowledge.graph_store.get_node(relates_to) is None:
             result += (
                 f"\nWarning: target entity not found: {relates_to} — edge not created"
             )
         else:
-            edge_id = registry.graph_store.upsert_edge(
+            edge_id = registry.knowledge.graph_store.upsert_edge(
                 source_id=node_id,
                 target_id=relates_to,
                 edge_type=edge_kind,
@@ -568,7 +570,7 @@ def save_memory(
 
     # Dedup stage 1: exact content hash match.
     chash = content_hash(content)
-    existing = registry.document_store.get_by_hash(chash)
+    existing = registry.knowledge.document_store.get_by_hash(chash)
     if existing is not None:
         existing_id = existing["doc_id"]
         logger.debug("save_memory_dedup_exact", doc_id=existing_id, content_hash=chash)
@@ -590,7 +592,9 @@ def save_memory(
     except Exception:
         logger.debug("save_memory_minhash_failed")
 
-    stored_id = registry.document_store.put(doc_id, content, metadata=metadata)
+    stored_id = registry.knowledge.document_store.put(
+        doc_id, content, metadata=metadata
+    )
 
     # Add to MinHash index for future fuzzy dedup.
     try:
@@ -602,7 +606,7 @@ def save_memory(
 
     # Emit MEMORY_STORED so enrichment / promotion workers can react.
     try:
-        registry.event_log.emit(
+        registry.operational.event_log.emit(
             EventType.MEMORY_STORED,
             source="save_memory",
             entity_id=stored_id,
@@ -648,12 +652,12 @@ def get_lessons(
     from trellis.retrieve.precedents import list_precedents as _list_prec  # noqa: PLC0415, I001
 
     registry = _get_registry()
-    lessons = _list_prec(registry.event_log, domain=domain, limit=limit)
+    lessons = _list_prec(registry.operational.event_log, domain=domain, limit=limit)
 
     result = format_lessons_as_markdown(lessons, max_tokens=max_tokens)
     try:
         track_token_usage(
-            registry.event_log,
+            registry.operational.event_log,
             layer="mcp",
             operation="get_lessons",
             response_tokens=estimate_tokens(result),
@@ -686,15 +690,17 @@ def get_graph(
         return "Error: entity_id must not be empty"
 
     registry = _get_registry()
-    node = registry.graph_store.get_node(entity_id)
+    node = registry.knowledge.graph_store.get_node(entity_id)
     if node is None:
         return f"Entity not found: {entity_id}"
 
-    subgraph = registry.graph_store.get_subgraph(seed_ids=[entity_id], depth=depth)
+    subgraph = registry.knowledge.graph_store.get_subgraph(
+        seed_ids=[entity_id], depth=depth
+    )
     result = format_subgraph_as_markdown(node, subgraph, max_tokens=max_tokens)
     try:
         track_token_usage(
-            registry.event_log,
+            registry.operational.event_log,
             layer="mcp",
             operation="get_graph",
             response_tokens=estimate_tokens(result),
@@ -772,7 +778,7 @@ def record_feedback(
 
     if has_pack:
         payload["pack_id"] = pack_id
-        registry.event_log.emit(
+        registry.operational.event_log.emit(
             EventType.FEEDBACK_RECORDED,
             "mcp",
             entity_id=pack_id,
@@ -781,7 +787,7 @@ def record_feedback(
         )
         target = f"pack: {pack_id}"
     else:
-        registry.event_log.emit(
+        registry.operational.event_log.emit(
             EventType.FEEDBACK_RECORDED,
             "mcp",
             entity_id=trace_id,
@@ -818,7 +824,7 @@ def search(
     registry = _get_registry()
 
     # Search documents
-    doc_results = registry.document_store.search(query, limit=limit)
+    doc_results = registry.knowledge.document_store.search(query, limit=limit)
     items: list[dict[str, Any]] = [
         {
             "item_id": doc["doc_id"],
@@ -830,7 +836,7 @@ def search(
     ]
 
     # Search graph nodes
-    all_nodes = registry.graph_store.query(limit=limit * 2)
+    all_nodes = registry.knowledge.graph_store.query(limit=limit * 2)
     q_lower = query.lower()
     for node in all_nodes:
         props = node.get("properties", {})
@@ -855,7 +861,7 @@ def search(
     )
     try:
         track_token_usage(
-            registry.event_log,
+            registry.operational.event_log,
             layer="mcp",
             operation="search",
             response_tokens=estimate_tokens(result),
@@ -962,7 +968,7 @@ def get_objective_context(
 
         try:
             track_token_usage(
-                registry.event_log,
+                registry.operational.event_log,
                 layer="mcp",
                 operation="get_objective_context",
                 response_tokens=estimate_tokens(result),
@@ -1075,7 +1081,7 @@ def get_task_context(
 
         try:
             track_token_usage(
-                registry.event_log,
+                registry.operational.event_log,
                 layer="mcp",
                 operation="get_task_context",
                 response_tokens=estimate_tokens(result),
@@ -1192,7 +1198,7 @@ def get_sectioned_context(
 
         try:
             track_token_usage(
-                registry.event_log,
+                registry.operational.event_log,
                 layer="mcp",
                 operation="get_sectioned_context",
                 response_tokens=estimate_tokens(result),

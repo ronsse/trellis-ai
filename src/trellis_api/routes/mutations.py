@@ -35,7 +35,9 @@ def execute_batch(req: BatchCommandRequest) -> BatchCommandResponse:
     """
     registry = get_registry()
     handlers = create_curate_handlers(registry)
-    executor = MutationExecutor(event_log=registry.event_log, handlers=handlers)
+    executor = MutationExecutor(
+        event_log=registry.operational.event_log, handlers=handlers
+    )
 
     # Build Command objects from the request items
     commands = [

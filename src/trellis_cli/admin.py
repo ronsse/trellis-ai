@@ -975,7 +975,7 @@ def _build_check_extractors_report() -> dict[str, Any]:
     flag_set = flag_raw in _TRUTHY
 
     config_buildable = llm_client is not None
-    alias_resolver_ok = registry.graph_store is not None
+    alias_resolver_ok = registry.knowledge.graph_store is not None
     memory_prompt_ok = _memory_prompt_available()
 
     warnings: list[dict[str, str]] = []
@@ -1460,9 +1460,7 @@ def _check_auth_rejects_missing(client: httpx.Client) -> dict[str, Any]:
 def _check_auth_accepts_valid(client: httpx.Client, api_key: str) -> dict[str, Any]:
     started = time.monotonic_ns()
     try:
-        response = client.get(
-            _SMOKE_AUTH_PROBE_PATH, headers={"X-API-Key": api_key}
-        )
+        response = client.get(_SMOKE_AUTH_PROBE_PATH, headers={"X-API-Key": api_key})
     except httpx.HTTPError as exc:
         return _record_check("auth_accepts_valid", "fail", started, error=str(exc))
     if response.status_code != HTTPStatus.OK:

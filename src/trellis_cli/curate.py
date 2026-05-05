@@ -24,7 +24,9 @@ def _execute_command(cmd: Command, output_format: str) -> None:
     """Submit a command to the MutationExecutor and display the result."""
     registry = _get_registry()
     handlers = create_curate_handlers(registry)
-    executor = MutationExecutor(event_log=registry.event_log, handlers=handlers)
+    executor = MutationExecutor(
+        event_log=registry.operational.event_log, handlers=handlers
+    )
     result = executor.execute(cmd)
 
     if output_format == "json":
@@ -92,7 +94,9 @@ def link(
     )
     registry = _get_registry()
     handlers = create_curate_handlers(registry)
-    executor = MutationExecutor(event_log=registry.event_log, handlers=handlers)
+    executor = MutationExecutor(
+        event_log=registry.operational.event_log, handlers=handlers
+    )
     result = executor.execute(cmd)
 
     if result.status == CommandStatus.FAILED:
@@ -180,7 +184,9 @@ def entity(
     )
     registry = _get_registry()
     handlers = create_curate_handlers(registry)
-    executor = MutationExecutor(event_log=registry.event_log, handlers=handlers)
+    executor = MutationExecutor(
+        event_log=registry.operational.event_log, handlers=handlers
+    )
     result = executor.execute(cmd)
 
     if output_format == "json":
@@ -380,7 +386,9 @@ def promote_learning(
 
     registry = _get_registry()
     handlers = create_curate_handlers(registry)
-    executor = MutationExecutor(event_log=registry.event_log, handlers=handlers)
+    executor = MutationExecutor(
+        event_log=registry.operational.event_log, handlers=handlers
+    )
 
     submission_results: list[dict[str, Any]] = []
     for entry in plan["results"]:

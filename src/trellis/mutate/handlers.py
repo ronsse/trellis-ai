@@ -20,7 +20,7 @@ class PrecedentPromoteHandler:
         self._registry = registry
 
     def handle(self, command: Command) -> tuple[str | None, str]:
-        event = self._registry.event_log.emit(
+        event = self._registry.operational.event_log.emit(
             EventType.PRECEDENT_PROMOTED,
             source="mutation_executor",
             entity_id=command.target_id,
@@ -44,7 +44,7 @@ class LabelAddHandler:
     def handle(self, command: Command) -> tuple[str | None, str]:
         target_id = command.args["target_id"]
         label = command.args["label"]
-        store = self._registry.graph_store
+        store = self._registry.knowledge.graph_store
 
         node = store.get_node(target_id)
         if node is None:
@@ -66,7 +66,7 @@ class LabelAddHandler:
             generation_spec=node.get("generation_spec"),
         )
 
-        self._registry.event_log.emit(
+        self._registry.operational.event_log.emit(
             EventType.LABEL_ADDED,
             source="mutation_executor",
             entity_id=target_id,
@@ -84,7 +84,7 @@ class LabelRemoveHandler:
     def handle(self, command: Command) -> tuple[str | None, str]:
         target_id = command.args["target_id"]
         label = command.args["label"]
-        store = self._registry.graph_store
+        store = self._registry.knowledge.graph_store
 
         node = store.get_node(target_id)
         if node is None:
@@ -105,7 +105,7 @@ class LabelRemoveHandler:
             generation_spec=node.get("generation_spec"),
         )
 
-        self._registry.event_log.emit(
+        self._registry.operational.event_log.emit(
             EventType.LABEL_REMOVED,
             source="mutation_executor",
             entity_id=target_id,
@@ -121,7 +121,7 @@ class FeedbackRecordHandler:
         self._registry = registry
 
     def handle(self, command: Command) -> tuple[str | None, str]:
-        event = self._registry.event_log.emit(
+        event = self._registry.operational.event_log.emit(
             EventType.FEEDBACK_RECORDED,
             source="mutation_executor",
             entity_id=command.target_id,
@@ -154,7 +154,7 @@ class EntityCreateHandler:
         caller_id = command.args.get("entity_id")
         node_role = command.args.get("node_role", "semantic")
         generation_spec = command.args.get("generation_spec")
-        node_id = self._registry.graph_store.upsert_node(
+        node_id = self._registry.knowledge.graph_store.upsert_node(
             node_id=caller_id,
             node_type=command.args["entity_type"],
             properties=props,
@@ -162,7 +162,7 @@ class EntityCreateHandler:
             generation_spec=generation_spec,
         )
 
-        self._registry.event_log.emit(
+        self._registry.operational.event_log.emit(
             EventType.ENTITY_CREATED,
             source="mutation_executor",
             entity_id=node_id,
@@ -188,7 +188,7 @@ class LinkCreateHandler:
           1. Direct ``get_node(node_id)`` (exact match on node_id column)
           2. Property lookup: ``properties->>'entity_id' = node_id``
         """
-        store = self._registry.graph_store
+        store = self._registry.knowledge.graph_store
         if store.get_node(node_id) is not None:
             return node_id
         # Fallback: search by entity_id stored in properties
@@ -202,7 +202,7 @@ class LinkCreateHandler:
         source_id = command.args["source_id"]
         target_id = command.args["target_id"]
         edge_kind = command.args["edge_kind"]
-        store = self._registry.graph_store
+        store = self._registry.knowledge.graph_store
 
         resolved_source = self._resolve_node(source_id)
         if resolved_source is None:
@@ -222,7 +222,7 @@ class LinkCreateHandler:
             properties=command.args.get("properties"),
         )
 
-        self._registry.event_log.emit(
+        self._registry.operational.event_log.emit(
             EventType.LINK_CREATED,
             source="mutation_executor",
             entity_id=edge_id,

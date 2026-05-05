@@ -18,7 +18,9 @@ def search_documents(
     filters: dict[str, Any] = {}
     if domain:
         filters["domain"] = domain
-    results = registry.document_store.search(query, limit=limit, filters=filters)
+    results = registry.knowledge.document_store.search(
+        query, limit=limit, filters=filters
+    )
     return [
         {
             "item_id": doc["doc_id"],
@@ -39,7 +41,7 @@ def search_graph_nodes(
     limit: int = 5,
 ) -> list[dict[str, Any]]:
     """Search graph nodes by name/description substring match."""
-    nodes = registry.graph_store.query(limit=limit)
+    nodes = registry.knowledge.graph_store.query(limit=limit)
     q_lower = query.lower()
     items: list[dict[str, Any]] = []
     for node in nodes:
@@ -71,7 +73,7 @@ def fetch_recent_traces(
     domain: str | None = None,
 ) -> list[dict[str, Any]]:
     """Fetch recent traces and return pack-style items."""
-    traces = registry.trace_store.query(domain=domain, limit=limit)
+    traces = registry.operational.trace_store.query(domain=domain, limit=limit)
     return [
         {
             "item_id": t.trace_id,
