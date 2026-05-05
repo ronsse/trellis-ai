@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+from typing import Any
 
 import typer
 from rich.console import Console
@@ -11,6 +12,7 @@ from rich.console import Console
 from trellis.retrieve.precedents import list_precedents as _list_precedents
 from trellis_cli.output import format_output, truncate_values
 from trellis_cli.stores import (
+    LOCAL_SOURCE_SYSTEM,
     get_document_store,
     get_event_log,
     get_graph_store,
@@ -26,8 +28,8 @@ _TRUNC_HELP = "Max characters for text fields"
 _QUIET_HELP = "Suppress Rich formatting"
 
 
-def _doc_preview(doc: dict, width: int) -> str:
-    """One-line preview from a document search result — newlines collapsed."""
+def _doc_preview(doc: dict[str, Any], width: int) -> str:
+    """One-line preview from a document search result — whitespace collapsed."""
     text = doc.get("snippet") or doc.get("content") or ""
     return " ".join(text.split())[:width]
 
@@ -171,7 +173,7 @@ def entity(
 
     # Fallback: resolve via local aliases so memorable names ("user-api") work.
     if result is None:
-        alias_match = store.resolve_alias("local", entity_id)
+        alias_match = store.resolve_alias(LOCAL_SOURCE_SYSTEM, entity_id)
         if alias_match:
             result = store.get_node(alias_match["entity_id"])
 

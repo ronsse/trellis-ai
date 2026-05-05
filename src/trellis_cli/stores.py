@@ -19,6 +19,11 @@ from trellis_cli.config import get_config_dir, get_data_dir
 
 logger = structlog.get_logger(__name__)
 
+# source_system value for aliases minted by this Trellis instance — distinct
+# from external-system aliases ("github", "dbt", …). Demo loader seeds these;
+# `retrieve entity` resolves memorable names through them.
+LOCAL_SOURCE_SYSTEM = "local"
+
 _registry: StoreRegistry | None = None
 
 

@@ -27,6 +27,7 @@ from trellis.schemas.trace import (
 )
 from trellis.stores.base.event_log import EventType
 from trellis_cli.stores import (
+    LOCAL_SOURCE_SYSTEM,
     _get_registry,
     get_document_store,
     get_graph_store,
@@ -1116,13 +1117,13 @@ def load(
 
     console.print("[bold]Loading demo data...[/bold]\n")
 
-    # 1. Entities → graph nodes (with name aliases so `retrieve entity <name>` resolves)
+    # 1. Entities → graph nodes (+ a label alias for each)
     entities = _build_entities()
     for eid, etype, name, props in entities:
         graph.upsert_node(eid, etype, {"name": name, **props})
         graph.upsert_alias(
             entity_id=eid,
-            source_system="local",
+            source_system=LOCAL_SOURCE_SYSTEM,
             raw_id=name,
             raw_name=name,
             is_primary=True,

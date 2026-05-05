@@ -97,16 +97,13 @@ class TestRetrieveEntity:
         assert result.exit_code == 1
 
     def test_entity_resolves_via_local_alias(self) -> None:
-        # Mirrors the README quickstart: `retrieve entity user-api` must work
-        # against demo data, where entity_id is a ULID but a "local" alias
-        # maps the human label to it.
-        from trellis_cli.stores import get_graph_store
+        from trellis_cli.stores import LOCAL_SOURCE_SYSTEM, get_graph_store
 
         graph = get_graph_store()
         graph.upsert_node("ulid_for_api", "service", {"name": "user-api"})
         graph.upsert_alias(
             entity_id="ulid_for_api",
-            source_system="local",
+            source_system=LOCAL_SOURCE_SYSTEM,
             raw_id="user-api",
             raw_name="user-api",
             is_primary=True,
