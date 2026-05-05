@@ -21,7 +21,9 @@ gating in ``tests/integration/test_neo4j_e2e.py``.
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -29,6 +31,7 @@ import sys
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -282,6 +285,56 @@ def find_console_script(name: str, *, install_hint: str) -> str:
         f"{name} console script not found next to the test runner's "
         f"python or on PATH — {install_hint}"
     )
+
+
+# structlog's default ConsoleRenderer prefixes every line with an
+# ISO-ish timestamp + ``[level    ]``. CLI subcommands route logs to
+# stdout (until the structlog->stderr fix lands; tracked separately),
+# so JSON-mode payloads are preceded by these log lines on stdout.
+# ``run_cli`` strips them before parsing — once stdout is logs-free
+# the regex matches nothing and the helper still works.
+_STRUCTLOG_LINE_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\s+\[\w+\s*\]")
+
+CLI_SUBCMD_TIMEOUT_SECONDS = 60.0
+
+
+def run_cli(
+    bin_path: str,
+    args: list[str],
+    env: dict[str, str],
+    *,
+    timeout_seconds: float = CLI_SUBCMD_TIMEOUT_SECONDS,
+) -> tuple[subprocess.CompletedProcess[bytes], dict[str, Any]]:
+    """Run ``trellis <args>`` as a subprocess and parse its JSON stdout.
+
+    Asserts exit 0; strips structlog console-renderer lines from
+    stdout; JSON-decodes what remains. Failures dump both streams.
+    """
+    completed = subprocess.run(  # noqa: S603 — argv is a resolved console-script + caller args
+        [bin_path, *args],
+        env=env,
+        capture_output=True,
+        timeout=timeout_seconds,
+        check=False,
+    )
+    stdout = completed.stdout.decode(errors="replace")
+    stderr = completed.stderr.decode(errors="replace")
+    assert completed.returncode == 0, (
+        f"CLI exited {completed.returncode} for {args}:\n"
+        f"stdout: {stdout}\nstderr: {stderr}"
+    )
+    payload = "\n".join(
+        line for line in stdout.splitlines() if not _STRUCTLOG_LINE_RE.match(line)
+    ).strip()
+    try:
+        parsed = json.loads(payload)
+    except json.JSONDecodeError as exc:
+        msg = (
+            f"CLI {args} did not emit valid JSON on stdout:\n"
+            f"stdout: {stdout!r}\nstderr: {stderr!r}\nerror: {exc}"
+        )
+        raise AssertionError(msg) from exc
+    return completed, parsed
 
 
 def initialize_trellis_stores(

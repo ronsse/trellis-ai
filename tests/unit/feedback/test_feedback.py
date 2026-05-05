@@ -439,7 +439,15 @@ class _CapturingEventLog:
             }
         )
 
-    def get_events(self, *, event_type=None, limit: int = 100, **_ignored):
+    def get_events(
+        self,
+        *,
+        event_type=None,
+        limit: int = 100,
+        order: str = "asc",
+        payload_filters: dict[str, str] | None = None,
+        **_ignored,
+    ):
         from types import SimpleNamespace
 
         matches = [
@@ -447,6 +455,16 @@ class _CapturingEventLog:
             for e in self.events
             if event_type is None or e["event_type"] == event_type
         ]
+        if payload_filters:
+            matches = [
+                e
+                for e in matches
+                if all(
+                    str(e["payload"].get(k)) == v for k, v in payload_filters.items()
+                )
+            ]
+        if order == "desc":
+            matches.reverse()
         return [SimpleNamespace(payload=e["payload"]) for e in matches[:limit]]
 
 
@@ -714,3 +732,53 @@ class TestLoadFeedbackLogBackwardCompat:
         # Fresh ULID was minted since the file row had no feedback_id.
         assert loaded[0].feedback_id.startswith("fb_")
         assert loaded[0].run_id == "legacy"
+
+
+class TestFeedbackIdScanLimitRegression:
+    """Regression: ``_feedback_id_in_event_log`` must find recent feedback
+    even when the EventLog has more than the scan limit's worth of older
+    rows. Earlier the helper relied on the default ``ORDER BY ASC`` of
+    ``get_events`` and a ``limit=10_000`` cap — on a busy log, the
+    matching recent feedback fell off the back of the scan window and
+    the helper falsely returned False, causing duplicate emissions and
+    broken reconcile idempotency.
+    """
+
+    def test_recent_feedback_visible_past_scan_limit(self, tmp_path: Path):
+        """Seed >10K older FEEDBACK_RECORDED events, then ask whether a
+        feedback added *afterwards* is present. Under the bug this was
+        False; under ``order='desc'`` it is True."""
+        from trellis.feedback.recording import _feedback_id_in_event_log
+        from trellis.stores.event_log import (
+            Event,
+            EventType,
+            SQLiteEventLog,
+        )
+
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        try:
+            scan_limit = 10_000
+            for i in range(scan_limit + 50):
+                event_log.append(
+                    Event(
+                        event_type=EventType.FEEDBACK_RECORDED,
+                        source="seed",
+                        payload={"feedback_id": f"fb_seed_{i}"},
+                    )
+                )
+            # The target feedback is the very last write — under ASC scan
+            # ordering with a 10K limit it would never be reached.
+            target_id = "fb_target_recent"
+            event_log.append(
+                Event(
+                    event_type=EventType.FEEDBACK_RECORDED,
+                    source="seed",
+                    payload={"feedback_id": target_id},
+                )
+            )
+
+            assert _feedback_id_in_event_log(event_log, target_id) is True
+            # Sanity: a feedback_id that was never written stays False.
+            assert _feedback_id_in_event_log(event_log, "fb_never_written") is False
+        finally:
+            event_log.close()

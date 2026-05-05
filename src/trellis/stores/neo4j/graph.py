@@ -35,6 +35,7 @@ from trellis.stores.base.graph import (
     check_node_role_immutable,
     validate_document_ids,
     validate_node_role_args,
+    validate_subgraph_depth,
 )
 from trellis.stores.neo4j.base import (
     DriverConfig,
@@ -786,11 +787,9 @@ class Neo4jGraphStore(Neo4jSessionRunner, GraphStore):
         edge_types: list[str] | None = None,
         as_of: datetime | None = None,
     ) -> dict[str, Any]:
+        validate_subgraph_depth(depth)
         if not seed_ids:
             return {"nodes": [], "edges": []}
-        if depth < 0:
-            msg = f"depth must be >= 0, got {depth}"
-            raise ValueError(msg)
 
         node_where, temporal_params = _temporal_where(as_of, "n")
         edge_where, _ = _temporal_where(as_of, "r")

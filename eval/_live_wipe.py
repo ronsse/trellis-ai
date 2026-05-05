@@ -117,25 +117,16 @@ def _wipe_neo4j_graph_store(store: object) -> None:
 
 
 def _truncate_postgres(store: object, tables: list[str], *, cascade: bool) -> None:
-    """TRUNCATE the given tables via the store's existing ``_conn``.
+    """TRUNCATE the given tables via the store's pooled ``_conn()`` helper.
 
-    Reaches into the store's private ``_conn`` attribute on purpose —
-    the registry doesn't expose a public truncate-tables method, and
-    eval is the only consumer that needs one. Defensive ``getattr``
-    fallback in case a future refactor changes the connection layout
-    so the failure surfaces as a no-op + warning rather than a crash.
+    Reaches into the store's private ``_conn()`` context manager
+    inherited from ``PostgresStoreBase`` — the registry doesn't expose
+    a public truncate-tables method, and eval is the only consumer
+    that needs one. ``_conn()`` checks out a connection from the pool
+    and auto-commits on exit, so no explicit commit here.
     """
-    conn = getattr(store, "_conn", None)
-    if conn is None:
-        logger.warning(
-            "eval.wipe_unavailable",
-            store=type(store).__name__,
-            reason="no _conn attribute",
-        )
-        return
     suffix = " CASCADE" if cascade else ""
     sql = f"TRUNCATE {', '.join(tables)} RESTART IDENTITY{suffix}"
-    with conn.cursor() as cur:
+    with store._conn() as conn, conn.cursor() as cur:  # type: ignore[attr-defined]
         cur.execute(sql)
-    conn.commit()
     logger.debug("eval.postgres_wiped", store=type(store).__name__, tables=tables)

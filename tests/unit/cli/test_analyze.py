@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from trellis.learning import PROMOTE_RECOMMENDATIONS
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 from trellis_cli.main import app
@@ -195,6 +196,123 @@ class TestPackSections:
         assert "tactical" in data["empty_section_flags"]
 
 
+class TestLearningCandidates:
+    def _seed_promote_signal(
+        self,
+        registry: StoreRegistry,
+        *,
+        item_id: str = "lc:doc:helpful",
+        rounds: int = 3,
+    ) -> None:
+        """Emit ``rounds`` graded packs marking ``item_id`` as helpful + successful."""
+        event_log = registry.event_log
+        for i in range(rounds):
+            pack_id = f"lc-pack-{i}"
+            event_log.emit(
+                EventType.PACK_ASSEMBLED,
+                source="test",
+                entity_id=pack_id,
+                entity_type="pack",
+                payload={
+                    "intent": "test intent",
+                    "domain": "lc-test",
+                    "injected_items": [
+                        {
+                            "item_id": item_id,
+                            "item_type": "document",
+                            "rank": 0,
+                            "strategy_source": "document",
+                        }
+                    ],
+                    "injected_item_ids": [item_id],
+                },
+            )
+            event_log.emit(
+                EventType.FEEDBACK_RECORDED,
+                source="test",
+                entity_id=pack_id,
+                entity_type="pack",
+                payload={
+                    "pack_id": pack_id,
+                    "outcome": "success",
+                    "success": True,
+                    "helpful_item_ids": [item_id],
+                },
+            )
+
+    def test_empty_event_log_writes_artifacts(self, tmp_path: Path) -> None:
+        out_dir = tmp_path / "review"
+        result = runner.invoke(
+            app,
+            [
+                "analyze",
+                "learning-candidates",
+                "--output-dir",
+                str(out_dir),
+                "--format",
+                "json",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout.strip())
+        assert data["status"] == "ok"
+        assert data["observation_count"] == 0
+        assert data["candidate_count"] == 0
+        assert data["candidates"] == []
+        assert Path(data["candidates_path"]).exists()
+        assert Path(data["decisions_template_path"]).exists()
+
+    def test_promote_signal_surfaces_candidate(
+        self, tmp_path: Path, temp_stores: StoreRegistry
+    ) -> None:
+        self._seed_promote_signal(temp_stores)
+        out_dir = tmp_path / "review"
+        result = runner.invoke(
+            app,
+            [
+                "analyze",
+                "learning-candidates",
+                "--output-dir",
+                str(out_dir),
+                "--format",
+                "json",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout.strip())
+        assert data["candidate_count"] == 1, data
+        candidate = data["candidates"][0]
+        assert candidate["item_id"] == "lc:doc:helpful"
+        assert candidate["recommendation_type"] in PROMOTE_RECOMMENDATIONS
+        decisions = json.loads(
+            Path(data["decisions_template_path"]).read_text(encoding="utf-8")
+        )
+        ids = {d["candidate_id"] for d in decisions["decisions"]}
+        assert candidate["candidate_id"] in ids
+
+    def test_min_support_filters(
+        self, tmp_path: Path, temp_stores: StoreRegistry
+    ) -> None:
+        self._seed_promote_signal(temp_stores, rounds=1)
+        out_dir = tmp_path / "review"
+        result = runner.invoke(
+            app,
+            [
+                "analyze",
+                "learning-candidates",
+                "--output-dir",
+                str(out_dir),
+                "--min-support",
+                "5",
+                "--format",
+                "json",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout.strip())
+        assert data["candidate_count"] == 0, data
+
+
 class TestAnalyzeHelp:
     def test_help(self) -> None:
         result = runner.invoke(app, ["analyze", "--help"])
@@ -205,5 +323,6 @@ class TestAnalyzeHelp:
             "token-usage",
             "advisory-effectiveness",
             "pack-sections",
+            "learning-candidates",
         ]:
             assert cmd in result.stdout

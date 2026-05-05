@@ -5,10 +5,13 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import time
 from collections import Counter, defaultdict
+from http import HTTPStatus
 from pathlib import Path
 from typing import Any
 
+import httpx
 import typer
 from rich.console import Console
 from rich.table import Table
@@ -442,7 +445,13 @@ def version(
 
 @admin_app.command()
 def serve(
-    host: str = typer.Option("0.0.0.0", help="Host to bind"),  # noqa: S104
+    host: str = typer.Option(
+        "127.0.0.1",
+        help=(
+            "Bind address. Loopback by default; set TRELLIS_API_HOST=0.0.0.0 "
+            "or pass --host 0.0.0.0 for container deployments."
+        ),
+    ),
     port: int = typer.Option(8420, help="Port to bind"),
 ) -> None:
     """Start the XPG REST API server."""
@@ -1371,3 +1380,286 @@ def migrate_graph(
             for target, msg in report.errors:
                 console.print(f"  [red]{target}[/red]: {msg}")
             raise typer.Exit(code=1)
+
+
+# ---------------------------------------------------------------------------
+# smoke-test — operationalises the validation checklist in
+# docs/deployment/runbook.md "Validating a deployment". Run after a
+# fresh deploy or before sending real traffic; exits non-zero on any
+# fail so a CI / k8s init-container hook can gate on it.
+# ---------------------------------------------------------------------------
+
+
+_SMOKE_AUTH_PROBE_PATH = "/api/v1/advisories"
+
+
+def _resolve_smoke_url() -> str:
+    host = os.environ.get("TRELLIS_API_HOST", "127.0.0.1")
+    port = os.environ.get("TRELLIS_API_PORT", "8420")
+    return f"http://{host}:{port}"
+
+
+def _record_check(
+    name: str, status: str, started_ns: int, **extra: Any
+) -> dict[str, Any]:
+    latency_ms = round((time.monotonic_ns() - started_ns) / 1_000_000, 2)
+    return {"name": name, "status": status, "latency_ms": latency_ms, **extra}
+
+
+def _check_healthz(client: httpx.Client) -> dict[str, Any]:
+    started = time.monotonic_ns()
+    try:
+        response = client.get("/healthz")
+    except httpx.HTTPError as exc:
+        return _record_check("healthz", "fail", started, error=str(exc))
+    if response.status_code != HTTPStatus.OK:
+        return _record_check(
+            "healthz",
+            "fail",
+            started,
+            error=f"expected 200, got {response.status_code}",
+        )
+    return _record_check("healthz", "pass", started)
+
+
+def _check_readyz(client: httpx.Client) -> dict[str, Any]:
+    started = time.monotonic_ns()
+    try:
+        response = client.get("/readyz")
+    except httpx.HTTPError as exc:
+        return _record_check("readyz", "fail", started, error=str(exc))
+    body = _safe_json(response)
+    backends = body.get("backends") if isinstance(body, dict) else None
+    if response.status_code != HTTPStatus.OK:
+        return _record_check(
+            "readyz",
+            "fail",
+            started,
+            error=f"expected 200, got {response.status_code}",
+            backends=backends,
+        )
+    return _record_check("readyz", "pass", started, backends=backends)
+
+
+def _check_auth_rejects_missing(client: httpx.Client) -> dict[str, Any]:
+    started = time.monotonic_ns()
+    try:
+        response = client.get(_SMOKE_AUTH_PROBE_PATH)
+    except httpx.HTTPError as exc:
+        return _record_check("auth_rejects_missing", "fail", started, error=str(exc))
+    if response.status_code != HTTPStatus.UNAUTHORIZED:
+        return _record_check(
+            "auth_rejects_missing",
+            "fail",
+            started,
+            error=f"expected 401, got {response.status_code}",
+        )
+    return _record_check("auth_rejects_missing", "pass", started)
+
+
+def _check_auth_accepts_valid(client: httpx.Client, api_key: str) -> dict[str, Any]:
+    started = time.monotonic_ns()
+    try:
+        response = client.get(
+            _SMOKE_AUTH_PROBE_PATH, headers={"X-API-Key": api_key}
+        )
+    except httpx.HTTPError as exc:
+        return _record_check("auth_accepts_valid", "fail", started, error=str(exc))
+    if response.status_code != HTTPStatus.OK:
+        return _record_check(
+            "auth_accepts_valid",
+            "fail",
+            started,
+            error=f"expected 200, got {response.status_code}",
+        )
+    return _record_check("auth_accepts_valid", "pass", started)
+
+
+def _check_metrics(client: httpx.Client) -> dict[str, Any]:
+    started = time.monotonic_ns()
+    try:
+        response = client.get("/metrics")
+    except httpx.HTTPError as exc:
+        return _record_check("metrics", "fail", started, error=str(exc))
+    # 404 means the [observability] extra isn't installed — that's a
+    # legitimate deploy choice, not a smoke-test failure. Treat as info.
+    if response.status_code == HTTPStatus.NOT_FOUND:
+        return _record_check(
+            "metrics",
+            "info",
+            started,
+            note="not wired (install trellis-ai[observability] to enable)",
+        )
+    if response.status_code != HTTPStatus.OK:
+        return _record_check(
+            "metrics",
+            "fail",
+            started,
+            error=f"expected 200, got {response.status_code}",
+        )
+    # Prometheus exposition format starts every metric with a # HELP
+    # comment; bail if the body doesn't look like one.
+    if "# HELP" not in response.text[:4096]:
+        return _record_check(
+            "metrics",
+            "fail",
+            started,
+            error="response is not Prometheus format (no '# HELP' line in first 4KB)",
+        )
+    return _record_check("metrics", "pass", started)
+
+
+def _safe_json(response: httpx.Response) -> Any:
+    try:
+        return response.json()
+    except (ValueError, json.JSONDecodeError):
+        return None
+
+
+def _summarize(checks: list[dict[str, Any]]) -> dict[str, int]:
+    counts = Counter(c["status"] for c in checks)
+    return {
+        "pass": counts.get("pass", 0),
+        "fail": counts.get("fail", 0),
+        "info": counts.get("info", 0),
+        "skip": counts.get("skip", 0),
+    }
+
+
+def _render_smoke_text(
+    base_url: str, checks: list[dict[str, Any]], summary: dict[str, int]
+) -> None:
+    style_for = {
+        "pass": "green",
+        "fail": "red",
+        "info": "yellow",
+        "skip": "dim",
+    }
+    label_for = {
+        "pass": "PASS",
+        "fail": "FAIL",
+        "info": "INFO",
+        "skip": "SKIP",
+    }
+    console.print(f"[bold]Trellis API smoke test[/bold] → {base_url}")
+    console.print()
+    for check in checks:
+        status = check["status"]
+        style = style_for.get(status, "white")
+        label = label_for.get(status, status.upper())
+        line = f"  [{style}]{label}[/{style}]  {check['name']:<24}"
+        if "latency_ms" in check:
+            line += f"  ({check['latency_ms']}ms)"
+        console.print(line)
+        if check.get("error"):
+            console.print(f"        [red]{check['error']}[/red]")
+        if check.get("note"):
+            console.print(f"        [dim]{check['note']}[/dim]")
+        if check.get("reason"):
+            console.print(f"        [dim]{check['reason']}[/dim]")
+        if check["name"] == "readyz" and check.get("backends"):
+            for backend, info in check["backends"].items():
+                if not isinstance(info, dict):
+                    continue
+                b_status = info.get("status", "unknown")
+                b_latency = info.get("latency_ms")
+                b_style = "green" if b_status == "ok" else "red"
+                detail = f"{b_status}"
+                if b_latency is not None:
+                    detail += f" ({b_latency}ms)"
+                console.print(f"        [{b_style}]{backend}[/{b_style}]: {detail}")
+                if info.get("error"):
+                    console.print(f"          [red]{info['error']}[/red]")
+    console.print()
+    total = sum(summary.values())
+    console.print(
+        f"{total} checks · "
+        f"[green]{summary['pass']} pass[/green] · "
+        f"[yellow]{summary['info']} info[/yellow] · "
+        f"[dim]{summary['skip']} skip[/dim] · "
+        f"[red]{summary['fail']} fail[/red]"
+    )
+
+
+@admin_app.command("smoke-test")
+def smoke_test(
+    url: str = typer.Option(
+        None,
+        "--url",
+        help=(
+            "Base URL of the API. Defaults to "
+            "http://$TRELLIS_API_HOST:$TRELLIS_API_PORT or "
+            "http://127.0.0.1:8420 if those env vars are unset."
+        ),
+    ),
+    api_key: str = typer.Option(
+        None,
+        "--api-key",
+        help=(
+            "X-API-Key value. Defaults to $TRELLIS_API_KEY. When neither "
+            "is set, the auth checks skip rather than fail — useful for "
+            "smoke-testing a dev instance running without auth."
+        ),
+    ),
+    timeout: float = typer.Option(
+        10.0, "--timeout", help="Per-request timeout in seconds."
+    ),
+    output_format: str = typer.Option(
+        "text", "--format", help="Output format: text or json."
+    ),
+) -> None:
+    """Validate a running Trellis deployment end-to-end.
+
+    Hits ``/healthz``, ``/readyz``, an authenticated ``/api/v1`` route
+    with and without the API key, and ``/metrics``. Exits 0 when every
+    required check passes; 1 when any check fails. Operationalises the
+    "Validating a deployment" checklist in
+    ``docs/deployment/runbook.md``.
+    """
+    base_url = url or _resolve_smoke_url()
+    key = api_key if api_key is not None else os.environ.get("TRELLIS_API_KEY")
+
+    checks: list[dict[str, Any]] = []
+    with httpx.Client(base_url=base_url, timeout=timeout) as client:
+        checks.append(_check_healthz(client))
+        checks.append(_check_readyz(client))
+        if key:
+            checks.append(_check_auth_rejects_missing(client))
+            checks.append(_check_auth_accepts_valid(client, key))
+        else:
+            checks.append(
+                {
+                    "name": "auth_rejects_missing",
+                    "status": "skip",
+                    "reason": "no API key configured (TRELLIS_API_KEY unset)",
+                }
+            )
+            checks.append(
+                {
+                    "name": "auth_accepts_valid",
+                    "status": "skip",
+                    "reason": "no API key configured (TRELLIS_API_KEY unset)",
+                }
+            )
+        checks.append(_check_metrics(client))
+
+    summary = _summarize(checks)
+    ok = summary["fail"] == 0
+
+    if output_format == "json":
+        print(
+            json.dumps(
+                {
+                    "url": base_url,
+                    "checks": checks,
+                    "summary": summary,
+                    "ok": ok,
+                },
+                indent=2,
+            )
+        )
+    else:
+        _render_smoke_text(base_url, checks, summary)
+
+    if not ok:
+        raise typer.Exit(code=1)

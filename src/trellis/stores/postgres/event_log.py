@@ -8,7 +8,7 @@ from typing import Any
 
 import structlog
 
-from trellis.stores.base.event_log import Event, EventLog, EventType
+from trellis.stores.base.event_log import Event, EventLog, EventOrder, EventType
 from trellis.stores.postgres.base import PostgresStoreBase
 
 logger = structlog.get_logger(__name__)
@@ -32,6 +32,26 @@ _CREATE_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type)",
     "CREATE INDEX IF NOT EXISTS idx_events_entity ON events(entity_id)",
     "CREATE INDEX IF NOT EXISTS idx_events_source ON events(source)",
+    # Composite index for ``get_events(event_type=X, order="desc", limit=N)``.
+    # Lets Postgres serve a recency-ordered slice of a single event type as an
+    # index range scan with no sort step.
+    "CREATE INDEX IF NOT EXISTS idx_events_type_occurred_desc "
+    "ON events(event_type, occurred_at DESC)",
+    # Composite index for entity-history lookups
+    # (``get_events(entity_id=X)`` ordered by recency).
+    "CREATE INDEX IF NOT EXISTS idx_events_entity_occurred_desc "
+    "ON events(entity_id, occurred_at DESC)",
+    # Partial expression index for ``_feedback_id_in_event_log`` — turns the
+    # 10K-row scan it currently does into an O(log N) JSON-key probe.
+    "CREATE INDEX IF NOT EXISTS idx_events_feedback_id "
+    "ON events ((payload->>'feedback_id')) "
+    "WHERE event_type = 'feedback.recorded'",
+    # Partial expression index for ``has_idempotency_key``. Targets the
+    # ``WHERE event_type = 'mutation.executed' AND payload->>'idempotency_key' = %s``
+    # query the mutation pipeline runs on every command.
+    "CREATE INDEX IF NOT EXISTS idx_events_idempotency_key "
+    "ON events ((payload->>'idempotency_key')) "
+    "WHERE event_type = 'mutation.executed'",
 ]
 
 
@@ -43,18 +63,17 @@ class PostgresEventLog(PostgresStoreBase, EventLog):
     # ------------------------------------------------------------------
 
     def _init_schema(self) -> None:
-        with self.conn.cursor() as cur:
+        with self._conn() as conn, conn.cursor() as cur:
             cur.execute(_CREATE_TABLE)
             for idx_sql in _CREATE_INDEXES:
                 cur.execute(idx_sql)
-        self.conn.commit()
 
     # ------------------------------------------------------------------
     # Append
     # ------------------------------------------------------------------
 
     def append(self, event: Event) -> None:
-        with self.conn.cursor() as cur:
+        with self._conn() as conn, conn.cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO events
@@ -75,7 +94,6 @@ class PostgresEventLog(PostgresStoreBase, EventLog):
                     event.schema_version,
                 ),
             )
-        self.conn.commit()
         logger.debug(
             "event_log.appended",
             event_id=event.event_id,
@@ -88,7 +106,7 @@ class PostgresEventLog(PostgresStoreBase, EventLog):
 
     def has_idempotency_key(self, key: str) -> bool:
         """Efficient single-row check for an idempotency key."""
-        with self.conn.cursor() as cur:
+        with self._conn() as conn, conn.cursor() as cur:
             cur.execute(
                 "SELECT 1 FROM events WHERE event_type = %s "
                 "AND payload->>'idempotency_key' = %s LIMIT 1",
@@ -109,6 +127,8 @@ class PostgresEventLog(PostgresStoreBase, EventLog):
         since: datetime | None = None,
         until: datetime | None = None,
         limit: int = 100,
+        order: EventOrder = "asc",
+        payload_filters: dict[str, str] | None = None,
     ) -> list[Event]:
         clauses: list[str] = []
         params: list[Any] = []
@@ -128,12 +148,23 @@ class PostgresEventLog(PostgresStoreBase, EventLog):
         if until is not None:
             clauses.append("occurred_at <= %s")
             params.append(until)
+        if payload_filters:
+            for key, value in payload_filters.items():
+                # ``payload->>'k' = 'v'`` returns TEXT; callers comparing
+                # ints / bools must coerce to str. JSONB makes this
+                # GIN-indexable but no index is required for correctness.
+                clauses.append("payload->>%s = %s")
+                params.extend([key, value])
 
         where = " AND ".join(clauses) if clauses else "1=1"
-        sql = f"SELECT * FROM events WHERE {where} ORDER BY occurred_at ASC LIMIT %s"
+        direction = "DESC" if order == "desc" else "ASC"
+        sql = (
+            f"SELECT * FROM events WHERE {where} "
+            f"ORDER BY occurred_at {direction} LIMIT %s"
+        )
         params.append(limit)
 
-        with self.conn.cursor() as cur:
+        with self._conn() as conn, conn.cursor() as cur:
             cur.execute(sql, params)
             rows = cur.fetchall()
         return [self._row_to_event(row) for row in rows]
@@ -161,7 +192,7 @@ class PostgresEventLog(PostgresStoreBase, EventLog):
         where = " AND ".join(clauses) if clauses else "1=1"
         sql = f"SELECT COUNT(*) FROM events WHERE {where}"
 
-        with self.conn.cursor() as cur:
+        with self._conn() as conn, conn.cursor() as cur:
             cur.execute(sql, params)
             row = cur.fetchone()
         return int(row[0]) if row else 0

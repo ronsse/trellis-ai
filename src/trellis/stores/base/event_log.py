@@ -5,12 +5,21 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from datetime import datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import Field
 
 from trellis.core.base import VersionedModel, utc_now
 from trellis.core.ids import generate_ulid
+
+#: Sort order for ``EventLog.get_events``. ``"asc"`` returns the oldest
+#: events first (chronological), ``"desc"`` returns the most recent
+#: events first. The default is ``"asc"`` so existing analytics callers
+#: that consume events in chronological order keep working without a
+#: change. Callers that short-circuit on the first match (duplicate
+#: checks, "find latest" lookups) should pass ``order="desc"`` so the
+#: ``limit`` cap doesn't truncate the recent end of the log.
+EventOrder = Literal["asc", "desc"]
 
 
 class EventType(StrEnum):
@@ -147,8 +156,27 @@ class EventLog(ABC):
         since: datetime | None = None,
         until: datetime | None = None,
         limit: int = 100,
+        order: EventOrder = "asc",
+        payload_filters: dict[str, str] | None = None,
     ) -> list[Event]:
-        """Query events with filters."""
+        """Query events with filters.
+
+        ``order`` controls truncation semantics when ``limit`` is hit:
+        ``"asc"`` (default) preserves chronological consumption for
+        analytics aggregators; ``"desc"`` returns the most recent events
+        first so duplicate-check / latest-N lookups can short-circuit
+        without missing recent rows.
+
+        ``payload_filters`` maps payload-key to expected string value;
+        predicates are AND-ed and pushed into the backend SQL so the
+        ``limit`` cap applies *after* the filter. This is the SQL-side
+        equivalent of post-fetch ``e.payload.get(K) == V`` and matters
+        when the unfiltered window would pull megabytes of JSON only to
+        keep a few rows. Backends compare against the textual JSON value
+        (``payload->>K`` on Postgres, ``json_extract(payload, '$.K')`` on
+        SQLite), so callers comparing against ints / bools must coerce
+        to ``str`` at the call site.
+        """
 
     @abstractmethod
     def count(

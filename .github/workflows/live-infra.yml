@@ -1,0 +1,66 @@
+name: Live infrastructure tests
+
+# Runs the integration suites that hit live cloud backends (Neo4j +
+# Postgres) so connection-pool, middleware, and wipe-helper
+# regressions surface in CI rather than during deploy validation.
+# Triggered:
+#
+#   * on push to main — every merge runs the live suite, catching
+#     anything that slipped through PR review. Code changes are when
+#     regressions land; that's when we want the signal.
+#   * on workflow_dispatch — operators can run on demand from the
+#     Actions tab before a deploy.
+#
+# No periodic schedule. Live infra doesn't drift on its own; if there
+# are no merges there are no regressions to catch.
+#
+# Required repo secrets (set under Settings → Secrets and variables →
+# Actions). Without these the job runs but every test skips cleanly
+# because the test fixtures themselves gate on these env vars:
+#
+#   * TRELLIS_TEST_NEO4J_URI         bolt:// or neo4j+s:// URI
+#   * TRELLIS_TEST_NEO4J_USER        Neo4j user
+#   * TRELLIS_TEST_NEO4J_PASSWORD    Neo4j password
+#   * TRELLIS_TEST_NEO4J_DATABASE    database name (provider-specific —
+#                                    e.g. AuraDB uses the instance ID,
+#                                    self-hosted defaults to "neo4j")
+#   * TRELLIS_TEST_PG_DSN            postgresql:// DSN
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Serialize runs against shared live infra — wipe_live_state in the
+# loop fixtures truncates Postgres tables and clears Neo4j nodes, so
+# two concurrent runs would corrupt each other's state. Don't cancel
+# in-progress; let the previous run finish before the next one starts.
+concurrency:
+  group: live-infra
+  cancel-in-progress: false
+
+jobs:
+  live-infra:
+    name: live-infra (AuraDB + Neon)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install Trellis with live-infra extras
+        run: pip install -e ".[dev,cloud,neo4j]"
+
+      - name: Run live integration suites
+        env:
+          TRELLIS_TEST_NEO4J_URI: ${{ secrets.TRELLIS_TEST_NEO4J_URI }}
+          TRELLIS_TEST_NEO4J_USER: ${{ secrets.TRELLIS_TEST_NEO4J_USER }}
+          TRELLIS_TEST_NEO4J_PASSWORD: ${{ secrets.TRELLIS_TEST_NEO4J_PASSWORD }}
+          TRELLIS_TEST_NEO4J_DATABASE: ${{ secrets.TRELLIS_TEST_NEO4J_DATABASE }}
+          TRELLIS_TEST_PG_DSN: ${{ secrets.TRELLIS_TEST_PG_DSN }}
+        run: |
+          pytest tests/integration/test_neo4j_e2e.py tests/integration/loops/ -v

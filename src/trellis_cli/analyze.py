@@ -10,6 +10,11 @@ from rich.console import Console
 from rich.table import Table
 
 from trellis.extract.telemetry import analyze_extractor_fallbacks
+from trellis.learning import (
+    analyze_learning_observations,
+    build_learning_observations_from_event_log,
+    write_learning_review_artifacts,
+)
 from trellis.retrieve.advisory_generator import AdvisoryGenerator
 from trellis.retrieve.effectiveness import (
     analyze_effectiveness,
@@ -978,3 +983,120 @@ def extractor_fallbacks(
         console.print("[bold]Findings[/bold]")
         for finding in report.findings:
             console.print(f"  [yellow]- {finding}[/yellow]")
+
+
+# ---------------------------------------------------------------------------
+# Learning Candidates (H2.3 — operator surface for the promote half)
+# ---------------------------------------------------------------------------
+
+
+@analyze_app.command("learning-candidates")
+def learning_candidates(
+    output_dir: Path = typer.Option(  # noqa: B008 - typer option default
+        ...,
+        "--output-dir",
+        "-o",
+        help=(
+            "Directory for the candidates JSON + decisions template. "
+            "Created if it doesn't exist."
+        ),
+    ),
+    days: int = typer.Option(30, help="Days of EventLog history to scan"),
+    min_support: int = typer.Option(
+        2,
+        "--min-support",
+        help=(
+            "Minimum times an item must appear in graded packs to score as a candidate"
+        ),
+    ),
+    output_format: str = typer.Option("text", "--format", help="Output format"),
+) -> None:
+    """Score the EventLog into learning candidates for human review.
+
+    Joins ``PACK_ASSEMBLED`` + ``FEEDBACK_RECORDED`` events into
+    learning observations, scores them against the promote /
+    investigate-noise thresholds, and writes two artifacts to
+    ``--output-dir``:
+
+      * ``intent_learning_candidates.json`` — the scored report.
+      * ``promotion_decisions.template.json`` — a blank approval form.
+        Edit this file and set ``approved: true`` on candidates you
+        want to promote, then pass it to ``trellis curate
+        promote-learning``.
+
+    Read-only. Does not mutate the graph; the promote step does that
+    after a human review pass.
+    """
+    event_log = get_event_log()
+    observations = build_learning_observations_from_event_log(event_log, days=days)
+    report = analyze_learning_observations(
+        observations=observations,
+        min_support=min_support,
+        artifacts_root=output_dir,
+    )
+    paths = write_learning_review_artifacts(report=report, output_dir=output_dir)
+
+    if output_format == "json":
+        print(
+            json.dumps(
+                {
+                    "status": "ok",
+                    "observation_count": report["observation_count"],
+                    "candidate_count": report["candidate_count"],
+                    "candidates_path": paths["candidates_path"],
+                    "decisions_template_path": paths["decisions_template_path"],
+                    "candidates": report["candidates"],
+                }
+            )
+        )
+        return
+
+    console.print(
+        f"[bold]Learning Candidates Report[/bold] (last {days} days, "
+        f"min_support={min_support})"
+    )
+    console.print(f"  Observations scanned: {report['observation_count']}")
+    console.print(f"  Candidates generated: {report['candidate_count']}")
+    console.print(f"  Candidates JSON: [cyan]{paths['candidates_path']}[/cyan]")
+    console.print(
+        f"  Decisions template: [cyan]{paths['decisions_template_path']}[/cyan]"
+    )
+
+    if not report["candidates"]:
+        console.print()
+        console.print(
+            "[dim]No candidates met the threshold. Either no graded packs "
+            "in this window, or no item appeared often enough to score. "
+            "Lower --min-support or wait for more feedback.[/dim]"
+        )
+        return
+
+    console.print()
+    table = Table(title="Candidates by Recommendation")
+    table.add_column("Candidate ID", style="cyan", max_width=24)
+    table.add_column("Recommendation", style="bold")
+    table.add_column("Item type", style="dim")
+    table.add_column("Served", justify="right")
+    table.add_column("Success rate", justify="right")
+    table.add_column("Retry rate", justify="right")
+    for candidate in report["candidates"]:
+        metrics = candidate["metrics"]
+        rec_style = (
+            "green"
+            if candidate["recommendation_type"].startswith("promote_")
+            else "yellow"
+        )
+        table.add_row(
+            candidate["candidate_id"],
+            f"[{rec_style}]{candidate['recommendation_type']}[/{rec_style}]",
+            candidate.get("item_type") or "-",
+            str(metrics["times_served"]),
+            f"{metrics['success_rate']:.1%}",
+            f"{metrics['retry_rate']:.1%}",
+        )
+    console.print(table)
+    console.print()
+    console.print(
+        "[dim]Edit the decisions template to approve promotions, then run "
+        "[bold]trellis curate promote-learning[/bold] with both files.[/dim]"
+    )

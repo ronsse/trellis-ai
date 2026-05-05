@@ -48,7 +48,7 @@ components:
           title: Metadata
           type: object
         requested_by:
-          default: api
+          default: api:mutations
           title: Requested By
           type: string
         strategy:
@@ -295,7 +295,7 @@ components:
           title: Entities
           type: array
         requested_by:
-          default: api
+          default: api:bulk-ingest
           title: Requested By
           type: string
         strategy:
@@ -997,7 +997,7 @@ components:
           title: Description
           type: string
         requested_by:
-          default: api
+          default: api:promote
           title: Requested By
           type: string
         title:
@@ -1011,50 +1011,6 @@ components:
       - title
       - description
       title: PromoteRequest
-      type: object
-    SelfUpdateRequest:
-      description: Request body for self-update.
-      properties:
-        ref:
-          default: main
-          description: Git ref to install (branch, tag, or commit)
-          title: Ref
-          type: string
-        restart:
-          default: true
-          description: Restart the trellis-api systemd service after install
-          title: Restart
-          type: boolean
-        restart_delay_secs:
-          default: 2
-          description: Seconds to wait before restart
-          maximum: 30.0
-          minimum: 1.0
-          title: Restart Delay Secs
-          type: integer
-      title: SelfUpdateRequest
-      type: object
-    SelfUpdateResponse:
-      description: Response from self-update.
-      properties:
-        pip_output:
-          title: Pip Output
-          type: string
-        ref:
-          title: Ref
-          type: string
-        restart_scheduled:
-          title: Restart Scheduled
-          type: boolean
-        status:
-          title: Status
-          type: string
-      required:
-      - status
-      - pip_output
-      - ref
-      - restart_scheduled
-      title: SelfUpdateResponse
       type: object
     StatsResponse:
       additionalProperties: false
@@ -1169,6 +1125,11 @@ components:
       - package_version
       title: VersionResponse
       type: object
+  securitySchemes:
+    APIKeyHeader:
+      in: header
+      name: X-API-Key
+      type: apiKey
 info:
   description: Structured memory and learning for AI agents
   title: Trellis API
@@ -1214,6 +1175,8 @@ paths:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
           description: Validation Error
+      security:
+      - APIKeyHeader: []
       summary: List Advisories
       tags:
       - admin
@@ -1269,6 +1232,8 @@ paths:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
           description: Validation Error
+      security:
+      - APIKeyHeader: []
       summary: Generate Advisories
       tags:
       - admin
@@ -1305,6 +1270,8 @@ paths:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
           description: Validation Error
+      security:
+      - APIKeyHeader: []
       summary: Execute Batch
       tags:
       - mutations
@@ -1338,6 +1305,8 @@ paths:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
           description: Validation Error
+      security:
+      - APIKeyHeader: []
       summary: Create Document
       tags:
       - curate
@@ -1379,6 +1348,8 @@ paths:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
           description: Validation Error
+      security:
+      - APIKeyHeader: []
       summary: Effectiveness
       tags:
       - admin
@@ -1425,6 +1396,8 @@ paths:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
           description: Validation Error
+      security:
+      - APIKeyHeader: []
       summary: Apply Noise Tags
       tags:
       - admin
@@ -1453,6 +1426,8 @@ paths:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
           description: Validation Error
+      security:
+      - APIKeyHeader: []
       summary: Create Entity
       tags:
       - curate
@@ -1491,6 +1466,8 @@ paths:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
           description: Validation Error
+      security:
+      - APIKeyHeader: []
       summary: Get Entity
       tags:
       - retrieve
@@ -1519,6 +1496,8 @@ paths:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
           description: Validation Error
+      security:
+      - APIKeyHeader: []
       summary: Ingest Evidence
       tags:
       - ingest
@@ -1565,6 +1544,8 @@ paths:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
           description: Validation Error
+      security:
+      - APIKeyHeader: []
       summary: Submit Drafts
       tags:
       - extract
@@ -1591,6 +1572,8 @@ paths:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
           description: Validation Error
+      security:
+      - APIKeyHeader: []
       summary: Record Feedback
       tags:
       - curate
@@ -1673,6 +1656,8 @@ paths:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
           description: Validation Error
+      security:
+      - APIKeyHeader: []
       summary: Search graph entities
       tags:
       - retrieve
@@ -1687,6 +1672,8 @@ paths:
               schema:
                 $ref: '#/components/schemas/HealthResponse'
           description: Successful Response
+      security:
+      - APIKeyHeader: []
       summary: Health
       tags:
       - admin
@@ -1720,6 +1707,8 @@ paths:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
           description: Validation Error
+      security:
+      - APIKeyHeader: []
       summary: Ingest Bulk
       tags:
       - ingest
@@ -1748,6 +1737,8 @@ paths:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
           description: Validation Error
+      security:
+      - APIKeyHeader: []
       summary: Create Link
       tags:
       - curate
@@ -1774,6 +1765,8 @@ paths:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
           description: Validation Error
+      security:
+      - APIKeyHeader: []
       summary: Assemble Pack
       tags:
       - retrieve
@@ -1821,6 +1814,8 @@ paths:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
           description: Validation Error
+      security:
+      - APIKeyHeader: []
       summary: Pack Feedback
       tags:
       - curate
@@ -1837,6 +1832,8 @@ paths:
                 title: Response List Policies Api V1 Policies Get
                 type: object
           description: Successful Response
+      security:
+      - APIKeyHeader: []
       summary: List Policies
       tags:
       - policies
@@ -1864,6 +1861,8 @@ paths:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
           description: Validation Error
+      security:
+      - APIKeyHeader: []
       summary: Create Policy
       tags:
       - policies
@@ -1893,6 +1892,8 @@ paths:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
           description: Validation Error
+      security:
+      - APIKeyHeader: []
       summary: Delete Policy
       tags:
       - policies
@@ -1921,6 +1922,8 @@ paths:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
           description: Validation Error
+      security:
+      - APIKeyHeader: []
       summary: Get Policy
       tags:
       - policies
@@ -1959,6 +1962,8 @@ paths:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
           description: Validation Error
+      security:
+      - APIKeyHeader: []
       summary: List Precedents
       tags:
       - retrieve
@@ -1984,6 +1989,8 @@ paths:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
           description: Validation Error
+      security:
+      - APIKeyHeader: []
       summary: Promote
       tags:
       - curate
@@ -2034,37 +2041,11 @@ paths:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
           description: Validation Error
+      security:
+      - APIKeyHeader: []
       summary: Search
       tags:
       - retrieve
-  /api/v1/self-update:
-    post:
-      description: Upgrade the trellis-ai package from git and restart.
-      operationId: self_update_api_v1_self_update_post
-      requestBody:
-        content:
-          application/json:
-            schema:
-              anyOf:
-              - $ref: '#/components/schemas/SelfUpdateRequest'
-              - type: 'null'
-              title: Req
-      responses:
-        '200':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/SelfUpdateResponse'
-          description: Successful Response
-        '422':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HTTPValidationError'
-          description: Validation Error
-      summary: Self Update
-      tags:
-      - admin
   /api/v1/stats:
     get:
       description: Get store statistics.
@@ -2076,6 +2057,8 @@ paths:
               schema:
                 $ref: '#/components/schemas/StatsResponse'
           description: Successful Response
+      security:
+      - APIKeyHeader: []
       summary: Stats
       tags:
       - admin
@@ -2122,6 +2105,8 @@ paths:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
           description: Validation Error
+      security:
+      - APIKeyHeader: []
       summary: List Traces
       tags:
       - retrieve
@@ -2149,6 +2134,8 @@ paths:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
           description: Validation Error
+      security:
+      - APIKeyHeader: []
       summary: Ingest Trace
       tags:
       - ingest
@@ -2178,6 +2165,8 @@ paths:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
           description: Validation Error
+      security:
+      - APIKeyHeader: []
       summary: Get Trace
       tags:
       - retrieve
@@ -2211,6 +2200,8 @@ paths:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
           description: Validation Error
+      security:
+      - APIKeyHeader: []
       summary: Upsert Vectors
       tags:
       - ingest
@@ -2227,6 +2218,8 @@ paths:
                 title: Response Reset Vectors Api V1 Vectors Reset Post
                 type: object
           description: Successful Response
+      security:
+      - APIKeyHeader: []
       summary: Reset Vectors
       tags:
       - admin
