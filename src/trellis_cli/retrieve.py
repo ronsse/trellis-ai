@@ -26,6 +26,12 @@ _TRUNC_HELP = "Max characters for text fields"
 _QUIET_HELP = "Suppress Rich formatting"
 
 
+def _doc_preview(doc: dict, width: int) -> str:
+    """One-line preview from a document search result — newlines collapsed."""
+    text = doc.get("snippet") or doc.get("content") or ""
+    return " ".join(text.split())[:width]
+
+
 @retrieve_app.command()
 def pack(
     intent: str = typer.Option(..., help="Intent for pack assembly"),
@@ -68,7 +74,8 @@ def pack(
         if agent:
             console.print(f"  Agent: {agent}")
         for r in results:
-            console.print(f"  - {r['doc_id']}")
+            preview = _doc_preview(r, 80)
+            console.print(f"  - {r['doc_id']}: {preview}")
 
 
 @retrieve_app.command()
@@ -120,11 +127,11 @@ def search(
         if not quiet:
             console.print(f"[green]Search results[/green] ({len(results)} found)")
         for r in results:
-            snippet = r.get("snippet", "")[:trunc]
+            preview = _doc_preview(r, trunc)
             if quiet:
-                sys.stdout.write(f"{r['doc_id']}: {snippet}\n")
+                sys.stdout.write(f"{r['doc_id']}: {preview}\n")
             else:
-                console.print(f"  - {r['doc_id']}: {snippet}")
+                console.print(f"  - {r['doc_id']}: {preview}")
 
 
 @retrieve_app.command()
@@ -161,6 +168,12 @@ def entity(
     """Retrieve a specific entity by ID."""
     store = get_graph_store()
     result = store.get_node(entity_id)
+
+    # Fallback: resolve via local aliases so memorable names ("user-api") work.
+    if result is None:
+        alias_match = store.resolve_alias("local", entity_id)
+        if alias_match:
+            result = store.get_node(alias_match["entity_id"])
 
     if result is None:
         if output_format == "json":

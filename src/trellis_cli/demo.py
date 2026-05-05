@@ -1116,10 +1116,17 @@ def load(
 
     console.print("[bold]Loading demo data...[/bold]\n")
 
-    # 1. Entities → graph nodes
+    # 1. Entities → graph nodes (with name aliases so `retrieve entity <name>` resolves)
     entities = _build_entities()
     for eid, etype, name, props in entities:
         graph.upsert_node(eid, etype, {"name": name, **props})
+        graph.upsert_alias(
+            entity_id=eid,
+            source_system="local",
+            raw_id=name,
+            raw_name=name,
+            is_primary=True,
+        )
     console.print(f"  [green]+[/green] {len(entities)} entities")
 
     # 2. Edges → graph relationships

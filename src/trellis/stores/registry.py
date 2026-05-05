@@ -685,7 +685,7 @@ class StoreRegistry:
         config_dir: Path | None = None,
         data_dir: Path | None = None,
     ) -> StoreRegistry:
-        """Create a registry from XPG config directory.
+        """Create a registry from a Trellis config directory.
 
         Accepts two config shapes for the store section:
 

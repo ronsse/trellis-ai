@@ -21,7 +21,7 @@ Multiple agents share the same substrate, so institutional knowledge compounds i
 
 ```bash
 pip install trellis-ai
-trellis admin init          # write ~/.config/trellis/config.yaml + init SQLite stores
+trellis admin init          # write ~/.trellis/config.yaml + init SQLite stores
 trellis demo load           # populate 66 realistic items: entities, traces, precedents
 trellis admin serve         # open http://localhost:8420
 ```
