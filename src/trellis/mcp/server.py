@@ -134,7 +134,7 @@ def _build_llm_client(registry: StoreRegistry) -> Any:
     """Construct an LLMClient, preferring the registry config over env vars.
 
     First tries ``registry.build_llm_client()`` (driven by the ``llm:``
-    block in ``~/.config/trellis/config.yaml``). If that returns ``None`` — either
+    block in ``~/.trellis/config.yaml``). If that returns ``None`` — either
     because no config is present or the configured provider couldn't be
     instantiated — falls back to the env-var path in
     :func:`_build_llm_client_from_env`. Returns ``None`` when neither

@@ -2,7 +2,7 @@
 """Seed demo data for the Trellis UI.
 
 Usage:
-    python scripts/seed_demo.py          # Uses ~/.config/trellis config (same as API)
+    python scripts/seed_demo.py          # Uses ~/.trellis config (same as API)
     python scripts/seed_demo.py --clean  # Wipe and re-seed
 """
 

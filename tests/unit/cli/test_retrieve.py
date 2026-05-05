@@ -96,6 +96,23 @@ class TestRetrieveEntity:
         result = runner.invoke(app, ["retrieve", "entity", "ent_456"])
         assert result.exit_code == 1
 
+    def test_entity_resolves_via_local_alias(self) -> None:
+        from trellis_cli.stores import LOCAL_SOURCE_SYSTEM, get_graph_store
+
+        graph = get_graph_store()
+        graph.upsert_node("ulid_for_api", "service", {"name": "user-api"})
+        graph.upsert_alias(
+            entity_id="ulid_for_api",
+            source_system=LOCAL_SOURCE_SYSTEM,
+            raw_id="user-api",
+            raw_name="user-api",
+            is_primary=True,
+        )
+
+        result = runner.invoke(app, ["retrieve", "entity", "user-api"])
+        assert result.exit_code == 0
+        assert "service" in result.stdout
+
 
 class TestRetrievePrecedents:
     def test_precedents(self) -> None:
