@@ -22,6 +22,11 @@ logger = structlog.get_logger(__name__)
 # source_system value for aliases minted by this Trellis instance — distinct
 # from external-system aliases ("github", "dbt", …). Demo loader seeds these;
 # `retrieve entity` resolves memorable names through them.
+#
+# Aliases key on (source_system, raw_id), so two entities sharing the same
+# raw_id under "local" will SCD-2 supersede each other — the older alias
+# version is closed and the newer one wins. Pick raw_ids that are unique
+# across entity types, or namespace them ("svc:foo", "team:foo").
 LOCAL_SOURCE_SYSTEM = "local"
 
 _registry: StoreRegistry | None = None
