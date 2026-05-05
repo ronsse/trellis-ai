@@ -26,7 +26,9 @@ def _execute_command(cmd: Command) -> CommandResponse:
     """Execute a command through the mutation pipeline."""
     registry = get_registry()
     handlers = create_curate_handlers(registry)
-    executor = MutationExecutor(event_log=registry.event_log, handlers=handlers)
+    executor = MutationExecutor(
+        event_log=registry.operational.event_log, handlers=handlers
+    )
     result = executor.execute(cmd)
     if result.status == CommandStatus.FAILED:
         raise HTTPException(status_code=400, detail=result.message)
@@ -117,7 +119,7 @@ def create_document(body: dict[str, Any]) -> dict[str, Any]:
     metadata = body.get("metadata", {})
     if not content:
         raise HTTPException(status_code=400, detail="content is required")
-    stored_id = registry.document_store.put(
+    stored_id = registry.knowledge.document_store.put(
         doc_id=doc_id, content=content, metadata=metadata
     )
     return {"status": "ok", "doc_id": stored_id}
@@ -148,7 +150,7 @@ def pack_feedback(
 ) -> dict[str, Any]:
     """Record feedback on a specific context pack."""
     registry = get_registry()
-    registry.event_log.emit(
+    registry.operational.event_log.emit(
         EventType.FEEDBACK_RECORDED,
         source="api",
         entity_id=pack_id,

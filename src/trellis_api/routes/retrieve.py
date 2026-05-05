@@ -30,7 +30,7 @@ def search(
     filters: dict[str, Any] = {}
     if domain:
         filters["domain"] = domain
-    results = registry.document_store.search(q, limit=limit, filters=filters)
+    results = registry.knowledge.document_store.search(q, limit=limit, filters=filters)
     return {"status": "ok", "query": q, "count": len(results), "results": results}
 
 
@@ -96,7 +96,7 @@ def search_entities(
 ) -> dict[str, Any]:
     """Search graph nodes by name or type."""
     registry = get_registry()
-    store = registry.graph_store
+    store = registry.knowledge.graph_store
 
     # Detect backend by checking for SQLite vs Postgres connection
     is_sqlite = hasattr(store, "_conn") and not hasattr(store, "conn")
@@ -261,11 +261,13 @@ def get_entity(
 ) -> dict[str, Any]:
     """Get an entity and its neighborhood."""
     registry = get_registry()
-    node = registry.graph_store.get_node(entity_id)
+    node = registry.knowledge.graph_store.get_node(entity_id)
     if node is None:
         raise HTTPException(status_code=404, detail=f"Entity not found: {entity_id}")
 
-    subgraph = registry.graph_store.get_subgraph(seed_ids=[entity_id], depth=depth)
+    subgraph = registry.knowledge.graph_store.get_subgraph(
+        seed_ids=[entity_id], depth=depth
+    )
     return {"status": "ok", "entity": node, "subgraph": subgraph}
 
 
@@ -277,8 +279,10 @@ def list_traces(
 ) -> dict[str, Any]:
     """List recent traces."""
     registry = get_registry()
-    traces = registry.trace_store.query(domain=domain, agent_id=agent, limit=limit)
-    total = registry.trace_store.count(domain=domain)
+    traces = registry.operational.trace_store.query(
+        domain=domain, agent_id=agent, limit=limit
+    )
+    total = registry.operational.trace_store.count(domain=domain)
 
     items = [t.to_summary_dict() for t in traces]
     return {"status": "ok", "total": total, "count": len(items), "traces": items}
@@ -288,7 +292,7 @@ def list_traces(
 def get_trace(trace_id: str) -> dict[str, Any]:
     """Get a specific trace by ID."""
     registry = get_registry()
-    trace = registry.trace_store.get(trace_id)
+    trace = registry.operational.trace_store.get(trace_id)
     if trace is None:
         raise HTTPException(status_code=404, detail=f"Trace not found: {trace_id}")
     return {"status": "ok", "trace": trace.model_dump(mode="json")}
@@ -301,5 +305,5 @@ def list_precedents(
 ) -> dict[str, Any]:
     """List promoted precedents."""
     registry = get_registry()
-    items = _list_precedents(registry.event_log, domain=domain, limit=limit)
+    items = _list_precedents(registry.operational.event_log, domain=domain, limit=limit)
     return {"status": "ok", "count": len(items), "precedents": items}

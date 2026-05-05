@@ -4,6 +4,16 @@ All notable changes to Trellis will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- **Internal call sites migrated off the deprecated flat `StoreRegistry` aliases** ([adr-planes-and-substrates.md §317-322](docs/design/adr-planes-and-substrates.md)). All in-tree code now uses the plane-namespaced form (`registry.knowledge.<store>` / `registry.operational.<store>`). The flat aliases (`registry.graph_store`, `registry.event_log`, etc.) still work and still emit `DeprecationWarning` — this PR removes only the *internal* warning churn ahead of the v0.6.0 removal. External callers see no behavior change.
+
+### Deprecated
+
+- **Flat `StoreRegistry` properties — `trace_store`, `document_store`, `graph_store`, `vector_store`, `event_log`, `blob_store`** — sunset target **v0.6.0**. Use `registry.knowledge.<store>` (graph, vector, document, blob) or `registry.operational.<store>` (trace, event_log) instead. Already emit `DeprecationWarning` since v0.4.0.
+- **Flat `stores:` config block** in `~/.trellis/config.yaml` — sunset target **v0.6.0**. Run `trellis admin migrate-config` to rewrite as `knowledge:` / `operational:` plane blocks. Already emits a structlog warning since v0.4.0.
+- **`TRELLIS_PG_DSN` env-var fallback** — sunset target **v0.6.0**. Set `TRELLIS_KNOWLEDGE_PG_DSN` and `TRELLIS_OPERATIONAL_PG_DSN` instead (both can point at the same DSN). Already emits a structlog warning since v0.4.0.
+
 ## [0.5.1] - 2026-04-29
 
 ### Added

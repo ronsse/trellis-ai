@@ -32,8 +32,8 @@ registry = StoreRegistry.from_config_dir()
 vault = ObsidianVault("/path/to/your/Vault")
 indexer = VaultIndexer(
     vault,
-    document_store=registry.document_store,
-    graph_store=registry.graph_store,
+    document_store=registry.knowledge.document_store,
+    graph_store=registry.knowledge.graph_store,
 )
 
 summary = indexer.index_vault()

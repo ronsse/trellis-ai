@@ -1189,7 +1189,7 @@ def load(
     console.print(f"  [green]+[/green] {len(precedents)} precedents")
 
     # 7. Emit PRECEDENT_PROMOTED events so the precedents tab works
-    event_log = registry.event_log
+    event_log = registry.operational.event_log
     for (
         prec_id,
         title,

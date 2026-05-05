@@ -144,7 +144,9 @@ def _run_extraction(
     """Register the extractor, dispatch, and return the result."""
     ext_registry = ExtractorRegistry()
     ext_registry.register(extractor)  # type: ignore[arg-type]
-    dispatcher = ExtractionDispatcher(ext_registry, event_log=registry.event_log)
+    dispatcher = ExtractionDispatcher(
+        ext_registry, event_log=registry.operational.event_log
+    )
     return asyncio.run(
         dispatcher.dispatch(raw_input, source_hint=source_hint),
     )
@@ -157,7 +159,7 @@ def _execute_batch(
     """Submit the batch and return ``(nodes_created, edges_created)``."""
     handlers = create_curate_handlers(registry)
     executor = MutationExecutor(
-        event_log=registry.event_log,
+        event_log=registry.operational.event_log,
         handlers=handlers,
     )
     results = executor.execute_batch(batch)
@@ -223,7 +225,7 @@ def ingest_dbt_manifest(
 
     # Index descriptions into the document store (dbt-specific side-channel
     # that used to live inside the worker's load() override).
-    doc_store = registry.document_store
+    doc_store = registry.knowledge.document_store
     doc_count = 0
     for entity in result.entities:
         desc = entity.properties.get("description", "")

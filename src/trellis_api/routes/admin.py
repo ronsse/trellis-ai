@@ -32,11 +32,11 @@ def stats() -> StatsResponse:
     """Get store statistics."""
     registry = get_registry()
     return StatsResponse(
-        traces=registry.trace_store.count(),
-        documents=registry.document_store.count(),
-        nodes=registry.graph_store.count_nodes(),
-        edges=registry.graph_store.count_edges(),
-        events=registry.event_log.count(),
+        traces=registry.operational.trace_store.count(),
+        documents=registry.knowledge.document_store.count(),
+        nodes=registry.knowledge.graph_store.count_nodes(),
+        edges=registry.knowledge.graph_store.count_edges(),
+        events=registry.operational.event_log.count(),
     )
 
 
@@ -48,7 +48,7 @@ def effectiveness(
     """Analyze context pack effectiveness."""
     registry = get_registry()
     report = analyze_effectiveness(
-        registry.event_log,
+        registry.operational.event_log,
         days=days,
         min_appearances=min_appearances,
     )
@@ -67,8 +67,8 @@ def apply_noise_tags(
     """
     registry = get_registry()
     report = run_effectiveness_feedback(
-        registry.event_log,
-        registry.document_store,
+        registry.operational.event_log,
+        registry.knowledge.document_store,
         days=days,
         min_appearances=min_appearances,
     )
@@ -99,7 +99,7 @@ def generate_advisories(
         return {"status": "error", "message": "stores_dir not configured"}
     store = AdvisoryStore(stores_dir / "advisories.json")
     generator = AdvisoryGenerator(
-        registry.event_log,
+        registry.operational.event_log,
         store,
         min_sample_size=min_sample,
         min_effect_size=min_effect,
@@ -133,7 +133,7 @@ def list_advisories(
 def reset_vectors() -> dict[str, Any]:
     """Drop and recreate the vectors table with current configured dimensions."""
     registry = get_registry()
-    vector_store = getattr(registry, "vector_store", None)
+    vector_store = getattr(registry.knowledge, "vector_store", None)
     if vector_store is None:
         return {"status": "error", "message": "Vector store not configured"}
 
