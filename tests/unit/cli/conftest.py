@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-import logging
-
 import pytest
-import structlog
 
 from trellis_cli.stores import _reset_registry
 
@@ -17,12 +14,10 @@ def _reset_cli_registry() -> None:
 
 
 @pytest.fixture(autouse=True)
-def _suppress_structlog() -> None:
-    """Suppress structlog console output during CLI tests.
+def _suppress_structlog(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Silence structlog during CliRunner tests via ``TRELLIS_LOG_LEVEL=CRITICAL``.
 
-    The CLI tests capture stdout via CliRunner, and structlog's
-    default console renderer writes there too, corrupting JSON output.
+    CliRunner merges stderr into ``result.output`` regardless of where
+    the logger writes, so the env-var tuning knob is the cleanest mute.
     """
-    structlog.configure(
-        wrapper_class=structlog.make_filtering_bound_logger(logging.CRITICAL),
-    )
+    monkeypatch.setenv("TRELLIS_LOG_LEVEL", "CRITICAL")

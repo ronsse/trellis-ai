@@ -62,7 +62,7 @@ def context_effectiveness(
     )
 
     if output_format == "json":
-        console.print(json.dumps(report.model_dump()))
+        print(json.dumps(report.model_dump()))
     else:
         console.print(f"[bold]Context Effectiveness Report[/bold] (last {days} days)")
         console.print(f"  Packs assembled: {report.total_packs}")
@@ -135,7 +135,7 @@ def apply_noise_tags(
     )
 
     if output_format == "json":
-        console.print(json.dumps(report.model_dump()))
+        print(json.dumps(report.model_dump()))
     else:
         console.print(f"[bold]Effectiveness Feedback Applied[/bold] (last {days} days)")
         console.print(f"  Packs analyzed: {report.total_packs}")
@@ -162,7 +162,7 @@ def token_usage(
     report = analyze_token_usage(event_log, days=days)
 
     if output_format == "json":
-        console.print(json.dumps(report.model_dump()))
+        print(json.dumps(report.model_dump()))
         return
 
     console.print(f"[bold]Token Usage Report[/bold] (last {days} days)")
@@ -268,10 +268,7 @@ def generate_advisories(
     report = generator.generate(days=days)
 
     if output_format == "json":
-        console.print(
-            json.dumps(report.model_dump(), indent=2, default=str),
-            highlight=False,
-        )
+        print(json.dumps(report.model_dump(), indent=2, default=str))
     else:
         console.print(f"[bold]Advisory Generation Report[/bold] (last {days} days)")
         console.print(f"  Packs analyzed: {report.total_packs}")
@@ -364,10 +361,7 @@ def advisory_effectiveness(
         )
 
     if output_format == "json":
-        console.print(
-            json.dumps(report.model_dump(), indent=2, default=str),
-            highlight=False,
-        )
+        print(json.dumps(report.model_dump(), indent=2, default=str))
     else:
         console.print(f"[bold]Advisory Effectiveness Report[/bold] (last {days} days)")
         console.print(f"  Packs with advisories: {report.total_packs_with_advisories}")
@@ -453,7 +447,7 @@ def pack_sections(
             }
             for s in report.section_stats
         ]
-        console.print(
+        print(
             json.dumps(
                 {
                     "total_sectioned_packs": report.total_sectioned_packs,
@@ -461,8 +455,7 @@ def pack_sections(
                     "empty_section_flags": report.empty_section_flags,
                 },
                 indent=2,
-            ),
-            highlight=False,
+            )
         )
         return
 
@@ -628,7 +621,7 @@ def pack_quality(
 
     if not assemble:
         if output_format == "json":
-            console.print(
+            print(
                 json.dumps(
                     {"scenarios": [s.model_dump() for s in scenarios]},
                     default=str,
@@ -647,7 +640,7 @@ def pack_quality(
         reports.append(report)
 
     if output_format == "json":
-        console.print(
+        print(
             json.dumps(
                 {"reports": [r.model_dump() for r in reports]},
                 default=str,
@@ -747,7 +740,7 @@ def dimension_predictiveness(
     )
 
     if output_format == "json":
-        console.print(json.dumps(report.model_dump(), default=str))
+        print(json.dumps(report.model_dump(), default=str))
         return
 
     console.print(f"[bold]Dimension Predictiveness Report[/bold] (last {days} days)")
@@ -818,7 +811,7 @@ def pack_telemetry(
     report = analyze_pack_telemetry(event_log, days=days)
 
     if output_format == "json":
-        console.print(json.dumps(report.model_dump()))
+        print(json.dumps(report.model_dump()))
         return
 
     console.print(f"[bold]Pack Telemetry Report[/bold] (last {days} days)")
@@ -925,7 +918,7 @@ def extractor_fallbacks(
     report = analyze_extractor_fallbacks(event_log, days=days)
 
     if output_format == "json":
-        console.print(json.dumps(report.model_dump()))
+        print(json.dumps(report.model_dump()))
         return
 
     console.print(f"[bold]Extractor Fallback Report[/bold] (last {days} days)")

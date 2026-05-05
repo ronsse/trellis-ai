@@ -653,9 +653,9 @@ class TestMainShutdown:
 
         monkeypatch.setattr(registry, "close", _tracking_close)
         monkeypatch.setattr(server_mod.mcp, "run", lambda: None)
-        # _configure_mcp_logging mutates global structlog config — keep
+        # configure_stderr_logging mutates global structlog config — keep
         # the conftest CRITICAL filter by stubbing it out here.
-        monkeypatch.setattr(server_mod, "_configure_mcp_logging", lambda: None)
+        monkeypatch.setattr(server_mod, "configure_stderr_logging", lambda: None)
 
         server_mod.main()
 
@@ -682,7 +682,7 @@ class TestMainShutdown:
 
         monkeypatch.setattr(registry, "close", _tracking_close)
         monkeypatch.setattr(server_mod.mcp, "run", _boom)
-        monkeypatch.setattr(server_mod, "_configure_mcp_logging", lambda: None)
+        monkeypatch.setattr(server_mod, "configure_stderr_logging", lambda: None)
 
         with pytest.raises(RuntimeError, match="simulated"):
             server_mod.main()
@@ -699,7 +699,7 @@ class TestMainShutdown:
         # already nulled it out via teardown, but be explicit.
         assert server_mod._registry is None
         monkeypatch.setattr(server_mod.mcp, "run", lambda: None)
-        monkeypatch.setattr(server_mod, "_configure_mcp_logging", lambda: None)
+        monkeypatch.setattr(server_mod, "configure_stderr_logging", lambda: None)
 
         # Should not raise.
         server_mod.main()

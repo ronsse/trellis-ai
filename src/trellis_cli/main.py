@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import typer
 
+from trellis.logging import configure_stderr_logging
 from trellis_cli.admin import admin_app
 from trellis_cli.analyze import analyze_app
 from trellis_cli.curate import curate_app
@@ -18,6 +19,10 @@ app = typer.Typer(
     name="trellis",
     help="Trellis — shared experience store for AI agents and teams.",
     no_args_is_help=True,
+    # Routes structlog to stderr so ``--format json`` stdout stays
+    # parseable. Wired as a Typer callback (not a console-script
+    # wrapper) so upgrades don't need a fresh ``pip install``.
+    callback=configure_stderr_logging,
 )
 
 # Register command groups

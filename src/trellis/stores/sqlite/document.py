@@ -21,13 +21,12 @@ logger = structlog.get_logger(__name__)
 def _build_tag_conditions(
     tag_filters: dict[str, Any],
 ) -> tuple[list[str], list[Any]]:
-    """Build SQL conditions for content_tags filtering.
+    """Build SQL conditions for ``content_tags`` filtering.
 
-    Handles two facet shapes:
-    - **list facet** (e.g. ``domain``): the item's stored value is a JSON array;
-      we check if *any* of the filter values appears in that array.
-    - **scalar facet** (e.g. ``content_type``, ``signal_quality``): the item's
-      stored value is a string; we check ``IN (?, ?, …)``.
+    List facets (e.g. ``domain``) match if any filter value is in the
+    JSON array; scalar facets (``content_type``, ``signal_quality``,
+    ``scope``) match by ``IN (...)``. Both wrap in ``IS NULL OR …`` so
+    untagged items pass — mirrors the Postgres path's default-pass.
     """
     conditions: list[str] = []
     params: list[Any] = []
@@ -38,18 +37,19 @@ def _build_tag_conditions(
             continue
         json_path = f"$.content_tags.{facet}"
         if facet in list_facets:
-            # Array facets: check if any filter value is in the JSON array.
             sub_parts = " OR ".join("je.value = ?" for _ in values)
             conditions.append(
-                f"EXISTS (SELECT 1 FROM json_each(d.metadata_json, '{json_path}') je"
-                f" WHERE {sub_parts})"
+                f"(json_extract(d.metadata_json, '{json_path}') IS NULL"
+                f" OR EXISTS (SELECT 1 FROM json_each(d.metadata_json,"
+                f" '{json_path}') je WHERE {sub_parts}))"
             )
             params.extend(values)
         else:
-            # For scalar facets: simple IN check.
             placeholders = ", ".join("?" for _ in values)
             conditions.append(
-                f"json_extract(d.metadata_json, '{json_path}') IN ({placeholders})"
+                f"(json_extract(d.metadata_json, '{json_path}') IS NULL"
+                f" OR json_extract(d.metadata_json, '{json_path}')"
+                f" IN ({placeholders}))"
             )
             params.extend(values)
 

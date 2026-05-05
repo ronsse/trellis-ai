@@ -203,6 +203,66 @@ def test_search_without_content_tags_still_works(
     assert len(results) == 1
 
 
+def test_search_untagged_doc_passes_signal_quality_filter(
+    doc_store: SQLiteDocumentStore,
+) -> None:
+    """Untagged docs survive a scalar ``signal_quality`` allowlist (default-pass)."""
+    doc_store.put(
+        None,
+        "tagged high-signal reference",
+        {
+            "content_tags": {"signal_quality": "high"},
+        },
+    )
+    doc_store.put(
+        None,
+        "tagged noise filler",
+        {
+            "content_tags": {"signal_quality": "noise"},
+        },
+    )
+    doc_store.put(None, "untagged reference doc")
+
+    results = doc_store.search(
+        "reference",
+        filters={"content_tags": {"signal_quality": ["high", "standard", "low"]}},
+    )
+    contents = {r["content"] for r in results}
+    assert "tagged high-signal reference" in contents
+    assert "untagged reference doc" in contents
+    assert "tagged noise filler" not in contents
+
+
+def test_search_untagged_doc_passes_domain_filter(
+    doc_store: SQLiteDocumentStore,
+) -> None:
+    """List facets honour the same default-pass rule as scalar facets."""
+    doc_store.put(
+        None,
+        "matching domain doc",
+        {
+            "content_tags": {"domain": ["data-pipeline"]},
+        },
+    )
+    doc_store.put(
+        None,
+        "wrong domain doc",
+        {
+            "content_tags": {"domain": ["infrastructure"]},
+        },
+    )
+    doc_store.put(None, "untagged domain doc")
+
+    results = doc_store.search(
+        "doc",
+        filters={"content_tags": {"domain": ["data-pipeline"]}},
+    )
+    contents = {r["content"] for r in results}
+    assert "matching domain doc" in contents
+    assert "untagged domain doc" in contents
+    assert "wrong domain doc" not in contents
+
+
 def test_update_preserves_created_at(doc_store: SQLiteDocumentStore) -> None:
     doc_store.put("d1", "v1")
     doc1 = doc_store.get("d1")
