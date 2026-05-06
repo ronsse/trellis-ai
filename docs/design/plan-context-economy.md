@@ -138,7 +138,7 @@ Reference: [context-economy-strategy.md](./context-economy-strategy.md)
    - `src/trellis_sdk/integrations/langgraph.py`:
      ```python
      def create_xpg_tools(client: TrellisClient) -> list[BaseTool]:
-         """Returns LangGraph-compatible tools wrapping XPG skills."""
+         """Returns LangGraph-compatible tools wrapping Trellis skills."""
      ```
    - Each tool has a concise description (<100 chars) to minimize schema overhead
 
@@ -147,7 +147,7 @@ Reference: [context-economy-strategy.md](./context-economy-strategy.md)
      - Same pattern, CrewAI `Tool` wrappers
 
 5. **Claude Code skill**
-   - Create an XPG skill for Claude Code that wraps CLI commands
+   - Create an Trellis skill for Claude Code that wraps CLI commands
    - Provides `trellis-context` skill that agents can invoke to get pre-summarized context
    - Uses CLI under the hood with `--format json | jq` for filtering
 

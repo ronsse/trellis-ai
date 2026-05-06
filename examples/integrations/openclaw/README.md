@@ -70,7 +70,7 @@ All tools accept `max_tokens` (default 2000 for core tools, configurable via `re
 
 ## Configuration
 
-By default, XPG uses SQLite for all stores (zero configuration). For advanced setups, create `~/.config/trellis/config.yaml`:
+By default, Trellis uses SQLite for all stores (zero configuration). For advanced setups, create `~/.config/trellis/config.yaml`:
 
 ```yaml
 stores:

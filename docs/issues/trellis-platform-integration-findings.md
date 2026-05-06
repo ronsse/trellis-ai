@@ -1,6 +1,6 @@
 # Integration Findings from trellis-platform Backfill
 
-Issues discovered while building the XPG graph backfill in fd-data-architecture-poc.
+Issues discovered while building the Trellis graph backfill in fd-data-architecture-poc.
 Each item is a gap in the trellis-ai core that caused friction.
 
 ## P0 — Blocks correct usage
