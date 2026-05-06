@@ -454,7 +454,7 @@ def serve(
     ),
     port: int = typer.Option(8420, help="Port to bind"),
 ) -> None:
-    """Start the XPG REST API server."""
+    """Start the Trellis REST API server."""
     try:
         import uvicorn  # noqa: PLC0415
 
@@ -466,7 +466,7 @@ def serve(
         )
         raise typer.Exit(code=1)  # noqa: B904
 
-    console.print(f"[green]Starting XPG API server on {host}:{port}[/green]")
+    console.print(f"[green]Starting Trellis API server on {host}:{port}[/green]")
     app = create_app()
     uvicorn.run(app, host=host, port=port)
 
@@ -1023,7 +1023,7 @@ def _build_check_extractors_report() -> dict[str, Any]:
                 "message": (
                     "LLM client is not buildable from config; only env-var"
                     " fallback is available. Consider adding an llm: block"
-                    " to ~/.config/trellis/config.yaml."
+                    " to ~/.trellis/config.yaml."
                 ),
             }
         )
@@ -1076,12 +1076,12 @@ def _print_check_extractors_report(report: dict[str, Any]) -> None:
         provider = llm.get("provider") or "?"
         model = llm.get("model") or "(default)"
         console.print(
-            f"  [green]OK[/green] configurable from ~/.config/trellis/config.yaml"
+            f"  [green]OK[/green] configurable from ~/.trellis/config.yaml"
             f" (provider={provider}, model={model})"
         )
     else:
         console.print(
-            "  [red]MISSING[/red] not configurable from ~/.config/trellis/config.yaml"
+            "  [red]MISSING[/red] not configurable from ~/.trellis/config.yaml"
         )
     if llm["env_fallback_available"]:
         console.print(

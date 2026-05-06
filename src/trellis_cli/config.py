@@ -11,12 +11,12 @@ from trellis.core.base import TrellisModel
 
 
 def get_config_dir() -> Path:
-    """Get XPG config directory."""
+    """Get Trellis config directory."""
     return Path(os.environ.get("TRELLIS_CONFIG_DIR", str(Path.home() / ".trellis")))
 
 
 def get_data_dir() -> Path:
-    """Get XPG data directory."""
+    """Get Trellis data directory."""
     return Path(os.environ.get("TRELLIS_DATA_DIR", str(get_config_dir() / "data")))
 
 

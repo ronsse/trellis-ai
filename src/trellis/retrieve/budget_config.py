@@ -1,7 +1,7 @@
 """Configurable retrieval budgets.
 
 Resolves per-tool and per-domain budget overrides from the ``retrieval.budgets``
-section of ``~/.config/trellis/config.yaml``.  Resolution order:
+section of ``~/.trellis/config.yaml``.  Resolution order:
 
 1. Explicit caller override (``max_tokens`` argument on a context tool)
 2. Tool-specific config under ``by_tool``
