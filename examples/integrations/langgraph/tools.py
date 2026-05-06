@@ -42,7 +42,7 @@ def _get_client(base_url: str | None = None) -> TrellisClient:
 def create_xpg_tools(
     base_url: str | None = None,
 ) -> list[Any]:
-    """Create LangGraph-compatible XPG tools.
+    """Create LangGraph-compatible Trellis tools.
 
     Args:
         base_url: Optional REST API URL. If None, uses local stores.

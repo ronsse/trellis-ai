@@ -16,7 +16,7 @@ metadata:
 
 Structured institutional memory for AI agents. Record traces of your work, build a shared knowledge graph, and retrieve context packs before starting new tasks.
 
-## When to Use XPG vs Built-in Memory
+## When to Use Trellis vs Built-in Memory
 
 | Use Case | Built-in Memory | Trellis |
 |----------|----------------|------------------|
@@ -29,7 +29,7 @@ Structured institutional memory for AI agents. Record traces of your work, build
 | Cross-agent institutional knowledge | | Yes |
 | Evidence linking (docs, snippets, files) | | Yes |
 
-**Rule of thumb:** If it's a note for yourself, use built-in memory. If it's structured knowledge that other agents or future sessions should learn from, use XPG.
+**Rule of thumb:** If it's a note for yourself, use built-in memory. If it's structured knowledge that other agents or future sessions should learn from, use Trellis.
 
 ## Available Tools
 

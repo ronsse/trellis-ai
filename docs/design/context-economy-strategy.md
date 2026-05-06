@@ -46,7 +46,7 @@ The most robust architecture uses a combination of all three, treating them as p
 
 **When to use it:** For heavy lifting, bulk ingestion (like parsing Spark or dbt manifests), and local scripting.
 
-**Agent Interaction:** Autonomous coding agents (like OpenDevin or local terminal-bound agents) should primarily interact with XPG through this layer using bash skills. It forces them to be deliberate about what data they print to stdout.
+**Agent Interaction:** Autonomous coding agents (like OpenDevin or local terminal-bound agents) should primarily interact with Trellis through this layer using bash skills. It forces them to be deliberate about what data they print to stdout.
 
 ### Layer 2 -- The Middle: Skills / Function Calling (The Routing Layer)
 
@@ -54,7 +54,7 @@ The most robust architecture uses a combination of all three, treating them as p
 
 **When to use it:** When building a custom, closed-loop agentic workflow where you know exactly what context the agent needs.
 
-**Agent Interaction:** Instead of giving a LangGraph node full access to XPG, you give it a specific skill like `get_latest_successful_trace(task_type)`. The skill executes the XPG query under the hood, summarizes the result into a tight markdown paragraph, and returns only that summary to the agent.
+**Agent Interaction:** Instead of giving a LangGraph node full access to Trellis, you give it a specific skill like `get_latest_successful_trace(task_type)`. The skill executes the Trellis query under the hood, summarizes the result into a tight markdown paragraph, and returns only that summary to the agent.
 
 ### Layer 3 -- The Surface: MCP (The UX Layer)
 
@@ -62,7 +62,7 @@ The most robust architecture uses a combination of all three, treating them as p
 
 **When to use it:** For frictionless, out-of-the-box integration with IDEs like Cursor or coding assistants like Cline, where you want the human and the AI to collaborate easily without writing custom LangChain wrappers.
 
-**Agent Interaction (The Trick):** Do not expose the entire `trellis` raw API through MCP. Instead, build specific "Macro Tools" into the XPG MCP server that are designed to return summarized markdown, not raw JSON.
+**Agent Interaction (The Trick):** Do not expose the entire `trellis` raw API through MCP. Instead, build specific "Macro Tools" into the Trellis MCP server that are designed to return summarized markdown, not raw JSON.
 
 **Example MCP Tool:** `get_experience_context(intent="AWS deployment")`. The server does the heavy graph traversal, assembles the "Pack," truncates it to the most relevant 2000 tokens, and returns it as plain text.
 
