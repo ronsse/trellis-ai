@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import typer
 
 from trellis.logging import configure_stderr_logging
@@ -19,11 +21,30 @@ app = typer.Typer(
     name="trellis",
     help="Trellis — shared experience store for AI agents and teams.",
     no_args_is_help=True,
-    # Routes structlog to stderr so ``--format json`` stdout stays
-    # parseable. Wired as a Typer callback (not a console-script
-    # wrapper) so upgrades don't need a fresh ``pip install``.
-    callback=configure_stderr_logging,
 )
+
+
+@app.callback()
+def _root(
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v", help="Show INFO-level logs (default: WARNING)."
+    ),
+    debug: bool = typer.Option(False, "--debug", help="Show DEBUG-level logs."),
+) -> None:
+    # CLI defaults to WARNING so per-command stderr stays quiet next to
+    # the friendly Rich output. ``TRELLIS_LOG_LEVEL`` always wins so
+    # operators can pin a level globally; the flags only set defaults
+    # when the env var is absent. Routing structlog to stderr keeps
+    # ``--format json`` stdout parseable.
+    if "TRELLIS_LOG_LEVEL" not in os.environ:
+        if debug:
+            os.environ["TRELLIS_LOG_LEVEL"] = "DEBUG"
+        elif verbose:
+            os.environ["TRELLIS_LOG_LEVEL"] = "INFO"
+        else:
+            os.environ["TRELLIS_LOG_LEVEL"] = "WARNING"
+    configure_stderr_logging()
+
 
 # Register command groups
 app.add_typer(admin_app, name="admin", help="Administration and setup")

@@ -352,7 +352,7 @@ trellis retrieve pack \
 
 ## Playbook 7: Using MCP Macro Tools
 
-**When to use:** When an AI agent needs context from XPG through an MCP-compatible IDE (Cursor, Cline, Claude Code).
+**When to use:** When an AI agent needs context from Trellis through an MCP-compatible IDE (Cursor, Cline, Claude Code).
 
 ### Steps
 
@@ -394,7 +394,7 @@ Args: {"trace_id": "01JRK5N7QF", "success": true, "notes": "Clean implementation
 
 ## Playbook 8: Using the Python SDK
 
-**When to use:** When integrating XPG into an orchestrator (LangGraph, CrewAI) or custom agent code.
+**When to use:** When integrating Trellis into an orchestrator (LangGraph, CrewAI) or custom agent code.
 
 ### Steps
 
@@ -545,7 +545,7 @@ trellis-mcp
 
 Press Ctrl+C after confirming it starts without errors.
 
-3. Add XPG to your `openclaw.json`:
+3. Add Trellis to your `openclaw.json`:
 
 ```json
 {
@@ -560,7 +560,7 @@ Press Ctrl+C after confirming it starts without errors.
 
 4. Restart OpenClaw. The agent now has access to 11 macro tools (8 core + 3 sectioned-context).
 
-5. Verify the agent can use XPG tools by asking it to run:
+5. Verify the agent can use Trellis tools by asking it to run:
 
 ```
 get_context(intent="test connection", max_tokens=500)
@@ -574,10 +574,10 @@ get_context(intent="test connection", max_tokens=500)
 
 **Build the knowledge graph:** When the agent discovers or creates important entities (services, concepts, patterns), use `save_knowledge` to add them to the graph with typed relationships.
 
-### When to Use XPG vs Built-in Memory
+### When to Use Trellis vs Built-in Memory
 
 - **Built-in memory:** Daily notes, session context, quick personal reminders.
-- **XPG:** Structured traces of work, reusable precedents, knowledge graph entities with typed relationships, temporal versioning, cross-agent institutional knowledge.
+- **Trellis:** Structured traces of work, reusable precedents, knowledge graph entities with typed relationships, temporal versioning, cross-agent institutional knowledge.
 
 ### If It Fails
 

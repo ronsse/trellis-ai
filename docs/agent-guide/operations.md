@@ -861,7 +861,7 @@ A `by_domain` multiplier, when present, scales the resolved `max_tokens`/`max_it
 
 ### OpenClaw Setup
 
-OpenClaw has native MCP client support. Add XPG to your `openclaw.json`:
+OpenClaw has native MCP client support. Add Trellis to your `openclaw.json`:
 
 ```json
 {

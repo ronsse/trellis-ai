@@ -1084,7 +1084,7 @@ def seed_events(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Seed demo data for XPG UI")
+    parser = argparse.ArgumentParser(description="Seed demo data for Trellis UI")
     parser.add_argument(
         "--clean", action="store_true", help="Remove existing data before seeding"
     )
