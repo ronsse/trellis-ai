@@ -558,6 +558,44 @@ class GraphStoreContractTests:
         aliases = store.get_aliases("ent_auth")
         assert {a["source_system"] for a in aliases} == {"github", "pagerduty"}
 
+    def test_alias_rebind_repoints_to_new_entity(self, store: GraphStore) -> None:
+        # Per docs/design/adr-alias-resolution.md §2.1: re-upserting with the
+        # same (source_system, raw_id) and a different entity_id MUST close
+        # the prior row and open a new one pointing at the new entity. Pins
+        # the SCD-2 rebind semantic so backends can't drift to "ignore" or
+        # "raise" without a coordinated design change.
+        store.upsert_node("ent_a", "service", {})
+        store.upsert_node("ent_b", "service", {})
+        store.upsert_alias("ent_a", "local", "user-api")
+        _sleep_for_ordering()
+        store.upsert_alias("ent_b", "local", "user-api")
+
+        resolved = store.resolve_alias("local", "user-api")
+        assert resolved is not None
+        assert resolved["entity_id"] == "ent_b"
+
+        # The current alias is not associated with the prior entity anymore.
+        a_aliases = store.get_aliases("ent_a")
+        assert all(a.get("raw_id") != "user-api" for a in a_aliases)
+        b_aliases = store.get_aliases("ent_b")
+        assert any(a.get("raw_id") == "user-api" for a in b_aliases)
+
+    def test_alias_rebind_preserves_history_via_as_of(self, store: GraphStore) -> None:
+        # The rebind must close the prior row rather than overwrite it: an
+        # as_of query before the rebind still resolves to the original
+        # entity. Companion to test_alias_rebind_repoints_to_new_entity.
+        store.upsert_node("ent_a", "service", {})
+        store.upsert_node("ent_b", "service", {})
+        store.upsert_alias("ent_a", "local", "user-api")
+        _sleep_for_ordering()
+        before_rebind = _now()
+        _sleep_for_ordering()
+        store.upsert_alias("ent_b", "local", "user-api")
+
+        historical = store.resolve_alias("local", "user-api", as_of=before_rebind)
+        assert historical is not None
+        assert historical["entity_id"] == "ent_a"
+
     # ------------------------------------------------------------------
     # deletion
     # ------------------------------------------------------------------

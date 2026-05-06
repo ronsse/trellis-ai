@@ -1,6 +1,6 @@
 # ADR: Alias Resolution — `(source_system, raw_id)` Uniqueness Invariant
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-05-05
 **Deciders:** Trellis core
 **Related:**
@@ -48,7 +48,7 @@ This ADR records the **current** semantics and the **immediate** posture. It doe
 The `(source_system, raw_id)` pair is the natural key of `entity_aliases`. **The storage contract is: callers pick a `raw_id` that is unique under their chosen `source_system`, or they accept the SCD-2 rebind semantic.** This is now stated explicitly:
 
 - **Inline.** [`src/trellis_cli/stores.py`](../../src/trellis_cli/stores.py)'s `LOCAL_SOURCE_SYSTEM` block comment already calls out the rebind behavior and recommends namespacing (`svc:foo`, `team:foo`) when uniqueness across types is not guaranteed.
-- **Contract test.** A new contract test in `tests/unit/stores/contracts/graph_store.py` will assert: re-upserting with the same `(source_system, raw_id)` and a *different* `entity_id` MUST close the prior row and open a new one pointing at the new entity. Pins the rebind semantic so backends can't drift to "ignore" or "raise" without a coordinated design change. (Not landed in this ADR; tracked in TODO under "Quickstart polish follow-ups".)
+- **Contract test.** [`tests/unit/stores/contracts/graph_store_contract.py`](../../tests/unit/stores/contracts/graph_store_contract.py) carries `test_alias_rebind_repoints_to_new_entity` and `test_alias_rebind_preserves_history_via_as_of`: re-upserting with the same `(source_system, raw_id)` and a different `entity_id` MUST close the prior row and open a new one, and an `as_of` query before the rebind must still resolve to the original entity. Pins the rebind semantic so backends can't drift to "ignore" or "raise" without a coordinated design change.
 
 ### 2.2 Demo loader stays raw-name-keyed
 
@@ -90,4 +90,4 @@ Nothing in the running code. The ADR documents the invariant that PR #99 implici
 
 ## 4. Status
 
-Proposed. Becomes Accepted once the contract test from §2.1 lands.
+Accepted (2026-05-05). The contract test from §2.1 landed alongside the ADR.
