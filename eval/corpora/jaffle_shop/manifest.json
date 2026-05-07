@@ -1,0 +1,201 @@
+{
+  "_metadata": {
+    "_comment": "Hand-crafted manifest fixture mirroring dbt-labs/jaffle_shop_classic's structure as of 2026-05-06. Not produced by `dbt parse` — see README.md for regeneration steps if a contributor wants the real thing.",
+    "project_name": "jaffle_shop",
+    "source": "structure derived from github.com/dbt-labs/jaffle_shop_classic",
+    "fixture_version": "1.0.0"
+  },
+  "nodes": {
+    "model.jaffle_shop.stg_customers": {
+      "unique_id": "model.jaffle_shop.stg_customers",
+      "resource_type": "model",
+      "name": "stg_customers",
+      "schema": "staging",
+      "database": "analytics",
+      "description": "Staged customer records, one row per customer with cleaned customer_id, first_name, and last_name fields sourced from raw_customers.",
+      "depends_on": {"nodes": ["source.jaffle_shop.raw.customers"]},
+      "config": {"materialized": "view"},
+      "tags": ["staging"]
+    },
+    "model.jaffle_shop.stg_orders": {
+      "unique_id": "model.jaffle_shop.stg_orders",
+      "resource_type": "model",
+      "name": "stg_orders",
+      "schema": "staging",
+      "database": "analytics",
+      "description": "Staged orders with order_id, customer_id, order_date, and status; sourced from raw_orders.",
+      "depends_on": {"nodes": ["source.jaffle_shop.raw.orders"]},
+      "config": {"materialized": "view"},
+      "tags": ["staging"]
+    },
+    "model.jaffle_shop.stg_payments": {
+      "unique_id": "model.jaffle_shop.stg_payments",
+      "resource_type": "model",
+      "name": "stg_payments",
+      "schema": "staging",
+      "database": "analytics",
+      "description": "Staged payments with payment_id, order_id, payment_method, and amount converted from cents to dollars.",
+      "depends_on": {"nodes": ["source.jaffle_shop.raw.payments"]},
+      "config": {"materialized": "view"},
+      "tags": ["staging"]
+    },
+    "model.jaffle_shop.customers": {
+      "unique_id": "model.jaffle_shop.customers",
+      "resource_type": "model",
+      "name": "customers",
+      "schema": "marts",
+      "database": "analytics",
+      "description": "Customer-grain mart joining stg_customers with aggregates from stg_orders and stg_payments. One row per customer with first_order, most_recent_order, number_of_orders, and customer_lifetime_value.",
+      "depends_on": {
+        "nodes": [
+          "model.jaffle_shop.stg_customers",
+          "model.jaffle_shop.stg_orders",
+          "model.jaffle_shop.stg_payments"
+        ]
+      },
+      "config": {"materialized": "table"},
+      "tags": ["marts", "customer"]
+    },
+    "model.jaffle_shop.orders": {
+      "unique_id": "model.jaffle_shop.orders",
+      "resource_type": "model",
+      "name": "orders",
+      "schema": "marts",
+      "database": "analytics",
+      "description": "Order-grain mart enriching stg_orders with payment-method totals (credit_card_amount, coupon_amount, bank_transfer_amount, gift_card_amount) and the overall order amount from stg_payments.",
+      "depends_on": {
+        "nodes": [
+          "model.jaffle_shop.stg_orders",
+          "model.jaffle_shop.stg_payments"
+        ]
+      },
+      "config": {"materialized": "table"},
+      "tags": ["marts", "orders"]
+    },
+    "test.jaffle_shop.unique_stg_customers_customer_id.c7614daacb": {
+      "unique_id": "test.jaffle_shop.unique_stg_customers_customer_id.c7614daacb",
+      "resource_type": "test",
+      "name": "unique_stg_customers_customer_id",
+      "depends_on": {"nodes": ["model.jaffle_shop.stg_customers"]},
+      "tags": []
+    },
+    "test.jaffle_shop.not_null_stg_customers_customer_id.e2cfb1f9aa": {
+      "unique_id": "test.jaffle_shop.not_null_stg_customers_customer_id.e2cfb1f9aa",
+      "resource_type": "test",
+      "name": "not_null_stg_customers_customer_id",
+      "depends_on": {"nodes": ["model.jaffle_shop.stg_customers"]},
+      "tags": []
+    },
+    "test.jaffle_shop.unique_stg_orders_order_id.e3b0c44298": {
+      "unique_id": "test.jaffle_shop.unique_stg_orders_order_id.e3b0c44298",
+      "resource_type": "test",
+      "name": "unique_stg_orders_order_id",
+      "depends_on": {"nodes": ["model.jaffle_shop.stg_orders"]},
+      "tags": []
+    },
+    "test.jaffle_shop.not_null_stg_orders_order_id.81cfe2fe64": {
+      "unique_id": "test.jaffle_shop.not_null_stg_orders_order_id.81cfe2fe64",
+      "resource_type": "test",
+      "name": "not_null_stg_orders_order_id",
+      "depends_on": {"nodes": ["model.jaffle_shop.stg_orders"]},
+      "tags": []
+    },
+    "test.jaffle_shop.accepted_values_stg_orders_status.080fb20aad": {
+      "unique_id": "test.jaffle_shop.accepted_values_stg_orders_status.080fb20aad",
+      "resource_type": "test",
+      "name": "accepted_values_stg_orders_status",
+      "depends_on": {"nodes": ["model.jaffle_shop.stg_orders"]},
+      "tags": []
+    },
+    "test.jaffle_shop.unique_stg_payments_payment_id.3744510712": {
+      "unique_id": "test.jaffle_shop.unique_stg_payments_payment_id.3744510712",
+      "resource_type": "test",
+      "name": "unique_stg_payments_payment_id",
+      "depends_on": {"nodes": ["model.jaffle_shop.stg_payments"]},
+      "tags": []
+    },
+    "test.jaffle_shop.not_null_stg_payments_payment_id.c19cc50095": {
+      "unique_id": "test.jaffle_shop.not_null_stg_payments_payment_id.c19cc50095",
+      "resource_type": "test",
+      "name": "not_null_stg_payments_payment_id",
+      "depends_on": {"nodes": ["model.jaffle_shop.stg_payments"]},
+      "tags": []
+    },
+    "test.jaffle_shop.accepted_values_stg_payments_payment_method.e1bdf5d472": {
+      "unique_id": "test.jaffle_shop.accepted_values_stg_payments_payment_method.e1bdf5d472",
+      "resource_type": "test",
+      "name": "accepted_values_stg_payments_payment_method",
+      "depends_on": {"nodes": ["model.jaffle_shop.stg_payments"]},
+      "tags": []
+    },
+    "test.jaffle_shop.unique_customers_customer_id.c5af1ff4f7": {
+      "unique_id": "test.jaffle_shop.unique_customers_customer_id.c5af1ff4f7",
+      "resource_type": "test",
+      "name": "unique_customers_customer_id",
+      "depends_on": {"nodes": ["model.jaffle_shop.customers"]},
+      "tags": []
+    },
+    "test.jaffle_shop.not_null_customers_customer_id.3b4e0ddfc6": {
+      "unique_id": "test.jaffle_shop.not_null_customers_customer_id.3b4e0ddfc6",
+      "resource_type": "test",
+      "name": "not_null_customers_customer_id",
+      "depends_on": {"nodes": ["model.jaffle_shop.customers"]},
+      "tags": []
+    },
+    "test.jaffle_shop.unique_orders_order_id.fed79b3a6e": {
+      "unique_id": "test.jaffle_shop.unique_orders_order_id.fed79b3a6e",
+      "resource_type": "test",
+      "name": "unique_orders_order_id",
+      "depends_on": {"nodes": ["model.jaffle_shop.orders"]},
+      "tags": []
+    },
+    "test.jaffle_shop.not_null_orders_order_id.cf6c17daed": {
+      "unique_id": "test.jaffle_shop.not_null_orders_order_id.cf6c17daed",
+      "resource_type": "test",
+      "name": "not_null_orders_order_id",
+      "depends_on": {"nodes": ["model.jaffle_shop.orders"]},
+      "tags": []
+    },
+    "test.jaffle_shop.relationships_orders_customer_id__customer_id__ref_customers_.c6ec7f58f2": {
+      "unique_id": "test.jaffle_shop.relationships_orders_customer_id__customer_id__ref_customers_.c6ec7f58f2",
+      "resource_type": "test",
+      "name": "relationships_orders_customer_id__customer_id__ref_customers_",
+      "depends_on": {
+        "nodes": [
+          "model.jaffle_shop.orders",
+          "model.jaffle_shop.customers"
+        ]
+      },
+      "tags": []
+    }
+  },
+  "sources": {
+    "source.jaffle_shop.raw.customers": {
+      "unique_id": "source.jaffle_shop.raw.customers",
+      "resource_type": "source",
+      "name": "customers",
+      "source_name": "raw",
+      "schema": "raw",
+      "database": "analytics",
+      "description": "Raw customers table from the application database. One row per registered user with id, first_name, and last_name."
+    },
+    "source.jaffle_shop.raw.orders": {
+      "unique_id": "source.jaffle_shop.raw.orders",
+      "resource_type": "source",
+      "name": "orders",
+      "source_name": "raw",
+      "schema": "raw",
+      "database": "analytics",
+      "description": "Raw orders table from the application database. One row per order placement with id, user_id, order_date, and status (placed/shipped/completed/return_pending/returned)."
+    },
+    "source.jaffle_shop.raw.payments": {
+      "unique_id": "source.jaffle_shop.raw.payments",
+      "resource_type": "source",
+      "name": "payments",
+      "source_name": "raw",
+      "schema": "raw",
+      "database": "analytics",
+      "description": "Raw payments table from the upstream payments service. One row per payment with id, orderid, paymentmethod (credit_card/coupon/bank_transfer/gift_card), and amount in cents."
+    }
+  }
+}
