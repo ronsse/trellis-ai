@@ -347,6 +347,74 @@ def load_github_corpus(
     return result
 
 
+_PHRASE_STOPWORDS = frozenset({
+    "the", "a", "an", "and", "or", "of", "to", "for", "in", "on", "at", "with",
+    "by", "from", "into", "over", "this", "that", "these", "those",
+    "is", "are", "was", "were", "be", "been", "being", "not", "no",
+    "can", "could", "should", "would", "may", "might", "do", "does", "did",
+    "have", "has", "had", "via", "per", "plus", "but", "if", "when",
+    "what", "which", "as", "its", "it", "s",
+})
+
+
+_MIN_TOKEN_LEN = 8
+_MIN_BIGRAM_LEN = 12
+_MIN_TRIGRAM_LEN = 18
+
+
+def _title_tokens_and_phrases(title: str) -> tuple[list[str], list[str]]:
+    """Yield (single tokens, 2-3 word phrases) from a PR title.
+
+    Stripped: backslash-escaped byte sequences left over from the
+    snapshot's literal-bytes encoding (e.g. ``\\xe2\\x80\\x94``) and
+    most punctuation. ``.`` ``-`` ``_`` ``/`` are kept so tokens like
+    ``scenario 5.1``, ``migrate-graph``, ``recommended-config.yaml``
+    survive intact.
+
+    Specificity thresholds (tuned against false-positive seeds on the
+    `topic_content` queries — generic phrases like ``"bulk upsert"``
+    or ``"the graphstore"`` were anchoring seeds to follow-up PRs
+    instead of the introducing PR):
+
+    * Single tokens: >= ``_MIN_TOKEN_LEN`` chars, not in stopwords.
+    * Bigrams: neither word is a stopword, joined length >=
+      ``_MIN_BIGRAM_LEN``.
+    * Trigrams: first and last word are not stopwords, joined length
+      >= ``_MIN_TRIGRAM_LEN``.
+
+    For each bigram, also emits a ``-s``-suffixed variant on the first
+    word so an intent like ``"scenarios 5.1"`` matches a title's
+    ``"scenario 5.1"`` — cheap heuristic plural handling.
+    """
+    cleaned = re.sub(r"\\x[0-9a-f]{2}", " ", title.lower())
+    cleaned = re.sub(r"[^a-z0-9\s\-_./]+", " ", cleaned)
+    words = cleaned.split()
+    tokens: list[str] = []
+    for w in words:
+        if len(w) >= _MIN_TOKEN_LEN and w not in _PHRASE_STOPWORDS:
+            tokens.append(w)
+    phrases: list[str] = []
+    for i in range(len(words) - 1):
+        a, b = words[i], words[i + 1]
+        if a in _PHRASE_STOPWORDS or b in _PHRASE_STOPWORDS:
+            continue
+        bigram = f"{a} {b}"
+        if len(bigram) < _MIN_BIGRAM_LEN:
+            continue
+        phrases.append(bigram)
+        if not a.endswith("s"):
+            phrases.append(f"{a}s {b}")
+    for i in range(len(words) - 2):
+        a, b, c = words[i], words[i + 1], words[i + 2]
+        if a in _PHRASE_STOPWORDS or c in _PHRASE_STOPWORDS:
+            continue
+        trigram = f"{a} {b} {c}"
+        if len(trigram) < _MIN_TRIGRAM_LEN:
+            continue
+        phrases.append(trigram)
+    return tokens, phrases
+
+
 def build_pr_name_index(registry: StoreRegistry) -> dict[str, str]:
     """Build a name→entity_id index for the loaded GitHub corpus.
 
@@ -356,25 +424,58 @@ def build_pr_name_index(registry: StoreRegistry) -> dict[str, str]:
     corpus-specific).
 
     Indexes:
-    - Each PR's ``#NNN`` form (e.g., ``"#42"``) → its entity_id
-    - Each PR's bare number form (e.g., ``"42"``) → its entity_id
-    - Each user's login → its entity_id
+
+    1. Each PR's bare number ``"NNN"`` (e.g. ``"42"``) → its entity_id,
+       **only for PR numbers >= 10**. The single-digit form 1-9 is
+       intentionally not indexed: an intent containing
+       ``"scenarios 5.1, 5.2, 5.3"`` would otherwise pull PRs 1, 2, 3
+       and 5 as spurious seeds. Word-boundary regex matching of bare
+       numbers covers ``"PR #34"``, ``"in #66's"``, etc. since ``#``
+       is a non-word char.
+    2. Each user's login → its entity_id.
+    3. Single tokens from each PR's title, **only when unique to one
+       PR** and >= 5 chars (e.g. ``"terminology"`` → PR #3).
+    4. 2-3 word title phrases, **only when unique to one PR** (e.g.
+       ``"tag vocabulary"`` → PR #4, ``"driver lifecycle"`` → PR #51).
+       Bigrams also get a ``-s`` plural variant on the first word so
+       ``"scenarios 5.1"`` matches a title's ``"scenario 5.1"``.
+
+    The unique-to-one-PR filter is what keeps the noise floor low:
+    common bigrams like ``"phase 1"`` appear in many PR titles and
+    are deliberately not indexed.
     """
     # GraphStore.query() defaults to limit=50 — too small for this
     # corpus (90 entities). 5000 is a generous ceiling for any
     # reasonable single-corpus scenario.
+    nodes = list(registry.knowledge.graph_store.query(limit=5000))
+
     index: dict[str, str] = {}
-    for node in registry.knowledge.graph_store.query(limit=5000):
+    pr_token_owners: dict[str, set[str]] = {}
+    pr_phrase_owners: dict[str, set[str]] = {}
+    for node in nodes:
         entity_id = node["node_id"]
         properties = node.get("properties") or {}
         node_type = node.get("node_type", "")
         if node_type == ENTITY_TYPE_PR:
             pr_num = properties.get("pr_number")
-            if pr_num is not None:
-                index.setdefault(f"#{pr_num}", entity_id)
+            if pr_num is not None and pr_num >= 10:
                 index.setdefault(str(pr_num), entity_id)
+            title = properties.get("title", "")
+            tokens, phrases = _title_tokens_and_phrases(title)
+            for tok in tokens:
+                pr_token_owners.setdefault(tok, set()).add(entity_id)
+            for phrase in phrases:
+                pr_phrase_owners.setdefault(phrase, set()).add(entity_id)
         elif node_type == ENTITY_TYPE_USER:
             login = properties.get("login", "")
             if login:
                 index.setdefault(login, entity_id)
+
+    for tok, owners in pr_token_owners.items():
+        if len(owners) == 1:
+            index.setdefault(tok, next(iter(owners)))
+    for phrase, owners in pr_phrase_owners.items():
+        if len(owners) == 1:
+            index.setdefault(phrase, next(iter(owners)))
+
     return index
