@@ -33,6 +33,10 @@ tmp*
 .claude/worktrees/
 .claude/scheduled_tasks.lock
 
-# Eval harness — runtime reports only; the dir itself stays via .gitkeep
+# Eval harness — runtime reports only; the dir itself stays via .gitkeep.
+# Phase A/B run records (`phase_*.json`) are citable artifacts — keep them.
 eval/reports/*
 !eval/reports/.gitkeep
+eval/runs/*
+!eval/runs/.gitkeep
+!eval/runs/phase_*.json

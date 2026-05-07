@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help setup install install-dev lint format typecheck test check clean build publish-check verify-wheel hooks hooks-run fix openapi openapi-check
+.PHONY: help setup install install-dev lint format typecheck test check clean build publish-check verify-wheel hooks hooks-run fix openapi openapi-check secrets-check eval-phase-a
 
 help: ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-15s\033[0m %s\n", $$1, $$2}'
@@ -66,3 +66,22 @@ openapi-check: ## Verify docs/api/v1.yaml matches the live FastAPI app (CI)
 		|| (echo ""; \
 		    echo "docs/api/v1.yaml is out of date. Run 'make openapi' and commit the diff."; \
 		    exit 1)
+
+# ---------------------------------------------------------------------------
+# Eval / secrets — see docs/design/plan-real-corpus-eval.md
+# ---------------------------------------------------------------------------
+
+secrets-check: ## Verify op:// references in .env resolve (no secrets printed)
+	@op run --env-file=.env -- python -c "import os, hashlib; \
+keys = ['MOONSHOT_API_KEY', 'OPENAI_API_KEY']; \
+[print(f'{k}: ' + (f'len={len(os.environ[k])}, sha256_first6={hashlib.sha256(os.environ[k].encode()).hexdigest()[:6]}' if os.environ.get(k) else 'NOT SET')) for k in keys]"
+
+eval-phase-a: ## Run scenario 5.4 with live Moonshot/Kimi via op-resolved secrets (forward-ref: Phase A wiring not yet landed)
+	@echo "NOTE: --provider moonshot flag is not yet implemented on eval.runner."
+	@echo "This target documents the target shape. Wire the flag as part of Phase A,"
+	@echo "then this target becomes runnable. See plan-real-corpus-eval.md §5.1."
+	op run --env-file=.env -- python -m eval.runner \
+		--scenario agent_loop_convergence \
+		--provider moonshot \
+		--rounds 100 \
+		--feedback-batch-size 10
