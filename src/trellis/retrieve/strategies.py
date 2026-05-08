@@ -372,7 +372,10 @@ class GraphSearch(SearchStrategy):
 
         if seed_ids:
             depth = filters.pop("depth", 2)
-            subgraph = self._store.get_subgraph(seed_ids, depth=depth)
+            edge_types = filters.pop("edge_types", None)
+            subgraph = self._store.get_subgraph(
+                seed_ids, depth=depth, edge_types=edge_types,
+            )
             nodes = subgraph.get("nodes", [])
         else:
             node_type = filters.pop("node_type", None)

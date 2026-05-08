@@ -1,0 +1,67 @@
+{
+  "name": "dbt_corpus_convergence",
+  "run_label": "phase_b1_dbt_with_graphsearch_canonical_dedup",
+  "timestamp_utc": "2026-05-07T09:30:00Z",
+  "host_notes": "100-round run with the canonical PackItem dedup fix landed (SeededGraphSearch rewrites item_id from <entity_id> to doc:<entity_id> so PackBuilder's exact-match dedup catches cross-strategy duplicates). Companion to phase_b1_2026-05-07_with_graphsearch.json (pre-dedup).",
+  "scenario_kwargs": {
+    "rounds": 100,
+    "feedback_batch_size": 10,
+    "seed": 0,
+    "enable_graph_search": true,
+    "manifest_path": "eval/corpora/jaffle_shop/manifest.json"
+  },
+  "status": "pass",
+  "metrics_summary": {
+    "convergence.useful_delta": 0.0903,
+    "convergence.weighted_delta": 0.0041,
+    "convergence.weighted_first_quarter_mean": 0.479,
+    "convergence.weighted_last_quarter_mean": 0.483,
+    "round_success_rate": 0.60,
+    "round_useful_fraction_overall": 0.2923,
+    "loops.advisories_generated_total": 8,
+    "loops.advisories_boosted_total": 49,
+    "loops.advisories_suppressed_total": 0,
+    "loops.noise_items_tagged_total": 148,
+    "embedder.calls_total": 101,
+    "cost.total_usd": 0.000043
+  },
+  "per_skill_success_rate": {
+    "column_transformation": 0.8182,
+    "change_impact": 1.0,
+    "downstream_lineage": 1.0,
+    "end_to_end_lineage": 1.0,
+    "multi_hop_lineage": 0.0,
+    "test_cross_reference": 0.0,
+    "test_coverage": 0.0,
+    "layer_classification": 0.0
+  },
+  "per_difficulty_success_rate": {
+    "medium": 0.5294,
+    "hard": 0.75
+  },
+  "diff_vs_pre_dedup": {
+    "round_success_rate": "0.60 → 0.60 (unchanged)",
+    "useful_delta": "+0.146 → +0.090 (regressed)",
+    "weighted_delta": "+0.018 → +0.004 (regressed)",
+    "noise_items_tagged_total": "258 → 148 (less aggressive noise loop)",
+    "advisories_boosted_total": "54 → 49 (slightly fewer)",
+    "skills_unchanged": [
+      "multi_hop_lineage (0%)",
+      "test_cross_reference (0%)",
+      "test_coverage (0%)",
+      "layer_classification (0%)"
+    ]
+  },
+  "interpretation": {
+    "dedup_didnt_move_stuck_skills": "Hypothesis was wrong. The 4 zero-scoring skills aren't blocked by cross-strategy duplicate items eating budget — they're blocked by deeper issues:\n  (1) `multi_hop_lineage`: GraphSearch returns the full subgraph including raw.* sources at depth 2, but position-decay scoring puts depth-2 nodes below the top-8 cutoff; required entities at depth 2 (3 of the 6 required) get cut by budget, not by duplicates.\n  (2) `test_cross_reference`: relationships test IS in the subgraph (depth 1 from both orders and customers seeds), should be findable by KeywordSearch on 'relationships' too. Likely tagged noise early by the effectiveness loop because it appears in failed packs (when other lineage queries pull it into their subgraphs without it being part of their required_coverage).\n  (3) `test_coverage`: intent has no entity name to seed; GraphSearch never fires. Orthogonal problem.\n  (4) `layer_classification`: same as (3) — 'mart-layer' isn't an entity name.",
+    "useful_delta_slight_regression": "Counterintuitive but explainable. Pre-dedup, the same entity could exist twice in the EventLog under doc:X and X — effectiveness analysis tracked them separately. Post-dedup, they're unified, so the noise-tagging signal concentrates on fewer canonical ids. Items that previously needed multiple failed appearances under each id form to be tagged are now tagged after fewer total appearances. Net: slightly more aggressive 'noise' classification, slightly less room for the loop to recover useful items in the last quarter.",
+    "advisories_boosted_dropped_5": "54 → 49. With unified ids, the fitness loop sees fewer distinct items to boost — each boost has more weight but there are fewer to apply."
+  },
+  "decision_recorded": "Canonical PackItem dedup is implemented and works as designed (cross-strategy duplicates ARE collapsed). It just doesn't fix the 4 stuck skills. The actual blockers are: pack budget too tight for 6-required-entity queries (multi_hop_lineage), noise-loop over-tagging on a small overlapping-subgraph corpus (test_cross_reference), and intents with no extractable entity name (test_coverage, layer_classification). Useful_delta and weighted_delta regressed slightly because unified ids concentrate noise-tagging signal — addressing this would require either higher noise-tagging thresholds or a positive-feedback resistance mechanism. For Phase B-1 the WITH-GRAPHSEARCH (pre-dedup) result remains the headline chart; the dedup fix is correct architecturally but doesn't earn its keep on this corpus shape. Saved for completeness and as a 'what we tried' record.",
+  "follow_ups_pending": [
+    "Per-query pack budget — lineage queries need max_items=12+ to fit raw.* sources alongside staging models. ~1 hour.",
+    "Noise-tagging resistance based on positive feedback — items referenced in successful packs should be slow to tag noise even if they appear in failed packs. ~1-2 days.",
+    "Phrase-based seed extraction for layer_classification / test_coverage — could be rule-based ('mart-layer' → filter node_type=dbt_model + tags contains 'marts') or LLM-based intent classification. ~1-3 days.",
+    "GraphSearch position-decay tuning — required entities at depth 2 deserve higher weight than they currently get. ~30 min."
+  ]
+}

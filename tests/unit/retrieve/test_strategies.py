@@ -288,6 +288,46 @@ class TestGraphSearch:
     def test_strategy_name(self, graph_store: MagicMock) -> None:
         assert GraphSearch(graph_store).name == "graph"
 
+    def test_edge_types_filter_forwarded_to_subgraph(
+        self,
+        graph_store: MagicMock,
+    ) -> None:
+        """``filters["edge_types"]`` reaches ``get_subgraph(edge_types=...)``.
+
+        Pins the contract the github_corpus_convergence scenario relies on
+        for ``author_attribution`` queries: passing
+        ``edge_types=["wasAttributedTo"]`` constrains BFS to that edge kind
+        instead of doing the bidirectional all-edges traversal.
+        """
+        strategy = GraphSearch(graph_store)
+        strategy.search(
+            "",
+            filters={
+                "seed_ids": ["user.alice"],
+                "edge_types": ["wasAttributedTo"],
+                "depth": 1,
+            },
+        )
+        graph_store.get_subgraph.assert_called_once()
+        _, kwargs = graph_store.get_subgraph.call_args
+        assert kwargs["edge_types"] == ["wasAttributedTo"]
+        assert kwargs["depth"] == 1
+
+    def test_edge_types_default_none_when_not_supplied(
+        self,
+        graph_store: MagicMock,
+    ) -> None:
+        """Backwards-compat: omitting ``edge_types`` forwards ``None``.
+
+        Pins the no-regression contract for callers that predate the
+        ``edge_types`` filter — they keep getting bidirectional all-edges
+        traversal exactly as before.
+        """
+        strategy = GraphSearch(graph_store)
+        strategy.search("", filters={"seed_ids": ["n1"]})
+        _, kwargs = graph_store.get_subgraph.call_args
+        assert kwargs["edge_types"] is None
+
 
 class TestGraphSearchNodeRole:
     """GraphSearch excludes structural nodes and boosts curated nodes."""

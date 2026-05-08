@@ -1,0 +1,92 @@
+{
+  "name": "dbt_corpus_convergence",
+  "run_label": "phase_f_dbt_lineage_closure",
+  "timestamp_utc": "2026-05-07T21:30:00Z",
+  "host_notes": "Phase F closes the last 0%-success skill on dbt (multi_hop_lineage). Adds an entity_id -> ancestors precompute via outbound `dependsOn` BFS, expands name seeds with their lineage when the intent contains lineage keywords (`upstream`, `lineage`, `ancestors`, `dependencies`), and runs GraphSearch with depth=0 so the precomputed closure is the pack — not a starting point for further BFS. Also fixes a name-index priority bug surfaced during diagnosis: 'customers' was binding to the source `raw.customers` instead of the mart `model.jaffle_shop.customers`, which left the lineage expansion with nothing to expand.",
+  "code_changes_under_test": {
+    "eval/corpora/dbt_loader.py": [
+      "build_name_index now does two-pass indexing — models first, then sources/tests. Without this, 'customers' bound to `source.jaffle_shop.raw.customers` (a leaf with no lineage to expand) and the multi_hop_lineage intent silently failed.",
+      "build_lineage_index() — at corpus-load time, computes the transitive closure of outbound `dependsOn` edges for every entity. Returns entity_id -> ordered list[ancestor entity_ids].",
+      "expand_seeds_with_lineage() — when intent contains a lineage keyword, expand each seed with its precomputed ancestors. Compose with extract_seed_ids."
+    ],
+    "eval/scenarios/dbt_corpus_convergence/scenario.py": "_build_pack accepts the lineage_index, expands name seeds before union with category seeds, and uses depth=0 when either category OR lineage expansion contributed seeds."
+  },
+  "providers": {
+    "chat": "unused",
+    "embed": {
+      "model": "text-embedding-3-small",
+      "endpoint": "https://api.openai.com/v1 (default)",
+      "input_usd_per_m_token": 0.02,
+      "dimension": 1536
+    }
+  },
+  "scenario_kwargs": {
+    "rounds": 100,
+    "feedback_batch_size": 10,
+    "success_coverage_threshold": 0.6,
+    "enable_graph_search": true
+  },
+  "corpus": {
+    "name": "jaffle_shop",
+    "nodes": 21,
+    "edges": 22,
+    "documents_indexed": 8,
+    "name_index_size": 35,
+    "category_index_size": 28,
+    "lineage_index_size": 18
+  },
+  "status": "pass",
+  "metrics_summary": {
+    "round_success_rate": 0.92,
+    "round_useful_fraction_overall": 0.4109,
+    "round_weighted_score_mean": 0.4668,
+    "round_coverage_mean": 0.904,
+    "convergence.useful_delta": 0.061,
+    "convergence.weighted_delta": -0.0049,
+    "loops.advisories_generated_total": 0,
+    "loops.noise_items_tagged_total": 92,
+    "embedder.calls_total": 101,
+    "cost.total_usd": 4.3e-05
+  },
+  "per_skill_success_rate": {
+    "change_impact": 1.0,
+    "column_transformation": 0.8182,
+    "downstream_lineage": 1.0,
+    "end_to_end_lineage": 1.0,
+    "layer_classification": 1.0,
+    "test_coverage": 1.0,
+    "test_cross_reference": 1.0,
+    "multi_hop_lineage": 1.0
+  },
+  "per_difficulty_success_rate": {
+    "medium": 0.8824,
+    "hard": 1.0
+  },
+  "comparison_to_phase_e": {
+    "vs_phase_e_dbt": {
+      "file": "phase_e_2026-05-07_dbt_category_seeds.json",
+      "round_success_rate": "0.84 -> 0.92 (+0.08)",
+      "per_difficulty.hard": "0.75 -> 1.0 (+0.25)",
+      "skills_unblocked": {
+        "multi_hop_lineage": "0.0 -> 1.0 — lineage expansion fills all 6 required upstream entities into the pack via depth=0 + precomputed closure"
+      },
+      "skills_held_at_100": ["change_impact", "downstream_lineage", "end_to_end_lineage", "layer_classification", "test_coverage", "test_cross_reference"],
+      "skills_unchanged_below_100": {
+        "column_transformation": "0.8182 -> 0.8182 — pre-existing; original B-1 run also showed 11/12 success on these 11 firings. Likely a single-query phrasing issue, not a lineage / category / seed-extraction issue."
+      }
+    },
+    "cumulative_arc_dbt": {
+      "phase_b1_baseline_no_graphsearch": "0.36",
+      "phase_b1_with_graphsearch": "0.60 (+0.24)",
+      "phase_e_category_seeds": "0.84 (+0.24)",
+      "phase_f_lineage_closure": "0.92 (+0.08)",
+      "total_lift_from_baseline": "+0.56 across three lifts; $0.0001 total paid spend on this corpus"
+    }
+  },
+  "interpretation": {
+    "headline": "Same architectural pattern as Phase E (precompute at corpus-load time, look up at query time, use depth=0 to make the precomputed result first-class). Where Phase E precomputed *category buckets* (schema='marts' -> set, test_type='not_null' -> set), Phase F precomputes *per-entity lineage closures* (m_customers -> set of all upstream Datasets). The category index is keyed on phrase; the lineage index is keyed on entity_id and looked up after name extraction.",
+    "name_priority_was_load_bearing": "Diagnosis found `customers` -> `source.jaffle_shop.raw.customers` (a leaf, no lineage to expand). The two-pass indexing (models first, then sources/tests) is what made expansion fire on the right entity. Same root cause shape as the github phase-D 'unique-only filter' tightening — the seed extractor's first attempt wasn't selective enough.",
+    "remaining_gap": "column_transformation (0.82 = 9/11 success) is the only sub-100% skill on dbt. Inspecting prior runs, the same number turned up under Phase B-1 with-GraphSearch (also 0.82), so this isn't a regression from any change in the seed/lineage stack — it's a query-shape mismatch that's been there since corpus inception. Likely the intent for one of the three column_transformation queries phrases the lookup in a way the current keyword/semantic scoring under-ranks. Out of scope for this hardening pass."
+  },
+  "decision_recorded": "Phase F closes multi_hop_lineage on dbt. Combined with Phase E (github author_attribution, dbt category skills), seven of eight dbt skills and six of seven github skills are now at 100%. The two open eval-blocked items in TODO are now: github multi_pr_series Q1 (body-token indexing or query rewriting — still open) and column_transformation on dbt (newly surfaced as the only sub-100% dbt skill — query-shape, not seed-extraction)."
+}
