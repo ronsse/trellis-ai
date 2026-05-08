@@ -272,7 +272,11 @@ def _drop_negated_user_seeds(
     """
     negated_ids: set[str] = set()
     for match in _NEGATION_BEFORE_USER.finditer(intent):
-        login = match.group(1).lower()
+        # The capture-group character class permits ``.`` and ``/`` so logins
+        # like ``app/dependabot`` survive intact; that means trailing
+        # punctuation (``"not by ronsse."``) also gets captured. Strip
+        # sentence-ending punctuation before the index lookup.
+        login = match.group(1).lower().rstrip(".,;!?")
         if login in name_index:
             negated_ids.add(name_index[login])
     return [s for s in seed_ids if s not in negated_ids]

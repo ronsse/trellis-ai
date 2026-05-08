@@ -96,6 +96,15 @@ _DBT_EDGE_KIND_ALIASES: dict[str, str] = {
     "depends_on": DEPENDS_ON,
 }
 
+# Entity-id prefixes that win the bare-name slot in :func:`build_name_index`
+# when multiple entities share a short-name (e.g., the ``customers`` mart
+# and the ``raw.customers`` source both expose ``customers`` as a short-
+# name candidate). dbt's manifest convention namespaces unique-ids as
+# ``<resource_type>.<project>.<name>`` — listing ``"model."`` here makes
+# the model the canonical owner of the short-name. Order matters: earlier
+# prefixes win over later ones.
+_NODE_PRIORITY_PREFIXES: Final[tuple[str, ...]] = ("model.",)
+
 
 def _canonicalize_edges(edges: list[EdgeDraft]) -> tuple[list[EdgeDraft], int]:
     """Return canonicalized edges + count of values that changed.
@@ -228,12 +237,12 @@ def build_name_index(registry: StoreRegistry) -> dict[str, str]:
     entity_id; otherwise duplicates are kept by the *first* hit, which
     is deterministic given a stable graph iteration order.
     """
-    # Two-pass indexing so models win the bare-name slot when a model and
-    # a source share a name (``customers`` mart vs ``raw.customers``
-    # source). Without this, an intent like "the customers mart" can
-    # bind ``customers`` -> source, then upstream-lineage expansion has
-    # nowhere to go (the source is a leaf). Pass 1 = models, pass 2 =
-    # sources + the rest.
+    # Two-pass indexing so :data:`_NODE_PRIORITY_PREFIXES` (currently
+    # ``"model."``) win the bare-name slot when a model and a source
+    # share a name (``customers`` mart vs ``raw.customers`` source).
+    # Without this, an intent like "the customers mart" can bind
+    # ``customers`` -> source, then upstream-lineage expansion has
+    # nowhere to go (the source is a leaf).
     index: dict[str, str] = {}
     nodes = list(registry.knowledge.graph_store.query(limit=5000))
 
@@ -253,11 +262,14 @@ def build_name_index(registry: StoreRegistry) -> dict[str, str]:
                 # Source-qualified key — uniquely identifies the source.
                 index.setdefault(f"{source_name}.{name}", entity_id)
 
+    def _is_priority(node: dict[str, Any]) -> bool:
+        return any(node["node_id"].startswith(p) for p in _NODE_PRIORITY_PREFIXES)
+
     for node in nodes:
-        if node["node_id"].startswith("model."):
+        if _is_priority(node):
             _index_node(node)
     for node in nodes:
-        if not node["node_id"].startswith("model."):
+        if not _is_priority(node):
             _index_node(node)
     return index
 
@@ -471,7 +483,13 @@ def _word_boundary_pattern(name: str) -> re.Pattern[str]:
     short-name. Without this, the github name_index (1154 entries) ×
     rounds × scenarios drives ~6-figure recompiles per session at
     ~10µs each. The cache is keyed on the lower-cased short-name so
-    a stable name_index pays at most once."""
+    a stable name_index pays at most once.
+
+    The cache is process-global. This is sound across corpora because
+    the compiled pattern depends only on the *name string*, not on
+    which entity_id the caller's index maps it to — two scenarios that
+    both have a ``"customers"`` name share the same regex even when
+    they bind it to different entity_ids."""
     return re.compile(r"\b" + re.escape(name.lower()) + r"\b")
 
 
