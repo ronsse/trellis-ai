@@ -67,7 +67,7 @@ task_pack = builder.build_sectioned(
 
 ### Using MCP Tools
 
-If your agents use the XPG MCP server:
+If your agents use the Trellis MCP server:
 
 ```
 get_objective_context(intent="Build daily GGR from sportsbook", domain="sportsbook")

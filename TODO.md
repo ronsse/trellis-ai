@@ -877,7 +877,7 @@ Each is independent and can land in any order once PR 6 ships.
 - [ ] Set up GitHub Actions for automated PyPI publishing on tag push
 
 ### Framework Integration (LangGraph)
-- [ ] Create `integrations/langgraph/` with XPG as a tool provider
+- [ ] Create `integrations/langgraph/` with Trellis as a tool provider
 - [ ] Wrap MCP tools as LangGraph `Tool` instances
 - [ ] Add example: agent retrieves context → executes → saves trace
 - [ ] Write README with setup instructions
@@ -897,7 +897,7 @@ Each is independent and can land in any order once PR 6 ships.
 
 ### Developer Experience
 - [ ] Add hosted playground (Streamlit or Gradio) showing graph visualization and search
-- [ ] Write persona-targeted docs: "XPG for platform teams", "XPG for solo devs with Claude Code"
+- [ ] Write persona-targeted docs: "Trellis for platform teams", "Trellis for solo devs with Claude Code"
 
 ### Human-Review UI — KPI dashboards, observability, metrics, run history
 
@@ -2220,6 +2220,6 @@ Captured during the smoke-test + simplify + review pass on [PR #99](https://gith
 - [ ] **Unit-test `_doc_preview`** in `src/trellis_cli/retrieve.py:30` — three branches (snippet present, content-only, both missing) plus the whitespace-collapse behavior. Today the function is exercised indirectly via `test_search` / `test_pack_request` but those fixtures don't seed documents, so all three branches go untested. The earlier docstring/behavior drift ("newlines collapsed" vs actual all-whitespace) is exactly what a unit test would have caught.
 - [ ] **JSON-format coverage for the `retrieve entity` alias-fallback path** — `test_entity_resolves_via_local_alias` only covers the text path. Add a sibling test that asserts `--format json` emits a valid result document when resolution is via alias.
 - [ ] **Verify demo loader actually seeds aliases** — add a one-line assertion in `tests/unit/cli/test_quickstart.py` (or wherever demo-load is exercised) that `graph.get_aliases(<known_eid>, source_system=LOCAL_SOURCE_SYSTEM)` returns the expected mapping. Belt-and-braces against silent demo-loader regressions.
-- [ ] **Wider XPG-rename sweep** — PR #99 fixed 9 user-visible / library spots. 18 files still reference "XPG", split between historical material (research notes, design docs, examples) and **two live TODO bullets in this file** (the langgraph integration entry and the persona-docs entry under Backlog → Developer Experience). Decide: scrub everywhere, scrub only live docs + active TODO entries, or leave as historical record.
+- [ ] **Wider XPG-rename sweep — historical only.** Live user-facing / library spots scrubbed across PR #99 (9 spots), the live TODO bullets, the live agent-guide docs (`playbooks.md`, `operations.md`, `tiered-context-retrieval.md`), and `scripts/seed_demo.py:1087`. Remaining mentions are in design docs (`docs/design/*.md`), plans (`docs/plans/*.md`), research notes, ADR backstory, the four `examples/integrations/{openclaw,langgraph}/` README+code templates, and a Graphiti-comparison subsection in this file (lines ~1996-1998). Decide: leave as historical record, or do a final scrub through design/plans/examples for naming hygiene.
 - [ ] **CLI default log level** — every `trellis retrieve …` and `trellis demo load` interleaves `[info ] store_instantiated …` structlog lines with the friendly Rich output. Default level should be WARNING for CLI commands, with `--verbose` to opt into INFO/DEBUG. PR #76 routed structlog to stderr but on a normal terminal both streams remain visible.
 - [x] **Investigate `(source_system, raw_id)` collision semantics for user-managed aliases** — captured in [`docs/design/adr-alias-resolution.md`](docs/design/adr-alias-resolution.md) (Accepted 2026-05-05). Documents the SCD-2 rebind footgun, sanctions the demo loader's name-as-raw-id pattern, and pins three deferred shapes (namespacing, strict-mode upsert, detection-only event). Contract tests `test_alias_rebind_{repoints_to_new_entity, preserves_history_via_as_of}` landed alongside the ADR.
