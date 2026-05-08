@@ -26,6 +26,7 @@ would supply a configured registry.
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import re
 from dataclasses import dataclass
@@ -41,7 +42,7 @@ from trellis.mutate.commands import CommandStatus, Operation
 from trellis.mutate.executor import MutationExecutor
 from trellis.mutate.handlers import create_curate_handlers
 from trellis.schemas.extraction import EdgeDraft, ExtractionResult
-from trellis.schemas.well_known import canonicalize_edge_kind
+from trellis.schemas.well_known import DEPENDS_ON, canonicalize_edge_kind
 from trellis.stores.registry import StoreRegistry
 from trellis_workers.extract import DbtManifestExtractor
 
@@ -92,7 +93,7 @@ class LoadResult:
 # this map collapses to empty and the function becomes a pure pass
 # through `canonicalize_edge_kind`.
 _DBT_EDGE_KIND_ALIASES: dict[str, str] = {
-    "depends_on": "dependsOn",
+    "depends_on": DEPENDS_ON,
 }
 
 
@@ -391,7 +392,7 @@ def build_lineage_index(
                     # showed the canonicalization happens upstream so the
                     # filter is layered on edge_kind only when set.
                     edge_kind = edge.get("edge_kind") or edge.get("edge_type")
-                    if edge_kind not in (None, "dependsOn", "depends_on"):
+                    if edge_kind not in (None, DEPENDS_ON, "depends_on"):
                         continue
                     seen.add(target)
                     ancestors.append(target)
@@ -452,8 +453,7 @@ def extract_category_seeds(
     intent_lower = intent.lower()
     consumed_spans: list[tuple[int, int]] = []
     for phrase in sorted(category_index, key=len, reverse=True):
-        pattern = r"\b" + re.escape(phrase) + r"\b"
-        for match in re.finditer(pattern, intent_lower):
+        for match in _word_boundary_pattern(phrase).finditer(intent_lower):
             start, end = match.span()
             if any(s <= start < e or s < end <= e for s, e in consumed_spans):
                 continue
@@ -463,6 +463,16 @@ def extract_category_seeds(
                     seen.add(eid)
             consumed_spans.append((start, end))
     return seeds
+
+
+@functools.lru_cache(maxsize=4096)
+def _word_boundary_pattern(name: str) -> re.Pattern[str]:
+    """Cached compile of ``\\b{escaped(name)}\\b`` for the lower-cased
+    short-name. Without this, the github name_index (1154 entries) ×
+    rounds × scenarios drives ~6-figure recompiles per session at
+    ~10µs each. The cache is keyed on the lower-cased short-name so
+    a stable name_index pays at most once."""
+    return re.compile(r"\b" + re.escape(name.lower()) + r"\b")
 
 
 def extract_seed_ids(intent: str, name_index: dict[str, str]) -> list[str]:
@@ -492,10 +502,7 @@ def extract_seed_ids(intent: str, name_index: dict[str, str]) -> list[str]:
     # Longest names first so ``raw.customers`` wins over ``customers``
     # when both sit in the index.
     for name in sorted(name_index, key=len, reverse=True):
-        # Use the dot/dot/dash variants where . may be present (sources).
-        # ``re.escape`` handles dots safely. Word-boundary on both sides.
-        pattern = r"\b" + re.escape(name.lower()) + r"\b"
-        for match in re.finditer(pattern, intent_lower):
+        for match in _word_boundary_pattern(name).finditer(intent_lower):
             start, end = match.span()
             # Skip if this span was already claimed by a longer name.
             if any(s <= start < e or s < end <= e for s, e in consumed_spans):

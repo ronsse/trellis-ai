@@ -51,6 +51,10 @@ DEFAULT_OPENAI_EMBEDDING_MODEL = "text-embedding-3-small"
 # OpenAI text-embedding-3-small native dimension. Registries that wire
 # this embedder must align ``embedding_dim`` accordingly.
 OPENAI_EMBEDDING_3_SMALL_DIM = 1536
+# Per-million-input-token cost for ``text-embedding-3-small`` (OpenAI
+# pricing as of 2026-04). Single source of truth for the eval scenarios'
+# cost telemetry; raise here when the provider re-prices.
+OPENAI_EMBED_3_SMALL_USD_PER_M = 0.02
 
 
 class RealLLMConfigError(RuntimeError):

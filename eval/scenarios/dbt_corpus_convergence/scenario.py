@@ -36,7 +36,10 @@ from typing import Any
 
 import structlog
 
-from eval._real_llm import build_phase_a_clients
+from eval._real_llm import (
+    OPENAI_EMBED_3_SMALL_USD_PER_M,
+    build_phase_a_clients,
+)
 from eval.corpora.dbt_loader import (
     LoadResult,
     build_category_index,
@@ -89,7 +92,7 @@ CONVERGENCE_DELTA_REGRESS_THRESHOLD = -0.05
 ROUND_WINDOW_FRACTION = 4
 DEFAULT_ADVISORY_MIN_SAMPLE_SIZE = 5
 
-OPENAI_EMBED_3_SMALL_USD_PER_M = 0.02
+# OPENAI_EMBED_3_SMALL_USD_PER_M re-exported from eval._real_llm.
 RUN_HARD_COST_CAP_USD = 0.50  # tighter than Phase A — embeddings only
 
 # ---------------------------------------------------------------------------
@@ -719,9 +722,8 @@ def run(  # noqa: PLR0915 — orchestrates many stages, single coherent run flow
     _validate(rounds, feedback_batch_size)
 
     telemetry = _Telemetry()
-    # Provider factory builds both clients. We only use the embedder.
+    # Provider factory builds both clients; only the embedder is used here.
     _, embedder, llm_config = build_phase_a_clients()
-    del _  # explicit: chat client unused for B-1
 
     findings: list[Finding] = []
     metrics: dict[str, float] = {

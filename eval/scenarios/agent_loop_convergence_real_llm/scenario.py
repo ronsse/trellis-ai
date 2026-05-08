@@ -32,7 +32,10 @@ from typing import Any
 
 import structlog
 
-from eval._real_llm import build_phase_a_clients
+from eval._real_llm import (
+    OPENAI_EMBED_3_SMALL_USD_PER_M,
+    build_phase_a_clients,
+)
 from eval.generators.trace_generator import (
     EvalQuery,
     GeneratedCorpus,
@@ -93,7 +96,8 @@ logger = structlog.get_logger(__name__)
 
 KIMI_K2_INPUT_USD_PER_M = 0.60
 KIMI_K2_OUTPUT_USD_PER_M = 2.50
-OPENAI_EMBED_3_SMALL_USD_PER_M = 0.02
+# OPENAI_EMBED_3_SMALL_USD_PER_M re-exported from eval._real_llm; imported
+# above so cost telemetry tracks one source of truth across scenarios.
 
 # Hard safety cap — abort if a single run blows past this. Phase A's expected
 # cost per run is ~$0.01; a 100x ceiling buys safety against pricing

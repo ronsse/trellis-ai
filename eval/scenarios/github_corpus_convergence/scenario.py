@@ -32,7 +32,10 @@ from typing import Any
 
 import structlog
 
-from eval._real_llm import build_phase_a_clients
+from eval._real_llm import (
+    OPENAI_EMBED_3_SMALL_USD_PER_M,
+    build_phase_a_clients,
+)
 from eval.corpora.dbt_loader import extract_seed_ids
 from eval.corpora.github_trellis.loader import (
     GitHubLoadResult,
@@ -67,6 +70,7 @@ from trellis.retrieve.strategies import (
     SemanticSearch,
 )
 from trellis.schemas.pack import Pack, PackBudget
+from trellis.schemas.well_known import WAS_ATTRIBUTED_TO
 from trellis.stores.advisory_store import AdvisoryStore
 from trellis.stores.registry import StoreRegistry
 
@@ -82,7 +86,7 @@ CONVERGENCE_DELTA_REGRESS_THRESHOLD = -0.05
 ROUND_WINDOW_FRACTION = 4
 DEFAULT_ADVISORY_MIN_SAMPLE_SIZE = 5
 
-OPENAI_EMBED_3_SMALL_USD_PER_M = 0.02
+# OPENAI_EMBED_3_SMALL_USD_PER_M re-exported from eval._real_llm.
 RUN_HARD_COST_CAP_USD = 1.00
 
 
@@ -292,7 +296,7 @@ def _build_pack(
         # the user(s) plus the PRs attributed to them, not 2-hop neighbors
         # via cross-references.
         if all(s.startswith(_USER_ENTITY_PREFIX) for s in seed_ids):
-            filters["edge_types"] = ["wasAttributedTo"]
+            filters["edge_types"] = [WAS_ATTRIBUTED_TO]
             filters["depth"] = 1
     pack = builder.build(
         intent=query.intent,
@@ -640,7 +644,6 @@ def run(  # noqa: PLR0915 — orchestrates many stages, single coherent flow
 
     telemetry = _Telemetry()
     _, embedder, llm_config = build_phase_a_clients()
-    del _
 
     findings: list[Finding] = []
     metrics: dict[str, float] = {

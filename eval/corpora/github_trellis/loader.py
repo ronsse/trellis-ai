@@ -53,6 +53,8 @@ from trellis.schemas.extraction import (
     ExtractionResult,
 )
 from trellis.schemas.well_known import (
+    WAS_ATTRIBUTED_TO,
+    WAS_INFORMED_BY,
     schema_alignment_for_edge_kind,
     schema_alignment_for_entity_type,
 )
@@ -69,10 +71,11 @@ DEFAULT_SNAPSHOT_PATH = Path(__file__).parent / "snapshot_raw.json"
 ENTITY_TYPE_PR = "github_pr"
 ENTITY_TYPE_USER = "github_user"
 
-# Edge kinds — emitted directly as canonical PROV-O verbs (no loader
-# canonicalization needed; the strings here are already the ADR §3.2 form).
-EDGE_KIND_ATTRIBUTED = "wasAttributedTo"
-EDGE_KIND_INFORMED_BY = "wasInformedBy"
+# Edge kinds — re-exported from trellis.schemas.well_known so the
+# canonical-PROV-O claim in the module docstring is statically enforced
+# rather than depending on string literals matching the ADR.
+EDGE_KIND_ATTRIBUTED = WAS_ATTRIBUTED_TO
+EDGE_KIND_INFORMED_BY = WAS_INFORMED_BY
 
 # Cross-reference regex — matches `#NNN` where NNN is 1-5 digits and not
 # preceded by a word character (so we don't match things like `abc#123`
