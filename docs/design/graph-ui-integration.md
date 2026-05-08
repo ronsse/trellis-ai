@@ -95,7 +95,7 @@ Browsable catalog of proven patterns.
 
 ### Why This Is the Killer Feature
 
-Every RAG system retrieves. XPG's unique value is that it **self-improves**. The Evolution View makes that improvement visible. Without it, users take the value on faith. With it, they watch it happen.
+Every RAG system retrieves. Trellis's unique value is that it **self-improves**. The Evolution View makes that improvement visible. Without it, users take the value on faith. With it, they watch it happen.
 
 This is not over-engineering. This is the differentiator.
 
@@ -346,7 +346,7 @@ Each week seeds: `PACK_ASSEMBLED` events with realistic item compositions, `FEED
 
 The OpenClaw MCP skill already provides 8 tools. Deeper integration:
 
-1. **Auto-trace capture**: A `session-end` hook that converts Claude Code's tool call history into XPG trace format and ingests it automatically
+1. **Auto-trace capture**: A `session-end` hook that converts Claude Code's tool call history into Trellis trace format and ingests it automatically
 2. **Pre-task context injection**: A `session-start` hook that calls `get_context(intent=<task>)` and injects relevant precedents
 3. **Inline precedent suggestions**: When the MCP server detects a query matching a high-confidence precedent, surface it proactively
 4. **Feedback capture**: Post-task prompt to record success/failure, closing the effectiveness loop

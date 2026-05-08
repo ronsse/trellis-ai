@@ -11,7 +11,7 @@ results fed back to the graph.
 
 The `trellis-platform` consumer repo (`fd-data-architecture-poc/trellis-platform`) built
 these patterns as one-off implementations to integrate the fd-poc pipeline's Claude
-Code workers with the XPG experience graph. They work, but they're hardcoded to
+Code workers with the Trellis experience graph. They work, but they're hardcoded to
 fd-poc's session/dispatch model. The patterns are generic and should live in the
 core library.
 

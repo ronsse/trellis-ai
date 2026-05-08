@@ -66,19 +66,19 @@ xpg_tools = create_xpg_tools()
 # 3. Call xpg_save_trace to record what happened
 ```
 
-### Custom Agent with XPG
+### Custom Agent with Trellis
 
 ```python
 from langgraph.prebuilt import create_react_agent
 
-# Combine XPG tools with your domain tools
+# Combine Trellis tools with your domain tools
 all_tools = xpg_tools + [your_search_tool, your_code_tool]
 agent = create_react_agent(model, all_tools)
 ```
 
 ### System Prompt Integration
 
-Guide the agent to use XPG tools at the right time:
+Guide the agent to use Trellis tools at the right time:
 
 ```python
 system_prompt = """You have access to an experience graph for institutional memory.

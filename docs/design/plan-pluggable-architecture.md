@@ -73,7 +73,7 @@ Reference: [architecture-design.md](./architecture-design.md)
 
 ## Phase 2: REST API via FastAPI
 
-**Goal:** Expose XPG operations over HTTP for distributed deployments and SDK consumption.
+**Goal:** Expose Trellis operations over HTTP for distributed deployments and SDK consumption.
 
 ### Tasks
 

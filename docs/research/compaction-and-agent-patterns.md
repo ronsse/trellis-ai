@@ -85,7 +85,7 @@ should_compact = (
 )
 ```
 
-Token estimation: `len(text) // 4 + 1` per content block (same heuristic XPG uses).
+Token estimation: `len(text) // 4 + 1` per content block (same heuristic Trellis uses).
 
 ### Budget-Aware Instruction Loading
 
@@ -101,11 +101,11 @@ A `SYSTEM_PROMPT_DYNAMIC_BOUNDARY` marker separates static from dynamic content.
 
 ---
 
-## Gap Analysis: XPG vs. These Patterns
+## Gap Analysis: Trellis vs. These Patterns
 
-### What XPG Already Does Well
+### What Trellis Already Does Well
 
-| Capability | XPG Implementation | Status |
+| Capability | Trellis Implementation | Status |
 |---|---|---|
 | Token budgeting at retrieval | PackBuilder with max_items + max_tokens | Solid |
 | Token estimation | `len(text) // 4 + 1` (same as Claude Code) | Matches |
@@ -120,7 +120,7 @@ A `SYSTEM_PROMPT_DYNAMIC_BOUNDARY` marker separates static from dynamic content.
 
 #### Gap 1: No Tiered Compaction for Stored Content
 
-**Current state:** XPG stores everything at full fidelity. Budgeting only happens at retrieval time (PackBuilder). Old traces accumulate without compaction.
+**Current state:** Trellis stores everything at full fidelity. Budgeting only happens at retrieval time (PackBuilder). Old traces accumulate without compaction.
 
 **What Claude Code does:** Three tiers of progressively expensive compression applied proactively, not just at retrieval.
 
@@ -306,11 +306,11 @@ The boundary enables Anthropic's prompt caching — the static prefix is shared 
 
 ---
 
-## Memory & Document Lifecycle Gaps in XPG
+## Memory & Document Lifecycle Gaps in Trellis
 
 ### Current State
 
-XPG's `DocumentStore` (used by `save_memory`) has minimal lifecycle management:
+Trellis's `DocumentStore` (used by `save_memory`) has minimal lifecycle management:
 
 | Feature | Documents | Traces | Graph Entities |
 |---------|-----------|--------|----------------|
@@ -409,14 +409,14 @@ The experience graph manages **shared organizational knowledge**:
 
 Currently `save_memory` is a raw `DocumentStore.put()` — an unstructured dump disconnected from both the learning pipeline and the graph. It tries to serve both use cases and serves neither:
 
-- **It's not agent-local memory** — the agent harness already handles that. Agents don't need XPG to store their session notes.
+- **It's not agent-local memory** — the agent harness already handles that. Agents don't need Trellis to store their session notes.
 - **It's not shared learning** — documents saved via `save_memory` never get classified, enriched, or promoted to the graph. They're searchable via FTS but orphaned from the precedent pipeline.
 
 ### What Agents Should Save to the Trellis
 
 The experience graph should capture **learnings**, not scratch. The filter:
 
-| Agent produces... | Save to XPG? | How? |
+| Agent produces... | Save to Trellis? | How? |
 |---|---|---|
 | "I discovered this deployment requires flag X" | Yes — shared constraint | `save_knowledge` (constraint entity) |
 | "Task succeeded after retrying with approach B" | Yes — execution pattern | `save_experience` (trace with outcome) |
@@ -544,18 +544,18 @@ Steps:
 
 ## Non-Applicable Patterns
 
-Some Claude Code patterns don't transfer to XPG:
+Some Claude Code patterns don't transfer to Trellis:
 
-- **`cache_edits` mechanism:** Specific to Anthropic's API prompt caching. XPG doesn't control the LLM's cache. Not applicable.
-- **Summarization call piggybacking on conversation cache:** Same reason — XPG doesn't own the conversation context. The agent's harness handles this.
-- **Tool result clearing by `tool_use_id`:** XPG stores domain knowledge, not conversation turns. The traces already have a different structure.
-- **Bootstrap fast paths:** Specific to CLI startup optimization. XPG's MCP server is long-running; startup cost is amortized.
+- **`cache_edits` mechanism:** Specific to Anthropic's API prompt caching. Trellis doesn't control the LLM's cache. Not applicable.
+- **Summarization call piggybacking on conversation cache:** Same reason — Trellis doesn't own the conversation context. The agent's harness handles this.
+- **Tool result clearing by `tool_use_id`:** Trellis stores domain knowledge, not conversation turns. The traces already have a different structure.
+- **Bootstrap fast paths:** Specific to CLI startup optimization. Trellis's MCP server is long-running; startup cost is amortized.
 
 ---
 
 ## Key Metrics from Claude Code (Reference)
 
-| Metric | Value | XPG Equivalent |
+| Metric | Value | Trellis Equivalent |
 |--------|-------|----------------|
 | Tool results retained | 5 most recent | N/A (stores all) |
 | Cache hit discount | 90% | N/A (no API cache control) |

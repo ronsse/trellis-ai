@@ -2,7 +2,7 @@
 
 **Status:** Accepted
 **Date:** 2026-04-15
-**Deciders:** XPG core
+**Deciders:** Trellis core
 **Related:**
 - [`./adr-deferred-cognition.md`](./adr-deferred-cognition.md) — LLM never in the write path; enrichment is deferred
 - [`../../src/trellis/llm/`](../../src/trellis/llm/) — `LLMClient`, `EmbedderClient`, `CrossEncoderClient` protocols + types
@@ -216,7 +216,7 @@ Implementations: local `sentence-transformers` (already ships as `BGECrossEncode
 - Violates the project's pattern of Protocol-based injection with late-binding — litellm is a concrete dependency, not a protocol
 - SQLite-local deployments (no LLM needed) still pull the dependency graph unless it's optional — and if it's optional, we need the protocol anyway
 
-**Verdict:** litellm is the right tool for applications that talk to many providers. XPG is a library — it should define the interface and let consumers pick the backend. Nothing stops a consumer from writing a `LiteLLMClient(LLMClient)` adapter (~30 LOC).
+**Verdict:** litellm is the right tool for applications that talk to many providers. Trellis is a library — it should define the interface and let consumers pick the backend. Nothing stops a consumer from writing a `LiteLLMClient(LLMClient)` adapter (~30 LOC).
 
 ---
 
