@@ -39,7 +39,9 @@ import structlog
 from eval._real_llm import build_phase_a_clients
 from eval.corpora.dbt_loader import (
     LoadResult,
+    build_category_index,
     build_name_index,
+    extract_category_seeds,
     extract_seed_ids,
     load_jaffle_shop_corpus,
 )
@@ -342,18 +344,34 @@ def _build_pack(
     query: JaffleShopQuery,
     *,
     name_index: dict[str, str],
+    category_index: dict[str, list[str]],
 ) -> tuple[Pack, list[str]]:
     """Build a pack with seed_ids extracted from the intent.
 
-    Returns ``(pack, seed_ids)``. ``seed_ids`` is the result of
-    :func:`extract_seed_ids` against the round's query — surfaced so
-    the round logger can record per-round seed counts and the report
-    can aggregate seed-extraction success.
+    Returns ``(pack, seed_ids)``. ``seed_ids`` is the union of:
+
+    * :func:`extract_seed_ids` — short-name resolution
+      (``customers`` → ``model.jaffle_shop.customers``)
+    * :func:`extract_category_seeds` — category-phrase resolution
+      (``mart-layer models`` → set of ``schema='marts'`` entities,
+      ``not null`` → set of ``not_null_*`` test entities)
+
+    When category seeds contributed, GraphSearch runs with
+    ``depth=0`` so the matched entities become first-class pack
+    candidates without traversal pulling in their structural
+    neighbors (which would otherwise displace the right answers
+    under the 8-item budget).
     """
-    seed_ids = extract_seed_ids(query.intent, name_index)
+    name_seeds = extract_seed_ids(query.intent, name_index)
+    category_seeds = extract_category_seeds(query.intent, category_index)
+    seed_ids = list(dict.fromkeys(name_seeds + category_seeds))
     filters: dict[str, Any] = {}
     if seed_ids:
         filters["seed_ids"] = seed_ids
+        if category_seeds:
+            # Category seeds are *the answer*, not a starting point for
+            # traversal. depth=0 returns just the seeds themselves.
+            filters["depth"] = 0
     pack = builder.build(
         intent=query.intent,
         domain=DBT_DOMAIN,
@@ -745,7 +763,9 @@ def run(  # noqa: PLR0915 — orchestrates many stages, single coherent run flow
 
     embed_fn = _make_embedding_fn(embedder, telemetry)
     name_index = build_name_index(registry)
+    category_index = build_category_index(registry)
     metrics["corpus.name_index_size"] = float(len(name_index))
+    metrics["corpus.category_index_size"] = float(len(category_index))
     metrics["config.enable_graph_search"] = 1.0 if enable_graph_search else 0.0
     strategies: list[SearchStrategy] = [
         KeywordSearch(registry.knowledge.document_store),
@@ -769,7 +789,7 @@ def run(  # noqa: PLR0915 — orchestrates many stages, single coherent run flow
         for round_index in range(rounds):
             query = _round_query(round_index)
             pack, round_seed_ids = _build_pack(
-                builder, query, name_index=name_index
+                builder, query, name_index=name_index, category_index=category_index
             )
             if round_seed_ids:
                 seed_extraction_hits += 1

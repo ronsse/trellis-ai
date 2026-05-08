@@ -30,7 +30,7 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 import structlog
 
@@ -247,6 +247,128 @@ def build_name_index(registry: StoreRegistry) -> dict[str, str]:
             if source_name and name:
                 index.setdefault(f"{source_name}.{name}", entity_id)
     return index
+
+
+_DBT_TEST_TYPE_PREFIXES: Final = {
+    "not_null": ["not null", "not-null", "no-null", "no null", "non-null"],
+    "unique": ["unique", "uniqueness", "unique-key"],
+    "relationships": [
+        "relationships test", "relationship test", "foreign-key",
+        "foreign key", "relationship between",
+    ],
+    "accepted_values": [
+        "accepted values", "accepted-values", "enum test", "value check",
+    ],
+}
+
+
+def build_category_index(
+    registry: StoreRegistry,
+) -> dict[str, list[str]]:
+    """Build a category-phrase → list[entity_id] index for the dbt corpus.
+
+    Layered alongside :func:`build_name_index`. Where the name index
+    answers "which entity does this short-name refer to?", the category
+    index answers "which entities match this *category* of intent?" —
+    intents like ``"all the mart-layer models"`` (schema='marts'),
+    ``"no null order_id"`` (test_type=not_null), ``"relationships test"``
+    (test_type=relationships).
+
+    The index is a `phrase -> list[entity_id]` so callers can union it
+    with name seeds and pass the combined set to
+    `GraphSearch(filters={"seed_ids": ..., "depth": 0})` to make the
+    matched entities first-class candidates without GraphSearch traversal
+    pulling in their structural neighbors.
+
+    Phrases are matched longest-first against the lowercased intent in
+    :func:`extract_category_seeds`. Multiple phrases can map to the same
+    entity_id list (e.g., ``"marts"`` and ``"mart-layer"`` both expand
+    to the schema='marts' set).
+    """
+    layer_buckets: dict[str, list[str]] = {}
+    test_type_buckets: dict[str, list[str]] = {}
+    for node in registry.knowledge.graph_store.query(limit=5000):
+        entity_id = node["node_id"]
+        node_type = node.get("node_type", "")
+        properties = node.get("properties") or {}
+        # Layer classification by `schema` property.
+        schema = properties.get("schema", "")
+        if schema:
+            layer_buckets.setdefault(schema.lower(), []).append(entity_id)
+        # Test-type classification by node_id naming convention. dbt
+        # auto-generates test names with the test type as a prefix
+        # (e.g., `test.<project>.not_null_<table>_<column>.<hash>`).
+        if node_type == "dbt_test":
+            short = entity_id.rsplit(".", 1)[-1] if "." in entity_id else entity_id
+            # Walk down from longer prefixes so `accepted_values_x` doesn't
+            # bucket as `accepted` somewhere unexpected.
+            for prefix in _DBT_TEST_TYPE_PREFIXES:
+                # Need to also handle the case where the short id is a
+                # hash, not the test name. In dbt manifests the test
+                # name precedes the hash so the second-to-last segment
+                # carries the prefix; check both.
+                for candidate in (short, entity_id.split(".")[-2] if entity_id.count(".") >= 2 else ""):
+                    if candidate.startswith(prefix + "_") or candidate == prefix:
+                        test_type_buckets.setdefault(prefix, []).append(entity_id)
+                        break
+
+    index: dict[str, list[str]] = {}
+
+    def _add(phrase: str, ids: list[str]) -> None:
+        if ids:
+            index.setdefault(phrase.lower(), list(dict.fromkeys(ids)))
+
+    # Layer phrases. ``mart-layer``/``marts``/``mart layer`` all expand
+    # to the schema='marts' set; same for staging and raw.
+    for schema_key, phrases in {
+        "marts": ["marts", "mart-layer", "mart layer", "mart-layer models"],
+        "staging": ["staging", "staging-layer", "staging layer", "staging models"],
+        "raw": ["raw layer", "source layer", "raw sources"],
+    }.items():
+        ids = layer_buckets.get(schema_key, [])
+        for p in phrases:
+            _add(p, ids)
+
+    # Test-type phrases.
+    for test_type, phrases in _DBT_TEST_TYPE_PREFIXES.items():
+        ids = test_type_buckets.get(test_type, [])
+        for p in phrases:
+            _add(p, ids)
+
+    return index
+
+
+def extract_category_seeds(
+    intent: str, category_index: dict[str, list[str]]
+) -> list[str]:
+    """Find entity_ids matching category phrases in *intent*.
+
+    Returns a deduplicated list. Each phrase maps to a *set* of entities
+    (e.g., all dbt_test entities of test_type=not_null), and multiple
+    phrases may match in a single intent (e.g., "not null tests on
+    order_id"). The union is returned in insertion order.
+
+    Used alongside :func:`extract_seed_ids` — the dbt scenario calls
+    both and unions the results before passing as ``seed_ids`` to
+    GraphSearch with ``depth=0`` so the matched entities are
+    first-class pack candidates without graph-traversal noise.
+    """
+    seeds: list[str] = []
+    seen: set[str] = set()
+    intent_lower = intent.lower()
+    consumed_spans: list[tuple[int, int]] = []
+    for phrase in sorted(category_index, key=len, reverse=True):
+        pattern = r"\b" + re.escape(phrase) + r"\b"
+        for match in re.finditer(pattern, intent_lower):
+            start, end = match.span()
+            if any(s <= start < e or s < end <= e for s, e in consumed_spans):
+                continue
+            for eid in category_index[phrase]:
+                if eid not in seen:
+                    seeds.append(eid)
+                    seen.add(eid)
+            consumed_spans.append((start, end))
+    return seeds
 
 
 def extract_seed_ids(intent: str, name_index: dict[str, str]) -> list[str]:
