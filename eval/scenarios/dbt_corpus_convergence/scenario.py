@@ -40,7 +40,9 @@ from eval._real_llm import build_phase_a_clients
 from eval.corpora.dbt_loader import (
     LoadResult,
     build_category_index,
+    build_lineage_index,
     build_name_index,
+    expand_seeds_with_lineage,
     extract_category_seeds,
     extract_seed_ids,
     load_jaffle_shop_corpus,
@@ -345,6 +347,7 @@ def _build_pack(
     *,
     name_index: dict[str, str],
     category_index: dict[str, list[str]],
+    lineage_index: dict[str, list[str]],
 ) -> tuple[Pack, list[str]]:
     """Build a pack with seed_ids extracted from the intent.
 
@@ -352,25 +355,33 @@ def _build_pack(
 
     * :func:`extract_seed_ids` — short-name resolution
       (``customers`` → ``model.jaffle_shop.customers``)
+    * :func:`expand_seeds_with_lineage` — when the intent contains
+      a lineage keyword (``upstream``, ``lineage``, ``ancestors``,
+      ``dependencies``), each name seed is expanded with its
+      precomputed transitive ``dependsOn`` ancestors.
     * :func:`extract_category_seeds` — category-phrase resolution
       (``mart-layer models`` → set of ``schema='marts'`` entities,
       ``not null`` → set of ``not_null_*`` test entities)
 
-    When category seeds contributed, GraphSearch runs with
-    ``depth=0`` so the matched entities become first-class pack
-    candidates without traversal pulling in their structural
+    When category seeds OR lineage expansion contributed, GraphSearch
+    runs with ``depth=0`` so the matched entities become first-class
+    pack candidates without traversal pulling in their structural
     neighbors (which would otherwise displace the right answers
     under the 8-item budget).
     """
     name_seeds = extract_seed_ids(query.intent, name_index)
+    expanded_seeds = expand_seeds_with_lineage(
+        name_seeds, query.intent, lineage_index
+    )
+    lineage_expanded = len(expanded_seeds) > len(name_seeds)
     category_seeds = extract_category_seeds(query.intent, category_index)
-    seed_ids = list(dict.fromkeys(name_seeds + category_seeds))
+    seed_ids = list(dict.fromkeys(expanded_seeds + category_seeds))
     filters: dict[str, Any] = {}
     if seed_ids:
         filters["seed_ids"] = seed_ids
-        if category_seeds:
-            # Category seeds are *the answer*, not a starting point for
-            # traversal. depth=0 returns just the seeds themselves.
+        if category_seeds or lineage_expanded:
+            # Category / lineage seeds are *the answer*, not a starting
+            # point for traversal. depth=0 returns just the seeds.
             filters["depth"] = 0
     pack = builder.build(
         intent=query.intent,
@@ -764,8 +775,10 @@ def run(  # noqa: PLR0915 — orchestrates many stages, single coherent run flow
     embed_fn = _make_embedding_fn(embedder, telemetry)
     name_index = build_name_index(registry)
     category_index = build_category_index(registry)
+    lineage_index = build_lineage_index(registry)
     metrics["corpus.name_index_size"] = float(len(name_index))
     metrics["corpus.category_index_size"] = float(len(category_index))
+    metrics["corpus.lineage_index_size"] = float(len(lineage_index))
     metrics["config.enable_graph_search"] = 1.0 if enable_graph_search else 0.0
     strategies: list[SearchStrategy] = [
         KeywordSearch(registry.knowledge.document_store),
@@ -789,7 +802,11 @@ def run(  # noqa: PLR0915 — orchestrates many stages, single coherent run flow
         for round_index in range(rounds):
             query = _round_query(round_index)
             pack, round_seed_ids = _build_pack(
-                builder, query, name_index=name_index, category_index=category_index
+                builder,
+                query,
+                name_index=name_index,
+                category_index=category_index,
+                lineage_index=lineage_index,
             )
             if round_seed_ids:
                 seed_extraction_hits += 1

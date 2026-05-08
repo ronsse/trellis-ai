@@ -227,25 +227,37 @@ def build_name_index(registry: StoreRegistry) -> dict[str, str]:
     entity_id; otherwise duplicates are kept by the *first* hit, which
     is deterministic given a stable graph iteration order.
     """
+    # Two-pass indexing so models win the bare-name slot when a model and
+    # a source share a name (``customers`` mart vs ``raw.customers``
+    # source). Without this, an intent like "the customers mart" can
+    # bind ``customers`` -> source, then upstream-lineage expansion has
+    # nowhere to go (the source is a leaf). Pass 1 = models, pass 2 =
+    # sources + the rest.
     index: dict[str, str] = {}
-    for node in registry.knowledge.graph_store.query(limit=5000):
+    nodes = list(registry.knowledge.graph_store.query(limit=5000))
+
+    def _index_node(node: dict[str, Any]) -> None:
         entity_id = node["node_id"]
         properties = node.get("properties") or {}
         name = properties.get("name", "")
         if name:
             index.setdefault(name, entity_id)
-        # Last segment after the final dot — covers `stg_customers`,
-        # `customers`, etc. for both models and sources.
         if "." in entity_id:
             short = entity_id.rsplit(".", 1)[-1]
             if short:
                 index.setdefault(short, entity_id)
-        # For source entities, expose `<source_name>.<table>` so query
-        # text mentioning "raw.customers" matches the source.
         if entity_id.startswith("source."):
             source_name = properties.get("source_name", "")
             if source_name and name:
+                # Source-qualified key — uniquely identifies the source.
                 index.setdefault(f"{source_name}.{name}", entity_id)
+
+    for node in nodes:
+        if node["node_id"].startswith("model."):
+            _index_node(node)
+    for node in nodes:
+        if not node["node_id"].startswith("model."):
+            _index_node(node)
     return index
 
 
@@ -336,6 +348,88 @@ def build_category_index(
             _add(p, ids)
 
     return index
+
+
+def build_lineage_index(
+    registry: StoreRegistry,
+) -> dict[str, list[str]]:
+    """Build an entity_id → list[ancestor entity_ids] index by transitive
+    closure of outbound ``dependsOn`` edges.
+
+    For each non-source entity, walks outbound edges (BFS) until exhaustion
+    and records every reachable entity. The result is a per-entity
+    "full upstream lineage" set that can be injected as additional seeds
+    when an intent says "upstream of X" / "lineage of X" / "ancestors of X".
+
+    This precompute exists because :meth:`GraphStore.get_subgraph` is
+    bidirectional — calling it from a leaf seed at depth=2 pulls in
+    *inbound* test edges and 2-hop test-of-staging neighbors, which
+    crowd out the required staging/raw entities under the 8-item pack
+    budget. Computing the directional closure at load time and seeding
+    GraphSearch with ``depth=0`` returns exactly the lineage entities,
+    nothing else.
+
+    Returns ``entity_id`` → ordered list of ancestor entity_ids
+    (excluding the entity itself).
+    """
+    g = registry.knowledge.graph_store
+    all_nodes = [n["node_id"] for n in g.query(limit=5000)]
+    index: dict[str, list[str]] = {}
+    for node_id in all_nodes:
+        ancestors: list[str] = []
+        seen: set[str] = {node_id}
+        frontier: list[str] = [node_id]
+        while frontier:
+            next_frontier: list[str] = []
+            for current in frontier:
+                for edge in g.get_edges(current, direction="outgoing"):
+                    target = edge.get("target_id")
+                    if not target or target in seen:
+                        continue
+                    # Follow only ``dependsOn`` edges. Some edges have
+                    # ``edge_kind`` returned as None on this backend; tests
+                    # showed the canonicalization happens upstream so the
+                    # filter is layered on edge_kind only when set.
+                    edge_kind = edge.get("edge_kind") or edge.get("edge_type")
+                    if edge_kind not in (None, "dependsOn", "depends_on"):
+                        continue
+                    seen.add(target)
+                    ancestors.append(target)
+                    next_frontier.append(target)
+            frontier = next_frontier
+        if ancestors:
+            index[node_id] = ancestors
+    return index
+
+
+_LINEAGE_INTENT_PATTERN = re.compile(
+    r"\b(?:upstream|lineage|ancestors?|dependencies|depends?\s+on)\b",
+    flags=re.IGNORECASE,
+)
+
+
+def expand_seeds_with_lineage(
+    seeds: list[str], intent: str, lineage_index: dict[str, list[str]]
+) -> list[str]:
+    """When *intent* contains a lineage keyword, expand each seed with
+    its precomputed ancestor list.
+
+    No-op when the intent has no lineage signal — same shape as
+    :func:`extract_category_seeds`, just sourced from a different
+    precomputed index. The combination of (name seed: m_customers) +
+    (lineage expansion) produces the closed set the intent is asking
+    for, ready to pass as ``filters["seed_ids"]`` with ``depth=0``.
+    """
+    if not _LINEAGE_INTENT_PATTERN.search(intent):
+        return seeds
+    expanded: list[str] = list(seeds)
+    seen = set(seeds)
+    for s in seeds:
+        for a in lineage_index.get(s, []):
+            if a not in seen:
+                expanded.append(a)
+                seen.add(a)
+    return expanded
 
 
 def extract_category_seeds(
