@@ -38,10 +38,19 @@ EMBEDDING_MODEL_CANDIDATES = [
 ]
 
 
-def _redact(s: str | None) -> str:
-    if not s:
-        return "<empty>"
-    return f"len={len(s)} prefix={s[:3]!r}"
+def _present(s: str | None) -> str:
+    """Boolean-only presence indicator for secret env vars.
+
+    The earlier version of this helper returned ``f"len={len(s)} prefix=
+    {s[:3]!r}"`` to help diagnose mis-pasted secrets, but CodeQL's
+    Python taint analysis (``py/clear-text-logging-sensitive-data``)
+    can't see that the sanitizer drops the value, so it flagged the
+    callers as high-severity clear-text-logging vulns. The output is
+    now boolean-only; if you need to verify which secret is actually
+    loaded, run ``op item get <ItemName>`` directly rather than
+    inspecting it through the probe.
+    """
+    return "set" if s else "<empty>"
 
 
 async def probe_chat() -> dict[str, Any]:
@@ -152,8 +161,8 @@ async def probe_openai_embedding_fallback() -> dict[str, Any]:
 async def main() -> int:
     print(f"Endpoint: {MOONSHOT_BASE_URL}")
     print(f"Chat model: {CHAT_MODEL}")
-    print(f"MOONSHOT_API_KEY: {_redact(os.environ.get('MOONSHOT_API_KEY'))}")
-    print(f"OPENAI_API_KEY:   {_redact(os.environ.get('OPENAI_API_KEY'))}")
+    print(f"MOONSHOT_API_KEY: {_present(os.environ.get('MOONSHOT_API_KEY'))}")
+    print(f"OPENAI_API_KEY:   {_present(os.environ.get('OPENAI_API_KEY'))}")
     print()
 
     print("=== Probe 1: Moonshot chat completions ===")
