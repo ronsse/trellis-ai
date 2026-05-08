@@ -1,0 +1,81 @@
+{
+  "name": "github_corpus_convergence",
+  "run_label": "phase_e_github_attribute_filter_with_negation_drop",
+  "timestamp_utc": "2026-05-07T20:30:00Z",
+  "host_notes": "Phase E follow-up to Phase D. Targets the one 0% skill remaining on github (author_attribution). Two changes layered onto the Phase D phrase-seed work: (1) GraphSearch now accepts an `edge_types` filter that passes through to graph_store.get_subgraph, scoping subgraph traversal to a specific edge kind; (2) the github scenario detects all-user-entity seed sets and constrains GraphSearch to depth=1 along `wasAttributedTo`. (3) the scenario also drops user seeds preceded by negation phrases (`not by ronsse`, `except dependabot`) before issuing GraphSearch.",
+  "code_changes_under_test": {
+    "src/trellis/retrieve/strategies.py": "GraphSearch.search now pops `edge_types` from filters and forwards to graph_store.get_subgraph(edge_types=...). Same shape as the existing `depth` pop. Backwards-compatible: omitting the key preserves prior unrestricted behaviour.",
+    "eval/scenarios/github_corpus_convergence/scenario.py": "_drop_negated_user_seeds() filters seed_ids using a regex matching `not by`, `except`, `excluding`, `without`, `other than` immediately before a known login. _build_pack() invokes it after seed extraction, then if all remaining seeds are user entities sets filters['edge_types']=['wasAttributedTo'] and filters['depth']=1."
+  },
+  "providers": {
+    "chat": "unused",
+    "embed": {
+      "model": "text-embedding-3-small",
+      "endpoint": "https://api.openai.com/v1 (default)",
+      "input_usd_per_m_token": 0.02,
+      "dimension": 1536
+    }
+  },
+  "scenario_kwargs": {
+    "rounds": 100,
+    "feedback_batch_size": 10,
+    "success_coverage_threshold": 0.6,
+    "enable_graph_search": true,
+    "snapshot_path": "eval/corpora/github_trellis/snapshot_raw.json"
+  },
+  "status": "pass",
+  "metrics_summary": {
+    "round_success_rate": 0.91,
+    "round_useful_fraction_overall": 0.2671,
+    "round_weighted_score_mean": 0.3648,
+    "convergence.useful_delta": -0.005,
+    "convergence.weighted_delta": 0.0001,
+    "loops.advisories_generated_total": 1,
+    "loops.advisories_boosted_total": 9,
+    "loops.noise_items_tagged_total": 229,
+    "embedder.calls_total": 101,
+    "cost.total_usd": 0.001386,
+    "seed_extraction.hit_rate": 0.91,
+    "seed_extraction.seeds_per_round_mean": 1.4
+  },
+  "per_skill_success_rate": {
+    "topic_content": 1.0,
+    "adr_landing": 1.0,
+    "bug_fix_identification": 1.0,
+    "cross_pr_lineage": 1.0,
+    "reverse_lineage": 1.0,
+    "author_attribution": 1.0,
+    "multi_pr_series": 0.4706
+  },
+  "per_difficulty_success_rate": {
+    "medium": 1.0,
+    "hard": 0.7805
+  },
+  "comparison_to_phase_d": {
+    "vs_phase_d": {
+      "file": "phase_d_2026-05-07_github_phrase_seed_extraction.json",
+      "round_success_rate": "0.83 -> 0.91 (+0.08)",
+      "per_difficulty.hard": "0.5854 -> 0.7805 (+0.20)",
+      "skills_unblocked": {
+        "author_attribution": "0.0 -> 1.0 — depth-1 wasAttributedTo traversal from a single user seed (after negation drop) returns exactly that user's PRs"
+      },
+      "skills_unchanged": {
+        "topic_content / adr_landing / bug_fix_identification / cross_pr_lineage / reverse_lineage": "all stay at 1.0 — the new filter only activates when ALL seeds resolve to user entities, so non-attribution intents are untouched",
+        "multi_pr_series": "0.4706 -> 0.4706 — Q1 'Phase 1-4 PRs' still has no entity-anchoring phrase; needs body-token indexing or query rewriting (separate scope)"
+      }
+    },
+    "cumulative_arc": {
+      "phase_b2_baseline_no_graphsearch": "0.47",
+      "phase_b2_with_graphsearch": "0.58 (+0.11 from GraphSearch)",
+      "phase_d_phrase_seeds": "0.83 (+0.25 from phrase-based seed extraction)",
+      "phase_e_attribute_filter": "0.91 (+0.08 from edge-typed traversal + negation handling)",
+      "total_lift_from_baseline": "+0.44 over 4 commits, $0.006 total spend across all paid runs in this arc"
+    }
+  },
+  "interpretation": {
+    "why_this_completed_the_picture": "Phase D took round_success from 0.58 -> 0.83 by giving the seed extractor more vocabulary (title tokens + phrases). What it left on the table was the one query type whose seeds the extractor could resolve but whose retrieval semantics weren't 'find content near these seeds' — they were 'find entities with this edge to these seeds'. Adding `edge_types` to GraphSearch is a 4-line change. The negation-aware seed drop is a 25-line scenario-side helper. Together they convert a 0% skill into a 100% skill.",
+    "what_made_the_negation_handling_load_bearing": "Without the negation drop, the intent 'PRs authored by app/dependabot, not by ronsse' extracted both user entity_ids. depth=1 wasAttributedTo from the union returns *every* PR in the corpus (since every PR is attributed to one of the two users). The filter was a no-op until seed selection became negation-aware. Pre-test confirmed: same 0.83 result without the negation drop. After adding the drop: 0.91.",
+    "still_at_zero_within_a_skill": "multi_pr_series Q1 (`eval-framework Phase 1 through Phase 4 PRs that shipped scenarios 5.1, 5.2, 5.3`) — required PRs #29-#32 are titled `Eval Phase N` but `Phase 1` / `Phase 2` etc. are common across many PR titles, so the unique-only filter rejects them from the index. Two fixable directions: (a) index PR-body tokens not just titles, (b) LLM-driven intent rewriting (`'eval-framework Phase 1 through Phase 4'` -> `'Eval Phase 1 + Eval Phase 2 + Eval Phase 3 + Eval Phase 4'`). Neither is required for a credible chart. multi_pr_series Q2 already passes via title phrases."
+  },
+  "decision_recorded": "Phase E commits as the second concrete win in the eval arc. round_success_rate is now 0.91 — six of seven skills at 100%, hard-difficulty queries at 0.78. The remaining gap is one query within one skill, with a clear (but separately-scoped) fix path. The TODO entry on attribute-based filtering is partially closed — github author_attribution is now solved; dbt's category-filter skills (layer_classification, test_coverage, test_cross_reference) remain open and need a property-filter variant of the same idea."
+}

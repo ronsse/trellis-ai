@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import statistics
 import tempfile
 import time
@@ -242,6 +243,37 @@ def _round_query(round_index: int) -> GitHubPRQuery:
     return GROUND_TRUTH_QUERIES[round_index % len(GROUND_TRUTH_QUERIES)]
 
 
+_USER_ENTITY_PREFIX = "github.user."
+
+# Phrases that precede a user mention to negate it ("not by ronsse",
+# "except dependabot", "without app/foo"). Used to drop user seeds the
+# intent is asking to *exclude* rather than retrieve.
+_NEGATION_BEFORE_USER = re.compile(
+    r"\b(?:not\s+by|except\s+(?:by\s+)?|excluding|without|other\s+than)\s+"
+    r"([A-Za-z0-9_\-/.]+)",
+    flags=re.IGNORECASE,
+)
+
+
+def _drop_negated_user_seeds(
+    seed_ids: list[str], intent: str, name_index: dict[str, str]
+) -> list[str]:
+    """Remove user seeds the intent is asking to exclude.
+
+    For an intent like ``"PRs authored by app/dependabot, not by ronsse"``
+    the seed extractor pulls both user entity_ids. Without this filter,
+    a depth-1 ``wasAttributedTo`` traversal returns *every* PR (since
+    every PR is attributed to one of the two users). Dropping the
+    negated user collapses the subgraph to just the requested set.
+    """
+    negated_ids: set[str] = set()
+    for match in _NEGATION_BEFORE_USER.finditer(intent):
+        login = match.group(1).lower()
+        if login in name_index:
+            negated_ids.add(name_index[login])
+    return [s for s in seed_ids if s not in negated_ids]
+
+
 def _build_pack(
     builder: PackBuilder,
     query: GitHubPRQuery,
@@ -249,9 +281,19 @@ def _build_pack(
     name_index: dict[str, str],
 ) -> tuple[Pack, list[str]]:
     seed_ids = extract_seed_ids(query.intent, name_index)
+    seed_ids = _drop_negated_user_seeds(seed_ids, query.intent, name_index)
     filters: dict[str, Any] = {}
     if seed_ids:
         filters["seed_ids"] = seed_ids
+        # Attribute-filter shape: when ALL seeds resolve to user entities,
+        # the intent is asking "what PRs did this user author" rather than
+        # "find related content near these seeds". Constrain GraphSearch to
+        # depth=1 along ``wasAttributedTo`` so the subgraph contains only
+        # the user(s) plus the PRs attributed to them, not 2-hop neighbors
+        # via cross-references.
+        if all(s.startswith(_USER_ENTITY_PREFIX) for s in seed_ids):
+            filters["edge_types"] = ["wasAttributedTo"]
+            filters["depth"] = 1
     pack = builder.build(
         intent=query.intent,
         domain=GITHUB_DOMAIN,
