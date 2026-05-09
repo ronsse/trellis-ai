@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import structlog
@@ -1211,6 +1212,134 @@ def get_sectioned_context(
         return f"Error: failed to assemble sectioned context for: {intent}"
     else:
         return result
+
+
+# ---------------------------------------------------------------------------
+# Macro Tool 12: execute_mutation
+# ---------------------------------------------------------------------------
+
+
+def _resolve_operation(operation: str) -> Any:
+    """Resolve an ``operation`` string to an :class:`Operation` enum member.
+
+    Accepts both the wire form (``"link.create"``) and the screaming-snake
+    name (``"LINK_CREATE"``). Returns ``None`` when the string matches
+    neither, leaving error reporting to the caller.
+    """
+    from trellis.mutate.commands import Operation  # noqa: PLC0415
+
+    try:
+        return Operation(operation)
+    except ValueError:
+        pass
+    try:
+        return Operation[operation]
+    except KeyError:
+        return None
+
+
+@mcp.tool()
+def execute_mutation(
+    operation: str,
+    args: dict[str, Any],
+    idempotency_key: str | None = None,
+    actor: str | None = None,
+) -> str:
+    """Execute a governed mutation through the ``MutationExecutor``.
+
+    Provides MCP-surface parity with the REST ``/api/v1/commands/batch``
+    endpoint for operator scripting. Wraps a single command in the same
+    five-stage pipeline (validate → policy → idempotency → execute →
+    emit), so policy gates and audit events apply identically.
+
+    Args:
+        operation: Operation name. Accepts the wire value
+            (e.g. ``"link.create"``) or the enum key
+            (e.g. ``"LINK_CREATE"``).
+        args: Operation-specific argument map. Required keys depend on
+            the operation — see ``OperationRegistry`` in
+            ``trellis.mutate.commands``.
+        idempotency_key: Optional dedup key. Repeat submissions with the
+            same key return ``status="duplicate"`` without re-executing.
+        actor: Optional audit identifier for the submitter. Defaults to
+            ``"mcp:execute_mutation"`` when not supplied.
+
+    Returns:
+        A JSON object string with fields ``status``, ``command_id``,
+        ``operation``, ``message``, and (on success) ``created_id``.
+        Validation, unknown-operation, and handler errors all surface
+        as ``status="error"`` or the executor's own status strings —
+        this tool does not raise to the MCP transport.
+    """
+    from trellis.mutate.commands import Command  # noqa: PLC0415
+    from trellis.mutate.executor import MutationExecutor  # noqa: PLC0415
+    from trellis.mutate.handlers import create_curate_handlers  # noqa: PLC0415
+
+    if not operation or not operation.strip():
+        return json.dumps(
+            {"status": "error", "message": "Error: operation must not be empty"}
+        )
+
+    op = _resolve_operation(operation)
+    if op is None:
+        return json.dumps(
+            {
+                "status": "error",
+                "message": f"Error: unknown operation: {operation}",
+            }
+        )
+
+    if not isinstance(args, dict):
+        return json.dumps(
+            {"status": "error", "message": "Error: args must be a dict"}
+        )
+
+    requested_by = actor.strip() if actor and actor.strip() else "mcp:execute_mutation"
+
+    try:
+        command = Command(
+            operation=op,
+            args=dict(args),
+            idempotency_key=idempotency_key,
+            requested_by=requested_by,
+        )
+    except Exception as exc:
+        return json.dumps(
+            {
+                "status": "error",
+                "message": f"Error: invalid command — {exc}",
+            }
+        )
+
+    try:
+        registry = _get_registry()
+        executor = MutationExecutor(
+            event_log=registry.operational.event_log,
+            handlers=create_curate_handlers(registry),
+        )
+        result = executor.execute(command)
+    except Exception as exc:
+        logger.exception("execute_mutation_failed", operation=str(op))
+        return json.dumps(
+            {
+                "status": "error",
+                "command_id": command.command_id,
+                "operation": str(op),
+                "message": f"Error: execution failed — {exc}",
+            }
+        )
+
+    response: dict[str, Any] = {
+        "status": result.status.value,
+        "command_id": result.command_id,
+        "operation": str(result.operation),
+        "message": result.message,
+    }
+    if result.created_id is not None:
+        response["created_id"] = result.created_id
+    if result.warnings:
+        response["warnings"] = list(result.warnings)
+    return json.dumps(response)
 
 
 # ---------------------------------------------------------------------------
