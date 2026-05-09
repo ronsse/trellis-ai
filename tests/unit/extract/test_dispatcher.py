@@ -11,7 +11,17 @@ from trellis.extract.base import ExtractorTier, NoExtractorAvailableError
 from trellis.extract.context import ExtractionContext
 from trellis.extract.dispatcher import ExtractionDispatcher
 from trellis.extract.registry import ExtractorRegistry
+from trellis.extract.validators import (
+    DraftLocalReferenceValidator,
+    EmptyResultValidator,
+    OrphanProvenanceValidator,
+    ValidationFinding,
+    default_validators,
+)
+from trellis.schemas.entity import GenerationSpec
+from trellis.schemas.enums import NodeRole
 from trellis.schemas.extraction import (
+    EdgeDraft,
     EntityDraft,
     ExtractionProvenance,
     ExtractionResult,
@@ -288,3 +298,254 @@ class TestFallbackTelemetry:
         events = event_log.get_events(event_type=EventType.EXTRACTOR_FALLBACK, limit=10)
         reasons = sorted(e.payload["reason"] for e in events)
         assert reasons == ["empty_result", "prefer_tier_override"]
+
+
+def _custom_extractor(
+    name: str,
+    tier: ExtractorTier,
+    sources: list[str],
+    *,
+    entities: list[EntityDraft] | None = None,
+    edges: list[EdgeDraft] | None = None,
+    residue: Any | None = None,
+) -> Any:
+    """Test extractor that emits a fully-controlled result payload."""
+
+    class _E:
+        def __init__(self) -> None:
+            self.name = name
+            self.tier = tier
+            self.supported_sources = sources
+            self.version = "1.0.0"
+
+        async def extract(
+            self,
+            raw_input: Any,
+            *,
+            source_hint: str | None = None,
+            context: ExtractionContext | None = None,
+        ) -> ExtractionResult:
+            return ExtractionResult(
+                entities=list(entities or []),
+                edges=list(edges or []),
+                extractor_used=self.name,
+                tier=self.tier.value,
+                provenance=ExtractionProvenance(
+                    extractor_name=self.name,
+                    source_hint=source_hint,
+                ),
+                unparsed_residue=residue,
+            )
+
+    return _E()
+
+
+class TestExtractionValidatorEnforcement:
+    """ADR §5.3 — when validators fire, the dispatcher rejects the extraction:
+    quarantine drafts in residue, emit EXTRACTION_REJECTED, return empty."""
+
+    async def test_no_validators_no_change(
+        self, event_log: SQLiteEventLog
+    ) -> None:
+        reg = ExtractorRegistry()
+        reg.register(
+            _make_extractor("det", ExtractorTier.DETERMINISTIC, ["s"], entities=1)
+        )
+        d = ExtractionDispatcher(reg, event_log=event_log)
+        result = await d.dispatch({}, source_hint="s")
+        assert len(result.entities) == 1
+        assert event_log.count(event_type=EventType.EXTRACTION_REJECTED) == 0
+        # EXTRACTION_DISPATCHED still fires on the happy path.
+        assert event_log.count(event_type=EventType.EXTRACTION_DISPATCHED) == 1
+
+    async def test_findings_quarantine_drafts_in_residue(
+        self, event_log: SQLiteEventLog
+    ) -> None:
+        reg = ExtractorRegistry()
+        # Extractor emits an entity AND an orphan edge — the orphan-edge
+        # validator will fire.
+        reg.register(
+            _custom_extractor(
+                "det",
+                ExtractorTier.DETERMINISTIC,
+                ["s"],
+                entities=[EntityDraft(entity_id="ent_a", entity_type="x", name="a")],
+                edges=[
+                    EdgeDraft(
+                        source_id="ent_a",
+                        target_id="ent_missing",
+                        edge_kind="related_to",
+                    )
+                ],
+            )
+        )
+        d = ExtractionDispatcher(
+            reg,
+            event_log=event_log,
+            validators=[DraftLocalReferenceValidator()],
+        )
+        result = await d.dispatch({}, source_hint="s")
+
+        # Empty drafts — no Commands flow downstream.
+        assert result.entities == []
+        assert result.edges == []
+        # Original signal is preserved in residue under the named key.
+        assert isinstance(result.unparsed_residue, dict)
+        rejected = result.unparsed_residue["rejected_by_validators"]
+        assert len(rejected["entities"]) == 1
+        assert len(rejected["edges"]) == 1
+        assert rejected["entities"][0]["entity_id"] == "ent_a"
+        assert rejected["edges"][0]["target_id"] == "ent_missing"
+        assert len(rejected["findings"]) >= 1
+        assert any(f["code"] == "orphan_edge" for f in rejected["findings"])
+
+    async def test_emits_extraction_rejected_event(
+        self, event_log: SQLiteEventLog
+    ) -> None:
+        reg = ExtractorRegistry()
+        reg.register(
+            _custom_extractor(
+                "det",
+                ExtractorTier.DETERMINISTIC,
+                ["s"],
+                entities=[],
+                edges=[],
+            )
+        )
+        d = ExtractionDispatcher(
+            reg,
+            event_log=event_log,
+            validators=[EmptyResultValidator()],
+        )
+        await d.dispatch({}, source_hint="s")
+
+        events = event_log.get_events(
+            event_type=EventType.EXTRACTION_REJECTED, limit=10
+        )
+        assert len(events) == 1
+        evt = events[0]
+        assert evt.source == "extraction_dispatcher"
+        assert evt.payload["source_hint"] == "s"
+        assert evt.payload["extractor_used"] == "det"
+        codes = [f["code"] for f in evt.payload["findings"]]
+        assert "empty_result" in codes
+        # EXTRACTION_DISPATCHED is suppressed — rejection is the canonical event.
+        assert event_log.count(event_type=EventType.EXTRACTION_DISPATCHED) == 0
+
+    async def test_curated_without_provenance_rejected(
+        self, event_log: SQLiteEventLog
+    ) -> None:
+        reg = ExtractorRegistry()
+        reg.register(
+            _custom_extractor(
+                "det",
+                ExtractorTier.DETERMINISTIC,
+                ["s"],
+                entities=[
+                    EntityDraft(
+                        entity_id="cur_1",
+                        entity_type="precedent",
+                        name="bad",
+                        node_role=NodeRole.CURATED,
+                    )
+                ],
+            )
+        )
+        d = ExtractionDispatcher(
+            reg,
+            event_log=event_log,
+            validators=[OrphanProvenanceValidator()],
+        )
+        result = await d.dispatch({}, source_hint="s")
+        assert result.entities == []
+        events = event_log.get_events(
+            event_type=EventType.EXTRACTION_REJECTED, limit=10
+        )
+        assert len(events) == 1
+        codes = [f["code"] for f in events[0].payload["findings"]]
+        assert "missing_generation_spec" in codes
+
+    async def test_curated_with_provenance_passes(
+        self, event_log: SQLiteEventLog
+    ) -> None:
+        reg = ExtractorRegistry()
+        reg.register(
+            _custom_extractor(
+                "det",
+                ExtractorTier.DETERMINISTIC,
+                ["s"],
+                entities=[
+                    EntityDraft(
+                        entity_id="cur_1",
+                        entity_type="precedent",
+                        name="ok",
+                        node_role=NodeRole.CURATED,
+                        generation_spec=GenerationSpec(
+                            generator_name="rollup",
+                            generator_version="1.0.0",
+                        ),
+                    )
+                ],
+            )
+        )
+        d = ExtractionDispatcher(
+            reg,
+            event_log=event_log,
+            validators=default_validators(),
+        )
+        result = await d.dispatch({}, source_hint="s")
+        assert len(result.entities) == 1
+        assert event_log.count(event_type=EventType.EXTRACTION_REJECTED) == 0
+
+    async def test_preserves_existing_residue_on_rejection(
+        self, event_log: SQLiteEventLog
+    ) -> None:
+        reg = ExtractorRegistry()
+        reg.register(
+            _custom_extractor(
+                "det",
+                ExtractorTier.DETERMINISTIC,
+                ["s"],
+                entities=[],
+                edges=[],
+                residue={"prior_signal": "carried-through"},
+            )
+        )
+        d = ExtractionDispatcher(
+            reg,
+            event_log=event_log,
+            validators=[EmptyResultValidator()],
+        )
+        result = await d.dispatch({}, source_hint="s")
+        assert isinstance(result.unparsed_residue, dict)
+        assert result.unparsed_residue["prior_signal"] == "carried-through"
+        assert "rejected_by_validators" in result.unparsed_residue
+
+    async def test_validator_exception_treated_as_rejection(
+        self, event_log: SQLiteEventLog
+    ) -> None:
+        class _Boom:
+            name = "boom"
+
+            def validate(
+                self,
+                result: ExtractionResult,
+                *,
+                source_hint: str | None = None,
+            ) -> list[ValidationFinding]:
+                msg = "boom"
+                raise RuntimeError(msg)
+
+        reg = ExtractorRegistry()
+        reg.register(
+            _make_extractor("det", ExtractorTier.DETERMINISTIC, ["s"], entities=1)
+        )
+        d = ExtractionDispatcher(reg, event_log=event_log, validators=[_Boom()])
+        result = await d.dispatch({}, source_hint="s")
+        assert result.entities == []
+        events = event_log.get_events(
+            event_type=EventType.EXTRACTION_REJECTED, limit=10
+        )
+        assert len(events) == 1
+        codes = [f["code"] for f in events[0].payload["findings"]]
+        assert "validator_error" in codes

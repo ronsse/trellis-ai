@@ -93,7 +93,10 @@ def link(
     )
     result = build_curate_executor(_get_registry()).execute(cmd)
 
-    if result.status == CommandStatus.FAILED:
+    if result.status in (CommandStatus.FAILED, CommandStatus.REJECTED):
+        # Handler-raised ValidationError now surfaces as REJECTED (Variant A'
+        # of adr-extraction-validation.md §5.5); both error states should
+        # exit non-zero so shell pipelines fail loud.
         if output_format == "json":
             console.print(json.dumps({"status": "error", "message": result.message}))
         else:

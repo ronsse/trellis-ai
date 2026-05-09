@@ -248,6 +248,28 @@ class TestLinkCreateHandler:
         with pytest.raises(ValidationError, match="target_id="):
             handler.handle(cmd)
 
+    def test_orphan_endpoint_carries_orphan_edge_code(
+        self, registry: StoreRegistry
+    ) -> None:
+        """Variant A' from adr-extraction-validation.md §5.5: handler-raised
+        ValidationError must carry ``code="orphan_edge"`` so the executor's
+        MUTATION_REJECTED event has a structured ``reason`` field."""
+        handler = LinkCreateHandler(registry)
+        cmd = Command(
+            operation=Operation.LINK_CREATE,
+            args={
+                "source_id": "missing_a",
+                "target_id": "missing_b",
+                "edge_kind": "related_to",
+            },
+        )
+        with pytest.raises(ValidationError) as exc_info:
+            handler.handle(cmd)
+        assert exc_info.value.code == "orphan_edge"
+        # Both endpoints surface in ``errors`` so callers see the full failure.
+        assert any("source_id=" in e for e in exc_info.value.errors)
+        assert any("target_id=" in e for e in exc_info.value.errors)
+
 
 def _make_trace(intent: str = "test intent") -> Trace:
     return Trace(

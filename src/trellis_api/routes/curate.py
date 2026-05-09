@@ -28,7 +28,10 @@ router = APIRouter()
 def _execute_command(cmd: Command) -> CommandResponse:
     """Execute a command through the mutation pipeline."""
     result = build_curate_executor(get_registry()).execute(cmd)
-    if result.status == CommandStatus.FAILED:
+    # Both FAILED (unexpected handler errors) and REJECTED (handler-raised
+    # ValidationError, post-Variant A') are 400-class outcomes from the
+    # API caller's perspective. See adr-extraction-validation.md §5.5.
+    if result.status in (CommandStatus.FAILED, CommandStatus.REJECTED):
         raise HTTPException(status_code=400, detail=result.message)
     return CommandResponse(
         status=result.status.value,

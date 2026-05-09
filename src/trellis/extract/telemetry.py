@@ -34,12 +34,18 @@ logger = structlog.get_logger(__name__)
 
 _FALLBACK_EVENT_LIMIT = 5000
 _DISPATCH_EVENT_LIMIT = 5000
+_VALIDATION_EVENT_LIMIT = 5000
 
 #: Fraction of dispatches on a single source_hint that must fall back before
 #: the source is flagged in findings. Deliberately high — we want a loud
 #: signal, not alerts for every occasional override.
 _HIGH_FALLBACK_RATE = 0.5
 _MIN_SOURCE_SAMPLES = 10
+
+#: Fraction of dispatches on a single source_hint that must hit
+#: ``EXTRACTION_REJECTED`` before the source is flagged in findings.
+#: Mirrors the fallback threshold — same loudness contract.
+_HIGH_VALIDATION_RATE = 0.5
 
 
 class SourceFallbackStats(TrellisModel):
@@ -200,8 +206,163 @@ def _build_findings(per_source: list[SourceFallbackStats]) -> list[str]:
     return findings
 
 
+class SourceValidationStats(TrellisModel):
+    """Per-source-hint extraction-validation aggregates."""
+
+    source_hint: str
+    total_dispatches: int
+    rejected_events: int
+    rejection_rate: float
+    codes: dict[str, int] = Field(default_factory=dict)
+    extractors: dict[str, int] = Field(default_factory=dict)
+
+
+class ExtractionValidationReport(TrellisModel):
+    """Aggregated EXTRACTION_REJECTED telemetry over an analysis window."""
+
+    total_dispatches: int
+    total_rejected: int
+    overall_rejection_rate: float
+    code_counts: dict[str, int] = Field(default_factory=dict)
+    per_source: list[SourceValidationStats] = Field(default_factory=list)
+    findings: list[str] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+
+def analyze_extraction_validation(
+    event_log: EventLog,
+    *,
+    days: int = 30,
+    limit: int = _VALIDATION_EVENT_LIMIT,
+) -> ExtractionValidationReport:
+    """Summarize extraction-validation telemetry since ``days`` ago.
+
+    Reads ``EXTRACTION_REJECTED`` and ``EXTRACTION_DISPATCHED`` events to
+    compute an overall rejection rate, per-validator-code counts, and
+    per-source aggregates. Mirrors the shape of
+    :func:`analyze_extractor_fallbacks` so consumers can swap one for the
+    other when wiring CLI surfaces. Closes Logic Gap 1.3 telemetry.
+    """
+    from trellis.stores.base.event_log import EventType  # noqa: PLC0415
+
+    since = datetime.now(tz=UTC) - timedelta(days=days)
+    rejected_events = event_log.get_events(
+        event_type=EventType.EXTRACTION_REJECTED,
+        since=since,
+        limit=limit,
+    )
+    dispatch_events = event_log.get_events(
+        event_type=EventType.EXTRACTION_DISPATCHED,
+        since=since,
+        limit=_DISPATCH_EVENT_LIMIT,
+    )
+
+    total_rejected = len(rejected_events)
+    total_dispatches = len(dispatch_events)
+
+    code_counts: Counter[str] = Counter()
+    per_source_dispatches: Counter[str] = Counter()
+    per_source_rejected: dict[str, dict] = defaultdict(
+        lambda: {"rejected": 0, "codes": Counter(), "extractors": Counter()}
+    )
+
+    for event in dispatch_events:
+        source_hint = (event.payload or {}).get("source_hint") or "<none>"
+        per_source_dispatches[source_hint] += 1
+
+    for event in rejected_events:
+        payload = event.payload or {}
+        source_hint = payload.get("source_hint") or "<none>"
+        extractor_used = payload.get("extractor_used") or "unknown"
+        entry = per_source_rejected[source_hint]
+        entry["rejected"] += 1
+        entry["extractors"][extractor_used] += 1
+        for finding in payload.get("findings") or []:
+            code = (finding or {}).get("code") or "unknown"
+            code_counts[code] += 1
+            entry["codes"][code] += 1
+
+    per_source: list[SourceValidationStats] = []
+    all_sources = set(per_source_dispatches) | set(per_source_rejected)
+    for source_hint in sorted(all_sources):
+        dispatches = per_source_dispatches.get(source_hint, 0)
+        rejected = per_source_rejected.get(source_hint, {}).get("rejected", 0)
+        rate = rejected / dispatches if dispatches else 0.0
+        codes = dict(per_source_rejected.get(source_hint, {}).get("codes") or {})
+        extractors = dict(
+            per_source_rejected.get(source_hint, {}).get("extractors") or {}
+        )
+        per_source.append(
+            SourceValidationStats(
+                source_hint=source_hint,
+                total_dispatches=dispatches,
+                rejected_events=rejected,
+                rejection_rate=rate,
+                codes=codes,
+                extractors=extractors,
+            )
+        )
+
+    overall_rate = total_rejected / total_dispatches if total_dispatches else 0.0
+
+    findings = _build_validation_findings(per_source)
+    notes: list[str] = []
+    if total_dispatches == 0 and total_rejected == 0:
+        notes.append(
+            "No EXTRACTION_DISPATCHED or EXTRACTION_REJECTED events in this "
+            "window. Either the dispatcher is unused, no ``event_log`` is "
+            "wired, or no validators are configured — check "
+            "``ExtractionDispatcher(event_log=..., validators=[...])``."
+        )
+
+    report = ExtractionValidationReport(
+        total_dispatches=total_dispatches,
+        total_rejected=total_rejected,
+        overall_rejection_rate=overall_rate,
+        code_counts=dict(code_counts),
+        per_source=per_source,
+        findings=findings,
+        notes=notes,
+    )
+    logger.info(
+        "extraction_validation_analyzed",
+        days=days,
+        total_dispatches=total_dispatches,
+        total_rejected=total_rejected,
+        overall_rate=overall_rate,
+    )
+    return report
+
+
+def _build_validation_findings(
+    per_source: list[SourceValidationStats],
+) -> list[str]:
+    findings: list[str] = []
+    for stats in per_source:
+        if stats.total_dispatches < _MIN_SOURCE_SAMPLES:
+            continue
+        if stats.rejection_rate < _HIGH_VALIDATION_RATE:
+            continue
+        top_code = (
+            max(stats.codes.items(), key=lambda kv: kv[1])[0]
+            if stats.codes
+            else "unknown"
+        )
+        findings.append(
+            f"source `{stats.source_hint}` has extractions rejected "
+            f"{stats.rejection_rate:.0%} of dispatches ({stats.rejected_events}"
+            f" of {stats.total_dispatches}) — top finding code "
+            f"`{top_code}`. Investigate the extractor or the validator "
+            "ruleset before junk silently degrades the corpus."
+        )
+    return findings
+
+
 __all__ = [
+    "ExtractionValidationReport",
     "ExtractorFallbackReport",
     "SourceFallbackStats",
+    "SourceValidationStats",
+    "analyze_extraction_validation",
     "analyze_extractor_fallbacks",
 ]

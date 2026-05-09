@@ -7,6 +7,7 @@ from typing import Protocol
 
 import structlog
 
+from trellis.errors import ValidationError
 from trellis.mutate.commands import (
     BatchStrategy,
     Command,
@@ -171,6 +172,21 @@ class MutationExecutor:
 
         try:
             created_id, message = handler.handle(command)
+        except ValidationError as exc:
+            # Variant A' (adr-extraction-validation.md §5.5): handler-raised
+            # ValidationError is a structured rejection, not an unexpected
+            # failure. Route through _emit_rejection so the audit event
+            # carries a stable ``reason`` (defaulting to "handler_validate"
+            # if the handler didn't supply one via ValidationError.code).
+            log.warning("handler_rejected", errors=exc.errors)
+            reason = exc.code if exc.code != "VALIDATION_ERROR" else "handler_validate"
+            self._emit_rejection(command, reason=reason, message=str(exc))
+            return CommandResult(
+                command_id=command.command_id,
+                status=CommandStatus.REJECTED,
+                operation=command.operation,
+                message=str(exc),
+            )
         except Exception as exc:
             log.exception("handler_failed")
             self._emit(command, CommandStatus.FAILED, str(exc))
