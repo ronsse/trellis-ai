@@ -230,6 +230,50 @@ To avoid this churn on a shared instance, give eval and unit tests
 or run eval against a Docker self-hosted Neo4j and reserve AuraDB for
 unit tests + production.
 
+### Diagnosing and fixing a stuck index slot
+
+The dimensions also collide: the unit-test fixture creates the index at
+`dim=3` (`tests/unit/stores/contracts/vector_store_contract.py` —
+`DIMS = 3` so every backend exercises the same vector shape), eval
+scenarios load embeddings at `dim=16`, and a real OpenAI corpus would
+sit at `dim=1536`. Even if the names matched, the dims don't — and the
+silent-no-op + 30s-timeout failure mode is the same.
+
+If a vector test or scenario load hangs for ~30s and then surfaces
+`VectorIndexNotOnlineError`, list what's actually present:
+
+```cypher
+SHOW VECTOR INDEXES
+YIELD name, labelsOrTypes, properties, options
+```
+
+Two indexes against `(:Node, embedding)` won't both appear — only the
+one that was created first. To free the slot for the other workload:
+
+```cypher
+DROP INDEX trellis_test_node_embeddings IF EXISTS
+```
+
+(Or drop `trellis_node_embeddings` if you're switching the other way.)
+Re-run the workload that needs the slot; its `CREATE VECTOR INDEX … IF
+NOT EXISTS` will now succeed and provision asynchronously.
+
+The eval loader does this automatically — see
+[`scripts/load_eval_dataset_to_aura.py`](../../scripts/load_eval_dataset_to_aura.py)
+lines 103–117 (`_wipe_and_drop_test_index`), which wipes the database
+and drops `trellis_test_node_embeddings` before re-creating
+`trellis_node_embeddings` at the eval-default dim. There is no
+equivalent helper on the unit-test side: the contract suite assumes a
+clean instance, so if you've just run the loader the first vector test
+pays the async-provisioning wait while the test index is recreated.
+
+**Recommended shape** for anyone running both the unit-test suite and
+eval/production scenarios against AuraDB: provision **two AuraDB Free
+instances** (the free tier allows multiple per account) — one bound to
+`TRELLIS_TEST_NEO4J_*` for the test suite, one bound to
+`TRELLIS_NEO4J_*` for everything else. They are independent vector-index
+slots and never collide.
+
 The same constraint applies to the column on the
 [`pgvector` backend](../../src/trellis/stores/pgvector/store.py): the
 `embedding` column carries a fixed dimension, and `CREATE TABLE IF NOT
