@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
@@ -42,6 +43,13 @@ class EnrichmentResult(TrellisModel):
     usage: TokenUsage | None = None
     success: bool = True
     error: str | None = None
+    #: Stamp asserting "this importance score was computed at this time".
+    #: Required whenever ``auto_importance > 0`` so the read-path
+    #: guardrail in :func:`trellis.retrieve.strategies._apply_importance`
+    #: can age it. ``None`` only when ``auto_importance == 0`` (no score
+    #: to stamp) or on failure paths. See
+    #: ``docs/design/adr-importance-score-freshness.md`` §3.5.
+    importance_scored_at: datetime | None = None
 
 
 ENRICHMENT_SYSTEM_PROMPT = """\
@@ -160,6 +168,13 @@ class EnrichmentService:
             result = self._parse_response(response.content)
             result.raw_response = response.content
             result.usage = response.usage
+            # Greenfield writer contract (adr-importance-score-freshness §3.5):
+            # any code path that sets auto_importance must also stamp
+            # importance_scored_at. Stamp at write time so the
+            # contract holds end-to-end through LLMFacetClassifier into
+            # ContentTags.
+            if result.success and result.auto_importance > 0:
+                result.importance_scored_at = datetime.now(UTC)
             return result
 
     async def batch_enrich(

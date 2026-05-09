@@ -239,6 +239,57 @@ class TestEnrich:
         user_content = llm.generate.call_args.kwargs["messages"][1].content
         assert "[Content truncated...]" in user_content
 
+    async def test_enrich_stamps_importance_scored_at_when_score_set(self):
+        """Greenfield writer contract (adr-importance-score-freshness §3.5):
+        when ``auto_importance > 0`` is written, ``importance_scored_at``
+        must be stamped at the same site so the read-path guardrail can
+        age the score."""
+        llm = _make_llm(VALID_JSON)  # importance: 0.7 in VALID_JSON
+        service = EnrichmentService(llm=llm)
+        result = await service.enrich(content="something")
+        assert result.success is True
+        assert result.auto_importance == 0.7
+        assert result.importance_scored_at is not None
+        # Should be tz-aware UTC datetime.
+        assert result.importance_scored_at.tzinfo is not None
+
+    async def test_enrich_no_stamp_when_importance_zero(self):
+        """Zero importance => no score to age => no stamp required."""
+        zero_json = json.dumps(
+            {
+                "tags": [],
+                "class": "notes",
+                "summary": "x",
+                "importance": 0.0,
+            }
+        )
+        llm = _make_llm(zero_json)
+        service = EnrichmentService(llm=llm)
+        result = await service.enrich(content="hello")
+        assert result.auto_importance == 0.0
+        assert result.importance_scored_at is None
+
+    async def test_enrich_no_stamp_on_failure_path(self):
+        """Failure paths return EnrichmentResult(success=False) and never
+        touch ``auto_importance`` — stamp must remain None."""
+
+        class BrokenLLM:
+            async def generate(
+                self,
+                *,
+                messages: list[Message],
+                temperature: float = 0.3,
+                max_tokens: int = 500,
+                model: str | None = None,
+            ) -> LLMResponse:
+                msg = "LLM down"
+                raise RuntimeError(msg)
+
+        service = EnrichmentService(llm=BrokenLLM())
+        result = await service.enrich(content="hello")
+        assert result.success is False
+        assert result.importance_scored_at is None
+
 
 # ---------------------------------------------------------------------------
 # batch_enrich

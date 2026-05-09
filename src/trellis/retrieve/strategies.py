@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypedDict
 
 import structlog
 
@@ -31,6 +31,21 @@ DEFAULT_RECENCY_HALF_LIFE_DAYS = 30.0
 #: fraction of its original relevance. Prevents high-importance archival
 #: content from being suppressed entirely.
 RECENCY_FLOOR = 0.3
+
+#: Grace period before importance-score staleness decay starts. Below this
+#: age (measured from ``importance_scored_at``) the legacy multiplier is
+#: applied as-is; past it, the score decays with the same half-life math
+#: as recency decay. See adr-importance-score-freshness §3.4.
+DEFAULT_IMPORTANCE_FRESH_HORIZON_DAYS = 180.0
+
+#: Floor for importance staleness decay — never zero out a stale score,
+#: just dampen it. Same semantics as :data:`RECENCY_FLOOR`.
+DEFAULT_IMPORTANCE_DECAY_FLOOR = 0.3
+
+#: Only decay importance scores at or above this threshold. Low scores
+#: barely move the multiplier already, so the freshness check would
+#: cost more than it gains. See adr-importance-score-freshness §3.4.
+DEFAULT_IMPORTANCE_DECAY_THRESHOLD = 0.5
 
 #: Default scoring boosts inside :class:`GraphSearch`. Exposed as
 #: module-level constants so they can be resolved through
@@ -88,11 +103,166 @@ class SearchStrategy(ABC):
         """Execute search and return ranked PackItems."""
 
 
-def _apply_importance(base_score: float, metadata: dict[str, Any]) -> float:
-    """Apply importance weighting: base_score * (1.0 + importance)."""
+def _apply_importance(
+    base_score: float,
+    metadata: dict[str, Any],
+    *,
+    now: datetime | None = None,
+    fresh_horizon_days: float = DEFAULT_IMPORTANCE_FRESH_HORIZON_DAYS,
+    floor: float = DEFAULT_IMPORTANCE_DECAY_FLOOR,
+    decay_threshold: float = DEFAULT_IMPORTANCE_DECAY_THRESHOLD,
+    half_life_days: float = DEFAULT_RECENCY_HALF_LIFE_DAYS,
+) -> float:
+    """Apply importance weighting with bounded staleness decay.
+
+    Decay is applied *only* when:
+
+    * the raw importance is at or above ``decay_threshold``, AND
+    * ``importance_scored_at`` (located on ``metadata["content_tags"]`` or
+      directly on ``metadata``) is past the ``fresh_horizon_days`` horizon.
+
+    Below those thresholds the function returns the legacy behavior:
+    ``base_score * (1.0 + clamp(importance, 0, 1))``.
+
+    Greenfield writer contract (adr-importance-score-freshness §3.5): if
+    ``auto_importance`` is set above ``decay_threshold`` but
+    ``importance_scored_at`` is missing, raises ``ValueError``. There is
+    no fallback to ``classified_at`` and no "treat as fresh" path —
+    every code path that writes ``auto_importance`` must also stamp.
+    """
     importance = float(metadata.get("auto_importance", 0.0))
+    if importance == 0.0:
+        # No importance score → no multiplier, no freshness check needed.
+        return base_score
     importance = max(0.0, min(1.0, importance))  # clamp 0-1
-    return base_score * (1.0 + importance)
+    if importance < decay_threshold:
+        # Sub-threshold scores skip the freshness check entirely — the
+        # multiplier is small enough that staleness barely moves it.
+        return base_score * (1.0 + importance)
+
+    # Above threshold: locate the freshness witness. ContentTags is the
+    # canonical home; `metadata["importance_scored_at"]` is supported as
+    # a flat alias for stores that flatten tags into top-level metadata.
+    tags = metadata.get("content_tags") or {}
+    raw_stamp = (
+        tags.get("importance_scored_at")
+        if isinstance(tags, dict)
+        else None
+    )
+    if raw_stamp is None:
+        raw_stamp = metadata.get("importance_scored_at")
+    if raw_stamp is None:
+        msg = (
+            "auto_importance is set but importance_scored_at is missing — "
+            "writer path is broken. Every code path that writes "
+            "auto_importance must also stamp importance_scored_at "
+            "(see adr-importance-score-freshness.md §3.5). "
+            f"Item metadata keys={sorted(metadata.keys())}"
+        )
+        raise ValueError(msg)
+    decayed = _decay_importance_if_stale(
+        importance,
+        raw_stamp,
+        now=now,
+        fresh_horizon_days=fresh_horizon_days,
+        half_life_days=half_life_days,
+        floor=floor,
+    )
+    return base_score * (1.0 + decayed)
+
+
+class _ImportanceParams(TypedDict):
+    """Typed bag for the per-(component, domain) importance-decay tunables.
+
+    Mirrors the keyword arguments of :func:`_apply_importance` so callers
+    can ``**`` -spread the registry-resolved values without losing types.
+    """
+
+    fresh_horizon_days: float
+    floor: float
+    decay_threshold: float
+    half_life_days: float
+
+
+def _resolve_importance_params(
+    registry: ParameterRegistry | None,
+    component_id: str,
+    domain: str | None,
+) -> _ImportanceParams:
+    """Resolve per-(component, domain) importance-decay overrides.
+
+    Mirrors the resolution shape of the recency params so callers can
+    spread the result into ``_apply_importance(**params)``.
+    """
+    return _ImportanceParams(
+        fresh_horizon_days=_resolve_param(
+            registry,
+            component_id,
+            domain,
+            "importance_fresh_horizon_days",
+            DEFAULT_IMPORTANCE_FRESH_HORIZON_DAYS,
+        ),
+        floor=_resolve_param(
+            registry,
+            component_id,
+            domain,
+            "importance_decay_floor",
+            DEFAULT_IMPORTANCE_DECAY_FLOOR,
+        ),
+        decay_threshold=_resolve_param(
+            registry,
+            component_id,
+            domain,
+            "importance_decay_threshold",
+            DEFAULT_IMPORTANCE_DECAY_THRESHOLD,
+        ),
+        half_life_days=_resolve_param(
+            registry,
+            component_id,
+            domain,
+            "recency_half_life_days",
+            DEFAULT_RECENCY_HALF_LIFE_DAYS,
+        ),
+    )
+
+
+def _decay_importance_if_stale(
+    importance: float,
+    raw_stamp: str | datetime,
+    *,
+    now: datetime | None = None,
+    fresh_horizon_days: float,
+    half_life_days: float,
+    floor: float,
+) -> float:
+    """Decay an importance score past the freshness horizon.
+
+    Mirrors :func:`_apply_recency_decay` but with a no-op grace period:
+    inside ``fresh_horizon_days`` the score is returned unchanged; past
+    it, the score decays with the same half-life math, capped at
+    ``floor``. Unparseable stamps return the score unchanged (the caller
+    enforces non-None at a higher level).
+    """
+    if isinstance(raw_stamp, datetime):
+        ts = raw_stamp
+    else:
+        try:
+            ts = datetime.fromisoformat(str(raw_stamp))
+        except (ValueError, TypeError):
+            return importance
+    reference = now or datetime.now(UTC)
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=UTC)
+    if reference.tzinfo is None:
+        reference = reference.replace(tzinfo=UTC)
+    age_days = max(0.0, (reference - ts).total_seconds() / 86400.0)
+    if age_days <= fresh_horizon_days:
+        return importance
+    # Past horizon: decay the *excess* age over the horizon with the
+    # standard half-life formula, floored.
+    excess = age_days - fresh_horizon_days
+    decay: float = 0.5 ** (excess / half_life_days)
+    return importance * (floor + (1.0 - floor) * decay)
 
 
 def _apply_recency_decay(
@@ -169,12 +339,15 @@ class KeywordSearch(SearchStrategy):
             "recency_floor",
             RECENCY_FLOOR,
         )
+        importance_params = _resolve_importance_params(
+            self._registry, _KEYWORD_COMPONENT, domain,
+        )
         results = self._store.search(query, limit=limit, filters=filters)
         items = []
         for doc in results:
             metadata = doc.get("metadata", {})
             base_score = abs(doc.get("rank", 0.0))
-            score = _apply_importance(base_score, metadata)
+            score = _apply_importance(base_score, metadata, **importance_params)
             score = _apply_recency_decay(
                 score,
                 doc.get("updated_at") or doc.get("created_at"),
@@ -239,13 +412,16 @@ class SemanticSearch(SearchStrategy):
             "recency_floor",
             RECENCY_FLOOR,
         )
+        importance_params = _resolve_importance_params(
+            self._registry, _SEMANTIC_COMPONENT, domain,
+        )
         query_vector = self._embedding_fn(query)
         results = self._store.query(query_vector, top_k=limit, filters=filters)
         items = []
         for result in results:
             metadata = result.get("metadata", {})
             base_score = result.get("score", 0.0)
-            score = _apply_importance(base_score, metadata)
+            score = _apply_importance(base_score, metadata, **importance_params)
             score = _apply_recency_decay(
                 score,
                 metadata.get("updated_at") or metadata.get("created_at"),
@@ -438,6 +614,9 @@ class GraphSearch(SearchStrategy):
             "recency_floor",
             RECENCY_FLOOR,
         )
+        importance_params = _resolve_importance_params(
+            self._registry, _GRAPH_COMPONENT, request_domain,
+        )
 
         items = []
         for i, node in enumerate(nodes[:limit]):
@@ -457,7 +636,7 @@ class GraphSearch(SearchStrategy):
                 base_score *= curated_boost
 
             # Importance boost
-            score = _apply_importance(base_score, props)
+            score = _apply_importance(base_score, props, **importance_params)
 
             # Prefer entities with descriptions — they carry more context
             if props.get("description") or props.get("comment"):

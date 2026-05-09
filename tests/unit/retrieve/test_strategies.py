@@ -9,6 +9,10 @@ from unittest.mock import MagicMock
 import pytest
 
 from trellis.retrieve.strategies import (
+    DEFAULT_IMPORTANCE_DECAY_FLOOR,
+    DEFAULT_IMPORTANCE_DECAY_THRESHOLD,
+    DEFAULT_IMPORTANCE_FRESH_HORIZON_DAYS,
+    DEFAULT_RECENCY_HALF_LIFE_DAYS,
     RECENCY_FLOOR,
     GraphSearch,
     KeywordSearch,
@@ -18,21 +22,166 @@ from trellis.retrieve.strategies import (
 )
 
 
+def _fresh_meta(importance: float) -> dict[str, Any]:
+    """Build a metadata dict with a fresh ``importance_scored_at`` stamp.
+
+    Useful for tests that exercise above-threshold importance values without
+    tripping the greenfield writer-contract guard.
+    """
+    return {
+        "auto_importance": importance,
+        "content_tags": {
+            "importance_scored_at": datetime.now(UTC).isoformat(),
+        },
+    }
+
+
 class TestApplyImportance:
     def test_no_importance(self) -> None:
         assert _apply_importance(1.0, {}) == 1.0
 
-    def test_with_importance(self) -> None:
-        assert _apply_importance(1.0, {"auto_importance": 0.5}) == 1.5
+    def test_zero_importance_no_stamp_required(self) -> None:
+        # importance == 0.0 short-circuits before the freshness check.
+        assert _apply_importance(1.0, {"auto_importance": 0.0}) == 1.0
 
-    def test_max_importance(self) -> None:
-        assert _apply_importance(1.0, {"auto_importance": 1.0}) == 2.0
+    def test_sub_threshold_importance_no_stamp_required(self) -> None:
+        # Below decay_threshold → legacy multiplier, no stamp lookup.
+        assert _apply_importance(1.0, {"auto_importance": 0.2}) == 1.2
 
-    def test_clamps_over_one(self) -> None:
-        assert _apply_importance(1.0, {"auto_importance": 2.0}) == 2.0
+    def test_with_importance_fresh_stamp(self) -> None:
+        assert _apply_importance(1.0, _fresh_meta(0.5)) == pytest.approx(1.5)
+
+    def test_max_importance_fresh_stamp(self) -> None:
+        assert _apply_importance(1.0, _fresh_meta(1.0)) == pytest.approx(2.0)
+
+    def test_clamps_over_one_fresh_stamp(self) -> None:
+        assert _apply_importance(1.0, _fresh_meta(2.0)) == pytest.approx(2.0)
 
     def test_clamps_negative(self) -> None:
+        # Negative clamps to 0.0 → short-circuit before freshness check.
         assert _apply_importance(1.0, {"auto_importance": -0.5}) == 1.0
+
+
+class TestApplyImportanceFreshness:
+    """Read-path guardrail (adr-importance-score-freshness §3.4)."""
+
+    _NOW = datetime(2026, 5, 9, 12, 0, 0, tzinfo=UTC)
+
+    def test_fresh_stamp_no_decay(self) -> None:
+        """Inside the horizon: legacy multiplier applied as-is."""
+        meta = {
+            "auto_importance": 0.9,
+            "content_tags": {
+                "importance_scored_at": (
+                    self._NOW - timedelta(days=10)
+                ).isoformat(),
+            },
+        }
+        assert _apply_importance(1.0, meta, now=self._NOW) == pytest.approx(1.9)
+
+    def test_stale_high_score_decays(self) -> None:
+        """Past horizon: score decays with the same half-life math."""
+        # 180d horizon + 30d half-life. At horizon + 30d (210d ago), the
+        # excess of 30d => decay = 0.5; floor=0.3; so importance is
+        # 0.9 * (0.3 + 0.7 * 0.5) = 0.9 * 0.65 = 0.585.
+        # Final: 1.0 * (1.0 + 0.585) = 1.585.
+        meta = {
+            "auto_importance": 0.9,
+            "content_tags": {
+                "importance_scored_at": (
+                    self._NOW - timedelta(days=210)
+                ).isoformat(),
+            },
+        }
+        result = _apply_importance(1.0, meta, now=self._NOW)
+        expected_importance = 0.9 * (
+            DEFAULT_IMPORTANCE_DECAY_FLOOR
+            + (1.0 - DEFAULT_IMPORTANCE_DECAY_FLOOR) * 0.5
+        )
+        assert result == pytest.approx(1.0 + expected_importance)
+
+    def test_very_old_stale_hits_floor(self) -> None:
+        """Decades past the horizon: score asymptotes to floor."""
+        meta = {
+            "auto_importance": 1.0,
+            "content_tags": {
+                "importance_scored_at": (
+                    self._NOW - timedelta(days=10000)
+                ).isoformat(),
+            },
+        }
+        result = _apply_importance(1.0, meta, now=self._NOW)
+        # Importance dampens to ~floor.
+        expected = 1.0 + (1.0 * DEFAULT_IMPORTANCE_DECAY_FLOOR)
+        assert result == pytest.approx(expected, abs=1e-3)
+
+    def test_stale_below_threshold_skips_decay(self) -> None:
+        """Stale but sub-threshold scores are not decayed (no stamp lookup)."""
+        # No stamp at all — sub-threshold path skips the freshness check.
+        meta = {"auto_importance": 0.4}
+        assert _apply_importance(1.0, meta, now=self._NOW) == pytest.approx(1.4)
+
+    def test_missing_stamp_above_threshold_raises(self) -> None:
+        """Greenfield contract: above-threshold score with no stamp = bug."""
+        meta = {"auto_importance": 0.7}  # No content_tags at all.
+        with pytest.raises(ValueError, match="importance_scored_at is missing"):
+            _apply_importance(1.0, meta, now=self._NOW)
+
+    def test_missing_stamp_in_content_tags_above_threshold_raises(self) -> None:
+        """Stamp missing inside content_tags also raises."""
+        meta = {
+            "auto_importance": 0.7,
+            "content_tags": {"domain": ["api"]},  # No importance_scored_at.
+        }
+        with pytest.raises(ValueError, match="importance_scored_at is missing"):
+            _apply_importance(1.0, meta, now=self._NOW)
+
+    def test_no_fallback_to_classified_at(self) -> None:
+        """The guardrail must NOT fall back to ``classified_at`` (greenfield)."""
+        meta = {
+            "auto_importance": 0.7,
+            "content_tags": {
+                # classified_at present, but importance_scored_at missing.
+                "classified_at": self._NOW.isoformat(),
+            },
+        }
+        with pytest.raises(ValueError, match="importance_scored_at is missing"):
+            _apply_importance(1.0, meta, now=self._NOW)
+
+    def test_flat_alias_stamp_accepted(self) -> None:
+        """Stamps stored at top-level metadata (flat alias) are read."""
+        meta = {
+            "auto_importance": 0.7,
+            "importance_scored_at": self._NOW.isoformat(),
+        }
+        result = _apply_importance(1.0, meta, now=self._NOW)
+        # Inside horizon → legacy multiplier.
+        assert result == pytest.approx(1.7)
+
+    def test_unparseable_stamp_returns_unchanged(self) -> None:
+        """Unparseable stamps are treated as fresh (the higher-level
+        guardrail enforces non-None; format is best-effort)."""
+        meta = {
+            "auto_importance": 0.7,
+            "content_tags": {"importance_scored_at": "not-a-date"},
+        }
+        result = _apply_importance(1.0, meta, now=self._NOW)
+        assert result == pytest.approx(1.7)
+
+    def test_monotonic_in_importance_for_fresh_items(self) -> None:
+        """Property: for fresh items, higher importance => higher score."""
+        prev = 0.0
+        for imp in (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0):
+            score = _apply_importance(1.0, _fresh_meta(imp), now=self._NOW)
+            assert score >= prev
+            prev = score
+
+    def test_constants_have_documented_defaults(self) -> None:
+        """Pin the constants so any change requires updating the ADR."""
+        assert DEFAULT_IMPORTANCE_FRESH_HORIZON_DAYS == 180.0
+        assert DEFAULT_IMPORTANCE_DECAY_FLOOR == 0.3
+        assert DEFAULT_IMPORTANCE_DECAY_THRESHOLD == 0.5
+        assert DEFAULT_RECENCY_HALF_LIFE_DAYS == 30.0
 
 
 class TestApplyRecencyDecay:
@@ -134,7 +283,16 @@ class TestKeywordSearch:
             {
                 "doc_id": "d2",
                 "content": "Java guide",
-                "metadata": {"tag": "tutorial", "auto_importance": 0.5},
+                "metadata": {
+                    "tag": "tutorial",
+                    "auto_importance": 0.5,
+                    # Greenfield writer contract: above-threshold importance
+                    # requires a freshness witness
+                    # (adr-importance-score-freshness.md §3.5).
+                    "content_tags": {
+                        "importance_scored_at": datetime.now(UTC).isoformat(),
+                    },
+                },
                 "rank": -0.6,
             },
         ]
