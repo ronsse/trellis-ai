@@ -105,7 +105,7 @@ Raw sources → `EntityDraft`/`EdgeDraft` records routed through `MutationExecut
 
 ### LLM Client Abstraction (`src/trellis/llm/`)
 
-Provider-agnostic protocols: `LLMClient`, `EmbedderClient`, `CrossEncoderClient`. Reference implementations for OpenAI / Anthropic live in `trellis.llm.providers` behind `[llm-openai]` / `[llm-anthropic]` optional extras so core stays dependency-free. See [`docs/design/adr-llm-client-abstraction.md`](docs/design/adr-llm-client-abstraction.md).
+Provider-agnostic protocols: `LLMClient`, `EmbedderClient`. Reference implementations for OpenAI / Anthropic live in `trellis.llm.providers` behind `[llm-openai]` / `[llm-anthropic]` optional extras so core stays dependency-free. See [`docs/design/adr-llm-client-abstraction.md`](docs/design/adr-llm-client-abstraction.md).
 
 ### Two feedback paths — EventLog (authoritative) vs JSONL (file-based)
 

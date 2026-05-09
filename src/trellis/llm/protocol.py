@@ -1,4 +1,4 @@
-"""Protocols for LLM, embedding, and cross-encoder clients."""
+"""Protocols for LLM and embedding clients."""
 
 from __future__ import annotations
 
@@ -46,20 +46,3 @@ class EmbedderClient(Protocol):
         *,
         model: str | None = None,
     ) -> list[EmbeddingResponse]: ...
-
-
-@runtime_checkable
-class CrossEncoderClient(Protocol):
-    """Protocol for cross-encoder reranking.
-
-    Scores ``(query, candidate)`` pairs for relevance.  Implementations
-    may be local (sentence-transformers) or API-based.
-    """
-
-    async def score_pairs(
-        self,
-        query: str,
-        candidates: list[str],
-        *,
-        model: str | None = None,
-    ) -> list[float]: ...
