@@ -1,14 +1,8 @@
 """Wire DTOs for the Trellis REST API and SDK.
 
-One-to-one port of the classes that formerly lived in
-``trellis_api/models.py``.  All DTOs now inherit from
-:class:`trellis_wire.base.WireModel` (response-shaped) or
-:class:`trellis_wire.base.WireRequestModel` (frozen, for inputs
-clients construct).
-
-**Naming parity:** class names are unchanged from ``trellis_api.models``
-so existing imports (``from trellis_api.models import BulkIngestRequest``)
-keep working via a re-export shim in that module.
+All DTOs inherit from :class:`trellis_wire.base.WireModel`
+(response-shaped) or :class:`trellis_wire.base.WireRequestModel`
+(frozen, for inputs clients construct).
 
 **Frozen scope:** requests are frozen; responses are not, because the
 bulk-ingest route currently builds responses by incrementing counters

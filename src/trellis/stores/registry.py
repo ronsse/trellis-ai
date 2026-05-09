@@ -574,8 +574,8 @@ class StoreRegistry:
         planes-and-substrates::
 
             knowledge:
-              graph: { backend: kuzu }
-              vector: { backend: kuzu }
+              graph: { backend: sqlite }
+              vector: { backend: sqlite }
               document: { backend: sqlite }
               blob: { backend: local }
             operational:
@@ -705,7 +705,7 @@ class StoreRegistry:
         if backend in {"postgres", "pgvector"} and "dsn" not in params:
             dsn = _resolve_plane_pg_dsn(store_type)
             if not dsn:
-                plane_env = _PLANE_PG_DSN_ENV.get(plane, "TRELLIS_*_PG_DSN")
+                plane_env = _PLANE_PG_DSN_ENV[plane]
                 msg = (
                     f"dsn must be set for {backend} backend"
                     f" (config or {plane_env} env var)"
