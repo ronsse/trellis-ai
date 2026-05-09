@@ -1,6 +1,6 @@
 # ADR: Extraction Validation Boundary — Where Malformed-Trace Rejection Lives
 
-**Status:** Proposed (drafted by swarm3 E-1, awaiting human review)
+**Status:** Accepted (2026-05-09; user confirmed event name, Variant A' scope, and no-fallback enforcement)
 **Date:** 2026-05-09
 **Deciders:** Trellis core
 **Related:**
@@ -181,50 +181,50 @@ Match the disposition used for Logic Gap 1.2: write the audit decision into the 
 
 ## 4. Decision
 
-**Recommendation: Option D (validator Protocol at the dispatcher boundary), in signal-only mode, plus the small Variant A′ fix to `LinkCreateHandler`'s rejection path. Defer the decision to *enforce* (drop / quarantine) until a consumer asks.**
+**Option D (validator Protocol at the dispatcher boundary), enforcing — when any validator fires the dispatcher quarantines the entities/edges into `unparsed_residue` and emits `EXTRACTION_REJECTED`. Plus Variant A′: `LinkCreateHandler.ValidationError` routes through `_emit_rejection({reason: "orphan_edge"})`.**
 
-This is a hybrid that respects POC discipline while closing the observability half of the gap immediately. The pattern matches what swarm2 did for Gap 4.3 (extractor fallback): introduce an event, ship the analyzer, leave enforcement opt-in.
+Greenfield project — no silent-fallback / signal-only intermediate stage. When a deterministic validator sees malformed extraction shape, the dispatcher rejects outright; the original signal is preserved in `unparsed_residue` for replay / forensics, but no Commands flow through. Operators see the rejection in the event log and can wire the analyzer for trends.
 
-### 4.1 What ships in Phase 1 (this ADR)
+### 4.1 What this ADR ships
 
 | Deliverable | Footprint |
 |---|---|
 | This ADR | ~600 lines of markdown |
 | `ExtractionValidator` Protocol | ~30 lines in new `src/trellis/extract/validators.py` |
 | Three default validators (see §5.2) | ~80 lines |
-| `EXTRACTION_REJECTED` event type (signal-only, dispatcher emits, doesn't drop) | ~10 lines in `event_log.py` + ~20 lines in `dispatcher.py` |
-| Variant A′: `LinkCreateHandler.ValidationError` → `_emit_rejection { reason="orphan_edge" }` | ~10 lines in `executor.py` + `handlers.py` |
+| `EXTRACTION_REJECTED` event type | ~10 lines in `event_log.py` + ~30 lines in `dispatcher.py` (enforcement: drop entities/edges into residue when validators fire) |
+| Variant A′: `LinkCreateHandler.ValidationError` → `_emit_rejection { reason="orphan_edge" }` (LinkCreateHandler ONLY — other handlers stay as-is) | ~10 lines in `executor.py` + `handlers.py` |
 | `analyze_extraction_validation()` analyzer in `extract/telemetry.py` | ~80 lines (mirrors `analyze_extractor_fallbacks` shape) |
-| Tests | ~150 lines (validator unit tests + dispatcher integration) |
+| Tests | ~150 lines (validator unit tests + dispatcher integration covering enforcement) |
 
-Total: ~400 lines of code + this ADR. No migrations, no breaking changes, no new CLI surface in Phase 1.
+Total: ~400 lines of code + this ADR. No migrations, no breaking changes, no new CLI surface.
 
-### 4.2 What Phase 1 does *not* ship
+### 4.2 What this ADR does *not* ship
 
-- **No drop / quarantine.** Validator outcomes are events. The dispatcher returns the result unchanged. No retrieval surface is filtered.
 - **No new rejection in `PackBuilder`.** Option B is *not* taken; assembly-time filtering would fight the "junk shouldn't be in the store" framing.
 - **No `MUTATION_REJECTED { reason="malformed_extraction" }` from the executor.** Option A's per-Command stage adds executor surface for marginal benefit; the validator already saw the whole result.
 - **No empty-tag-facets validator.** That's a classification-pipeline concern, not extraction. Defer to a sibling ADR if it's worth solving — see §6.
-- **No per-domain validator policies.** Phase 1 ships defaults only; per-domain configuration awaits a consumer.
+- **No per-domain validator policies.** Defaults only; per-domain configuration awaits a consumer.
+- **No sweep of all handlers for Variant A′.** Only `LinkCreateHandler` raises `ValidationError` from a handler today; other handlers are not touched in this ADR. (User decision 2026-05-09.)
+- **No severity tier / signal-only mode.** Validators reject directly; no `Literal["info", "warn", "reject"]` discriminator. (Greenfield, no fallback paths.)
 
 ### 4.3 Why this and not the others
 
 - **Why not A alone:** Per-Command granularity can't see the whole extraction. Empty-extraction makes zero Commands; A is structurally blind to it.
-- **Why not B alone:** It's signal-rich but addresses the wrong half — the audit is about junk *accumulating*, not about junk being *retrieved*. PackBuilder filtering masks the problem; D + executor consolidation lets us *not write* it once enforcement is on.
+- **Why not B alone:** It's signal-rich but addresses the wrong half — the audit is about junk *accumulating*, not about junk being *retrieved*. PackBuilder filtering masks the problem; D + executor consolidation lets us *not write* it.
 - **Why not C:** Doesn't close the gap. Same outcome as Option E with extra schema surface.
-- **Why not E:** The gap genuinely has three concrete failure shapes (§1.3) that are easy to detect deterministically. Spending ~400 lines for permanent observability into all three is cheaper than re-rooting a corpus-quality regression in three months.
-- **Why D + A′:** A′ fixes a real, latent inconsistency (handler-raised rejections don't carry `reason`) regardless of D. D gives us the observation surface and a clean upgrade path to enforcement when someone asks.
+- **Why not E:** The gap has three concrete deterministic failure shapes (§1.3). Cheap to detect, cheap to enforce.
+- **Why D + A′:** A′ fixes a real, latent inconsistency (handler-raised rejections don't carry `reason`) regardless of D. D rejects bad extractions at the right boundary.
 
-### 4.4 Upgrade path to enforcement (deferred)
+### 4.4 What "rejection" looks like at the dispatch boundary
 
-A future ADR can graduate Phase 1's signal-only validator to enforcement by:
+When any validator returns at least one `ValidationFinding`, `ExtractionDispatcher.dispatch()`:
 
-1. Adding `ExtractionValidator.severity: Literal["info", "warn", "reject"]` (or a config gate at the dispatcher).
-2. On `severity="reject"` outcomes, the dispatcher returns `ExtractionResult(entities=[], edges=[], unparsed_residue=<original>, ...)` — i.e., the result is *quarantined into residue*, not dropped, so no signal is lost.
-3. Add `EXTRACTION_REJECTED { reason, validator_name }` as the persistent record.
-4. (Optional) Add a `RetentionStore`-style quarantine bucket so quarantined results are recoverable and a human can review aggregates before tightening the rule.
+1. Records the original `entities` + `edges` into the returned result's `unparsed_residue` (under a structured key — see §5.3) so the original extraction is recoverable for forensics / replay.
+2. Returns `ExtractionResult(entities=[], edges=[], unparsed_residue=<populated>, ...)` — empty drafts mean `result_to_batch()` produces an empty `CommandBatch`; `MutationExecutor` runs zero Commands; nothing lands in the stores.
+3. Emits `EXTRACTION_REJECTED { source_hint, extractor_used, findings: [ValidationFinding] }` to the event log. Operators / analyzers consume this to find systematic upstream issues.
 
-Doing this in Phase 1 is over-shipping for a POC with no consumer asking.
+No silent path: every rejected extraction is observable, the original signal is preserved in residue, and no caller sees stale or malformed data.
 
 ---
 
@@ -322,11 +322,32 @@ class ExtractionDispatcher:
         ... # existing select + extract + EXTRACTOR_FALLBACK
         result = await extractor.extract(...)
 
-        # NEW: validation pass — signal-only in Phase 1.
+        # Validation pass — enforcement, not signal-only.
         if self._validators:
             findings = self._collect_findings(result, source_hint=source_hint)
             if findings:
-                self._emit_validation(result, source_hint=source_hint, findings=findings)
+                # Quarantine the original entities/edges into residue so the
+                # signal is recoverable; return empty drafts so no Commands
+                # flow downstream.
+                quarantined_residue = {
+                    **(result.unparsed_residue or {}),
+                    "rejected_by_validators": {
+                        "entities": [e.model_dump(mode="json") for e in result.entities],
+                        "edges": [e.model_dump(mode="json") for e in result.edges],
+                        "findings": [f.__dict__ for f in findings],
+                    },
+                }
+                self._emit_extraction_rejected(
+                    source_hint=source_hint,
+                    extractor_used=extractor.name,
+                    findings=findings,
+                )
+                return ExtractionResult(
+                    entities=[],
+                    edges=[],
+                    unparsed_residue=quarantined_residue,
+                    extractor_used=extractor.name,
+                )
 
         # Existing fallback signals + EXTRACTION_DISPATCHED still fire.
         ...
@@ -339,15 +360,15 @@ class ExtractionDispatcher:
 # src/trellis/stores/base/event_log.py
 
 #: Emitted by ExtractionDispatcher when one or more
-#: ExtractionValidator instances flag the result. Signal-only in Phase 1
-#: — the result is still returned and routed through MutationExecutor.
+#: ExtractionValidator instances flag a malformed extraction result.
+#: Enforcing: when this event fires the dispatcher has already quarantined
+#: the original entities/edges into ``unparsed_residue["rejected_by_validators"]``
+#: and returned an empty result, so no Commands flow downstream. Operators
+#: consume this for trend analysis via analyze_extraction_validation().
 #: Payload: { source_hint, extractor_used, findings: [ValidationFinding] }.
-#: Closes the observability half of Logic Gap 1.3. See
-#: docs/design/adr-extraction-validation.md.
+#: Closes Logic Gap 1.3. See docs/design/adr-extraction-validation.md.
 EXTRACTION_REJECTED = "extraction.rejected"
 ```
-
-(*Naming note:* the event is called `EXTRACTION_REJECTED` even though Phase 1 only flags. This pre-positions for Phase 2 enforcement; until then, the event describes *what would have been rejected if enforcement were on*. Alternative: call it `EXTRACTION_VALIDATED` and let payload severity discriminate. Either works; see §7 open question 1.)
 
 ### 5.5 Variant A′ — handler rejection symmetry
 
@@ -430,19 +451,19 @@ None. The dispatcher constructor gains an optional `validators=` kwarg defaulted
 
 ---
 
-## 7. Open questions
+## 7. Resolved decisions (originally open questions)
 
-These are not blockers for Phase 1 but want resolution before the impl agent fires.
+User decisions 2026-05-09:
 
-1. **Event name: `EXTRACTION_REJECTED` vs `EXTRACTION_VALIDATED`.** "Rejected" pre-positions for Phase 2 enforcement and matches `MUTATION_REJECTED`. "Validated" is more honest about Phase 1 (flag-only). Lean: `EXTRACTION_REJECTED` with payload field `severity: "warn"` until Phase 2 introduces `severity: "reject"`. Reviewer may disagree.
+1. **Event name: `EXTRACTION_REJECTED`.** "Rejected" is the better description of the action — when the event fires, the dispatcher has rejected the extraction. No `severity` discriminator (greenfield, no signal-only mode).
 
-2. **Should the empty-tag-facets shape be in scope at all?** It's listed in Logic Gap 1.3, but classification runs *after* extraction — there's no `ExtractionResult` to validate. Either: (a) defer to a sibling "ClassificationValidator" Protocol on `ClassifierPipeline` (mirrors this design); (b) absorb it as an `EmptyTagsValidator` here that runs against `ExtractionResult.entities[i].properties.get("content_tags", {})` if classification was inlined; (c) leave it for a separate ADR. Lean: (c). It's a different boundary with different consumers (PackBuilder, not MutationExecutor).
+2. **Empty-tag-facets shape: defer to a separate ADR.** Classification runs after extraction; the validator at this boundary cannot inspect classified tags. A future `ClassificationValidator` Protocol on `ClassifierPipeline` (mirroring this design) is the right home if the gap proves real.
 
-3. **Should Phase 1 ship a CLI?** `trellis analyze extraction-validation` is one line of wrapper code over the analyzer. Extractor-fallback shipped one in Gap 4.3. Lean: yes if it's truly trivial; no if it pulls in CLI test scaffolding.
+3. **Variant A′ scope: `LinkCreateHandler` only.** No sweep of other handlers in this ADR. Other handlers don't raise `ValidationError` today; if one starts to, the impl agent for *that* handler adds the `code` kwarg.
 
-4. **Variant A′ scope — only `LinkCreateHandler`, or sweep all handlers?** Handler-raised `ValidationError` currently bypasses `_emit_rejection` regardless of which handler raised. Sweeping all handlers is ~30 lines and one test per handler. Lean: do `LinkCreateHandler` in this ADR's PR; spawn a separate task for the sweep.
+4. **CLI surface: deferred.** `analyze_extraction_validation()` is reachable via Python; CLI wrapper waits until a consumer asks.
 
-5. **Should the dispatcher accept validators per-source-hint, not globally?** Per-source is the right shape long-term (different rules for `dbt-manifest` vs `save_memory`), but adds config surface. Lean: ship globally in Phase 1; per-source-hint when the second consumer asks.
+5. **Per-source-hint validators: deferred.** Defaults are global; per-source configuration lands when a second consumer needs different rules.
 
 ---
 

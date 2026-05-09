@@ -1,6 +1,6 @@
 # ADR: Importance-Score Freshness — Tag-Change-Triggered Recompute, with Read-Time Decay Guardrail
 
-**Status:** Proposed (drafted by swarm3 E-2, awaiting human review)
+**Status:** Accepted (2026-05-09; user confirmed all-at-once impl with no fallback paths)
 **Date:** 2026-05-09
 **Deciders:** Trellis core
 **Related:**
@@ -198,19 +198,29 @@ def _apply_importance(
     `base_score * (1.0 + clamp(importance, 0, 1))`.
     """
     importance = float(metadata.get("auto_importance", 0.0))
+    if importance == 0.0:
+        # No importance score → no multiplier, no freshness check needed.
+        return base_score
     importance = max(0.0, min(1.0, importance))
     if importance < decay_threshold:
         return base_score * (1.0 + importance)
 
-    # Locate the freshness witness. ContentTags is the canonical home,
-    # but the metadata dict may carry it flattened (older serializers).
+    # Locate the freshness witness. ContentTags is the canonical home;
+    # importance_scored_at is REQUIRED for any item carrying auto_importance.
+    # Greenfield project — no fallback to classified_at, no fallback for
+    # missing stamps. A missing stamp is a bug in the writer path; surface
+    # it loudly rather than silently treating the score as fresh.
     tags = metadata.get("content_tags") or {}
     raw_stamp = (
         tags.get("importance_scored_at")
         or metadata.get("importance_scored_at")
-        or tags.get("classified_at")  # fallback
-        or metadata.get("classified_at")
     )
+    if raw_stamp is None:
+        raise ValueError(
+            "auto_importance is set but importance_scored_at is missing — "
+            "writer path is broken. Item metadata: "
+            f"keys={sorted(metadata.keys())}"
+        )
     decayed = _decay_importance_if_stale(
         importance,
         raw_stamp,
@@ -225,13 +235,14 @@ def _apply_importance(
 
 The constants are exposed via `ParameterRegistry` so per-domain overrides work the same way as the existing recency params (`recency_half_life_days`, `recency_floor`).
 
-### 3.5 Backward compatibility
+### 3.5 No legacy compat — greenfield writer contract
 
-- **Items with no `importance_scored_at`.** Two cases:
-  1. The item *also* has no `classified_at` → legacy / hand-edited. Treat as fresh (no decay) for *importance* on read; the refresh sweep (Gap 1.1) will eventually visit it and stamp both. We deliberately fail-open here: applying decay to items we have no freshness signal for would silently down-weight legitimate untouched content.
-  2. The item has `classified_at` but no `importance_scored_at` → pre-this-ADR data. Use `classified_at` as the fallback freshness witness on read (already shown in §3.4). On the next refresh pass, both fields get stamped together.
-- **No bulk migration script.** The refresh sweep is the migration. Items get stamped lazily as they pass through `reclassify_item` or `apply_noise_tags`. Operators who want eager stamping can run `trellis admin reclassify-stale --max-age-days=0` (existing CLI), which forces a full pass.
-- **Stored `auto_importance` values are not rewritten** until an item is refreshed. The read-path guardrail handles them in the meantime.
+- **`importance_scored_at` is REQUIRED for any item with `auto_importance` set.** Missing stamp → loud `ValueError` at read. No fallback to `classified_at`, no "treat as fresh" path. (User decision 2026-05-09: no silent fallbacks.)
+- The contract is enforced at the writer side: every code path that sets `auto_importance` must also stamp `importance_scored_at`. There are exactly three writer paths after this ADR:
+  1. `EnrichmentService.enrich()` — original LLM-based scoring; stamps at write time.
+  2. `reclassify_item()` in `classify/refresh.py` — re-derives via `compute_importance` + stamps (per §3.3).
+  3. `apply_noise_tags()` in `classify/feedback.py` — adjusts `signal_quality` so importance changes; re-stamps (per §3.3 close).
+- No bulk migration script needed for greenfield. If pre-existing items exist in a deployment, operators run `trellis admin reclassify-stale --max-age-days=0` once before deploying this ADR's read path; the refresh sweep stamps everything via path (2).
 
 ---
 
@@ -286,17 +297,11 @@ Estimated impl scope: ~150-250 LOC (schema field + 3 small functions + tests). N
 
 ---
 
-## 7. POC-stage assessment
+## 7. Resolved scope (originally a POC-stage split-ship recommendation)
 
-This is a long-tail quality concern, not a correctness bug. Symptoms:
+User decision 2026-05-09: **ship everything in one impl PR — schema field + refresh hook + feedback hook + read-path guardrail.** No split-shipment.
 
-- No reported user pain (the gap is theoretical / inferred from domain reasoning in TODO.md).
-- The mitigating systems (recency decay on content age, `apply_noise_tags` for the bottom of the distribution) already cover the most common pathologies.
-- The recommended fix is small enough (~one schema field, one refresh-path hook, one read-path tweak) that *implementing* it is barely more expensive than *deferring* it.
-
-**Recommendation: ship the schema field + refresh hook in this slice; defer the read-time guardrail until we have an alert/dashboard-domain user reporting actual pain.** The schema field is forward-compatible (purely additive); landing it now means the freshness witness is already populated when the guardrail is needed. The guardrail itself can wait for a real signal.
-
-If the impl agent prefers to land everything together for atomicity, that's defensible — the total scope is small. The split-shipment recommendation is about scope discipline, not technical risk.
+Rationale: the total scope is small (~150-250 LOC); greenfield project so there is no legacy data to migrate around; the no-fallback contract (§3.5) requires the read path and the writer paths to ship together (otherwise reads would raise on items the writer hadn't stamped yet).
 
 ---
 
