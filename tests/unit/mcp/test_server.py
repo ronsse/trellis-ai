@@ -21,7 +21,13 @@ from trellis.mcp.server import (
     get_lessons as _get_lessons,
 )
 from trellis.mcp.server import (
+    get_objective_context as _get_objective_context,
+)
+from trellis.mcp.server import (
     get_sectioned_context as _get_sectioned_context,
+)
+from trellis.mcp.server import (
+    get_task_context as _get_task_context,
 )
 from trellis.mcp.server import (
     record_feedback as _record_feedback,
@@ -49,7 +55,9 @@ def _unwrap(tool_or_fn):  # type: ignore[no-untyped-def]
 get_context = _unwrap(_get_context)
 get_graph = _unwrap(_get_graph)
 get_lessons = _unwrap(_get_lessons)
+get_objective_context = _unwrap(_get_objective_context)
 get_sectioned_context = _unwrap(_get_sectioned_context)
+get_task_context = _unwrap(_get_task_context)
 record_feedback = _unwrap(_record_feedback)
 save_experience = _unwrap(_save_experience)
 save_knowledge = _unwrap(_save_knowledge)
@@ -568,6 +576,162 @@ class TestGetLessons:
     def test_with_domain_filter(self) -> None:
         result = get_lessons(domain="platform")
         assert isinstance(result, str)
+
+    def test_invalid_limit_type_raises(self) -> None:
+        # ``limit`` is typed ``int`` and is forwarded down to the SQL layer.
+        # Passing a non-int surfaces a useful, non-generic error from the
+        # store backend (TypeError or sqlite3 error) rather than being
+        # silently coerced. We catch the union so the assertion stays
+        # meaningful across SQLite versions / store backends.
+        import sqlite3
+
+        with pytest.raises((TypeError, sqlite3.IntegrityError, sqlite3.DataError)):
+            get_lessons(limit="ten")  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# get_objective_context
+# ---------------------------------------------------------------------------
+
+
+class TestGetObjectiveContext:
+    def test_empty_intent_returns_error(self) -> None:
+        assert get_objective_context("").startswith("Error")
+        assert get_objective_context("   ").startswith("Error")
+
+    def test_returns_markdown_string(self) -> None:
+        result = get_objective_context("ship the deploy checklist")
+        assert isinstance(result, str)
+        # Either the formatter rendered something, or the assembly failed
+        # gracefully — both produce a string, not an exception.
+        assert len(result) > 0
+
+    def test_with_domain_filter(self, temp_registry: StoreRegistry) -> None:
+        temp_registry.document_store.put(
+            "doc-obj-domain", "platform deploy guide", metadata={"domain": "platform"}
+        )
+        result = get_objective_context(
+            "release plan", domain="platform", max_tokens=1500
+        )
+        assert isinstance(result, str)
+
+    def test_session_dedup_across_calls(self, temp_registry: StoreRegistry) -> None:
+        # Just exercise the session_id path; semantic dedup is covered by
+        # PackBuilder unit tests. Here we only assert the call shape works.
+        first = get_objective_context(
+            "objective dedup probe", session_id="sess-obj-1"
+        )
+        second = get_objective_context(
+            "objective dedup probe", session_id="sess-obj-1"
+        )
+        assert isinstance(first, str)
+        assert isinstance(second, str)
+
+    def test_assembly_failure_returns_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If pack-builder construction blows up, return a graceful Error: message.
+
+        The tool wraps assembly in try/except and returns a friendly error
+        rather than raising — verify that contract.
+        """
+
+        def _boom(_registry: object) -> None:
+            msg = "fake builder failure"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(server_mod, "_build_pack_builder", _boom)
+        result = get_objective_context("anything")
+        assert result.startswith("Error")
+        assert "objective context" in result
+
+
+# ---------------------------------------------------------------------------
+# get_task_context
+# ---------------------------------------------------------------------------
+
+
+class TestGetTaskContext:
+    def test_empty_intent_returns_error(self) -> None:
+        assert get_task_context("").startswith("Error")
+        assert get_task_context("   ").startswith("Error")
+
+    def test_returns_markdown_string(self) -> None:
+        result = get_task_context("write SQL for sessions table")
+        assert isinstance(result, str)
+        assert len(result) > 0
+
+    def test_with_entity_ids(self, temp_registry: StoreRegistry) -> None:
+        graph = temp_registry.graph_store
+        graph.upsert_node(
+            node_id="uc://cat.sch.tbl",
+            node_type="table",
+            properties={"name": "sessions"},
+        )
+        result = get_task_context(
+            "summarize sessions",
+            entity_ids=["uc://cat.sch.tbl"],
+            max_tokens=1500,
+        )
+        assert isinstance(result, str)
+
+    def test_invalid_entity_ids_type_returns_error(self) -> None:
+        # ``entity_ids`` is typed ``list[str] | None``; passing a non-list
+        # like an int gets caught by the outer try/except (Pydantic
+        # ValidationError on SectionRequest, or list ops fail) and the
+        # tool returns a graceful "Error:" string rather than raising.
+        result = get_task_context("intent", entity_ids=42)  # type: ignore[arg-type]
+        assert result.startswith("Error")
+
+    def test_assembly_failure_returns_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _boom(_registry: object) -> None:
+            msg = "fake builder failure"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(server_mod, "_build_pack_builder", _boom)
+        result = get_task_context("anything")
+        assert result.startswith("Error")
+        assert "task context" in result
+
+
+# ---------------------------------------------------------------------------
+# get_sectioned_context — error-path coverage beyond the happy path above
+# ---------------------------------------------------------------------------
+
+
+class TestGetSectionedContextErrors:
+    def test_invalid_section_schema_returns_error(self) -> None:
+        """A section dict missing the required ``name`` key fails validation,
+        and the tool wraps SectionRequest.model_validate in its outer
+        try/except → returns an ``Error:`` string, not a raised exception."""
+        result = get_sectioned_context(
+            "intent",
+            sections=[{"retrieval_affinities": ["domain_knowledge"]}],
+        )
+        assert result.startswith("Error")
+
+    def test_assembly_failure_returns_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _boom(_registry: object) -> None:
+            msg = "fake builder failure"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(server_mod, "_build_pack_builder", _boom)
+        result = get_sectioned_context(
+            "intent",
+            sections=[
+                {
+                    "name": "Background",
+                    "retrieval_affinities": ["domain_knowledge"],
+                    "max_tokens": 500,
+                }
+            ],
+        )
+        assert result.startswith("Error")
+        assert "sectioned context" in result
 
 
 # ---------------------------------------------------------------------------
