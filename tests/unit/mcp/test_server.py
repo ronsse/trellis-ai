@@ -609,7 +609,7 @@ class TestGetObjectiveContext:
         assert len(result) > 0
 
     def test_with_domain_filter(self, temp_registry: StoreRegistry) -> None:
-        temp_registry.document_store.put(
+        temp_registry.knowledge.document_store.put(
             "doc-obj-domain", "platform deploy guide", metadata={"domain": "platform"}
         )
         result = get_objective_context(
@@ -664,7 +664,7 @@ class TestGetTaskContext:
         assert len(result) > 0
 
     def test_with_entity_ids(self, temp_registry: StoreRegistry) -> None:
-        graph = temp_registry.graph_store
+        graph = temp_registry.knowledge.graph_store
         graph.upsert_node(
             node_id="uc://cat.sch.tbl",
             node_type="table",

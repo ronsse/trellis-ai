@@ -54,7 +54,6 @@ _OPS_WITH_SIMPLE_ARGS: list[tuple[Operation, dict[str, Any]]] = [
     (Operation.PRECEDENT_UPDATE, {"precedent_id": "p1"}),
     (Operation.REDACTION_APPLY, {"target_id": "n1", "reason": "pii"}),
     (Operation.RETENTION_PRUNE, {}),
-    (Operation.PACK_INVALIDATE, {"pack_id": "pk1"}),
 ]
 
 # Identifier-ish strings — printable, bounded, non-empty. Avoid surrogates and
