@@ -193,10 +193,16 @@ class TestExecuteMutationErrors:
         assert "edge_kind" in payload["message"]
         assert payload["operation"] == "link.create"
 
-    def test_handler_failure_surfaces_failed_status(
+    def test_handler_failure_surfaces_rejected_status(
         self, temp_registry: StoreRegistry
     ) -> None:
-        """A handler that raises (e.g. unknown source node) yields ``failed``."""
+        """A handler-raised ``ValidationError`` (e.g. orphan-edge FK miss)
+        now surfaces as ``rejected`` rather than ``failed``: per Variant A'
+        in adr-extraction-validation.md §5.5, ``LinkCreateHandler`` raises
+        ``ValidationError(code="orphan_edge")`` and the executor routes that
+        through ``_emit_rejection`` so the audit event carries a structured
+        ``reason`` field — distinct from unexpected handler exceptions
+        which still surface as ``failed``."""
         raw = execute_mutation(
             operation="link.create",
             args={
@@ -206,5 +212,5 @@ class TestExecuteMutationErrors:
             },
         )
         payload = json.loads(raw)
-        assert payload["status"] == "failed"
+        assert payload["status"] == "rejected"
         assert "does not reference an existing entity" in payload["message"].lower()

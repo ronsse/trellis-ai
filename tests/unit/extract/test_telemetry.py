@@ -7,7 +7,9 @@ from pathlib import Path
 import pytest
 
 from trellis.extract.telemetry import (
+    ExtractionValidationReport,
     ExtractorFallbackReport,
+    analyze_extraction_validation,
     analyze_extractor_fallbacks,
 )
 from trellis.stores.base.event_log import EventType
@@ -146,3 +148,100 @@ class TestAnalyzeExtractorFallbacks:
             _emit_fallback(event_log, source_hint="sparse", reason="empty_result")
         report = analyze_extractor_fallbacks(event_log, days=30)
         assert not any("sparse" in f for f in report.findings)
+
+
+def _emit_rejected(
+    log: SQLiteEventLog,
+    *,
+    source_hint: str | None,
+    extractor_used: str = "rules",
+    codes: list[str] | None = None,
+) -> None:
+    findings = [
+        {"validator_name": code, "code": code, "message": "x", "affected": {}}
+        for code in (codes or ["empty_result"])
+    ]
+    log.emit(
+        EventType.EXTRACTION_REJECTED,
+        source="extraction_dispatcher",
+        payload={
+            "source_hint": source_hint,
+            "extractor_used": extractor_used,
+            "findings": findings,
+        },
+    )
+
+
+class TestAnalyzeExtractionValidation:
+    """ADR §5.6 — analyzer mirrors analyze_extractor_fallbacks shape."""
+
+    def test_empty_window_returns_note(self, event_log) -> None:
+        report = analyze_extraction_validation(event_log, days=30)
+        assert isinstance(report, ExtractionValidationReport)
+        assert report.total_dispatches == 0
+        assert report.total_rejected == 0
+        assert report.notes
+        assert "EXTRACTION_DISPATCHED" in report.notes[0]
+
+    def test_aggregates_per_source_and_per_code(self, event_log) -> None:
+        for _ in range(4):
+            _emit_dispatch(event_log, source_hint="dbt")
+            _emit_rejected(event_log, source_hint="dbt", codes=["empty_result"])
+        _emit_dispatch(event_log, source_hint="lineage")
+        _emit_rejected(
+            event_log,
+            source_hint="lineage",
+            codes=["missing_generation_spec", "orphan_edge"],
+        )
+        report = analyze_extraction_validation(event_log, days=30)
+        assert report.total_dispatches == 5
+        assert report.total_rejected == 5
+        assert report.code_counts == {
+            "empty_result": 4,
+            "missing_generation_spec": 1,
+            "orphan_edge": 1,
+        }
+        by_source = {s.source_hint: s for s in report.per_source}
+        assert by_source["dbt"].rejection_rate == pytest.approx(1.0)
+        assert by_source["dbt"].codes == {"empty_result": 4}
+        assert by_source["lineage"].codes == {
+            "missing_generation_spec": 1,
+            "orphan_edge": 1,
+        }
+
+    def test_finding_fires_above_threshold(self, event_log) -> None:
+        for _ in range(12):
+            _emit_dispatch(event_log, source_hint="rules-heavy")
+        for _ in range(10):
+            _emit_rejected(
+                event_log,
+                source_hint="rules-heavy",
+                codes=["empty_result"],
+            )
+        report = analyze_extraction_validation(event_log, days=30)
+        assert any(
+            "rules-heavy" in f and "empty_result" in f for f in report.findings
+        )
+
+    def test_finding_suppressed_below_sample_floor(self, event_log) -> None:
+        for _ in range(5):
+            _emit_dispatch(event_log, source_hint="sparse")
+            _emit_rejected(event_log, source_hint="sparse", codes=["empty_result"])
+        report = analyze_extraction_validation(event_log, days=30)
+        assert not any("sparse" in f for f in report.findings)
+
+    def test_extractor_breakdown_per_source(self, event_log) -> None:
+        for _ in range(2):
+            _emit_dispatch(event_log, source_hint="dbt")
+        _emit_rejected(event_log, source_hint="dbt", extractor_used="rules")
+        _emit_rejected(event_log, source_hint="dbt", extractor_used="llm")
+        report = analyze_extraction_validation(event_log, days=30)
+        by_source = {s.source_hint: s for s in report.per_source}
+        assert by_source["dbt"].extractors == {"rules": 1, "llm": 1}
+
+    def test_none_source_hint_bucketed(self, event_log) -> None:
+        _emit_dispatch(event_log, source_hint=None)
+        _emit_rejected(event_log, source_hint=None)
+        report = analyze_extraction_validation(event_log, days=30)
+        by_source = {s.source_hint: s for s in report.per_source}
+        assert "<none>" in by_source

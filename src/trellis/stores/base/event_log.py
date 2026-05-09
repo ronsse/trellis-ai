@@ -101,6 +101,19 @@ class EventType(StrEnum):
     #: substrate — without this event, patterns like "rules always return
     #: empty for this source; LLM always runs" are invisible.
     EXTRACTOR_FALLBACK = "extractor.fallback"
+    #: Emitted by :class:`~trellis.extract.dispatcher.ExtractionDispatcher`
+    #: when one or more :class:`~trellis.extract.validators.ExtractionValidator`
+    #: instances flag a malformed extraction result. Enforcing — when this
+    #: fires the dispatcher has already quarantined the original
+    #: ``entities`` / ``edges`` into
+    #: ``unparsed_residue["rejected_by_validators"]`` and returned an empty
+    #: result, so no Commands flow downstream. Operators consume this for
+    #: trend analysis via
+    #: :func:`~trellis.extract.telemetry.analyze_extraction_validation`.
+    #: Payload: ``{ source_hint, extractor_used, findings: [...] }``.
+    #: Closes Logic Gap 1.3. See
+    #: ``docs/design/adr-extraction-validation.md``.
+    EXTRACTION_REJECTED = "extraction.rejected"
 
     # System
     SYSTEM_INITIALIZED = "system.initialized"

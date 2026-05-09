@@ -30,19 +30,34 @@ from trellis.extract.llm import LLMExtractor
 from trellis.extract.registry import ExtractorRegistry
 from trellis.extract.save_memory import build_save_memory_extractor
 from trellis.extract.telemetry import (
+    ExtractionValidationReport,
     ExtractorFallbackReport,
     SourceFallbackStats,
+    SourceValidationStats,
+    analyze_extraction_validation,
     analyze_extractor_fallbacks,
+)
+from trellis.extract.validators import (
+    DraftLocalReferenceValidator,
+    EmptyResultValidator,
+    ExtractionValidator,
+    OrphanProvenanceValidator,
+    ValidationFinding,
+    default_validators,
 )
 
 __all__ = [
     "AliasMatchExtractor",
     "AliasResolver",
+    "DraftLocalReferenceValidator",
     "EdgeRule",
+    "EmptyResultValidator",
     "EntityRule",
     "ExtractionContext",
     "ExtractionDispatcher",
     "ExtractionRuleBundle",
+    "ExtractionValidationReport",
+    "ExtractionValidator",
     "Extractor",
     "ExtractorFallbackReport",
     "ExtractorRegistry",
@@ -51,8 +66,13 @@ __all__ = [
     "JSONRulesExtractor",
     "LLMExtractor",
     "NoExtractorAvailableError",
+    "OrphanProvenanceValidator",
     "ResidueSelector",
     "SourceFallbackStats",
+    "SourceValidationStats",
+    "ValidationFinding",
+    "analyze_extraction_validation",
     "analyze_extractor_fallbacks",
     "build_save_memory_extractor",
+    "default_validators",
 ]

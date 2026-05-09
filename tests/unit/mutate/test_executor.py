@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock
 
+from trellis.errors import ValidationError
 from trellis.mutate import build_curate_executor
 from trellis.mutate.commands import (
     BatchStrategy,
@@ -192,6 +193,58 @@ class TestMutationExecutor:
         executor.register_handler(Operation.ENTITY_CREATE, handler)
         result = executor.execute(_cmd())
         assert result.status == CommandStatus.SUCCESS
+
+    def test_handler_raised_validation_error_routes_through_emit_rejection(
+        self,
+    ) -> None:
+        """Variant A' from adr-extraction-validation.md §5.5: a handler that
+        raises ``ValidationError`` is treated as a structured rejection — the
+        executor emits ``MUTATION_REJECTED`` with ``reason=exc.code`` and
+        returns ``CommandStatus.REJECTED`` (not FAILED)."""
+        event_log = MagicMock()
+        handler = MagicMock()
+        handler.handle.side_effect = ValidationError(
+            "FK check failed",
+            errors=["source missing", "target missing"],
+            code="orphan_edge",
+        )
+        executor = MutationExecutor(
+            event_log=event_log,
+            handlers={Operation.ENTITY_CREATE: handler},
+        )
+        result = executor.execute(_cmd())
+
+        assert result.status == CommandStatus.REJECTED
+        assert "FK check failed" in result.message
+
+        event_log.emit.assert_called_once()
+        event_type, source = event_log.emit.call_args.args
+        assert event_type.value == "mutation.rejected"
+        assert source == "mutation_executor"
+        payload = event_log.emit.call_args.kwargs["payload"]
+        assert payload["reason"] == "orphan_edge"
+        assert payload["status"] == CommandStatus.REJECTED
+        assert "FK check failed" in payload["message"]
+
+    def test_handler_validation_error_without_explicit_code_uses_default(
+        self,
+    ) -> None:
+        """When a handler raises ValidationError without a custom ``code``,
+        the rejection event uses the conventional ``handler_validate``
+        reason — preserves the audit-symmetry contract for handlers that
+        haven't yet adopted explicit codes."""
+        event_log = MagicMock()
+        handler = MagicMock()
+        handler.handle.side_effect = ValidationError("plain validation failure")
+        executor = MutationExecutor(
+            event_log=event_log,
+            handlers={Operation.ENTITY_CREATE: handler},
+        )
+        result = executor.execute(_cmd())
+
+        assert result.status == CommandStatus.REJECTED
+        payload = event_log.emit.call_args.kwargs["payload"]
+        assert payload["reason"] == "handler_validate"
 
 
 class TestIdempotencyCacheEviction:

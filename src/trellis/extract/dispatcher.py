@@ -25,11 +25,13 @@ import structlog
 
 from trellis.extract.base import ExtractorTier, NoExtractorAvailableError
 from trellis.extract.context import ExtractionContext
+from trellis.extract.validators import ValidationFinding
 from trellis.stores.base.event_log import EventType
 
 if TYPE_CHECKING:
     from trellis.extract.base import Extractor
     from trellis.extract.registry import ExtractorRegistry
+    from trellis.extract.validators import ExtractionValidator
     from trellis.schemas.extraction import ExtractionResult
     from trellis.stores.base.event_log import EventLog
 
@@ -60,9 +62,16 @@ class ExtractionDispatcher:
         registry: ExtractorRegistry,
         *,
         event_log: EventLog | None = None,
+        validators: list[ExtractionValidator] | None = None,
     ) -> None:
         self._registry = registry
         self._event_log = event_log
+        # Validators run AFTER extraction but BEFORE the result is returned.
+        # See adr-extraction-validation.md §5.3 for the enforcement contract:
+        # any finding causes the dispatcher to quarantine entities/edges into
+        # ``unparsed_residue["rejected_by_validators"]`` and emit
+        # ``EXTRACTION_REJECTED`` — no Commands flow downstream.
+        self._validators: list[ExtractionValidator] = list(validators or [])
 
     async def dispatch(
         self,
@@ -102,6 +111,23 @@ class ExtractionDispatcher:
             source_hint=source_hint,
             context=ctx,
         )
+
+        # Validation pass — enforcement, not signal-only. When any validator
+        # returns findings the dispatcher quarantines the original drafts
+        # into ``unparsed_residue["rejected_by_validators"]``, emits
+        # EXTRACTION_REJECTED, and returns an empty result so no Commands
+        # flow downstream. EXTRACTION_DISPATCHED and the empty_result
+        # fallback are deliberately skipped — the rejection event is the
+        # canonical record of the dispatch.
+        # See adr-extraction-validation.md §5.3.
+        if self._validators:
+            findings = self._collect_findings(result, source_hint=source_hint)
+            if findings:
+                return self._reject_extraction(
+                    result,
+                    findings=findings,
+                    source_hint=source_hint,
+                )
 
         # Fallback signal #2: the chosen extractor produced no drafts.
         # Not a real retry (dispatcher doesn't do that today), but a strong
@@ -247,4 +273,112 @@ class ExtractionDispatcher:
                 "extractor_fallback_emit_failed",
                 source_hint=source_hint,
                 reason=reason,
+            )
+
+    def _collect_findings(
+        self,
+        result: ExtractionResult,
+        *,
+        source_hint: str | None,
+    ) -> list[ValidationFinding]:
+        """Run every wired validator and gather findings."""
+        all_findings: list[ValidationFinding] = []
+        for validator in self._validators:
+            try:
+                findings = validator.validate(result, source_hint=source_hint)
+            except Exception:
+                # Validators must be cheap and total. A buggy validator
+                # should not silently corrupt the dispatch — log and treat
+                # as a finding so the operator notices.
+                logger.exception(
+                    "validator_raised",
+                    validator=getattr(validator, "name", validator.__class__.__name__),
+                    source_hint=source_hint,
+                )
+                all_findings.append(
+                    ValidationFinding(
+                        validator_name=getattr(
+                            validator, "name", validator.__class__.__name__
+                        ),
+                        code="validator_error",
+                        message="validator raised; treating as a rejection",
+                    )
+                )
+                continue
+            all_findings.extend(findings)
+        return all_findings
+
+    def _reject_extraction(
+        self,
+        result: ExtractionResult,
+        *,
+        findings: list[ValidationFinding],
+        source_hint: str | None,
+    ) -> ExtractionResult:
+        """Quarantine the rejected drafts + emit EXTRACTION_REJECTED.
+
+        Returns a fresh :class:`ExtractionResult` whose ``entities`` and
+        ``edges`` are empty so ``result_to_batch()`` produces no Commands.
+        The original drafts are preserved under
+        ``unparsed_residue["rejected_by_validators"]`` for forensics.
+        """
+        from trellis.schemas.extraction import ExtractionResult  # noqa: PLC0415
+
+        existing_residue = result.unparsed_residue
+        residue_base: dict[str, Any] = (
+            dict(existing_residue) if isinstance(existing_residue, dict) else {}
+        )
+        if not isinstance(existing_residue, dict) and existing_residue is not None:
+            # Preserve any non-dict residue under a stable key so we never
+            # lose signal — even if the extractor's residue shape is
+            # opaque to us.
+            residue_base["original_residue"] = existing_residue
+        residue_base["rejected_by_validators"] = {
+            "entities": [draft.model_dump(mode="json") for draft in result.entities],
+            "edges": [draft.model_dump(mode="json") for draft in result.edges],
+            "findings": [finding.__dict__ for finding in findings],
+        }
+
+        self._emit_extraction_rejected(
+            source_hint=source_hint,
+            extractor_used=result.extractor_used,
+            findings=findings,
+        )
+        return ExtractionResult(
+            entities=[],
+            edges=[],
+            extractor_used=result.extractor_used,
+            tier=result.tier,
+            llm_calls=result.llm_calls,
+            tokens_used=result.tokens_used,
+            overall_confidence=result.overall_confidence,
+            provenance=result.provenance,
+            unparsed_residue=residue_base,
+        )
+
+    def _emit_extraction_rejected(
+        self,
+        *,
+        source_hint: str | None,
+        extractor_used: str,
+        findings: list[ValidationFinding],
+    ) -> None:
+        """Fire EXTRACTION_REJECTED with the validator findings. Fail-soft."""
+        if self._event_log is None:
+            return
+        try:
+            self._event_log.emit(
+                EventType.EXTRACTION_REJECTED,
+                source="extraction_dispatcher",
+                payload={
+                    "source_hint": source_hint,
+                    "extractor_used": extractor_used,
+                    "findings": [finding.__dict__ for finding in findings],
+                },
+            )
+        except Exception:
+            logger.exception(
+                "extraction_rejected_emit_failed",
+                source_hint=source_hint,
+                extractor_used=extractor_used,
             )

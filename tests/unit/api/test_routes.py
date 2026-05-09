@@ -394,7 +394,11 @@ def test_bulk_ingest_continue_on_error(client):
     assert data["entities"]["succeeded"] == 2
     assert data["edges"]["total"] == 3
     assert data["edges"]["succeeded"] == 2
-    assert data["edges"]["failed"] == 1
+    # Variant A' (adr-extraction-validation.md §5.5): orphan-edge FK failures
+    # raised by LinkCreateHandler now route through _emit_rejection and
+    # surface as REJECTED, not FAILED.
+    assert data["edges"]["rejected"] == 1
+    assert data["edges"]["failed"] == 0
     assert data["edges"]["skipped"] == 0
 
 
@@ -428,7 +432,10 @@ def test_bulk_ingest_stop_on_error(client):
     assert resp.status_code == 200
     data = resp.json()
     assert data["entities"]["succeeded"] == 1
-    assert data["edges"]["failed"] == 1
+    # Orphan-edge FK rejection now surfaces as REJECTED (Variant A'); stop
+    # semantics still halt the batch via _is_terminal_failure.
+    assert data["edges"]["rejected"] == 1
+    assert data["edges"]["failed"] == 0
     assert data["edges"]["skipped"] == 1
     assert data["aliases"]["skipped"] == 1
     assert data["aliases"]["succeeded"] == 0

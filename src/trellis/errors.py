@@ -13,11 +13,25 @@ class TrellisError(Exception):
 
 
 class ValidationError(TrellisError):
-    """Raised when input validation fails."""
+    """Raised when input validation fails.
 
-    def __init__(self, message: str, *, errors: list[str] | None = None) -> None:
+    ``code`` is a short, stable identifier (e.g. ``"orphan_edge"``) used by
+    :meth:`MutationExecutor._emit_rejection` as the ``reason`` field on the
+    emitted ``MUTATION_REJECTED`` event. Defaults to the generic
+    ``"VALIDATION_ERROR"`` for back-compat; handlers raising structured
+    rejections should pass an explicit ``code`` so the audit trail names the
+    actual failure.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        errors: list[str] | None = None,
+        code: str = "VALIDATION_ERROR",
+    ) -> None:
         self.errors: list[str] = errors or []
-        super().__init__(message, code="VALIDATION_ERROR")
+        super().__init__(message, code=code)
 
 
 class ConfigError(TrellisError):

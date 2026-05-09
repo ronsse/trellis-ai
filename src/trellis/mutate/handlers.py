@@ -293,7 +293,10 @@ class LinkCreateHandler:
             )
         if missing:
             msg = f"LINK_CREATE FK check failed: {'; '.join(missing)}"
-            raise ValidationError(msg, errors=missing)
+            # ``code`` becomes the ``reason`` field on the MUTATION_REJECTED
+            # event the executor emits — see Variant A' in
+            # docs/design/adr-extraction-validation.md.
+            raise ValidationError(msg, errors=missing, code="orphan_edge")
         # Both checks passed → both resolved values are non-None.
         return resolved_source, resolved_target  # type: ignore[return-value]
 
