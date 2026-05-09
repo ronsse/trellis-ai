@@ -5,10 +5,11 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from trellis.core.base import TimestampedModel, TrellisModel, VersionedModel
 from trellis.core.ids import generate_ulid
+from trellis.schemas._type_warnings import warn_if_near_miss_edge_kind
 
 
 class Edge(TimestampedModel, VersionedModel):
@@ -28,6 +29,19 @@ class Edge(TimestampedModel, VersionedModel):
     target_id: str
     edge_kind: str
     properties: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("edge_kind", mode="after")
+    @classmethod
+    def _warn_on_near_miss_edge_kind(cls, value: str) -> str:
+        """Open-string contract preserved — value is returned verbatim.
+
+        Emits a ``structlog`` warning under event key
+        ``edge_kind.suspicious_input`` when *value* looks like a typo
+        of a well-known canonical / alias / legacy enum value. Never
+        raises (mirrors :class:`~trellis.schemas.entity.Entity`).
+        """
+        warn_if_near_miss_edge_kind(value)
+        return value
 
 
 class CompactionReport(TrellisModel):

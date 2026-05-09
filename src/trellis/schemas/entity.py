@@ -5,10 +5,11 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from trellis.core.base import TimestampedModel, TrellisModel, VersionedModel, utc_now
 from trellis.core.ids import generate_ulid
+from trellis.schemas._type_warnings import warn_if_near_miss_entity_type
 from trellis.schemas.enums import NodeRole
 
 
@@ -65,6 +66,20 @@ class Entity(TimestampedModel, VersionedModel):
     metadata: dict = Field(default_factory=dict)
     node_role: NodeRole = NodeRole.SEMANTIC
     generation_spec: GenerationSpec | None = None
+
+    @field_validator("entity_type", mode="after")
+    @classmethod
+    def _warn_on_near_miss_entity_type(cls, value: str) -> str:
+        """Open-string contract preserved — value is returned verbatim.
+
+        Emits a ``structlog`` warning under event key
+        ``entity_type.suspicious_input`` when *value* looks like a typo
+        of a well-known canonical / alias / legacy enum value. Never
+        raises: closing the entity-type set would break domain
+        integrations (CLAUDE.md).
+        """
+        warn_if_near_miss_entity_type(value)
+        return value
 
     @model_validator(mode="after")
     def _validate_generation_spec(self) -> Entity:
