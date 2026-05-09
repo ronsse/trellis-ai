@@ -340,7 +340,7 @@ class TestQuarterMeans:
     """Pin :func:`_quarter_means` against adversarial inputs."""
 
     def test_empty_returns_zeros(self) -> None:
-        from eval.scenarios.agent_loop_convergence.scenario import _quarter_means
+        from eval.scenarios._convergence_common import _quarter_means
 
         assert _quarter_means([]) == (0.0, 0.0)
 
@@ -348,13 +348,13 @@ class TestQuarterMeans:
         """Below the four-sample threshold, both quarters fall back to
         the full-sample mean — so the resulting delta is zero, not a
         misleadingly large first-vs-last swing."""
-        from eval.scenarios.agent_loop_convergence.scenario import _quarter_means
+        from eval.scenarios._convergence_common import _quarter_means
 
         first, last = _quarter_means([0.7])
         assert first == last == 0.7
 
     def test_two_and_three_values_collapse_to_full_mean(self) -> None:
-        from eval.scenarios.agent_loop_convergence.scenario import _quarter_means
+        from eval.scenarios._convergence_common import _quarter_means
 
         for values in ([0.2, 0.6], [0.0, 0.5, 1.0]):
             first, last = _quarter_means(values)
@@ -363,7 +363,7 @@ class TestQuarterMeans:
     def test_four_values_window_one_picks_endpoints(self) -> None:
         """At exactly four samples, ``window = 1`` so the first quarter
         is values[0] and the last is values[3]."""
-        from eval.scenarios.agent_loop_convergence.scenario import _quarter_means
+        from eval.scenarios._convergence_common import _quarter_means
 
         first, last = _quarter_means([0.1, 0.2, 0.3, 0.9])
         assert first == 0.1
@@ -372,7 +372,7 @@ class TestQuarterMeans:
     def test_eight_values_window_two_means(self) -> None:
         """At eight samples, ``window = 2`` so the first quarter averages
         the first two values and the last quarter averages the last two."""
-        from eval.scenarios.agent_loop_convergence.scenario import _quarter_means
+        from eval.scenarios._convergence_common import _quarter_means
 
         values = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
         first, last = _quarter_means(values)
@@ -383,7 +383,7 @@ class TestQuarterMeans:
         """For any N >= 4, the first and last quarters must be disjoint
         slices — otherwise ``last - first`` mixes the same samples and
         silently inflates / deflates the delta."""
-        from eval.scenarios.agent_loop_convergence.scenario import _quarter_means
+        from eval.scenarios._convergence_common import _quarter_means
 
         for n in (4, 5, 6, 7, 8, 12, 30, 100):
             values = [float(i) for i in range(n)]
@@ -420,7 +420,7 @@ class TestConvergenceStats:
         )
 
     def test_empty_rounds_return_zero_deltas(self) -> None:
-        from eval.scenarios.agent_loop_convergence.scenario import _convergence_stats
+        from eval.scenarios._convergence_common import _convergence_stats
 
         stats = _convergence_stats([])
         assert stats.weighted_delta == 0.0
@@ -430,7 +430,7 @@ class TestConvergenceStats:
         """A round with no items served has no useful fraction to
         compute. The math must guard against ZeroDivisionError, treating
         such rounds as 0.0 useful."""
-        from eval.scenarios.agent_loop_convergence.scenario import _convergence_stats
+        from eval.scenarios._convergence_common import _convergence_stats
 
         rounds = [self._make_round(items_served=0, items_referenced=0)]
         stats = _convergence_stats(rounds)
@@ -440,7 +440,7 @@ class TestConvergenceStats:
     def test_monotonic_improvement_produces_positive_deltas(self) -> None:
         """A run that improves over time should yield positive deltas
         on both useful and weighted dimensions."""
-        from eval.scenarios.agent_loop_convergence.scenario import _convergence_stats
+        from eval.scenarios._convergence_common import _convergence_stats
 
         rounds = [
             self._make_round(
@@ -459,7 +459,7 @@ class TestConvergenceStats:
         """A run where useful-fraction drops over time should yield a
         negative ``useful_delta`` — exactly what the regress gate
         catches."""
-        from eval.scenarios.agent_loop_convergence.scenario import _convergence_stats
+        from eval.scenarios._convergence_common import _convergence_stats
 
         rounds = [
             self._make_round(

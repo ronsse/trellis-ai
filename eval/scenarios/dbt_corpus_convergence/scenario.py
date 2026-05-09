@@ -30,16 +30,13 @@ import asyncio
 import statistics
 import tempfile
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import structlog
 
-from eval._real_llm import (
-    OPENAI_EMBED_3_SMALL_USD_PER_M,
-    build_phase_a_clients,
-)
+from eval._real_llm import build_phase_a_clients
 from eval.corpora.dbt_loader import (
     LoadResult,
     build_category_index,
@@ -56,14 +53,29 @@ from eval.corpora.jaffle_shop.queries import (
     JaffleShopQuery,
 )
 from eval.runner import Finding, ScenarioReport, ScenarioStatus
-from trellis.feedback.models import PackFeedback
-from trellis.feedback.recording import record_feedback
-from trellis.llm.protocol import EmbedderClient
-from trellis.retrieve.advisory_generator import AdvisoryGenerator
-from trellis.retrieve.effectiveness import (
-    run_advisory_fitness_loop,
-    run_effectiveness_feedback,
+from eval.scenarios._convergence_common import (
+    CONVERGENCE_DELTA_REGRESS_THRESHOLD,
+    DEFAULT_ADVISORY_MIN_SAMPLE_SIZE,
+    DEFAULT_FEEDBACK_BATCH_SIZE,
+    DEFAULT_PACK_MAX_ITEMS,
+    DEFAULT_PACK_MAX_TOKENS,
+    DEFAULT_PROFILE_NAME,
+    DEFAULT_ROUNDS,
+    DEFAULT_SUCCESS_COVERAGE_THRESHOLD,
+    _base_round_metrics,
+    _convergence_metrics,
+    _convergence_stats,
+    _convergence_summary_finding,
+    _loop_metrics,
+    _loops_summary_finding,
+    _LoopStats,
+    _record_round_feedback,
+    _run_periodic_loops,
+    _validate_basic_kwargs,
 )
+from eval.scenarios._strategies import _SeededGraphSearch
+from eval.scenarios._telemetry import _EmbedTelemetry, _make_embedding_fn
+from trellis.llm.protocol import EmbedderClient
 from trellis.retrieve.evaluate import (
     BUILTIN_PROFILES,
     EvaluationScenario,
@@ -71,7 +83,6 @@ from trellis.retrieve.evaluate import (
 )
 from trellis.retrieve.pack_builder import PackBuilder
 from trellis.retrieve.strategies import (
-    GraphSearch,
     KeywordSearch,
     SearchStrategy,
     SemanticSearch,
@@ -82,56 +93,9 @@ from trellis.stores.registry import StoreRegistry
 
 logger = structlog.get_logger(__name__)
 
-DEFAULT_ROUNDS = 30
-DEFAULT_FEEDBACK_BATCH_SIZE = 5
-DEFAULT_PACK_MAX_ITEMS = 8
-DEFAULT_PACK_MAX_TOKENS = 1_500
-DEFAULT_SUCCESS_COVERAGE_THRESHOLD = 0.6
-DEFAULT_PROFILE_NAME = "domain_context"
-CONVERGENCE_DELTA_REGRESS_THRESHOLD = -0.05
-ROUND_WINDOW_FRACTION = 4
-DEFAULT_ADVISORY_MIN_SAMPLE_SIZE = 5
-
-# OPENAI_EMBED_3_SMALL_USD_PER_M re-exported from eval._real_llm.
-RUN_HARD_COST_CAP_USD = 0.50  # tighter than Phase A — embeddings only
-
-# ---------------------------------------------------------------------------
-# Telemetry — embeddings only (no chat)
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class _EmbedRecord:
-    model: str
-    input_tokens: int
-    latency_ms: int
-
-
-@dataclass
-class _Telemetry:
-    embed_calls: list[_EmbedRecord] = field(default_factory=list)
-
-    def record_embed(self, model: str, in_tok: int, latency_ms: int) -> None:
-        self.embed_calls.append(_EmbedRecord(model, in_tok, latency_ms))
-
-    def total_cost_usd(self) -> float:
-        in_tok = sum(c.input_tokens for c in self.embed_calls)
-        return (in_tok / 1e6) * OPENAI_EMBED_3_SMALL_USD_PER_M
-
-    def to_metrics(self) -> dict[str, float]:
-        lat = [c.latency_ms for c in self.embed_calls]
-        return {
-            "embedder.calls_total": float(len(self.embed_calls)),
-            "embedder.input_tokens_total": float(
-                sum(c.input_tokens for c in self.embed_calls)
-            ),
-            "cost.embed_usd": round(self.total_cost_usd(), 6),
-            "cost.total_usd": round(self.total_cost_usd(), 6),
-            "latency.embed_ms_p50": (
-                round(statistics.median(lat), 1) if lat else 0.0
-            ),
-            "latency.embed_ms_max": float(max(lat) if lat else 0),
-        }
+# Embeddings-only scenario — tighter than Phase A's $1 cap since there's
+# no chat surface to inflate cost.
+RUN_HARD_COST_CAP_USD = 0.50
 
 
 # ---------------------------------------------------------------------------
@@ -175,7 +139,7 @@ def _populate_test_descriptions(
     registry: StoreRegistry,
     *,
     embedder: EmbedderClient,
-    telemetry: _Telemetry,
+    telemetry: _EmbedTelemetry,
 ) -> tuple[int, int]:
     """Fill in docs for test entities, then embed all docs in one batch.
 
@@ -260,83 +224,7 @@ def _populate_test_descriptions(
 
 
 # ---------------------------------------------------------------------------
-# SeededGraphSearch — wraps GraphSearch so it returns empty when no
-# seed_ids are present in the filters. Without this wrapper,
-# GraphSearch's no-seeds fallback dumps every non-structural node into
-# the pack (21 items in the dbt corpus), crowding out
-# Keyword/SemanticSearch hits. The scenario only wants GraphSearch to
-# fire when the round's intent successfully maps to one or more known
-# entity short-names via :func:`extract_seed_ids`.
-# ---------------------------------------------------------------------------
-
-
-class _SeededGraphSearch(SearchStrategy):
-    """Seeded GraphSearch with doc-prefixed item_ids for cross-strategy dedup.
-
-    Two responsibilities, both small:
-
-    1. **Seed gating.** Returns empty when ``filters["seed_ids"]`` is
-       absent or empty — avoids GraphSearch's no-seeds fallback of
-       returning every non-structural node, which floods the pack.
-
-    2. **item_id canonicalization for dedup.** GraphSearch emits
-       ``PackItem.item_id == node_id`` (e.g.,
-       ``"model.jaffle_shop.customers"``). KeywordSearch and
-       SemanticSearch emit ``PackItem.item_id == "doc:" + node_id``
-       (e.g., ``"doc:model.jaffle_shop.customers"``). Without
-       canonicalization, the same entity appears in the pack twice
-       and PackBuilder's exact-match dedup keeps both — wasting
-       budget on cross-strategy duplicates.
-
-       This wrapper rewrites each GraphSearch PackItem's ``item_id``
-       to ``"doc:" + node_id`` so PackBuilder's existing dedup
-       collapses cross-strategy hits. The original ``node_id`` is
-       preserved in ``metadata["graph_node_id"]`` for any downstream
-       consumer that wants the raw form.
-    """
-
-    def __init__(self, graph_store: Any) -> None:
-        self._inner = GraphSearch(graph_store)
-
-    @property
-    def name(self) -> str:
-        return "graph_seeded"
-
-    def search(
-        self,
-        query: str,
-        *,
-        limit: int = 20,
-        filters: dict[str, Any] | None = None,
-    ) -> list[Any]:
-        if not filters:
-            return []
-        seed_ids = filters.get("seed_ids")
-        if not seed_ids:
-            return []
-        items = self._inner.search(query, limit=limit, filters=filters)
-        rewritten = []
-        for item in items:
-            if item.item_id.startswith("doc:"):
-                rewritten.append(item)
-                continue
-            new_metadata = {
-                **(item.metadata or {}),
-                "graph_node_id": item.item_id,
-            }
-            rewritten.append(
-                item.model_copy(
-                    update={
-                        "item_id": f"doc:{item.item_id}",
-                        "metadata": new_metadata,
-                    }
-                )
-            )
-        return rewritten
-
-
-# ---------------------------------------------------------------------------
-# Per-round helpers — query selection and grading
+# Per-round helpers — query selection, pack build, grading
 # ---------------------------------------------------------------------------
 
 
@@ -444,7 +332,8 @@ def _score_pack(pack: Pack, query: JaffleShopQuery) -> dict[str, float]:
 
 
 # ---------------------------------------------------------------------------
-# Per-round bookkeeping (mirrors Phase A's shape)
+# Per-round bookkeeping — _RoundResult is local because the discriminator
+# is ``skill`` + ``difficulty`` here (vs ``domain`` in agent_loop).
 # ---------------------------------------------------------------------------
 
 
@@ -461,153 +350,16 @@ class _RoundResult:
     success: bool
 
 
-@dataclass
-class _ConvergenceStats:
-    weighted_first_quarter_mean: float
-    weighted_last_quarter_mean: float
-    weighted_delta: float
-    useful_first_quarter_mean: float
-    useful_last_quarter_mean: float
-    useful_delta: float
-
-
-@dataclass
-class _LoopStats:
-    effectiveness_runs: int = 0
-    noise_items_tagged_total: int = 0
-    advisory_runs: int = 0
-    advisories_generated_total: int = 0
-    advisories_suppressed_total: int = 0
-    advisories_restored_total: int = 0
-    advisories_boosted_total: int = 0
-
-
-def _record_round_feedback(
-    *,
-    feedback_log_dir: Path,
-    registry: StoreRegistry,
-    pack: Pack,
-    query: JaffleShopQuery,
-    referenced: list[str],
-    success: bool,
-    round_index: int,
-    run_id: str,
-) -> None:
-    feedback = PackFeedback(
-        run_id=run_id,
-        phase=f"round_{round_index:03d}",
-        intent=query.intent,
-        outcome="success" if success else "failure",
-        items_served=[item.item_id for item in pack.items],
-        items_referenced=referenced,
-        intent_family=query.skill,  # use skill as intent_family for B-1
-        agent_id="dbt_corpus_synthetic_agent",
-    )
-    record_feedback(
-        feedback,
-        log_dir=feedback_log_dir,
-        event_log=registry.operational.event_log,
-        pack_id=pack.pack_id,
-    )
-
-
-def _run_periodic_loops(
-    *,
-    registry: StoreRegistry,
-    advisory_store: AdvisoryStore,
-    stats: _LoopStats,
-    generate_advisories: bool,
-    advisory_min_sample_size: int = DEFAULT_ADVISORY_MIN_SAMPLE_SIZE,
-) -> None:
-    knowledge = registry.knowledge
-    operational = registry.operational
-
-    effectiveness = run_effectiveness_feedback(
-        operational.event_log,
-        knowledge.document_store,
-    )
-    stats.effectiveness_runs += 1
-    stats.noise_items_tagged_total += len(effectiveness.noise_candidates)
-
-    if generate_advisories:
-        report = AdvisoryGenerator(
-            operational.event_log,
-            advisory_store,
-            min_sample_size=advisory_min_sample_size,
-        ).generate()
-        stats.advisories_generated_total += report.advisories_generated
-    stats.advisory_runs += 1
-
-    fitness = run_advisory_fitness_loop(
-        operational.event_log,
-        advisory_store,
-        min_presentations=2,
-    )
-    stats.advisories_boosted_total += len(fitness.advisories_boosted)
-    stats.advisories_suppressed_total += len(fitness.advisories_suppressed)
-    stats.advisories_restored_total += len(fitness.advisories_restored)
-
-
 # ---------------------------------------------------------------------------
-# Convergence math (same shape as Phase A)
-# ---------------------------------------------------------------------------
-
-
-def _quarter_means(values: list[float]) -> tuple[float, float]:
-    if not values:
-        return 0.0, 0.0
-    if len(values) < ROUND_WINDOW_FRACTION:
-        full = statistics.fmean(values)
-        return full, full
-    window = max(1, len(values) // ROUND_WINDOW_FRACTION)
-    return statistics.fmean(values[:window]), statistics.fmean(values[-window:])
-
-
-def _convergence_stats(rounds: list[_RoundResult]) -> _ConvergenceStats:
-    weighted = [r.weighted_score for r in rounds]
-    useful = [
-        (r.items_referenced / r.items_served) if r.items_served else 0.0
-        for r in rounds
-    ]
-    w_first, w_last = _quarter_means(weighted)
-    u_first, u_last = _quarter_means(useful)
-    return _ConvergenceStats(
-        weighted_first_quarter_mean=w_first,
-        weighted_last_quarter_mean=w_last,
-        weighted_delta=w_last - w_first,
-        useful_first_quarter_mean=u_first,
-        useful_last_quarter_mean=u_last,
-        useful_delta=u_last - u_first,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Metric aggregation
+# Per-skill / per-difficulty metrics — discriminator is scenario-specific.
 # ---------------------------------------------------------------------------
 
 
 def _round_metrics(rounds: list[_RoundResult]) -> dict[str, float]:
-    if not rounds:
-        return {}
-    weighted_scores = [r.weighted_score for r in rounds]
-    coverage = [r.coverage_fraction for r in rounds]
-    successes = sum(1 for r in rounds if r.success)
-    served = sum(r.items_served for r in rounds)
-    referenced = sum(r.items_referenced for r in rounds)
-    metrics: dict[str, float] = {
-        "round_weighted_score_mean": round(statistics.fmean(weighted_scores), 4),
-        "round_weighted_score_min": round(min(weighted_scores), 4),
-        "round_weighted_score_max": round(max(weighted_scores), 4),
-        "round_coverage_mean": round(statistics.fmean(coverage), 4),
-        "round_success_rate": round(successes / len(rounds), 4),
-        "round_total_items_served": float(served),
-        "round_total_items_referenced": float(referenced),
-        "round_useful_fraction_overall": (
-            round(referenced / served, 4) if served else 0.0
-        ),
-    }
-    metrics.update(_per_skill_round_metrics(rounds))
-    metrics.update(_per_difficulty_round_metrics(rounds))
+    metrics = _base_round_metrics(rounds)
+    if metrics:
+        metrics.update(_per_skill_round_metrics(rounds))
+        metrics.update(_per_difficulty_round_metrics(rounds))
     return metrics
 
 
@@ -643,68 +395,9 @@ def _per_difficulty_round_metrics(
     return out
 
 
-def _convergence_metrics(c: _ConvergenceStats) -> dict[str, float]:
-    return {
-        "convergence.weighted_first_quarter_mean": round(
-            c.weighted_first_quarter_mean, 4
-        ),
-        "convergence.weighted_last_quarter_mean": round(
-            c.weighted_last_quarter_mean, 4
-        ),
-        "convergence.weighted_delta": round(c.weighted_delta, 4),
-        "convergence.useful_first_quarter_mean": round(
-            c.useful_first_quarter_mean, 4
-        ),
-        "convergence.useful_last_quarter_mean": round(c.useful_last_quarter_mean, 4),
-        "convergence.useful_delta": round(c.useful_delta, 4),
-    }
-
-
-def _loop_metrics(s: _LoopStats) -> dict[str, float]:
-    return {
-        "loops.effectiveness_runs": float(s.effectiveness_runs),
-        "loops.noise_items_tagged_total": float(s.noise_items_tagged_total),
-        "loops.advisory_runs": float(s.advisory_runs),
-        "loops.advisories_generated_total": float(s.advisories_generated_total),
-        "loops.advisories_suppressed_total": float(s.advisories_suppressed_total),
-        "loops.advisories_restored_total": float(s.advisories_restored_total),
-        "loops.advisories_boosted_total": float(s.advisories_boosted_total),
-    }
-
-
-def _make_embedding_fn(embedder: EmbedderClient, telemetry: _Telemetry) -> Any:
-    """Sync ``callable(str) -> list[float]`` for SemanticSearch query embeds."""
-
-    def embed_query(text: str) -> list[float]:
-        async def _one() -> list[float]:
-            started = time.monotonic()
-            resp = await embedder.embed(text)
-            elapsed_ms = int((time.monotonic() - started) * 1000)
-            usage = resp.usage
-            telemetry.record_embed(
-                model=resp.model or "unknown",
-                in_tok=usage.prompt_tokens if usage else 0,
-                latency_ms=elapsed_ms,
-            )
-            return list(resp.embedding)
-
-        return asyncio.run(_one())
-
-    return embed_query
-
-
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
-
-
-def _validate(rounds: int, feedback_batch_size: int) -> None:
-    if rounds <= 0:
-        msg = "rounds must be positive"
-        raise ValueError(msg)
-    if feedback_batch_size <= 0:
-        msg = "feedback_batch_size must be positive"
-        raise ValueError(msg)
 
 
 def run(  # noqa: PLR0915 — orchestrates many stages, single coherent run flow
@@ -719,9 +412,9 @@ def run(  # noqa: PLR0915 — orchestrates many stages, single coherent run flow
     manifest_path: Path | None = None,
     enable_graph_search: bool = True,
 ) -> ScenarioReport:
-    _validate(rounds, feedback_batch_size)
+    _validate_basic_kwargs(rounds=rounds, feedback_batch_size=feedback_batch_size)
 
-    telemetry = _Telemetry()
+    telemetry = _EmbedTelemetry()
     # Provider factory builds both clients; only the embedder is used here.
     _, embedder, llm_config = build_phase_a_clients()
 
@@ -834,11 +527,13 @@ def run(  # noqa: PLR0915 — orchestrates many stages, single coherent run flow
                 feedback_log_dir=feedback_dir,
                 registry=registry,
                 pack=pack,
-                query=query,
+                intent=query.intent,
+                intent_family=query.skill,
                 referenced=referenced,
                 success=success,
                 round_index=round_index,
                 run_id=run_id,
+                agent_id="dbt_corpus_synthetic_agent",
             )
             if (round_index + 1) % feedback_batch_size == 0:
                 _run_periodic_loops(
@@ -887,39 +582,8 @@ def run(  # noqa: PLR0915 — orchestrates many stages, single coherent run flow
             seed_ids_grand_total / rounds, 4
         )
 
-    findings.append(
-        Finding(
-            severity="info",
-            message=(
-                f"weighted score: {convergence.weighted_first_quarter_mean:.3f} "
-                f"→ {convergence.weighted_last_quarter_mean:.3f} "
-                f"(Δ {convergence.weighted_delta:+.3f})"
-            ),
-            detail={
-                "useful_fraction_first_quarter": round(
-                    convergence.useful_first_quarter_mean, 4
-                ),
-                "useful_fraction_last_quarter": round(
-                    convergence.useful_last_quarter_mean, 4
-                ),
-                "useful_delta": round(convergence.useful_delta, 4),
-            },
-        )
-    )
-    findings.append(
-        Finding(
-            severity="info",
-            message=(
-                f"loops fired: {loop_stats.effectiveness_runs} effectiveness, "
-                f"{loop_stats.advisory_runs} advisory; "
-                f"noise tags applied: {loop_stats.noise_items_tagged_total}; "
-                f"advisories generated {loop_stats.advisories_generated_total}, "
-                f"suppressed {loop_stats.advisories_suppressed_total}, "
-                f"restored {loop_stats.advisories_restored_total}, "
-                f"boosted {loop_stats.advisories_boosted_total}"
-            ),
-        )
-    )
+    findings.append(_convergence_summary_finding(convergence))
+    findings.append(_loops_summary_finding(loop_stats))
     findings.append(
         Finding(
             severity="info",

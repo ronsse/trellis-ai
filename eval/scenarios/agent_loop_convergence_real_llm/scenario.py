@@ -587,11 +587,13 @@ def run(
                 feedback_log_dir=feedback_dir,
                 registry=registry,
                 pack=pack,
-                query=query,
+                intent=query.intent,
+                intent_family=query.domain,
                 referenced=referenced,
                 success=success,
                 round_index=round_index,
                 run_id=run_id,
+                agent_id="synthetic_convergence_agent",
             )
             if (round_index + 1) % feedback_batch_size == 0:
                 _run_periodic_loops(

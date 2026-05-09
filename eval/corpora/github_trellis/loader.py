@@ -446,6 +446,15 @@ def build_pr_name_index(registry: StoreRegistry) -> dict[str, str]:
     The unique-to-one-PR filter is what keeps the noise floor low:
     common bigrams like ``"phase 1"`` appear in many PR titles and
     are deliberately not indexed.
+
+    Body-token indexing was evaluated and rejected: a folded title +
+    body pass grew the index 26x (1.1k → 30k entries) but produced
+    zero new hits on the existing ground-truth intents and added two
+    false-positive seeds. The eval intents reference title-unique
+    phrases or generic terms; bodies don't surface anything the
+    intents key on (they're long-form prose with topic-overlap
+    citations of other PRs in the series, which the unique filter
+    already drops). Title-only is the right tool for this corpus.
     """
     # GraphStore.query() defaults to limit=50 — too small for this
     # corpus (90 entities). 5000 is a generous ceiling for any

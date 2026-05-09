@@ -41,7 +41,7 @@ from __future__ import annotations
 import statistics
 import tempfile
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 import structlog
@@ -54,12 +54,26 @@ from eval.generators.trace_generator import (
     generate_corpus,
 )
 from eval.runner import Finding, ScenarioReport, ScenarioStatus
-from trellis.feedback.models import PackFeedback
-from trellis.feedback.recording import record_feedback
-from trellis.retrieve.advisory_generator import AdvisoryGenerator
-from trellis.retrieve.effectiveness import (
-    run_advisory_fitness_loop,
-    run_effectiveness_feedback,
+from eval.scenarios._convergence_common import (
+    CONVERGENCE_DELTA_REGRESS_THRESHOLD,
+    DEFAULT_ADVISORY_MIN_SAMPLE_SIZE,
+    DEFAULT_FEEDBACK_BATCH_SIZE,
+    DEFAULT_PACK_MAX_ITEMS,
+    DEFAULT_PACK_MAX_TOKENS,
+    DEFAULT_PROFILE_NAME,
+    DEFAULT_ROUNDS,
+    DEFAULT_SUCCESS_COVERAGE_THRESHOLD,
+    _base_round_metrics,
+    _convergence_metrics,
+    _convergence_stats,
+    _convergence_summary_finding,
+    _ConvergenceStats,
+    _loop_metrics,
+    _loops_summary_finding,
+    _LoopStats,
+    _record_round_feedback,
+    _run_periodic_loops,
+    _validate_basic_kwargs,
 )
 from trellis.retrieve.evaluate import (
     BUILTIN_PROFILES,
@@ -74,25 +88,11 @@ from trellis.stores.registry import StoreRegistry
 
 logger = structlog.get_logger(__name__)
 
-DEFAULT_ROUNDS = 30
-DEFAULT_FEEDBACK_BATCH_SIZE = 5
-DEFAULT_PACK_MAX_ITEMS = 8
-DEFAULT_PACK_MAX_TOKENS = 1_500
+# Scenario-local overrides — agent_loop ships an extra synthetic-corpus
+# knob (traces/entities per trace) that other convergence scenarios
+# don't expose because they load real corpora.
 DEFAULT_TRACES_PER_DOMAIN = 6
 DEFAULT_ENTITIES_PER_TRACE = 3
-DEFAULT_SUCCESS_COVERAGE_THRESHOLD = 0.6
-DEFAULT_PROFILE_NAME = "domain_context"
-CONVERGENCE_DELTA_REGRESS_THRESHOLD = -0.05
-ROUND_WINDOW_FRACTION = 4  # compare first vs last quarter of rounds
-
-# Production default for AdvisoryGenerator.min_sample_size is 5. The
-# scenario corpus is small (~5 packs by the time the first periodic
-# pass fires), so per-entity sample sizes never reach 5 — only the
-# global "keyword strategy" advisory ever forms. Lower this kwarg
-# when running with regime_shift_round so per-entity advisories form
-# at batch 1 and have something to be suppressed when the regime
-# shifts. Production gates remain at their defaults.
-DEFAULT_ADVISORY_MIN_SAMPLE_SIZE = 5
 
 # Regime-shift mode (opt-in). When ``regime_shift_round`` is set, the
 # agent grades post-shift rounds against a modified required_coverage
@@ -161,7 +161,8 @@ _DISTRACTOR_DOCS: dict[str, list[tuple[str, str]]] = {
 
 
 # ---------------------------------------------------------------------------
-# Per-round bookkeeping
+# Per-round bookkeeping — _RoundResult stays scenario-local because the
+# discriminator is ``domain`` here vs ``skill``/``difficulty`` elsewhere.
 # ---------------------------------------------------------------------------
 
 
@@ -175,30 +176,6 @@ class _RoundResult:
     coverage_fraction: float
     weighted_score: float
     success: bool
-
-
-@dataclass
-class _ConvergenceStats:
-    weighted_first_quarter_mean: float
-    weighted_last_quarter_mean: float
-    weighted_delta: float
-    useful_first_quarter_mean: float
-    useful_last_quarter_mean: float
-    useful_delta: float
-
-
-@dataclass
-class _LoopStats:
-    """Cumulative counts surfaced from the periodic loops."""
-
-    effectiveness_runs: int = 0
-    noise_items_tagged_total: int = 0
-    advisory_runs: int = 0
-    advisories_generated_total: int = 0
-    advisories_suppressed_total: int = 0
-    advisories_restored_total: int = 0
-    advisories_boosted_total: int = 0
-    suppressed_ids: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -390,135 +367,6 @@ def _score_pack(pack: Pack, query: EvalQuery) -> dict[str, float]:
     }
 
 
-def _record_round_feedback(
-    *,
-    feedback_log_dir: Path,
-    registry: StoreRegistry,
-    pack: Pack,
-    query: EvalQuery,
-    referenced: list[str],
-    success: bool,
-    round_index: int,
-    run_id: str,
-) -> None:
-    feedback = PackFeedback(
-        run_id=run_id,
-        phase=f"round_{round_index:03d}",
-        intent=query.intent,
-        outcome="success" if success else "failure",
-        items_served=[item.item_id for item in pack.items],
-        items_referenced=referenced,
-        intent_family=query.domain,
-        agent_id="synthetic_convergence_agent",
-    )
-    record_feedback(
-        feedback,
-        log_dir=feedback_log_dir,
-        event_log=registry.operational.event_log,
-        pack_id=pack.pack_id,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Periodic convergence loops
-# ---------------------------------------------------------------------------
-
-
-def _run_periodic_loops(
-    *,
-    registry: StoreRegistry,
-    advisory_store: AdvisoryStore,
-    stats: _LoopStats,
-    generate_advisories: bool,
-    advisory_min_sample_size: int = DEFAULT_ADVISORY_MIN_SAMPLE_SIZE,
-) -> None:
-    """Run the noise-tagging + advisory loops once.
-
-    ``generate_advisories`` controls whether ``AdvisoryGenerator.generate``
-    fires this pass. We only generate on the *first* periodic pass:
-    ``AdvisoryGenerator`` mints fresh ULIDs every call without
-    deduplicating against the existing store, so regenerating each
-    batch would saddle every subsequent fitness pass with a brand-new
-    cohort of zero-presentation advisories — convergence becomes
-    invisible to the suppression gate. Generating once after the first
-    feedback batch lets advisory IDs stay stable so presentations
-    accumulate across the remaining rounds.
-    """
-    knowledge = registry.knowledge
-    operational = registry.operational
-
-    effectiveness = run_effectiveness_feedback(
-        operational.event_log,
-        knowledge.document_store,
-        # min_appearances=2 (the default) is fine — distractors recur
-        # quickly under the round-robin query schedule.
-    )
-    stats.effectiveness_runs += 1
-    stats.noise_items_tagged_total += len(effectiveness.noise_candidates)
-
-    if generate_advisories:
-        advisory_report = AdvisoryGenerator(
-            operational.event_log,
-            advisory_store,
-            min_sample_size=advisory_min_sample_size,
-        ).generate()
-        stats.advisories_generated_total += advisory_report.advisories_generated
-    stats.advisory_runs += 1
-
-    fitness = run_advisory_fitness_loop(
-        operational.event_log,
-        advisory_store,
-        # Use small thresholds so the synthetic corpus surfaces
-        # decisions; the production defaults expect 30+ presentations.
-        min_presentations=2,
-    )
-    stats.advisories_boosted_total += len(fitness.advisories_boosted)
-    stats.advisories_suppressed_total += len(fitness.advisories_suppressed)
-    stats.advisories_restored_total += len(fitness.advisories_restored)
-    stats.suppressed_ids.extend(fitness.advisories_suppressed)
-
-
-# ---------------------------------------------------------------------------
-# Convergence math
-# ---------------------------------------------------------------------------
-
-
-def _quarter_means(values: list[float]) -> tuple[float, float]:
-    """Return ``(first_quarter_mean, last_quarter_mean)``.
-
-    Defensive against tiny round counts: when fewer than four samples
-    are available, both quarters fall back to the full-sample mean,
-    so the resulting delta is zero rather than misleadingly large.
-    """
-    if not values:
-        return 0.0, 0.0
-    if len(values) < ROUND_WINDOW_FRACTION:
-        full = statistics.fmean(values)
-        return full, full
-    window = max(1, len(values) // ROUND_WINDOW_FRACTION)
-    return (
-        statistics.fmean(values[:window]),
-        statistics.fmean(values[-window:]),
-    )
-
-
-def _convergence_stats(rounds: list[_RoundResult]) -> _ConvergenceStats:
-    weighted = [r.weighted_score for r in rounds]
-    useful = [
-        (r.items_referenced / r.items_served) if r.items_served else 0.0 for r in rounds
-    ]
-    w_first, w_last = _quarter_means(weighted)
-    u_first, u_last = _quarter_means(useful)
-    return _ConvergenceStats(
-        weighted_first_quarter_mean=w_first,
-        weighted_last_quarter_mean=w_last,
-        weighted_delta=w_last - w_first,
-        useful_first_quarter_mean=u_first,
-        useful_last_quarter_mean=u_last,
-        useful_delta=u_last - u_first,
-    )
-
-
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -532,12 +380,7 @@ def _validate_run_kwargs(
     regime_shift_replacement_count: int,
 ) -> None:
     """Reject contradictory kwarg combinations at the boundary."""
-    if rounds <= 0:
-        msg = "rounds must be positive"
-        raise ValueError(msg)
-    if feedback_batch_size <= 0:
-        msg = "feedback_batch_size must be positive"
-        raise ValueError(msg)
+    _validate_basic_kwargs(rounds=rounds, feedback_batch_size=feedback_batch_size)
     if regime_shift_round is not None and regime_shift_round < 0:
         msg = "regime_shift_round must be non-negative when set"
         raise ValueError(msg)
@@ -656,11 +499,13 @@ def run(
                 feedback_log_dir=feedback_dir,
                 registry=registry,
                 pack=pack,
-                query=query,
+                intent=query.intent,
+                intent_family=query.domain,
                 referenced=referenced,
                 success=success,
                 round_index=round_index,
                 run_id=run_id,
+                agent_id="synthetic_convergence_agent",
             )
             if (round_index + 1) % feedback_batch_size == 0:
                 _run_periodic_loops(
@@ -745,31 +590,15 @@ def run(
 
 
 # ---------------------------------------------------------------------------
-# Metric / finding aggregation
+# Per-domain metric aggregation — the discriminator is scenario-specific,
+# so this stays here rather than moving to the common module.
 # ---------------------------------------------------------------------------
 
 
 def _round_metrics(rounds: list[_RoundResult]) -> dict[str, float]:
-    if not rounds:
-        return {}
-    weighted_scores = [r.weighted_score for r in rounds]
-    coverage = [r.coverage_fraction for r in rounds]
-    successes = sum(1 for r in rounds if r.success)
-    served = sum(r.items_served for r in rounds)
-    referenced = sum(r.items_referenced for r in rounds)
-    metrics: dict[str, float] = {
-        "round_weighted_score_mean": round(statistics.fmean(weighted_scores), 4),
-        "round_weighted_score_min": round(min(weighted_scores), 4),
-        "round_weighted_score_max": round(max(weighted_scores), 4),
-        "round_coverage_mean": round(statistics.fmean(coverage), 4),
-        "round_success_rate": round(successes / len(rounds), 4),
-        "round_total_items_served": float(served),
-        "round_total_items_referenced": float(referenced),
-        "round_useful_fraction_overall": (
-            round(referenced / served, 4) if served else 0.0
-        ),
-    }
-    metrics.update(_per_domain_round_metrics(rounds))
+    metrics = _base_round_metrics(rounds)
+    if metrics:
+        metrics.update(_per_domain_round_metrics(rounds))
     return metrics
 
 
@@ -789,68 +618,8 @@ def _per_domain_round_metrics(rounds: list[_RoundResult]) -> dict[str, float]:
     return out
 
 
-def _convergence_metrics(convergence: _ConvergenceStats) -> dict[str, float]:
-    return {
-        "convergence.weighted_first_quarter_mean": round(
-            convergence.weighted_first_quarter_mean, 4
-        ),
-        "convergence.weighted_last_quarter_mean": round(
-            convergence.weighted_last_quarter_mean, 4
-        ),
-        "convergence.weighted_delta": round(convergence.weighted_delta, 4),
-        "convergence.useful_first_quarter_mean": round(
-            convergence.useful_first_quarter_mean, 4
-        ),
-        "convergence.useful_last_quarter_mean": round(
-            convergence.useful_last_quarter_mean, 4
-        ),
-        "convergence.useful_delta": round(convergence.useful_delta, 4),
-    }
-
-
-def _loop_metrics(stats: _LoopStats) -> dict[str, float]:
-    return {
-        "loops.effectiveness_runs": float(stats.effectiveness_runs),
-        "loops.noise_items_tagged_total": float(stats.noise_items_tagged_total),
-        "loops.advisory_runs": float(stats.advisory_runs),
-        "loops.advisories_generated_total": float(stats.advisories_generated_total),
-        "loops.advisories_suppressed_total": float(stats.advisories_suppressed_total),
-        "loops.advisories_restored_total": float(stats.advisories_restored_total),
-        "loops.advisories_boosted_total": float(stats.advisories_boosted_total),
-    }
-
-
 def _convergence_findings(
     convergence: _ConvergenceStats, stats: _LoopStats
 ) -> Iterable[Finding]:
-    yield Finding(
-        severity="info",
-        message=(
-            f"weighted score: {convergence.weighted_first_quarter_mean:.3f} "
-            f"→ {convergence.weighted_last_quarter_mean:.3f} "
-            f"(Δ {convergence.weighted_delta:+.3f})"
-        ),
-        detail={
-            "useful_fraction_first_quarter": round(
-                convergence.useful_first_quarter_mean, 4
-            ),
-            "useful_fraction_last_quarter": round(
-                convergence.useful_last_quarter_mean, 4
-            ),
-        },
-    )
-    yield Finding(
-        severity="info",
-        message=(
-            f"loops fired: {stats.effectiveness_runs} effectiveness, "
-            f"{stats.advisory_runs} advisory; "
-            f"noise tags applied: {stats.noise_items_tagged_total}; "
-            f"advisories — generated {stats.advisories_generated_total}, "
-            f"suppressed {stats.advisories_suppressed_total}, "
-            f"restored {stats.advisories_restored_total}, "
-            f"boosted {stats.advisories_boosted_total}"
-        ),
-        detail={
-            "suppressed_ids": stats.suppressed_ids[:20],
-        },
-    )
+    yield _convergence_summary_finding(convergence)
+    yield _loops_summary_finding(stats)
