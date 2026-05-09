@@ -196,8 +196,16 @@ def reclassify_stale(
             continue
 
         tags = (doc.get("metadata") or {}).get("content_tags") or {}
-        classified_at = _parse_classified_at(tags.get("classified_at"))
-        if classified_at is not None and classified_at >= cutoff:
+        # Option A: missing/unparseable classified_at is treated as
+        # *always stale*. Legacy or hand-edited rows that never carried a
+        # stamp must be reclassified — there's no other freshness signal,
+        # and silently skipping them would let drift accumulate forever.
+        raw_stamp = tags.get("classified_at")
+        classified_at = _parse_classified_at(raw_stamp)
+        if classified_at is None:
+            # Fall through to reclassify — explicit "missing => stale".
+            pass
+        elif classified_at >= cutoff:
             result.skipped_fresh += 1
             continue
 

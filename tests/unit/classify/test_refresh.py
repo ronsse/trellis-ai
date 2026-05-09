@@ -448,6 +448,60 @@ class TestReclassifyStale:
         types = [e["event_type"] for e in event_log.events]
         assert types.count(EventType.TAGS_REFRESHED) == 2
 
+    def test_missing_classified_at_treated_as_stale(self) -> None:
+        """Existing content_tags without a classified_at stamp must be
+        reclassified — Option A: missing => always stale (explicit).
+        """
+        store = _InMemoryDocStore()
+        store.put(
+            "doc-no-stamp",
+            "content",
+            {
+                "content_tags": {
+                    "domain": ["legacy"],
+                    # No classified_at field at all.
+                }
+            },
+        )
+
+        result = reclassify_stale(
+            pipeline=self._pipeline(),
+            document_store=store,
+            max_age_days=30,
+        )
+
+        assert result.scanned == 1
+        assert result.refreshed == 1
+        assert result.skipped_fresh == 0
+        assert result.item_ids_refreshed == ["doc-no-stamp"]
+
+    def test_unparseable_classified_at_treated_as_stale(self) -> None:
+        """An unparseable classified_at value also routes to "stale" — we
+        cannot prove freshness, so we refresh.
+        """
+        store = _InMemoryDocStore()
+        store.put(
+            "doc-bad-stamp",
+            "content",
+            {
+                "content_tags": {
+                    "domain": ["legacy"],
+                    "classified_at": "not-a-real-timestamp",
+                }
+            },
+        )
+
+        result = reclassify_stale(
+            pipeline=self._pipeline(),
+            document_store=store,
+            max_age_days=30,
+        )
+
+        assert result.scanned == 1
+        assert result.refreshed == 1
+        assert result.skipped_fresh == 0
+        assert result.item_ids_refreshed == ["doc-bad-stamp"]
+
     def test_parses_plain_iso_timestamp(self) -> None:
         """Naive ISO timestamps (no tz suffix) parse and land as UTC."""
         store = _InMemoryDocStore()
