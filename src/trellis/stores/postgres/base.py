@@ -52,6 +52,9 @@ class PostgresStoreBase:
 
     DEFAULT_POOL_MIN_SIZE: int = 2
     DEFAULT_POOL_MAX_SIZE: int = 20
+    # Bump per-subclass when a schema migration ships. Read by
+    # ``StoreRegistry`` for the substrate-fingerprint check (Logic Gap 4.5).
+    SCHEMA_VERSION: str = "1"
 
     def __init__(
         self,
