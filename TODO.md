@@ -2222,4 +2222,65 @@ Captured during the smoke-test + simplify + review pass on [PR #99](https://gith
 - [ ] **Verify demo loader actually seeds aliases** — add a one-line assertion in `tests/unit/cli/test_quickstart.py` (or wherever demo-load is exercised) that `graph.get_aliases(<known_eid>, source_system=LOCAL_SOURCE_SYSTEM)` returns the expected mapping. Belt-and-braces against silent demo-loader regressions.
 - [x] **Wider XPG-rename sweep — done.** All live user-visible spots, library code, agent-guide docs, design docs, plans, research notes, example-integration templates, and the Graphiti-comparison subsection of this file have been scrubbed across PRs #99, #101, and the historical-sweep PR. Historical naming context lives in git history.
 - [ ] **CLI default log level** — every `trellis retrieve …` and `trellis demo load` interleaves `[info ] store_instantiated …` structlog lines with the friendly Rich output. Default level should be WARNING for CLI commands, with `--verbose` to opt into INFO/DEBUG. PR #76 routed structlog to stderr but on a normal terminal both streams remain visible.
+
+## Legacy-compat sweep (2026-05-08)
+
+Triggered by the `tag_filters` simplification: confirmed that the **specific** "accept two shapes for the same input" pattern that `tag_filters` had does not leak anywhere else (grep for `isinstance.*list.*dict` found only the tag_filters file pre-cleanup, now clean). The broader codebase still carries other legacy-compat patterns from earlier "phased rollout with deprecation cycle" thinking. Pre-roll-out the deprecation cycles aren't earning anything — drop them.
+
+Listed by risk × effort. Each item is small enough to land independently.
+
+### Tier 1 — re-export shims (~1 hour total, very low risk)
+
+- [ ] **Delete `src/trellis/stores/{document,event_log,graph,trace,vector}.py`** — 5 files of "backward-compatible re-exports" pointing at `trellis.stores.{base,sqlite}.<x>`. Migrate ~25 import sites across `src/`, `tests/`, `eval/` to the canonical submodule paths (`trellis.stores.sqlite.document`, `trellis.stores.base.event_log`, etc.). Pure import rename — `git grep -l` then `sed`.
+- [ ] **Delete `src/trellis_api/models.py`** — "backward-compatibility shim" re-exporting `trellis_wire` DTOs under their old names. Migrate the ~6 route imports (`src/trellis_api/routes/{admin,curate,ingest,mutations,retrieve,version}.py`) to `from trellis_wire import …`. The shim's docstring already says "New code should prefer trellis_wire directly" — it's been waiting for someone to finish the migration.
+
+### Tier 2 — back-compat fallbacks for older event/item shapes (~half day total)
+
+These are runtime branches that exist solely to handle pre-migration data shapes. Pre-roll-out there's no pre-migration data.
+
+- [ ] **`src/trellis/retrieve/effectiveness.py:135-164,233-295`** — three back-compat branches that fall back to `pack_feedback` (rating/success) when `FEEDBACK_RECORDED` events lack `helpful_item_ids`. Today every emitter populates `helpful_item_ids` via `PackFeedback.to_event_payload()`. Drop the fallback path; the noise loop becomes usage-rate-only with no `usage_signal_present` gate.
+- [ ] **`src/trellis/learning/observations.py:59`** — handles events without `pack_id` "(legacy / hand-emitted)". Drop the missing-pack_id path, require `pack_id` at parse time.
+- [ ] **`src/trellis/classify/refresh.py:166`** — refresh path that re-runs classification when `content_tags.classified_at` is missing "(legacy or hand-edited)". Acceptable to leave as-is (the refresh is idempotent) but a `# TODO: drop after first migration pass` comment would prevent the path from quietly becoming load-bearing.
+
+### Tier 3 — config/registry legacy plane (~1-2 days, touches deployment)
+
+The user's memory file flags this as "Phase 6 PR 2 pending — gated on v0.5.3 PyPI release; delete alias machinery + ~38 test sites + 5 deprecation tests; bump to v0.6.0". The PyPI gating concern was about external consumers — there are none. Drop now.
+
+- [ ] **`src/trellis/stores/registry.py`** — remove (a) `TRELLIS_PG_DSN` legacy env var fallback (lines 144-179, 316-346), (b) flat `stores:` config block support (lines 222-293), (c) flat property accessors `registry.graph_store` etc. (lines 1051+ marked "Deprecated flat aliases"), (d) the `_LEGACY_PG_DSN_*` and `_reset_deprecation_guards` machinery, (e) the ~5 deprecation tests. Force every caller to plane-split shape.
+- [ ] **`src/trellis_cli/admin.py:218`** — remove `trellis admin migrate-config` CLI subcommand. Without flat-shape support there's nothing to migrate.
+- [ ] **`src/trellis_cli/stores.py:45`** — remove the "cloud YAML and the legacy flat shape both work" parsing branch.
+
+### Tier 4 — deprecation infrastructure (currently unused, ~30 min)
+
+- [ ] **`src/trellis_api/deprecation.py`** + **`src/trellis_wire/dtos.py:49 DeprecationNotice`** + **`src/trellis_api/routes/version.py:40` deprecations field** — RFC 9745 route-deprecation header machinery. `ROUTE_DEPRECATIONS = {}` is empty; the infrastructure has never been used. Either delete it (consistent with "no deprecation cycle, just rip the bandaid") or keep but document that it's reserved for post-roll-out. Pre-roll-out it's dead weight.
+
+### Out of scope — keep these
+
+The audit also flagged but **deliberately** keeps:
+
+- **Graph ontology aliases** (`schemas/well_known.py`, `schemas/enums.py`, `retrieve/strategies.py:304`, `extract/llm.py:314`). Phased canonical-name migration per `adr-graph-ontology.md` and `adr-canonical-graph-layer.md`. Different pattern: "translate old vocabulary to new", not "support two input shapes". Pre-roll-out we *could* drop the legacy enums too, but the alias machinery also serves as defensive parsing for LLM output that may emit non-canonical names. Keep.
+- **`stores/base/graph.py:661,708`** — `execute_node_query` / `execute_subgraph_query` default ABC routes through legacy `query()` / `get_subgraph()`. Transitional plugin contract; backends in-tree all override, so the default is only exercised by hypothetical third-party plugins. Low cost to keep, complexity to remove.
+- **`trellis_cli/retrieve.py:102,216`** — "Preserve backward-compatible JSON structure" comments on CLI output. CLI output is the *one* surface where breaking the JSON shape would actually bite a script in the wild. Keep.
+
+## Docker / cloud-deploy follow-ups (2026-05-08)
+
+Captured during the docker-compose smoke-test pass. The stack now boots clean and `deploy/smoke.sh` returns 10/10 pass against `/healthz`, `/readyz`, `/api/version`, `/ui/`, and a real POST→GET round-trip through Postgres. Items below were noticed in passing.
+
+- [ ] **`POST /api/v1/vectors` swallows per-row errors.** The handler in [`src/trellis_api/routes/ingest.py:79`](src/trellis_api/routes/ingest.py:79) wraps each upsert in `except Exception: errors += 1` with no log line. Caught during the smoke pass when an 8-dim test vector hit the 1536-dim pgvector column — the response said `"errors": 2` with no clue why. At minimum the handler should `logger.warning("vector_upsert_failed", item_id=..., exc_info=True)`; ideally surface the rejection reason in the response body so callers can debug dimension mismatches without shell access to the API container.
+- [ ] **Document the pgvector column dimension as part of the cloud-deploy contract.** The `vectors.embedding` column is hardcoded to `vector(1536)` (matches OpenAI `text-embedding-3-small`). A caller using a different embedder will silently lose every upsert. Either expose the dim as a config value the ingest path validates against, or surface it in `/readyz` so an operator can spot the mismatch before traffic hits.
+- [ ] **AWS ECS + RDS dry-run.** Compose stack is the offline rehearsal; the actual cloud-deploy is the next step. Known infra deltas: blob backend flips from `local` (compose volume) to `s3` (`TRELLIS_S3_BUCKET`), and the Postgres DSN points at RDS. Volume-ownership fix from this pass (`mkdir -p /var/lib/trellis && chown trellis:trellis`) carries over — EFS mount-target must respect it or ECS hits the same `RegistryValidationError` we just caught locally.
+
+## GitHub corpus seed-extraction follow-ups (2026-05-08)
+
+- [ ] **Revisit body-token indexing on a richer corpus.** Hypothesis was: extending `_title_tokens_and_phrases` (in `eval/corpora/github_trellis/loader.py`) to also pull unique tokens/phrases from PR *bodies* would raise `multi_pr_series` Q1's hit rate from 0/4 to 4/4 by surfacing phrases like `harness skeleton` / `multi-backend equivalence` that the intent supposedly references.
+
+  **Evaluated 2026-05-08 — rejected on the trellis-ai snapshot.** A clean two-pass impl (titles first via `setdefault`, then bodies as a fill-only pass) grew the index 26x (1.1k → 30k entries) but produced **zero new true-positive seeds across all 12 ground-truth queries** and added **two new false-positive seeds** (reverse_lineage and one bug_fix_identification query). Three reasons it didn't pan out on this corpus:
+
+  1. The intents reference **paraphrased / range / plural** language ("Phase 1 through Phase 4", "scenarios 5.1, 5.2, and 5.3") that no PR title or body contains literally.
+  2. Phrases unique-per-PR in titles (`harness skeleton`, `multi-backend equivalence`, `synthetic traces`, `populated-graph performance`) **don't appear in this intent** — it asks about "eval-framework Phase N", which appears in 6 PRs' bodies → not unique → still not indexed.
+  3. Bodies are full-paragraph stacked-PR prose with extensive cross-references; the unique-to-one-PR filter correctly drops most of it, leaving body-derived entries that are mostly per-PR detail (URLs, method names, code snippets) that no hand-authored intent keys on.
+
+  **Worth revisiting when:** the corpus contains PRs whose body text is more topically distinctive than its title (research papers, design docs, PR templates with consistent structured sections). A future curated corpus where bodies carry per-entity "key topics" content would benefit. For now, title-only is the right tool for trellis-ai's PR shape. Negative-result note left in `build_pr_name_index`'s docstring so the path doesn't get re-tried.
+
+- [ ] **Architectural follow-up — semantic-seed extraction.** The deeper finding is that `extract_seed_ids` is a literal-substring matcher. Bodies are good food for embedding-based search (paraphrase-tolerant) but bad food for literal-phrase indexing (too noisy, too overlapping). Real fix is a path that converts SemanticSearch's top-k matches into `seed_ids` for `GraphSearch` so paraphrased intents reach the graph traversal. Sketch: at retrieval time, embed the intent → top-K most-similar entity-summary docs → use their entity_ids as graph-traversal seeds. Cross-references the curation-engine work in `agent_loop_convergence_degraded` (the "improves with use" claim still depends on cheap literal indexing for now). Estimate: 1-2 days, plus an eval pass to confirm no regression on existing queries.
 - [x] **Investigate `(source_system, raw_id)` collision semantics for user-managed aliases** — captured in [`docs/design/adr-alias-resolution.md`](docs/design/adr-alias-resolution.md) (Accepted 2026-05-05). Documents the SCD-2 rebind footgun, sanctions the demo loader's name-as-raw-id pattern, and pins three deferred shapes (namespacing, strict-mode upsert, detection-only event). Contract tests `test_alias_rebind_{repoints_to_new_entity, preserves_history_via_as_of}` landed alongside the ADR.
