@@ -55,10 +55,11 @@ def build_learning_observations_from_event_log(
     by ``(intent_family, item_id)`` and proposes promotion / noise
     candidates for human review.
 
-    Joining strategy: pack_id is the canonical join key. Feedback
-    events without a ``pack_id`` payload field (legacy / hand-emitted)
-    fall back to ``entity_id``. Packs without matching feedback are
-    excluded — they have no outcome to attribute.
+    Joining strategy: pack_id is the canonical join key, read strictly
+    from ``payload.pack_id``. Feedback events missing that field are
+    skipped — there is no reliable way to attribute their outcome.
+    Packs without matching feedback are excluded — they have no outcome
+    to attribute.
 
     Args:
         event_log: Source event log.
@@ -96,7 +97,7 @@ def build_learning_observations_from_event_log(
     observations: list[dict[str, Any]] = []
     for event in feedback_events:
         payload = event.payload or {}
-        pack_id = str(payload.get("pack_id") or event.entity_id or "").strip()
+        pack_id = str(payload.get("pack_id") or "").strip()
         if not pack_id:
             continue
         pack_payload = pack_payloads.get(pack_id)
