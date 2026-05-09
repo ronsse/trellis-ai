@@ -18,7 +18,7 @@ from trellis.stores.base.document import DocumentStore
 def _make_store(docs: dict[str, dict]) -> MagicMock:
     """Build a MagicMock DocumentStore that returns ``docs`` from get()."""
     store = MagicMock(spec=DocumentStore)
-    store.get.side_effect = lambda item_id: docs.get(item_id)
+    store.get.side_effect = docs.get
     return store
 
 

@@ -233,4 +233,4 @@ class TestExecuteMutationErrors:
         )
         payload = json.loads(raw)
         assert payload["status"] == "failed"
-        assert "not found" in payload["message"].lower()
+        assert "does not reference an existing entity" in payload["message"].lower()
