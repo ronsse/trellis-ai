@@ -11,6 +11,7 @@ from trellis.core.base import utc_now
 from trellis.core.hashing import content_hash as _content_hash
 from trellis.core.ids import generate_ulid
 from trellis.stores.base.document import DocumentStore
+from trellis.stores.base.tag_filters import normalize_facet_filter
 from trellis.stores.postgres.base import PostgresStoreBase
 
 logger = structlog.get_logger(__name__)
@@ -175,24 +176,32 @@ class PostgresDocumentStore(PostgresStoreBase, DocumentStore):
                     # excludes noise) actually filters here. Without
                     # this, ``apply_noise_tags`` updates a doc's
                     # metadata but the next pack still includes it.
-                    for facet, allowed in value.items():
-                        allowed_list = (
-                            list(allowed) if isinstance(allowed, list) else [allowed]
-                        )
-                        if not allowed_list:
+                    #
+                    # Operator parsing comes from the shared
+                    # :func:`normalize_facet_filter` so SQLite and
+                    # Postgres see identical semantics. Adds first-class
+                    # ``not_in`` so callers can spell "anything but
+                    # noise" directly.
+                    for facet, raw in value.items():
+                        normalized = normalize_facet_filter(raw)
+                        if normalized is None:
                             continue
-                        placeholders = ", ".join(["%s"] * len(allowed_list))
+                        operator, values_list = normalized
+                        placeholders = ", ".join(["%s"] * len(values_list))
+                        membership = "NOT IN" if operator == "not_in" else "IN"
                         # ``metadata -> 'content_tags' ->> facet`` reads
                         # the JSON path as text. NULL (facet missing)
                         # is falsy under ``IN (...)`` and would exclude
                         # un-tagged items, so an explicit IS NULL OR
                         # branch keeps default-pass semantics — items
-                        # without the facet tag are kept.
+                        # without the facet tag are kept regardless of
+                        # whether the operator is in or not_in.
                         conditions.append(
                             "(metadata -> 'content_tags' ->> %s IS NULL "
-                            f"OR metadata -> 'content_tags' ->> %s IN ({placeholders}))"
+                            f"OR metadata -> 'content_tags' ->> %s "
+                            f"{membership} ({placeholders}))"
                         )
-                        params.extend([facet, facet, *allowed_list])
+                        params.extend([facet, facet, *values_list])
                 elif isinstance(value, str | int | float | bool):
                     conditions.append("metadata->>%s = %s")
                     params.extend([key, str(value)])

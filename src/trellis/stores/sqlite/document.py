@@ -13,9 +13,13 @@ from trellis.core.base import utc_now
 from trellis.core.hashing import content_hash as _content_hash
 from trellis.core.ids import generate_ulid
 from trellis.stores.base.document import DocumentStore
+from trellis.stores.base.tag_filters import normalize_facet_filter
 from trellis.stores.sqlite.base import SQLiteStoreBase
 
 logger = structlog.get_logger(__name__)
+
+
+_LIST_FACETS = {"domain"}
 
 
 def _build_tag_conditions(
@@ -27,29 +31,44 @@ def _build_tag_conditions(
     JSON array; scalar facets (``content_type``, ``signal_quality``,
     ``scope``) match by ``IN (...)``. Both wrap in ``IS NULL OR …`` so
     untagged items pass — mirrors the Postgres path's default-pass.
+
+    Per-facet operators (``in`` / ``not_in`` / ``eq`` / ``ne``) come
+    from :func:`normalize_facet_filter` so SQLite and Postgres see
+    identical operator semantics. ``not_in`` is the case the new
+    shape unlocks: previously callers had to enumerate the inverse
+    set (``["high", "standard", "low"]`` to mean "anything but
+    noise"), which breaks when a new value is added. Now they can
+    spell it directly: ``{"signal_quality": {"not_in": ["noise"]}}``.
     """
     conditions: list[str] = []
     params: list[Any] = []
-    list_facets = {"domain"}
 
-    for facet, values in tag_filters.items():
-        if not isinstance(values, list) or not values:
+    for facet, raw_value in tag_filters.items():
+        normalized = normalize_facet_filter(raw_value)
+        if normalized is None:
             continue
+        operator, values = normalized
         json_path = f"$.content_tags.{facet}"
-        if facet in list_facets:
+        if facet in _LIST_FACETS:
             sub_parts = " OR ".join("je.value = ?" for _ in values)
+            inner = (
+                f"EXISTS (SELECT 1 FROM json_each(d.metadata_json,"
+                f" '{json_path}') je WHERE {sub_parts})"
+            )
+            if operator == "not_in":
+                inner = f"NOT {inner}"
             conditions.append(
                 f"(json_extract(d.metadata_json, '{json_path}') IS NULL"
-                f" OR EXISTS (SELECT 1 FROM json_each(d.metadata_json,"
-                f" '{json_path}') je WHERE {sub_parts}))"
+                f" OR {inner})"
             )
             params.extend(values)
         else:
             placeholders = ", ".join("?" for _ in values)
+            membership = "NOT IN" if operator == "not_in" else "IN"
             conditions.append(
                 f"(json_extract(d.metadata_json, '{json_path}') IS NULL"
                 f" OR json_extract(d.metadata_json, '{json_path}')"
-                f" IN ({placeholders}))"
+                f" {membership} ({placeholders}))"
             )
             params.extend(values)
 

@@ -93,7 +93,10 @@ class PackRequest(WireRequestModel):
     agent_id: str | None = None
     max_items: int = 50
     max_tokens: int = 8000
-    tag_filters: dict[str, list[str]] | None = None
+    #: Per-facet operator dict: ``{"signal_quality": {"not_in": ["noise"]}}``.
+    #: Operators are ``in`` / ``not_in`` / ``eq`` / ``ne``. See
+    #: :func:`trellis.stores.base.tag_filters.normalize_facet_filter`.
+    tag_filters: dict[str, dict[str, Any]] | None = None
 
 
 class PackResponse(WireModel):

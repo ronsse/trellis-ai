@@ -140,15 +140,17 @@ class TestPackBuilder:
         builder.build(
             "q",
             tag_filters={
-                "domain": ["data-pipeline"],
-                "signal_quality": ["high", "standard"],
+                "domain": {"in": ["data-pipeline"]},
+                "signal_quality": {"in": ["high", "standard"]},
             },
         )
         call_kwargs = s.search.call_args
         filters = call_kwargs[1]["filters"]
         assert "content_tags" in filters
-        assert filters["content_tags"]["domain"] == ["data-pipeline"]
-        assert filters["content_tags"]["signal_quality"] == ["high", "standard"]
+        assert filters["content_tags"]["domain"] == {"in": ["data-pipeline"]}
+        assert filters["content_tags"]["signal_quality"] == {
+            "in": ["high", "standard"],
+        }
 
     def test_tag_filters_merged_with_existing_filters(self) -> None:
         s = _make_strategy("kw", [])
@@ -156,33 +158,34 @@ class TestPackBuilder:
         builder.build(
             "q",
             filters={"category": "tutorial"},
-            tag_filters={"domain": ["api"]},
+            tag_filters={"domain": {"in": ["api"]}},
         )
         call_kwargs = s.search.call_args
         filters = call_kwargs[1]["filters"]
         assert filters["category"] == "tutorial"
-        assert filters["content_tags"]["domain"] == ["api"]
+        assert filters["content_tags"]["domain"] == {"in": ["api"]}
 
     def test_default_noise_exclusion(self) -> None:
-        """Noise should be excluded by default with no signal_quality filter."""
+        """Noise excluded by default via ``{"not_in": ["noise"]}`` —
+        robust to a future ``signal_quality`` value being added (the
+        old enumerated allowlist would silently miss it)."""
         s = _make_strategy("kw", [])
         builder = PackBuilder(strategies=[s])
-        builder.build("q", tag_filters={"domain": ["api"]})
+        builder.build("q", tag_filters={"domain": {"in": ["api"]}})
         call_kwargs = s.search.call_args
         filters = call_kwargs[1]["filters"]
-        assert "noise" not in filters["content_tags"]["signal_quality"]
-        assert "high" in filters["content_tags"]["signal_quality"]
-        assert "standard" in filters["content_tags"]["signal_quality"]
-        assert "low" in filters["content_tags"]["signal_quality"]
+        assert filters["content_tags"]["signal_quality"] == {
+            "not_in": ["noise"],
+        }
 
     def test_explicit_signal_quality_overrides_default(self) -> None:
         """When signal_quality is explicitly provided, no default exclusion."""
         s = _make_strategy("kw", [])
         builder = PackBuilder(strategies=[s])
-        builder.build("q", tag_filters={"signal_quality": ["noise"]})
+        builder.build("q", tag_filters={"signal_quality": {"in": ["noise"]}})
         call_kwargs = s.search.call_args
         filters = call_kwargs[1]["filters"]
-        assert filters["content_tags"]["signal_quality"] == ["noise"]
+        assert filters["content_tags"]["signal_quality"] == {"in": ["noise"]}
 
     def test_no_tag_filters_no_content_tags_in_filters(self) -> None:
         """When tag_filters is None, no content_tags key added to filters."""

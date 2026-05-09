@@ -991,15 +991,24 @@ class PackBuilder:
     ) -> dict[str, Any] | None:
         """Merge user filters and tag_filters into a single filters dict.
 
-        When ``tag_filters`` is provided but does not include ``signal_quality``,
-        the default ``["high", "standard", "low"]`` is applied (excludes noise).
+        Each facet under ``tag_filters`` is a single-key operator dict:
+        ``{"in": [...]}``, ``{"not_in": [...]}``, ``{"eq": x}``, or
+        ``{"ne": x}``. Bare lists and bare scalars are rejected
+        downstream by the document store's filter parser — the
+        operator must be explicit so silent no-ops can't happen.
+
+        When ``tag_filters`` is provided but does not include
+        ``signal_quality``, the default ``{"not_in": ["noise"]}`` is
+        applied — express the negation directly instead of enumerating
+        the inverse allowlist (which would silently miss any new
+        ``signal_quality`` value added later).
         """
         if tag_filters is None:
             return filters
 
         effective_tags = dict(tag_filters)
         if "signal_quality" not in effective_tags:
-            effective_tags["signal_quality"] = ["high", "standard", "low"]
+            effective_tags["signal_quality"] = {"not_in": ["noise"]}
 
         merged = dict(filters) if filters else {}
         merged["content_tags"] = effective_tags

@@ -305,6 +305,19 @@ Classification tags attached to any stored item. Four orthogonal facets for pre-
 
 ContentTags are embedded in metadata/properties JSON on documents, entities, traces, and evidence. Use `tag_filters` on `PackBuilder.build()` or `content_tags` key in store `search()` filters.
 
+Each facet under `tag_filters` is a single-key operator dict. Bare lists or scalars raise `ValueError` — the operator must be explicit. Untagged items always pass; the filters narrow tagged items only.
+
+```python
+tag_filters={
+    "signal_quality": {"not_in": ["noise"]},        # robust to new values
+    "domain":         {"in": ["data-pipeline", "infrastructure"]},
+    "content_type":   {"eq": "error-resolution"},   # scalar sugar
+    "scope":          {"ne": "private"},            # scalar sugar
+}
+```
+
+Operators: `in`, `not_in`, `eq`, `ne`. `eq` and `ne` are scalar sugar over single-element `in` / `not_in`. The PackBuilder applies a default `{"signal_quality": {"not_in": ["noise"]}}` when `tag_filters` is provided but `signal_quality` is not specified — pass the empty dict to opt into noise exclusion without other constraints.
+
 ### Reserved namespaces
 
 Certain keys in `custom` and values in `domain` are reserved — the schema validator rejects them with an instructive error pointing to the correct destination. See [adr-tag-vocabulary-split.md](../design/adr-tag-vocabulary-split.md) for the full decision record and per-namespace definitions.

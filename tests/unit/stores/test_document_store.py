@@ -131,7 +131,7 @@ def test_search_with_content_tags_domain(doc_store: SQLiteDocumentStore) -> None
     )
     results = doc_store.search(
         "pipeline",
-        filters={"content_tags": {"domain": ["data-pipeline"]}},
+        filters={"content_tags": {"domain": {"in": ["data-pipeline"]}}},
     )
     assert len(results) == 1
     assert results[0]["metadata"]["content_tags"]["domain"] == ["data-pipeline"]
@@ -152,7 +152,7 @@ def test_search_with_content_tags_signal_quality(
     )
     results = doc_store.search(
         "reference",
-        filters={"content_tags": {"signal_quality": ["high", "standard"]}},
+        filters={"content_tags": {"signal_quality": {"in": ["high", "standard"]}}},
     )
     assert len(results) == 1
     assert results[0]["metadata"]["content_tags"]["signal_quality"] == "high"
@@ -185,8 +185,8 @@ def test_search_with_content_tags_multi_facet(doc_store: SQLiteDocumentStore) ->
         "spark pipeline",
         filters={
             "content_tags": {
-                "domain": ["data-pipeline"],
-                "content_type": ["error-resolution"],
+                "domain": {"in": ["data-pipeline"]},
+                "content_type": {"eq": "error-resolution"},
             },
         },
     )
@@ -206,7 +206,11 @@ def test_search_without_content_tags_still_works(
 def test_search_untagged_doc_passes_signal_quality_filter(
     doc_store: SQLiteDocumentStore,
 ) -> None:
-    """Untagged docs survive a scalar ``signal_quality`` allowlist (default-pass)."""
+    """Untagged docs survive the ``signal_quality`` filter (default-pass).
+
+    Pinned via the ``not_in`` shape — that's the canonical "exclude
+    noise" idiom now (vs. the old enumerate-the-inverse allowlist).
+    """
     doc_store.put(
         None,
         "tagged high-signal reference",
@@ -225,7 +229,7 @@ def test_search_untagged_doc_passes_signal_quality_filter(
 
     results = doc_store.search(
         "reference",
-        filters={"content_tags": {"signal_quality": ["high", "standard", "low"]}},
+        filters={"content_tags": {"signal_quality": {"not_in": ["noise"]}}},
     )
     contents = {r["content"] for r in results}
     assert "tagged high-signal reference" in contents
@@ -255,7 +259,7 @@ def test_search_untagged_doc_passes_domain_filter(
 
     results = doc_store.search(
         "doc",
-        filters={"content_tags": {"domain": ["data-pipeline"]}},
+        filters={"content_tags": {"domain": {"in": ["data-pipeline"]}}},
     )
     contents = {r["content"] for r in results}
     assert "matching domain doc" in contents
@@ -275,3 +279,155 @@ def test_update_preserves_created_at(doc_store: SQLiteDocumentStore) -> None:
     assert doc2["created_at"] == created
     # updated_at should change (or at least not be before created_at)
     assert doc2["updated_at"] >= created
+
+
+# ---------------------------------------------------------------------------
+# Operator-dict tag_filters — the not_in case that was the whole point of
+# the new shape, plus eq/ne sugar and the list-facet equivalents.
+# ---------------------------------------------------------------------------
+
+
+def test_search_with_not_in_scalar_facet(doc_store: SQLiteDocumentStore) -> None:
+    """The case that motivated the new operator DSL: spell "anything
+    but noise" directly instead of enumerating the inverse allowlist.
+    Robust to a future ``signal_quality`` value being added — the old
+    ``["high", "standard", "low"]`` form would silently miss it."""
+    doc_store.put(
+        None,
+        "useful keep me reference",
+        {"content_tags": {"signal_quality": "high"}},
+    )
+    doc_store.put(
+        None,
+        "ordinary keep me reference",
+        {"content_tags": {"signal_quality": "standard"}},
+    )
+    doc_store.put(
+        None,
+        "noise drop me reference",
+        {"content_tags": {"signal_quality": "noise"}},
+    )
+
+    results = doc_store.search(
+        "reference",
+        filters={"content_tags": {"signal_quality": {"not_in": ["noise"]}}},
+    )
+    contents = {r["content"] for r in results}
+    assert "useful keep me reference" in contents
+    assert "ordinary keep me reference" in contents
+    assert "noise drop me reference" not in contents
+
+
+def test_search_with_ne_scalar_sugar(doc_store: SQLiteDocumentStore) -> None:
+    """``ne`` is sugar over single-element ``not_in``; verify they
+    behave identically on the SQL path."""
+    doc_store.put(
+        None,
+        "high pri reference",
+        {"content_tags": {"signal_quality": "high"}},
+    )
+    doc_store.put(
+        None,
+        "noise pri reference",
+        {"content_tags": {"signal_quality": "noise"}},
+    )
+
+    results = doc_store.search(
+        "reference",
+        filters={"content_tags": {"signal_quality": {"ne": "noise"}}},
+    )
+    contents = {r["content"] for r in results}
+    assert "high pri reference" in contents
+    assert "noise pri reference" not in contents
+
+
+def test_search_with_eq_scalar_sugar(doc_store: SQLiteDocumentStore) -> None:
+    doc_store.put(
+        None,
+        "exact match reference",
+        {"content_tags": {"content_type": "error-resolution"}},
+    )
+    doc_store.put(
+        None,
+        "wrong type reference",
+        {"content_tags": {"content_type": "pattern"}},
+    )
+
+    results = doc_store.search(
+        "reference",
+        filters={"content_tags": {"content_type": {"eq": "error-resolution"}}},
+    )
+    contents = {r["content"] for r in results}
+    assert "exact match reference" in contents
+    assert "wrong type reference" not in contents
+
+
+def test_search_bare_list_filter_raises(doc_store: SQLiteDocumentStore) -> None:
+    """Bare-list facet values are no longer accepted — callers must
+    spell the operator explicitly. The error must surface from the
+    search call, not get silently swallowed."""
+    doc_store.put(None, "any reference", {"content_tags": {"signal_quality": "high"}})
+    with pytest.raises(ValueError, match="single-key operator dict"):
+        doc_store.search(
+            "reference",
+            filters={"content_tags": {"signal_quality": ["high", "standard"]}},
+        )
+
+
+def test_search_not_in_list_facet(doc_store: SQLiteDocumentStore) -> None:
+    """List facets (currently just ``domain``) need the ``NOT EXISTS``
+    branch in the generated SQL; otherwise scalar negation would
+    over-match. Pin the list-facet branch separately."""
+    doc_store.put(
+        None,
+        "data pipeline keeper",
+        {"content_tags": {"domain": ["data-pipeline"]}},
+    )
+    doc_store.put(
+        None,
+        "infra dropper",
+        {"content_tags": {"domain": ["infrastructure"]}},
+    )
+
+    results = doc_store.search(
+        "keeper OR dropper",
+        filters={"content_tags": {"domain": {"not_in": ["infrastructure"]}}},
+    )
+    contents = {r["content"] for r in results}
+    assert "data pipeline keeper" in contents
+    assert "infra dropper" not in contents
+
+
+def test_search_not_in_keeps_untagged_default_pass(
+    doc_store: SQLiteDocumentStore,
+) -> None:
+    """``not_in`` must respect the same default-pass policy as ``in``:
+    untagged items survive the filter. Otherwise switching from
+    list-form to ``not_in`` would silently start excluding every
+    untagged item — a contract regression."""
+    doc_store.put(
+        None,
+        "tagged noise filler",
+        {"content_tags": {"signal_quality": "noise"}},
+    )
+    doc_store.put(None, "untagged plain filler")
+
+    results = doc_store.search(
+        "filler",
+        filters={"content_tags": {"signal_quality": {"not_in": ["noise"]}}},
+    )
+    contents = {r["content"] for r in results}
+    assert "untagged plain filler" in contents
+    assert "tagged noise filler" not in contents
+
+
+def test_search_with_invalid_operator_raises(doc_store: SQLiteDocumentStore) -> None:
+    """Validation errors from the shared helper must propagate to the
+    caller — silent no-ops are the failure mode the new shape was
+    designed to eliminate."""
+    doc_store.put(None, "any reference", {"content_tags": {"signal_quality": "high"}})
+    with pytest.raises(ValueError, match="unknown operator"):
+        doc_store.search(
+            "reference",
+            filters={"content_tags": {"signal_quality": {"contains": ["x"]}}},
+        )
