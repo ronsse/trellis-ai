@@ -12,7 +12,7 @@ opt-in local invocations can dial them back in selectively.
 
 Why rewrite the ``-m`` expression instead of just unmarking nodes?
 ``addopts`` runs before ``pytest_collection_modifyitems`` and pytest's mark
-filter is applied at collection. Removing markers from items inside this
+filter is applied at collection. Removing markers from items inside that
 hook fights the filter rather than working with it. Editing
 ``config.option.markexpr`` directly tells pytest "the user wants these
 markers in" before the filter ever runs. See docs/agent-guide/testing.md
@@ -83,28 +83,16 @@ def _env_truthy(name: str) -> bool:
 
 
 def _strip_not_marker(expr: str, marker: str) -> str:
-    """Remove ``not <marker>`` segments from a pytest -m expression.
+    """Drop ``not <marker>`` clauses from an ``and``-joined pytest -m expression.
 
-    Handles the three shapes that show up in our addopts string:
-      - ``not <marker> and <rest>``     (leading clause)
-      - ``<rest> and not <marker>``     (trailing or middle clause)
-      - ``not <marker>``                 (sole clause)
-
-    Other shapes pass through unchanged. Whitespace is normalised
-    afterward so the resulting expression is what pytest expects.
+    Splits on ``and``, filters out the segment that matches the marker, and
+    rejoins. Whitespace inside each segment is normalised so input like
+    ``"not live  and not slow"`` round-trips cleanly. ``or`` expressions are
+    not split — addopts only ever ships ``and`` chains today.
     """
-    # `not foo and ` (leading) or ` and not foo` (trailing / middle) —
-    # word boundaries on the marker name prevent `not neo` from also
-    # matching `not neo4j`.
-    patterns = (
-        rf"\bnot\s+{re.escape(marker)}\b\s+and\s+",
-        rf"\s+and\s+\bnot\s+{re.escape(marker)}\b",
-        rf"\bnot\s+{re.escape(marker)}\b",
-    )
-    out = expr
-    for pat in patterns:
-        out = re.sub(pat, " ", out)
-    return re.sub(r"\s+", " ", out).strip()
+    target = f"not {marker}"
+    segments = [seg.strip() for seg in re.split(r"\s+and\s+", expr.strip())]
+    return " and ".join(seg for seg in segments if seg and seg != target)
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -122,20 +110,4 @@ def pytest_configure(config: pytest.Config) -> None:
         if config.getoption(opt_attr, default=False) or _env_truthy(env_var):
             for marker in markers:
                 expr = _strip_not_marker(expr, marker)
-    # Trim a dangling `and`/`or` that could remain after stripping.
-    expr = re.sub(r"^(and|or)\s+", "", expr)
-    expr = re.sub(r"\s+(and|or)$", "", expr)
     config.option.markexpr = expr
-
-
-def pytest_collection_modifyitems(
-    config: pytest.Config, items: list[pytest.Item]
-) -> None:
-    """No-op hook held in place for clarity.
-
-    The actual gating happens in ``pytest_configure`` via mark-expression
-    rewriting (which runs before pytest's built-in filter). This stub
-    documents the contract for readers who expect to find the logic here
-    per the F1 task brief.
-    """
-    del config, items  # gating is done earlier; nothing to do at this stage.

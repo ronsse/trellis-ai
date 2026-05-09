@@ -45,26 +45,6 @@ import pytest
 pytestmark = pytest.mark.live
 
 
-def _live_server_reachable(url: str) -> bool:
-    """Return True if ``GET {url}/healthz`` returns *any* HTTP response.
-
-    Used as a belt-and-braces skip guard: F1's ``--include-live`` flag
-    is the primary gate (default-deselects every ``live``-marked test),
-    but until F1 lands on ``main`` the marker only emits a warning and
-    pytest will still execute the body. Probing ``/healthz`` here turns
-    "no compose stack running" into a clean skip rather than a
-    ConnectError failure under a default ``make test`` run.
-
-    Once F1 ships, this fallback becomes a no-op (the runner deselects
-    the file before the fixture ever evaluates).
-    """
-    try:
-        httpx.get(f"{url}/healthz", timeout=1.0)
-    except httpx.HTTPError:
-        return False
-    return True
-
-
 # ULID pattern matching deploy/smoke.sh's grep -oE '[0-9A-Z]{26}' — Crockford
 # base32, fixed 26-char width. Keep in sync if the trace_id format ever changes.
 _ULID_RE = re.compile(r"[0-9A-Z]{26}")
@@ -82,17 +62,16 @@ _SMOKE_TRACE_BODY: dict[str, object] = {
 }
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def base_url() -> str:
     """Resolve the orchestrator base URL the same way ``deploy/smoke.sh`` does.
 
     Reads ``TRELLIS_BASE_URL`` (the same env var the bash script reads)
     and falls back to ``http://localhost:8420`` — the docker-compose
-    published port. Skips the test when no live server is reachable so
-    a default ``make test`` invocation can't fail on developer machines
-    that don't have the compose stack up. Once F1's ``--include-live``
-    gate lands, this skip is unreachable in practice — the runner
-    deselects the whole file first.
+    published port. Probes ``/healthz`` once per module so a missing
+    compose stack turns into a clean skip for every test in this file
+    rather than a ConnectError per test. ``--include-live`` is the
+    primary gate; this probe is belt-and-braces for runs that bypass it.
 
     Returning a plain ``str`` rather than a fixture that pre-builds an
     ``httpx.Client`` keeps each test free to choose its own timeout /
@@ -100,7 +79,9 @@ def base_url() -> str:
     does.
     """
     url = os.environ.get("TRELLIS_BASE_URL", "http://localhost:8420")
-    if not _live_server_reachable(url):
+    try:
+        httpx.get(f"{url}/healthz", timeout=1.0)
+    except httpx.HTTPError:
         pytest.skip(
             f"no live Trellis API at {url} — start the docker-compose "
             f"stack (deploy/) or set TRELLIS_BASE_URL to a running instance"

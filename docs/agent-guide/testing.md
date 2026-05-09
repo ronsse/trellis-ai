@@ -88,25 +88,14 @@ pytest -m live --collect-only
 
 ## How the gating works
 
-`addopts` in `pyproject.toml` ships with a hard `-m "not live and not slow
-and not neo and not neo4j and not postgres and not pgvector and not
-lancedb"` filter. By default pytest deselects every test that carries any
-of those markers.
-
-`tests/conftest.py` registers `--include-<name>` flags. When `pytest`
-starts, `pytest_configure` reads the flags and the matching env vars,
-then strips the matching `not <marker>` segments from the active mark
-expression. The resulting filter is what pytest's standard collection
-filter sees. This means:
+`tests/conftest.py:pytest_configure` reads the `--include-<name>` flags
+and the matching env vars, then strips matching `not <marker>` segments
+from the active `-m` expression before pytest's collection filter runs.
+This means:
 
 - `pytest --include-live` re-enables tests carrying `live` while keeping
   the other exclusions intact (so `live + slow` tests still get filtered
   unless you also pass `--include-slow`).
 - `pytest -m live` (without `--include-live`) **also** works — passing
-  `-m` on the command line replaces the filter wholesale, so the
-  exclusion no longer applies to the explicitly-requested marker.
-
-The conftest rewrites the expression rather than unmarking nodes after
-collection because pytest's own filter runs at collection time;
-post-collection unmarking would have to fight that filter rather than
-work with it.
+  `-m` on the command line replaces the filter wholesale, so the default
+  exclusions no longer apply to the explicitly-requested marker.
