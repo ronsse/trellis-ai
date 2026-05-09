@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -58,10 +59,15 @@ search = _unwrap(_search)
 
 
 @pytest.fixture(autouse=True)
-def _suppress_structlog() -> None:
+def _suppress_structlog() -> Iterator[None]:
+    prior = structlog.get_config()
     structlog.configure(
         wrapper_class=structlog.make_filtering_bound_logger(logging.CRITICAL),
     )
+    try:
+        yield
+    finally:
+        structlog.configure(**prior)
 
 
 @pytest.fixture(autouse=True)
