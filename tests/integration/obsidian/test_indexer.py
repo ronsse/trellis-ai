@@ -12,8 +12,8 @@ from examples.integrations.obsidian.indexer import (
 )
 from examples.integrations.obsidian.vault import ObsidianVault
 
-from trellis.stores.document import SQLiteDocumentStore
-from trellis.stores.graph import SQLiteGraphStore
+from trellis.stores.sqlite.document import SQLiteDocumentStore
+from trellis.stores.sqlite.graph import SQLiteGraphStore
 
 
 @pytest.fixture

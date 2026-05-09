@@ -16,7 +16,8 @@ from trellis.schemas.extraction import (
     ExtractionProvenance,
     ExtractionResult,
 )
-from trellis.stores.event_log import EventType, SQLiteEventLog
+from trellis.stores.base.event_log import EventType
+from trellis.stores.sqlite.event_log import SQLiteEventLog
 
 
 def _make_extractor(

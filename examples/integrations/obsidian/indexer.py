@@ -13,8 +13,8 @@ from pydantic import Field
 
 from .vault import ObsidianVault
 from trellis.core.base import TrellisModel
-from trellis.stores.document import DocumentStore
-from trellis.stores.graph import GraphStore
+from trellis.stores.base.document import DocumentStore
+from trellis.stores.base.graph import GraphStore
 
 logger = structlog.get_logger(__name__)
 
