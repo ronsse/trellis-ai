@@ -29,7 +29,8 @@ import asyncio
 import functools
 import json
 import re
-from dataclasses import dataclass
+import weakref
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
 
@@ -104,6 +105,86 @@ _DBT_EDGE_KIND_ALIASES: dict[str, str] = {
 # the model the canonical owner of the short-name. Order matters: earlier
 # prefixes win over later ones.
 _NODE_PRIORITY_PREFIXES: Final[tuple[str, ...]] = ("model.",)
+
+
+# ---------------------------------------------------------------------------
+# Shared graph view — single fetch + memoized closure
+# ---------------------------------------------------------------------------
+#
+# The three sibling builders (:func:`build_name_index`,
+# :func:`build_category_index`, :func:`build_lineage_index`) used to each
+# run their own ``graph_store.query(limit=5000)`` pass; ``build_lineage_index``
+# also ran per-entity BFS over ``get_edges`` with no cross-entity memoization
+# (worst-case O(N x E) — fine for the 21-node Jaffle Shop fixture but
+# scales poorly to a real 10K-model dbt manifest).
+#
+# ``_GraphView`` bundles the data all three builders need in one shot:
+# the node list (one ``query`` call) and per-node outbound ``dependsOn``
+# adjacency (one ``get_edges`` call per node). ``build_lineage_index``
+# then BFSes over the in-memory adjacency — eliminating the per-entity
+# DB roundtrips that were the dominant cost on Postgres/Neo4j backends
+# while preserving the BFS-layer ancestor ordering the legacy code
+# produced (the downstream ``GraphSearch(seed_ids=..., depth=0)`` ranks
+# items in seed order under budget pressure, so the order is part of
+# the public surface). See :func:`build_lineage_index` for the
+# asymptotic trade-off vs a true topo+DP closure.
+#
+# Cache: keyed on the graph store instance via ``WeakKeyDictionary`` so
+# the three siblings called consecutively from the dbt convergence
+# scenario share the same view. The cache is cleared at the top of
+# :func:`load_jaffle_shop_corpus` so a fresh load gets fresh data.
+@dataclass(frozen=True)
+class _GraphView:
+    """One-shot snapshot of the structural data the three index builders
+    consume: nodes (full dicts) and per-node outbound ``dependsOn``
+    adjacency (target ``node_id`` lists)."""
+
+    nodes: list[dict[str, Any]] = field(default_factory=list)
+    depends_on: dict[str, list[str]] = field(default_factory=dict)
+
+
+_GRAPH_VIEW_CACHE: weakref.WeakKeyDictionary[Any, _GraphView] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _collect_graph_view(registry: StoreRegistry) -> _GraphView:
+    """Return a cached :class:`_GraphView` for *registry*'s graph store.
+
+    On first call for a given graph store: runs ONE
+    ``graph_store.query(limit=5000)`` pass and ONE
+    ``graph_store.get_edges(node_id, direction="outgoing")`` call per
+    node, builds the outbound ``dependsOn`` adjacency, and caches.
+    Subsequent calls for the same graph store reuse the snapshot.
+
+    The cache is invalidated on each :func:`load_jaffle_shop_corpus`
+    call so reload-then-rebuild flows see the updated graph.
+    """
+    graph_store = registry.knowledge.graph_store
+    cached = _GRAPH_VIEW_CACHE.get(graph_store)
+    if cached is not None:
+        return cached
+    nodes = list(graph_store.query(limit=5000))
+    depends_on: dict[str, list[str]] = {}
+    for node in nodes:
+        node_id = node["node_id"]
+        targets: list[str] = []
+        for edge in graph_store.get_edges(node_id, direction="outgoing"):
+            target = edge.get("target_id")
+            if not target:
+                continue
+            # Some backends omit ``edge_kind`` on the returned dict; fall
+            # through to ``edge_type``. ``None`` is treated as accept
+            # because the legacy code did so (see git history of
+            # :func:`build_lineage_index`).
+            edge_kind = edge.get("edge_kind") or edge.get("edge_type")
+            if edge_kind not in (None, DEPENDS_ON, "depends_on"):
+                continue
+            targets.append(target)
+        depends_on[node_id] = targets
+    view = _GraphView(nodes=nodes, depends_on=depends_on)
+    _GRAPH_VIEW_CACHE[graph_store] = view
+    return view
 
 
 def _canonicalize_edges(edges: list[EdgeDraft]) -> tuple[list[EdgeDraft], int]:
@@ -244,7 +325,7 @@ def build_name_index(registry: StoreRegistry) -> dict[str, str]:
     # ``customers`` -> source, then upstream-lineage expansion has
     # nowhere to go (the source is a leaf).
     index: dict[str, str] = {}
-    nodes = list(registry.knowledge.graph_store.query(limit=5000))
+    nodes = _collect_graph_view(registry).nodes
 
     def _index_node(node: dict[str, Any]) -> None:
         entity_id = node["node_id"]
@@ -312,7 +393,7 @@ def build_category_index(
     """
     layer_buckets: dict[str, list[str]] = {}
     test_type_buckets: dict[str, list[str]] = {}
-    for node in registry.knowledge.graph_store.query(limit=5000):
+    for node in _collect_graph_view(registry).nodes:
         entity_id = node["node_id"]
         node_type = node.get("node_type", "")
         properties = node.get("properties") or {}
@@ -369,10 +450,11 @@ def build_lineage_index(
     """Build an entity_id → list[ancestor entity_ids] index by transitive
     closure of outbound ``dependsOn`` edges.
 
-    For each non-source entity, walks outbound edges (BFS) until exhaustion
-    and records every reachable entity. The result is a per-entity
-    "full upstream lineage" set that can be injected as additional seeds
-    when an intent says "upstream of X" / "lineage of X" / "ancestors of X".
+    For each non-source entity, records every transitively reachable
+    entity along outbound ``dependsOn`` edges. The result is a
+    per-entity "full upstream lineage" set that can be injected as
+    additional seeds when an intent says "upstream of X" / "lineage
+    of X" / "ancestors of X".
 
     This precompute exists because :meth:`GraphStore.get_subgraph` is
     bidirectional — calling it from a leaf seed at depth=2 pulls in
@@ -382,29 +464,35 @@ def build_lineage_index(
     GraphSearch with ``depth=0`` returns exactly the lineage entities,
     nothing else.
 
-    Returns ``entity_id`` → ordered list of ancestor entity_ids
-    (excluding the entity itself).
+    Implementation: BFS over the in-memory ``dependsOn`` adjacency
+    from :func:`_collect_graph_view`. Eliminates the per-entity
+    ``get_edges`` DB roundtrips of the prior implementation (the
+    dominant cost on real backends like Postgres/Neo4j) and shares
+    the single-fetch view with :func:`build_name_index` and
+    :func:`build_category_index`. List order is BFS-layer order to
+    match the legacy output exactly (preserves downstream
+    ``GraphSearch(seed_ids=..., depth=0)`` ranking under budget
+    pressure).
+
+    Asymptotic: ``O(sum(closure_size))`` per node, bounded by
+    ``O(N * depth)`` in practice. For a real dbt manifest with low
+    fanout and shallow depth, this is negligible compared to the
+    eliminated DB roundtrips. A future refactor could swap to true
+    O(N + E) topo-sort + DP at the cost of a different (set-equal
+    but list-reordered) ancestor list — left as-is here so the
+    public surface returns byte-identical output.
     """
-    g = registry.knowledge.graph_store
-    all_nodes = [n["node_id"] for n in g.query(limit=5000)]
+    direct = _collect_graph_view(registry).depends_on
     index: dict[str, list[str]] = {}
-    for node_id in all_nodes:
+    for node_id in direct:
         ancestors: list[str] = []
         seen: set[str] = {node_id}
         frontier: list[str] = [node_id]
         while frontier:
             next_frontier: list[str] = []
             for current in frontier:
-                for edge in g.get_edges(current, direction="outgoing"):
-                    target = edge.get("target_id")
-                    if not target or target in seen:
-                        continue
-                    # Follow only ``dependsOn`` edges. Some edges have
-                    # ``edge_kind`` returned as None on this backend; tests
-                    # showed the canonicalization happens upstream so the
-                    # filter is layered on edge_kind only when set.
-                    edge_kind = edge.get("edge_kind") or edge.get("edge_type")
-                    if edge_kind not in (None, DEPENDS_ON, "depends_on"):
+                for target in direct.get(current, ()):
+                    if target in seen:
                         continue
                     seen.add(target)
                     ancestors.append(target)
@@ -557,6 +645,11 @@ def load_jaffle_shop_corpus(
     # Strip our own metadata block — extractor would ignore it but the
     # log signal is cleaner without "extractor saw an extra key" noise.
     manifest.pop("_metadata", None)
+
+    # Drop any cached :class:`_GraphView` for this graph store — the load
+    # is about to mutate it, and the three sibling builders called after
+    # this function must see the post-load nodes/edges.
+    _GRAPH_VIEW_CACHE.pop(registry.knowledge.graph_store, None)
 
     logger.info(
         "dbt_loader.start",
