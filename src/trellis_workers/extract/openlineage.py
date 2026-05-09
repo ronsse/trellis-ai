@@ -114,6 +114,12 @@ class OpenLineageExtractor:
                     },
                 )
 
+            # OpenLineage events stream in chunks: a job emitted in one
+            # batch may reference a dataset already extracted in a prior
+            # batch (or vice versa).  Mark edges allow_dangling so the FK
+            # pre-flight in LinkCreateHandler doesn't reject cross-batch
+            # references.  Within a single batch _ensure_dataset still
+            # registers the entity, so the strict path is also satisfied.
             for inp in event.get("inputs", []) or []:
                 did = _ensure_dataset(inp, seen)
                 if did:
@@ -122,6 +128,7 @@ class OpenLineageExtractor:
                             source_id=jid,
                             target_id=did,
                             edge_kind="reads_from",
+                            allow_dangling=True,
                         )
                     )
 
@@ -133,6 +140,7 @@ class OpenLineageExtractor:
                             source_id=jid,
                             target_id=did,
                             edge_kind="writes_to",
+                            allow_dangling=True,
                         )
                     )
 

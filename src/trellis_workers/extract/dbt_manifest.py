@@ -114,11 +114,17 @@ class DbtManifestExtractor:
             dep_nodes = (
                 depends_on.get("nodes", []) if isinstance(depends_on, dict) else []
             )
+            # depends_on targets may live in a separate manifest (e.g. a
+            # downstream project depending on an upstream package), so the
+            # referenced unique_id won't necessarily be in the same batch.
+            # Mark these edges as allow_dangling so the FK pre-flight in
+            # LinkCreateHandler doesn't reject cross-manifest references.
             edges.extend(
                 EdgeDraft(
                     source_id=unique_id,
                     target_id=dep_id,
                     edge_kind="depends_on",
+                    allow_dangling=True,
                 )
                 for dep_id in dep_nodes
             )
