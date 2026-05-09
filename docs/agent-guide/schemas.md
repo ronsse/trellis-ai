@@ -866,8 +866,6 @@ Examples of domain-specific edge types: `reads_from`, `writes_to`, `materializes
 | `feedback.record` | Curate | Record feedback |
 | `redaction.apply` | Maintain | Redact content |
 | `retention.prune` | Maintain | Run retention pruning |
-| `pack.publish` | Maintain | Publish a context pack |
-| `pack.invalidate` | Maintain | Invalidate a pack |
 
 ### CommandStatus
 

@@ -640,8 +640,6 @@ result = executor.execute(cmd)
 |-----------|---------------|-------------|
 | `redaction.apply` | `target_id`, `reason` | Redact content from a target |
 | `retention.prune` | (none) | Run retention pruning |
-| `pack.publish` | `pack` (dict) | Publish a context pack |
-| `pack.invalidate` | `pack_id` | Invalidate a published pack |
 
 ### Batch Execution
 
