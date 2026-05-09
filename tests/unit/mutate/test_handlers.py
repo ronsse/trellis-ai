@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from trellis.errors import ValidationError
 from trellis.mutate.commands import Command, Operation
 from trellis.mutate.handlers import (
     EntityCreateHandler,
@@ -162,7 +163,7 @@ class TestLinkCreateHandler:
                 "edge_kind": "related_to",
             },
         )
-        with pytest.raises(ValueError, match="Source node not found"):
+        with pytest.raises(ValidationError, match="source_id="):
             handler.handle(cmd)
 
     def test_missing_target(self, registry: StoreRegistry) -> None:
@@ -178,7 +179,7 @@ class TestLinkCreateHandler:
                 "edge_kind": "related_to",
             },
         )
-        with pytest.raises(ValueError, match="Target node not found"):
+        with pytest.raises(ValidationError, match="target_id="):
             handler.handle(cmd)
 
 
