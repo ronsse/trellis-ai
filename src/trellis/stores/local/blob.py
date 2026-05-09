@@ -75,14 +75,14 @@ class LocalBlobStore(BlobStore):
         if not base.exists():
             return []
         keys = [
-            str(p.relative_to(self._root))
+            p.relative_to(self._root).as_posix()
             for p in base.rglob("*")
             if p.is_file() and ".meta" not in p.parts
         ]
         return sorted(keys)
 
     def get_uri(self, key: str) -> str:
-        return f"file://{(self._root / key).resolve()}"
+        return f"file://{(self._root / key).resolve().as_posix()}"
 
     def sweep_expired(
         self,
