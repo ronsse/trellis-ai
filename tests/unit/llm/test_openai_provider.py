@@ -222,23 +222,46 @@ class TestExtractUsage:
 # -- Tests: import error handling ------------------------------------------
 
 
+def _block_module_import(monkeypatch: pytest.MonkeyPatch, blocked: str) -> None:
+    """Make ``import <blocked>`` raise ModuleNotFoundError; pass everything else."""
+    import builtins
+
+    real_import = builtins.__import__
+    msg = f"No module named '{blocked}'"
+
+    def guarded_import(name: str, *args: object, **kwargs: object) -> object:
+        if name == blocked:
+            raise ModuleNotFoundError(msg)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+
+
+def _install_fake_openai_module(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[dict[str, object]]:
+    """Install a stub ``openai`` module whose AsyncOpenAI captures kwargs.
+
+    Returns the captured-kwargs list — each constructor call appends one entry.
+    """
+    captured: list[dict[str, object]] = []
+
+    class FakeAsyncOpenAI:
+        def __init__(self, **kwargs: object) -> None:
+            captured.append(kwargs)
+
+    fake_module = ModuleType("openai")
+    fake_module.AsyncOpenAI = FakeAsyncOpenAI  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "openai", fake_module)
+    return captured
+
+
 class TestImportGuard:
     def test_module_not_found_when_openai_missing(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """If the openai SDK cannot be imported, raise a helpful error."""
-        import builtins
-
-        real_import = builtins.__import__
-
-        msg = "No module named 'openai'"
-
-        def guarded_import(name: str, *args: object, **kwargs: object) -> object:
-            if name == "openai":
-                raise ModuleNotFoundError(msg)
-            return real_import(name, *args, **kwargs)
-
-        monkeypatch.setattr(builtins, "__import__", guarded_import)
+        _block_module_import(monkeypatch, "openai")
         with pytest.raises(ModuleNotFoundError, match="llm-openai"):
             OpenAIClient(api_key="sk-test")
 
@@ -246,18 +269,7 @@ class TestImportGuard:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """The same guard fires for the embedder constructor path."""
-        import builtins
-
-        real_import = builtins.__import__
-
-        msg = "No module named 'openai'"
-
-        def guarded_import(name: str, *args: object, **kwargs: object) -> object:
-            if name == "openai":
-                raise ModuleNotFoundError(msg)
-            return real_import(name, *args, **kwargs)
-
-        monkeypatch.setattr(builtins, "__import__", guarded_import)
+        _block_module_import(monkeypatch, "openai")
         with pytest.raises(ModuleNotFoundError, match="llm-openai"):
             OpenAIEmbedder(api_key="sk-test")
 
@@ -350,16 +362,7 @@ class TestConstructorKwargs:
     ) -> None:
         """The adapter forwards ``api_key`` and ``base_url`` to AsyncOpenAI
         only when they are non-empty."""
-        captured: list[dict[str, object]] = []
-
-        class FakeAsyncOpenAI:
-            def __init__(self, **kwargs: object) -> None:
-                captured.append(kwargs)
-
-        fake_module = ModuleType("openai")
-        fake_module.AsyncOpenAI = FakeAsyncOpenAI  # type: ignore[attr-defined]
-        monkeypatch.setitem(sys.modules, "openai", fake_module)
-
+        captured = _install_fake_openai_module(monkeypatch)
         OpenAIClient(api_key="sk-test", base_url="https://example/api")
         OpenAIEmbedder(api_key="sk-test-2", base_url="https://example/emb")
         assert captured == [
@@ -370,16 +373,7 @@ class TestConstructorKwargs:
     def test_build_async_client_omits_unset_kwargs(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        captured: list[dict[str, object]] = []
-
-        class FakeAsyncOpenAI:
-            def __init__(self, **kwargs: object) -> None:
-                captured.append(kwargs)
-
-        fake_module = ModuleType("openai")
-        fake_module.AsyncOpenAI = FakeAsyncOpenAI  # type: ignore[attr-defined]
-        monkeypatch.setitem(sys.modules, "openai", fake_module)
-
+        captured = _install_fake_openai_module(monkeypatch)
         OpenAIClient()
         OpenAIEmbedder()
         assert captured == [{}, {}]

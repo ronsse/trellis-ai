@@ -194,23 +194,43 @@ class TestExtractUsage:
 # -- Tests: import error handling ------------------------------------------
 
 
+def _block_module_import(monkeypatch: pytest.MonkeyPatch, blocked: str) -> None:
+    """Make ``import <blocked>`` raise ModuleNotFoundError; pass everything else."""
+    import builtins
+
+    real_import = builtins.__import__
+    msg = f"No module named '{blocked}'"
+
+    def guarded_import(name: str, *args: object, **kwargs: object) -> object:
+        if name == blocked:
+            raise ModuleNotFoundError(msg)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+
+
+def _install_fake_anthropic_module(
+    monkeypatch: pytest.MonkeyPatch,
+) -> dict[str, object]:
+    """Install a stub ``anthropic`` module whose AsyncAnthropic captures kwargs."""
+    captured: dict[str, object] = {}
+
+    class FakeAsyncAnthropic:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+    fake_module = ModuleType("anthropic")
+    fake_module.AsyncAnthropic = FakeAsyncAnthropic  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "anthropic", fake_module)
+    return captured
+
+
 class TestImportGuard:
     def test_module_not_found_when_anthropic_missing(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """If the anthropic SDK cannot be imported, raise a helpful error."""
-        import builtins
-
-        real_import = builtins.__import__
-
-        msg = "No module named 'anthropic'"
-
-        def guarded_import(name: str, *args: object, **kwargs: object) -> object:
-            if name == "anthropic":
-                raise ModuleNotFoundError(msg)
-            return real_import(name, *args, **kwargs)
-
-        monkeypatch.setattr(builtins, "__import__", guarded_import)
+        _block_module_import(monkeypatch, "anthropic")
         with pytest.raises(ModuleNotFoundError, match="llm-anthropic"):
             AnthropicClient(api_key="sk-ant-test")
 
@@ -270,16 +290,7 @@ class TestConstructorKwargs:
     ) -> None:
         """The adapter forwards ``api_key`` and ``base_url`` to AsyncAnthropic
         only when they are non-empty."""
-        captured: dict[str, object] = {}
-
-        class FakeAsyncAnthropic:
-            def __init__(self, **kwargs: object) -> None:
-                captured.update(kwargs)
-
-        fake_module = ModuleType("anthropic")
-        fake_module.AsyncAnthropic = FakeAsyncAnthropic  # type: ignore[attr-defined]
-        monkeypatch.setitem(sys.modules, "anthropic", fake_module)
-
+        captured = _install_fake_anthropic_module(monkeypatch)
         AnthropicClient(api_key="sk-ant-test", base_url="https://example/api")
         assert captured == {
             "api_key": "sk-ant-test",
@@ -291,16 +302,7 @@ class TestConstructorKwargs:
     ) -> None:
         """Falsy ``api_key`` / ``base_url`` are not forwarded — the SDK falls
         back to its own env-based default."""
-        captured: dict[str, object] = {}
-
-        class FakeAsyncAnthropic:
-            def __init__(self, **kwargs: object) -> None:
-                captured.update(kwargs)
-
-        fake_module = ModuleType("anthropic")
-        fake_module.AsyncAnthropic = FakeAsyncAnthropic  # type: ignore[attr-defined]
-        monkeypatch.setitem(sys.modules, "anthropic", fake_module)
-
+        captured = _install_fake_anthropic_module(monkeypatch)
         AnthropicClient()
         assert captured == {}
 
@@ -338,9 +340,7 @@ class TestExtractTextEdgeCases:
 class TestExtractUsageEdgeCases:
     def test_zero_tokens(self) -> None:
         usage = _extract_usage(SimpleNamespace(input_tokens=0, output_tokens=0))
-        assert usage == TokenUsage(
-            prompt_tokens=0, completion_tokens=0, total_tokens=0
-        )
+        assert usage == TokenUsage(prompt_tokens=0, completion_tokens=0, total_tokens=0)
 
     def test_missing_attrs_default_to_zero(self) -> None:
         # ``getattr(..., 0)`` fallback for absent input/output token attrs.
@@ -349,9 +349,7 @@ class TestExtractUsageEdgeCases:
 
     def test_none_token_attrs_coerced_to_zero(self) -> None:
         # Defensive: SDK may yield ``None`` rather than omitting the attr.
-        usage = _extract_usage(
-            SimpleNamespace(input_tokens=None, output_tokens=None)
-        )
+        usage = _extract_usage(SimpleNamespace(input_tokens=None, output_tokens=None))
         assert usage == TokenUsage()
 
 
