@@ -154,6 +154,19 @@ _PLANE_PG_DSN_ENV: dict[str, str] = {
 _VALIDATE_CONNECTIVITY_ENV = "TRELLIS_VALIDATE_CONNECTIVITY"
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 
+# Fingerprint-mismatch check (Logic Gap 4.5). On by default; the env var
+# bypasses for migration windows where a substrate is being swapped or
+# upgraded and the operator has accepted the staleness risk for the
+# transition. Read at validate-time so the same registry instance can
+# flip behaviour between runs.
+_FINGERPRINT_SKIP_ENV = "TRELLIS_SKIP_FINGERPRINT_CHECK"
+_FINGERPRINT_META_FILENAME = "_trellis_meta.json"
+# Default schema version when a substrate class doesn't override
+# ``SCHEMA_VERSION``. Bumping this is a fleet-wide migration event;
+# bumping the per-class constant on a single substrate is the normal
+# path when only that substrate's schema changes.
+_DEFAULT_SCHEMA_VERSION = "1"
+
 
 def _resolve_connectivity_check(explicit: bool | None) -> bool:
     """Return the effective connectivity-check flag for a validate() call."""
@@ -872,6 +885,151 @@ class StoreRegistry:
                 failures.append((store_type, ConfigError(err_msg, setting=param)))
         return failures
 
+    def _resolve_substrate_class(self, store_type: str) -> type | None:
+        """Import and return the substrate class for ``store_type``, or None.
+
+        Used by :meth:`_check_schema_fingerprints` to read the
+        ``SCHEMA_VERSION`` class attribute without paying the cost of
+        a full ``_instantiate`` (which opens connections, creates files,
+        etc.). Returns ``None`` when the backend can't be resolved at
+        all — the regular instantiation path will surface that with a
+        better error.
+        """
+        backend, _ = self._resolve_backend(store_type)
+        registry = _get_merged_backends(store_type)
+        spec = registry.get(backend)
+        if spec is None:
+            return None
+        module_path, class_name = spec
+        try:
+            import importlib  # noqa: PLC0415
+
+            module = importlib.import_module(module_path)
+            cls = getattr(module, class_name, None)
+            return cls if isinstance(cls, type) else None
+        except Exception:
+            # Import failures are surfaced by the instantiation path;
+            # don't double-report here.
+            return None
+
+    def _compute_fingerprints(self, store_types: Iterable[str]) -> dict[str, str]:
+        """Compute the configured fingerprint per store_type.
+
+        Format: ``"{store_kind}/{backend}/v{SCHEMA_VERSION}"``. The
+        backend name distinguishes substrate swaps; the version
+        distinguishes within-substrate schema changes. Together they
+        give us a single string that flips whenever the on-disk shape
+        is no longer compatible with what we wrote last boot.
+        """
+        out: dict[str, str] = {}
+        for store_type in store_types:
+            backend, _ = self._resolve_backend(store_type)
+            cls = self._resolve_substrate_class(store_type)
+            version = (
+                str(getattr(cls, "SCHEMA_VERSION", _DEFAULT_SCHEMA_VERSION))
+                if cls is not None
+                else _DEFAULT_SCHEMA_VERSION
+            )
+            out[store_type] = f"{store_type}/{backend}/v{version}"
+        return out
+
+    def _fingerprint_meta_path(self) -> Path | None:
+        """Return the on-disk path for the fingerprint meta file, or None.
+
+        Returns ``None`` when ``stores_dir`` isn't configured — an
+        all-remote deployment (postgres + s3 + neo4j with no local
+        sqlite) has nowhere natural to write the file. In that case
+        the check is silently skipped; the alternative would require
+        every substrate to grow its own metadata table, which is out
+        of scope for this unit (Logic Gap 4.5).
+        """
+        if self._stores_dir is None:
+            return None
+        return self._stores_dir / _FINGERPRINT_META_FILENAME
+
+    def _load_fingerprint_meta(self) -> dict[str, str]:
+        """Read the persisted fingerprint map; empty dict on first boot."""
+        path = self._fingerprint_meta_path()
+        if path is None or not path.exists():
+            return {}
+        try:
+            import json  # noqa: PLC0415
+
+            data = json.loads(path.read_text())
+        except (OSError, ValueError):
+            logger.warning("fingerprint_meta_read_failed", path=str(path))
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        return {str(k): str(v) for k, v in data.items()}
+
+    def _write_fingerprint_meta(self, meta: dict[str, str]) -> None:
+        """Persist the fingerprint map; best-effort (logs and continues on error)."""
+        path = self._fingerprint_meta_path()
+        if path is None:
+            return
+        try:
+            import json  # noqa: PLC0415
+
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(meta, indent=2, sort_keys=True))
+        except OSError:
+            logger.warning("fingerprint_meta_write_failed", path=str(path))
+
+    def _check_schema_fingerprints(
+        self, store_types: Iterable[str]
+    ) -> tuple[list[tuple[str, Exception]], dict[str, str]]:
+        """Compare configured vs stored fingerprints; return (errors, to_write).
+
+        First-boot semantics: a missing entry is not an error — the
+        configured fingerprint is queued for write after instantiation
+        succeeds, so we don't lock in a fingerprint for a store that
+        couldn't actually start. Mismatched entries become
+        :class:`ConfigError`. ``TRELLIS_SKIP_FINGERPRINT_CHECK=1``
+        bypasses both branches.
+        """
+        import os  # noqa: PLC0415
+
+        if os.environ.get(_FINGERPRINT_SKIP_ENV, "").strip().lower() in _TRUTHY:
+            logger.debug("schema_fingerprint_check_skipped_env")
+            return [], {}
+
+        # No on-disk place to put the meta file → no-op. All-remote
+        # deployments (no sqlite/local-blob ⇒ no stores_dir) pay no
+        # tax for the check; the threat model degrades gracefully to
+        # ``no protection`` rather than ``boot crash``.
+        if self._fingerprint_meta_path() is None:
+            logger.debug("schema_fingerprint_check_skipped_no_stores_dir")
+            return [], {}
+
+        targets = list(store_types)
+        configured = self._compute_fingerprints(targets)
+        stored = self._load_fingerprint_meta()
+
+        errors: list[tuple[str, Exception]] = []
+        to_write: dict[str, str] = {}
+        for store_type in targets:
+            want = configured[store_type]
+            have = stored.get(store_type)
+            if have is None:
+                # First boot for this store — queue the write.
+                to_write[store_type] = want
+                continue
+            if have == want:
+                continue
+            msg = (
+                f"SchemaFingerprintMismatch: store '{store_type}' "
+                f"(plane={_PLANE_OF.get(store_type, '?')}): "
+                f"configured fingerprint '{want}' != stored fingerprint '{have}'. "
+                "Substrate schema may be out of date. Run migrations or switch "
+                f"substrate, or set {_FINGERPRINT_SKIP_ENV}=1 to bypass during a "
+                "migration window."
+            )
+            errors.append(
+                (store_type, ConfigError(msg, setting=f"stores.{store_type}.backend"))
+            )
+        return errors, to_write
+
     def _check_embedding_dim_consistency(self) -> list[tuple[str, Exception]]:
         """Ensure ``vector`` and ``graph`` configs agree on ``embedding_dim``.
 
@@ -964,9 +1122,19 @@ class StoreRegistry:
         errors.extend(self._check_uri_formats(targets))
         errors.extend(self._check_embedding_dim_consistency())
 
+        # Schema-fingerprint check (Logic Gap 4.5) — detects substrate
+        # swaps and schema-version bumps that would otherwise corrupt
+        # data at write time. ``to_write_fp`` is held until after
+        # instantiation succeeds so we never lock in a fingerprint for
+        # a store that failed to start.
+        fp_errors, to_write_fp = self._check_schema_fingerprints(targets)
+        errors.extend(fp_errors)
+
+        instantiated_ok: set[str] = set()
         for store_type in targets:
             try:
                 self._get(store_type)
+                instantiated_ok.add(store_type)
             except Exception as exc:
                 # Catch every exception type so a misbehaving plugin
                 # backend (e.g. raising a custom Error subclass on
@@ -980,6 +1148,17 @@ class StoreRegistry:
 
         if _resolve_connectivity_check(check_connectivity):
             errors.extend(self._check_neo4j_connectivity())
+
+        # Persist first-boot fingerprints only when nothing else failed.
+        # If any store crashed during instantiation, leave the meta file
+        # alone — operator fixes the breakage, re-runs validate, and
+        # bootstrap completes once everything is green.
+        if not errors and to_write_fp:
+            stored = self._load_fingerprint_meta()
+            for store_type, fp in to_write_fp.items():
+                if store_type in instantiated_ok:
+                    stored[store_type] = fp
+            self._write_fingerprint_meta(stored)
 
         if errors:
             raise RegistryValidationError(errors)

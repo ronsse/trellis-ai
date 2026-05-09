@@ -14,7 +14,14 @@ class SQLiteStoreBase:
 
     Handles: Path resolution, parent directory creation, connection
     with ``check_same_thread=False``, ``row_factory``, and schema init.
+
+    Subclasses inherit ``SCHEMA_VERSION = "1"``; a subclass that ships
+    a schema-changing migration must override the constant on itself
+    (NOT mutate the base) so :class:`StoreRegistry` can fail-fast on
+    a stale on-disk shape via the fingerprint check (Logic Gap 4.5).
     """
+
+    SCHEMA_VERSION: str = "1"
 
     def __init__(self, db_path: str | Path) -> None:
         self._db_path = Path(db_path)
