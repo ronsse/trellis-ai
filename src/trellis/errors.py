@@ -20,6 +20,21 @@ class ValidationError(TrellisError):
         super().__init__(message, code="VALIDATION_ERROR")
 
 
+class ConfigError(TrellisError):
+    """Raised when configuration is missing or malformed.
+
+    Distinct from :class:`ValidationError` — config errors carry a
+    ``setting`` hint pointing at the missing/wrong key (env var or
+    YAML path) so operators can edit the right thing without tracing
+    through the registry. The setting name is also the most useful
+    grouping key in startup-aggregate error rendering.
+    """
+
+    def __init__(self, message: str, *, setting: str | None = None) -> None:
+        self.setting = setting
+        super().__init__(message, code="CONFIG_ERROR")
+
+
 class StoreError(TrellisError):
     """Raised when a storage operation fails."""
 

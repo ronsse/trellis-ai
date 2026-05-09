@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
+from trellis.errors import ConfigError
 from trellis.stores.registry import StoreRegistry, _reset_backend_cache
 
 
@@ -34,7 +35,7 @@ class TestStoreRegistryPluginDiscovery:
             config={"graph": {"backend": "absent"}},
             stores_dir=tmp_path / "stores",
         )
-        with pytest.raises(ValueError, match="Unknown backend 'absent'"):
+        with pytest.raises(ConfigError, match="Unknown backend 'absent'"):
             _ = registry.graph_store
 
     def test_builtin_unaffected_by_absent_plugins(self, tmp_path: Path):

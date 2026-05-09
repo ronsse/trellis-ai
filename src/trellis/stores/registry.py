@@ -5,9 +5,11 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 
 import structlog
 
+from trellis.errors import ConfigError, ValidationError
 from trellis.stores.base import (
     BlobStore,
     DocumentStore,
@@ -634,6 +636,47 @@ class _OperationalPlane:
         return self._registry._get("tuner_state")  # type: ignore[no-any-return]
 
 
+# Per-backend URI validation rules. Each entry maps the backend name
+# to the param key that carries the URI/DSN and the set of schemes
+# that are valid for it. Postgres accepts both ``postgres://`` and
+# ``postgresql://`` (psycopg parses both). Neo4j accepts the bolt and
+# neo4j scheme families (the ``+s`` / ``+ssc`` variants enable TLS).
+# S3 isn't listed here — its config carries a bucket name, not a URI,
+# so there's no scheme-level invariant the registry can enforce.
+_BACKEND_URI_RULES: dict[str, tuple[str, frozenset[str]]] = {
+    "postgres": ("dsn", frozenset({"postgres", "postgresql"})),
+    "pgvector": ("dsn", frozenset({"postgres", "postgresql"})),
+    "neo4j": (
+        "uri",
+        frozenset({"bolt", "neo4j", "bolt+s", "bolt+ssc", "neo4j+s", "neo4j+ssc"}),
+    ),
+}
+
+
+def _validate_uri(
+    backend: str, uri: str, allowed_schemes: frozenset[str]
+) -> str | None:
+    """Return an error message when ``uri`` is malformed; ``None`` on success.
+
+    Parses with :func:`urlparse`, demands a non-empty scheme matching
+    one of ``allowed_schemes``, and demands a non-empty netloc (the
+    last check catches ``postgres:///dbname`` and ``://localhost``
+    typos that the scheme check alone would miss).
+    """
+    parsed = urlparse(uri)
+    expected = sorted(allowed_schemes)
+    if not parsed.scheme:
+        return f"empty URL scheme (expected one of {expected})"
+    if parsed.scheme not in allowed_schemes:
+        return (
+            f"unexpected URL scheme '{parsed.scheme}' for {backend} backend"
+            f" (expected one of {expected})"
+        )
+    if not parsed.netloc:
+        return f"empty network location in URI '{uri}' (host:port required)"
+    return None
+
+
 class StoreRegistry:
     """Lazily instantiates and caches store backends based on configuration."""
 
@@ -773,12 +816,12 @@ class StoreRegistry:
         plane = _PLANE_OF.get(store_type)
         if plane is None:
             msg = f"Unknown store type '{store_type}'"
-            raise ValueError(msg)
+            raise ValidationError(msg)
 
         registry = _get_merged_backends(store_type)
         if backend not in registry:
             msg = f"Unknown backend '{backend}' for store type '{store_type}'"
-            raise ValueError(msg)
+            raise ConfigError(msg, setting=f"stores.{store_type}.backend")
 
         module_path, class_name = registry[backend]
 
@@ -794,7 +837,7 @@ class StoreRegistry:
                     "stores_dir must be set for sqlite backends"
                     " without explicit db_path"
                 )
-                raise ValueError(msg)
+                raise ConfigError(msg, setting="stores_dir")
             self._stores_dir.mkdir(parents=True, exist_ok=True)
             db_names = {
                 "trace": "traces.db",
@@ -812,7 +855,7 @@ class StoreRegistry:
         if backend == "lancedb" and "uri" not in params:
             if self._stores_dir is None:
                 msg = "stores_dir must be set for lancedb backend without explicit uri"
-                raise ValueError(msg)
+                raise ConfigError(msg, setting="stores_dir")
             self._stores_dir.mkdir(parents=True, exist_ok=True)
             params["uri"] = str(self._stores_dir / "lancedb")
 
@@ -823,7 +866,7 @@ class StoreRegistry:
                     "stores_dir must be set for local blob backend"
                     " without explicit root_dir"
                 )
-                raise ValueError(msg)
+                raise ConfigError(msg, setting="stores_dir")
             params["root_dir"] = self._stores_dir / "blobs"
 
         # For postgres / pgvector backends, default DSN from env.
@@ -839,7 +882,7 @@ class StoreRegistry:
                     f" (config or {plane_env} env var;"
                     f" TRELLIS_PG_DSN accepted as legacy fallback)"
                 )
-                raise ValueError(msg)
+                raise ConfigError(msg, setting=plane_env)
             params["dsn"] = dsn
 
         # For neo4j backend, share one driver per (uri, user) across the
@@ -861,7 +904,7 @@ class StoreRegistry:
                     "bucket must be set for s3 backend"
                     " (config or TRELLIS_S3_BUCKET env var)"
                 )
-                raise ValueError(msg)
+                raise ConfigError(msg, setting="TRELLIS_S3_BUCKET")
             params["bucket"] = bucket
 
         logger.info("store_instantiated", store_type=store_type, backend=backend)
@@ -887,7 +930,7 @@ class StoreRegistry:
 
         if "uri" not in params:
             msg = "neo4j backend requires 'uri' in config or env"
-            raise ValueError(msg)
+            raise ConfigError(msg, setting="stores.graph.uri")
         uri = params["uri"]
         user = params.get("user", "neo4j")
         key = (uri, user)
@@ -900,7 +943,7 @@ class StoreRegistry:
 
         if "password" not in params:
             msg = "neo4j backend requires 'password' in config"
-            raise ValueError(msg)
+            raise ConfigError(msg, setting="stores.graph.password")
 
         raw_cfg = params.get("driver_config")
         if raw_cfg is None:
@@ -926,6 +969,69 @@ class StoreRegistry:
         if store_type not in self._cache:
             self._cache[store_type] = self._instantiate(store_type)
         return self._cache[store_type]
+
+    def _check_uri_formats(
+        self, store_types: Iterable[str]
+    ) -> list[tuple[str, Exception]]:
+        """Validate URI/DSN format for every relevant store in ``store_types``.
+
+        Pre-flight check that catches typos (``://localhost``,
+        ``postgres:///db``) before ``_instantiate`` hands them to a
+        client SDK that may report them with a less actionable
+        error. Configs without an explicit URI in the dict (e.g.
+        Postgres relying on ``TRELLIS_KNOWLEDGE_PG_DSN``) are skipped
+        here — the env-var fallback path is exercised in
+        ``_instantiate`` and raises its own ``ConfigError`` if unset.
+        """
+        failures: list[tuple[str, Exception]] = []
+        for store_type in store_types:
+            store_cfg = self._config.get(store_type, {})
+            if not isinstance(store_cfg, dict):
+                continue
+            backend = store_cfg.get("backend", self._default_backend(store_type))
+            rule = _BACKEND_URI_RULES.get(backend)
+            if rule is None:
+                continue
+            param, allowed = rule
+            uri = store_cfg.get(param)
+            if not uri:
+                continue
+            err_msg = _validate_uri(backend, uri, allowed)
+            if err_msg is not None:
+                failures.append((store_type, ConfigError(err_msg, setting=param)))
+        return failures
+
+    def _check_embedding_dim_consistency(self) -> list[tuple[str, Exception]]:
+        """Ensure ``vector`` and ``graph`` configs agree on ``embedding_dim``.
+
+        The Neo4j shape #2 vector store stores embeddings as a property
+        on graph-store nodes, so the two stores must share a dimension
+        when both opt in. Either store may omit ``embedding_dim`` (the
+        graph store opts out of vector storage; the vector store falls
+        back to its backend default), in which case there is nothing
+        to compare and no error is raised.
+        """
+        graph_cfg = self._config.get("graph") or {}
+        vector_cfg = self._config.get("vector") or {}
+        if not isinstance(graph_cfg, dict) or not isinstance(vector_cfg, dict):
+            return []
+        graph_dim = graph_cfg.get("embedding_dim")
+        vector_dim = vector_cfg.get("embedding_dim")
+        if graph_dim is None or vector_dim is None:
+            return []
+        if graph_dim == vector_dim:
+            return []
+        msg = (
+            f"embedding_dim mismatch: graph={graph_dim} vs vector={vector_dim};"
+            " the Neo4j shape #2 path stores vectors on graph nodes, so the"
+            " two configs must agree."
+        )
+        return [
+            (
+                "embedding_dim",
+                ConfigError(msg, setting="stores.{graph,vector}.embedding_dim"),
+            )
+        ]
 
     def validate(
         self,
@@ -978,6 +1084,15 @@ class StoreRegistry:
             list(store_types) if store_types is not None else list(_PLANE_OF.keys())
         )
         errors: list[tuple[str, Exception]] = []
+
+        # Pre-flight: cheap, declarative checks that surface bad config
+        # before we try to instantiate (which can be slow and may swallow
+        # the underlying typo behind a driver-level error). Aggregated
+        # alongside instantiation failures so the operator sees one
+        # consolidated report.
+        errors.extend(self._check_uri_formats(targets))
+        errors.extend(self._check_embedding_dim_consistency())
+
         for store_type in targets:
             try:
                 self._get(store_type)
