@@ -16,6 +16,13 @@ import pytest
 
 from trellis_sdk import AsyncTrellisClient
 
+pytestmark = [
+    pytest.mark.live,
+    pytest.mark.slow,
+    pytest.mark.neo4j,
+    pytest.mark.postgres,
+]
+
 
 @pytest.mark.asyncio
 async def test_async_version_handshake(live_api_server: str) -> None:

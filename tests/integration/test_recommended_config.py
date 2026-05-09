@@ -134,6 +134,7 @@ PASSWORD = os.environ.get("TRELLIS_TEST_NEO4J_PASSWORD", "")
 DATABASE = os.environ.get("TRELLIS_TEST_NEO4J_DATABASE", "neo4j")
 
 
+@pytest.mark.live
 @pytest.mark.neo4j
 @pytest.mark.skipif(not URI, reason="TRELLIS_TEST_NEO4J_URI not set")
 def test_local_default_shape_validates_against_real_neo4j(tmp_path: Path) -> None:

@@ -49,7 +49,13 @@ from trellis.learning import PROMOTE_RECOMMENDATIONS
 if TYPE_CHECKING:
     from tests.integration.loops.conftest import LoopEnvironment
 
-pytestmark = pytest.mark.asyncio
+pytestmark = [
+    pytest.mark.asyncio,
+    pytest.mark.live,
+    pytest.mark.slow,
+    pytest.mark.neo4j,
+    pytest.mark.postgres,
+]
 
 _INTENT = "learnpromote"  # single-token; see conftest module docstring
 _HELPFUL_DOC_ID = "lp:doc:helpful"

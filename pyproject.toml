@@ -199,9 +199,17 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-addopts = "-v --tb=short"
+# Default-exclude opt-in markers. Each marker has an --include-<name> flag
+# (and TRELLIS_TEST_<NAME> env var) wired in tests/conftest.py that relaxes
+# its corresponding "not <marker>" constraint. See docs/agent-guide/testing.md.
+addopts = "-v --tb=short -m \"not live and not slow and not neo and not neo4j and not postgres and not pgvector and not lancedb\""
 pythonpath = ["src", "."]
 markers = [
-    "postgres: requires a running Postgres instance (set TRELLIS_TEST_PG_DSN)",
-    "neo4j: requires a running Neo4j instance (set TRELLIS_TEST_NEO4J_URI)",
+    "live: requires a real backend service running (uvicorn, real Postgres, real Neo4j, real S3). Excluded by default; use --include-live or TRELLIS_TEST_LIVE=1.",
+    "slow: takes longer than ~5s typical. Excluded by default; use --include-slow or TRELLIS_TEST_SLOW=1.",
+    "neo: requires Neo4j. Excluded by default; use --include-neo or TRELLIS_TEST_NEO=1. Synonym of `neo4j` for ergonomic typing — both names are registered and both are gated by --include-neo.",
+    "neo4j: requires a running Neo4j instance (set TRELLIS_TEST_NEO4J_URI). Excluded by default; use --include-neo or TRELLIS_TEST_NEO=1.",
+    "postgres: requires a running Postgres instance (set TRELLIS_TEST_PG_DSN). Excluded by default; use --include-postgres or TRELLIS_TEST_POSTGRES=1.",
+    "pgvector: requires a Postgres with the pgvector extension. Excluded by default; use --include-pgvector or TRELLIS_TEST_PGVECTOR=1.",
+    "lancedb: requires the lancedb extra installed. Excluded by default; use --include-lancedb or TRELLIS_TEST_LANCEDB=1.",
 ]

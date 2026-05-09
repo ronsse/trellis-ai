@@ -51,7 +51,13 @@ from trellis.feedback.recording import _feedback_id_in_event_log
 if TYPE_CHECKING:
     from tests.integration.loops.conftest import LoopEnvironment
 
-pytestmark = pytest.mark.asyncio
+pytestmark = [
+    pytest.mark.asyncio,
+    pytest.mark.live,
+    pytest.mark.slow,
+    pytest.mark.neo4j,
+    pytest.mark.postgres,
+]
 
 _INTENT = "reconcile"  # single-token; see conftest module docstring
 

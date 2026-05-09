@@ -12,6 +12,8 @@ pytest.importorskip("pyarrow")
 from trellis.stores.base.vector import VectorStore  # noqa: E402
 from trellis.stores.lancedb.store import LanceVectorStore  # noqa: E402
 
+pytestmark = pytest.mark.lancedb
+
 
 @pytest.fixture
 def vector_store(tmp_path: Path) -> LanceVectorStore:

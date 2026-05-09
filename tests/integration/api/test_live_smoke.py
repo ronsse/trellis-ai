@@ -21,6 +21,14 @@ isn't set. Run with::
 from __future__ import annotations
 
 import httpx  # noqa: TC002 — used at runtime in test fixtures' type hints
+import pytest
+
+pytestmark = [
+    pytest.mark.live,
+    pytest.mark.slow,
+    pytest.mark.neo4j,
+    pytest.mark.postgres,
+]
 
 # ── Unversioned: deployment plumbing + version handshake ──────────────
 

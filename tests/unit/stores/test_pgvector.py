@@ -16,6 +16,7 @@ DSN = os.environ.get("TRELLIS_TEST_PG_DSN", "")
 
 pytestmark = [
     pytest.mark.postgres,
+    pytest.mark.pgvector,
     pytest.mark.skipif(not DSN, reason="TRELLIS_TEST_PG_DSN not set"),
 ]
 
