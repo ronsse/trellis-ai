@@ -92,12 +92,14 @@ class MutationExecutor:
         # Stage 1: Validate
         valid, errors = self._registry.validate(command)
         if not valid:
+            message = f"Validation failed: {'; '.join(errors)}"
             log.warning("validation_failed", errors=errors)
+            self._emit_rejection(command, reason="validate", message=message)
             return CommandResult(
                 command_id=command.command_id,
                 status=CommandStatus.FAILED,
                 operation=command.operation,
-                message=f"Validation failed: {'; '.join(errors)}",
+                message=message,
             )
 
         # Stage 2: Policy Check
@@ -105,7 +107,11 @@ class MutationExecutor:
             allowed, message, warnings = self._policy_gate.check(command)
             if not allowed:
                 log.warning("policy_rejected", message=message)
-                self._emit(command, CommandStatus.REJECTED, message)
+                self._emit_rejection(
+                    command,
+                    reason="policy_violation",
+                    message=message,
+                )
                 return CommandResult(
                     command_id=command.command_id,
                     status=CommandStatus.REJECTED,
@@ -119,24 +125,36 @@ class MutationExecutor:
             if command.idempotency_key in self._seen_idempotency_keys:
                 # Refresh recency so hot keys aren't evicted ahead of cold ones.
                 self._seen_idempotency_keys.move_to_end(command.idempotency_key)
+                message = f"Duplicate command: {command.idempotency_key}"
                 log.info("duplicate_command", key=command.idempotency_key)
+                self._emit_rejection(
+                    command,
+                    reason="idempotency_replay",
+                    message=message,
+                )
                 return CommandResult(
                     command_id=command.command_id,
                     status=CommandStatus.DUPLICATE,
                     operation=command.operation,
-                    message=f"Duplicate command: {command.idempotency_key}",
+                    message=message,
                 )
             # Check persisted events for cross-restart deduplication
             if self._event_log is not None and self._event_log.has_idempotency_key(
                 command.idempotency_key,
             ):
                 self._record_idempotency_key(command.idempotency_key)
+                message = f"Duplicate command (persisted): {command.idempotency_key}"
                 log.info("duplicate_command_persisted", key=command.idempotency_key)
+                self._emit_rejection(
+                    command,
+                    reason="idempotency_replay",
+                    message=message,
+                )
                 return CommandResult(
                     command_id=command.command_id,
                     status=CommandStatus.DUPLICATE,
                     operation=command.operation,
-                    message=f"Duplicate command (persisted): {command.idempotency_key}",
+                    message=message,
                 )
             self._record_idempotency_key(command.idempotency_key)
 
@@ -248,25 +266,66 @@ class MutationExecutor:
         self._seen_idempotency_keys[key] = None
 
     def _emit(self, command: Command, status: CommandStatus, message: str) -> None:
-        """Emit an event to the event log if available."""
-        if self._event_log is None:
-            return
+        """Emit a SUCCESS or FAILED event to the event log if available.
+
+        Rejection paths (validate / policy / idempotency) emit through
+        :meth:`_emit_rejection` instead so every rejection event carries a
+        ``reason`` field naming the stage that rejected the command.
+        """
         event_type = (
             EventType.MUTATION_EXECUTED
             if status == CommandStatus.SUCCESS
             else EventType.MUTATION_REJECTED
         )
+        self._emit_event(event_type, command, status, message)
+
+    def _emit_rejection(
+        self,
+        command: Command,
+        *,
+        reason: str,
+        message: str,
+    ) -> None:
+        """Emit a uniform :attr:`EventType.MUTATION_REJECTED` event.
+
+        Called from every rejection stage (``validate`` / ``policy_violation``
+        / ``idempotency_replay``) so the audit trail is symmetric — one event
+        per rejection, ``reason`` discriminates the stage.
+        """
+        self._emit_event(
+            EventType.MUTATION_REJECTED,
+            command,
+            CommandStatus.REJECTED,
+            message,
+            reason=reason,
+        )
+
+    def _emit_event(
+        self,
+        event_type: EventType,
+        command: Command,
+        status: CommandStatus,
+        message: str,
+        *,
+        reason: str | None = None,
+    ) -> None:
+        """Build the payload and emit a single executor event."""
+        if self._event_log is None:
+            return
+        payload: dict[str, object] = {
+            "command_id": command.command_id,
+            "operation": command.operation,
+            "status": status,
+            "message": message,
+            "requested_by": command.requested_by,
+            "idempotency_key": command.idempotency_key,
+        }
+        if reason is not None:
+            payload["reason"] = reason
         self._event_log.emit(
             event_type,
             "mutation_executor",
             entity_id=command.target_id,
             entity_type=command.target_type,
-            payload={
-                "command_id": command.command_id,
-                "operation": command.operation,
-                "status": status,
-                "message": message,
-                "requested_by": command.requested_by,
-                "idempotency_key": command.idempotency_key,
-            },
+            payload=payload,
         )

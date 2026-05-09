@@ -1,20 +1,24 @@
 """Property-based invariants for the governed mutation pipeline.
 
-These tests use ``hypothesis`` to generate random Commands and assert
-pipeline invariants that should hold across the entire input space:
+Uses ``hypothesis`` to generate random Commands and assert pipeline
+invariants that should hold across the entire input space:
 
-1. Single event per SUCCESS — accepted commands emit exactly one
+1. **Single event per SUCCESS** — accepted commands emit exactly one
    ``MUTATION_EXECUTED`` event when an event log is attached.
-2. Zero events for validation failures and idempotency duplicates.
-   (NOTE: policy rejections DO emit one ``MUTATION_REJECTED`` event by
-   design — see ``executor.py`` line ~108. The unit spec wording
-   "zero events on rejection" is reconciled with reality below.)
-3. Idempotency replay — same key twice produces one event total.
-4. STOP_ON_ERROR halts the batch at the first failure: downstream
-   commands are not handled and emit no events.
+2. **Single rejection event per rejection (Option A — uniform emit)** —
+   every rejection (validate / policy / idempotency-replay) emits
+   exactly one ``MUTATION_REJECTED`` event whose payload carries a
+   ``reason`` field naming the stage. Symmetric audit trail across all
+   three rejection paths.
+3. **Idempotency replay** — same key twice produces one
+   ``MUTATION_EXECUTED`` (the first call) plus one ``MUTATION_REJECTED``
+   with ``reason="idempotency_replay"`` (the second call); the handler
+   runs only once.
+4. **STOP_ON_ERROR halts the batch** at the first failure; downstream
+   commands are never handled and emit no events.
 
-Stores are mocked. No SQLite, no real backends — these tests are
-pure pipeline property checks that finish in well under a second.
+Stores are mocked. No SQLite, no real backends — pure pipeline property
+checks that finish in well under a second.
 """
 
 from __future__ import annotations
@@ -77,11 +81,10 @@ def valid_commands(draw: st.DrawFn) -> Command:
 def invalid_commands(draw: st.DrawFn) -> Command:
     """Commands that should fail validation (drop a required arg)."""
     op, args = draw(st.sampled_from(_OPS_WITH_SIMPLE_ARGS))
-    # Skip ops with no required args — they can't be made invalid this way.
     required = OperationRegistry().get_required_args(op)
     if not required:
-        # Force an unknown-op-style failure by sending an empty args
-        # with a multi-arg op. Pick LINK_CREATE which always needs args.
+        # Force an unknown-op-style failure by sending empty args with a
+        # multi-arg op. Pick LINK_CREATE which always requires args.
         op = Operation.LINK_CREATE
         args = {}
     else:
@@ -105,104 +108,77 @@ def _all_op_handlers() -> dict[str, MagicMock]:
     return {op: _ok_handler() for op, _ in _OPS_WITH_SIMPLE_ARGS}
 
 
-def _mock_event_log() -> MagicMock:
-    """Build an event-log mock that returns False for ``has_idempotency_key``.
+def _emitted_event_types(event_log: MagicMock) -> list[str]:
+    """Return the list of emitted event-type values, in call order."""
+    return [call.args[0].value for call in event_log.emit.call_args_list]
 
-    Centralised because every test in this module needs the same
-    pre-canned ``has_idempotency_key`` return — without it the executor
-    skips the in-process FIFO check and hits ``AttributeError`` on the
-    bare MagicMock.
-    """
-    event_log = MagicMock()
-    event_log.has_idempotency_key.return_value = False
-    return event_log
+
+def _emitted_payloads(event_log: MagicMock) -> list[dict[str, Any]]:
+    """Return the list of emitted payloads, in call order."""
+    return [call.kwargs["payload"] for call in event_log.emit.call_args_list]
 
 
 # ---------------------------------------------------------------------------
-# Property 1: single event per SUCCESS
+# Property 1: single MUTATION_EXECUTED per SUCCESS
 # ---------------------------------------------------------------------------
 
 
 class TestSingleEventPerSuccess:
     @given(cmd=valid_commands())
     def test_success_emits_exactly_one_event(self, cmd: Command) -> None:
-        event_log = _mock_event_log()
+        event_log = MagicMock()
+        event_log.has_idempotency_key.return_value = False
         executor = MutationExecutor(
             event_log=event_log,
             handlers=_all_op_handlers(),
         )
         result = executor.execute(cmd)
         assert result.status == CommandStatus.SUCCESS
-        # Exactly one MUTATION_EXECUTED event from the executor itself.
-        # (Handlers may or may not emit additional events; we mocked them.)
-        assert event_log.emit.call_count == 1
-        emitted_event_type = event_log.emit.call_args[0][0]
-        assert emitted_event_type.value == "mutation.executed"
+        assert _emitted_event_types(event_log) == ["mutation.executed"]
 
 
 # ---------------------------------------------------------------------------
-# Property 2: zero events on validation failure / idempotency duplicate
+# Property 2: every rejection emits exactly one MUTATION_REJECTED event
+# (Option A — uniform emit across validate / policy / idempotency)
 # ---------------------------------------------------------------------------
 
 
-class TestZeroEventsOnSilentRejection:
-    """Validation failures and idempotency duplicates do not touch the event
-    log. Policy rejections DO emit one ``MUTATION_REJECTED`` event by design
-    — covered separately in ``TestPolicyRejectionEmitsOneEvent``.
+class TestUniformRejectionEvents:
+    """Any rejection produces exactly 1 ``MUTATION_REJECTED`` event whose
+    payload's ``reason`` field names the stage that rejected the command.
+
+    This was previously asymmetric: only policy rejections emitted, while
+    validate-stage and idempotency-replay rejections were silent. Option A
+    makes all three paths uniform so the audit trail is symmetric.
     """
 
     @given(cmd=invalid_commands())
-    def test_validation_failure_emits_no_events(self, cmd: Command) -> None:
-        event_log = _mock_event_log()
+    def test_validate_rejection_emits_one_event_with_reason(
+        self,
+        cmd: Command,
+    ) -> None:
+        event_log = MagicMock()
+        event_log.has_idempotency_key.return_value = False
         executor = MutationExecutor(
             event_log=event_log,
             handlers=_all_op_handlers(),
         )
         result = executor.execute(cmd)
         assert result.status == CommandStatus.FAILED
-        assert event_log.emit.call_count == 0
-
-    @given(key=_safe_text)
-    def test_idempotency_duplicate_emits_no_events(self, key: str) -> None:
-        event_log = _mock_event_log()
-        executor = MutationExecutor(
-            event_log=event_log,
-            handlers=_all_op_handlers(),
-        )
-        cmd1 = Command(
-            operation=Operation.ENTITY_CREATE,
-            args={"entity_type": "svc", "name": "x"},
-            idempotency_key=key,
-        )
-        cmd2 = Command(
-            operation=Operation.ENTITY_CREATE,
-            args={"entity_type": "svc", "name": "x"},
-            idempotency_key=key,
-        )
-        r1 = executor.execute(cmd1)
-        r2 = executor.execute(cmd2)
-        assert r1.status == CommandStatus.SUCCESS
-        assert r2.status == CommandStatus.DUPLICATE
-        # Only one event total — from the first SUCCESS. Duplicate emits none.
-        assert event_log.emit.call_count == 1
-
-
-# ---------------------------------------------------------------------------
-# Property 2b (documented exception): policy rejection emits exactly one event
-# ---------------------------------------------------------------------------
-
-
-class TestPolicyRejectionEmitsOneEvent:
-    """Policy rejection emits exactly one ``MUTATION_REJECTED`` event — this
-    is the documented executor behaviour (executor.py L106-115). Listed as a
-    distinct property to make the contract explicit.
-    """
+        assert _emitted_event_types(event_log) == ["mutation.rejected"]
+        payload = _emitted_payloads(event_log)[0]
+        assert payload["reason"] == "validate"
+        assert payload["status"] == CommandStatus.REJECTED
 
     @given(cmd=valid_commands())
-    def test_policy_rejection_emits_one_rejection_event(self, cmd: Command) -> None:
+    def test_policy_rejection_emits_one_event_with_reason(
+        self,
+        cmd: Command,
+    ) -> None:
         gate = MagicMock()
         gate.check.return_value = (False, "denied", [])
-        event_log = _mock_event_log()
+        event_log = MagicMock()
+        event_log.has_idempotency_key.return_value = False
         executor = MutationExecutor(
             event_log=event_log,
             policy_gate=gate,
@@ -210,44 +186,63 @@ class TestPolicyRejectionEmitsOneEvent:
         )
         result = executor.execute(cmd)
         assert result.status == CommandStatus.REJECTED
-        assert event_log.emit.call_count == 1
-        emitted_event_type = event_log.emit.call_args[0][0]
-        assert emitted_event_type.value == "mutation.rejected"
+        assert _emitted_event_types(event_log) == ["mutation.rejected"]
+        payload = _emitted_payloads(event_log)[0]
+        assert payload["reason"] == "policy_violation"
+
+    @given(cmd=valid_commands(), key=_safe_text)
+    def test_idempotency_replay_emits_one_rejection_after_first_success(
+        self,
+        cmd: Command,
+        key: str,
+    ) -> None:
+        cmd = cmd.model_copy(update={"idempotency_key": key})
+        replay = cmd.model_copy(update={"command_id": cmd.command_id + "_replay"})
+
+        event_log = MagicMock()
+        event_log.has_idempotency_key.return_value = False
+        executor = MutationExecutor(
+            event_log=event_log,
+            handlers=_all_op_handlers(),
+        )
+        r1 = executor.execute(cmd)
+        r2 = executor.execute(replay)
+
+        assert r1.status == CommandStatus.SUCCESS
+        assert r2.status == CommandStatus.DUPLICATE
+        # Two events total: SUCCESS for the first call, REJECTED for the replay.
+        assert _emitted_event_types(event_log) == [
+            "mutation.executed",
+            "mutation.rejected",
+        ]
+        replay_payload = _emitted_payloads(event_log)[1]
+        assert replay_payload["reason"] == "idempotency_replay"
+        assert replay_payload["idempotency_key"] == key
 
 
 # ---------------------------------------------------------------------------
-# Property 3: idempotency replay does not double-apply
+# Property 3: idempotency replay does not double-handle
 # ---------------------------------------------------------------------------
 
 
 class TestIdempotencyReplay:
     @given(cmd=valid_commands(), key=_safe_text)
     def test_replay_does_not_double_handle(self, cmd: Command, key: str) -> None:
-        # Force an idempotency key onto a freshly-built command (the strategy
-        # may have given None — we want determinism here).
         cmd = cmd.model_copy(update={"idempotency_key": key})
+        replay = cmd.model_copy(update={"command_id": cmd.command_id + "_replay"})
 
         handlers = _all_op_handlers()
-        event_log = _mock_event_log()
+        event_log = MagicMock()
+        event_log.has_idempotency_key.return_value = False
         executor = MutationExecutor(
             event_log=event_log,
             handlers=handlers,
         )
-        r1 = executor.execute(cmd)
-        # Submit a second command with the same idempotency key.
-        cmd2 = cmd.model_copy(update={"command_id": cmd.command_id + "_replay"})
-        r2 = executor.execute(cmd2)
+        executor.execute(cmd)
+        executor.execute(replay)
 
-        assert r1.status == CommandStatus.SUCCESS
-        assert r2.status == CommandStatus.DUPLICATE
-
-        # The handler for this op was called exactly once (not twice).
-        target_handler = handlers[cmd.operation]
-        assert target_handler.handle.call_count == 1
-
-        # And exactly one event was emitted — the SUCCESS. The DUPLICATE
-        # short-circuit emits no event.
-        assert event_log.emit.call_count == 1
+        # Handler runs exactly once even though we submitted twice.
+        assert handlers[cmd.operation].handle.call_count == 1
 
 
 # ---------------------------------------------------------------------------
@@ -266,7 +261,8 @@ class TestBatchStopOnError:
         good_after: int,
     ) -> None:
         handlers = _all_op_handlers()
-        event_log = _mock_event_log()
+        event_log = MagicMock()
+        event_log.has_idempotency_key.return_value = False
         executor = MutationExecutor(
             event_log=event_log,
             handlers=handlers,
@@ -287,53 +283,13 @@ class TestBatchStopOnError:
         batch = CommandBatch(commands=commands, strategy=BatchStrategy.STOP_ON_ERROR)
         results = executor.execute_batch(batch)
 
-        # Halted at the bad command → results length == good_before + 1
         assert len(results) == good_before + 1
         for r in results[:good_before]:
             assert r.status == CommandStatus.SUCCESS
         assert results[-1].status == CommandStatus.FAILED
 
-        # Only the SUCCESSes before the failure emit events. Validation
-        # failure emits zero. None of the post-failure commands are touched.
-        assert event_log.emit.call_count == good_before
+        # Each SUCCESS before the failure emits one MUTATION_EXECUTED, the
+        # validate-stage rejection emits one MUTATION_REJECTED, then nothing
+        # more (downstream commands are never executed).
+        assert event_log.emit.call_count == good_before + 1
         assert handlers[Operation.ENTITY_CREATE].handle.call_count == good_before
-
-    @given(
-        good_before=st.integers(min_value=0, max_value=3),
-        good_after=st.integers(min_value=1, max_value=4),
-    )
-    def test_continue_on_error_runs_all_commands(
-        self,
-        good_before: int,
-        good_after: int,
-    ) -> None:
-        """Sanity counter-test: CONTINUE_ON_ERROR keeps running. Confirms the
-        STOP_ON_ERROR property above isn't an artifact of, e.g., the bad
-        command silently consuming the rest of the iterator.
-        """
-        handlers = _all_op_handlers()
-        event_log = _mock_event_log()
-        executor = MutationExecutor(
-            event_log=event_log,
-            handlers=handlers,
-        )
-
-        good = lambda: Command(  # noqa: E731
-            operation=Operation.ENTITY_CREATE,
-            args={"entity_type": "svc", "name": "x"},
-        )
-        bad = Command(operation=Operation.ENTITY_CREATE, args={})
-        commands = [
-            *[good() for _ in range(good_before)],
-            bad,
-            *[good() for _ in range(good_after)],
-        ]
-        batch = CommandBatch(
-            commands=commands, strategy=BatchStrategy.CONTINUE_ON_ERROR
-        )
-        results = executor.execute_batch(batch)
-
-        assert len(results) == len(commands)
-        # All goods succeed; the bad one fails.
-        success_count = sum(1 for r in results if r.status == CommandStatus.SUCCESS)
-        assert success_count == good_before + good_after

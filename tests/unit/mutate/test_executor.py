@@ -138,6 +138,53 @@ class TestMutationExecutor:
         event_log.emit.assert_called_once()
         call_args = event_log.emit.call_args
         assert call_args[0][0].value == "mutation.rejected"
+        assert call_args.kwargs["payload"]["reason"] == "policy_violation"
+
+    def test_validate_rejection_emits_event(self) -> None:
+        """Option A: validate-stage rejection emits exactly one
+        MUTATION_REJECTED event with ``reason="validate"`` so the audit
+        trail is symmetric across all three rejection stages."""
+        event_log = MagicMock()
+        executor = MutationExecutor(
+            event_log=event_log,
+            handlers={Operation.ENTITY_CREATE: _handler()},
+        )
+        # Missing required args triggers validate-stage rejection
+        result = executor.execute(Command(operation=Operation.ENTITY_CREATE, args={}))
+
+        assert result.status == CommandStatus.FAILED
+        event_log.emit.assert_called_once()
+        event_type, source = event_log.emit.call_args.args
+        assert event_type.value == "mutation.rejected"
+        assert source == "mutation_executor"
+        payload = event_log.emit.call_args.kwargs["payload"]
+        assert payload["reason"] == "validate"
+        assert payload["status"] == CommandStatus.REJECTED
+        assert "Validation failed" in payload["message"]
+
+    def test_idempotency_rejection_emits_event(self) -> None:
+        """Option A: idempotency-stage rejection emits exactly one
+        MUTATION_REJECTED event with ``reason="idempotency_replay"``."""
+        event_log = MagicMock()
+        # has_idempotency_key returns False so the in-memory cache path is
+        # the one exercised by the second submission.
+        event_log.has_idempotency_key.return_value = False
+        executor = MutationExecutor(
+            event_log=event_log,
+            handlers={Operation.ENTITY_CREATE: _handler()},
+        )
+        executor.execute(_cmd(idempotency_key="dup"))
+        event_log.emit.reset_mock()  # drop the SUCCESS emit from the first call
+
+        result = executor.execute(_cmd(idempotency_key="dup"))
+
+        assert result.status == CommandStatus.DUPLICATE
+        event_log.emit.assert_called_once()
+        event_type, _source = event_log.emit.call_args.args
+        assert event_type.value == "mutation.rejected"
+        payload = event_log.emit.call_args.kwargs["payload"]
+        assert payload["reason"] == "idempotency_replay"
+        assert payload["idempotency_key"] == "dup"
 
     def test_register_handler(self) -> None:
         executor = MutationExecutor()
