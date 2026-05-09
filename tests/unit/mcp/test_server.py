@@ -98,7 +98,7 @@ class TestGetContext:
         assert "No context found" in result
 
     def test_returns_matching_documents(self, temp_registry: StoreRegistry) -> None:
-        doc_store = temp_registry.document_store
+        doc_store = temp_registry.knowledge.document_store
         doc_store.put(
             "doc1", "How to deploy the platform safely", metadata={"domain": "platform"}
         )
@@ -109,7 +109,7 @@ class TestGetContext:
         assert len(result) > 0
 
     def test_returns_matching_graph_nodes(self, temp_registry: StoreRegistry) -> None:
-        graph = temp_registry.graph_store
+        graph = temp_registry.knowledge.graph_store
         graph.upsert_node(
             node_id="n1",
             node_type="concept",
@@ -122,7 +122,7 @@ class TestGetContext:
         assert "deployment" in result.lower()
 
     def test_deduplicates_results(self, temp_registry: StoreRegistry) -> None:
-        doc_store = temp_registry.document_store
+        doc_store = temp_registry.knowledge.document_store
         doc_store.put("d1", "duplicate content about testing")
         doc_store.put("d1", "duplicate content about testing")  # same id
 
@@ -187,7 +187,7 @@ class TestSaveKnowledge:
     def test_creates_edge_when_target_exists(
         self, temp_registry: StoreRegistry
     ) -> None:
-        graph = temp_registry.graph_store
+        graph = temp_registry.knowledge.graph_store
         target_id = graph.upsert_node(
             node_id=None, node_type="concept", properties={"name": "target"}
         )
@@ -236,7 +236,7 @@ class TestSaveMemory:
 
         save_memory("dedup event test")
         save_memory("dedup event test")
-        events = temp_registry.event_log.get_events(
+        events = temp_registry.operational.event_log.get_events(
             event_type=EventType.MEMORY_STORED, limit=100
         )
         assert len(events) == 1
@@ -246,7 +246,7 @@ class TestSaveMemory:
 
         result = save_memory("event emission test", metadata={"domain": "ops"})
         doc_id = result.split(":", 1)[1].strip()
-        events = temp_registry.event_log.get_events(
+        events = temp_registry.operational.event_log.get_events(
             event_type=EventType.MEMORY_STORED, limit=100
         )
         assert len(events) == 1
@@ -418,7 +418,7 @@ class TestGetGraph:
         assert "not found" in result.lower()
 
     def test_returns_entity_neighborhood(self, temp_registry: StoreRegistry) -> None:
-        graph = temp_registry.graph_store
+        graph = temp_registry.knowledge.graph_store
         graph.upsert_node(
             node_id="e1", node_type="system", properties={"name": "API Server"}
         )
@@ -453,7 +453,7 @@ class TestRecordFeedback:
 
     def test_feedback_event_is_logged(self, temp_registry: StoreRegistry) -> None:
         record_feedback("trace_42", success=True, notes="great")
-        events = temp_registry.event_log.get_events(entity_id="trace_42")
+        events = temp_registry.operational.event_log.get_events(entity_id="trace_42")
         assert len(events) >= 1
         assert any(e.payload.get("success") is True for e in events)
 
@@ -462,7 +462,7 @@ class TestRecordFeedback:
     ) -> None:
         result = record_feedback(pack_id="pack_99", success=True)
         assert "pack_99" in result
-        events = temp_registry.event_log.get_events(entity_id="pack_99")
+        events = temp_registry.operational.event_log.get_events(entity_id="pack_99")
         assert len(events) >= 1
         event = events[0]
         assert event.entity_type == "pack"
@@ -478,7 +478,7 @@ class TestRecordFeedback:
             unhelpful_item_ids=["doc_noise"],
             followed_advisory_ids=["adv_1"],
         )
-        events = temp_registry.event_log.get_events(entity_id="pack_7")
+        events = temp_registry.operational.event_log.get_events(entity_id="pack_7")
         assert len(events) >= 1
         payload = events[0].payload
         assert payload["helpful_item_ids"] == ["doc_a", "entity_b"]
@@ -491,9 +491,11 @@ class TestRecordFeedback:
         result = record_feedback(trace_id="trace_x", pack_id="pack_y", success=True)
         # Pack feedback takes precedence
         assert "pack: pack_y" in result
-        pack_events = temp_registry.event_log.get_events(entity_id="pack_y")
+        pack_events = temp_registry.operational.event_log.get_events(entity_id="pack_y")
         assert len(pack_events) == 1
-        trace_events = temp_registry.event_log.get_events(entity_id="trace_x")
+        trace_events = temp_registry.operational.event_log.get_events(
+            entity_id="trace_x"
+        )
         assert len(trace_events) == 0
 
 
@@ -511,13 +513,13 @@ class TestSearch:
         assert "No results" in result
 
     def test_finds_documents(self, temp_registry: StoreRegistry) -> None:
-        temp_registry.document_store.put("d1", "kubernetes deployment guide")
+        temp_registry.knowledge.document_store.put("d1", "kubernetes deployment guide")
         result = search("kubernetes")
         assert isinstance(result, str)
         assert len(result) > 0
 
     def test_finds_graph_nodes(self, temp_registry: StoreRegistry) -> None:
-        temp_registry.graph_store.upsert_node(
+        temp_registry.knowledge.graph_store.upsert_node(
             node_id="n1", node_type="concept", properties={"name": "kubernetes"}
         )
         result = search("kubernetes")
@@ -581,9 +583,11 @@ class TestSessionAwareGetContext:
     ) -> None:
         from trellis.stores.base.event_log import EventType
 
-        temp_registry.document_store.put("doc-session-1", "kubernetes deployment tips")
+        temp_registry.knowledge.document_store.put(
+            "doc-session-1", "kubernetes deployment tips"
+        )
         get_context("kubernetes", session_id="sess-1")
-        events = temp_registry.event_log.get_events(
+        events = temp_registry.operational.event_log.get_events(
             event_type=EventType.PACK_ASSEMBLED, limit=10
         )
         matching = [e for e in events if e.payload.get("session_id") == "sess-1"]
@@ -593,7 +597,9 @@ class TestSessionAwareGetContext:
     def test_repeat_call_same_session_excludes_served_items(
         self, temp_registry: StoreRegistry
     ) -> None:
-        temp_registry.document_store.put("doc-repeat", "kubernetes deployment tips")
+        temp_registry.knowledge.document_store.put(
+            "doc-repeat", "kubernetes deployment tips"
+        )
         first = get_context("kubernetes", session_id="sess-repeat")
         assert "doc-repeat" in first or len(first) > 0
         second = get_context("kubernetes", session_id="sess-repeat")
@@ -601,13 +607,17 @@ class TestSessionAwareGetContext:
         assert "No context found" in second
 
     def test_different_session_not_deduped(self, temp_registry: StoreRegistry) -> None:
-        temp_registry.document_store.put("doc-isolated", "kubernetes deployment tips")
+        temp_registry.knowledge.document_store.put(
+            "doc-isolated", "kubernetes deployment tips"
+        )
         get_context("kubernetes", session_id="sess-A")
         other = get_context("kubernetes", session_id="sess-B")
         assert "No context found" not in other
 
     def test_no_session_id_no_dedup(self, temp_registry: StoreRegistry) -> None:
-        temp_registry.document_store.put("doc-nosess", "kubernetes deployment tips")
+        temp_registry.knowledge.document_store.put(
+            "doc-nosess", "kubernetes deployment tips"
+        )
         first = get_context("kubernetes")
         second = get_context("kubernetes")
         # Without session_id, both calls return content
@@ -642,7 +652,7 @@ class TestMainShutdown:
         registry = StoreRegistry(stores_dir=tmp_path / "stores2")
         registry.stores_dir.mkdir(parents=True)
         # Touch a store so close() has something to do.
-        registry.document_store.put("doc1", "shutdown probe")
+        registry.knowledge.document_store.put("doc1", "shutdown probe")
         server_mod._registry = registry
         close_calls: list[int] = []
         original_close = registry.close

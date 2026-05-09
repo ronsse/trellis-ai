@@ -200,7 +200,6 @@ class TestValidateConnectivityFailures:
         }
         monkeypatch.delenv("TRELLIS_KNOWLEDGE_PG_DSN", raising=False)
         monkeypatch.delenv("TRELLIS_OPERATIONAL_PG_DSN", raising=False)
-        monkeypatch.delenv("TRELLIS_PG_DSN", raising=False)
 
         with patch("trellis.stores.neo4j.base.GraphDatabase") as mock_gd:
             driver = MagicMock(name="driver")

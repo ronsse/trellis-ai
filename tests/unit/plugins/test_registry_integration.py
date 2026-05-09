@@ -35,13 +35,13 @@ class TestStoreRegistryPluginDiscovery:
             stores_dir=tmp_path / "stores",
         )
         with pytest.raises(ValueError, match="Unknown backend 'absent'"):
-            _ = registry.graph_store
+            _ = registry.knowledge.graph_store
 
     def test_builtin_unaffected_by_absent_plugins(self, tmp_path: Path):
         """Existing SQLite behavior is unchanged when no plugins are present."""
         registry = StoreRegistry(stores_dir=tmp_path / "stores")
         # Build the sqlite graph store — default config.
-        store = registry.graph_store
+        store = registry.knowledge.graph_store
         assert store is not None
 
     def test_plugin_backend_discoverable(self, tmp_path: Path, monkeypatch):
@@ -79,7 +79,7 @@ class TestStoreRegistryPluginDiscovery:
                 config={"graph": {"backend": "stub_backend"}},
                 stores_dir=tmp_path / "stores",
             )
-            store = registry.graph_store
+            store = registry.knowledge.graph_store
             assert isinstance(store, StubGraphStore)
 
     def test_plugin_cannot_shadow_builtin_by_default(self, tmp_path: Path):
@@ -113,7 +113,7 @@ class TestStoreRegistryPluginDiscovery:
         with patch("trellis.plugins.loader.entry_points", side_effect=fake_eps):
             _reset_backend_cache()
             registry = StoreRegistry(stores_dir=tmp_path / "stores")
-            store = registry.graph_store
+            store = registry.knowledge.graph_store
             # Built-in SQLite class, not the shadow.
             assert not hasattr(store, "identity")
 
@@ -150,6 +150,6 @@ class TestStoreRegistryPluginDiscovery:
         with patch("trellis.plugins.loader.entry_points", side_effect=fake_eps):
             _reset_backend_cache()
             registry = StoreRegistry(stores_dir=tmp_path / "stores")
-            store = registry.graph_store
+            store = registry.knowledge.graph_store
             assert isinstance(store, OverrideStore)
             assert store.identity == "override"

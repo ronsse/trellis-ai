@@ -41,7 +41,7 @@ class TestPrecedentPromoteHandler:
 
 class TestLabelAddHandler:
     def test_adds_label(self, registry: StoreRegistry) -> None:
-        node_id = registry.graph_store.upsert_node(
+        node_id = registry.knowledge.graph_store.upsert_node(
             node_id=None, node_type="concept", properties={"name": "test"}
         )
         handler = LabelAddHandler(registry)
@@ -52,12 +52,12 @@ class TestLabelAddHandler:
         result_id, _message = handler.handle(cmd)
         assert result_id == node_id
 
-        node = registry.graph_store.get_node(node_id)
+        node = registry.knowledge.graph_store.get_node(node_id)
         assert node is not None
         assert "important" in node["properties"]["labels"]
 
     def test_idempotent_label(self, registry: StoreRegistry) -> None:
-        node_id = registry.graph_store.upsert_node(
+        node_id = registry.knowledge.graph_store.upsert_node(
             node_id=None,
             node_type="concept",
             properties={"name": "test", "labels": ["existing"]},
@@ -68,7 +68,7 @@ class TestLabelAddHandler:
             args={"target_id": node_id, "label": "existing"},
         )
         handler.handle(cmd)
-        node = registry.graph_store.get_node(node_id)
+        node = registry.knowledge.graph_store.get_node(node_id)
         assert node is not None
         assert node["properties"]["labels"].count("existing") == 1
 
@@ -85,7 +85,7 @@ class TestLabelAddHandler:
 
 class TestLabelRemoveHandler:
     def test_removes_label(self, registry: StoreRegistry) -> None:
-        node_id = registry.graph_store.upsert_node(
+        node_id = registry.knowledge.graph_store.upsert_node(
             node_id=None,
             node_type="concept",
             properties={"name": "test", "labels": ["a", "b"]},
@@ -96,7 +96,7 @@ class TestLabelRemoveHandler:
             args={"target_id": node_id, "label": "a"},
         )
         handler.handle(cmd)
-        node = registry.graph_store.get_node(node_id)
+        node = registry.knowledge.graph_store.get_node(node_id)
         assert node is not None
         assert "a" not in node["properties"]["labels"]
         assert "b" in node["properties"]["labels"]
@@ -126,7 +126,7 @@ class TestEntityCreateHandler:
         assert node_id is not None
         assert "Test Entity" in message
 
-        node = registry.graph_store.get_node(node_id)
+        node = registry.knowledge.graph_store.get_node(node_id)
         assert node is not None
         assert node["node_type"] == "concept"
         assert node["properties"]["name"] == "Test Entity"
@@ -134,10 +134,10 @@ class TestEntityCreateHandler:
 
 class TestLinkCreateHandler:
     def test_creates_link(self, registry: StoreRegistry) -> None:
-        id1 = registry.graph_store.upsert_node(
+        id1 = registry.knowledge.graph_store.upsert_node(
             node_id=None, node_type="concept", properties={"name": "A"}
         )
-        id2 = registry.graph_store.upsert_node(
+        id2 = registry.knowledge.graph_store.upsert_node(
             node_id=None, node_type="concept", properties={"name": "B"}
         )
         handler = LinkCreateHandler(registry)
@@ -150,7 +150,7 @@ class TestLinkCreateHandler:
         assert "related_to" in message
 
     def test_missing_source(self, registry: StoreRegistry) -> None:
-        id2 = registry.graph_store.upsert_node(
+        id2 = registry.knowledge.graph_store.upsert_node(
             node_id=None, node_type="concept", properties={"name": "B"}
         )
         handler = LinkCreateHandler(registry)
@@ -166,7 +166,7 @@ class TestLinkCreateHandler:
             handler.handle(cmd)
 
     def test_missing_target(self, registry: StoreRegistry) -> None:
-        id1 = registry.graph_store.upsert_node(
+        id1 = registry.knowledge.graph_store.upsert_node(
             node_id=None, node_type="concept", properties={"name": "A"}
         )
         handler = LinkCreateHandler(registry)

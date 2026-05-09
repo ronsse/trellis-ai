@@ -88,10 +88,11 @@ You now have a working substrate. Add `--scope project` to `init` if you'd rathe
 Default is local SQLite. Switch backends in `~/.config/trellis/config.yaml`:
 
 ```yaml
-stores:
-  trace: { backend: postgres, dsn: ${TRELLIS_PG_DSN} }
+knowledge:
   vector: { backend: pgvector }
   blob: { backend: s3, bucket: ${TRELLIS_S3_BUCKET} }
+operational:
+  trace: { backend: postgres, dsn: ${TRELLIS_OPERATIONAL_PG_DSN} }
 ```
 
 Start the REST API with:

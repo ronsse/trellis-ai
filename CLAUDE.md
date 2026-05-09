@@ -72,7 +72,7 @@ Six ABCs in `stores/base/`: TraceStore, DocumentStore, GraphStore, VectorStore, 
 
 | Store | Default | Cloud |
 |-------|---------|-------|
-| Trace/Document/EventLog | `sqlite` | `postgres` (`TRELLIS_PG_DSN`) |
+| Trace/Document/EventLog | `sqlite` | `postgres` (`TRELLIS_KNOWLEDGE_PG_DSN` / `TRELLIS_OPERATIONAL_PG_DSN`) |
 | Graph | `sqlite` | `postgres` or `neo4j` (Bolt URI + credentials) |
 | Vector | `sqlite` | `pgvector`, `lancedb`, or `neo4j` (HNSW on `:Node.embedding`) |
 | Blob | `local` | `s3` (`TRELLIS_S3_BUCKET`) |

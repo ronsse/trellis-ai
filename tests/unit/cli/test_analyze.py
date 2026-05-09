@@ -38,7 +38,7 @@ def temp_stores(_temp_stores: StoreRegistry) -> StoreRegistry:
 
 def _emit_pack_and_feedback(registry: StoreRegistry, *, success: bool) -> None:
     """Emit a PACK_ASSEMBLED + FEEDBACK_RECORDED pair for testing."""
-    event_log = registry.event_log
+    event_log = registry.operational.event_log
     event_log.emit(
         EventType.PACK_ASSEMBLED,
         source="test",
@@ -174,7 +174,7 @@ class TestPackSections:
         assert data["empty_section_flags"] == []
 
     def test_reports_section_stats(self, temp_stores: StoreRegistry) -> None:
-        temp_stores.event_log.emit(
+        temp_stores.operational.event_log.emit(
             EventType.PACK_ASSEMBLED,
             source="pack_builder",
             entity_id="pk",
@@ -205,7 +205,7 @@ class TestLearningCandidates:
         rounds: int = 3,
     ) -> None:
         """Emit ``rounds`` graded packs marking ``item_id`` as helpful + successful."""
-        event_log = registry.event_log
+        event_log = registry.operational.event_log
         for i in range(rounds):
             pack_id = f"lc-pack-{i}"
             event_log.emit(
