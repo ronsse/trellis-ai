@@ -1,4 +1,18 @@
-"""ClassifierPipeline — unified classification for ingestion and enrichment."""
+"""ClassifierPipeline — unified classification for ingestion and enrichment.
+
+Audit decision (swarm B6): "Should ``CLASSIFIER_MODE_CHANGED`` be a new
+``EventType``?" — **No.** Mode is not a runtime-mutable flag; it is
+deterministically derived from whether ``llm_classifier`` was supplied at
+construction (see :attr:`mode`). There is no in-process flip to observe.
+Per-item mode observation is already covered: the pipeline stamps
+:attr:`MergedClassification.mode` on every result and that value is
+propagated to :attr:`ContentTags.classified_mode`, which then rides
+inside the ``after`` payload of every :attr:`EventType.TAGS_REFRESHED`
+event emitted by ``classify.refresh``. Operators wanting "what mode
+classified this item" should read ``after.classified_mode`` from the
+refresh event or the persisted ``content_tags`` — no new event type
+needed.
+"""
 
 from __future__ import annotations
 
