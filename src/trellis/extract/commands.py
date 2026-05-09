@@ -68,21 +68,27 @@ def result_to_batch(
             )
         )
 
-    commands.extend(
-        Command(
-            operation=Operation.LINK_CREATE,
-            args={
-                "source_id": edge.source_id,
-                "target_id": edge.target_id,
-                "edge_kind": edge.edge_kind,
-                "properties": dict(edge.properties),
-            },
-            target_id=edge.source_id,
-            target_type="entity",
-            requested_by=requested_by,
+    for edge in result.edges:
+        link_args: dict[str, object] = {
+            "source_id": edge.source_id,
+            "target_id": edge.target_id,
+            "edge_kind": edge.edge_kind,
+            "properties": dict(edge.properties),
+        }
+        # Only forward the flag when set — keeps the args minimal and
+        # leaves the LinkCreateHandler default (strict FK) intact for
+        # the common case.
+        if edge.allow_dangling:
+            link_args["allow_dangling"] = True
+        commands.append(
+            Command(
+                operation=Operation.LINK_CREATE,
+                args=link_args,
+                target_id=edge.source_id,
+                target_type="entity",
+                requested_by=requested_by,
+            )
         )
-        for edge in result.edges
-    )
 
     return CommandBatch(
         commands=commands,

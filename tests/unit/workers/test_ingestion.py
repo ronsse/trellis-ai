@@ -143,6 +143,13 @@ class TestDbtManifestExtractor:
             "depends_on",
         ) in pairs
 
+    async def test_depends_on_edges_allow_dangling(self) -> None:
+        """Cross-manifest depends_on targets may not be in the same batch."""
+        ext = DbtManifestExtractor()
+        result = await ext.extract(SAMPLE_DBT_MANIFEST)
+        assert result.edges, "fixture should produce depends_on edges"
+        assert all(edge.allow_dangling for edge in result.edges)
+
     async def test_empty_manifest(self) -> None:
         ext = DbtManifestExtractor()
         result = await ext.extract({"nodes": {}, "sources": {}})
@@ -222,6 +229,13 @@ class TestOpenLineageExtractor:
             "dataset:warehouse:analytics.daily_events",
             "writes_to",
         ) in pairs
+
+    async def test_edges_allow_dangling(self) -> None:
+        """Streamed OL events may reference datasets emitted in prior batches."""
+        ext = OpenLineageExtractor()
+        result = await ext.extract(SAMPLE_OL_EVENTS)
+        assert result.edges, "fixture should produce reads_from / writes_to edges"
+        assert all(edge.allow_dangling for edge in result.edges)
 
     async def test_deduplicates_edges(self) -> None:
         ext = OpenLineageExtractor()

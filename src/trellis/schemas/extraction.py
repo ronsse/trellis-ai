@@ -45,6 +45,14 @@ class EdgeDraft(TrellisModel):
     entities whose IDs will be assigned downstream).  The CLI/API layer is
     responsible for resolving draft-local references before issuing
     ``LINK_CREATE`` commands.
+
+    ``allow_dangling`` opts the edge out of pre-flight FK validation in
+    ``LinkCreateHandler``.  Use it for extractors that legitimately emit
+    edges whose targets live outside the current batch — e.g. dbt
+    ``depends_on`` references that span manifests, or OpenLineage events
+    streamed in chunks where a job's dataset was extracted in a prior
+    batch.  Default ``False`` keeps strict FK semantics for in-batch
+    edges.
     """
 
     source_id: str
@@ -52,6 +60,7 @@ class EdgeDraft(TrellisModel):
     edge_kind: str
     properties: dict[str, Any] = Field(default_factory=dict)
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    allow_dangling: bool = False
 
 
 class ExtractionProvenance(TrellisModel):

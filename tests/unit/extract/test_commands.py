@@ -83,6 +83,32 @@ class TestEdgeConversion:
         assert cmd.args["properties"] == {"confidence_note": "llm"}
         assert cmd.target_id == "ent-a"  # router key
         assert cmd.target_type == "entity"
+        # Default: flag is absent — strict FK pre-flight applies.
+        assert "allow_dangling" not in cmd.args
+
+    def test_allow_dangling_edge_forwards_flag(self) -> None:
+        """Drafts opting out of FK validation propagate the flag to args."""
+        edge = EdgeDraft(
+            source_id="ent-a",
+            target_id="ent-b",
+            edge_kind="depends_on",
+            allow_dangling=True,
+        )
+        batch = result_to_batch(_result(edges=[edge]), requested_by="t")
+        cmd = batch.commands[0]
+        assert cmd.args["allow_dangling"] is True
+
+    def test_strict_edge_omits_flag(self) -> None:
+        """Strict (default) drafts must not leak ``allow_dangling`` into args."""
+        edge = EdgeDraft(
+            source_id="ent-a",
+            target_id="ent-b",
+            edge_kind="mentions",
+            allow_dangling=False,
+        )
+        batch = result_to_batch(_result(edges=[edge]), requested_by="t")
+        cmd = batch.commands[0]
+        assert "allow_dangling" not in cmd.args
 
 
 class TestBatchShape:
