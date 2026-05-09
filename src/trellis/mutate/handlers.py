@@ -6,6 +6,7 @@ from typing import Any
 
 import structlog
 
+from trellis.errors import ValidationError
 from trellis.mutate.commands import Command, Operation
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
@@ -176,7 +177,26 @@ class EntityCreateHandler:
 
 
 class LinkCreateHandler:
-    """Validate both nodes exist, create edge via graph store."""
+    """Validate both endpoints exist, then create edge via graph store.
+
+    Pre-flight FK validation runs at the start of :meth:`handle` (before any
+    side effect) so orphan edges can't be created in the first place. The
+    legacy CLI ``graph-health`` command surfaces orphans post-hoc as a
+    safety net; this handler closes the door at ingest time.
+
+    The check resolves each endpoint via :meth:`_resolve_node` (direct
+    ``get_node`` lookup, then property-based fallback on ``entity_id``).
+    On miss, raises :class:`trellis.errors.ValidationError` with a message
+    that names which side (source / target / both) failed and which IDs
+    were attempted — the executor turns that into a ``MUTATION_REJECTED``
+    event and a ``CommandStatus.FAILED`` result, so ``LINK_CREATED`` is
+    never emitted for a dangling edge.
+
+    Escape hatch: pass ``allow_dangling=True`` in ``command.args`` to skip
+    FK validation. This is for bootstrap / edge-before-node ingest paths
+    (e.g. extractors that emit edges in dependency order before their
+    referenced nodes exist). Default is ``False`` — strict.
+    """
 
     def __init__(self, registry: StoreRegistry) -> None:
         self._registry = registry
@@ -202,16 +222,31 @@ class LinkCreateHandler:
         source_id = command.args["source_id"]
         target_id = command.args["target_id"]
         edge_kind = command.args["edge_kind"]
+        allow_dangling = bool(command.args.get("allow_dangling", False))
         store = self._registry.knowledge.graph_store
 
-        resolved_source = self._resolve_node(source_id)
-        if resolved_source is None:
-            msg = f"Source node not found: {source_id}"
-            raise ValueError(msg)
-        resolved_target = self._resolve_node(target_id)
-        if resolved_target is None:
-            msg = f"Target node not found: {target_id}"
-            raise ValueError(msg)
+        if allow_dangling:
+            # Bootstrap path: skip FK lookup entirely. Caller takes
+            # responsibility for resolving dangling endpoints later.
+            resolved_source = source_id
+            resolved_target = target_id
+        else:
+            resolved_source = self._resolve_node(source_id)
+            resolved_target = self._resolve_node(target_id)
+            missing: list[str] = []
+            if resolved_source is None:
+                missing.append(
+                    f"source_id={source_id!r} does not reference an "
+                    "existing entity"
+                )
+            if resolved_target is None:
+                missing.append(
+                    f"target_id={target_id!r} does not reference an "
+                    "existing entity"
+                )
+            if missing:
+                msg = f"LINK_CREATE FK check failed: {'; '.join(missing)}"
+                raise ValidationError(msg, errors=missing)
         source_id = resolved_source
         target_id = resolved_target
 
