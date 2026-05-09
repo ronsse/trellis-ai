@@ -37,8 +37,6 @@ class Operation(StrEnum):
     # Maintain
     REDACTION_APPLY = "redaction.apply"
     RETENTION_PRUNE = "retention.prune"
-    PACK_PUBLISH = "pack.publish"
-    PACK_INVALIDATE = "pack.invalidate"
 
 
 class CommandStatus(StrEnum):
@@ -147,8 +145,6 @@ class OperationRegistry:
         self._schemas[Operation.FEEDBACK_RECORD] = {"target_id", "rating"}
         self._schemas[Operation.REDACTION_APPLY] = {"target_id", "reason"}
         self._schemas[Operation.RETENTION_PRUNE] = set()
-        self._schemas[Operation.PACK_PUBLISH] = {"pack"}
-        self._schemas[Operation.PACK_INVALIDATE] = {"pack_id"}
 
     def validate(self, command: Command) -> tuple[bool, list[str]]:
         """Validate a command's args against its operation's schema.

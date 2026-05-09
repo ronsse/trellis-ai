@@ -22,7 +22,7 @@ class TestOperation:
             assert "." in op  # all ops are dotted
 
     def test_operation_count(self) -> None:
-        assert len(Operation) == 19
+        assert len(Operation) == 17
 
 
 class TestCommand:
