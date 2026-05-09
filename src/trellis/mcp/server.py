@@ -66,6 +66,22 @@ def _build_pack_builder(registry: StoreRegistry) -> PackBuilder:
     )
 
 
+def _build_mutation_executor(registry: StoreRegistry) -> Any:
+    """Build a curate-handler MutationExecutor for the MCP surface.
+
+    Both ``execute_mutation`` and ``save_memory``'s extraction pipeline
+    construct an executor with the same ``event_log`` + curate-handlers
+    wiring; the helper centralises that so the assembly stays consistent.
+    """
+    from trellis.mutate.executor import MutationExecutor  # noqa: PLC0415
+    from trellis.mutate.handlers import create_curate_handlers  # noqa: PLC0415
+
+    return MutationExecutor(
+        event_log=registry.operational.event_log,
+        handlers=create_curate_handlers(registry),
+    )
+
+
 _minhash_index: Any = None
 
 
@@ -239,10 +255,6 @@ def _run_memory_extraction(
 
         from trellis.extract.commands import result_to_batch  # noqa: PLC0415
         from trellis.extract.context import ExtractionContext  # noqa: PLC0415
-        from trellis.mutate.executor import MutationExecutor  # noqa: PLC0415
-        from trellis.mutate.handlers import (  # noqa: PLC0415
-            create_curate_handlers,
-        )
 
         context = ExtractionContext(
             allow_llm_fallback=True,
@@ -260,11 +272,7 @@ def _run_memory_extraction(
             return
 
         batch = result_to_batch(result, requested_by="mcp:save_memory")
-        executor = MutationExecutor(
-            event_log=registry.operational.event_log,
-            handlers=create_curate_handlers(registry),
-        )
-        executor.execute_batch(batch)
+        _build_mutation_executor(registry).execute_batch(batch)
     except Exception:
         logger.debug("memory_extraction_failed", doc_id=doc_id, exc_info=True)
 
@@ -1272,8 +1280,6 @@ def execute_mutation(
         this tool does not raise to the MCP transport.
     """
     from trellis.mutate.commands import Command  # noqa: PLC0415
-    from trellis.mutate.executor import MutationExecutor  # noqa: PLC0415
-    from trellis.mutate.handlers import create_curate_handlers  # noqa: PLC0415
 
     if not operation or not operation.strip():
         return json.dumps(
@@ -1312,11 +1318,7 @@ def execute_mutation(
         )
 
     try:
-        registry = _get_registry()
-        executor = MutationExecutor(
-            event_log=registry.operational.event_log,
-            handlers=create_curate_handlers(registry),
-        )
+        executor = _build_mutation_executor(_get_registry())
         result = executor.execute(command)
     except Exception as exc:
         logger.exception("execute_mutation_failed", operation=str(op))
