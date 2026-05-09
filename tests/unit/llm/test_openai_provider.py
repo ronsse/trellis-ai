@@ -6,12 +6,14 @@ Tests inject a mock async client via the ``client=`` kwarg, so the real
 
 from __future__ import annotations
 
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
 from trellis.llm.protocol import EmbedderClient, LLMClient
+from trellis.llm.providers import openai as openai_provider
 from trellis.llm.providers.openai import (
     DEFAULT_CHAT_MODEL,
     DEFAULT_EMBEDDING_MODEL,
@@ -239,3 +241,169 @@ class TestImportGuard:
         monkeypatch.setattr(builtins, "__import__", guarded_import)
         with pytest.raises(ModuleNotFoundError, match="llm-openai"):
             OpenAIClient(api_key="sk-test")
+
+    def test_module_not_found_when_openai_missing_for_embedder(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The same guard fires for the embedder constructor path."""
+        import builtins
+
+        real_import = builtins.__import__
+
+        msg = "No module named 'openai'"
+
+        def guarded_import(name: str, *args: object, **kwargs: object) -> object:
+            if name == "openai":
+                raise ModuleNotFoundError(msg)
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", guarded_import)
+        with pytest.raises(ModuleNotFoundError, match="llm-openai"):
+            OpenAIEmbedder(api_key="sk-test")
+
+
+# -- Tests: error propagation ----------------------------------------------
+
+
+class _FakeAPIError(Exception):
+    """Stand-in for an openai SDK exception class."""
+
+
+class TestErrorPropagation:
+    """The adapter does not wrap SDK errors in trellis.errors types — it lets
+    them propagate. These tests pin that contract so a future change is a
+    deliberate decision, not an accident."""
+
+    async def test_chat_sdk_exception_propagates_unchanged(self) -> None:
+        boom = _FakeAPIError("upstream 5xx")
+        create = AsyncMock(side_effect=boom)
+        client_obj = SimpleNamespace(
+            chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+        )
+        c = OpenAIClient(client=client_obj)
+        with pytest.raises(_FakeAPIError, match="upstream 5xx"):
+            await c.generate(messages=[Message(role="user", content="hi")])
+
+    async def test_chat_timeout_propagates(self) -> None:
+        create = AsyncMock(side_effect=TimeoutError("deadline"))
+        client_obj = SimpleNamespace(
+            chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+        )
+        c = OpenAIClient(client=client_obj)
+        with pytest.raises(TimeoutError):
+            await c.generate(messages=[Message(role="user", content="hi")])
+
+    async def test_embed_sdk_exception_propagates_unchanged(self) -> None:
+        boom = _FakeAPIError("rate limited")
+        create = AsyncMock(side_effect=boom)
+        client_obj = SimpleNamespace(embeddings=SimpleNamespace(create=create))
+        e = OpenAIEmbedder(client=client_obj)
+        with pytest.raises(_FakeAPIError, match="rate limited"):
+            await e.embed("hello")
+
+    async def test_embed_batch_sdk_exception_propagates_unchanged(self) -> None:
+        create = AsyncMock(side_effect=_FakeAPIError("malformed json"))
+        client_obj = SimpleNamespace(embeddings=SimpleNamespace(create=create))
+        e = OpenAIEmbedder(client=client_obj)
+        with pytest.raises(_FakeAPIError, match="malformed json"):
+            await e.embed_batch(["a", "b"])
+
+
+# -- Tests: constructor kwargs ---------------------------------------------
+
+
+class TestConstructorKwargs:
+    async def test_chat_default_model_kwarg_overrides_class_default(self) -> None:
+        client_obj, create = _chat_mock(_make_chat_response())
+        c = OpenAIClient(default_model="gpt-4o", client=client_obj)
+        await c.generate(messages=[Message(role="user", content="hi")])
+        assert create.call_args.kwargs["model"] == "gpt-4o"
+
+    async def test_chat_explicit_model_beats_constructor_default(self) -> None:
+        client_obj, create = _chat_mock(_make_chat_response())
+        c = OpenAIClient(default_model="ctor-default", client=client_obj)
+        await c.generate(
+            messages=[Message(role="user", content="hi")],
+            model="call-override",
+        )
+        assert create.call_args.kwargs["model"] == "call-override"
+
+    async def test_embedder_default_model_kwarg_overrides_class_default(
+        self,
+    ) -> None:
+        client_obj, create = _embeddings_mock(_make_embedding_response([[0.0]]))
+        e = OpenAIEmbedder(
+            default_model="text-embedding-3-large",
+            client=client_obj,
+        )
+        await e.embed("x")
+        assert create.call_args.kwargs["model"] == "text-embedding-3-large"
+
+    async def test_embedder_explicit_model_beats_constructor_default(self) -> None:
+        client_obj, create = _embeddings_mock(_make_embedding_response([[0.0]]))
+        e = OpenAIEmbedder(default_model="ctor-default", client=client_obj)
+        await e.embed("x", model="call-override")
+        assert create.call_args.kwargs["model"] == "call-override"
+
+    def test_build_async_client_passes_api_key_and_base_url(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The adapter forwards ``api_key`` and ``base_url`` to AsyncOpenAI
+        only when they are non-empty."""
+        captured: list[dict[str, object]] = []
+
+        class FakeAsyncOpenAI:
+            def __init__(self, **kwargs: object) -> None:
+                captured.append(kwargs)
+
+        fake_module = ModuleType("openai")
+        fake_module.AsyncOpenAI = FakeAsyncOpenAI  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "openai", fake_module)
+
+        OpenAIClient(api_key="sk-test", base_url="https://example/api")
+        OpenAIEmbedder(api_key="sk-test-2", base_url="https://example/emb")
+        assert captured == [
+            {"api_key": "sk-test", "base_url": "https://example/api"},
+            {"api_key": "sk-test-2", "base_url": "https://example/emb"},
+        ]
+
+    def test_build_async_client_omits_unset_kwargs(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        captured: list[dict[str, object]] = []
+
+        class FakeAsyncOpenAI:
+            def __init__(self, **kwargs: object) -> None:
+                captured.append(kwargs)
+
+        fake_module = ModuleType("openai")
+        fake_module.AsyncOpenAI = FakeAsyncOpenAI  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "openai", fake_module)
+
+        OpenAIClient()
+        OpenAIEmbedder()
+        assert captured == [{}, {}]
+
+
+# -- Tests: embedder request shape -----------------------------------------
+
+
+class TestEmbedderRequestShape:
+    async def test_single_embed_wraps_text_in_list(self) -> None:
+        """``embed(text)`` calls ``embeddings.create(input=[text])`` — a one-
+        element list, not a bare string. This guards against an accidental
+        change that would silently change the SDK request shape."""
+        client_obj, create = _embeddings_mock(_make_embedding_response([[0.1]]))
+        e = OpenAIEmbedder(client=client_obj)
+        await e.embed("hello")
+        assert create.call_args.kwargs["input"] == ["hello"]
+
+
+# -- Sanity: module exposes the documented surface -------------------------
+
+
+def test_module_exports_default_model_constants() -> None:
+    assert isinstance(openai_provider.DEFAULT_CHAT_MODEL, str)
+    assert isinstance(openai_provider.DEFAULT_EMBEDDING_MODEL, str)
+    assert openai_provider.DEFAULT_CHAT_MODEL.startswith("gpt-")
+    assert "embedding" in openai_provider.DEFAULT_EMBEDDING_MODEL

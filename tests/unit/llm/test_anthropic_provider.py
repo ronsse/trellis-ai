@@ -6,12 +6,14 @@ Tests inject a mock async client via the ``client=`` kwarg, so the real
 
 from __future__ import annotations
 
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
 from trellis.llm.protocol import LLMClient
+from trellis.llm.providers import anthropic as anthropic_provider
 from trellis.llm.providers.anthropic import (
     DEFAULT_MODEL,
     AnthropicClient,
@@ -211,3 +213,151 @@ class TestImportGuard:
         monkeypatch.setattr(builtins, "__import__", guarded_import)
         with pytest.raises(ModuleNotFoundError, match="llm-anthropic"):
             AnthropicClient(api_key="sk-ant-test")
+
+
+# -- Tests: error propagation ----------------------------------------------
+
+
+class _FakeAPIError(Exception):
+    """Stand-in for an anthropic SDK exception class."""
+
+
+class TestErrorPropagation:
+    """The adapter does not wrap SDK errors in trellis.errors types — it lets
+    them propagate. These tests pin that contract so a future change is a
+    deliberate decision, not an accident."""
+
+    async def test_sdk_exception_propagates_unchanged(self) -> None:
+        boom = _FakeAPIError("upstream 5xx")
+        create = AsyncMock(side_effect=boom)
+        client_obj = SimpleNamespace(messages=SimpleNamespace(create=create))
+        c = AnthropicClient(client=client_obj)
+        with pytest.raises(_FakeAPIError, match="upstream 5xx"):
+            await c.generate(messages=[Message(role="user", content="hi")])
+
+    async def test_timeout_exception_propagates_unchanged(self) -> None:
+        create = AsyncMock(side_effect=TimeoutError("deadline"))
+        client_obj = SimpleNamespace(messages=SimpleNamespace(create=create))
+        c = AnthropicClient(client=client_obj)
+        with pytest.raises(TimeoutError):
+            await c.generate(messages=[Message(role="user", content="hi")])
+
+
+# -- Tests: constructor kwargs ---------------------------------------------
+
+
+class TestConstructorKwargs:
+    async def test_default_model_kwarg_overrides_class_default(self) -> None:
+        client_obj, create = _messages_mock(_make_message_response())
+        c = AnthropicClient(
+            default_model="claude-sonnet-4-6",
+            client=client_obj,
+        )
+        await c.generate(messages=[Message(role="user", content="hi")])
+        assert create.call_args.kwargs["model"] == "claude-sonnet-4-6"
+
+    async def test_explicit_model_beats_constructor_default(self) -> None:
+        client_obj, create = _messages_mock(_make_message_response())
+        c = AnthropicClient(default_model="ctor-default", client=client_obj)
+        await c.generate(
+            messages=[Message(role="user", content="hi")],
+            model="call-override",
+        )
+        assert create.call_args.kwargs["model"] == "call-override"
+
+    def test_build_async_client_passes_api_key_and_base_url(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The adapter forwards ``api_key`` and ``base_url`` to AsyncAnthropic
+        only when they are non-empty."""
+        captured: dict[str, object] = {}
+
+        class FakeAsyncAnthropic:
+            def __init__(self, **kwargs: object) -> None:
+                captured.update(kwargs)
+
+        fake_module = ModuleType("anthropic")
+        fake_module.AsyncAnthropic = FakeAsyncAnthropic  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "anthropic", fake_module)
+
+        AnthropicClient(api_key="sk-ant-test", base_url="https://example/api")
+        assert captured == {
+            "api_key": "sk-ant-test",
+            "base_url": "https://example/api",
+        }
+
+    def test_build_async_client_omits_unset_kwargs(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Falsy ``api_key`` / ``base_url`` are not forwarded — the SDK falls
+        back to its own env-based default."""
+        captured: dict[str, object] = {}
+
+        class FakeAsyncAnthropic:
+            def __init__(self, **kwargs: object) -> None:
+                captured.update(kwargs)
+
+        fake_module = ModuleType("anthropic")
+        fake_module.AsyncAnthropic = FakeAsyncAnthropic  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "anthropic", fake_module)
+
+        AnthropicClient()
+        assert captured == {}
+
+
+# -- Tests: helper edge cases ----------------------------------------------
+
+
+class TestSplitSystemSeparator:
+    def test_two_system_messages_joined_with_blank_line(self) -> None:
+        system, _ = _split_system(
+            [
+                Message(role="system", content="A"),
+                Message(role="user", content="q"),
+                Message(role="system", content="B"),
+            ]
+        )
+        # Conversation order between system messages does not matter — they
+        # all collapse into ``system_text`` joined by a blank line.
+        assert system == "A\n\nB"
+
+
+class TestExtractTextEdgeCases:
+    def test_text_block_with_empty_string_skipped(self) -> None:
+        # Empty ``text=""`` is falsy, so the block is dropped entirely.
+        block = SimpleNamespace(type="text", text="")
+        resp = SimpleNamespace(content=[block])
+        assert _extract_text(resp) == ""
+
+    def test_block_missing_type_attr_skipped(self) -> None:
+        block = SimpleNamespace(text="orphan")
+        resp = SimpleNamespace(content=[block])
+        assert _extract_text(resp) == ""
+
+
+class TestExtractUsageEdgeCases:
+    def test_zero_tokens(self) -> None:
+        usage = _extract_usage(SimpleNamespace(input_tokens=0, output_tokens=0))
+        assert usage == TokenUsage(
+            prompt_tokens=0, completion_tokens=0, total_tokens=0
+        )
+
+    def test_missing_attrs_default_to_zero(self) -> None:
+        # ``getattr(..., 0)`` fallback for absent input/output token attrs.
+        usage = _extract_usage(SimpleNamespace())
+        assert usage == TokenUsage()
+
+    def test_none_token_attrs_coerced_to_zero(self) -> None:
+        # Defensive: SDK may yield ``None`` rather than omitting the attr.
+        usage = _extract_usage(
+            SimpleNamespace(input_tokens=None, output_tokens=None)
+        )
+        assert usage == TokenUsage()
+
+
+# -- Sanity: module exposes the documented surface -------------------------
+
+
+def test_module_exports_default_model_constant() -> None:
+    assert isinstance(anthropic_provider.DEFAULT_MODEL, str)
+    assert anthropic_provider.DEFAULT_MODEL.startswith("claude-")
