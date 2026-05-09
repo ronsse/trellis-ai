@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
-from trellis.stores.graph import SQLiteGraphStore
+from trellis.stores.sqlite.graph import SQLiteGraphStore
 
 
 @pytest.fixture

@@ -8,7 +8,8 @@ import pytest
 
 pytest.importorskip("numpy")
 
-from trellis.stores.vector import SQLiteVectorStore, VectorStore
+from trellis.stores.base.vector import VectorStore
+from trellis.stores.sqlite.vector import SQLiteVectorStore
 
 
 @pytest.fixture

@@ -8,9 +8,9 @@ import structlog
 from pydantic import Field
 
 from trellis.core.base import TrellisModel, utc_now
-from trellis.stores.document import DocumentStore
-from trellis.stores.event_log import EventLog, EventType
-from trellis.stores.trace import TraceStore
+from trellis.stores.base.document import DocumentStore
+from trellis.stores.base.event_log import EventLog, EventType
+from trellis.stores.base.trace import TraceStore
 
 logger = structlog.get_logger(__name__)
 

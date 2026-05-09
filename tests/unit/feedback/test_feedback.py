@@ -749,11 +749,8 @@ class TestFeedbackIdScanLimitRegression:
         feedback added *afterwards* is present. Under the bug this was
         False; under ``order='desc'`` it is True."""
         from trellis.feedback.recording import _feedback_id_in_event_log
-        from trellis.stores.event_log import (
-            Event,
-            EventType,
-            SQLiteEventLog,
-        )
+        from trellis.stores.base.event_log import Event, EventType
+        from trellis.stores.sqlite.event_log import SQLiteEventLog
 
         event_log = SQLiteEventLog(tmp_path / "events.db")
         try:

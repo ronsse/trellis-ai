@@ -15,7 +15,7 @@ from trellis.mutate.commands import (
     CommandStatus,
     OperationRegistry,
 )
-from trellis.stores.event_log import EventLog, EventType
+from trellis.stores.base.event_log import EventLog, EventType
 
 logger = structlog.get_logger()
 

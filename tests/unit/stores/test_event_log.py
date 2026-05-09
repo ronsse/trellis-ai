@@ -8,7 +8,8 @@ from pathlib import Path
 import pytest
 
 from trellis.core.base import utc_now
-from trellis.stores.event_log import Event, EventType, SQLiteEventLog
+from trellis.stores.base.event_log import Event, EventType
+from trellis.stores.sqlite.event_log import SQLiteEventLog
 
 
 @pytest.fixture

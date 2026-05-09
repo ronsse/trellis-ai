@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from trellis.stores.document import SQLiteDocumentStore
+from trellis.stores.sqlite.document import SQLiteDocumentStore
 
 
 @pytest.fixture

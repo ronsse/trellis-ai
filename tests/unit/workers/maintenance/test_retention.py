@@ -10,9 +10,10 @@ import pytest
 from trellis.core.base import utc_now
 from trellis.schemas.enums import OutcomeStatus, TraceSource
 from trellis.schemas.trace import Outcome, Trace, TraceContext
-from trellis.stores.document import SQLiteDocumentStore
-from trellis.stores.event_log import EventType, SQLiteEventLog
-from trellis.stores.trace import SQLiteTraceStore
+from trellis.stores.base.event_log import EventType
+from trellis.stores.sqlite.document import SQLiteDocumentStore
+from trellis.stores.sqlite.event_log import SQLiteEventLog
+from trellis.stores.sqlite.trace import SQLiteTraceStore
 from trellis_workers.maintenance.retention import (
     RetentionPolicy,
     RetentionWorker,

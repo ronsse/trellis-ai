@@ -12,12 +12,12 @@ from trellis.llm import Message
 from trellis.schemas.enums import OutcomeStatus
 from trellis.schemas.precedent import Precedent
 from trellis.schemas.trace import Trace
-from trellis.stores.event_log import EventType
+from trellis.stores.base.event_log import EventType
 
 if TYPE_CHECKING:
     from trellis.llm import LLMClient
-    from trellis.stores.event_log import EventLog
-    from trellis.stores.trace import TraceStore
+    from trellis.stores.base.event_log import EventLog
+    from trellis.stores.base.trace import TraceStore
 
 logger = structlog.get_logger(__name__)
 

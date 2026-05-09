@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from trellis.stores.graph import SQLiteGraphStore
+from trellis.stores.sqlite.graph import SQLiteGraphStore
 
 
 @pytest.fixture

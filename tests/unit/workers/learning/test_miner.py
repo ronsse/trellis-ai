@@ -16,8 +16,9 @@ from trellis.schemas.trace import (
     Trace,
     TraceContext,
 )
-from trellis.stores.event_log import EventType, SQLiteEventLog
-from trellis.stores.trace import SQLiteTraceStore
+from trellis.stores.base.event_log import EventType
+from trellis.stores.sqlite.event_log import SQLiteEventLog
+from trellis.stores.sqlite.trace import SQLiteTraceStore
 from trellis_workers.learning.miner import PrecedentMiner
 
 # ---------------------------------------------------------------------------

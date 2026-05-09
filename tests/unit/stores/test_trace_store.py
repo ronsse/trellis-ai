@@ -9,7 +9,7 @@ from trellis.core.base import utc_now
 from trellis.errors import StoreError
 from trellis.schemas.enums import OutcomeStatus, TraceSource
 from trellis.schemas.trace import Outcome, Trace, TraceContext, TraceStep
-from trellis.stores.trace import SQLiteTraceStore
+from trellis.stores.sqlite.trace import SQLiteTraceStore
 
 
 @pytest.fixture
