@@ -41,12 +41,20 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     TRELLIS_CONFIG_DIR=/etc/trellis
 
 RUN groupadd --system --gid 1000 trellis \
- && useradd --system --uid 1000 --gid trellis --home /home/trellis --create-home trellis
+ && useradd --system --uid 1000 --gid trellis --home /home/trellis --create-home trellis \
+ && mkdir -p /var/lib/trellis /etc/trellis \
+ && chown trellis:trellis /var/lib/trellis /etc/trellis
 
 COPY --from=builder /opt/venv /opt/venv
 
 USER trellis
 WORKDIR /home/trellis
+
+# Declare the data volume so docker named-volume mounts inherit the
+# trellis:trellis ownership set above. Without this, a fresh
+# ``docker volume create`` lands as root:root and the trellis user
+# can't write to it (RegistryValidationError on first boot).
+VOLUME ["/var/lib/trellis"]
 
 EXPOSE 8420
 
