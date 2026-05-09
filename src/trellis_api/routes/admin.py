@@ -14,7 +14,7 @@ from trellis.retrieve.effectiveness import (
 )
 from trellis.stores.advisory_store import AdvisoryStore
 from trellis_api.app import get_registry
-from trellis_api.models import HealthResponse, StatsResponse
+from trellis_wire.dtos import HealthResponse, StatsResponse
 
 logger = structlog.get_logger(__name__)
 

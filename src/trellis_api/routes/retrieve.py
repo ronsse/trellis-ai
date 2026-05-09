@@ -14,7 +14,7 @@ from trellis.retrieve.strategies import build_strategies
 from trellis.schemas.pack import PackBudget
 from trellis.stores.advisory_store import AdvisoryStore
 from trellis_api.app import get_registry
-from trellis_api.models import PackRequest, PackResponse
+from trellis_wire.dtos import PackRequest, PackResponse
 
 router = APIRouter()
 
