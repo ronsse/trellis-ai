@@ -14,8 +14,12 @@ from trellis.mutate.handlers import (
     LabelRemoveHandler,
     LinkCreateHandler,
     PrecedentPromoteHandler,
+    TraceIngestHandler,
     create_curate_handlers,
 )
+from trellis.schemas.enums import TraceSource
+from trellis.schemas.trace import Trace, TraceContext
+from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 
 
@@ -182,6 +186,70 @@ class TestLinkCreateHandler:
             handler.handle(cmd)
 
 
+def _make_trace(intent: str = "test intent") -> Trace:
+    return Trace(
+        source=TraceSource.AGENT,
+        intent=intent,
+        context=TraceContext(agent_id="agent-1", domain="test"),
+    )
+
+
+class TestTraceIngestHandler:
+    def test_appends_trace_and_emits_event(self, registry: StoreRegistry) -> None:
+        handler = TraceIngestHandler(registry)
+        trace = _make_trace("ingest me")
+        cmd = Command(
+            operation=Operation.TRACE_INGEST,
+            args={"trace": trace},
+            target_id=trace.trace_id,
+            target_type="trace",
+        )
+
+        created_id, message = handler.handle(cmd)
+
+        assert created_id == trace.trace_id
+        assert trace.trace_id in message
+        assert registry.operational.trace_store.get(trace.trace_id) is not None
+        events = registry.operational.event_log.get_events(
+            event_type=EventType.TRACE_INGESTED,
+            entity_id=trace.trace_id,
+        )
+        assert len(events) == 1
+        assert events[0].payload["intent"] == "ingest me"
+        assert events[0].payload["domain"] == "test"
+
+    def test_accepts_dict_args(self, registry: StoreRegistry) -> None:
+        handler = TraceIngestHandler(registry)
+        trace = _make_trace()
+        cmd = Command(
+            operation=Operation.TRACE_INGEST,
+            args={"trace": trace.model_dump(mode="json")},
+        )
+        created_id, _ = handler.handle(cmd)
+        assert created_id == trace.trace_id
+
+    def test_idempotent_on_duplicate_trace_id(
+        self, registry: StoreRegistry
+    ) -> None:
+        handler = TraceIngestHandler(registry)
+        trace = _make_trace()
+        cmd = Command(
+            operation=Operation.TRACE_INGEST,
+            args={"trace": trace},
+            target_id=trace.trace_id,
+        )
+        handler.handle(cmd)
+        # Second submission with same trace returns same id, no second event
+        created_id, message = handler.handle(cmd)
+        assert created_id == trace.trace_id
+        assert "already" in message.lower()
+        events = registry.operational.event_log.get_events(
+            event_type=EventType.TRACE_INGESTED,
+            entity_id=trace.trace_id,
+        )
+        assert len(events) == 1
+
+
 class TestCreateCurateHandlers:
     def test_returns_all_handlers(self, registry: StoreRegistry) -> None:
         handlers = create_curate_handlers(registry)
@@ -191,3 +259,4 @@ class TestCreateCurateHandlers:
         assert Operation.FEEDBACK_RECORD in handlers
         assert Operation.ENTITY_CREATE in handlers
         assert Operation.LINK_CREATE in handlers
+        assert Operation.TRACE_INGEST in handlers
