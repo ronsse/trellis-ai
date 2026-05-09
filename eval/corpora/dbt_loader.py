@@ -368,6 +368,31 @@ _DBT_TEST_TYPE_PREFIXES: Final = {
 }
 
 
+# Lineage-of-X category phrase templates. ``{name}`` is substituted with
+# the model's display name (and ``{name} mart`` for marts-schema models)
+# in :func:`build_category_index`. Each template comes in two forms —
+# bare and ``the``-prefixed — because the category index uses
+# word-boundary literal matching (``\b...\b``) and natural-language
+# intents commonly say "lineage of THE customers" rather than "lineage
+# of customers". The longest-first sort in
+# :func:`extract_category_seeds` plus consumed-span tracking means the
+# more specific phrase ("full upstream lineage of the customers mart")
+# wins when present, and shorter forms back-fill otherwise — all of
+# them resolve to the same closure, so the union is a no-op.
+_LINEAGE_OF_X_TEMPLATES: Final[tuple[str, ...]] = (
+    "upstream of {name}",
+    "upstream of the {name}",
+    "lineage of {name}",
+    "lineage of the {name}",
+    "ancestors of {name}",
+    "ancestors of the {name}",
+    "full upstream lineage of {name}",
+    "full upstream lineage of the {name}",
+    "upstream lineage of {name}",
+    "upstream lineage of the {name}",
+)
+
+
 def build_category_index(
     registry: StoreRegistry,
 ) -> dict[str, list[str]]:
@@ -390,9 +415,27 @@ def build_category_index(
     :func:`extract_category_seeds`. Multiple phrases can map to the same
     entity_id list (e.g., ``"marts"`` and ``"mart-layer"`` both expand
     to the schema='marts' set).
+
+    In addition to layer and test-type phrases, this index emits a
+    "lineage-of-X" family per model with non-empty upstream lineage:
+    phrases like ``"upstream of customers"``,
+    ``"lineage of the customers mart"``, and
+    ``"full upstream lineage of the customers"`` all map to
+    ``[<model_id>, *<closure>]`` (the model itself plus its full
+    transitive ``dependsOn`` closure). With ``depth=0`` GraphSearch this
+    surfaces the entire upstream subgraph in one pass — closing the
+    ``multi_hop_lineage`` skill gap where ranking + the 8-item pack
+    budget previously dropped staging/raw layers from depth=2 traversal.
     """
     layer_buckets: dict[str, list[str]] = {}
     test_type_buckets: dict[str, list[str]] = {}
+    # Per-model display name → entity_id, harvested in the same pass so
+    # we can emit lineage-of-X phrases without a second graph walk. Skip
+    # sources (no outbound dependsOn → no lineage closure) and tests
+    # (their "lineage" is the single model they cover, already handled
+    # by name + test-type indices).
+    model_names: dict[str, str] = {}
+    model_schemas: dict[str, str] = {}
     for node in _collect_graph_view(registry).nodes:
         entity_id = node["node_id"]
         node_type = node.get("node_type", "")
@@ -401,6 +444,9 @@ def build_category_index(
         schema = properties.get("schema", "")
         if schema:
             layer_buckets.setdefault(schema.lower(), []).append(entity_id)
+        _harvest_model_name(
+            entity_id, node_type, properties, schema, model_names, model_schemas
+        )
         # Test-type classification by node_id naming convention. dbt
         # auto-generates test names with the test type as a prefix
         # (e.g., `test.<project>.not_null_<table>_<column>.<hash>`).
@@ -441,7 +487,73 @@ def build_category_index(
         for p in phrases:
             _add(p, ids)
 
+    # Lineage-of-X phrases. For every model with non-empty closure, emit
+    # the full template family keyed on display name (and on
+    # ``"<name> mart"`` for marts-schema models so phrases like
+    # ``"lineage of the customers mart"`` — the exact form used by the
+    # multi_hop_lineage ground-truth intent — match too). The closure
+    # comes from the same memoized graph view, so this adds no extra
+    # graph_store roundtrips.
+    _emit_lineage_of_x_phrases(
+        index,
+        model_names=model_names,
+        model_schemas=model_schemas,
+        lineage_index=build_lineage_index(registry),
+    )
+
     return index
+
+
+def _harvest_model_name(
+    entity_id: str,
+    node_type: str,
+    properties: dict[str, Any],
+    schema: str,
+    model_names: dict[str, str],
+    model_schemas: dict[str, str],
+) -> None:
+    """Record *entity_id*'s display name (and schema if marts/staging/etc)
+    into the per-model lookup tables — but only if the node is a model
+    with a non-empty ``name``. No-op for sources / tests / nameless rows."""
+    if node_type != "dbt_model":
+        return
+    name = properties.get("name", "")
+    if not name:
+        return
+    model_names[entity_id] = name
+    if schema:
+        model_schemas[entity_id] = schema.lower()
+
+
+def _emit_lineage_of_x_phrases(
+    index: dict[str, list[str]],
+    *,
+    model_names: dict[str, str],
+    model_schemas: dict[str, str],
+    lineage_index: dict[str, list[str]],
+) -> None:
+    """Mutate *index* with the lineage-of-X phrase family.
+
+    For every model in *model_names* that has a non-empty closure in
+    *lineage_index*, registers the cartesian product of name variants
+    against :data:`_LINEAGE_OF_X_TEMPLATES`. Marts-schema models also get
+    ``"<name> mart"`` variants so the canonical "the customers mart"
+    phrasing matches. Each phrase resolves to ``[<model_id>, *closure]``
+    so a downstream ``GraphSearch(..., depth=0)`` returns the full
+    upstream subgraph in one pass.
+    """
+    for entity_id, name in model_names.items():
+        closure = lineage_index.get(entity_id)
+        if not closure:
+            continue
+        seeds = [entity_id, *closure]
+        name_variants = [name]
+        if model_schemas.get(entity_id) == "marts":
+            name_variants.append(f"{name} mart")
+        for variant in name_variants:
+            for template in _LINEAGE_OF_X_TEMPLATES:
+                phrase = template.format(name=variant).lower()
+                index.setdefault(phrase, list(dict.fromkeys(seeds)))
 
 
 def build_lineage_index(
