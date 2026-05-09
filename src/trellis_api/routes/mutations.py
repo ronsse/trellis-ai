@@ -4,15 +4,14 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from trellis.mutate.commands import (
+from trellis.mutate import (
     BatchStrategy,
     Command,
     CommandBatch,
     CommandStatus,
     Operation,
+    build_curate_executor,
 )
-from trellis.mutate.executor import MutationExecutor
-from trellis.mutate.handlers import create_curate_handlers
 from trellis_api.app import get_registry
 from trellis_wire.dtos import (
     BatchCommandRequest,
@@ -33,11 +32,7 @@ def execute_batch(req: BatchCommandRequest) -> BatchCommandResponse:
     - ``stop_on_error`` — halt on the first ``FAILED`` or ``REJECTED``.
     - ``continue_on_error`` — execute all, include errors in results.
     """
-    registry = get_registry()
-    handlers = create_curate_handlers(registry)
-    executor = MutationExecutor(
-        event_log=registry.operational.event_log, handlers=handlers
-    )
+    executor = build_curate_executor(get_registry())
 
     # Build Command objects from the request items
     commands = [

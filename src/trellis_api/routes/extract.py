@@ -28,9 +28,7 @@ import structlog
 from fastapi import APIRouter, Header
 
 from trellis.extract.commands import result_to_batch
-from trellis.mutate.commands import CommandStatus
-from trellis.mutate.executor import MutationExecutor
-from trellis.mutate.handlers import create_curate_handlers
+from trellis.mutate import CommandStatus, build_curate_executor
 from trellis.wire.translate import (
     batch_strategy_to_core,
     extraction_batch_to_core_result,
@@ -68,11 +66,7 @@ def submit_drafts(
     extractor_id = f"{batch.extractor_name}@{batch.extractor_version}"
     requested_by = req.requested_by or extractor_id
 
-    registry = get_registry()
-    handlers = create_curate_handlers(registry)
-    executor = MutationExecutor(
-        event_log=registry.operational.event_log, handlers=handlers
-    )
+    executor = build_curate_executor(get_registry())
 
     # Wire batch → core ExtractionResult → CommandBatch.  The bridge
     # is the same one CLI ingest and MCP save_memory use, so the

@@ -9,6 +9,12 @@ import structlog
 from fastmcp import FastMCP
 
 from trellis.logging import configure_stderr_logging
+from trellis.mutate import (
+    Command,
+    CommandStatus,
+    Operation,
+    build_curate_executor,
+)
 from trellis.ops import ParameterRegistry
 from trellis.retrieve.formatters import (
     format_advisories_as_markdown,
@@ -63,22 +69,6 @@ def _build_pack_builder(registry: StoreRegistry) -> PackBuilder:
         event_log=registry.operational.event_log,
         advisory_store=advisory_store,
         reranker=build_reranker("rrf", parameter_registry=param_registry),
-    )
-
-
-def _build_mutation_executor(registry: StoreRegistry) -> Any:
-    """Build a curate-handler MutationExecutor for the MCP surface.
-
-    Both ``execute_mutation`` and ``save_memory``'s extraction pipeline
-    construct an executor with the same ``event_log`` + curate-handlers
-    wiring; the helper centralises that so the assembly stays consistent.
-    """
-    from trellis.mutate.executor import MutationExecutor  # noqa: PLC0415
-    from trellis.mutate.handlers import create_curate_handlers  # noqa: PLC0415
-
-    return MutationExecutor(
-        event_log=registry.operational.event_log,
-        handlers=create_curate_handlers(registry),
     )
 
 
@@ -272,7 +262,7 @@ def _run_memory_extraction(
             return
 
         batch = result_to_batch(result, requested_by="mcp:save_memory")
-        _build_mutation_executor(registry).execute_batch(batch)
+        build_curate_executor(registry).execute_batch(batch)
     except Exception:
         logger.debug("memory_extraction_failed", doc_id=doc_id, exc_info=True)
 
@@ -482,13 +472,20 @@ def save_experience(trace_json: str) -> str:
     except Exception as exc:
         return f"Error: Invalid trace JSON — {exc}"
 
-    try:
-        registry = _get_registry()
-        trace_id = registry.operational.trace_store.append(trace)
-    except Exception as exc:
-        return f"Error: Failed to store trace — {exc}"
+    executor = build_curate_executor(_get_registry())
+    result = executor.execute(
+        Command(
+            operation=Operation.TRACE_INGEST,
+            args={"trace": trace},
+            target_id=trace.trace_id,
+            target_type="trace",
+            requested_by="mcp:save_experience",
+        )
+    )
+    if result.status != CommandStatus.SUCCESS:
+        return f"Error: Failed to store trace — {result.message}"
 
-    return f"Trace saved: {trace_id}"
+    return f"Trace saved: {result.created_id}"
 
 
 # ---------------------------------------------------------------------------
@@ -1318,7 +1315,7 @@ def execute_mutation(
         )
 
     try:
-        executor = _build_mutation_executor(_get_registry())
+        executor = build_curate_executor(_get_registry())
         result = executor.execute(command)
     except Exception as exc:
         logger.exception("execute_mutation_failed", operation=str(op))

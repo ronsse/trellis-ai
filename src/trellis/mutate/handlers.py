@@ -332,6 +332,7 @@ def create_curate_handlers(
 ) -> dict[str, Any]:
     """Create all curate operation handlers for a given registry."""
     return {
+        Operation.TRACE_INGEST: TraceIngestHandler(registry),
         Operation.PRECEDENT_PROMOTE: PrecedentPromoteHandler(registry),
         Operation.LABEL_ADD: LabelAddHandler(registry),
         Operation.LABEL_REMOVE: LabelRemoveHandler(registry),

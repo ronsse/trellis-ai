@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import MagicMock
 
+from trellis.mutate import build_curate_executor
 from trellis.mutate.commands import (
     BatchStrategy,
     Command,
@@ -12,6 +14,9 @@ from trellis.mutate.commands import (
     Operation,
 )
 from trellis.mutate.executor import MutationExecutor
+from trellis.schemas.enums import TraceSource
+from trellis.schemas.trace import Trace, TraceContext
+from trellis.stores.registry import StoreRegistry
 
 
 def _cmd(
@@ -330,3 +335,33 @@ class TestBatchExecution:
         assert results[0].status == CommandStatus.SUCCESS
         assert results[1].status == CommandStatus.FAILED
         assert results[2].status == CommandStatus.SUCCESS
+
+
+class TestBuildCurateExecutor:
+    """The ``build_curate_executor`` factory wires every default handler."""
+
+    def test_round_trips_a_trace_through_the_pipeline(
+        self, tmp_path: Path
+    ) -> None:
+        stores_dir = tmp_path / "stores"
+        stores_dir.mkdir()
+        registry = StoreRegistry(stores_dir=stores_dir)
+        executor = build_curate_executor(registry)
+        trace = Trace(
+            source=TraceSource.AGENT,
+            intent="round-trip",
+            steps=[],
+            context=TraceContext(agent_id="a", domain="d"),
+        )
+        result = executor.execute(
+            Command(
+                operation=Operation.TRACE_INGEST,
+                args={"trace": trace},
+                target_id=trace.trace_id,
+                target_type="trace",
+            )
+        )
+        assert result.status == CommandStatus.SUCCESS
+        assert result.created_id == trace.trace_id
+        assert registry.operational.trace_store.get(trace.trace_id) is not None
+
