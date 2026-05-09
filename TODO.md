@@ -165,7 +165,7 @@ The advisory fitness loop just shipped but we have no operational visibility and
 
 ### Sprint C — LLM abstraction decision (ADR, not code) — COMPLETE (2026-04-15)
 
-- [x] **ADR: LLM Client Abstraction** — decided Option B: Protocol in core, reference implementations behind optional extras. `LLMClient` protocol (replaces `LLMCallable`) with `Message`/`LLMResponse`/`TokenUsage` types in `trellis.llm`. `EmbedderClient` protocol for future async paths. `CrossEncoderClient` protocol for reranking. Reference implementations for OpenAI and Anthropic SDKs behind `[llm-openai]`/`[llm-anthropic]` optional extras. **Clean cut:** `LLMCallable` had no production consumers — deleted outright; `EnrichmentService`/`PrecedentMiner` migrated; `EnrichmentResult` gained `usage: TokenUsage | None`. Phases 1–3 of the ADR are implemented; Phase 4 (Sprint F features) remains. See [`docs/design/adr-llm-client-abstraction.md`](docs/design/adr-llm-client-abstraction.md).
+- [x] **ADR: LLM Client Abstraction** — decided Option B: Protocol in core, reference implementations behind optional extras. `LLMClient` protocol (replaces `LLMCallable`) with `Message`/`LLMResponse`/`TokenUsage` types in `trellis.llm`. `EmbedderClient` protocol for future async paths. (A `CrossEncoderClient` Protocol was originally sketched for reranking but was removed in 2026-05 as YAGNI — re-add when the first reranker implementation lands.) Reference implementations for OpenAI and Anthropic SDKs behind `[llm-openai]`/`[llm-anthropic]` optional extras. **Clean cut:** `LLMCallable` had no production consumers — deleted outright; `EnrichmentService`/`PrecedentMiner` migrated; `EnrichmentResult` gained `usage: TokenUsage | None`. Phases 1–3 of the ADR are implemented; Phase 4 (Sprint F features) remains. See [`docs/design/adr-llm-client-abstraction.md`](docs/design/adr-llm-client-abstraction.md).
 
 ### Sprint D — Credibility signals (interstitial, low cognitive load)
 
@@ -184,7 +184,7 @@ Do in parallel with Sprints A–C; none of these block or conflict. See [Reposit
 
 ### Sprint F — Unblocked (Sprints A + C complete)
 
-- **LLM Client Protocols + Reference Implementations (Phases 1–3 of ADR)** — DONE. `trellis.llm` package shipped: `LLMClient`, `EmbedderClient`, `CrossEncoderClient` protocols + types + OpenAI/Anthropic providers + `EnrichmentService`/`PrecedentMiner` migrated. `LLMCallable` deleted (no production callers). See [`docs/design/adr-llm-client-abstraction.md`](docs/design/adr-llm-client-abstraction.md).
+- **LLM Client Protocols + Reference Implementations (Phases 1–3 of ADR)** — DONE. `trellis.llm` package shipped: `LLMClient` and `EmbedderClient` protocols + types + OpenAI/Anthropic providers + `EnrichmentService`/`PrecedentMiner` migrated. `LLMCallable` deleted (no production callers). (A `CrossEncoderClient` Protocol was sketched originally but removed in 2026-05 as YAGNI — re-add when an LLM-based reranker lands.) See [`docs/design/adr-llm-client-abstraction.md`](docs/design/adr-llm-client-abstraction.md).
 - **Pack Quality Evaluation Framework** — cleaner to build now that Sprint A observability reveals where real gaps are.
 - **Tiered Extraction Pipeline — Phase 1 DONE (2026-04-15).** Shipped `trellis.extract` core (`Extractor` Protocol, `ExtractorTier`, `ExtractionContext`, `ExtractionDispatcher` with event telemetry, `ExtractorRegistry`, `JSONRulesExtractor`) + `EntityDraft`/`EdgeDraft`/`ExtractionResult` schemas + `EXTRACTION_DISPATCHED` event. `DbtManifestExtractor` and `OpenLineageExtractor` ported to `trellis_workers.extract` (pure — no I/O, no store writes). Old `IngestionWorker` base + `dbt.py` + `openlineage.py` deleted. CLI `trellis ingest dbt-manifest` / `openlineage` now route through `MutationExecutor` (governed writes).
 - **Tiered Extraction Pipeline — Phase 2 DONE (2026-04-15 → 2026-04-16).** Steps 1–9 all shipped. See [Tiered Extraction Pipeline — Phase 2 Plan](#tiered-extraction-pipeline--phase-2-plan) below for the per-step record. Scope broadened beyond the original LLM-only framing to lead with deterministic wins first — preserved the "deterministic options for the write" differentiator (LLM-tier extractors are additive, opt-in (`allow_llm_fallback=False` by default), never a silent replacement for rules). Future Tiered-Extraction work (graduation tracking, LLM-assisted dedup, self-learning classification) should branch off its own plan section.
@@ -193,7 +193,7 @@ Do in parallel with Sprints A–C; none of these block or conflict. See [Reposit
 ### Deprioritized / deferred
 
 - ~~**`LLMExtractor`, `SaveMemoryExtractor`, `HybridJSONExtractor`**~~ — **SHIPPED** 2026-04-16 in Phase 2 Steps 4–6 (composition won — factory `build_save_memory_extractor` instead of a dedicated class).
-- **LLM-based rerankers + `CrossEncoderClient`** — [unblocked: `CrossEncoderClient` protocol ships today — add implementations alongside rerank features]
+- **LLM-based rerankers + `CrossEncoderClient`** — re-add the ~16-LOC Protocol alongside the first implementation (it was removed in 2026-05 as YAGNI — see ADR §2.5).
 - ~~**Prompt library pattern**~~ — **SHIPPED (minimal)** 2026-04-16 in Phase 2 Step 3 — `PromptTemplate` + `render()` + two templates. Full Jinja2-based registry still deferred; three prompts against `str.format` is below the complexity threshold.
 - **LLM-assisted dedup for `save_memory`** — [unblocked: `EmbedderClient` protocol ships today; needs async embedding path before wiring]
 - **Self-Learning Classification** — depends on sufficient `ENRICHMENT_COMPLETED` volume; revisit once LLM tier is live.
@@ -364,7 +364,7 @@ Folded into 8D — single commit covers the config template, playbook, ADR, and 
 - Jinja2 prompt library with versioning (str.format is enough for three prompts).
 - Streaming LLM responses (ADR §2.4).
 - Structured output / `response_model` (ADR §2.4).
-- `CrossEncoderClient` implementations (separate backlog item).
+- `CrossEncoderClient` Protocol + implementations (separate backlog item — Protocol was removed in 2026-05 as YAGNI; re-add it together with the first implementation).
 - Graduation tracking (LLM→Hybrid→Deterministic auto-promotion) — needs effectiveness data we don't have yet.
 - `SCD Type 2` for extracted entities — out of scope; existing graph versioning applies once drafts land.
 
@@ -835,8 +835,8 @@ Each is independent and can land in any order once PR 6 ships.
   recent traces), expand into 2–3 alternative phrasings and union
   the results. Records its own `OutcomeEvent` so the tuner can learn
   when expansion helps vs. hurts.
-- **Cross-encoder rerank** — wire `CrossEncoderClient` (already a
-  protocol in `trellis.llm`, currently unused) as an optional
+- **Cross-encoder rerank** — re-add `CrossEncoderClient` Protocol
+  (~16 LOC; removed 2026-05 as YAGNI) and wire it as an optional
   `Reranker` after RRF. Slow but high-precision; should run only on
   the top-k items after RRF/MMR.
 - **`BanditTuner`** — Thompson-sampling alternative to `RuleTuner`.
@@ -1977,7 +1977,7 @@ Graphiti is a **1-D specialist** (conversational memory with temporal facts, hea
   1. Add `Reranker` Protocol in `src/trellis/retrieve/rerankers/base.py` with `rank(query: str, candidates: list[PackItem]) -> list[RankedItem]`
   2. Ship three built-in rerankers: `RRFReranker` (deterministic, no LLM, combines heterogeneous score distributions from our keyword/semantic/graph strategies — highest ROI), `MMRReranker` (deterministic, adds diversity — useful against the "sectioned packs all returning similar items" problem), `BGECrossEncoder` (local sentence-transformers model, optional dependency via `[rerank]` extra)
   3. `PackBuilder` accepts optional `reranker: Reranker | None` parameter. Applied after strategy union + dedup, before budget enforcement.
-  4. Ship `CrossEncoderClient` abstraction (mirroring our LLM client approach) only if/when we add the LLM-based rerankers
+  4. Re-add `CrossEncoderClient` Protocol (mirroring our LLM client approach; removed 2026-05 as YAGNI) only if/when we add the LLM-based rerankers
   5. Tests: per-reranker unit tests with synthetic candidates; integration test showing RRF improves pack quality on a fixture scenario
   6. Reference: Graphiti's `graphiti_core/cross_encoder/bge_reranker_client.py` is a ~80-line implementation worth copying as a starting point
 

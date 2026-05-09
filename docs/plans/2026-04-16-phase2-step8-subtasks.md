@@ -251,8 +251,8 @@ non-critical warnings (flag unset but clients buildable), exit 1.
 3. **ADR Phase 4 close** — in `docs/design/adr-llm-client-abstraction.md`
    §5 Phase 4, mark the shipped items: `LLMExtractor`,
    `HybridJSONExtractor`, `build_save_memory_extractor` factory,
-   prompt scaffolding. Leave unshipped items (`CrossEncoderClient`
-   implementations, LLM-assisted dedup, full prompt library) as open.
+   prompt scaffolding. Leave unshipped items (cross-encoder rerankers,
+   LLM-assisted dedup, full prompt library) as open.
 4. **TODO update** — mark Steps 8 and 9 DONE in
    `TODO.md#tiered-extraction-pipeline--phase-2-plan`. Strike the
    matching items in the "Deprioritized / deferred" list that are

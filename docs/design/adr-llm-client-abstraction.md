@@ -5,7 +5,7 @@
 **Deciders:** Trellis core
 **Related:**
 - [`./adr-deferred-cognition.md`](./adr-deferred-cognition.md) — LLM never in the write path; enrichment is deferred
-- [`../../src/trellis/llm/`](../../src/trellis/llm/) — `LLMClient`, `EmbedderClient`, `CrossEncoderClient` protocols + types
+- [`../../src/trellis/llm/`](../../src/trellis/llm/) — `LLMClient`, `EmbedderClient` protocols + types
 - [`../../src/trellis/llm/providers/`](../../src/trellis/llm/providers/) — Reference OpenAI / Anthropic implementations
 - [`../../src/trellis_workers/enrichment/service.py`](../../src/trellis_workers/enrichment/service.py) — `EnrichmentService` consumer
 - [`../../src/trellis/classify/classifiers/llm.py`](../../src/trellis/classify/classifiers/llm.py) — `LLMFacetClassifier` wrapping `EnrichmentService`
@@ -54,7 +54,6 @@ Six blocked features need LLM capabilities beyond what `LLMCallable` provides:
 | **`LLMExtractor`** (entity/edge extraction) | Multi-turn prompts, token tracking for cost analysis | No message list, no usage reporting |
 | **`HybridJSONExtractor`** | Conditional LLM fallback with cost awareness | No usage reporting |
 | **`SaveMemoryExtractor`** | Fast extraction in `save_memory` path | No model routing (want cheaper model) |
-| **`CrossEncoderClient`** rerankers | Pair scoring (query, candidate) | Entirely different operation shape |
 | **LLM-assisted dedup** | Embedding similarity + LLM confirmation | No embedding support; needs both clients |
 | **Prompt library** | Versioned templates with usage aggregation | No usage reporting, no prompt identity |
 
@@ -163,19 +162,9 @@ No adapter ships; callers with existing `LLMCallable`-shaped code can write ~10 
 - **Caching.** Response caching is an orthogonal concern (decorator or middleware pattern). Not part of the protocol.
 - **Prompt library.** Jinja2 templates and prompt versioning are a layer above `LLMClient`, not inside it. They consume `LLMClient.generate()`. Build when the first extractor lands.
 
-### 2.5 CrossEncoderClient is a separate protocol
+### 2.5 Cross-encoder reranking — deferred
 
-Cross-encoder reranking is not text generation — it scores `(query, candidate)` pairs. It gets its own protocol alongside `LLMClient`:
-
-```python
-@runtime_checkable
-class CrossEncoderClient(Protocol):
-    async def score_pairs(
-        self, query: str, candidates: list[str], *, model: str | None = None,
-    ) -> list[float]: ...
-```
-
-Implementations: local `sentence-transformers` (already ships as `BGECrossEncoder` behind `[rerank]` extra), or API-based (OpenAI, Cohere) behind `[llm-openai]`, etc.
+A `CrossEncoderClient` Protocol was defined in Phase 1 (`score_pairs(query, candidates) -> list[float]`) but never gained implementations or callers. It was removed in 2026-05 as YAGNI cleanup. When LLM-based rerankers land, re-add the Protocol alongside the implementation — the surface is small (~16 LOC) and pair-scoring is operationally different enough from `generate()` that it warrants its own Protocol.
 
 ---
 
@@ -249,7 +238,7 @@ Ordered for incremental delivery. Each phase is independently shippable.
 ### Phase 1: Protocols and types — DONE
 
 1. `src/trellis/llm/` created with `protocol.py`, `types.py`, `__init__.py`.
-2. `LLMClient`, `EmbedderClient`, `CrossEncoderClient` protocols defined alongside `Message`, `LLMResponse`, `TokenUsage`, `EmbeddingResponse`.
+2. `LLMClient` and `EmbedderClient` protocols defined alongside `Message`, `LLMResponse`, `TokenUsage`, `EmbeddingResponse`. (`CrossEncoderClient` was sketched here originally; removed 2026-05 as YAGNI — re-add when an LLM-based reranker lands. See §2.5.)
 3. Unit tests for type validation and protocol conformance (`tests/unit/llm/`).
 
 ### Phase 2: Reference implementations — DONE
@@ -285,6 +274,6 @@ Features that can now target `LLMClient` directly.
 
 **Still open:**
 
-- LLM-based `CrossEncoderClient` implementations (rerankers).
+- LLM-based rerankers (re-introduce `CrossEncoderClient` Protocol when the first implementation lands — see §2.5).
 - LLM-assisted dedup in `save_memory` (needs async embedding path before wiring — see Phase 3 deferred note).
 - Full Jinja2-based prompt library with a versioning registry. Three prompts against `str.format` is still below the complexity threshold where Jinja2 pays for itself.
