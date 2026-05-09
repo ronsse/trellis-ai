@@ -402,44 +402,6 @@ components:
       - rules
       title: CreatePolicyRequest
       type: object
-    DeprecationNotice:
-      additionalProperties: false
-      description: 'One deprecated route surfaced by ``GET /api/version``.
-
-
-        Mirrors :class:`trellis_api.deprecation.DeprecationEntry` but with
-
-        ISO-string dates for wire-safe serialization.  Clients can log a
-
-        warning or schedule a migration off the deprecated path before
-
-        they actually call it.'
-      properties:
-        deprecated_since:
-          title: Deprecated Since
-          type: string
-        path:
-          title: Path
-          type: string
-        reason:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: Reason
-        replacement:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: Replacement
-        sunset_on:
-          title: Sunset On
-          type: string
-      required:
-      - path
-      - deprecated_since
-      - sunset_on
-      title: DeprecationNotice
-      type: object
     DraftSubmissionRequest:
       additionalProperties: false
       description: 'HTTP body wrapper for ``POST /api/v1/extract/drafts``.
@@ -1098,11 +1060,6 @@ components:
         api_version:
           title: Api Version
           type: string
-        deprecations:
-          items:
-            $ref: '#/components/schemas/DeprecationNotice'
-          title: Deprecations
-          type: array
         mcp_tools_version:
           default: 1
           title: Mcp Tools Version
