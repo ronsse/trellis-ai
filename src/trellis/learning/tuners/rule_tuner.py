@@ -200,7 +200,7 @@ class TuningRule:
         value = getattr(agg, self.condition_key, None)
         if value is None or isinstance(value, bool):
             return None
-        if isinstance(value, (int, float)):
+        if isinstance(value, int | float):
             return float(value)
         return None
 
