@@ -23,7 +23,7 @@ from trellis.api_version import (
     api_version_string,
 )
 from trellis.core.base import get_version
-from trellis_api.models import VersionResponse
+from trellis_wire.dtos import VersionResponse
 
 router = APIRouter()
 
