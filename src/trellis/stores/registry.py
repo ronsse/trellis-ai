@@ -166,9 +166,10 @@ def _resolve_connectivity_check(explicit: bool | None) -> bool:
 def _extract_store_config(data: dict[str, Any], config_source: str) -> dict[str, Any]:
     """Flatten the YAML store config into the internal ``{store_type: cfg}`` shape.
 
-    Accepts the plane-split shape (``knowledge:`` / ``operational:`` blocks).
-    The internal representation stays flat (``{"graph": {...}, ...}``) because
-    ``_instantiate`` resolves the plane from ``_PLANE_OF`` at lookup time.
+    Accepts the plane-split shape (``knowledge:`` / ``operational:``
+    blocks). The internal representation stays flat
+    (``{"graph": {...}, ...}``) because ``_instantiate`` resolves the
+    plane from ``_PLANE_OF`` at lookup time.
     """
     knowledge_cfg = data.get("knowledge")
     operational_cfg = data.get("operational")
@@ -216,9 +217,10 @@ def _extract_store_config(data: dict[str, Any], config_source: str) -> dict[str,
 def _resolve_plane_pg_dsn(store_type: str) -> str | None:
     """Resolve a Postgres DSN for ``store_type`` via its plane's env var.
 
-    Reads ``TRELLIS_{PLANE}_PG_DSN`` per ADR planes-and-substrates.
-    Returns ``None`` when no plane env var is set; the caller raises a
-    helpful message in that case.
+    Precedence:
+
+    1. ``TRELLIS_{PLANE}_PG_DSN`` (per ADR planes-and-substrates).
+    2. ``None`` — caller raises with a helpful message.
     """
     import os  # noqa: PLC0415
 
