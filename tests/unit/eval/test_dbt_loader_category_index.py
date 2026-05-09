@@ -155,6 +155,7 @@ def test_pack_build_proxy_covers_multi_hop_lineage_required(
     embedder-free.
     """
     from eval.scenarios._strategies import _SeededGraphSearch
+
     from trellis.retrieve.pack_builder import PackBuilder
     from trellis.schemas.pack import PackBudget
 
