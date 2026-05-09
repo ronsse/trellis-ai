@@ -40,7 +40,7 @@ def test_generator_different_seeds_produce_different_graphs() -> None:
 
 def test_generator_emits_unit_vectors() -> None:
     g = generate_graph(
-        seed=0, node_count=5, edge_count=0, embedding_count=5, embedding_dim=8
+        seed=0, node_count=5, edge_count=0, embedding_count=5, embedding_dim=3
     )
     for node in g.nodes:
         assert node.embedding is not None
@@ -66,7 +66,7 @@ def test_run_sqlite_only_skips_postgres_and_neo4j(monkeypatch) -> None:
         node_count=20,
         edge_count=30,
         embedding_count=10,
-        embedding_dim=8,
+        embedding_dim=3,
         vector_top_k=5,
     )
 

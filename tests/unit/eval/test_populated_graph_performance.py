@@ -56,7 +56,7 @@ def test_recall_at_k_partial() -> None:
 def test_brute_force_top_k_returns_self_first() -> None:
     """Querying with a node's own embedding should find it at rank 1."""
     graph = generate_graph(
-        seed=0, node_count=8, edge_count=0, embedding_count=8, embedding_dim=8
+        seed=0, node_count=8, edge_count=0, embedding_count=8, embedding_dim=3
     )
     embedded = [n for n in graph.nodes if n.embedding is not None]
     assert embedded[0].embedding is not None  # narrow Optional
@@ -81,7 +81,7 @@ def test_run_sqlite_only_skips_other_backends(monkeypatch) -> None:
         node_count=30,
         edge_count=40,
         embedding_count=10,
-        embedding_dim=8,
+        embedding_dim=3,
         counts=QueryMixCounts(
             entity_lookups=4,
             type_queries=3,
