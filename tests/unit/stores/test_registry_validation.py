@@ -53,7 +53,6 @@ class TestValidateFailure:
         # depends on whether psycopg is installed (a missing driver
         # would raise ``ModuleNotFoundError`` first), but either way
         # validation must catch it before request-time.
-        monkeypatch.delenv("TRELLIS_PG_DSN", raising=False)
         monkeypatch.delenv("TRELLIS_KNOWLEDGE_PG_DSN", raising=False)
         monkeypatch.delenv("TRELLIS_OPERATIONAL_PG_DSN", raising=False)
 
@@ -102,7 +101,6 @@ class TestValidateFailure:
         # The graph entry is broken; trace is fine. The aggregate must
         # carry only the broken one — no false-positive failures from
         # healthy stores leaking into the report.
-        monkeypatch.delenv("TRELLIS_PG_DSN", raising=False)
         monkeypatch.delenv("TRELLIS_KNOWLEDGE_PG_DSN", raising=False)
 
         config = {"graph": {"backend": "postgres"}}
