@@ -34,11 +34,21 @@ def unwrap_tool(tool_or_fn: Any) -> Any:
 
 
 @pytest.fixture(autouse=True)
-def _suppress_structlog() -> None:
-    """Filter structlog below CRITICAL for the duration of the test."""
+def _suppress_structlog() -> Iterator[None]:
+    """Filter structlog below CRITICAL for the duration of the test.
+
+    Captures the prior config and restores it in teardown so the filter
+    doesn't leak into later tests in the same session — capture-and-restore
+    matters because structlog config is process-global.
+    """
+    prior = structlog.get_config()
     structlog.configure(
         wrapper_class=structlog.make_filtering_bound_logger(logging.CRITICAL),
     )
+    try:
+        yield
+    finally:
+        structlog.configure(**prior)
 
 
 @pytest.fixture(autouse=True)
