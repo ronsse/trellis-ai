@@ -20,6 +20,12 @@ import time
 from pathlib import Path
 
 import httpx
+import pytest
+
+pytestmark = [
+    pytest.mark.live,
+    pytest.mark.slow,
+]
 
 _HEALTHZ_TIMEOUT_SECONDS = 30.0
 _HEALTHZ_POLL_INTERVAL_SECONDS = 0.25

@@ -31,7 +31,13 @@ from tests.integration.loops.conftest import (
     trigger_apply_noise_tags,
 )
 
-pytestmark = pytest.mark.asyncio
+pytestmark = [
+    pytest.mark.asyncio,
+    pytest.mark.live,
+    pytest.mark.slow,
+    pytest.mark.neo4j,
+    pytest.mark.postgres,
+]
 
 
 _INTENT = "noisedemote"  # single-token; see conftest module docstring

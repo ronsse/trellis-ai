@@ -49,6 +49,7 @@ from trellis.stores.base.event_log import EventType
 # cleanly instead of erroring inside the registry fixture. Mirrors the
 # unit-suite pattern in tests/unit/stores/test_neo4j_*.py.
 pytestmark = [
+    pytest.mark.live,
     pytest.mark.neo4j,
     pytest.mark.skipif(
         not os.environ.get("TRELLIS_TEST_NEO4J_URI"),

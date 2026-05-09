@@ -17,6 +17,8 @@ from tests.unit.stores.contracts.vector_store_contract import (
     VectorStoreContractTests,
 )
 
+pytestmark = pytest.mark.lancedb
+
 
 class TestLanceVectorContract(VectorStoreContractTests):
     @pytest.fixture

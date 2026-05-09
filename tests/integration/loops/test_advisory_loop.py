@@ -30,7 +30,13 @@ import pytest
 
 from tests.integration.loops.conftest import LoopEnvironment
 
-pytestmark = pytest.mark.asyncio
+pytestmark = [
+    pytest.mark.asyncio,
+    pytest.mark.live,
+    pytest.mark.slow,
+    pytest.mark.neo4j,
+    pytest.mark.postgres,
+]
 
 
 # Each bucket gets its own single-word marker. Postgres FTS tokenizes

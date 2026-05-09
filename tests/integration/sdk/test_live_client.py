@@ -15,8 +15,16 @@ against the cloud-default deployment shape.
 from __future__ import annotations
 
 import httpx
+import pytest
 
 from trellis_sdk import TrellisClient
+
+pytestmark = [
+    pytest.mark.live,
+    pytest.mark.slow,
+    pytest.mark.neo4j,
+    pytest.mark.postgres,
+]
 
 
 def test_version_handshake_against_live_server(live_api_server: str) -> None:
