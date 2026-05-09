@@ -168,6 +168,32 @@ class TestContentTagsClassifiedMode:
         assert restored == tags
 
 
+class TestContentTagsImportanceScoredAt:
+    """``importance_scored_at`` records when the LLM-derived auto_importance
+    was last computed (Gap 3.5)."""
+
+    def test_default_is_none(self) -> None:
+        """Legacy items / hand-edited metadata have no stamped value."""
+        tags = ContentTags()
+        assert tags.importance_scored_at is None
+
+    def test_accepts_datetime(self) -> None:
+        stamp = datetime(2026, 5, 9, 12, 0, 0, tzinfo=UTC)
+        tags = ContentTags(importance_scored_at=stamp)
+        assert tags.importance_scored_at == stamp
+
+    def test_round_trips_through_json(self) -> None:
+        stamp = datetime(2026, 5, 9, 12, 0, 0, tzinfo=UTC)
+        tags = ContentTags(
+            domain=["api"],
+            importance_scored_at=stamp,
+            classified_at=stamp,
+        )
+        restored = ContentTags.model_validate_json(tags.model_dump_json())
+        assert restored.importance_scored_at == stamp
+        assert restored == tags
+
+
 class TestRetrievalAffinity:
     @pytest.mark.parametrize(
         "affinity",

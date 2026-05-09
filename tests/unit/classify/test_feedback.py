@@ -65,6 +65,34 @@ class TestHappyPath:
         # If this fails, the function emitted an unparseable stamp
         datetime.fromisoformat(stamp)
 
+    def test_also_stamps_importance_scored_at(self) -> None:
+        """Flipping signal_quality to "noise" shifts the
+        :func:`compute_importance` boost — so the importance score
+        effectively re-aged. ``apply_noise_tags`` must stamp
+        ``importance_scored_at`` alongside ``classified_at``
+        (adr-importance-score-freshness §3.3 close)."""
+        docs = {
+            "doc1": {
+                "content": "noisy content",
+                "metadata": {
+                    "content_tags": {
+                        "domain": ["api"],
+                        "signal_quality": "standard",
+                    }
+                },
+            }
+        }
+        store = _make_store(docs)
+        apply_noise_tags(["doc1"], store)
+
+        _, _, metadata = store.put.call_args.args
+        tags = metadata["content_tags"]
+        importance_stamp = tags["importance_scored_at"]
+        # Same instant as classified_at — both reflect this rescoring event.
+        assert importance_stamp == tags["classified_at"]
+        # Parseable ISO timestamp.
+        datetime.fromisoformat(importance_stamp)
+
 
 class TestEdgeCaseMissingDocument:
     """When ``store.get`` returns None, the candidate is skipped silently."""

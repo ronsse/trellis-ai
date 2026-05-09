@@ -19,7 +19,10 @@ def apply_noise_tags(
     """Update signal_quality to ``"noise"`` for items flagged by effectiveness analysis.
 
     Also stamps ``classified_at`` so the refreshed tag set is visible to
-    staleness-based retrieval logic (Gap 1.1).
+    staleness-based retrieval logic (Gap 1.1) and ``importance_scored_at``
+    because flipping ``signal_quality`` to ``"noise"`` shifts the
+    ``compute_importance`` boost — the score effectively re-aged
+    (adr-importance-score-freshness §3.3 close).
 
     Returns the number of items updated.
     """
@@ -38,6 +41,7 @@ def apply_noise_tags(
         content_tags = metadata.setdefault("content_tags", {})
         content_tags["signal_quality"] = "noise"
         content_tags["classified_at"] = stamp
+        content_tags["importance_scored_at"] = stamp
 
         document_store.put(item_id, doc["content"], metadata)
         updated += 1

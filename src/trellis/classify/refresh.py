@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from trellis.classify.importance import compute_importance
 from trellis.classify.pipeline import ClassifierPipeline
 from trellis.classify.protocol import ClassificationContext
 from trellis.stores.base.event_log import EventType
@@ -119,8 +120,39 @@ def reclassify_item(
             after=before_tags,
         )
 
-    fresh_tags = merged.to_content_tags().model_dump(mode="json")
-    if fresh_tags == before_tags:
+    # Hook B (adr-importance-score-freshness §3.3): re-derive importance
+    # against the freshly-merged tags so the stored score ages on the
+    # same cadence as the tags it depends on. The base_importance preserves
+    # the LLM contribution (frozen prior) while re-applying tag-derived
+    # boosts on top.
+    fresh_tags_obj = merged.to_content_tags()
+    prior_importance = float(metadata.get("auto_importance", 0.0))
+    new_importance = compute_importance(
+        fresh_tags_obj,
+        base_importance=prior_importance,
+    )
+    fresh_tags_obj = fresh_tags_obj.model_copy(
+        update={"importance_scored_at": datetime.now(UTC)}
+    )
+    fresh_tags = fresh_tags_obj.model_dump(mode="json")
+
+    # Tags-unchanged early-out: skip when neither the tag set nor the
+    # importance score would change. We compare against ``before_tags``
+    # ignoring the freshness stamp itself (the stamp varies on every call;
+    # using it as a tiebreaker would defeat the early-out). Importance is
+    # checked against the existing metadata value.
+    before_tags_no_stamp = {
+        k: v
+        for k, v in before_tags.items()
+        if k != "importance_scored_at"
+    }
+    fresh_tags_no_stamp = {
+        k: v for k, v in fresh_tags.items() if k != "importance_scored_at"
+    }
+    if (
+        fresh_tags_no_stamp == before_tags_no_stamp
+        and new_importance == prior_importance
+    ):
         return RefreshOutcome(
             item_id=item_id,
             refreshed=False,
@@ -130,6 +162,7 @@ def reclassify_item(
         )
 
     metadata["content_tags"] = fresh_tags
+    metadata["auto_importance"] = new_importance
     document_store.put(item_id, content, metadata)
     logger.info(
         "tags_refreshed",

@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import pytest
+
 from trellis.classify.pipeline import ClassifierPipeline
 from trellis.classify.protocol import (
     ClassificationContext,
@@ -318,6 +320,77 @@ class TestReclassifyItem:
         assert ctx.title == "RFC: Retry Strategy"
         assert ctx.existing_tags is not None
         assert ctx.existing_tags.signal_quality == "high"
+
+    def test_refresh_stamps_importance_scored_at(self) -> None:
+        """Reclassifying an item must stamp ``importance_scored_at`` so the
+        read-path guardrail can age the score (adr-importance-score-freshness §3.3)."""
+        store = _InMemoryDocStore()
+        store.put("doc-1", "content", {})
+
+        outcome = reclassify_item(
+            "doc-1",
+            pipeline=self._pipeline(),
+            document_store=store,
+        )
+
+        assert outcome.refreshed is True
+        assert outcome.after is not None
+        stamp = outcome.after.get("importance_scored_at")
+        assert stamp is not None
+        # Round-trips as ISO string
+        parsed = datetime.fromisoformat(stamp)
+        assert parsed.tzinfo is not None
+
+        persisted = store.get("doc-1")
+        assert persisted is not None
+        assert (
+            persisted["metadata"]["content_tags"]["importance_scored_at"] == stamp
+        )
+
+    def test_refresh_recomputes_importance_with_prior_as_base(self) -> None:
+        """Refresh re-derives ``auto_importance`` via compute_importance with
+        the prior LLM score as base — the LLM contribution is preserved
+        (adr-importance-score-freshness §3.3)."""
+        store = _InMemoryDocStore()
+        # Prior LLM-derived importance is 0.5; tags carry signal_quality=high
+        # which adds a +0.3 boost. Result should be 0.8.
+        store.put(
+            "doc-1",
+            "content",
+            {"auto_importance": 0.5},
+        )
+        # Pipeline must produce signal_quality=high so we can observe the boost.
+        pipeline = ClassifierPipeline(
+            classifiers=[
+                _StubClassifier(
+                    "stub",
+                    tags={"domain": ["x"], "signal_quality": ["high"]},
+                )
+            ]
+        )
+
+        reclassify_item("doc-1", pipeline=pipeline, document_store=store)
+
+        persisted = store.get("doc-1")
+        assert persisted is not None
+        assert persisted["metadata"]["auto_importance"] == pytest.approx(0.8)
+
+    def test_refresh_stamps_when_prior_importance_zero(self) -> None:
+        """Even a zero prior importance + zero new importance still re-stamps
+        on a tag-change refresh — the stamp asserts "this item was rescored,
+        result was 0.0", not "this item has no score"."""
+        store = _InMemoryDocStore()
+        store.put("doc-1", "content", {})
+
+        reclassify_item(
+            "doc-1",
+            pipeline=self._pipeline(),
+            document_store=store,
+        )
+
+        persisted = store.get("doc-1")
+        assert persisted is not None
+        assert persisted["metadata"]["content_tags"]["importance_scored_at"] is not None
 
     def test_malformed_existing_tags_fallback_to_none(self) -> None:
         """Corrupt stored tags must not block refresh — they're replaced."""

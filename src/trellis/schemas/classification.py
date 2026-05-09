@@ -131,6 +131,20 @@ class ContentTags(TrellisModel):
     #: means "never stamped" — same legacy / hand-edit story as
     #: :attr:`classified_at`.
     classified_mode: ClassifierMode | None = None
+    #: When the *importance score* embedded in this item's metadata
+    #: (``metadata["auto_importance"]``) was last computed. Distinct from
+    #: :attr:`classified_at` because importance can refresh on a different
+    #: cadence (e.g., re-derived from refreshed tags via
+    #: :func:`~trellis.classify.importance.compute_importance`, or re-scored
+    #: by the enrichment worker). Closes Gap 3.5: without it, retrieval has
+    #: no way to tell a stale 6-month-old high score from a fresh one and
+    #: cannot apply read-time decay safely. ``None`` means "never stamped"
+    #: — same legacy / hand-edit story as :attr:`classified_at`. The
+    #: read-path guardrail in :func:`trellis.retrieve.strategies._apply_importance`
+    #: raises ``ValueError`` if ``auto_importance`` is set but this stamp is
+    #: missing — every writer of ``auto_importance`` MUST also stamp here.
+    #: See ``docs/design/adr-importance-score-freshness.md``.
+    importance_scored_at: datetime | None = None
 
     @model_validator(mode="after")
     def _reject_reserved_namespaces(self) -> ContentTags:
