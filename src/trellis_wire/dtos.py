@@ -46,22 +46,6 @@ class ErrorResponse(WireModel):
 # -- Version handshake --
 
 
-class DeprecationNotice(WireModel):
-    """One deprecated route surfaced by ``GET /api/version``.
-
-    Mirrors :class:`trellis_api.deprecation.DeprecationEntry` but with
-    ISO-string dates for wire-safe serialization.  Clients can log a
-    warning or schedule a migration off the deprecated path before
-    they actually call it.
-    """
-
-    path: str
-    deprecated_since: str  # ISO date
-    sunset_on: str  # ISO date
-    replacement: str | None = None
-    reason: str | None = None
-
-
 class VersionResponse(WireModel):
     """Response body for ``GET /api/version``.
 
@@ -83,7 +67,6 @@ class VersionResponse(WireModel):
     sdk_min: str
     package_version: str
     mcp_tools_version: int = 1
-    deprecations: list[DeprecationNotice] = Field(default_factory=list)
 
 
 # -- Ingest --

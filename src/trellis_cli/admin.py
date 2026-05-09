@@ -393,7 +393,6 @@ def version(
         api_version_string,
     )
     from trellis.core.base import get_version  # noqa: PLC0415
-    from trellis_api.deprecation import ROUTE_DEPRECATIONS  # noqa: PLC0415
 
     info: dict[str, Any] = {
         "api_major": API_MAJOR,
@@ -403,16 +402,6 @@ def version(
         "sdk_min": SDK_MIN,
         "package_version": get_version(),
         "mcp_tools_version": MCP_TOOLS_VERSION,
-        "deprecations": [
-            {
-                "path": path,
-                "deprecated_since": entry.deprecated_since.isoformat(),
-                "sunset_on": entry.sunset_on.isoformat(),
-                "replacement": entry.replacement,
-                "reason": entry.reason,
-            }
-            for path, entry in ROUTE_DEPRECATIONS.items()
-        ],
     }
 
     if output_format == "json":
@@ -427,20 +416,7 @@ def version(
     table.add_row("sdk_min", info["sdk_min"])
     table.add_row("package_version", info["package_version"])
     table.add_row("mcp_tools_version", str(info["mcp_tools_version"]))
-    table.add_row("deprecations", str(len(info["deprecations"])))
     console.print(table)
-    if info["deprecations"]:
-        dep_table = Table(title="Deprecated routes")
-        dep_table.add_column("Path", style="yellow")
-        dep_table.add_column("Sunset on")
-        dep_table.add_column("Replacement")
-        for d in info["deprecations"]:
-            dep_table.add_row(
-                d["path"],
-                d["sunset_on"],
-                d["replacement"] or "-",
-            )
-        console.print(dep_table)
 
 
 @admin_app.command()

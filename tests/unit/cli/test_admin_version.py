@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from datetime import date
 
 from typer.testing import CliRunner
 
@@ -13,8 +12,6 @@ from trellis.api_version import (
     MCP_TOOLS_VERSION,
     WIRE_SCHEMA,
 )
-from trellis_api import deprecation
-from trellis_api.deprecation import DeprecationEntry
 from trellis_cli.main import app
 
 runner = CliRunner()
@@ -34,22 +31,3 @@ class TestAdminVersion:
         assert payload["api_minor"] == API_MINOR
         assert payload["wire_schema"] == WIRE_SCHEMA
         assert payload["mcp_tools_version"] == MCP_TOOLS_VERSION
-        assert payload["deprecations"] == []
-
-    def test_surfaces_registered_deprecations(self, monkeypatch):
-        monkeypatch.setitem(
-            deprecation.ROUTE_DEPRECATIONS,
-            "/api/v1/old",
-            DeprecationEntry(
-                deprecated_since=date(2026, 4, 17),
-                sunset_on=date(2026, 10, 17),
-                replacement="/api/v1/new",
-                reason="renamed",
-            ),
-        )
-        result = runner.invoke(app, ["admin", "version", "--format", "json"])
-        assert result.exit_code == 0
-        payload = json.loads(result.stdout)
-        assert len(payload["deprecations"]) == 1
-        assert payload["deprecations"][0]["path"] == "/api/v1/old"
-        assert payload["deprecations"][0]["replacement"] == "/api/v1/new"

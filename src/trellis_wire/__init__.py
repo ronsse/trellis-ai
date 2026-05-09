@@ -36,7 +36,6 @@ from trellis_wire.dtos import (
     BulkIngestResponse,
     BulkItemResult,
     CommandResponse,
-    DeprecationNotice,
     EntityCreateRequest,
     ErrorResponse,
     FeedbackRequest,
@@ -72,7 +71,6 @@ __all__ = [
     "StatusResponse",
     "ErrorResponse",
     # Version handshake
-    "DeprecationNotice",
     "VersionResponse",
     # Ingest
     "IngestResponse",
