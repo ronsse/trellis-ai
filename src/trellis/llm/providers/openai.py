@@ -7,7 +7,7 @@ Requires the ``[llm-openai]`` optional extra::
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import structlog
 
@@ -15,6 +15,7 @@ from trellis.llm.types import EmbeddingResponse, LLMResponse, Message, TokenUsag
 
 if TYPE_CHECKING:
     from openai import AsyncOpenAI
+    from openai.types.chat import ChatCompletionMessageParam
 
 logger = structlog.get_logger(__name__)
 
@@ -68,9 +69,16 @@ class OpenAIClient:
         model: str | None = None,
     ) -> LLMResponse:
         chosen_model = model or self._default_model
+        # Message.role is Literal["system", "user", "assistant"] which matches
+        # the OpenAI SDK's ChatCompletionMessageParam union, but mypy can't pick
+        # one TypedDict from {"role": str, "content": str} without help.
+        sdk_messages = cast(
+            "list[ChatCompletionMessageParam]",
+            [{"role": m.role, "content": m.content} for m in messages],
+        )
         resp = await self._client.chat.completions.create(
             model=chosen_model,
-            messages=[{"role": m.role, "content": m.content} for m in messages],
+            messages=sdk_messages,
             temperature=temperature,
             max_tokens=max_tokens,
         )
