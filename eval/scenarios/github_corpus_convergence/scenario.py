@@ -75,6 +75,7 @@ from trellis.retrieve.evaluate import (
     evaluate_pack,
 )
 from trellis.retrieve.pack_builder import PackBuilder
+from trellis.retrieve.semantic_seeds import SemanticSeedExtractor
 from trellis.retrieve.strategies import (
     KeywordSearch,
     SearchStrategy,
@@ -134,13 +135,90 @@ def _drop_negated_user_seeds(
     return [s for s in seed_ids if s not in negated_ids]
 
 
+#: Hard cap on total seed count after literal + semantic union (SEM-1).
+#:
+#: Each seed anchors a depth=2 GraphSearch subgraph, and on the github
+#: corpus's cross-reference density (~250 ``wasInformedBy`` edges
+#: across 88 PRs) more than ~4-5 seeds expand a combined subgraph that
+#: exceeds the 8-item pack budget and displaces the right answers
+#: with structurally-adjacent neighbors. Tuned at 4 to leave room
+#: for a 1-3 PR literal hit plus 1-3 semantic completions for
+#: paraphrased intents — small enough to stay under the budget after
+#: depth-2 fan-out, large enough to cover the multi_pr_series Q1
+#: shape (4 PRs in a series, of which the literal extractor finds 0-1).
+#:
+#: This cap is the no-regression posture for SEM-1: it bounds the
+#: subgraph size so the literal path's high-precision answers (e.g.,
+#: cross_pr_lineage's ``"PR #66"``) keep their cited PRs in scope
+#: even when 1-2 semantic top-K hits are off-target. See the proxy
+#: test's regression cases for the boundary measurements.
+SEM1_MAX_TOTAL_SEEDS = 4
+
+
 def _build_pack(
     builder: PackBuilder,
     query: GitHubPRQuery,
     *,
     name_index: dict[str, str],
+    semantic_seed_extractor: SemanticSeedExtractor | None = None,
 ) -> tuple[Pack, list[str]]:
+    """Build a pack with literal + (optional) semantic seed extraction.
+
+    Seed-source composition (SEM-1):
+
+    * :func:`extract_seed_ids` — literal short-name / unique-phrase
+      matches from the loader's PR-name index. Catches intents that
+      reference a PR by ``#NNN``, login, or unique title phrase.
+      Always runs first.
+    * :meth:`SemanticSeedExtractor.extract` (when an extractor is
+      supplied) — embedding-based top-K against entity-summary docs.
+      Catches paraphrased intents that no literal index entry matches
+      (e.g., "Phase 1 through Phase 4 PRs that shipped scenarios 5.1,
+      5.2, 5.3" — no PR title literally contains "Phase 1 through
+      Phase 4"). Always runs, but bounded — see
+      :data:`SEM1_MAX_TOTAL_SEEDS`.
+
+    Composition rule:
+
+    * Literal seeds keep priority — they fill the seed list first.
+    * Semantic seeds fill any remaining slots up to the
+      :data:`SEM1_MAX_TOTAL_SEEDS` cap, in similarity-rank order.
+
+    A query like cross_pr_lineage (literal returns 1 high-confidence
+    ``"#66"``) admits up to ``SEM1_MAX_TOTAL_SEEDS - 1`` semantic
+    additions; multi_pr_series Q1 (literal returns 0 or 1 noise hit)
+    gets the remaining ``SEM1_MAX_TOTAL_SEEDS`` from semantic. The
+    cap keeps the depth=2 expanded subgraph compact enough to fit
+    the pack budget after dedup and ranking — without the cap, the
+    semantic path's 5-10 seeds inflate the subgraph past the 8-item
+    pack budget and the literal path's right answers get displaced
+    by structurally-adjacent neighbors.
+
+    Negation handling (:func:`_drop_negated_user_seeds`) runs over
+    the final seed set so a semantic hit on an excluded user is also
+    dropped.
+
+    The user-attribution edge-type narrowing only triggers when
+    *every* surviving seed is a user entity — semantic-seed
+    contributions are PR entities and so naturally widen out of that
+    code path (which is the right behavior; that branch is for the
+    pure "what did user X author" intent shape).
+    """
     seed_ids = extract_seed_ids(query.intent, name_index)
+    if semantic_seed_extractor is not None and len(seed_ids) < SEM1_MAX_TOTAL_SEEDS:
+        # Bounded composition: semantic adds enough to bring the union
+        # to the cap, no more. See SEM1_MAX_TOTAL_SEEDS for the cap
+        # rationale.
+        remaining = SEM1_MAX_TOTAL_SEEDS - len(seed_ids)
+        semantic_seeds = semantic_seed_extractor.extract(query.intent)
+        seen = set(seed_ids)
+        for sid in semantic_seeds:
+            if remaining <= 0:
+                break
+            if sid not in seen:
+                seed_ids.append(sid)
+                seen.add(sid)
+                remaining -= 1
     seed_ids = _drop_negated_user_seeds(seed_ids, query.intent, name_index)
     filters: dict[str, Any] = {}
     if seed_ids:
@@ -349,7 +427,7 @@ def _read_snapshot_authors(snapshot_path: Path) -> dict[int, str]:
 # ---------------------------------------------------------------------------
 
 
-def run(  # noqa: PLR0915 — orchestrates many stages, single coherent flow
+def run(  # noqa: PLR0912, PLR0915 — orchestrates many stages, single coherent flow
     registry: StoreRegistry,
     *,
     seed: int = 0,
@@ -436,6 +514,21 @@ def run(  # noqa: PLR0915 — orchestrates many stages, single coherent flow
         event_log=registry.operational.event_log,
         advisory_store=advisory_store,
     )
+    # SEM-1: semantic-seed extraction for paraphrased intents that the
+    # literal extract_seed_ids cannot reach (e.g., multi_pr_series Q1).
+    # Only enabled when GraphSearch is enabled — without it the seeds
+    # have nowhere to go (KeywordSearch + SemanticSearch already run on
+    # the raw intent). The cache is sized for one round per query.
+    semantic_seed_extractor: SemanticSeedExtractor | None = None
+    if enable_graph_search:
+        semantic_seed_extractor = SemanticSeedExtractor(
+            registry.knowledge.vector_store,
+            embed_fn,
+            cache_size=max(len(GROUND_TRUTH_QUERIES) * 2, 32),
+        )
+    metrics["config.semantic_seed_extraction"] = (
+        1.0 if semantic_seed_extractor is not None else 0.0
+    )
 
     loop_stats = _LoopStats()
     round_results: list[_RoundResult] = []
@@ -447,7 +540,10 @@ def run(  # noqa: PLR0915 — orchestrates many stages, single coherent flow
         for round_index in range(rounds):
             query = _round_query(round_index)
             pack, round_seed_ids = _build_pack(
-                builder, query, name_index=name_index
+                builder,
+                query,
+                name_index=name_index,
+                semantic_seed_extractor=semantic_seed_extractor,
             )
             if round_seed_ids:
                 seed_extraction_hits += 1
