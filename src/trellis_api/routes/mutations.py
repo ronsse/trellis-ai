@@ -14,7 +14,7 @@ from trellis.mutate.commands import (
 from trellis.mutate.executor import MutationExecutor
 from trellis.mutate.handlers import create_curate_handlers
 from trellis_api.app import get_registry
-from trellis_api.models import (
+from trellis_wire.dtos import (
     BatchCommandRequest,
     BatchCommandResponse,
     CommandResponse,
