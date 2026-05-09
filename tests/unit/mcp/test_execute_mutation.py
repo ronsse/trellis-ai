@@ -8,41 +8,15 @@ in parallel.
 from __future__ import annotations
 
 import json
-import logging
-from pathlib import Path
 
-import pytest
-import structlog
-
-import trellis.mcp.server as server_mod
+from tests.unit.mcp.conftest import unwrap_tool
 from trellis.mcp.server import execute_mutation as _execute_mutation
 from trellis.stores.registry import StoreRegistry
 
-
-def _unwrap(tool_or_fn):  # type: ignore[no-untyped-def]
-    """Unwrap a FastMCP FunctionTool to its underlying callable."""
-    return getattr(tool_or_fn, "fn", tool_or_fn)
+execute_mutation = unwrap_tool(_execute_mutation)
 
 
-execute_mutation = _unwrap(_execute_mutation)
-
-
-@pytest.fixture(autouse=True)
-def _suppress_structlog() -> None:
-    structlog.configure(
-        wrapper_class=structlog.make_filtering_bound_logger(logging.CRITICAL),
-    )
-
-
-@pytest.fixture
-def temp_registry(tmp_path: Path) -> StoreRegistry:
-    """Create a temp StoreRegistry and patch into the MCP server module."""
-    stores_dir = tmp_path / "stores"
-    stores_dir.mkdir(parents=True)
-    registry = StoreRegistry(stores_dir=stores_dir)
-    server_mod._registry = registry
-    yield registry
-    server_mod._registry = None
+# ``_suppress_structlog`` and ``temp_registry`` come from conftest.py.
 
 
 # ---------------------------------------------------------------------------

@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import contextlib
 import json
-import logging
 from pathlib import Path
 
 import pytest
-import structlog
 
 import trellis.mcp.server as server_mod
+from tests.unit.mcp.conftest import unwrap_tool
 from trellis.mcp.server import (
     get_context as _get_context,
 )
@@ -46,49 +45,20 @@ from trellis.mcp.server import (
 )
 from trellis.stores.registry import StoreRegistry
 
-
-def _unwrap(tool_or_fn):  # type: ignore[no-untyped-def]
-    """Unwrap a FastMCP FunctionTool to its underlying callable."""
-    return getattr(tool_or_fn, "fn", tool_or_fn)
-
-
-get_context = _unwrap(_get_context)
-get_graph = _unwrap(_get_graph)
-get_lessons = _unwrap(_get_lessons)
-get_objective_context = _unwrap(_get_objective_context)
-get_sectioned_context = _unwrap(_get_sectioned_context)
-get_task_context = _unwrap(_get_task_context)
-record_feedback = _unwrap(_record_feedback)
-save_experience = _unwrap(_save_experience)
-save_knowledge = _unwrap(_save_knowledge)
-save_memory = _unwrap(_save_memory)
-search = _unwrap(_search)
+get_context = unwrap_tool(_get_context)
+get_graph = unwrap_tool(_get_graph)
+get_lessons = unwrap_tool(_get_lessons)
+get_objective_context = unwrap_tool(_get_objective_context)
+get_sectioned_context = unwrap_tool(_get_sectioned_context)
+get_task_context = unwrap_tool(_get_task_context)
+record_feedback = unwrap_tool(_record_feedback)
+save_experience = unwrap_tool(_save_experience)
+save_knowledge = unwrap_tool(_save_knowledge)
+save_memory = unwrap_tool(_save_memory)
+search = unwrap_tool(_search)
 
 
-@pytest.fixture(autouse=True)
-def _suppress_structlog() -> None:
-    structlog.configure(
-        wrapper_class=structlog.make_filtering_bound_logger(logging.CRITICAL),
-    )
-
-
-@pytest.fixture(autouse=True)
-def _temp_registry(tmp_path: Path, request: pytest.FixtureRequest) -> StoreRegistry:
-    """Create a temp StoreRegistry and patch into the MCP server module."""
-    stores_dir = tmp_path / "stores"
-    stores_dir.mkdir(parents=True)
-    registry = StoreRegistry(stores_dir=stores_dir)
-    server_mod._registry = registry
-    # Stash for tests that need direct access
-    request.config.cache_registry = registry  # type: ignore[attr-defined]
-    yield registry
-    server_mod._registry = None
-
-
-@pytest.fixture
-def temp_registry(_temp_registry: StoreRegistry) -> StoreRegistry:
-    """Expose the autouse registry for tests that need direct access."""
-    return _temp_registry
+# ``_suppress_structlog`` and ``temp_registry`` come from conftest.py.
 
 
 # ---------------------------------------------------------------------------
@@ -869,7 +839,7 @@ class TestMainShutdown:
     ) -> None:
         """If no tool ever called ``_get_registry()``, finally must no-op."""
         self._drain_registry()
-        # No registry constructed; the autouse _temp_registry fixture
+        # No registry constructed; the autouse temp_registry fixture
         # already nulled it out via teardown, but be explicit.
         assert server_mod._registry is None
         monkeypatch.setattr(server_mod.mcp, "run", lambda: None)

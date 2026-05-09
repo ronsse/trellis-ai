@@ -105,6 +105,19 @@ def _all_op_handlers() -> dict[str, MagicMock]:
     return {op: _ok_handler() for op, _ in _OPS_WITH_SIMPLE_ARGS}
 
 
+def _mock_event_log() -> MagicMock:
+    """Build an event-log mock that returns False for ``has_idempotency_key``.
+
+    Centralised because every test in this module needs the same
+    pre-canned ``has_idempotency_key`` return — without it the executor
+    skips the in-process FIFO check and hits ``AttributeError`` on the
+    bare MagicMock.
+    """
+    event_log = MagicMock()
+    event_log.has_idempotency_key.return_value = False
+    return event_log
+
+
 # ---------------------------------------------------------------------------
 # Property 1: single event per SUCCESS
 # ---------------------------------------------------------------------------
@@ -113,8 +126,7 @@ def _all_op_handlers() -> dict[str, MagicMock]:
 class TestSingleEventPerSuccess:
     @given(cmd=valid_commands())
     def test_success_emits_exactly_one_event(self, cmd: Command) -> None:
-        event_log = MagicMock()
-        event_log.has_idempotency_key.return_value = False
+        event_log = _mock_event_log()
         executor = MutationExecutor(
             event_log=event_log,
             handlers=_all_op_handlers(),
@@ -141,8 +153,7 @@ class TestZeroEventsOnSilentRejection:
 
     @given(cmd=invalid_commands())
     def test_validation_failure_emits_no_events(self, cmd: Command) -> None:
-        event_log = MagicMock()
-        event_log.has_idempotency_key.return_value = False
+        event_log = _mock_event_log()
         executor = MutationExecutor(
             event_log=event_log,
             handlers=_all_op_handlers(),
@@ -153,8 +164,7 @@ class TestZeroEventsOnSilentRejection:
 
     @given(key=_safe_text)
     def test_idempotency_duplicate_emits_no_events(self, key: str) -> None:
-        event_log = MagicMock()
-        event_log.has_idempotency_key.return_value = False
+        event_log = _mock_event_log()
         executor = MutationExecutor(
             event_log=event_log,
             handlers=_all_op_handlers(),
@@ -192,8 +202,7 @@ class TestPolicyRejectionEmitsOneEvent:
     def test_policy_rejection_emits_one_rejection_event(self, cmd: Command) -> None:
         gate = MagicMock()
         gate.check.return_value = (False, "denied", [])
-        event_log = MagicMock()
-        event_log.has_idempotency_key.return_value = False
+        event_log = _mock_event_log()
         executor = MutationExecutor(
             event_log=event_log,
             policy_gate=gate,
@@ -219,8 +228,7 @@ class TestIdempotencyReplay:
         cmd = cmd.model_copy(update={"idempotency_key": key})
 
         handlers = _all_op_handlers()
-        event_log = MagicMock()
-        event_log.has_idempotency_key.return_value = False
+        event_log = _mock_event_log()
         executor = MutationExecutor(
             event_log=event_log,
             handlers=handlers,
@@ -258,8 +266,7 @@ class TestBatchStopOnError:
         good_after: int,
     ) -> None:
         handlers = _all_op_handlers()
-        event_log = MagicMock()
-        event_log.has_idempotency_key.return_value = False
+        event_log = _mock_event_log()
         executor = MutationExecutor(
             event_log=event_log,
             handlers=handlers,
@@ -305,8 +312,7 @@ class TestBatchStopOnError:
         command silently consuming the rest of the iterator.
         """
         handlers = _all_op_handlers()
-        event_log = MagicMock()
-        event_log.has_idempotency_key.return_value = False
+        event_log = _mock_event_log()
         executor = MutationExecutor(
             event_log=event_log,
             handlers=handlers,

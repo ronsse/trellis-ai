@@ -270,6 +270,33 @@ class LinkCreateHandler:
             return node_id_val
         return None
 
+    def _resolve_endpoints(
+        self, source_id: str, target_id: str
+    ) -> tuple[str, str]:
+        """Resolve both edge endpoints or raise :class:`ValidationError`.
+
+        Centralises the FK-validation block so the happy-path of
+        :meth:`handle` doesn't carry the per-side error wiring. Both
+        endpoints are checked even on a single miss so callers see all
+        root causes in one round trip.
+        """
+        resolved_source = self._resolve_node(source_id)
+        resolved_target = self._resolve_node(target_id)
+        missing: list[str] = []
+        if resolved_source is None:
+            missing.append(
+                f"source_id={source_id!r} does not reference an existing entity"
+            )
+        if resolved_target is None:
+            missing.append(
+                f"target_id={target_id!r} does not reference an existing entity"
+            )
+        if missing:
+            msg = f"LINK_CREATE FK check failed: {'; '.join(missing)}"
+            raise ValidationError(msg, errors=missing)
+        # Both checks passed → both resolved values are non-None.
+        return resolved_source, resolved_target  # type: ignore[return-value]
+
     def handle(self, command: Command) -> tuple[str | None, str]:
         source_id = command.args["source_id"]
         target_id = command.args["target_id"]
@@ -277,30 +304,8 @@ class LinkCreateHandler:
         allow_dangling = bool(command.args.get("allow_dangling", False))
         store = self._registry.knowledge.graph_store
 
-        if allow_dangling:
-            # Bootstrap path: skip FK lookup entirely. Caller takes
-            # responsibility for resolving dangling endpoints later.
-            resolved_source = source_id
-            resolved_target = target_id
-        else:
-            resolved_source = self._resolve_node(source_id)
-            resolved_target = self._resolve_node(target_id)
-            missing: list[str] = []
-            if resolved_source is None:
-                missing.append(
-                    f"source_id={source_id!r} does not reference an "
-                    "existing entity"
-                )
-            if resolved_target is None:
-                missing.append(
-                    f"target_id={target_id!r} does not reference an "
-                    "existing entity"
-                )
-            if missing:
-                msg = f"LINK_CREATE FK check failed: {'; '.join(missing)}"
-                raise ValidationError(msg, errors=missing)
-        source_id = resolved_source
-        target_id = resolved_target
+        if not allow_dangling:
+            source_id, target_id = self._resolve_endpoints(source_id, target_id)
 
         edge_id = store.upsert_edge(
             source_id=source_id,
