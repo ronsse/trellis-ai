@@ -14,8 +14,12 @@ from trellis.mutate.handlers import (
     LabelRemoveHandler,
     LinkCreateHandler,
     PrecedentPromoteHandler,
+    TraceIngestHandler,
     create_curate_handlers,
 )
+from trellis.schemas.enums import TraceSource
+from trellis.schemas.trace import Trace, TraceContext
+from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 
 
@@ -24,6 +28,46 @@ def registry(tmp_path: Path) -> StoreRegistry:
     stores_dir = tmp_path / "stores"
     stores_dir.mkdir()
     return StoreRegistry(stores_dir=stores_dir)
+
+
+class TestTraceIngestHandler:
+    @staticmethod
+    def _trace() -> Trace:
+        return Trace(
+            source=TraceSource.AGENT,
+            intent="diagnose",
+            steps=[],
+            context=TraceContext(agent_id="agent-1", domain="platform"),
+        )
+
+    def test_persists_trace_and_emits_event(self, registry: StoreRegistry) -> None:
+        handler = TraceIngestHandler(registry)
+        trace = self._trace()
+        cmd = Command(
+            operation=Operation.TRACE_INGEST,
+            args={"trace": trace},
+            target_id=trace.trace_id,
+            target_type="trace",
+        )
+        created_id, message = handler.handle(cmd)
+
+        assert created_id == trace.trace_id
+        assert trace.trace_id in message
+        assert registry.operational.trace_store.get(trace.trace_id) is not None
+        events = registry.operational.event_log.get_events(
+            event_type=EventType.TRACE_INGESTED
+        )
+        assert any(ev.entity_id == trace.trace_id for ev in events)
+
+    def test_accepts_dict_payload(self, registry: StoreRegistry) -> None:
+        handler = TraceIngestHandler(registry)
+        trace = self._trace()
+        cmd = Command(
+            operation=Operation.TRACE_INGEST,
+            args={"trace": trace.model_dump()},
+        )
+        created_id, _message = handler.handle(cmd)
+        assert created_id == trace.trace_id
 
 
 class TestPrecedentPromoteHandler:
@@ -185,6 +229,7 @@ class TestLinkCreateHandler:
 class TestCreateCurateHandlers:
     def test_returns_all_handlers(self, registry: StoreRegistry) -> None:
         handlers = create_curate_handlers(registry)
+        assert Operation.TRACE_INGEST in handlers
         assert Operation.PRECEDENT_PROMOTE in handlers
         assert Operation.LABEL_ADD in handlers
         assert Operation.LABEL_REMOVE in handlers

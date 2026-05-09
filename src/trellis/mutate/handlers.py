@@ -7,10 +7,40 @@ from typing import Any
 import structlog
 
 from trellis.mutate.commands import Command, Operation
+from trellis.schemas.trace import Trace
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 
 logger = structlog.get_logger(__name__)
+
+
+class TraceIngestHandler:
+    """Persist a trace via the operational TraceStore and emit TRACE_INGESTED.
+
+    Args contract: ``trace`` is either a :class:`Trace` instance or a dict
+    that validates against the schema (callers may pass ``trace.model_dump()``
+    when bridging across process boundaries).
+    """
+
+    def __init__(self, registry: StoreRegistry) -> None:
+        self._registry = registry
+
+    def handle(self, command: Command) -> tuple[str | None, str]:
+        raw = command.args["trace"]
+        trace = raw if isinstance(raw, Trace) else Trace.model_validate(raw)
+        trace_id = self._registry.operational.trace_store.append(trace)
+        self._registry.operational.event_log.emit(
+            EventType.TRACE_INGESTED,
+            source="mutation_executor",
+            entity_id=trace_id,
+            entity_type="trace",
+            payload={
+                "source": trace.source.value,
+                "intent": trace.intent,
+                "domain": trace.context.domain if trace.context else None,
+            },
+        )
+        return trace_id, f"Trace ingested: {trace_id}"
 
 
 class PrecedentPromoteHandler:
@@ -240,6 +270,7 @@ def create_curate_handlers(
 ) -> dict[str, Any]:
     """Create all curate operation handlers for a given registry."""
     return {
+        Operation.TRACE_INGEST: TraceIngestHandler(registry),
         Operation.PRECEDENT_PROMOTE: PrecedentPromoteHandler(registry),
         Operation.LABEL_ADD: LabelAddHandler(registry),
         Operation.LABEL_REMOVE: LabelRemoveHandler(registry),

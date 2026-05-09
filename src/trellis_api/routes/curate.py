@@ -6,9 +6,12 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
 
-from trellis.mutate.commands import Command, CommandStatus, Operation
-from trellis.mutate.executor import MutationExecutor
-from trellis.mutate.handlers import create_curate_handlers
+from trellis.mutate import (
+    Command,
+    CommandStatus,
+    Operation,
+    build_curate_executor,
+)
 from trellis.stores.base.event_log import EventType
 from trellis_api.app import get_registry
 from trellis_api.models import (
@@ -24,12 +27,7 @@ router = APIRouter()
 
 def _execute_command(cmd: Command) -> CommandResponse:
     """Execute a command through the mutation pipeline."""
-    registry = get_registry()
-    handlers = create_curate_handlers(registry)
-    executor = MutationExecutor(
-        event_log=registry.operational.event_log, handlers=handlers
-    )
-    result = executor.execute(cmd)
+    result = build_curate_executor(get_registry()).execute(cmd)
     if result.status == CommandStatus.FAILED:
         raise HTTPException(status_code=400, detail=result.message)
     return CommandResponse(

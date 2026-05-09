@@ -11,9 +11,13 @@ from rich.console import Console
 from rich.table import Table
 
 from trellis.learning import prepare_learning_promotions
-from trellis.mutate.commands import Command, CommandStatus, Operation
-from trellis.mutate.executor import MutationExecutor
-from trellis.mutate.handlers import create_curate_handlers
+from trellis.mutate import (
+    Command,
+    CommandStatus,
+    MutationExecutor,
+    Operation,
+    build_curate_executor,
+)
 from trellis_cli.stores import _get_registry
 
 curate_app = typer.Typer(no_args_is_help=True)
@@ -22,12 +26,7 @@ console = Console()
 
 def _execute_command(cmd: Command, output_format: str) -> None:
     """Submit a command to the MutationExecutor and display the result."""
-    registry = _get_registry()
-    handlers = create_curate_handlers(registry)
-    executor = MutationExecutor(
-        event_log=registry.operational.event_log, handlers=handlers
-    )
-    result = executor.execute(cmd)
+    result = build_curate_executor(_get_registry()).execute(cmd)
 
     if output_format == "json":
         console.print(
@@ -92,12 +91,7 @@ def link(
         target_type="entity",
         requested_by="cli:link",
     )
-    registry = _get_registry()
-    handlers = create_curate_handlers(registry)
-    executor = MutationExecutor(
-        event_log=registry.operational.event_log, handlers=handlers
-    )
-    result = executor.execute(cmd)
+    result = build_curate_executor(_get_registry()).execute(cmd)
 
     if result.status == CommandStatus.FAILED:
         if output_format == "json":
@@ -182,12 +176,7 @@ def entity(
         target_type="entity",
         requested_by="cli:entity",
     )
-    registry = _get_registry()
-    handlers = create_curate_handlers(registry)
-    executor = MutationExecutor(
-        event_log=registry.operational.event_log, handlers=handlers
-    )
-    result = executor.execute(cmd)
+    result = build_curate_executor(_get_registry()).execute(cmd)
 
     if output_format == "json":
         console.print(
@@ -384,11 +373,7 @@ def promote_learning(
         )
         return
 
-    registry = _get_registry()
-    handlers = create_curate_handlers(registry)
-    executor = MutationExecutor(
-        event_log=registry.operational.event_log, handlers=handlers
-    )
+    executor = build_curate_executor(_get_registry())
 
     submission_results: list[dict[str, Any]] = []
     for entry in plan["results"]:

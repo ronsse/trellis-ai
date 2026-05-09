@@ -8,15 +8,13 @@ import structlog
 from fastapi import APIRouter, HTTPException
 
 from trellis.core.ids import generate_ulid
-from trellis.errors import StoreError
+from trellis.mutate import build_curate_executor
 from trellis.mutate.commands import (
     BatchStrategy,
     Command,
     CommandStatus,
     Operation,
 )
-from trellis.mutate.executor import MutationExecutor
-from trellis.mutate.handlers import create_curate_handlers
 from trellis.schemas.evidence import Evidence
 from trellis.schemas.trace import Trace
 from trellis_api.app import get_registry
@@ -37,19 +35,28 @@ router = APIRouter()
 
 @router.post("/traces", response_model=IngestResponse)
 def ingest_trace(body: dict[str, Any]) -> IngestResponse:
-    """Ingest a trace."""
+    """Ingest a trace through the governed mutation pipeline."""
     try:
         trace = Trace.model_validate(body)
     except Exception as exc:
         raise HTTPException(status_code=422, detail=f"Invalid trace: {exc}") from exc
 
-    registry = get_registry()
-    try:
-        trace_id = registry.operational.trace_store.append(trace)
-    except StoreError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    executor = build_curate_executor(get_registry())
+    result = executor.execute(
+        Command(
+            operation=Operation.TRACE_INGEST,
+            args={"trace": trace},
+            target_id=trace.trace_id,
+            target_type="trace",
+            requested_by="api:ingest-trace",
+        )
+    )
+    if result.status == CommandStatus.FAILED:
+        # TraceStore.append raises StoreError on duplicate trace_id; the
+        # handler propagates that as a FAILED status. 409 is the closest fit.
+        raise HTTPException(status_code=409, detail=result.message)
 
-    return IngestResponse(trace_id=trace_id)
+    return IngestResponse(trace_id=result.created_id or trace.trace_id)
 
 
 @router.post("/evidence", response_model=IngestResponse)
@@ -186,10 +193,7 @@ def ingest_bulk(req: BulkIngestRequest) -> BulkIngestResponse:
     reference entities, so entities must land first).
     """
     registry = get_registry()
-    handlers = create_curate_handlers(registry)
-    executor = MutationExecutor(
-        event_log=registry.operational.event_log, handlers=handlers
-    )
+    executor = build_curate_executor(registry)
 
     response = BulkIngestResponse(
         batch_id=generate_ulid(),

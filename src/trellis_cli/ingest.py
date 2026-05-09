@@ -13,18 +13,18 @@ from rich.console import Console
 from trellis.extract.commands import result_to_batch
 from trellis.extract.dispatcher import ExtractionDispatcher
 from trellis.extract.registry import ExtractorRegistry
+from trellis.mutate import build_curate_executor
 from trellis.mutate.commands import (
+    Command,
     CommandBatch,
     CommandStatus,
     Operation,
 )
-from trellis.mutate.executor import MutationExecutor
-from trellis.mutate.handlers import create_curate_handlers
 from trellis.schemas.evidence import Evidence
 from trellis.schemas.extraction import ExtractionResult
 from trellis.schemas.trace import Trace
 from trellis.stores.registry import StoreRegistry
-from trellis_cli.stores import _get_registry, get_document_store, get_trace_store
+from trellis_cli.stores import _get_registry, get_document_store
 
 ingest_app = typer.Typer(no_args_is_help=True)
 console = Console()
@@ -59,9 +59,25 @@ def ingest_trace(
             console.print(f"[red]Invalid trace: {exc}[/red]")
         raise typer.Exit(code=1) from None
 
-    # Persist to store
-    store = get_trace_store()
-    store.append(trace)
+    # Persist via the governed mutation pipeline
+    executor = build_curate_executor(_get_registry())
+    result = executor.execute(
+        Command(
+            operation=Operation.TRACE_INGEST,
+            args={"trace": trace},
+            target_id=trace.trace_id,
+            target_type="trace",
+            requested_by="cli:ingest-trace",
+        )
+    )
+    if result.status != CommandStatus.SUCCESS:
+        if output_format == "json":
+            console.print(
+                json.dumps({"status": "error", "message": result.message})
+            )
+        else:
+            console.print(f"[red]Failed to ingest trace: {result.message}[/red]")
+        raise typer.Exit(code=1)
 
     if output_format == "json":
         console.print(
@@ -157,12 +173,7 @@ def _execute_batch(
     batch: CommandBatch,
 ) -> tuple[int, int]:
     """Submit the batch and return ``(nodes_created, edges_created)``."""
-    handlers = create_curate_handlers(registry)
-    executor = MutationExecutor(
-        event_log=registry.operational.event_log,
-        handlers=handlers,
-    )
-    results = executor.execute_batch(batch)
+    results = build_curate_executor(registry).execute_batch(batch)
     nodes = sum(
         1
         for r in results

@@ -8,6 +8,12 @@ import structlog
 from fastmcp import FastMCP
 
 from trellis.logging import configure_stderr_logging
+from trellis.mutate import (
+    Command,
+    CommandStatus,
+    Operation,
+    build_curate_executor,
+)
 from trellis.ops import ParameterRegistry
 from trellis.retrieve.formatters import (
     format_advisories_as_markdown,
@@ -238,10 +244,6 @@ def _run_memory_extraction(
 
         from trellis.extract.commands import result_to_batch  # noqa: PLC0415
         from trellis.extract.context import ExtractionContext  # noqa: PLC0415
-        from trellis.mutate.executor import MutationExecutor  # noqa: PLC0415
-        from trellis.mutate.handlers import (  # noqa: PLC0415
-            create_curate_handlers,
-        )
 
         context = ExtractionContext(
             allow_llm_fallback=True,
@@ -259,11 +261,7 @@ def _run_memory_extraction(
             return
 
         batch = result_to_batch(result, requested_by="mcp:save_memory")
-        executor = MutationExecutor(
-            event_log=registry.operational.event_log,
-            handlers=create_curate_handlers(registry),
-        )
-        executor.execute_batch(batch)
+        build_curate_executor(registry).execute_batch(batch)
     except Exception:
         logger.debug("memory_extraction_failed", doc_id=doc_id, exc_info=True)
 
@@ -473,13 +471,20 @@ def save_experience(trace_json: str) -> str:
     except Exception as exc:
         return f"Error: Invalid trace JSON — {exc}"
 
-    try:
-        registry = _get_registry()
-        trace_id = registry.operational.trace_store.append(trace)
-    except Exception as exc:
-        return f"Error: Failed to store trace — {exc}"
+    executor = build_curate_executor(_get_registry())
+    result = executor.execute(
+        Command(
+            operation=Operation.TRACE_INGEST,
+            args={"trace": trace},
+            target_id=trace.trace_id,
+            target_type="trace",
+            requested_by="mcp:save_experience",
+        )
+    )
+    if result.status != CommandStatus.SUCCESS:
+        return f"Error: Failed to store trace — {result.message}"
 
-    return f"Trace saved: {trace_id}"
+    return f"Trace saved: {result.created_id}"
 
 
 # ---------------------------------------------------------------------------
