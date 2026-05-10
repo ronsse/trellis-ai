@@ -431,6 +431,15 @@ class TestExtractionValidatorEnforcement:
         assert "empty_result" in codes
         # EXTRACTION_DISPATCHED is suppressed — rejection is the canonical event.
         assert event_log.count(event_type=EventType.EXTRACTION_DISPATCHED) == 0
+        # EXTRACTOR_FALLBACK still fires for the empty-result case — different
+        # consumer (graduation tracking via analyze_extractor_fallbacks) than
+        # EXTRACTION_REJECTED (validation tracking). Both lenses want the
+        # data; per adr-extraction-validation.md §6.2.
+        fallback_events = event_log.get_events(
+            event_type=EventType.EXTRACTOR_FALLBACK, limit=10
+        )
+        assert len(fallback_events) == 1
+        assert fallback_events[0].payload["reason"] == "empty_result"
 
     async def test_curated_without_provenance_rejected(
         self, event_log: SQLiteEventLog

@@ -112,27 +112,16 @@ class ExtractionDispatcher:
             context=ctx,
         )
 
-        # Validation pass — enforcement, not signal-only. When any validator
-        # returns findings the dispatcher quarantines the original drafts
-        # into ``unparsed_residue["rejected_by_validators"]``, emits
-        # EXTRACTION_REJECTED, and returns an empty result so no Commands
-        # flow downstream. EXTRACTION_DISPATCHED and the empty_result
-        # fallback are deliberately skipped — the rejection event is the
-        # canonical record of the dispatch.
-        # See adr-extraction-validation.md §5.3.
-        if self._validators:
-            findings = self._collect_findings(result, source_hint=source_hint)
-            if findings:
-                return self._reject_extraction(
-                    result,
-                    findings=findings,
-                    source_hint=source_hint,
-                )
-
         # Fallback signal #2: the chosen extractor produced no drafts.
-        # Not a real retry (dispatcher doesn't do that today), but a strong
-        # graduation-tracking signal — "deterministic silently failed for
-        # this source_hint" is exactly the pattern graduation wants to spot.
+        # Emitted BEFORE the validator pass because this is the
+        # graduation-tracking lens ("deterministic silently failed for
+        # this source_hint — consider promoting to a higher tier") and
+        # must fire even when the validator pass also rejects. Two events
+        # for one shape: EXTRACTOR_FALLBACK serves analyze_extractor_fallbacks
+        # (tier-promotion decisions); EXTRACTION_REJECTED serves
+        # analyze_extraction_validation (corpus-quality decisions). Per
+        # adr-extraction-validation.md §6.2, both consumers want the
+        # data in their own framing.
         if not result.entities and not result.edges:
             self._emit_fallback(
                 source_hint=source_hint,
@@ -141,6 +130,23 @@ class ExtractionDispatcher:
                 skipped_tier=None,
                 reason=FALLBACK_REASON_EMPTY_RESULT,
             )
+
+        # Validation pass — enforcement, not signal-only. When any validator
+        # returns findings the dispatcher quarantines the original drafts
+        # into ``unparsed_residue["rejected_by_validators"]``, emits
+        # EXTRACTION_REJECTED, and returns an empty result so no Commands
+        # flow downstream. EXTRACTION_DISPATCHED is deliberately skipped —
+        # rejection is the canonical record. EXTRACTOR_FALLBACK still fires
+        # above (graduation lens; different consumer).
+        # See adr-extraction-validation.md §5.3 + §6.2.
+        if self._validators:
+            findings = self._collect_findings(result, source_hint=source_hint)
+            if findings:
+                return self._reject_extraction(
+                    result,
+                    findings=findings,
+                    source_hint=source_hint,
+                )
 
         self._emit(result, source_hint=source_hint)
         return result
