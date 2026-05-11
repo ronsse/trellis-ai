@@ -448,7 +448,15 @@ client.close()
 
 ## Playbook 9: Importing External Data
 
-**When to use:** When you want to populate the knowledge graph from dbt lineage or OpenLineage events.
+**When to use:** When you want to populate the knowledge graph from any external source — dbt, OpenLineage, or anything else you build a custom extractor for.
+
+> For the broader cold-start story (what to model, how to extract, how to keep it fresh), read these three first:
+> - [modeling-guide.md](modeling-guide.md) — what goes in the graph vs document vs blob, and the cross-database routing convention.
+> - [source-modeling-cookbook.md](source-modeling-cookbook.md) — per-source recipes for documentation, Jira, Confluence, SQL query logs, Unity Catalog, and git repos.
+> - [extractor-authoring.md](extractor-authoring.md) — the `Extractor` Protocol contract and worked examples.
+> Plus [freshness-and-curation.md](freshness-and-curation.md) for the refresh model after the initial ingest succeeds.
+>
+> This playbook covers the two extractors core ships out of the box; everything else is on you to implement against the protocol.
 
 ### dbt Manifest
 
@@ -490,6 +498,7 @@ trellis ingest openlineage lineage-events.json --format json
 - Both commands are **idempotent** — re-running produces the same graph
 - dbt descriptions are indexed in the document store for full-text search
 - Use `trellis retrieve entity <id>` to explore the imported graph
+- For drift detection on re-runs, prefer `trellis extract refresh --source <name>` (with a `sources.yaml` declared) over `trellis ingest`. The refresh CLI emits structured diff events; the ingest CLI is the one-shot path. See [freshness-and-curation.md](freshness-and-curation.md).
 
 ---
 

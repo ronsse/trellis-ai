@@ -1,0 +1,93 @@
+{
+  "metadata": {
+    "dbt_version": "1.7.4",
+    "adapter_type": "snowflake",
+    "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v11.json",
+    "generated_at": "2026-05-11T10:00:00.000000Z",
+    "project_id": "jaffle_shop_demo"
+  },
+  "nodes": {
+    "model.jaffle_shop.stg_orders": {
+      "unique_id": "model.jaffle_shop.stg_orders",
+      "resource_type": "model",
+      "name": "stg_orders",
+      "schema": "staging",
+      "database": "analytics",
+      "description": "Cleaned and typed raw orders. One row per order placed by a customer, regardless of status.",
+      "depends_on": {"nodes": ["source.jaffle_shop.raw.orders"]},
+      "config": {"materialized": "view"},
+      "tags": ["staging", "orders"]
+    },
+    "model.jaffle_shop.stg_customers": {
+      "unique_id": "model.jaffle_shop.stg_customers",
+      "resource_type": "model",
+      "name": "stg_customers",
+      "schema": "staging",
+      "database": "analytics",
+      "description": "Cleaned customer dimension. One row per customer with PII masking applied.",
+      "depends_on": {"nodes": ["source.jaffle_shop.raw.customers"]},
+      "config": {"materialized": "view"},
+      "tags": ["staging", "customers"]
+    },
+    "model.jaffle_shop.fct_orders": {
+      "unique_id": "model.jaffle_shop.fct_orders",
+      "resource_type": "model",
+      "name": "fct_orders",
+      "schema": "marts",
+      "database": "analytics",
+      "description": "Fact table for orders. One row per order, joined with customer attributes and order-line aggregates.",
+      "depends_on": {"nodes": ["model.jaffle_shop.stg_orders", "model.jaffle_shop.stg_customers"]},
+      "config": {"materialized": "table"},
+      "tags": ["marts", "orders", "core"]
+    },
+    "model.jaffle_shop.dim_customers": {
+      "unique_id": "model.jaffle_shop.dim_customers",
+      "resource_type": "model",
+      "name": "dim_customers",
+      "schema": "marts",
+      "database": "analytics",
+      "description": "Customer dimension with lifetime-value aggregations. Slowly changing.",
+      "depends_on": {"nodes": ["model.jaffle_shop.stg_customers", "model.jaffle_shop.fct_orders"]},
+      "config": {"materialized": "table"},
+      "tags": ["marts", "customers", "core"]
+    },
+    "test.jaffle_shop.not_null_fct_orders_order_id": {
+      "unique_id": "test.jaffle_shop.not_null_fct_orders_order_id",
+      "resource_type": "test",
+      "name": "not_null_fct_orders_order_id",
+      "schema": "tests",
+      "database": "analytics",
+      "depends_on": {"nodes": ["model.jaffle_shop.fct_orders"]},
+      "tags": ["data-quality"]
+    },
+    "test.jaffle_shop.unique_dim_customers_customer_id": {
+      "unique_id": "test.jaffle_shop.unique_dim_customers_customer_id",
+      "resource_type": "test",
+      "name": "unique_dim_customers_customer_id",
+      "schema": "tests",
+      "database": "analytics",
+      "depends_on": {"nodes": ["model.jaffle_shop.dim_customers"]},
+      "tags": ["data-quality"]
+    }
+  },
+  "sources": {
+    "source.jaffle_shop.raw.orders": {
+      "unique_id": "source.jaffle_shop.raw.orders",
+      "resource_type": "source",
+      "name": "orders",
+      "source_name": "raw",
+      "schema": "raw",
+      "database": "warehouse_raw",
+      "description": "Raw orders table from the production OLTP database. One row per order."
+    },
+    "source.jaffle_shop.raw.customers": {
+      "unique_id": "source.jaffle_shop.raw.customers",
+      "resource_type": "source",
+      "name": "customers",
+      "source_name": "raw",
+      "schema": "raw",
+      "database": "warehouse_raw",
+      "description": "Raw customer records from the user service. May contain PII."
+    }
+  }
+}

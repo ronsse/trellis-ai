@@ -93,11 +93,65 @@ ENTITY_TYPE_ALIASES: Final[dict[str, str]] = {
     "file": FILE,
     "project": PROJECT,
     "concept": CONCEPT,
+    "dataset": DATASET,
     # ``domain`` is intentionally *not* aliased. It is removed from the
     # well-known defaults (per ADR) because it collides with the
     # ContentTags.domain classification facet. Existing data using
     # ``entity_type="domain"`` continues to work as an open string.
 }
+
+# ---------------------------------------------------------------------------
+# Recommended properties — cross-database routing (Dataset / Table)
+# ---------------------------------------------------------------------------
+#
+# Entities representing queryable datasets — canonical type ``Dataset``
+# (plus the lowercase ``"dataset"`` alias and extractor-specific shapes
+# like ``dbt_model`` / ``dbt_source``) — SHOULD carry the routing
+# properties below so query-engine agents can dispatch queries without
+# consulting the prompt or out-of-band config.
+#
+# These are *recommended convention*, not enforced schema: Trellis entity
+# properties are open bags by design (the storage layer accepts anything).
+# Extractors that claim Dataset shape populate these when the upstream
+# system supplies the information. Consumers read with ``.get(...)`` and
+# fall back gracefully when a property is absent — well-modeled metadata
+# (Unity Catalog, dbt) fills all of them; ad-hoc sources may fill only
+# ``source_system``.
+#
+# - ``source_system``: short identifier of the data platform
+#   (``"snowflake"``, ``"postgres"``, ``"bigquery"``, ``"databricks"``,
+#   ``"duckdb"``, etc.). Maps directly to dbt's ``metadata.adapter_type``
+#   and to the URI scheme of OpenLineage namespaces.
+# - ``connection_ref``: env-var name (or secrets-manager reference)
+#   resolving to a connection string or client config. Never inline
+#   credentials. Optional — many entities are read-only metadata records
+#   that don't need a connection.
+# - ``database_name``: physical database / catalog name.
+# - ``schema_name``: physical schema / namespace within the database.
+#   (Distinct from the dbt ``schema`` property, which historically encodes
+#   both physical schema and logical layer convention; both keys coexist.)
+# - ``physical_uri``: optional fully-qualified locator, e.g.
+#   ``"snowflake://account/db/schema/table"`` or
+#   ``"postgres://host:port/db.schema.table"``. Extractors construct this
+#   only when the upstream source supplies enough information; agents
+#   prefer this over recomposing from the parts.
+
+DATASET_PROP_SOURCE_SYSTEM: Final = "source_system"
+DATASET_PROP_CONNECTION_REF: Final = "connection_ref"
+DATASET_PROP_DATABASE_NAME: Final = "database_name"
+DATASET_PROP_SCHEMA_NAME: Final = "schema_name"
+DATASET_PROP_PHYSICAL_URI: Final = "physical_uri"
+
+DATASET_ROUTING_PROPERTIES: Final[frozenset[str]] = frozenset(
+    {
+        DATASET_PROP_SOURCE_SYSTEM,
+        DATASET_PROP_CONNECTION_REF,
+        DATASET_PROP_DATABASE_NAME,
+        DATASET_PROP_SCHEMA_NAME,
+        DATASET_PROP_PHYSICAL_URI,
+    }
+)
+
 
 # ---------------------------------------------------------------------------
 # Canonical edge kinds — PROV-O verbs + Trellis-specific kept values

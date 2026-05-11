@@ -42,3 +42,30 @@ class TestDemoLoad:
         assert node is not None
         assert node["node_type"] == "service"
         assert node["properties"]["name"] == "user-api"
+
+    def test_loads_cold_start_fixture_via_extractor_path(self) -> None:
+        """The demo loads dbt + OpenLineage fixtures through the same
+        ExtractionDispatcher + MutationExecutor path a real deployment uses,
+        so drift between the demo and cold-start ingestion stays impossible."""
+        result = runner.invoke(app, ["demo", "load"])
+        assert result.exit_code == 0, result.stdout
+        assert "cold-start" in result.stdout
+
+        from trellis_cli.stores import get_graph_store
+
+        graph = get_graph_store()
+        # dbt manifest fixture should land fct_orders as a dbt_model with
+        # the routing properties populated.
+        fct = graph.get_node("model.jaffle_shop.fct_orders")
+        assert fct is not None
+        assert fct["node_type"] == "dbt_model"
+        props = fct["properties"]
+        assert props.get("source_system") == "snowflake"
+        assert props.get("schema_name") == "marts"
+        assert props.get("database_name") == "analytics"
+        assert props.get("physical_uri") == "snowflake://analytics/marts/fct_orders"
+
+        # OpenLineage fixture should land at least one job entity.
+        job = graph.get_node("job:dbt:fct_orders_build")
+        assert job is not None
+        assert job["node_type"] == "job"
