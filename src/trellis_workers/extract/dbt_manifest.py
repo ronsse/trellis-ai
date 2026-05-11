@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 import structlog
 
 from trellis.extract.base import ExtractorTier
+from trellis.schemas import well_known as wk
 from trellis.schemas.extraction import (
     EdgeDraft,
     EntityDraft,
@@ -54,7 +55,7 @@ class DbtManifestExtractor:
     supported_sources: ClassVar[list[str]] = ["dbt-manifest"]
     version = "0.1.0"
 
-    async def extract(
+    async def extract(  # noqa: PLR0912 - routing-property branches are intentional
         self,
         raw_input: Any,
         *,
@@ -69,6 +70,12 @@ class DbtManifestExtractor:
                 f"got {type(raw_input).__name__}"
             )
             raise TypeError(msg)
+
+        # Source system identifier lives at manifest scope, not per
+        # resource. Populated for every dataset-shaped entity below as
+        # the cross-database routing convention from
+        # ``trellis.schemas.well_known`` (see DATASET_ROUTING_PROPERTIES).
+        adapter_type = (raw_input.get("metadata") or {}).get("adapter_type")
 
         resources: list[dict[str, Any]] = list(raw_input.get("nodes", {}).values())
         resources.extend(raw_input.get("sources", {}).values())
@@ -90,6 +97,31 @@ class DbtManifestExtractor:
             for field in ("schema", "database", "description", "tags"):
                 if resource.get(field):
                     properties[field] = resource[field]
+
+            # Cross-database routing convention. ``schema`` / ``database``
+            # above are the raw dbt-manifest field names (kept for
+            # existing consumers); ``schema_name`` / ``database_name`` /
+            # ``source_system`` / ``physical_uri`` are the canonical
+            # routing keys per wk.DATASET_ROUTING_PROPERTIES. Tests are
+            # not queryable datasets — skip physical_uri for them.
+            if adapter_type:
+                properties[wk.DATASET_PROP_SOURCE_SYSTEM] = adapter_type
+            schema_value = resource.get("schema")
+            if schema_value:
+                properties[wk.DATASET_PROP_SCHEMA_NAME] = schema_value
+            database_value = resource.get("database")
+            if database_value:
+                properties[wk.DATASET_PROP_DATABASE_NAME] = database_value
+            if (
+                adapter_type
+                and database_value
+                and schema_value
+                and resource_type != "test"
+                and resource.get("name")
+            ):
+                properties[wk.DATASET_PROP_PHYSICAL_URI] = (
+                    f"{adapter_type}://{database_value}/{schema_value}/{resource['name']}"
+                )
 
             if resource_type == "model":
                 materialized = (resource.get("config") or {}).get("materialized")

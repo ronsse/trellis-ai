@@ -11,6 +11,7 @@ from __future__ import annotations
 import pytest
 
 from trellis.extract.base import ExtractorTier
+from trellis.schemas import well_known as wk
 from trellis_workers.extract import (
     DbtManifestExtractor,
     OpenLineageExtractor,
@@ -268,3 +269,155 @@ class TestOpenLineageExtractor:
         assert result.extractor_used == "openlineage"
         assert result.tier == ExtractorTier.DETERMINISTIC.value
         assert result.provenance.source_hint == "openlineage"
+
+
+# ---------------------------------------------------------------------------
+# Cross-database routing properties contract (B1)
+#
+# Both reference extractors are expected to populate the canonical routing
+# properties from ``trellis.schemas.well_known`` on dataset-shaped entities
+# when the upstream source supplies the information.
+# ---------------------------------------------------------------------------
+
+
+_MANIFEST_WITH_ADAPTER: dict = {
+    "metadata": {"adapter_type": "snowflake"},
+    "nodes": {
+        "model.p.fct_orders": {
+            "unique_id": "model.p.fct_orders",
+            "resource_type": "model",
+            "name": "fct_orders",
+            "schema": "marts",
+            "database": "analytics",
+            "config": {"materialized": "table"},
+        },
+        "test.p.not_null_fct_orders": {
+            "unique_id": "test.p.not_null_fct_orders",
+            "resource_type": "test",
+            "name": "not_null_fct_orders",
+            "schema": "marts",
+            "database": "analytics",
+        },
+        "model.p.no_database": {
+            "unique_id": "model.p.no_database",
+            "resource_type": "model",
+            "name": "no_database",
+            "schema": "staging",
+        },
+    },
+    "sources": {
+        "source.p.raw.orders": {
+            "unique_id": "source.p.raw.orders",
+            "resource_type": "source",
+            "name": "orders",
+            "source_name": "raw",
+            "schema": "public",
+            "database": "raw_landing",
+        },
+    },
+}
+
+
+class TestDbtRoutingProperties:
+    async def test_model_has_full_routing(self) -> None:
+        result = await DbtManifestExtractor().extract(_MANIFEST_WITH_ADAPTER)
+        fct = next(e for e in result.entities if e.entity_id == "model.p.fct_orders")
+        assert fct.properties[wk.DATASET_PROP_SOURCE_SYSTEM] == "snowflake"
+        assert fct.properties[wk.DATASET_PROP_SCHEMA_NAME] == "marts"
+        assert fct.properties[wk.DATASET_PROP_DATABASE_NAME] == "analytics"
+        assert (
+            fct.properties[wk.DATASET_PROP_PHYSICAL_URI]
+            == "snowflake://analytics/marts/fct_orders"
+        )
+
+    async def test_source_has_full_routing(self) -> None:
+        result = await DbtManifestExtractor().extract(_MANIFEST_WITH_ADAPTER)
+        src = next(e for e in result.entities if e.entity_id == "source.p.raw.orders")
+        assert src.properties[wk.DATASET_PROP_SOURCE_SYSTEM] == "snowflake"
+        assert src.properties[wk.DATASET_PROP_SCHEMA_NAME] == "public"
+        assert src.properties[wk.DATASET_PROP_DATABASE_NAME] == "raw_landing"
+        assert (
+            src.properties[wk.DATASET_PROP_PHYSICAL_URI]
+            == "snowflake://raw_landing/public/orders"
+        )
+
+    async def test_tests_skip_physical_uri(self) -> None:
+        """dbt tests are not queryable datasets — no physical_uri."""
+        result = await DbtManifestExtractor().extract(_MANIFEST_WITH_ADAPTER)
+        t = next(
+            e for e in result.entities if e.entity_id == "test.p.not_null_fct_orders"
+        )
+        assert wk.DATASET_PROP_PHYSICAL_URI not in t.properties
+        # ``source_system`` is still populated — it's a property of the
+        # manifest, not the resource type.
+        assert t.properties[wk.DATASET_PROP_SOURCE_SYSTEM] == "snowflake"
+
+    async def test_missing_parts_skip_physical_uri(self) -> None:
+        result = await DbtManifestExtractor().extract(_MANIFEST_WITH_ADAPTER)
+        m = next(e for e in result.entities if e.entity_id == "model.p.no_database")
+        assert wk.DATASET_PROP_PHYSICAL_URI not in m.properties
+        # ``database_name`` is absent in source — extractor must not fabricate.
+        assert wk.DATASET_PROP_DATABASE_NAME not in m.properties
+        assert m.properties[wk.DATASET_PROP_SCHEMA_NAME] == "staging"
+
+    async def test_no_adapter_type_skips_source_system(self) -> None:
+        manifest_no_adapter = {
+            "nodes": {
+                "model.p.x": {
+                    "unique_id": "model.p.x",
+                    "resource_type": "model",
+                    "name": "x",
+                    "schema": "s",
+                    "database": "d",
+                },
+            },
+        }
+        result = await DbtManifestExtractor().extract(manifest_no_adapter)
+        e = next(iter(result.entities))
+        assert wk.DATASET_PROP_SOURCE_SYSTEM not in e.properties
+        assert wk.DATASET_PROP_PHYSICAL_URI not in e.properties
+        # Parts are still populated.
+        assert e.properties[wk.DATASET_PROP_SCHEMA_NAME] == "s"
+        assert e.properties[wk.DATASET_PROP_DATABASE_NAME] == "d"
+
+
+class TestOpenLineageRoutingProperties:
+    async def test_uri_namespace_extracts_scheme(self) -> None:
+        events = [
+            {
+                "eventType": "COMPLETE",
+                "job": {"namespace": "spark", "name": "j"},
+                "outputs": [
+                    {"namespace": "snowflake://acct.region", "name": "db.public.orders"}
+                ],
+            }
+        ]
+        result = await OpenLineageExtractor().extract(events)
+        ds = next(e for e in result.entities if e.entity_type == "dataset")
+        assert ds.properties[wk.DATASET_PROP_SOURCE_SYSTEM] == "snowflake"
+        assert (
+            ds.properties[wk.DATASET_PROP_PHYSICAL_URI]
+            == "snowflake://acct.region/db.public.orders"
+        )
+
+    async def test_bare_namespace_used_as_system(self) -> None:
+        events = [
+            {
+                "eventType": "COMPLETE",
+                "job": {"namespace": "spark", "name": "j"},
+                "outputs": [{"namespace": "warehouse", "name": "raw.events"}],
+            }
+        ]
+        result = await OpenLineageExtractor().extract(events)
+        ds = next(e for e in result.entities if e.entity_type == "dataset")
+        assert ds.properties[wk.DATASET_PROP_SOURCE_SYSTEM] == "warehouse"
+        assert (
+            ds.properties[wk.DATASET_PROP_PHYSICAL_URI] == "warehouse:raw.events"
+        )
+
+    async def test_routing_only_on_datasets_not_jobs(self) -> None:
+        result = await OpenLineageExtractor().extract(SAMPLE_OL_EVENTS)
+        job = next(e for e in result.entities if e.entity_type == "job")
+        # Jobs are not queryable datasets — routing properties stay empty.
+        assert wk.DATASET_PROP_SOURCE_SYSTEM not in job.properties
+        assert wk.DATASET_PROP_PHYSICAL_URI not in job.properties

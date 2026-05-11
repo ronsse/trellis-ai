@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 import structlog
 
 from trellis.extract.base import ExtractorTier
+from trellis.schemas import well_known as wk
 from trellis.schemas.extraction import (
     EdgeDraft,
     EntityDraft,
@@ -34,6 +35,34 @@ def _job_id(namespace: str, name: str) -> str:
     return f"job:{namespace}:{name}"
 
 
+def _routing_from_namespace(namespace: str, name: str) -> dict[str, str]:
+    """Derive cross-database routing properties from an OL dataset id.
+
+    OpenLineage namespaces follow https://github.com/OpenLineage/OpenLineage/
+    blob/main/spec/Naming.md — typical shapes are ``<scheme>://<host>``
+    (full URI) or a bare system identifier. We extract the scheme as
+    ``source_system`` when present; otherwise the bare namespace acts as
+    the system identifier. ``physical_uri`` joins namespace and dataset
+    name with ``/`` so consumers have a single canonical locator.
+    The dataset name itself is not parsed into ``database_name`` /
+    ``schema_name`` here — OL dataset names are dotted strings whose
+    structure varies by adapter; deterministic extractors should not
+    invent that mapping. A more sophisticated downstream extractor (e.g.,
+    Unity Catalog) can backfill the parts.
+    """
+    routing: dict[str, str] = {}
+    if "://" in namespace:
+        scheme, _, _rest = namespace.partition("://")
+        if scheme:
+            routing[wk.DATASET_PROP_SOURCE_SYSTEM] = scheme
+    elif namespace:
+        routing[wk.DATASET_PROP_SOURCE_SYSTEM] = namespace
+    if namespace and name:
+        sep = "/" if "://" in namespace else ":"
+        routing[wk.DATASET_PROP_PHYSICAL_URI] = f"{namespace}{sep}{name}"
+    return routing
+
+
 def _ensure_dataset(
     dataset: dict[str, Any],
     seen: dict[str, EntityDraft],
@@ -49,6 +78,7 @@ def _ensure_dataset(
             "namespace": ds_ns,
             "name": ds_name,
         }
+        props.update(_routing_from_namespace(ds_ns, ds_name))
         facets = dataset.get("facets") or {}
         if facets:
             props["facets"] = facets

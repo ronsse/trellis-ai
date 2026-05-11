@@ -2,12 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import typer
 from rich.console import Console
 
 from trellis.core.ids import generate_ulid
+from trellis.extract.commands import result_to_batch
+from trellis.extract.dispatcher import ExtractionDispatcher
+from trellis.extract.registry import ExtractorRegistry
+from trellis.mutate import build_curate_executor
+from trellis.mutate.commands import CommandStatus, Operation
 from trellis.schemas.enums import (
     EdgeKind,
     EntityType,
@@ -1094,10 +1102,111 @@ def _build_precedents() -> list[
 
 
 # ---------------------------------------------------------------------------
+#  Cold-start fixture loader — exercises the extractor path end-to-end so
+#  the demo and a real deployment use the same code path.
+# ---------------------------------------------------------------------------
+
+
+def _find_cold_start_fixture() -> Path | None:
+    """Locate ``examples/cold-start-fixture/`` relative to the source tree.
+
+    Returns ``None`` when the fixture isn't reachable (e.g., the package
+    was installed without the examples directory) so the demo falls back
+    to legacy-only loading gracefully.
+    """
+    # Two candidate locations: development checkout (repo_root/examples)
+    # and an installed package whose examples directory sits alongside
+    # the trellis_cli package (sdist layout).
+    candidates = [
+        Path(__file__).resolve().parents[2] / "examples" / "cold-start-fixture",
+        Path(__file__).resolve().parents[1] / "examples" / "cold-start-fixture",
+    ]
+    for c in candidates:
+        if (c / "manifest.json").exists():
+            return c
+    return None
+
+
+def _run_extractor_on_fixture(
+    extractor: object, raw_input: object, source_hint: str
+) -> tuple[int, int]:
+    """Run an extractor against an in-memory raw input and execute the batch.
+
+    Returns ``(nodes_created_or_updated, edges_created_or_updated)``.
+    """
+    registry = _get_registry()
+    ext_registry = ExtractorRegistry()
+    ext_registry.register(extractor)  # type: ignore[arg-type]
+    dispatcher = ExtractionDispatcher(
+        ext_registry, event_log=registry.operational.event_log
+    )
+    result = asyncio.run(
+        dispatcher.dispatch(raw_input, source_hint=source_hint),
+    )
+    batch = result_to_batch(result, requested_by=f"cli:demo-load:{source_hint}")
+    results = build_curate_executor(registry).execute_batch(batch)
+    nodes = sum(
+        1
+        for r in results
+        if r.operation == Operation.ENTITY_CREATE and r.status == CommandStatus.SUCCESS
+    )
+    edges = sum(
+        1
+        for r in results
+        if r.operation == Operation.LINK_CREATE and r.status == CommandStatus.SUCCESS
+    )
+    return nodes, edges
+
+
+def _load_cold_start_fixture(fixture_dir: Path) -> tuple[int, int]:
+    """Load the cold-start fixture via the extractor path.
+
+    Returns ``(total_nodes, total_edges)``. Failures here are logged and
+    re-raised — the demo treats the cold-start path as required, so a
+    broken fixture should fail loudly rather than silently producing a
+    half-loaded graph.
+    """
+    from trellis_workers.extract import (  # noqa: PLC0415
+        DbtManifestExtractor,
+        OpenLineageExtractor,
+    )
+
+    total_nodes = 0
+    total_edges = 0
+
+    # dbt manifest
+    manifest_path = fixture_dir / "manifest.json"
+    manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    nodes, edges = _run_extractor_on_fixture(
+        DbtManifestExtractor(), manifest_data, "dbt-manifest"
+    )
+    total_nodes += nodes
+    total_edges += edges
+
+    # OpenLineage events (NDJSON in the fixture, but support array form too)
+    events_path = fixture_dir / "openlineage-events.jsonl"
+    if not events_path.exists():
+        events_path = fixture_dir / "openlineage-events.json"
+    if events_path.exists():
+        raw = events_path.read_text(encoding="utf-8").strip()
+        if raw.startswith("["):
+            events = json.loads(raw)
+        else:
+            events = [json.loads(line) for line in raw.splitlines() if line.strip()]
+        nodes, edges = _run_extractor_on_fixture(
+            OpenLineageExtractor(), events, "openlineage"
+        )
+        total_nodes += nodes
+        total_edges += edges
+
+    return total_nodes, total_edges
+
+
+# ---------------------------------------------------------------------------
 #  Load command
 # ---------------------------------------------------------------------------
 @demo_app.command("load")
-def load(
+def load(  # noqa: PLR0912, PLR0915 - sequential fixture loading by section
     force: bool = typer.Option(
         False, "--force", "-f", help="Overwrite existing demo data"
     ),
@@ -1226,6 +1335,32 @@ def load(
             },
         )
 
+    # 8. Cold-start fixture: data-platform graph via the extractor path.
+    # This makes the demo exercise the same code path a real deployment
+    # uses (dbt manifests + OpenLineage events through the governed
+    # mutation pipeline), so drift between "demo" and "cold start" stays
+    # impossible. Falls back gracefully when the fixture isn't reachable
+    # (e.g., minimal installs that ship without examples/).
+    fixture_dir = _find_cold_start_fixture()
+    cold_start_nodes = 0
+    cold_start_edges = 0
+    if fixture_dir is not None:
+        try:
+            cold_start_nodes, cold_start_edges = _load_cold_start_fixture(fixture_dir)
+        except Exception as exc:
+            console.print(
+                f"  [yellow]![/yellow] Cold-start fixture failed: {exc}"
+            )
+        else:
+            console.print(
+                f"  [green]+[/green] {cold_start_nodes} cold-start entities "
+                f"({cold_start_edges} edges) via extractor path"
+            )
+    else:
+        console.print(
+            "  [dim]·[/dim] cold-start fixture not bundled; skipping"
+        )
+
     # Emit summary event
     event_log.emit(
         EventType.SYSTEM_INITIALIZED,
@@ -1237,6 +1372,8 @@ def load(
             "evidence": len(evidence_items),
             "documents": len(docs),
             "precedents": len(precedents),
+            "cold_start_nodes": cold_start_nodes,
+            "cold_start_edges": cold_start_edges,
         },
     )
 
@@ -1247,6 +1384,8 @@ def load(
         + len(evidence_items)
         + len(docs)
         + len(precedents)
+        + cold_start_nodes
+        + cold_start_edges
     )
     console.print(
         f"\n[bold green]Done![/bold green] "

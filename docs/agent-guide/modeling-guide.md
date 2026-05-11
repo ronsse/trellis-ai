@@ -18,6 +18,30 @@ This guide exists to make the right decision the obvious one.
 
 ---
 
+## Where data lives: the four stores
+
+Before deciding what becomes a node, you have to decide whether it belongs in the graph at all. Trellis splits storage into four agent-facing stores (the Knowledge Plane) plus two Trellis-internal stores (the Operational Plane). The right question is not "what should this look like as a graph?" but "which of the four stores does this piece of information actually belong to?"
+
+| Store | What it holds | What it's optimized for | Anti-pattern |
+|---|---|---|---|
+| **Graph** | Identity-bearing structural facts: entities, relationships, versioning, ownership, lineage. | Cross-parent traversal, temporal queries via SCD Type 2, structured filters. | Storing free-form text as node properties. Storing leaf-only data that never traverses. |
+| **Document** | Free-form text content: descriptions, READMEs, runbooks, wiki pages, schema docs, ADRs. Always linked to one or more graph nodes via `described_by` or similar edges. | Full-text search, semantic search via vector embeddings (when the document store also serves vectors), token-budget-aware pack assembly. | Stuffing structured key-value data into document text so the structured query becomes a regex. See *Property-envy documents* below. |
+| **Blob** | Binary artifacts: PDFs, parquet files, model checkpoints, screenshots, raw payloads larger than the document store cares to inline. Referenced by URL stored as a property on the owning graph node. | High-volume, infrequently-accessed bytes. Lifecycle-managed (TTL) without polluting the graph. | Inlining 50MB PDFs as base64 in document content. |
+| **Vector** | Embeddings for similarity search. Two shapes are supported: an *independent* vector store (default) or *attached to graph nodes* as an optional property (the Neo4j shape #2 — same nodes, same database). | Approximate-nearest-neighbour retrieval, semantic-seed extraction (see swarm 3 SEM-1), tag-filtered similarity. | Embedding every structural node "just in case." Embeddings should follow retrievable content, not plumbing. |
+
+The Operational Plane stores — `TraceStore` (immutable agent execution records) and `EventLog` (governance audit) — are not addressed by domain modeling decisions. They're populated automatically by the mutation pipeline; you don't choose to put data there.
+
+**The decision question:** *"Where will an agent or operator want to find this six months from now?"*
+
+- If they'll filter or traverse by it: graph property or node.
+- If they'll read it as prose: document.
+- If they'll fetch it as a file: blob.
+- If they'll do similarity search on it: vector (often alongside document or graph).
+
+A single real-world artifact often lives in three of the four. A dbt source table becomes: a graph node (the structural fact), a document holding its description (the prose), and a vector embedding of that description (for semantic retrieval). The graph node is the anchor; the others hang off it via edges or properties.
+
+---
+
 ## The four-question test
 
 Before adding anything to the graph, answer these four questions about it. A thing should be a **node** only if **at least one** of them is true:
@@ -122,6 +146,82 @@ This is a soft guarantee, not a hard one — consumers with legitimate need can 
 
 ---
 
+## Reference vs summary: when to inline, when to point
+
+The document-vs-property axis covered above answers *whether* free-form content goes in the document store. A second decision follows: when free-form content does go in the document store, how much of the source should be inlined versus referenced via URL?
+
+This matters most for sources that already have their own canonical storage — Confluence pages, Jira tickets, git files, Notion docs, S3 objects. The temptation is to inline the entire body so retrieval is self-contained. The cost is two-fold: bloated document store, and drift between Trellis's snapshot and the source's current state.
+
+The decision rule:
+
+| Source content shape | What to store in document | What to store as property/edge |
+|---|---|---|
+| Small, stable, frequently retrieved | **Inline.** Full body in document content. | URL in node properties for the audit trail. |
+| Small, mutates frequently | **Summary + reference.** A 1-3 sentence digest in the document; full body fetched from source. | Source URL as a node property; `last_seen_revision` as a timestamp. |
+| Large, infrequently retrieved | **Reference only.** No document. | Source URL on the node; a one-line description on the node itself. |
+| Large, contains pockets of high-value text | **Selective inline.** Extract the high-signal sections as their own documents; link the rest by reference. | Source URL on the parent node; `derived_from` edge from each extracted document. |
+| Binary | **Never inline.** | Blob URL as a property; the node carries metadata only. |
+
+Concrete thresholds we've found useful (your mileage may vary):
+
+- **Inline when** content < 4KB *and* mutates less than weekly *and* is queried/embedded/searched. Inline-able items dominate retrieval cost; spending storage on copies pays off.
+- **Reference when** content > 50KB *or* mutates daily *or* is rarely retrieved.
+- **Summary + reference when** size is somewhere in between *or* mutation rate is moderate. The summary captures intent ("Q3 OKR — improve retrieval p95 latency to under 200ms") so an agent can decide whether to fetch the full body.
+
+Common shapes by source:
+
+- **Confluence / wiki pages**: usually small enough to inline; deduplicate against the parent-page revision tree so each page version doesn't become a new document.
+- **dbt model descriptions**: short, stable, inline.
+- **PDF runbooks**: store as blob, summary as document, both linked to the same graph node.
+- **Jira tickets**: title + description as document; comments as reference (re-fetch on access) — comments grow unboundedly and rarely matter to retrieval.
+- **GitHub issues / PRs**: similar to Jira. Reviews, comments, and CI output stay external.
+
+If you can't decide, default to **reference + summary**. It's the safest position: the source stays authoritative, your store stays small, and you can promote to fully-inlined later if retrieval signal pushes you there. The reverse (un-inlining after the fact) is harder.
+
+---
+
+## Cross-database routing properties for queryable datasets
+
+Entities representing queryable datasets — canonical type `Dataset` (plus the lowercase `dataset` alias and extractor-specific shapes like `dbt_model` / `dbt_source` / `UC_TABLE`) — should carry routing properties so query-engine agents can dispatch queries without consulting the prompt or out-of-band config. The convention is defined in [`src/trellis/schemas/well_known.py`](../../src/trellis/schemas/well_known.py) under `DATASET_ROUTING_PROPERTIES`:
+
+| Property | Type | Required? | Meaning |
+|---|---|---|---|
+| `source_system` | string | recommended | Short identifier of the data platform: `"snowflake"`, `"postgres"`, `"bigquery"`, `"databricks"`, `"duckdb"`. Maps to dbt's `metadata.adapter_type` and to the URI scheme of OpenLineage namespaces. |
+| `connection_ref` | string | optional | Env-var name (or secrets-manager key) resolving to a connection string or client config. **Never inline a credential.** Optional because many entities are read-only metadata records that don't need an active connection. |
+| `database_name` | string | recommended | Physical database / catalog name. |
+| `schema_name` | string | recommended | Physical schema / namespace within the database. Distinct from the dbt `schema` property, which historically encodes both physical schema and logical layer convention; both keys coexist on dbt-extracted entities. |
+| `physical_uri` | string | optional | Fully-qualified locator: `snowflake://account/db/schema/table` or `postgres://host:port/db.schema.table`. Extractors construct this only when the upstream source supplies enough information; agents prefer this over recomposing from parts. |
+
+These are *recommended convention*, not enforced schema — Trellis entity properties are open bags by design. Extractors populate what the upstream system supplies; consumers read with `.get(...)` and fall back gracefully when a property is absent.
+
+**Worked example.** A dbt model `analytics.marts.fct_orders` extracted from a Snowflake-adapter dbt project lands with:
+
+```json
+{
+  "entity_id": "model.my_project.fct_orders",
+  "entity_type": "dbt_model",
+  "name": "fct_orders",
+  "properties": {
+    "unique_id": "model.my_project.fct_orders",
+    "schema": "marts",
+    "database": "analytics",
+    "source_system": "snowflake",
+    "schema_name": "marts",
+    "database_name": "analytics",
+    "physical_uri": "snowflake://analytics/marts/fct_orders",
+    "materialized": "table"
+  }
+}
+```
+
+A query-engine agent gets this entity in a pack, reads `physical_uri`, looks up the active Snowflake connection via `connection_ref` (when present), and dispatches a query against the right warehouse — without the orchestrating prompt needing to know which database holds what.
+
+**What extractors are responsible for**: populating the properties they can derive from the source. dbt manifests provide `adapter_type`, `database`, `schema`, `name` — everything except `connection_ref`. OpenLineage namespaces provide a URI scheme that becomes `source_system`. Unity Catalog provides all five parts directly. Markdown docs and git repos provide nothing — they're not queryable datasets and shouldn't claim the convention.
+
+**What curators are responsible for**: filling `connection_ref` when an entity is meant to be queried interactively. This is the only field that requires deployment-specific knowledge (which env var holds the connection string), so it's the one a curator typically adds rather than an extractor.
+
+---
+
 ## Temporal considerations
 
 ### Every node is a temporal entity
@@ -155,6 +255,44 @@ The answer is **yes, keep SCD on for structural nodes too**, for two reasons:
 2. Structural nodes should be rare. If you have so many that SCD cost becomes a problem, the real answer is "model fewer things as nodes," not "turn off versioning for the ones you have."
 
 If storage cost ever becomes a pain point for a legitimately large structural graph, we'll add a `skip_history: bool` flag on `NodeRole` configuration — but that's a future problem, not a current one.
+
+---
+
+## Freshness signals: how staleness propagates
+
+A graph that mirrors moving production systems is wrong the moment it stops being refreshed. Trellis exposes three signals so agents can reason about staleness rather than treating every read as ground truth.
+
+### Signal 1: `valid_from` / `valid_to` (SCD Type 2)
+
+Every node carries `valid_from` and `valid_to` timestamps. The current version has `valid_to=NULL`; superseded versions carry the timestamp when the next version landed. `get_node_history(node_id)` returns the chain; `as_of=<ts>` on graph queries time-travels the entire read.
+
+This is the *fact* axis: "what did the graph say at time T?" It does not directly answer "is the current version stale?" — that requires the next two signals.
+
+### Signal 2: `importance_scored_at`
+
+Set on nodes that participate in retrieval ranking. Records the timestamp when the node's importance score was last computed. A refresh hook (`recompute_importance(...)`) updates the score and stamps the field. The read-path guardrail in `PackBuilder` flags nodes whose `importance_scored_at` is older than a configurable threshold so retrieval can downrank them or trigger background refresh.
+
+Practical use: a dbt model that hasn't been re-extracted in 30 days but is still being retrieved is a candidate for either re-extraction or demotion. Agents read `importance_scored_at` from the pack metadata; the EventLog emits `IMPORTANCE_REFRESHED` when the score is recomputed.
+
+### Signal 3: `TAGS_REFRESHED` events + `Lifecycle.state`
+
+When an extractor re-runs and produces a structural diff vs the prior extraction (e.g., a column was added to a table, a description changed, a depends-on edge appeared), the dispatcher emits a `TAGS_REFRESHED` event into the `EventLog` with the structured diff payload. Agents watching the event log know that cached pack content referencing the affected node is stale.
+
+`Lifecycle.state` is the human-readable summary of that signal: `active` (current), `superseded` (a newer version exists), `deprecated` (marked by a curator), `archived` (removed from default retrieval), `noise` (demoted by feedback). State transitions are driven by:
+
+- *Extractor re-runs* (via `trellis extract refresh`) → may set `superseded` or `archived` based on diff
+- *Curator action* → can set `deprecated`, `archived`, or restore to `active`
+- *Feedback loop* → `apply_noise_tags()` demotes consistently-irrelevant items to `noise`
+
+### Three signals, three uses
+
+| Question an agent asks | Signal to read |
+|---|---|
+| "What did this entity look like on 2026-04-01?" | `as_of` time-travel via `valid_from` / `valid_to`. |
+| "How confident should I be that this entity's importance is current?" | `importance_scored_at` age. |
+| "Has this entity been touched recently, and what changed?" | `TAGS_REFRESHED` events on the EventLog; `Lifecycle.state` for the rolled-up answer. |
+
+See [`freshness-and-curation.md`](freshness-and-curation.md) for operational details on triggering refresh, reading drift events, and the two refresh modes (periodic re-run vs pushed events).
 
 ---
 
@@ -463,6 +601,124 @@ Public API functions only — not every helper function, not every parameter. Th
 
 ---
 
+## Worked example 3: Curated knowledge from SQL query logs
+
+This is the canonical curated-derivation example because SQL query logs are simultaneously high-volume, low-signal-per-row, and high-signal-in-aggregate. They illustrate why curated nodes exist as a distinct role.
+
+### The raw shape
+
+A warehouse query log emits one row per executed query: text, runtime, user, timestamp, referenced tables. Ingesting this directly gives you a stream of `QueryExecution` entities with `reads_from` / `writes_to` edges to `Dataset` entities:
+
+```python
+# ingest one event per query execution
+upsert_node(
+    entity_id=f"query:{run_id}",
+    entity_type="QueryExecution",
+    node_role="semantic",
+    properties={
+        "query_text": event.sql,
+        "runtime_ms": event.duration_ms,
+        "user": event.user,
+        "started_at": event.timestamp,
+        "warehouse": event.compute,
+    },
+)
+for table_fqn in event.read_tables:
+    upsert_edge(
+        source=f"query:{run_id}",
+        target=f"dataset:{table_fqn}",
+        kind="reads_from",
+    )
+for table_fqn in event.write_tables:
+    upsert_edge(
+        source=f"query:{run_id}",
+        target=f"dataset:{table_fqn}",
+        kind="writes_to",
+    )
+```
+
+A million queries a day produces a million `QueryExecution` nodes a day. Most of them never get retrieved individually — and that's fine, because the *value is in the aggregate*, not in any single execution.
+
+### The derived shape
+
+A nightly analyzer reads the raw `QueryExecution` history and produces curated entities representing patterns:
+
+```python
+# Curated entity for a popular join pattern
+upsert_node(
+    entity_id="join_pattern:orders_joined_with_customers",
+    entity_type="JoinPattern",
+    node_role="curated",
+    generation_spec={
+        "generator_name": "sql_log_analyzer",
+        "generator_version": "1.2",
+        "generated_at": "2026-05-11T03:00:00Z",
+        "source_node_ids": [...],  # the QueryExecution ids that contributed
+        "parameters": {
+            "lookback_days": 30,
+            "min_query_count": 50,
+        },
+    },
+    properties={
+        "left_dataset": "snowflake://analytics/marts/fct_orders",
+        "right_dataset": "snowflake://analytics/marts/dim_customers",
+        "join_keys": ["customer_id"],
+        "occurrence_count": 1847,
+        "median_runtime_ms": 1250,
+        "common_filters": ["order_date > current_date - 30"],
+        "example_query": "SELECT ... FROM fct_orders o JOIN dim_customers c ON o.customer_id = c.customer_id WHERE ...",
+        "description": (
+            "Highly recurring join on customer_id, appearing in 1847 queries "
+            "over the last 30 days. Typical filter narrows to recent orders. "
+            "Consider materializing as a wide table if runtime becomes a "
+            "bottleneck."
+        ),
+    },
+)
+upsert_edge(
+    source="join_pattern:orders_joined_with_customers",
+    target="dataset:snowflake://analytics/marts/fct_orders",
+    kind="involves_dataset",
+)
+upsert_edge(
+    source="join_pattern:orders_joined_with_customers",
+    target="dataset:snowflake://analytics/marts/dim_customers",
+    kind="involves_dataset",
+)
+```
+
+The `JoinPattern` node is curated because:
+
+1. It's **synthesized** — derived from many `QueryExecution` rows, not extracted from any single source.
+2. It's **regeneratable** — running the analyzer again next month produces an updated `JoinPattern` reflecting the new month's data.
+3. It's **valuable for strategic retrieval** — when an agent is asked "how do orders and customers join?", this pattern is exactly the kind of high-density content that should outrank an arbitrary `QueryExecution` from last Tuesday.
+4. It's **meant to be refined** — a curator can edit `description` to add domain context ("customer_id is the only join key — do not use email even though it appears unique") without breaking the regenerator.
+
+Other curated entities the same analyzer might produce:
+
+- **`AccessPattern`** — "Dataset X is co-accessed with Dataset Y in 73% of queries that read X." Useful for retrieval expansion and for warehouse layout decisions.
+- **`HotDataset`** — top-N most-queried datasets per domain. Boosts these in pack retrieval when the agent's objective is broad.
+- **`QueryTemplate`** — parameterized query body extracted by clustering similar `QueryExecution.query_text` values. Useful as a starting point for new SQL-generation tasks.
+
+### What goes into the graph vs what doesn't
+
+| Thing | Where it lives | Why |
+|---|---|---|
+| Individual `QueryExecution` rows | Graph as semantic nodes | Cross-parent traversal: `reads_from` / `writes_to` edges to Datasets carry lineage. SCD Type 2 captures execution history. |
+| `query_text` (raw SQL) | Graph property on `QueryExecution` (small) **or** Document linked via `described_by` (long queries) | The 4KB threshold applies — most queries inline, occasional 50KB analytics queries get documented. |
+| Execution plans, profiling output | Blob, referenced from `QueryExecution.profile_uri` | Large, binary, infrequently retrieved. |
+| `JoinPattern` / `AccessPattern` / `HotDataset` | Graph as curated nodes | Synthesized, regeneratable, retrieval-boosted. |
+| `JoinPattern.description` (human-edited narrative) | Graph property on the curated node | Small, mutates only on curator edit, queried alongside the node. |
+| The analyzer script itself | Source repo (not in graph) | Code, not data. Versioned via `generation_spec.generator_version`. |
+
+### The freshness contract for derived nodes
+
+Curated nodes inherit the freshness signals from [the freshness section](#freshness-signals-how-staleness-propagates) but with one twist: `generation_spec.generated_at` is the authoritative "when was this computed" timestamp, distinct from `valid_from` (when this version landed). An agent reading a `JoinPattern` with `generated_at` two months old should treat it as a soft signal that the underlying query mix may have shifted. The next analyzer run will produce a new version; both old and new live in the SCD Type 2 history.
+
+When a curator edits `description` between analyzer runs, the SCD Type 2 history shows the edit but `generation_spec` is unchanged — the substantive content is human-authored, not regenerated. The next analyzer run preserves human edits or notifies the curator that a regenerated version conflicts; see `freshness-and-curation.md` for the policy.
+
+---
+
 ## When curated nodes earn their role
 
 Curated nodes are the least obvious of the three roles. A thing should be `node_role=curated` (rather than `semantic`) when **all** of these are true:
@@ -547,6 +803,9 @@ See the `trellis curate` CLI namespace in [operations.md](operations.md) (when i
 - [playbooks.md](playbooks.md) — step-by-step procedures for common ingestion patterns
 - [tagging-for-retrieval.md](tagging-for-retrieval.md) — how `ContentTags` and `retrieval_affinity` interact with `node_role`
 - [tiered-context-retrieval.md](tiered-context-retrieval.md) — how sectioned pack assembly uses `node_role` to filter and boost content
+- [extractor-authoring.md](extractor-authoring.md) — the `Extractor` Protocol contract, tier semantics, and how to ship one as a plugin
+- [source-modeling-cookbook.md](source-modeling-cookbook.md) — per-source recipes for documentation, Jira, Confluence, SQL queries, Unity Catalog, and git repos
+- [freshness-and-curation.md](freshness-and-curation.md) — how to keep extracted data fresh, the two refresh modes, and curator workflows
 
 ---
 

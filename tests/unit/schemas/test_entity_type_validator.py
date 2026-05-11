@@ -102,13 +102,15 @@ class TestEntityTypeNearMissWarns:
 
     def test_case_drift_warns(self, log_output: list[dict]) -> None:
         # Lowercase form of canonical that isn't already a registered
-        # alias — ``Dataset`` has no lowercase legacy alias, so
-        # ``dataset`` should be flagged as a near-miss.
-        entity = Entity(entity_type="dataset", name="orders")
-        assert entity.entity_type == "dataset"
+        # alias — ``Agent`` (PROV-O) has no lowercase legacy alias, so
+        # ``agent`` should be flagged as a near-miss. (``dataset`` is
+        # registered as an alias of ``Dataset`` for OpenLineage interop,
+        # so it intentionally does *not* warn.)
+        entity = Entity(entity_type="agent", name="alice")
+        assert entity.entity_type == "agent"
         events = _events_with_key(log_output, "entity_type.suspicious_input")
         assert len(events) == 1
-        assert events[0]["suggestion"] == "Dataset"
+        assert events[0]["suggestion"] == "Agent"
 
 
 class TestEntityTypeOpenStringPreserved:

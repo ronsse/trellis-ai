@@ -11,6 +11,7 @@ from trellis_cli.admin import admin_app
 from trellis_cli.analyze import analyze_app
 from trellis_cli.curate import curate_app
 from trellis_cli.demo import demo_app
+from trellis_cli.extract_refresh import extract_app
 from trellis_cli.ingest import ingest_app
 from trellis_cli.metrics import metrics_app
 from trellis_cli.policy import policy_app
@@ -52,6 +53,11 @@ app.add_typer(admin_app, name="admin", help="Administration and setup")
 worker_app = typer.Typer(help="Run curation workers", no_args_is_help=True)
 
 app.add_typer(ingest_app, name="ingest")
+app.add_typer(
+    extract_app,
+    name="extract",
+    help="Re-run extractors and emit structural diffs",
+)
 app.add_typer(curate_app, name="curate")
 app.add_typer(retrieve_app, name="retrieve")
 app.add_typer(analyze_app, name="analyze")

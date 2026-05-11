@@ -1,0 +1,28 @@
+# Cold-start fixture for the Trellis demo.
+#
+# Two extractor inputs build a small data-platform graph:
+#
+#   * `jaffle-dbt`     — dbt manifest with 4 models + 2 sources + 2 tests
+#                        across an analytics warehouse on Snowflake.
+#   * `lineage-events` — OpenLineage events showing how those tables get
+#                        built, with raw-load jobs in Airflow and
+#                        transformation jobs in dbt.
+#
+# `trellis demo load` reads this file and runs both extractors. To re-run
+# either source against fresh state:
+#
+#   trellis extract refresh --source jaffle-dbt --sources-file examples/cold-start-fixture/sources.yaml
+#   trellis extract refresh --source lineage-events --sources-file examples/cold-start-fixture/sources.yaml
+#
+# See docs/agent-guide/freshness-and-curation.md for the broader refresh story.
+
+sources:
+  - name: jaffle-dbt
+    type: dbt-manifest
+    path: manifest.json
+    enabled: true
+
+  - name: lineage-events
+    type: openlineage
+    path: openlineage-events.jsonl
+    enabled: true
