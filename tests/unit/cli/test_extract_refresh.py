@@ -127,7 +127,7 @@ class TestRefreshCliValidation:
                 "--type",
                 "dbt-manifest",
                 "--path",
-                "/tmp/x",
+                "/tmp/x",  # noqa: S108  # not actually read — error path under test
             ],
         )
         assert result.exit_code == 1

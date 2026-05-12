@@ -66,7 +66,7 @@ def _resolve_extractor(extractor_type: str) -> object:
 
         for ext in (DbtManifestExtractor(), OpenLineageExtractor()):
             if registry.get(ext.name) is None:
-                registry.register(ext)
+                registry.register(ext)  # type: ignore[arg-type]
     except ImportError:
         pass
 
