@@ -824,9 +824,8 @@ components:
         tag_filters:
           anyOf:
           - additionalProperties:
-              items:
-                type: string
-              type: array
+              additionalProperties: true
+              type: object
             type: object
           - type: 'null'
           title: Tag Filters
@@ -2068,7 +2067,7 @@ paths:
       tags:
       - retrieve
     post:
-      description: Ingest a trace.
+      description: Ingest a trace through the governed mutation pipeline.
       operationId: ingest_trace_api_v1_traces_post
       requestBody:
         content:
