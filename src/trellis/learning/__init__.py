@@ -10,7 +10,13 @@ from trellis.learning.schema_evolution import (
     REQUIRED_PARAM_KEYS as REQUIRED_SCHEMA_EVOLUTION_PARAM_KEYS,
 )
 from trellis.learning.scoring import (
+    LEARNING_NOISE_RETRY_KEY,
+    LEARNING_NOISE_SUCCESS_KEY,
+    LEARNING_PROMOTE_RETRY_KEY,
+    LEARNING_PROMOTE_SUCCESS_KEY,
+    LEARNING_SCORING_COMPONENT,
     PROMOTE_RECOMMENDATIONS,
+    REQUIRED_LEARNING_PARAMETER_KEYS,
     analyze_learning_observations,
     build_learning_promotion_payloads,
     normalize_intent_family,
@@ -19,8 +25,14 @@ from trellis.learning.scoring import (
 )
 
 __all__ = [
+    "LEARNING_NOISE_RETRY_KEY",
+    "LEARNING_NOISE_SUCCESS_KEY",
+    "LEARNING_PROMOTE_RETRY_KEY",
+    "LEARNING_PROMOTE_SUCCESS_KEY",
+    "LEARNING_SCORING_COMPONENT",
     "PROMOTE_RECOMMENDATIONS",
     "RECOMMENDED_SEED_VALUES",
+    "REQUIRED_LEARNING_PARAMETER_KEYS",
     "REQUIRED_SCHEMA_EVOLUTION_PARAM_KEYS",
     "WellKnownCandidate",
     "analyze_learning_observations",

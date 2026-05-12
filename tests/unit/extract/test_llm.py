@@ -253,23 +253,27 @@ class TestJsonTolerance:
         assert len(result.entities) == 1
         assert result.entities[0].name == "C"
 
-    async def test_malformed_json_surfaces_residue(self) -> None:
+    async def test_malformed_json_raises_extraction_failure(self) -> None:
+        """ADR-extraction-failure-telemetry: parse errors emit + raise,
+        no silent ``return []`` masking the failure from analytics."""
+        from trellis.extract.telemetry import ExtractionFailureError
+
         fake = FakeLLMClient(response_text="not json at all")
         ext = LLMExtractor(llm_client=fake)
-        result = await ext.extract("x")
-        assert result.entities == []
-        assert result.edges == []
-        assert result.unparsed_residue == "not json at all"
-        assert result.overall_confidence == 0.0
-        assert result.llm_calls == 1  # call still happened
+        with pytest.raises(ExtractionFailureError) as excinfo:
+            await ext.extract("x")
+        assert excinfo.value.failure_kind == "parse_error"
+        assert excinfo.value.extractor_id == "LLMExtractor"
 
-    async def test_empty_response_surfaces_residue(self) -> None:
+    async def test_empty_response_raises_extraction_failure(self) -> None:
+        """Empty / whitespace-only LLM responses are parse_error failures."""
+        from trellis.extract.telemetry import ExtractionFailureError
+
         fake = FakeLLMClient(response_text="")
         ext = LLMExtractor(llm_client=fake)
-        result = await ext.extract("x")
-        assert result.entities == []
-        assert result.unparsed_residue == ""
-        assert result.overall_confidence == 0.0
+        with pytest.raises(ExtractionFailureError) as excinfo:
+            await ext.extract("x")
+        assert excinfo.value.failure_kind == "parse_error"
 
 
 # ---------------------------------------------------------------------------
@@ -430,3 +434,182 @@ class TestResultMetadata:
         assert result.provenance.extractor_name == "custom-llm"
         assert result.provenance.extractor_version == "2.3.4"
         assert result.provenance.source_hint == "free-text"
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 — EXTRACTION_FAILED telemetry replaces silent parse fallback.
+# See docs/design/adr-extraction-failure-telemetry.md
+# ---------------------------------------------------------------------------
+
+
+class TestExtractionFailureTelemetry:
+    """Verify the emit-then-raise contract replaces the old silent fallback."""
+
+    async def test_parse_error_emits_event_then_raises(self, tmp_path) -> None:
+        from pathlib import Path
+
+        from trellis.extract.telemetry import (
+            ExtractionFailureError,
+            reset_extraction_failure_state,
+        )
+        from trellis.stores.base.event_log import EventType
+        from trellis.stores.sqlite.event_log import SQLiteEventLog
+
+        reset_extraction_failure_state()
+        # Force EXTRACTION_FAILURE_NO_SAMPLE so we get the full event
+        # without sampling state interfering across test ordering.
+        import os
+
+        os.environ["EXTRACTION_FAILURE_NO_SAMPLE"] = "1"
+        try:
+            log = SQLiteEventLog(Path(tmp_path) / "events.db")
+            fake = FakeLLMClient(response_text="not json at all")
+            ext = LLMExtractor(llm_client=fake, event_log=log, model="m-1")
+            with pytest.raises(ExtractionFailureError) as excinfo:
+                await ext.extract("input text", source_hint="freetext")
+
+            assert excinfo.value.failure_kind == "parse_error"
+
+            events = log.get_events(event_type=EventType.EXTRACTION_FAILED)
+            assert len(events) == 1
+            payload = events[0].payload
+            assert payload["extractor_id"] == "LLMExtractor"
+            assert payload["extractor_tier"] == "llm"
+            assert payload["failure_kind"] == "parse_error"
+            assert payload["source_hint"] == "freetext"
+            assert payload["error_class"] == "JSONDecodeError"
+            assert isinstance(payload["error_excerpt"], str)
+            # Bounded — never exceeds 200 chars (POC directive).
+            assert len(payload["error_excerpt"]) <= 200
+            assert payload["prompt_hash"]
+            assert payload["source_excerpt_hash"]
+            log.close()
+        finally:
+            os.environ.pop("EXTRACTION_FAILURE_NO_SAMPLE", None)
+            reset_extraction_failure_state()
+
+    async def test_validation_error_emits_validation_kind(self, tmp_path) -> None:
+        from pathlib import Path
+        from unittest.mock import patch
+
+        from pydantic import ValidationError
+
+        from trellis.extract.telemetry import (
+            ExtractionFailureError,
+            reset_extraction_failure_state,
+        )
+        from trellis.stores.base.event_log import EventType
+        from trellis.stores.sqlite.event_log import SQLiteEventLog
+
+        reset_extraction_failure_state()
+        import os
+
+        os.environ["EXTRACTION_FAILURE_NO_SAMPLE"] = "1"
+        try:
+            log = SQLiteEventLog(Path(tmp_path) / "events.db")
+            payload = {
+                "entities": [
+                    {
+                        "entity_type": "Person",
+                        "name": "Alice",
+                        "confidence": 0.9,
+                    }
+                ],
+                "edges": [],
+            }
+            fake = FakeLLMClient(response_text=json.dumps(payload))
+            ext = LLMExtractor(llm_client=fake, event_log=log)
+
+            # Force a ValidationError from _to_drafts by patching the
+            # internal helper to raise. This exercises the Pydantic-error
+            # branch without trying to coax pydantic into rejecting a
+            # valid draft (the extractor's own clamping makes that hard).
+            validation_exc = ValidationError.from_exception_data(
+                "EntityDraft",
+                [
+                    {
+                        "type": "string_type",
+                        "loc": ("name",),
+                        "input": 42,
+                    }
+                ],
+            )
+            with (
+                patch(
+                    "trellis.extract.llm._to_drafts",
+                    side_effect=validation_exc,
+                ),
+                pytest.raises(ExtractionFailureError) as excinfo,
+            ):
+                await ext.extract("input")
+
+            assert excinfo.value.failure_kind == "validation_error"
+            events = log.get_events(event_type=EventType.EXTRACTION_FAILED)
+            assert len(events) == 1
+            assert events[0].payload["failure_kind"] == "validation_error"
+            assert events[0].payload["error_class"] == "ValidationError"
+            log.close()
+        finally:
+            os.environ.pop("EXTRACTION_FAILURE_NO_SAMPLE", None)
+            reset_extraction_failure_state()
+
+    async def test_dispatcher_catches_failure_and_emits_tier_fallback(
+        self, tmp_path
+    ) -> None:
+        """End-to-end: LLMExtractor under the dispatcher degrades to an
+        empty result + emits BOTH EXTRACTION_FAILED (tier_fallback) and
+        EXTRACTOR_FALLBACK (empty_result) events."""
+        from pathlib import Path
+
+        from trellis.extract.context import ExtractionContext
+        from trellis.extract.dispatcher import ExtractionDispatcher
+        from trellis.extract.registry import ExtractorRegistry
+        from trellis.extract.telemetry import reset_extraction_failure_state
+        from trellis.stores.base.event_log import EventType
+        from trellis.stores.sqlite.event_log import SQLiteEventLog
+
+        reset_extraction_failure_state()
+        import os
+
+        os.environ["EXTRACTION_FAILURE_NO_SAMPLE"] = "1"
+        try:
+            log = SQLiteEventLog(Path(tmp_path) / "events.db")
+            fake = FakeLLMClient(response_text="not json")
+            ext = LLMExtractor(
+                llm_client=fake,
+                event_log=log,
+                supported_sources=["free-text"],
+            )
+            registry = ExtractorRegistry()
+            registry.register(ext)
+            dispatcher = ExtractionDispatcher(registry, event_log=log)
+
+            result = await dispatcher.dispatch(
+                "x",
+                source_hint="free-text",
+                context=ExtractionContext(allow_llm_fallback=True),
+            )
+
+            # Dispatcher returned empty result — POC directive satisfied
+            # only because the EXTRACTION_FAILED event captured the
+            # original failure.
+            assert result.entities == []
+            assert result.edges == []
+            assert isinstance(result.unparsed_residue, dict)
+            assert result.unparsed_residue["extraction_failure"]["failure_kind"] == (
+                "parse_error"
+            )
+
+            # Two EXTRACTION_FAILED events: the original parse_error
+            # from LLMExtractor + the tier_fallback from the dispatcher.
+            failed_events = log.get_events(event_type=EventType.EXTRACTION_FAILED)
+            kinds = sorted(e.payload["failure_kind"] for e in failed_events)
+            assert kinds == ["parse_error", "tier_fallback"]
+
+            # EXTRACTOR_FALLBACK fires for graduation tracking.
+            fallback_events = log.get_events(event_type=EventType.EXTRACTOR_FALLBACK)
+            assert any(e.payload["reason"] == "empty_result" for e in fallback_events)
+            log.close()
+        finally:
+            os.environ.pop("EXTRACTION_FAILURE_NO_SAMPLE", None)
+            reset_extraction_failure_state()

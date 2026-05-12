@@ -1,8 +1,20 @@
-"""Extractor fallback telemetry — consume EXTRACTOR_FALLBACK events.
+"""Extractor fallback + failure telemetry.
 
-Closes Gap 4.3 by turning the per-dispatch fallback events emitted by
-:class:`~trellis.extract.dispatcher.ExtractionDispatcher` into an operator-
-readable report. Two fallback signals are tracked today:
+Two distinct surfaces share this module by design:
+
+* :func:`analyze_extractor_fallbacks` /
+  :func:`analyze_extraction_validation` consume
+  ``EXTRACTOR_FALLBACK`` and ``EXTRACTION_REJECTED`` events emitted by
+  :class:`~trellis.extract.dispatcher.ExtractionDispatcher` and turn them
+  into operator-readable reports (Gap 4.3 / Logic Gap 1.3).
+* :func:`emit_extraction_failure` is the writer-side helper that replaces
+  the silent ``except json.JSONDecodeError: return []`` defect in
+  :class:`~trellis.extract.llm.LLMExtractor` and
+  ``trellis_workers.learning.miner.PrecedentMiner._parse_candidates``.
+  Callers emit-then-raise; the dispatcher is the one legitimate degrader.
+  See ``docs/design/adr-extraction-failure-telemetry.md``.
+
+Two fallback signals are tracked by the analyzers today:
 
 * ``prefer_tier_override`` — caller forced a lower-priority tier.
 * ``empty_result`` — chosen extractor ran but produced no drafts. Strongest
@@ -11,16 +23,19 @@ readable report. Two fallback signals are tracked today:
 
 Per-source aggregates let consumers ask "where do rules keep losing?" and
 "is this source stable enough to graduate down a tier?" without re-running
-the dispatcher. The report is read-only — proposing tier changes or
+the dispatcher. The reports are read-only — proposing tier changes or
 retiring extractors is left to operators (and, later, a dedicated tuning
 rule that watches these aggregates).
 """
 
 from __future__ import annotations
 
-from collections import Counter, defaultdict
+import os
+import re
+import threading
+from collections import Counter, OrderedDict, defaultdict
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import structlog
 from pydantic import Field
@@ -31,6 +46,300 @@ if TYPE_CHECKING:
     from trellis.stores.base.event_log import EventLog
 
 logger = structlog.get_logger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# emit_extraction_failure — writer-side helper (ADR-extraction-failure-telemetry)
+# ---------------------------------------------------------------------------
+
+#: Canonical failure kinds for :func:`emit_extraction_failure`. The
+#: ``Literal`` mirrors the ADR §2.1 event schema verbatim. Keep this in
+#: sync with the analyzer that aggregates by ``failure_kind`` (Phase 2).
+ExtractionFailureKind = Literal[
+    "parse_error",
+    "validation_error",
+    "policy_violation",
+    "low_confidence",
+    "tier_fallback",
+    "model_error",
+    "budget_exhausted",
+]
+
+ExtractionTier = Literal["deterministic", "hybrid", "llm"]
+
+
+class ExtractionFailureError(RuntimeError):
+    """Raised by extractors after emitting an EXTRACTION_FAILED event.
+
+    Carries the same ``failure_kind`` that landed on the event so that the
+    dispatcher can record the original failure in its ``tier_fallback``
+    event without re-deriving it.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        failure_kind: ExtractionFailureKind,
+        extractor_id: str,
+    ) -> None:
+        super().__init__(message)
+        self.failure_kind: ExtractionFailureKind = failure_kind
+        self.extractor_id = extractor_id
+
+
+# Sampling state — process-local LRU keyed by
+# ``(extractor_id, prompt_hash, failure_kind)``. POC scope: in-process only;
+# multi-process aggregation deferred (the analyzer reads from the EventLog,
+# which is the shared substrate).
+_SAMPLE_CAP_ENV = "EXTRACTION_FAILURE_SAMPLE_CAP"
+_SAMPLE_BYPASS_ENV = "EXTRACTION_FAILURE_NO_SAMPLE"
+_SAMPLE_LRU_MAX = 4096  # cap the in-process cache to keep RSS bounded
+
+
+def _load_sample_cap() -> int:
+    """Read and validate ``EXTRACTION_FAILURE_SAMPLE_CAP``.
+
+    Read on every ``emit_extraction_failure`` call so operators can tune
+    the cap without restarting the process. Misconfiguration (non-integer
+    or negative value) raises — POC directive: loud on misuse.
+    """
+    raw = os.environ.get(_SAMPLE_CAP_ENV)
+    if raw is None or raw == "":
+        return 10
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        msg = f"{_SAMPLE_CAP_ENV} must be a non-negative integer; got {raw!r}"
+        raise ValueError(msg) from exc
+    if value < 0:
+        msg = f"{_SAMPLE_CAP_ENV} must be a non-negative integer; got {value}"
+        raise ValueError(msg)
+    return value
+
+
+class _ClusterEntry:
+    """Single-cluster counter for the sampling LRU.
+
+    Kept as a lightweight mutable class (not a dataclass) so the LRU
+    can update fields in place without re-inserting.
+    """
+
+    __slots__ = ("capped_count", "count", "last_event_id")
+
+    def __init__(self) -> None:
+        self.count: int = 0
+        self.capped_count: int = 0
+        self.last_event_id: str | None = None
+
+
+class _SamplerState:
+    """Process-local sampling state for :func:`emit_extraction_failure`.
+
+    Counts how many full events we've emitted per
+    ``(extractor_id, prompt_hash, failure_kind)`` triple. Once the cap is
+    hit the helper still records the failure (so the analyzer can see it
+    happened) by emitting an aggregate-only update on the most recent
+    event_id rather than dropping the call. POC scope deliberately keeps
+    this in-memory: the EventLog is the shared, persistent substrate.
+    """
+
+    def __init__(self, max_size: int = _SAMPLE_LRU_MAX) -> None:
+        self._lock = threading.Lock()
+        self._state: OrderedDict[tuple[str, str | None, str], _ClusterEntry] = (
+            OrderedDict()
+        )
+        self._max_size = max_size
+
+    def observe(
+        self,
+        cluster_key: tuple[str, str | None, str],
+        cap: int,
+    ) -> tuple[bool, int, int]:
+        """Record an observation; return ``(emit_full, count, capped_count)``.
+
+        ``emit_full`` is ``True`` when the current observation falls within
+        the per-cluster cap; aggregate-only beyond that. ``count`` is the
+        total observations (including this one); ``capped_count`` is the
+        number suppressed so far (excluding this one — the caller can
+        increment if it decides to suppress).
+        """
+        with self._lock:
+            entry = self._state.get(cluster_key)
+            if entry is None:
+                entry = _ClusterEntry()
+                self._state[cluster_key] = entry
+            else:
+                # Touch to refresh LRU recency.
+                self._state.move_to_end(cluster_key)
+            entry.count += 1
+            count_val = entry.count
+            emit_full = count_val <= cap
+            capped_count = entry.capped_count
+            if not emit_full:
+                entry.capped_count = capped_count + 1
+            # Evict oldest if over budget.
+            while len(self._state) > self._max_size:
+                self._state.popitem(last=False)
+            return emit_full, count_val, capped_count
+
+    def set_last_event_id(
+        self,
+        cluster_key: tuple[str, str | None, str],
+        event_id: str,
+    ) -> None:
+        with self._lock:
+            entry = self._state.get(cluster_key)
+            if entry is not None:
+                entry.last_event_id = event_id
+
+    def get_last_event_id(
+        self,
+        cluster_key: tuple[str, str | None, str],
+    ) -> str | None:
+        with self._lock:
+            entry = self._state.get(cluster_key)
+            if entry is None:
+                return None
+            return entry.last_event_id
+
+    def reset(self) -> None:
+        with self._lock:
+            self._state.clear()
+
+
+_SAMPLER = _SamplerState()
+
+
+def reset_extraction_failure_state() -> None:
+    """Test helper — clear the process-local sampling state.
+
+    Use in ``pytest`` fixtures (typically ``autouse=True``) so per-test
+    state doesn't leak. Not exported in ``__all__`` — internal contract.
+    """
+    _SAMPLER.reset()
+
+
+# Redaction patterns. Conservative — false positives (over-redaction) are
+# acceptable; false negatives (PII leak) are not. POC seed: email, UUID-
+# shaped IDs, SSN-shaped 3-2-4 digits.
+_EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
+_UUID_RE = re.compile(
+    r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"
+)
+_SSN_RE = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
+
+_REDACTORS: list[tuple[re.Pattern[str], str]] = [
+    (_EMAIL_RE, "[REDACTED_EMAIL]"),
+    (_UUID_RE, "[REDACTED_UUID]"),
+    (_SSN_RE, "[REDACTED_SSN]"),
+]
+
+_ERROR_EXCERPT_MAX = 200
+
+
+def _redact(text: str) -> str:
+    out = text
+    for pattern, replacement in _REDACTORS:
+        out = pattern.sub(replacement, out)
+    return out
+
+
+def emit_extraction_failure(
+    *,
+    event_log: EventLog | None,
+    extractor_id: str,
+    extractor_tier: ExtractionTier,
+    failure_kind: ExtractionFailureKind,
+    source_hint: str | None = None,
+    prompt_hash: str | None = None,
+    source_excerpt_hash: str | None = None,
+    model: str | None = None,
+    error_class: str,
+    error_excerpt: str,
+    correlation_id: str | None = None,
+) -> None:
+    """Emit an ``EXTRACTION_FAILED`` event with redaction + sampling.
+
+    The helper is total: when ``event_log`` is ``None`` it is a no-op so
+    extractors don't have to special-case "wired vs. unwired". Sampling is
+    per-process and keyed by ``(extractor_id, prompt_hash, failure_kind)``;
+    the first ``EXTRACTION_FAILURE_SAMPLE_CAP`` (default 10) observations
+    in a cluster emit in full, subsequent observations record only an
+    aggregate count delta. Set ``EXTRACTION_FAILURE_NO_SAMPLE=1`` in tests
+    that need deterministic per-call assertions.
+
+    See ``docs/design/adr-extraction-failure-telemetry.md`` §2 for the
+    payload schema; this helper is the only place that constructs it.
+    """
+    from trellis.stores.base.event_log import EventType  # noqa: PLC0415
+
+    if event_log is None:
+        return
+
+    # Cap then redact — the hard 200-char bound holds both before and
+    # after redaction (replacements are bounded-length placeholders, but
+    # they can grow text length slightly; we re-cap to be safe).
+    excerpt = (error_excerpt or "")[:_ERROR_EXCERPT_MAX]
+    excerpt = _redact(excerpt)[:_ERROR_EXCERPT_MAX]
+
+    bypass = os.environ.get(_SAMPLE_BYPASS_ENV)
+    if bypass and bypass not in {"0", "", "false", "False"}:
+        emit_full = True
+        count = 1
+        capped_count = 0
+        cluster_key = (extractor_id, prompt_hash, failure_kind)
+    else:
+        cap = _load_sample_cap()
+        cluster_key = (extractor_id, prompt_hash, failure_kind)
+        emit_full, count, capped_count = _SAMPLER.observe(cluster_key, cap)
+
+    payload: dict[str, object] = {
+        "extractor_id": extractor_id,
+        "extractor_tier": extractor_tier,
+        "failure_kind": failure_kind,
+        "source_hint": source_hint,
+        "prompt_hash": prompt_hash,
+        "source_excerpt_hash": source_excerpt_hash,
+        "model": model,
+        "error_class": error_class,
+        "error_excerpt": excerpt,
+        "correlation_id": correlation_id,
+        "cluster_count": count,
+        "sampled": not emit_full,
+    }
+
+    if not emit_full:
+        # Aggregate-only update — annotate the prior cluster event_id so
+        # analyzers can join. POC scope: still appends a small event so
+        # the count is queryable; this keeps the EventLog as the single
+        # source of truth without needing a mutable counter.
+        last_id = _SAMPLER.get_last_event_id(cluster_key)
+        if last_id is not None:
+            payload["aggregate_for_event_id"] = last_id
+        payload["capped_count"] = capped_count + 1
+
+    try:
+        event = event_log.emit(
+            EventType.EXTRACTION_FAILED,
+            source="extraction_failure_helper",
+            payload=payload,
+        )
+    except Exception:
+        # Fail-soft on the event-log side: a broken event log must not
+        # break the extractor's emit-then-raise contract. The caller will
+        # still raise; the log already captured the failure at WARN.
+        logger.exception(
+            "extraction_failure_emit_failed",
+            extractor_id=extractor_id,
+            failure_kind=failure_kind,
+        )
+        return
+
+    if emit_full:
+        _SAMPLER.set_last_event_id(cluster_key, event.event_id)
+
 
 _FALLBACK_EVENT_LIMIT = 5000
 _DISPATCH_EVENT_LIMIT = 5000
@@ -359,10 +668,14 @@ def _build_validation_findings(
 
 
 __all__ = [
+    "ExtractionFailureError",
+    "ExtractionFailureKind",
+    "ExtractionTier",
     "ExtractionValidationReport",
     "ExtractorFallbackReport",
     "SourceFallbackStats",
     "SourceValidationStats",
     "analyze_extraction_validation",
     "analyze_extractor_fallbacks",
+    "emit_extraction_failure",
 ]

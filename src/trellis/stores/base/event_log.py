@@ -114,6 +114,19 @@ class EventType(StrEnum):
     #: Closes Logic Gap 1.3. See
     #: ``docs/design/adr-extraction-validation.md``.
     EXTRACTION_REJECTED = "extraction.rejected"
+    #: Emitted by :func:`~trellis.extract.telemetry.emit_extraction_failure`
+    #: at any extractor site that previously swallowed a parse/validation
+    #: failure silently. Replaces the silent
+    #: ``except json.JSONDecodeError: return []`` defect in
+    #: :class:`~trellis.extract.llm.LLMExtractor` and
+    #: ``trellis_workers.learning.miner.PrecedentMiner._parse_candidates``
+    #: with an emit-then-raise contract; see
+    #: ``docs/design/adr-extraction-failure-telemetry.md``. Payload schema:
+    #: ``{extractor_id, extractor_tier, failure_kind, source_hint,
+    #: prompt_hash, source_excerpt_hash, model, error_class,
+    #: error_excerpt, correlation_id}``. ``error_excerpt`` is bounded at
+    #: 200 chars and redacted of common PII patterns (email, UUID, SSN).
+    EXTRACTION_FAILED = "extraction.failed"
 
     #: Emitted by the well-known promotion loop
     #: (:mod:`trellis.learning.schema_evolution`) when an open-string

@@ -1,6 +1,53 @@
 # TODO — Growth & Adoption
 
 > **Active hand-off:** [`docs/design/implementation-roadmap.md`](docs/design/implementation-roadmap.md) is the single-page authoritative roadmap with the state of every open phase, recommended execution order, and live-test credentials. Read that first; this file is the per-item granular log.
+>
+> **Active program (2026-05-11):** [`docs/design/plan-self-improvement-program.md`](docs/design/plan-self-improvement-program.md) — closes the loop on empirical observations, provenance, schema evolution, dogfooding, and a coding-agent self-improvement loop. Seven feature items + two cleanup tracks, swarm-decomposable. POC directive: no silent fallbacks; loud-on-misuse. Section below.
+
+## Self-improvement program — proposed 2026-05-11
+
+A program to close the dual-loop's promote half and add four new loops. Read [`docs/design/plan-self-improvement-program.md`](docs/design/plan-self-improvement-program.md) first (umbrella plan: ordering, dependencies, considerations, success criteria, security model). Each item below points to its own ADR + plan; each is a single swarm unit (or splittable into named phases).
+
+**POC directives across all items:** no silent fallbacks; no backwards-compat shims; loud on misuse; no half-finished implementations; type extensibility preserved. See umbrella plan §2 for the spec.
+
+### Feature items (additive)
+
+- [ ] **Item 1 — Observation / Measurement entity vocabulary.** Adds `Observation` + `Measurement` canonical entity types and `hasObservation` canonical edge kind. First-class home for query-history insights, profiling stats, learned patterns. ADR: [`adr-observation-entity-type.md`](docs/design/adr-observation-entity-type.md). Plan: [`plan-observation-entity-type.md`](docs/design/plan-observation-entity-type.md). 4 phases, ~1400 LOC + ~700 LOC tests. **No deps.**
+- [ ] **Item 2 — Provenance columns (Phase 3 of graph-ontology).** Promote `source_trace_id` / `agent_id` / `confidence` / `evidence_ref` / `extractor_tier` from edge `properties` JSON to first-class columns on all four backends. ADR already accepted in [`adr-graph-ontology.md`](docs/design/adr-graph-ontology.md) §6.4. Plan: [`plan-provenance-columns.md`](docs/design/plan-provenance-columns.md). ~1070 LOC. **Depends on Item 1 (provides the consumer signal).**
+- [ ] **Item 3 — Parameter-registry wiring.** Wake existing dead code in `learning/scoring.py`. Required `registry` kwarg; delete hard-coded `_NOISE_*_THRESHOLD` constants. Smallest unit in the program. Plan: [`plan-parameter-registry-wiring.md`](docs/design/plan-parameter-registry-wiring.md). ~330 LOC. **No deps.**
+- [ ] **Item 4 — Extraction-failure telemetry + analyzer.** New `EXTRACTION_FAILED` event type; replace silent JSON-parse swallows in LLMExtractor + miner; ship `analyze_extraction_health` CLI. ADR: [`adr-extraction-failure-telemetry.md`](docs/design/adr-extraction-failure-telemetry.md). Plan: [`plan-extraction-failure-analyzer.md`](docs/design/plan-extraction-failure-analyzer.md). 5 phases, ~1130 LOC + ~700 LOC tests. **Bridges into cleanup C2.**
+- [ ] **Item 5 — Well-known promotion loop.** Surface open-string types eligible for canonical promotion (count + extractor-diversity + domain-diversity + signal-quality criteria). Human-gated via ADR amendment; never auto-mutates `well_known.py`. Generalizes `CUSTOM_TAG_USED` telemetry from `adr-tag-vocabulary-split.md`. ADR: [`adr-well-known-promotion-loop.md`](docs/design/adr-well-known-promotion-loop.md). Plan: [`plan-well-known-promotion-loop.md`](docs/design/plan-well-known-promotion-loop.md). 5 phases, ~1290 LOC + ~665 LOC tests. **No deps.**
+- [ ] **Item 6 — Dogfooding meta-traces.** Every analyze/tune/promote CLI command records a meta-`Activity` (PROV-O) into the graph, with `wasInformedBy` edges (sampled) to consumed events and `wasGeneratedBy` edges from produced observations. First sanctioned cross-plane handler. Unblocks Scenario 5.4 (loop convergence). ADR: [`adr-dogfooding-meta-traces.md`](docs/design/adr-dogfooding-meta-traces.md). Plan: [`plan-dogfooding-meta-traces.md`](docs/design/plan-dogfooding-meta-traces.md). 4 phases, ~1270 LOC + ~800 LOC tests. **Depends on Items 1 + 2.**
+- [ ] **Item 7 — Coding-agent self-improvement loop (capstone).** Proposal generator reads `EXTRACTION_FAILED` clusters / `WELL_KNOWN_CANDIDATE` events / `ADVISORY_DRIFT_DETECTED` events; produces stable proposal markdown. Phase 2+3 (gated): Claude Code SDK spawn against a sandboxed worktree with file allowlist; draft PR via gh CLI. Proposals-only by default; auto-spawn is a separate future ADR. ADR: [`adr-coding-agent-loop.md`](docs/design/adr-coding-agent-loop.md). Plan: [`plan-coding-agent-loop.md`](docs/design/plan-coding-agent-loop.md). 4 phases in 2 cohorts, ~2150 LOC + ~1250 LOC tests. **Depends on Items 4 + 5 + 6.**
+
+### Cleanup tracks (parallel; swarm-decomposable)
+
+- [ ] **C1 — Dead-code removal.** Nine independently-decidable cleanup items: delete the JSONL→learning.scoring file-only bridge (TODO line 70's "option c"), `Operation.TRACE_INGEST` stub, post-Item-3 dead thresholds, eval scenario boilerplate consolidation, post-Item-4 extract-layer audit, normalize "self-learning" → "feedback loop" framing, `trellis_workers` orphan audit. Two items are **explicit no-action** (WorkflowEngine, EnrichmentService event-loop wiring — both flagged "validate before deleting"). Plan: [`plan-cleanup-dead-code.md`](docs/design/plan-cleanup-dead-code.md). ~920 LOC delta across 5 concurrent swarm units. **C1.3 depends on Item 3; C1.5 depends on Item 4 Phase 1.**
+- [ ] **C2 — Silent-fallback hardening.** Audit + replace every `try: X except: pass` / `except: return []` / `except: return None` pattern in `src/` per the POC no-fallback directive. Six phases (audit → embedders → policy/executor → retrieve → MCP → sweep). Each PR ships with a failure-injection test demonstrating loud behavior. Plan: [`plan-cleanup-silent-fallbacks.md`](docs/design/plan-cleanup-silent-fallbacks.md). ~600 LOC + sweep, across 3+ cohorts. **Depends on Item 4 Phase 0 (provides the emit helper).**
+
+### Recommended execution order
+
+Per [`plan-self-improvement-program.md`](docs/design/plan-self-improvement-program.md) §4:
+
+1. **C2 Phase 0** (audit) — establishes POC discipline. Standalone.
+2. **Item 1** (Observation vocabulary) — unblocks Items 2 + 6.
+3. **Item 3** (registry wiring) — smallest unit; wakes dead code. Standalone.
+4. **Item 4** (extraction-failure telemetry) — generates signal Item 7 needs.
+5. **Item 5** (well-known promotion loop) — generates signal Item 7 needs.
+6. **C1** (dead-code removal) — runs in parallel; cleans up slack from Items 3 + 4.
+7. **Item 2** (provenance columns) — schedule now (Item 1 provides the consumer).
+8. **Item 6** (dogfooding) — needs Items 1 + 2.
+9. **Item 7** (coding-agent loop) — capstone.
+
+Items 3, 4, 5, C1, C2 are **independently parallelizable** (5 concurrent swarm units).
+
+### Considerations the program owns
+
+Per [`plan-self-improvement-program.md`](docs/design/plan-self-improvement-program.md) §5–§6: per-item eval scenarios, plane discipline, LLM cost budgets, idempotency for self-modifying loops, privacy / data classification inheritance, canonical-registry versioning, MCP+SDK surface for new operations, contract test extensions for new edge semantics, security model for Item 7 (branch isolation, no auto-merge, file allowlists, secret scrubbing, weekly LOC cap). Also flagged: backpressure on dogfooding, observation freshness decay, structural-vs-empirical conflict resolution, system-authored content filtering by default, no "regress trust" mechanism (out of scope), cross-loop event-stream contention between Items 4 and 5.
+
+### Program-level eval
+
+- [ ] **Master scenario `program_convergence` + 6 satellite scenarios.** Replaces and extends the deferred Scenario 5.4 with a 9-axis convergence chart proving each item's loop closes. Plan: [`plan-program-level-eval.md`](docs/design/plan-program-level-eval.md). Per-axis wiring lands with each item's PR (not a separate follow-on); regression-suite + chart renderer are independent units totaling ~850 LOC after items 1-7 land.
 
 ## Knowledge graph foundations — research + ADR
 
@@ -85,7 +132,7 @@ These are loose ends from the audit that ran with this section. None block the e
 
   **Out of scope:** column-level lineage. The dbt extractor currently treats columns as opaque properties of the `Dataset` node, not as separate `:Column` entities, and that's the right call for retrieval-shaped queries (a 100-table corpus would otherwise become a 1000+ node corpus dominated by structural noise). Column-level reasoning belongs in a downstream tool that receives a packed `Dataset` and parses its `description` / `columns` properties on demand.
 
-- [ ] **Consolidate eval scenario boilerplate** — surfaced 2026-05-07 by the simplify pass on the eval/real-corpus-hardening branch. Three convergence scenarios (`agent_loop_convergence_real_llm`, `dbt_corpus_convergence`, `github_corpus_convergence`) carry ~600 LOC of near-verbatim duplication: `_SeededGraphSearch`, `_Telemetry` + `_EmbedRecord`, the round-bookkeeping dataclasses (`_RoundResult`, `_ConvergenceStats`, `_LoopStats`), the convergence-stats helpers (`_quarter_means`, `_convergence_stats`, etc.), `_make_embedding_fn`, and `_run_periodic_loops` / `_record_round_feedback`. The github scenario's "kept here to avoid scenario-to-scenario coupling" comment is weak — both scenarios already share `extract_seed_ids` and the public PackBuilder/strategies surface, so a shared `eval/_scenario_common.py` (or split into `_telemetry.py` + `_convergence_loop.py` + `_strategies.py`) introduces no coupling that doesn't already exist. Deferred from the simplify pass to keep the seed-vocabulary PR focused; tackle as a follow-up refactor.
+- [x] **Consolidate eval scenario boilerplate** — landed 2026-05-09 in commit `689c7ef` ("refactor(eval): consolidate convergence-scenario boilerplate"). Shared modules now live at `eval/scenarios/_convergence_common.py` (~351 LOC), `eval/scenarios/_strategies.py` (~74 LOC), `eval/scenarios/_telemetry.py` (~85 LOC). Per-scenario reductions: `agent_loop_convergence` −231 LOC, `dbt_corpus_convergence` −336 LOC, `github_corpus_convergence` −311 LOC. Intentionally not unified: `agent_loop_convergence_real_llm` keeps its own chat+embed `_Telemetry` (shared module is embed-only); `_RoundResult` stays scenario-local because the discriminator differs (domain vs skill+difficulty).
 
 - [ ] **`build_lineage_index` global memoization for real-manifest scale** — `eval/corpora/dbt_loader.py::build_lineage_index` does per-entity BFS with no cross-entity memoization. Fine for the 21-node jaffle_shop fixture (microseconds) but worst-case O(N × E) scales poorly: a real dbt manifest with 10K+ models and depth-5–10 fan-out would cost tens of millions of edge visits at scenario setup. When a real-manifest scenario lands, refactor to a topo-sort + DP pass over the dependency DAG (computes each entity's closure in O(E) total). Same observation applies to the three separate `graph_store.query(limit=5000)` passes in `build_name_index` / `build_category_index` / `build_lineage_index` — fold to a single iteration over a pre-fetched node list.
 

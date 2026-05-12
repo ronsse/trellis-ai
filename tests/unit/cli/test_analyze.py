@@ -313,6 +313,100 @@ class TestLearningCandidates:
         assert data["candidate_count"] == 0, data
 
 
+class TestLearningParameterRegistry:
+    """CLI-side wiring for the registry-required scoring path.
+
+    Plan §6 in docs/design/plan-parameter-registry-wiring.md requires the
+    CLI to (a) load a config-file registry when present and (b) WARN
+    when it falls back to in-module seed defaults. Library-side TypeError
+    / KeyError tests live in tests/unit/learning/test_scoring.py.
+    """
+
+    def test_cli_warns_on_default_registry(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Capture the structlog warning emitted when no learning_params.yaml
+        # is present. The CliRunner muting (TRELLIS_LOG_LEVEL=CRITICAL via
+        # tests/unit/cli/conftest.py) means we must reach past the muted
+        # logger and capture the call directly.
+        from trellis_cli import analyze as analyze_module
+
+        captured: list[dict[str, object]] = []
+
+        def _capture(event: str, **kwargs: object) -> None:
+            captured.append({"event": event, **kwargs})
+
+        monkeypatch.setattr(analyze_module.logger, "warning", _capture)
+
+        out_dir = tmp_path / "review"
+        result = runner.invoke(
+            app,
+            [
+                "analyze",
+                "learning-candidates",
+                "--output-dir",
+                str(out_dir),
+                "--format",
+                "json",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert captured, "expected a WARN entry when no learning_params.yaml exists"
+        events = [entry["event"] for entry in captured]
+        assert "learning.parameter_registry.seeded_defaults" in events
+
+    def test_cli_uses_config_registry_when_present(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Write a config file. Set the noise_success_threshold high enough
+        # that an otherwise-neutral 0.6 success rate flips to
+        # investigate_noise — proves the file values actually drive
+        # decisions and the WARN path is bypassed.
+        import yaml as _yaml
+
+        from trellis_cli import analyze as analyze_module
+        from trellis_cli.config import get_config_dir
+
+        config_dir = get_config_dir()
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "learning_params.yaml").write_text(
+            _yaml.dump(
+                {
+                    "promote_success_threshold": 0.75,
+                    "promote_retry_threshold": 0.25,
+                    "noise_success_threshold": 0.99,
+                    "noise_retry_threshold": 0.5,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        captured: list[dict[str, object]] = []
+        monkeypatch.setattr(
+            analyze_module.logger,
+            "warning",
+            lambda event, **kwargs: captured.append({"event": event, **kwargs}),
+        )
+
+        out_dir = tmp_path / "review"
+        result = runner.invoke(
+            app,
+            [
+                "analyze",
+                "learning-candidates",
+                "--output-dir",
+                str(out_dir),
+                "--format",
+                "json",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        events = [entry["event"] for entry in captured]
+        assert "learning.parameter_registry.seeded_defaults" not in events, (
+            "config-loaded registry must not emit the defaults WARN"
+        )
+
+
 class TestAnalyzeHelp:
     def test_help(self) -> None:
         result = runner.invoke(app, ["analyze", "--help"])
