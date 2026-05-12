@@ -137,7 +137,7 @@ Reference: [context-economy-strategy.md](./context-economy-strategy.md)
 3. **LangGraph tool adapter**
    - `src/trellis_sdk/integrations/langgraph.py`:
      ```python
-     def create_xpg_tools(client: TrellisClient) -> list[BaseTool]:
+     def create_trellis_tools(client: TrellisClient) -> list[BaseTool]:
          """Returns LangGraph-compatible tools wrapping Trellis skills."""
      ```
    - Each tool has a concise description (<100 chars) to minimize schema overhead

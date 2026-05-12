@@ -17,7 +17,7 @@ Prerequisites:
 Run from the repo root:
     python examples/langgraph_agent.py
 
-The LangGraph tool wrapper used here (``create_xpg_tools``) is a reference
+The LangGraph tool wrapper used here (``create_trellis_tools``) is a reference
 template at ``examples/integrations/langgraph/tools.py`` — copy it into
 your own project rather than importing from this repo. We add it to
 ``sys.path`` below so this script is runnable from a fresh clone.
@@ -36,27 +36,27 @@ sys.path.insert(0, str(_TEMPLATE_DIR))
 from langchain_openai import ChatOpenAI  # noqa: E402
 from langgraph.prebuilt import create_react_agent  # noqa: E402
 
-from tools import create_xpg_tools  # type: ignore[import-not-found]  # noqa: E402
+from tools import create_trellis_tools  # type: ignore[import-not-found]  # noqa: E402
 
 
 SYSTEM_PROMPT = """You are an engineering agent with access to a shared
 experience graph (Trellis) for institutional memory.
 
 Before starting non-trivial work:
-- Call xpg_get_context with your task intent to find prior art.
+- Call trellis_get_context with your task intent to find prior art.
 
 After completing meaningful work:
-- Call xpg_save_trace with a JSON trace of what you did.
+- Call trellis_save_trace with a JSON trace of what you did.
 
 When you discover important services, systems, or concepts:
-- Call xpg_save_knowledge to add them to the knowledge graph.
+- Call trellis_save_knowledge to add them to the knowledge graph.
 
 Default to local mode — every tool call is fast and cheap."""
 
 
 def main() -> None:
     # Local mode — no Trellis API server needed.
-    tools = create_xpg_tools()
+    tools = create_trellis_tools()
 
     model = ChatOpenAI(model="gpt-4o-mini", temperature=0)
     agent = create_react_agent(model, tools, prompt=SYSTEM_PROMPT)

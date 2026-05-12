@@ -18,16 +18,16 @@ Add structured institutional memory to LangGraph agents. Agents retrieve context
 from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import create_react_agent
 
-from myproject.trellis_tools import create_xpg_tools
+from myproject.trellis_tools import create_trellis_tools
 
 # Local mode — no Trellis API server needed
-xpg_tools = create_xpg_tools()
+trellis_tools = create_trellis_tools()
 
 # Or remote mode (via REST API)
-# xpg_tools = create_xpg_tools(base_url="http://localhost:8420")
+# trellis_tools = create_trellis_tools(base_url="http://localhost:8420")
 
 model = ChatOpenAI(model="gpt-4o")
-agent = create_react_agent(model, xpg_tools)
+agent = create_react_agent(model, trellis_tools)
 
 response = agent.invoke({
     "messages": [{"role": "user",
@@ -41,11 +41,11 @@ For a full runnable demo, see [`examples/langgraph_agent.py`](../../langgraph_ag
 
 | Tool | Purpose |
 |------|---------|
-| `xpg_get_context` | Retrieve relevant context before starting a task |
-| `xpg_search` | Search documents and entities |
-| `xpg_save_trace` | Record a trace of completed work |
-| `xpg_save_knowledge` | Create entities in the knowledge graph |
-| `xpg_recent_activity` | Summarize recent activity |
+| `trellis_get_context` | Retrieve relevant context before starting a task |
+| `trellis_search` | Search documents and entities |
+| `trellis_save_trace` | Record a trace of completed work |
+| `trellis_save_knowledge` | Create entities in the knowledge graph |
+| `trellis_recent_activity` | Summarize recent activity |
 
 ## Patterns
 
@@ -56,14 +56,14 @@ The core pattern for agents with institutional memory:
 ```python
 from langgraph.graph import StateGraph, MessagesState
 
-from myproject.trellis_tools import create_xpg_tools
+from myproject.trellis_tools import create_trellis_tools
 
-xpg_tools = create_xpg_tools()
+trellis_tools = create_trellis_tools()
 
 # In your graph, the agent will naturally:
-# 1. Call xpg_get_context to check for prior art
+# 1. Call trellis_get_context to check for prior art
 # 2. Do its work using other tools
-# 3. Call xpg_save_trace to record what happened
+# 3. Call trellis_save_trace to record what happened
 ```
 
 ### Custom Agent with Trellis
@@ -72,7 +72,7 @@ xpg_tools = create_xpg_tools()
 from langgraph.prebuilt import create_react_agent
 
 # Combine Trellis tools with your domain tools
-all_tools = xpg_tools + [your_search_tool, your_code_tool]
+all_tools = trellis_tools + [your_search_tool, your_code_tool]
 agent = create_react_agent(model, all_tools)
 ```
 
@@ -84,13 +84,13 @@ Guide the agent to use Trellis tools at the right time:
 system_prompt = """You have access to an experience graph for institutional memory.
 
 Before starting non-trivial work:
-- Call xpg_get_context with your task intent
+- Call trellis_get_context with your task intent
 
 After completing meaningful work:
-- Call xpg_save_trace with a JSON trace of what you did
+- Call trellis_save_trace with a JSON trace of what you did
 
 When you discover important entities:
-- Call xpg_save_knowledge to add them to the knowledge graph
+- Call trellis_save_knowledge to add them to the knowledge graph
 """
 ```
 
@@ -99,7 +99,7 @@ When you discover important entities:
 By default, tools use local SQLite stores. For remote mode:
 
 ```python
-xpg_tools = create_xpg_tools(base_url="http://localhost:8420")
+trellis_tools = create_trellis_tools(base_url="http://localhost:8420")
 ```
 
 Start the API server with:

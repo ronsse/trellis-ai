@@ -621,18 +621,18 @@ def _init_stores_if_needed(config_path: Path) -> str:
 def _ensure_gitignore(project_dir: Path) -> str | None:
     """Add .trellis/ to .gitignore if missing. Returns step name or None."""
     gitignore = project_dir / ".gitignore"
-    xpg_line = ".trellis/"
+    gitignore_line = ".trellis/"
     try:
         content = gitignore.read_text()
     except FileNotFoundError:
-        gitignore.write_text(xpg_line + "\n")
+        gitignore.write_text(gitignore_line + "\n")
         return "gitignore_created"
-    if xpg_line in content.splitlines():
+    if gitignore_line in content.splitlines():
         return None
     with gitignore.open("a") as f:
         if not content.endswith("\n"):
             f.write("\n")
-        f.write(xpg_line + "\n")
+        f.write(gitignore_line + "\n")
     return "gitignore_updated"
 
 
