@@ -14,8 +14,8 @@
 ### What's live and tested
 
 * **All five storage planes wired:** trace / document / graph / vector / event_log / blob. `StoreRegistry` (`src/trellis/stores/registry.py`) constructs each from config or env vars.
-* **Three graph backends:** SQLite (default), Postgres, Neo4j. All three pass the `GraphStoreContractTests` suite.
-* **Four vector backends:** SQLite (default), pgvector, LanceDB, Neo4j (shape #2 — embeddings as properties on `:Node` rows). The first three pass `VectorStoreContractTests`; Neo4j shape #2 has its own per-backend test file by design (its `upsert` requires an existing graph node).
+* **Three graph backends:** SQLite (default), Postgres, Neo4j. All three pass the `GraphStoreContractTests` suite. ArcadeDB is being added (graph + vector) as the new blessed substrate per the open ADR.
+* **Three vector backends:** SQLite (default), pgvector, Neo4j (shape #2 — embeddings as properties on `:Node` rows). The first two pass `VectorStoreContractTests`; Neo4j shape #2 has its own per-backend test file by design (its `upsert` requires an existing graph node). *LanceDB was removed in 2026-05 as part of the ArcadeDB consolidation.*
 * **Canonical query DSL** lives at `src/trellis/stores/base/graph_query.py`. `FilterClause` / `NodeQuery` / `SubgraphQuery` / `SubgraphResult` with `eq` / `in` / `exists` operators. Compiled to native dialect by each backend.
 * **Well-known type registry** at `src/trellis/schemas/well_known.py`. Schema.org-aligned entity types, PROV-O-aligned edge kinds, alias maps from legacy lowercase to canonical, `canonicalize_*` helpers.
 
@@ -23,10 +23,10 @@
 
 | Run mode | Pass | Skip | Notes |
 |---|---|---|---|
-| `pytest tests/unit/` | 653 | 118 | Default. SQLite + LanceDB live; Postgres / Neo4j / pgvector skip cleanly. |
+| `pytest tests/unit/` | 653 | 118 | Default. SQLite live; Postgres / Neo4j / pgvector skip cleanly. (Counts predate LanceDB removal in 2026-05.) |
 | `+ TRELLIS_TEST_NEO4J_*` set | +110 | -54 | 33 graph + 19 vector + 58 contract. Validated against AuraDB Free 2026-04-25. |
 | `+ TRELLIS_TEST_PG_DSN` set | +44 | -28 | A.2: 14 PG store + 13 pgvector store + 11 PG-graph contract + 25 pgvector contract = 63 PG-gated tests, all green against Neon free tier 2026-04-25. |
-| Full unit suite, all extras + both env vars set | 2347 | 0 | Smoke baseline after A.2: zero skips, zero failures across SQLite / LanceDB / Neo4j / Postgres / pgvector / OpenAI / Anthropic / FastAPI / FastMCP. |
+| Full unit suite, all extras + both env vars set | 2347 | 0 | Smoke baseline after A.2: zero skips, zero failures across SQLite / Neo4j / Postgres / pgvector / OpenAI / Anthropic / FastAPI / FastMCP. (Counts predate LanceDB removal in 2026-05.) |
 | `pytest tests/integration/test_neo4j_e2e.py` (env loaded) | 6 | 0 | A.1 e2e: ENTITY_CREATE / LINK_CREATE / audit-events / JSON extractor → Neo4j / PackBuilder→graph / SemanticSearch→shape #2 vector. Skips cleanly otherwise. |
 | `pytest tests/unit/schemas/test_well_known.py` | 85 | 0 | Phase 0 (41) + Phase 1/2 helpers (44 — alignment URIs, alias inverse, query expansion). |
 | `pytest tests/unit/extract/` | 147 | 0 | All 139 prior + 8 new Phase 1 canonicalisation tests in `TestCanonicalNameEmission`. |
@@ -329,7 +329,6 @@ tests/unit/stores/contracts/test_postgres_graph_contract.py
 tests/unit/stores/contracts/test_neo4j_graph_contract.py
 tests/unit/stores/contracts/test_sqlite_vector_contract.py
 tests/unit/stores/contracts/test_pgvector_contract.py
-tests/unit/stores/contracts/test_lancedb_vector_contract.py
 tests/integration/conftest.py           # A.1
 tests/integration/test_neo4j_e2e.py     # A.1
 docs/design/adr-graph-ontology.md

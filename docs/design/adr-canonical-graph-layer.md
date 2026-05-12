@@ -3,6 +3,8 @@
 **Status:** Phases 0-3 landed (Phase 4 vector DSL deferred — informational only)
 **Date:** 2026-04-24 (Phases 0-3 completed 2026-04-25)
 **Deciders:** Trellis core
+
+> **Note (2026-05-11):** This ADR predates the ArcadeDB consolidation. References to **LanceDB** below describe the historical backend set; LanceDB was removed in 2026-05 in favor of ArcadeDB (graph + vector unified substrate). References to **Neptune** and **Kuzu** as candidates were evaluated and **not pursued** — see the open ArcadeDB ADR for rationale.
 **Related:**
 - [`./adr-planes-and-substrates.md`](./adr-planes-and-substrates.md) — defines the Knowledge / Operational plane split that this ADR sits inside
 - [`./adr-plugin-contract.md`](./adr-plugin-contract.md) — entry-point-based backend registration; this ADR strengthens the per-backend contract that plugins must satisfy

@@ -17,9 +17,9 @@ this repo with the `dev` extra installed:
 uv pip install -e ".[dev]"
 ```
 
-If a scenario targets a particular backend (Postgres, Neo4j, pgvector,
-LanceDB) install the matching extra too — see the deployment docs
-under [`docs/deployment/`](../deployment/) for backend-specific setup.
+If a scenario targets a particular backend (Postgres, Neo4j, pgvector)
+install the matching extra too — see the deployment docs under
+[`docs/deployment/`](../deployment/) for backend-specific setup.
 
 ## Quickstart
 

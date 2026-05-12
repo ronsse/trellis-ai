@@ -2197,10 +2197,19 @@ Captured during the pre-merge simplify + review pass on the 6-PR branch converge
 - [ ] **Defend SQLite read-path against a stored `"null"` string** (`src/trellis/stores/sqlite/graph.py:944`). `json.loads(raw) if raw else []` treats `"null"` as truthy, then `json.loads("null")` returns `None` and leaks upward. Use `json.loads(raw) or []`.
 - [ ] **Add a `get_node_history()` test for pre-migration rows** returning `document_ids: []` — analogous to `TestSQLiteBackfillGracefulDegrade` but covering the history path, which the current suite misses.
 
-### Substrate (post-Kuzu-archive)
-- [ ] **Write `docs/design/adr-blessed-substrate-selection.md`** evaluating SurrealDB, DuckDB + DuckPGQ + VSS, FalkorDB, Dgraph, Neo4j Community against the blessed-substrate criteria in `adr-planes-and-substrates.md` §2.3. Pick a successor. Supersedes the 2026-04-19 amendment on the planes ADR.
-- [ ] **Spike SurrealDB as the Knowledge Plane graph+vector substrate.** Prototype `SurrealStore(GraphStore, VectorStore)` against a spike branch. Goals: validate embedded mode (`rocksdb://` or `surrealkv://`), dual-ABC conformance, single-query graph+vector retrieval. Non-goal: DocumentStore migration (keep separate until the spike finishes).
-- [ ] **If SurrealDB is picked:** update `adr-planes-and-substrates.md` §2.2 / §2.3 with the substrate decision, register in `_BUILTIN_BACKENDS`, add `[surrealdb]` optional extra in `pyproject.toml`, port the `KuzuStore` tests (412 lines) to the SurrealDB backend.
+### Substrate (post-Kuzu-archive) — RESOLVED 2026-05-11
+
+> **Status:** Closed by the ArcadeDB substrate selection (see [docs/design/adr-arcadedb-blessed-substrate.md](docs/design/adr-arcadedb-blessed-substrate.md)). ArcadeDB chosen over SurrealDB, DuckDB + DuckPGQ + VSS, FalkorDB, Dgraph, Neo4j Community, Neptune Database, and LadybugDB/Kuzu — won on Apache 2.0 license + predictable AWS hosting + Bolt drop-in compatibility (97.8% TCK openCypher) + native HNSW.
+
+- [x] **Substrate ADR written.** [docs/design/adr-arcadedb-blessed-substrate.md](docs/design/adr-arcadedb-blessed-substrate.md).
+- [x] **ArcadeDB spike validated.** Docker container, 76/76 contract tests pass against `ArcadeDBGraphStore`, 17/17 vector tests pass against `ArcadeDBVectorStore`.
+- [x] **BoltOpenCypherGraphStore extracted** from Neo4j (`src/trellis/stores/bolt_opencypher/`). Neo4j + ArcadeDB share ~1000 LOC of Cypher payload + SCD-2 logic.
+- [x] **`[arcadedb]` extra added** to `pyproject.toml`; registered under `_BUILTIN_BACKENDS["knowledge"]["graph"]` and `["vector"]`; `_inject_arcadedb_driver` + `_resolve_arcadedb_vector_params` resolvers added to `StoreRegistry`; `arcadedb` pytest marker added; `--include-arcadedb` flag added to conftest.
+
+**Follow-up backlog (not blocking the substrate adoption):**
+- [ ] **Load characterization on ECS Fargate.** Run a representative trace-ingestion + pack-build workload against ArcadeDB on a single Fargate task with EFS journal; compare to AuraDB Free baseline (per memory `project_neo4j_bulk_upsert_findings.md`).
+- [ ] **HA-Raft replication.** Single-writer covers current deployments; revisit if a customer needs failover.
+- [ ] **DocumentStore consolidation.** ArcadeDB has FTS; could host the `DocumentStore` too. Out of scope until the operational simplification value is concrete.
 - [ ] **Evaluate consolidating `DocumentStore` onto the same backend** once the graph+vector substrate stabilizes. The value is reduced operational surface (one DB to back up / tune / authorize); the risk is FTS quality (SQLite FTS5 vs SurrealDB FTS vs Postgres `tsvector`).
 - [x] **Assess downstream license implications of BSL-1.1** — *Resolved 2026-04-20.* SurrealDB 3.0 is BSL 1.1 (LICENSE last updated 2025-12-17), Change Date 2030-01-01 → auto-converts to Apache 2.0. Python SDK `surrealdb.py` is Apache-2.0. The Additional Use Grant forbids only offerings "that enable third parties to create, manage, or control schemas or tables" — i.e. competing DBaaS/Supabase-style products. Trellis consumers embedding SurrealDB as a hidden storage backend (users never see SurrealQL) are **allowed**: internal SaaS, self-hosted bundles, and embedded-mode agent products all pass. Required posture if SurrealDB is picked:
   - Gate behind `[surrealdb]` optional extra so non-adopters never pull BSL code.

@@ -1,19 +1,77 @@
-# Trellis recommended configurations — three blessed deployment shapes.
+# Trellis recommended configurations — four blessed deployment shapes.
 #
-# Pick ONE of the three blocks below and copy it to your config.yaml at
-# the path TRELLIS_CONFIG_DIR points at (default ~/.trellis/config.yaml).
-# All three put Neo4j on the Knowledge Plane (the blessed graph backend
-# per docs/design/plan-neo4j-hardening.md). The Operational Plane
-# choice is what changes — pick by deployment context.
+# Pick ONE of the blocks below and copy it to your config.yaml at the
+# path TRELLIS_CONFIG_DIR points at (default ~/.trellis/config.yaml).
+#
+# The **ArcadeDB** block (#1) is the recommended self-hosted AWS shape:
+# one Apache-2.0 substrate covering both graph + vector planes, Bolt +
+# openCypher 25 at 97.8% TCK, native HNSW via jVector. Per
+# docs/design/adr-arcadedb-blessed-substrate.md.
+#
+# The Neo4j blocks (#2, #3) remain supported for users on existing
+# Neo4j infrastructure.
 #
 # References
-#   docs/deployment/neo4j-local.md   — Step-by-step for the local block
-#   docs/deployment/neo4j-auradb.md  — Step-by-step for the cloud block
+#   docs/design/adr-arcadedb-blessed-substrate.md — Why ArcadeDB is blessed
+#   docs/deployment/neo4j-local.md   — Step-by-step for the Neo4j local block
+#   docs/deployment/neo4j-auradb.md  — Step-by-step for the Neo4j cloud block
 #   docs/deployment/aws-ecs.md       — ECS-specific deployment notes
 #   docs/design/adr-planes-and-substrates.md — Why the planes split
 
 # ===========================================================================
-# 1. LOCAL DEFAULT — Neo4j (Docker) + SQLite operational
+# 1. ARCADEDB (BLESSED) — single substrate for graph + vector
+# ===========================================================================
+# The recommended self-hosted shape: ArcadeDB on a single ECS Fargate
+# task (or `docker run` for local dev) covers both Knowledge-plane
+# graph and vector. Postgres handles Operational-plane traces + events.
+#
+# Local dev:
+#   docker run -d --name trellis-arcadedb \
+#     -p 2480:2480 -p 7687:7687 \
+#     -e JAVA_OPTS='-Darcadedb.server.rootPassword=playwithdata \
+#                   -Darcadedb.server.plugins=Bolt:com.arcadedb.bolt.BoltProtocolPlugin' \
+#     arcadedata/arcadedb:latest
+#
+# Required env vars:
+#   TRELLIS_ARCADEDB_URI=bolt://localhost:7687
+#   TRELLIS_ARCADEDB_USER=root
+#   TRELLIS_ARCADEDB_PASSWORD=<root password>
+#   TRELLIS_ARCADEDB_DATABASE=trellis        # auto-created on first boot
+#   TRELLIS_ARCADEDB_HTTP_URL=http://localhost:2480
+#
+# knowledge:
+#   graph:
+#     backend: arcadedb
+#     uri: ${TRELLIS_ARCADEDB_URI}
+#     user: ${TRELLIS_ARCADEDB_USER}
+#     password: ${TRELLIS_ARCADEDB_PASSWORD}
+#     database: ${TRELLIS_ARCADEDB_DATABASE}
+#     http_url: ${TRELLIS_ARCADEDB_HTTP_URL}
+#   vector:
+#     backend: arcadedb
+#     http_url: ${TRELLIS_ARCADEDB_HTTP_URL}
+#     user: ${TRELLIS_ARCADEDB_USER}
+#     password: ${TRELLIS_ARCADEDB_PASSWORD}
+#     database: ${TRELLIS_ARCADEDB_DATABASE}
+#     dimensions: 1536
+#   document:
+#     backend: sqlite       # or `postgres` if you already have an operational DSN
+#   blob:
+#     backend: local        # or `s3` for production
+# operational:
+#   trace:
+#     backend: sqlite       # or `postgres` for production
+#   event_log:
+#     backend: sqlite
+#   outcome:
+#     backend: sqlite
+#   parameter:
+#     backend: sqlite
+#   tuner_state:
+#     backend: sqlite
+
+# ===========================================================================
+# 2. NEO4J LOCAL — Docker Neo4j + SQLite operational
 # ===========================================================================
 # The blessed local-development shape. Knowledge Plane talks to a Neo4j
 # container (`docker run neo4j:5 ...` per neo4j-local.md). Operational
@@ -57,7 +115,7 @@
 #     backend: sqlite
 
 # ===========================================================================
-# 2. CLOUD DEFAULT — Neo4j AuraDB + Postgres operational
+# 3. NEO4J CLOUD — AuraDB + Postgres operational
 # ===========================================================================
 # The blessed managed-cloud shape. Knowledge Plane on AuraDB, Operational
 # Plane on Postgres (Neon for the cheapest managed option, or RDS / Cloud
@@ -110,7 +168,7 @@
 #     backend: sqlite     # postgres backend pending
 
 # ===========================================================================
-# 3. POSTGRES-ONLY ALTERNATIVE — Postgres + pgvector for everything
+# 4. POSTGRES-ONLY ALTERNATIVE — Postgres + pgvector for everything
 # ===========================================================================
 # Supported alternative for users who want to consolidate on one engine.
 # NOT the blessed shape — the canonical graph layer ADR favors a real

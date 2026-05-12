@@ -25,7 +25,7 @@ The wiring lives in three places:
 | `neo`      | Test requires Neo4j. `neo4j` is a registered synonym (already used by tests).  | `--include-neo`       | `TRELLIS_TEST_NEO=1`     |
 | `postgres` | Test requires Postgres (`TRELLIS_TEST_PG_DSN`).                                | `--include-postgres`  | `TRELLIS_TEST_POSTGRES=1`|
 | `pgvector` | Test requires Postgres with the `pgvector` extension.                          | `--include-pgvector`  | `TRELLIS_TEST_PGVECTOR=1`|
-| `lancedb`  | Test requires the `lancedb` optional extra installed.                          | `--include-lancedb`   | `TRELLIS_TEST_LANCEDB=1` |
+| `arcadedb` | Test requires a running ArcadeDB instance (set TRELLIS_TEST_ARCADEDB_URI).     | `--include-arcadedb`  | `TRELLIS_TEST_ARCADEDB=1`|
 
 `neo` and `neo4j` are both registered marker names and `--include-neo` (or
 `TRELLIS_TEST_NEO=1`) gates both. New tests should prefer `neo`; existing
@@ -48,10 +48,38 @@ Add `@pytest.mark.slow` whenever the test:
 - does a `time.sleep(>1)` in steady state, **or**
 - runs more than a few seconds in CI under typical conditions.
 
-Add the backend-specific marker (`neo`, `postgres`, `pgvector`, `lancedb`)
-whenever the test imports from / talks to that backend, even if it also
-carries `live`. The backend markers let CI matrices target a single
-backend without picking up unrelated live tests.
+Add the backend-specific marker (`neo`, `postgres`, `pgvector`,
+`arcadedb`) whenever the test imports from / talks to that backend,
+even if it also carries `live`. The backend markers let CI matrices
+target a single backend without picking up unrelated live tests.
+
+## ArcadeDB locally for tests
+
+Stand up an ArcadeDB container with the Neo4j-Bolt plugin enabled so
+the `neo4j` Python driver can connect:
+
+```bash
+docker run -d --name trellis-arcadedb \
+  -p 2480:2480 -p 7687:7687 \
+  -e JAVA_OPTS='-Darcadedb.server.rootPassword=playwithdata \
+                -Darcadedb.server.plugins=Bolt:com.arcadedb.bolt.BoltProtocolPlugin' \
+  arcadedata/arcadedb:latest
+
+export TRELLIS_TEST_ARCADEDB_URI=bolt://localhost:7687
+export TRELLIS_TEST_ARCADEDB_USER=root
+export TRELLIS_TEST_ARCADEDB_PASSWORD=playwithdata
+export TRELLIS_TEST_ARCADEDB_HTTP_URL=http://localhost:2480
+export TRELLIS_TEST_ARCADEDB_DATABASE=trellis_test
+
+pytest tests/unit/stores/contracts/test_arcadedb_graph_contract.py \
+       tests/unit/stores/test_arcadedb_vector.py --include-arcadedb -v
+```
+
+The graph contract suite (`test_arcadedb_graph_contract.py`) reuses the
+same `GraphStoreContractTests` that the Neo4j backend runs — 76 tests,
+all green against ArcadeDB. The vector tests
+(`test_arcadedb_vector.py`) cover the shape-#2 paired-graph workflow:
+nodes created via Cypher, embeddings attached via SQL.
 
 A test can carry multiple markers — the loop suite under
 `tests/integration/loops/` carries `live`, `slow`, `neo4j`, and `postgres`

@@ -311,7 +311,7 @@ Identified during the landscape comparison; carried forward to the recommendatio
 | Store | Default | Cloud |
 |---|---|---|
 | Trace/Document/Graph/EventLog | `sqlite` | `postgres` |
-| Vector | `sqlite` | `pgvector`, `lancedb` |
+| Vector | `sqlite` | `pgvector` (LanceDB removed 2026-05) |
 | Blob | `local` | `s3` |
 
 - Embedding function: loaded via `_import_callable(dotted_path)` or `_build_openai_embedding_fn()` from config
@@ -540,7 +540,7 @@ At the bottom of the architecture, Trellis is built on seven ideas:
 
 3. **Governed 5-stage mutation pipeline.** All writes flow through `validate → policy_check → idempotency_check → execute → emit_event`. Handlers and policy gates are Protocols, not hardcoded. Batch execution is stratified (sequential / stop-on-error / continue-on-error).
 
-4. **Pluggable store abstraction via late-binding ImportLib.** Six ABCs define contracts; `StoreRegistry` dynamically loads backends from config via `importlib`. No dependency on any specific SQL dialect or vector DB. Applications choose deployment topology (SQLite local, Postgres cloud, pgvector vs. lancedb) without code changes.
+4. **Pluggable store abstraction via late-binding ImportLib.** Six ABCs define contracts; `StoreRegistry` dynamically loads backends from config via `importlib`. No dependency on any specific SQL dialect or vector DB. Applications choose deployment topology (SQLite local, Postgres + pgvector cloud, Neo4j graph + vector) without code changes.
 
 5. **Deterministic-first classification with LLM fallback.** `ContentTags` facets are populated by four lightweight deterministic classifiers first. LLM classifier runs only if confidence is below threshold or a classifier flags `needs_llm_review`. Keeps costs low and latency predictable.
 
