@@ -104,8 +104,13 @@ class TestCheckDriverInstalled:
         check_driver_installed()
 
     def test_raises_with_install_hint_when_missing(self) -> None:
+        # ``HAS_NEO4J`` + ``check_driver_installed`` moved to
+        # ``bolt_opencypher.base`` (shared across Bolt-speaking
+        # backends); ``neo4j.base`` re-exports both. The driver-missing
+        # error message still mentions ``trellis-ai[neo4j]`` as the
+        # primary install hint.
         with (
-            patch("trellis.stores.neo4j.base.HAS_NEO4J", False),
+            patch("trellis.stores.bolt_opencypher.base.HAS_NEO4J", False),
             pytest.raises(ImportError, match=r"trellis-ai\[neo4j\]"),
         ):
             check_driver_installed()
