@@ -1,8 +1,9 @@
 """Top-level pytest configuration: opt-in marker gating + hypothesis profile.
 
-Markers ``live``, ``slow``, ``neo`` / ``neo4j``, ``postgres``, and
-``pgvector`` are excluded from the default ``pytest`` run via the
-``-m "not ..."`` expression in ``[tool.pytest.ini_options].addopts``.
+Markers ``live``, ``slow``, ``neo`` / ``neo4j``, ``arcadedb``,
+``postgres``, and ``pgvector`` are excluded from the default ``pytest``
+run via the ``-m "not ..."`` expression in
+``[tool.pytest.ini_options].addopts``.
 
 Each ``--include-<marker>`` CLI flag (with a ``TRELLIS_TEST_<MARKER>=1``
 env-var equivalent) relaxes its corresponding ``not <marker>`` constraint
@@ -57,6 +58,7 @@ _INCLUDE_FLAGS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("--include-neo", "TRELLIS_TEST_NEO", ("neo", "neo4j")),
     ("--include-postgres", "TRELLIS_TEST_POSTGRES", ("postgres",)),
     ("--include-pgvector", "TRELLIS_TEST_PGVECTOR", ("pgvector",)),
+    ("--include-arcadedb", "TRELLIS_TEST_ARCADEDB", ("arcadedb",)),
 )
 
 

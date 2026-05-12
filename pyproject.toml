@@ -75,6 +75,13 @@ llm-anthropic = [
 neo4j = [
     "neo4j>=5.20",
 ]
+arcadedb = [
+    # ArcadeDB exposes the Neo4j Bolt wire protocol; the neo4j Python
+    # driver connects directly. SQL DDL (vector index creation +
+    # vectorNeighbors queries) goes over the HTTP REST endpoint using
+    # only stdlib urllib, so no additional dependency is needed there.
+    "neo4j>=5.20",
+]
 observability = [
     # OpenTelemetry SDK + auto-instrumentations for FastAPI, psycopg,
     # and Neo4j. The SDK is no-op until ``OTEL_EXPORTER_OTLP_ENDPOINT``
@@ -90,7 +97,7 @@ observability = [
     "prometheus-fastapi-instrumentator>=7.0",
 ]
 all = [
-    "trellis-ai[cloud,neo4j,llm-openai,llm-anthropic,observability]",
+    "trellis-ai[cloud,neo4j,arcadedb,llm-openai,llm-anthropic,observability]",
 ]
 
 [project.scripts]
@@ -200,10 +207,11 @@ pythonpath = ["src", "."]
 # its corresponding "not <marker>" constraint. See docs/agent-guide/testing.md.
 addopts = """\
     -v --tb=short \
-    -m "not live and not slow and not neo and not neo4j \
+    -m "not live and not slow and not neo and not neo4j and not arcadedb \
     and not postgres and not pgvector"\
 """
 markers = [
+    "arcadedb: requires a running ArcadeDB instance (set TRELLIS_TEST_ARCADEDB_URI). Excluded by default; use --include-arcadedb or TRELLIS_TEST_ARCADEDB=1.",
     "live: requires a real backend service running (uvicorn, real Postgres, real Neo4j, real S3). Excluded by default; use --include-live or TRELLIS_TEST_LIVE=1.",
     "neo: requires Neo4j. Excluded by default; use --include-neo or TRELLIS_TEST_NEO=1. Synonym of `neo4j` for ergonomic typing — both names are registered and both are gated by --include-neo.",
     "neo4j: requires a running Neo4j instance (set TRELLIS_TEST_NEO4J_URI). Excluded by default; use --include-neo or TRELLIS_TEST_NEO=1.",

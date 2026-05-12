@@ -83,6 +83,7 @@ _BUILTIN_BACKENDS: dict[str, dict[str, dict[str, tuple[str, str]]]] = {
             "sqlite": ("trellis.stores.sqlite.graph", "SQLiteGraphStore"),
             "postgres": ("trellis.stores.postgres.graph", "PostgresGraphStore"),
             "neo4j": ("trellis.stores.neo4j.graph", "Neo4jGraphStore"),
+            "arcadedb": ("trellis.stores.arcadedb.graph", "ArcadeDBGraphStore"),
         },
         "vector": {
             "sqlite": ("trellis.stores.sqlite.vector", "SQLiteVectorStore"),
@@ -771,6 +772,10 @@ class StoreRegistry:
         if backend == "neo4j" and "driver" not in params:
             params = self._inject_neo4j_driver(params)
 
+        # ArcadeDB graph: shares the Bolt driver cache with Neo4j.
+        if backend == "arcadedb" and store_type == "graph" and "driver" not in params:
+            params = self._inject_arcadedb_driver(params)
+
         # For s3 backend, default bucket from env
         if backend == "s3" and "bucket" not in params:
             import os  # noqa: PLC0415
@@ -837,6 +842,114 @@ class StoreRegistry:
             raise TypeError(msg)
 
         driver = build_driver(uri, user, params["password"], config=cfg)
+        self._bolt_drivers[key] = driver
+        new_params.pop("password")
+        new_params["driver"] = driver
+        return new_params
+
+    def _inject_arcadedb_driver(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Resolve a shared ArcadeDB Bolt driver for ``params`` and inject it.
+
+        Mirrors :meth:`_inject_neo4j_driver` — same driver-cache key
+        shape (``(uri, user)``), same shared ``_bolt_drivers`` dict,
+        same closing semantics. Differences from the Neo4j path:
+
+        - Default user is ``"root"`` (ArcadeDB's conventional admin
+          user) rather than ``"neo4j"``.
+        - Honors ``TRELLIS_ARCADEDB_URI`` / ``_USER`` / ``_PASSWORD`` /
+          ``_DATABASE`` env vars as fallbacks before raising.
+        - Triggers the HTTP-based ``ensure_database`` call exactly
+          once per driver (only when the driver is newly built), so the
+          target database is created idempotently at first use.
+        """
+        import os  # noqa: PLC0415
+
+        from trellis.stores.arcadedb.base import (  # noqa: PLC0415
+            build_arcadedb_driver,
+            derive_http_url_from_bolt,
+            ensure_database,
+        )
+        from trellis.stores.bolt_opencypher.base import (  # noqa: PLC0415
+            BoltDriverConfig,
+        )
+
+        uri = params.get("uri") or os.environ.get("TRELLIS_ARCADEDB_URI")
+        if not uri:
+            msg = (
+                "arcadedb backend requires 'uri' in config or "
+                "TRELLIS_ARCADEDB_URI env var (e.g. bolt://host:7687)"
+            )
+            raise ConfigError(msg, setting="stores.graph.uri")
+        user = params.get("user") or os.environ.get("TRELLIS_ARCADEDB_USER") or "root"
+        password = params.get("password") or os.environ.get("TRELLIS_ARCADEDB_PASSWORD")
+        database = (
+            params.get("database")
+            or os.environ.get("TRELLIS_ARCADEDB_DATABASE")
+            or "trellis"
+        )
+        http_url = params.get("http_url") or os.environ.get("TRELLIS_ARCADEDB_HTTP_URL")
+        ensure_db = params.get("ensure_database_exists", True)
+
+        key = (uri, user)
+        # Strip driver_config from params we'll forward to the store —
+        # it's consumed at driver build time, not by the store itself.
+        new_params = {
+            k: v
+            for k, v in params.items()
+            if k not in {"driver_config", "http_url", "ensure_database_exists"}
+        }
+        new_params["uri"] = uri
+        new_params["user"] = user
+        new_params["database"] = database
+
+        if key in self._bolt_drivers:
+            # Driver already built (e.g. by the graph store; vector
+            # store now joining the pool). Strip ``password`` so the
+            # store skips its own build path and uses the injected
+            # driver.
+            new_params.pop("password", None)
+            new_params["driver"] = self._bolt_drivers[key]
+            return new_params
+
+        if not password:
+            msg = (
+                "arcadedb backend requires 'password' in config or "
+                "TRELLIS_ARCADEDB_PASSWORD env var"
+            )
+            raise ConfigError(msg, setting="stores.graph.password")
+
+        raw_cfg = params.get("driver_config")
+        if raw_cfg is None:
+            cfg: BoltDriverConfig | None = None
+        elif isinstance(raw_cfg, BoltDriverConfig):
+            cfg = raw_cfg
+        elif isinstance(raw_cfg, dict):
+            cfg = BoltDriverConfig(**raw_cfg)
+        else:
+            msg = (
+                "driver_config must be a BoltDriverConfig, a dict, or omitted; "
+                f"got {type(raw_cfg).__name__}"
+            )
+            raise TypeError(msg)
+
+        # Ensure the target database exists before the Bolt driver
+        # binds to it. ``ensure_database`` is idempotent — a no-op when
+        # the database already exists.
+        if ensure_db:
+            if not http_url:
+                http_url = derive_http_url_from_bolt(uri)
+            if not http_url:
+                msg = (
+                    "arcadedb backend with ensure_database_exists=True "
+                    "needs an http_url (or a parseable host in the Bolt "
+                    "uri). Set http_url in config, set "
+                    "TRELLIS_ARCADEDB_HTTP_URL, or disable "
+                    "ensure_database_exists."
+                )
+                raise ConfigError(msg, setting="stores.graph.http_url")
+            ensure_database(http_url, user, password, database)
+
+        driver = build_arcadedb_driver(uri, user, password, config=cfg)
         self._bolt_drivers[key] = driver
         new_params.pop("password")
         new_params["driver"] = driver
