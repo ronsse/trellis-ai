@@ -9,12 +9,20 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+import structlog
+
 from trellis.extract.telemetry import analyze_extractor_fallbacks
 from trellis.learning import (
+    RECOMMENDED_SEED_VALUES as SCHEMA_EVOLUTION_SEED_DEFAULTS,
     analyze_learning_observations,
+    analyze_well_known_candidates,
     build_learning_observations_from_event_log,
     write_learning_review_artifacts,
 )
+from trellis.learning.schema_evolution import (
+    PARAM_COMPONENT_ID as SCHEMA_EVOLUTION_COMPONENT_ID,
+)
+from trellis.ops import ParameterRegistry
 from trellis.retrieve.advisory_generator import AdvisoryGenerator
 from trellis.retrieve.effectiveness import (
     analyze_effectiveness,
@@ -32,8 +40,17 @@ from trellis.retrieve.evaluate import (
 from trellis.retrieve.pack_sections import analyze_pack_sections
 from trellis.retrieve.telemetry import analyze_pack_telemetry
 from trellis.retrieve.token_usage import analyze_token_usage
+from trellis.schemas.parameters import ParameterScope, ParameterSet
 from trellis.stores.advisory_store import AdvisoryStore
-from trellis_cli.stores import get_document_store, get_event_log
+from trellis.stores.base.parameter import ParameterStore
+from trellis_cli.stores import (
+    get_document_store,
+    get_event_log,
+    get_graph_store,
+    get_parameter_store,
+)
+
+logger = structlog.get_logger(__name__)
 
 analyze_app = typer.Typer(no_args_is_help=True)
 console = Console()
@@ -1100,3 +1117,237 @@ def learning_candidates(
         "[dim]Edit the decisions template to approve promotions, then run "
         "[bold]trellis curate promote-learning[/bold] with both files.[/dim]"
     )
+
+
+# ---------------------------------------------------------------------------
+# Schema Evolution — well-known promotion candidates (self-improvement item 5)
+# ---------------------------------------------------------------------------
+
+
+class _InMemoryParameterStore(ParameterStore):
+    """Minimal in-memory ParameterStore for CLI invocations without a config.
+
+    Used by :func:`_build_schema_evolution_registry` when no persistent
+    snapshot has been seeded yet. Operators wanting persistence put a
+    snapshot in the configured ParameterStore via the governed mutation
+    pipeline; until then the CLI runs with the recommended defaults
+    and logs a single WARN.
+    """
+
+    def __init__(self) -> None:
+        self._snapshots: dict[
+            tuple[str, str | None, str | None, str | None], ParameterSet
+        ] = {}
+
+    def put(self, params: ParameterSet) -> ParameterSet:
+        self._snapshots[params.scope.key()] = params
+        return params
+
+    def get(self, params_version: str) -> ParameterSet | None:
+        for snapshot in self._snapshots.values():
+            if snapshot.params_version == params_version:
+                return snapshot
+        return None
+
+    def get_active(self, scope: ParameterScope) -> ParameterSet | None:
+        return self._snapshots.get(scope.key())
+
+    def resolve(self, scope: ParameterScope) -> ParameterSet | None:
+        candidates = [
+            scope,
+            ParameterScope(component_id=scope.component_id),
+        ]
+        seen: set[tuple[str, str | None, str | None, str | None]] = set()
+        for cand in candidates:
+            key = cand.key()
+            if key in seen:
+                continue
+            seen.add(key)
+            active = self.get_active(cand)
+            if active is not None:
+                return active
+        return None
+
+    def list_versions(
+        self,
+        scope: ParameterScope | None = None,
+        *,
+        limit: int = 100,
+    ) -> list[ParameterSet]:
+        if scope is None:
+            return list(self._snapshots.values())[:limit]
+        snapshot = self.get_active(scope)
+        return [snapshot] if snapshot is not None else []
+
+    def close(self) -> None:
+        self._snapshots.clear()
+
+
+def _build_schema_evolution_registry() -> ParameterRegistry:
+    """Construct a ParameterRegistry for ``learning.schema_evolution``.
+
+    Resolution order:
+
+    1. Persistent ParameterStore from the configured registry, if an
+       active snapshot exists for the schema-evolution component and
+       carries every key in :data:`SCHEMA_EVOLUTION_SEED_DEFAULTS`.
+    2. In-memory snapshot seeded with the recommended defaults
+       (count=500, distinct extractors=2, distinct domains=2,
+       signal_quality=standard, window=7d, cooldown=7d). One WARN log
+       line so operators notice they're running unseeded.
+    """
+    persistent_store = get_parameter_store()
+    persistent_registry = ParameterRegistry(persistent_store)
+    persistent_snapshot = persistent_registry.get_values(
+        ParameterScope(component_id=SCHEMA_EVOLUTION_COMPONENT_ID)
+    )
+    if all(k in persistent_snapshot for k in SCHEMA_EVOLUTION_SEED_DEFAULTS):
+        return persistent_registry
+
+    logger.warning(
+        "schema_evolution.parameter_registry.seeded_defaults",
+        component=SCHEMA_EVOLUTION_COMPONENT_ID,
+        defaults=dict(SCHEMA_EVOLUTION_SEED_DEFAULTS),
+        remediation=(
+            "seed via ParameterStore.put() with a ParameterSet "
+            "containing the keys in "
+            "trellis.learning.RECOMMENDED_SEED_VALUES"
+        ),
+    )
+    store = _InMemoryParameterStore()
+    store.put(
+        ParameterSet(
+            scope=ParameterScope(component_id=SCHEMA_EVOLUTION_COMPONENT_ID),
+            values=dict(SCHEMA_EVOLUTION_SEED_DEFAULTS),
+            source="cli:analyze",
+            notes="seeded by trellis_cli.analyze._build_schema_evolution_registry",
+        )
+    )
+    return ParameterRegistry(store=store)
+
+
+@analyze_app.command("schema-evolution")
+def schema_evolution(
+    kinds: str = typer.Option(
+        "entity_type,edge_kind",
+        "--kinds",
+        help=(
+            "Comma-separated subset of candidate kinds to analyze. "
+            "Choices: 'entity_type', 'edge_kind'."
+        ),
+    ),
+    no_emit: bool = typer.Option(
+        False,
+        "--no-emit",
+        help=(
+            "Dry-run: surface candidates without emitting "
+            "WELL_KNOWN_CANDIDATE events to the EventLog."
+        ),
+    ),
+    strict: bool = typer.Option(
+        False,
+        "--strict",
+        help=(
+            "Exit non-zero (code 1) when any new candidate is surfaced. "
+            "Useful for CI gates that want to flag potential schema growth."
+        ),
+    ),
+    output_format: str = typer.Option(
+        "text",
+        "--format",
+        help="Output format: text or json.",
+    ),
+) -> None:
+    """Surface open-string types eligible for canonical promotion.
+
+    Reads the GraphStore for current ``node_type`` / ``edge_type``
+    values, joins them against the EventLog's ``MUTATION_EXECUTED``
+    history, and reports values that crossed the operator-tunable
+    promotion thresholds (count, distinct extractors, distinct domains,
+    signal quality, evidence window). Surfaced candidates are emitted
+    as ``WELL_KNOWN_CANDIDATE`` events unless ``--no-emit`` is set.
+
+    The loop is **surface-only** — it never auto-mutates
+    :mod:`trellis.schemas.well_known`. The promotion path is a
+    human-authored ADR amendment; use ``trellis admin
+    draft-promotion-adr <candidate_id>`` to scaffold one.
+
+    See ``docs/design/adr-well-known-promotion-loop.md``.
+    """
+    parsed_kinds = tuple(k.strip() for k in kinds.split(",") if k.strip())
+    valid_kinds = {"entity_type", "edge_kind"}
+    invalid = [k for k in parsed_kinds if k not in valid_kinds]
+    if invalid:
+        msg = (
+            f"--kinds: invalid value(s) {invalid!r}; "
+            f"choose from {sorted(valid_kinds)}"
+        )
+        raise typer.BadParameter(msg)
+
+    graph_store = get_graph_store()
+    event_log = get_event_log()
+    registry = _build_schema_evolution_registry()
+
+    candidates = analyze_well_known_candidates(
+        graph_store=graph_store,
+        event_log=event_log,
+        registry=registry,
+        candidate_kinds=parsed_kinds,  # type: ignore[arg-type]
+        emit_events=not no_emit,
+    )
+
+    if output_format == "json":
+        print(
+            json.dumps(
+                {
+                    "status": "ok",
+                    "candidate_count": len(candidates),
+                    "emitted": (not no_emit) and len(candidates) > 0,
+                    "candidates": [c.to_event_payload() for c in candidates],
+                }
+            )
+        )
+    else:
+        mode = "DRY-RUN" if no_emit else "EMIT"
+        console.print(
+            f"[bold]Schema-evolution candidates[/bold]  ({mode})  "
+            f"{len(candidates)} surfaced"
+        )
+        if not candidates:
+            console.print(
+                "[dim]No open-string types crossed the promotion thresholds. "
+                "Adjust thresholds via the ParameterRegistry "
+                f"('{SCHEMA_EVOLUTION_COMPONENT_ID}' component) if this is "
+                "unexpected.[/dim]"
+            )
+        else:
+            table = Table(title="Promotion Candidates")
+            table.add_column("Kind", style="cyan")
+            table.add_column("Open string", style="bold")
+            table.add_column("Count", justify="right")
+            table.add_column("Extractors", justify="right")
+            table.add_column("Domains", justify="right")
+            table.add_column("Suggested", style="green")
+            table.add_column("candidate_id", style="dim")
+            for c in candidates:
+                suggested = c.suggested_canonical_name
+                if c.naming_collision:
+                    suggested = f"[yellow]{suggested}[/yellow]"
+                table.add_row(
+                    c.candidate_kind,
+                    c.open_string_value,
+                    str(c.count),
+                    str(len(c.distinct_extractors)),
+                    str(len(c.distinct_domains)),
+                    suggested,
+                    c.candidate_id,
+                )
+            console.print(table)
+            for c in candidates:
+                if c.notes:
+                    console.print(
+                        f"[dim]{c.candidate_id}: {'; '.join(c.notes)}[/dim]"
+                    )
+
+    if strict and candidates:
+        raise typer.Exit(code=1)

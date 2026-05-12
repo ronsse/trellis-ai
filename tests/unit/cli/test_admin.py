@@ -214,3 +214,183 @@ class TestCheckExtractorsWarn:
         data = json.loads(result.stdout.strip())
         assert data["status"] == "warn"
         assert any(w["signal"] == "env_fallback_only" for w in data["warnings"])
+
+
+# ---------------------------------------------------------------------------
+# draft-promotion-adr (self-improvement item 5)
+# ---------------------------------------------------------------------------
+
+
+class TestDraftPromotionAdr:
+    """Tests for ``trellis admin draft-promotion-adr <candidate_id>``."""
+
+    def _seed_candidate_event(
+        self,
+        tmp_path,
+        monkeypatch,
+        *,
+        candidate_id: str = "wkc_ent_test1234567890ab",
+        open_string: str = "dbt_model",
+        suggested_canonical: str = "DbtModel",
+        kind: str = "entity_type",
+    ):
+        """Emit a WELL_KNOWN_CANDIDATE event and return paths used by the test."""
+        config_dir = tmp_path / "config"
+        data_dir = tmp_path / "data"
+        stores_dir = data_dir / "stores"
+        stores_dir.mkdir(parents=True)
+        monkeypatch.setenv("TRELLIS_CONFIG_DIR", str(config_dir))
+        monkeypatch.setenv("TRELLIS_DATA_DIR", str(data_dir))
+
+        # Initialize a fresh registry so the event_log is real.
+        from trellis.stores.base.event_log import EventType
+        from trellis.stores.registry import StoreRegistry
+        from trellis_cli.stores import _reset_registry
+
+        _reset_registry()
+        registry = StoreRegistry(stores_dir=stores_dir)
+        registry.operational.event_log.emit(
+            EventType.WELL_KNOWN_CANDIDATE,
+            source="learning.schema_evolution",
+            entity_id=candidate_id,
+            entity_type=kind,
+            payload={
+                "candidate_id": candidate_id,
+                "candidate_kind": kind,
+                "open_string_value": open_string,
+                "count": 500,
+                "distinct_extractors": ["worker:dbt", "worker:lineage"],
+                "distinct_domains": ["analytics", "finance"],
+                "avg_signal_quality": "standard",
+                "first_seen": "2026-04-01T00:00:00+00:00",
+                "last_seen": "2026-05-11T00:00:00+00:00",
+                "suggested_canonical_name": suggested_canonical,
+                "suggested_alignment_uri": None,
+                "naming_collision": False,
+                "recurrence_count": 0,
+                "notes": [],
+            },
+        )
+        registry.close()
+        _reset_registry()
+        return config_dir, data_dir
+
+    def test_drafts_adr_to_default_path(self, tmp_path, monkeypatch):
+        cid = "wkc_ent_t111111111111111"
+        self._seed_candidate_event(tmp_path, monkeypatch, candidate_id=cid)
+        monkeypatch.chdir(tmp_path)
+        result = runner.invoke(admin_app, ["draft-promotion-adr", cid])
+        assert result.exit_code == 0, result.output
+        output_path = tmp_path / "docs" / "design" / "adr-promote-dbt_model.md"
+        assert output_path.exists()
+        content = output_path.read_text(encoding="utf-8")
+        # Sanity check: template variables were substituted.
+        assert cid in content
+        assert "dbt_model" in content
+        assert "DbtModel" in content
+        assert "Decision" in content
+        # The candidate evidence rendered.
+        assert "500" in content  # count
+        assert "worker:dbt" in content
+
+    def test_refuses_to_overwrite_without_force(self, tmp_path, monkeypatch):
+        cid = "wkc_ent_t222222222222222"
+        self._seed_candidate_event(tmp_path, monkeypatch, candidate_id=cid)
+        monkeypatch.chdir(tmp_path)
+        result1 = runner.invoke(admin_app, ["draft-promotion-adr", cid])
+        assert result1.exit_code == 0
+        # Second invocation without --force fails.
+        result2 = runner.invoke(admin_app, ["draft-promotion-adr", cid])
+        assert result2.exit_code == 1, result2.output
+        assert "Refusing to overwrite" in result2.output
+
+    def test_force_overwrites_existing_file(self, tmp_path, monkeypatch):
+        cid = "wkc_ent_t333333333333333"
+        self._seed_candidate_event(tmp_path, monkeypatch, candidate_id=cid)
+        monkeypatch.chdir(tmp_path)
+        runner.invoke(admin_app, ["draft-promotion-adr", cid])
+        output_path = tmp_path / "docs" / "design" / "adr-promote-dbt_model.md"
+        output_path.write_text("STALE", encoding="utf-8")
+        result = runner.invoke(admin_app, ["draft-promotion-adr", cid, "--force"])
+        assert result.exit_code == 0, result.output
+        assert "STALE" not in output_path.read_text(encoding="utf-8")
+
+    def test_naming_collision_raises(self, tmp_path, monkeypatch):
+        # Seed a candidate whose suggested name collides with the
+        # canonical PERSON in well_known.
+        cid = "wkc_ent_t444444444444444"
+        self._seed_candidate_event(
+            tmp_path,
+            monkeypatch,
+            candidate_id=cid,
+            open_string="PERSON",
+            suggested_canonical="Person",
+        )
+        monkeypatch.chdir(tmp_path)
+        result = runner.invoke(admin_app, ["draft-promotion-adr", cid])
+        assert result.exit_code != 0
+        assert "collide" in result.output.lower() or "person" in result.output.lower()
+
+    def test_canonical_name_override_passes_through(self, tmp_path, monkeypatch):
+        cid = "wkc_ent_t555555555555555"
+        self._seed_candidate_event(
+            tmp_path,
+            monkeypatch,
+            candidate_id=cid,
+            open_string="dbt_model",
+            suggested_canonical="DbtModel",
+        )
+        monkeypatch.chdir(tmp_path)
+        result = runner.invoke(
+            admin_app,
+            [
+                "draft-promotion-adr",
+                cid,
+                "--canonical-name",
+                "DbtBuildArtifact",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        output_path = tmp_path / "docs" / "design" / "adr-promote-dbt_model.md"
+        content = output_path.read_text(encoding="utf-8")
+        assert "DbtBuildArtifact" in content
+        assert "DBT_BUILD_ARTIFACT" in content  # constant name derivation
+
+    def test_unknown_candidate_id_errors(self, tmp_path, monkeypatch):
+        # Seed nothing, then look up a non-existent id.
+        config_dir = tmp_path / "config"
+        data_dir = tmp_path / "data"
+        stores_dir = data_dir / "stores"
+        stores_dir.mkdir(parents=True)
+        monkeypatch.setenv("TRELLIS_CONFIG_DIR", str(config_dir))
+        monkeypatch.setenv("TRELLIS_DATA_DIR", str(data_dir))
+        from trellis_cli.stores import _reset_registry
+
+        _reset_registry()
+        monkeypatch.chdir(tmp_path)
+        result = runner.invoke(
+            admin_app, ["draft-promotion-adr", "wkc_ent_nonexistent"]
+        )
+        assert result.exit_code == 1
+        assert "No WELL_KNOWN_CANDIDATE" in result.output
+
+    def test_json_output(self, tmp_path, monkeypatch):
+        cid = "wkc_ent_t666666666666666"
+        self._seed_candidate_event(tmp_path, monkeypatch, candidate_id=cid)
+        monkeypatch.chdir(tmp_path)
+        result = runner.invoke(
+            admin_app, ["draft-promotion-adr", cid, "--format", "json"]
+        )
+        assert result.exit_code == 0, result.output
+        # structlog may emit pre-empt store-open logs before our JSON
+        # write; the JSON object is always the final non-blank line.
+        json_line = next(
+            line
+            for line in reversed(result.stdout.splitlines())
+            if line.strip().startswith("{")
+        )
+        data = json.loads(json_line)
+        assert data["status"] == "ok"
+        assert data["candidate_id"] == cid
+        assert "adr-promote-dbt_model.md" in data["output_path"]
+        assert data["bytes_written"] > 0
