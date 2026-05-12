@@ -11,11 +11,47 @@
 [![Python](https://img.shields.io/pypi/pyversions/trellis-ai.svg)](https://pypi.org/project/trellis-ai/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/ronsse/trellis-ai/blob/main/LICENSE)
 
-**Shared context substrate for AI agents that improves retrieval from outcomes, not prompts. Runs local or cloud.**
+**A shared knowledge layer for AI agents.** Agents write what they did. Trellis builds a cross-agent graph, attributes outcomes back to the **exact context items** that produced them, and tunes retrieval under statistical governance. Multi-backend (SQLite, Postgres + pgvector, ArcadeDB, Neo4j, S3). Four interfaces (CLI, MCP, REST, Python SDK). One install.
 
-Trellis is the layer that sits between your agents and the context they need to do work. Agents write **immutable traces** of what they did and read **token-budgeted context packs** before starting new tasks. Feedback is attributed back to the **exact items** that were served — so low-signal items get suppressed, advisory confidence sharpens, and scoring weights are tuned under **statistical governance** (proposals only land when sample size and effect size pass a threshold). As tagging and extraction rules stabilize, LLM calls recede in favor of deterministic paths: the LLM bootstraps the signal, deterministic retrieval inherits it.
+```
+agent reads pack ──► does work ──► writes trace + feedback ──► graph + audit log
+        ▲                                                              │
+        └──── better pack next time (noise demoted, weights tuned) ◄──┘
+```
 
-Multiple agents share the same substrate, so institutional knowledge compounds instead of evaporating at the end of each session. Not a vector DB, not per-conversation "memory" — it's the **cross-agent knowledge layer** that gives a team of agents a shared past.
+Most "agent memory" attributes feedback to a session or a user. Trellis attributes it to the **specific items served** in the pack. That's the seam that lets noise suppression, advisory fitness, and parameter promotion all work from the same signal — and lets multiple agents share a substrate where institutional knowledge compounds instead of evaporating at the end of each session.
+
+## Why Trellis vs rolling your own?
+
+A useful cross-agent knowledge layer means assembling, at minimum:
+
+- an **immutable trace store** with schema validation and an audit log
+- a **graph store with temporal versioning** (SCD-2) so "what did we know at time T?" is answerable
+- a **vector + keyword search** wired into the same query layer
+- a **retrieval engine** that combines them, dedupes by item id, and enforces a token budget
+- **feedback attribution to the specific items** served (not just the session or the user)
+- a **statistical-gating mechanism** so noisy feedback doesn't destroy your weights
+- a **governed mutation pipeline** that won't let agents corrupt the graph
+- an **MCP server, REST API, Python SDK, and CLI** around all of it
+- a **tiered extractor** that graduates from LLM-driven to deterministic as patterns stabilize
+- a **plugin contract** so adopters can swap any backend without forking core
+
+Trellis ships all of that as one install. Started from a vector DB plus glue code, the list above is months of yak-shaving — most of which doesn't surface until something breaks.
+
+### What Trellis is NOT
+
+- **Not a vector DB.** Vectors are one of six stores. Pluggable behind the same API (SQLite, pgvector, ArcadeDB, Neo4j HNSW).
+- **Not per-conversation memory.** The "memory" in Trellis is a *cross-agent graph* — multiple agents share the same substrate.
+- **Not a RAG framework.** RAG is one access pattern; Trellis adds attribution, statistical governance, and an audit log around it.
+- **Not a managed service.** Self-hosted: local SQLite, or your Postgres / ArcadeDB / Neo4j. One `pip install` (or one Docker image).
+- **Not a prompt library.** Trellis stores *what happened* (traces) and *what was learned* (precedents + advisories) — not what to say.
+
+### When *not* to use Trellis
+
+- You're building a single-session chatbot. The overhead is unjustified — prompt engineering is enough.
+- You only need vector similarity. A bare vector DB is simpler.
+- Your agent has no need to learn from past work. Pure tool-call agents don't benefit.
+- You're at < 100 agent runs total. The statistical-governance machinery has nothing to chew on yet.
 
 ## Quickstart — 60 seconds
 
@@ -152,7 +188,7 @@ flowchart TB
     Pack["Context Pack Builder<br/>keyword + semantic + graph<br/>dedupe → rerank → token-budget"]
     Work["Agent does work<br/>emits trace + feedback"]
     Mut["Governed Write Pipeline<br/>validate → policy → idempotency<br/>→ classify → execute → emit event"]
-    Store["Pluggable Storage<br/>SQLite · Postgres + pgvector · S3<br/>LanceDB / SurrealDB (alternates)"]
+    Store["Pluggable Storage<br/>SQLite · Postgres + pgvector · ArcadeDB · Neo4j · S3"]
 
     subgraph Workers["Background workers — analyze & curate"]
         direction TB
