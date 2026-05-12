@@ -89,6 +89,7 @@ _BUILTIN_BACKENDS: dict[str, dict[str, dict[str, tuple[str, str]]]] = {
             "sqlite": ("trellis.stores.sqlite.vector", "SQLiteVectorStore"),
             "pgvector": ("trellis.stores.pgvector.store", "PgVectorStore"),
             "neo4j": ("trellis.stores.neo4j.vector", "Neo4jVectorStore"),
+            "arcadedb": ("trellis.stores.arcadedb.vector", "ArcadeDBVectorStore"),
         },
         "document": {
             "sqlite": ("trellis.stores.sqlite.document", "SQLiteDocumentStore"),
@@ -772,9 +773,13 @@ class StoreRegistry:
         if backend == "neo4j" and "driver" not in params:
             params = self._inject_neo4j_driver(params)
 
-        # ArcadeDB graph: shares the Bolt driver cache with Neo4j.
+        # ArcadeDB: graph shares the Bolt driver cache with Neo4j;
+        # vector takes HTTP-only params (no Bolt driver) via a
+        # separate resolver.
         if backend == "arcadedb" and store_type == "graph" and "driver" not in params:
             params = self._inject_arcadedb_driver(params)
+        elif backend == "arcadedb" and store_type == "vector":
+            params = self._resolve_arcadedb_vector_params(params)
 
         # For s3 backend, default bucket from env
         if backend == "s3" and "bucket" not in params:
@@ -953,6 +958,82 @@ class StoreRegistry:
         self._bolt_drivers[key] = driver
         new_params.pop("password")
         new_params["driver"] = driver
+        return new_params
+
+    def _resolve_arcadedb_vector_params(
+        self, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Resolve HTTP-side config for an ArcadeDB vector store.
+
+        The vector store talks SQL over HTTP, not Cypher over Bolt, so
+        it doesn't share the Bolt driver cache. It needs:
+        ``http_url`` / ``user`` / ``password`` / ``database`` — derived
+        from explicit params first, then env vars
+        (``TRELLIS_ARCADEDB_HTTP_URL`` / ``_USER`` / ``_PASSWORD`` /
+        ``_DATABASE``), with reasonable defaults where possible.
+
+        If ``http_url`` is missing AND a sibling Bolt URI is present
+        (``uri`` param or ``TRELLIS_ARCADEDB_URI``), derive
+        ``http_url`` by swapping the Bolt port for the HTTP port on the
+        same host. Lets a single ``arcadedb:`` config block cover both
+        graph (Bolt) + vector (HTTP) backends without duplicating the
+        host.
+        """
+        import os  # noqa: PLC0415
+
+        from trellis.stores.arcadedb.base import (  # noqa: PLC0415
+            derive_http_url_from_bolt,
+        )
+
+        new_params = dict(params)
+        # http_url priority: explicit param > env var > derived from
+        # sibling Bolt URI.
+        http_url = new_params.get("http_url") or os.environ.get(
+            "TRELLIS_ARCADEDB_HTTP_URL"
+        )
+        if not http_url:
+            bolt_uri = new_params.get("uri") or os.environ.get(
+                "TRELLIS_ARCADEDB_URI"
+            )
+            if bolt_uri:
+                http_url = derive_http_url_from_bolt(bolt_uri)
+        if not http_url:
+            msg = (
+                "arcadedb vector backend requires 'http_url' in config or "
+                "TRELLIS_ARCADEDB_HTTP_URL env var (or a sibling Bolt 'uri' "
+                "to derive it from)"
+            )
+            raise ConfigError(msg, setting="stores.vector.http_url")
+
+        user = (
+            new_params.get("user")
+            or os.environ.get("TRELLIS_ARCADEDB_USER")
+            or "root"
+        )
+        password = (
+            new_params.get("password")
+            or os.environ.get("TRELLIS_ARCADEDB_PASSWORD")
+        )
+        if not password:
+            msg = (
+                "arcadedb vector backend requires 'password' in config or "
+                "TRELLIS_ARCADEDB_PASSWORD env var"
+            )
+            raise ConfigError(msg, setting="stores.vector.password")
+        database = (
+            new_params.get("database")
+            or os.environ.get("TRELLIS_ARCADEDB_DATABASE")
+            or "trellis"
+        )
+
+        # The vector store doesn't take a Bolt ``uri`` or ``driver`` —
+        # strip them so the constructor doesn't complain.
+        for key in ("uri", "driver", "driver_config", "ensure_database_exists"):
+            new_params.pop(key, None)
+        new_params["http_url"] = http_url
+        new_params["user"] = user
+        new_params["password"] = password
+        new_params["database"] = database
         return new_params
 
     def _get(self, store_type: str) -> Any:

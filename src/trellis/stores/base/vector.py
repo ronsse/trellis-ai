@@ -6,6 +6,18 @@ from abc import ABC, abstractmethod
 from typing import Any
 
 
+def format_vector_literal(vec: list[float], *, separator: str = ",") -> str:
+    """Render a list of floats as a SQL list literal ``"[v1, v2, ...]"``.
+
+    Used by backends whose typed-vector columns reject parameter-bound
+    Python lists (pgvector's ``::vector`` cast wants a literal;
+    ArcadeDB's ``LIST OF FLOAT`` rejects bound ``ARRAY_OF_FLOATS``).
+    ``repr(float(x))`` is injection-safe — only numeric literals end
+    up in the SQL.
+    """
+    return "[" + separator.join(repr(float(x)) for x in vec) + "]"
+
+
 class VectorStore(ABC):
     """Abstract interface for vector storage.
 
@@ -43,9 +55,9 @@ class VectorStore(ABC):
         with the same ``item_id`` would have collapsed (last-write-wins
         deterministically); bulk paths can't make the same guarantee
         across all backends (Neo4j's UNWIND fires SET twice
-        non-deterministically; LanceDB's ``merge_insert`` with
-        duplicate sources is implementation-defined). Reject up-front
-        rather than ship divergent semantics.
+        non-deterministically; other backends' merge-style writes are
+        similarly implementation-defined). Reject up-front rather than
+        ship divergent semantics.
 
         On backends with network round-trip cost (Neo4j),
         implementations SHOULD consolidate the work into a small

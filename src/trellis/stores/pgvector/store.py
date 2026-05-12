@@ -32,7 +32,9 @@ def _format_vector(vec: list[float]) -> str:
     # gets sent as a Postgres array (e.g. smallint[]) and the ::vector cast
     # then fails with "cannot cast smallint[] to vector". Formatting as the
     # vector text literal lets the cast succeed without pulling in numpy.
-    return "[" + ",".join(repr(float(x)) for x in vec) + "]"
+    from trellis.stores.base.vector import format_vector_literal  # noqa: PLC0415
+
+    return format_vector_literal(vec)
 
 
 class PgVectorStore(PostgresStoreBase, VectorStore):
