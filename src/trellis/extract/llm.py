@@ -150,23 +150,21 @@ class LLMExtractor:
         )
         tokens = response.usage.total_tokens if response.usage else 0
 
-        # Prompt + source hashes for telemetry clustering. Both are
-        # short SHA-256 digests; they let the analyzer group failures by
-        # (extractor, prompt template, input shape) without storing raw
-        # content. Computed lazily — we only pay the hash cost when the
-        # parse fails below.
+        # Hashes for telemetry clustering are computed lazily inside the
+        # failure branches below: SHA-256 of the rendered prompt groups
+        # failures by template + injected vars; SHA-256 of the input text
+        # groups by source shape. Hash cost is only paid when extraction
+        # fails — happy path skips it entirely.
         parsed, parse_exc = _parse_json_with_exception(response.content)
         if parsed is None:
-            prompt_hash = _prompt_hash(messages)
-            source_excerpt_hash = content_hash(text) if text else None
             emit_extraction_failure(
                 event_log=self._event_log,
                 extractor_id=self.__class__.__name__,
                 extractor_tier="llm",
                 failure_kind="parse_error",
                 source_hint=source_hint,
-                prompt_hash=prompt_hash,
-                source_excerpt_hash=source_excerpt_hash,
+                prompt_hash=_prompt_hash(messages),
+                source_excerpt_hash=content_hash(text) if text else None,
                 model=response.model or self._model,
                 error_class=(
                     type(parse_exc).__name__
@@ -201,16 +199,14 @@ class LLMExtractor:
         try:
             entities, edges, confidence = _to_drafts(parsed)
         except ValidationError as exc:
-            prompt_hash = _prompt_hash(messages)
-            source_excerpt_hash = content_hash(text) if text else None
             emit_extraction_failure(
                 event_log=self._event_log,
                 extractor_id=self.__class__.__name__,
                 extractor_tier="llm",
                 failure_kind="validation_error",
                 source_hint=source_hint,
-                prompt_hash=prompt_hash,
-                source_excerpt_hash=source_excerpt_hash,
+                prompt_hash=_prompt_hash(messages),
+                source_excerpt_hash=content_hash(text) if text else None,
                 model=response.model or self._model,
                 error_class=type(exc).__name__,
                 error_excerpt=str(exc),
@@ -274,7 +270,9 @@ def _parse_input(raw_input: Any) -> tuple[str, str | None]:
     raise TypeError(msg)
 
 
-def _parse_json_tolerant(content: str) -> dict[str, Any] | None:
+def _parse_json_with_exception(
+    content: str,
+) -> tuple[dict[str, Any] | None, Exception | None]:
     """Recover a JSON object from realistic LLM output.
 
     Strategy:
@@ -284,21 +282,10 @@ def _parse_json_tolerant(content: str) -> dict[str, Any] | None:
 
     A bare JSON array is lifted into ``{"entities": [...], "edges": []}``
     since some prompts may coax that shape out of stubborn models.
-    Returns ``None`` when nothing parseable is found.
-    """
-    parsed, _ = _parse_json_with_exception(content)
-    return parsed
-
-
-def _parse_json_with_exception(
-    content: str,
-) -> tuple[dict[str, Any] | None, Exception | None]:
-    """Same as :func:`_parse_json_tolerant` but also returns the last
-    exception encountered.
-
-    The exception lets the telemetry helper record a meaningful
-    ``error_class`` / ``error_excerpt`` instead of a generic message.
-    Returns ``(None, None)`` when input is empty / blank.
+    Returns ``(parsed, None)`` on success and ``(None, last_exc)`` on
+    failure. The exception lets :func:`emit_extraction_failure` record a
+    meaningful ``error_class`` / ``error_excerpt``. Empty / blank input
+    returns ``(None, None)``.
     """
     if not content or not content.strip():
         return None, None
@@ -319,14 +306,6 @@ def _parse_json_with_exception(
     if isinstance(data, list):
         return {"entities": data, "edges": []}, None
     return None, last_exc
-
-
-def _try_json_loads(text: str) -> Any | None:
-    """Parse ``text`` as JSON; return ``None`` on failure."""
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        return None
 
 
 def _try_json_loads_with_exc(text: str) -> tuple[Any | None, Exception | None]:

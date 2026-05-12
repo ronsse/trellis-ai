@@ -100,8 +100,9 @@ _SAMPLE_LRU_MAX = 4096  # cap the in-process cache to keep RSS bounded
 def _load_sample_cap() -> int:
     """Read and validate ``EXTRACTION_FAILURE_SAMPLE_CAP``.
 
-    POC directive: any non-negative integer is accepted; anything else
-    raises at import time so misconfiguration is loud, not silent.
+    Read on every ``emit_extraction_failure`` call so operators can tune
+    the cap without restarting the process. Misconfiguration (non-integer
+    or negative value) raises — POC directive: loud on misuse.
     """
     raw = os.environ.get(_SAMPLE_CAP_ENV)
     if raw is None or raw == "":
@@ -115,9 +116,6 @@ def _load_sample_cap() -> int:
         msg = f"{_SAMPLE_CAP_ENV} must be a non-negative integer; got {value}"
         raise ValueError(msg)
     return value
-
-
-_SAMPLE_CAP_DEFAULT = _load_sample_cap()
 
 
 class _ClusterEntry:
