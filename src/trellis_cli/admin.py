@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import structlog
 import typer
 from rich.console import Console
 from rich.table import Table
@@ -57,6 +58,7 @@ _LLM_CONFIG_TEMPLATE = """
 
 admin_app = typer.Typer(no_args_is_help=True)
 console = Console()
+logger = structlog.get_logger(__name__)
 
 
 @admin_app.command()
@@ -1452,38 +1454,35 @@ def _lookup_candidate_payload(event_log: Any, candidate_id: str) -> dict[str, An
     raise typer.Exit(code=1)
 
 
-def _render_promotion_adr(  # noqa: PLR0913
+def _render_promotion_adr(
     *,
     candidate: dict[str, Any],
     canonical_name_override: str | None,
     drafted_date: str,
-    count_threshold: int,
-    distinct_extractors_threshold: int,
-    distinct_domains_threshold: int,
-    min_signal_quality_threshold: str,
-    window_days_threshold: int,
+    thresholds: dict[str, Any],
 ) -> str:
     """Substitute the candidate payload into the markdown template.
 
     The template uses ``str.format``-style placeholders; everything
     that varies per-candidate is computed here so the template itself
     stays a near-pure scaffold.
-    """
-    canonical_name = (
-        canonical_name_override
-        if canonical_name_override
-        else candidate.get("suggested_canonical_name", "")
-    )
 
-    # Re-run collision detection against the (possibly overridden)
-    # canonical name so the rendered ADR carries the correct warning.
+    ``thresholds`` is the ``RECOMMENDED_SEED_VALUES`` mapping (or any
+    equivalent snapshot) — the keys consumed are the standard
+    schema-evolution parameter names from ``learning.schema_evolution``.
+    """
     from trellis.learning.schema_evolution import (  # noqa: PLC0415
         _detect_naming_collision,
     )
 
+    canonical_name = canonical_name_override or candidate.get(
+        "suggested_canonical_name", ""
+    )
+
+    # Re-run collision detection against the (possibly overridden)
+    # canonical name so the rendered ADR carries the correct warning.
     kind: str = candidate.get("candidate_kind", "entity_type")
-    naming_collision = _detect_naming_collision(canonical_name, kind)  # type: ignore[arg-type]
-    if naming_collision:
+    if _detect_naming_collision(canonical_name, kind):  # type: ignore[arg-type]
         msg = (
             f"Suggested canonical name {canonical_name!r} collides with an "
             f"existing canonical or alias in trellis.schemas.well_known. "
@@ -1494,26 +1493,20 @@ def _render_promotion_adr(  # noqa: PLR0913
 
     kind_label = "entity type" if kind == "entity_type" else "edge kind"
     kind_upper = "ENTITY_TYPE" if kind == "entity_type" else "EDGE_KIND"
-    well_known_constant_name = _well_known_constant_name(canonical_name, kind)  # type: ignore[arg-type]
+    well_known_constant_name = _well_known_constant_name(canonical_name)
 
     first_seen = str(candidate.get("first_seen", ""))
     last_seen = str(candidate.get("last_seen", ""))
-    evidence_span_days = _evidence_span_days(first_seen, last_seen)
 
     extractors = candidate.get("distinct_extractors") or []
     domains = candidate.get("distinct_domains") or []
-    extractors_block = "\n".join(f"- `{e}`" for e in extractors) or "- _none recorded_"
-    domains_block = "\n".join(f"- `{d}`" for d in domains) or "- _none recorded_"
 
     alignment_uri = candidate.get("suggested_alignment_uri")
-    alignment_uri_label = (
-        f"`{alignment_uri}` _(advisory; verify the URI resolves to a real "
-        "published schema before accepting)_"
-        if alignment_uri
-        else "_(none suggested — pick one only if it corresponds to a real "
-        "schema.org / PROV-O term)_"
-    )
     if alignment_uri:
+        alignment_uri_label = (
+            f"`{alignment_uri}` _(advisory; verify the URI resolves to a real "
+            "published schema before accepting)_"
+        )
         alignment_diff_block = (
             "Add to `_ENTITY_SCHEMA_ALIGNMENT` (or `_EDGE_SCHEMA_ALIGNMENT`):\n"
             "\n```python\n"
@@ -1521,14 +1514,14 @@ def _render_promotion_adr(  # noqa: PLR0913
             "```"
         )
     else:
+        alignment_uri_label = (
+            "_(none suggested — pick one only if it corresponds to a real "
+            "schema.org / PROV-O term)_"
+        )
         alignment_diff_block = (
             "_No alignment URI suggested. Omit the `_*_SCHEMA_ALIGNMENT` entry "
             "unless the ADR author identifies a real published schema URI._"
         )
-
-    # `naming_collision` is always False here because we reject above on
-    # collision; keep the placeholder for template stability.
-    naming_collision_block = ""
 
     return _load_promotion_adr_template().format(
         candidate_id=candidate.get("candidate_id", ""),
@@ -1537,17 +1530,25 @@ def _render_promotion_adr(  # noqa: PLR0913
         candidate_kind_upper=kind_upper,
         open_string_value=candidate.get("open_string_value", ""),
         count=candidate.get("count", 0),
-        count_threshold=count_threshold,
+        count_threshold=int(thresholds["well_known_count_threshold"]),
         distinct_extractors_count=len(extractors),
-        distinct_extractors_threshold=distinct_extractors_threshold,
-        distinct_extractors_block=extractors_block,
+        distinct_extractors_threshold=int(
+            thresholds["well_known_distinct_extractors"]
+        ),
+        distinct_extractors_block=(
+            "\n".join(f"- `{e}`" for e in extractors) or "- _none recorded_"
+        ),
         distinct_domains_count=len(domains),
-        distinct_domains_threshold=distinct_domains_threshold,
-        distinct_domains_block=domains_block,
+        distinct_domains_threshold=int(thresholds["well_known_distinct_domains"]),
+        distinct_domains_block=(
+            "\n".join(f"- `{d}`" for d in domains) or "- _none recorded_"
+        ),
         avg_signal_quality=candidate.get("avg_signal_quality", ""),
-        min_signal_quality_threshold=min_signal_quality_threshold,
-        evidence_window_days_observed=evidence_span_days,
-        window_days_threshold=window_days_threshold,
+        min_signal_quality_threshold=str(
+            thresholds["well_known_min_signal_quality"]
+        ),
+        evidence_window_days_observed=_evidence_span_days(first_seen, last_seen),
+        window_days_threshold=int(thresholds["well_known_window_days"]),
         first_seen=first_seen,
         last_seen=last_seen,
         recurrence_count=candidate.get("recurrence_count", 0),
@@ -1555,12 +1556,14 @@ def _render_promotion_adr(  # noqa: PLR0913
         well_known_constant_name=well_known_constant_name,
         alignment_uri_label=alignment_uri_label,
         alignment_diff_block=alignment_diff_block,
-        naming_collision_block=naming_collision_block,
+        # ``naming_collision_block`` is always empty because we reject
+        # above on collision; kept in the template for stability.
+        naming_collision_block="",
         drafted_date=drafted_date,
     )
 
 
-def _well_known_constant_name(canonical_name: str, kind: str) -> str:
+def _well_known_constant_name(canonical_name: str) -> str:
     """Generate the ``UPPER_SNAKE_CASE`` constant name for ``well_known.py``.
 
     Mirrors the convention used by existing canonicals (``PERSON``,
@@ -1648,7 +1651,6 @@ def draft_promotion_adr(
 
     See ``docs/design/adr-well-known-promotion-loop.md``.
     """
-    import logging  # noqa: PLC0415
     from datetime import UTC, datetime  # noqa: PLC0415
 
     from trellis.learning.schema_evolution import (  # noqa: PLC0415
@@ -1663,10 +1665,12 @@ def draft_promotion_adr(
     # filenames in the repo follow lowercase-hyphenated convention; we
     # use underscores in the file slug to avoid masking the open string
     # with hyphenation noise (``"my-edge-kind"`` -> ``"my_edge_kind"``).
-    open_string = candidate.get("open_string_value", "unknown")
-    slug = "".join(c if c.isalnum() else "_" for c in str(open_string)).strip("_").lower()
+    open_string = str(candidate.get("open_string_value", "unknown"))
+    slug = "".join(c if c.isalnum() else "_" for c in open_string).strip("_").lower()
     output_path = (
-        output if output is not None else Path("docs/design") / f"adr-promote-{slug}.md"
+        output
+        if output is not None
+        else Path("docs/design") / f"adr-promote-{slug}.md"
     )
 
     if output_path.exists() and not force:
@@ -1680,13 +1684,10 @@ def draft_promotion_adr(
     if output_path.exists() and force:
         # Loud-on-misuse: an operator overwriting a previously-drafted
         # ADR is doing something destructive; surface it as a WARN.
-        log = logging.getLogger("trellis.admin")
-        log.warning(
+        logger.warning(
             "draft_promotion_adr.overwriting_existing_file",
-            extra={
-                "path": str(output_path),
-                "candidate_id": candidate_id,
-            },
+            path=str(output_path),
+            candidate_id=candidate_id,
         )
         console.print(
             f"[yellow]Overwriting existing file at {output_path}.[/yellow]"
@@ -1697,19 +1698,7 @@ def draft_promotion_adr(
         candidate=candidate,
         canonical_name_override=canonical_name,
         drafted_date=drafted_date,
-        count_threshold=int(RECOMMENDED_SEED_VALUES["well_known_count_threshold"]),
-        distinct_extractors_threshold=int(
-            RECOMMENDED_SEED_VALUES["well_known_distinct_extractors"]
-        ),
-        distinct_domains_threshold=int(
-            RECOMMENDED_SEED_VALUES["well_known_distinct_domains"]
-        ),
-        min_signal_quality_threshold=str(
-            RECOMMENDED_SEED_VALUES["well_known_min_signal_quality"]
-        ),
-        window_days_threshold=int(
-            RECOMMENDED_SEED_VALUES["well_known_window_days"]
-        ),
+        thresholds=dict(RECOMMENDED_SEED_VALUES),
     )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)

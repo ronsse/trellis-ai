@@ -5,15 +5,16 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import structlog
 import typer
 from rich.console import Console
 from rich.table import Table
 
-import structlog
-
 from trellis.extract.telemetry import analyze_extractor_fallbacks
 from trellis.learning import (
     RECOMMENDED_SEED_VALUES as SCHEMA_EVOLUTION_SEED_DEFAULTS,
+)
+from trellis.learning import (
     analyze_learning_observations,
     analyze_well_known_candidates,
     build_learning_observations_from_event_log,

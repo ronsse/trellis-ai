@@ -839,20 +839,20 @@ def _analyze_kind(
         distinct_domains, avg_signal_quality = _summarize_tags(items)
         if len(distinct_domains) < thresholds.distinct_domains:
             continue
-        if _SIGNAL_QUALITY_ORDER.index(avg_signal_quality) < _SIGNAL_QUALITY_ORDER.index(
-            thresholds.min_signal_quality
-        ):
+        avg_rank = _SIGNAL_QUALITY_ORDER.index(avg_signal_quality)
+        min_rank = _SIGNAL_QUALITY_ORDER.index(thresholds.min_signal_quality)
+        if avg_rank < min_rank:
             continue
 
         first_seen, last_seen = _first_last_seen(items)
-        # If the evidence window is shorter than the configured
-        # minimum, defer the candidate. This filters short-lived spikes.
-        if (last_seen - first_seen) < timedelta(days=thresholds.window_days):
-            # Allow the first_seen to be older than window_start (which
-            # is itself ``now - window_days``); the criterion is the
-            # *span* of evidence, not the start of the window.
-            if first_seen > window_start:
-                continue
+        # Defer candidates whose evidence span is shorter than the
+        # configured minimum AND that started inside the window —
+        # filters short-lived spikes without rejecting older types
+        # that haven't been written to recently. The criterion is the
+        # *span* of evidence, not the start of the window.
+        span = last_seen - first_seen
+        if span < timedelta(days=thresholds.window_days) and first_seen > window_start:
+            continue
 
         candidate_id = _compute_candidate_id(value, kind)
         prior = prior_candidates.get(candidate_id)
@@ -867,21 +867,13 @@ def _analyze_kind(
             continue
 
         canonical_name = suggest_canonical_name(value, kind)
-        if canonical_name == value:
-            # Already canonical-shaped; ADR §2.4 says no suggestion in
-            # that case. Pass through the original so the ADR author
-            # can decide.
-            canonical_name_for_ui = canonical_name
-        else:
-            canonical_name_for_ui = canonical_name
-
-        naming_collision = _detect_naming_collision(canonical_name_for_ui, kind)
-        alignment_uri = _suggest_alignment_uri(canonical_name_for_ui, kind)
+        naming_collision = _detect_naming_collision(canonical_name, kind)
+        alignment_uri = _suggest_alignment_uri(canonical_name, kind)
 
         notes: list[str] = []
         if naming_collision:
             notes.append(
-                f"suggested canonical name {canonical_name_for_ui!r} collides "
+                f"suggested canonical name {canonical_name!r} collides "
                 "with an existing canonical or alias; ADR author must rename "
                 "or alias explicitly"
             )
@@ -896,7 +888,7 @@ def _analyze_kind(
                 avg_signal_quality=avg_signal_quality,
                 first_seen=first_seen,
                 last_seen=last_seen,
-                suggested_canonical_name=canonical_name_for_ui,
+                suggested_canonical_name=canonical_name,
                 suggested_alignment_uri=alignment_uri,
                 candidate_id=candidate_id,
                 cooldown_until=cooldown_until,
