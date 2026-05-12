@@ -518,9 +518,7 @@ def _summarize_tags(
         avg_quality = "standard"
     else:
         # Pick the worst observed (lowest rank).
-        avg_quality = min(
-            qualities, key=lambda q: _SIGNAL_QUALITY_ORDER.index(q)
-        )
+        avg_quality = min(qualities, key=_SIGNAL_QUALITY_ORDER.index)
     return tuple(sorted(domains)), avg_quality
 
 
