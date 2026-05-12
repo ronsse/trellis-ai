@@ -5,16 +5,25 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import structlog
 import typer
+import yaml
 from rich.console import Console
 from rich.table import Table
 
 from trellis.extract.telemetry import analyze_extractor_fallbacks
 from trellis.learning import (
+    LEARNING_NOISE_RETRY_KEY,
+    LEARNING_NOISE_SUCCESS_KEY,
+    LEARNING_PROMOTE_RETRY_KEY,
+    LEARNING_PROMOTE_SUCCESS_KEY,
+    LEARNING_SCORING_COMPONENT,
+    REQUIRED_LEARNING_PARAMETER_KEYS,
     analyze_learning_observations,
     build_learning_observations_from_event_log,
     write_learning_review_artifacts,
 )
+from trellis.ops import ParameterRegistry
 from trellis.retrieve.advisory_generator import AdvisoryGenerator
 from trellis.retrieve.effectiveness import (
     analyze_effectiveness,
@@ -32,8 +41,13 @@ from trellis.retrieve.evaluate import (
 from trellis.retrieve.pack_sections import analyze_pack_sections
 from trellis.retrieve.telemetry import analyze_pack_telemetry
 from trellis.retrieve.token_usage import analyze_token_usage
+from trellis.schemas.parameters import ParameterScope, ParameterSet
 from trellis.stores.advisory_store import AdvisoryStore
+from trellis.stores.base.parameter import ParameterStore
+from trellis_cli.config import get_config_dir
 from trellis_cli.stores import get_document_store, get_event_log
+
+logger = structlog.get_logger(__name__)
 
 analyze_app = typer.Typer(no_args_is_help=True)
 console = Console()
@@ -45,6 +59,164 @@ _RATE_YELLOW = 0.4
 # Extractor-fallback display thresholds (inverted — high rate = bad)
 _FALLBACK_RATE_RED = 0.5
 _FALLBACK_RATE_YELLOW = 0.2
+
+# Seed defaults for the learning ParameterRegistry. These live in the CLI
+# module (NOT in trellis.learning.scoring) per the POC directive in
+# plan-self-improvement-program.md §2 ("loud on misuse" — the library raises
+# when called without a registry; defaults are deliberately operator-facing).
+# Operators dismiss the WARN by running 'trellis admin init-learning-params'
+# which seeds these values to ``~/.config/trellis/learning_params.yaml``.
+LEARNING_PARAMETER_SEED_DEFAULTS: dict[str, float] = {
+    LEARNING_PROMOTE_SUCCESS_KEY: 0.75,
+    LEARNING_PROMOTE_RETRY_KEY: 0.25,
+    LEARNING_NOISE_SUCCESS_KEY: 0.4,
+    LEARNING_NOISE_RETRY_KEY: 0.5,
+}
+
+LEARNING_PARAMS_CONFIG_FILENAME = "learning_params.yaml"
+
+
+class _InMemoryParameterStore(ParameterStore):
+    """Minimal in-memory ParameterStore for CLI invocations without a config.
+
+    Holds a single snapshot keyed by exact scope. The scoring layer only
+    needs ``resolve()`` for its ``ParameterScope(component_id=...)`` query;
+    other methods are minimally implemented to satisfy the ABC. Intentionally
+    not exposed outside this module — operators who want persistence run
+    ``trellis admin init-learning-params``.
+    """
+
+    def __init__(self) -> None:
+        self._snapshots: dict[
+            tuple[str, str | None, str | None, str | None], ParameterSet
+        ] = {}
+
+    def put(self, params: ParameterSet) -> ParameterSet:
+        self._snapshots[params.scope.key()] = params
+        return params
+
+    def get(self, params_version: str) -> ParameterSet | None:
+        for snapshot in self._snapshots.values():
+            if snapshot.params_version == params_version:
+                return snapshot
+        return None
+
+    def get_active(self, scope: ParameterScope) -> ParameterSet | None:
+        return self._snapshots.get(scope.key())
+
+    def resolve(self, scope: ParameterScope) -> ParameterSet | None:
+        # Narrowest first, then walk back to the component-level scope.
+        candidates = [
+            scope,
+            ParameterScope(component_id=scope.component_id),
+        ]
+        seen: set[tuple[str, str | None, str | None, str | None]] = set()
+        for cand in candidates:
+            key = cand.key()
+            if key in seen:
+                continue
+            seen.add(key)
+            active = self.get_active(cand)
+            if active is not None:
+                return active
+        return None
+
+    def list_versions(
+        self,
+        scope: ParameterScope | None = None,
+        *,
+        limit: int = 100,
+    ) -> list[ParameterSet]:
+        if scope is None:
+            return list(self._snapshots.values())[:limit]
+        snapshot = self.get_active(scope)
+        return [snapshot] if snapshot is not None else []
+
+    def close(self) -> None:
+        self._snapshots.clear()
+
+
+def _load_learning_params_config() -> dict[str, float] | None:
+    """Load learning-parameter overrides from the config dir, if present.
+
+    Returns ``None`` when the file does not exist. Raises
+    :class:`typer.BadParameter` if the file exists but is malformed —
+    operators get a loud error rather than a silent fallback to defaults.
+    """
+    config_path = get_config_dir() / LEARNING_PARAMS_CONFIG_FILENAME
+    if not config_path.exists():
+        return None
+    try:
+        raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError as exc:
+        msg = f"Invalid YAML in {config_path}: {exc}"
+        raise typer.BadParameter(msg) from exc
+    if not isinstance(raw, dict):
+        msg = f"{config_path}: expected a mapping, got {type(raw).__name__}"
+        raise typer.BadParameter(msg)
+    values: dict[str, float] = {}
+    for key in REQUIRED_LEARNING_PARAMETER_KEYS:
+        if key not in raw:
+            msg = (
+                f"{config_path}: missing required key {key!r}. "
+                f"Required keys: {list(REQUIRED_LEARNING_PARAMETER_KEYS)}."
+            )
+            raise typer.BadParameter(msg)
+        try:
+            values[key] = float(raw[key])
+        except (TypeError, ValueError) as exc:
+            msg = f"{config_path}: key {key!r} is not a number: {raw[key]!r}"
+            raise typer.BadParameter(msg) from exc
+    return values
+
+
+def _build_learning_registry() -> ParameterRegistry:
+    """Construct a ParameterRegistry for the learning.scoring component.
+
+    Loads ``~/.config/trellis/learning_params.yaml`` if present; otherwise
+    seeds an in-memory store with :data:`LEARNING_PARAMETER_SEED_DEFAULTS`
+    and emits a single WARN log line pointing the operator at
+    ``trellis admin init-learning-params``.
+    """
+    overrides = _load_learning_params_config()
+    values: dict[str, float | int | str | bool]
+    if overrides is None:
+        logger.warning(
+            "learning.parameter_registry.seeded_defaults",
+            component=LEARNING_SCORING_COMPONENT,
+            defaults=dict(LEARNING_PARAMETER_SEED_DEFAULTS),
+            remediation=(
+                "run 'trellis admin init-learning-params' to seed "
+                f"{get_config_dir() / LEARNING_PARAMS_CONFIG_FILENAME}"
+            ),
+        )
+        values = dict(LEARNING_PARAMETER_SEED_DEFAULTS)
+    else:
+        values = dict(overrides)
+    store = _InMemoryParameterStore()
+    store.put(
+        ParameterSet(
+            scope=ParameterScope(component_id=LEARNING_SCORING_COMPONENT),
+            values=values,
+            source="cli:analyze",
+            notes="seeded by trellis_cli.analyze._build_learning_registry",
+        )
+    )
+    return ParameterRegistry(store=store)
+
+
+def _build_learning_registry_or_exit() -> ParameterRegistry:
+    """Wrap :func:`_build_learning_registry` to translate ``BadParameter``.
+
+    The CLI command surface wants a clean :class:`typer.Exit` on
+    misconfiguration rather than the noisy ``BadParameter`` traceback
+    Typer surfaces for option-validation failures.
+    """
+    try:
+        return _build_learning_registry()
+    except typer.BadParameter as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from exc
 
 
 @analyze_app.command("context-effectiveness")
@@ -1028,9 +1200,11 @@ def learning_candidates(
     after a human review pass.
     """
     event_log = get_event_log()
+    registry = _build_learning_registry_or_exit()
     observations = build_learning_observations_from_event_log(event_log, days=days)
     report = analyze_learning_observations(
         observations=observations,
+        registry=registry,
         min_support=min_support,
         artifacts_root=output_dir,
     )

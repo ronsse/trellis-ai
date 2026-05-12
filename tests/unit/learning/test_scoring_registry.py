@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.unit.learning._registry_fixture import build_seeded_registry
 from trellis.learning.scoring import _recommend_learning_action
 from trellis.ops import ParameterRegistry
 from trellis.schemas.parameters import ParameterScope, ParameterSet
@@ -19,12 +20,17 @@ def param_store(tmp_path: Path):
     s.close()
 
 
-def test_recommend_learning_action_defaults_unchanged():
+def test_recommend_learning_action_seeded_defaults() -> None:
+    """With a registry seeded with the historical defaults, the four
+    recommendation buckets fire exactly as before the registry-required
+    refactor. Proves the seed values preserve behaviour."""
+    registry = build_seeded_registry()
     # High success + low retry -> promote_guidance (default thresholds).
     result = _recommend_learning_action(
         item_type="guidance",
         success_rate=0.9,
         retry_rate=0.1,
+        registry=registry,
     )
     assert result == "promote_guidance"
 
@@ -32,13 +38,17 @@ def test_recommend_learning_action_defaults_unchanged():
         item_type="precedent",
         success_rate=0.9,
         retry_rate=0.1,
+        registry=registry,
     )
     assert result == "promote_precedent"
 
     # Low success -> noise.
     assert (
         _recommend_learning_action(
-            item_type="guidance", success_rate=0.2, retry_rate=0.1
+            item_type="guidance",
+            success_rate=0.2,
+            retry_rate=0.1,
+            registry=registry,
         )
         == "investigate_noise"
     )
@@ -46,7 +56,10 @@ def test_recommend_learning_action_defaults_unchanged():
     # In the neutral band -> None.
     assert (
         _recommend_learning_action(
-            item_type="guidance", success_rate=0.5, retry_rate=0.3
+            item_type="guidance",
+            success_rate=0.5,
+            retry_rate=0.3,
+            registry=registry,
         )
         is None
     )

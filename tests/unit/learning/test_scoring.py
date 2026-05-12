@@ -7,13 +7,23 @@ from pathlib import Path
 
 import pytest
 
+from tests.unit.learning._registry_fixture import build_seeded_registry
 from trellis.learning.scoring import (
+    LEARNING_NOISE_SUCCESS_KEY,
+    LEARNING_PROMOTE_SUCCESS_KEY,
     analyze_learning_observations,
     build_learning_promotion_payloads,
     normalize_intent_family,
     prepare_learning_promotions,
     write_learning_review_artifacts,
 )
+from trellis.ops import ParameterRegistry
+
+
+@pytest.fixture
+def learning_registry() -> ParameterRegistry:
+    """Default registry seeded with the historical learning thresholds."""
+    return build_seeded_registry()
 
 # ---------------------------------------------------------------------------
 # normalize_intent_family
@@ -135,25 +145,39 @@ def _make_item(
 
 
 class TestAnalyzeLearningObservations:
-    def test_empty_observations(self) -> None:
-        result = analyze_learning_observations(observations=[])
+    def test_empty_observations(
+        self, learning_registry: ParameterRegistry
+    ) -> None:
+        result = analyze_learning_observations(
+            observations=[], registry=learning_registry
+        )
         assert result["observation_count"] == 0
         assert result["candidate_count"] == 0
         assert result["candidates"] == []
 
-    def test_min_support_filters_single_observation(self) -> None:
+    def test_min_support_filters_single_observation(
+        self, learning_registry: ParameterRegistry
+    ) -> None:
         obs = _make_observation(items=[_make_item()])
-        result = analyze_learning_observations(observations=[obs], min_support=2)
+        result = analyze_learning_observations(
+            observations=[obs], registry=learning_registry, min_support=2
+        )
         assert result["candidate_count"] == 0
 
-    def test_min_support_passes_with_enough_observations(self) -> None:
+    def test_min_support_passes_with_enough_observations(
+        self, learning_registry: ParameterRegistry
+    ) -> None:
         item = _make_item()
         obs1 = _make_observation(run_id="run-1", items=[item])
         obs2 = _make_observation(run_id="run-2", items=[item])
-        result = analyze_learning_observations(observations=[obs1, obs2], min_support=2)
+        result = analyze_learning_observations(
+            observations=[obs1, obs2], registry=learning_registry, min_support=2
+        )
         assert result["candidate_count"] == 1
 
-    def test_success_rate_computed_correctly(self) -> None:
+    def test_success_rate_computed_correctly(
+        self, learning_registry: ParameterRegistry
+    ) -> None:
         # 4 successes out of 4 => success_rate=1.0, which crosses the 0.75 promote
         # threshold so a candidate is produced for inspection.
         item = _make_item(item_id="x")
@@ -162,43 +186,59 @@ class TestAnalyzeLearningObservations:
         obs3 = _make_observation(run_id="r3", outcome="success", items=[item])
         obs4 = _make_observation(run_id="r4", outcome="success", items=[item])
         result = analyze_learning_observations(
-            observations=[obs1, obs2, obs3, obs4], min_support=1
+            observations=[obs1, obs2, obs3, obs4],
+            registry=learning_registry,
+            min_support=1,
         )
         candidate = result["candidates"][0]
         assert candidate["metrics"]["success_rate"] == pytest.approx(1.0, rel=1e-3)
         assert candidate["metrics"]["times_served"] == 4
 
-    def test_promote_guidance_recommendation_for_high_success_rate(self) -> None:
+    def test_promote_guidance_recommendation_for_high_success_rate(
+        self, learning_registry: ParameterRegistry
+    ) -> None:
         item = _make_item(item_type="guidance")
         obs1 = _make_observation(run_id="r1", outcome="success", items=[item])
         obs2 = _make_observation(run_id="r2", outcome="success", items=[item])
         obs3 = _make_observation(run_id="r3", outcome="success", items=[item])
         result = analyze_learning_observations(
-            observations=[obs1, obs2, obs3], min_support=1
+            observations=[obs1, obs2, obs3],
+            registry=learning_registry,
+            min_support=1,
         )
         assert result["candidates"][0]["recommendation_type"] == "promote_guidance"
 
-    def test_promote_precedent_recommendation_for_precedent_type(self) -> None:
+    def test_promote_precedent_recommendation_for_precedent_type(
+        self, learning_registry: ParameterRegistry
+    ) -> None:
         item = _make_item(item_type="precedent")
         obs1 = _make_observation(run_id="r1", outcome="success", items=[item])
         obs2 = _make_observation(run_id="r2", outcome="success", items=[item])
         obs3 = _make_observation(run_id="r3", outcome="success", items=[item])
         result = analyze_learning_observations(
-            observations=[obs1, obs2, obs3], min_support=1
+            observations=[obs1, obs2, obs3],
+            registry=learning_registry,
+            min_support=1,
         )
         assert result["candidates"][0]["recommendation_type"] == "promote_precedent"
 
-    def test_investigate_noise_for_low_success_rate(self) -> None:
+    def test_investigate_noise_for_low_success_rate(
+        self, learning_registry: ParameterRegistry
+    ) -> None:
         item = _make_item()
         obs1 = _make_observation(run_id="r1", outcome="failure", items=[item])
         obs2 = _make_observation(run_id="r2", outcome="failure", items=[item])
         obs3 = _make_observation(run_id="r3", outcome="failure", items=[item])
         result = analyze_learning_observations(
-            observations=[obs1, obs2, obs3], min_support=1
+            observations=[obs1, obs2, obs3],
+            registry=learning_registry,
+            min_support=1,
         )
         assert result["candidates"][0]["recommendation_type"] == "investigate_noise"
 
-    def test_mid_range_success_rate_excluded(self) -> None:
+    def test_mid_range_success_rate_excluded(
+        self, learning_registry: ParameterRegistry
+    ) -> None:
         # success_rate ~0.6, retry_rate 0 — no action taken, candidate excluded
         item = _make_item()
         obss = [
@@ -207,21 +247,33 @@ class TestAnalyzeLearningObservations:
             )
             for i in range(5)
         ]
-        result = analyze_learning_observations(observations=obss, min_support=1)
+        result = analyze_learning_observations(
+            observations=obss, registry=learning_registry, min_support=1
+        )
         # 3/5 = 0.6 success, retry_rate=0 => no action (between thresholds)
         assert result["candidate_count"] == 0
 
-    def test_artifacts_root_stored(self) -> None:
+    def test_artifacts_root_stored(
+        self, learning_registry: ParameterRegistry
+    ) -> None:
         result = analyze_learning_observations(
-            observations=[], artifacts_root="/var/data/artifacts"
+            observations=[],
+            registry=learning_registry,
+            artifacts_root="/var/data/artifacts",
         )
         assert result["artifacts_root"] == "/var/data/artifacts"
 
-    def test_artifacts_root_none_by_default(self) -> None:
-        result = analyze_learning_observations(observations=[])
+    def test_artifacts_root_none_by_default(
+        self, learning_registry: ParameterRegistry
+    ) -> None:
+        result = analyze_learning_observations(
+            observations=[], registry=learning_registry
+        )
         assert result["artifacts_root"] is None
 
-    def test_selection_efficiency_averaged(self) -> None:
+    def test_selection_efficiency_averaged(
+        self, learning_registry: ParameterRegistry
+    ) -> None:
         item = _make_item()
         obs1 = _make_observation(
             run_id="r1", outcome="success", items=[item], selection_efficiency=0.8
@@ -233,22 +285,98 @@ class TestAnalyzeLearningObservations:
             run_id="r3", outcome="success", items=[item], selection_efficiency=0.4
         )
         result = analyze_learning_observations(
-            observations=[obs1, obs2, obs3], min_support=1
+            observations=[obs1, obs2, obs3],
+            registry=learning_registry,
+            min_support=1,
         )
         assert result["candidates"][0]["metrics"][
             "avg_selection_efficiency"
         ] == pytest.approx(0.6, rel=1e-3)
 
-    def test_supporting_run_ids_aggregated(self) -> None:
+    def test_supporting_run_ids_aggregated(
+        self, learning_registry: ParameterRegistry
+    ) -> None:
         item = _make_item()
         obs1 = _make_observation(run_id="run-alpha", outcome="success", items=[item])
         obs2 = _make_observation(run_id="run-beta", outcome="success", items=[item])
         obs3 = _make_observation(run_id="run-gamma", outcome="success", items=[item])
         result = analyze_learning_observations(
-            observations=[obs1, obs2, obs3], min_support=1
+            observations=[obs1, obs2, obs3],
+            registry=learning_registry,
+            min_support=1,
         )
         run_ids = result["candidates"][0]["supporting_run_ids"]
         assert sorted(run_ids) == ["run-alpha", "run-beta", "run-gamma"]
+
+
+class TestRegistryContract:
+    """POC directive: scoring must raise on missing registry / keys.
+
+    Plan §6 in docs/design/plan-parameter-registry-wiring.md requires three
+    scoring-layer assertions: missing-kwarg TypeError, missing-key KeyError,
+    and override responsiveness. The CLI WARN/config tests live in
+    tests/unit/cli/test_analyze.py.
+    """
+
+    def test_analyze_learning_observations_requires_registry(self) -> None:
+        # Per POC directive (plan-self-improvement-program.md §2 "loud on
+        # misuse"), omitting the required registry kwarg must raise rather
+        # than silently substitute hard-coded defaults.
+        with pytest.raises(TypeError, match="registry"):
+            analyze_learning_observations(observations=[])  # type: ignore[call-arg]
+
+    def test_analyze_learning_observations_raises_on_missing_key(self) -> None:
+        # A registry whose snapshot lacks a required key must surface
+        # KeyError naming the missing key — never a silent fallback.
+        empty_registry = build_seeded_registry(replace=True)
+        item = _make_item(item_type="guidance")
+        obs1 = _make_observation(run_id="r1", outcome="success", items=[item])
+        obs2 = _make_observation(run_id="r2", outcome="success", items=[item])
+        obs3 = _make_observation(run_id="r3", outcome="success", items=[item])
+        with pytest.raises(KeyError) as exc_info:
+            analyze_learning_observations(
+                observations=[obs1, obs2, obs3],
+                registry=empty_registry,
+                min_support=1,
+            )
+        # The missing-key message must name the offending key so the
+        # operator knows which value to seed.
+        assert LEARNING_PROMOTE_SUCCESS_KEY in str(exc_info.value)
+
+    def test_recommendation_uses_registry_threshold(self) -> None:
+        # Verify the registry value drives the cut-off: pick a
+        # success_rate of 0.6 — above the default noise threshold (0.4)
+        # so it lands in the neutral band, but below an override of 0.99
+        # so it must be classified as noise.
+        mid_item = _make_item(item_id="mid", item_type="guidance")
+        mid_obss = [
+            _make_observation(
+                run_id=f"r{i}",
+                outcome="success" if i < 3 else "failure",
+                items=[mid_item],
+            )
+            for i in range(5)
+        ]
+
+        # Under defaults: 0.6 success, retry_rate=0 ⇒ neutral, no candidate.
+        default_run = analyze_learning_observations(
+            observations=mid_obss,
+            registry=build_seeded_registry(),
+            min_support=1,
+        )
+        assert default_run["candidate_count"] == 0
+
+        # With noise_success_threshold=0.99: 0.6 <= 0.99 ⇒ investigate_noise.
+        flipped_run = analyze_learning_observations(
+            observations=mid_obss,
+            registry=build_seeded_registry(
+                overrides={LEARNING_NOISE_SUCCESS_KEY: 0.99},
+            ),
+            min_support=1,
+        )
+        assert (
+            flipped_run["candidates"][0]["recommendation_type"] == "investigate_noise"
+        )
 
 
 # ---------------------------------------------------------------------------

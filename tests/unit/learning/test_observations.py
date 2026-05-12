@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.unit.learning._registry_fixture import build_seeded_registry
 from trellis.feedback.models import PackFeedback
 from trellis.feedback.recording import record_feedback
 from trellis.learning import (
@@ -28,6 +29,7 @@ from trellis.learning import (
     prepare_learning_promotions,
     write_learning_review_artifacts,
 )
+from trellis.ops import ParameterRegistry
 from trellis.stores.base.event_log import EventType
 from trellis.stores.sqlite.event_log import SQLiteEventLog
 
@@ -37,6 +39,11 @@ def event_log(tmp_path: Path):
     log = SQLiteEventLog(tmp_path / "events.db")
     yield log
     log.close()
+
+
+@pytest.fixture
+def learning_registry() -> ParameterRegistry:
+    return build_seeded_registry()
 
 
 def _emit_pack_assembled(
@@ -257,7 +264,7 @@ class TestPromoteChain:
     its 30-round corpus."""
 
     def test_consistent_success_promotes_guidance(
-        self, event_log, tmp_path: Path
+        self, event_log, tmp_path: Path, learning_registry: ParameterRegistry
     ) -> None:
         """An item that's helpful 4/4 times across distinct runs and
         is stamped item_type=guidance must surface a
@@ -291,7 +298,11 @@ class TestPromoteChain:
         observations = build_learning_observations_from_event_log(event_log)
         assert len(observations) == 4
 
-        report = analyze_learning_observations(observations=observations, min_support=2)
+        report = analyze_learning_observations(
+            observations=observations,
+            registry=learning_registry,
+            min_support=2,
+        )
         assert report["candidate_count"] == 1
         candidate = report["candidates"][0]
         assert candidate["item_id"] == "guidance:strong"
@@ -299,7 +310,7 @@ class TestPromoteChain:
         assert candidate["metrics"]["success_rate"] == 1.0
 
     def test_consistent_success_on_precedent_promotes_precedent(
-        self, event_log, tmp_path: Path
+        self, event_log, tmp_path: Path, learning_registry: ParameterRegistry
     ) -> None:
         """When ``item_type=precedent``, the recommendation flips to
         ``promote_precedent`` even with the same outcome shape — this
@@ -327,10 +338,16 @@ class TestPromoteChain:
             )
 
         observations = build_learning_observations_from_event_log(event_log)
-        report = analyze_learning_observations(observations=observations, min_support=2)
+        report = analyze_learning_observations(
+            observations=observations,
+            registry=learning_registry,
+            min_support=2,
+        )
         assert report["candidates"][0]["recommendation_type"] == "promote_precedent"
 
-    def test_consistent_failure_flags_noise(self, event_log, tmp_path: Path) -> None:
+    def test_consistent_failure_flags_noise(
+        self, event_log, tmp_path: Path, learning_registry: ParameterRegistry
+    ) -> None:
         """Items in repeatedly failing packs surface as
         ``investigate_noise`` candidates."""
         for n in range(4):
@@ -355,11 +372,15 @@ class TestPromoteChain:
             )
 
         observations = build_learning_observations_from_event_log(event_log)
-        report = analyze_learning_observations(observations=observations, min_support=2)
+        report = analyze_learning_observations(
+            observations=observations,
+            registry=learning_registry,
+            min_support=2,
+        )
         assert report["candidates"][0]["recommendation_type"] == "investigate_noise"
 
     def test_full_promote_chain_round_trips_to_entity_payload(
-        self, event_log, tmp_path: Path
+        self, event_log, tmp_path: Path, learning_registry: ParameterRegistry
     ) -> None:
         """The whole loop: feedback → analyze → write artifacts → an
         operator approves one candidate → ``prepare_learning_promotions``
@@ -391,7 +412,11 @@ class TestPromoteChain:
             )
 
         observations = build_learning_observations_from_event_log(event_log)
-        report = analyze_learning_observations(observations=observations, min_support=2)
+        report = analyze_learning_observations(
+            observations=observations,
+            registry=learning_registry,
+            min_support=2,
+        )
         assert report["candidate_count"] == 1
         candidate = report["candidates"][0]
 

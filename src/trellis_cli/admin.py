@@ -119,6 +119,64 @@ def init(
         console.print(f"  Data:   {actual_data_dir}")
 
 
+@admin_app.command("init-learning-params")
+def init_learning_params(
+    force: bool = typer.Option(
+        False, "--force", help="Overwrite existing learning_params.yaml"
+    ),
+    output_format: str = typer.Option(
+        "text", "--format", help="Output format: text or json"
+    ),
+) -> None:
+    """Seed ``learning_params.yaml`` so ``trellis analyze learning-candidates``
+    stops WARNing about defaulted thresholds.
+
+    Writes the four required learning thresholds to
+    ``$TRELLIS_CONFIG_DIR/learning_params.yaml`` (defaults to
+    ``~/.trellis/learning_params.yaml``). Operators can edit the values
+    afterwards; the analyze CLI loads them on the next invocation.
+    """
+    # Import inside the function to avoid pulling analyze CLI deps (yaml,
+    # ParameterRegistry, etc) on every admin invocation.
+    from trellis_cli.analyze import (  # noqa: PLC0415
+        LEARNING_PARAMETER_SEED_DEFAULTS,
+        LEARNING_PARAMS_CONFIG_FILENAME,
+    )
+
+    config_dir = get_config_dir()
+    config_dir.mkdir(parents=True, exist_ok=True)
+    target = config_dir / LEARNING_PARAMS_CONFIG_FILENAME
+
+    if target.exists() and not force:
+        if output_format == "json":
+            print(json.dumps({"status": "exists", "path": str(target)}))
+        else:
+            console.print(
+                f"[yellow]Already exists: {target}."
+                " Pass --force to overwrite.[/yellow]"
+            )
+        raise typer.Exit(code=0)
+
+    import yaml  # noqa: PLC0415
+
+    target.write_text(
+        yaml.dump(
+            dict(LEARNING_PARAMETER_SEED_DEFAULTS),
+            default_flow_style=False,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    if output_format == "json":
+        print(json.dumps({"status": "written", "path": str(target)}))
+    else:
+        console.print(f"[green]Wrote {target}[/green]")
+        console.print(
+            "[dim]Edit values to tune the promote / noise thresholds, then"
+            " rerun 'trellis analyze learning-candidates'.[/dim]"
+        )
+
+
 @admin_app.command()
 def health(
     output_format: str = typer.Option(

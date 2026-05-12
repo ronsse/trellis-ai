@@ -33,8 +33,29 @@ if TYPE_CHECKING:
 _LEARNING_ARTIFACT_VERSION = "1.0"
 _DEFAULT_MIN_SUPPORT = 2
 
-# Component id used when resolving registry overrides for promotion/noise thresholds.
-_SCORING_COMPONENT = "learning.scoring"
+# Component id used when resolving registry overrides for promotion/noise
+# thresholds. Exported so the CLI seed path and test fixtures share one
+# source of truth.
+LEARNING_SCORING_COMPONENT = "learning.scoring"
+
+# Registry parameter keys. Operators tune these per ``(component, domain,
+# intent_family)`` cell via ``ParameterStore``. Per the POC directive
+# (plan-self-improvement-program §2) the scoring module carries no
+# hard-coded defaults — callers must supply a registry whose snapshot
+# resolves every key below or :func:`analyze_learning_observations` raises
+# ``KeyError``. Seed defaults live in the CLI module (see
+# ``trellis_cli.analyze``) so a fresh install can run without a config.
+LEARNING_PROMOTE_SUCCESS_KEY = "promote_success_threshold"
+LEARNING_PROMOTE_RETRY_KEY = "promote_retry_threshold"
+LEARNING_NOISE_SUCCESS_KEY = "noise_success_threshold"
+LEARNING_NOISE_RETRY_KEY = "noise_retry_threshold"
+
+REQUIRED_LEARNING_PARAMETER_KEYS: tuple[str, ...] = (
+    LEARNING_PROMOTE_SUCCESS_KEY,
+    LEARNING_PROMOTE_RETRY_KEY,
+    LEARNING_NOISE_SUCCESS_KEY,
+    LEARNING_NOISE_RETRY_KEY,
+)
 
 _INTENT_FAMILY_KEYWORDS: tuple[tuple[tuple[str, ...], str], ...] = (
     (("analyze", "profile", "explore"), "source_analysis"),
@@ -142,9 +163,9 @@ def _accumulate_item(
 def analyze_learning_observations(
     *,
     observations: Sequence[Mapping[str, Any]],
+    registry: ParameterRegistry,
     min_support: int = _DEFAULT_MIN_SUPPORT,
     artifacts_root: str | Path | None = None,
-    registry: ParameterRegistry | None = None,
 ) -> dict[str, Any]:
     candidate_map: dict[tuple[str, str], dict[str, Any]] = {}
 
@@ -393,11 +414,6 @@ def build_learning_promotion_payloads(
     }
 
 
-_PROMOTE_SUCCESS_THRESHOLD = 0.75
-_PROMOTE_RETRY_THRESHOLD = 0.25
-_NOISE_SUCCESS_THRESHOLD = 0.4
-_NOISE_RETRY_THRESHOLD = 0.5
-
 #: Recommendation values that flow through ``prepare_learning_promotions``
 #: into ENTITY_CREATE payloads. The CLI surface checks the candidate's
 #: ``recommendation_type`` against this set to decide whether to surface
@@ -407,32 +423,49 @@ PROMOTE_RECOMMENDATIONS: frozenset[str] = frozenset(
 )
 
 
+def _resolve_required_threshold(
+    registry: ParameterRegistry, scope: ParameterScope, key: str
+) -> float:
+    """Resolve a required threshold from the registry.
+
+    Per the POC directive (plan-self-improvement-program §2), no hard-coded
+    fallback exists at the scoring layer. A missing key raises ``KeyError``
+    naming both the key and the scope so operators can seed it.
+    """
+    # Sentinel object distinguishes "key resolved to None" from "key absent".
+    sentinel: object = object()
+    value = registry.get(scope, key, sentinel)
+    if value is sentinel:
+        msg = (
+            f"ParameterRegistry is missing required key {key!r} for scope "
+            f"{scope.key()!r}. Seed it via 'trellis admin init-learning-params' "
+            f"or call ParameterStore.put() with a ParameterSet containing keys: "
+            f"{list(REQUIRED_LEARNING_PARAMETER_KEYS)}."
+        )
+        raise KeyError(msg)
+    return float(value)
+
+
 def _recommend_learning_action(
     *,
     item_type: str,
     success_rate: float,
     retry_rate: float,
-    registry: ParameterRegistry | None = None,
+    registry: ParameterRegistry,
 ) -> str | None:
-    scope = ParameterScope(component_id=_SCORING_COMPONENT)
-    if registry is None:
-        promote_success = _PROMOTE_SUCCESS_THRESHOLD
-        promote_retry = _PROMOTE_RETRY_THRESHOLD
-        noise_success = _NOISE_SUCCESS_THRESHOLD
-        noise_retry = _NOISE_RETRY_THRESHOLD
-    else:
-        promote_success = registry.get(
-            scope, "promote_success_threshold", _PROMOTE_SUCCESS_THRESHOLD
-        )
-        promote_retry = registry.get(
-            scope, "promote_retry_threshold", _PROMOTE_RETRY_THRESHOLD
-        )
-        noise_success = registry.get(
-            scope, "noise_success_threshold", _NOISE_SUCCESS_THRESHOLD
-        )
-        noise_retry = registry.get(
-            scope, "noise_retry_threshold", _NOISE_RETRY_THRESHOLD
-        )
+    scope = ParameterScope(component_id=LEARNING_SCORING_COMPONENT)
+    promote_success = _resolve_required_threshold(
+        registry, scope, LEARNING_PROMOTE_SUCCESS_KEY
+    )
+    promote_retry = _resolve_required_threshold(
+        registry, scope, LEARNING_PROMOTE_RETRY_KEY
+    )
+    noise_success = _resolve_required_threshold(
+        registry, scope, LEARNING_NOISE_SUCCESS_KEY
+    )
+    noise_retry = _resolve_required_threshold(
+        registry, scope, LEARNING_NOISE_RETRY_KEY
+    )
 
     if success_rate >= promote_success and retry_rate <= promote_retry:
         if item_type == "precedent":
@@ -487,7 +520,13 @@ def _utc_now() -> str:
 
 
 __all__ = [
+    "LEARNING_NOISE_RETRY_KEY",
+    "LEARNING_NOISE_SUCCESS_KEY",
+    "LEARNING_PROMOTE_RETRY_KEY",
+    "LEARNING_PROMOTE_SUCCESS_KEY",
+    "LEARNING_SCORING_COMPONENT",
     "PROMOTE_RECOMMENDATIONS",
+    "REQUIRED_LEARNING_PARAMETER_KEYS",
     "analyze_learning_observations",
     "build_learning_promotion_payloads",
     "normalize_intent_family",
