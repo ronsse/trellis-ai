@@ -181,7 +181,7 @@ class TestValidateConnectivityFailures:
             errors = excinfo.value.errors
             assert len(errors) == 1
             label, exc = errors[0]
-            assert label.startswith("neo4j-driver:bolt://")
+            assert label.startswith("bolt-driver:bolt://")
             assert "ServiceUnavailable" in str(exc)
 
     def test_connectivity_failure_aggregates_with_config_failure(
@@ -213,7 +213,7 @@ class TestValidateConnectivityFailures:
             labels = [label for label, _ in excinfo.value.errors]
             # Both kinds of failure surface in the same aggregate.
             assert any(label == "trace" for label in labels)
-            assert any(label.startswith("neo4j-driver:") for label in labels)
+            assert any(label.startswith("bolt-driver:") for label in labels)
 
     def test_connectivity_skipped_when_no_neo4j_drivers(
         self, monkeypatch: pytest.MonkeyPatch

@@ -1,28 +1,50 @@
-"""Shared helpers for Neo4j-backed stores.
+"""Neo4j-specific helpers — built on the shared Bolt base.
 
-Four concerns live here:
+The driver, session, and connection-verification machinery is shared
+across all Bolt-speaking backends and lives in
+:mod:`trellis.stores.bolt_opencypher.base`. This module:
 
-1. Detecting whether the optional ``neo4j`` driver is installed.
-2. Holding the driver-construction kwargs that production deployments
-   need (timeouts, pool sizing, keep-alive) in one place — :class:`DriverConfig`.
-3. Building a ``Driver`` from a URI / user / password + a config — :func:`build_driver`.
-4. The :class:`Neo4jSessionRunner` mixin that wraps the
-   ``session.execute_{read,write}(lambda tx: ...)`` ceremony that
-   otherwise repeats at every call site.
-
-Driver sharing across stores (the ``Neo4jGraphStore`` + ``Neo4jVectorStore``
-pair pointing at the same instance) is handled by :class:`StoreRegistry`,
-which constructs a single driver per ``(uri, user)`` and injects it into
-both stores. Stores own a driver when they build their own; they do *not*
-own one that was injected. ``close()`` respects that distinction so the
-registry's eventual shutdown sweep doesn't race with a store's individual
-``close()`` call.
+1. Re-exports the shared types under their historical Neo4j-prefixed
+   names (``DriverConfig`` = ``BoltDriverConfig``,
+   ``Neo4jSessionRunner`` = ``BoltSessionRunner``) for backward
+   compatibility with existing imports from
+   ``trellis.stores.neo4j.base``.
+2. Owns :func:`build_driver` — Neo4j-specific because it uses basic
+   authentication. ArcadeDB does the same; managed-Neptune would wrap
+   it with SigV4.
+3. Owns :func:`wait_for_vector_index_online` and
+   :class:`VectorIndexNotOnlineError` — Neo4j vector-index specific
+   (the SHOW VECTOR INDEXES surface is Neo4j-only today).
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
+
+from trellis.stores.bolt_opencypher.base import (
+    HAS_NEO4J,
+    BoltDriverConfig,
+    BoltSessionRunner,
+    check_driver_installed,
+    verify_connectivity,
+)
+
+# Backward-compatible aliases. Existing code imports ``DriverConfig``
+# and ``Neo4jSessionRunner`` from ``trellis.stores.neo4j.base``; keep
+# those names resolvable.
+DriverConfig = BoltDriverConfig
+Neo4jSessionRunner = BoltSessionRunner
+
+__all__ = [
+    "HAS_NEO4J",
+    "DriverConfig",
+    "Neo4jSessionRunner",
+    "VectorIndexNotOnlineError",
+    "build_driver",
+    "check_driver_installed",
+    "verify_connectivity",
+    "wait_for_vector_index_online",
+]
 
 if TYPE_CHECKING:
     from neo4j import Driver
@@ -30,70 +52,9 @@ if TYPE_CHECKING:
 try:
     from neo4j import GraphDatabase
 
-    HAS_NEO4J = True
+    _HAS_NEO4J_LOCAL = True
 except ImportError:
-    HAS_NEO4J = False
-
-_MISSING_MSG = (
-    "neo4j driver is required for Neo4jGraphStore / Neo4jVectorStore. "
-    "Install it with: pip install 'trellis-ai[neo4j]'"
-)
-
-
-def check_driver_installed() -> None:
-    """Raise ``ImportError`` with install hint if ``neo4j`` is unavailable."""
-    if not HAS_NEO4J:
-        raise ImportError(_MISSING_MSG)
-
-
-# Sane production defaults. These match what the Neo4j Python driver
-# documentation recommends for a long-lived service: a 30-second ceiling
-# on the initial connect handshake, a generous-but-bounded pool so a
-# misbehaving caller can't open unlimited sockets, retry that gives up
-# faster than the default 30s minute so a stuck transaction surfaces as
-# a clear error, and TCP keep-alive so AuraDB / load balancers don't
-# silently kill idle connections.
-_DEFAULT_USER_AGENT = "trellis-ai"
-
-
-@dataclass(frozen=True)
-class DriverConfig:
-    """Driver construction kwargs with production-safe defaults.
-
-    Pass an instance to :func:`build_driver` (or via the
-    ``driver_config`` constructor kwarg on ``Neo4jGraphStore`` /
-    ``Neo4jVectorStore``) to override individual fields. Frozen so
-    instances are safe to share across stores.
-
-    Attributes
-    ----------
-    connection_timeout
-        Seconds the driver waits to establish a Bolt connection before
-        raising. Default 30s — anything longer typically means DNS or
-        TLS misconfiguration; surface fast. Today (without this kwarg)
-        a misconfigured network hangs the call indefinitely.
-    max_connection_pool_size
-        Maximum concurrent Bolt connections per driver. Default 100 —
-        matches AuraDB Pro's default per-instance limit and is
-        comfortably above any single Trellis caller's needs.
-    max_transaction_retry_time
-        Seconds the driver retries a transient transaction failure
-        (e.g. ``TransientError`` from concurrent writes) before
-        re-raising. Default 30s.
-    keep_alive
-        Whether the driver enables TCP keep-alive on its connections.
-        Default True — required for AuraDB and most cloud LBs that
-        silently drop idle TCP sessions after a few minutes.
-    user_agent
-        Identifies Trellis in Neo4j's session monitoring / audit logs.
-        Defaults to ``"trellis-ai"``.
-    """
-
-    connection_timeout: float = 30.0
-    max_connection_pool_size: int = 100
-    max_transaction_retry_time: float = 30.0
-    keep_alive: bool = True
-    user_agent: str = _DEFAULT_USER_AGENT
+    _HAS_NEO4J_LOCAL = False
 
 
 def build_driver(
@@ -103,12 +64,12 @@ def build_driver(
     *,
     config: DriverConfig | None = None,
 ) -> Driver:
-    """Construct a Neo4j ``Driver`` with the given config (or defaults).
+    """Construct a Neo4j ``Driver`` with basic auth + the given config.
 
     Caller owns the returned driver's lifecycle — call ``driver.close()``
     when done. Use ``StoreRegistry`` to share one driver across stores
-    pointing at the same instance; otherwise each ``Neo4jGraphStore`` /
-    ``Neo4jVectorStore`` constructs its own pool.
+    pointing at the same instance; otherwise each store constructs its
+    own pool.
     """
     cfg = config or DriverConfig()
     return GraphDatabase.driver(
@@ -120,65 +81,6 @@ def build_driver(
         keep_alive=cfg.keep_alive,
         user_agent=cfg.user_agent,
     )
-
-
-class Neo4jSessionRunner:
-    """Mixin: thin wrappers over ``session.execute_{read,write}``.
-
-    Subclasses must expose ``self._driver`` (a Neo4j ``Driver``) and
-    ``self._database`` (target database name). Each helper opens its
-    own session — appropriate for one-shot operations, but bulk paths
-    that issue many round trips back-to-back should manage a single
-    session themselves to avoid per-call connection-acquisition cost.
-    """
-
-    _driver: Driver
-    _database: str
-
-    def _run_read_single(self, cypher: str, **params: Any) -> Any:
-        """Run a read transaction and return the single row (or ``None``)."""
-        with self._driver.session(database=self._database) as session:
-            return session.execute_read(lambda tx: tx.run(cypher, **params).single())
-
-    def _run_read_list(self, cypher: str, **params: Any) -> Any:
-        """Run a read transaction and return all rows as a list.
-
-        Returns ``Any`` rather than ``list[Any]`` because the ``neo4j``
-        package is an optional extra — without it installed, mypy types
-        ``Driver`` and ``Session`` as ``Any`` and ``warn_return_any``
-        flags ``list[Any]`` annotations on values that flow through
-        them. Callers iterate the result, so the precise type is moot.
-        """
-        with self._driver.session(database=self._database) as session:
-            return session.execute_read(lambda tx: list(tx.run(cypher, **params)))
-
-    def _run_write(self, cypher: str, **params: Any) -> None:
-        """Run a write transaction, discarding any result rows."""
-        with self._driver.session(database=self._database) as session:
-            session.execute_write(lambda tx: tx.run(cypher, **params).consume())
-
-    def _run_write_single(self, cypher: str, **params: Any) -> Any:
-        """Run a write transaction and return the single row (or ``None``)."""
-        with self._driver.session(database=self._database) as session:
-            return session.execute_write(lambda tx: tx.run(cypher, **params).single())
-
-
-def verify_connectivity(driver: Driver) -> None:
-    """Perform a Bolt round-trip to confirm the driver can reach the server.
-
-    Wraps ``Driver.verify_connectivity()`` — the official driver builtin
-    that probes the server with a ``RESET`` and raises if the
-    connection can't be established. Used by
-    :meth:`StoreRegistry.validate` when ``check_connectivity=True`` so
-    operators see "Neo4j unreachable" at startup rather than as an
-    opaque Bolt error on the first request.
-
-    Raises whatever the driver raises (``ServiceUnavailable``,
-    ``AuthError``, etc.) — caller is expected to wrap the failure into
-    a higher-level aggregate (typically
-    :class:`RegistryValidationError`).
-    """
-    driver.verify_connectivity()
 
 
 # Default poll cadence for :func:`wait_for_vector_index_online`. 0.5s is

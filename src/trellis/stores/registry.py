@@ -604,11 +604,13 @@ class StoreRegistry:
         self._cache: dict[str, Any] = {}
         self._embedding_fn_cache: Callable[[str], list[float]] | None = _UNSET
         self._budget_config_cache: Any = _UNSET
-        # Shared Neo4j drivers: one ``Driver`` per ``(uri, user)`` so a
+        # Shared Bolt drivers: one ``Driver`` per ``(uri, user)`` so a
         # graph + vector pair pointing at the same instance reuses one
-        # connection pool. Closed by :meth:`close` after individual
-        # stores have closed (a no-op for stores with injected drivers).
-        self._neo4j_drivers: dict[tuple[str, str], Any] = {}
+        # connection pool. Used by Neo4j today; future Bolt-speaking
+        # backends share the same cache. Closed by :meth:`close` after
+        # individual stores have closed (a no-op for stores with
+        # injected drivers).
+        self._bolt_drivers: dict[tuple[str, str], Any] = {}
         self._knowledge = _KnowledgePlane(self)
         self._operational = _OperationalPlane(self)
 
@@ -811,9 +813,9 @@ class StoreRegistry:
         key = (uri, user)
 
         new_params = {k: v for k, v in params.items() if k != "driver_config"}
-        if key in self._neo4j_drivers:
+        if key in self._bolt_drivers:
             new_params.pop("password", None)
-            new_params["driver"] = self._neo4j_drivers[key]
+            new_params["driver"] = self._bolt_drivers[key]
             return new_params
 
         if "password" not in params:
@@ -835,7 +837,7 @@ class StoreRegistry:
             raise TypeError(msg)
 
         driver = build_driver(uri, user, params["password"], config=cfg)
-        self._neo4j_drivers[key] = driver
+        self._bolt_drivers[key] = driver
         new_params.pop("password")
         new_params["driver"] = driver
         return new_params
@@ -1079,12 +1081,13 @@ class StoreRegistry:
         -------------------
 
         When ``check_connectivity=True``, additionally performs a Bolt
-        round-trip per cached Neo4j driver via
-        :func:`trellis.stores.neo4j.base.verify_connectivity`. Failures
-        (``ServiceUnavailable``, ``AuthError``, etc.) are added to the
-        same aggregate so the operator sees both config errors and
-        unreachable-backend errors in one shot. ``store_type`` for each
-        connectivity error is reported as ``"neo4j-driver:<uri>"``.
+        round-trip per cached Bolt driver via
+        :func:`trellis.stores.bolt_opencypher.base.verify_connectivity`.
+        Failures (``ServiceUnavailable``, ``AuthError``, etc.) are
+        added to the same aggregate so the operator sees both config
+        errors and unreachable-backend errors in one shot.
+        ``store_type`` for each connectivity error is reported as
+        ``"bolt-driver:<uri>"``.
 
         Default (``check_connectivity=None``): respect the
         ``TRELLIS_VALIDATE_CONNECTIVITY`` env var (truthy values
@@ -1138,7 +1141,7 @@ class StoreRegistry:
                 )
 
         if _resolve_connectivity_check(check_connectivity):
-            errors.extend(self._check_neo4j_connectivity())
+            errors.extend(self._check_bolt_connectivity())
 
         # Persist first-boot fingerprints only when nothing else failed.
         # If any store crashed during instantiation, leave the meta file
@@ -1158,24 +1161,29 @@ class StoreRegistry:
             store_count=len(targets),
         )
 
-    def _check_neo4j_connectivity(self) -> list[tuple[str, Exception]]:
-        """Ping every cached Neo4j driver. Returns ``(label, exc)`` per failure."""
-        if not self._neo4j_drivers:
+    def _check_bolt_connectivity(self) -> list[tuple[str, Exception]]:
+        """Ping every cached Bolt driver. Returns ``(label, exc)`` per failure.
+
+        Covers all Bolt-speaking backends — the underlying
+        ``verify_connectivity`` call is the same Bolt-level round-trip
+        regardless of which server is at the other end.
+        """
+        if not self._bolt_drivers:
             return []
-        from trellis.stores.neo4j.base import (  # noqa: PLC0415
+        from trellis.stores.bolt_opencypher.base import (  # noqa: PLC0415
             verify_connectivity,
         )
 
         failures: list[tuple[str, Exception]] = []
-        for (uri, user), driver in self._neo4j_drivers.items():
-            label = f"neo4j-driver:{uri}"
+        for (uri, user), driver in self._bolt_drivers.items():
+            label = f"bolt-driver:{uri}"
             try:
                 verify_connectivity(driver)
-                logger.debug("neo4j_connectivity_ok", uri=uri, user=user)
+                logger.debug("bolt_connectivity_ok", uri=uri, user=user)
             except Exception as exc:
                 failures.append((label, exc))
                 logger.warning(
-                    "neo4j_connectivity_check_failed",
+                    "bolt_connectivity_check_failed",
                     uri=uri,
                     user=user,
                     error=str(exc),
@@ -1499,12 +1507,12 @@ class StoreRegistry:
             except Exception:
                 logger.warning("store_close_failed", store=type(store).__name__)
         self._cache.clear()
-        for key, driver in self._neo4j_drivers.items():
+        for key, driver in self._bolt_drivers.items():
             try:
                 driver.close()
             except Exception:
-                logger.warning("neo4j_driver_close_failed", uri=key[0], user=key[1])
-        self._neo4j_drivers.clear()
+                logger.warning("bolt_driver_close_failed", uri=key[0], user=key[1])
+        self._bolt_drivers.clear()
 
     def __enter__(self) -> StoreRegistry:
         """Enable use as a context manager — see :meth:`close`."""
