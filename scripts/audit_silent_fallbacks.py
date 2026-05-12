@@ -1,5 +1,4 @@
-# ruff: noqa: E501, EM102, ERA001, PERF401, PLR0911, PLR0912, PLR0915, PLR2004
-# ruff: noqa: SIM103, SIM108, TRY003, ARG001
+# ruff: noqa: EM102, TRY003, PLR0911, PLR0915, PLR2004
 """Silent-fallback audit script (Cleanup C2 Phase 0).
 
 Walks a source tree, locates every ``except`` clause, and classifies each
@@ -38,7 +37,7 @@ import ast
 import sys
 from collections import Counter, defaultdict
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -67,44 +66,42 @@ BUCKET_GUARD = "GUARD"
 BUCKET_TEST_ONLY = "TEST-ONLY"
 BUCKET_NOT_SILENT = "NOT-SILENT"  # filtered out before report — handler re-raises
 
+BUCKET_ORDER = (BUCKET_DEFECT, BUCKET_GRACEFUL, BUCKET_GUARD, BUCKET_TEST_ONLY)
+
+# Catch kinds the heuristic treats as "broad".
+_BROAD_CATCH = frozenset({"bare", "Exception", "BaseException"})
+
+# Logging-call attribute names recognised by ``_is_logging_call``.
+_LOG_METHODS = frozenset(
+    {"debug", "info", "warning", "warn", "error", "exception", "critical"}
+)
+
+# Function-name prefixes that signal an intentional swallow on failure.
+_TRY_MAYBE_PREFIXES = ("try_", "maybe_", "_try_", "_maybe_")
+
 
 # ---------------------------------------------------------------------------
 # Data classes
 # ---------------------------------------------------------------------------
 
 
-@dataclass
+@dataclass(frozen=True)
 class Finding:
     """One ``except`` clause with classification metadata."""
 
-    path: Path
     relpath: str
     line: int
-    end_line: int
     except_text: str
-    handler_excerpt: list[str]
-    handler_pattern: (
-        str  # one of: pass, return-empty, log-return-empty, log-only, other
-    )
-    catch_kind: str  # one of: bare, Exception, BaseException, specific
+    handler_excerpt: tuple[str, ...]
+    handler_pattern: str  # pass | return-empty | log-return-empty | log-only | other
+    catch_kind: str  # bare | Exception | BaseException | specific
     function_name: str | None
     bucket: str
     note: str
 
-    def is_silent(self) -> bool:
-        return self.bucket != BUCKET_NOT_SILENT
-
-
-@dataclass
-class FileReport:
-    """All findings for a single file (in source order)."""
-
-    relpath: str
-    findings: list[Finding] = field(default_factory=list)
-
 
 # ---------------------------------------------------------------------------
-# Walker
+# AST walker
 # ---------------------------------------------------------------------------
 
 
@@ -115,19 +112,17 @@ class ExceptVisitor(ast.NodeVisitor):
         self.handlers: list[tuple[ast.ExceptHandler, str | None]] = []
         self._function_stack: list[str] = []
 
-    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:  # noqa: N802
+    def _visit_function(
+        self, node: ast.FunctionDef | ast.AsyncFunctionDef
+    ) -> None:
         self._function_stack.append(node.name)
         try:
             self.generic_visit(node)
         finally:
             self._function_stack.pop()
 
-    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:  # noqa: N802
-        self._function_stack.append(node.name)
-        try:
-            self.generic_visit(node)
-        finally:
-            self._function_stack.pop()
+    visit_FunctionDef = _visit_function  # noqa: N815
+    visit_AsyncFunctionDef = _visit_function  # noqa: N815
 
     def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:  # noqa: N802
         enclosing = self._function_stack[-1] if self._function_stack else None
@@ -140,25 +135,12 @@ class ExceptVisitor(ast.NodeVisitor):
 # ---------------------------------------------------------------------------
 
 
-def _format_except_clause(node: ast.ExceptHandler) -> str:
-    """Render the ``except`` clause line text (without the body)."""
-    if node.type is None:
-        prefix = "except"
-    else:
-        prefix = "except " + ast.unparse(node.type)
-    if node.name:
-        prefix = f"{prefix} as {node.name}"
-    return prefix + ":"
-
-
 def _catch_kind(node: ast.ExceptHandler) -> str:
     if node.type is None:
         return "bare"
     text = ast.unparse(node.type)
-    if text == "Exception":
-        return "Exception"
-    if text == "BaseException":
-        return "BaseException"
+    if text in {"Exception", "BaseException"}:
+        return text
     return "specific"
 
 
@@ -168,81 +150,45 @@ def _is_empty_return(stmt: ast.stmt) -> bool:
         return False
     if stmt.value is None:
         return True
-    try:
-        rendered = ast.unparse(stmt.value).strip()
-    except (
-        Exception
-    ) as exc:  # pragma: no cover — ast.unparse raises only on malformed AST
-        raise RuntimeError(f"ast.unparse failed on return value: {exc!r}") from exc
-    return rendered in _EMPTY_RETURN_REPRS
+    return ast.unparse(stmt.value).strip() in _EMPTY_RETURN_REPRS
 
 
 def _handler_reraises(body: list[ast.stmt]) -> bool:
-    """True if any statement (recursively) is a bare ``raise``."""
-    for stmt in body:
-        for sub in ast.walk(stmt):
-            if isinstance(sub, ast.Raise):
-                return True
-    return False
+    """True if any statement (recursively) is a ``raise``."""
+    return any(
+        isinstance(sub, ast.Raise) for stmt in body for sub in ast.walk(stmt)
+    )
 
 
 def _is_logging_call(stmt: ast.stmt) -> bool:
-    """Heuristic: True if stmt is an expression-statement calling something
-    like ``logger.warning(...)`` / ``log.error(...)`` / ``print(...)``."""
-    if not isinstance(stmt, ast.Expr):
+    """Heuristic: True if stmt is a logging-method or print expression-stmt."""
+    if not isinstance(stmt, ast.Expr) or not isinstance(stmt.value, ast.Call):
         return False
-    call = stmt.value
-    if not isinstance(call, ast.Call):
-        return False
-    func = call.func
+    func = stmt.value.func
     if isinstance(func, ast.Attribute):
-        name = func.attr.lower()
-        return name in {
-            "debug",
-            "info",
-            "warning",
-            "warn",
-            "error",
-            "exception",
-            "critical",
-        }
-    if isinstance(func, ast.Name) and func.id == "print":
-        return True
-    return False
+        return func.attr.lower() in _LOG_METHODS
+    return isinstance(func, ast.Name) and func.id == "print"
 
 
 def _classify_handler_body(body: list[ast.stmt]) -> str:
-    """Return one of: pass, return-empty, log-return-empty, log-only, other.
-
-    ``pass``: body is exactly ``[Pass]``.
-    ``return-empty``: body returns an empty sentinel with no other action.
-    ``log-return-empty``: body is one logging call followed by an empty return.
-    ``log-only``: body is only logging calls (no return).
-    ``other``: anything else.
-    """
+    """Return one of: pass, return-empty, log-return-empty, log-only, other."""
     if len(body) == 1 and isinstance(body[0], ast.Pass):
         return "pass"
     if len(body) == 1 and _is_empty_return(body[0]):
         return "return-empty"
-    if len(body) == 2 and _is_logging_call(body[0]) and _is_empty_return(body[1]):
-        return "log-return-empty"
-    if body and all(_is_logging_call(s) for s in body):
-        return "log-only"
-    # Three+ statements that end with empty return preceded only by logging
-    # also counts as log-return-empty (e.g. logger.warning(...); logger.debug(...); return None).
     if (
         len(body) >= 2
         and _is_empty_return(body[-1])
         and all(_is_logging_call(s) for s in body[:-1])
     ):
         return "log-return-empty"
+    if body and all(_is_logging_call(s) for s in body):
+        return "log-only"
     return "other"
 
 
 def _looks_like_try_or_maybe(function_name: str | None) -> bool:
-    if not function_name:
-        return False
-    return function_name.startswith(("try_", "maybe_", "_try_", "_maybe_"))
+    return function_name is not None and function_name.startswith(_TRY_MAYBE_PREFIXES)
 
 
 def _bucket_for(
@@ -259,81 +205,91 @@ def _bucket_for(
     indicate the handler should be filtered out of the report (it
     re-raises somewhere).
     """
-    # First: handler that re-raises is not silent. Skip from report.
     if _handler_reraises(body):
         return BUCKET_NOT_SILENT, ""
 
     # Tests get their own bucket regardless of pattern.
-    if "tests/" in relpath.replace("\\", "/") or relpath.startswith("tests"):
+    if "tests/" in relpath or relpath.startswith("tests"):
         return BUCKET_TEST_ONLY, ""
 
-    note_bits: list[str] = []
-
-    # Catch-too-broad is always at least a reviewer concern.
-    if catch_kind in {"bare", "Exception", "BaseException"}:
-        note_bits.append(f"broad catch ({catch_kind})")
-
-    # Function naming hints intent ("try_X" / "maybe_Y" are by convention
-    # allowed to swallow on failure).
+    broad = catch_kind in _BROAD_CATCH
     try_maybe = _looks_like_try_or_maybe(function_name)
+    broad_prefix = f"broad catch ({catch_kind})" if broad else ""
+
+    # The original behaviour: only the return-empty/log-return-empty DEFECT
+    # branch appends its default to the broad-catch prefix. Every other
+    # branch uses the prefix when present and the default otherwise.
+    def fallback(default: str) -> str:
+        return broad_prefix or default
 
     if handler_pattern == "pass":
-        # Bare pass with no logging is almost always a defect, regardless
-        # of catch breadth.
-        bucket = BUCKET_DEFECT
         if try_maybe:
-            note_bits.append("function name suggests intentional swallow")
-            bucket = BUCKET_GRACEFUL
-        return bucket, "; ".join(note_bits) or "silent pass — caller has no signal."
+            return BUCKET_GRACEFUL, fallback(
+                "function name suggests intentional swallow"
+            )
+        return BUCKET_DEFECT, fallback("silent pass — caller has no signal.")
 
     if handler_pattern in {"return-empty", "log-return-empty"}:
         if try_maybe:
-            return (
-                BUCKET_GRACEFUL,
-                "; ".join(note_bits)
-                or "function named try_/maybe_ — empty return is the conventional signal.",
+            return BUCKET_GRACEFUL, fallback(
+                "function named try_/maybe_ — empty return is the conventional signal."
             )
-        bucket = BUCKET_DEFECT
-        if handler_pattern == "log-return-empty":
-            note_bits.append(
-                "logs warning then returns empty — classic silent-fallback shape"
-            )
-        else:
-            note_bits.append("returns empty without logging — caller has no signal")
-        return bucket, "; ".join(note_bits)
+        default = (
+            "logs warning then returns empty — classic silent-fallback shape"
+            if handler_pattern == "log-return-empty"
+            else "returns empty without logging — caller has no signal"
+        )
+        return BUCKET_DEFECT, f"{broad_prefix}; {default}" if broad_prefix else default
 
     if handler_pattern == "log-only":
-        # Logging only, no return — control flow continues. If the catch
-        # is broad, that's suspicious; if it's specific, this is often a
-        # GRACEFUL-DEGRADATION shape (best-effort cache write, etc.).
-        if catch_kind in {"bare", "Exception", "BaseException"}:
-            return (
-                BUCKET_DEFECT,
-                "; ".join(note_bits)
-                or "logs and swallows — control flow continues with possibly invalid state",
+        if broad:
+            return BUCKET_DEFECT, fallback(
+                "logs and swallows — control flow continues with possibly invalid state"
             )
-        return (
-            BUCKET_GRACEFUL,
-            "; ".join(note_bits)
-            or "logs and continues — likely best-effort; verify intent.",
+        return BUCKET_GRACEFUL, (
+            "logs and continues — likely best-effort; verify intent."
         )
 
-    # handler_pattern == "other"
-    # The body does something non-trivial. Could still be silent if it
-    # masks the exception, but we lack semantic context. Mark GUARD when
-    # the catch is specific (most defensible) and DEFECT-with-note when
-    # the catch is broad.
-    if catch_kind in {"bare", "Exception", "BaseException"}:
-        return (
-            BUCKET_DEFECT,
-            "; ".join(note_bits)
-            or "broad catch with non-trivial body — verify the exception is not silently masked",
+    # handler_pattern == "other": non-trivial body.
+    if broad:
+        return BUCKET_DEFECT, fallback(
+            "broad catch with non-trivial body —"
+            " verify the exception is not silently masked"
         )
-    return (
-        BUCKET_GUARD,
-        "; ".join(note_bits)
-        or "specific catch with non-trivial body — likely a guard; review on a case-by-case basis.",
+    return BUCKET_GUARD, (
+        "specific catch with non-trivial body —"
+        " likely a guard; review on a case-by-case basis."
     )
+
+
+# ---------------------------------------------------------------------------
+# Known-critical-site rules (cleanup plan §4)
+# ---------------------------------------------------------------------------
+
+
+def _classify_known_critical(finding: Finding) -> str | None:
+    """If this finding is one of the §4 known-critical sites, return a label."""
+    rp = finding.relpath
+    fn = finding.function_name or ""
+
+    if rp == "trellis/extract/llm.py" and fn in {
+        "_parse_candidates",
+        "_try_json_loads",
+        "_parse_json_tolerant",
+    }:
+        return "§4.1 LLMExtractor parse swallow"
+    if rp == "trellis_workers/learning/miner.py" and fn == "_parse_candidates":
+        return "§4.2 worker miner parse swallow"
+    if rp.startswith("trellis/llm/providers/"):
+        return "§4.5 embedder/LLM provider swallow"
+    if (
+        rp.startswith("trellis/mutate/policies/")
+        or rp == "trellis/mutate/policy_gate.py"
+    ):
+        return "§4.6 policy gate deny-on-error"
+    if rp == "trellis/mutate/executor.py" and finding.catch_kind in _BROAD_CATCH:
+        return "§4.7 MutationExecutor broad-catch / event-log swallow"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -341,42 +297,50 @@ def _bucket_for(
 # ---------------------------------------------------------------------------
 
 
-def _read_source(path: Path) -> str:
-    return path.read_text(encoding="utf-8")
-
-
 def _extract_handler_excerpt(
     source_lines: list[str],
     node: ast.ExceptHandler,
     max_lines: int = 4,
-) -> list[str]:
+) -> tuple[str, ...]:
     """Return the handler body excerpt (up to ``max_lines`` lines)."""
     if not node.body:
-        return []
+        return ()
     start = node.body[0].lineno
-    # The end_lineno of the handler is the last line of the last stmt.
-    end = node.body[-1].end_lineno or start
-    end = min(end, start + max_lines - 1)
-    return [
-        source_lines[i - 1]
-        for i in range(start, end + 1)
-        if 1 <= i <= len(source_lines)
-    ]
+    end = min(node.body[-1].end_lineno or start, start + max_lines - 1)
+    return tuple(source_lines[i - 1] for i in range(start, end + 1))
+
+
+def _except_clause_text(node: ast.ExceptHandler, source_lines: list[str]) -> str:
+    """Render the ``except`` clause line text (without the body)."""
+    idx = node.lineno - 1
+    if 0 <= idx < len(source_lines):
+        return source_lines[idx].strip()
+    # Reconstruct from AST as fallback (shouldn't happen on valid inputs).
+    prefix = "except" if node.type is None else f"except {ast.unparse(node.type)}"
+    if node.name:
+        prefix = f"{prefix} as {node.name}"
+    return prefix + ":"
+
+
+def _relpath_of(path: Path, root: Path) -> str:
+    try:
+        return str(path.relative_to(root)).replace("\\", "/")
+    except ValueError:
+        return str(path).replace("\\", "/")
 
 
 def scan_file(path: Path, root: Path) -> list[Finding]:
     """Parse ``path`` and return one ``Finding`` per silent ``except`` clause.
 
-    Parse errors raise with the filename in the message — silent skipping
-    would violate the POC directive this audit enforces.
+    Parse and read errors raise with the filename in the message — silent
+    skipping would violate the POC directive this audit enforces.
     """
     try:
-        source = _read_source(path)
+        source = path.read_text(encoding="utf-8")
     except OSError as exc:
         raise RuntimeError(
             f"audit_silent_fallbacks: cannot read {path}: {exc!r}"
         ) from exc
-
     try:
         tree = ast.parse(source, filename=str(path))
     except SyntaxError as exc:
@@ -385,6 +349,7 @@ def scan_file(path: Path, root: Path) -> list[Finding]:
         ) from exc
 
     source_lines = source.splitlines()
+    relpath = _relpath_of(path, root)
 
     visitor = ExceptVisitor()
     visitor.visit(tree)
@@ -393,20 +358,6 @@ def scan_file(path: Path, root: Path) -> list[Finding]:
     for handler, fn_name in visitor.handlers:
         catch_kind = _catch_kind(handler)
         pattern = _classify_handler_body(handler.body)
-        excerpt = _extract_handler_excerpt(source_lines, handler)
-        except_line_idx = handler.lineno - 1
-        except_text = (
-            source_lines[except_line_idx].strip()
-            if 0 <= except_line_idx < len(source_lines)
-            else _format_except_clause(handler)
-        )
-
-        try:
-            relpath = str(path.relative_to(root))
-        except ValueError:
-            relpath = str(path)
-        relpath = relpath.replace("\\", "/")
-
         bucket, note = _bucket_for(
             relpath=relpath,
             handler_pattern=pattern,
@@ -414,19 +365,14 @@ def scan_file(path: Path, root: Path) -> list[Finding]:
             body=handler.body,
             function_name=fn_name,
         )
-
         if bucket == BUCKET_NOT_SILENT:
             continue
-
-        end_line = handler.end_lineno or handler.lineno
         findings.append(
             Finding(
-                path=path,
                 relpath=relpath,
                 line=handler.lineno,
-                end_line=end_line,
-                except_text=except_text,
-                handler_excerpt=excerpt,
+                except_text=_except_clause_text(handler, source_lines),
+                handler_excerpt=_extract_handler_excerpt(source_lines, handler),
                 handler_pattern=pattern,
                 catch_kind=catch_kind,
                 function_name=fn_name,
@@ -434,7 +380,6 @@ def scan_file(path: Path, root: Path) -> list[Finding]:
                 note=note,
             )
         )
-
     return findings
 
 
@@ -444,80 +389,31 @@ def iter_python_files(root: Path) -> Iterable[Path]:
 
 
 # ---------------------------------------------------------------------------
-# Subpackage / known-DEFECT detection
-# ---------------------------------------------------------------------------
-
-
-def _subpackage_for(relpath: str) -> str:
-    parts = relpath.split("/")
-    if not parts:
-        return "<root>"
-    return parts[0]
-
-
-def _classify_known_critical(finding: Finding) -> str | None:
-    """If this finding is one of the §4 known-critical sites, return a label."""
-    rp = finding.relpath
-    fn = finding.function_name or ""
-
-    # §4.1 — LLMExtractor _parse_candidates (actually lives in _try_json_loads)
-    if rp == "trellis/extract/llm.py" and fn in {
-        "_parse_candidates",
-        "_try_json_loads",
-        "_parse_json_tolerant",
-    }:
-        return "§4.1 LLMExtractor parse swallow"
-
-    # §4.2 — Worker miner _parse_candidates
-    if rp == "trellis_workers/learning/miner.py" and fn == "_parse_candidates":
-        return "§4.2 worker miner parse swallow"
-
-    # §4.5 — embedder / LLM provider error swallowing
-    if rp.startswith("trellis/llm/providers/"):
-        return "§4.5 embedder/LLM provider swallow"
-
-    # §4.6 — policy gate "deny on error"
-    if (
-        rp.startswith("trellis/mutate/policies/")
-        or rp == "trellis/mutate/policy_gate.py"
-    ):
-        return "§4.6 policy gate deny-on-error"
-
-    # §4.7 — EventLog write swallowing / broad-catch in MutationExecutor
-    if rp == "trellis/mutate/executor.py" and finding.catch_kind in {
-        "bare",
-        "Exception",
-        "BaseException",
-    }:
-        return "§4.7 MutationExecutor broad-catch / event-log swallow"
-
-    return None
-
-
-# ---------------------------------------------------------------------------
 # Report rendering
 # ---------------------------------------------------------------------------
 
 
-def _bucket_counter(findings: list[Finding]) -> Counter[str]:
+def _subpackage_for(relpath: str) -> str:
+    head, _, _ = relpath.partition("/")
+    return head or "<root>"
+
+
+def _bucket_counts(findings: Iterable[Finding]) -> Counter[str]:
     return Counter(f.bucket for f in findings)
 
 
-def _format_count_line(label: str, count: int, total: int) -> str:
-    pct = (100.0 * count / total) if total else 0.0
-    return f"- **{label}**: {count} ({pct:.1f}%)"
+def _ordered_subpackages(present: set[str]) -> list[str]:
+    """KNOWN_SUBPACKAGES first (in declared order), then any extras sorted."""
+    known = [s for s in KNOWN_SUBPACKAGES if s in present]
+    extras = sorted(present - set(known))
+    return known + extras
 
 
-def render_report(
-    findings: list[Finding],
-    *,
-    src_root: Path,
-    generated_for: str,
-) -> str:
+def render_report(findings: list[Finding], *, src_root_label: str) -> str:
     """Render the full Markdown report deterministically."""
     findings_sorted = sorted(findings, key=lambda f: (f.relpath, f.line))
     total = len(findings_sorted)
-    overall_counter = _bucket_counter(findings_sorted)
+    overall = _bucket_counts(findings_sorted)
 
     by_subpackage: dict[str, list[Finding]] = defaultdict(list)
     by_file: dict[str, list[Finding]] = defaultdict(list)
@@ -525,78 +421,64 @@ def render_report(
         by_subpackage[_subpackage_for(f.relpath)].append(f)
         by_file[f.relpath].append(f)
 
-    known_critical: list[tuple[str, Finding]] = []
-    for f in findings_sorted:
-        label = _classify_known_critical(f)
-        if label is not None:
-            known_critical.append((label, f))
-    # Stable sort by section label so re-runs produce identical reports.
-    known_critical.sort(key=lambda item: (item[0], item[1].relpath, item[1].line))
+    known_critical = sorted(
+        (
+            (label, f)
+            for f in findings_sorted
+            if (label := _classify_known_critical(f)) is not None
+        ),
+        key=lambda item: (item[0], item[1].relpath, item[1].line),
+    )
 
-    lines: list[str] = []
-    lines.append("# Silent-fallback audit — 2026-05")
-    lines.append("")
-    lines.append(
+    out: list[str] = []
+    emit = out.append
+
+    def blank() -> None:
+        out.append("")
+
+    emit("# Silent-fallback audit — 2026-05")
+    blank()
+    emit(
         "Generated by `scripts/audit_silent_fallbacks.py`. Re-run to refresh; "
         "the script is deterministic so diffs are meaningful."
     )
-    lines.append("")
-    # Render the source root relative to the cwd when possible so the
-    # report is portable across worktrees.
-    try:
-        rendered_root = str(Path(generated_for).resolve().relative_to(Path.cwd()))
-    except ValueError:
-        rendered_root = generated_for
-    rendered_root = rendered_root.replace("\\", "/")
-    lines.append(f"- **Source root scanned:** `{rendered_root}`")
-    lines.append(f"- **Total candidate `except` sites flagged:** **{total}**")
-    lines.append("")
+    blank()
+    emit(f"- **Source root scanned:** `{src_root_label}`")
+    emit(f"- **Total candidate `except` sites flagged:** **{total}**")
+    blank()
 
     # Overall bucket summary
-    lines.append("## Bucket totals")
-    lines.append("")
-    for bucket in (BUCKET_DEFECT, BUCKET_GRACEFUL, BUCKET_GUARD, BUCKET_TEST_ONLY):
-        lines.append(_format_count_line(bucket, overall_counter.get(bucket, 0), total))
-    lines.append("")
-    lines.append(
+    emit("## Bucket totals")
+    blank()
+    for bucket in BUCKET_ORDER:
+        count = overall.get(bucket, 0)
+        pct = (100.0 * count / total) if total else 0.0
+        emit(f"- **{bucket}**: {count} ({pct:.1f}%)")
+    blank()
+    emit(
         "> The script flags every `except` clause that doesn't `raise` somewhere in "
         "its body. Bucket assignment is heuristic (AST shape + catch breadth + "
         "function name) and must be confirmed by a human before any code change."
     )
-    lines.append("")
+    blank()
 
     # Per-subpackage breakdown
-    lines.append("## Per-directory breakdown")
-    lines.append("")
-    lines.append("| Subpackage | Total | DEFECT | GRACEFUL | GUARD | TEST-ONLY |")
-    lines.append("|---|---:|---:|---:|---:|---:|")
-    # Stable order: KNOWN_SUBPACKAGES first, then any extras alphabetical.
-    seen: set[str] = set()
-    ordered_subpkgs: list[str] = []
-    for s in KNOWN_SUBPACKAGES:
-        if s in by_subpackage:
-            ordered_subpkgs.append(s)
-            seen.add(s)
-    for s in sorted(by_subpackage):
-        if s not in seen:
-            ordered_subpkgs.append(s)
-    for s in ordered_subpkgs:
+    emit("## Per-directory breakdown")
+    blank()
+    emit("| Subpackage | Total | DEFECT | GRACEFUL | GUARD | TEST-ONLY |")
+    emit("|---|---:|---:|---:|---:|---:|")
+    for s in _ordered_subpackages(set(by_subpackage)):
         sub_findings = by_subpackage[s]
-        counter = _bucket_counter(sub_findings)
-        lines.append(
-            f"| `{s}/` | {len(sub_findings)} | "
-            f"{counter.get(BUCKET_DEFECT, 0)} | "
-            f"{counter.get(BUCKET_GRACEFUL, 0)} | "
-            f"{counter.get(BUCKET_GUARD, 0)} | "
-            f"{counter.get(BUCKET_TEST_ONLY, 0)} |"
-        )
-    lines.append("")
+        counts = _bucket_counts(sub_findings)
+        cells = " | ".join(str(counts.get(b, 0)) for b in BUCKET_ORDER)
+        emit(f"| `{s}/` | {len(sub_findings)} | {cells} |")
+    blank()
 
     # Known-critical highlights
-    lines.append("## DEFECT — known critical")
-    lines.append("")
+    emit("## DEFECT — known critical")
+    blank()
     if not known_critical:
-        lines.append(
+        emit(
             "_No known-critical sites detected._ (Expected sites: LLMExtractor "
             "parse swallow, worker miner parse swallow, embedder/LLM provider "
             "swallow, policy-gate deny-on-error, MutationExecutor event-log "
@@ -605,58 +487,54 @@ def render_report(
         )
     else:
         for label, f in known_critical:
-            lines.append(
+            emit(
                 f"- **{label}** — `{f.relpath}:{f.line}` in "
                 f"`{f.function_name or '<module>'}` — `{f.except_text}` "
                 f"(pattern=`{f.handler_pattern}`, catch=`{f.catch_kind}`)"
             )
-    lines.append("")
+    blank()
 
     # Per-file detailed listing
-    lines.append("## Per-file findings")
-    lines.append("")
+    emit("## Per-file findings")
+    blank()
     if not findings_sorted:
-        lines.append("_No findings._")
-        lines.append("")
+        emit("_No findings._")
+        blank()
 
     current_subpackage: str | None = None
     for relpath in sorted(by_file):
         sub = _subpackage_for(relpath)
         if sub != current_subpackage:
-            lines.append(f"### `{sub}/`")
-            lines.append("")
+            emit(f"### `{sub}/`")
+            blank()
             current_subpackage = sub
 
         file_findings = by_file[relpath]
-        counter = _bucket_counter(file_findings)
-        bucket_summary = ", ".join(
-            f"{b}={counter.get(b, 0)}"
-            for b in (BUCKET_DEFECT, BUCKET_GRACEFUL, BUCKET_GUARD, BUCKET_TEST_ONLY)
-            if counter.get(b, 0)
+        counts = _bucket_counts(file_findings)
+        summary = ", ".join(
+            f"{b}={counts[b]}" for b in BUCKET_ORDER if counts.get(b, 0)
         )
-        lines.append(
-            f"#### `{relpath}` ({len(file_findings)} sites — {bucket_summary})"
-        )
-        lines.append("")
+        emit(f"#### `{relpath}` ({len(file_findings)} sites — {summary})")
+        blank()
 
         for f in file_findings:
-            lines.append(
+            emit(
                 f"- **line {f.line}** — bucket=**{f.bucket}**, "
                 f"pattern=`{f.handler_pattern}`, catch=`{f.catch_kind}`, "
                 f"fn=`{f.function_name or '<module>'}`"
             )
-            lines.append("")
-            lines.append("  ```python")
-            lines.append(f"  {f.except_text}")
+            blank()
+            emit("  ```python")
+            emit(f"  {f.except_text}")
             for excerpt_line in f.handler_excerpt:
-                lines.append(f"  {excerpt_line}")
-            lines.append("  ```")
+                emit(f"  {excerpt_line}")
+            emit("  ```")
             if f.note:
-                lines.append("")
-                lines.append(f"  _Reviewer note:_ {f.note}")
-            lines.append("")
+                blank()
+                emit(f"  _Reviewer note:_ {f.note}")
+            blank()
 
-    return "\n".join(lines).rstrip() + "\n"
+    return "\n".join(out).rstrip() + "\n"
 
 
 # ---------------------------------------------------------------------------
@@ -672,16 +550,10 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         )
     )
     parser.add_argument(
-        "--src",
-        type=Path,
-        required=True,
-        help="Root directory to scan (e.g. src/).",
+        "--src", type=Path, required=True, help="Root directory to scan (e.g. src/)."
     )
     parser.add_argument(
-        "--output",
-        type=Path,
-        required=True,
-        help="Markdown output path.",
+        "--output", type=Path, required=True, help="Markdown output path."
     )
     parser.add_argument(
         "--summary-only",
@@ -691,24 +563,31 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _render_root_label(src_root: Path) -> str:
+    """Render src_root relative to cwd when possible, for portable reports."""
+    try:
+        return str(src_root.resolve().relative_to(Path.cwd())).replace("\\", "/")
+    except ValueError:
+        return str(src_root).replace("\\", "/")
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(list(argv) if argv is not None else sys.argv[1:])
     src_root: Path = args.src.resolve()
-    if not src_root.exists():
-        msg = f"audit_silent_fallbacks: --src does not exist: {src_root}"
-        raise SystemExit(msg)
     if not src_root.is_dir():
-        msg = f"audit_silent_fallbacks: --src is not a directory: {src_root}"
-        raise SystemExit(msg)
+        raise SystemExit(
+            f"audit_silent_fallbacks: --src is not a directory: {src_root}"
+        )
 
     all_findings: list[Finding] = []
     for py_path in iter_python_files(src_root):
         all_findings.extend(scan_file(py_path, src_root))
 
-    total = len(all_findings)
-    counter = _bucket_counter(all_findings)
-    print(f"[audit] scanned {src_root} — {total} silent-fallback candidates")
-    for bucket in (BUCKET_DEFECT, BUCKET_GRACEFUL, BUCKET_GUARD, BUCKET_TEST_ONLY):
+    counter = _bucket_counts(all_findings)
+    print(
+        f"[audit] scanned {src_root} — {len(all_findings)} silent-fallback candidates"
+    )
+    for bucket in BUCKET_ORDER:
         print(f"[audit]   {bucket}: {counter.get(bucket, 0)}")
 
     if args.summary_only:
@@ -716,11 +595,7 @@ def main(argv: list[str] | None = None) -> int:
 
     output: Path = args.output.resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
-    report = render_report(
-        all_findings,
-        src_root=src_root,
-        generated_for=str(src_root),
-    )
+    report = render_report(all_findings, src_root_label=_render_root_label(src_root))
     output.write_text(report, encoding="utf-8")
     print(f"[audit] wrote {output}")
     return 0
