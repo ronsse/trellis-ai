@@ -128,6 +128,17 @@ class EventType(StrEnum):
     #: 200 chars and redacted of common PII patterns (email, UUID, SSN).
     EXTRACTION_FAILED = "extraction.failed"
 
+    #: Emitted by the well-known promotion loop
+    #: (:mod:`trellis.learning.schema_evolution`) when an open-string
+    #: ``node_type`` or ``edge_kind`` value crosses the operator-configured
+    #: promotion thresholds. Surface-only — the canonical
+    #: :mod:`trellis.schemas.well_known` registry is never auto-mutated;
+    #: this event is the signal that a human-authored ADR amendment may
+    #: be warranted. Payload includes the stable ``candidate_id`` so
+    #: cooldown / recurrence tracking can deduplicate. See
+    #: ``docs/design/adr-well-known-promotion-loop.md``.
+    WELL_KNOWN_CANDIDATE = "well_known.candidate"
+
     # System
     SYSTEM_INITIALIZED = "system.initialized"
     MUTATION_EXECUTED = "mutation.executed"

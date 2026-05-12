@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import structlog
 import typer
 from rich.console import Console
 from rich.table import Table
@@ -57,6 +58,7 @@ _LLM_CONFIG_TEMPLATE = """
 
 admin_app = typer.Typer(no_args_is_help=True)
 console = Console()
+logger = structlog.get_logger(__name__)
 
 
 @admin_app.command()
@@ -1457,3 +1459,325 @@ def smoke_test(
 
     if not ok:
         raise typer.Exit(code=1)
+
+
+# ---------------------------------------------------------------------------
+# draft-promotion-adr — self-improvement item 5, ADR scaffold for a
+# WELL_KNOWN_CANDIDATE. Reads the most recent surfaced candidate from
+# the EventLog, renders the markdown template, and writes the ADR.
+# ---------------------------------------------------------------------------
+
+
+_PROMOTION_ADR_TEMPLATE_NAME = "promotion_adr.md"
+
+
+def _load_promotion_adr_template() -> str:
+    """Read the promotion-ADR template from package data.
+
+    Templates use :meth:`str.format` (no Jinja). Reading from package
+    data keeps the file alongside the source so it ships with the
+    wheel — no separate distribution concern.
+    """
+    from importlib.resources import files  # noqa: PLC0415
+
+    return (files("trellis.templates") / _PROMOTION_ADR_TEMPLATE_NAME).read_text(
+        encoding="utf-8"
+    )
+
+
+def _lookup_candidate_payload(event_log: Any, candidate_id: str) -> dict[str, Any]:
+    """Return the most recent ``WELL_KNOWN_CANDIDATE`` payload for ``candidate_id``.
+
+    Raises :class:`typer.Exit` with a clear error message when the id
+    doesn't match any emitted event — the operator must run ``trellis
+    analyze schema-evolution`` first.
+    """
+    from trellis.stores.base.event_log import EventType  # noqa: PLC0415
+
+    events = event_log.get_events(
+        event_type=EventType.WELL_KNOWN_CANDIDATE,
+        limit=1000,
+        order="desc",
+    )
+    for event in events:
+        if event.payload.get("candidate_id") == candidate_id:
+            payload = dict(event.payload)
+            payload["_event_recorded_at"] = event.recorded_at.isoformat()
+            return payload
+    msg = (
+        f"No WELL_KNOWN_CANDIDATE event found with candidate_id="
+        f"{candidate_id!r}. Run 'trellis analyze schema-evolution' first."
+    )
+    console.print(f"[red]{msg}[/red]")
+    raise typer.Exit(code=1)
+
+
+def _render_promotion_adr(
+    *,
+    candidate: dict[str, Any],
+    canonical_name_override: str | None,
+    drafted_date: str,
+    thresholds: dict[str, Any],
+) -> str:
+    """Substitute the candidate payload into the markdown template.
+
+    The template uses ``str.format``-style placeholders; everything
+    that varies per-candidate is computed here so the template itself
+    stays a near-pure scaffold.
+
+    ``thresholds`` is the ``RECOMMENDED_SEED_VALUES`` mapping (or any
+    equivalent snapshot) — the keys consumed are the standard
+    schema-evolution parameter names from ``learning.schema_evolution``.
+    """
+    from trellis.learning.schema_evolution import (  # noqa: PLC0415
+        _detect_naming_collision,
+    )
+
+    canonical_name = canonical_name_override or candidate.get(
+        "suggested_canonical_name", ""
+    )
+
+    # Re-run collision detection against the (possibly overridden)
+    # canonical name so the rendered ADR carries the correct warning.
+    kind: str = candidate.get("candidate_kind", "entity_type")
+    if _detect_naming_collision(canonical_name, kind):  # type: ignore[arg-type]
+        msg = (
+            f"Suggested canonical name {canonical_name!r} collides with an "
+            f"existing canonical or alias in trellis.schemas.well_known. "
+            "Rename via --canonical-name <new_name> or alias explicitly "
+            "rather than overwriting."
+        )
+        raise typer.BadParameter(msg)
+
+    kind_label = "entity type" if kind == "entity_type" else "edge kind"
+    kind_upper = "ENTITY_TYPE" if kind == "entity_type" else "EDGE_KIND"
+    well_known_constant_name = _well_known_constant_name(canonical_name)
+
+    first_seen = str(candidate.get("first_seen", ""))
+    last_seen = str(candidate.get("last_seen", ""))
+
+    extractors = candidate.get("distinct_extractors") or []
+    domains = candidate.get("distinct_domains") or []
+
+    alignment_uri = candidate.get("suggested_alignment_uri")
+    if alignment_uri:
+        alignment_uri_label = (
+            f"`{alignment_uri}` _(advisory; verify the URI resolves to a real "
+            "published schema before accepting)_"
+        )
+        alignment_diff_block = (
+            "Add to `_ENTITY_SCHEMA_ALIGNMENT` (or `_EDGE_SCHEMA_ALIGNMENT`):\n"
+            "\n```python\n"
+            f"{well_known_constant_name}: \"{alignment_uri}\",\n"
+            "```"
+        )
+    else:
+        alignment_uri_label = (
+            "_(none suggested — pick one only if it corresponds to a real "
+            "schema.org / PROV-O term)_"
+        )
+        alignment_diff_block = (
+            "_No alignment URI suggested. Omit the `_*_SCHEMA_ALIGNMENT` entry "
+            "unless the ADR author identifies a real published schema URI._"
+        )
+
+    return _load_promotion_adr_template().format(
+        candidate_id=candidate.get("candidate_id", ""),
+        candidate_kind=kind,
+        candidate_kind_label=kind_label,
+        candidate_kind_upper=kind_upper,
+        open_string_value=candidate.get("open_string_value", ""),
+        count=candidate.get("count", 0),
+        count_threshold=int(thresholds["well_known_count_threshold"]),
+        distinct_extractors_count=len(extractors),
+        distinct_extractors_threshold=int(
+            thresholds["well_known_distinct_extractors"]
+        ),
+        distinct_extractors_block=(
+            "\n".join(f"- `{e}`" for e in extractors) or "- _none recorded_"
+        ),
+        distinct_domains_count=len(domains),
+        distinct_domains_threshold=int(thresholds["well_known_distinct_domains"]),
+        distinct_domains_block=(
+            "\n".join(f"- `{d}`" for d in domains) or "- _none recorded_"
+        ),
+        avg_signal_quality=candidate.get("avg_signal_quality", ""),
+        min_signal_quality_threshold=str(
+            thresholds["well_known_min_signal_quality"]
+        ),
+        evidence_window_days_observed=_evidence_span_days(first_seen, last_seen),
+        window_days_threshold=int(thresholds["well_known_window_days"]),
+        first_seen=first_seen,
+        last_seen=last_seen,
+        recurrence_count=candidate.get("recurrence_count", 0),
+        suggested_canonical_name=canonical_name,
+        well_known_constant_name=well_known_constant_name,
+        alignment_uri_label=alignment_uri_label,
+        alignment_diff_block=alignment_diff_block,
+        # ``naming_collision_block`` is always empty because we reject
+        # above on collision; kept in the template for stability.
+        naming_collision_block="",
+        drafted_date=drafted_date,
+    )
+
+
+def _well_known_constant_name(canonical_name: str) -> str:
+    """Generate the ``UPPER_SNAKE_CASE`` constant name for ``well_known.py``.
+
+    Mirrors the convention used by existing canonicals (``PERSON``,
+    ``WAS_GENERATED_BY``, ``ATTACHED_TO``). camelCase and PascalCase
+    both split on capital-letter boundaries.
+    """
+    import re  # noqa: PLC0415
+
+    tokens = re.findall(r"[A-Z][a-z0-9]*|[a-z0-9]+", canonical_name)
+    if not tokens:
+        return canonical_name.upper().replace("-", "_").replace(" ", "_")
+    return "_".join(t.upper() for t in tokens)
+
+
+def _evidence_span_days(first_seen: str, last_seen: str) -> int:
+    """Compute the day-count between two ISO-format timestamps.
+
+    Returns ``0`` on any parsing failure — the rendered ADR shows
+    ``0 day(s)`` and the ADR author can correct manually. Failing
+    silently is the right shape here because the timestamps are
+    informational, not load-bearing.
+    """
+    from datetime import datetime  # noqa: PLC0415
+
+    try:
+        f = datetime.fromisoformat(first_seen)
+        l_ = datetime.fromisoformat(last_seen)
+    except (TypeError, ValueError):
+        return 0
+    delta = l_ - f
+    return max(delta.days, 0)
+
+
+@admin_app.command("draft-promotion-adr")
+def draft_promotion_adr(
+    candidate_id: str = typer.Argument(
+        ..., help="The candidate_id from a WELL_KNOWN_CANDIDATE event."
+    ),
+    output: Path = typer.Option(  # noqa: B008 — Typer option default
+        None,
+        "--output",
+        "-o",
+        help=(
+            "Output markdown path. Defaults to "
+            "docs/design/adr-promote-<open-string>.md."
+        ),
+    ),
+    canonical_name: str = typer.Option(
+        None,
+        "--canonical-name",
+        help=(
+            "Override the analyzer's suggested canonical name. "
+            "Useful when the heuristic guess is wrong."
+        ),
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help=(
+            "Overwrite an existing ADR file. Emits a WARN log line "
+            "noting the prior content was discarded."
+        ),
+    ),
+    output_format: str = typer.Option(
+        "text",
+        "--format",
+        help="Output format: text or json.",
+    ),
+) -> None:
+    """Draft a promotion ADR for an open-string type that crossed thresholds.
+
+    Reads the most recent ``WELL_KNOWN_CANDIDATE`` event with the
+    given ``candidate_id``, renders the markdown template
+    (``src/trellis/templates/promotion_adr.md``), and writes the ADR
+    to ``--output``. The promotion ADR is the human-gated step in the
+    well-known promotion loop — the file produced here is a *draft*,
+    not a decision; the ADR author fills in the "Decision" section
+    before requesting review.
+
+    Refuses to overwrite an existing file unless ``--force`` is set.
+    Raises if the (possibly overridden) canonical name collides with
+    an existing canonical or alias in
+    :mod:`trellis.schemas.well_known` — the ADR amendment cannot
+    silently rename through collisions.
+
+    See ``docs/design/adr-well-known-promotion-loop.md``.
+    """
+    from datetime import UTC, datetime  # noqa: PLC0415
+
+    from trellis.learning.schema_evolution import (  # noqa: PLC0415
+        RECOMMENDED_SEED_VALUES,
+    )
+
+    event_log = get_event_log()
+    candidate = _lookup_candidate_payload(event_log, candidate_id)
+
+    # Default output path: docs/design/adr-promote-<safe-name>.md where
+    # safe-name is the open-string value lowercased + underscored. ADR
+    # filenames in the repo follow lowercase-hyphenated convention; we
+    # use underscores in the file slug to avoid masking the open string
+    # with hyphenation noise (``"my-edge-kind"`` -> ``"my_edge_kind"``).
+    open_string = str(candidate.get("open_string_value", "unknown"))
+    slug = "".join(c if c.isalnum() else "_" for c in open_string).strip("_").lower()
+    output_path = (
+        output
+        if output is not None
+        else Path("docs/design") / f"adr-promote-{slug}.md"
+    )
+
+    if output_path.exists() and not force:
+        msg = (
+            f"Refusing to overwrite existing ADR at {output_path}. "
+            "Pass --force to overwrite (the prior content will be replaced)."
+        )
+        console.print(f"[red]{msg}[/red]")
+        raise typer.Exit(code=1)
+
+    if output_path.exists() and force:
+        # Loud-on-misuse: an operator overwriting a previously-drafted
+        # ADR is doing something destructive; surface it as a WARN.
+        logger.warning(
+            "draft_promotion_adr.overwriting_existing_file",
+            path=str(output_path),
+            candidate_id=candidate_id,
+        )
+        console.print(
+            f"[yellow]Overwriting existing file at {output_path}.[/yellow]"
+        )
+
+    drafted_date = datetime.now(tz=UTC).date().isoformat()
+    rendered = _render_promotion_adr(
+        candidate=candidate,
+        canonical_name_override=canonical_name,
+        drafted_date=drafted_date,
+        thresholds=dict(RECOMMENDED_SEED_VALUES),
+    )
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(rendered, encoding="utf-8")
+
+    if output_format == "json":
+        print(
+            json.dumps(
+                {
+                    "status": "ok",
+                    "candidate_id": candidate_id,
+                    "output_path": str(output_path),
+                    "bytes_written": len(rendered.encode("utf-8")),
+                }
+            )
+        )
+    else:
+        console.print(
+            f"[green]Drafted promotion ADR for candidate {candidate_id} ->"
+            f" {output_path}[/green]"
+        )
+        console.print(
+            "[dim]Fill in the 'Decision' section before requesting review.[/dim]"
+        )

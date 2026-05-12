@@ -418,5 +418,145 @@ class TestAnalyzeHelp:
             "advisory-effectiveness",
             "pack-sections",
             "learning-candidates",
+            "schema-evolution",
         ]:
             assert cmd in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# Schema-evolution CLI tests (self-improvement item 5)
+# ---------------------------------------------------------------------------
+
+
+def _seed_schema_evolution_candidate(registry: StoreRegistry) -> None:
+    """Plant 30 ``metric`` nodes across two extractors / two domains."""
+    graph_store = registry.knowledge.graph_store
+    event_log = registry.operational.event_log
+    for i in range(15):
+        nid = graph_store.upsert_node(
+            node_id=f"metric_{i}",
+            node_type="metric",
+            properties={
+                "content_tags": {
+                    "domain": ["analytics"],
+                    "signal_quality": "standard",
+                },
+            },
+        )
+        event_log.emit(
+            EventType.MUTATION_EXECUTED,
+            source="mutation_executor",
+            entity_id=nid,
+            entity_type="metric",
+            payload={"requested_by": "worker:dbt"},
+        )
+    for i in range(15, 30):
+        nid = graph_store.upsert_node(
+            node_id=f"metric_{i}",
+            node_type="metric",
+            properties={
+                "content_tags": {
+                    "domain": ["finance"],
+                    "signal_quality": "standard",
+                },
+            },
+        )
+        event_log.emit(
+            EventType.MUTATION_EXECUTED,
+            source="mutation_executor",
+            entity_id=nid,
+            entity_type="metric",
+            payload={"requested_by": "worker:lineage"},
+        )
+
+
+def _override_schema_evolution_thresholds(registry: StoreRegistry) -> None:
+    """Persist a low-threshold snapshot so 30 synthetic nodes surface."""
+    from trellis.learning.schema_evolution import (
+        PARAM_COMPONENT_ID,
+        RECOMMENDED_SEED_VALUES,
+    )
+    from trellis.schemas.parameters import ParameterScope, ParameterSet
+
+    values: dict[str, float | int | str | bool] = dict(RECOMMENDED_SEED_VALUES)
+    values["well_known_count_threshold"] = 20
+    values["well_known_window_days"] = 0
+    registry.operational.parameter_store.put(
+        ParameterSet(
+            scope=ParameterScope(component_id=PARAM_COMPONENT_ID),
+            values=values,
+            source="test:cli_schema_evolution",
+        )
+    )
+
+
+class TestSchemaEvolutionCLI:
+    def test_empty_graph_no_candidates_text(self, temp_stores: StoreRegistry) -> None:
+        _override_schema_evolution_thresholds(temp_stores)
+        result = runner.invoke(app, ["analyze", "schema-evolution"])
+        assert result.exit_code == 0, result.output
+        assert "0 surfaced" in result.output
+
+    def test_empty_graph_no_candidates_json(self, temp_stores: StoreRegistry) -> None:
+        _override_schema_evolution_thresholds(temp_stores)
+        result = runner.invoke(
+            app, ["analyze", "schema-evolution", "--format", "json"]
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout.strip())
+        assert data["status"] == "ok"
+        assert data["candidate_count"] == 0
+        assert data["candidates"] == []
+        assert data["emitted"] is False
+
+    def test_surfaces_candidate_and_emits_event(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        _override_schema_evolution_thresholds(temp_stores)
+        _seed_schema_evolution_candidate(temp_stores)
+        result = runner.invoke(
+            app, ["analyze", "schema-evolution", "--format", "json"]
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout.strip())
+        assert data["candidate_count"] == 1
+        assert data["candidates"][0]["open_string_value"] == "metric"
+        assert data["candidates"][0]["suggested_canonical_name"] == "Metric"
+        assert data["emitted"] is True
+        events = temp_stores.operational.event_log.get_events(
+            event_type=EventType.WELL_KNOWN_CANDIDATE, limit=5
+        )
+        assert len(events) == 1
+
+    def test_dry_run_no_events_emitted(self, temp_stores: StoreRegistry) -> None:
+        _override_schema_evolution_thresholds(temp_stores)
+        _seed_schema_evolution_candidate(temp_stores)
+        result = runner.invoke(
+            app,
+            ["analyze", "schema-evolution", "--no-emit", "--format", "json"],
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout.strip())
+        assert data["candidate_count"] == 1
+        assert data["emitted"] is False
+        events = temp_stores.operational.event_log.get_events(
+            event_type=EventType.WELL_KNOWN_CANDIDATE, limit=5
+        )
+        assert events == []
+
+    def test_strict_exits_nonzero_when_candidate_surfaces(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        _override_schema_evolution_thresholds(temp_stores)
+        _seed_schema_evolution_candidate(temp_stores)
+        result = runner.invoke(
+            app, ["analyze", "schema-evolution", "--strict", "--format", "json"]
+        )
+        assert result.exit_code == 1, result.output
+
+    def test_invalid_kinds_rejected(self, temp_stores: StoreRegistry) -> None:
+        _override_schema_evolution_thresholds(temp_stores)
+        result = runner.invoke(
+            app, ["analyze", "schema-evolution", "--kinds", "not_a_kind"]
+        )
+        assert result.exit_code != 0
