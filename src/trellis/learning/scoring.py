@@ -33,8 +33,10 @@ if TYPE_CHECKING:
 _LEARNING_ARTIFACT_VERSION = "1.0"
 _DEFAULT_MIN_SUPPORT = 2
 
-# Component id used when resolving registry overrides for promotion/noise thresholds.
-_SCORING_COMPONENT = "learning.scoring"
+# Component id used when resolving registry overrides for promotion/noise
+# thresholds. Exported so the CLI seed path and test fixtures share one
+# source of truth.
+LEARNING_SCORING_COMPONENT = "learning.scoring"
 
 # Registry parameter keys. Operators tune these per ``(component, domain,
 # intent_family)`` cell via ``ParameterStore``. Per the POC directive
@@ -43,11 +45,6 @@ _SCORING_COMPONENT = "learning.scoring"
 # resolves every key below or :func:`analyze_learning_observations` raises
 # ``KeyError``. Seed defaults live in the CLI module (see
 # ``trellis_cli.analyze``) so a fresh install can run without a config.
-# Registry keys for the four learning thresholds. The constant names use a
-# ``_KEY`` suffix (rather than ``_THRESHOLD``) so the dead-code grep in
-# plan-parameter-registry-wiring §7 can't accidentally match the new public
-# identifiers — the deleted module-level fallback constants used the
-# ``_THRESHOLD`` suffix.
 LEARNING_PROMOTE_SUCCESS_KEY = "promote_success_threshold"
 LEARNING_PROMOTE_RETRY_KEY = "promote_retry_threshold"
 LEARNING_NOISE_SUCCESS_KEY = "noise_success_threshold"
@@ -456,7 +453,7 @@ def _recommend_learning_action(
     retry_rate: float,
     registry: ParameterRegistry,
 ) -> str | None:
-    scope = ParameterScope(component_id=_SCORING_COMPONENT)
+    scope = ParameterScope(component_id=LEARNING_SCORING_COMPONENT)
     promote_success = _resolve_required_threshold(
         registry, scope, LEARNING_PROMOTE_SUCCESS_KEY
     )
@@ -527,6 +524,7 @@ __all__ = [
     "LEARNING_NOISE_SUCCESS_KEY",
     "LEARNING_PROMOTE_RETRY_KEY",
     "LEARNING_PROMOTE_SUCCESS_KEY",
+    "LEARNING_SCORING_COMPONENT",
     "PROMOTE_RECOMMENDATIONS",
     "REQUIRED_LEARNING_PARAMETER_KEYS",
     "analyze_learning_observations",

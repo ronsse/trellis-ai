@@ -17,6 +17,7 @@ from trellis.learning import (
     LEARNING_NOISE_SUCCESS_KEY,
     LEARNING_PROMOTE_RETRY_KEY,
     LEARNING_PROMOTE_SUCCESS_KEY,
+    LEARNING_SCORING_COMPONENT,
     REQUIRED_LEARNING_PARAMETER_KEYS,
     analyze_learning_observations,
     build_learning_observations_from_event_log,
@@ -65,7 +66,6 @@ _FALLBACK_RATE_YELLOW = 0.2
 # when called without a registry; defaults are deliberately operator-facing).
 # Operators dismiss the WARN by running 'trellis admin init-learning-params'
 # which seeds these values to ``~/.config/trellis/learning_params.yaml``.
-_LEARNING_SCORING_COMPONENT = "learning.scoring"
 LEARNING_PARAMETER_SEED_DEFAULTS: dict[str, float] = {
     LEARNING_PROMOTE_SUCCESS_KEY: 0.75,
     LEARNING_PROMOTE_RETRY_KEY: 0.25,
@@ -183,7 +183,7 @@ def _build_learning_registry() -> ParameterRegistry:
     if overrides is None:
         logger.warning(
             "learning.parameter_registry.seeded_defaults",
-            component=_LEARNING_SCORING_COMPONENT,
+            component=LEARNING_SCORING_COMPONENT,
             defaults=dict(LEARNING_PARAMETER_SEED_DEFAULTS),
             remediation=(
                 "run 'trellis admin init-learning-params' to seed "
@@ -196,7 +196,7 @@ def _build_learning_registry() -> ParameterRegistry:
     store = _InMemoryParameterStore()
     store.put(
         ParameterSet(
-            scope=ParameterScope(component_id=_LEARNING_SCORING_COMPONENT),
+            scope=ParameterScope(component_id=LEARNING_SCORING_COMPONENT),
             values=values,
             source="cli:analyze",
             notes="seeded by trellis_cli.analyze._build_learning_registry",

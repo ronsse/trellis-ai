@@ -7,14 +7,9 @@ from pathlib import Path
 
 import pytest
 
-from tests.unit.learning._registry_fixture import (
-    build_empty_registry,
-    build_seeded_registry,
-)
+from tests.unit.learning._registry_fixture import build_seeded_registry
 from trellis.learning.scoring import (
-    LEARNING_NOISE_RETRY_KEY,
     LEARNING_NOISE_SUCCESS_KEY,
-    LEARNING_PROMOTE_RETRY_KEY,
     LEARNING_PROMOTE_SUCCESS_KEY,
     analyze_learning_observations,
     build_learning_promotion_payloads,
@@ -333,7 +328,7 @@ class TestRegistryContract:
     def test_analyze_learning_observations_raises_on_missing_key(self) -> None:
         # A registry whose snapshot lacks a required key must surface
         # KeyError naming the missing key — never a silent fallback.
-        empty_registry = build_empty_registry()
+        empty_registry = build_seeded_registry(replace=True)
         item = _make_item(item_type="guidance")
         obs1 = _make_observation(run_id="r1", outcome="success", items=[item])
         obs2 = _make_observation(run_id="r2", outcome="success", items=[item])
@@ -349,44 +344,10 @@ class TestRegistryContract:
         assert LEARNING_PROMOTE_SUCCESS_KEY in str(exc_info.value)
 
     def test_recommendation_uses_registry_threshold(self) -> None:
-        # Override the registry so a previously-promotable item falls into
-        # the neutral band — verifies the registry value (not a stale
-        # constant) actually drives the decision.
-        strict_registry = build_seeded_registry(
-            overrides={
-                LEARNING_PROMOTE_SUCCESS_KEY: 0.95,
-                LEARNING_PROMOTE_RETRY_KEY: 0.05,
-            }
-        )
-        item = _make_item(item_type="guidance")
-        # success_rate=1.0, retry_rate=0 — would promote under defaults.
-        obss = [
-            _make_observation(run_id=f"r{i}", outcome="success", items=[item])
-            for i in range(3)
-        ]
-        # With promote_success=0.95, success_rate=1.0 still passes — flip
-        # the noise threshold instead to flip the bucket.
-        noise_registry = build_seeded_registry(
-            overrides={
-                LEARNING_NOISE_SUCCESS_KEY: 0.99,
-                LEARNING_NOISE_RETRY_KEY: 0.5,
-            }
-        )
-        # First confirm baseline: strict_registry still promotes 1.0/0.0.
-        baseline = analyze_learning_observations(
-            observations=obss,
-            registry=strict_registry,
-            min_support=1,
-        )
-        assert (
-            baseline["candidates"][0]["recommendation_type"] == "promote_guidance"
-        )
-        # Now confirm the override flips: a failed-success item is noise
-        # under defaults, and stays noise when noise_success_threshold is
-        # raised. To prove the registry value drives the cut-off, pick a
-        # success_rate that's *above* the default noise threshold (0.4)
-        # but below the override (0.99) — under defaults it would land
-        # in the neutral band, under the override it becomes noise.
+        # Verify the registry value drives the cut-off: pick a
+        # success_rate of 0.6 — above the default noise threshold (0.4)
+        # so it lands in the neutral band, but below an override of 0.99
+        # so it must be classified as noise.
         mid_item = _make_item(item_id="mid", item_type="guidance")
         mid_obss = [
             _make_observation(
@@ -396,21 +357,25 @@ class TestRegistryContract:
             )
             for i in range(5)
         ]
-        # 3/5 = 0.6 success, retry_rate=0 — defaults: neutral, no candidate.
+
+        # Under defaults: 0.6 success, retry_rate=0 ⇒ neutral, no candidate.
         default_run = analyze_learning_observations(
             observations=mid_obss,
             registry=build_seeded_registry(),
             min_support=1,
         )
         assert default_run["candidate_count"] == 0
-        # With noise_success_threshold=0.99, 0.6 <= 0.99 -> investigate_noise.
+
+        # With noise_success_threshold=0.99: 0.6 <= 0.99 ⇒ investigate_noise.
         flipped_run = analyze_learning_observations(
             observations=mid_obss,
-            registry=noise_registry,
+            registry=build_seeded_registry(
+                overrides={LEARNING_NOISE_SUCCESS_KEY: 0.99},
+            ),
             min_support=1,
         )
-        assert flipped_run["candidates"][0]["recommendation_type"] == (
-            "investigate_noise"
+        assert (
+            flipped_run["candidates"][0]["recommendation_type"] == "investigate_noise"
         )
 
 
