@@ -372,14 +372,25 @@ class TestGenerateCandidatesErrors:
             store.append(t)
 
     @pytest.mark.asyncio
-    async def test_invalid_json_returns_empty(
+    async def test_invalid_json_raises_extraction_failure(
         self, trace_store: SQLiteTraceStore
     ) -> None:
+        """ADR-extraction-failure-telemetry: parse errors emit + raise.
+
+        The old silent ``return []`` masked broken-model symptoms; the
+        miner now raises so the caller (or operator-level loop) can see
+        the failure. The dispatcher is the *one* legitimate degrader and
+        the miner doesn't go through the dispatcher.
+        """
+        from trellis.extract.telemetry import ExtractionFailureError
+
         self._seed_failures(trace_store)
 
         miner = PrecedentMiner(trace_store, llm=_bad_json_llm())
-        result = await miner.generate_precedent_candidates()
-        assert result == []
+        with pytest.raises(ExtractionFailureError) as excinfo:
+            await miner.generate_precedent_candidates()
+        assert excinfo.value.failure_kind == "parse_error"
+        assert excinfo.value.extractor_id == "PrecedentMiner"
 
     @pytest.mark.asyncio
     async def test_llm_exception_returns_empty(
@@ -390,3 +401,37 @@ class TestGenerateCandidatesErrors:
         miner = PrecedentMiner(trace_store, llm=_error_llm())
         result = await miner.generate_precedent_candidates()
         assert result == []
+
+    @pytest.mark.asyncio
+    async def test_invalid_json_emits_extraction_failed_event(
+        self,
+        trace_store: SQLiteTraceStore,
+        event_log: SQLiteEventLog,
+    ) -> None:
+        """When wired with an EventLog the miner emits EXTRACTION_FAILED."""
+        import os
+
+        from trellis.extract.telemetry import (
+            ExtractionFailureError,
+            reset_extraction_failure_state,
+        )
+
+        reset_extraction_failure_state()
+        os.environ["EXTRACTION_FAILURE_NO_SAMPLE"] = "1"
+        try:
+            self._seed_failures(trace_store)
+            miner = PrecedentMiner(
+                trace_store, event_log=event_log, llm=_bad_json_llm()
+            )
+            with pytest.raises(ExtractionFailureError):
+                await miner.generate_precedent_candidates()
+
+            events = event_log.get_events(event_type=EventType.EXTRACTION_FAILED)
+            assert len(events) == 1
+            payload = events[0].payload
+            assert payload["extractor_id"] == "PrecedentMiner"
+            assert payload["failure_kind"] == "parse_error"
+            assert payload["extractor_tier"] == "llm"
+        finally:
+            os.environ.pop("EXTRACTION_FAILURE_NO_SAMPLE", None)
+            reset_extraction_failure_state()

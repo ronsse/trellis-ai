@@ -6,8 +6,14 @@ import json
 from typing import TYPE_CHECKING
 
 import structlog
+from pydantic import ValidationError
 
+from trellis.core.hashing import content_hash
 from trellis.core.ids import generate_ulid
+from trellis.extract.telemetry import (
+    ExtractionFailureError,
+    emit_extraction_failure,
+)
 from trellis.llm import Message
 from trellis.schemas.enums import OutcomeStatus
 from trellis.schemas.precedent import Precedent
@@ -201,16 +207,39 @@ class PrecedentMiner:
         analyzed: list[Trace],
         domain: str | None,
     ) -> list[Precedent]:
-        """Parse LLM response into ``Precedent`` objects."""
+        """Parse LLM response into ``Precedent`` objects.
+
+        Emits :class:`EventType.EXTRACTION_FAILED` and raises
+        :class:`ExtractionFailureError` on malformed JSON or validation
+        errors. The caller — :meth:`generate_precedent_candidates` —
+        decides whether to degrade gracefully (POC directive: no silent
+        ``return []``).
+        """
+        text = response.strip()
+        if text.startswith("```"):
+            lines = text.split("\n")
+            text = "\n".join(lines[1:-1])
         try:
-            text = response.strip()
-            if text.startswith("```"):
-                lines = text.split("\n")
-                text = "\n".join(lines[1:-1])
             parsed = json.loads(text)
-        except (json.JSONDecodeError, ValueError):
+        except (json.JSONDecodeError, ValueError) as exc:
+            emit_extraction_failure(
+                event_log=self._event_log,
+                extractor_id="PrecedentMiner",
+                extractor_tier="llm",
+                failure_kind="parse_error",
+                source_hint="precedent_miner",
+                source_excerpt_hash=content_hash(response) if response else None,
+                model=None,
+                error_class=type(exc).__name__,
+                error_excerpt=str(exc),
+            )
             logger.warning("precedent_parse_error", response=response[:200])
-            return []
+            msg = f"PrecedentMiner: failed to parse JSON response: {exc}"
+            raise ExtractionFailureError(
+                msg,
+                failure_kind="parse_error",
+                extractor_id="PrecedentMiner",
+            ) from exc
 
         if not isinstance(parsed, list):
             return []
@@ -228,16 +257,37 @@ class PrecedentMiner:
 
             confidence = float(item.get("confidence", 0.5))
 
-            precedent = Precedent(
-                precedent_id=generate_ulid(),
-                source_trace_ids=source_ids,
-                title=title,
-                description=description,
-                pattern=item.get("pattern"),
-                applicability=[domain] if domain else [],
-                confidence=min(max(confidence, 0.0), 1.0),
-                promoted_by="precedent_miner",
-            )
+            try:
+                precedent = Precedent(
+                    precedent_id=generate_ulid(),
+                    source_trace_ids=source_ids,
+                    title=title,
+                    description=description,
+                    pattern=item.get("pattern"),
+                    applicability=[domain] if domain else [],
+                    confidence=min(max(confidence, 0.0), 1.0),
+                    promoted_by="precedent_miner",
+                )
+            except ValidationError as exc:
+                emit_extraction_failure(
+                    event_log=self._event_log,
+                    extractor_id="PrecedentMiner",
+                    extractor_tier="llm",
+                    failure_kind="validation_error",
+                    source_hint="precedent_miner",
+                    source_excerpt_hash=content_hash(response) if response else None,
+                    model=None,
+                    error_class=type(exc).__name__,
+                    error_excerpt=str(exc),
+                )
+                logger.warning("precedent_validation_error", error=str(exc)[:200])
+                msg = f"PrecedentMiner: precedent failed Pydantic validation: {exc}"
+                raise ExtractionFailureError(
+                    msg,
+                    failure_kind="validation_error",
+                    extractor_id="PrecedentMiner",
+                ) from exc
+
             precedents.append(precedent)
 
             if self._event_log is not None:

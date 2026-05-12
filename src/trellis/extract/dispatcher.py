@@ -25,6 +25,7 @@ import structlog
 
 from trellis.extract.base import ExtractorTier, NoExtractorAvailableError
 from trellis.extract.context import ExtractionContext
+from trellis.extract.telemetry import ExtractionFailureError, emit_extraction_failure
 from trellis.extract.validators import ValidationFinding
 from trellis.stores.base.event_log import EventType
 
@@ -106,11 +107,29 @@ class ExtractionDispatcher:
                 reason=FALLBACK_REASON_PREFER_TIER,
             )
 
-        result = await extractor.extract(
-            raw_input,
-            source_hint=source_hint,
-            context=ctx,
-        )
+        # ADR-extraction-failure-telemetry §2.2: the dispatcher is the
+        # ONE legitimate degrader for ``ExtractionFailureError``. The
+        # POC directive is "no silent fallback" — every site that used
+        # to ``except json.JSONDecodeError: return []`` now emits an
+        # EXTRACTION_FAILED event and re-raises. The dispatcher is the
+        # callsite that converts the raise into an observable
+        # ``tier_fallback`` event + empty result so a single broken row
+        # doesn't abort a whole batch. The EXTRACTION_FAILED event
+        # already records the original failure_kind; we surface it on
+        # ``error_class`` of the tier_fallback event so analyzers can
+        # join the two without re-querying the failure log.
+        try:
+            result = await extractor.extract(
+                raw_input,
+                source_hint=source_hint,
+                context=ctx,
+            )
+        except ExtractionFailureError as exc:
+            return self._degrade_for_failure(
+                exc,
+                extractor=extractor,
+                source_hint=source_hint,
+            )
 
         # Fallback signal #2: the chosen extractor produced no drafts.
         # Emitted BEFORE the validator pass because this is the
@@ -360,6 +379,69 @@ class ExtractionDispatcher:
             overall_confidence=result.overall_confidence,
             provenance=result.provenance,
             unparsed_residue=residue_base,
+        )
+
+    def _degrade_for_failure(
+        self,
+        exc: ExtractionFailureError,
+        *,
+        extractor: Extractor,
+        source_hint: str | None,
+    ) -> ExtractionResult:
+        """Convert an ``ExtractionFailureError`` into an observable degrade.
+
+        Emits both:
+          * a second ``EXTRACTION_FAILED`` event with
+            ``failure_kind="tier_fallback"`` so the analyzer sees the
+            dispatcher-level decision to skip the row; the
+            ``error_class`` field carries the *original* failure_kind so
+            joins are cheap.
+          * an ``EXTRACTOR_FALLBACK`` event with reason ``empty_result``
+            for the fallback analyzer (graduation tracking) — same
+            shape as the natural "extractor produced no drafts" path so
+            consumers don't have to special-case raised failures.
+        """
+        from trellis.schemas.extraction import (  # noqa: PLC0415
+            ExtractionProvenance,
+            ExtractionResult,
+        )
+
+        emit_extraction_failure(
+            event_log=self._event_log,
+            extractor_id=extractor.__class__.__name__,
+            extractor_tier=extractor.tier.value,  # type: ignore[arg-type]
+            failure_kind="tier_fallback",
+            source_hint=source_hint,
+            error_class=exc.failure_kind,
+            error_excerpt=str(exc),
+        )
+        self._emit_fallback(
+            source_hint=source_hint,
+            chosen_extractor=extractor.name,
+            chosen_tier=extractor.tier.value,
+            skipped_tier=None,
+            reason=FALLBACK_REASON_EMPTY_RESULT,
+        )
+        return ExtractionResult(
+            entities=[],
+            edges=[],
+            extractor_used=extractor.name,
+            tier=extractor.tier.value,
+            llm_calls=0,
+            tokens_used=0,
+            overall_confidence=0.0,
+            unparsed_residue={
+                "extraction_failure": {
+                    "failure_kind": exc.failure_kind,
+                    "error_class": exc.__class__.__name__,
+                    "message": str(exc),
+                }
+            },
+            provenance=ExtractionProvenance(
+                extractor_name=extractor.name,
+                extractor_version=getattr(extractor, "version", "0.0.0"),
+                source_hint=source_hint,
+            ),
         )
 
     def _emit_extraction_rejected(

@@ -30,9 +30,15 @@ import re
 from typing import TYPE_CHECKING, Any
 
 import structlog
+from pydantic import ValidationError
 
+from trellis.core.hashing import content_hash
 from trellis.extract.base import ExtractorTier
 from trellis.extract.prompts import ENTITY_EXTRACTION_V1, PromptTemplate, render
+from trellis.extract.telemetry import (
+    ExtractionFailureError,
+    emit_extraction_failure,
+)
 from trellis.schemas.enums import NodeRole
 from trellis.schemas.extraction import (
     EdgeDraft,
@@ -50,6 +56,7 @@ from trellis.schemas.well_known import (
 if TYPE_CHECKING:
     from trellis.extract.context import ExtractionContext
     from trellis.llm.protocol import LLMClient
+    from trellis.stores.base.event_log import EventLog
 
 logger = structlog.get_logger(__name__)
 
@@ -80,6 +87,7 @@ class LLMExtractor:
         max_tokens: int = 2000,
         supported_sources: list[str] | None = None,
         version: str = "0.1.0",
+        event_log: EventLog | None = None,
     ) -> None:
         self.name = name
         self._llm = llm_client
@@ -91,6 +99,10 @@ class LLMExtractor:
         self._max_tokens = max_tokens
         self.supported_sources = list(supported_sources or [])
         self.version = version
+        # ADR-extraction-failure-telemetry: when wired, parse/validation
+        # failures emit EXTRACTION_FAILED via the telemetry helper and
+        # then re-raise. The dispatcher is the one legitimate degrader.
+        self._event_log = event_log
 
     async def extract(
         self,
@@ -138,27 +150,82 @@ class LLMExtractor:
         )
         tokens = response.usage.total_tokens if response.usage else 0
 
-        parsed = _parse_json_tolerant(response.content)
+        # Prompt + source hashes for telemetry clustering. Both are
+        # short SHA-256 digests; they let the analyzer group failures by
+        # (extractor, prompt template, input shape) without storing raw
+        # content. Computed lazily — we only pay the hash cost when the
+        # parse fails below.
+        parsed, parse_exc = _parse_json_with_exception(response.content)
         if parsed is None:
+            prompt_hash = _prompt_hash(messages)
+            source_excerpt_hash = content_hash(text) if text else None
+            emit_extraction_failure(
+                event_log=self._event_log,
+                extractor_id=self.__class__.__name__,
+                extractor_tier="llm",
+                failure_kind="parse_error",
+                source_hint=source_hint,
+                prompt_hash=prompt_hash,
+                source_excerpt_hash=source_excerpt_hash,
+                model=response.model or self._model,
+                error_class=(
+                    type(parse_exc).__name__
+                    if parse_exc is not None
+                    else "JSONDecodeError"
+                ),
+                error_excerpt=(
+                    str(parse_exc)
+                    if parse_exc is not None
+                    else f"unparseable response (len={len(response.content)})"
+                ),
+            )
             logger.info(
                 "llm_extractor_parse_failed",
                 extractor=self.name,
                 response_len=len(response.content),
             )
-            return _make_result(
-                name=self.name,
-                version=self.version,
-                tier=self.tier,
-                entities=[],
-                edges=[],
-                llm_calls=1,
-                tokens_used=tokens,
-                overall_confidence=0.0,
-                unparsed_residue=response.content,
-                source_hint=source_hint,
+            # POC directive: silent fallbacks are forbidden. The
+            # dispatcher catches this and degrades explicitly with a
+            # ``tier_fallback`` event; callers that want degradation
+            # must do the same.
+            msg = (
+                "LLMExtractor: failed to parse JSON response "
+                f"(len={len(response.content)})"
+            )
+            raise ExtractionFailureError(
+                msg,
+                failure_kind="parse_error",
+                extractor_id=self.__class__.__name__,
             )
 
-        entities, edges, confidence = _to_drafts(parsed)
+        try:
+            entities, edges, confidence = _to_drafts(parsed)
+        except ValidationError as exc:
+            prompt_hash = _prompt_hash(messages)
+            source_excerpt_hash = content_hash(text) if text else None
+            emit_extraction_failure(
+                event_log=self._event_log,
+                extractor_id=self.__class__.__name__,
+                extractor_tier="llm",
+                failure_kind="validation_error",
+                source_hint=source_hint,
+                prompt_hash=prompt_hash,
+                source_excerpt_hash=source_excerpt_hash,
+                model=response.model or self._model,
+                error_class=type(exc).__name__,
+                error_excerpt=str(exc),
+            )
+            logger.info(
+                "llm_extractor_validation_failed",
+                extractor=self.name,
+                error=str(exc)[:200],
+            )
+            msg = f"LLMExtractor: drafts failed Pydantic validation: {exc}"
+            raise ExtractionFailureError(
+                msg,
+                failure_kind="validation_error",
+                extractor_id=self.__class__.__name__,
+            ) from exc
 
         return _make_result(
             name=self.name,
@@ -219,29 +286,39 @@ def _parse_json_tolerant(content: str) -> dict[str, Any] | None:
     since some prompts may coax that shape out of stubborn models.
     Returns ``None`` when nothing parseable is found.
     """
+    parsed, _ = _parse_json_with_exception(content)
+    return parsed
+
+
+def _parse_json_with_exception(
+    content: str,
+) -> tuple[dict[str, Any] | None, Exception | None]:
+    """Same as :func:`_parse_json_tolerant` but also returns the last
+    exception encountered.
+
+    The exception lets the telemetry helper record a meaningful
+    ``error_class`` / ``error_excerpt`` instead of a generic message.
+    Returns ``(None, None)`` when input is empty / blank.
+    """
     if not content or not content.strip():
-        return None
+        return None, None
 
     stripped = _CODE_FENCE_RE.sub("", content).strip()
     if not stripped:
-        return None
+        return None, None
 
-    # Primary attempt: parse the whole stripped payload.
-    data = _try_json_loads(stripped)
+    data, last_exc = _try_json_loads_with_exc(stripped)
     if data is None:
-        # Fallback: extract the widest brace span.  Catches prose
-        # wrappers around the JSON ("Here's the JSON: {...}. Let me
-        # know...") without needing a full streaming parser.
         start = stripped.find("{")
         end = stripped.rfind("}")
         if start != -1 and end > start:
-            data = _try_json_loads(stripped[start : end + 1])
+            data, last_exc = _try_json_loads_with_exc(stripped[start : end + 1])
 
     if isinstance(data, dict):
-        return data
+        return data, None
     if isinstance(data, list):
-        return {"entities": data, "edges": []}
-    return None
+        return {"entities": data, "edges": []}, None
+    return None, last_exc
 
 
 def _try_json_loads(text: str) -> Any | None:
@@ -250,6 +327,32 @@ def _try_json_loads(text: str) -> Any | None:
         return json.loads(text)
     except json.JSONDecodeError:
         return None
+
+
+def _try_json_loads_with_exc(text: str) -> tuple[Any | None, Exception | None]:
+    """Parse ``text`` as JSON; return ``(value, None)`` on success or
+    ``(None, exc)`` on failure."""
+    try:
+        return json.loads(text), None
+    except json.JSONDecodeError as exc:
+        return None, exc
+
+
+def _prompt_hash(messages: list[Any]) -> str:
+    """Return a short SHA-256 digest of the rendered prompt.
+
+    Used as the clustering key for ``EXTRACTION_FAILED`` events so the
+    analyzer can group "all parse errors from the same prompt template
+    + injected vars" together. We hash ``role|content`` joined with
+    newlines so the digest is stable across runs but sensitive to any
+    prompt drift.
+    """
+    parts: list[str] = []
+    for msg in messages:
+        role = getattr(msg, "role", "")
+        content = getattr(msg, "content", "")
+        parts.append(f"{role}|{content}")
+    return content_hash("\n".join(parts))
 
 
 def _to_drafts(
