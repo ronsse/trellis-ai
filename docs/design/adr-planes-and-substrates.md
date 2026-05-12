@@ -3,6 +3,8 @@
 **Status:** Proposed
 **Date:** 2026-04-18
 **Deciders:** Trellis core
+
+> **Note (2026-05-11):** Substrate inventory has shifted. **LanceDB** was removed in 2026-05 (replaced by ArcadeDB as the unified graph + vector substrate). **Neptune** and **Kuzu/LadybugDB** were evaluated as candidates and **not pursued** — see the open ArcadeDB ADR for the candidate comparison and rationale.
 **Related:**
 - [`./adr-terminology.md`](./adr-terminology.md) — canonical meanings of "plane", "substrate" vs "backend", and related terms
 - [`./adr-llm-client-abstraction.md`](./adr-llm-client-abstraction.md) — Precedent for "Protocol in core, implementations optional"

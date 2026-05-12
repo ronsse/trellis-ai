@@ -72,9 +72,9 @@ flowchart TB
     subgraph Backends["Pluggable backends"]
         direction LR
         SQ["SQLite<br/>default / local"]
-        PG["Postgres + pgvector<br/>blessed cloud"]
+        AR["ArcadeDB<br/>blessed: graph + vector"]
+        PG["Postgres + pgvector<br/>cloud alternative"]
         S3["S3<br/>blob storage"]
-        LA["LanceDB / SurrealDB<br/>alternates"]
     end
 
     Users --> CLI & MCP & REST & SDK & UI
@@ -89,7 +89,7 @@ flowchart TB
     class CLI,MCP,REST,SDK,UI,Users iface;
     class PB,GP,CL,WK core;
     class TR,GR,DO,VE,EL,BL data;
-    class SQ,PG,S3,LA back;
+    class SQ,PG,S3,AR back;
 ```
 
 ## What's in the substrate
@@ -208,9 +208,9 @@ Requires Python 3.11+.
 
 ```bash
 pip install trellis-ai                    # core (SQLite everywhere — local default)
-pip install "trellis-ai[cloud]"           # + Postgres, pgvector, S3 (blessed cloud default)
+pip install "trellis-ai[arcadedb]"        # + ArcadeDB (blessed graph + vector via Bolt + HTTP)
+pip install "trellis-ai[cloud]"           # + Postgres, pgvector, S3
 pip install "trellis-ai[neo4j]"           # + Neo4j driver (graph + vector via Bolt / AuraDB)
-pip install "trellis-ai[vectors]"         # + LanceDB (alternate local ANN)
 pip install "trellis-ai[llm-openai]"      # + OpenAI for enrichment & extraction
 pip install "trellis-ai[llm-anthropic]"   # + Anthropic
 pip install "trellis-ai[all]"             # everything
@@ -279,7 +279,7 @@ context = get_context_for_task(client, "implement retry logic", domain="backend"
 
 ## Planes & substrates
 
-Trellis separates **agent-facing** stores from **Trellis-internal** stores. Each plane has a blessed default backend ("substrate"); other backends are opt-in. **Backends are pluggable** — SQLite is the local default, pgvector is the current blessed cloud default, and alternates (LanceDB today, SurrealDB coming next) are first-class options wired via config.
+Trellis separates **agent-facing** stores from **Trellis-internal** stores. Each plane has a blessed default backend ("substrate"); other backends are opt-in. **Backends are pluggable** — SQLite is the local default for everything, **ArcadeDB is the blessed graph + vector substrate** for self-hosted AWS deployments (Apache 2.0, Bolt + openCypher 25, native HNSW), and Postgres + pgvector remains a supported alternative for cloud workloads.
 
 ```mermaid
 flowchart LR
@@ -300,11 +300,10 @@ flowchart LR
     subgraph Substrates["Substrates"]
         direction TB
         SQ["SQLite — local default"]
-        PG["Postgres + pgvector<br/>blessed cloud default"]
-        N4["Neo4j + AuraDB<br/>graph-native cloud"]
+        AR["ArcadeDB<br/>blessed graph + vector<br/>(Apache 2.0)"]
+        PG["Postgres + pgvector<br/>cloud alternative"]
+        N4["Neo4j + AuraDB<br/>graph alternative"]
         S3["S3 — blobs in cloud"]
-        LA["LanceDB — alternate<br/>(local ANN)"]
-        SD["SurrealDB — coming next"]
     end
 
     G --- SQ
@@ -321,9 +320,8 @@ flowchart LR
     G -.-> N4
     V -.-> N4
     B -.-> S3
-    V -.-> LA
-    G -.-> SD
-    V -.-> SD
+    G -.-> AR
+    V -.-> AR
 
     classDef knowledge fill:#0b3d2e,stroke:#34d399,color:#e5e7eb;
     classDef ops fill:#3b1c36,stroke:#f472b6,color:#e5e7eb;
@@ -332,20 +330,20 @@ flowchart LR
     class G,D,V,B knowledge;
     class TR,EL ops;
     class SQ,PG,S3 sub;
-    class N4,LA,SD alt;
+    class N4,AR alt;
 ```
 
 Solid lines are blessed defaults (SQLite locally, Postgres + pgvector in cloud); dotted lines are alternate/exploratory substrates wired via `~/.config/trellis/config.yaml`. Choosing pgvector collocates keyword, semantic, and graph retrieval in a single Postgres transaction — one DSN, one consistency story. **Neo4j (and AuraDB)** is supported as a graph-native alternative for graph + vector when you want Cypher-native traversal or are already on a managed Neo4j instance.
 
 ## Storage — local or cloud
 
-Backends are wired from `~/.config/trellis/config.yaml`. SQLite is the local default; **Postgres + pgvector is the blessed cloud default**, chosen so keyword, semantic, and graph retrieval share one transactional store. **Neo4j / AuraDB** is a first-class graph-native alternative for graph + vector — see [`docs/deployment/neo4j-local.md`](docs/deployment/neo4j-local.md) and [`docs/deployment/neo4j-auradb.md`](docs/deployment/neo4j-auradb.md). LanceDB remains an alternate for vector-heavy local workloads; **SurrealDB integration is the next substrate on the roadmap**.
+Backends are wired from `~/.config/trellis/config.yaml`. SQLite is the local default; **ArcadeDB is the blessed graph + vector substrate** (Apache 2.0, Bolt + openCypher 25, native HNSW via jVector) — see [`docs/design/adr-arcadedb-blessed-substrate.md`](docs/design/adr-arcadedb-blessed-substrate.md) and [`docs/deployment/recommended-config.yaml`](docs/deployment/recommended-config.yaml) for the recommended shape. **Postgres + pgvector** remains a supported alternative for shops standardized on Postgres. **Neo4j / AuraDB** is the migration target for existing Neo4j deployments — see [`docs/deployment/neo4j-local.md`](docs/deployment/neo4j-local.md) and [`docs/deployment/neo4j-auradb.md`](docs/deployment/neo4j-auradb.md).
 
-| Store | Local default | Cloud default | Alternates |
-|-------|---------------|---------------|------------|
+| Store | Local default | Cloud blessed | Alternatives |
+|-------|---------------|---------------|--------------|
 | Trace / Document / Event Log | `sqlite` | `postgres` | — |
-| Graph | `sqlite` | `postgres` | `neo4j` (Bolt / AuraDB) |
-| Vector | `sqlite` | `pgvector` | `neo4j` (HNSW on `:Node`), `lancedb` (local ANN) |
+| Graph | `sqlite` | **`arcadedb`** | `neo4j` (Bolt / AuraDB), `postgres` |
+| Vector | `sqlite` | **`arcadedb`** (native HNSW) | `pgvector`, `neo4j` (HNSW on `:Node`) |
 | Blob | `local` | `s3` | — |
 
 For copy-paste config, see [`docs/deployment/recommended-config.yaml`](docs/deployment/recommended-config.yaml) — three blessed shapes (local Neo4j+SQLite, cloud AuraDB+Postgres, Postgres-only). Set `TRELLIS_VALIDATE_CONNECTIVITY=1` in production to fail-fast at startup if Neo4j is unreachable.

@@ -75,7 +75,8 @@ By default, Trellis uses SQLite for all stores (zero configuration). For advance
 ```yaml
 stores:
   vector:
-    backend: lancedb    # serverless ANN, recommended for local use
+    backend: pgvector   # Postgres + pgvector — blessed cloud default
+    # backend: sqlite   # SQLite vector store — zero-config local default
   # graph:
   #   backend: postgres
   #   dsn: postgresql://user:pass@host/db

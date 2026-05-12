@@ -15,8 +15,8 @@ Instead of the core application knowing *how* to save a trace, it only knows *th
 * **Abstract Base Classes (ABCs):** Define strict Python ABCs for stores (`BaseGraphStore`, `BaseVectorStore`, `BaseTraceStore`, `BaseBlobStore`).
 * **Dependency Injection (DI):** When initializing the Trellis client or service, inject the specific storage classes based on a configuration file (e.g., `trellis.yaml`).
 * **The Pattern:**
-  * *Local Mode:* Injects `SQLiteGraphStore`, `ChromaVectorStore`, `LocalBlobStore`.
-  * *Cloud Mode:* Injects `NeptuneGraphStore`, `PgVectorStore`, `S3BlobStore`.
+  * *Local Mode:* Injects `SQLiteGraphStore`, `SQLiteVectorStore`, `LocalBlobStore`.
+  * *Cloud Mode:* Injects `Neo4jGraphStore` (or `ArcadeDBGraphStore` once landed), `PgVectorStore`, `S3BlobStore`.
 
 ## 2. Document & File Storage (The Obsidian Question)
 

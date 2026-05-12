@@ -73,12 +73,32 @@ def _extract_block(text: str, header: str) -> dict[str, Any]:
     return yaml.safe_load("\n".join(yaml_lines)) or {}
 
 
-class TestLocalDefaultBlock:
-    """The local-default block names Neo4j (knowledge) + SQLite (operational)."""
+class TestArcadeDBBlessedBlock:
+    """The blessed shape names ArcadeDB on graph + vector + SQLite operational."""
 
     def setup_method(self) -> None:
         text = _CONFIG_PATH.read_text(encoding="utf-8")
-        self.block = _extract_block(text, "LOCAL DEFAULT")
+        self.block = _extract_block(text, "ARCADEDB (BLESSED)")
+
+    def test_knowledge_graph_uses_arcadedb(self) -> None:
+        assert self.block["knowledge"]["graph"]["backend"] == "arcadedb"
+
+    def test_knowledge_vector_uses_arcadedb(self) -> None:
+        assert self.block["knowledge"]["vector"]["backend"] == "arcadedb"
+
+    def test_operational_trace_uses_sqlite(self) -> None:
+        assert self.block["operational"]["trace"]["backend"] == "sqlite"
+
+    def test_operational_event_log_uses_sqlite(self) -> None:
+        assert self.block["operational"]["event_log"]["backend"] == "sqlite"
+
+
+class TestNeo4jLocalBlock:
+    """Neo4j local: Docker Neo4j (knowledge) + SQLite (operational)."""
+
+    def setup_method(self) -> None:
+        text = _CONFIG_PATH.read_text(encoding="utf-8")
+        self.block = _extract_block(text, "NEO4J LOCAL")
 
     def test_knowledge_graph_uses_neo4j(self) -> None:
         assert self.block["knowledge"]["graph"]["backend"] == "neo4j"
@@ -93,12 +113,12 @@ class TestLocalDefaultBlock:
         assert self.block["operational"]["event_log"]["backend"] == "sqlite"
 
 
-class TestCloudDefaultBlock:
-    """Cloud-default: AuraDB Neo4j (knowledge) + Postgres (operational)."""
+class TestNeo4jCloudBlock:
+    """Neo4j cloud: AuraDB Neo4j (knowledge) + Postgres (operational)."""
 
     def setup_method(self) -> None:
         text = _CONFIG_PATH.read_text(encoding="utf-8")
-        self.block = _extract_block(text, "CLOUD DEFAULT")
+        self.block = _extract_block(text, "NEO4J CLOUD")
 
     def test_knowledge_graph_uses_neo4j(self) -> None:
         assert self.block["knowledge"]["graph"]["backend"] == "neo4j"
@@ -125,13 +145,23 @@ class TestPostgresOnlyBlock:
 
 
 # ---------------------------------------------------------------------------
-# Live smoke against the local-default shape (env-gated)
+# Live smoke against the Neo4j local-default shape (env-gated)
 # ---------------------------------------------------------------------------
 
 URI = os.environ.get("TRELLIS_TEST_NEO4J_URI", "")
 USER = os.environ.get("TRELLIS_TEST_NEO4J_USER", "neo4j")
 PASSWORD = os.environ.get("TRELLIS_TEST_NEO4J_PASSWORD", "")
 DATABASE = os.environ.get("TRELLIS_TEST_NEO4J_DATABASE", "neo4j")
+
+ARCADE_URI = os.environ.get("TRELLIS_TEST_ARCADEDB_URI", "")
+ARCADE_USER = os.environ.get("TRELLIS_TEST_ARCADEDB_USER", "root")
+ARCADE_PASSWORD = os.environ.get("TRELLIS_TEST_ARCADEDB_PASSWORD", "")
+ARCADE_DATABASE = os.environ.get(
+    "TRELLIS_TEST_ARCADEDB_DATABASE", "trellis_recommended_smoke"
+)
+ARCADE_HTTP_URL = os.environ.get(
+    "TRELLIS_TEST_ARCADEDB_HTTP_URL", "http://localhost:2480"
+)
 
 
 @pytest.mark.live
@@ -185,5 +215,86 @@ def test_local_default_shape_validates_against_real_neo4j(tmp_path: Path) -> Non
             store_types=list(config.keys()),
             check_connectivity=True,
         )
+    finally:
+        registry.close()
+
+
+# ---------------------------------------------------------------------------
+# Live smoke against the ArcadeDB blessed shape (env-gated)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.live
+@pytest.mark.arcadedb
+@pytest.mark.skipif(
+    not ARCADE_URI, reason="TRELLIS_TEST_ARCADEDB_URI not set"
+)
+def test_arcadedb_blessed_shape_validates_end_to_end(tmp_path: Path) -> None:
+    """Construct the blessed ArcadeDB-everywhere registry and exercise
+    the full ``validate(check_connectivity=True)`` path against a live
+    instance.
+
+    Covers:
+
+    - Both graph and vector backends instantiating against the same
+      ArcadeDB database.
+    - Driver sharing across the graph backend (Bolt) — vector uses
+      SQL-via-HTTP, so it doesn't enter the Bolt driver cache; the
+      connectivity check pings only Bolt drivers and that's fine.
+    - SQLite operational plane stores instantiating cleanly alongside.
+
+    Run with the local Docker setup from
+    ``docs/agent-guide/testing.md``::
+
+        TRELLIS_TEST_ARCADEDB_URI=bolt://localhost:7687
+        TRELLIS_TEST_ARCADEDB_USER=root
+        TRELLIS_TEST_ARCADEDB_PASSWORD=playwithdata
+        TRELLIS_TEST_ARCADEDB_HTTP_URL=http://localhost:2480
+    """
+    from trellis.stores.registry import StoreRegistry
+
+    config = {
+        "graph": {
+            "backend": "arcadedb",
+            "uri": ARCADE_URI,
+            "user": ARCADE_USER,
+            "password": ARCADE_PASSWORD,
+            "database": ARCADE_DATABASE,
+            "http_url": ARCADE_HTTP_URL,
+        },
+        "vector": {
+            "backend": "arcadedb",
+            "http_url": ARCADE_HTTP_URL,
+            "user": ARCADE_USER,
+            "password": ARCADE_PASSWORD,
+            "database": ARCADE_DATABASE,
+            "dimensions": 3,
+            "index_name": "trellis_recommended_smoke_emb",
+        },
+        "document": {"backend": "sqlite"},
+        "blob": {"backend": "local"},
+        "trace": {"backend": "sqlite"},
+        "event_log": {"backend": "sqlite"},
+        "outcome": {"backend": "sqlite"},
+        "parameter": {"backend": "sqlite"},
+        "tuner_state": {"backend": "sqlite"},
+    }
+    registry = StoreRegistry(config=config, stores_dir=tmp_path / "stores")
+    try:
+        registry.validate(
+            store_types=list(config.keys()),
+            check_connectivity=True,
+        )
+        # Smoke: round-trip a node + an embedding through both stores
+        # to confirm cross-plane visibility (graph writes via Cypher,
+        # vector reads via SQL).
+        graph = registry.knowledge.graph_store
+        vector = registry.knowledge.vector_store
+        node_id = graph.upsert_node("smoke-1", "doc", {"k": "v"})
+        vector.upsert(node_id, [0.1, 0.2, 0.3], metadata={"src": "smoke"})
+        fetched = vector.get(node_id)
+        assert fetched is not None
+        assert fetched["item_id"] == node_id
+        assert fetched["dimensions"] == 3
     finally:
         registry.close()

@@ -73,9 +73,11 @@ Six ABCs in `stores/base/`: TraceStore, DocumentStore, GraphStore, VectorStore, 
 | Store | Default | Cloud |
 |-------|---------|-------|
 | Trace/Document/EventLog | `sqlite` | `postgres` (`TRELLIS_KNOWLEDGE_PG_DSN` / `TRELLIS_OPERATIONAL_PG_DSN`) |
-| Graph | `sqlite` | `postgres` or `neo4j` (Bolt URI + credentials) |
-| Vector | `sqlite` | `pgvector`, `lancedb`, or `neo4j` (HNSW on `:Node.embedding`) |
+| Graph | `sqlite` | **`arcadedb` (blessed)**, `postgres`, or `neo4j` (Bolt URI + credentials) |
+| Vector | `sqlite` | **`arcadedb` (blessed)**, `pgvector`, or `neo4j` (HNSW on `:Node.embedding`) |
 | Blob | `local` | `s3` (`TRELLIS_S3_BUCKET`) |
+
+**ArcadeDB** is the blessed graph + vector substrate for self-hosted AWS deployments (Apache 2.0, Bolt + openCypher 25 at 97.8% TCK, native HNSW via jVector — see [`docs/design/adr-arcadedb-blessed-substrate.md`](docs/design/adr-arcadedb-blessed-substrate.md)). The graph backend is a thin adapter over a shared [`BoltOpenCypherGraphStore`](src/trellis/stores/bolt_opencypher/graph.py) base class that Neo4j also subclasses; ~1000 LOC of Cypher payload + SCD-2 logic is shared between the two backends. The vector backend uses ArcadeDB's SQL-over-HTTP path (`LSM_VECTOR` index + `vectorNeighbors` function) — graph and vector see the same `(:Node)` rows but use different protocols.
 
 The Neo4j vector store attaches embeddings as an *optional* property on the
 graph store's `(:Node)` rows (shape #2) — same database, same nodes, no

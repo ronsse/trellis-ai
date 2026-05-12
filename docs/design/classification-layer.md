@@ -375,7 +375,7 @@ pack = builder.build(
 This flows down to strategies:
 
 - **KeywordSearch**: adds `WHERE` clauses on tag fields in the document store query
-- **SemanticSearch**: passes tag filters as metadata filters to vector store (Weaviate/Pinecone/LanceDB all support this natively)
+- **SemanticSearch**: passes tag filters as metadata filters to vector store (most ANN backends support this natively)
 - **GraphSearch**: filters nodes by tag properties before traversal
 
 The budget problem improves because we're scoring a focused candidate set, not everything.

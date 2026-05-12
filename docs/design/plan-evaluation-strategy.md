@@ -33,7 +33,7 @@ fine to wait."
 ## 2. State of the project at hand-off
 
 ### What's live and tested
-* All five storage planes wired with multi-backend support (SQLite default; Postgres / pgvector / LanceDB / Neo4j optional).
+* All five storage planes wired with multi-backend support (SQLite default; Postgres / pgvector / Neo4j optional). *(LanceDB removed in 2026-05; ArcadeDB inbound as unified graph + vector substrate.)*
 * Neo4j hardening: Phase 1.2 (`StoreRegistry` context-manager protocol) and Phase 1.4 (vector-index ONLINE-wait after CREATE) landed. The remaining Phase 1 + 2 items (driver lifecycle / pool sharing, opt-in connectivity check, onboarding docs, recommended-config.yaml, `trellis admin migrate-graph`) are deferred until a real workload signal justifies them — see TODO.md "Deferred from the Neo4j hardening series".
 * Provisioned: Neo4j AuraDB Free (`cfc3411f.databases.neo4j.io`), Neon Postgres free tier (`ep-lively-sun-an9d71ul...`). Credentials in `.env` (gitignored).
 * Test suite: green with all extras + `.env` loaded.

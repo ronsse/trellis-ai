@@ -3,6 +3,8 @@
 **Date:** 2026-04-11
 **Status:** Baseline reference — captures the state of competing systems as of this date for positioning Trellis against the landscape.
 
+> **Note (2026-05-11):** Substrate inventory captured below predates the ArcadeDB consolidation. LanceDB was removed from Trellis in 2026-05. Kuzu (now LadybugDB) and Neptune were evaluated as Trellis backends and not pursued. See the open ArcadeDB ADR for the current substrate decision.
+
 **Sources (read directly during research):**
 - [getzep/graphiti](https://github.com/getzep/graphiti) — `graphiti_core/graphiti.py`, `nodes.py`, `edges.py`, `search/search_config.py`, `search/search_config_recipes.py`, `utils/maintenance/node_operations.py`, `utils/maintenance/edge_operations.py`, `utils/maintenance/community_operations.py`, `driver/`, `server/graph_service/`, `mcp_server/`
 - [Zep concepts](https://help.getzep.com/concepts), [getzep.com](https://www.getzep.com/)

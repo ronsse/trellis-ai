@@ -212,7 +212,7 @@ enrichment + vector paths.
   Registry's `embedding_dim` config must be set to 1536.
 - **Vector store: SQLite** (default) for dev; corpus is small (~50
   embeddings = entities + distractors). Phase B-1's larger corpus
-  may motivate switching to LanceDB or pgvector.
+  may motivate switching to pgvector (or ArcadeDB once landed).
 - `rounds`: 100 (plan §5.4 cites this; current default is 30).
 - `feedback_batch_size`: 10 (so 10 dual-loop passes).
 - Budget cap: **$25 hard stop** via per-round cost tracking; abort if
