@@ -558,29 +558,6 @@ def _init_stores_if_needed(config_path: Path) -> str:
     return "stores_initialized"
 
 
-def _check_lancedb(output_format: str) -> None:
-    """Verify lancedb is importable; exit with error if not."""
-    try:
-        import lancedb  # noqa: F401, PLC0415
-    except ImportError:
-        hint = 'pip install lancedb  # or: uv pip install "trellis[vectors]"'
-        if output_format == "json":
-            typer.echo(
-                json.dumps(
-                    {
-                        "status": "error",
-                        "error": "lancedb not installed",
-                        "hint": hint,
-                    }
-                )
-            )
-        else:
-            console.print(
-                f"[red]lancedb is not installed.[/red]\n  Install with: {hint}"
-            )
-        raise typer.Exit(code=1)  # noqa: B904
-
-
 def _ensure_gitignore(project_dir: Path) -> str | None:
     """Add .trellis/ to .gitignore if missing. Returns step name or None."""
     gitignore = project_dir / ".gitignore"
@@ -635,9 +612,6 @@ def _print_quickstart_summary(
 @admin_app.command()
 def quickstart(
     scope: str = typer.Option("root", help="root (global) or project (local)"),
-    with_vectors: bool = typer.Option(
-        False, "--with-vectors", help="Enable LanceDB vector store"
-    ),
     force: bool = typer.Option(
         False, "--force", help="Overwrite existing MCP server entry"
     ),
@@ -648,10 +622,6 @@ def quickstart(
     """Initialize stores and register MCP server with Claude Code."""
     config_path = get_config_dir() / "config.yaml"
     steps: list[str] = [_init_stores_if_needed(config_path)]
-
-    if with_vectors:
-        _check_lancedb(output_format)
-        steps.append("lancedb_available")
 
     # Build MCP server entry
     project_dir = Path.cwd()

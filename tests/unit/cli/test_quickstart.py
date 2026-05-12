@@ -228,21 +228,3 @@ class TestQuickstart:
         settings = json.loads(settings_path.read_text())
         assert "other-server" in settings["mcpServers"]
         assert "trellis" in settings["mcpServers"]
-
-    def test_with_vectors_missing_lancedb(self, monkeypatch):
-        # Make lancedb unimportable
-        import builtins
-
-        real_import = builtins.__import__
-
-        def mock_import(name, *args, **kwargs):
-            if name == "lancedb":
-                msg = "no lancedb"
-                raise ImportError(msg)
-            return real_import(name, *args, **kwargs)
-
-        monkeypatch.setattr(builtins, "__import__", mock_import)
-
-        result = runner.invoke(app, ["admin", "quickstart", "--with-vectors"])
-        assert result.exit_code == 1
-        assert "lancedb" in result.stdout.lower()

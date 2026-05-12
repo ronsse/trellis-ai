@@ -38,8 +38,8 @@ if TYPE_CHECKING:
 
 
 # All contract tests use 3-D vectors so backends that pin dimensions
-# at construction time (pgvector) and backends that infer them from
-# the first upsert (LanceDB) exercise the same shape.
+# at construction time (pgvector) and backends that store them as a
+# node property (neo4j shape #2) exercise the same shape.
 DIMS = 3
 
 
@@ -78,7 +78,7 @@ class VectorStoreContractTests:
         assert result["dimensions"] == DIMS
         assert len(result["vector"]) == DIMS
         # Stored vector should be approximately the input (float
-        # round-trip via numpy/pgvector/lancedb may lose precision).
+        # round-trip via numpy/pgvector may lose precision).
         for got, want in zip(result["vector"], _vec(0.1, 0.2, 0.3), strict=False):
             assert abs(got - want) < 1e-5
 
@@ -306,8 +306,8 @@ class VectorStoreContractTests:
 
     def test_upsert_bulk_rejects_duplicate_item_ids(self, store: VectorStore) -> None:
         """Within-batch duplicate ``item_id`` rejected — last-write-wins
-        is non-deterministic across backends (Neo4j UNWIND, LanceDB
-        merge_insert), so the contract requires de-dup before the call."""
+        is non-deterministic across backends (e.g. Neo4j UNWIND ordering),
+        so the contract requires de-dup before the call."""
         before = store.count()
         with pytest.raises(ValueError, match=r"upsert_bulk\[1\].*duplicate"):
             store.upsert_bulk(

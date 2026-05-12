@@ -57,7 +57,7 @@ def test_operational_namespace_has_expected_properties(tmp_path: Path) -> None:
 
 
 def test_knowledge_namespace_has_expected_properties(tmp_path: Path) -> None:
-    pytest.importorskip("numpy")  # SQLiteVectorStore requires [vectors]
+    pytest.importorskip("numpy")  # SQLiteVectorStore requires numpy
     registry = StoreRegistry(stores_dir=tmp_path / "stores")
     plane = registry.knowledge
     from trellis.stores.base import (
