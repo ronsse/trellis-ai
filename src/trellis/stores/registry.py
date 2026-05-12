@@ -87,7 +87,6 @@ _BUILTIN_BACKENDS: dict[str, dict[str, dict[str, tuple[str, str]]]] = {
         "vector": {
             "sqlite": ("trellis.stores.sqlite.vector", "SQLiteVectorStore"),
             "pgvector": ("trellis.stores.pgvector.store", "PgVectorStore"),
-            "lancedb": ("trellis.stores.lancedb.store", "LanceVectorStore"),
             "neo4j": ("trellis.stores.neo4j.vector", "Neo4jVectorStore"),
         },
         "document": {
@@ -735,14 +734,6 @@ class StoreRegistry:
                 "tuner_state": "tuner_state.db",
             }
             params["db_path"] = self._stores_dir / db_names[store_type]
-
-        # For lancedb backend, default to stores_dir/lancedb/
-        if backend == "lancedb" and "uri" not in params:
-            if self._stores_dir is None:
-                msg = "stores_dir must be set for lancedb backend without explicit uri"
-                raise ConfigError(msg, setting="stores_dir")
-            self._stores_dir.mkdir(parents=True, exist_ok=True)
-            params["uri"] = str(self._stores_dir / "lancedb")
 
         # For local blob backend, default to stores_dir/blobs/
         if backend == "local" and "root_dir" not in params:

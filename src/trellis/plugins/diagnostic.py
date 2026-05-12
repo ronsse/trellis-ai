@@ -41,7 +41,7 @@ _BUILTIN_STORE_NAMES: dict[str, set[str]] = {
     "trellis.stores.trace": {"sqlite", "postgres"},
     "trellis.stores.document": {"sqlite", "postgres"},
     "trellis.stores.graph": {"sqlite", "postgres"},
-    "trellis.stores.vector": {"sqlite", "pgvector", "lancedb"},
+    "trellis.stores.vector": {"sqlite", "pgvector"},
     "trellis.stores.event_log": {"sqlite", "postgres"},
     "trellis.stores.blob": {"local", "s3"},
 }

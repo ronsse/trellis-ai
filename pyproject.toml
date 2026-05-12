@@ -60,11 +60,6 @@ dev = [
     "pre-commit>=4.0",
     "hypothesis>=6.92",
 ]
-vectors = [
-    "lancedb>=0.6",
-    "pyarrow",
-    "pandas",
-]
 cloud = [
     "psycopg[binary]>=3.1",
     "psycopg-pool>=3.1",
@@ -95,7 +90,7 @@ observability = [
     "prometheus-fastapi-instrumentator>=7.0",
 ]
 all = [
-    "trellis-ai[vectors,cloud,neo4j,llm-openai,llm-anthropic,observability]",
+    "trellis-ai[cloud,neo4j,llm-openai,llm-anthropic,observability]",
 ]
 
 [project.scripts]
@@ -181,8 +176,6 @@ disallow_untyped_defs = false
 module = [
     "trellis._version",
     "numpy", "numpy.*",
-    "lancedb", "lancedb.*",
-    "pyarrow", "pyarrow.*",
     "psycopg", "psycopg.*",
     "psycopg_pool", "psycopg_pool.*",
     "pgvector", "pgvector.*",
@@ -208,10 +201,9 @@ pythonpath = ["src", "."]
 addopts = """\
     -v --tb=short \
     -m "not live and not slow and not neo and not neo4j \
-    and not postgres and not pgvector and not lancedb"\
+    and not postgres and not pgvector"\
 """
 markers = [
-    "lancedb: requires the lancedb extra installed. Excluded by default; use --include-lancedb or TRELLIS_TEST_LANCEDB=1.",
     "live: requires a real backend service running (uvicorn, real Postgres, real Neo4j, real S3). Excluded by default; use --include-live or TRELLIS_TEST_LIVE=1.",
     "neo: requires Neo4j. Excluded by default; use --include-neo or TRELLIS_TEST_NEO=1. Synonym of `neo4j` for ergonomic typing — both names are registered and both are gated by --include-neo.",
     "neo4j: requires a running Neo4j instance (set TRELLIS_TEST_NEO4J_URI). Excluded by default; use --include-neo or TRELLIS_TEST_NEO=1.",
