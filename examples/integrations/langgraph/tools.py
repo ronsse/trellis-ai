@@ -7,10 +7,10 @@ This file is shipped as a copy-paste starting point, not as an installable
 module. Drop it into your own project (e.g. ``myproject/trellis_tools.py``)
 and import from there:
 
-    from myproject.trellis_tools import create_xpg_tools
+    from myproject.trellis_tools import create_trellis_tools
 
-    tools = create_xpg_tools()                                 # local mode
-    tools = create_xpg_tools(base_url="http://localhost:8420") # remote mode
+    tools = create_trellis_tools()                                 # local mode
+    tools = create_trellis_tools(base_url="http://localhost:8420") # remote mode
     agent = create_react_agent(model, tools)
 
 Provides LangGraph-compatible tool functions that wrap the Trellis SDK,
@@ -39,7 +39,7 @@ def _get_client(base_url: str | None = None) -> TrellisClient:
     return _client
 
 
-def create_xpg_tools(
+def create_trellis_tools(
     base_url: str | None = None,
 ) -> list[Any]:
     """Create LangGraph-compatible Trellis tools.
@@ -53,7 +53,7 @@ def create_xpg_tools(
     client = TrellisClient(base_url=base_url)
 
     @tool
-    def xpg_get_context(
+    def trellis_get_context(
         intent: str,
         domain: str = "",
         max_tokens: int = 2000,
@@ -76,7 +76,7 @@ def create_xpg_tools(
         )
 
     @tool
-    def xpg_search(
+    def trellis_search(
         query: str,
         domain: str = "",
         limit: int = 10,
@@ -102,7 +102,7 @@ def create_xpg_tools(
         return "\n".join(lines)
 
     @tool
-    def xpg_save_trace(trace_json: str) -> str:
+    def trellis_save_trace(trace_json: str) -> str:
         """Save an experience trace recording what you did and what happened.
 
         Call this after completing meaningful work to build institutional memory.
@@ -128,7 +128,7 @@ def create_xpg_tools(
         return f"Trace saved: {trace_id}"
 
     @tool
-    def xpg_save_knowledge(
+    def trellis_save_knowledge(
         name: str,
         entity_type: str = "concept",
         properties_json: str = "{}",
@@ -154,7 +154,7 @@ def create_xpg_tools(
         return f"Entity created: {entity_id} ({entity_type}: {name})"
 
     @tool
-    def xpg_recent_activity(
+    def trellis_recent_activity(
         domain: str = "",
         limit: int = 10,
         max_tokens: int = 1500,
@@ -176,9 +176,9 @@ def create_xpg_tools(
         )
 
     return [
-        xpg_get_context,
-        xpg_search,
-        xpg_save_trace,
-        xpg_save_knowledge,
-        xpg_recent_activity,
+        trellis_get_context,
+        trellis_search,
+        trellis_save_trace,
+        trellis_save_knowledge,
+        trellis_recent_activity,
     ]
