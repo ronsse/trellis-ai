@@ -666,6 +666,14 @@ class StoreRegistry:
         # individual stores have closed (a no-op for stores with
         # injected drivers).
         self._bolt_drivers: dict[tuple[str, str], Any] = {}
+        # Tracks ``(uri, user)`` keys for which the ArcadeDB edge-
+        # provenance schema migration has been installed in *this*
+        # registry instance. Used by :meth:`_inject_arcadedb_driver` to
+        # skip redundant HTTP DDL on repeat injections (e.g. a second
+        # graph store reusing the cached driver). The DDL itself is
+        # ``CREATE PROPERTY ... IF NOT EXISTS`` so re-running is safe;
+        # this just avoids the round trip.
+        self._arcadedb_provenance_migrated: set[tuple[str, str]] = set()
         self._knowledge = _KnowledgePlane(self)
         self._operational = _OperationalPlane(self)
 
@@ -961,22 +969,32 @@ class StoreRegistry:
         ensure_db = params.get("ensure_database_exists", True)
 
         key = (uri, user)
-        # Strip driver_config from params we'll forward to the store —
-        # it's consumed at driver build time, not by the store itself.
+        # Strip ``driver_config`` + ``ensure_database_exists`` from
+        # forwarded params — both are consumed here (driver build /
+        # database creation), not by the store. ``http_url`` is *kept*
+        # so the constructor's injected-driver branch can recognise the
+        # registry path (and suppress its "migration skipped" warning).
+        # ``password`` is stripped below alongside the driver injection
+        # to preserve the constructor's "driver XOR password" mutex.
         new_params = {
             k: v
             for k, v in params.items()
-            if k not in {"driver_config", "http_url", "ensure_database_exists"}
+            if k not in {"driver_config", "ensure_database_exists"}
         }
         new_params["uri"] = uri
         new_params["user"] = user
         new_params["database"] = database
 
         if key in self._bolt_drivers:
-            # Driver already built (e.g. by the graph store; vector
-            # store now joining the pool). Strip ``password`` so the
-            # store skips its own build path and uses the injected
-            # driver.
+            self._ensure_arcadedb_provenance_migrated_on_cached_driver(
+                key=key,
+                http_url=http_url,
+                uri=uri,
+                user=user,
+                password=password,
+                database=database,
+                new_params=new_params,
+            )
             new_params.pop("password", None)
             new_params["driver"] = self._bolt_drivers[key]
             return new_params
@@ -1027,11 +1045,17 @@ class StoreRegistry:
         self._run_arcadedb_edge_provenance_migration(
             http_url=http_url, uri=uri, user=user, password=password, database=database
         )
+        self._arcadedb_provenance_migrated.add(key)
 
         driver = build_arcadedb_driver(uri, user, password, config=cfg)
         self._bolt_drivers[key] = driver
         new_params.pop("password")
         new_params["driver"] = driver
+        # Forward the resolved ``http_url`` so the constructor's
+        # injected-driver branch can tell it ran through the registry
+        # (and skip its no-longer-applicable "migration skipped" warning).
+        if http_url and not new_params.get("http_url"):
+            new_params["http_url"] = http_url
         return new_params
 
     @staticmethod
@@ -1080,6 +1104,69 @@ class StoreRegistry:
             password=password,
             database=database,
         )
+
+    def _ensure_arcadedb_provenance_migrated_on_cached_driver(
+        self,
+        *,
+        key: tuple[str, str],
+        http_url: str | None,
+        uri: str,
+        user: str,
+        password: str | None,
+        database: str,
+        new_params: dict[str, Any],
+    ) -> None:
+        """Re-run the provenance migration on the cached-driver path.
+
+        The cached-driver path used to short-circuit before the
+        migration helper ran. In production a registry typically only
+        builds one graph store per ``(uri, user)`` so the new-driver
+        path covers it — but any caller that reuses a registry across
+        store constructions (test harnesses, future multi-store layouts)
+        would silently bypass the FLOAT MIN/MAX constraint on
+        ``edge.confidence``.
+
+        Idempotent — skips when the registry has already recorded a
+        successful migration for this ``(uri, user)`` in
+        :attr:`_arcadedb_provenance_migrated`. Falls back to deriving
+        the HTTP URL from the Bolt URI when the explicit value is
+        absent. Warns (does not raise) when the credentials needed to
+        run the migration are unavailable on this injection — the
+        cached driver still works, only the defense-in-depth constraint
+        is at risk.
+        """
+        from trellis.stores.arcadedb.base import (  # noqa: PLC0415
+            derive_http_url_from_bolt,
+        )
+
+        if key in self._arcadedb_provenance_migrated:
+            return
+        resolved_http_url = http_url or derive_http_url_from_bolt(uri)
+        if resolved_http_url and password:
+            self._run_arcadedb_edge_provenance_migration(
+                http_url=resolved_http_url,
+                uri=uri,
+                user=user,
+                password=password,
+                database=database,
+            )
+            self._arcadedb_provenance_migrated.add(key)
+            if not new_params.get("http_url"):
+                new_params["http_url"] = resolved_http_url
+        else:
+            logger.warning(
+                "arcadedb_provenance_schema_migration_skipped_cached_driver",
+                reason=(
+                    "ArcadeDB driver was already cached for this "
+                    "(uri, user) and the current injection lacks the "
+                    "http_url+password needed to run the edge "
+                    "provenance migration. The FLOAT MIN/MAX constraint "
+                    "on edge.confidence may not be installed if the "
+                    "cached driver was built without credentials in scope."
+                ),
+                uri=uri,
+                database=database,
+            )
 
     def _resolve_arcadedb_vector_params(
         self, params: dict[str, Any]
