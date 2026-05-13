@@ -113,6 +113,7 @@ def _raise_mutation_failed(
     """Raise ``McpError(MUTATION_FAILED, …)`` — app-layer code."""
     raise McpError(ErrorData(code=MUTATION_FAILED, message=message, data=data))
 
+
 mcp = FastMCP(
     "trellis",
     instructions=(
@@ -1692,4 +1693,3 @@ def main() -> None:
                 logger.exception("mcp_server_registry_close_failed")
             finally:
                 _registry = None
-            _registry = None
