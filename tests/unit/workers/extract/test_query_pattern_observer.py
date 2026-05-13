@@ -18,7 +18,12 @@ import pytest
 
 from trellis.extract.base import ExtractorTier
 from trellis.schemas.extraction import EdgeDraft, EntityDraft, ExtractionResult
-from trellis.schemas.well_known import HAS_OBSERVATION, MEASUREMENT, OBSERVATION
+from trellis.schemas.well_known import (
+    HAS_MEASUREMENT,
+    HAS_OBSERVATION,
+    MEASUREMENT,
+    OBSERVATION,
+)
 from trellis_workers.extract import (
     QueryLogRecord,
     QueryPatternObserver,
@@ -80,9 +85,14 @@ async def test_emits_measurement_and_observation_per_subject() -> None:
     assert len(measurements) == 2
     assert len(observations) == 2
 
-    # One hasObservation edge per emitted draft.
+    # One edge per emitted draft: ``hasMeasurement`` for the Measurement
+    # entities and ``hasObservation`` for the Observation entities. The
+    # distinction lets consumers route on edge kind alone (ADR §2.2).
     assert len(result.edges) == 4
-    assert all(e.edge_kind == HAS_OBSERVATION for e in result.edges)
+    measurement_edges = [e for e in result.edges if e.edge_kind == HAS_MEASUREMENT]
+    observation_edges = [e for e in result.edges if e.edge_kind == HAS_OBSERVATION]
+    assert len(measurement_edges) == 2
+    assert len(observation_edges) == 2
     assert all(e.allow_dangling is True for e in result.edges)
 
 

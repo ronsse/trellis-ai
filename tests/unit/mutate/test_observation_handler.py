@@ -90,7 +90,8 @@ class TestObservationRecordHandler:
     ) -> None:
         """No silent defaults: missing required fields raise loudly."""
         handler = ObservationRecordHandler(registry)
-        # Missing `content` and `confidence` — both required.
+        # Missing `content` — required. (``confidence`` is optional per
+        # adr-observation-entity-type.md §2.1.)
         body = {
             "subject_entity_id": "ds-1",
             "subject_entity_type": "Dataset",
@@ -175,3 +176,37 @@ class TestMeasurementRecordHandler:
         )
         with pytest.raises(ValidationError):
             handler.handle(cmd)
+
+    def test_writes_has_measurement_edge_not_has_observation(
+        self, registry: StoreRegistry
+    ) -> None:
+        """Measurement attaches via ``hasMeasurement``, not ``hasObservation``.
+
+        Per ``adr-observation-entity-type.md`` §2.2 the verb is
+        Observation-specific; Measurement gets its own edge kind so
+        consumers can route on edge kind without inspecting target
+        node type. See PR #124 review.
+        """
+        subject_id = _seed_subject(registry)
+        handler = MeasurementRecordHandler(registry)
+        meas = Measurement(
+            subject_entity_id=subject_id,
+            subject_entity_type="Dataset",
+            metric_name="null_rate",
+            metric_value=0.03,
+            observer_agent_id="agent-2",
+        )
+        cmd = Command(
+            operation=Operation.MEASUREMENT_RECORD, args={"measurement": meas}
+        )
+        handler.handle(cmd)
+
+        # Pull the outgoing edges from the subject and look for the one
+        # pointing at the measurement node.
+        edges = registry.knowledge.graph_store.get_edges(
+            node_id=subject_id, direction="outgoing"
+        )
+        matching = [e for e in edges if e["target_id"] == meas.measurement_id]
+        edge_kinds = {e["edge_type"] for e in matching}
+        assert "hasMeasurement" in edge_kinds
+        assert "hasObservation" not in edge_kinds

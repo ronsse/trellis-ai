@@ -361,6 +361,21 @@ class TestObservationRegistration:
         assert wk.is_canonical_edge_kind("hasObservation")
         assert wk.HAS_OBSERVATION == "hasObservation"
 
+    def test_has_measurement_is_canonical_edge(self) -> None:
+        # Distinct edge kind for Measurement so the Measurement handler
+        # doesn't overload ``hasObservation`` (ADR §2.2). Consumers can
+        # then route on edge kind alone.
+        assert wk.is_canonical_edge_kind("hasMeasurement")
+        assert wk.HAS_MEASUREMENT == "hasMeasurement"
+
+    def test_has_observation_and_measurement_are_distinct(self) -> None:
+        assert wk.HAS_OBSERVATION != wk.HAS_MEASUREMENT
+
+    def test_has_measurement_has_no_alignment(self) -> None:
+        # Same rationale as hasObservation — Trellis-specific verb with
+        # no clean PROV-O / schema.org analogue (ADR §2.2).
+        assert wk.schema_alignment_for_edge_kind("hasMeasurement") is None
+
     def test_observation_alignment_uri(self) -> None:
         assert (
             wk.schema_alignment_for_entity_type("Observation")
@@ -384,7 +399,9 @@ class TestObservationRegistration:
         assert wk.is_canonical_edge_kind("wasDerivedFrom")
 
     def test_well_known_version_bumped(self) -> None:
-        # Adding ``Observation`` / ``Measurement`` is an additive
-        # change — minor bump per plan-self-improvement-program.md §5.6
-        # and adr-observation-entity-type.md §5.
-        assert wk.WELL_KNOWN_VERSION == "1.1.0"
+        # Adding ``hasMeasurement`` is an additive change — minor bump
+        # per plan-self-improvement-program.md §5.6 and
+        # adr-observation-entity-type.md §5. The 1.1.0 entry registered
+        # Observation/Measurement entities + hasObservation edge;
+        # 1.2.0 adds the dedicated Measurement edge kind.
+        assert wk.WELL_KNOWN_VERSION == "1.2.0"
