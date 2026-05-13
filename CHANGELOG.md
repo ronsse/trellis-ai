@@ -4,6 +4,19 @@ All notable changes to Trellis will be documented in this file.
 
 ## [Unreleased]
 
+### Cleanup (C2 silent-fallback program)
+
+The silent-fallback cleanup track defined in [`docs/design/plan-cleanup-silent-fallbacks.md`](docs/design/plan-cleanup-silent-fallbacks.md) finished its scheduled phases. Each phase shipped as its own PR; Phase 7 is the closing verification.
+
+- **Phase 1.5** — retention malformed-date surfacing ([#116](https://github.com/ronsse/trellis-ai/pull/116))
+- **Phase 2** — StoreRegistry typed import errors with `trellis[<extra>]` install hints ([#118](https://github.com/ronsse/trellis-ai/pull/118))
+- **Phase 3** — MCP structured error protocol via the `_raise_*` helper family ([#119](https://github.com/ronsse/trellis-ai/pull/119))
+- **Phase 4** — `GraphMigrator` aggregate-error path + `PackBuilder` explicit `PackAssemblyError` / `strategy_failures` ([#120](https://github.com/ronsse/trellis-ai/pull/120))
+- **Phase 5** — telemetry / observability per-site review across `trellis_api/observability.py`, `feedback/recording.py`, `classify/refresh.py`, `extract/dispatcher.py` ([#122](https://github.com/ronsse/trellis-ai/pull/122))
+- **Phase 6** — CLI `typer.Exit` exit codes, `MutationExecutor` typed catches (`ValidationError` / `PolicyViolationError` / `IdempotencyError` / `(StoreError, TrellisError)`), SDK HTTP exception hierarchy ([#123](https://github.com/ronsse/trellis-ai/pull/123))
+- **Audit script** — helper-aware mode is now the default (recognises `_raise_*` helper indirection, `NoReturn` annotations, and `sys.exit` / `typer.Exit` / `click.Abort` stack-aborts); `--literal-only` retained for back-compat with the historical baseline ([#128](https://github.com/ronsse/trellis-ai/pull/128))
+- **Phase 7** — verification: DEFECT count in `src/` dropped from **113** to **85** in literal-only mode (apples-to-apples vs the 2026-05-12 baseline); the new authoritative helper-aware count is **67**. 33 of the 67 carry the canonical inline `# GRACEFUL-DEGRADATION:` / `# GUARD:` / `# AGGREGATE:` annotation; **34 unjustified survivors** remain (exceeds the original ≤ 10 target). Detailed per-file analysis lives in [`audit/silent_fallbacks_2026-05-12-final.md`](audit/silent_fallbacks_2026-05-12-final.md); a Phase 8 follow-up is warranted to either attach canonical annotations or replace handlers with explicit emit-then-raise.
+
 ## [0.8.0] - 2026-05-12
 
 First wave of the **self-improvement program** scoped in [`docs/design/plan-self-improvement-program.md`](docs/design/plan-self-improvement-program.md). Five PRs landed in one batch.
