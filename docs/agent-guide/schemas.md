@@ -397,6 +397,92 @@ Cross-system identifier mapped onto a canonical entity.
 
 ---
 
+## Observation
+
+An empirical, narrative claim about a subject entity — derived from a trace, log, or analysis run. Lives in the graph as a node of canonical type `Observation`. Pairs with [Measurement](#measurement) (the scalar/time-series counterpart) under the same `hasObservation` edge from the subject.
+
+See [`adr-observation-entity-type.md`](../design/adr-observation-entity-type.md) for the design rationale and [`plan-observation-entity-type.md`](../design/plan-observation-entity-type.md) for the implementation phases. The Pydantic model lives in [`src/trellis/schemas/observation.py`](../../src/trellis/schemas/observation.py).
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `observation_id` | `string` | No | ULID | Stable identifier |
+| `subject_entity_id` | `string` | **Yes** | -- | The entity the observation is *about* |
+| `subject_entity_type` | `string` | **Yes** | -- | Open-string entity type of the subject (canonical recommended) |
+| `observer_agent_id` | `string` | **Yes** | -- | Which agent (human or automated) produced this observation |
+| `content` | `string` | **Yes** | -- | Observation text / narrative description |
+| `confidence` | `float` | **Yes** | -- | Producer confidence in `[0.0, 1.0]` |
+| `observed_at` | `datetime` | No | UTC now | When the observation was made |
+| `evidence_ref` | `string` or `null` | No | `null` | Pointer to supporting evidence (`trace_id`, `document_id`, URN) |
+| `metadata` | `dict` or `null` | No | `null` | Open bag for `kind` / `value` / `window_*` / `sample_size` / `method` etc. |
+
+```json
+{
+  "subject_entity_id": "dataset:warehouse/public/users",
+  "subject_entity_type": "Dataset",
+  "observer_agent_id": "trellis_workers.query_pattern_observer",
+  "content": "users table observed in 47 query log rows last hour",
+  "confidence": 0.97,
+  "metadata": {"kind": "query_pattern", "sample_size": 47}
+}
+```
+
+---
+
+## Measurement
+
+A scalar / numeric / boolean measurement attached to an entity. Machine-comparable counterpart to [Observation](#observation); use this when the signal reduces to a single number you would graph over time. **Append-only by convention** — emit a new node per measurement window rather than mutating an existing one (avoids unbounded SCD-2 cost on high-frequency metric streams; see [`adr-observation-entity-type.md`](../design/adr-observation-entity-type.md) §5.6).
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `measurement_id` | `string` | No | ULID | Stable identifier |
+| `subject_entity_id` | `string` | **Yes** | -- | The entity the measurement is *about* |
+| `subject_entity_type` | `string` | **Yes** | -- | Open-string entity type of the subject |
+| `metric_name` | `string` | **Yes** | -- | Semantic name (`"null_rate"`, `"query_count"`, `"p99_latency_ms"`) |
+| `metric_value` | `float` | **Yes** | -- | The measured scalar value |
+| `unit` | `string` or `null` | No | `null` | Optional unit (`"percent"`, `"count"`, `"ms"`) |
+| `measured_at` | `datetime` | No | UTC now | When the measurement was taken |
+| `observer_agent_id` | `string` | **Yes** | -- | Which agent recorded the measurement |
+| `metadata` | `dict` or `null` | No | `null` | Open bag for `window_start` / `window_end` / `sample_size` / `method` |
+
+```json
+{
+  "subject_entity_id": "dataset:warehouse/public/users",
+  "subject_entity_type": "Dataset",
+  "metric_name": "query_count",
+  "metric_value": 47,
+  "unit": "count",
+  "observer_agent_id": "trellis_workers.query_pattern_observer",
+  "metadata": {"window_start": "2026-05-12T11:00:00Z", "window_end": "2026-05-12T12:00:00Z"}
+}
+```
+
+### Retrieving observations and measurements
+
+`ObservationSearch` (in [`src/trellis/retrieve/observation_strategy.py`](../../src/trellis/retrieve/observation_strategy.py)) is the retrieval strategy that surfaces these nodes in `PackBuilder` output. It is **opt-in** — the default strategy set does not include it; callers add it explicitly:
+
+```python
+from trellis.retrieve import ObservationSearch, PackBuilder
+from trellis.retrieve.strategies import build_strategies
+
+strategies = build_strategies(registry)
+strategies.append(ObservationSearch(registry.knowledge.graph_store))
+pack = PackBuilder(strategies=strategies).build(
+    intent="why is this column flagged?",
+    filters={
+        "subject_entity_id": "dataset:warehouse/public/users",
+        "confidence_threshold": 0.5,        # drop weak claims
+        "observed_after": cutoff_datetime,  # freshness watermark
+        "include_measurements": True,       # default — emit both kinds
+    },
+)
+```
+
+Scoring applies the same exponential half-life decay used by the recency curve in [`adr-importance-score-freshness.md`](../design/adr-importance-score-freshness.md): newer observations rank above older ones with identical `confidence`. Subject filtering is mandatory — calling the strategy without `subject_entity_id` or `seed_ids` returns an empty pack (no silent "give me everything" fallback).
+
+`Observation` items land in the `operational` retrieval tier by default (same bucket as traces and error resolutions); applications wanting a dedicated metrics tier pass a custom heuristics dict to [`TierMapper`](../../src/trellis/retrieve/tier_mapping.py).
+
+---
+
 ## Evidence
 
 A piece of evidence supporting traces, precedents, or entities. The `content_hash` is auto-computed from `content` if not provided.
@@ -789,6 +875,8 @@ The graph store accepts **any string** for entity types. The values below are we
 | `Concept` | `concept` | (Trellis-specific) | Abstract concept |
 | `Agent` | — | PROV-O | Anything that *acts* (human user, automated agent, system actor) |
 | `Activity` | — | PROV-O | Unit of work — a trace, task, or workflow run as a graph node |
+| `Observation` | — | schema.org `Observation` | Empirical narrative claim about a subject entity (see [Observation](#observation)) |
+| `Measurement` | — | schema.org `PropertyValue` | Scalar / numeric measurement attached to a subject entity (see [Measurement](#measurement)) |
 | — | `domain` | (dropped from defaults) | Removed because it collides with `ContentTags.domain`. Existing data using `entity_type="domain"` keeps working as an open string. |
 
 Use `canonicalize_entity_type("person") -> "Person"` to normalize legacy values when bucketing across the alias boundary.
@@ -855,6 +943,7 @@ The graph store accepts **any string** for edge types. The values below are well
 | `attachedTo` | `evidence_attached_to` | (Trellis-specific) | Evidence row bound to an entity row |
 | `supports` | `evidence_supports` | (Trellis-specific) | Evidence backs a claim epistemically |
 | `appliesTo` | `precedent_applies_to` | (Trellis-specific) | Precedent applies to a class of situations |
+| `hasObservation` | — | (Trellis-specific) | Subject entity has an attached [Observation](#observation) or [Measurement](#measurement) |
 
 Examples of domain-specific edge types: `reads_from`, `writes_to`, `materializes_to`, `defined_in`, `owned_by`. These pass through `canonicalize_edge_kind` unchanged.
 
