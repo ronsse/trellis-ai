@@ -68,6 +68,26 @@ META_TRACES_ENV_VAR: str = "TRELLIS_META_TRACES"
 _VALID_META_TRACES_VALUES = frozenset({"on", "off"})
 
 
+def _provenance_kwargs(*, activity_id: str, agent_id: str) -> dict[str, Any]:
+    """Build the five Item-2 provenance columns for a meta-edge.
+
+    Every edge written by the recorder carries the same column shape:
+    ``source_trace_id=None`` (Activities are not traces),
+    ``confidence=1.0`` (the analyzer asserts fact), ``evidence_ref`` set
+    to the Activity ID so downstream queries can rejoin every edge from
+    the same invocation, and ``extractor_tier="DETERMINISTIC"`` matching
+    the SQL provenance-column casing in
+    :data:`trellis.schemas.graph.ALLOWED_EXTRACTOR_TIERS`.
+    """
+    return {
+        "source_trace_id": None,
+        "agent_id": agent_id,
+        "confidence": 1.0,
+        "evidence_ref": activity_id,
+        "extractor_tier": "DETERMINISTIC",
+    }
+
+
 def _meta_traces_enabled() -> bool:
     """Return ``True`` if meta-trace recording is enabled.
 
@@ -242,25 +262,20 @@ class MetaAnalysisRecord:
                 "live with-block"
             )
             raise RuntimeError(msg)
-        graph_store = self._registry.knowledge.graph_store
         # ``upsert_edge`` accepts the five provenance kwargs on every
         # built-in backend (see Item 2). The ABC signature does not
         # declare them yet — the dict-spread pattern below mirrors
         # ``trellis_cli.admin_migrate_provenance`` and lets the typed
         # call site stay clean without a per-line ``# type: ignore``.
-        provenance: dict[str, Any] = {
-            "source_trace_id": None,
-            "agent_id": self._agent_id,
-            "confidence": 1.0,
-            "evidence_ref": self._activity_id,
-            "extractor_tier": "DETERMINISTIC",
-        }
-        graph_store.upsert_edge(
+        self._registry.knowledge.graph_store.upsert_edge(
             source_id=source_id,
             target_id=target_id,
             edge_type=edge_kind,
             properties=properties or {},
-            **provenance,
+            **_provenance_kwargs(
+                activity_id=self._activity_id,
+                agent_id=self._agent_id,
+            ),
         )
 
 
@@ -487,19 +502,12 @@ def _create_activity(
     # trellis_meta_") matches without scanning Activity properties.
     # ``**`` spread keeps mypy happy until the ABC widens to declare
     # the provenance kwargs (see Item 2 follow-up).
-    provenance: dict[str, Any] = {
-        "source_trace_id": None,
-        "agent_id": agent_id,
-        "confidence": 1.0,
-        "evidence_ref": activity_id,
-        "extractor_tier": "DETERMINISTIC",
-    }
     graph_store.upsert_edge(
         source_id=activity_id,
         target_id=agent_id,
         edge_type=wk.WAS_ASSOCIATED_WITH,
         properties={"analyzer_name": analyzer_name},
-        **provenance,
+        **_provenance_kwargs(activity_id=activity_id, agent_id=agent_id),
     )
     return activity_id
 
