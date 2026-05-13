@@ -1,4 +1,20 @@
-"""Pack builder — orchestrates search strategies to assemble retrieval packs."""
+"""Pack builder — orchestrates search strategies to assemble retrieval packs.
+
+Failure semantics (C2 Phase 4):
+
+* A single configured strategy that raises is treated as a hard
+  failure: the build cannot meaningfully assemble a pack without it.
+  :class:`PackAssemblyError` is raised. Required-strategy failures
+  never produce a quiet empty pack.
+* When **multiple** strategies are configured and one (or more) fails,
+  the build continues with the survivors. Each failure is recorded in
+  a :class:`StrategyFailure` and surfaced in the ``PACK_ASSEMBLED``
+  event payload under ``strategy_failures``. If **all** strategies
+  fail the build raises :class:`PackAssemblyError`.
+* A configured reranker that raises is treated as a hard failure for
+  the same reason — the caller asked for reranked relevance, and
+  silently falling back to the unranked order would mask the misconfig.
+"""
 
 from __future__ import annotations
 
@@ -42,6 +58,53 @@ DEFAULT_SESSION_DEDUP_WINDOW_MINUTES = 60
 #: to skip. See :mod:`trellis.retrieve.evaluate` for scorer building blocks
 #: and ``docs/agent-guide/pack-quality-evaluation.md`` for usage.
 PackEvaluator = Callable[[Pack], "QualityReport | None"]
+
+
+class PackAssemblyError(RuntimeError):
+    """Raised when pack assembly cannot make progress.
+
+    Two surfaces raise this:
+
+    * **Required-strategy failure** — the single configured strategy
+      raises. Returning an empty pack here would mask the bug; the
+      caller asked for retrieval and the system could not perform any.
+    * **All-strategies failure** — every strategy in a multi-strategy
+      pipeline raised. The build has nothing to assemble.
+
+    The collected :class:`StrategyFailure` entries are attached via
+    :attr:`strategy_failures` so the caller can inspect which strategies
+    failed and why, even though the original exceptions are chained
+    via ``__cause__`` (only the last one — the others are listed in
+    the failure records).
+    """
+
+    def __init__(
+        self, message: str, strategy_failures: list[StrategyFailure]
+    ) -> None:
+        super().__init__(message)
+        self.strategy_failures = list(strategy_failures)
+
+
+@dataclass(frozen=True)
+class StrategyFailure:
+    """One entry per failed :class:`SearchStrategy.search` call.
+
+    Attached to :class:`PackAssemblyError` when raised, and included in
+    the ``PACK_ASSEMBLED`` event payload under ``strategy_failures``
+    when the build continues with survivors.
+    """
+
+    strategy: str
+    error_class: str
+    message: str
+
+    def to_event_payload(self) -> dict[str, str]:
+        """Serialize for inclusion in the ``PACK_ASSEMBLED`` event."""
+        return {
+            "strategy": self.strategy,
+            "error_class": self.error_class,
+            "message": self.message,
+        }
 
 
 @dataclass(frozen=True)
@@ -176,6 +239,7 @@ class PackBuilder:
         strategies_used: list[str] = []
         candidates_found = 0
         rejected: list[RejectedItem] = []
+        strategy_failures: list[StrategyFailure] = []
 
         merged_filters = self._build_filters(filters, tag_filters)
         # Propagate structural preference into the per-strategy filter so
@@ -197,9 +261,46 @@ class PackBuilder:
                 logger.debug(
                     "strategy_completed", strategy=strategy.name, items=len(items)
                 )
-            except Exception:
+            except Exception as exc:
+                # NOT silent: each captured failure is surfaced post-loop
+                # via ``PackAssemblyError`` (required-strategy + all-failed
+                # cases) or in the ``PACK_ASSEMBLED`` event payload under
+                # ``strategy_failures`` (partial-failure case). The audit
+                # heuristic flags this except handler because the raise
+                # happens conditionally outside the block — see the
+                # ``raise PackAssemblyError(...)`` below.
                 logger.exception("strategy_failed", strategy=strategy.name)
+                strategy_failures.append(
+                    StrategyFailure(
+                        strategy=strategy.name,
+                        error_class=type(exc).__name__,
+                        message=str(exc),
+                    )
+                )
                 continue
+
+        # Loud-by-default failure surfaces (C2 Phase 4).
+        # 1. Single configured strategy that failed: required-strategy
+        #    failure — never return an empty pack here.
+        # 2. Multiple configured strategies and *all* of them failed:
+        #    we cannot make progress, raise.
+        if strategy_failures:
+            total = len(self._strategies)
+            failed = len(strategy_failures)
+            if total == 1:
+                first = strategy_failures[0]
+                msg = (
+                    "Required strategy "
+                    f"{first.strategy!r} failed: "
+                    f"{first.error_class}: {first.message}"
+                )
+                raise PackAssemblyError(msg, strategy_failures)
+            if failed == total:
+                msg = (
+                    f"All {total} configured strategies failed; "
+                    "no candidates available for pack assembly"
+                )
+                raise PackAssemblyError(msg, strategy_failures)
 
         # Promote metadata["source_strategy"] → strategy_source field
         all_items = self._promote_strategy_source(all_items)
@@ -259,14 +360,21 @@ class PackBuilder:
                         kept.append(item)
                 deduped = kept
 
-        # Rerank if a reranker is configured (after dedup + filters, before budget)
+        # Rerank if a reranker is configured (after dedup + filters, before budget).
+        # Loud-by-default (C2 Phase 4): a configured reranker that fails
+        # is a misconfiguration the caller needs to see — silently
+        # falling back to unranked order would mask it.
         if self._reranker is not None:
             try:
                 deduped = self._reranker.rerank(intent, deduped)
                 logger.debug("reranker_applied", reranker=self._reranker.name)
-            except Exception:
+            except Exception as exc:
                 logger.exception("reranker_failed", reranker=self._reranker.name)
-                # Fall through with original ordering
+                msg = (
+                    f"Reranker {self._reranker.name!r} failed: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                raise PackAssemblyError(msg, strategy_failures) from exc
 
         # Sort by relevance_score descending
         deduped.sort(key=lambda x: x.relevance_score, reverse=True)
@@ -323,7 +431,7 @@ class PackBuilder:
 
         # Emit telemetry event
         if self._event_log is not None:
-            self._emit_telemetry(pack)
+            self._emit_telemetry(pack, strategy_failures=strategy_failures)
 
         return pack
 
@@ -359,6 +467,7 @@ class PackBuilder:
         all_items: list[PackItem] = []
         strategies_used: list[str] = []
         candidates_found = 0
+        strategy_failures: list[StrategyFailure] = []
 
         merged_filters = self._build_filters(filters, tag_filters)
         if include_structural:
@@ -375,9 +484,39 @@ class PackBuilder:
                 candidates_found += len(items)
                 all_items.extend(items)
                 strategies_used.append(strategy.name)
-            except Exception:
+            except Exception as exc:
+                # NOT silent — see the matching note in :meth:`build`.
+                # Required- and all-fail cases raise ``PackAssemblyError``
+                # below; partial failures are surfaced in the
+                # ``PACK_ASSEMBLED`` event payload.
                 logger.exception("strategy_failed", strategy=strategy.name)
+                strategy_failures.append(
+                    StrategyFailure(
+                        strategy=strategy.name,
+                        error_class=type(exc).__name__,
+                        message=str(exc),
+                    )
+                )
                 continue
+
+        # Loud-by-default failure surfaces (C2 Phase 4) — see build().
+        if strategy_failures:
+            total = len(self._strategies)
+            failed = len(strategy_failures)
+            if total == 1:
+                first = strategy_failures[0]
+                msg = (
+                    "Required strategy "
+                    f"{first.strategy!r} failed: "
+                    f"{first.error_class}: {first.message}"
+                )
+                raise PackAssemblyError(msg, strategy_failures)
+            if failed == total:
+                msg = (
+                    f"All {total} configured strategies failed; "
+                    "no candidates available for sectioned pack assembly"
+                )
+                raise PackAssemblyError(msg, strategy_failures)
 
         # 2. Deduplicate
         deduped = self._deduplicate(all_items)
@@ -405,14 +544,20 @@ class PackBuilder:
                 deduped = [i for i in deduped if i.item_id not in served]
 
         # 3b. Rerank the shared candidate pool before section filling.
+        # Loud-by-default (C2 Phase 4) — see build().
         if self._reranker is not None:
             try:
                 deduped = self._reranker.rerank(intent, deduped)
                 logger.debug("reranker_applied_sectioned", reranker=self._reranker.name)
-            except Exception:
+            except Exception as exc:
                 logger.exception(
                     "reranker_failed_sectioned", reranker=self._reranker.name
                 )
+                msg = (
+                    f"Reranker {self._reranker.name!r} failed: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                raise PackAssemblyError(msg, strategy_failures) from exc
 
         # 4. Fill each section independently
         #    Track which section each item lands in (for cross-section dedup)
@@ -500,11 +645,18 @@ class PackBuilder:
 
         # 5. Emit telemetry
         if self._event_log is not None:
-            self._emit_sectioned_telemetry(sectioned_pack)
+            self._emit_sectioned_telemetry(
+                sectioned_pack, strategy_failures=strategy_failures
+            )
 
         return sectioned_pack
 
-    def _emit_sectioned_telemetry(self, pack: SectionedPack) -> None:
+    def _emit_sectioned_telemetry(
+        self,
+        pack: SectionedPack,
+        *,
+        strategy_failures: list[StrategyFailure] | None = None,
+    ) -> None:
         """Emit telemetry event for a sectioned pack."""
         per_item_estimates = [
             item.estimated_tokens or self._token_counter.count(item.excerpt)
@@ -542,6 +694,9 @@ class PackBuilder:
                 "advisory_ids": [a.advisory_id for a in pack.advisories],
                 "reranker": self._reranker.name if self._reranker else None,
                 "semantic_dedup_enabled": self._semantic_dedup is not None,
+                "strategy_failures": [
+                    sf.to_event_payload() for sf in (strategy_failures or [])
+                ],
                 **token_budget_fields,
             },
         )
@@ -563,6 +718,11 @@ class PackBuilder:
         try:
             report = self._evaluator(pack)
         except Exception:
+            # GRACEFUL-DEGRADATION: assembly-time evaluation is a
+            # diagnostics hook, not part of the retrieval contract. A
+            # broken evaluator must not prevent the agent from receiving
+            # a pack. The exception is logged in full and the pack is
+            # returned without a quality report.
             logger.exception("pack_evaluator_failed", pack_id=pack.pack_id)
             return
         if report is None:
@@ -596,10 +756,28 @@ class PackBuilder:
                     },
                 )
             except Exception:
+                # GRACEFUL-DEGRADATION: a failed telemetry emit must not
+                # invalidate a successfully assembled pack. The pack
+                # itself is already attached to ``pack.metadata``; the
+                # event is best-effort observability and is logged on
+                # failure so an operator can investigate.
                 logger.exception("pack_quality_event_emit_failed", pack_id=pack.pack_id)
 
-    def _emit_telemetry(self, pack: Pack) -> None:
-        """Emit a ContextRetrievalEvent for observability."""
+    def _emit_telemetry(
+        self,
+        pack: Pack,
+        *,
+        strategy_failures: list[StrategyFailure] | None = None,
+    ) -> None:
+        """Emit a ContextRetrievalEvent for observability.
+
+        ``strategy_failures`` (C2 Phase 4) records each strategy that
+        raised during this build but did not block assembly because a
+        sibling strategy succeeded. Empty list when all strategies
+        succeeded — kept in the payload for schema consistency so
+        downstream consumers can ``payload.get("strategy_failures", [])``
+        without a key check.
+        """
         report = pack.retrieval_report
         token_budget_fields = self._build_token_budget_payload(
             pack.budget.max_tokens,
@@ -661,6 +839,9 @@ class PackBuilder:
                 "semantic_dedup_rejected": sum(
                     1 for r in report.rejected_items if r.reason == "semantic_dedup"
                 ),
+                "strategy_failures": [
+                    sf.to_event_payload() for sf in (strategy_failures or [])
+                ],
                 **token_budget_fields,
             },
         )
@@ -715,6 +896,11 @@ class PackBuilder:
                         delta=delta,
                     )
             except Exception:
+                # GRACEFUL-DEGRADATION: the validator is an optional
+                # second-pass tokenizer used for telemetry drift
+                # detection. A failed validator should not block pack
+                # delivery — the primary tokenizer already produced an
+                # estimate and the pack is already assembled.
                 logger.exception("token_budget_validator_failed")
         return payload
 
@@ -742,6 +928,12 @@ class PackBuilder:
                 limit=200,
             )
         except Exception:
+            # GRACEFUL-DEGRADATION: session dedup is a duplicate-
+            # suppression optimization. A failed event-log query means
+            # the agent may receive a previously-served item again,
+            # which is undesirable but not incorrect. Raising here would
+            # turn a transient observability outage into a hard
+            # retrieval failure.
             logger.exception("session_dedup_event_query_failed")
             return set()
 
@@ -777,6 +969,11 @@ class PackBuilder:
             )
             return [a for a in all_advisories if a.scope in {"global", domain}]
         except Exception:
+            # GRACEFUL-DEGRADATION: advisories are auxiliary guidance
+            # attached to packs, not core retrieval payload. A failed
+            # advisory store query must not block the primary pack from
+            # being delivered; the agent gets the pack without
+            # advisories and the failure is logged for follow-up.
             logger.exception("advisory_retrieval_failed")
             return []
 

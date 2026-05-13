@@ -1106,6 +1106,15 @@ def migrate_graph(
         "--max-nodes",
         help="Safety cap. Source graphs above this need paginated iteration.",
     ),
+    continue_on_error: bool = typer.Option(
+        False,
+        "--continue-on-error",
+        help=(
+            "Capture per-step failures into the report and keep going instead "
+            "of raising on the first one. Default behavior raises loudly so "
+            "partial migrations are visible."
+        ),
+    ),
     output_format: str = typer.Option(
         "text", "--format", help="Output format: text or json"
     ),
@@ -1140,17 +1149,32 @@ def migrate_graph(
     from trellis.migrate import (  # noqa: PLC0415
         GraphMigrator,
         MigrationCapacityExceededError,
+        MigrationStepError,
     )
+    from trellis.mutate.commands import BatchStrategy  # noqa: PLC0415
 
     src_registry, src_store = _load_graph_store_from_yaml(from_config)
     dst_registry, dst_store = _load_graph_store_from_yaml(to_config)
 
+    strategy = (
+        BatchStrategy.CONTINUE_ON_ERROR
+        if continue_on_error
+        else BatchStrategy.STOP_ON_ERROR
+    )
+
     try:
         migrator = GraphMigrator(src_store, dst_store, max_nodes=max_nodes)
         try:
-            report = migrator.run(dry_run=dry_run)
+            report = migrator.run(dry_run=dry_run, strategy=strategy)
         except MigrationCapacityExceededError as exc:
             console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(code=1) from exc
+        except MigrationStepError as exc:
+            console.print(f"[red]Migration aborted: {exc}[/red]")
+            console.print(
+                "[yellow]Re-run with --continue-on-error to capture all "
+                "failures in one pass.[/yellow]"
+            )
             raise typer.Exit(code=1) from exc
     finally:
         # Close in dest-first order so the source connection survives if
@@ -1166,6 +1190,7 @@ def migrate_graph(
         payload["errors"] = [
             {"target": target, "message": msg} for target, msg in payload["errors"]
         ]
+        # step_failures already serialize cleanly via asdict (dataclass).
         console.print(json.dumps(payload, indent=2))
     else:
         if report.dry_run:

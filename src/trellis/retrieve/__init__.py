@@ -20,9 +20,11 @@ from trellis.retrieve.evaluate import (
     evaluate_pack,
 )
 from trellis.retrieve.pack_builder import (
+    PackAssemblyError,
     PackBuilder,
     PackEvaluator,
     SemanticDedupConfig,
+    StrategyFailure,
 )
 from trellis.retrieve.strategies import (
     GraphSearch,
@@ -61,6 +63,7 @@ __all__ = [
     "KNOWN_REJECTION_REASONS",
     "KeywordSearch",
     "NoiseScorer",
+    "PackAssemblyError",
     "PackBuilder",
     "PackEvaluator",
     "PackTelemetryReport",
@@ -71,6 +74,7 @@ __all__ = [
     "SemanticDedupConfig",
     "SemanticSearch",
     "StrategyContribution",
+    "StrategyFailure",
     "TierMapper",
     "TokenCounter",
     "analyze_dimension_predictiveness",

@@ -25,10 +25,14 @@ from trellis.migrate.graph_migrator import (
     GraphMigrator,
     MigrationCapacityExceededError,
     MigrationReport,
+    MigrationStepError,
+    MigrationStepFailure,
 )
 
 __all__ = [
     "GraphMigrator",
     "MigrationCapacityExceededError",
     "MigrationReport",
+    "MigrationStepError",
+    "MigrationStepFailure",
 ]
