@@ -141,6 +141,34 @@ class SemanticDedupConfig:
     min_shingles: int = 5
 
 
+def _raise_if_blocking_strategy_failures(
+    strategy_failures: list[StrategyFailure],
+    total_strategies: int,
+    *,
+    pack_kind: str,
+) -> None:
+    """Raise :class:`PackAssemblyError` for required-fail and all-fail (C2 Phase 4).
+
+    ``pack_kind`` is interpolated into the all-failed message so
+    sectioned vs. flat builds report which path tripped.
+    """
+    if not strategy_failures:
+        return
+    if total_strategies == 1:
+        first = strategy_failures[0]
+        msg = (
+            f"Required strategy {first.strategy!r} failed: "
+            f"{first.error_class}: {first.message}"
+        )
+        raise PackAssemblyError(msg, strategy_failures)
+    if len(strategy_failures) == total_strategies:
+        msg = (
+            f"All {total_strategies} configured strategies failed; "
+            f"no candidates available for {pack_kind} assembly"
+        )
+        raise PackAssemblyError(msg, strategy_failures)
+
+
 class PackBuilder:
     """Assembles retrieval packs by running search strategies and applying budgets.
 
@@ -300,23 +328,9 @@ class PackBuilder:
         #    failure — never return an empty pack here.
         # 2. Multiple configured strategies and *all* of them failed:
         #    we cannot make progress, raise.
-        if strategy_failures:
-            total = len(self._strategies)
-            failed = len(strategy_failures)
-            if total == 1:
-                first = strategy_failures[0]
-                msg = (
-                    "Required strategy "
-                    f"{first.strategy!r} failed: "
-                    f"{first.error_class}: {first.message}"
-                )
-                raise PackAssemblyError(msg, strategy_failures)
-            if failed == total:
-                msg = (
-                    f"All {total} configured strategies failed; "
-                    "no candidates available for pack assembly"
-                )
-                raise PackAssemblyError(msg, strategy_failures)
+        _raise_if_blocking_strategy_failures(
+            strategy_failures, len(self._strategies), pack_kind="pack",
+        )
 
         # Promote metadata["source_strategy"] → strategy_source field
         all_items = self._promote_strategy_source(all_items)
@@ -544,23 +558,11 @@ class PackBuilder:
                 continue
 
         # Loud-by-default failure surfaces (C2 Phase 4) — see build().
-        if strategy_failures:
-            total = len(self._strategies)
-            failed = len(strategy_failures)
-            if total == 1:
-                first = strategy_failures[0]
-                msg = (
-                    "Required strategy "
-                    f"{first.strategy!r} failed: "
-                    f"{first.error_class}: {first.message}"
-                )
-                raise PackAssemblyError(msg, strategy_failures)
-            if failed == total:
-                msg = (
-                    f"All {total} configured strategies failed; "
-                    "no candidates available for sectioned pack assembly"
-                )
-                raise PackAssemblyError(msg, strategy_failures)
+        _raise_if_blocking_strategy_failures(
+            strategy_failures,
+            len(self._strategies),
+            pack_kind="sectioned pack",
+        )
 
         # 2. Deduplicate
         deduped = self._deduplicate(all_items)

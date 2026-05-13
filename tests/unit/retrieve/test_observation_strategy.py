@@ -13,7 +13,12 @@ from typing import Any
 from unittest.mock import MagicMock
 
 from trellis.retrieve.observation_strategy import ObservationSearch
-from trellis.schemas.well_known import HAS_OBSERVATION, MEASUREMENT, OBSERVATION
+from trellis.schemas.well_known import (
+    HAS_MEASUREMENT,
+    HAS_OBSERVATION,
+    MEASUREMENT,
+    OBSERVATION,
+)
 
 NOW = datetime(2026, 5, 12, 12, 0, 0, tzinfo=UTC)
 
@@ -373,10 +378,11 @@ def test_limit_caps_result_size() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_strategy_uses_canonical_edge_kind() -> None:
-    """Ensures the strategy queries the canonical ``hasObservation`` form
-    rather than a legacy alias (no aliases exist yet, but pinning the
-    behaviour now keeps us honest if one is added later)."""
+def test_strategy_uses_canonical_edge_kinds() -> None:
+    """Ensures the strategy queries the canonical ``hasObservation`` and
+    ``hasMeasurement`` forms rather than legacy aliases (no aliases
+    exist yet, but pinning the behaviour now keeps us honest if one is
+    added later)."""
     store = _make_store(
         edges_by_subject={"dataset:x": [{"target_id": "obs1"}]},
         nodes_by_id={
@@ -387,5 +393,31 @@ def test_strategy_uses_canonical_edge_kind() -> None:
     )
     strategy = ObservationSearch(graph_store=store)
     strategy.search("", filters={"subject_entity_id": "dataset:x"})
-    call = store.get_edges.call_args
-    assert call.kwargs.get("edge_type") == HAS_OBSERVATION
+    edge_kinds_queried = {
+        c.kwargs.get("edge_type") for c in store.get_edges.call_args_list
+    }
+    assert HAS_OBSERVATION in edge_kinds_queried
+    assert HAS_MEASUREMENT in edge_kinds_queried
+
+
+def test_strategy_skips_has_measurement_when_measurements_disabled() -> None:
+    """When ``include_measurements=False`` the strategy must not waste
+    a graph round-trip on ``hasMeasurement``."""
+    store = _make_store(
+        edges_by_subject={"dataset:x": [{"target_id": "obs1"}]},
+        nodes_by_id={
+            "obs1": _make_observation_node(
+                "obs1", subject_entity_id="dataset:x", observed_at=NOW,
+            ),
+        },
+    )
+    strategy = ObservationSearch(graph_store=store)
+    strategy.search(
+        "",
+        filters={"subject_entity_id": "dataset:x", "include_measurements": False},
+    )
+    edge_kinds_queried = {
+        c.kwargs.get("edge_type") for c in store.get_edges.call_args_list
+    }
+    assert HAS_OBSERVATION in edge_kinds_queried
+    assert HAS_MEASUREMENT not in edge_kinds_queried

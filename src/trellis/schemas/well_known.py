@@ -53,8 +53,11 @@ from typing import Final
 #   1.0.0 — original schema.org / PROV-O alignment (adr-graph-ontology.md)
 #   1.1.0 — add ``Observation`` / ``Measurement`` entity types and
 #           ``hasObservation`` edge kind (adr-observation-entity-type.md)
+#   1.2.0 — add ``hasMeasurement`` edge kind so Measurement edges no
+#           longer overload ``hasObservation`` (adr-observation-entity-
+#           type.md §2.2).
 
-WELL_KNOWN_VERSION: Final = "1.1.0"
+WELL_KNOWN_VERSION: Final = "1.2.0"
 
 # ---------------------------------------------------------------------------
 # Canonical entity types — schema.org + PROV-O
@@ -200,8 +203,11 @@ APPLIES_TO: Final = "appliesTo"
 
 # Trellis-specific verbs for empirical observations (no clean PROV-O
 # equivalent — schema.org/observationAbout points the wrong direction).
-# See adr-observation-entity-type.md §2.2.
+# See adr-observation-entity-type.md §2.2. ``hasMeasurement`` is the
+# Measurement counterpart so Measurement edges don't overload
+# ``hasObservation`` and consumers can route on edge kind alone.
 HAS_OBSERVATION: Final = "hasObservation"
+HAS_MEASUREMENT: Final = "hasMeasurement"
 
 CANONICAL_EDGE_KINDS: Final[frozenset[str]] = frozenset(
     {
@@ -218,6 +224,7 @@ CANONICAL_EDGE_KINDS: Final[frozenset[str]] = frozenset(
         SUPPORTS,
         APPLIES_TO,
         HAS_OBSERVATION,
+        HAS_MEASUREMENT,
     }
 )
 

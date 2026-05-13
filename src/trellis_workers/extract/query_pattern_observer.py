@@ -23,9 +23,11 @@ Given a query log targeting tables, the extractor emits:
 - One :class:`~trellis.schemas.well_known.OBSERVATION` ``EntityDraft`` per
   subject entity whose query count exceeds a small floor (default 1).
   The observation's ``content`` summarises the activity over the window.
-- For every emitted Measurement *and* Observation, a
-  ``hasObservation`` :class:`~trellis.schemas.extraction.EdgeDraft` from
-  the subject to the new node.
+- For every emitted Measurement a ``hasMeasurement``
+  :class:`~trellis.schemas.extraction.EdgeDraft` from the subject to
+  the new node; for every emitted Observation a ``hasObservation``
+  edge. Per ``adr-observation-entity-type.md`` §2.2 the verbs are
+  distinct so consumers can route on edge kind alone.
 
 Why both? See ADR §1: ``Measurement`` is the **machine-comparable scalar**
 home (graphable, time-series friendly); ``Observation`` is the
@@ -60,6 +62,7 @@ from trellis.schemas.extraction import (
     ExtractionResult,
 )
 from trellis.schemas.well_known import (
+    HAS_MEASUREMENT,
     HAS_OBSERVATION,
     MEASUREMENT,
     OBSERVATION,
@@ -131,7 +134,8 @@ class QueryPatternObserver:
       ``observation_min_query_count`` (default 1 — single-shot queries
       don't need a narrative claim, they're already captured by the
       measurement).
-    - One ``hasObservation`` EdgeDraft per emitted Measurement/Observation.
+    - One EdgeDraft per emitted node: ``hasMeasurement`` for the
+      Measurement, ``hasObservation`` for the Observation.
 
     The extractor is pure: no store access, no mutation pipeline calls.
     """
@@ -173,8 +177,8 @@ class QueryPatternObserver:
 
         Returns:
             An :class:`ExtractionResult` whose ``entities`` contain
-            Measurement + Observation drafts and whose ``edges`` contain
-            the ``hasObservation`` links.
+            Measurement + Observation drafts and whose ``edges`` carry
+            the ``hasMeasurement`` / ``hasObservation`` links.
         """
         del context  # deterministic — no cost budget
 
@@ -191,7 +195,7 @@ class QueryPatternObserver:
                 EdgeDraft(
                     source_id=agg.subject_entity_id,
                     target_id=measurement_draft.entity_id,
-                    edge_kind=HAS_OBSERVATION,
+                    edge_kind=HAS_MEASUREMENT,
                     # Subjects are passed through to ``MutationExecutor``
                     # which checks FK on the subject. The subject is
                     # expected to already exist in the graph — but

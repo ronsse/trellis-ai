@@ -67,6 +67,7 @@ from trellis.retrieve.strategies import (
 )
 from trellis.schemas.pack import PackItem
 from trellis.schemas.well_known import (
+    HAS_MEASUREMENT,
     HAS_OBSERVATION,
     MEASUREMENT,
     OBSERVATION,
@@ -94,10 +95,10 @@ DEFAULT_CONFIDENCE_THRESHOLD: float | None = None
 class ObservationSearch(SearchStrategy):
     """Retrieval strategy that surfaces Observation / Measurement nodes.
 
-    Walks ``hasObservation`` edges outbound from one or more subject
-    entities, optionally filters by minimum ``confidence`` and an
-    ``observed_after`` watermark, and scores results with freshness decay
-    on ``observed_at``.
+    Walks ``hasObservation`` (and optionally ``hasMeasurement``) edges
+    outbound from one or more subject entities, optionally filters by
+    minimum ``confidence`` and an ``observed_after`` watermark, and
+    scores results with freshness decay on ``observed_at``.
 
     Filter contract (passed via ``filters`` dict to :meth:`search`):
 
@@ -110,10 +111,10 @@ class ObservationSearch(SearchStrategy):
     - ``observed_after`` (``datetime`` | ISO-8601 ``str``) — freshness
       watermark; observations strictly older than this are dropped.
     - ``include_measurements`` (``bool``) — when ``True``, ``Measurement``
-      nodes are returned alongside ``Observation`` nodes (both hang off
-      the same ``hasObservation`` edge; the type filter is applied in
-      Python so this works uniformly across graph backends). Defaults
-      to ``True``.
+      nodes attached via ``hasMeasurement`` are returned alongside
+      ``Observation`` nodes attached via ``hasObservation``. The two
+      edge kinds are distinct per ADR §2.2 so consumers route on edge
+      kind alone. Defaults to ``True``.
 
     The ``query`` string argument is currently ignored — observations are
     keyed by subject, not by free-text search.  A future enhancement could
@@ -177,31 +178,9 @@ class ObservationSearch(SearchStrategy):
         observed_after = _parse_datetime(filters.get("observed_after"))
         include_measurements = bool(filters.get("include_measurements", True))
 
-        # Collect candidate observation node IDs by walking outbound
-        # hasObservation edges from each subject. We canonicalize the
-        # edge kind so legacy aliases bucket correctly.
-        canonical_edge = canonicalize_edge_kind(HAS_OBSERVATION)
-        observation_ids: list[str] = []
-        seen_ids: set[str] = set()
-        for subject_id in seed_ids:
-            try:
-                edges = self._store.get_edges(
-                    subject_id,
-                    direction="outgoing",
-                    edge_type=canonical_edge,
-                )
-            except Exception:  # pragma: no cover — backend errors are logged
-                logger.exception(
-                    "observation_search_edge_lookup_failed", subject_id=subject_id,
-                )
-                continue
-            for edge in edges:
-                target_id = edge.get("target_id")
-                if not target_id or target_id in seen_ids:
-                    continue
-                seen_ids.add(target_id)
-                observation_ids.append(target_id)
-
+        observation_ids = self._collect_observation_ids(
+            seed_ids, include_measurements=include_measurements,
+        )
         if not observation_ids:
             return []
 
@@ -307,6 +286,47 @@ class ObservationSearch(SearchStrategy):
                 seen.add(s)
                 ordered.append(s)
         return ordered
+
+    def _collect_observation_ids(
+        self, seed_ids: list[str], *, include_measurements: bool,
+    ) -> list[str]:
+        """Walk outbound ``hasObservation`` / ``hasMeasurement`` edges.
+
+        Returns the deduplicated, order-preserving list of target node
+        IDs hanging off ``seed_ids``. Backend errors on a single
+        (subject, edge_kind) pair are logged and skipped — they should
+        not collapse the whole search. ``HAS_MEASUREMENT`` is only
+        traversed when ``include_measurements`` is true so the
+        Observation-only path stays a single round-trip per subject.
+        """
+        edge_kinds: list[str] = [canonicalize_edge_kind(HAS_OBSERVATION)]
+        if include_measurements:
+            edge_kinds.append(canonicalize_edge_kind(HAS_MEASUREMENT))
+
+        observation_ids: list[str] = []
+        seen_ids: set[str] = set()
+        for subject_id in seed_ids:
+            for edge_kind in edge_kinds:
+                try:
+                    edges = self._store.get_edges(
+                        subject_id,
+                        direction="outgoing",
+                        edge_type=edge_kind,
+                    )
+                except Exception:  # pragma: no cover — backend errors are logged
+                    logger.exception(
+                        "observation_search_edge_lookup_failed",
+                        subject_id=subject_id,
+                        edge_kind=edge_kind,
+                    )
+                    continue
+                for edge in edges:
+                    target_id = edge.get("target_id")
+                    if not target_id or target_id in seen_ids:
+                        continue
+                    seen_ids.add(target_id)
+                    observation_ids.append(target_id)
+        return observation_ids
 
     def _load_nodes(self, node_ids: list[str]) -> list[dict[str, Any]]:
         """Resolve node IDs to full node rows.

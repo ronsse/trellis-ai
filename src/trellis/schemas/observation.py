@@ -63,8 +63,12 @@ class Observation(TrellisModel):
     content: str
     """The observation text / narrative description."""
 
-    confidence: float = Field(ge=0.0, le=1.0)
-    """How confident the producer is in the observation, in ``[0.0, 1.0]``."""
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    """How confident the producer is in the observation, in ``[0.0, 1.0]``.
+
+    Optional per ``adr-observation-entity-type.md`` §2.1 — an agent may
+    not always assign a confidence score, and forcing a default would
+    fabricate signal. ``None`` means "producer did not score this"."""
 
     observed_at: datetime = Field(default_factory=utc_now)
     """When the observation was made (defaults to now, UTC)."""

@@ -11,7 +11,12 @@ from trellis.mutate.commands import Command, Operation
 from trellis.schemas.measurement import Measurement
 from trellis.schemas.observation import Observation
 from trellis.schemas.trace import Trace
-from trellis.schemas.well_known import HAS_OBSERVATION, MEASUREMENT, OBSERVATION
+from trellis.schemas.well_known import (
+    HAS_MEASUREMENT,
+    HAS_OBSERVATION,
+    MEASUREMENT,
+    OBSERVATION,
+)
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 
@@ -493,12 +498,15 @@ class MeasurementRecordHandler:
         )
 
         # Same narrow-catch discipline as ObservationRecordHandler —
-        # silent-fallback hygiene per PR #122 (C2 Phase 5).
+        # silent-fallback hygiene per PR #122 (C2 Phase 5). Measurement
+        # gets its own ``hasMeasurement`` edge kind so consumers can
+        # route on edge kind alone without inspecting the target node's
+        # type (adr-observation-entity-type.md §2.2).
         try:
             store.upsert_edge(
                 source_id=meas.subject_entity_id,
                 target_id=node_id,
-                edge_type=HAS_OBSERVATION,
+                edge_type=HAS_MEASUREMENT,
             )
         except (NotFoundError, StoreError) as exc:
             logger.info(
