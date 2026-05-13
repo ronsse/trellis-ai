@@ -15,6 +15,11 @@ if TYPE_CHECKING:
 from trellis.core.base import utc_now
 from trellis.core.ids import generate_ulid
 from trellis.schemas.graph import CompactionReport
+from trellis.stores.base.edge_provenance import (
+    EDGE_PROVENANCE_FIELDS,
+    extract_edge_provenance,
+    validate_edge_provenance,
+)
 from trellis.stores.base.event_log import EventLog, EventType
 from trellis.stores.base.graph import (
     GraphStore,
@@ -66,8 +71,48 @@ CREATE TABLE IF NOT EXISTS edges (
     properties JSONB NOT NULL DEFAULT '{}',
     created_at TIMESTAMPTZ NOT NULL,
     valid_from TIMESTAMPTZ NOT NULL,
-    valid_to TIMESTAMPTZ DEFAULT NULL
+    valid_to TIMESTAMPTZ DEFAULT NULL,
+    -- Provenance columns (Phase 3 of adr-graph-ontology §6.4 /
+    -- item 2 of plan-self-improvement-program). NULL by default;
+    -- ``confidence`` carries a CHECK constraint mirroring the
+    -- schema-layer validator so out-of-range values fail at the
+    -- DB boundary too.
+    source_trace_id TEXT DEFAULT NULL,
+    agent_id TEXT DEFAULT NULL,
+    confidence DOUBLE PRECISION DEFAULT NULL
+        CHECK (confidence IS NULL OR (confidence >= 0.0 AND confidence <= 1.0)),
+    evidence_ref TEXT DEFAULT NULL,
+    extractor_tier TEXT DEFAULT NULL
 )"""
+
+# Additive ALTERs for databases created against pre-v5 schemas. Each
+# statement is idempotent (``IF NOT EXISTS``); the CHECK constraint on
+# ``confidence`` is attached separately because ``IF NOT EXISTS`` on
+# CHECK requires a NAME, and Postgres has no plain "add check if
+# missing" form — we wrap it in a DO block so re-running is safe.
+_MIGRATE_ADD_EDGE_PROVENANCE = [
+    "ALTER TABLE edges ADD COLUMN IF NOT EXISTS source_trace_id TEXT DEFAULT NULL",
+    "ALTER TABLE edges ADD COLUMN IF NOT EXISTS agent_id TEXT DEFAULT NULL",
+    (
+        "ALTER TABLE edges "
+        "ADD COLUMN IF NOT EXISTS confidence DOUBLE PRECISION DEFAULT NULL"
+    ),
+    "ALTER TABLE edges ADD COLUMN IF NOT EXISTS evidence_ref TEXT DEFAULT NULL",
+    "ALTER TABLE edges ADD COLUMN IF NOT EXISTS extractor_tier TEXT DEFAULT NULL",
+    # CHECK constraint on confidence range. Wrapped in DO so re-running
+    # against an already-migrated database is a no-op rather than a
+    # "constraint already exists" error.
+    """\
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'edges_confidence_range_check'
+    ) THEN
+        ALTER TABLE edges ADD CONSTRAINT edges_confidence_range_check
+            CHECK (confidence IS NULL OR (confidence >= 0.0 AND confidence <= 1.0));
+    END IF;
+END$$""",
+]
 
 _CREATE_ENTITY_ALIASES = """\
 CREATE TABLE IF NOT EXISTS entity_aliases (
