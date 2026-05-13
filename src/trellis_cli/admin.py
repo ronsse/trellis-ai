@@ -1861,3 +1861,18 @@ def draft_promotion_adr(
         console.print(
             "[dim]Fill in the 'Decision' section before requesting review.[/dim]"
         )
+
+
+# ---------------------------------------------------------------------------
+# migrate-provenance — Phase 2 of plan-provenance-columns.md (Item 2)
+# ---------------------------------------------------------------------------
+# Registered via a hook on the standalone module so the migrate logic
+# (~350 LOC) doesn't bloat this file.  Import-then-register keeps the
+# Typer command-tree definition in this module, the implementation
+# elsewhere.
+
+from trellis_cli.admin_migrate_provenance import (  # noqa: E402
+    register as _register_migrate_provenance,
+)
+
+_register_migrate_provenance(admin_app)

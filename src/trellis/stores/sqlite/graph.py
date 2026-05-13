@@ -32,6 +32,33 @@ from trellis.stores.sqlite.base import SQLiteStoreBase
 
 logger = structlog.get_logger(__name__)
 
+#: SQL operator strings for the range ops on the DSL.  Module-private —
+#: only the SQLite compiler reads this.  Keys match
+#: :data:`trellis.stores.base.graph_query.FilterOp`.
+_SQLITE_RANGE_SQL: dict[str, str] = {
+    "lt": "<",
+    "lte": "<=",
+    "gt": ">",
+    "gte": ">=",
+}
+
+#: Edge columns the DSL is allowed to address directly (not through the
+#: ``properties.<key>`` JSON path).  Provenance columns are the
+#: motivating consumer — see ``plan-provenance-columns.md`` Phase 2.
+_EDGE_TOP_LEVEL_COLUMNS: frozenset[str] = frozenset(
+    {
+        "edge_id",
+        "edge_type",
+        "source_id",
+        "target_id",
+        "source_trace_id",
+        "agent_id",
+        "confidence",
+        "evidence_ref",
+        "extractor_tier",
+    }
+)
+
 
 class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
     """SQLite-backed graph store with recursive CTE subgraph traversal.
@@ -1232,17 +1259,31 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
 
     @staticmethod
     def _compile_clause_sqlite(clause: Any) -> tuple[str, list[Any]]:
-        """Translate one :class:`FilterClause` to a SQLite WHERE fragment."""
+        """Translate one node-side :class:`FilterClause` to a SQLite WHERE fragment."""
         column = SQLiteGraphStore._field_to_sql_expr(clause.field)
-        if clause.op == "eq":
+        return SQLiteGraphStore._render_clause_sqlite(column, clause)
+
+    @staticmethod
+    def _render_clause_sqlite(column: str, clause: Any) -> tuple[str, list[Any]]:
+        """Render a resolved SQL column expression against the clause op.
+
+        Shared between node and edge compilation so the operator
+        surface (``eq`` / ``in`` / ``exists`` / range) is implemented
+        in exactly one place.
+        """
+        op = clause.op
+        if op == "eq":
             return f"{column} = ?", [clause.value]
-        if clause.op == "in":
+        if op == "in":
             placeholders = ", ".join("?" for _ in clause.value)
             return f"{column} IN ({placeholders})", list(clause.value)
-        if clause.op == "exists":
+        if op == "exists":
             return f"{column} IS NOT NULL", []
-        msg = f"Unknown filter op {clause.op!r}"
-        raise ValueError(msg)
+        sql_op = _SQLITE_RANGE_SQL.get(op)
+        if sql_op is None:
+            msg = f"Unknown filter op {clause.op!r}"
+            raise ValueError(msg)
+        return f"{column} {sql_op} ?", [clause.value]
 
     @staticmethod
     def _field_to_sql_expr(field: str) -> str:
@@ -1258,6 +1299,56 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
             # from the DSL so it's not user input.
             return f"json_extract(properties_json, '$.{key}')"
         msg = f"Unsupported DSL field path: {field!r}"
+        raise ValueError(msg)
+
+    # --------------------------------------------------------------
+    # Edge-side DSL — Phase 2 of plan-provenance-columns.md
+    # --------------------------------------------------------------
+
+    def execute_edge_query(self, query: Any) -> list[dict[str, Any]]:
+        """Compile :class:`EdgeQuery` to a SQLite SELECT.
+
+        Allowed field paths:
+
+        * ``edge_type`` / ``source_id`` / ``target_id`` / ``edge_id``
+        * the five provenance columns (``source_trace_id`` etc.)
+        * ``properties.<key>`` via ``json_extract``
+
+        Range ops (``lt`` / ``lte`` / ``gt`` / ``gte``) compile to the
+        obvious ``column <op> ?`` predicate.  Out-of-range values
+        (e.g. ``confidence < 2.0``) pass through — that's caller
+        business.
+        """
+        sql, params = self._compile_edge_query(query)
+        cursor = self._conn.execute(sql, params)
+        return [self._edge_row_to_dict(row) for row in cursor.fetchall()]
+
+    def _compile_edge_query(self, query: Any) -> tuple[str, list[Any]]:
+        """Pure compile step for :class:`EdgeQuery`.  Exposed for tests."""
+        where_parts: list[str] = [self._temporal_filter(query.as_of)]
+        params: list[Any] = list(self._temporal_params(query.as_of))
+        for clause in query.filters:
+            column = SQLiteGraphStore._edge_field_to_sql_expr(clause.field)
+            frag, p = SQLiteGraphStore._render_clause_sqlite(column, clause)
+            where_parts.append(frag)
+            params.extend(p)
+        sql = (
+            "SELECT * FROM edges WHERE "
+            + " AND ".join(where_parts)
+            + " ORDER BY created_at DESC LIMIT ?"
+        )
+        params.append(query.limit)
+        return sql, params
+
+    @staticmethod
+    def _edge_field_to_sql_expr(field: str) -> str:
+        """Map a DSL edge-field path to a SQLite column or JSON extract."""
+        if field in _EDGE_TOP_LEVEL_COLUMNS:
+            return field
+        if field.startswith("properties."):
+            key = field.split(".", 1)[1]
+            return f"json_extract(properties_json, '$.{key}')"
+        msg = f"Unsupported DSL edge field path: {field!r}"
         raise ValueError(msg)
 
     # ------------------------------------------------------------------

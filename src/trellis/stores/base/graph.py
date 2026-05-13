@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from trellis.schemas.graph import CompactionReport
     from trellis.stores.base.event_log import EventLog
     from trellis.stores.base.graph_query import (
+        EdgeQuery,
         NodeQuery,
         SubgraphQuery,
         SubgraphResult,
@@ -701,6 +702,27 @@ class GraphStore(ABC):
             limit=query.limit,
             as_of=query.as_of,
         )
+
+    def execute_edge_query(self, query: EdgeQuery) -> list[dict[str, Any]]:
+        """Execute a typed :class:`EdgeQuery` against the store.
+
+        Phase 2 — added alongside the provenance columns
+        (``plan-provenance-columns.md``) so callers can ask "edges
+        with ``confidence < 0.7``" / "edges minted by trace X" without
+        falling through to ``properties.<key>`` JSON extraction.
+
+        Backends MUST override this method with a native compiler.
+        There is no legacy ``query_edges`` method to fall back to —
+        the existing :meth:`get_edges` is keyed by a single
+        ``node_id`` and cannot express set/range filters across the
+        whole edge table.  Default routing therefore raises
+        :class:`NotImplementedError`.
+        """
+        msg = (
+            f"{type(self).__name__} does not implement execute_edge_query; "
+            "backend must override with a compiler"
+        )
+        raise NotImplementedError(msg)
 
     def execute_subgraph_query(self, query: SubgraphQuery) -> SubgraphResult:
         """Execute a typed :class:`SubgraphQuery` against the store.

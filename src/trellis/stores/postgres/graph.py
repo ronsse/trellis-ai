@@ -32,6 +32,44 @@ from trellis.stores.postgres.base import PostgresStoreBase
 
 logger = structlog.get_logger(__name__)
 
+#: SQL operator strings for the range ops on the DSL.  Module-private.
+_POSTGRES_RANGE_SQL: dict[str, str] = {
+    "lt": "<",
+    "lte": "<=",
+    "gt": ">",
+    "gte": ">=",
+}
+
+#: Edge columns the DSL is allowed to address directly (not through
+#: ``properties.<key>`` JSONB).  Provenance columns are the motivating
+#: consumer — see ``plan-provenance-columns.md`` Phase 2.
+_EDGE_TOP_LEVEL_COLUMNS: frozenset[str] = frozenset(
+    {
+        "edge_id",
+        "edge_type",
+        "source_id",
+        "target_id",
+        "source_trace_id",
+        "agent_id",
+        "confidence",
+        "evidence_ref",
+        "extractor_tier",
+    }
+)
+
+
+def _pg_text_lit(value: str) -> str:
+    """Render a single-quoted SQL TEXT literal with naive escape.
+
+    Used in narrow code paths where the JSON path key is interpolated
+    into a SQL expression rather than bound as a parameter (Postgres
+    can't bind to ``->>`` operands).  Keys originate from the DSL, not
+    raw user input, but escaping single quotes keeps the renderer
+    robust to constants that happen to contain them.
+    """
+    return "'" + value.replace("'", "''") + "'"
+
+
 _CREATE_NODES = """\
 CREATE TABLE IF NOT EXISTS nodes (
     version_id TEXT PRIMARY KEY,
@@ -1149,7 +1187,7 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
 
     @staticmethod
     def _compile_clause_postgres(clause: Any) -> tuple[str, list[Any]]:
-        """Translate one :class:`FilterClause` to a Postgres WHERE fragment.
+        """Translate one node-side :class:`FilterClause` to a Postgres WHERE fragment.
 
         Top-level columns (``node_type`` / ``node_role`` / ``node_id``)
         compile to direct ``=`` / ``IN`` / ``IS NOT NULL`` predicates.
@@ -1164,15 +1202,24 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
         if clause.field.startswith("properties."):
             return PostgresGraphStore._compile_properties_clause(clause)
         column = PostgresGraphStore._field_to_column(clause.field)
-        if clause.op == "eq":
+        return PostgresGraphStore._render_top_level_clause(column, clause)
+
+    @staticmethod
+    def _render_top_level_clause(column: str, clause: Any) -> tuple[str, list[Any]]:
+        """Render a Postgres WHERE fragment for a top-level column clause."""
+        op = clause.op
+        if op == "eq":
             return f"{column} = %s", [clause.value]
-        if clause.op == "in":
+        if op == "in":
             placeholders = ", ".join("%s" for _ in clause.value)
             return f"{column} IN ({placeholders})", list(clause.value)
-        if clause.op == "exists":
+        if op == "exists":
             return f"{column} IS NOT NULL", []
-        msg = f"Unknown filter op {clause.op!r}"
-        raise ValueError(msg)
+        sql_op = _POSTGRES_RANGE_SQL.get(op)
+        if sql_op is None:
+            msg = f"Unknown filter op {clause.op!r}"
+            raise ValueError(msg)
+        return f"{column} {sql_op} %s", [clause.value]
 
     @staticmethod
     def _compile_properties_clause(clause: Any) -> tuple[str, list[Any]]:
@@ -1187,6 +1234,18 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
             )
         if clause.op == "exists":
             return "properties ? %s", [key]
+        sql_op = _POSTGRES_RANGE_SQL.get(clause.op)
+        if sql_op is not None:
+            # JSON-path range comparisons need the JSONB ``->>`` text
+            # extraction plus a numeric cast.  We can't know the dtype
+            # statically; coerce to ``NUMERIC`` since the consumer
+            # asking ``properties.confidence < ?`` is by construction
+            # asking a numeric question.  String range filters on
+            # ``properties.<key>`` are not in scope today.
+            return (
+                f"(properties->>{_pg_text_lit(key)})::numeric {sql_op} %s",
+                [clause.value],
+            )
         msg = f"Unknown filter op {clause.op!r}"
         raise ValueError(msg)
 
@@ -1195,6 +1254,57 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
         if field in {"node_type", "node_role", "node_id"}:
             return field
         msg = f"Unsupported DSL field path: {field!r}"
+        raise ValueError(msg)
+
+    # --------------------------------------------------------------
+    # Edge-side DSL — Phase 2 of plan-provenance-columns.md
+    # --------------------------------------------------------------
+
+    def execute_edge_query(self, query: Any) -> list[dict[str, Any]]:
+        """Compile :class:`EdgeQuery` to a Postgres SELECT.
+
+        Allowed field paths mirror the SQLite backend:
+        edge columns (``edge_type`` / ``source_id`` / ``target_id`` /
+        ``edge_id``), provenance columns, or ``properties.<key>``.
+
+        Range ops route to ``column <op> %s``; out-of-range values
+        pass through (caller business).
+        """
+        sql, params = self._compile_edge_query(query)
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+        return [self._edge_row_to_dict(row) for row in rows]
+
+    def _compile_edge_query(self, query: Any) -> tuple[str, list[Any]]:
+        """Pure compile step for :class:`EdgeQuery`."""
+        where_parts: list[str] = [self._temporal_filter(query.as_of)]
+        params: list[Any] = list(self._temporal_params(query.as_of))
+        for clause in query.filters:
+            frag, p = self._compile_edge_clause_postgres(clause)
+            where_parts.append(frag)
+            params.extend(p)
+        sql = (
+            "SELECT * FROM edges WHERE "
+            + " AND ".join(where_parts)
+            + " ORDER BY created_at DESC LIMIT %s"
+        )
+        params.append(query.limit)
+        return sql, params
+
+    @staticmethod
+    def _compile_edge_clause_postgres(clause: Any) -> tuple[str, list[Any]]:
+        """Translate one edge-side :class:`FilterClause` for Postgres."""
+        if clause.field.startswith("properties."):
+            return PostgresGraphStore._compile_properties_clause(clause)
+        column = PostgresGraphStore._edge_field_to_column(clause.field)
+        return PostgresGraphStore._render_top_level_clause(column, clause)
+
+    @staticmethod
+    def _edge_field_to_column(field: str) -> str:
+        if field in _EDGE_TOP_LEVEL_COLUMNS:
+            return field
+        msg = f"Unsupported DSL edge field path: {field!r}"
         raise ValueError(msg)
 
     # ------------------------------------------------------------------
