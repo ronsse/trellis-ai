@@ -701,7 +701,9 @@ class PackBuilder:
         # 5. Emit telemetry
         if self._event_log is not None:
             self._emit_sectioned_telemetry(
-                sectioned_pack, strategy_failures=strategy_failures
+                sectioned_pack,
+                strategy_failures=strategy_failures,
+                meta_filtered_count=meta_filtered_count,
             )
 
         return sectioned_pack
@@ -711,6 +713,7 @@ class PackBuilder:
         pack: SectionedPack,
         *,
         strategy_failures: list[StrategyFailure] | None = None,
+        meta_filtered_count: int = 0,
     ) -> None:
         """Emit telemetry event for a sectioned pack."""
         per_item_estimates = [
@@ -752,6 +755,7 @@ class PackBuilder:
                 "strategy_failures": [
                     sf.to_event_payload() for sf in (strategy_failures or [])
                 ],
+                "meta_filtered_count": meta_filtered_count,
                 **token_budget_fields,
             },
         )

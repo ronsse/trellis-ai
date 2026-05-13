@@ -985,3 +985,42 @@ Examples of domain-specific edge types: `reads_from`, `writes_to`, `materializes
 | `sequential` | Execute all commands in order |
 | `stop_on_error` | Stop on first failure or rejection |
 | `continue_on_error` | Execute all, collect all results |
+
+---
+
+## Meta-Activities (`Activity` nodes under the `trellis_meta_` namespace)
+
+Trellis-internal analyzers (the context-effectiveness loop, the
+schema-evolution promoter, the CLI `analyze` / `admin` commands, etc.)
+record their runs as graph `Activity` nodes via
+`trellis.meta.record_meta_analysis`. These look like any other graph
+node but carry a reserved provenance shape:
+
+- `node_type == "Activity"`.
+- `properties.agent_id` starts with `trellis_meta_` (the
+  `META_AGENT_PREFIX` constant in `trellis.meta.agents`).
+- `properties.analyzer_name` is a stable string identifying the
+  analyzer (e.g., `cli.analyze.context-effectiveness`).
+- A `wasAssociatedWith` edge points from the Activity to a synthetic
+  `Agent` node whose `node_id` equals the `agent_id` above.
+
+PackBuilder filters these out by default. `PackBuilder.build()` and
+`PackBuilder.build_sectioned()` both accept `include_meta: bool = False`
+— the default drops Activities matching the namespace, so agent-facing
+packs are not polluted with Trellis's own analysis traces. Operators
+debugging the self-improvement loop can opt in via `include_meta=True`,
+which surfaces meta-Activities alongside user-authored nodes. The
+`PACK_ASSEMBLED` event payload exposes `meta_filtered_count` so
+telemetry consumers can see how many rows the filter dropped.
+
+**Reserved namespace.** The `trellis_meta_` prefix is reserved by the
+schema-evolution analyzer and the PackBuilder filter — do **not** emit
+user-data Activity nodes whose `agent_id` matches this prefix. They
+would be invisible to most pack assemblies. Pick a `meta_` -free
+`agent_id` for human-authored Activities.
+
+CLI commands that record meta-Activities accept `--no-meta-trace` to
+skip recording for a single invocation. The `TRELLIS_META_TRACES`
+env var (values: `"on"` / `"off"`) governs the global default. See
+`docs/design/adr-dogfooding-meta-traces.md` and
+`docs/design/plan-self-improvement-program.md` §6 for the design.
