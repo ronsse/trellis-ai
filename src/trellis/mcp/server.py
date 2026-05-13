@@ -1507,6 +1507,137 @@ def _resolve_operation(operation: str) -> Any:
         return None
 
 
+# ---------------------------------------------------------------------------
+# Macro Tool: record_observation / query_observations (Item 1 Phase 1)
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def record_observation(
+    subject_entity_id: str,
+    subject_entity_type: str,
+    observer_agent_id: str,
+    content: str,
+    confidence: float,
+    evidence_ref: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> str:
+    """Record an empirical Observation about a subject entity.
+
+    See ``docs/design/adr-observation-entity-type.md`` for the data model
+    rationale. The Observation lands as a graph node with a
+    ``hasObservation`` edge from the subject entity. Missing required
+    fields surface as a JSON error envelope — no silent defaults.
+
+    Args:
+        subject_entity_id: The entity the observation is *about*.
+        subject_entity_type: Open-string entity type of the subject.
+        observer_agent_id: Which agent (human or automated) produced this.
+        content: Narrative description of the observation.
+        confidence: Producer confidence in ``[0.0, 1.0]``.
+        evidence_ref: Optional pointer to supporting evidence
+            (e.g., a trace_id / document_id / URN).
+        metadata: Optional bag for conventional keys (kind, window_start,
+            window_end, sample_size, method, …). See ADR §2.3.
+
+    Returns:
+        A JSON object with ``status``, ``observation_id`` (on success),
+        or ``message`` on failure. This tool never raises to MCP.
+    """
+    from trellis.schemas.observation import Observation  # noqa: PLC0415
+
+    try:
+        obs = Observation(
+            subject_entity_id=subject_entity_id,
+            subject_entity_type=subject_entity_type,
+            observer_agent_id=observer_agent_id,
+            content=content,
+            confidence=confidence,
+            evidence_ref=evidence_ref,
+            metadata=metadata,
+        )
+    except Exception as exc:
+        return json.dumps(
+            {"status": "error", "message": f"Invalid observation: {exc}"}
+        )
+
+    try:
+        command = Command(
+            operation=Operation.OBSERVATION_RECORD,
+            args={"observation": obs},
+            target_id=obs.observation_id,
+            target_type="Observation",
+            requested_by="mcp:record_observation",
+        )
+        executor = build_curate_executor(_get_registry())
+        result = executor.execute(command)
+    except Exception as exc:
+        logger.exception("record_observation_failed")
+        return json.dumps(
+            {"status": "error", "message": f"Execution failed: {exc}"}
+        )
+
+    if result.status != CommandStatus.SUCCESS:
+        return json.dumps(
+            {
+                "status": result.status.value,
+                "message": result.message,
+            }
+        )
+    return json.dumps(
+        {
+            "status": "ok",
+            "observation_id": result.created_id or obs.observation_id,
+        }
+    )
+
+
+@mcp.tool()
+def query_observations(
+    subject_entity_id: str = "",
+    observer_agent_id: str = "",
+    limit: int = 100,
+) -> str:
+    """Query Observation nodes by subject and/or observer.
+
+    Args:
+        subject_entity_id: Filter by subject entity id (empty = no filter).
+        observer_agent_id: Filter by observer agent id (empty = no filter).
+        limit: Maximum results to return (default 100).
+
+    Returns:
+        A JSON object with ``observations``: a list of Observation
+        property dicts. Each dict carries ``node_id`` plus the
+        schema's payload fields.
+    """
+    registry = _get_registry()
+    props: dict[str, Any] = {}
+    if subject_entity_id and subject_entity_id.strip():
+        props["subject_entity_id"] = subject_entity_id.strip()
+    if observer_agent_id and observer_agent_id.strip():
+        props["observer_agent_id"] = observer_agent_id.strip()
+
+    try:
+        rows = registry.knowledge.graph_store.query(
+            node_type="Observation",
+            properties=props or None,
+            limit=limit,
+        )
+    except Exception as exc:
+        logger.exception("query_observations_failed")
+        return json.dumps(
+            {"status": "error", "message": f"Query failed: {exc}"}
+        )
+
+    projected: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row.get("properties", {}))
+        item["node_id"] = row.get("node_id")
+        item["node_type"] = row.get("node_type")
+        projected.append(item)
+    return json.dumps({"status": "ok", "observations": projected})
+
+
 @mcp.tool()
 def execute_mutation(
     operation: str,

@@ -91,6 +91,13 @@ class EventType(StrEnum):
     # Memory (save_memory MCP tool / unstructured observation ingestion)
     MEMORY_STORED = "memory.stored"
 
+    # Empirical-observation ingestion — see adr-observation-entity-type.md
+    # and Item 1 Phase 1 of plan-self-improvement-program.md. Emitted by
+    # the ObservationHandler / MeasurementHandler when a new Observation
+    # or Measurement node lands in the graph.
+    OBSERVATION_RECORDED = "observation.recorded"
+    MEASUREMENT_RECORDED = "measurement.recorded"
+
     # Extraction (tiered extraction pipeline — raw input -> entity/edge drafts)
     EXTRACTION_DISPATCHED = "extraction.dispatched"
     #: Emitted when the :class:`~trellis.extract.dispatcher.ExtractionDispatcher`

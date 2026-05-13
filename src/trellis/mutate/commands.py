@@ -33,6 +33,8 @@ class Operation(StrEnum):
     LABEL_ADD = "label.add"
     LABEL_REMOVE = "label.remove"
     FEEDBACK_RECORD = "feedback.record"
+    OBSERVATION_RECORD = "observation.record"
+    MEASUREMENT_RECORD = "measurement.record"
 
     # Maintain
     REDACTION_APPLY = "redaction.apply"
@@ -143,6 +145,14 @@ class OperationRegistry:
         self._schemas[Operation.LABEL_ADD] = {"target_id", "label"}
         self._schemas[Operation.LABEL_REMOVE] = {"target_id", "label"}
         self._schemas[Operation.FEEDBACK_RECORD] = {"target_id", "rating"}
+        # Observation/Measurement record operations: the only required arg
+        # is the (already-validated) entity payload. Per Item 1 Phase 1 of
+        # plan-self-improvement-program.md the handler does the deep
+        # schema validation by running Observation.model_validate /
+        # Measurement.model_validate on the payload — missing required
+        # fields raise loudly, no silent defaults.
+        self._schemas[Operation.OBSERVATION_RECORD] = {"observation"}
+        self._schemas[Operation.MEASUREMENT_RECORD] = {"measurement"}
         self._schemas[Operation.REDACTION_APPLY] = {"target_id", "reason"}
         self._schemas[Operation.RETENTION_PRUNE] = set()
 
