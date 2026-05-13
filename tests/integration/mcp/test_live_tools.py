@@ -119,20 +119,24 @@ async def test_save_memory_dedups_on_repeat(mcp_session: Client) -> None:
 async def test_save_experience_validates_trace_json(
     mcp_session: Client,
 ) -> None:
-    """``save_experience`` rejects malformed trace JSON with a clear error.
+    """``save_experience`` rejects malformed trace JSON via the structured
+    JSON-RPC error protocol.
 
     The happy-path needs a full ``Trace`` schema instance which is
-    unwieldy for a smoke test; the error path is the cheapest
-    round-trip that proves the tool's argument decoder + JSON validator
-    are wired correctly.
+    unwieldy for a smoke test; the error path is the cheapest round-trip
+    that proves the tool's argument decoder + JSON validator + the new
+    ``McpError`` propagation through FastMCP are all wired correctly.
     """
-    result = await mcp_session.call_tool(
-        "save_experience",
-        {"trace_json": "not-valid-json"},
-    )
-    text = _result_text(result)
-    assert text.startswith("Error:")
-    assert "trace JSON" in text or "Invalid" in text
+    from fastmcp.exceptions import ToolError
+
+    with pytest.raises(ToolError) as excinfo:
+        await mcp_session.call_tool(
+            "save_experience",
+            {"trace_json": "not-valid-json"},
+        )
+    # FastMCP wraps the server-side ``McpError`` into a ``ToolError``
+    # whose message carries the same text we set on ``ErrorData.message``.
+    assert "trace JSON" in str(excinfo.value) or "invalid" in str(excinfo.value).lower()
 
 
 # ── Read tools ────────────────────────────────────────────────────────
@@ -173,14 +177,18 @@ async def test_get_lessons_returns_markdown(mcp_session: Client) -> None:
 
 
 async def test_get_graph_reports_missing_entity(mcp_session: Client) -> None:
-    """``get_graph`` emits a clear ``Entity not found`` for an unknown id."""
-    result = await mcp_session.call_tool(
-        "get_graph",
-        {"entity_id": "mcp:does-not-exist", "depth": 1, "max_tokens": 300},
-    )
-    text = _result_text(result)
-    assert "Entity not found" in text
-    assert "mcp:does-not-exist" in text
+    """``get_graph`` surfaces a missing-entity lookup as a structured
+    ``McpError(RESOURCE_NOT_FOUND, …)`` over JSON-RPC."""
+    from fastmcp.exceptions import ToolError
+
+    with pytest.raises(ToolError) as excinfo:
+        await mcp_session.call_tool(
+            "get_graph",
+            {"entity_id": "mcp:does-not-exist", "depth": 1, "max_tokens": 300},
+        )
+    msg = str(excinfo.value)
+    assert "entity not found" in msg.lower()
+    assert "mcp:does-not-exist" in msg
 
 
 async def test_get_graph_round_trip_after_save_knowledge(
@@ -267,14 +275,16 @@ async def test_get_sectioned_context_with_custom_sections(
 async def test_get_sectioned_context_rejects_empty_sections(
     mcp_session: Client,
 ) -> None:
-    """Empty ``sections`` list is rejected at the tool layer with a clear error."""
-    result = await mcp_session.call_tool(
-        "get_sectioned_context",
-        {"intent": "x", "sections": []},
-    )
-    text = _result_text(result)
-    assert text.startswith("Error:")
-    assert "sections" in text
+    """Empty ``sections`` list is rejected via the structured JSON-RPC
+    error protocol (INVALID_PARAMS), not a string-Error return."""
+    from fastmcp.exceptions import ToolError
+
+    with pytest.raises(ToolError) as excinfo:
+        await mcp_session.call_tool(
+            "get_sectioned_context",
+            {"intent": "x", "sections": []},
+        )
+    assert "sections" in str(excinfo.value).lower()
 
 
 # ── Feedback ──────────────────────────────────────────────────────────
@@ -297,11 +307,15 @@ async def test_record_feedback_writes_event(mcp_session: Client) -> None:
 
 
 async def test_record_feedback_requires_target(mcp_session: Client) -> None:
-    """Calling ``record_feedback`` without trace_id or pack_id returns an error."""
-    result = await mcp_session.call_tool(
-        "record_feedback",
-        {"success": True},
-    )
-    text = _result_text(result)
-    assert text.startswith("Error:")
-    assert "trace_id" in text or "pack_id" in text
+    """``record_feedback`` without trace_id or pack_id raises through the
+    JSON-RPC structured-error protocol (INVALID_PARAMS) rather than
+    returning a ``"Error: …"`` string."""
+    from fastmcp.exceptions import ToolError
+
+    with pytest.raises(ToolError) as excinfo:
+        await mcp_session.call_tool(
+            "record_feedback",
+            {"success": True},
+        )
+    msg = str(excinfo.value).lower()
+    assert "trace_id" in msg or "pack_id" in msg
