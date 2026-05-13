@@ -49,6 +49,45 @@ class ConfigError(TrellisError):
         super().__init__(message, code="CONFIG_ERROR")
 
 
+class BackendNotInstalledError(ConfigError):
+    """Raised when a configured backend's optional Python extra is not installed.
+
+    The POC-stage directive (see ``docs/design/plan-cleanup-silent-fallbacks.md``)
+    forbids silent ``except ImportError: return None`` fallbacks: an operator
+    who configures ``backend: arcadedb`` and then sees a SQLite store instead
+    has no way to discover the missing extra. This exception names the
+    backend and the install command so the fix is one line.
+
+    A subclass of :class:`ConfigError` so existing startup-aggregation
+    paths (``RegistryValidationError``) keep grouping it as a configuration
+    problem rather than a runtime crash.
+    """
+
+    def __init__(
+        self,
+        *,
+        backend_name: str,
+        extra: str | None = None,
+        package_name: str | None = None,
+    ) -> None:
+        self.backend_name = backend_name
+        self.extra = extra
+        self.package_name = package_name
+        if extra:
+            install_hint = f'Run: uv pip install -e ".[{extra}]"'
+        elif package_name:
+            install_hint = f"Run: uv pip install {package_name}"
+        else:
+            install_hint = (
+                "Install the matching optional dependency for this backend."
+            )
+        message = (
+            f"Backend {backend_name!r} is not installed. {install_hint}"
+        )
+        super().__init__(message, setting=f"backend.{backend_name}")
+        self.code = "BACKEND_NOT_INSTALLED"
+
+
 class StoreError(TrellisError):
     """Raised when a storage operation fails."""
 

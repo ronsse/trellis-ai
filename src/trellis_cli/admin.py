@@ -17,6 +17,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from trellis.errors import BackendNotInstalledError
 from trellis_cli.claude_integration import (
     get_claude_settings_path,
     merge_mcp_server,
@@ -763,7 +764,16 @@ def _build_check_extractors_report() -> dict[str, Any]:
     """
     registry = _get_registry()
 
-    llm_client = registry.build_llm_client()
+    # ``build_llm_client`` now raises ``BackendNotInstalledError`` when
+    # the configured provider's optional SDK is missing. For this
+    # diagnostic we surface that as "config-path unbuildable" — the
+    # downstream status logic already covers the "blocked vs env
+    # fallback" cases.
+    try:
+        llm_client = registry.build_llm_client()
+    except BackendNotInstalledError:
+        logger.debug("check_extractors_llm_sdk_not_installed", exc_info=True)
+        llm_client = None
     llm_cfg: dict[str, Any] = dict(registry._llm_config or {})
     provider = llm_cfg.get("provider")
     model = llm_cfg.get("model")
