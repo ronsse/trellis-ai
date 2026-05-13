@@ -71,10 +71,12 @@ class TestObservationsSDK:
 
     def test_missing_required_field_raises_422(self, client) -> None:
         """Missing required field hits server-side validation. The SDK
-        raises a TrellisAPIError, not a silent default."""
-        from trellis_sdk.exceptions import TrellisAPIError
+        raises a typed 4xx :class:`TrellisClientError`, not a silent
+        default (legacy ``TrellisAPIError`` no longer covers this path
+        since #123 split the hierarchy)."""
+        from trellis_sdk.exceptions import TrellisClientError
 
-        with pytest.raises(TrellisAPIError):
+        with pytest.raises(TrellisClientError):
             client.record_observation(
                 {
                     "subject_entity_id": "ds-1",

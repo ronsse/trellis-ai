@@ -1565,7 +1565,7 @@ def record_observation(
             content=content,
             confidence=confidence,
             evidence_ref=evidence_ref,
-            metadata=metadata,
+            metadata=metadata or {},
         )
     except Exception as exc:
         return json.dumps(
