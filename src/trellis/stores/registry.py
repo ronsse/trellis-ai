@@ -954,11 +954,67 @@ class StoreRegistry:
                 raise ConfigError(msg, setting="stores.graph.http_url")
             ensure_database(http_url, user, password, database)
 
+        # Run the typed-property schema migration (Phase 3 of
+        # adr-graph-ontology §6.4) over HTTP SQL while we still hold
+        # ``http_url`` + ``password``. The constructor will receive
+        # only the injected ``driver`` (per the mutual-exclusion
+        # contract) and so cannot run this migration itself. Idempotent.
+        self._run_arcadedb_edge_provenance_migration(
+            http_url=http_url, uri=uri, user=user, password=password, database=database
+        )
+
         driver = build_arcadedb_driver(uri, user, password, config=cfg)
         self._bolt_drivers[key] = driver
         new_params.pop("password")
         new_params["driver"] = driver
         return new_params
+
+    @staticmethod
+    def _run_arcadedb_edge_provenance_migration(
+        *,
+        http_url: str | None,
+        uri: str,
+        user: str,
+        password: str,
+        database: str,
+    ) -> None:
+        """Idempotently install ArcadeDB's typed-property edge schema.
+
+        Pulled out of :meth:`_inject_arcadedb_driver` purely for
+        statement-count reasons (PLR0915). Falls back to deriving the
+        HTTP URL from the Bolt ``uri`` when the explicit value is
+        absent. Emits a warning rather than raising when no URL is
+        resolvable — the store still functions without the FLOAT
+        MIN/MAX constraint, just without the defense-in-depth backstop
+        on ``confidence``.
+        """
+        from trellis.stores.arcadedb.base import (  # noqa: PLC0415
+            derive_http_url_from_bolt,
+        )
+
+        resolved = http_url or derive_http_url_from_bolt(uri)
+        if not resolved:
+            logger.warning(
+                "arcadedb_provenance_schema_migration_skipped_no_http_url",
+                reason=(
+                    "could not resolve http_url for ArcadeDB schema "
+                    "migration. The FLOAT MIN/MAX constraint on "
+                    "edge.confidence will not be installed. Set http_url "
+                    "in config, TRELLIS_ARCADEDB_HTTP_URL env var, or "
+                    "use a Bolt URI with a parseable host."
+                ),
+            )
+            return
+        from trellis.stores.arcadedb.graph import (  # noqa: PLC0415
+            ArcadeDBGraphStore,
+        )
+
+        ArcadeDBGraphStore._init_arcadedb_edge_provenance_schema(
+            http_url=resolved,
+            user=user,
+            password=password,
+            database=database,
+        )
 
     def _resolve_arcadedb_vector_params(
         self, params: dict[str, Any]

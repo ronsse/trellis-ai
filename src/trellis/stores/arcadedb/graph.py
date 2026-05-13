@@ -139,11 +139,16 @@ class ArcadeDBGraphStore(BoltOpenCypherGraphStore):
                 raise ValueError(msg)
             super().__init__(driver=driver, database=database, owns_driver=False)
             # Property-schema migration requires HTTP credentials. The
-            # injected-driver path doesn't have them, so we skip and
-            # rely on lazy property creation on first write. The
-            # ``IF NOT EXISTS`` clause makes the deferred migration
-            # safe to run later (e.g. via ``trellis admin migrate-
-            # provenance``, planned in E2).
+            # injected-driver path doesn't always have them; the
+            # registry runs this migration itself (with full
+            # credentials) before injecting the driver, so the common
+            # production path is already covered. When a caller
+            # constructs the store directly with an injected driver and
+            # omits ``http_url`` / ``password``, we surface the missing
+            # constraint as a warning rather than failing — the store
+            # still functions (ArcadeDB auto-creates untyped properties
+            # on first write) but loses the FLOAT MIN/MAX defense-in-
+            # depth on ``confidence``.
             if http_url is not None and password is not None:
                 self._init_arcadedb_edge_provenance_schema(
                     http_url=http_url,
@@ -152,8 +157,16 @@ class ArcadeDBGraphStore(BoltOpenCypherGraphStore):
                     database=database,
                 )
             else:
-                logger.debug(
-                    "arcadedb_provenance_schema_migration_skipped_injected_driver"
+                logger.warning(
+                    "arcadedb_provenance_schema_migration_skipped_injected_driver",
+                    reason=(
+                        "http_url and/or password not supplied alongside "
+                        "injected driver; the FLOAT MIN/MAX constraint on "
+                        "edge.confidence will not be installed. Pass both "
+                        "to enable the schema-typed property constraint, "
+                        "or construct via StoreRegistry which handles "
+                        "this automatically."
+                    ),
                 )
             logger.info(
                 "arcadedb_graph_store_initialized",
