@@ -27,6 +27,7 @@ import structlog
 
 from trellis.classify.dedup.minhash import MinHashIndex
 from trellis.core.base import utc_now
+from trellis.meta.agents import META_AGENT_PREFIX
 from trellis.retrieve.evaluate import QualityReport
 from trellis.retrieve.rerankers.base import Reranker
 from trellis.retrieve.strategies import SearchStrategy
@@ -43,6 +44,7 @@ from trellis.schemas.pack import (
     SectionedPack,
     SectionRequest,
 )
+from trellis.schemas.well_known import ACTIVITY
 from trellis.stores.advisory_store import AdvisoryStore
 from trellis.stores.base.event_log import EventLog, EventType
 
@@ -212,6 +214,7 @@ class PackBuilder:
         tag_filters: dict[str, Any] | None = None,
         limit_per_strategy: int = 20,
         include_structural: bool = False,
+        include_meta: bool = False,
         session_dedup_window_minutes: int = DEFAULT_SESSION_DEDUP_WINDOW_MINUTES,
     ) -> Pack:
         """Assemble a pack by running all strategies and applying budget.
@@ -221,11 +224,13 @@ class PackBuilder:
             2. Collect all PackItems.
             3. Deduplicate by item_id (keep highest score).
             4. Drop structural items unless ``include_structural=True``.
-            5. Drop items already served in this session (session dedup).
-            6. Sort by relevance_score descending.
-            7. Apply budget limits (max_items, then max_tokens).
-            8. Build RetrievalReport.
-            9. Return Pack.
+            5. Drop Trellis-internal meta-Activities unless
+               ``include_meta=True``.
+            6. Drop items already served in this session (session dedup).
+            7. Sort by relevance_score descending.
+            8. Apply budget limits (max_items, then max_tokens).
+            9. Build RetrievalReport.
+            10. Return Pack.
 
         When ``session_id`` is provided, any ``item_id`` that appears in a
         ``PACK_ASSEMBLED`` event for this session within the last
@@ -233,6 +238,16 @@ class PackBuilder:
         ``session_dedup``). This prevents the agent from receiving the
         same context repeatedly across multiple tool calls in one
         conversation.
+
+        ``include_meta`` (default ``False``) filters out graph nodes
+        produced by :func:`trellis.meta.record_meta_analysis` — i.e.,
+        ``Activity`` nodes whose ``agent_id`` starts with
+        ``trellis_meta_``. Without this default, every agent-facing pack
+        would surface Trellis's own analysis traces (see Item 6 Phase 2
+        of ``docs/design/plan-self-improvement-program.md``). Set
+        ``include_meta=True`` to surface them — useful for the
+        ``meta_trace_round_trip`` eval scenario and for operators
+        debugging the self-improvement loop.
         """
         budget = budget or PackBudget()
         all_items: list[PackItem] = []
@@ -240,6 +255,7 @@ class PackBuilder:
         candidates_found = 0
         rejected: list[RejectedItem] = []
         strategy_failures: list[StrategyFailure] = []
+        meta_filtered_count = 0
 
         merged_filters = self._build_filters(filters, tag_filters)
         # Propagate structural preference into the per-strategy filter so
@@ -338,6 +354,29 @@ class PackBuilder:
                     kept.append(item)
             deduped = kept
 
+        # Meta-Activity filter (Item 6 Phase 2): drop graph nodes that
+        # represent Trellis's own analyzer runs. Without this default,
+        # every agent-facing pack would pollute itself with the
+        # ``Activity`` nodes emitted by ``record_meta_analysis``. Opt-in
+        # via ``include_meta=True``.
+        if not include_meta:
+            kept_meta: list[PackItem] = []
+            for item in deduped:
+                if self._is_meta_activity(item):
+                    meta_filtered_count += 1
+                    rejected.append(
+                        RejectedItem(
+                            item_id=item.item_id,
+                            item_type=item.item_type,
+                            relevance_score=item.relevance_score,
+                            reason="meta_activity_filter",
+                            strategy_source=item.strategy_source,
+                        )
+                    )
+                else:
+                    kept_meta.append(item)
+            deduped = kept_meta
+
         # Session dedup: drop items recently served in this session.
         if session_id:
             served = self._recently_served_item_ids(
@@ -431,7 +470,11 @@ class PackBuilder:
 
         # Emit telemetry event
         if self._event_log is not None:
-            self._emit_telemetry(pack, strategy_failures=strategy_failures)
+            self._emit_telemetry(
+                pack,
+                strategy_failures=strategy_failures,
+                meta_filtered_count=meta_filtered_count,
+            )
 
         return pack
 
@@ -448,6 +491,7 @@ class PackBuilder:
         limit_per_strategy: int = 20,
         tier_mapper: TierMapper | None = None,
         include_structural: bool = False,
+        include_meta: bool = False,
         session_dedup_window_minutes: int = DEFAULT_SESSION_DEDUP_WINDOW_MINUTES,
     ) -> SectionedPack:
         """Assemble a sectioned pack with independently budgeted sections.
@@ -534,6 +578,17 @@ class PackBuilder:
                 for item in deduped
                 if (item.metadata or {}).get("node_role") != "structural"
             ]
+
+        # 3a-meta. Meta-Activity filter (Item 6 Phase 2).
+        meta_filtered_count = 0
+        if not include_meta:
+            kept_meta: list[PackItem] = []
+            for item in deduped:
+                if self._is_meta_activity(item):
+                    meta_filtered_count += 1
+                else:
+                    kept_meta.append(item)
+            deduped = kept_meta
 
         # 3a. Session dedup: drop items recently served in this session.
         if session_id:
@@ -646,7 +701,9 @@ class PackBuilder:
         # 5. Emit telemetry
         if self._event_log is not None:
             self._emit_sectioned_telemetry(
-                sectioned_pack, strategy_failures=strategy_failures
+                sectioned_pack,
+                strategy_failures=strategy_failures,
+                meta_filtered_count=meta_filtered_count,
             )
 
         return sectioned_pack
@@ -656,6 +713,7 @@ class PackBuilder:
         pack: SectionedPack,
         *,
         strategy_failures: list[StrategyFailure] | None = None,
+        meta_filtered_count: int = 0,
     ) -> None:
         """Emit telemetry event for a sectioned pack."""
         per_item_estimates = [
@@ -697,6 +755,7 @@ class PackBuilder:
                 "strategy_failures": [
                     sf.to_event_payload() for sf in (strategy_failures or [])
                 ],
+                "meta_filtered_count": meta_filtered_count,
                 **token_budget_fields,
             },
         )
@@ -768,6 +827,7 @@ class PackBuilder:
         pack: Pack,
         *,
         strategy_failures: list[StrategyFailure] | None = None,
+        meta_filtered_count: int = 0,
     ) -> None:
         """Emit a ContextRetrievalEvent for observability.
 
@@ -777,6 +837,11 @@ class PackBuilder:
         succeeded — kept in the payload for schema consistency so
         downstream consumers can ``payload.get("strategy_failures", [])``
         without a key check.
+
+        ``meta_filtered_count`` (Item 6 Phase 2) records how many graph
+        nodes were dropped by the default meta-Activity filter. ``0``
+        when the build either had no candidates of that shape or was
+        called with ``include_meta=True``.
         """
         report = pack.retrieval_report
         token_budget_fields = self._build_token_budget_payload(
@@ -842,6 +907,7 @@ class PackBuilder:
                 "strategy_failures": [
                     sf.to_event_payload() for sf in (strategy_failures or [])
                 ],
+                "meta_filtered_count": meta_filtered_count,
                 **token_budget_fields,
             },
         )
@@ -976,6 +1042,32 @@ class PackBuilder:
             # advisories and the failure is logged for follow-up.
             logger.exception("advisory_retrieval_failed")
             return []
+
+    @staticmethod
+    def _is_meta_activity(item: PackItem) -> bool:
+        """Return ``True`` when this item is a Trellis-internal meta-Activity.
+
+        Meta-Activities are recorded by
+        :func:`trellis.meta.record_meta_analysis` and have two signatures:
+
+        * ``metadata["node_type"]`` equals :data:`trellis.schemas.well_known.ACTIVITY`
+          (GraphSearch stamps the raw node_type into metadata).
+        * ``metadata["agent_id"]`` (the Activity's analyzer agent) starts with
+          :data:`trellis.meta.agents.META_AGENT_PREFIX` (``trellis_meta_``).
+
+        Both signals must be present — a user-authored Activity node with a
+        non-synthetic ``agent_id`` is *not* a meta-Activity and stays in the
+        pack. This is the post-strategy filter applied when
+        ``include_meta=False`` (the default).
+        """
+        meta = item.metadata or {}
+        node_type = meta.get("node_type")
+        agent_id = meta.get("agent_id")
+        if node_type != ACTIVITY:
+            return False
+        if not isinstance(agent_id, str):
+            return False
+        return agent_id.startswith(META_AGENT_PREFIX)
 
     @staticmethod
     def _promote_strategy_source(items: list[PackItem]) -> list[PackItem]:

@@ -1312,3 +1312,193 @@ class TestPackBuilderTokenBudget:
             assert "token_total_estimated" in payload
         finally:
             event_log.close()
+
+
+# ---------------------------------------------------------------------------
+# Meta-Activity filter (Item 6 Phase 2)
+# ---------------------------------------------------------------------------
+
+
+def _meta_activity_item(
+    item_id: str, *, agent_id: str = "trellis_meta_analyzer"
+) -> PackItem:
+    """Build a PackItem matching what GraphSearch emits for a meta-Activity.
+
+    Two metadata signals matter for ``PackBuilder._is_meta_activity``:
+    ``node_type == "Activity"`` and ``agent_id`` starts with
+    ``trellis_meta_``. The rest is unobserved.
+    """
+    return PackItem(
+        item_id=item_id,
+        item_type="entity",
+        excerpt="meta activity",
+        relevance_score=0.5,
+        metadata={
+            "source_strategy": "graph",
+            "node_type": "Activity",
+            "agent_id": agent_id,
+            "analyzer_name": "test",
+        },
+    )
+
+
+def _regular_activity_item(item_id: str) -> PackItem:
+    """A user-authored Activity that must NOT trigger the meta filter."""
+    return PackItem(
+        item_id=item_id,
+        item_type="entity",
+        excerpt="real activity",
+        relevance_score=0.5,
+        metadata={
+            "source_strategy": "graph",
+            "node_type": "Activity",
+            "agent_id": "human-analyst-1",
+        },
+    )
+
+
+class TestMetaActivityFilter:
+    def test_default_excludes_meta_activity(self) -> None:
+        """include_meta=False (default) drops meta-Activity items."""
+        s = _make_strategy(
+            "graph",
+            [_meta_activity_item("meta-1"), _item("d1", 0.9)],
+        )
+        builder = PackBuilder(strategies=[s])
+        pack = builder.build("q")
+        item_ids = [item.item_id for item in pack.items]
+        assert "meta-1" not in item_ids
+        assert "d1" in item_ids
+
+    def test_opt_in_includes_meta_activity(self) -> None:
+        """include_meta=True surfaces meta-Activity items."""
+        s = _make_strategy(
+            "graph",
+            [_meta_activity_item("meta-1"), _item("d1", 0.9)],
+        )
+        builder = PackBuilder(strategies=[s])
+        pack = builder.build("q", include_meta=True)
+        item_ids = [item.item_id for item in pack.items]
+        assert "meta-1" in item_ids
+        assert "d1" in item_ids
+
+    def test_filter_is_agent_id_specific_not_blanket_activity_drop(self) -> None:
+        """User-authored Activities (non-synthetic agent_id) must remain."""
+        s = _make_strategy(
+            "graph",
+            [
+                _meta_activity_item("meta-1"),
+                _regular_activity_item("real-1"),
+            ],
+        )
+        builder = PackBuilder(strategies=[s])
+        pack = builder.build("q")
+        item_ids = [item.item_id for item in pack.items]
+        assert "real-1" in item_ids
+        assert "meta-1" not in item_ids
+
+    def test_meta_filtered_count_emitted_in_event(
+        self, tmp_path: Path
+    ) -> None:
+        """PACK_ASSEMBLED payload includes ``meta_filtered_count``."""
+        from trellis.stores.base.event_log import EventType
+
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        try:
+            s = _make_strategy(
+                "graph",
+                [
+                    _meta_activity_item("meta-1"),
+                    _meta_activity_item("meta-2"),
+                    _item("d1", 0.9),
+                ],
+            )
+            builder = PackBuilder(strategies=[s], event_log=event_log)
+            builder.build("q")
+            events = event_log.get_events(
+                event_type=EventType.PACK_ASSEMBLED, limit=10
+            )
+            assert len(events) == 1
+            assert events[0].payload["meta_filtered_count"] == 2
+        finally:
+            event_log.close()
+
+    def test_meta_filtered_count_zero_when_opt_in(
+        self, tmp_path: Path
+    ) -> None:
+        """include_meta=True yields ``meta_filtered_count == 0`` (filter no-op)."""
+        from trellis.stores.base.event_log import EventType
+
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        try:
+            s = _make_strategy(
+                "graph",
+                [_meta_activity_item("meta-1"), _item("d1", 0.9)],
+            )
+            builder = PackBuilder(strategies=[s], event_log=event_log)
+            builder.build("q", include_meta=True)
+            events = event_log.get_events(
+                event_type=EventType.PACK_ASSEMBLED, limit=10
+            )
+            assert events[0].payload["meta_filtered_count"] == 0
+        finally:
+            event_log.close()
+
+    def test_meta_filtered_count_in_sectioned_telemetry(
+        self, tmp_path: Path
+    ) -> None:
+        """``build_sectioned`` also propagates ``meta_filtered_count``."""
+        from trellis.stores.base.event_log import EventType
+
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        try:
+            s = _make_strategy(
+                "graph",
+                [_meta_activity_item("meta-1"), _item("d1", 0.9)],
+            )
+            builder = PackBuilder(strategies=[s], event_log=event_log)
+            builder.build_sectioned(
+                "q",
+                sections=[SectionRequest(name="default", max_items=5, max_tokens=200)],
+            )
+            events = event_log.get_events(
+                event_type=EventType.PACK_ASSEMBLED, limit=10
+            )
+            assert len(events) == 1
+            assert events[0].payload["meta_filtered_count"] == 1
+        finally:
+            event_log.close()
+
+    def test_is_meta_activity_requires_both_signals(self) -> None:
+        """Helper requires node_type==Activity AND agent_id prefix match."""
+        # node_type=Activity but agent_id not synthetic — keep.
+        non_meta = _regular_activity_item("real-1")
+        assert PackBuilder._is_meta_activity(non_meta) is False
+
+        # synthetic agent_id but wrong node_type — keep (defensive).
+        wrong_type = PackItem(
+            item_id="x",
+            item_type="entity",
+            excerpt="",
+            relevance_score=0.5,
+            metadata={
+                "node_type": "Document",
+                "agent_id": "trellis_meta_analyzer",
+            },
+        )
+        assert PackBuilder._is_meta_activity(wrong_type) is False
+
+        # Both signals present — drop.
+        meta = _meta_activity_item("meta-1")
+        assert PackBuilder._is_meta_activity(meta) is True
+
+    def test_is_meta_activity_handles_empty_metadata(self) -> None:
+        """An item with empty metadata is never a meta-Activity."""
+        item = PackItem(
+            item_id="x",
+            item_type="document",
+            excerpt="",
+            relevance_score=0.5,
+            metadata={},
+        )
+        assert PackBuilder._is_meta_activity(item) is False

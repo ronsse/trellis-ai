@@ -313,21 +313,35 @@ def migrate_provenance_command(
     dry_run: bool,
     batch_size: int,
     output_format: str,
+    no_meta_trace: bool = False,
 ) -> None:
     """CLI body — wraps :func:`run_migrate_provenance` with output + exit codes."""
+    from trellis_cli._meta_wiring import wrap_cli_meta_analysis  # noqa: PLC0415
+
     store = get_graph_store()
     try:
         event_log: EventLog | None = get_event_log()
     except Exception:
         event_log = None
 
+    meta_cm = wrap_cli_meta_analysis(
+        agent_suffix="admin",
+        analyzer_name="cli.admin.migrate-provenance",
+        disabled=no_meta_trace,
+    )
     try:
-        report = run_migrate_provenance(
-            store,
-            dry_run=dry_run,
-            batch_size=batch_size,
-            event_log=event_log,
-        )
+        with meta_cm as _meta_record:
+            report = run_migrate_provenance(
+                store,
+                dry_run=dry_run,
+                batch_size=batch_size,
+                event_log=event_log,
+            )
+            if _meta_record.enabled and not dry_run:
+                _meta_record.produced_finding(
+                    f"migrate-provenance-{report.edges_migrated}-edges",
+                    finding_type="ProvenanceMigrationReport",
+                )
     except MigrationDriftError as exc:
         if output_format == "json":
             # On drift we still emit the partial report so operators
@@ -395,6 +409,14 @@ def register(admin_app: typer.Typer) -> None:
             "--format",
             help="Output format: text or json.",
         ),
+        no_meta_trace: bool = typer.Option(
+            False,
+            "--no-meta-trace",
+            help=(
+                "Skip recording this migration as a meta-Activity "
+                "(Item 6 Phase 2)."
+            ),
+        ),
     ) -> None:
         """Lift provenance from legacy ``properties`` JSON into typed columns.
 
@@ -403,7 +425,12 @@ def register(admin_app: typer.Typer) -> None:
         ``EXTRACTION_FAILED`` event per offending row and raises a
         :class:`MigrationDriftError` when >1% of scanned edges fail.
         """
-        migrate_provenance_command(dry_run, batch_size, output_format)
+        migrate_provenance_command(
+            dry_run,
+            batch_size,
+            output_format,
+            no_meta_trace=no_meta_trace,
+        )
 
 
 __all__ = [

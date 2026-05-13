@@ -18,6 +18,7 @@ from rich.console import Console
 from rich.table import Table
 
 from trellis.errors import BackendNotInstalledError
+from trellis_cli._meta_wiring import wrap_cli_meta_analysis
 from trellis_cli.claude_integration import (
     get_claude_settings_path,
     merge_mcp_server,
@@ -1153,6 +1154,11 @@ def migrate_graph(
     output_format: str = typer.Option(
         "text", "--format", help="Output format: text or json"
     ),
+    no_meta_trace: bool = typer.Option(
+        False,
+        "--no-meta-trace",
+        help="Skip recording this migration as a meta-Activity (Item 6 Phase 2).",
+    ),
 ) -> None:
     """Copy current graph data (nodes + edges + aliases) between backends.
 
@@ -1197,25 +1203,36 @@ def migrate_graph(
         else BatchStrategy.STOP_ON_ERROR
     )
 
-    try:
-        migrator = GraphMigrator(src_store, dst_store, max_nodes=max_nodes)
+    with wrap_cli_meta_analysis(
+        agent_suffix="admin",
+        analyzer_name="cli.admin.migrate-graph",
+        disabled=no_meta_trace,
+    ) as _meta_record:
         try:
-            report = migrator.run(dry_run=dry_run, strategy=strategy)
-        except MigrationCapacityExceededError as exc:
-            console.print(f"[red]{exc}[/red]")
-            raise typer.Exit(code=1) from exc
-        except MigrationStepError as exc:
-            console.print(f"[red]Migration aborted: {exc}[/red]")
-            console.print(
-                "[yellow]Re-run with --continue-on-error to capture all "
-                "failures in one pass.[/yellow]"
+            migrator = GraphMigrator(src_store, dst_store, max_nodes=max_nodes)
+            try:
+                report = migrator.run(dry_run=dry_run, strategy=strategy)
+            except MigrationCapacityExceededError as exc:
+                console.print(f"[red]{exc}[/red]")
+                raise typer.Exit(code=1) from exc
+            except MigrationStepError as exc:
+                console.print(f"[red]Migration aborted: {exc}[/red]")
+                console.print(
+                    "[yellow]Re-run with --continue-on-error to capture all "
+                    "failures in one pass.[/yellow]"
+                )
+                raise typer.Exit(code=1) from exc
+        finally:
+            # Close in dest-first order so the source connection survives
+            # if the dest close blows up — diagnostics may need to
+            # re-read source.
+            dst_registry.close()
+            src_registry.close()
+        if _meta_record.enabled and not dry_run:
+            _meta_record.produced_finding(
+                f"migrate-graph-{report.nodes_written}-nodes",
+                finding_type="GraphMigrationReport",
             )
-            raise typer.Exit(code=1) from exc
-    finally:
-        # Close in dest-first order so the source connection survives if
-        # the dest close blows up — diagnostics may need to re-read source.
-        dst_registry.close()
-        src_registry.close()
 
     if output_format == "json":
         from dataclasses import asdict  # noqa: PLC0415
@@ -1770,6 +1787,11 @@ def draft_promotion_adr(
         "--format",
         help="Output format: text or json.",
     ),
+    no_meta_trace: bool = typer.Option(
+        False,
+        "--no-meta-trace",
+        help="Skip recording this run as a meta-Activity (Item 6 Phase 2).",
+    ),
 ) -> None:
     """Draft a promotion ADR for an open-string type that crossed thresholds.
 
@@ -1796,7 +1818,17 @@ def draft_promotion_adr(
     )
 
     event_log = get_event_log()
-    candidate = _lookup_candidate_payload(event_log, candidate_id)
+    with wrap_cli_meta_analysis(
+        agent_suffix="admin",
+        analyzer_name="cli.admin.draft-promotion-adr",
+        disabled=no_meta_trace,
+    ) as _meta_record:
+        candidate = _lookup_candidate_payload(event_log, candidate_id)
+        if _meta_record.enabled:
+            _meta_record.produced_finding(
+                f"promotion-adr-{candidate_id}",
+                finding_type="PromotionADRDraft",
+            )
 
     # Default output path: docs/design/adr-promote-<safe-name>.md where
     # safe-name is the open-string value lowercased + underscored. ADR
