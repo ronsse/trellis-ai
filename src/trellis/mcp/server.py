@@ -1510,6 +1510,16 @@ def _resolve_operation(operation: str) -> Any:
 # ---------------------------------------------------------------------------
 # Macro Tool: record_observation / query_observations (Item 1 Phase 1)
 # ---------------------------------------------------------------------------
+#
+# Measurement is intentionally *not* exposed as an MCP tool in Phase 1.
+# Measurement rows are append-only by convention (see ADR
+# ``adr-observation-entity-type.md`` §2.1 / §5.6) and are produced
+# primarily by automated metric streams, where per-call MCP overhead is
+# the wrong shape — those callers should use the REST endpoint
+# (`POST /api/v1/measurements`) or the SDK (`record_measurement`) which
+# both go through the same governed pipeline. Reconsider exposing
+# Measurement on MCP if agent-driven scalar capture becomes a real
+# workload.
 
 
 @mcp.tool()

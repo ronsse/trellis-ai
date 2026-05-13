@@ -6,7 +6,7 @@ from typing import Any
 
 import structlog
 
-from trellis.errors import StoreError, ValidationError
+from trellis.errors import NotFoundError, StoreError, ValidationError
 from trellis.mutate.commands import Command, Operation
 from trellis.schemas.measurement import Measurement
 from trellis.schemas.observation import Observation
@@ -400,17 +400,23 @@ class ObservationRecordHandler:
         # still keep the observation row, but the edge is skipped. This
         # matches the open-string entity-type rule (CLAUDE.md
         # type-extensibility).
+        #
+        # Narrow the catch to ``StoreError`` (which ``NotFoundError``
+        # subclasses): unexpected exceptions (DB driver bugs, schema
+        # errors) are escalated rather than silently swallowed — see
+        # PR #122 (C2 Phase 5) for the silent-fallback discipline.
         try:
             store.upsert_edge(
                 source_id=obs.subject_entity_id,
                 target_id=node_id,
                 edge_type=HAS_OBSERVATION,
             )
-        except Exception:
-            logger.debug(
+        except (NotFoundError, StoreError) as exc:
+            logger.info(
                 "observation_edge_skipped",
                 subject_entity_id=obs.subject_entity_id,
                 observation_id=node_id,
+                reason=str(exc),
             )
 
         self._registry.operational.event_log.emit(
@@ -475,17 +481,20 @@ class MeasurementRecordHandler:
             properties=props,
         )
 
+        # Same narrow-catch discipline as ObservationRecordHandler —
+        # silent-fallback hygiene per PR #122 (C2 Phase 5).
         try:
             store.upsert_edge(
                 source_id=meas.subject_entity_id,
                 target_id=node_id,
                 edge_type=HAS_OBSERVATION,
             )
-        except Exception:
-            logger.debug(
+        except (NotFoundError, StoreError) as exc:
+            logger.info(
                 "measurement_edge_skipped",
                 subject_entity_id=meas.subject_entity_id,
                 measurement_id=node_id,
+                reason=str(exc),
             )
 
         self._registry.operational.event_log.emit(
