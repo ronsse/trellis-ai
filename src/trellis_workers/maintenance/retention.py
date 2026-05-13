@@ -8,11 +8,48 @@ import structlog
 from pydantic import Field
 
 from trellis.core.base import TrellisModel, utc_now
+from trellis.extract.telemetry import emit_extraction_failure
 from trellis.stores.base.document import DocumentStore
 from trellis.stores.base.event_log import EventLog, EventType
 from trellis.stores.base.trace import TraceStore
 
 logger = structlog.get_logger(__name__)
+
+#: Maximum fraction of scanned documents whose ``updated_at`` may fail to
+#: parse before :class:`StalenessDetector` raises :class:`RetentionDriftError`.
+#: 1% is ~10x the noise floor we'd accept from a healthy ingest pipeline;
+#: anything above it is operator-visible drift, not transient bad data.
+MALFORMED_DOCUMENT_THRESHOLD = 0.01
+
+
+class RetentionDriftError(RuntimeError):
+    """Raised when too many documents have unparseable ``updated_at`` strings.
+
+    Surfaces what the previous silent ``except (ValueError, TypeError): pass``
+    used to hide. The message embeds the malformed ratio and the first five
+    offending document ids so operators have something to grep for in logs.
+    """
+
+    def __init__(
+        self,
+        *,
+        malformed_count: int,
+        total_documents: int,
+        sample_doc_ids: list[str],
+    ) -> None:
+        ratio = malformed_count / max(total_documents, 1)
+        sample = ", ".join(sample_doc_ids[:5]) or "<none>"
+        message = (
+            f"Retention drift: {malformed_count}/{total_documents} documents "
+            f"({ratio:.2%}) have unparseable updated_at strings, exceeding "
+            f"threshold {MALFORMED_DOCUMENT_THRESHOLD:.2%}. "
+            f"First offending doc_ids: {sample}."
+        )
+        super().__init__(message)
+        self.malformed_count = malformed_count
+        self.total_documents = total_documents
+        self.ratio = ratio
+        self.sample_doc_ids = list(sample_doc_ids[:5])
 
 
 class RetentionPolicy(TrellisModel):
@@ -126,6 +163,11 @@ class StalenessReport(TrellisModel):
     total_documents: int = 0
     stale_documents: list[str] = Field(default_factory=list)
     missing_documents: list[str] = Field(default_factory=list)
+    #: Documents whose ``updated_at`` string could not be parsed. Surfaced
+    #: as a first-class report field (rather than silently dropped) so
+    #: operators can see drift accumulating before it crosses
+    #: :data:`MALFORMED_DOCUMENT_THRESHOLD` and starts raising.
+    malformed_documents: list[str] = Field(default_factory=list)
 
 
 class StalenessDetector:
@@ -140,15 +182,23 @@ class StalenessDetector:
         self,
         document_store: DocumentStore,
         staleness_days: int = 90,
+        event_log: EventLog | None = None,
     ) -> None:
         self._document_store = document_store
         self._staleness_days = staleness_days
+        self._event_log = event_log
 
     def check(self) -> StalenessReport:
         """Check for stale documents.
 
         Returns:
             StalenessReport with findings.
+
+        Raises:
+            RetentionDriftError: when more than
+                :data:`MALFORMED_DOCUMENT_THRESHOLD` of scanned documents
+                have unparseable ``updated_at`` strings — invisible drift
+                that the operator must investigate.
         """
         report = StalenessReport()
         cutoff = utc_now() - timedelta(days=self._staleness_days)
@@ -159,21 +209,54 @@ class StalenessDetector:
         for doc in all_docs:
             # Use updated_at directly from list result instead of re-fetching
             updated_str = doc.get("updated_at")
-            if updated_str:
-                try:
-                    updated_at = datetime.fromisoformat(updated_str)
-                    if updated_at.tzinfo is None:
-                        updated_at = updated_at.replace(tzinfo=UTC)
-                    if updated_at < cutoff:
-                        report.stale_documents.append(doc["doc_id"])
-                except (ValueError, TypeError):
-                    pass
+            if not updated_str:
+                continue
+            doc_id = doc.get("doc_id", "<unknown>")
+            try:
+                updated_at = datetime.fromisoformat(updated_str)
+                if updated_at.tzinfo is None:
+                    updated_at = updated_at.replace(tzinfo=UTC)
+                if updated_at < cutoff:
+                    report.stale_documents.append(doc_id)
+            except (ValueError, TypeError) as exc:
+                # Surface the failure instead of swallowing it. The doc
+                # is tracked on the report so the loop can decide if the
+                # rate of failures has crossed the drift threshold.
+                report.malformed_documents.append(doc_id)
+                emit_extraction_failure(
+                    event_log=self._event_log,
+                    extractor_id="retention.staleness",
+                    extractor_tier="deterministic",
+                    failure_kind="parse_error",
+                    source_hint="document_store.updated_at",
+                    error_class=type(exc).__name__,
+                    error_excerpt=(
+                        f"doc_id={doc_id} updated_at={updated_str!r}: {exc}"
+                    ),
+                )
+                logger.exception(
+                    "staleness_check_malformed_updated_at",
+                    doc_id=doc_id,
+                    updated_at=updated_str,
+                    error_class=type(exc).__name__,
+                )
 
         logger.info(
             "staleness_check_complete",
             total=report.total_documents,
             stale=len(report.stale_documents),
             missing=len(report.missing_documents),
+            malformed=len(report.malformed_documents),
         )
+
+        malformed = len(report.malformed_documents)
+        if malformed > 0:
+            ratio = malformed / max(report.total_documents, 1)
+            if ratio > MALFORMED_DOCUMENT_THRESHOLD:
+                raise RetentionDriftError(
+                    malformed_count=malformed,
+                    total_documents=report.total_documents,
+                    sample_doc_ids=report.malformed_documents,
+                )
 
         return report

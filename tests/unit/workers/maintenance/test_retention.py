@@ -15,6 +15,8 @@ from trellis.stores.sqlite.document import SQLiteDocumentStore
 from trellis.stores.sqlite.event_log import SQLiteEventLog
 from trellis.stores.sqlite.trace import SQLiteTraceStore
 from trellis_workers.maintenance.retention import (
+    MALFORMED_DOCUMENT_THRESHOLD,
+    RetentionDriftError,
     RetentionPolicy,
     RetentionWorker,
     StalenessDetector,
@@ -281,3 +283,132 @@ class TestStalenessDetector:
         assert report.total_documents == 1
         assert len(report.stale_documents) == 0
         assert len(report.missing_documents) == 0
+
+
+# ---------------------------------------------------------------------------
+# StalenessDetector — malformed-date drift (C2 Phase 1.5)
+# ---------------------------------------------------------------------------
+
+
+def _corrupt_updated_at(
+    document_store: SQLiteDocumentStore, doc_id: str, value: str
+) -> None:
+    """Inject a deliberately malformed ``updated_at`` for ``doc_id``."""
+    document_store._conn.execute(
+        "UPDATE documents SET updated_at = ? WHERE doc_id = ?",
+        (value, doc_id),
+    )
+    document_store._conn.commit()
+
+
+class TestStalenessDetectorMalformedDates:
+    """C2 Phase 1.5: surface malformed updated_at instead of swallowing."""
+
+    def test_malformed_under_threshold_records_and_does_not_raise(
+        self,
+        document_store: SQLiteDocumentStore,
+        event_log: SQLiteEventLog,
+    ) -> None:
+        """1 malformed of >=100 docs is under threshold (1%) → no raise."""
+        bad_id = document_store.put(None, "bad doc")
+        _corrupt_updated_at(document_store, bad_id, "not-a-date")
+        for i in range(150):
+            document_store.put(None, f"good doc {i}")
+
+        detector = StalenessDetector(
+            document_store, staleness_days=90, event_log=event_log
+        )
+        report = detector.check()
+
+        assert report.total_documents == 151
+        assert bad_id in report.malformed_documents
+        assert len(report.malformed_documents) == 1
+        events = event_log.get_events(event_type=EventType.EXTRACTION_FAILED)
+        assert len(events) == 1
+        payload = events[0].payload
+        assert payload["failure_kind"] == "parse_error"
+        assert payload["extractor_id"] == "retention.staleness"
+
+    def test_malformed_above_threshold_raises_drift_error(
+        self,
+        document_store: SQLiteDocumentStore,
+        event_log: SQLiteEventLog,
+    ) -> None:
+        """5/10 malformed (50%) is far above 1% → raises RetentionDriftError."""
+        bad_ids: list[str] = []
+        for i in range(5):
+            doc_id = document_store.put(None, f"bad doc {i}")
+            _corrupt_updated_at(document_store, doc_id, f"garbage-{i}")
+            bad_ids.append(doc_id)
+        for i in range(5):
+            document_store.put(None, f"good doc {i}")
+
+        detector = StalenessDetector(
+            document_store, staleness_days=90, event_log=event_log
+        )
+        with pytest.raises(RetentionDriftError) as exc_info:
+            detector.check()
+
+        err = exc_info.value
+        assert err.malformed_count == 5
+        assert err.total_documents == 10
+        assert err.ratio == 0.5
+        for doc_id in err.sample_doc_ids:
+            assert doc_id in str(err)
+        assert f"{MALFORMED_DOCUMENT_THRESHOLD:.2%}" in str(err)
+
+    def test_mixed_valid_and_malformed_under_threshold(
+        self,
+        document_store: SQLiteDocumentStore,
+        event_log: SQLiteEventLog,
+    ) -> None:
+        """Valid docs flag stale correctly; malformed ones go to their list."""
+        stale_id = document_store.put(None, "stale content")
+        old_date = (utc_now() - timedelta(days=120)).isoformat()
+        document_store._conn.execute(
+            "UPDATE documents SET updated_at = ? WHERE doc_id = ?",
+            (old_date, stale_id),
+        )
+        document_store._conn.commit()
+
+        bad_id = document_store.put(None, "bad content")
+        _corrupt_updated_at(document_store, bad_id, "????")
+
+        for i in range(150):
+            document_store.put(None, f"fresh {i}")
+
+        detector = StalenessDetector(
+            document_store, staleness_days=90, event_log=event_log
+        )
+        report = detector.check()
+
+        assert report.total_documents == 152
+        assert stale_id in report.stale_documents
+        assert bad_id in report.malformed_documents
+        assert bad_id not in report.stale_documents
+        assert stale_id not in report.malformed_documents
+
+    def test_empty_document_set_no_error(
+        self,
+        document_store: SQLiteDocumentStore,
+        event_log: SQLiteEventLog,
+    ) -> None:
+        """Empty store: no malformed, no raise, no division by zero."""
+        detector = StalenessDetector(
+            document_store, staleness_days=90, event_log=event_log
+        )
+        report = detector.check()
+
+        assert report.total_documents == 0
+        assert report.malformed_documents == []
+
+    def test_zero_documents_total_no_division_by_zero(
+        self,
+        document_store: SQLiteDocumentStore,
+    ) -> None:
+        """No event_log, no docs: still completes cleanly."""
+        detector = StalenessDetector(document_store, staleness_days=90)
+        report = detector.check()
+
+        assert report.total_documents == 0
+        assert report.malformed_documents == []
