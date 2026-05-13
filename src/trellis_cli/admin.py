@@ -1908,3 +1908,16 @@ from trellis_cli.admin_migrate_provenance import (  # noqa: E402
 )
 
 _register_migrate_provenance(admin_app)
+
+
+# ---------------------------------------------------------------------------
+# generate-proposals / list-proposals / show-proposal — Item 7 Phase 1
+# ---------------------------------------------------------------------------
+# Registration hook mirrors migrate-provenance above so the proposal-CLI
+# logic stays in its own module and admin.py only carries the wiring.
+
+from trellis_cli.admin_proposals import (  # noqa: E402
+    register as _register_proposals,
+)
+
+_register_proposals(admin_app)
