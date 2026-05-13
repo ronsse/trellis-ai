@@ -1698,6 +1698,190 @@ paths:
       summary: Create Link
       tags:
       - curate
+  /api/v1/measurements:
+    get:
+      description: Query Measurement nodes by subject / metric_name / observer.
+      operationId: list_measurements_api_v1_measurements_get
+      parameters:
+      - in: query
+        name: subject_entity_id
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Subject Entity Id
+      - in: query
+        name: metric_name
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Metric Name
+      - in: query
+        name: observer_agent_id
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Observer Agent Id
+      - in: query
+        name: limit
+        required: false
+        schema:
+          default: 100
+          maximum: 1000
+          minimum: 1
+          title: Limit
+          type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                title: Response List Measurements Api V1 Measurements Get
+                type: object
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - APIKeyHeader: []
+      summary: List Measurements
+      tags:
+      - observations
+    post:
+      description: Record a :class:`Measurement` through the governed pipeline.
+      operationId: record_measurement_api_v1_measurements_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              additionalProperties: true
+              title: Body
+              type: object
+        required: true
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                title: Response Record Measurement Api V1 Measurements Post
+                type: object
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - APIKeyHeader: []
+      summary: Record Measurement
+      tags:
+      - observations
+  /api/v1/observations:
+    get:
+      description: 'Query Observation nodes by subject and/or observer.
+
+
+        Filters apply on the graph store''s property-level WHERE clause —
+
+        matches against the same keys the Pydantic schema declares.'
+      operationId: list_observations_api_v1_observations_get
+      parameters:
+      - in: query
+        name: subject_entity_id
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Subject Entity Id
+      - in: query
+        name: observer_agent_id
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Observer Agent Id
+      - in: query
+        name: limit
+        required: false
+        schema:
+          default: 100
+          maximum: 1000
+          minimum: 1
+          title: Limit
+          type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                title: Response List Observations Api V1 Observations Get
+                type: object
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - APIKeyHeader: []
+      summary: List Observations
+      tags:
+      - observations
+    post:
+      description: 'Record an :class:`Observation` through the governed pipeline.
+
+
+        Body shape: the full Observation Pydantic payload (see
+
+        ``src/trellis/schemas/observation.py``). Missing required fields
+
+        surface as a 422 — the handler raises ``ValidationError`` and the
+
+        executor turns that into a structured rejection.'
+      operationId: record_observation_api_v1_observations_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              additionalProperties: true
+              title: Body
+              type: object
+        required: true
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                title: Response Record Observation Api V1 Observations Post
+                type: object
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - APIKeyHeader: []
+      summary: Record Observation
+      tags:
+      - observations
   /api/v1/packs:
     post:
       description: Assemble a context pack.
