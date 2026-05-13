@@ -44,7 +44,6 @@ class TestObservationRequiredFields:
             "subject_entity_type",
             "observer_agent_id",
             "content",
-            "confidence",
         ],
     )
     def test_missing_required_field_raises(self, missing_field: str) -> None:
@@ -52,6 +51,19 @@ class TestObservationRequiredFields:
         kwargs.pop(missing_field)
         with pytest.raises(ValidationError):
             Observation(**kwargs)  # type: ignore[arg-type]
+
+    def test_confidence_is_optional(self) -> None:
+        # Per ``adr-observation-entity-type.md`` §2.1: an agent may not
+        # always assign a confidence score. Omitting ``confidence`` is
+        # valid and resolves to ``None`` (no fabricated default).
+        kwargs = _valid_kwargs()
+        kwargs.pop("confidence")
+        obs = Observation(**kwargs)  # type: ignore[arg-type]
+        assert obs.confidence is None
+
+    def test_confidence_explicit_none(self) -> None:
+        obs = Observation(**{**_valid_kwargs(), "confidence": None})  # type: ignore[arg-type]
+        assert obs.confidence is None
 
     def test_extra_field_forbidden(self) -> None:
         # TrellisModel inherits ``extra="forbid"``; unknown fields must
@@ -131,3 +143,12 @@ class TestObservationRoundTrip:
         obs = Observation(**_valid_kwargs())  # type: ignore[arg-type]
         assert obs.metadata == {}
         assert obs.evidence_ref is None
+
+    def test_json_round_trip_none_confidence(self) -> None:
+        kwargs = _valid_kwargs()
+        kwargs.pop("confidence")
+        original = Observation(**kwargs)  # type: ignore[arg-type]
+        as_json = original.model_dump_json()
+        restored = Observation.model_validate_json(as_json)
+        assert restored == original
+        assert restored.confidence is None
