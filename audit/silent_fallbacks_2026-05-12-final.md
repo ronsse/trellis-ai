@@ -1,0 +1,1583 @@
+# C2 Phase 7 — final verification (2026-05-13)
+
+> **Purpose.** Closeout snapshot for the C2 silent-fallback cleanup
+> program defined in [`docs/design/plan-cleanup-silent-fallbacks.md`](../docs/design/plan-cleanup-silent-fallbacks.md).
+> All cleanup phases (1.5 / 2 / 3 / 4 / 5 / 6) have merged into `main`.
+> This snapshot is the "after" reading against the
+> [`silent_fallbacks_2026-05-12-baseline.md`](silent_fallbacks_2026-05-12-baseline.md)
+> capture (the literal-only baseline taken before Phases 1.5–6 landed).
+>
+> **Mode note.** This file is generated in the new default *helper-aware*
+> mode (PR [#128](https://github.com/ronsse/trellis-ai/pull/128) — recognises
+> `_raise_*` helper indirection, `NoReturn` annotations, and stack-abort
+> calls like `sys.exit` / `typer.Exit` / `click.Abort`). The legacy
+> *literal-only* numbers are captured separately in
+> [`silent_fallbacks_2026-05-12-final-literal.md`](silent_fallbacks_2026-05-12-final-literal.md)
+> for back-comparison with the original 2026-05-12 baseline (which was
+> generated before #128 landed and therefore is itself literal-only).
+
+## Headline counts
+
+| Reading | Count | vs baseline (literal-only) |
+|---|---:|---:|
+| **Helper-aware (new default)** — total `except` sites | 125 | — |
+| Helper-aware — **DEFECT** | **67** | — |
+| Helper-aware — GRACEFUL-DEGRADATION | 11 | — |
+| Helper-aware — GUARD | 47 | — |
+| Helper-aware — TEST-ONLY | 0 | — |
+| Literal-only — total | 143 | 156 → **143** (−13) |
+| Literal-only — **DEFECT** | **85** | 113 → **85** (−28) |
+| Unjustified DEFECTs (no canonical inline annotation, helper-aware) | **34** | target ≤ 10 — **exceeded** |
+
+**Two readings, two purposes.**
+
+* The **helper-aware DEFECT count (67)** is the new authoritative number.
+  The cleanup landed enough `_raise_*` helper indirection (notably in the
+  MCP protocol layer in PR #119) that the legacy script over-counted by
+  18 sites. Going forward use this column.
+* The **literal-only count (85)** is the apples-to-apples back-compare
+  against the 2026-05-12 baseline (113 literal-only DEFECTs pre-cleanup).
+  Net delta of **−28 DEFECTs in `src/`** from the cleanup PRs.
+
+## Cleanup PR cross-reference
+
+| Phase | What landed | PR |
+|---|---|---|
+| 1.5 | retention malformed-date surfacing | [#116](https://github.com/ronsse/trellis-ai/pull/116) |
+| 2 | StoreRegistry typed import errors | [#118](https://github.com/ronsse/trellis-ai/pull/118) |
+| 3 | MCP structured error protocol (`_raise_*` helpers) | [#119](https://github.com/ronsse/trellis-ai/pull/119) |
+| 4 | GraphMigrator + PackBuilder explicit failures | [#120](https://github.com/ronsse/trellis-ai/pull/120) |
+| 5 | telemetry per-site review | [#122](https://github.com/ronsse/trellis-ai/pull/122) |
+| 6 | CLI exit codes + executor typed catches + SDK HTTP exception hierarchy | [#123](https://github.com/ronsse/trellis-ai/pull/123) |
+| audit | helper-aware mode now the script default | [#128](https://github.com/ronsse/trellis-ai/pull/128) |
+| 7 | this verification | (the PR opened with this report) |
+
+## Unjustified DEFECT survivors (helper-aware mode)
+
+The C2 rubric: a DEFECT is "justified" if the handler carries an inline
+canonical annotation comment matching `# GRACEFUL-DEGRADATION:`, `# GUARD:`,
+or `# AGGREGATE:` (with that exact prefix; informal "fail-soft" / "NOT
+silent" comments are noted but do not count for the rubric).
+
+**Annotated DEFECTs (33 of 67).** Each phase landed inline canonical
+annotations on the sites it consciously preserved as best-effort:
+
+| File | Lines (canonical-annotated) | Count |
+|---|---|---:|
+| `trellis/classify/refresh.py` | 332, 365 | 2 |
+| `trellis/extract/dispatcher.py` | 300, 323, 480 | 3 |
+| `trellis/feedback/recording.py` | 182, 206, 290 | 3 |
+| `trellis/mcp/server.py` | 239, 376, 590, 605, 875, 925, 1093, 1204, 1329, 1458, 1498, 1504, 1688 | 13 |
+| `trellis/retrieve/pack_builder.py` | 720, 758, 898, 930, 971 | 5 |
+| `trellis/stores/registry.py` | 1482, 1538, 1897, 1912 | 4 |
+| `trellis_api/observability.py` | 60, 93, 135 | 3 |
+| **Total annotated** |  | **33** |
+
+**Unjustified DEFECTs (34 of 67).** No canonical inline annotation. These
+are the real residue after the C2 cleanup and **exceed the ≤ 10 target
+the plan set** for Phase 7. Some carry informal inline justifications
+(noted in the "note" column) but do not match the canonical labels the
+rubric asked for. Per the closeout-plan instruction this PR does **not**
+modify any of these — they are surfaced here for a follow-up sweep.
+
+| File | Line | Pattern | Catch | Note |
+|---|---:|---|---|---|
+| `trellis/extract/registry.py` | 100 | other | Exception | broad catch + continue; plugin init loop |
+| `trellis/extract/telemetry.py` | 329 | log-return-empty | Exception | informal "Fail-soft" comment present |
+| `trellis/feedback/recording.py` | 326 | log-return-empty | specific | informal `# DEFECT (Phase 5 fix)` comment |
+| `trellis/ops/recording.py` | 90 | log-only | Exception | broad catch |
+| `trellis/ops/registry.py` | 121 | other | Exception | broad catch |
+| `trellis/plugins/loader.py` | 157 | log-return-empty | Exception | function-level docstring justifies |
+| `trellis/plugins/loader.py` | 176 | log-return-empty | Exception | function-level docstring justifies |
+| `trellis/retrieve/budget_config.py` | 80 | other | Exception | falls back to defaults without logging |
+| `trellis/retrieve/effectiveness.py` | 919 | log-only | Exception | telemetry-emit swallow |
+| `trellis/retrieve/observation_strategy.py` | 193 | other | Exception | `# pragma: no cover` only |
+| `trellis/retrieve/observation_strategy.py` | 323 | other | Exception | `# pragma: no cover` only |
+| `trellis/retrieve/observation_strategy.py` | 333 | other | Exception | `# pragma: no cover` only |
+| `trellis/retrieve/observation_strategy.py` | 356 | return-empty | specific | docstring justifies; no inline label |
+| `trellis/retrieve/observation_strategy.py` | 373 | return-empty | specific | docstring justifies; no inline label |
+| `trellis/retrieve/pack_builder.py` | 264 | other | Exception | informal `# NOT silent:` comment |
+| `trellis/retrieve/pack_builder.py` | 487 | other | Exception | informal `# NOT silent:` comment |
+| `trellis/retrieve/semantic_seeds.py` | 205 | log-return-empty | Exception | informal inline justification |
+| `trellis/retrieve/strategies.py` | 726 | log-only | Exception | broad catch on optional init |
+| `trellis/stores/advisory_store.py` | 185 | log-only | Exception | load-failed swallow |
+| `trellis/stores/pgvector/store.py` | 123 | return-empty | specific | inline non-canonical comment |
+| `trellis/stores/policy_store.py` | 70 | log-only | Exception | load-failed swallow |
+| `trellis_api/routes/admin.py` | 153 | other | Exception | returns `{status: error}` to client |
+| `trellis_api/routes/health.py` | 50 | other | Exception | probe-fail returns "degraded" |
+| `trellis_api/routes/ingest.py` | 113 | other | Exception | per-row error counter |
+| `trellis_api/routes/ingest.py` | 295 | other | Exception | bulk alias loop continues |
+| `trellis_cli/admin.py` | 775 | log-return-empty | specific | function docstring justifies |
+| `trellis_cli/admin.py` | 1378 | log-return-empty | specific | function docstring justifies |
+| `trellis_cli/admin.py` | 1726 | log-return-empty | specific | parse helper, returns 0 |
+| `trellis_cli/claude_integration.py` | 40 | log-return-empty | specific | function docstring justifies |
+| `trellis_sdk/_http.py` | 209 | return-empty | specific | docstring at module level |
+| `trellis_sdk/_http.py` | 237 | return-empty | specific | retry-after parse helper |
+| `trellis_workers/enrichment/service.py` | 164 | other | Exception | broad catch returns failure result |
+| `trellis_workers/learning/miner.py` | 185 | log-return-empty | Exception | LLM call broad catch |
+| `trellis_workers/maintenance/retention.py` | 140 | other | Exception | broad catch + continue (per-trace) |
+| **Total unjustified** |  |  |  | **34** |
+
+> **Recommendation.** Open a Phase 8 follow-up to either (a) attach the
+> canonical inline annotation to the sites where the informal comment
+> already documents the intent (about 12 of the 34) or (b) replace the
+> handler with explicit emit-then-raise (the remaining ~22). The
+> ≤ 10 target the original plan set for Phase 7 remains achievable but
+> requires per-site work beyond the verification scope.
+
+## Per-directory breakdown
+
+| Subpackage | Total | DEFECT | GRACEFUL | GUARD | TEST-ONLY |
+|---|---:|---:|---:|---:|---:|
+| `trellis/` | 90 | 51 | 8 | 31 | 0 |
+| `trellis_cli/` | 17 | 4 | 2 | 11 | 0 |
+| `trellis_api/` | 9 | 7 | 1 | 1 | 0 |
+| `trellis_sdk/` | 3 | 2 | 0 | 1 | 0 |
+| `trellis_workers/` | 6 | 3 | 0 | 3 | 0 |
+
+---
+
+# Audit script output (helper-aware mode)
+
+Generated by `scripts/audit_silent_fallbacks.py`. Re-run to refresh; the script is deterministic so diffs are meaningful.
+
+- **Source root scanned:** `src`
+- **Total candidate `except` sites flagged:** **125**
+
+## Bucket totals
+
+- **DEFECT**: 67 (53.6%)
+- **GRACEFUL-DEGRADATION**: 11 (8.8%)
+- **GUARD**: 47 (37.6%)
+- **TEST-ONLY**: 0 (0.0%)
+
+> The script flags every `except` clause that doesn't `raise` somewhere in its body. Bucket assignment is heuristic (AST shape + catch breadth + function name) and must be confirmed by a human before any code change.
+
+## Per-directory breakdown
+
+| Subpackage | Total | DEFECT | GRACEFUL | GUARD | TEST-ONLY |
+|---|---:|---:|---:|---:|---:|
+| `trellis/` | 90 | 51 | 8 | 31 | 0 |
+| `trellis_cli/` | 17 | 4 | 2 | 11 | 0 |
+| `trellis_api/` | 9 | 7 | 1 | 1 | 0 |
+| `trellis_sdk/` | 3 | 2 | 0 | 1 | 0 |
+| `trellis_workers/` | 6 | 3 | 0 | 3 | 0 |
+
+## DEFECT — known critical
+
+_No known-critical sites detected._ (Expected sites: LLMExtractor parse swallow, worker miner parse swallow, embedder/LLM provider swallow, policy-gate deny-on-error, MutationExecutor event-log swallow. If the audit returns zero here, verify the scanner patterns are still correct.)
+
+## Per-file findings
+
+### `trellis/`
+
+#### `trellis/classify/classifiers/llm.py` (1 sites — GUARD=1)
+
+- **line 56** — bucket=**GUARD**, pattern=`other`, catch=`specific`, fn=`classify`
+
+  ```python
+  except RuntimeError:
+              loop = None
+  ```
+
+  _Reviewer note:_ specific catch with non-trivial body — likely a guard; review on a case-by-case basis.
+
+#### `trellis/classify/refresh.py` (3 sites — DEFECT=2, GRACEFUL-DEGRADATION=1)
+
+- **line 293** — bucket=**GRACEFUL-DEGRADATION**, pattern=`log-only`, catch=`specific`, fn=`_default_context_builder`
+
+  ```python
+  except ValidationError:
+              logger.warning(
+                  "existing_tags_malformed",
+                  item_id=doc.get("doc_id"),
+                  exc_info=True,
+  ```
+
+  _Reviewer note:_ logs and continues — likely best-effort; verify intent.
+
+- **line 332** — bucket=**DEFECT**, pattern=`log-return-empty`, catch=`specific`, fn=`_parse_classified_at`
+
+  ```python
+  except (TypeError, ValueError):
+          logger.warning(
+              "classified_at_parse_failed",
+              raw=raw,
+              exc_info=True,
+  ```
+
+  _Reviewer note:_ logs warning then returns empty — classic silent-fallback shape
+
+- **line 365** — bucket=**DEFECT**, pattern=`log-only`, catch=`Exception`, fn=`_emit_tags_refreshed`
+
+  ```python
+  except Exception:
+          logger.exception(
+              "tags_refreshed_emit_failed",
+              item_id=item_id,
+          )
+  ```
+
+  _Reviewer note:_ broad catch (Exception)
+
+#### `trellis/core/base.py` (1 sites — GUARD=1)
+
+- **line 25** — bucket=**GUARD**, pattern=`other`, catch=`specific`, fn=`get_version`
+
+  ```python
+  except ImportError:
+          return "0.0.0-dev"
+  ```
+
+  _Reviewer note:_ specific catch with non-trivial body — likely a guard; review on a case-by-case basis.
+
+#### `trellis/extract/dispatcher.py` (4 sites — DEFECT=3, GUARD=1)
+
+- **line 127** — bucket=**GUARD**, pattern=`other`, catch=`specific`, fn=`dispatch`
+
+  ```python
+  except ExtractionFailureError as exc:
+              return self._degrade_for_failure(
+                  exc,
+                  extractor=extractor,
+                  source_hint=source_hint,
+  ```
+
+  _Reviewer note:_ specific catch with non-trivial body — likely a guard; review on a case-by-case basis.
+
+- **line 300** — bucket=**DEFECT**, pattern=`log-only`, catch=`Exception`, fn=`_emit_fallback`
+
+  ```python
+  except Exception:
+              logger.exception(
+                  "extractor_fallback_emit_failed",
+                  source_hint=source_hint,
+                  reason=reason,
+  ```
+
+  _Reviewer note:_ broad catch (Exception)
+
+- **line 323** — bucket=**DEFECT**, pattern=`other`, catch=`Exception`, fn=`_collect_findings`
+
+  ```python
+  except Exception:
+                  logger.exception(
+                      "validator_raised",
+                      validator=getattr(validator, "name", validator.__class__.__name__),
+                      source_hint=source_hint,
+  ```
+
+  _Reviewer note:_ broad catch (Exception)
+
+- **line 480** — bucket=**DEFECT**, pattern=`log-only`, catch=`Exception`, fn=`_emit_extraction_rejected`
+
+  ```python
+  except Exception:
+              logger.exception(
+                  "extraction_rejected_emit_failed",
+                  source_hint=source_hint,
+                  extractor_used=extractor_used,
+  ```
+
+  _Reviewer note:_ broad catch (Exception)
+
+#### `trellis/extract/llm.py` (2 sites — GUARD=2)
+
+- **line 316** — bucket=**GUARD**, pattern=`other`, catch=`specific`, fn=`_try_json_loads_with_exc`
+
+  ```python
+  except json.JSONDecodeError as exc:
+          return None, exc
+  ```
+
+  _Reviewer note:_ specific catch with non-trivial body — likely a guard; review on a case-by-case basis.
+
+- **line 444** — bucket=**GUARD**, pattern=`other`, catch=`specific`, fn=`_clamp_confidence`
+
+  ```python
+  except (TypeError, ValueError):
+          return default
+  ```
+
+  _Reviewer note:_ specific catch with non-trivial body — likely a guard; review on a case-by-case basis.
+
+#### `trellis/extract/registry.py` (1 sites — DEFECT=1)
+
+- **line 100** — bucket=**DEFECT**, pattern=`other`, catch=`Exception`, fn=`load_entry_points`
+
+  ```python
+  except Exception:
+                  logger.exception("extractor_plugin_init_failed", name=spec.name)
+                  continue
+  ```
+
+  _Reviewer note:_ broad catch (Exception)
+
+#### `trellis/extract/telemetry.py` (1 sites — DEFECT=1)
+
+- **line 329** — bucket=**DEFECT**, pattern=`log-return-empty`, catch=`Exception`, fn=`emit_extraction_failure`
+
+  ```python
+  except Exception:
+          logger.exception(
+              "extraction_failure_emit_failed",
+              extractor_id=extractor_id,
+              failure_kind=failure_kind,
+  ```
+
+  _Reviewer note:_ broad catch (Exception); logs warning then returns empty — classic silent-fallback shape
+
+#### `trellis/feedback/recording.py` (4 sites — DEFECT=4)
+
+- **line 182** — bucket=**DEFECT**, pattern=`other`, catch=`Exception`, fn=`record_feedback`
+
+  ```python
+  except Exception as exc:
+              event_log_error = exc
+              logger.exception(
+                  "feedback_event_emit_failed",
+                  run_id=feedback.run_id,
+  ```
+
+  _Reviewer note:_ broad catch (Exception)
+
+- **line 206** — bucket=**DEFECT**, pattern=`other`, catch=`Exception`, fn=`record_feedback`
+
+  ```python
+  except Exception as exc:
+              outcome_error = exc
+              logger.exception(
+                  "feedback_outcome_emit_failed",
+                  run_id=feedback.run_id,
+  ```
+
+  _Reviewer note:_ broad catch (Exception)
+
+- **line 290** — bucket=**DEFECT**, pattern=`other`, catch=`Exception`, fn=`reconcile_feedback_log_to_event_log`
+
+  ```python
+  except Exception:
+              result.failed += 1
+              result.missing_feedback_ids.append(fb.feedback_id)
+              logger.exception(
+                  "feedback_reconcile_emit_failed",
+  ```
+
+  _Reviewer note:_ broad catch (Exception)
+
+- **line 326** — bucket=**DEFECT**, pattern=`log-return-empty`, catch=`specific`, fn=`_parse_timestamp`
+
+  ```python
+  except (TypeError, ValueError):
+          logger.warning(
+              "feedback_timestamp_parse_failed",
+              raw=raw,
+              exc_info=True,
+  ```
+
+  _Reviewer note:_ logs warning then returns empty — classic silent-fallback shape
+
+#### `trellis/learning/schema_evolution.py` (1 sites — GUARD=1)
+
+- **line 543** — bucket=**GUARD**, pattern=`other`, catch=`specific`, fn=`_first_last_seen`
+
+  ```python
+  except ValueError:
+                      continue
+  ```
+
+  _Reviewer note:_ specific catch with non-trivial body — likely a guard; review on a case-by-case basis.
+
+#### `trellis/learning/tuners/promotion.py` (1 sites — GUARD=1)
+
+- **line 128** — bucket=**GUARD**, pattern=`other`, catch=`specific`, fn=`_compute_effect_size`
+
+  ```python
+  except (TypeError, ValueError):
+              continue
+  ```
+
+  _Reviewer note:_ specific catch with non-trivial body — likely a guard; review on a case-by-case basis.
+
+#### `trellis/learning/tuners/rule_tuner.py` (1 sites — GRACEFUL-DEGRADATION=1)
+
+- **line 447** — bucket=**GRACEFUL-DEGRADATION**, pattern=`log-only`, catch=`specific`, fn=`run`
+
+  ```python
+  except ValueError:
+                      logger.warning(
+                          "rule_tuner.cursor_parse_failed",
+                          tuner=self._tuner_name,
+                          cursor=raw_cursor,
+  ```
+
+  _Reviewer note:_ logs and continues — likely best-effort; verify intent.
+
+#### `trellis/mcp/server.py` (16 sites — DEFECT=13, GRACEFUL-DEGRADATION=3)
+
+- **line 239** — bucket=**DEFECT**, pattern=`other`, catch=`Exception`, fn=`_build_llm_client`
+
+  ```python
+  except Exception:
+          logger.exception("llm_client_registry_failed")
+          client = None
+  ```
+
+  _Reviewer note:_ broad catch (Exception)
+
+- **line 273** — bucket=**GRACEFUL-DEGRADATION**, pattern=`log-only`, catch=`specific`, fn=`_build_llm_client_from_env`
+
+  ```python
+  except ModuleNotFoundError:
+              logger.debug("llm_client_openai_not_installed")
+  ```
+
+  _Reviewer note:_ logs and continues — likely best-effort; verify intent.
+
+- **line 292** — bucket=**GRACEFUL-DEGRADATION**, pattern=`log-only`, catch=`specific`, fn=`_build_llm_client_from_env`
+
+  ```python
+  except ModuleNotFoundError:
+              logger.debug("llm_client_anthropic_not_installed")
+  ```
+
+  _Reviewer note:_ logs and continues — likely best-effort; verify intent.
+
+- **line 376** — bucket=**DEFECT**, pattern=`log-only`, catch=`Exception`, fn=`_run_memory_extraction`
+
+  ```python
+  except Exception:
+          logger.exception(
+              "memory_extraction_failed",
+              doc_id=doc_id,
+          )
+  ```
+
+  _Reviewer note:_ broad catch (Exception)
+
+- **line 590** — bucket=**DEFECT**, pattern=`log-only`, catch=`Exception`, fn=`get_context`
+
+  ```python
+  except Exception:
+              logger.exception("get_context_pack_emit_failed")
+  ```
+
+  _Reviewer note:_ broad catch (Exception)
+
+- **line 605** — bucket=**DEFECT**, pattern=`log-only`, catch=`Exception`, fn=`get_context`
+
+  ```python
+  except Exception:
+          logger.exception("token_tracking_failed", operation="get_context")
+  ```
+
+  _Reviewer note:_ broad catch (Exception)
+
+- **line 875** — bucket=**DEFECT**, pattern=`log-only`, catch=`Exception`, fn=`get_lessons`
+
+  ```python
+  except Exception:
+          logger.exception("token_tracking_failed", operation="get_lessons")
+  ```
+
+  _Reviewer note:_ broad catch (Exception)
+
+- **line 925** — bucket=**DEFECT**, pattern=`log-only`, catch=`Exception`, fn=`get_graph`
+
+  ```python
+  except Exception:
+          logger.exception("token_tracking_failed", operation="get_graph")
+  ```
+
+  _Reviewer note:_ broad catch (Exception)
+
+- **line 1093** — bucket=**DEFECT**, pattern=`log-only`, catch=`Exception`, fn=`search`
+
+  ```python
+  except Exception:
+          logger.exception("token_tracking_failed", operation="search")
+  ```
+
+  _Reviewer note:_ broad catch (Exception)
+
+- **line 1204** — bucket=**DEFECT**, pattern=`log-only`, catch=`Exception`, fn=`get_objective_context`
+
+  ```python
+  except Exception:
+              logger.exception(
+                  "token_tracking_failed", operation="get_objective_context"
+              )
+  ```
+
+  _Reviewer note:_ broad catch (Exception)
+
+- **line 1329** — bucket=**DEFECT**, pattern=`log-only`, catch=`Exception`, fn=`get_task_context`
+
+  ```python
+  except Exception:
+              logger.exception("token_tracking_failed", operation="get_task_context")
+  ```
+
+  _Reviewer note:_ broad catch (Exception)
+
+- **line 1458** — bucket=**DEFECT**, pattern=`log-only`, catch=`Exception`, fn=`get_sectioned_context`
+
+  ```python
+  except Exception:
+              logger.exception(
+                  "token_tracking_failed", operation="get_sectioned_context"
+              )
+  ```
+
+  _Reviewer note:_ broad catch (Exception)
+
+- **line 1498** — bucket=**DEFECT**, pattern=`pass`, catch=`specific`, fn=`_resolve_operation`
+
+  ```python
+  except ValueError:
+          pass
+  ```
+
+  _Reviewer note:_ silent pass — caller has no signal.
+
+- **line 1504** — bucket=**DEFECT**, pattern=`return-empty`, catch=`specific`, fn=`_resolve_operation`
+
+  ```python
+  except KeyError:
+          return None
+  ```
+
+  _Reviewer note:_ returns empty without logging — caller has no signal
+
+- **line 1658** — bucket=**GRACEFUL-DEGRADATION**, pattern=`log-only`, catch=`specific`, fn=`_install_shutdown_signal_handlers`
+
+  ```python
+  except (AttributeError, ValueError, OSError):
+              logger.debug("mcp_server_signal_unsupported", signal=sig_name)
+  ```
+
+  _Reviewer note:_ logs and continues — likely best-effort; verify intent.
+
+- **line 1688** — bucket=**DEFECT**, pattern=`log-only`, catch=`Exception`, fn=`main`
+
+  ```python
+  except Exception:
+                  logger.exception("mcp_server_registry_close_failed")
+  ```
+
+  _Reviewer note:_ broad catch (Exception)
+
+#### `trellis/mutate/executor.py` (5 sites — GUARD=5)
+
+- **line 203** — bucket=**GUARD**, pattern=`other`, catch=`specific`, fn=`execute`
+
+  ```python
+  except ValidationError as exc:
+              log.warning("handler_rejected", errors=exc.errors)
+              reason = exc.code if exc.code != "VALIDATION_ERROR" else "handler_validate"
+              self._emit_rejection(command, reason=reason, message=str(exc))
+              return CommandResult(
+  ```
+
+  _Reviewer note:_ specific catch with non-trivial body — likely a guard; review on a case-by-case basis.
+
+- **line 218** — bucket=**GUARD**, pattern=`other`, catch=`specific`, fn=`execute`
+
+  ```python
+  except PolicyViolationError as exc:
+              log.warning("handler_policy_rejected", policy_id=exc.policy_id)
+              self._emit_rejection(
+                  command,
+                  reason="policy_violation",
+  ```
+
+  _Reviewer note:_ specific catch with non-trivial body — likely a guard; review on a case-by-case basis.
+
+- **line 237** — bucket=**GUARD**, pattern=`other`, catch=`specific`, fn=`execute`
+
+  ```python
+  except IdempotencyError as exc:
+              log.info("handler_idempotency_replay", key=exc.idempotency_key)
+              self._emit_rejection(
+                  command,
+                  reason="idempotency_replay",
+  ```
+
+  _Reviewer note:_ specific catch with non-trivial body — likely a guard; review on a case-by-case basis.
+
+- **line 254** — bucket=**GUARD**, pattern=`other`, catch=`specific`, fn=`execute`
+
+  ```python
+  except (StoreError, TrellisError) as exc:
+              store_name = getattr(exc, "store", None)
+              log.exception(
+                  "handler_typed_error",
+                  error_type=type(exc).__name__,
+  ```
+
+  _Reviewer note:_ specific catch with non-trivial body — likely a guard; review on a case-by-case basis.
+
+- **line 278** — bucket=**GUARD**, pattern=`other`, catch=`specific`, fn=`execute`
+
+  ```python
+  except _UNEXPECTED_HANDLER_FAILURE as exc:
+              log.exception("handler_failed_unexpected", error_type=type(exc).__name__)
+              self._emit(command, CommandStatus.FAILED, str(exc))
+              return CommandResult(
+                  command_id=command.command_id,
+  ```
+
+  _Reviewer note:_ specific catch with non-trivial body — likely a guard; review on a case-by-case basis.
+
+#### `trellis/ops/recording.py` (1 sites — DEFECT=1)
+
+- **line 90** — bucket=**DEFECT**, pattern=`log-only`, catch=`Exception`, fn=`record_outcome`
+
+  ```python
+  except Exception:
+          logger.exception(
+              "record_outcome.append_failed",
+              component_id=component_id,
+              event_id=event.event_id,
+  ```
+
+  _Reviewer note:_ broad catch (Exception)
+
+#### `trellis/ops/registry.py` (1 sites — DEFECT=1)
+
+- **line 121** — bucket=**DEFECT**, pattern=`other`, catch=`Exception`, fn=`_resolve`
+
+  ```python
+  except Exception:
+              logger.warning(
+                  "parameter_registry.resolve_failed",
+                  scope=key,
+                  exc_info=True,
+  ```
+
+  _Reviewer note:_ broad catch (Exception)
+
+#### `trellis/plugins/loader.py` (2 sites — DEFECT=2)
+
+- **line 157** — bucket=**DEFECT**, pattern=`log-return-empty`, catch=`Exception`, fn=`discover`
+
+  ```python
+  except Exception:
+          logger.exception("plugin_entry_points_lookup_failed", group=group)
+          return []
+  ```
+
+  _Reviewer note:_ broad catch (Exception); logs warning then returns empty — classic silent-fallback shape
+
+- **line 176** — bucket=**DEFECT**, pattern=`log-return-empty`, catch=`Exception`, fn=`load_class`
+
+  ```python
+  except Exception:
+          logger.exception(
+              "plugin_module_import_failed",
+              group=spec.group,
+              name=spec.name,
+  ```
+
+  _Reviewer note:_ broad catch (Exception); logs warning then returns empty — classic silent-fallback shape
+
+#### `trellis/retrieve/budget_config.py` (1 sites — DEFECT=1)
+
+- **line 80** — bucket=**DEFECT**, pattern=`other`, catch=`Exception`, fn=`from_dict`
+
+  ```python
+  except Exception:
+              return cls()
+  ```
+
+  _Reviewer note:_ broad catch (Exception)
+
+#### `trellis/retrieve/effectiveness.py` (1 sites — DEFECT=1)
+
+- **line 919** — bucket=**DEFECT**, pattern=`log-only`, catch=`Exception`, fn=`_emit_fitness_event`
+
+  ```python
+  except Exception:
+          logger.exception(
+              "advisory_fitness_event_emit_failed",
+              event_type=event_type.value,
+              advisory_id=advisory_id,
+  ```
+
+  _Reviewer note:_ broad catch (Exception)
+
+#### `trellis/retrieve/observation_strategy.py` (5 sites — DEFECT=5)
+
+- **line 193** — bucket=**DEFECT**, pattern=`other`, catch=`Exception`, fn=`search`
+
+  ```python
+  except Exception:  # pragma: no cover — backend errors are logged
+                  logger.exception(
+                      "observation_search_edge_lookup_failed", subject_id=subject_id,
+                  )
+                  continue
+  ```
+
+  _Reviewer note:_ broad catch (Exception)
+
+- **line 323** — bucket=**DEFECT**, pattern=`other`, catch=`Exception`, fn=`_load_nodes`
+
+  ```python
+  except Exception:  # pragma: no cover
+                  logger.exception("observation_search_bulk_get_failed")
+                  bulk_rows = None
+  ```
+
+  _Reviewer note:_ broad catch (Exception)
+
+- **line 333** — bucket=**DEFECT**, pattern=`other`, catch=`Exception`, fn=`_load_nodes`
+
+  ```python
+  except Exception:  # pragma: no cover
+                  logger.exception(
+                      "observation_search_get_node_failed", node_id=node_id,
+                  )
+                  continue
+  ```
+
+  _Reviewer note:_ broad catch (Exception)
+
+- **line 356** — bucket=**DEFECT**, pattern=`return-empty`, catch=`specific`, fn=`_parse_datetime`
+
+  ```python
+  except ValueError:
+              return None
+  ```
+
+  _Reviewer note:_ returns empty without logging — caller has no signal
+
+- **line 373** — bucket=**DEFECT**, pattern=`return-empty`, catch=`specific`, fn=`_coerce_confidence`
+
+  ```python
+  except (TypeError, ValueError):
+          return None
+  ```
+
+  _Reviewer note:_ returns empty without logging — caller has no signal
+
+#### `trellis/retrieve/pack_builder.py` (7 sites — DEFECT=7)
+
+- **line 264** — bucket=**DEFECT**, pattern=`other`, catch=`Exception`, fn=`build`
+
+  ```python
+  except Exception as exc:
+                  logger.exception("strategy_failed", strategy=strategy.name)
+                  strategy_failures.append(
+                      StrategyFailure(
+                          strategy=strategy.name,
+  ```
+
+  _Reviewer note:_ broad catch (Exception)
+
+- **line 487** — bucket=**DEFECT**, pattern=`other`, catch=`Exception`, fn=`build_sectioned`
+
+  ```python
+  except Exception as exc:
+                  logger.exception("strategy_failed", strategy=strategy.name)
+                  strategy_failures.append(
+                      StrategyFailure(
+                          strategy=strategy.name,
+  ```
+
+  _Reviewer note:_ broad catch (Exception)
+
+- **line 720** — bucket=**DEFECT**, pattern=`log-return-empty`, catch=`Exception`, fn=`_attach_quality_report`
+
+  ```python
+  except Exception:
+              logger.exception("pack_evaluator_failed", pack_id=pack.pack_id)
+              return
+  ```
+
+  _Reviewer note:_ broad catch (Exception); logs warning then returns empty — classic silent-fallback shape
+
+- **line 758** — bucket=**DEFECT**, pattern=`log-only`, catch=`Exception`, fn=`_attach_quality_report`
+
+  ```python
+  except Exception:
+                  logger.exception("pack_quality_event_emit_failed", pack_id=pack.pack_id)
+  ```
+
+  _Reviewer note:_ broad catch (Exception)
+
+- **line 898** — bucket=**DEFECT**, pattern=`log-only`, catch=`Exception`, fn=`_build_token_budget_payload`
+
+  ```python
+  except Exception:
+                  logger.exception("token_budget_validator_failed")
+  ```
+
+  _Reviewer note:_ broad catch (Exception)
+
+- **line 930** — bucket=**DEFECT**, pattern=`other`, catch=`Exception`, fn=`_recently_served_item_ids`
+
+  ```python
+  except Exception:
+              logger.exception("session_dedup_event_query_failed")
+              return set()
+  ```
+
+  _Reviewer note:_ broad catch (Exception)
+
+- **line 971** — bucket=**DEFECT**, pattern=`log-return-empty`, catch=`Exception`, fn=`_get_matching_advisories`
+
+  ```python
+  except Exception:
+              logger.exception("advisory_retrieval_failed")
+              return []
+  ```
+
+  _Reviewer note:_ broad catch (Exception); logs warning then returns empty — classic silent-fallback shape
+
+#### `trellis/retrieve/semantic_seeds.py` (1 sites — DEFECT=1)
+
+- **line 205** — bucket=**DEFECT**, pattern=`log-return-empty`, catch=`Exception`, fn=`extract`
+
+  ```python
+  except Exception:
+              logger.exception(
+                  "semantic_seed_extractor_query_failed",
+                  top_k=self._top_k,
+                  intent_preview=intent[:80],
+  ```
+
+  _Reviewer note:_ broad catch (Exception); logs warning then returns empty — classic silent-fallback shape
+
+#### `trellis/retrieve/strategies.py` (3 sites — DEFECT=1, GUARD=2)
+
+- **line 251** — bucket=**GUARD**, pattern=`other`, catch=`specific`, fn=`_decay_importance_if_stale`
+
+  ```python
+  except (ValueError, TypeError):
+              return importance
+  ```
+
+  _Reviewer note:_ specific catch with non-trivial body — likely a guard; review on a case-by-case basis.
+
+- **line 290** — bucket=**GUARD**, pattern=`other`, catch=`specific`, fn=`_apply_recency_decay`
+
+  ```python
+  except (ValueError, TypeError):
+          return base_score
+  ```
+
+  _Reviewer note:_ specific catch with non-trivial body — likely a guard; review on a case-by-case basis.
+
+- **line 726** — bucket=**DEFECT**, pattern=`log-only`, catch=`Exception`, fn=`build_strategies`
+
+  ```python
+  except Exception:
+              logger.warning("semantic_search_init_failed", exc_info=True)
+  ```
+
+  _Reviewer note:_ broad catch (Exception)
+
+#### `trellis/stores/advisory_store.py` (1 sites — DEFECT=1)
+
+- **line 185** — bucket=**DEFECT**, pattern=`log-only`, catch=`Exception`, fn=`_load`
+
+  ```python
+  except Exception:
+              logger.exception("advisory_load_failed", path=str(self._path))
+  ```
+
+  _Reviewer note:_ broad catch (Exception)
+
+#### `trellis/stores/arcadedb/base.py` (1 sites — GUARD=1)
+
+- **line 139** — bucket=**GUARD**, pattern=`other`, catch=`specific`, fn=`_http_request`
+
+  ```python
+  except urllib.error.HTTPError as exc:
+          body_text = exc.read().decode() if exc.fp else ""
+          return exc.code, body_text
+  ```
+
+  _Reviewer note:_ specific catch with non-trivial body — likely a guard; review on a case-by-case basis.
+
+#### `trellis/stores/base/graph.py` (1 sites — GUARD=1)
+
+- **line 39** — bucket=**GUARD**, pattern=`other`, catch=`specific`, fn=`_resolve_max_subgraph_depth`
+
+  ```python
+  except ValueError:
+          _logger.warning(
+              "trellis_graph_max_subgraph_depth_invalid",
+              raw=raw,
+              fallback=6,
+  ```
+
+  _Reviewer note:_ specific catch with non-trivial body — likely a guard; review on a case-by-case basis.
+
+#### `trellis/stores/bolt_opencypher/base.py` (1 sites — GUARD=1)
+
+- **line 37** — bucket=**GUARD**, pattern=`other`, catch=`specific`, fn=`<module>`
+
+  ```python
+  except ImportError:
+      HAS_NEO4J = False
+  ```
+
+  _Reviewer note:_ specific catch with non-trivial body — likely a guard; review on a case-by-case basis.
+
+#### `trellis/stores/local/blob.py` (3 sites — GUARD=3)
+
+- **line 109** — bucket=**GUARD**, pattern=`other`, catch=`specific`, fn=`sweep_expired`
+
+  ```python
+  except (OSError, json.JSONDecodeError):
+                  errors += 1
+                  logger.exception("blob_meta_read_failed", key=key)
+                  continue
+  ```
+
+  _Reviewer note:_ specific catch with non-trivial body — likely a guard; review on a case-by-case basis.
+
+- **line 119** — bucket=**GUARD**, pattern=`other`, catch=`specific`, fn=`sweep_expired`
+
+  ```python
+  except (TypeError, ValueError):
+                  errors += 1
+                  logger.warning("blob_expires_at_parse_failed", key=key, value=raw)
+                  continue
+  ```
+
+  _Reviewer note:_ specific catch with non-trivial body — likely a guard; review on a case-by-case basis.
+
+- **line 130** — bucket=**GUARD**, pattern=`other`, catch=`specific`, fn=`sweep_expired`
+
+  ```python
+  except OSError:
+                      errors += 1
+                      swept -= 1  # decrement — the delete failed
+                      logger.exception("blob_delete_failed", key=key)
+  ```
+
+  _Reviewer note:_ specific catch with non-trivial body — likely a guard; review on a case-by-case basis.
+
+#### `trellis/stores/neo4j/base.py` (1 sites — GUARD=1)
+
+- **line 56** — bucket=**GUARD**, pattern=`other`, catch=`specific`, fn=`<module>`
+
+  ```python
+  except ImportError:
+      _HAS_NEO4J_LOCAL = False
+  ```
+
+  _Reviewer note:_ specific catch with non-trivial body — likely a guard; review on a case-by-case basis.
+
+#### `trellis/stores/pgvector/store.py` (3 sites — DEFECT=1, GUARD=2)
+
+- **line 19** — bucket=**GUARD**, pattern=`other`, catch=`specific`, fn=`<module>`
+
+  ```python
+  except ImportError:
+      HAS_PSYCOPG = False
+  ```
+
+  _Reviewer note:_ specific catch with non-trivial body — likely a guard; review on a case-by-case basis.
+
+- **line 26** — bucket=**GUARD**, pattern=`other`, catch=`specific`, fn=`<module>`
+
+  ```python
+  except ImportError:
+      HAS_PGVECTOR = False
+  ```
+
+  _Reviewer note:_ specific catch with non-trivial body — likely a guard; review on a case-by-case basis.
+
+- **line 123** — bucket=**DEFECT**, pattern=`return-empty`, catch=`specific`, fn=`_init_schema`
+
+  ```python
+  except (IndexError, ValueError):
+              return
+  ```
+
+  _Reviewer note:_ returns empty without logging — caller has no signal
+
+#### `trellis/stores/policy_store.py` (1 sites — DEFECT=1)
+
+- **line 70** — bucket=**DEFECT**, pattern=`log-only`, catch=`Exception`, fn=`_load`
+
+  ```python
+  except Exception:
+              logger.exception("policy_load_failed", path=str(self._path))
+  ```
+
+  _Reviewer note:_ broad catch (Exception)
+
+#### `trellis/stores/postgres/base.py` (1 sites — GUARD=1)
+
+- **line 30** — bucket=**GUARD**, pattern=`other`, catch=`specific`, fn=`_env_int`
+
+  ```python
+  except ValueError:
+          return default
+  ```
+
+  _Reviewer note:_ specific catch with non-trivial body — likely a guard; review on a case-by-case basis.
+
+#### `trellis/stores/registry.py` (9 sites — DEFECT=4, GRACEFUL-DEGRADATION=3, GUARD=2)
+
+- **line 283** — bucket=**GUARD**, pattern=`other`, catch=`specific`, fn=`_get_merged_backends`
+
+  ```python
+  except ImportError:
+          logger.debug("plugin_loader_unavailable", store_type=store_type)
+          _MERGED_BACKENDS_CACHE[store_type] = dict(builtins)
+          return _MERGED_BACKENDS_CACHE[store_type]
+  ```
+
+  _Reviewer note:_ specific catch with non-trivial body — likely a guard; review on a case-by-case basis.
+
+- **line 334** — bucket=**GRACEFUL-DEGRADATION**, pattern=`return-empty`, catch=`Exception`, fn=`_try_llm_plugin`
+
+  ```python
+  except Exception:
+          return None
+  ```
+
+  _Reviewer note:_ broad catch (Exception)
+
+- **line 349** — bucket=**GRACEFUL-DEGRADATION**, pattern=`log-return-empty`, catch=`Exception`, fn=`_try_llm_plugin`
+
+  ```python
+  except Exception:
+              logger.exception(
+                  failure_event,
+                  provider=provider,
+                  plugin=spec.value,
+  ```
+
+  _Reviewer note:_ broad catch (Exception)
+
+- **line 1246** — bucket=**GUARD**, pattern=`other`, catch=`specific`, fn=`_compute_fingerprints`
+
+  ```python
+  except BackendNotInstalledError:
+                  cls = None
+  ```
+
+  _Reviewer note:_ specific catch with non-trivial body — likely a guard; review on a case-by-case basis.
+
+- **line 1319** — bucket=**GRACEFUL-DEGRADATION**, pattern=`log-only`, catch=`specific`, fn=`_write_fingerprint_meta`
+
+  ```python
+  except OSError:
+              logger.warning("fingerprint_meta_write_failed", path=str(path))
+  ```
+
+  _Reviewer note:_ logs and continues — likely best-effort; verify intent.
+
+- **line 1482** — bucket=**DEFECT**, pattern=`other`, catch=`Exception`, fn=`validate`
+
+  ```python
+  except Exception as exc:
+                  errors.append((store_type, exc))
+                  logger.warning(
+                      "store_registry_validation_failed",
+                      store_type=store_type,
+  ```
+
+  _Reviewer note:_ broad catch (Exception)
+
+- **line 1538** — bucket=**DEFECT**, pattern=`other`, catch=`Exception`, fn=`_check_bolt_connectivity`
+
+  ```python
+  except Exception as exc:
+                  failures.append((label, exc))
+                  logger.warning(
+                      "bolt_connectivity_check_failed",
+                      uri=uri,
+  ```
+
+  _Reviewer note:_ broad catch (Exception)
+
+- **line 1897** — bucket=**DEFECT**, pattern=`log-only`, catch=`Exception`, fn=`close`
+
+  ```python
+  except Exception:
+                  logger.warning(
+                      "store_close_failed",
+                      store=type(store).__name__,
+                      exc_info=True,
+  ```
+
+  _Reviewer note:_ broad catch (Exception)
+
+- **line 1912** — bucket=**DEFECT**, pattern=`log-only`, catch=`Exception`, fn=`close`
+
+  ```python
+  except Exception:
+                  logger.warning(
+                      "bolt_driver_close_failed",
+                      uri=key[0],
+                      user=key[1],
+  ```
+
+  _Reviewer note:_ broad catch (Exception)
+
+#### `trellis/stores/s3/blob.py` (4 sites — GUARD=4)
+
+- **line 23** — bucket=**GUARD**, pattern=`other`, catch=`specific`, fn=`<module>`
+
+  ```python
+  except ImportError:
+      HAS_BOTO3 = False
+  ```
+
+  _Reviewer note:_ specific catch with non-trivial body — likely a guard; review on a case-by-case basis.
+
+- **line 183** — bucket=**GUARD**, pattern=`other`, catch=`specific`, fn=`sweep_expired`
+
+  ```python
+  except ClientError:
+                  errors += 1
+                  logger.exception("blob_head_failed", key=key)
+                  continue
+  ```
+
+  _Reviewer note:_ specific catch with non-trivial body — likely a guard; review on a case-by-case basis.
+
+- **line 193** — bucket=**GUARD**, pattern=`other`, catch=`specific`, fn=`sweep_expired`
+
+  ```python
+  except (TypeError, ValueError):
+                  errors += 1
+                  logger.warning("blob_expires_at_parse_failed", key=key, value=raw)
+                  continue
+  ```
+
+  _Reviewer note:_ specific catch with non-trivial body — likely a guard; review on a case-by-case basis.
+
+- **line 207** — bucket=**GUARD**, pattern=`other`, catch=`specific`, fn=`sweep_expired`
+
+  ```python
+  except ClientError:
+                      errors += 1
+                      swept -= 1
+                      logger.exception("blob_delete_failed", key=key)
+  ```
+
+  _Reviewer note:_ specific catch with non-trivial body — likely a guard; review on a case-by-case basis.
+
+#### `trellis/stores/sqlite/vector.py` (1 sites — GUARD=1)
+
+- **line 15** — bucket=**GUARD**, pattern=`other`, catch=`specific`, fn=`<module>`
+
+  ```python
+  except ImportError:
+      HAS_NUMPY = False
+  ```
+
+  _Reviewer note:_ specific catch with non-trivial body — likely a guard; review on a case-by-case basis.
+
+### `trellis_api/`
+
+#### `trellis_api/observability.py` (4 sites — DEFECT=3, GRACEFUL-DEGRADATION=1)
+
+- **line 60** — bucket=**DEFECT**, pattern=`log-return-empty`, catch=`specific`, fn=`_install_otel`
+
+  ```python
+  except ImportError:
+          logger.info(
+              "otel_skipped_not_installed",
+              hint="install with `pip install trellis-ai[observability]`",
+          )
+  ```
+
+  _Reviewer note:_ logs warning then returns empty — classic silent-fallback shape
+
+- **line 78** — bucket=**GRACEFUL-DEGRADATION**, pattern=`log-only`, catch=`specific`, fn=`_install_otel`
+
+  ```python
+  except ImportError:
+          logger.info("otel_psycopg_not_installed")
+  ```
+
+  _Reviewer note:_ logs and continues — likely best-effort; verify intent.
+
+- **line 93** — bucket=**DEFECT**, pattern=`log-return-empty`, catch=`specific`, fn=`_install_prometheus`
+
+  ```python
+  except ImportError:
+          logger.info(
+              "prometheus_skipped_not_installed",
+              hint="install with `pip install trellis-ai[observability]`",
+          )
+  ```
+
+  _Reviewer note:_ logs warning then returns empty — classic silent-fallback shape
+
+- **line 135** — bucket=**DEFECT**, pattern=`log-only`, catch=`Exception`, fn=`install_observability`
+
+  ```python
+  except Exception:
+              logger.exception("otel_fastapi_instrument_failed")
+  ```
+
+  _Reviewer note:_ broad catch (Exception)
+
+#### `trellis_api/routes/admin.py` (1 sites — DEFECT=1)
+
+- **line 153** — bucket=**DEFECT**, pattern=`other`, catch=`Exception`, fn=`reset_vectors`
+
+  ```python
+  except Exception as exc:
+          return {"status": "error", "message": str(exc)}
+  ```
+
+  _Reviewer note:_ broad catch (Exception)
+
+#### `trellis_api/routes/health.py` (2 sites — DEFECT=1, GUARD=1)
+
+- **line 50** — bucket=**DEFECT**, pattern=`other`, catch=`Exception`, fn=`_probe`
+
+  ```python
+  except Exception as exc:
+          latency_ms = (time.monotonic_ns() - start_ns) / 1_000_000
+          logger.warning(
+              "readyz_probe_failed",
+              backend=name,
+  ```
+
+  _Reviewer note:_ broad catch (Exception)
+
+- **line 84** — bucket=**GUARD**, pattern=`other`, catch=`specific`, fn=`readyz`
+
+  ```python
+  except RuntimeError:
+          response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+          return {"status": "initializing"}
+  ```
+
+  _Reviewer note:_ specific catch with non-trivial body — likely a guard; review on a case-by-case basis.
+
+#### `trellis_api/routes/ingest.py` (2 sites — DEFECT=2)
+
+- **line 113** — bucket=**DEFECT**, pattern=`other`, catch=`Exception`, fn=`upsert_vectors`
+
+  ```python
+  except Exception:
+              errors += 1
+  ```
+
+  _Reviewer note:_ broad catch (Exception)
+
+- **line 295** — bucket=**DEFECT**, pattern=`other`, catch=`Exception`, fn=`ingest_bulk`
+
+  ```python
+  except Exception as exc:
+              logger.warning(
+                  "bulk_alias_failed",
+                  entity_id=alias.entity_id,
+                  source_system=alias.source_system,
+  ```
+
+  _Reviewer note:_ broad catch (Exception)
+
+### `trellis_cli/`
+
+#### `trellis_cli/admin.py` (12 sites — DEFECT=3, GUARD=9)
+
+- **line 459** — bucket=**GUARD**, pattern=`other`, catch=`specific`, fn=`graph_health`
+
+  ```python
+  except (RuntimeError, OSError, ValueError, KeyError, LookupError) as exc:
+              health_logger.debug(
+                  "graph_health_outbound_query_failed",
+                  node_id=nid,
+                  error_type=type(exc).__name__,
+  ```
+
+  _Reviewer note:_ specific catch with non-trivial body — likely a guard; review on a case-by-case basis.
+
+- **line 516** — bucket=**GUARD**, pattern=`other`, catch=`specific`, fn=`graph_health`
+
+  ```python
+  except (RuntimeError, OSError, ValueError, KeyError, LookupError) as exc:
+              health_logger.debug(
+                  "graph_health_orphan_query_failed",
+                  node_id=nid,
+                  error_type=type(exc).__name__,
+  ```
+
+  _Reviewer note:_ specific catch with non-trivial body — likely a guard; review on a case-by-case basis.
+
+- **line 645** — bucket=**GUARD**, pattern=`other`, catch=`specific`, fn=`_ensure_gitignore`
+
+  ```python
+  except FileNotFoundError:
+          gitignore.write_text(gitignore_line + "\n")
+          return "gitignore_created"
+  ```
+
+  _Reviewer note:_ specific catch with non-trivial body — likely a guard; review on a case-by-case basis.
+
+- **line 775** — bucket=**DEFECT**, pattern=`log-return-empty`, catch=`specific`, fn=`_memory_prompt_available`
+
+  ```python
+  except ImportError as exc:
+          structlog.get_logger(__name__).debug(
+              "memory_prompt_import_failed",
+              error=str(exc),
+          )
+  ```
+
+  _Reviewer note:_ logs warning then returns empty — classic silent-fallback shape
+
+- **line 799** — bucket=**GUARD**, pattern=`other`, catch=`specific`, fn=`_build_check_extractors_report`
+
+  ```python
+  except BackendNotInstalledError:
+          logger.debug("check_extractors_llm_sdk_not_installed", exc_info=True)
+          llm_client = None
+  ```
+
+  _Reviewer note:_ specific catch with non-trivial body — likely a guard; review on a case-by-case basis.
+
+- **line 1271** — bucket=**GUARD**, pattern=`other`, catch=`specific`, fn=`_check_healthz`
+
+  ```python
+  except httpx.HTTPError as exc:
+          return _record_check("healthz", "fail", started, error=str(exc))
+  ```
+
+  _Reviewer note:_ specific catch with non-trivial body — likely a guard; review on a case-by-case basis.
+
+- **line 1287** — bucket=**GUARD**, pattern=`other`, catch=`specific`, fn=`_check_readyz`
+
+  ```python
+  except httpx.HTTPError as exc:
+          return _record_check("readyz", "fail", started, error=str(exc))
+  ```
+
+  _Reviewer note:_ specific catch with non-trivial body — likely a guard; review on a case-by-case basis.
+
+- **line 1306** — bucket=**GUARD**, pattern=`other`, catch=`specific`, fn=`_check_auth_rejects_missing`
+
+  ```python
+  except httpx.HTTPError as exc:
+          return _record_check("auth_rejects_missing", "fail", started, error=str(exc))
+  ```
+
+  _Reviewer note:_ specific catch with non-trivial body — likely a guard; review on a case-by-case basis.
+
+- **line 1322** — bucket=**GUARD**, pattern=`other`, catch=`specific`, fn=`_check_auth_accepts_valid`
+
+  ```python
+  except httpx.HTTPError as exc:
+          return _record_check("auth_accepts_valid", "fail", started, error=str(exc))
+  ```
+
+  _Reviewer note:_ specific catch with non-trivial body — likely a guard; review on a case-by-case basis.
+
+- **line 1338** — bucket=**GUARD**, pattern=`other`, catch=`specific`, fn=`_check_metrics`
+
+  ```python
+  except httpx.HTTPError as exc:
+          return _record_check("metrics", "fail", started, error=str(exc))
+  ```
+
+  _Reviewer note:_ specific catch with non-trivial body — likely a guard; review on a case-by-case basis.
+
+- **line 1378** — bucket=**DEFECT**, pattern=`log-return-empty`, catch=`specific`, fn=`_safe_json`
+
+  ```python
+  except (ValueError, json.JSONDecodeError) as exc:
+          structlog.get_logger(__name__).debug(
+              "smoke_check_body_not_json",
+              error=str(exc),
+              content_type=response.headers.get("content-type", ""),
+  ```
+
+  _Reviewer note:_ logs warning then returns empty — classic silent-fallback shape
+
+- **line 1726** — bucket=**DEFECT**, pattern=`log-return-empty`, catch=`specific`, fn=`_evidence_span_days`
+
+  ```python
+  except (TypeError, ValueError) as exc:
+          structlog.get_logger(__name__).debug(
+              "evidence_span_parse_failed",
+              first_seen=first_seen,
+              last_seen=last_seen,
+  ```
+
+  _Reviewer note:_ logs warning then returns empty — classic silent-fallback shape
+
+#### `trellis_cli/claude_integration.py` (1 sites — DEFECT=1)
+
+- **line 40** — bucket=**DEFECT**, pattern=`log-return-empty`, catch=`specific`, fn=`read_claude_settings`
+
+  ```python
+  except FileNotFoundError:
+          _logger.debug("claude_settings_not_found", path=str(path))
+          return {}
+  ```
+
+  _Reviewer note:_ logs warning then returns empty — classic silent-fallback shape
+
+#### `trellis_cli/demo.py` (1 sites — GUARD=1)
+
+- **line 1351** — bucket=**GUARD**, pattern=`other`, catch=`specific`, fn=`load`
+
+  ```python
+  except (RuntimeError, OSError, ValueError, KeyError, LookupError) as exc:
+              structlog.get_logger(__name__).warning(
+                  "demo_cold_start_fixture_failed",
+                  fixture_dir=str(fixture_dir),
+                  error_type=type(exc).__name__,
+  ```
+
+  _Reviewer note:_ specific catch with non-trivial body — likely a guard; review on a case-by-case basis.
+
+#### `trellis_cli/extract_refresh.py` (3 sites — GRACEFUL-DEGRADATION=2, GUARD=1)
+
+- **line 73** — bucket=**GRACEFUL-DEGRADATION**, pattern=`log-only`, catch=`specific`, fn=`_resolve_extractor`
+
+  ```python
+  except ImportError as exc:
+          _logger.debug(
+              "extract_refresh_workers_extras_missing",
+              error=str(exc),
+          )
+  ```
+
+  _Reviewer note:_ logs and continues — likely best-effort; verify intent.
+
+- **line 131** — bucket=**GUARD**, pattern=`other`, catch=`specific`, fn=`_snapshot_entities`
+
+  ```python
+  except (RuntimeError, OSError, ValueError, KeyError, LookupError) as exc:
+              _logger.debug(
+                  "extract_refresh_snapshot_get_node_failed",
+                  entity_id=entity_id,
+                  error_type=type(exc).__name__,
+  ```
+
+  _Reviewer note:_ specific catch with non-trivial body — likely a guard; review on a case-by-case basis.
+
+- **line 222** — bucket=**GRACEFUL-DEGRADATION**, pattern=`log-only`, catch=`specific`, fn=`_emit_refresh_event`
+
+  ```python
+  except (RuntimeError, OSError, ValueError) as exc:
+          _logger.exception(
+              "extract_refresh_emit_failed",
+              entity_id=entity_id,
+              source_name=source_name,
+  ```
+
+  _Reviewer note:_ logs and continues — likely best-effort; verify intent.
+
+### `trellis_sdk/`
+
+#### `trellis_sdk/_http.py` (2 sites — DEFECT=2)
+
+- **line 209** — bucket=**DEFECT**, pattern=`return-empty`, catch=`specific`, fn=`_safe_json`
+
+  ```python
+  except (ValueError, _json.JSONDecodeError, UnicodeDecodeError):
+          return None
+  ```
+
+  _Reviewer note:_ returns empty without logging — caller has no signal
+
+- **line 237** — bucket=**DEFECT**, pattern=`return-empty`, catch=`specific`, fn=`_parse_retry_after`
+
+  ```python
+  except (TypeError, ValueError):
+          return None
+  ```
+
+  _Reviewer note:_ returns empty without logging — caller has no signal
+
+#### `trellis_sdk/client.py` (1 sites — GUARD=1)
+
+- **line 135** — bucket=**GUARD**, pattern=`other`, catch=`specific`, fn=`_ensure_handshake`
+
+  ```python
+  except httpx.HTTPError:
+              self._handshake_done = False
+              return
+  ```
+
+  _Reviewer note:_ specific catch with non-trivial body — likely a guard; review on a case-by-case basis.
+
+### `trellis_workers/`
+
+#### `trellis_workers/enrichment/service.py` (3 sites — DEFECT=1, GUARD=2)
+
+- **line 164** — bucket=**DEFECT**, pattern=`other`, catch=`Exception`, fn=`enrich`
+
+  ```python
+  except Exception as e:
+              logger.exception("enrichment_failed", title=title)
+              return EnrichmentResult(success=False, error=str(e))
+  ```
+
+  _Reviewer note:_ broad catch (Exception)
+
+- **line 223** — bucket=**GUARD**, pattern=`other`, catch=`specific`, fn=`_parse_response`
+
+  ```python
+  except json.JSONDecodeError as e:
+              match = re.search(r"\{.*\}", text, re.DOTALL)
+              if match:
+                  try:
+                      data = json.loads(match.group())
+  ```
+
+  _Reviewer note:_ specific catch with non-trivial body — likely a guard; review on a case-by-case basis.
+
+- **line 228** — bucket=**GUARD**, pattern=`other`, catch=`specific`, fn=`_parse_response`
+
+  ```python
+  except json.JSONDecodeError:
+                      return EnrichmentResult(
+                          success=False,
+                          error=f"Invalid JSON: {e}",
+                          raw_response=response,
+  ```
+
+  _Reviewer note:_ specific catch with non-trivial body — likely a guard; review on a case-by-case basis.
+
+#### `trellis_workers/learning/miner.py` (1 sites — DEFECT=1)
+
+- **line 185** — bucket=**DEFECT**, pattern=`log-return-empty`, catch=`Exception`, fn=`generate_precedent_candidates`
+
+  ```python
+  except Exception:
+              logger.exception("precedent_generation_llm_error")
+              return []
+  ```
+
+  _Reviewer note:_ broad catch (Exception); logs warning then returns empty — classic silent-fallback shape
+
+#### `trellis_workers/maintenance/retention.py` (2 sites — DEFECT=1, GUARD=1)
+
+- **line 140** — bucket=**DEFECT**, pattern=`other`, catch=`Exception`, fn=`run`
+
+  ```python
+  except Exception as e:
+                      report.errors.append(f"Error pruning {trace.trace_id}: {e}")
+                      continue
+  ```
+
+  _Reviewer note:_ broad catch (Exception)
+
+- **line 221** — bucket=**GUARD**, pattern=`other`, catch=`specific`, fn=`check`
+
+  ```python
+  except (ValueError, TypeError) as exc:
+                  report.malformed_documents.append(doc_id)
+                  emit_extraction_failure(
+                      event_log=self._event_log,
+                      extractor_id="retention.staleness",
+  ```
+
+  _Reviewer note:_ specific catch with non-trivial body — likely a guard; review on a case-by-case basis.

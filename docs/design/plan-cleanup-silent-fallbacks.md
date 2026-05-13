@@ -129,78 +129,53 @@ Commit `a8c41ca` on branch `cleanup/c2-phase0-silent-fallback-audit`. 730-LOC sc
 
 The 2 known DEFECTs in `src/trellis/extract/llm.py` and `src/trellis_workers/learning/miner.py` ship with Item 4 Phase 1. This plan does not duplicate.
 
-### Phase 1.5 — retention invisible-drift bug (P0 standalone, ~30 LOC) — NEW
+### Phase 1.5 — retention invisible-drift bug ✅ landed via [#116](https://github.com/ronsse/trellis-ai/pull/116)
 
-**File:** `src/trellis_workers/maintenance/retention.py:169`.
+**File:** `src/trellis_workers/maintenance/retention.py:169`. Replaced `except (ValueError, TypeError): pass` with `emit_extraction_failure(...)` + a `report.malformed_documents` field on `StalenessReport`. Threshold-cross raises on > 1% malformed rate.
 
-**Action:** replace `except (ValueError, TypeError): pass` with:
-1. `emit_extraction_failure(failure_kind="parse_error", extractor_id="retention.staleness", error_class=type(exc).__name__, ...)` once Item 4 Phase 0 helper exists — or use `logger.error(...)` interim and add the doc_id to a `report.malformed_documents` field on `StalenessReport`.
-2. Raise on totals-mismatch: if `len(malformed_documents) / total > 0.01`, raise (10× normal → operator must look).
+### Phase 2 — stores/registry.py typed import errors ✅ landed via [#118](https://github.com/ronsse/trellis-ai/pull/118)
 
-**Why standalone:** invisible retention drift is an operational defect that doesn't share scope with the MCP / registry / migrate sweeps. Ship as its own small PR.
+**File:** `src/trellis/stores/registry.py`. Replaced ImportError swallows that returned `None` for missing optionals with explicit `BackendNotInstalledError` raises carrying the matching `trellis[<extra>]` install hint. Aggregate-error sites (`validate()`, `_check_bolt_connectivity()`) annotated with `# AGGREGATE:` per the new rubric.
 
-**Estimated size:** ~30 LOC delta + ~50 LOC tests.
+### Phase 3 — mcp/server.py structured error protocol ✅ landed via [#119](https://github.com/ronsse/trellis-ai/pull/119)
 
-### Phase 2 — stores/registry.py (19 sites, 16 DEFECT)
+**File:** `src/trellis/mcp/server.py`. Introduced the `_raise_*` helper family (`_raise_invalid_params`, `_raise_resource_missing`, etc.) so handlers can route through typed exceptions while the audit script's helper-aware mode (see #128 below) still recognises them as non-silent. Token-tracking + post-success telemetry sites kept as GRACEFUL with inline annotations.
 
-**File:** `src/trellis/stores/registry.py`.
+### Phase 4 — migrate/graph_migrator.py + retrieve/pack_builder.py explicit failures ✅ landed via [#120](https://github.com/ronsse/trellis-ai/pull/120)
 
-**Action:** the 16 DEFECTs are mostly `ImportError` swallows that return `None` for missing optional backends (e.g., Anthropic SDK at :1554, vector backends, blob backends). Replace with explicit raise + a clear "install `trellis[<extra>]` to enable" message. The 3 GRACEFUL sites should already be annotated; verify and add inline comments where missing.
+Two files, originally 18 DEFECTs. `migrate/graph_migrator.py` consolidated to a single aggregate-error path that surfaces every per-row failure in one `MigrationFailed`. `retrieve/pack_builder.py` per-strategy failures now surface in the `PACK_ASSEMBLED` event payload under `strategy_failures` and raise `PackAssemblyError` when required strategies fail or all-fail. Inline `# NOT silent:` comment documents the deferred-raise pattern.
 
-**Done when:** importing the package on a fresh install with no optionals succeeds; instantiating a backend that needs an optional dependency raises with the install instruction.
+### Phase 5 — telemetry / observability cluster ✅ landed via [#122](https://github.com/ronsse/trellis-ai/pull/122)
 
-**Estimated size:** ~250 LOC delta + ~200 LOC tests.
+Files: `src/trellis_api/observability.py`, `src/trellis/feedback/recording.py`, `src/trellis/classify/refresh.py`, `src/trellis/extract/dispatcher.py`. Per-site review: post-success telemetry emits annotated as `# GRACEFUL-DEGRADATION (C2 Phase 5):` with explicit TODO for the `metrics.telemetry_failures` counter. Primary-path swallows replaced with emit-then-raise.
 
-### Phase 3 — mcp/server.py (34 sites, 31 DEFECT) — biggest single-file effort
+### Phase 6 — CLI tail + executor + SDK ✅ landed via [#123](https://github.com/ronsse/trellis-ai/pull/123)
 
-**File:** `src/trellis/mcp/server.py` (+ any helpers `mcp/` imports).
+Files: `src/trellis_cli/`, `src/trellis/mutate/executor.py`, `src/trellis_sdk/_http.py`. CLI sites now bubble proper exit codes (`typer.Exit`/`sys.exit`). `executor.py` broad `except Exception` replaced by typed catches for `ValidationError`, `PolicyViolationError`, `IdempotencyError`, `(StoreError, TrellisError)` plus the residual `_UNEXPECTED_HANDLER_FAILURE` guard. SDK gained a structured HTTP exception hierarchy.
 
-**Action:** MCP has a structured error protocol. Replace each `except Exception: return {"error": str(exc)}` pattern with `raise` — the MCP framework wraps and surfaces it to the client correctly. For tool handlers that legitimately want to degrade (e.g., search returns empty when index is cold), annotate the case and emit a `MCP_TOOL_DEGRADED` event.
+### Audit-script helper-call-chain awareness ✅ landed via [#128](https://github.com/ronsse/trellis-ai/pull/128)
 
-**Done when:** every flagged site is either `raise` or has an inline comment naming the rationale + emits an event. MCP integration tests pass against the loud-failure mode.
+Default mode now recognises:
+- intra-module functions whose body ends in `raise`,
+- functions annotated `NoReturn` / `typing.NoReturn`,
+- name-convention helpers matching `_raise_*` / `raise_*`,
+- stack-abort calls (`sys.exit`, `os._exit`, `typer.Exit`, `click.Abort`, `pytest.exit`, `pytest.fail`).
 
-**Estimated size:** ~400 LOC delta + ~250 LOC tests.
+`--literal-only` flag restores the legacy behaviour for back-compat with the 2026-05-12 baseline. **Going forward the helper-aware count is the authoritative DEFECT total**; the literal-only column is reserved for diff against the historical baseline.
 
-**Risk:** MCP tool behavior changes are observable to clients. If any external integration relies on `{"error": "..."}` payloads, this is a breaking change. POC stage: no external integrations exist; document the change in CHANGELOG.
+### Phase 7 — final verification + report refresh ✅ landed (this PR)
 
-### Phase 4 — migrate/graph_migrator.py (9 DEFECT) + retrieve/pack_builder.py (9 DEFECT)
+Re-ran `python scripts/audit_silent_fallbacks.py --src src/` in both modes after Phases 1.5–6 merged. Snapshots written to:
+- [`audit/silent_fallbacks_2026-05-12-final.md`](../../audit/silent_fallbacks_2026-05-12-final.md) — helper-aware, the new authoritative reading.
+- [`audit/silent_fallbacks_2026-05-12-final-literal.md`](../../audit/silent_fallbacks_2026-05-12-final-literal.md) — literal-only, for back-comparison with the [2026-05-12 baseline](../../audit/silent_fallbacks_2026-05-12-baseline.md).
 
-Two files, 18 DEFECTs total, both all-DEFECT (no GRACEFUL among them). Pair into one PR since both are core-library concerns.
+**Headline counts:**
+- Helper-aware DEFECTs in `src/`: **67** (the new authoritative number).
+- Literal-only DEFECTs in `src/`: **85** (down from **113** at the baseline — **−28** net).
+- Canonical-annotated DEFECTs: **33** (sites with inline `# GRACEFUL-DEGRADATION:` / `# GUARD:` / `# AGGREGATE:` labels).
+- Unjustified DEFECT survivors: **34** — **exceeds the original ≤ 10 target**.
 
-**Action:**
-- `migrate/graph_migrator.py`: migration steps that swallow errors silently leave the graph in an inconsistent state. Replace with raise + a clear `MigrationFailed("step={n}, source={...}, target={...}, ...")`.
-- `retrieve/pack_builder.py`: unavailable-store strategies must raise at construction. Optional-strategy degradation must emit an event.
-
-**Done when:** failure-injection tests demonstrate loud failure on each site. Existing PackBuilder tests still pass against the new construction-time validation.
-
-**Estimated size:** ~250 LOC delta + ~200 LOC tests.
-
-### Phase 5 — telemetry / observability cluster
-
-Files: `src/trellis_api/observability.py` (3 DEFECT), `src/trellis/feedback/recording.py` (4 DEFECT), `src/trellis/classify/refresh.py` (3 DEFECT), `src/trellis/extract/dispatcher.py` (3 DEFECT).
-
-These share a pattern: "swallow exceptions inside the observability path so the primary operation isn't broken by a telemetry failure." This is the closest thing to legitimate graceful degradation in the audit. **Per-site review needed:**
-
-- If the primary operation already succeeded and the swallow is on a post-success telemetry emit → annotate as GRACEFUL with an explicit `TELEMETRY_EMIT_FAILED` event going somewhere durable (process-local sentinel queue + admin reconciliation command).
-- If the swallow is on the primary operation itself → DEFECT, replace.
-
-**Estimated size:** ~200 LOC delta + ~150 LOC tests.
-
-### Phase 6 — CLI tail + executor + remaining scattered (~30 sites)
-
-Files: `src/trellis_cli/` (15 sites, 9 DEFECT), `src/trellis/mutate/executor.py:190` (the one critical DEFECT), `src/trellis_sdk/_http.py` + `async_client.py` (4 sites, 3 DEFECT), and any small remaining concentrations.
-
-CLI sites are mostly user-facing — they should bubble exit codes, not swallow. `executor.py:190` is the broad `except Exception` in `execute()` — replace with specific catches + emit `EXECUTION_FAILED` event with reason.
-
-**Estimated size:** ~250 LOC delta + ~200 LOC tests.
-
-### Phase 7 — final verification + report refresh
-
-Re-run `python scripts/audit_silent_fallbacks.py --src src/ --output audit/silent_fallbacks_2026-NN.md` after Phases 1-6 land. Compare against the 2026-05 baseline. Any remaining DEFECTs should be either justified GRACEFUL with inline comments or explicitly tracked as known-future work.
-
-**Done when:** DEFECT bucket count drops to ≤ 10 (from 112), and each remaining DEFECT has an inline justification comment or a tracked TODO.
-
-**Estimated size:** ~50 LOC docs + audit re-run.
+The original Phase 7 done-when ("≤ 10 unjustified DEFECTs") is **not met**. A Phase 8 follow-up is warranted to either (a) attach the canonical inline annotation to ~12 sites where the informal justification already exists or (b) replace ~22 sites with explicit emit-then-raise. Detailed file/line list lives in the final report's "Unjustified DEFECT survivors" section.
 
 ## 6. Total size estimate — revised
 
