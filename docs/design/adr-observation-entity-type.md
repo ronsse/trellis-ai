@@ -1,9 +1,10 @@
 # ADR: Observation / Measurement entity vocabulary
 
-**Status:** Proposed
+**Status:** Accepted — Phase 0 landed 2026-05-12 (Pydantic schemas + well-known registration; SDK/MCP/retrieval are Phase 1+).
 **Date:** 2026-05-11
 **Deciders:** Trellis core
 **Amends:** [`adr-graph-ontology.md`](./adr-graph-ontology.md) — adds canonical entity types and edge kinds to the well-known registry
+**Implementation (Phase 0):** [`src/trellis/schemas/observation.py`](../../src/trellis/schemas/observation.py), [`src/trellis/schemas/measurement.py`](../../src/trellis/schemas/measurement.py), [`src/trellis/schemas/well_known.py`](../../src/trellis/schemas/well_known.py) (`OBSERVATION` / `MEASUREMENT` / `HAS_OBSERVATION` constants, `WELL_KNOWN_VERSION = "1.1.0"`).
 **Related:**
 - [`./plan-observation-entity-type.md`](./plan-observation-entity-type.md) — implementation plan for this ADR
 - [`./adr-graph-ontology.md`](./adr-graph-ontology.md) — sets the schema.org / PROV-O alignment policy this ADR extends
@@ -127,7 +128,7 @@ Observations attached to an entity inherit the `DataClassification` of that enti
 
 | Phase | Scope | Status |
 |---|---|---|
-| 0 | This ADR + well_known.py additions + 6 tests + docs | Proposed |
+| 0 | This ADR + well_known.py additions + Pydantic schemas + tests + docs | **Landed 2026-05-12** |
 | 1 | SDK helper `record_observation(...)` + MCP tool | Proposed (see plan) |
 | 2 | `ObservationSearch` retrieval strategy | Proposed (see plan) |
 | 3 | Sample extractor in `trellis_workers` producing query-pattern observations | Proposed (see plan) |
