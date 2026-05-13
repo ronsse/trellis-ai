@@ -64,6 +64,17 @@ FilterOp = Literal["eq", "in", "exists", "lt", "lte", "gt", "gte"]
 #: backend compilers can ``in _RANGE_OPS`` without re-listing them.
 _RANGE_OPS: frozenset[str] = frozenset({"lt", "lte", "gt", "gte"})
 
+#: Canonical mapping from DSL range op to the glyph used by both SQL
+#: and openCypher (they share the same set of inequality operators).
+#: Shared by every backend compiler so the SQLite, Postgres, and
+#: Bolt-path compilers never drift on the mapping.
+RANGE_OP_GLYPH: dict[str, str] = {
+    "lt": "<",
+    "lte": "<=",
+    "gt": ">",
+    "gte": ">=",
+}
+
 
 @dataclass(frozen=True)
 class FilterClause:

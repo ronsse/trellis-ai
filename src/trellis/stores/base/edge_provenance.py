@@ -37,6 +37,13 @@ EDGE_PROVENANCE_FIELDS: tuple[str, ...] = (
     "extractor_tier",
 )
 
+#: Edge columns the canonical DSL is allowed to address directly (not
+#: through the ``properties.<key>`` JSON path). Shared by every backend
+#: compiler — the 5 provenance columns plus the 4 intrinsic edge columns.
+EDGE_TOP_LEVEL_COLUMNS: frozenset[str] = frozenset(
+    {"edge_id", "edge_type", "source_id", "target_id", *EDGE_PROVENANCE_FIELDS}
+)
+
 
 def validate_edge_provenance(
     *,

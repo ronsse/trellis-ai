@@ -57,6 +57,7 @@ from rich.console import Console
 from trellis.extract.telemetry import emit_extraction_failure
 from trellis.stores.base.edge_provenance import (
     EDGE_PROVENANCE_FIELDS,
+    extract_edge_provenance,
     validate_edge_provenance,
 )
 from trellis_cli.stores import get_event_log, get_graph_store
@@ -145,23 +146,6 @@ def _all_provenance_columns_null(edge: dict[str, Any]) -> bool:
     return all(edge.get(field) is None for field in EDGE_PROVENANCE_FIELDS)
 
 
-def _extract_legacy_provenance(properties: dict[str, Any]) -> dict[str, Any]:
-    """Pull provenance keys out of the legacy ``properties`` JSON blob.
-
-    Missing keys default to ``None`` — same shape as
-    :func:`trellis.stores.base.edge_provenance.extract_edge_provenance`.
-    Separate function so callers can distinguish "no legacy data"
-    (every value None) from "validation failure" (one or more values
-    rejected).
-    """
-    return {field: properties.get(field) for field in EDGE_PROVENANCE_FIELDS}
-
-
-def _has_any_legacy_provenance(legacy: dict[str, Any]) -> bool:
-    """``True`` when at least one legacy key is populated."""
-    return any(value is not None for value in legacy.values())
-
-
 def _migrate_one_edge(
     store: GraphStore,
     edge: dict[str, Any],
@@ -172,8 +156,8 @@ def _migrate_one_edge(
 ) -> None:
     """Process one candidate edge in-place; update ``report`` counters."""
     properties = dict(edge.get("properties") or {})
-    legacy = _extract_legacy_provenance(properties)
-    if not _has_any_legacy_provenance(legacy):
+    legacy = extract_edge_provenance(properties)
+    if all(value is None for value in legacy.values()):
         report.edges_no_legacy_provenance += 1
         return
 
@@ -253,23 +237,6 @@ def _iter_all_edges(store: GraphStore) -> list[dict[str, Any]]:
     return edges
 
 
-def _commit_batch_if_supported(store: GraphStore) -> None:  # noqa: ARG001
-    """Flush pending writes when the backend exposes a transaction handle.
-
-    The SQLite/Postgres ``upsert_edge`` already commits per call (the
-    ``commit=True`` default).  This function is a no-op for those
-    backends — kept as a hook so future backends with batch semantics
-    can override.  Intentionally permissive; we don't want migration
-    to fail because a backend lacks an explicit flush hook.
-
-    Args:
-        store: Retained for the future signature; unused today.
-    """
-    # Nothing portable today.  Future: detect a ``flush()`` /
-    # ``transaction()`` method and call it.
-    return
-
-
 def run_migrate_provenance(
     store: GraphStore,
     *,
@@ -287,7 +254,11 @@ def run_migrate_provenance(
     report = MigrateProvenanceReport(dry_run=dry_run, batch_size=batch_size)
     all_edges = _iter_all_edges(store)
 
-    pending_in_batch = 0
+    # ``batch_size`` is preserved on the report for observability, but the
+    # SQLite/Postgres ``upsert_edge`` already commits per call (the
+    # ``commit=True`` default), so there's nothing to flush between
+    # batches today.  Backends with explicit batch semantics can add
+    # a flush hook here without changing the report shape.
     for edge in all_edges:
         report.edges_scanned += 1
         if not _all_provenance_columns_null(edge):
@@ -300,13 +271,6 @@ def run_migrate_provenance(
             event_log=event_log,
             report=report,
         )
-        pending_in_batch += 1
-        if pending_in_batch >= batch_size:
-            _commit_batch_if_supported(store)
-            pending_in_batch = 0
-
-    if pending_in_batch:
-        _commit_batch_if_supported(store)
 
     if report.edges_scanned:
         report.drift_rate = report.edges_malformed / report.edges_scanned

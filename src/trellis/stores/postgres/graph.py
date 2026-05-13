@@ -17,6 +17,7 @@ from trellis.core.ids import generate_ulid
 from trellis.schemas.graph import CompactionReport
 from trellis.stores.base.edge_provenance import (
     EDGE_PROVENANCE_FIELDS,
+    EDGE_TOP_LEVEL_COLUMNS,
     extract_edge_provenance,
     validate_edge_provenance,
 )
@@ -28,34 +29,10 @@ from trellis.stores.base.graph import (
     validate_node_role_args,
     validate_subgraph_depth,
 )
+from trellis.stores.base.graph_query import RANGE_OP_GLYPH
 from trellis.stores.postgres.base import PostgresStoreBase
 
 logger = structlog.get_logger(__name__)
-
-#: SQL operator strings for the range ops on the DSL.  Module-private.
-_POSTGRES_RANGE_SQL: dict[str, str] = {
-    "lt": "<",
-    "lte": "<=",
-    "gt": ">",
-    "gte": ">=",
-}
-
-#: Edge columns the DSL is allowed to address directly (not through
-#: ``properties.<key>`` JSONB).  Provenance columns are the motivating
-#: consumer — see ``plan-provenance-columns.md`` Phase 2.
-_EDGE_TOP_LEVEL_COLUMNS: frozenset[str] = frozenset(
-    {
-        "edge_id",
-        "edge_type",
-        "source_id",
-        "target_id",
-        "source_trace_id",
-        "agent_id",
-        "confidence",
-        "evidence_ref",
-        "extractor_tier",
-    }
-)
 
 
 def _pg_text_lit(value: str) -> str:
@@ -1215,7 +1192,7 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
             return f"{column} IN ({placeholders})", list(clause.value)
         if op == "exists":
             return f"{column} IS NOT NULL", []
-        sql_op = _POSTGRES_RANGE_SQL.get(op)
+        sql_op = RANGE_OP_GLYPH.get(op)
         if sql_op is None:
             msg = f"Unknown filter op {clause.op!r}"
             raise ValueError(msg)
@@ -1234,7 +1211,7 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
             )
         if clause.op == "exists":
             return "properties ? %s", [key]
-        sql_op = _POSTGRES_RANGE_SQL.get(clause.op)
+        sql_op = RANGE_OP_GLYPH.get(clause.op)
         if sql_op is not None:
             # JSON-path range comparisons need the JSONB ``->>`` text
             # extraction plus a numeric cast.  We can't know the dtype
@@ -1302,7 +1279,7 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
 
     @staticmethod
     def _edge_field_to_column(field: str) -> str:
-        if field in _EDGE_TOP_LEVEL_COLUMNS:
+        if field in EDGE_TOP_LEVEL_COLUMNS:
             return field
         msg = f"Unsupported DSL edge field path: {field!r}"
         raise ValueError(msg)

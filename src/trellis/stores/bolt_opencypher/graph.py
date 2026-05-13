@@ -47,6 +47,7 @@ from trellis.core.ids import generate_ulid
 from trellis.schemas.graph import CompactionReport
 from trellis.stores.base.edge_provenance import (
     EDGE_PROVENANCE_FIELDS,
+    EDGE_TOP_LEVEL_COLUMNS,
     extract_edge_provenance,
     validate_edge_provenance,
 )
@@ -58,23 +59,13 @@ from trellis.stores.base.graph import (
     validate_node_role_args,
     validate_subgraph_depth,
 )
+from trellis.stores.base.graph_query import RANGE_OP_GLYPH
 from trellis.stores.bolt_opencypher.base import BoltSessionRunner
 
 if TYPE_CHECKING:
     from neo4j import Driver, ManagedTransaction
 
 logger = structlog.get_logger(__name__)
-
-#: Cypher operator strings for the range ops on the DSL.  Cypher uses
-#: the same glyphs as SQL — kept as a dict for parity with the SQLite /
-#: Postgres compilers and so the lookup falls through cleanly on
-#: unknown ops.
-_BOLT_RANGE_OPS: dict[str, str] = {
-    "lt": "<",
-    "lte": "<=",
-    "gt": ">",
-    "gte": ">=",
-}
 
 #: Python comparison fallbacks used when a range op lands on a
 #: ``properties.<key>`` path that we evaluate client-side after JSON
@@ -85,22 +76,6 @@ _PY_RANGE_CMPS: dict[str, Any] = {
     "gt": operator.gt,
     "gte": operator.ge,
 }
-
-#: Edge columns the DSL is allowed to address directly.  Provenance
-#: columns are the motivating consumer for Phase 2.
-_BOLT_EDGE_TOP_LEVEL_COLUMNS: frozenset[str] = frozenset(
-    {
-        "edge_id",
-        "edge_type",
-        "source_id",
-        "target_id",
-        "source_trace_id",
-        "agent_id",
-        "confidence",
-        "evidence_ref",
-        "extractor_tier",
-    }
-)
 
 
 def _iso(dt: datetime | None) -> str | None:
@@ -1216,7 +1191,7 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             return f"{var}.{column} IN ${pname}", {pname: list(clause.value)}
         if op == "exists":
             return f"{var}.{column} IS NOT NULL", {}
-        cypher_op = _BOLT_RANGE_OPS.get(op)
+        cypher_op = RANGE_OP_GLYPH.get(op)
         if cypher_op is None:
             msg = f"Unknown filter op {clause.op!r}"
             raise ValueError(msg)
@@ -1294,7 +1269,7 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             if clause.field.startswith("properties."):
                 py_predicates.append(self._compile_edge_property_predicate(clause))
                 continue
-            if clause.field not in _BOLT_EDGE_TOP_LEVEL_COLUMNS:
+            if clause.field not in EDGE_TOP_LEVEL_COLUMNS:
                 msg = f"Unsupported DSL edge field path: {clause.field!r}"
                 raise ValueError(msg)
             frag, params = BoltOpenCypherGraphStore._compile_native_cypher_clause(

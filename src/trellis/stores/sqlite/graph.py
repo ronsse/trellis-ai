@@ -17,6 +17,7 @@ from trellis.core.ids import generate_ulid
 from trellis.schemas.graph import CompactionReport
 from trellis.stores.base.edge_provenance import (
     EDGE_PROVENANCE_FIELDS,
+    EDGE_TOP_LEVEL_COLUMNS,
     extract_edge_provenance,
     validate_edge_provenance,
 )
@@ -28,36 +29,10 @@ from trellis.stores.base.graph import (
     validate_node_role_args,
     validate_subgraph_depth,
 )
+from trellis.stores.base.graph_query import RANGE_OP_GLYPH
 from trellis.stores.sqlite.base import SQLiteStoreBase
 
 logger = structlog.get_logger(__name__)
-
-#: SQL operator strings for the range ops on the DSL.  Module-private —
-#: only the SQLite compiler reads this.  Keys match
-#: :data:`trellis.stores.base.graph_query.FilterOp`.
-_SQLITE_RANGE_SQL: dict[str, str] = {
-    "lt": "<",
-    "lte": "<=",
-    "gt": ">",
-    "gte": ">=",
-}
-
-#: Edge columns the DSL is allowed to address directly (not through the
-#: ``properties.<key>`` JSON path).  Provenance columns are the
-#: motivating consumer — see ``plan-provenance-columns.md`` Phase 2.
-_EDGE_TOP_LEVEL_COLUMNS: frozenset[str] = frozenset(
-    {
-        "edge_id",
-        "edge_type",
-        "source_id",
-        "target_id",
-        "source_trace_id",
-        "agent_id",
-        "confidence",
-        "evidence_ref",
-        "extractor_tier",
-    }
-)
 
 
 class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
@@ -1279,7 +1254,7 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
             return f"{column} IN ({placeholders})", list(clause.value)
         if op == "exists":
             return f"{column} IS NOT NULL", []
-        sql_op = _SQLITE_RANGE_SQL.get(op)
+        sql_op = RANGE_OP_GLYPH.get(op)
         if sql_op is None:
             msg = f"Unknown filter op {clause.op!r}"
             raise ValueError(msg)
@@ -1343,7 +1318,7 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
     @staticmethod
     def _edge_field_to_sql_expr(field: str) -> str:
         """Map a DSL edge-field path to a SQLite column or JSON extract."""
-        if field in _EDGE_TOP_LEVEL_COLUMNS:
+        if field in EDGE_TOP_LEVEL_COLUMNS:
             return field
         if field.startswith("properties."):
             key = field.split(".", 1)[1]
