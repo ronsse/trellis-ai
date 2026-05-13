@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import re
 import sys
 from collections import Counter, defaultdict
 from collections.abc import Iterable
@@ -78,6 +79,33 @@ _LOG_METHODS = frozenset(
 
 # Function-name prefixes that signal an intentional swallow on failure.
 _TRY_MAYBE_PREFIXES = ("try_", "maybe_", "_try_", "_maybe_")
+
+# Helper-naming convention for raising helpers (e.g. ``_raise_invalid_params``).
+# Matches ``raise_*`` and ``_raise_*`` at the *function name* level (after any
+# dotted attribute prefix is stripped). Tight enough to avoid false positives
+# on names like ``raised`` or ``raisedex``.
+_RAISE_HELPER_NAME_RE = re.compile(r"^_?raise_\w+$")
+
+# Calls that abort the current call stack: treat them as equivalent to ``raise``
+# for the purpose of "this except block does not silently swallow". Matched by
+# the *last segment* of the call's dotted name (e.g. ``typer.Exit`` matches on
+# the ``Exit`` segment plus the ``typer`` module prefix).
+_STACK_ABORT_FULL_PATHS = frozenset(
+    {
+        "sys.exit",
+        "os._exit",
+        "typer.Exit",
+        "click.Abort",
+        "click.exceptions.Abort",
+        "pytest.exit",
+        "pytest.fail",
+    }
+)
+
+# Bare-name aborts that don't carry a module prefix (e.g. when callers do
+# ``from sys import exit`` and call ``exit(...)``). Conservative — only the
+# names we expect to see used unqualified in this codebase.
+_STACK_ABORT_BARE_NAMES = frozenset({"_exit"})
 
 
 # ---------------------------------------------------------------------------
@@ -160,6 +188,152 @@ def _handler_reraises(body: list[ast.stmt]) -> bool:
     )
 
 
+# ---------------------------------------------------------------------------
+# Helper-call-chain awareness (Followup 2)
+# ---------------------------------------------------------------------------
+
+
+def _dotted_name(node: ast.AST) -> str | None:
+    """Return the dotted form of a ``Name``/``Attribute`` chain, or ``None``.
+
+    ``foo`` → ``"foo"``; ``a.b.c`` → ``"a.b.c"``; ``f().x`` → ``None`` because
+    the base is a call expression, not an attribute chain.
+    """
+    parts: list[str] = []
+    current: ast.AST = node
+    while isinstance(current, ast.Attribute):
+        parts.append(current.attr)
+        current = current.value
+    if isinstance(current, ast.Name):
+        parts.append(current.id)
+        return ".".join(reversed(parts))
+    return None
+
+
+def _is_noreturn_annotation(returns: ast.expr | None) -> bool:
+    """True if ``returns`` is a ``NoReturn``/``typing.NoReturn`` annotation."""
+    if returns is None:
+        return False
+    name = _dotted_name(returns)
+    if name is None:
+        return False
+    return name == "NoReturn" or name.endswith(".NoReturn")
+
+
+def _function_provably_raises(
+    fn: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> bool:
+    """True if ``fn``'s body provably ends in ``raise`` on every path.
+
+    Conservative: only considers the *last* statement of the top-level body.
+    A function whose body returns normally on some branch but raises on
+    others is NOT recognized — callers would still need to handle the
+    non-raising path. This avoids false positives.
+    """
+    if not fn.body:
+        return False
+    last = fn.body[-1]
+    return isinstance(last, ast.Raise)
+
+
+def _build_module_raising_helpers(tree: ast.Module) -> dict[str, bool]:
+    """Pre-pass: scan top-level functions, return ``{name: raises?}``.
+
+    A function is recorded as "raises" when any of:
+
+    * The last statement of its body is a ``raise`` (AST shape), OR
+    * Its return annotation is ``NoReturn`` / ``typing.NoReturn``, OR
+    * Its name matches the ``_raise_*`` / ``raise_*`` convention.
+
+    Nested functions are NOT walked — the convention is module-level. Cross
+    module helpers are NOT resolved here; the convention regex handles
+    those at the call site (see ``_call_is_helper_raise``).
+    """
+    helpers: dict[str, bool] = {}
+    for node in tree.body:
+        if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            continue
+        raises = (
+            _function_provably_raises(node)
+            or _is_noreturn_annotation(node.returns)
+            or bool(_RAISE_HELPER_NAME_RE.match(node.name))
+        )
+        if raises:
+            helpers[node.name] = True
+    return helpers
+
+
+def _call_is_stack_abort(call: ast.Call) -> bool:
+    """True if ``call`` is one of the recognised stack-abort calls.
+
+    Matches by exact dotted name (e.g. ``sys.exit``, ``typer.Exit``) and
+    by short tail (e.g. ``exit`` reaching from a ``from sys import exit``
+    is conservatively NOT matched — only ``_exit`` and explicit dotted
+    forms, because a bare ``exit`` is overloaded in REPL contexts).
+    """
+    name = _dotted_name(call.func)
+    if name is None:
+        return False
+    if name in _STACK_ABORT_FULL_PATHS:
+        return True
+    # Match by trailing segment for the common qualified-import forms
+    # (e.g. ``typer.Exit`` matches even if imported as ``from typer import Exit``
+    # → call dotted name would just be ``Exit`` — but that risks false positives
+    # so only accept when the *unqualified* name is in our explicit bare-set).
+    return name in _STACK_ABORT_BARE_NAMES
+
+
+def _call_is_helper_raise(
+    call: ast.Call,
+    module_helpers: dict[str, bool],
+) -> bool:
+    """True if ``call`` invokes a recognised raising helper.
+
+    Recognises two cases:
+
+    1. ``foo(...)`` where ``foo`` is in ``module_helpers`` — an
+       intra-module helper detected by the pre-pass.
+    2. ``foo(...)`` or ``mod.foo(...)`` where the *function-name segment*
+       matches the ``_raise_*`` / ``raise_*`` convention. This catches
+       cross-module imports without walking other files.
+    """
+    name = _dotted_name(call.func)
+    if name is None:
+        return False
+    tail = name.rsplit(".", 1)[-1]
+    if tail in module_helpers:
+        return True
+    return bool(_RAISE_HELPER_NAME_RE.match(tail))
+
+
+def _handler_aborts(
+    body: list[ast.stmt],
+    module_helpers: dict[str, bool],
+    *,
+    literal_only: bool,
+) -> bool:
+    """True if ``body`` aborts the call stack — by raise, helper, or exit.
+
+    In ``literal_only`` mode this is equivalent to the legacy
+    ``_handler_reraises`` (literal ``raise`` only). Otherwise, recognises
+    helper-call indirection per the rules described in
+    ``_build_module_raising_helpers`` and ``_call_is_stack_abort``.
+    """
+    if _handler_reraises(body):
+        return True
+    if literal_only:
+        return False
+    for stmt in body:
+        for sub in ast.walk(stmt):
+            if not isinstance(sub, ast.Call):
+                continue
+            if _call_is_stack_abort(sub):
+                return True
+            if _call_is_helper_raise(sub, module_helpers):
+                return True
+    return False
+
+
 def _is_logging_call(stmt: ast.stmt) -> bool:
     """Heuristic: True if stmt is a logging-method or print expression-stmt."""
     if not isinstance(stmt, ast.Expr) or not isinstance(stmt.value, ast.Call):
@@ -198,14 +372,17 @@ def _bucket_for(
     catch_kind: str,
     body: list[ast.stmt],
     function_name: str | None,
+    module_helpers: dict[str, bool],
+    literal_only: bool,
 ) -> tuple[str, str]:
     """Decide a bucket suggestion plus reviewer note.
 
     Returns (bucket, note). ``bucket`` may be ``BUCKET_NOT_SILENT`` to
-    indicate the handler should be filtered out of the report (it
-    re-raises somewhere).
+    indicate the handler should be filtered out of the report (its body
+    aborts — by literal raise, helper-call indirection, or stack-abort
+    call like ``sys.exit``).
     """
-    if _handler_reraises(body):
+    if _handler_aborts(body, module_helpers, literal_only=literal_only):
         return BUCKET_NOT_SILENT, ""
 
     # Tests get their own bucket regardless of pattern.
@@ -329,11 +506,21 @@ def _relpath_of(path: Path, root: Path) -> str:
         return str(path).replace("\\", "/")
 
 
-def scan_file(path: Path, root: Path) -> list[Finding]:
+def scan_file(
+    path: Path,
+    root: Path,
+    *,
+    literal_only: bool = False,
+) -> list[Finding]:
     """Parse ``path`` and return one ``Finding`` per silent ``except`` clause.
 
     Parse and read errors raise with the filename in the message — silent
     skipping would violate the POC directive this audit enforces.
+
+    ``literal_only=True`` restores legacy behavior (only a literal ``raise``
+    in the handler body marks it as non-silent). When ``False`` (default),
+    helper-call indirection and stack-abort calls also count as aborting —
+    see ``_handler_aborts`` for the full rules.
     """
     try:
         source = path.read_text(encoding="utf-8")
@@ -351,6 +538,10 @@ def scan_file(path: Path, root: Path) -> list[Finding]:
     source_lines = source.splitlines()
     relpath = _relpath_of(path, root)
 
+    module_helpers = (
+        {} if literal_only else _build_module_raising_helpers(tree)
+    )
+
     visitor = ExceptVisitor()
     visitor.visit(tree)
 
@@ -364,6 +555,8 @@ def scan_file(path: Path, root: Path) -> list[Finding]:
             catch_kind=catch_kind,
             body=handler.body,
             function_name=fn_name,
+            module_helpers=module_helpers,
+            literal_only=literal_only,
         )
         if bucket == BUCKET_NOT_SILENT:
             continue
@@ -546,19 +739,43 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Audit silent-fallback patterns in a source tree. Read-only; "
-            "produces a deterministic Markdown report."
+            "produces a deterministic Markdown report. By default, an "
+            "``except`` body counts as 'aborting' (i.e. not silent) if it "
+            "literally re-raises, calls a recognised raising helper "
+            "(intra-module function ending in ``raise``, function with a "
+            "``NoReturn`` annotation, or name matching ``_raise_*`` / "
+            "``raise_*``), or calls a stack-abort like ``sys.exit`` / "
+            "``typer.Exit`` / ``click.Abort``. Pass ``--literal-only`` to "
+            "restore the legacy behavior (literal ``raise`` only) — useful "
+            "for replaying older baselines."
         )
     )
     parser.add_argument(
         "--src", type=Path, required=True, help="Root directory to scan (e.g. src/)."
     )
     parser.add_argument(
-        "--output", type=Path, required=True, help="Markdown output path."
+        "--output",
+        type=Path,
+        required=False,
+        default=None,
+        help=(
+            "Markdown output path. Required unless ``--summary-only`` is set."
+        ),
     )
     parser.add_argument(
         "--summary-only",
         action="store_true",
         help="Print summary to stdout, do not write report. Useful for spot checks.",
+    )
+    parser.add_argument(
+        "--literal-only",
+        action="store_true",
+        help=(
+            "Legacy mode: only a literal ``raise`` in the handler body "
+            "counts as a re-raise. Disables helper-call recognition. "
+            "Use this to reproduce reports generated before the helper "
+            "awareness was added (e.g. the 2026-05-12 baseline)."
+        ),
     )
     return parser.parse_args(argv)
 
@@ -579,13 +796,18 @@ def main(argv: list[str] | None = None) -> int:
             f"audit_silent_fallbacks: --src is not a directory: {src_root}"
         )
 
+    literal_only: bool = args.literal_only
     all_findings: list[Finding] = []
     for py_path in iter_python_files(src_root):
-        all_findings.extend(scan_file(py_path, src_root))
+        all_findings.extend(
+            scan_file(py_path, src_root, literal_only=literal_only)
+        )
 
     counter = _bucket_counts(all_findings)
+    mode_label = "literal-only" if literal_only else "helper-aware"
     print(
-        f"[audit] scanned {src_root} — {len(all_findings)} silent-fallback candidates"
+        f"[audit] scanned {src_root} ({mode_label} mode) — "
+        f"{len(all_findings)} silent-fallback candidates"
     )
     for bucket in BUCKET_ORDER:
         print(f"[audit]   {bucket}: {counter.get(bucket, 0)}")
@@ -593,6 +815,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.summary_only:
         return 0
 
+    if args.output is None:
+        flag = "--summary-only"
+        raise SystemExit(
+            f"audit_silent_fallbacks: --output is required unless {flag} is set"
+        )
     output: Path = args.output.resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     report = render_report(all_findings, src_root_label=_render_root_label(src_root))
