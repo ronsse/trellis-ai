@@ -1,6 +1,8 @@
 """Learning module for Trellis — intent-family scoring and promotion."""
 
-from trellis.learning.observations import build_learning_observations_from_event_log
+from trellis.learning.pack_observations import (
+    build_learning_observations_from_event_log,
+)
 from trellis.learning.schema_evolution import (
     RECOMMENDED_SEED_VALUES,
     WellKnownCandidate,
