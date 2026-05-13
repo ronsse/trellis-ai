@@ -96,10 +96,10 @@ class _NoopMetaRecord:
         self.analyzer_name = analyzer_name
         self.agent_id = agent_id
 
-    def consumed_event(self, event_id: str) -> None:  # noqa: D401
+    def consumed_event(self, event_id: str) -> None:
         del event_id
 
-    def consumed_observation(self, observation_id: str) -> None:  # noqa: D401
+    def consumed_observation(self, observation_id: str) -> None:
         del observation_id
 
     def produced_finding(self, finding_id: str, finding_type: str) -> None:

@@ -1319,7 +1319,9 @@ class TestPackBuilderTokenBudget:
 # ---------------------------------------------------------------------------
 
 
-def _meta_activity_item(item_id: str, *, agent_id: str = "trellis_meta_analyzer") -> PackItem:
+def _meta_activity_item(
+    item_id: str, *, agent_id: str = "trellis_meta_analyzer"
+) -> PackItem:
     """Build a PackItem matching what GraphSearch emits for a meta-Activity.
 
     Two metadata signals matter for ``PackBuilder._is_meta_activity``:
@@ -1399,7 +1401,7 @@ class TestMetaActivityFilter:
         self, tmp_path: Path
     ) -> None:
         """PACK_ASSEMBLED payload includes ``meta_filtered_count``."""
-        from trellis.stores.base.event_log import EventType  # noqa: PLC0415
+        from trellis.stores.base.event_log import EventType
 
         event_log = SQLiteEventLog(tmp_path / "events.db")
         try:
@@ -1425,7 +1427,7 @@ class TestMetaActivityFilter:
         self, tmp_path: Path
     ) -> None:
         """include_meta=True yields ``meta_filtered_count == 0`` (filter no-op)."""
-        from trellis.stores.base.event_log import EventType  # noqa: PLC0415
+        from trellis.stores.base.event_log import EventType
 
         event_log = SQLiteEventLog(tmp_path / "events.db")
         try:
@@ -1446,7 +1448,7 @@ class TestMetaActivityFilter:
         self, tmp_path: Path
     ) -> None:
         """``build_sectioned`` also propagates ``meta_filtered_count``."""
-        from trellis.stores.base.event_log import EventType  # noqa: PLC0415
+        from trellis.stores.base.event_log import EventType
 
         event_log = SQLiteEventLog(tmp_path / "events.db")
         try:
