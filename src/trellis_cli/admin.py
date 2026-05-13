@@ -26,6 +26,7 @@ from trellis_cli.claude_integration import (
     write_claude_settings,
 )
 from trellis_cli.config import TrellisConfig, get_config_dir, get_data_dir
+from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_OK, EXIT_STORE, EXIT_VALIDATION
 from trellis_cli.stores import (
     _get_registry,
     get_document_store,
@@ -86,7 +87,7 @@ def init(
                 f"[yellow]Config already exists at {config_path}."
                 " Use --force to overwrite.[/yellow]"
             )
-        raise typer.Exit(code=0)
+        raise typer.Exit(code=EXIT_OK)
 
     # Set up data directory
     actual_data_dir = Path(data_dir) if data_dir else get_data_dir()
@@ -159,7 +160,7 @@ def init_learning_params(
                 f"[yellow]Already exists: {target}."
                 " Pass --force to overwrite.[/yellow]"
             )
-        raise typer.Exit(code=0)
+        raise typer.Exit(code=EXIT_OK)
 
     import yaml  # noqa: PLC0415
 
@@ -294,7 +295,7 @@ def serve(
             "[red]FastAPI/uvicorn not installed."
             " Install with: pip install fastapi uvicorn[/red]"
         )
-        raise typer.Exit(code=1)  # noqa: B904
+        raise typer.Exit(code=EXIT_INTERNAL)  # noqa: B904
 
     console.print(f"[green]Starting Trellis API server on {host}:{port}[/green]")
     app = create_app()
@@ -364,7 +365,7 @@ def graph_health(  # noqa: PLR0912, PLR0915
             )
         else:
             console.print("[yellow]Graph is empty — nothing to analyse.[/yellow]")
-        raise typer.Exit(code=0)
+        raise typer.Exit(code=EXIT_OK)
 
     # Fetch all current nodes (up to 10K for analysis).
     all_nodes = gstore.query(
@@ -554,12 +555,18 @@ def graph_health(  # noqa: PLR0912, PLR0915
     else:
         _print_graph_health_report(report)
 
-    # Exit code: 0 ok, 1 warnings, 2 critical
+    # Exit code: 0 ok, otherwise EXIT_INTERNAL. The pre-ADR convention
+    # used 1=warnings / 2=critical here, but 2 is now reserved for
+    # validation errors (see adr-cli-exit-codes.md). Both severities are
+    # operational findings about the graph corpus — not validation /
+    # policy / idempotency / store conditions — so they collapse to
+    # EXIT_INTERNAL (1) under the new map. CI gates that previously
+    # distinguished warnings from critical via 1-vs-2 now need to parse
+    # the JSON ``warnings`` array instead.
+    # was: code=2 (predates exit-code ADR) for critical; code=1 for warning
     severity_levels = {w.get("severity") for w in warnings}
-    if "critical" in severity_levels:
-        raise typer.Exit(code=2)
-    if "warning" in severity_levels:
-        raise typer.Exit(code=1)
+    if "critical" in severity_levels or "warning" in severity_levels:
+        raise typer.Exit(code=EXIT_INTERNAL)
 
 
 def _print_graph_health_report(report: dict[str, Any]) -> None:
@@ -815,15 +822,18 @@ def _build_check_extractors_report() -> dict[str, Any]:
     warnings: list[dict[str, str]] = []
 
     # Status logic:
-    # * BLOCKED (exit 2) — flag set AND no LLM client obtainable from
-    #   either config or env. Extraction would silently skip in prod.
+    # * BLOCKED — flag set AND no LLM client obtainable from either
+    #   config or env. Extraction would silently skip in prod. Emits
+    #   EXIT_INTERNAL (1) under the ADR — "blocked" is a deployment-
+    #   misconfiguration probe failure, not a validation / policy /
+    #   store error. was: code=2 (predates exit-code ADR)
     # * WARN (exit 1) — suboptimal but not fatal. Two sub-cases:
     #     (a) LLM buildable but flag unset.
     #     (b) Flag set, config-path unbuildable, but env fallback present.
     # * READY (exit 0) — flag set AND config-buildable LLM.
     if flag_set and not config_buildable and not env_fallback_available:
         status = "blocked"
-        exit_code = 2
+        exit_code = EXIT_INTERNAL
         warnings.append(
             {
                 "severity": "critical",
@@ -836,7 +846,7 @@ def _build_check_extractors_report() -> dict[str, Any]:
         )
     elif not flag_set and config_buildable:
         status = "warn"
-        exit_code = 1
+        exit_code = EXIT_INTERNAL
         warnings.append(
             {
                 "severity": "warning",
@@ -849,7 +859,7 @@ def _build_check_extractors_report() -> dict[str, Any]:
         )
     elif flag_set and not config_buildable and env_fallback_available:
         status = "warn"
-        exit_code = 1
+        exit_code = EXIT_INTERNAL
         warnings.append(
             {
                 "severity": "warning",
@@ -863,11 +873,11 @@ def _build_check_extractors_report() -> dict[str, Any]:
         )
     elif flag_set and config_buildable:
         status = "ready"
-        exit_code = 0
+        exit_code = EXIT_OK
     else:
         # Flag unset AND no LLM configured — inert but not wrong.
         status = "warn"
-        exit_code = 1
+        exit_code = EXIT_INTERNAL
         warnings.append(
             {
                 "severity": "warning",
@@ -976,12 +986,15 @@ def check_extractors(
 ) -> None:
     """Report readiness of the ``save_memory`` tiered-extraction pipeline.
 
-    Exit codes:
+    Exit codes (see ``trellis_cli.exit_codes`` /
+    ``docs/design/adr-cli-exit-codes.md``):
 
-    * ``0`` — READY (LLM client buildable AND feature flag set)
-    * ``1`` — WARN (buildable but flag unset; or flag set with only
-      env-var fallback available)
-    * ``2`` — BLOCKED (flag set AND no LLM client obtainable anywhere)
+    * :data:`~trellis_cli.exit_codes.EXIT_OK` — READY (LLM client
+      buildable AND feature flag set).
+    * :data:`~trellis_cli.exit_codes.EXIT_INTERNAL` — WARN or BLOCKED.
+      WARN: buildable but flag unset, or flag set with only env-var
+      fallback available. BLOCKED: flag set AND no LLM client
+      obtainable anywhere — extraction would silently skip in prod.
     """
     report = _build_check_extractors_report()
     if output_format == "json":
@@ -1096,20 +1109,20 @@ def _load_graph_store_from_yaml(path: Path) -> Any:
 
     if not path.exists():
         console.print(f"[red]Config file not found: {path}[/red]")
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=EXIT_VALIDATION)
 
     try:
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     except yaml.YAMLError as exc:
         console.print(f"[red]Invalid YAML in {path}: {exc}[/red]")
-        raise typer.Exit(code=1) from exc
+        raise typer.Exit(code=EXIT_VALIDATION) from exc
 
     graph_block = data.get("graph")
     if not isinstance(graph_block, dict) or "backend" not in graph_block:
         console.print(
             f"[red]{path} must contain a 'graph:' block with a 'backend' key[/red]"
         )
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=EXIT_VALIDATION)
 
     config: dict[str, Any] = {"graph": graph_block}
     # SQLite backend needs stores_dir for default db_path resolution.
@@ -1214,14 +1227,14 @@ def migrate_graph(
                 report = migrator.run(dry_run=dry_run, strategy=strategy)
             except MigrationCapacityExceededError as exc:
                 console.print(f"[red]{exc}[/red]")
-                raise typer.Exit(code=1) from exc
+                raise typer.Exit(code=EXIT_INTERNAL) from exc
             except MigrationStepError as exc:
                 console.print(f"[red]Migration aborted: {exc}[/red]")
                 console.print(
                     "[yellow]Re-run with --continue-on-error to capture all "
                     "failures in one pass.[/yellow]"
                 )
-                raise typer.Exit(code=1) from exc
+                raise typer.Exit(code=EXIT_STORE) from exc
         finally:
             # Close in dest-first order so the source connection survives
             # if the dest close blows up — diagnostics may need to
@@ -1254,7 +1267,7 @@ def migrate_graph(
             console.print("[red]Errors:[/red]")
             for target, msg in report.errors:
                 console.print(f"  [red]{target}[/red]: {msg}")
-            raise typer.Exit(code=1)
+            raise typer.Exit(code=EXIT_STORE)
 
 
 # ---------------------------------------------------------------------------
@@ -1547,7 +1560,7 @@ def smoke_test(
         _render_smoke_text(base_url, checks, summary)
 
     if not ok:
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=EXIT_INTERNAL)
 
 
 # ---------------------------------------------------------------------------
@@ -1598,7 +1611,10 @@ def _lookup_candidate_payload(event_log: Any, candidate_id: str) -> dict[str, An
         f"{candidate_id!r}. Run 'trellis analyze schema-evolution' first."
     )
     console.print(f"[red]{msg}[/red]")
-    raise typer.Exit(code=1)
+    # Not-found is a workflow state (operator must run schema-evolution
+    # first), not a malformed input — surface as EXIT_INTERNAL rather
+    # than EXIT_VALIDATION.
+    raise typer.Exit(code=EXIT_INTERNAL)
 
 
 def _render_promotion_adr(
@@ -1849,7 +1865,9 @@ def draft_promotion_adr(
             "Pass --force to overwrite (the prior content will be replaced)."
         )
         console.print(f"[red]{msg}[/red]")
-        raise typer.Exit(code=1)
+        # Overwrite-without-force is a destructive-action guard rather
+        # than a malformed-input error — surface as EXIT_INTERNAL.
+        raise typer.Exit(code=EXIT_INTERNAL)
 
     if output_path.exists() and force:
         # Loud-on-misuse: an operator overwriting a previously-drafted

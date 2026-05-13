@@ -150,6 +150,13 @@ class TestCheckExtractorsReady:
 
 
 class TestCheckExtractorsBlocked:
+    # Pre-ADR convention used exit code 2 to mean "BLOCKED" here. Code 2
+    # is now reserved for validation errors (see
+    # docs/design/adr-cli-exit-codes.md). BLOCKED is a deployment-
+    # misconfiguration probe failure rather than a validation / policy /
+    # store error, so it collapses to EXIT_INTERNAL (1) under the new
+    # map. The assertions below were updated from 2 -> 1 with the
+    # implementation in PR #refactor-cli-adopt-exit-code-constants.
     @patch("trellis_cli.admin._get_registry")
     def test_flag_set_no_llm_anywhere_exits_two(self, mock_get_reg, monkeypatch):
         mock_get_reg.return_value = _make_registry(
@@ -159,7 +166,7 @@ class TestCheckExtractorsBlocked:
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
         monkeypatch.setenv("TRELLIS_ENABLE_MEMORY_EXTRACTION", "1")
         result = runner.invoke(admin_app, ["check-extractors"])
-        assert result.exit_code == 2
+        assert result.exit_code == 1  # was 2 pre-ADR; see class docstring
         assert "BLOCKED" in result.stdout
 
     @patch("trellis_cli.admin._get_registry")
@@ -171,10 +178,10 @@ class TestCheckExtractorsBlocked:
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
         monkeypatch.setenv("TRELLIS_ENABLE_MEMORY_EXTRACTION", "1")
         result = runner.invoke(admin_app, ["check-extractors", "--format", "json"])
-        assert result.exit_code == 2
+        assert result.exit_code == 1  # was 2 pre-ADR; see class docstring
         data = json.loads(result.stdout.strip())
         assert data["status"] == "blocked"
-        assert data["exit_code"] == 2
+        assert data["exit_code"] == 1  # was 2 pre-ADR; see class docstring
         assert data["llm_client"]["config_buildable"] is False
         assert data["llm_client"]["env_fallback_available"] is False
         assert any(w["signal"] == "no_llm_client" for w in data["warnings"])
