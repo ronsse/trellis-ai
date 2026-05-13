@@ -12,6 +12,7 @@ from trellis.schemas.enums import Enforcement, PolicyType
 from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
 from trellis.stores.policy_store import PolicyStore
 from trellis_cli.config import get_data_dir
+from trellis_cli.exit_codes import EXIT_INTERNAL
 
 policy_app = typer.Typer(no_args_is_help=True)
 console = Console()
@@ -84,7 +85,7 @@ def show_policy(
     match = _find_policy(store, policy_id)
     if match is None:
         console.print(f"[red]Policy not found: {policy_id}[/red]")
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=EXIT_INTERNAL)
 
     if output_format == "json":
         _print_json(match.model_dump(mode="json"))
@@ -173,7 +174,7 @@ def remove_policy(
             )
         else:
             console.print(f"[red]Policy not found: {policy_id}[/red]")
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=EXIT_INTERNAL)
 
     store.remove(match.policy_id)
 

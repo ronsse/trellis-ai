@@ -32,14 +32,19 @@ Behaviour (mirrors ``plan-provenance-columns.md`` §4 + plan brief):
 * **JSON output.**  Per the project's hard rule, ``--format json``
   emits a single JSON object on stdout suitable for piping to ``jq``.
 
-Exit codes follow the project map established in PR #123:
+Exit codes follow :mod:`trellis_cli.exit_codes` (the canonical map
+introduced in PR #123 and documented in
+``docs/design/adr-cli-exit-codes.md``):
 
-* ``0`` — success (including no-op runs).
-* ``1`` — unexpected runtime error.
-* ``5`` — store error during scan / write.
+* :data:`~trellis_cli.exit_codes.EXIT_OK` (0) — success (including
+  no-op runs).
+* :data:`~trellis_cli.exit_codes.EXIT_INTERNAL` (1) — unexpected
+  runtime error.
+* :data:`~trellis_cli.exit_codes.EXIT_STORE` (5) — store error during
+  scan / write.
 
 Drift detection raises :class:`MigrationDriftError` which surfaces as
-exit code ``1`` (parallel to ``RetentionDriftError`` from PR #116;
+``EXIT_INTERNAL`` (parallel to ``RetentionDriftError`` from PR #116;
 both signal "the data is in a state operators need to look at").
 """
 
@@ -60,6 +65,7 @@ from trellis.stores.base.edge_provenance import (
     extract_edge_provenance,
     validate_edge_provenance,
 )
+from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_OK, EXIT_STORE
 from trellis_cli.stores import get_event_log, get_graph_store
 
 if TYPE_CHECKING:
@@ -81,13 +87,6 @@ _DRIFT_THRESHOLD: float = 0.01
 #: full before truncating with a "… and N more" line.  Keeps the
 #: console output finite when a misconfigured store rains errors.
 _ERROR_PREVIEW_LIMIT = 10
-
-#: Exit code map.  Kept narrow — anything store-shaped goes to ``5``,
-#: anything else to ``1``.
-_EXIT_OK = 0
-_EXIT_RUNTIME = 1
-_EXIT_STORE = 5
-
 
 class MigrationDriftError(RuntimeError):
     """Raised when too many edges have malformed legacy provenance.
@@ -357,7 +356,7 @@ def migrate_provenance_command(
             console.print(json.dumps(payload, indent=2))
         else:
             console.print(f"[red]{exc}[/red]")
-        raise typer.Exit(code=_EXIT_RUNTIME) from exc
+        raise typer.Exit(code=EXIT_INTERNAL) from exc
     except typer.Exit:
         raise
     except Exception as exc:
@@ -374,14 +373,14 @@ def migrate_provenance_command(
             )
         else:
             console.print(f"[red]store error: {type(exc).__name__}: {exc}[/red]")
-        raise typer.Exit(code=_EXIT_STORE) from exc
+        raise typer.Exit(code=EXIT_STORE) from exc
 
     if output_format == "json":
         console.print(json.dumps(report.to_payload(), indent=2, default=str))
     else:
         _print_text_report(report)
 
-    raise typer.Exit(code=_EXIT_OK)
+    raise typer.Exit(code=EXIT_OK)
 
 
 def register(admin_app: typer.Typer) -> None:

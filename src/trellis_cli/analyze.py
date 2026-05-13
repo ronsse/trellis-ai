@@ -53,6 +53,7 @@ from trellis.stores.advisory_store import AdvisoryStore
 from trellis.stores.base.parameter import ParameterStore
 from trellis_cli._meta_wiring import wrap_cli_meta_analysis
 from trellis_cli.config import get_config_dir
+from trellis_cli.exit_codes import EXIT_INTERNAL
 from trellis_cli.stores import (
     get_document_store,
     get_event_log,
@@ -229,7 +230,7 @@ def _build_learning_registry_or_exit() -> ParameterRegistry:
         return _build_learning_registry()
     except typer.BadParameter as exc:
         console.print(f"[red]{exc}[/red]")
-        raise typer.Exit(code=1) from exc
+        raise typer.Exit(code=EXIT_INTERNAL) from exc
 
 
 @analyze_app.command("context-effectiveness")
@@ -1648,4 +1649,4 @@ def schema_evolution(
                     )
 
     if strict and candidates:
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=EXIT_INTERNAL)

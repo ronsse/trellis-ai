@@ -10,6 +10,7 @@ import typer
 from rich.console import Console
 
 from trellis.retrieve.precedents import list_precedents as _list_precedents
+from trellis_cli.exit_codes import EXIT_INTERNAL
 from trellis_cli.output import format_output, truncate_values
 from trellis_cli.stores import (
     LOCAL_SOURCE_SYSTEM,
@@ -150,7 +151,7 @@ def trace(
             console.print(json.dumps({"status": "not_found", "trace_id": trace_id}))
         else:
             console.print(f"[yellow]Trace not found[/yellow]: {trace_id}")
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=EXIT_INTERNAL)
 
     if output_format == "json":
         console.print(result.model_dump_json())
@@ -182,7 +183,7 @@ def entity(
             console.print(json.dumps({"status": "not_found", "entity_id": entity_id}))
         else:
             console.print(f"[yellow]Entity not found[/yellow]: {entity_id}")
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=EXIT_INTERNAL)
 
     if output_format == "json":
         console.print(json.dumps(result))

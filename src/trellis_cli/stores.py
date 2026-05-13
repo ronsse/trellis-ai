@@ -16,6 +16,7 @@ from trellis.stores.base import (
 )
 from trellis.stores.registry import StoreRegistry
 from trellis_cli.config import get_config_dir, get_data_dir
+from trellis_cli.exit_codes import EXIT_INTERNAL
 
 logger = structlog.get_logger(__name__)
 
@@ -55,7 +56,7 @@ def _get_registry() -> StoreRegistry:
             Console().print(
                 "[red]Stores not initialized. Run 'trellis admin init' first.[/red]"
             )
-            raise typer.Exit(code=1)
+            raise typer.Exit(code=EXIT_INTERNAL)
         _registry = StoreRegistry.from_config_dir(
             config_dir=config_dir,
             data_dir=data_dir,
