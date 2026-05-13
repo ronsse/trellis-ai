@@ -280,16 +280,21 @@ def _default_context_builder(doc: dict[str, Any]) -> ClassificationContext:
     existing_tags = None
     if isinstance(existing_tags_raw, dict):
         # Import lazily to avoid a hard schema dependency in this layer.
+        from pydantic import ValidationError  # noqa: PLC0415
+
         from trellis.schemas.classification import ContentTags  # noqa: PLC0415
 
         try:
             existing_tags = ContentTags.model_validate(existing_tags_raw)
-        except Exception:
-            # Malformed stored tags are common in pre-1.1-fix data; fall
-            # back to None rather than failing the whole refresh.
-            logger.debug(
+        # GRACEFUL-DEGRADATION (C2 Phase 5): refresh tolerates malformed pre-1.1
+        # tags by re-classifying from scratch; warn so corrupt rows remain
+        # observable to operators.
+        # TODO(c2-phase5): add metrics.telemetry_failures counter (structlog-only).
+        except ValidationError:
+            logger.warning(
                 "existing_tags_malformed",
                 item_id=doc.get("doc_id"),
+                exc_info=True,
             )
 
     return ClassificationContext(
@@ -304,7 +309,14 @@ def _default_context_builder(doc: dict[str, Any]) -> ClassificationContext:
 
 
 def _parse_classified_at(raw: Any) -> datetime | None:
-    """Parse a stored classified_at value (ISO-8601 string) to datetime."""
+    """Parse a stored classified_at value (ISO-8601 string) to datetime.
+
+    Callers in :func:`reclassify_stale` treat ``None`` as "missing =>
+    always stale", so the empty-return is a first-class signal (not a
+    silent swallow). The fall-through cases below intentionally return
+    ``None`` to drive that behavior. Corrupt non-empty strings still
+    log a warning so operators see when stored stamps are malformed.
+    """
     if raw is None:
         return None
     if isinstance(raw, datetime):
@@ -313,7 +325,16 @@ def _parse_classified_at(raw: Any) -> datetime | None:
         return None
     try:
         parsed = datetime.fromisoformat(raw)
+    # GRACEFUL-DEGRADATION (C2 Phase 5): caller treats None as "always stale" so
+    # the empty return is the intended signal; log on malformed input so
+    # corrupt stamps remain observable.
+    # TODO(c2-phase5): add metrics.telemetry_failures counter (structlog-only).
     except (TypeError, ValueError):
+        logger.warning(
+            "classified_at_parse_failed",
+            raw=raw,
+            exc_info=True,
+        )
         return None
     return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
@@ -338,6 +359,9 @@ def _emit_tags_refreshed(
                 "classified_by": after.get("classified_by", []),
             },
         )
+    # GRACEFUL-DEGRADATION (C2 Phase 5): tags already persisted to document_store;
+    # this event emit is post-success telemetry and must not roll back the write.
+    # TODO(c2-phase5): add metrics.telemetry_failures counter (structlog-only).
     except Exception:
         logger.exception(
             "tags_refreshed_emit_failed",

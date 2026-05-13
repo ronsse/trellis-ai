@@ -53,10 +53,14 @@ def _install_otel() -> bool:
     """
     try:
         import opentelemetry.instrumentation.fastapi  # noqa: F401, PLC0415
+    # GRACEFUL-DEGRADATION (C2 Phase 5): optional [observability] extra not
+    # installed — app boot proceeds. ImportError is narrow and the absence is
+    # an expected steady-state, not a runtime failure.
+    # TODO(c2-phase5): add metrics.telemetry_failures counter (structlog-only).
     except ImportError:
-        logger.debug(
+        logger.info(
             "otel_skipped_not_installed",
-            extra="install with `pip install trellis-ai[observability]`",
+            hint="install with `pip install trellis-ai[observability]`",
         )
         return False
 
@@ -68,8 +72,11 @@ def _install_otel() -> bool:
         )
 
         PsycopgInstrumentor().instrument()
+    # GRACEFUL-DEGRADATION (C2 Phase 5): psycopg OTel sub-extra optional;
+    # absence expected on non-Postgres deploys.
+    # TODO(c2-phase5): add metrics.telemetry_failures counter (structlog-only).
     except ImportError:
-        logger.debug("otel_psycopg_not_installed")
+        logger.info("otel_psycopg_not_installed")
 
     return True
 
@@ -80,10 +87,13 @@ def _install_prometheus(app: FastAPI) -> bool:
         from prometheus_fastapi_instrumentator import (  # noqa: PLC0415
             Instrumentator,
         )
+    # GRACEFUL-DEGRADATION (C2 Phase 5): optional [observability] extra not
+    # installed — /metrics not mounted, app boot proceeds.
+    # TODO(c2-phase5): add metrics.telemetry_failures counter (structlog-only).
     except ImportError:
-        logger.debug(
+        logger.info(
             "prometheus_skipped_not_installed",
-            extra="install with `pip install trellis-ai[observability]`",
+            hint="install with `pip install trellis-ai[observability]`",
         )
         return False
 
@@ -119,8 +129,11 @@ def install_observability(app: FastAPI) -> dict[str, bool]:
 
             FastAPIInstrumentor.instrument_app(app)
             fastapi_instrumented = True
-        except Exception as exc:
-            logger.warning("otel_fastapi_instrument_failed", error=str(exc))
+        # GRACEFUL-DEGRADATION (C2 Phase 5): telemetry hookup must not break app
+        # boot; failure surfaces via the returned status dict.
+        # TODO(c2-phase5): add metrics.telemetry_failures counter (structlog-only).
+        except Exception:
+            logger.exception("otel_fastapi_instrument_failed")
 
     logger.info(
         "observability_installed",
