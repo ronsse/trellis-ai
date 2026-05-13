@@ -203,3 +203,64 @@ class TestArcadeDBEdgeProvenance:
                 DATABASE,
                 "UPDATE EDGE SET confidence = 2.5 WHERE edge_type = 'depends_on'",
             )
+
+    def test_registry_built_arcadedb_installs_provenance_schema(self):
+        """Schema-typed property installation must run via the registry
+        path, not just direct construction.
+
+        Reproduces the gap PR #126 + #127 reviewers identified: building
+        ArcadeDBGraphStore via ``StoreRegistry`` used to strip
+        ``http_url`` + ``password`` before calling the constructor with
+        ``driver=...``, leaving the constructor's injected-driver
+        branch unable to run the typed-property migration. The registry
+        now runs the migration itself before injecting the driver — so
+        a registry-built store should reject an out-of-range
+        ``confidence`` write at the server boundary even when the
+        Python validator is bypassed.
+        """
+        from trellis.stores.arcadedb.base import execute_sql
+        from trellis.stores.registry import StoreRegistry
+
+        config = {
+            "graph": {
+                "backend": "arcadedb",
+                "uri": URI,
+                "user": USER,
+                "password": PASSWORD,
+                "database": DATABASE,
+                "http_url": HTTP_URL,
+            },
+        }
+        registry = StoreRegistry(config=config)
+        try:
+            graph_store = registry.knowledge.graph_store
+            # Clean rows from prior tests in this class.
+            with graph_store._driver.session(
+                database=graph_store._database
+            ) as session:
+                session.run(
+                    "MATCH (n) WHERE n:Node OR n:Alias DETACH DELETE n"
+                )
+            graph_store.upsert_node("a", "service", {})
+            graph_store.upsert_node("b", "service", {})
+            graph_store.upsert_edge(
+                "a", "b", "depends_on", confidence=0.5
+            )
+            # Server-side FLOAT MIN/MAX must reject an out-of-range
+            # raw-SQL update — proof the typed-property migration
+            # installed via the registry path. Pre-fix, this UPDATE
+            # would succeed because the property was auto-created
+            # untyped on first write.
+            with pytest.raises(RuntimeError):
+                execute_sql(
+                    HTTP_URL,
+                    USER,
+                    PASSWORD,
+                    DATABASE,
+                    "UPDATE EDGE SET confidence = 2.5 "
+                    "WHERE edge_type = 'depends_on'",
+                )
+        finally:
+            registry.close()
+
+

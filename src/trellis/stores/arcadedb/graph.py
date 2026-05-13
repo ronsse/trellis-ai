@@ -139,16 +139,19 @@ class ArcadeDBGraphStore(BoltOpenCypherGraphStore):
                 raise ValueError(msg)
             super().__init__(driver=driver, database=database, owns_driver=False)
             # Property-schema migration requires HTTP credentials. The
-            # injected-driver path doesn't always have them; the
-            # registry runs this migration itself (with full
-            # credentials) before injecting the driver, so the common
-            # production path is already covered. When a caller
-            # constructs the store directly with an injected driver and
-            # omits ``http_url`` / ``password``, we surface the missing
-            # constraint as a warning rather than failing — the store
-            # still functions (ArcadeDB auto-creates untyped properties
-            # on first write) but loses the FLOAT MIN/MAX defense-in-
-            # depth on ``confidence``.
+            # registry path forwards ``http_url`` (so we know it
+            # resolved one) but strips ``password`` to preserve the
+            # mutex with ``driver``. In that case the registry already
+            # ran the migration before injecting the driver — log at
+            # debug, no missing-constraint risk.
+            #
+            # If both ``http_url`` and ``password`` are present (a
+            # direct caller bypassing the mutex check would not get
+            # past the guard above, so this is only the future-proof
+            # path where the constructor itself drives migration), run
+            # it here. Otherwise — no http_url at all — fall back to
+            # the warning: a direct caller missed credentials and the
+            # FLOAT MIN/MAX constraint will not be installed.
             if http_url is not None and password is not None:
                 self._init_arcadedb_edge_provenance_schema(
                     http_url=http_url,
@@ -156,16 +159,26 @@ class ArcadeDBGraphStore(BoltOpenCypherGraphStore):
                     password=password,
                     database=database,
                 )
+            elif http_url is not None:
+                logger.debug(
+                    "arcadedb_provenance_schema_migration_handled_by_registry",
+                    reason=(
+                        "http_url forwarded alongside injected driver but "
+                        "password stripped (registry mutex). Registry runs "
+                        "the typed-property migration itself before "
+                        "injecting the driver."
+                    ),
+                )
             else:
                 logger.warning(
                     "arcadedb_provenance_schema_migration_skipped_injected_driver",
                     reason=(
-                        "http_url and/or password not supplied alongside "
-                        "injected driver; the FLOAT MIN/MAX constraint on "
-                        "edge.confidence will not be installed. Pass both "
-                        "to enable the schema-typed property constraint, "
-                        "or construct via StoreRegistry which handles "
-                        "this automatically."
+                        "http_url not supplied alongside injected driver; "
+                        "the FLOAT MIN/MAX constraint on edge.confidence "
+                        "will not be installed. Pass http_url (and run "
+                        "the migration externally) to enable the schema-"
+                        "typed property constraint, or construct via "
+                        "StoreRegistry which handles this automatically."
                     ),
                 )
             logger.info(
