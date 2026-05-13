@@ -175,6 +175,10 @@ def record_feedback(
                     payload=feedback.to_event_payload(pack_id=pack_id),
                 )
                 event_log_emitted = True
+        # GRACEFUL-DEGRADATION (C2 Phase 5): JSONL append is durable; EventLog
+        # bridge is best-effort. Failure surfaces to caller via
+        # FeedbackRecordResult.event_log_error so a retry/reconcile can run.
+        # TODO(c2-phase5): add metrics.telemetry_failures counter (structlog-only).
         except Exception as exc:
             event_log_error = exc
             logger.exception(
@@ -195,6 +199,10 @@ def record_feedback(
                 component_id=component_id,
             )
             outcome_emitted = True
+        # GRACEFUL-DEGRADATION (C2 Phase 5): JSONL append is durable; OutcomeStore
+        # bridge is best-effort. Failure surfaces via
+        # FeedbackRecordResult.outcome_error.
+        # TODO(c2-phase5): add metrics.telemetry_failures counter (structlog-only).
         except Exception as exc:
             outcome_error = exc
             logger.exception(
@@ -275,6 +283,10 @@ def reconcile_feedback_log_to_event_log(
                 payload=fb.to_event_payload(pack_id=pack_id),
             )
             result.emitted += 1
+        # GRACEFUL-DEGRADATION (C2 Phase 5): reconciliation loop must drain the
+        # JSONL log; per-row failures are recorded on ReconcileResult so the
+        # caller can retry the missing ids.
+        # TODO(c2-phase5): add metrics.telemetry_failures counter (structlog-only).
         except Exception:
             result.failed += 1
             result.missing_feedback_ids.append(fb.feedback_id)
@@ -296,12 +308,27 @@ def reconcile_feedback_log_to_event_log(
 
 
 def _parse_timestamp(raw: str) -> datetime | None:
-    """Parse an ISO-8601 timestamp, returning ``None`` on failure."""
+    """Parse an ISO-8601 timestamp, returning ``None`` on failure.
+
+    Empty input is a first-class "unknown timestamp" signal and returns
+    ``None`` silently. A *malformed* non-empty input is data corruption
+    and must surface — the bridge into the OutcomeStore loses
+    ``occurred_at`` otherwise and the operator has no signal that a row
+    arrived bad. We log a warning and still return ``None`` because the
+    bridge contract is fail-soft (the JSONL append is the audit trail),
+    but the loud log closes the silent-fallback gap.
+    """
     if not raw:
         return None
     try:
         return datetime.fromisoformat(raw)
+    # DEFECT (Phase 5 fix): previously swallowed silently; malformed timestamps now log.
     except (TypeError, ValueError):
+        logger.warning(
+            "feedback_timestamp_parse_failed",
+            raw=raw,
+            exc_info=True,
+        )
         return None
 
 
