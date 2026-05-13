@@ -8,11 +8,16 @@ The default rules are:
 - **domain_knowledge**: org/universal scope constraints, decisions, documentation;
   precedent/owner/team entities
 - **technical_pattern**: patterns, procedures, code, configurations
-- **operational**: traces, error-resolutions
+- **operational**: traces, error-resolutions; empirical observations / measurements
 - **reference**: entity metadata, configurations
 
-Applications can override these rules by passing a custom ``TierMapper``
-to ``PackBuilder.build_sectioned()``.
+Observations and measurements (Item 1 Phase 2 of the self-improvement
+program — see ``docs/design/plan-observation-entity-type.md``) land in the
+**operational** affinity by default: they describe runtime behaviour of a
+subject entity ("table X was queried N times", "column Y has null_rate
+0.03") which is the same shape of signal as traces and error-resolutions.
+Applications that want their own bucket (e.g., a dedicated ``metric``
+sub-tier) pass a custom heuristics dict to :class:`TierMapper`.
 """
 
 from __future__ import annotations
@@ -39,7 +44,12 @@ _DEFAULT_HEURISTICS: dict[str, dict[str, Any]] = {
     "operational": {
         "content_types": {"error-resolution"},
         "scopes": set(),
-        "item_types": {"trace"},
+        # Observations and measurements (Item 1 Phase 2) ride the
+        # operational affinity — they're empirical claims about an
+        # entity's runtime behaviour, same shape of signal as traces.
+        # Both share the ``"observation"`` ``PackItem.item_type``
+        # produced by :class:`ObservationSearch`.
+        "item_types": {"trace", "observation"},
         "require_scope": False,
     },
     "reference": {

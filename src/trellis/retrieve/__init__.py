@@ -19,6 +19,7 @@ from trellis.retrieve.evaluate import (
     analyze_dimension_predictiveness,
     evaluate_pack,
 )
+from trellis.retrieve.observation_strategy import ObservationSearch
 from trellis.retrieve.pack_builder import (
     PackAssemblyError,
     PackBuilder,
@@ -63,6 +64,7 @@ __all__ = [
     "KNOWN_REJECTION_REASONS",
     "KeywordSearch",
     "NoiseScorer",
+    "ObservationSearch",
     "PackAssemblyError",
     "PackBuilder",
     "PackEvaluator",

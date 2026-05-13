@@ -12,8 +12,14 @@ loading and command submission through
 
 from trellis_workers.extract.dbt_manifest import DbtManifestExtractor
 from trellis_workers.extract.openlineage import OpenLineageExtractor
+from trellis_workers.extract.query_pattern_observer import (
+    QueryLogRecord,
+    QueryPatternObserver,
+)
 
 __all__ = [
     "DbtManifestExtractor",
     "OpenLineageExtractor",
+    "QueryLogRecord",
+    "QueryPatternObserver",
 ]
