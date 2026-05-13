@@ -24,7 +24,10 @@ import structlog
 
 from trellis_sdk.exceptions import (
     TrellisAPIError,
+    TrellisClientError,
     TrellisRateLimitError,
+    TrellisServerError,
+    TrellisTransportError,
     TrellisVersionMismatchError,
 )
 
@@ -45,19 +48,31 @@ SDK_WIRE_SCHEMA = "0.1.0"
 SDK_VERSION = "0.1.0"
 
 _HTTP_OK_MAX = 299
+_HTTP_CLIENT_MIN = 400
+_HTTP_CLIENT_MAX = 499
 _HTTP_NOT_FOUND = 404
 _HTTP_RATE_LIMITED = 429
+_HTTP_SERVER_MIN = 500
 
 
 def raise_for_status(resp: httpx.Response, *, request_path: str) -> None:
-    """Convert a non-2xx response into a typed :class:`TrellisError`.
+    """Convert a non-2xx response into a typed :class:`TrellisHttpError`.
 
-    * ``404`` is *not* raised here — many SDK methods translate it to
-      a ``None`` return; leave that decision to the caller.
-    * ``429`` maps to :class:`TrellisRateLimitError` with
-      ``Retry-After`` parsed.
-    * Any other non-2xx maps to :class:`TrellisAPIError` with the
-      parsed JSON body attached.
+    Status-class mapping:
+
+    * ``2xx`` -> no exception.
+    * ``404`` -> no exception (many SDK methods translate to ``None``).
+    * ``429`` -> :class:`TrellisRateLimitError` with ``Retry-After``
+      parsed. Subclass of :class:`TrellisClientError`.
+    * other ``4xx`` -> :class:`TrellisClientError` (caller bug).
+    * ``5xx`` -> :class:`TrellisServerError` (transient).
+    * ``1xx``/``3xx`` -> :class:`TrellisAPIError` (legacy fallthrough;
+      shouldn't normally happen because ``httpx`` follows redirects by
+      default and ``1xx`` is purely informational).
+
+    Network/transport failures never reach this function — they raise
+    ``httpx.HTTPError`` from the request call site; the request wrapper
+    converts those to :class:`TrellisTransportError`.
     """
     status = resp.status_code
     if status <= _HTTP_OK_MAX:
@@ -74,7 +89,35 @@ def raise_for_status(resp: httpx.Response, *, request_path: str) -> None:
             body=body,
             request_path=request_path,
         )
+    if _HTTP_CLIENT_MIN <= status <= _HTTP_CLIENT_MAX:
+        raise TrellisClientError(
+            message,
+            status_code=status,
+            body=body,
+            request_path=request_path,
+        )
+    if status >= _HTTP_SERVER_MIN:
+        raise TrellisServerError(
+            message,
+            status_code=status,
+            body=body,
+            request_path=request_path,
+        )
+    # 1xx/3xx — shouldn't reach here; preserve legacy shape for safety.
     raise TrellisAPIError(status, message, body=body, request_path=request_path)
+
+
+def wrap_transport_error(exc: Exception, *, request_path: str) -> TrellisTransportError:
+    """Convert an ``httpx`` transport failure into a typed SDK error.
+
+    Callers wrap the request call site in a ``try``/``except
+    httpx.HTTPError`` and re-raise the result of this function so the
+    typed-exception contract reaches every caller — they never need
+    to ``import httpx`` just to catch a connection refused.
+    """
+    wrapped = TrellisTransportError(str(exc), request_path=request_path)
+    wrapped.__cause__ = exc
+    return wrapped
 
 
 def check_handshake(
@@ -150,9 +193,20 @@ def _parse_version(v: str) -> tuple[int, ...]:
 
 
 def _safe_json(resp: httpx.Response) -> Any:
+    """Best-effort JSON decode of an error-response body.
+
+    Documented graceful degradation: when the server returns a non-JSON
+    error page (HTML, plaintext, etc.), the caller falls back to
+    ``resp.text`` for the diagnostic message. We deliberately catch
+    only the parser-level failure modes ``httpx``/``json`` can raise
+    so unrelated bugs (e.g. a real ``TypeError`` in the response
+    pipeline) propagate.
+    """
+    import json as _json  # noqa: PLC0415 — narrow import inside fallback
+
     try:
         return resp.json()
-    except Exception:
+    except (ValueError, _json.JSONDecodeError, UnicodeDecodeError):
         return None
 
 
@@ -195,4 +249,5 @@ __all__ = [
     "SDK_WIRE_SCHEMA",
     "check_handshake",
     "raise_for_status",
+    "wrap_transport_error",
 ]

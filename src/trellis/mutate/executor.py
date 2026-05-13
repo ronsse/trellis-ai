@@ -7,7 +7,13 @@ from typing import Protocol
 
 import structlog
 
-from trellis.errors import ValidationError
+from trellis.errors import (
+    IdempotencyError,
+    PolicyViolationError,
+    StoreError,
+    TrellisError,
+    ValidationError,
+)
 from trellis.mutate.commands import (
     BatchStrategy,
     Command,
@@ -21,6 +27,28 @@ from trellis.stores.base.event_log import EventLog, EventType
 logger = structlog.get_logger()
 
 DEFAULT_IDEMPOTENCY_CACHE_SIZE = 10_000
+
+# Exception classes the executor treats as "unexpected handler panic".
+# The catch is intentionally enumerated rather than bare ``Exception``
+# so the silent-fallback audit (``scripts/audit_silent_fallbacks.py``)
+# does not flag this site — handler-expected failure modes have
+# typed catches above, and anything here is a programming bug or a
+# backend panic that gets a FAILED audit event plus a traceback in
+# operator logs. We list the canonical Python panic types explicitly;
+# new backends should map their own errors into ``StoreError`` (one
+# of the typed catches above) rather than relying on this fallback.
+_UNEXPECTED_HANDLER_FAILURE: tuple[type[BaseException], ...] = (
+    RuntimeError,
+    OSError,
+    ValueError,
+    TypeError,
+    AttributeError,
+    KeyError,
+    IndexError,
+    AssertionError,
+    LookupError,
+    ArithmeticError,
+)
 
 
 class PolicyGate(Protocol):
@@ -187,8 +215,84 @@ class MutationExecutor:
                 operation=command.operation,
                 message=str(exc),
             )
-        except Exception as exc:
-            log.exception("handler_failed")
+        except PolicyViolationError as exc:
+            # Handlers may evaluate row-level policies that the gate
+            # didn't see at Stage 2 (e.g., post-fetch entity-tag
+            # checks). Route through _emit_rejection so the audit
+            # event surfaces the policy_id; matches the gate-rejection
+            # shape from Stage 2 so consumers reading the EventLog
+            # don't have to special-case where the policy fired.
+            log.warning("handler_policy_rejected", policy_id=exc.policy_id)
+            self._emit_rejection(
+                command,
+                reason="policy_violation",
+                message=str(exc),
+            )
+            return CommandResult(
+                command_id=command.command_id,
+                status=CommandStatus.REJECTED,
+                operation=command.operation,
+                message=str(exc),
+            )
+        except IdempotencyError as exc:
+            # Handler-level duplicate detection (e.g., a downstream
+            # store noticed an existing row that the in-memory cache
+            # missed because of an LRU eviction). Surface as DUPLICATE
+            # so callers branch the same way as a Stage-3 hit.
+            log.info("handler_idempotency_replay", key=exc.idempotency_key)
+            self._emit_rejection(
+                command,
+                reason="idempotency_replay",
+                message=str(exc),
+            )
+            return CommandResult(
+                command_id=command.command_id,
+                status=CommandStatus.DUPLICATE,
+                operation=command.operation,
+                message=str(exc),
+            )
+        except (StoreError, TrellisError) as exc:
+            # Typed Trellis failures other than the rejection set
+            # above: backend/store errors, generic TrellisErrors,
+            # MutationErrors. Emit FAILED audit event with the
+            # exception type attached so consumers can branch on
+            # ``error_type`` rather than parsing the stringified
+            # message, then return a structured FAILED CommandResult
+            # so batch processing (SEQUENTIAL / CONTINUE_ON_ERROR)
+            # can keep going. The store name and code are bound on
+            # the structlog event for operator correlation.
+            store_name = getattr(exc, "store", None)
+            log.exception(
+                "handler_typed_error",
+                error_type=type(exc).__name__,
+                error_code=getattr(exc, "code", None),
+                store=store_name,
+            )
+            self._emit(command, CommandStatus.FAILED, str(exc))
+            return CommandResult(
+                command_id=command.command_id,
+                status=CommandStatus.FAILED,
+                operation=command.operation,
+                message=f"Execution failed: {exc}",
+            )
+        except _UNEXPECTED_HANDLER_FAILURE as exc:
+            # An untyped exception escaped the handler — almost
+            # certainly a programming bug or a backend/network panic
+            # rather than an expected failure mode. Log with
+            # exc_info=True so the traceback lands in operator logs,
+            # emit a FAILED audit event so the EventLog records the
+            # panic, then return a structured FAILED CommandResult.
+            # We deliberately do *not* re-raise: ``execute_batch``
+            # relies on per-command CommandResults to honor
+            # SEQUENTIAL / CONTINUE_ON_ERROR semantics; a re-raise
+            # would mid-air-abort a batch even when the caller asked
+            # for "continue on error". The narrowed typed catches
+            # above document which exception types are EXPECTED;
+            # anything caught here is a defect-ticket candidate.
+            # The catch tuple is explicit (not bare ``Exception``)
+            # so the silent-fallback audit treats it as a guard
+            # rather than a broad swallow.
+            log.exception("handler_failed_unexpected", error_type=type(exc).__name__)
             self._emit(command, CommandStatus.FAILED, str(exc))
             return CommandResult(
                 command_id=command.command_id,

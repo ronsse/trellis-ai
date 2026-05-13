@@ -22,8 +22,11 @@ from trellis_sdk.client import TrellisClient
 from trellis_sdk.exceptions import (
     TrellisAPIError,
     TrellisRateLimitError,
+    TrellisServerError,
     TrellisVersionMismatchError,
 )
+
+assert TrellisAPIError is not None  # re-export sanity
 
 
 class TestRaiseForStatus:
@@ -38,12 +41,15 @@ class TestRaiseForStatus:
         resp.status_code = 404
         raise_for_status(resp, request_path="/api/v1/x")  # no exception
 
-    def test_500_raises_api_error(self):
+    def test_500_raises_server_error(self):
+        # Post-Phase-6: 5xx is now ``TrellisServerError`` (transient).
+        # ``TrellisAPIError`` is the legacy alias; the typed split lets
+        # callers branch retry strategy on the new class.
         resp = MagicMock(spec=httpx.Response)
         resp.status_code = 500
         resp.text = "boom"
         resp.json.side_effect = ValueError("not json")
-        with pytest.raises(TrellisAPIError) as exc_info:
+        with pytest.raises(TrellisServerError) as exc_info:
             raise_for_status(resp, request_path="/api/v1/x")
         assert exc_info.value.status_code == 500
         assert exc_info.value.request_path == "/api/v1/x"

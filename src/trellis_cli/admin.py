@@ -449,12 +449,22 @@ def graph_health(  # noqa: PLR0912, PLR0915
     leaf_analysis: list[dict[str, Any]] = []
     node_ids = [n["node_id"] for n in all_nodes]
     # Build outbound edge counts
+    health_logger = structlog.get_logger(__name__)
     outbound: Counter[str] = Counter()
     for nid in node_ids[:2000]:  # cap for performance
         try:
             edges = gstore.get_edges(nid, direction="outgoing")
             outbound[nid] = len(edges)
-        except Exception:  # noqa: S112
+        except (RuntimeError, OSError, ValueError, KeyError, LookupError) as exc:
+            # Per-node failure during health-scan: log + continue so
+            # one bad row doesn't poison the whole report. Caught
+            # exception list is enumerated (not bare ``Exception``)
+            # so the audit treats this as a typed guard.
+            health_logger.debug(
+                "graph_health_outbound_query_failed",
+                node_id=nid,
+                error_type=type(exc).__name__,
+            )
             continue
 
     # Group by (entity_type, node_role) for leaf analysis
@@ -502,7 +512,14 @@ def graph_health(  # noqa: PLR0912, PLR0915
             edges = gstore.get_edges(nid, direction="both")
             if not edges:
                 orphans.append(nid)
-        except Exception:  # noqa: S112
+        except (RuntimeError, OSError, ValueError, KeyError, LookupError) as exc:
+            # Per-node failure during orphan-scan: log + continue so
+            # one bad row doesn't poison the whole report.
+            health_logger.debug(
+                "graph_health_orphan_query_failed",
+                node_id=nid,
+                error_type=type(exc).__name__,
+            )
             continue
 
     if orphans:
@@ -744,13 +761,21 @@ def _memory_prompt_available() -> bool:
     This is a forward-compat sentinel. Today the import always succeeds
     because the prompt ships with core; the check exists so a future
     refactor that moves the prompt behind an extra surfaces here, not
-    as a runtime ``ImportError`` inside the MCP server.
+    as a runtime ``ImportError`` inside the MCP server. The caller
+    treats the bool as authoritative ("extractor available / not"),
+    so the ``False`` branch is documented graceful-degradation: log
+    at ``debug`` so the missing-extra signal is recoverable from
+    structured logs.
     """
     try:
         from trellis.extract.prompts.extraction import (  # noqa: F401, PLC0415
             MEMORY_EXTRACTION_V1,
         )
-    except ImportError:
+    except ImportError as exc:
+        structlog.get_logger(__name__).debug(
+            "memory_prompt_import_failed",
+            error=str(exc),
+        )
         return False
     return True
 
@@ -1306,9 +1331,21 @@ def _check_metrics(client: httpx.Client) -> dict[str, Any]:
 
 
 def _safe_json(response: httpx.Response) -> Any:
+    """Best-effort JSON decode of a smoke-check response body.
+
+    Documented graceful degradation: smoke probes also accept plain
+    text / HTML error responses, so a JSON parse failure is not a
+    bug — we log at ``debug`` so the failure is recoverable from
+    structured logs without polluting the smoke-check stdout.
+    """
     try:
         return response.json()
-    except (ValueError, json.JSONDecodeError):
+    except (ValueError, json.JSONDecodeError) as exc:
+        structlog.get_logger(__name__).debug(
+            "smoke_check_body_not_json",
+            error=str(exc),
+            content_type=response.headers.get("content-type", ""),
+        )
         return None
 
 
@@ -1642,14 +1679,22 @@ def _evidence_span_days(first_seen: str, last_seen: str) -> int:
     Returns ``0`` on any parsing failure — the rendered ADR shows
     ``0 day(s)`` and the ADR author can correct manually. Failing
     silently is the right shape here because the timestamps are
-    informational, not load-bearing.
+    informational, not load-bearing. We log at ``debug`` so the
+    parse failure is recoverable from structured logs without
+    failing the ADR draft pass.
     """
     from datetime import datetime  # noqa: PLC0415
 
     try:
         f = datetime.fromisoformat(first_seen)
         l_ = datetime.fromisoformat(last_seen)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError) as exc:
+        structlog.get_logger(__name__).debug(
+            "evidence_span_parse_failed",
+            first_seen=first_seen,
+            last_seen=last_seen,
+            error=str(exc),
+        )
         return 0
     delta = l_ - f
     return max(delta.days, 0)

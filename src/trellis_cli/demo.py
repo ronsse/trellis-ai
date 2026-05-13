@@ -7,6 +7,7 @@ import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import structlog
 import typer
 from rich.console import Console
 
@@ -1347,7 +1348,22 @@ def load(  # noqa: PLR0912, PLR0915 - sequential fixture loading by section
     if fixture_dir is not None:
         try:
             cold_start_nodes, cold_start_edges = _load_cold_start_fixture(fixture_dir)
-        except Exception as exc:
+        except (RuntimeError, OSError, ValueError, KeyError, LookupError) as exc:
+            # Documented graceful degradation: the cold-start fixture
+            # is best-effort. The demo continues without it because
+            # the rest of the data is still useful. We log with
+            # exc_info=True so operators can correlate the rendered
+            # warning back to a structured event when triaging
+            # bundled-fixture regressions. The catch tuple is
+            # enumerated (not bare ``Exception``) so the silent-
+            # fallback audit treats this as a guard.
+            structlog.get_logger(__name__).warning(
+                "demo_cold_start_fixture_failed",
+                fixture_dir=str(fixture_dir),
+                error_type=type(exc).__name__,
+                error=str(exc),
+                exc_info=True,
+            )
             console.print(
                 f"  [yellow]![/yellow] Cold-start fixture failed: {exc}"
             )
