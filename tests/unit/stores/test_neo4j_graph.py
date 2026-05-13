@@ -421,3 +421,107 @@ class TestCompactVersions:
         report = graph_store.compact_versions(datetime.now(UTC) - timedelta(days=5))
         assert report.edges_compacted == 1
         assert report.aliases_compacted == 1
+
+
+# ---------------------------------------------------------------------------
+# Edge provenance (Phase 3 of adr-graph-ontology §6.4 / item 2 of the
+# self-improvement program). The five Cypher relationship properties +
+# the Python-boundary validator. Mirrors the SQLite + Postgres patterns
+# in test_edge_provenance.py and test_postgres_stores.py.
+# ---------------------------------------------------------------------------
+
+
+class TestEdgeProvenance:
+    def test_round_trip_all_fields(self, graph_store):
+        graph_store.upsert_node("a", "service", {})
+        graph_store.upsert_node("b", "service", {})
+        graph_store.upsert_edge(
+            "a",
+            "b",
+            "depends_on",
+            source_trace_id="tr_42",
+            agent_id="agent-7",
+            confidence=0.83,
+            evidence_ref="doc-9",
+            extractor_tier="HYBRID",
+        )
+        edges = graph_store.get_edges("a", direction="outgoing")
+        assert len(edges) == 1
+        edge = edges[0]
+        assert edge["source_trace_id"] == "tr_42"
+        assert edge["agent_id"] == "agent-7"
+        assert edge["confidence"] == pytest.approx(0.83)
+        assert edge["evidence_ref"] == "doc-9"
+        assert edge["extractor_tier"] == "HYBRID"
+
+    def test_missing_provenance_reads_back_none(self, graph_store):
+        from trellis.stores.base.edge_provenance import EDGE_PROVENANCE_FIELDS
+
+        graph_store.upsert_node("a", "service", {})
+        graph_store.upsert_node("b", "service", {})
+        graph_store.upsert_edge("a", "b", "depends_on", {"w": 1.0})
+        edge = graph_store.get_edges("a", direction="outgoing")[0]
+        for field in EDGE_PROVENANCE_FIELDS:
+            assert edge[field] is None
+
+    def test_bad_confidence_raises_before_network(self, graph_store):
+        graph_store.upsert_node("a", "service", {})
+        graph_store.upsert_node("b", "service", {})
+        with pytest.raises(ValueError, match="confidence must be in"):
+            graph_store.upsert_edge("a", "b", "depends_on", confidence=1.5)
+        # The validator runs before the Bolt round trip, so no edge
+        # was written.
+        assert graph_store.get_edges("a", direction="outgoing") == []
+
+    def test_bad_extractor_tier_raises_before_network(self, graph_store):
+        graph_store.upsert_node("a", "service", {})
+        graph_store.upsert_node("b", "service", {})
+        with pytest.raises(ValueError, match="extractor_tier must be one of"):
+            graph_store.upsert_edge("a", "b", "depends_on", extractor_tier="MAGIC")
+        assert graph_store.get_edges("a", direction="outgoing") == []
+
+    def test_bulk_edges_round_trip_provenance(self, graph_store):
+        graph_store.upsert_node("a", "s", {})
+        graph_store.upsert_node("b", "s", {})
+        graph_store.upsert_node("c", "s", {})
+        graph_store.upsert_edges_bulk(
+            [
+                {
+                    "source_id": "a",
+                    "target_id": "b",
+                    "edge_type": "links_to",
+                    "confidence": 0.5,
+                    "extractor_tier": "DETERMINISTIC",
+                    "agent_id": "agent-1",
+                },
+                {
+                    "source_id": "a",
+                    "target_id": "c",
+                    "edge_type": "links_to",
+                },
+            ]
+        )
+        edges = sorted(
+            graph_store.get_edges("a", direction="outgoing"),
+            key=lambda e: e["target_id"],
+        )
+        assert edges[0]["confidence"] == pytest.approx(0.5)
+        assert edges[0]["extractor_tier"] == "DETERMINISTIC"
+        assert edges[0]["agent_id"] == "agent-1"
+        assert edges[1]["confidence"] is None
+        assert edges[1]["agent_id"] is None
+
+    def test_bulk_bad_provenance_raises_with_row_index(self, graph_store):
+        graph_store.upsert_node("a", "s", {})
+        graph_store.upsert_node("b", "s", {})
+        with pytest.raises(ValueError, match=r"upsert_edges_bulk\[0\]"):
+            graph_store.upsert_edges_bulk(
+                [
+                    {
+                        "source_id": "a",
+                        "target_id": "b",
+                        "edge_type": "links_to",
+                        "extractor_tier": "INVALID",
+                    }
+                ]
+            )

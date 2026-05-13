@@ -355,6 +355,98 @@ class TestPostgresGraphStore:
         # Dry run did not delete the row.
         assert len(store.get_node_history("n1")) == 2
 
+    # ------------------------------------------------------------------
+    # Edge provenance (Phase 3 of adr-graph-ontology §6.4 / item 2 of
+    # plan-self-improvement-program). The five columns + CHECK
+    # constraint mirror the SQLite write path; tests track that here.
+    # ------------------------------------------------------------------
+
+    def test_edge_provenance_round_trips(self, store) -> None:
+        store.upsert_node("a", "service", {})
+        store.upsert_node("b", "service", {})
+        store.upsert_edge(
+            "a",
+            "b",
+            "depends_on",
+            source_trace_id="tr_42",
+            agent_id="agent-7",
+            confidence=0.83,
+            evidence_ref="doc-9",
+            extractor_tier="HYBRID",
+        )
+        edges = store.get_edges("a", direction="outgoing")
+        assert len(edges) == 1
+        edge = edges[0]
+        assert edge["source_trace_id"] == "tr_42"
+        assert edge["agent_id"] == "agent-7"
+        assert edge["confidence"] == pytest.approx(0.83)
+        assert edge["evidence_ref"] == "doc-9"
+        assert edge["extractor_tier"] == "HYBRID"
+
+    def test_edge_without_provenance_reads_back_none(self, store) -> None:
+        from trellis.stores.base.edge_provenance import EDGE_PROVENANCE_FIELDS
+
+        store.upsert_node("a", "service", {})
+        store.upsert_node("b", "service", {})
+        store.upsert_edge("a", "b", "depends_on", {"w": 1.0})
+        edge = store.get_edges("a", direction="outgoing")[0]
+        for field in EDGE_PROVENANCE_FIELDS:
+            assert edge[field] is None
+
+    def test_edge_bad_confidence_raises_before_write(self, store) -> None:
+        store.upsert_node("a", "service", {})
+        store.upsert_node("b", "service", {})
+        with pytest.raises(ValueError, match="confidence must be in"):
+            store.upsert_edge("a", "b", "depends_on", confidence=1.5)
+        assert store.get_edges("a", direction="outgoing") == []
+
+    def test_edge_bad_extractor_tier_raises_before_write(self, store) -> None:
+        store.upsert_node("a", "service", {})
+        store.upsert_node("b", "service", {})
+        with pytest.raises(ValueError, match="extractor_tier must be one of"):
+            store.upsert_edge("a", "b", "depends_on", extractor_tier="MAGIC")
+        assert store.get_edges("a", direction="outgoing") == []
+
+    def test_bulk_edges_provenance_round_trips(self, store) -> None:
+        store.upsert_node("a", "s", {})
+        store.upsert_node("b", "s", {})
+        store.upsert_node("c", "s", {})
+        store.upsert_edges_bulk(
+            [
+                {
+                    "source_id": "a",
+                    "target_id": "b",
+                    "edge_type": "links_to",
+                    "confidence": 0.5,
+                    "extractor_tier": "DETERMINISTIC",
+                },
+                {
+                    "source_id": "a",
+                    "target_id": "c",
+                    "edge_type": "links_to",
+                },
+            ]
+        )
+        edges = sorted(
+            store.get_edges("a", direction="outgoing"),
+            key=lambda e: e["target_id"],
+        )
+        assert edges[0]["confidence"] == pytest.approx(0.5)
+        assert edges[0]["extractor_tier"] == "DETERMINISTIC"
+        assert edges[1]["confidence"] is None
+        assert edges[1]["extractor_tier"] is None
+
+    def test_init_schema_idempotent_with_provenance(self, store) -> None:
+        """Re-running ``_init_schema`` against an already-migrated DB is a no-op.
+
+        ``_MIGRATE_ADD_EDGE_PROVENANCE`` uses ``ADD COLUMN IF NOT
+        EXISTS`` for the columns and a DO block guarded by
+        ``pg_constraint`` lookup for the CHECK — both must survive a
+        second pass.
+        """
+        store._init_schema()
+        store._init_schema()
+
 
 # ======================================================================
 # EventLog

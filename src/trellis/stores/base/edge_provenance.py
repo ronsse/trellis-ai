@@ -67,7 +67,9 @@ def validate_edge_provenance(
         TypeError: if any provided field has the wrong runtime type.
     """
     if source_trace_id is not None and not isinstance(source_trace_id, str):
-        msg = f"source_trace_id must be str or None, got {type(source_trace_id).__name__}"
+        msg = (
+            f"source_trace_id must be str or None, got {type(source_trace_id).__name__}"
+        )
         raise TypeError(msg)
     if agent_id is not None and not isinstance(agent_id, str):
         msg = f"agent_id must be str or None, got {type(agent_id).__name__}"
@@ -78,16 +80,14 @@ def validate_edge_provenance(
     if confidence is not None:
         # bool is a subclass of int in Python — reject explicitly so a
         # ``confidence=True`` typo doesn't silently land as 1.0.
-        if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
+        if isinstance(confidence, bool) or not isinstance(confidence, int | float):
             msg = (
                 f"confidence must be a float in [0.0, 1.0] or None, "
                 f"got {type(confidence).__name__}"
             )
             raise TypeError(msg)
         if not (0.0 <= float(confidence) <= 1.0):
-            msg = (
-                f"confidence must be in [0.0, 1.0], got {confidence!r}"
-            )
+            msg = f"confidence must be in [0.0, 1.0], got {confidence!r}"
             raise ValueError(msg)
     if extractor_tier is not None:
         if not isinstance(extractor_tier, str):
@@ -123,5 +123,5 @@ def extract_edge_provenance(
         caller didn't supply them).
     """
     if spec is None:
-        return {field: None for field in EDGE_PROVENANCE_FIELDS}
+        return dict.fromkeys(EDGE_PROVENANCE_FIELDS)
     return {field: spec.get(field) for field in EDGE_PROVENANCE_FIELDS}

@@ -180,6 +180,12 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
             for alter_sql in _MIGRATE_ADD_NODE_ROLE:
                 cur.execute(alter_sql)
             cur.execute(_CREATE_EDGES)
+            # Additive v5 migration: pick up provenance columns on
+            # databases that were created against pre-v5 schemas. Each
+            # ALTER is idempotent (``IF NOT EXISTS``); the CHECK on
+            # ``confidence`` is guarded by a DO block.
+            for alter_sql in _MIGRATE_ADD_EDGE_PROVENANCE:
+                cur.execute(alter_sql)
             cur.execute(_CREATE_ENTITY_ALIASES)
             for idx_sql in _CREATE_INDEXES:
                 cur.execute(idx_sql)
@@ -614,7 +620,23 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
         properties: dict[str, Any] | None = None,
         *,
         commit: bool = True,  # noqa: ARG002
+        source_trace_id: str | None = None,
+        agent_id: str | None = None,
+        confidence: float | None = None,
+        evidence_ref: str | None = None,
+        extractor_tier: str | None = None,
     ) -> str:
+        # Validate provenance up-front so the SQL never sees an
+        # out-of-range confidence or unknown extractor_tier. Mirrors
+        # the schema-layer validation in :class:`trellis.schemas.graph.Edge`.
+        validate_edge_provenance(
+            source_trace_id=source_trace_id,
+            agent_id=agent_id,
+            confidence=confidence,
+            evidence_ref=evidence_ref,
+            extractor_tier=extractor_tier,
+        )
+
         now = utc_now()
         properties_json = json.dumps(properties or {})
 
@@ -648,8 +670,11 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
                         """
                         INSERT INTO edges
                             (version_id, edge_id, source_id, target_id, edge_type,
-                             properties, created_at, valid_from, valid_to)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NULL)
+                             properties, created_at, valid_from, valid_to,
+                             source_trace_id, agent_id, confidence,
+                             evidence_ref, extractor_tier)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NULL,
+                                %s, %s, %s, %s, %s)
                         """,
                         (
                             version_id,
@@ -660,6 +685,11 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
                             properties_json,
                             now,
                             now,
+                            source_trace_id,
+                            agent_id,
+                            confidence,
+                            evidence_ref,
+                            extractor_tier,
                         ),
                     )
             else:
@@ -670,8 +700,11 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
                         """
                         INSERT INTO edges
                             (version_id, edge_id, source_id, target_id, edge_type,
-                             properties, created_at, valid_from, valid_to)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NULL)
+                             properties, created_at, valid_from, valid_to,
+                             source_trace_id, agent_id, confidence,
+                             evidence_ref, extractor_tier)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NULL,
+                                %s, %s, %s, %s, %s)
                         """,
                         (
                             version_id,
@@ -682,6 +715,11 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
                             properties_json,
                             now,
                             now,
+                            source_trace_id,
+                            agent_id,
+                            confidence,
+                            evidence_ref,
+                            extractor_tier,
                         ),
                     )
 
@@ -747,7 +785,7 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
             now = utc_now()
             edge_ids: list[str] = []
             insert_rows: list[tuple[Any, ...]] = []
-            for spec in edges:
+            for i, spec in enumerate(edges):
                 key = (spec["source_id"], spec["target_id"], spec["edge_type"])
                 prior = existing_edges.get(key)
                 if prior is not None:
@@ -757,6 +795,12 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
                     edge_id = generate_ulid()
                     created_at = now
                 edge_ids.append(edge_id)
+                prov = extract_edge_provenance(spec)
+                try:
+                    validate_edge_provenance(**prov)
+                except (ValueError, TypeError) as exc:
+                    msg = f"upsert_edges_bulk[{i}]: {exc}"
+                    raise type(exc)(msg) from exc
                 insert_rows.append(
                     (
                         generate_ulid(),
@@ -767,6 +811,11 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
                         json.dumps(spec.get("properties") or {}),
                         created_at,
                         now,
+                        prov["source_trace_id"],
+                        prov["agent_id"],
+                        prov["confidence"],
+                        prov["evidence_ref"],
+                        prov["extractor_tier"],
                     )
                 )
 
@@ -781,8 +830,11 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
                     """
                     INSERT INTO edges
                         (version_id, edge_id, source_id, target_id, edge_type,
-                         properties, created_at, valid_from, valid_to)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NULL)
+                         properties, created_at, valid_from, valid_to,
+                         source_trace_id, agent_id, confidence,
+                         evidence_ref, extractor_tier)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NULL,
+                            %s, %s, %s, %s, %s)
                     """,
                     insert_rows,
                 )
@@ -819,7 +871,9 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
             cur.execute(
                 f"""
                 SELECT version_id, edge_id, source_id, target_id, edge_type,
-                       properties, created_at, valid_from, valid_to
+                       properties, created_at, valid_from, valid_to,
+                       source_trace_id, agent_id, confidence,
+                       evidence_ref, extractor_tier
                 FROM edges WHERE {where_clause}
                 """,
                 params,
@@ -924,7 +978,9 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
 
                 edge_query = f"""
                 SELECT version_id, edge_id, source_id, target_id, edge_type,
-                       properties, created_at, valid_from, valid_to
+                       properties, created_at, valid_from, valid_to,
+                       source_trace_id, agent_id, confidence,
+                       evidence_ref, extractor_tier
                 FROM edges
                 WHERE source_id = ANY(%s)
                   AND target_id = ANY(%s)
@@ -1276,6 +1332,14 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
 
     @classmethod
     def _edge_row_to_dict(cls, row: tuple[Any, ...]) -> dict[str, Any]:
+        # Row layout (v5 — added provenance columns at indices 9-13):
+        # 0 version_id, 1 edge_id, 2 source_id, 3 target_id, 4 edge_type,
+        # 5 properties, 6 created_at, 7 valid_from, 8 valid_to,
+        # 9 source_trace_id, 10 agent_id, 11 confidence,
+        # 12 evidence_ref, 13 extractor_tier.
+        # Older row tuples (length 9 — pre-v5 callers built rows by hand
+        # without the provenance trailing columns) read back as None for
+        # each provenance field, mirroring the SQLite tolerance pattern.
         props_raw = row[5]
         if isinstance(props_raw, str):
             props = json.loads(props_raw)
@@ -1284,7 +1348,7 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
         else:
             props = {}
 
-        return {
+        result: dict[str, Any] = {
             "edge_id": row[1],
             "source_id": row[2],
             "target_id": row[3],
@@ -1294,6 +1358,11 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
             "valid_from": cls._to_iso(row[7]),
             "valid_to": cls._to_iso(row[8]),
         }
+        # Provenance columns are v5 additive. Tolerate shorter row
+        # tuples from callers that pre-date the SELECT extension.
+        for i, field in enumerate(EDGE_PROVENANCE_FIELDS, start=9):
+            result[field] = row[i] if len(row) > i else None
+        return result
 
     @classmethod
     def _alias_row_to_dict(cls, row: tuple[Any, ...]) -> dict[str, Any]:

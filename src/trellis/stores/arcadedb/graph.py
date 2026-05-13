@@ -18,6 +18,7 @@ import structlog
 from trellis.stores.arcadedb.base import (
     build_arcadedb_driver,
     ensure_database,
+    execute_sql,
 )
 from trellis.stores.bolt_opencypher.base import (
     BoltDriverConfig,
@@ -29,6 +30,41 @@ if TYPE_CHECKING:
     from neo4j import Driver
 
 logger = structlog.get_logger(__name__)
+
+
+#: ArcadeDB schema-typed properties for the edge provenance columns
+#: (Phase 3 of ``adr-graph-ontology.md`` §6.4 / item 2 of the
+#: self-improvement program). ArcadeDB stores relationship properties
+#: untyped by default; declaring them with ``CREATE PROPERTY`` opts the
+#: column into ArcadeDB's type-coercion + constraint surface so
+#: ``confidence`` carries a server-enforced ``MIN/MAX`` range matching
+#: the Python-boundary validator. ``extractor_tier`` is left untyped
+#: beyond STRING — ArcadeDB has no enum constraint, so the allowlist is
+#: enforced by :func:`trellis.stores.base.edge_provenance.validate_edge_provenance`.
+#:
+#: ``CREATE PROPERTY ... IF NOT EXISTS`` is idempotent — re-runs are
+#: cheap no-ops against an already-migrated database. The trailing
+#: ``CREATE EDGE TYPE EDGE IF NOT EXISTS`` mirrors the vector store's
+#: ``CREATE VERTEX TYPE Node IF NOT EXISTS`` pattern: the Cypher write
+#: path auto-creates the edge type on first use, but we declare it
+#: explicitly so ``CREATE PROPERTY`` has a target schema to attach to
+#: even on a fresh database where no edges have been written yet.
+_ARCADEDB_EDGE_PROVENANCE_SCHEMA: tuple[str, ...] = (
+    "CREATE EDGE TYPE EDGE IF NOT EXISTS",
+    "CREATE PROPERTY EDGE.source_trace_id IF NOT EXISTS STRING",
+    "CREATE PROPERTY EDGE.agent_id IF NOT EXISTS STRING",
+    # ArcadeDB FLOAT is 32-bit; FLOAT supports MIN/MAX constraints.
+    # The Python validator enforces the same [0.0, 1.0] range with a
+    # message that points at the offending value.
+    "CREATE PROPERTY EDGE.confidence IF NOT EXISTS FLOAT (MIN 0.0, MAX 1.0)",
+    "CREATE PROPERTY EDGE.evidence_ref IF NOT EXISTS STRING",
+    # ArcadeDB has no enum constraint — the allowlist
+    # ({DETERMINISTIC, HYBRID, LLM}) is enforced at the Python
+    # boundary in ``validate_edge_provenance``. Declaring the property
+    # as STRING still pulls it into ArcadeDB's schema so queries can
+    # filter on it without JSON-extracting the properties bag.
+    "CREATE PROPERTY EDGE.extractor_tier IF NOT EXISTS STRING",
+)
 
 
 class ArcadeDBGraphStore(BoltOpenCypherGraphStore):
@@ -102,6 +138,23 @@ class ArcadeDBGraphStore(BoltOpenCypherGraphStore):
                 )
                 raise ValueError(msg)
             super().__init__(driver=driver, database=database, owns_driver=False)
+            # Property-schema migration requires HTTP credentials. The
+            # injected-driver path doesn't have them, so we skip and
+            # rely on lazy property creation on first write. The
+            # ``IF NOT EXISTS`` clause makes the deferred migration
+            # safe to run later (e.g. via ``trellis admin migrate-
+            # provenance``, planned in E2).
+            if http_url is not None and password is not None:
+                self._init_arcadedb_edge_provenance_schema(
+                    http_url=http_url,
+                    user=user,
+                    password=password,
+                    database=database,
+                )
+            else:
+                logger.debug(
+                    "arcadedb_provenance_schema_migration_skipped_injected_driver"
+                )
             logger.info(
                 "arcadedb_graph_store_initialized",
                 uri=uri,
@@ -127,10 +180,56 @@ class ArcadeDBGraphStore(BoltOpenCypherGraphStore):
             ensure_database(http_url, user, password, database)
         driver = build_arcadedb_driver(uri, user, password, config=driver_config)
         super().__init__(driver=driver, database=database, owns_driver=True)
+        # Idempotently declare schema-typed properties for the
+        # provenance columns + the FLOAT MIN/MAX constraint on
+        # ``confidence``. Runs over HTTP SQL because openCypher does
+        # not expose ArcadeDB's typed-property DDL. Safe to call on
+        # every boot — every statement is ``IF NOT EXISTS``.
+        if http_url is not None:
+            self._init_arcadedb_edge_provenance_schema(
+                http_url=http_url,
+                user=user,
+                password=password,
+                database=database,
+            )
+        else:
+            logger.warning(
+                "arcadedb_provenance_schema_migration_skipped_no_http_url",
+                reason=(
+                    "http_url not supplied; provenance properties will be "
+                    "created lazily on first write without typed-property "
+                    "constraints. Pass http_url to enable the FLOAT "
+                    "MIN/MAX constraint on confidence."
+                ),
+            )
         logger.info(
             "arcadedb_graph_store_initialized",
             uri=uri,
             database=database,
+        )
+
+    @staticmethod
+    def _init_arcadedb_edge_provenance_schema(
+        *,
+        http_url: str,
+        user: str,
+        password: str,
+        database: str,
+    ) -> None:
+        """Run the idempotent ``CREATE PROPERTY`` migration via HTTP SQL.
+
+        Each statement is ``IF NOT EXISTS`` so calling this against an
+        already-migrated database is a no-op. Failures bubble up as
+        ``RuntimeError`` from :func:`execute_sql` — the registry will
+        surface them at boot rather than as opaque errors on first
+        write.
+        """
+        for stmt in _ARCADEDB_EDGE_PROVENANCE_SCHEMA:
+            execute_sql(http_url, user, password, database, stmt)
+        logger.info(
+            "arcadedb_edge_provenance_schema_migrated",
+            database=database,
+            statements=len(_ARCADEDB_EDGE_PROVENANCE_SCHEMA),
         )
 
     def close(self) -> None:
