@@ -1545,6 +1545,7 @@ def record_observation(
         or ``message`` on failure. This tool never raises to MCP.
     """
     from trellis.schemas.observation import Observation  # noqa: PLC0415
+    from trellis.schemas.well_known import OBSERVATION  # noqa: PLC0415
 
     try:
         obs = Observation(
@@ -1566,7 +1567,7 @@ def record_observation(
             operation=Operation.OBSERVATION_RECORD,
             args={"observation": obs},
             target_id=obs.observation_id,
-            target_type="Observation",
+            target_type=OBSERVATION,
             requested_by="mcp:record_observation",
         )
         executor = build_curate_executor(_get_registry())
@@ -1610,16 +1611,18 @@ def query_observations(
         property dicts. Each dict carries ``node_id`` plus the
         schema's payload fields.
     """
+    from trellis.schemas.well_known import OBSERVATION  # noqa: PLC0415
+
     registry = _get_registry()
     props: dict[str, Any] = {}
-    if subject_entity_id and subject_entity_id.strip():
+    if subject_entity_id.strip():
         props["subject_entity_id"] = subject_entity_id.strip()
-    if observer_agent_id and observer_agent_id.strip():
+    if observer_agent_id.strip():
         props["observer_agent_id"] = observer_agent_id.strip()
 
     try:
         rows = registry.knowledge.graph_store.query(
-            node_type="Observation",
+            node_type=OBSERVATION,
             properties=props or None,
             limit=limit,
         )
