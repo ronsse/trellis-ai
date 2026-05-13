@@ -12,8 +12,12 @@ from trellis_sdk.async_client import AsyncTrellisClient
 from trellis_sdk.client import TrellisClient
 from trellis_sdk.exceptions import (
     TrellisAPIError,
+    TrellisClientError,
     TrellisError,
+    TrellisHttpError,
     TrellisRateLimitError,
+    TrellisServerError,
+    TrellisTransportError,
     TrellisVersionMismatchError,
 )
 
@@ -21,7 +25,11 @@ __all__ = [
     "AsyncTrellisClient",
     "TrellisAPIError",
     "TrellisClient",
+    "TrellisClientError",
     "TrellisError",
+    "TrellisHttpError",
     "TrellisRateLimitError",
+    "TrellisServerError",
+    "TrellisTransportError",
     "TrellisVersionMismatchError",
 ]

@@ -5,6 +5,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import structlog
+
+_logger = structlog.get_logger(__name__)
+
 
 def get_claude_settings_path(scope: str, project_dir: Path | None = None) -> Path:
     """Return the path to the Claude Code settings file for the given scope.
@@ -26,10 +30,15 @@ def read_claude_settings(path: Path) -> dict:
     """Read and parse a Claude Code settings file.
 
     Returns an empty dict if the file does not exist or is empty.
+    The missing-file branch is documented graceful-degradation —
+    the initial ``trellis admin init`` call is expected to bootstrap
+    from no file. We log at ``debug`` so the create-from-empty path
+    is recoverable from structured logs.
     """
     try:
         text = path.read_text().strip()
     except FileNotFoundError:
+        _logger.debug("claude_settings_not_found", path=str(path))
         return {}
     if not text:
         return {}

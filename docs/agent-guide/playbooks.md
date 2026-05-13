@@ -790,7 +790,7 @@ The server stamps `{key}:{i}` on each command, so per-entity deduplication survi
 - **Run it as a CronJob / scheduled Action.** One sync script per source, per schedule, per environment.
 - **One idempotency key per snapshot.** Use a source-system snapshot ID (git SHA, DB timestamp, warehouse version) — not `datetime.now()`, which would dedupe nothing.
 - **Chunk large syncs.** For >10k entities, split into batches and submit sequentially. The response includes `executed` / `succeeded` counts per batch.
-- **Typed exceptions.** `TrellisRateLimitError` exposes `retry_after_seconds`; `TrellisAPIError` has `status_code` + `body`. Wrap `submit_drafts()` with your retry policy.
+- **Typed exceptions.** Catch `TrellisHttpError` for any HTTP-boundary failure, or branch on the subclasses: `TrellisRateLimitError` (429, exposes `retry_after_seconds`), `TrellisClientError` (other 4xx, don't retry), `TrellisServerError` (5xx, transient), `TrellisTransportError` (no response — connection refused, timeout, DNS). Wrap `submit_drafts()` with your retry policy.
 
 ### 7. Testing
 

@@ -29,6 +29,7 @@ from trellis_sdk._http import (
     SDK_API_MINOR,
     check_handshake,
     raise_for_status,
+    wrap_transport_error,
 )
 from trellis_wire import (
     BatchStrategy,
@@ -126,10 +127,16 @@ class AsyncTrellisClient:
         headers: dict[str, str] | None = None,
     ) -> httpx.Response:
         await self._ensure_handshake()
-        async with self._semaphore:
-            resp = await self._http.request(
-                method, path, json=json, params=params, headers=headers
-            )
+        try:
+            async with self._semaphore:
+                resp = await self._http.request(
+                    method, path, json=json, params=params, headers=headers
+                )
+        except httpx.HTTPError as exc:
+            # Network/transport-level failure — no response was received.
+            # Wrap into a typed SDK exception so callers don't have to
+            # know about httpx.
+            raise wrap_transport_error(exc, request_path=path) from exc
         raise_for_status(resp, request_path=path)
         return resp
 
@@ -141,9 +148,31 @@ class AsyncTrellisClient:
                 return
             try:
                 resp = await self._http.get("/api/version")
-            except httpx.HTTPError:
-                return
+            except httpx.HTTPError as exc:
+                # Handshake transport failure surfaces as a typed
+                # TrellisTransportError. Pre-Phase-6 this was silently
+                # swallowed, which masked DNS/connection failures
+                # behind cryptic "method not allowed" errors on the
+                # subsequent real call.
+                logger.warning(
+                    "sdk_async_handshake_transport_failed",
+                    request_path="/api/version",
+                    error=str(exc),
+                )
+                raise wrap_transport_error(
+                    exc, request_path="/api/version"
+                ) from exc
             if resp.status_code != 200:  # noqa: PLR2004
+                # Older servers may not expose ``/api/version`` at all —
+                # documented graceful degradation: skip the version
+                # check rather than blocking every subsequent call.
+                # The version check is best-effort; the real failure
+                # mode (incompatible API) surfaces on the next call
+                # with full context.
+                logger.debug(
+                    "sdk_async_handshake_endpoint_missing",
+                    status_code=resp.status_code,
+                )
                 return
             check_handshake(resp.json())
             self._handshake_done = True
@@ -181,8 +210,11 @@ class AsyncTrellisClient:
     async def get_trace(self, trace_id: str) -> dict[str, Any] | None:
         await self._ensure_handshake()
         path = f"/api/v1/traces/{trace_id}"
-        async with self._semaphore:
-            resp = await self._http.get(path)
+        try:
+            async with self._semaphore:
+                resp = await self._http.get(path)
+        except httpx.HTTPError as exc:
+            raise wrap_transport_error(exc, request_path=path) from exc
         if resp.status_code == _HTTP_NOT_FOUND:
             return None
         raise_for_status(resp, request_path=path)
@@ -310,8 +342,11 @@ class AsyncTrellisClient:
     async def get_entity(self, entity_id: str) -> dict[str, Any] | None:
         await self._ensure_handshake()
         path = f"/api/v1/entities/{entity_id}"
-        async with self._semaphore:
-            resp = await self._http.get(path)
+        try:
+            async with self._semaphore:
+                resp = await self._http.get(path)
+        except httpx.HTTPError as exc:
+            raise wrap_transport_error(exc, request_path=path) from exc
         if resp.status_code == _HTTP_NOT_FOUND:
             return None
         raise_for_status(resp, request_path=path)

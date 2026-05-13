@@ -26,6 +26,7 @@ from trellis_sdk._http import (
     SDK_API_MINOR,
     check_handshake,
     raise_for_status,
+    wrap_transport_error,
 )
 from trellis_wire import (
     BatchStrategy,
@@ -111,9 +112,15 @@ class TrellisClient:
         headers: dict[str, str] | None = None,
     ) -> httpx.Response:
         self._ensure_handshake()
-        resp = self._http.request(
-            method, path, json=json, params=params, headers=headers
-        )
+        try:
+            resp = self._http.request(
+                method, path, json=json, params=params, headers=headers
+            )
+        except httpx.HTTPError as exc:
+            # Network/transport failure — no response was received.
+            # Wrap into a typed SDK exception so callers don't have
+            # to import httpx to catch connection errors.
+            raise wrap_transport_error(exc, request_path=path) from exc
         raise_for_status(resp, request_path=path)
         return resp
 
@@ -172,10 +179,14 @@ class TrellisClient:
 
     def get_trace(self, trace_id: str) -> dict[str, Any] | None:
         self._ensure_handshake()
-        resp = self._http.get(f"/api/v1/traces/{trace_id}")
+        path = f"/api/v1/traces/{trace_id}"
+        try:
+            resp = self._http.get(path)
+        except httpx.HTTPError as exc:
+            raise wrap_transport_error(exc, request_path=path) from exc
         if resp.status_code == _HTTP_NOT_FOUND:
             return None
-        raise_for_status(resp, request_path=f"/api/v1/traces/{trace_id}")
+        raise_for_status(resp, request_path=path)
         return cast("dict[str, Any] | None", resp.json().get("trace"))
 
     def list_traces(
@@ -307,7 +318,10 @@ class TrellisClient:
     def get_entity(self, entity_id: str) -> dict[str, Any] | None:
         self._ensure_handshake()
         path = f"/api/v1/entities/{entity_id}"
-        resp = self._http.get(path)
+        try:
+            resp = self._http.get(path)
+        except httpx.HTTPError as exc:
+            raise wrap_transport_error(exc, request_path=path) from exc
         if resp.status_code == _HTTP_NOT_FOUND:
             return None
         raise_for_status(resp, request_path=path)

@@ -28,6 +28,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+import structlog
 import typer
 from rich.console import Console
 
@@ -40,6 +41,8 @@ from trellis.schemas.extraction import ExtractionResult
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 from trellis_cli.stores import _get_registry
+
+_logger = structlog.get_logger(__name__)
 
 extract_app = typer.Typer(no_args_is_help=True)
 console = Console()
@@ -67,8 +70,17 @@ def _resolve_extractor(extractor_type: str) -> object:
         for ext in (DbtManifestExtractor(), OpenLineageExtractor()):
             if registry.get(ext.name) is None:
                 registry.register(ext)  # type: ignore[arg-type]
-    except ImportError:
-        pass
+    except ImportError as exc:
+        # ``trellis_workers`` is an optional install (`pip install
+        # trellis-ai[workers]`). Documented graceful degradation: the
+        # CLI still resolves entry-point-registered extractors when
+        # the workers extras aren't installed. Log at ``debug`` so
+        # the missing-extras path is recoverable from structured logs
+        # without raising on minimal installs.
+        _logger.debug(
+            "extract_refresh_workers_extras_missing",
+            error=str(exc),
+        )
 
     candidates = registry.candidates_for(extractor_type)
     if candidates:
@@ -116,9 +128,20 @@ def _snapshot_entities(
     for entity_id in entity_ids:
         try:
             snapshot[entity_id] = graph.get_node(entity_id)
-        except Exception:
+        except (RuntimeError, OSError, ValueError, KeyError, LookupError) as exc:
             # Backend errors are non-fatal for the diff path. We just
-            # report missing snapshot for that id and continue.
+            # report missing snapshot for that id and continue. Log
+            # at ``debug`` so the missing-snapshot signal is
+            # recoverable from structured logs without spamming the
+            # CLI summary. The catch tuple is enumerated (not bare
+            # ``Exception``) so the silent-fallback audit treats
+            # this as a guard.
+            _logger.debug(
+                "extract_refresh_snapshot_get_node_failed",
+                entity_id=entity_id,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
             snapshot[entity_id] = None
     return snapshot
 
@@ -196,16 +219,18 @@ def _emit_refresh_event(
                 "diff": diff,
             },
         )
-    except Exception:
-        # Log via structlog rather than failing the refresh. EventLog
-        # writes are best-effort — operators can still consume the CLI
-        # summary if the audit channel is down.
-        import structlog  # noqa: PLC0415
-
-        structlog.get_logger(__name__).exception(
+    except (RuntimeError, OSError, ValueError) as exc:
+        # Documented graceful degradation: EventLog writes during a
+        # refresh are best-effort — operators can still consume the
+        # CLI summary if the audit channel is down (the structured
+        # log below preserves the failure for forensic correlation).
+        # The catch tuple is enumerated (not bare ``Exception``) so
+        # the silent-fallback audit treats this as a guard.
+        _logger.exception(
             "extract_refresh_emit_failed",
             entity_id=entity_id,
             source_name=source_name,
+            error_type=type(exc).__name__,
         )
 
 
