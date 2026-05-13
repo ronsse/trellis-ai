@@ -9,6 +9,10 @@ from __future__ import annotations
 
 import json
 
+import pytest
+from mcp.shared.exceptions import McpError
+from mcp.types import INTERNAL_ERROR, INVALID_PARAMS
+
 from tests.unit.mcp.conftest import unwrap_tool
 from trellis.mcp.server import execute_mutation as _execute_mutation
 from trellis.stores.registry import StoreRegistry
@@ -156,25 +160,73 @@ class TestExecuteMutationHappyPath:
 
 
 class TestExecuteMutationErrors:
-    def test_unknown_operation_returns_error(
+    def test_unknown_operation_raises_invalid_params(
         self, temp_registry: StoreRegistry
     ) -> None:
-        """An operation string that matches no enum member is rejected."""
-        raw = execute_mutation(
-            operation="link.zorblax",
-            args={"source_id": "a", "target_id": "b", "edge_kind": "k"},
-        )
-        payload = json.loads(raw)
-        assert payload["status"] == "error"
-        assert "unknown operation" in payload["message"].lower()
+        """An operation string that matches no enum member raises INVALID_PARAMS."""
+        with pytest.raises(McpError) as excinfo:
+            execute_mutation(
+                operation="link.zorblax",
+                args={"source_id": "a", "target_id": "b", "edge_kind": "k"},
+            )
+        assert excinfo.value.error.code == INVALID_PARAMS
+        assert "unknown operation" in excinfo.value.error.message.lower()
+        assert excinfo.value.error.data is not None
+        assert excinfo.value.error.data["value"] == "link.zorblax"
 
-    def test_empty_operation_returns_error(
+    def test_empty_operation_raises_invalid_params(
         self, temp_registry: StoreRegistry
     ) -> None:
-        raw = execute_mutation(operation="   ", args={})
-        payload = json.loads(raw)
-        assert payload["status"] == "error"
-        assert "operation must not be empty" in payload["message"].lower()
+        with pytest.raises(McpError) as excinfo:
+            execute_mutation(operation="   ", args={})
+        assert excinfo.value.error.code == INVALID_PARAMS
+        assert "operation must not be empty" in excinfo.value.error.message.lower()
+        assert excinfo.value.error.data == {"field": "operation"}
+
+    def test_non_dict_args_raises_invalid_params(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        """``args`` must be a dict; bytes / list / scalar all rejected pre-flight."""
+        with pytest.raises(McpError) as excinfo:
+            execute_mutation(operation="link.create", args="not-a-dict")  # type: ignore[arg-type]
+        assert excinfo.value.error.code == INVALID_PARAMS
+        assert "args must be a dict" in excinfo.value.error.message.lower()
+
+    def test_executor_crash_raises_internal_error_with_chain(
+        self,
+        temp_registry: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Unexpected executor exceptions surface as INTERNAL_ERROR with
+        the original cause chained via ``from`` and the command_id in
+        ``data`` for correlation."""
+        import trellis.mcp.server as server_mod
+
+        class _ExplodingExecutor:
+            def execute(self, _command: object) -> None:
+                msg = "fake executor outage"
+                raise RuntimeError(msg)
+
+        monkeypatch.setattr(
+            server_mod, "build_curate_executor", lambda _r: _ExplodingExecutor()
+        )
+
+        with pytest.raises(McpError) as excinfo:
+            execute_mutation(
+                operation="link.create",
+                args={"source_id": "a", "target_id": "b", "edge_kind": "k"},
+            )
+        err = excinfo.value
+        assert err.error.code == INTERNAL_ERROR
+        assert "execution failed" in err.error.message.lower()
+        assert "fake executor outage" in err.error.message
+        # ``from exc`` preserves the original cause.
+        assert isinstance(excinfo.value.__cause__, RuntimeError)
+        assert str(excinfo.value.__cause__) == "fake executor outage"
+        assert err.error.data is not None
+        assert err.error.data["operation"] == "link.create"
+        assert "command_id" in err.error.data
+        assert err.error.data["error_class"] == "RuntimeError"
 
     def test_missing_required_arg_returns_validation_error(
         self, temp_registry: StoreRegistry

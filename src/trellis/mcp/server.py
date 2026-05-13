@@ -1,12 +1,41 @@
-"""MCP Macro Tools server — high-level, token-efficient tools for AI agents."""
+"""MCP Macro Tools server — high-level, token-efficient tools for AI agents.
+
+Error contract
+--------------
+Tool handlers raise :class:`mcp.shared.exceptions.McpError` rather than
+returning ``"Error: …"`` strings or dict-shape error payloads. The
+FastMCP runtime forwards ``McpError`` directly through the JSON-RPC
+transport so clients see a structured error object with a stable
+``code`` plus a human-readable ``message``. This is the loud-failure
+contract from the silent-fallback cleanup track (C2 Phase 3):
+
+* ``INVALID_PARAMS`` (-32602) — pre-flight argument validation
+  (empty intent, unknown operation enum, missing required key, etc.).
+* ``RESOURCE_NOT_FOUND`` (-32001, app-layer) — handler asked for an
+  entity that doesn't exist (e.g. ``get_graph`` with an unknown id).
+* ``MUTATION_FAILED`` (-32003, app-layer) — a mutation went through
+  the executor and came back non-success (REJECTED / FAILED). The
+  ``data`` field carries the structured executor response.
+* ``INTERNAL_ERROR`` (-32603) — unexpected failure inside a tool
+  (store outage, pack builder crash, etc.). The original exception
+  chains via ``from`` so server-side logs preserve the traceback.
+
+Pre-flight validation returns no longer use string sentinels; callers
+that previously did ``if result.startswith("Error:")`` need to catch
+``McpError`` instead. The contract is documented in
+``docs/design/adr-mcp-contract.md`` and the per-site audit lives in
+``audit/silent_fallbacks_2026-05.md``.
+"""
 
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, NoReturn
 
 import structlog
 from fastmcp import FastMCP
+from mcp.shared.exceptions import McpError
+from mcp.types import INTERNAL_ERROR, INVALID_PARAMS, ErrorData
 
 from trellis.logging import configure_stderr_logging
 from trellis.mutate import (
@@ -34,6 +63,55 @@ from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 
 logger = structlog.get_logger(__name__)
+
+# ---------------------------------------------------------------------------
+# Custom JSON-RPC error codes (app-layer, -32000..-32099 reserved range)
+# ---------------------------------------------------------------------------
+
+#: Caller asked for an entity / resource that does not exist.
+RESOURCE_NOT_FOUND = -32001
+
+#: A policy gate denied the operation.
+POLICY_DENIED = -32002
+
+#: A governed mutation executed but came back non-success.
+MUTATION_FAILED = -32003
+
+
+def _raise_invalid_params(
+    message: str, *, data: dict[str, Any] | None = None
+) -> NoReturn:
+    """Raise ``McpError(INVALID_PARAMS, …)`` — short for the common case."""
+    raise McpError(ErrorData(code=INVALID_PARAMS, message=message, data=data))
+
+
+def _raise_internal(
+    message: str,
+    *,
+    cause: BaseException | None = None,
+    data: dict[str, Any] | None = None,
+) -> NoReturn:
+    """Raise ``McpError(INTERNAL_ERROR, …)`` chaining the cause if given.
+
+    Centralising this keeps the ``from exc`` chaining consistent — losing
+    the chain hides the original traceback from operator logs.
+    """
+    err = McpError(ErrorData(code=INTERNAL_ERROR, message=message, data=data))
+    if cause is not None:
+        raise err from cause
+    raise err
+
+
+def _raise_not_found(message: str, *, data: dict[str, Any] | None = None) -> NoReturn:
+    """Raise ``McpError(RESOURCE_NOT_FOUND, …)`` — app-layer code."""
+    raise McpError(ErrorData(code=RESOURCE_NOT_FOUND, message=message, data=data))
+
+
+def _raise_mutation_failed(
+    message: str, *, data: dict[str, Any] | None = None
+) -> NoReturn:
+    """Raise ``McpError(MUTATION_FAILED, …)`` — app-layer code."""
+    raise McpError(ErrorData(code=MUTATION_FAILED, message=message, data=data))
 
 mcp = FastMCP(
     "trellis",
@@ -98,11 +176,12 @@ def _get_memory_extractor(registry: StoreRegistry) -> Any:
 
     Returns ``None`` when:
       * ``TRELLIS_ENABLE_MEMORY_EXTRACTION`` is not set truthy, OR
-      * No LLM client can be constructed from the environment, OR
-      * Construction raises for any reason.
+      * No LLM client can be constructed from the environment.
 
-    All failure paths log at debug level and cache ``None`` so we don't
-    retry on every save_memory call.
+    Raises ``McpError(INTERNAL_ERROR)`` if the flag is on and the
+    extractor module fails to import / construct — the agent asked
+    for the feature and a build failure is a real problem they should
+    see, not a silently-disabled enhancement.
     """
     global _memory_extractor, _memory_extractor_attempted  # noqa: PLW0603
     if _memory_extractor_attempted:
@@ -131,9 +210,16 @@ def _get_memory_extractor(registry: StoreRegistry) -> Any:
             llm_client=llm_client,
         )
         logger.info("memory_extractor_enabled")
-    except Exception:
-        logger.debug("memory_extractor_init_failed", exc_info=True)
-        _memory_extractor = None
+    except McpError:
+        # Already structured — let it propagate.
+        raise
+    except Exception as exc:
+        logger.exception("memory_extractor_init_failed")
+        _raise_internal(
+            f"memory extractor construction failed: {exc}",
+            cause=exc,
+            data={"stage": "memory_extractor_init"},
+        )
     return _memory_extractor
 
 
@@ -150,7 +236,11 @@ def _build_llm_client(registry: StoreRegistry) -> Any:
     try:
         client = registry.build_llm_client()
     except Exception:
-        logger.debug("llm_client_registry_failed", exc_info=True)
+        # GRACEFUL-DEGRADATION: registry config is the preferred source
+        # but the env-var path below is an explicit, documented fallback
+        # for deployments without a populated ``llm:`` block. Logged at
+        # exception level so config drift is visible in stderr.
+        logger.exception("llm_client_registry_failed")
         client = None
     if client is not None:
         logger.debug("llm_client_from_registry")
@@ -180,9 +270,16 @@ def _build_llm_client_from_env() -> Any:
 
             return OpenAIClient()
         except ModuleNotFoundError:
+            # GRACEFUL-DEGRADATION: optional [llm-openai] extra not
+            # installed — fall through to Anthropic.
             logger.debug("llm_client_openai_not_installed")
-        except Exception:
-            logger.debug("llm_client_openai_init_failed", exc_info=True)
+        except Exception as exc:
+            logger.exception("llm_client_openai_init_failed")
+            _raise_internal(
+                f"OpenAI client construction failed: {exc}",
+                cause=exc,
+                data={"provider": "openai"},
+            )
 
     if os.environ.get("ANTHROPIC_API_KEY"):
         try:
@@ -192,9 +289,17 @@ def _build_llm_client_from_env() -> Any:
 
             return AnthropicClient()
         except ModuleNotFoundError:
+            # GRACEFUL-DEGRADATION: optional [llm-anthropic] extra not
+            # installed — caller gets ``None`` and the extraction stage
+            # is skipped.
             logger.debug("llm_client_anthropic_not_installed")
-        except Exception:
-            logger.debug("llm_client_anthropic_init_failed", exc_info=True)
+        except Exception as exc:
+            logger.exception("llm_client_anthropic_init_failed")
+            _raise_internal(
+                f"Anthropic client construction failed: {exc}",
+                cause=exc,
+                data={"provider": "anthropic"},
+            )
 
     return None
 
@@ -214,9 +319,13 @@ def _build_alias_resolver(registry: StoreRegistry) -> Any:
         matches: list[str] = []
         try:
             nodes = graph_store.query(limit=2000)
-        except Exception:
-            logger.debug("alias_resolver_query_failed", alias=alias)
-            return matches
+        except Exception as exc:
+            logger.exception("alias_resolver_query_failed", alias=alias)
+            _raise_internal(
+                f"alias resolver graph query failed: {exc}",
+                cause=exc,
+                data={"alias": alias},
+            )
         for node in nodes:
             name = str(node.get("name", "")).lower()
             if name == target:
@@ -264,14 +373,24 @@ def _run_memory_extraction(
         batch = result_to_batch(result, requested_by="mcp:save_memory")
         build_curate_executor(registry).execute_batch(batch)
     except Exception:
-        logger.debug("memory_extraction_failed", doc_id=doc_id, exc_info=True)
+        # GRACEFUL-DEGRADATION: the save_memory contract is "the document
+        # is stored + MEMORY_STORED emitted". Tiered extraction is a
+        # feature-flagged bonus pass and its failure must never roll back
+        # a successful memory write. Logged at exception level so the
+        # operator can spot persistent extraction breakage in stderr.
+        logger.exception(
+            "memory_extraction_failed",
+            doc_id=doc_id,
+        )
 
 
 def _get_minhash_index(registry: StoreRegistry) -> Any:
     """Get or create a cached MinHash index for fuzzy dedup.
 
     Lazily populates the index from the document store on first access.
-    Returns ``None`` if the dedup module is unavailable.
+    Raises ``McpError(INTERNAL_ERROR)`` if the dedup module is broken —
+    silent disable used to mean memories were stored without fuzzy
+    dedup, producing invisible duplicates.
     """
     global _minhash_index  # noqa: PLW0603
     if _minhash_index is not None:
@@ -285,9 +404,13 @@ def _get_minhash_index(registry: StoreRegistry) -> Any:
         for doc in docs:
             _minhash_index.add(doc["doc_id"], doc.get("content", ""))
         logger.debug("minhash_index_initialized", size=_minhash_index.size)
-    except Exception:
-        logger.debug("minhash_index_init_failed")
-        return None
+    except Exception as exc:
+        logger.exception("minhash_index_init_failed")
+        _raise_internal(
+            f"MinHash dedup index initialisation failed: {exc}",
+            cause=exc,
+            data={"stage": "minhash_index_init"},
+        )
     return _minhash_index
 
 
@@ -317,12 +440,16 @@ def get_context(  # noqa: PLR0912, PLR0915
             excluded, preventing repetition across calls.
     """
     if not intent or not intent.strip():
-        return "Error: intent must not be empty"
+        _raise_invalid_params(
+            "intent must not be empty",
+            data={"field": "intent"},
+        )
 
     registry = _get_registry()
     items: list[dict[str, Any]] = []
 
-    # Search documents
+    # Search documents — a store outage here used to silently drop the
+    # document axis from the merged pack. Loud raise instead.
     try:
         filters: dict[str, Any] = {}
         if domain:
@@ -339,8 +466,13 @@ def get_context(  # noqa: PLR0912, PLR0915
             }
             for doc in doc_results
         )
-    except Exception:
+    except Exception as exc:
         logger.exception("get_context_doc_search_failed")
+        _raise_internal(
+            f"document search failed: {exc}",
+            cause=exc,
+            data={"stage": "doc_search", "intent": intent},
+        )
 
     # Search graph
     try:
@@ -360,8 +492,13 @@ def get_context(  # noqa: PLR0912, PLR0915
                         "relevance_score": 0.5,
                     }
                 )
-    except Exception:
+    except Exception as exc:
         logger.exception("get_context_graph_search_failed")
+        _raise_internal(
+            f"graph search failed: {exc}",
+            cause=exc,
+            data={"stage": "graph_search", "intent": intent},
+        )
 
     # Recent traces
     try:
@@ -375,8 +512,13 @@ def get_context(  # noqa: PLR0912, PLR0915
             }
             for t in traces
         )
-    except Exception:
+    except Exception as exc:
         logger.exception("get_context_trace_search_failed")
+        _raise_internal(
+            f"trace search failed: {exc}",
+            cause=exc,
+            data={"stage": "trace_search", "intent": intent},
+        )
 
     # Session dedup: exclude items already served in this session.
     session_served: set[str] = set()
@@ -401,8 +543,16 @@ def get_context(  # noqa: PLR0912, PLR0915
                 for section in payload.get("sections", []) or []:
                     for iid in section.get("item_ids", []) or []:
                         session_served.add(iid)
-        except Exception:
-            logger.debug("get_context_session_dedup_failed")
+        except Exception as exc:
+            logger.exception("get_context_session_dedup_failed")
+            _raise_internal(
+                f"session dedup query failed: {exc}",
+                cause=exc,
+                data={
+                    "stage": "session_dedup",
+                    "session_id": session_id,
+                },
+            )
 
     # Deduplicate and sort
     seen: set[str] = set()
@@ -437,7 +587,11 @@ def get_context(  # noqa: PLR0912, PLR0915
                 },
             )
         except Exception:
-            logger.debug("get_context_pack_emit_failed")
+            # GRACEFUL-DEGRADATION: pack already assembled and returned —
+            # an event-log emit failure is a telemetry concern, not a
+            # tool-result correctness concern. Phase 5 covers telemetry
+            # site cleanup.
+            logger.exception("get_context_pack_emit_failed")
 
     try:
         track_token_usage(
@@ -448,7 +602,9 @@ def get_context(  # noqa: PLR0912, PLR0915
             budget_tokens=max_tokens,
         )
     except Exception:
-        logger.debug("token_tracking_failed", operation="get_context")
+        # GRACEFUL-DEGRADATION: token tracking is post-success telemetry;
+        # failure here must not invalidate a successful pack assembly.
+        logger.exception("token_tracking_failed", operation="get_context")
     return result
 
 
@@ -465,12 +621,18 @@ def save_experience(trace_json: str) -> str:
         trace_json: JSON string conforming to the Trace schema.
     """
     if not trace_json or not trace_json.strip():
-        return "Error: trace_json must not be empty"
+        _raise_invalid_params(
+            "trace_json must not be empty",
+            data={"field": "trace_json"},
+        )
 
     try:
         trace = Trace.model_validate_json(trace_json)
     except Exception as exc:
-        return f"Error: Invalid trace JSON — {exc}"
+        _raise_invalid_params(
+            f"invalid trace JSON: {exc}",
+            data={"field": "trace_json", "error_class": type(exc).__name__},
+        )
 
     executor = build_curate_executor(_get_registry())
     result = executor.execute(
@@ -483,7 +645,14 @@ def save_experience(trace_json: str) -> str:
         )
     )
     if result.status != CommandStatus.SUCCESS:
-        return f"Error: Failed to store trace — {result.message}"
+        _raise_mutation_failed(
+            f"failed to store trace: {result.message}",
+            data={
+                "status": result.status.value,
+                "command_id": result.command_id,
+                "message": result.message,
+            },
+        )
 
     return f"Trace saved: {result.created_id}"
 
@@ -513,7 +682,10 @@ def save_knowledge(
             Default: "entity_related_to".
     """
     if not name or not name.strip():
-        return "Error: name must not be empty"
+        _raise_invalid_params(
+            "name must not be empty",
+            data={"field": "name"},
+        )
 
     props = dict(properties or {})
     props["name"] = name
@@ -529,6 +701,10 @@ def save_knowledge(
 
     if relates_to:
         if registry.knowledge.graph_store.get_node(relates_to) is None:
+            # Entity already created — surface a warning string in the
+            # response rather than raising, since the create succeeded.
+            # Callers that want strict link semantics should call
+            # ``execute_mutation`` with ``LINK_CREATE`` directly.
             result += (
                 f"\nWarning: target entity not found: {relates_to} — edge not created"
             )
@@ -567,7 +743,10 @@ def save_memory(
         doc_id: Optional document ID. Auto-generated if not provided.
     """
     if not content or not content.strip():
-        return "Error: content must not be empty"
+        _raise_invalid_params(
+            "content must not be empty",
+            data={"field": "content"},
+        )
 
     from trellis.core.hashing import content_hash  # noqa: PLC0415
 
@@ -595,20 +774,38 @@ def save_memory(
                     similarity=round(similarity, 3),
                 )
                 return f"Fuzzy duplicate (similarity {similarity:.0%}): {match_id}"
-    except Exception:
-        logger.debug("save_memory_minhash_failed")
+    except McpError:
+        # _get_minhash_index already wrapped the cause structurally.
+        raise
+    except Exception as exc:
+        logger.exception("save_memory_minhash_failed")
+        _raise_internal(
+            f"fuzzy dedup query failed: {exc}",
+            cause=exc,
+            data={"stage": "minhash_find"},
+        )
 
     stored_id = registry.knowledge.document_store.put(
         doc_id, content, metadata=metadata
     )
 
-    # Add to MinHash index for future fuzzy dedup.
+    # Add to MinHash index for future fuzzy dedup. The write already
+    # succeeded; an index-add failure means future calls won't see this
+    # doc in fuzzy lookups but the doc itself is persisted — surface as
+    # a real error so operators can diagnose the dedup drift.
     try:
         minhash_index = _get_minhash_index(registry)
         if minhash_index is not None:
             minhash_index.add(stored_id, content)
-    except Exception:
-        logger.debug("save_memory_minhash_index_add_failed", doc_id=stored_id)
+    except McpError:
+        raise
+    except Exception as exc:
+        logger.exception("save_memory_minhash_index_add_failed", doc_id=stored_id)
+        _raise_internal(
+            f"failed to index stored memory for fuzzy dedup: {exc}",
+            cause=exc,
+            data={"stage": "minhash_add", "doc_id": stored_id},
+        )
 
     # Emit MEMORY_STORED so enrichment / promotion workers can react.
     try:
@@ -624,8 +821,13 @@ def save_memory(
                 "metadata": metadata,
             },
         )
-    except Exception:
-        logger.debug("memory_stored_event_emission_failed", doc_id=stored_id)
+    except Exception as exc:
+        logger.exception("memory_stored_event_emission_failed", doc_id=stored_id)
+        _raise_internal(
+            f"MEMORY_STORED event emit failed: {exc}",
+            cause=exc,
+            data={"stage": "memory_stored_emit", "doc_id": stored_id},
+        )
 
     # Feature-flagged tiered extraction (TRELLIS_ENABLE_MEMORY_EXTRACTION=1).
     # Runs AliasMatch + LLM residue via the governed MutationExecutor.
@@ -670,7 +872,8 @@ def get_lessons(
             budget_tokens=max_tokens,
         )
     except Exception:
-        logger.debug("token_tracking_failed", operation="get_lessons")
+        # GRACEFUL-DEGRADATION: token tracking is post-success telemetry.
+        logger.exception("token_tracking_failed", operation="get_lessons")
     return result
 
 
@@ -693,12 +896,18 @@ def get_graph(
         max_tokens: Maximum response size in tokens (default 2000).
     """
     if not entity_id or not entity_id.strip():
-        return "Error: entity_id must not be empty"
+        _raise_invalid_params(
+            "entity_id must not be empty",
+            data={"field": "entity_id"},
+        )
 
     registry = _get_registry()
     node = registry.knowledge.graph_store.get_node(entity_id)
     if node is None:
-        return f"Entity not found: {entity_id}"
+        _raise_not_found(
+            f"entity not found: {entity_id}",
+            data={"entity_id": entity_id},
+        )
 
     subgraph = registry.knowledge.graph_store.get_subgraph(
         seed_ids=[entity_id], depth=depth
@@ -713,7 +922,8 @@ def get_graph(
             budget_tokens=max_tokens,
         )
     except Exception:
-        logger.debug("token_tracking_failed", operation="get_graph")
+        # GRACEFUL-DEGRADATION: token tracking is post-success telemetry.
+        logger.exception("token_tracking_failed", operation="get_graph")
     return result
 
 
@@ -766,7 +976,10 @@ def record_feedback(
     has_trace = bool(trace_id and trace_id.strip())
     has_pack = bool(pack_id and pack_id.strip())
     if not has_trace and not has_pack:
-        return "Error: one of trace_id or pack_id must be provided"
+        _raise_invalid_params(
+            "one of trace_id or pack_id must be provided",
+            data={"fields": ["trace_id", "pack_id"]},
+        )
 
     registry = _get_registry()
 
@@ -825,7 +1038,10 @@ def search(
         max_tokens: Maximum response size in tokens (default 2000).
     """
     if not query or not query.strip():
-        return "Error: query must not be empty"
+        _raise_invalid_params(
+            "query must not be empty",
+            data={"field": "query"},
+        )
 
     registry = _get_registry()
 
@@ -874,7 +1090,8 @@ def search(
             budget_tokens=max_tokens,
         )
     except Exception:
-        logger.debug("token_tracking_failed", operation="search")
+        # GRACEFUL-DEGRADATION: token tracking is post-success telemetry.
+        logger.exception("token_tracking_failed", operation="search")
     return result
 
 
@@ -908,7 +1125,10 @@ def get_objective_context(
             excluded from the result, preventing repetition across calls.
     """
     if not intent or not intent.strip():
-        return "Error: intent must not be empty"
+        _raise_invalid_params(
+            "intent must not be empty",
+            data={"field": "intent"},
+        )
 
     try:
         registry = _get_registry()
@@ -981,12 +1201,21 @@ def get_objective_context(
                 budget_tokens=resolved_tokens,
             )
         except Exception:
-            logger.debug("token_tracking_failed", operation="get_objective_context")
-    except Exception:
+            # GRACEFUL-DEGRADATION: token tracking is post-success telemetry.
+            logger.exception(
+                "token_tracking_failed", operation="get_objective_context"
+            )
+    except McpError:
+        # Already structured by a deeper helper — let it propagate.
+        raise
+    except Exception as exc:
         logger.exception("get_objective_context_failed")
-        return f"Error: failed to assemble objective context for: {intent}"
-    else:
-        return result
+        _raise_internal(
+            f"failed to assemble objective context for intent={intent!r}: {exc}",
+            cause=exc,
+            data={"tool": "get_objective_context", "intent": intent},
+        )
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1020,7 +1249,10 @@ def get_task_context(
             excluded, preventing repetition across calls.
     """
     if not intent or not intent.strip():
-        return "Error: intent must not be empty"
+        _raise_invalid_params(
+            "intent must not be empty",
+            data={"field": "intent"},
+        )
 
     try:
         registry = _get_registry()
@@ -1094,12 +1326,18 @@ def get_task_context(
                 budget_tokens=resolved_tokens,
             )
         except Exception:
-            logger.debug("token_tracking_failed", operation="get_task_context")
-    except Exception:
+            # GRACEFUL-DEGRADATION: token tracking is post-success telemetry.
+            logger.exception("token_tracking_failed", operation="get_task_context")
+    except McpError:
+        raise
+    except Exception as exc:
         logger.exception("get_task_context_failed")
-        return f"Error: failed to assemble task context for: {intent}"
-    else:
-        return result
+        _raise_internal(
+            f"failed to assemble task context for intent={intent!r}: {exc}",
+            cause=exc,
+            data={"tool": "get_task_context", "intent": intent},
+        )
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1149,9 +1387,15 @@ def get_sectioned_context(
         ]
     """
     if not intent or not intent.strip():
-        return "Error: intent must not be empty"
+        _raise_invalid_params(
+            "intent must not be empty",
+            data={"field": "intent"},
+        )
     if not sections:
-        return "Error: sections must not be empty"
+        _raise_invalid_params(
+            "sections must not be empty",
+            data={"field": "sections"},
+        )
 
     try:
         registry = _get_registry()
@@ -1211,12 +1455,20 @@ def get_sectioned_context(
                 budget_tokens=resolved_tokens,
             )
         except Exception:
-            logger.debug("token_tracking_failed", operation="get_sectioned_context")
-    except Exception:
+            # GRACEFUL-DEGRADATION: token tracking is post-success telemetry.
+            logger.exception(
+                "token_tracking_failed", operation="get_sectioned_context"
+            )
+    except McpError:
+        raise
+    except Exception as exc:
         logger.exception("get_sectioned_context_failed")
-        return f"Error: failed to assemble sectioned context for: {intent}"
-    else:
-        return result
+        _raise_internal(
+            f"failed to assemble sectioned context for intent={intent!r}: {exc}",
+            cause=exc,
+            data={"tool": "get_sectioned_context", "intent": intent},
+        )
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1230,16 +1482,27 @@ def _resolve_operation(operation: str) -> Any:
     Accepts both the wire form (``"link.create"``) and the screaming-snake
     name (``"LINK_CREATE"``). Returns ``None`` when the string matches
     neither, leaving error reporting to the caller.
+
+    The two ``except`` clauses below are intentionally tight: the wire
+    form falls through ``ValueError`` to try the enum-name form, and the
+    enum-name miss returns ``None`` so the caller can raise a single
+    INVALID_PARAMS with the offending string and the registry context.
+    Replacing either with a raise here would force the caller to mask
+    the legitimate "try other form" flow.
     """
     from trellis.mutate.commands import Operation  # noqa: PLC0415
 
     try:
         return Operation(operation)
     except ValueError:
+        # GUARD: tried the wire form ("link.create"); fall through and
+        # try the enum-name form ("LINK_CREATE") below.
         pass
     try:
         return Operation[operation]
     except KeyError:
+        # GUARD: neither wire form nor enum name matched. Caller
+        # surfaces an INVALID_PARAMS McpError with the offending string.
         return None
 
 
@@ -1272,29 +1535,35 @@ def execute_mutation(
     Returns:
         A JSON object string with fields ``status``, ``command_id``,
         ``operation``, ``message``, and (on success) ``created_id``.
-        Validation, unknown-operation, and handler errors all surface
-        as ``status="error"`` or the executor's own status strings —
-        this tool does not raise to the MCP transport.
+        The executor's own non-success statuses (``rejected``, ``failed``,
+        ``duplicate``) are still returned in the JSON body — those are
+        structured outcomes, not transport-layer errors.
+
+    Raises:
+        McpError: With ``INVALID_PARAMS`` for pre-flight argument
+            issues (empty operation, unknown enum, non-dict args,
+            ``Command`` construction failure) and ``INTERNAL_ERROR``
+            for unexpected executor-side crashes.
     """
     from trellis.mutate.commands import Command  # noqa: PLC0415
 
     if not operation or not operation.strip():
-        return json.dumps(
-            {"status": "error", "message": "Error: operation must not be empty"}
+        _raise_invalid_params(
+            "operation must not be empty",
+            data={"field": "operation"},
         )
 
     op = _resolve_operation(operation)
     if op is None:
-        return json.dumps(
-            {
-                "status": "error",
-                "message": f"Error: unknown operation: {operation}",
-            }
+        _raise_invalid_params(
+            f"unknown operation: {operation}",
+            data={"field": "operation", "value": operation},
         )
 
     if not isinstance(args, dict):
-        return json.dumps(
-            {"status": "error", "message": "Error: args must be a dict"}
+        _raise_invalid_params(
+            "args must be a dict",
+            data={"field": "args", "type": type(args).__name__},
         )
 
     requested_by = actor.strip() if actor and actor.strip() else "mcp:execute_mutation"
@@ -1307,11 +1576,9 @@ def execute_mutation(
             requested_by=requested_by,
         )
     except Exception as exc:
-        return json.dumps(
-            {
-                "status": "error",
-                "message": f"Error: invalid command — {exc}",
-            }
+        _raise_invalid_params(
+            f"invalid command: {exc}",
+            data={"operation": str(op), "error_class": type(exc).__name__},
         )
 
     try:
@@ -1319,13 +1586,14 @@ def execute_mutation(
         result = executor.execute(command)
     except Exception as exc:
         logger.exception("execute_mutation_failed", operation=str(op))
-        return json.dumps(
-            {
-                "status": "error",
+        _raise_internal(
+            f"execution failed: {exc}",
+            cause=exc,
+            data={
                 "command_id": command.command_id,
                 "operation": str(op),
-                "message": f"Error: execution failed — {exc}",
-            }
+                "error_class": type(exc).__name__,
+            },
         )
 
     response: dict[str, Any] = {
@@ -1387,9 +1655,12 @@ def _install_shutdown_signal_handlers() -> None:
         try:
             signal.signal(sig, _handler)
         except (AttributeError, ValueError, OSError):
+            # GRACEFUL-DEGRADATION: best-effort signal handler install.
             # ValueError: signal only works in main thread / not supported
             # OSError: same on some platforms
-            # AttributeError: defensive, in case of platform stubbing
+            # AttributeError: defensive, in case of platform stubbing.
+            # Falling back to the default handler is correct — the
+            # stdio-EOF shutdown path still works.
             logger.debug("mcp_server_signal_unsupported", signal=sig_name)
 
 
@@ -1414,5 +1685,11 @@ def main() -> None:
             try:
                 _registry.close()
             except Exception:
+                # GRACEFUL-DEGRADATION: this runs inside the ``finally``
+                # of ``main()``; re-raising would mask an in-flight
+                # ``mcp.run()`` exception and obscure the original cause
+                # of shutdown. Log loudly, let the process exit.
                 logger.exception("mcp_server_registry_close_failed")
+            finally:
+                _registry = None
             _registry = None
