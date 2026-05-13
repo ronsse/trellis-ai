@@ -18,6 +18,7 @@ from trellis.mutate import (
     Operation,
     build_curate_executor,
 )
+from trellis_cli.exit_codes import EXIT_INTERNAL
 from trellis_cli.stores import _get_registry
 
 curate_app = typer.Typer(no_args_is_help=True)
@@ -101,7 +102,7 @@ def link(
             console.print(json.dumps({"status": "error", "message": result.message}))
         else:
             console.print(f"[red]{result.message}[/red]")
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=EXIT_INTERNAL)
 
     if output_format == "json":
         console.print(
@@ -167,7 +168,7 @@ def entity(
                 )
             else:
                 console.print(f"[red]Invalid JSON for --properties[/red]: {exc}")
-            raise typer.Exit(code=1) from exc
+            raise typer.Exit(code=EXIT_INTERNAL) from exc
 
     cmd = Command(
         operation=Operation.ENTITY_CREATE,

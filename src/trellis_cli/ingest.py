@@ -24,6 +24,7 @@ from trellis.schemas.evidence import Evidence
 from trellis.schemas.extraction import ExtractionResult
 from trellis.schemas.trace import Trace
 from trellis.stores.registry import StoreRegistry
+from trellis_cli.exit_codes import EXIT_INTERNAL
 from trellis_cli.stores import _get_registry, get_document_store
 
 ingest_app = typer.Typer(no_args_is_help=True)
@@ -45,7 +46,7 @@ def ingest_trace(
         path = Path(file)
         if not path.exists():
             console.print(f"[red]File not found: {file}[/red]")
-            raise typer.Exit(code=1)
+            raise typer.Exit(code=EXIT_INTERNAL)
         raw = path.read_text()
 
     # Parse and validate
@@ -57,7 +58,7 @@ def ingest_trace(
             console.print(json.dumps({"status": "error", "message": str(exc)}))
         else:
             console.print(f"[red]Invalid trace: {exc}[/red]")
-        raise typer.Exit(code=1) from None
+        raise typer.Exit(code=EXIT_INTERNAL) from None
 
     # Persist via the governed mutation pipeline
     executor = build_curate_executor(_get_registry())
@@ -77,7 +78,7 @@ def ingest_trace(
             )
         else:
             console.print(f"[red]Failed to ingest trace: {result.message}[/red]")
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=EXIT_INTERNAL)
 
     if output_format == "json":
         console.print(
@@ -107,7 +108,7 @@ def ingest_evidence(
     path = Path(file)
     if not path.exists():
         console.print(f"[red]File not found: {file}[/red]")
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=EXIT_INTERNAL)
 
     try:
         data = json.loads(path.read_text())
@@ -117,7 +118,7 @@ def ingest_evidence(
             console.print(json.dumps({"status": "error", "message": str(exc)}))
         else:
             console.print(f"[red]Invalid evidence: {exc}[/red]")
-        raise typer.Exit(code=1) from None
+        raise typer.Exit(code=EXIT_INTERNAL) from None
 
     # Persist to document store
     store = get_document_store()
@@ -200,7 +201,7 @@ def ingest_dbt_manifest(
     path = Path(manifest_path)
     if not path.exists():
         console.print(f"[red]Path not found: {manifest_path}[/red]")
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=EXIT_INTERNAL)
 
     manifest_file = path / "target" / "manifest.json" if path.is_dir() else path
 
@@ -211,7 +212,7 @@ def ingest_dbt_manifest(
             console.print(json.dumps({"status": "error", "message": str(exc)}))
         else:
             console.print(f"[red]Could not read manifest: {exc}[/red]")
-        raise typer.Exit(code=1) from None
+        raise typer.Exit(code=EXIT_INTERNAL) from None
 
     from trellis_workers.extract import DbtManifestExtractor  # noqa: PLC0415
 
@@ -232,7 +233,7 @@ def ingest_dbt_manifest(
             console.print(json.dumps({"status": "error", "message": str(exc)}))
         else:
             console.print(f"[red]dbt ingest failed: {exc}[/red]")
-        raise typer.Exit(code=1) from None
+        raise typer.Exit(code=EXIT_INTERNAL) from None
 
     # Index descriptions into the document store (dbt-specific side-channel
     # that used to live inside the worker's load() override).
@@ -274,7 +275,7 @@ def ingest_openlineage(
     path = Path(events_path)
     if not path.exists():
         console.print(f"[red]File not found: {events_path}[/red]")
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=EXIT_INTERNAL)
 
     # Support JSON array and NDJSON — CLI owns file I/O.
     try:
@@ -289,7 +290,7 @@ def ingest_openlineage(
             console.print(json.dumps({"status": "error", "message": str(exc)}))
         else:
             console.print(f"[red]Could not read events file: {exc}[/red]")
-        raise typer.Exit(code=1) from None
+        raise typer.Exit(code=EXIT_INTERNAL) from None
 
     from trellis_workers.extract import OpenLineageExtractor  # noqa: PLC0415
 
@@ -310,7 +311,7 @@ def ingest_openlineage(
             console.print(json.dumps({"status": "error", "message": str(exc)}))
         else:
             console.print(f"[red]OpenLineage ingest failed: {exc}[/red]")
-        raise typer.Exit(code=1) from None
+        raise typer.Exit(code=EXIT_INTERNAL) from None
 
     counts = {"nodes": nodes, "edges": edges}
     if output_format == "json":

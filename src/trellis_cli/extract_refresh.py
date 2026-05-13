@@ -40,6 +40,7 @@ from trellis.mutate import build_curate_executor
 from trellis.schemas.extraction import ExtractionResult
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
+from trellis_cli.exit_codes import EXIT_INTERNAL
 from trellis_cli.stores import _get_registry
 
 _logger = structlog.get_logger(__name__)
@@ -385,11 +386,11 @@ def refresh(  # noqa: PLR0912, PLR0915 - CLI dispatch with explicit branching by
         console.print(
             "[red]Specify exactly one of --source or --type.[/red]"
         )
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=EXIT_INTERNAL)
 
     if extractor_type is not None and path is None:
         console.print("[red]--type requires --path.[/red]")
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=EXIT_INTERNAL)
 
     summary: dict[str, Any]
     if source is not None:
@@ -398,37 +399,37 @@ def refresh(  # noqa: PLR0912, PLR0915 - CLI dispatch with explicit branching by
             console.print(
                 f"[red]sources.yaml not found: {sources_path}[/red]"
             )
-            raise typer.Exit(code=1)
+            raise typer.Exit(code=EXIT_INTERNAL)
         config = load_sources(sources_path)
         entry = config.find(source)
         if entry is None:
             console.print(
                 f"[red]Source {source!r} not declared in {sources_path}[/red]"
             )
-            raise typer.Exit(code=1)
+            raise typer.Exit(code=EXIT_INTERNAL)
         if not entry.enabled:
             console.print(
                 f"[yellow]Source {source!r} is disabled in {sources_path} — "
                 f"refusing to refresh. Remove enabled: false to proceed.[/yellow]"
             )
-            raise typer.Exit(code=1)
+            raise typer.Exit(code=EXIT_INTERNAL)
         try:
             summary = _refresh_entry(entry, sources_root=sources_path.parent.resolve())
         except typer.BadParameter as exc:
             console.print(f"[red]{exc}[/red]")
-            raise typer.Exit(code=1) from None
+            raise typer.Exit(code=EXIT_INTERNAL) from None
         except Exception as exc:
             if output_format == "json":
                 print(json.dumps({"status": "error", "message": str(exc)}))
             else:
                 console.print(f"[red]Refresh failed: {exc}[/red]")
-            raise typer.Exit(code=1) from None
+            raise typer.Exit(code=EXIT_INTERNAL) from None
     else:
         # --type path
         type_path = Path(path)  # type: ignore[arg-type]
         if not type_path.exists():
             console.print(f"[red]Path not found: {type_path}[/red]")
-            raise typer.Exit(code=1)
+            raise typer.Exit(code=EXIT_INTERNAL)
         try:
             extractor = _resolve_extractor(extractor_type)  # type: ignore[arg-type]
             raw_input = _read_raw_input(type_path, extractor_type)  # type: ignore[arg-type]
@@ -442,13 +443,13 @@ def refresh(  # noqa: PLR0912, PLR0915 - CLI dispatch with explicit branching by
             )
         except typer.BadParameter as exc:
             console.print(f"[red]{exc}[/red]")
-            raise typer.Exit(code=1) from None
+            raise typer.Exit(code=EXIT_INTERNAL) from None
         except Exception as exc:
             if output_format == "json":
                 print(json.dumps({"status": "error", "message": str(exc)}))
             else:
                 console.print(f"[red]Refresh failed: {exc}[/red]")
-            raise typer.Exit(code=1) from None
+            raise typer.Exit(code=EXIT_INTERNAL) from None
 
     if output_format == "json":
         # Use plain print to avoid Rich's word-wrapping on long JSON, which
