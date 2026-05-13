@@ -146,6 +146,28 @@ class EventType(StrEnum):
     #: ``docs/design/adr-well-known-promotion-loop.md``.
     WELL_KNOWN_CANDIDATE = "well_known.candidate"
 
+    # Proposal lifecycle (coding-agent self-improvement loop — Item 7).
+    #: Emitted by
+    #: :class:`trellis_workers.code_authoring.ProposalGenerator` when a
+    #: new proposal is drafted for a signal cluster (e.g., a cluster of
+    #: :attr:`EXTRACTION_FAILED` events crossing the count threshold, or
+    #: a surfaced :attr:`WELL_KNOWN_CANDIDATE`). Payload schema:
+    #: ``{proposal_id, cluster_signature, markdown_preview, source_event_count}``.
+    #: ``proposal_id`` is the SHA-256 hash of the cluster signature so
+    #: re-running the generator over the same window produces a stable
+    #: ID for idempotency checks. See
+    #: ``docs/design/adr-coding-agent-loop.md`` and
+    #: ``docs/design/plan-coding-agent-loop.md`` Phase 0.
+    PROPOSAL_DRAFTED = "proposal.drafted"
+    #: Emitted by :class:`trellis_workers.code_authoring.ProposalGenerator`
+    #: when a re-run of the generator surfaces the same ``proposal_id``
+    #: that already has a :attr:`PROPOSAL_DRAFTED` event in the log.
+    #: Currently fires whenever the same proposal would otherwise be
+    #: re-drafted; Phase 2's growth-threshold logic ("cluster grew ≥
+    #: 50%") will narrow this to the meaningful-change case. Payload is
+    #: the same shape as :attr:`PROPOSAL_DRAFTED`.
+    PROPOSAL_UPDATED = "proposal.updated"
+
     # System
     SYSTEM_INITIALIZED = "system.initialized"
     MUTATION_EXECUTED = "mutation.executed"
