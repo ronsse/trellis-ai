@@ -38,6 +38,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
 
+from trellis.meta.agents import META_AGENT_PREFIX
 from trellis.schemas import well_known as wk
 from trellis.stores.base.event_log import EventType
 
@@ -134,8 +135,10 @@ _DEFAULT_NODE_SCAN_LIMIT: int = 50_000
 #: counts. Reserves the ``"trellis_meta_"`` namespace for Item 6's
 #: dogfooding loop so its own ``MUTATION_EXECUTED`` events don't make
 #: Item 6-emitted open-string types into perpetual self-promotion
-#: candidates.
-META_EXTRACTOR_PREFIX: str = "trellis_meta_"
+#: candidates. Re-exported alias of
+#: :data:`trellis.meta.agents.META_AGENT_PREFIX` — the meta module owns
+#: the namespace; this alias preserves the pre-Item-6 import path.
+META_EXTRACTOR_PREFIX: str = META_AGENT_PREFIX
 
 
 # ---------------------------------------------------------------------------
