@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 
 import structlog
 
-from trellis.errors import ConfigError, ValidationError
+from trellis.errors import BackendNotInstalledError, ConfigError, ValidationError
 from trellis.stores.base import (
     BlobStore,
     DocumentStore,
@@ -168,6 +168,19 @@ _FINGERPRINT_META_FILENAME = "_trellis_meta.json"
 # path when only that substrate's schema changes.
 _DEFAULT_SCHEMA_VERSION = "1"
 
+# Mapping from backend name to the ``pyproject.toml`` optional-extra that
+# pulls in its Python dependencies. Used by
+# :class:`BackendNotInstalledError` to render an install command in the
+# error message. Backends that ship in core (``sqlite``, ``local``) are
+# absent from this map — their import never fails.
+_EXTRA_FOR_BACKEND: dict[str, str] = {
+    "postgres": "cloud",
+    "pgvector": "cloud",
+    "s3": "cloud",
+    "neo4j": "neo4j",
+    "arcadedb": "arcadedb",
+}
+
 
 def _resolve_connectivity_check(explicit: bool | None) -> bool:
     """Return the effective connectivity-check flag for a validate() call."""
@@ -267,7 +280,13 @@ def _get_merged_backends(store_type: str) -> dict[str, tuple[str, str]]:
     builtins = _BUILTIN_BACKENDS.get(plane, {}).get(store_type, {})
     try:
         from trellis.plugins import GROUP_STORES, merge_with_builtins  # noqa: PLC0415
-    except Exception:
+    except ImportError:
+        # GRACEFUL-DEGRADATION: ``trellis.plugins`` is shipped in core,
+        # but a deliberately stripped install (e.g. embedded zipapp without
+        # the plugin loader) is a supported deployment shape. Built-in
+        # backends keep working; only entry-point plugins are unavailable.
+        # Narrow to ImportError so genuine bugs in plugin discovery still
+        # surface as unhandled exceptions.
         logger.debug("plugin_loader_unavailable", store_type=store_type)
         _MERGED_BACKENDS_CACHE[store_type] = dict(builtins)
         return _MERGED_BACKENDS_CACHE[store_type]
@@ -377,20 +396,46 @@ def _try_llm_embedder_plugin(
     )
 
 
-def _import_callable(dotted_path: str) -> Callable[[str], list[float]] | None:
-    """Import a callable from a dotted module path (e.g. ``pkg.mod.func``)."""
+def _import_callable(dotted_path: str) -> Callable[[str], list[float]]:
+    """Import a callable from a dotted module path (e.g. ``pkg.mod.func``).
+
+    Raises :class:`ConfigError` when the path is malformed, the module
+    cannot be imported, or the named attribute is not callable. Returning
+    ``None`` silently here would let a misconfigured ``TRELLIS_EMBEDDING_FN``
+    propagate as ``embedding_fn is None`` downstream, which masks the typo
+    behind a "no embeddings configured" branch.
+    """
     import importlib  # noqa: PLC0415
 
+    module_path, _, attr_name = dotted_path.rpartition(".")
+    if not module_path or not attr_name:
+        msg = (
+            f"Invalid embedding callable path {dotted_path!r} —"
+            " expected a dotted path like 'pkg.module.func'."
+        )
+        raise ConfigError(msg, setting="embeddings.provider")
     try:
-        module_path, _, attr_name = dotted_path.rpartition(".")
         module = importlib.import_module(module_path)
-        fn = getattr(module, attr_name)
-        if callable(fn):
-            return fn  # type: ignore[no-any-return]
-        logger.warning("embedding_fn_not_callable", path=dotted_path)
-    except Exception:
-        logger.warning("embedding_fn_import_failed", path=dotted_path, exc_info=True)
-    return None
+    except ImportError as exc:
+        msg = (
+            f"Could not import embedding callable {dotted_path!r}:"
+            f" module {module_path!r} is not importable ({exc})."
+        )
+        raise ConfigError(msg, setting="embeddings.provider") from exc
+    fn = getattr(module, attr_name, None)
+    if fn is None:
+        msg = (
+            f"Embedding callable path {dotted_path!r} resolved, but"
+            f" attribute {attr_name!r} is missing from {module_path!r}."
+        )
+        raise ConfigError(msg, setting="embeddings.provider")
+    if not callable(fn):
+        msg = (
+            f"Embedding callable path {dotted_path!r} resolved, but"
+            f" {attr_name!r} is not callable."
+        )
+        raise ConfigError(msg, setting="embeddings.provider")
+    return fn  # type: ignore[no-any-return]
 
 
 def _mask_api_key(api_key: str | None) -> str:
@@ -440,13 +485,21 @@ def _resolve_api_key(cfg: dict[str, Any]) -> str | None:
 
 def _build_openai_embedding_fn(
     config: dict[str, Any],
-) -> Callable[[str], list[float]] | None:
-    """Build an embedding callable using the OpenAI SDK."""
+) -> Callable[[str], list[float]]:
+    """Build an embedding callable using the OpenAI SDK.
+
+    Raises :class:`BackendNotInstalledError` when the ``openai`` SDK
+    is not installed — returning ``None`` here silently demoted
+    ``embeddings: provider: openai`` configs to no-embedding mode
+    instead of telling the operator the extra is missing.
+    """
     try:
         import openai  # noqa: PLC0415
-    except ModuleNotFoundError:
-        logger.warning("embedding_fn_openai_not_installed")
-        return None
+    except ModuleNotFoundError as exc:
+        raise BackendNotInstalledError(
+            backend_name="openai-embeddings",
+            extra="llm-openai",
+        ) from exc
 
     model = config.get("model", "text-embedding-3-small")
     # Prefer api_key_env over literal api_key; either falls back to the
@@ -659,18 +712,30 @@ class StoreRegistry:
         llm_config: dict[str, Any] = {}
         config_path = config_dir / "config.yaml"
         if config_path.exists():
-            try:
-                import yaml  # noqa: PLC0415
+            import yaml  # noqa: PLC0415
 
-                data = yaml.safe_load(config_path.read_text()) or {}
-                store_config = _extract_store_config(data, str(config_path))
-                embedding_config = data.get("embeddings", {})
-                retrieval_config = data.get("retrieval", {})
-                llm_config = data.get("llm", {})
-                if data.get("data_dir"):
-                    data_dir = Path(data["data_dir"])
-            except Exception:
-                logger.warning("registry_config_load_failed", path=str(config_path))
+            try:
+                raw_text = config_path.read_text()
+            except OSError as exc:
+                msg = (
+                    f"Could not read Trellis config at {config_path}: {exc}."
+                    " Check file permissions or pass an explicit config_dir."
+                )
+                raise ConfigError(msg, setting="config_dir") from exc
+            try:
+                data = yaml.safe_load(raw_text) or {}
+            except yaml.YAMLError as exc:
+                msg = (
+                    f"Could not parse Trellis config at {config_path}: {exc}."
+                    " Fix the YAML syntax and retry."
+                )
+                raise ConfigError(msg, setting="config.yaml") from exc
+            store_config = _extract_store_config(data, str(config_path))
+            embedding_config = data.get("embeddings", {})
+            retrieval_config = data.get("retrieval", {})
+            llm_config = data.get("llm", {})
+            if data.get("data_dir"):
+                data_dir = Path(data["data_dir"])
 
         stores_dir = data_dir / "stores"
         return cls(
@@ -1078,9 +1143,11 @@ class StoreRegistry:
         Used by :meth:`_check_schema_fingerprints` to read the
         ``SCHEMA_VERSION`` class attribute without paying the cost of
         a full ``_instantiate`` (which opens connections, creates files,
-        etc.). Returns ``None`` when the backend can't be resolved at
-        all — the regular instantiation path will surface that with a
-        better error.
+        etc.). Returns ``None`` when no backend entry is registered for
+        the configured name; raises :class:`BackendNotInstalledError`
+        when the backend is known but its optional extra is missing,
+        so the fingerprint check fails loudly instead of silently
+        skipping schema-drift detection for backends whose SDK is gone.
         """
         backend, _ = self._resolve_backend(store_type)
         registry = _get_merged_backends(store_type)
@@ -1088,16 +1155,17 @@ class StoreRegistry:
         if spec is None:
             return None
         module_path, class_name = spec
-        try:
-            import importlib  # noqa: PLC0415
+        import importlib  # noqa: PLC0415
 
+        try:
             module = importlib.import_module(module_path)
-            cls = getattr(module, class_name, None)
-            return cls if isinstance(cls, type) else None
-        except Exception:
-            # Import failures are surfaced by the instantiation path;
-            # don't double-report here.
-            return None
+        except ImportError as exc:
+            raise BackendNotInstalledError(
+                backend_name=backend,
+                extra=_EXTRA_FOR_BACKEND.get(backend),
+            ) from exc
+        cls = getattr(module, class_name, None)
+        return cls if isinstance(cls, type) else None
 
     def _compute_fingerprints(self, store_types: Iterable[str]) -> dict[str, str]:
         """Compute the configured fingerprint per store_type.
@@ -1107,11 +1175,24 @@ class StoreRegistry:
         distinguishes within-substrate schema changes. Together they
         give us a single string that flips whenever the on-disk shape
         is no longer compatible with what we wrote last boot.
+
+        Catches :class:`BackendNotInstalledError` here and falls back
+        to the default schema version: the same error will surface
+        with a better contextual message during instantiation, and
+        we don't want the fingerprint check to short-circuit the
+        aggregate validation report.
         """
         out: dict[str, str] = {}
         for store_type in store_types:
             backend, _ = self._resolve_backend(store_type)
-            cls = self._resolve_substrate_class(store_type)
+            try:
+                cls = self._resolve_substrate_class(store_type)
+            except BackendNotInstalledError:
+                # AGGREGATE-DEFER: instantiation path will re-raise the
+                # same error with the per-store context, which the
+                # validate() loop captures into the
+                # ``RegistryValidationError`` aggregate.
+                cls = None
             version = (
                 str(getattr(cls, "SCHEMA_VERSION", _DEFAULT_SCHEMA_VERSION))
                 if cls is not None
@@ -1135,17 +1216,36 @@ class StoreRegistry:
         return self._stores_dir / _FINGERPRINT_META_FILENAME
 
     def _load_fingerprint_meta(self) -> dict[str, str]:
-        """Read the persisted fingerprint map; empty dict on first boot."""
+        """Read the persisted fingerprint map; empty dict on first boot.
+
+        Raises :class:`ConfigError` when the meta file exists but cannot
+        be read or parsed — a corrupt fingerprint file would silently
+        disable schema-drift detection on the affected stores, which is
+        the exact regression Logic Gap 4.5 was meant to prevent.
+        """
         path = self._fingerprint_meta_path()
         if path is None or not path.exists():
             return {}
-        try:
-            import json  # noqa: PLC0415
+        import json  # noqa: PLC0415
 
-            data = json.loads(path.read_text())
-        except (OSError, ValueError):
-            logger.warning("fingerprint_meta_read_failed", path=str(path))
-            return {}
+        try:
+            raw = path.read_text()
+        except OSError as exc:
+            msg = (
+                f"Could not read fingerprint meta at {path}: {exc}."
+                " Fix the underlying I/O error or delete the file to"
+                " reset the fingerprint store (first-boot semantics)."
+            )
+            raise ConfigError(msg, setting="stores_dir") from exc
+        try:
+            data = json.loads(raw)
+        except ValueError as exc:
+            msg = (
+                f"Could not parse fingerprint meta at {path}: {exc}."
+                " The file is corrupt. Delete it to reset the fingerprint"
+                " store (first-boot semantics) and re-run validate."
+            )
+            raise ConfigError(msg, setting="stores_dir") from exc
         if not isinstance(data, dict):
             return {}
         return {str(k): str(v) for k, v in data.items()}
@@ -1324,9 +1424,14 @@ class StoreRegistry:
                 self._get(store_type)
                 instantiated_ok.add(store_type)
             except Exception as exc:
-                # Catch every exception type so a misbehaving plugin
-                # backend (e.g. raising a custom Error subclass on
-                # missing config) doesn't bypass the aggregate.
+                # AGGREGATE: not a silent fallback. The exception is held
+                # for re-raise via :class:`RegistryValidationError` at the
+                # end of this method so an operator deploying a fresh
+                # stack sees every misconfigured store in one report
+                # instead of fixing them serially. Catch every exception
+                # type so a misbehaving plugin backend (e.g. raising a
+                # custom Error subclass on missing config) doesn't bypass
+                # the aggregate.
                 errors.append((store_type, exc))
                 logger.warning(
                     "store_registry_validation_failed",
@@ -1375,6 +1480,12 @@ class StoreRegistry:
                 verify_connectivity(driver)
                 logger.debug("bolt_connectivity_ok", uri=uri, user=user)
             except Exception as exc:
+                # AGGREGATE: not a silent fallback. The exception is held
+                # for re-raise via :class:`RegistryValidationError` by the
+                # caller so the operator sees every unreachable driver in
+                # one shot. The Bolt driver can raise ``ServiceUnavailable``,
+                # ``AuthError``, or arbitrary user-defined subclasses; the
+                # broad catch keeps all of them in the aggregate.
                 failures.append((label, exc))
                 logger.warning(
                     "bolt_connectivity_check_failed",
@@ -1421,6 +1532,13 @@ class StoreRegistry:
         ``openai`` SDK.  Deployments can also set ``TRELLIS_EMBEDDING_FN`` to a
         dotted import path (e.g. ``mypackage.embeddings.embed``) for fully
         custom providers.
+
+        Returns ``None`` only when no embedding is configured at all
+        (no env var, no ``embeddings.provider``). Raises
+        :class:`BackendNotInstalledError` when ``provider: openai`` is
+        configured but the ``llm-openai`` extra is missing, and
+        :class:`ConfigError` when the dotted-path provider can't be
+        imported or doesn't resolve to a callable.
         """
         if self._embedding_fn_cache is not _UNSET:
             return self._embedding_fn_cache  # type: ignore[return-value]
@@ -1485,11 +1603,16 @@ class StoreRegistry:
               base_url: https://...       # optional
 
         ``api_key_env`` is preferred over ``api_key`` so secrets stay out of
-        the config file. Returns ``None`` — never raises — when the config
-        is absent, incomplete, references an unknown provider, cannot
-        resolve an API key, or when the provider SDK is not installed.
-        Provider SDK imports are deferred to inside this method so core
-        stays dependency-free.
+        the config file. Returns ``None`` when the config is absent,
+        incomplete, references an unknown provider, or cannot resolve an
+        API key — these are valid "not configured" states. Raises
+        :class:`BackendNotInstalledError` when a provider is configured
+        but its optional SDK extra (``llm-openai`` / ``llm-anthropic``)
+        is not installed, so an operator who set ``provider: openai``
+        without ``pip install trellis-ai[llm-openai]`` sees an explicit
+        error instead of silently getting no LLM client. Provider SDK
+        imports are deferred to inside this method so core stays
+        dependency-free.
         """
         cfg = self._llm_config
         if not cfg:
@@ -1519,9 +1642,11 @@ class StoreRegistry:
                     DEFAULT_CHAT_MODEL,
                     OpenAIClient,
                 )
-            except ModuleNotFoundError:
-                logger.debug("llm_client_sdk_not_installed", provider=provider)
-                return None
+            except ModuleNotFoundError as exc:
+                raise BackendNotInstalledError(
+                    backend_name="openai",
+                    extra="llm-openai",
+                ) from exc
 
             chosen_model = model or DEFAULT_CHAT_MODEL
             try:
@@ -1530,9 +1655,12 @@ class StoreRegistry:
                     base_url=base_url,
                     default_model=chosen_model,
                 )
-            except ModuleNotFoundError:
-                logger.debug("llm_client_sdk_not_installed", provider=provider)
-                return None
+            except ModuleNotFoundError as exc:
+                # Constructor itself imports the openai SDK lazily.
+                raise BackendNotInstalledError(
+                    backend_name="openai",
+                    extra="llm-openai",
+                ) from exc
 
         elif provider == "anthropic":
             try:
@@ -1540,9 +1668,11 @@ class StoreRegistry:
                     DEFAULT_MODEL,
                     AnthropicClient,
                 )
-            except ModuleNotFoundError:
-                logger.debug("llm_client_sdk_not_installed", provider=provider)
-                return None
+            except ModuleNotFoundError as exc:
+                raise BackendNotInstalledError(
+                    backend_name="anthropic",
+                    extra="llm-anthropic",
+                ) from exc
 
             chosen_model = model or DEFAULT_MODEL
             try:
@@ -1551,9 +1681,12 @@ class StoreRegistry:
                     base_url=base_url,
                     default_model=chosen_model,
                 )
-            except ModuleNotFoundError:
-                logger.debug("llm_client_sdk_not_installed", provider=provider)
-                return None
+            except ModuleNotFoundError as exc:
+                # Constructor itself imports the anthropic SDK lazily.
+                raise BackendNotInstalledError(
+                    backend_name="anthropic",
+                    extra="llm-anthropic",
+                ) from exc
 
         else:
             # Unknown built-in — try the plugin path.  Entry points
@@ -1587,10 +1720,12 @@ class StoreRegistry:
         for ``provider``, ``api_key`` / ``api_key_env``, and ``base_url``
         when those fields are omitted. This lets a single OpenAI
         ``llm:`` block produce both a chat client and an embedder without
-        repetition. Returns ``None`` — never raises — under the same
-        conditions as :meth:`build_llm_client`. Currently only the OpenAI
-        provider ships a first-party embedder implementation; Anthropic
-        and other providers return ``None``.
+        repetition. Returns ``None`` when the embedder provider is
+        configured but no first-party implementation ships for it
+        (currently only OpenAI has one — Anthropic returns ``None``).
+        Raises :class:`BackendNotInstalledError` when the OpenAI
+        embedder is configured but the ``llm-openai`` extra is not
+        installed, mirroring :meth:`build_llm_client` semantics.
         """
         parent = self._llm_config
         if not parent:
@@ -1627,9 +1762,11 @@ class StoreRegistry:
                     DEFAULT_EMBEDDING_MODEL,
                     OpenAIEmbedder,
                 )
-            except ModuleNotFoundError:
-                logger.debug("embedder_client_sdk_not_installed", provider=provider)
-                return None
+            except ModuleNotFoundError as exc:
+                raise BackendNotInstalledError(
+                    backend_name="openai",
+                    extra="llm-openai",
+                ) from exc
 
             chosen_model = model or DEFAULT_EMBEDDING_MODEL
             try:
@@ -1638,9 +1775,12 @@ class StoreRegistry:
                     base_url=base_url,
                     default_model=chosen_model,
                 )
-            except ModuleNotFoundError:
-                logger.debug("embedder_client_sdk_not_installed", provider=provider)
-                return None
+            except ModuleNotFoundError as exc:
+                # Constructor itself imports the openai SDK lazily.
+                raise BackendNotInstalledError(
+                    backend_name="openai",
+                    extra="llm-openai",
+                ) from exc
             logger.info(
                 "embedder_client_built",
                 provider=provider,
@@ -1699,13 +1839,30 @@ class StoreRegistry:
             try:
                 store.close()
             except Exception:
-                logger.warning("store_close_failed", store=type(store).__name__)
+                # GRACEFUL-DEGRADATION: shutdown sweep. One misbehaving
+                # store must not block cleanup of the others, or shutdown
+                # leaks every resource after the first failure. The warning
+                # is the observability signal; raising here would defeat
+                # the purpose of the sweep.
+                logger.warning(
+                    "store_close_failed",
+                    store=type(store).__name__,
+                    exc_info=True,
+                )
         self._cache.clear()
         for key, driver in self._bolt_drivers.items():
             try:
                 driver.close()
             except Exception:
-                logger.warning("bolt_driver_close_failed", uri=key[0], user=key[1])
+                # GRACEFUL-DEGRADATION: same shutdown-sweep rationale as
+                # the store loop above. We log with traceback so the
+                # operator can diagnose flaky driver shutdowns post-hoc.
+                logger.warning(
+                    "bolt_driver_close_failed",
+                    uri=key[0],
+                    user=key[1],
+                    exc_info=True,
+                )
         self._bolt_drivers.clear()
 
     def __enter__(self) -> StoreRegistry:

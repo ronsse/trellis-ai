@@ -1,6 +1,8 @@
 """Tests for exception hierarchy."""
 
 from trellis.errors import (
+    BackendNotInstalledError,
+    ConfigError,
     IdempotencyError,
     MutationError,
     NotFoundError,
@@ -42,3 +44,27 @@ def test_policy_violation_is_mutation_error():
     assert isinstance(err, MutationError)
     assert err.code == "POLICY_VIOLATION"
     assert err.policy_id == "pol-1"
+
+
+def test_backend_not_installed_renders_extra_hint():
+    err = BackendNotInstalledError(backend_name="arcadedb", extra="arcadedb")
+    assert "arcadedb" in err.message
+    assert 'uv pip install -e ".[arcadedb]"' in err.message
+    assert err.code == "BACKEND_NOT_INSTALLED"
+    assert isinstance(err, ConfigError)
+    assert err.setting == "backend.arcadedb"
+
+
+def test_backend_not_installed_falls_back_to_package_name():
+    err = BackendNotInstalledError(
+        backend_name="custom-llm",
+        package_name="trellis-plugin-bedrock",
+    )
+    assert "trellis-plugin-bedrock" in err.message
+    assert err.extra is None
+
+
+def test_backend_not_installed_without_hint_still_renders():
+    err = BackendNotInstalledError(backend_name="unknown")
+    assert "unknown" in err.message
+    assert "optional dependency" in err.message

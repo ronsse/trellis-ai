@@ -2,8 +2,13 @@
 
 These tests exercise :meth:`StoreRegistry.build_llm_client` and
 :meth:`StoreRegistry.build_embedder_client` against the ``llm:`` block of
-``config.yaml``. All failure modes must return ``None`` and log at
-``debug`` — never raise — per the 8A brief.
+``config.yaml``. "Not configured" states (no ``llm:`` block, missing
+provider, unresolvable API key, unknown provider) return ``None``.
+"Misconfigured" states — specifically, a provider whose optional SDK is
+not installed — raise :class:`BackendNotInstalledError` so the operator
+sees the missing extra instead of silently getting no LLM client (C2
+Phase 2 of the silent-fallback cleanup; see
+``docs/design/plan-cleanup-silent-fallbacks.md``).
 """
 
 from __future__ import annotations
@@ -14,6 +19,7 @@ from typing import Any
 
 import pytest
 
+from trellis.errors import BackendNotInstalledError
 from trellis.stores.registry import (
     StoreRegistry,
     _mask_api_key,
@@ -211,7 +217,15 @@ def test_build_llm_client_env_var_unset(
 def test_build_llm_client_sdk_not_installed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Simulated missing SDK — ``build_llm_client`` returns None, no raise."""
+    """Simulated missing OpenAI SDK — ``build_llm_client`` raises with hint.
+
+    Per C2 Phase 2 (see ``docs/design/plan-cleanup-silent-fallbacks.md``)
+    a configured provider whose SDK is missing must surface as
+    :class:`BackendNotInstalledError` naming the install command, not
+    a silent ``None``. The previous contract (return ``None``) silently
+    demoted ``provider: openai`` to "no LLM" — operators had no way to
+    notice the missing extra.
+    """
     # Pretend both the provider module and its underlying SDK are unavailable.
     real_import = builtins.__import__
 
@@ -240,7 +254,11 @@ def test_build_llm_client_sdk_not_installed(
     registry = StoreRegistry.from_config_dir(
         config_dir=config_dir, data_dir=tmp_path / "data"
     )
-    assert registry.build_llm_client() is None
+    with pytest.raises(BackendNotInstalledError) as exc_info:
+        registry.build_llm_client()
+    assert exc_info.value.backend_name == "openai"
+    assert exc_info.value.extra == "llm-openai"
+    assert "llm-openai" in str(exc_info.value)
 
 
 # -- build_embedder_client -------------------------------------------------
