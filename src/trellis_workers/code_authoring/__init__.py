@@ -28,9 +28,31 @@ from trellis_workers.code_authoring.clustering import (
     cluster_failures,
     compute_cluster_signature,
 )
+from trellis_workers.code_authoring.generator import (
+    DEFAULT_WINDOW,
+    PROPOSAL_GENERATOR_AGENT_ID,
+    PROPOSAL_GENERATOR_ANALYZER_NAME,
+    ProposalGenerator,
+)
+from trellis_workers.code_authoring.proposal import (
+    MARKDOWN_PREVIEW_CHARS,
+    MAX_SAMPLE_EVENT_IDS_IN_MARKDOWN,
+    Proposal,
+    compute_proposal_id,
+    render_markdown,
+)
 
 __all__ = [
+    "DEFAULT_WINDOW",
+    "MARKDOWN_PREVIEW_CHARS",
+    "MAX_SAMPLE_EVENT_IDS_IN_MARKDOWN",
+    "PROPOSAL_GENERATOR_AGENT_ID",
+    "PROPOSAL_GENERATOR_ANALYZER_NAME",
     "Cluster",
+    "Proposal",
+    "ProposalGenerator",
     "cluster_failures",
     "compute_cluster_signature",
+    "compute_proposal_id",
+    "render_markdown",
 ]
