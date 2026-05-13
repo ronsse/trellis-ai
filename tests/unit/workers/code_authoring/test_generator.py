@@ -169,7 +169,7 @@ def test_proposal_id_matches_hash_of_cluster_signature(
 def test_proposal_markdown_carries_expected_sections(
     registry: StoreRegistry,
 ) -> None:
-    """Markdown round-trip — source_file, failure_class, count, sample IDs all present."""
+    """Markdown round-trip — source_file, failure_class, count, IDs all present."""
     e1 = _seed_failure_event(registry, source_file="src/trellis/extract/llm.py")
     e2 = _seed_failure_event(registry, source_file="src/trellis/extract/llm.py")
     proposals = ProposalGenerator(registry).run()
@@ -281,7 +281,7 @@ def test_events_outside_window_are_excluded(registry: StoreRegistry) -> None:
 def test_run_records_meta_activity_under_proposal_generator_agent(
     registry: StoreRegistry,
 ) -> None:
-    """The run wraps itself in ``record_meta_analysis`` — Activity lands in the graph."""
+    """The run wraps itself in ``record_meta_analysis`` — Activity lands."""
     _seed_failure_event(registry)
     ProposalGenerator(registry).run()
 

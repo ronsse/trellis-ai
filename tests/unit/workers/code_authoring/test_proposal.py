@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
 
 import pytest
 
@@ -18,9 +17,6 @@ from trellis_workers.code_authoring.proposal import (
     compute_proposal_id,
     render_markdown,
 )
-
-if TYPE_CHECKING:
-    pass
 
 
 def _make_cluster(

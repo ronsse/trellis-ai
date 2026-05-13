@@ -155,8 +155,7 @@ def render_markdown(
     if not sample:
         lines.append("_No sample event IDs available._")
     else:
-        for event_id in sample:
-            lines.append(f"- `{event_id}`")
+        lines.extend(f"- `{event_id}`" for event_id in sample)
         remainder = len(cluster.events) - len(sample)
         if remainder > 0:
             lines.append(f"- _… and {remainder} more (see provenance edges)._")
