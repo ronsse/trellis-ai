@@ -125,7 +125,9 @@ class TestObservationRoundTrip:
         assert restored.evidence_ref == "trace_xyz"
         assert restored.metadata == {"kind": "filter_rate", "sample_size": 1000}
 
-    def test_metadata_optional_defaults_to_none(self) -> None:
+    def test_metadata_defaults_to_empty_dict(self) -> None:
+        # Matches every other Trellis schema (Evidence, Entity, Precedent,
+        # Outcome, Pack) — saves consumers from None-checks.
         obs = Observation(**_valid_kwargs())  # type: ignore[arg-type]
-        assert obs.metadata is None
+        assert obs.metadata == {}
         assert obs.evidence_ref is None

@@ -120,5 +120,11 @@ class TestMeasurementRoundTrip:
         restored = Measurement.model_validate_json(as_json)
         assert restored == original
         assert restored.unit == "percent"
-        assert restored.metadata is not None
         assert restored.metadata["sample_size"] == 10_000
+
+    def test_metadata_defaults_to_empty_dict(self) -> None:
+        # Matches every other Trellis schema (Evidence, Entity, Precedent,
+        # Outcome, Pack) — saves consumers from None-checks.
+        m = Measurement(**_valid_kwargs())  # type: ignore[arg-type]
+        assert m.metadata == {}
+        assert m.unit is None

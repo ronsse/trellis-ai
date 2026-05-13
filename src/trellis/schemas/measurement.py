@@ -74,8 +74,10 @@ class Measurement(TrellisModel):
     observer_agent_id: str
     """Which agent (human or automated) recorded the measurement."""
 
-    metadata: dict[str, Any] | None = None
-    """Optional bag for the conventional keys documented in
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    """Open bag for the conventional keys documented in
     ``adr-observation-entity-type.md`` §2.3 (``window_start``,
     ``window_end``, ``sample_size``, ``method``, ``confidence``,
-    freshness/tag data)."""
+    freshness/tag data). Defaults to ``{}`` for consistency with every
+    other Trellis schema (``Evidence``, ``Entity``, ``Precedent``,
+    ``Outcome``, ``Pack``) — saves consumers from ``None``-checks."""

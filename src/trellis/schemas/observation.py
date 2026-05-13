@@ -74,10 +74,12 @@ class Observation(TrellisModel):
     ``document_id``, or other URN). Free-form by design; the consuming
     surface decides how to resolve."""
 
-    metadata: dict[str, Any] | None = None
-    """Optional bag for the conventional keys documented in
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    """Open bag for the conventional keys documented in
     ``adr-observation-entity-type.md`` §2.3 (``kind``, ``value``,
     ``unit``, ``window_start``, ``window_end``, ``sample_size``,
-    ``method``, freshness/tag data). Open-bag by design; the registry
-    does not enforce schema here so domain producers can carry
-    domain-specific signal without amendment."""
+    ``method``, freshness/tag data). The registry does not enforce
+    schema here so domain producers can carry domain-specific signal
+    without amendment. Defaults to ``{}`` for consistency with every
+    other Trellis schema (``Evidence``, ``Entity``, ``Precedent``,
+    ``Outcome``, ``Pack``) — saves consumers from ``None``-checks."""
