@@ -345,11 +345,15 @@ class ObservationRecordHandler:
     a :class:`pydantic.ValidationError` *inside* the handler — surfaced
     as ``CommandStatus.FAILED`` to the caller, never silently defaulted.
 
-    Idempotency: the upsert is keyed on ``observation.observation_id``,
-    so repeated submissions of the same ID return the existing node.
-    See ``docs/design/adr-observation-entity-type.md`` §2.1 — Observation
-    rows are append-only by convention; ``hasObservation`` is the
-    canonical edge from the subject entity to the new node.
+    Idempotency semantics: re-recording with the same id REPLACES the
+    existing observation and re-emits the ``OBSERVATION_RECORDED`` event.
+    This diverges from :class:`TraceIngestHandler`'s
+    short-circuit-on-repeat behavior because Observations are mutable
+    signals over time — an agent may revise its confidence as new
+    evidence arrives. Use a new ``observation_id`` to record a distinct
+    signal. See ``docs/design/adr-observation-entity-type.md`` §2.1;
+    ``hasObservation`` is the canonical edge from the subject entity to
+    the observation node.
     """
 
     def __init__(self, registry: StoreRegistry) -> None:
@@ -442,6 +446,13 @@ class MeasurementRecordHandler:
     ``measurement_id``. See ``docs/design/adr-observation-entity-type.md``
     §2.1 — Measurement rows are *append-only by convention* so the SCD-2
     cost of high-frequency metric streams stays bounded.
+
+    Idempotency semantics: re-recording with the same id REPLACES the
+    existing measurement and re-emits the ``MEASUREMENT_RECORDED`` event.
+    This diverges from :class:`TraceIngestHandler`'s
+    short-circuit-on-repeat behavior because Measurements are mutable
+    signals over time — a metric may be re-measured with a corrected
+    value. Use a new ``measurement_id`` to record a distinct signal.
     """
 
     def __init__(self, registry: StoreRegistry) -> None:
