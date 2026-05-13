@@ -144,21 +144,20 @@ class TrellisTransportError(TrellisHttpError):
 
 
 class TrellisAPIError(TrellisHttpError):
-    """Legacy alias for any non-2xx HTTP response.
+    """Legacy class for non-2xx HTTP responses — **not caught by new code paths**.
 
     Predates the split into :class:`TrellisClientError` /
-    :class:`TrellisServerError`. New code should catch one of those
-    instead — but callers that already handle ``TrellisAPIError``
-    continue to work because the typed subclasses also inherit from
-    :class:`TrellisHttpError`, and concrete instances raised by the
-    helpers in :mod:`trellis_sdk._http` are of the new subclasses
-    (which are *not* ``TrellisAPIError`` subclasses).
+    :class:`TrellisServerError`. The new typed subclasses inherit from
+    :class:`TrellisHttpError`, not from ``TrellisAPIError``, so existing
+    ``except TrellisAPIError`` callers will **stop catching** 4xx/5xx
+    responses raised by :func:`raise_for_status`. Migrate to
+    :class:`TrellisHttpError` (catches everything) or one of the
+    specific subclasses (4xx vs 5xx vs 429 vs transport).
 
-    For backwards compatibility :func:`raise_for_status` still raises
-    ``TrellisAPIError`` for any 4xx/5xx that isn't otherwise mapped to
-    a more specific subclass — but the typed mapping covers 4xx and
-    5xx already, so this class is effectively reserved for hand-rolled
-    callers.
+    ``raise_for_status`` only emits ``TrellisAPIError`` itself for the
+    1xx/3xx fallthrough — every realistic non-2xx path lands on a
+    typed subclass. This class is effectively reserved for hand-rolled
+    callers and the version-handshake leftovers.
 
     ``status_code`` is required here (unlike :class:`TrellisHttpError`
     where ``None`` is allowed for transport errors).
