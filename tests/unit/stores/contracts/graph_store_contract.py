@@ -881,6 +881,162 @@ class GraphStoreContractTests:
         )
         assert {r["node_id"] for r in results} == {"a"}
 
+    # ------------------------------------------------------------------
+    # Edge provenance — round-trip + NULL semantics (Phase 1 of Item 2)
+    # ------------------------------------------------------------------
+
+    def test_edge_provenance_round_trip(self, store: GraphStore) -> None:
+        """All five provenance columns survive a write/read round-trip."""
+        store.upsert_node("a", "service", {})
+        store.upsert_node("b", "service", {})
+        store.upsert_edge(
+            "a",
+            "b",
+            "depends_on",
+            source_trace_id="trace-xyz",
+            agent_id="agent-1",
+            confidence=0.85,
+            evidence_ref="doc-42",
+            extractor_tier="DETERMINISTIC",
+        )
+        edges = store.get_edges("a", direction="outgoing")
+        assert len(edges) == 1
+        edge = edges[0]
+        assert edge["source_trace_id"] == "trace-xyz"
+        assert edge["agent_id"] == "agent-1"
+        # Float comparison tolerates the Postgres NUMERIC(4,3) round-trip
+        # which can return ``Decimal('0.850')`` rather than ``0.85``.
+        assert float(edge["confidence"]) == pytest.approx(0.85)
+        assert edge["evidence_ref"] == "doc-42"
+        assert edge["extractor_tier"] == "DETERMINISTIC"
+
+    def test_edge_provenance_null_when_omitted(self, store: GraphStore) -> None:
+        """Edges written without provenance read back with NULL columns."""
+        store.upsert_node("a", "service", {})
+        store.upsert_node("b", "service", {})
+        store.upsert_edge("a", "b", "depends_on")
+        edges = store.get_edges("a", direction="outgoing")
+        assert len(edges) == 1
+        edge = edges[0]
+        assert edge["source_trace_id"] is None
+        assert edge["agent_id"] is None
+        assert edge["confidence"] is None
+        assert edge["evidence_ref"] is None
+        assert edge["extractor_tier"] is None
+
+    def test_edge_provenance_confidence_out_of_range_raises(
+        self, store: GraphStore
+    ) -> None:
+        """``confidence`` outside [0, 1] is rejected before any I/O."""
+        store.upsert_node("a", "service", {})
+        store.upsert_node("b", "service", {})
+        before = store.count_edges()
+        with pytest.raises(ValueError, match=r"confidence"):
+            store.upsert_edge("a", "b", "depends_on", confidence=1.5)
+        # Nothing landed: the helper raises before any backend network
+        # call.  Verifies the helper is the first line of defense
+        # ahead of any backend CHECK / property-constraint enforcement.
+        assert store.count_edges() == before
+
+    # ------------------------------------------------------------------
+    # Edge DSL — Phase 2 of Item 2 (plan-provenance-columns.md)
+    # ------------------------------------------------------------------
+
+    def test_execute_edge_query_filter_by_confidence_range(
+        self, store: GraphStore
+    ) -> None:
+        """Seed five edges across the [0, 1] range, filter ``confidence < 0.5``."""
+        from trellis.stores.base.graph_query import EdgeQuery, FilterClause
+
+        # Five distinct edge_types so SCD-2 doesn't deduplicate them
+        # onto the same (source, target, type) triple.
+        store.upsert_node("a", "service", {})
+        store.upsert_node("b", "service", {})
+        for i, conf in enumerate([0.1, 0.3, 0.5, 0.7, 0.9]):
+            store.upsert_edge(
+                "a", "b", f"edge_kind_{i}", confidence=conf
+            )
+        results = store.execute_edge_query(
+            EdgeQuery(filters=(FilterClause("confidence", "lt", 0.5),))
+        )
+        confs = sorted(float(r["confidence"]) for r in results)
+        assert confs == [pytest.approx(0.1), pytest.approx(0.3)]
+
+    def test_execute_edge_query_filter_by_source_trace_id(
+        self, store: GraphStore
+    ) -> None:
+        """Filtering by ``source_trace_id`` returns only matching rows."""
+        from trellis.stores.base.graph_query import EdgeQuery, FilterClause
+
+        store.upsert_node("a", "service", {})
+        store.upsert_node("b", "service", {})
+        store.upsert_edge("a", "b", "edge_a", source_trace_id="trace-1")
+        store.upsert_edge("a", "b", "edge_b", source_trace_id="trace-2")
+        store.upsert_edge("a", "b", "edge_c", source_trace_id="trace-1")
+        results = store.execute_edge_query(
+            EdgeQuery(filters=(FilterClause("source_trace_id", "eq", "trace-1"),))
+        )
+        assert {r["edge_type"] for r in results} == {"edge_a", "edge_c"}
+
+    def test_execute_edge_query_filter_by_extractor_tier_exact(
+        self, store: GraphStore
+    ) -> None:
+        """``extractor_tier="DETERMINISTIC"`` returns only that tier's edges."""
+        from trellis.stores.base.graph_query import EdgeQuery, FilterClause
+
+        store.upsert_node("a", "service", {})
+        store.upsert_node("b", "service", {})
+        store.upsert_edge("a", "b", "edge_det", extractor_tier="DETERMINISTIC")
+        store.upsert_edge("a", "b", "edge_hyb", extractor_tier="HYBRID")
+        store.upsert_edge("a", "b", "edge_llm", extractor_tier="LLM")
+        results = store.execute_edge_query(
+            EdgeQuery(
+                filters=(FilterClause("extractor_tier", "eq", "DETERMINISTIC"),)
+            )
+        )
+        assert {r["edge_type"] for r in results} == {"edge_det"}
+
+    def test_execute_edge_query_filter_by_extractor_tier_in_set(
+        self, store: GraphStore
+    ) -> None:
+        """``extractor_tier IN (...)`` returns the union of matches."""
+        from trellis.stores.base.graph_query import EdgeQuery, FilterClause
+
+        store.upsert_node("a", "service", {})
+        store.upsert_node("b", "service", {})
+        store.upsert_edge("a", "b", "edge_det", extractor_tier="DETERMINISTIC")
+        store.upsert_edge("a", "b", "edge_hyb", extractor_tier="HYBRID")
+        store.upsert_edge("a", "b", "edge_llm", extractor_tier="LLM")
+        results = store.execute_edge_query(
+            EdgeQuery(
+                filters=(
+                    FilterClause(
+                        "extractor_tier",
+                        "in",
+                        ("DETERMINISTIC", "HYBRID"),
+                    ),
+                )
+            )
+        )
+        assert {r["edge_type"] for r in results} == {"edge_det", "edge_hyb"}
+
+    def test_execute_edge_query_out_of_range_filter_returns_all(
+        self, store: GraphStore
+    ) -> None:
+        """Caller asking ``confidence < 2.0`` doesn't raise — every row matches."""
+        from trellis.stores.base.graph_query import EdgeQuery, FilterClause
+
+        store.upsert_node("a", "service", {})
+        store.upsert_node("b", "service", {})
+        store.upsert_edge("a", "b", "e1", confidence=0.1)
+        store.upsert_edge("a", "b", "e2", confidence=0.9)
+        results = store.execute_edge_query(
+            EdgeQuery(filters=(FilterClause("confidence", "lt", 2.0),))
+        )
+        # Both edges have confidence < 2.0; over-range filter must not
+        # raise — that's caller business per Phase 2 plan.
+        assert {r["edge_type"] for r in results} == {"e1", "e2"}
+
 
 def _now() -> datetime:
     """Return the current time in the same UTC-aware shape stores use."""

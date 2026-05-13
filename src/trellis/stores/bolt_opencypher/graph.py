@@ -35,6 +35,7 @@ Per-backend subclasses override the **seams**:
 from __future__ import annotations
 
 import json
+import operator
 import time
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
@@ -46,6 +47,7 @@ from trellis.core.ids import generate_ulid
 from trellis.schemas.graph import CompactionReport
 from trellis.stores.base.edge_provenance import (
     EDGE_PROVENANCE_FIELDS,
+    EDGE_TOP_LEVEL_COLUMNS,
     extract_edge_provenance,
     validate_edge_provenance,
 )
@@ -57,12 +59,23 @@ from trellis.stores.base.graph import (
     validate_node_role_args,
     validate_subgraph_depth,
 )
+from trellis.stores.base.graph_query import RANGE_OP_GLYPH
 from trellis.stores.bolt_opencypher.base import BoltSessionRunner
 
 if TYPE_CHECKING:
     from neo4j import Driver, ManagedTransaction
 
 logger = structlog.get_logger(__name__)
+
+#: Python comparison fallbacks used when a range op lands on a
+#: ``properties.<key>`` path that we evaluate client-side after JSON
+#: decode.  Keeps the predicate factory short.
+_PY_RANGE_CMPS: dict[str, Any] = {
+    "lt": operator.lt,
+    "lte": operator.le,
+    "gt": operator.gt,
+    "gte": operator.ge,
+}
 
 
 def _iso(dt: datetime | None) -> str | None:
@@ -1155,31 +1168,154 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         if column not in {"node_type", "node_role", "node_id"}:
             msg = f"Unsupported DSL field path: {clause.field!r}"
             raise ValueError(msg)
-        if clause.op == "eq":
+        return BoltOpenCypherGraphStore._compile_native_cypher_clause(
+            "n", column, clause, idx
+        )
+
+    @staticmethod
+    def _compile_native_cypher_clause(
+        var: str, column: str, clause: Any, idx: int
+    ) -> tuple[str, dict[str, Any]]:
+        """Translate one clause into a native Cypher predicate.
+
+        Shared between node and edge compilers — both want
+        ``<var>.<column> <op> $param`` shape with a unique parameter
+        name per clause.
+        """
+        op = clause.op
+        if op == "eq":
             pname = f"f{idx}"
-            return f"n.{column} = ${pname}", {pname: clause.value}
-        if clause.op == "in":
+            return f"{var}.{column} = ${pname}", {pname: clause.value}
+        if op == "in":
             pname = f"f{idx}"
-            return f"n.{column} IN ${pname}", {pname: list(clause.value)}
-        if clause.op == "exists":
-            return f"n.{column} IS NOT NULL", {}
-        msg = f"Unknown filter op {clause.op!r}"
-        raise ValueError(msg)
+            return f"{var}.{column} IN ${pname}", {pname: list(clause.value)}
+        if op == "exists":
+            return f"{var}.{column} IS NOT NULL", {}
+        cypher_op = RANGE_OP_GLYPH.get(op)
+        if cypher_op is None:
+            msg = f"Unknown filter op {clause.op!r}"
+            raise ValueError(msg)
+        pname = f"f{idx}"
+        return f"{var}.{column} {cypher_op} ${pname}", {pname: clause.value}
 
     @staticmethod
     def _compile_property_predicate(clause: Any) -> Any:
         """Return a callable that takes a node-dict and returns bool."""
         key = clause.field.split(".", 1)[1]
-        if clause.op == "eq":
+        op = clause.op
+        if op == "eq":
             target = clause.value
             return lambda node: node["properties"].get(key) == target
-        if clause.op == "in":
+        if op == "in":
             allowed = set(clause.value)
             return lambda node: node["properties"].get(key) in allowed
-        if clause.op == "exists":
+        if op == "exists":
             return lambda node: node["properties"].get(key) is not None
-        msg = f"Unknown filter op {clause.op!r}"
-        raise ValueError(msg)
+        cmp_fn = _PY_RANGE_CMPS.get(op)
+        if cmp_fn is None:
+            msg = f"Unknown filter op {clause.op!r}"
+            raise ValueError(msg)
+        target = clause.value
+        return lambda node, _cmp=cmp_fn, _t=target: (
+            node["properties"].get(key) is not None
+            and _cmp(node["properties"].get(key), _t)
+        )
+
+    # --------------------------------------------------------------
+    # Edge-side DSL — Phase 2 of plan-provenance-columns.md
+    # --------------------------------------------------------------
+
+    def execute_edge_query(self, query: Any) -> list[dict[str, Any]]:
+        """Compile :class:`EdgeQuery` to Cypher.
+
+        Native edge properties (``edge_type`` / ``source_id`` /
+        ``target_id`` / ``edge_id`` and the five provenance keys)
+        compile to native Cypher predicates (``r.<key> <op> $param``).
+        ``properties.<key>`` predicates land on the JSON-stringified
+        ``properties_json`` property; the backend over-fetches with
+        the structural filters applied in Cypher and applies the
+        property predicates client-side after decoding — same approach
+        the node compiler uses.  Same semantics on Neo4j and ArcadeDB.
+        """
+        cypher_parts, cypher_params, py_predicates = self._compile_edge_query(query)
+        cypher = (
+            "MATCH ()-[r:EDGE]->() WHERE "
+            + " AND ".join(cypher_parts)
+            + " RETURN r ORDER BY r.created_at DESC"
+        )
+        fetch_limit = query.limit * 10 if py_predicates else query.limit
+        cypher += f" LIMIT {int(fetch_limit)}"
+
+        records = self._run_read_list(cypher, **cypher_params)
+        results: list[dict[str, Any]] = []
+        for record in records:
+            row = _edge_props_to_dict(dict(record["r"]))
+            if all(pred(row) for pred in py_predicates):
+                results.append(row)
+                if len(results) >= query.limit:
+                    break
+        return results
+
+    def _compile_edge_query(
+        self, query: Any
+    ) -> tuple[list[str], dict[str, Any], list[Any]]:
+        """Pure compile — returns (cypher_where_parts, params, py_predicates)."""
+        cypher_parts: list[str] = [self._temporal_filter_cypher_var("r", query.as_of)]
+        cypher_params: dict[str, Any] = {}
+        if query.as_of is not None:
+            cypher_params["as_of"] = query.as_of.isoformat()
+        py_predicates: list[Any] = []
+        for i, clause in enumerate(query.filters):
+            if clause.field.startswith("properties."):
+                py_predicates.append(self._compile_edge_property_predicate(clause))
+                continue
+            if clause.field not in EDGE_TOP_LEVEL_COLUMNS:
+                msg = f"Unsupported DSL edge field path: {clause.field!r}"
+                raise ValueError(msg)
+            frag, params = BoltOpenCypherGraphStore._compile_native_cypher_clause(
+                "r", clause.field, clause, i
+            )
+            cypher_parts.append(frag)
+            cypher_params.update(params)
+        return cypher_parts, cypher_params, py_predicates
+
+    @staticmethod
+    def _compile_edge_property_predicate(clause: Any) -> Any:
+        """Edge-properties predicate — same JSON-decode story as nodes."""
+        key = clause.field.split(".", 1)[1]
+        op = clause.op
+        if op == "eq":
+            target = clause.value
+            return lambda edge: edge["properties"].get(key) == target
+        if op == "in":
+            allowed = set(clause.value)
+            return lambda edge: edge["properties"].get(key) in allowed
+        if op == "exists":
+            return lambda edge: edge["properties"].get(key) is not None
+        cmp_fn = _PY_RANGE_CMPS.get(op)
+        if cmp_fn is None:
+            msg = f"Unknown filter op {clause.op!r}"
+            raise ValueError(msg)
+        target = clause.value
+        return lambda edge, _cmp=cmp_fn, _t=target: (
+            edge["properties"].get(key) is not None
+            and _cmp(edge["properties"].get(key), _t)
+        )
+
+    @staticmethod
+    def _temporal_filter_cypher_var(var: str, as_of: datetime | None) -> str:
+        """Same shape as :meth:`_temporal_filter_cypher` but for any var.
+
+        ``_temporal_filter_cypher`` hard-codes ``n.``; the edge compiler
+        needs ``r.``.  Same semantics.
+        """
+        if as_of is None:
+            return f"{var}.valid_to IS NULL"
+        return (
+            f"datetime({var}.valid_from) <= datetime($as_of) "
+            f"AND ({var}.valid_to IS NULL "
+            f"OR datetime({var}.valid_to) > datetime($as_of))"
+        )
 
     @staticmethod
     def _temporal_filter_cypher(as_of: datetime | None) -> str:

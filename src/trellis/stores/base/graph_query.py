@@ -4,17 +4,25 @@ Per ``docs/design/adr-canonical-graph-layer.md`` Phase 1, this module
 defines the small typed value-object DSL that `GraphStore` backends
 compile to their native query dialect.
 
-Operator surface (Phase 1):
+Operator surface:
+
+Phase 1 (node + edge):
 
 * ``eq`` — exact equality on a scalar value (str / int / float / bool)
 * ``in`` — membership in a tuple of scalar values
 * ``exists`` — the property path resolves to a non-null value
 
-Operators explicitly **out of scope** for Phase 1: range comparisons
-(``gt`` / ``lt``), regex match, full-text search (the `DocumentStore`
-owns that), nested-path traversal beyond one level. Each can graduate
-later when a consumer asks; the gate is an ADR amendment + a contract
-test extension.
+Phase 2 — range comparisons (added for provenance filtering on edges,
+``plan-provenance-columns.md``):
+
+* ``lt`` / ``lte`` / ``gt`` / ``gte`` — numeric inequality.  Values are
+  not validated for range here (e.g. ``confidence < 2.0`` is allowed —
+  the DSL just translates cleanly; over-range filters return every row
+  the inequality matches).  Operator vocabulary is short-form
+  (``lt`` etc.) for parity with the Phase 1 ops.
+
+Operators still out of scope: regex match, full-text search (the
+``DocumentStore`` owns that), nested-path traversal beyond one level.
 
 Field paths in :class:`FilterClause` use dotted notation:
 
@@ -22,6 +30,15 @@ Field paths in :class:`FilterClause` use dotted notation:
 * ``"properties.team"`` — JSON property nested one level inside
   ``properties``
 * ``"node_role"`` — ``"semantic"`` / ``"structural"`` / ``"curated"``
+
+Edge field paths (used with :class:`EdgeQuery`):
+
+* ``"edge_type"`` / ``"source_id"`` / ``"target_id"`` — edge columns
+* ``"source_trace_id"`` / ``"agent_id"`` / ``"confidence"`` /
+  ``"evidence_ref"`` / ``"extractor_tier"`` — the five provenance
+  columns promoted in Phase 3 of ``adr-graph-ontology.md``
+* ``"properties.<key>"`` — JSON property nested one level inside the
+  edge's ``properties``
 
 Backends are responsible for parsing these paths into their native
 form (e.g., Postgres ``properties->>'team'``; SQLite
@@ -35,9 +52,28 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Literal
 
-# The set of operators a backend MUST support to be contract-compliant
-# in Phase 1. Extending this set is an ADR amendment.
-FilterOp = Literal["eq", "in", "exists"]
+# The set of operators a backend MUST support to be contract-compliant.
+# Range ops (``lt`` / ``lte`` / ``gt`` / ``gte``) were added in Phase 2
+# alongside provenance-column filtering on edges; backends may reject
+# them on string-typed fields, but the DSL itself does not gate by
+# dtype — translation is the backend's responsibility.
+FilterOp = Literal["eq", "in", "exists", "lt", "lte", "gt", "gte"]
+
+#: Range operators — used by backends to branch SQL/Cypher emission and
+#: by the FilterClause invariant check.  Kept as a module constant so
+#: backend compilers can ``in _RANGE_OPS`` without re-listing them.
+_RANGE_OPS: frozenset[str] = frozenset({"lt", "lte", "gt", "gte"})
+
+#: Canonical mapping from DSL range op to the glyph used by both SQL
+#: and openCypher (they share the same set of inequality operators).
+#: Shared by every backend compiler so the SQLite, Postgres, and
+#: Bolt-path compilers never drift on the mapping.
+RANGE_OP_GLYPH: dict[str, str] = {
+    "lt": "<",
+    "lte": "<=",
+    "gt": ">",
+    "gte": ">=",
+}
 
 
 @dataclass(frozen=True)
@@ -46,9 +82,10 @@ class FilterClause:
 
     Args:
         field: Dotted path. Top-level columns or ``properties.<key>``.
-        op: One of ``"eq"``, ``"in"``, ``"exists"``.
-        value: Scalar for ``eq``; tuple of scalars for ``in``;
-            ignored for ``exists`` (pass ``None``).
+        op: One of ``"eq"``, ``"in"``, ``"exists"``, ``"lt"``, ``"lte"``,
+            ``"gt"``, ``"gte"``.
+        value: Scalar for ``eq`` and range ops; tuple of scalars for
+            ``in``; ignored for ``exists`` (pass ``None``).
     """
 
     field: str
@@ -68,6 +105,29 @@ class FilterClause:
         if self.op == "exists" and self.value is not None:
             msg = "FilterClause op='exists' must have value=None"
             raise ValueError(msg)
+        if self.op in _RANGE_OPS:
+            # Range ops take a scalar.  Tuples and ``None`` are nonsense
+            # for ``confidence < ?``-style predicates; reject early so
+            # the backend compiler never has to second-guess.
+            if isinstance(self.value, tuple):
+                msg = (
+                    f"FilterClause op={self.op!r} must use a scalar value, "
+                    "not a tuple"
+                )
+                raise TypeError(msg)
+            if self.value is None:
+                msg = f"FilterClause op={self.op!r} must have a scalar value, not None"
+                raise ValueError(msg)
+            # bool is an int subclass — reject explicitly so a
+            # ``confidence < True`` typo doesn't silently land as 1.
+            if isinstance(self.value, bool) or not isinstance(
+                self.value, int | float | str
+            ):
+                msg = (
+                    f"FilterClause op={self.op!r} value must be a numeric or "
+                    f"string scalar, got {type(self.value).__name__}"
+                )
+                raise TypeError(msg)
 
 
 @dataclass(frozen=True)
@@ -80,6 +140,29 @@ class NodeQuery:
         limit: Maximum rows to return.
         as_of: Optional point-in-time filter. ``None`` reads the
             current version of every matching node.
+    """
+
+    filters: tuple[FilterClause, ...] = ()
+    limit: int = 50
+    as_of: datetime | None = None
+
+
+@dataclass(frozen=True)
+class EdgeQuery:
+    """A typed read query over the edge table.
+
+    Mirrors :class:`NodeQuery` but resolves field paths against the
+    edge row.  Added in Phase 2 of ``plan-provenance-columns.md`` so
+    callers can ask "edges with ``confidence < 0.7``" / "edges minted
+    by trace X" without falling back to ``properties.<key>`` JSON
+    extraction.
+
+    Args:
+        filters: Conjunction (AND) of :class:`FilterClause` predicates.
+            Empty tuple matches every current edge.
+        limit: Maximum rows to return.
+        as_of: Optional point-in-time filter. ``None`` reads the
+            current version of every matching edge.
     """
 
     filters: tuple[FilterClause, ...] = ()
