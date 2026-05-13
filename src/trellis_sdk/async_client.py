@@ -382,6 +382,63 @@ class AsyncTrellisClient:
         resp = await self._request("POST", "/api/v1/links", json=payload)
         return cast("str", resp.json()["edge_id"])
 
+    # -- Observations + Measurements (Item 1 Phase 1) --
+
+    async def record_observation(self, observation: dict[str, Any]) -> str:
+        """POST /api/v1/observations. Returns the new ``observation_id``."""
+        resp = await self._request(
+            "POST", "/api/v1/observations", json=observation
+        )
+        return cast("str", resp.json()["observation_id"])
+
+    async def query_observations(
+        self,
+        *,
+        subject_entity_id: str | None = None,
+        observer_agent_id: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """GET /api/v1/observations."""
+        params: dict[str, Any] = {"limit": limit}
+        if subject_entity_id is not None:
+            params["subject_entity_id"] = subject_entity_id
+        if observer_agent_id is not None:
+            params["observer_agent_id"] = observer_agent_id
+        resp = await self._request("GET", "/api/v1/observations", params=params)
+        return cast(
+            "list[dict[str, Any]]", resp.json().get("observations", [])
+        )
+
+    async def record_measurement(self, measurement: dict[str, Any]) -> str:
+        """POST /api/v1/measurements. Returns the new ``measurement_id``."""
+        resp = await self._request(
+            "POST", "/api/v1/measurements", json=measurement
+        )
+        return cast("str", resp.json()["measurement_id"])
+
+    async def query_measurements(
+        self,
+        *,
+        subject_entity_id: str | None = None,
+        metric_name: str | None = None,
+        observer_agent_id: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """GET /api/v1/measurements."""
+        params: dict[str, Any] = {"limit": limit}
+        if subject_entity_id is not None:
+            params["subject_entity_id"] = subject_entity_id
+        if metric_name is not None:
+            params["metric_name"] = metric_name
+        if observer_agent_id is not None:
+            params["observer_agent_id"] = observer_agent_id
+        resp = await self._request(
+            "GET", "/api/v1/measurements", params=params
+        )
+        return cast(
+            "list[dict[str, Any]]", resp.json().get("measurements", [])
+        )
+
     # -- Extract (client-side extractor contract) --
 
     async def submit_drafts(

@@ -66,6 +66,7 @@ def create_app() -> FastAPI:
         health,
         ingest,
         mutations,
+        observations,
         policies,
         retrieve,
         version,
@@ -131,6 +132,12 @@ def create_app() -> FastAPI:
     )
     app.include_router(
         extract.router, prefix="/api/v1", tags=["extract"], dependencies=auth
+    )
+    app.include_router(
+        observations.router,
+        prefix="/api/v1",
+        tags=["observations"],
+        dependencies=auth,
     )
 
     # Static UI at /ui — stays unauthenticated; the UI calls /api/v1

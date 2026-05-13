@@ -6,9 +6,12 @@ from typing import Any
 
 import structlog
 
-from trellis.errors import StoreError, ValidationError
+from trellis.errors import NotFoundError, StoreError, ValidationError
 from trellis.mutate.commands import Command, Operation
+from trellis.schemas.measurement import Measurement
+from trellis.schemas.observation import Observation
 from trellis.schemas.trace import Trace
+from trellis.schemas.well_known import HAS_OBSERVATION, MEASUREMENT, OBSERVATION
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 
@@ -330,6 +333,198 @@ class LinkCreateHandler:
         return edge_id, f"Link created: {source_id} --[{edge_kind}]--> {target_id}"
 
 
+class ObservationRecordHandler:
+    """Persist an Observation as a graph node + ``hasObservation`` edge.
+
+    Wires :data:`Operation.OBSERVATION_RECORD` into the governed mutation
+    pipeline so empirical-observation ingestion follows the same audit /
+    idempotency / policy contract as every other mutation. ``args``
+    expects an ``observation`` key holding either an :class:`Observation`
+    instance or a dict; dicts are routed through
+    ``Observation.model_validate`` so any missing required field raises
+    a :class:`pydantic.ValidationError` *inside* the handler — surfaced
+    as ``CommandStatus.FAILED`` to the caller, never silently defaulted.
+
+    Idempotency semantics: re-recording with the same id REPLACES the
+    existing observation and re-emits the ``OBSERVATION_RECORDED`` event.
+    This diverges from :class:`TraceIngestHandler`'s
+    short-circuit-on-repeat behavior because Observations are mutable
+    signals over time — an agent may revise its confidence as new
+    evidence arrives. Use a new ``observation_id`` to record a distinct
+    signal. See ``docs/design/adr-observation-entity-type.md`` §2.1;
+    ``hasObservation`` is the canonical edge from the subject entity to
+    the observation node.
+    """
+
+    def __init__(self, registry: StoreRegistry) -> None:
+        self._registry = registry
+
+    def handle(self, command: Command) -> tuple[str | None, str]:
+        raw = command.args["observation"]
+        try:
+            obs = (
+                raw
+                if isinstance(raw, Observation)
+                else Observation.model_validate(raw)
+            )
+        except Exception as exc:
+            # Loud-on-missing-required-field discipline. The executor
+            # turns ValidationError into a structured rejection event.
+            msg = f"Observation validation failed: {exc}"
+            raise ValidationError(msg, code="observation_validation") from exc
+
+        store = self._registry.knowledge.graph_store
+
+        # Idempotent upsert — repeat submissions of the same observation_id
+        # collapse onto the existing node. The graph store's SCD-2 layer
+        # treats a same-payload upsert as a no-op version close + reopen.
+        props: dict[str, Any] = {
+            "observation_id": obs.observation_id,
+            "subject_entity_id": obs.subject_entity_id,
+            "subject_entity_type": obs.subject_entity_type,
+            "observer_agent_id": obs.observer_agent_id,
+            "content": obs.content,
+            "confidence": obs.confidence,
+            "observed_at": obs.observed_at.isoformat(),
+        }
+        if obs.evidence_ref is not None:
+            props["evidence_ref"] = obs.evidence_ref
+        if obs.metadata is not None:
+            props["metadata"] = obs.metadata
+
+        node_id = store.upsert_node(
+            node_id=obs.observation_id,
+            node_type=OBSERVATION,
+            properties=props,
+        )
+
+        # Best-effort hasObservation edge from the subject entity to the
+        # new observation node. The subject may not be a graph node in
+        # all deployments (e.g., raw trace IDs) — when the FK fails we
+        # still keep the observation row, but the edge is skipped. This
+        # matches the open-string entity-type rule (CLAUDE.md
+        # type-extensibility).
+        #
+        # Narrow the catch to ``StoreError`` (which ``NotFoundError``
+        # subclasses): unexpected exceptions (DB driver bugs, schema
+        # errors) are escalated rather than silently swallowed — see
+        # PR #122 (C2 Phase 5) for the silent-fallback discipline.
+        try:
+            store.upsert_edge(
+                source_id=obs.subject_entity_id,
+                target_id=node_id,
+                edge_type=HAS_OBSERVATION,
+            )
+        except (NotFoundError, StoreError) as exc:
+            logger.info(
+                "observation_edge_skipped",
+                subject_entity_id=obs.subject_entity_id,
+                observation_id=node_id,
+                reason=str(exc),
+            )
+
+        self._registry.operational.event_log.emit(
+            EventType.OBSERVATION_RECORDED,
+            source="mutation_executor",
+            entity_id=node_id,
+            entity_type=OBSERVATION,
+            payload={
+                "observation_id": node_id,
+                "subject_entity_id": obs.subject_entity_id,
+                "subject_entity_type": obs.subject_entity_type,
+                "observer_agent_id": obs.observer_agent_id,
+                "confidence": obs.confidence,
+            },
+        )
+        return node_id, f"Observation recorded: {node_id}"
+
+
+class MeasurementRecordHandler:
+    """Persist a Measurement as an append-only graph node.
+
+    Sibling of :class:`ObservationRecordHandler` keyed on
+    ``measurement_id``. See ``docs/design/adr-observation-entity-type.md``
+    §2.1 — Measurement rows are *append-only by convention* so the SCD-2
+    cost of high-frequency metric streams stays bounded.
+
+    Idempotency semantics: re-recording with the same id REPLACES the
+    existing measurement and re-emits the ``MEASUREMENT_RECORDED`` event.
+    This diverges from :class:`TraceIngestHandler`'s
+    short-circuit-on-repeat behavior because Measurements are mutable
+    signals over time — a metric may be re-measured with a corrected
+    value. Use a new ``measurement_id`` to record a distinct signal.
+    """
+
+    def __init__(self, registry: StoreRegistry) -> None:
+        self._registry = registry
+
+    def handle(self, command: Command) -> tuple[str | None, str]:
+        raw = command.args["measurement"]
+        try:
+            meas = (
+                raw
+                if isinstance(raw, Measurement)
+                else Measurement.model_validate(raw)
+            )
+        except Exception as exc:
+            msg = f"Measurement validation failed: {exc}"
+            raise ValidationError(msg, code="measurement_validation") from exc
+
+        store = self._registry.knowledge.graph_store
+
+        props: dict[str, Any] = {
+            "measurement_id": meas.measurement_id,
+            "subject_entity_id": meas.subject_entity_id,
+            "subject_entity_type": meas.subject_entity_type,
+            "metric_name": meas.metric_name,
+            "metric_value": meas.metric_value,
+            "observer_agent_id": meas.observer_agent_id,
+            "measured_at": meas.measured_at.isoformat(),
+        }
+        if meas.unit is not None:
+            props["unit"] = meas.unit
+        if meas.metadata is not None:
+            props["metadata"] = meas.metadata
+
+        node_id = store.upsert_node(
+            node_id=meas.measurement_id,
+            node_type=MEASUREMENT,
+            properties=props,
+        )
+
+        # Same narrow-catch discipline as ObservationRecordHandler —
+        # silent-fallback hygiene per PR #122 (C2 Phase 5).
+        try:
+            store.upsert_edge(
+                source_id=meas.subject_entity_id,
+                target_id=node_id,
+                edge_type=HAS_OBSERVATION,
+            )
+        except (NotFoundError, StoreError) as exc:
+            logger.info(
+                "measurement_edge_skipped",
+                subject_entity_id=meas.subject_entity_id,
+                measurement_id=node_id,
+                reason=str(exc),
+            )
+
+        self._registry.operational.event_log.emit(
+            EventType.MEASUREMENT_RECORDED,
+            source="mutation_executor",
+            entity_id=node_id,
+            entity_type=MEASUREMENT,
+            payload={
+                "measurement_id": node_id,
+                "subject_entity_id": meas.subject_entity_id,
+                "subject_entity_type": meas.subject_entity_type,
+                "metric_name": meas.metric_name,
+                "metric_value": meas.metric_value,
+                "observer_agent_id": meas.observer_agent_id,
+            },
+        )
+        return node_id, f"Measurement recorded: {node_id}"
+
+
 def create_curate_handlers(
     registry: StoreRegistry,
 ) -> dict[str, Any]:
@@ -342,5 +537,6 @@ def create_curate_handlers(
         Operation.FEEDBACK_RECORD: FeedbackRecordHandler(registry),
         Operation.ENTITY_CREATE: EntityCreateHandler(registry),
         Operation.LINK_CREATE: LinkCreateHandler(registry),
-        Operation.TRACE_INGEST: TraceIngestHandler(registry),
+        Operation.OBSERVATION_RECORD: ObservationRecordHandler(registry),
+        Operation.MEASUREMENT_RECORD: MeasurementRecordHandler(registry),
     }
