@@ -44,6 +44,11 @@ import structlog
 from trellis.core.base import utc_now
 from trellis.core.ids import generate_ulid
 from trellis.schemas.graph import CompactionReport
+from trellis.stores.base.edge_provenance import (
+    EDGE_PROVENANCE_FIELDS,
+    extract_edge_provenance,
+    validate_edge_provenance,
+)
 from trellis.stores.base.event_log import EventLog, EventType
 from trellis.stores.base.graph import (
     GraphStore,
@@ -152,7 +157,12 @@ def _node_props_to_dict(props: dict[str, Any]) -> dict[str, Any]:
 
 
 def _edge_props_to_dict(props: dict[str, Any]) -> dict[str, Any]:
-    return {
+    # Provenance properties (v5 — Phase 3 of adr-graph-ontology §6.4)
+    # are emitted as Cypher relationship properties. Bolt drivers return
+    # missing properties as absent dict keys, which surface as ``None``
+    # through ``dict.get`` — matching the SQLite / Postgres "absent or
+    # NULL" semantics callers already expect.
+    result: dict[str, Any] = {
         "edge_id": props["edge_id"],
         "source_id": props["source_id"],
         "target_id": props["target_id"],
@@ -162,6 +172,9 @@ def _edge_props_to_dict(props: dict[str, Any]) -> dict[str, Any]:
         "valid_from": props.get("valid_from"),
         "valid_to": props.get("valid_to"),
     }
+    for field in EDGE_PROVENANCE_FIELDS:
+        result[field] = props.get(field)
+    return result
 
 
 def _alias_props_to_dict(props: dict[str, Any]) -> dict[str, Any]:
@@ -632,7 +645,27 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         properties: dict[str, Any] | None = None,
         *,
         commit: bool = True,  # noqa: ARG002
+        source_trace_id: str | None = None,
+        agent_id: str | None = None,
+        confidence: float | None = None,
+        evidence_ref: str | None = None,
+        extractor_tier: str | None = None,
     ) -> str:
+        # Validate provenance up-front so the Bolt round trip never
+        # ships an out-of-range confidence or unknown extractor_tier.
+        # Mirrors the schema-layer validation in
+        # :class:`trellis.schemas.graph.Edge`. The Bolt driver
+        # serialises ``None`` as a missing property, which both Neo4j
+        # and ArcadeDB treat as "property not set" — matching the
+        # SQLite / Postgres NULL semantics.
+        validate_edge_provenance(
+            source_trace_id=source_trace_id,
+            agent_id=agent_id,
+            confidence=confidence,
+            evidence_ref=evidence_ref,
+            extractor_tier=extractor_tier,
+        )
+
         # One Cypher round trip: endpoint MATCH + existing-edge
         # OPTIONAL MATCH + close-old + create-new in a single query.
         # ``coalesce`` carries ``edge_id`` and ``created_at`` forward
@@ -649,6 +682,11 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             "properties_json": json.dumps(properties or {}),
             "valid_from": now,
             "valid_to": None,
+            "source_trace_id": source_trace_id,
+            "agent_id": agent_id,
+            "confidence": confidence,
+            "evidence_ref": evidence_ref,
+            "extractor_tier": extractor_tier,
         }
 
         cypher = """
@@ -703,6 +741,22 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         )
         self._pre_validate_edges_bulk(edges)
 
+        # Pre-validate provenance per row so a bad row in the middle of
+        # the batch raises before any I/O. ``extract_edge_provenance``
+        # surfaces missing keys as ``None`` (matching the single-row
+        # upsert default); ``validate_edge_provenance`` then rejects
+        # out-of-range confidence or unknown extractor_tier. Same shape
+        # as the SQLite / Postgres bulk paths.
+        per_row_provenance: list[dict[str, Any]] = []
+        for i, spec in enumerate(edges):
+            prov = extract_edge_provenance(spec)
+            try:
+                validate_edge_provenance(**prov)
+            except (ValueError, TypeError) as exc:
+                msg = f"upsert_edges_bulk[{i}]: {exc}"
+                raise type(exc)(msg) from exc
+            per_row_provenance.append(prov)
+
         # Pre-generate candidate edge_ids so coalesce in Cypher can pick
         # between the prior edge_id (carry forward) and ours (new edge).
         # ``row_index`` lets us reorder the returned rows back into input
@@ -723,6 +777,7 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
                     "properties_json": json.dumps(spec.get("properties") or {}),
                     "valid_from": now,
                     "valid_to": None,
+                    **per_row_provenance[i],
                 },
             }
             for i, spec in enumerate(edges)

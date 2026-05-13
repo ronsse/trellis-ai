@@ -15,6 +15,11 @@ import structlog
 from trellis.core.base import utc_now
 from trellis.core.ids import generate_ulid
 from trellis.schemas.graph import CompactionReport
+from trellis.stores.base.edge_provenance import (
+    EDGE_PROVENANCE_FIELDS,
+    extract_edge_provenance,
+    validate_edge_provenance,
+)
 from trellis.stores.base.event_log import EventLog, EventType
 from trellis.stores.base.graph import (
     GraphStore,
@@ -73,6 +78,13 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
         # an empty list.
         self._migrate_add_document_ids()
 
+        # v4 → v5 additive migration: edge provenance columns (Phase 3
+        # of adr-graph-ontology §6.4). Five NULL-by-default columns on
+        # the ``edges`` table so retrieval can filter on provenance
+        # without json-extracting the properties bag. Idempotent —
+        # skips columns that already exist.
+        self._migrate_add_edge_provenance()
+
     def _create_v2_schema(self) -> None:
         """Create temporal (v2/v3) schema from scratch."""
         self._conn.executescript("""
@@ -99,7 +111,17 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
                 properties_json TEXT NOT NULL DEFAULT '{}',
                 created_at TEXT NOT NULL,
                 valid_from TEXT NOT NULL,
-                valid_to TEXT DEFAULT NULL
+                valid_to TEXT DEFAULT NULL,
+                -- Provenance columns (Phase 3 of adr-graph-ontology
+                -- §6.4 / item 2 of plan-self-improvement-program).
+                -- All NULL by default; validated in Python at write
+                -- time (CHECK is supported but its error messages are
+                -- opaque — Python raises with the offending value).
+                source_trace_id TEXT DEFAULT NULL,
+                agent_id TEXT DEFAULT NULL,
+                confidence REAL DEFAULT NULL,
+                evidence_ref TEXT DEFAULT NULL,
+                extractor_tier TEXT DEFAULT NULL
             );
 
             CREATE INDEX IF NOT EXISTS idx_nodes_node_id ON nodes(node_id);
@@ -154,7 +176,11 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
             DROP TABLE nodes;
             ALTER TABLE nodes_v2 RENAME TO nodes;
 
-            -- Edges migration
+            -- Edges migration. Provenance columns (source_trace_id,
+            -- agent_id, confidence, evidence_ref, extractor_tier) are
+            -- added by the additive ``_migrate_add_edge_provenance``
+            -- pass after this rebuild — kept out of the v1→v2 INSERT
+            -- so the migration is a single column-aligned SELECT.
             CREATE TABLE edges_v2 (
                 version_id TEXT PRIMARY KEY,
                 edge_id TEXT NOT NULL,
@@ -246,6 +272,37 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
             "ALTER TABLE nodes ADD COLUMN document_ids_json TEXT DEFAULT NULL"
         )
         self._conn.commit()
+
+    def _migrate_add_edge_provenance(self) -> None:
+        """Additive migration: ensure edges table has provenance columns.
+
+        Introduced in v5 for Phase 3 of ``adr-graph-ontology.md`` §6.4
+        (item 2 of the self-improvement program). Idempotent — only
+        ALTERs the columns it's missing. Pre-existing rows keep the
+        columns NULL which the read path surfaces as ``None``.
+
+        SQLite supports ``ALTER TABLE ... ADD COLUMN`` for NULL-default
+        columns without a table rebuild, so this is safe to run against
+        large populated tables.
+        """
+        col_cursor = self._conn.execute("PRAGMA table_info(edges)")
+        col_names = {row["name"] for row in col_cursor.fetchall()}
+        provenance_columns = {
+            "source_trace_id": "TEXT DEFAULT NULL",
+            "agent_id": "TEXT DEFAULT NULL",
+            "confidence": "REAL DEFAULT NULL",
+            "evidence_ref": "TEXT DEFAULT NULL",
+            "extractor_tier": "TEXT DEFAULT NULL",
+        }
+        altered = False
+        for name, ddl in provenance_columns.items():
+            if name in col_names:
+                continue
+            logger.info("migrating_graph_schema_add_edge_provenance", column=name)
+            self._conn.execute(f"ALTER TABLE edges ADD COLUMN {name} {ddl}")
+            altered = True
+        if altered:
+            self._conn.commit()
 
     def _create_alias_schema(self) -> None:
         self._conn.executescript("""
@@ -647,7 +704,23 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
         properties: dict[str, Any] | None = None,
         *,
         commit: bool = True,
+        source_trace_id: str | None = None,
+        agent_id: str | None = None,
+        confidence: float | None = None,
+        evidence_ref: str | None = None,
+        extractor_tier: str | None = None,
     ) -> str:
+        # Validate provenance up-front so the SQL never sees an
+        # out-of-range confidence or unknown extractor_tier. Mirrors
+        # the schema-layer validation in :class:`trellis.schemas.graph.Edge`.
+        validate_edge_provenance(
+            source_trace_id=source_trace_id,
+            agent_id=agent_id,
+            confidence=confidence,
+            evidence_ref=evidence_ref,
+            extractor_tier=extractor_tier,
+        )
+
         # Check if a current edge already exists by (source, target, type)
         cursor = self._conn.execute(
             """
@@ -679,8 +752,10 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
                 """
                 INSERT INTO edges
                     (version_id, edge_id, source_id, target_id, edge_type,
-                     properties_json, created_at, valid_from, valid_to)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                     properties_json, created_at, valid_from, valid_to,
+                     source_trace_id, agent_id, confidence,
+                     evidence_ref, extractor_tier)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)
                 """,
                 (
                     version_id,
@@ -691,6 +766,11 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
                     properties_json,
                     now_iso,
                     now_iso,
+                    source_trace_id,
+                    agent_id,
+                    confidence,
+                    evidence_ref,
+                    extractor_tier,
                 ),
             )
         else:
@@ -700,8 +780,10 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
                 """
                 INSERT INTO edges
                     (version_id, edge_id, source_id, target_id, edge_type,
-                     properties_json, created_at, valid_from, valid_to)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                     properties_json, created_at, valid_from, valid_to,
+                     source_trace_id, agent_id, confidence,
+                     evidence_ref, extractor_tier)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)
                 """,
                 (
                     version_id,
@@ -712,6 +794,11 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
                     properties_json,
                     now_iso,
                     now_iso,
+                    source_trace_id,
+                    agent_id,
+                    confidence,
+                    evidence_ref,
+                    extractor_tier,
                 ),
             )
 
@@ -782,7 +869,7 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
         now_iso = utc_now().isoformat()
         edge_ids: list[str] = []
         insert_rows: list[tuple[Any, ...]] = []
-        for spec in edges:
+        for i, spec in enumerate(edges):
             key = (spec["source_id"], spec["target_id"], spec["edge_type"])
             prior = existing_edges.get(key)
             if prior is not None:
@@ -792,6 +879,12 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
                 edge_id = generate_ulid()
                 created_at = now_iso
             edge_ids.append(edge_id)
+            prov = extract_edge_provenance(spec)
+            try:
+                validate_edge_provenance(**prov)
+            except (ValueError, TypeError) as exc:
+                msg = f"upsert_edges_bulk[{i}]: {exc}"
+                raise type(exc)(msg) from exc
             insert_rows.append(
                 (
                     generate_ulid(),
@@ -802,6 +895,11 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
                     json.dumps(spec.get("properties") or {}),
                     created_at,
                     now_iso,
+                    prov["source_trace_id"],
+                    prov["agent_id"],
+                    prov["confidence"],
+                    prov["evidence_ref"],
+                    prov["extractor_tier"],
                 )
             )
 
@@ -818,8 +916,10 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
             """
             INSERT INTO edges
                 (version_id, edge_id, source_id, target_id, edge_type,
-                 properties_json, created_at, valid_from, valid_to)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                 properties_json, created_at, valid_from, valid_to,
+                 source_trace_id, agent_id, confidence,
+                 evidence_ref, extractor_tier)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)
             """,
             insert_rows,
         )
@@ -1277,7 +1377,11 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
 
     @staticmethod
     def _edge_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
-        return {
+        # Provenance columns are v5 additive; tolerate their absence on
+        # in-memory rows that tests build by hand (matches the pattern
+        # used for v3 ``node_role`` and v4 ``document_ids_json``).
+        row_keys = set(row.keys())
+        result: dict[str, Any] = {
             "edge_id": row["edge_id"],
             "source_id": row["source_id"],
             "target_id": row["target_id"],
@@ -1287,6 +1391,9 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
             "valid_from": row["valid_from"],
             "valid_to": row["valid_to"],
         }
+        for field in EDGE_PROVENANCE_FIELDS:
+            result[field] = row[field] if field in row_keys else None
+        return result
 
     @staticmethod
     def _alias_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
