@@ -28,6 +28,8 @@ from trellis.schemas.extraction import (
     ExtractionResult,
 )
 from trellis.schemas.graph import Edge
+from trellis.schemas.measurement import Measurement
+from trellis.schemas.observation import Observation
 from trellis.schemas.outcome import (
     INTENT_FAMILIES,
     PHASES,
@@ -93,7 +95,9 @@ __all__ = [
     "GenerationSpec",
     "Lifecycle",
     "LifecycleState",
+    "Measurement",
     "NodeRole",
+    "Observation",
     "Outcome",
     "OutcomeEvent",
     "OutcomeStatus",

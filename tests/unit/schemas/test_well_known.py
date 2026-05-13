@@ -339,3 +339,52 @@ class TestExpandEdgeKindQuery:
 
     def test_unknown_value_returns_singleton(self) -> None:
         assert wk.expand_edge_kind_query("mentions") == ("mentions",)
+
+
+# ---------------------------------------------------------------------------
+# Observation / Measurement registration — adr-observation-entity-type.md
+# ---------------------------------------------------------------------------
+
+
+class TestObservationRegistration:
+    """Phase 0 of adr-observation-entity-type.md — well-known canonicals."""
+
+    def test_observation_is_canonical_entity(self) -> None:
+        assert wk.is_canonical_entity_type("Observation")
+        assert wk.OBSERVATION == "Observation"
+
+    def test_measurement_is_canonical_entity(self) -> None:
+        assert wk.is_canonical_entity_type("Measurement")
+        assert wk.MEASUREMENT == "Measurement"
+
+    def test_has_observation_is_canonical_edge(self) -> None:
+        assert wk.is_canonical_edge_kind("hasObservation")
+        assert wk.HAS_OBSERVATION == "hasObservation"
+
+    def test_observation_alignment_uri(self) -> None:
+        assert (
+            wk.schema_alignment_for_entity_type("Observation")
+            == "schema.org/Observation"
+        )
+
+    def test_measurement_alignment_uri(self) -> None:
+        assert (
+            wk.schema_alignment_for_entity_type("Measurement")
+            == "schema.org/PropertyValue"
+        )
+
+    def test_has_observation_has_no_alignment(self) -> None:
+        # Trellis-specific verb — ADR §2.2 documents the absence of a
+        # PROV-O / schema.org analogue.
+        assert wk.schema_alignment_for_edge_kind("hasObservation") is None
+
+    def test_was_derived_from_still_canonical(self) -> None:
+        # ADR depends on ``wasDerivedFrom`` continuing to exist — it is
+        # the provenance edge every Observation should carry.
+        assert wk.is_canonical_edge_kind("wasDerivedFrom")
+
+    def test_well_known_version_bumped(self) -> None:
+        # Adding ``Observation`` / ``Measurement`` is an additive
+        # change — minor bump per plan-self-improvement-program.md §5.6
+        # and adr-observation-entity-type.md §5.
+        assert wk.WELL_KNOWN_VERSION == "1.1.0"

@@ -40,6 +40,23 @@ from __future__ import annotations
 from typing import Final
 
 # ---------------------------------------------------------------------------
+# Version of the canonical registry
+# ---------------------------------------------------------------------------
+#
+# Per ``plan-self-improvement-program.md`` §5.6 and
+# ``adr-observation-entity-type.md`` §5: adding a new canonical name is
+# a **minor** version bump (additive change; names are reserved forever
+# per ``adr-graph-ontology.md`` §5.4). Removing or renaming a canonical
+# would be a major bump.
+#
+# Version log:
+#   1.0.0 — original schema.org / PROV-O alignment (adr-graph-ontology.md)
+#   1.1.0 — add ``Observation`` / ``Measurement`` entity types and
+#           ``hasObservation`` edge kind (adr-observation-entity-type.md)
+
+WELL_KNOWN_VERSION: Final = "1.1.0"
+
+# ---------------------------------------------------------------------------
 # Canonical entity types — schema.org + PROV-O
 # ---------------------------------------------------------------------------
 
@@ -61,6 +78,10 @@ CONCEPT: Final = "Concept"  # no exact schema.org match; kept Trellis-specific
 AGENT: Final = "Agent"
 ACTIVITY: Final = "Activity"
 
+# Empirical-observation classes — see adr-observation-entity-type.md
+OBSERVATION: Final = "Observation"
+MEASUREMENT: Final = "Measurement"
+
 CANONICAL_ENTITY_TYPES: Final[frozenset[str]] = frozenset(
     {
         PERSON,
@@ -77,6 +98,8 @@ CANONICAL_ENTITY_TYPES: Final[frozenset[str]] = frozenset(
         CONCEPT,
         AGENT,
         ACTIVITY,
+        OBSERVATION,
+        MEASUREMENT,
     }
 )
 
@@ -175,6 +198,11 @@ ATTACHED_TO: Final = "attachedTo"
 SUPPORTS: Final = "supports"
 APPLIES_TO: Final = "appliesTo"
 
+# Trellis-specific verbs for empirical observations (no clean PROV-O
+# equivalent — schema.org/observationAbout points the wrong direction).
+# See adr-observation-entity-type.md §2.2.
+HAS_OBSERVATION: Final = "hasObservation"
+
 CANONICAL_EDGE_KINDS: Final[frozenset[str]] = frozenset(
     {
         USED,
@@ -189,6 +217,7 @@ CANONICAL_EDGE_KINDS: Final[frozenset[str]] = frozenset(
         ATTACHED_TO,
         SUPPORTS,
         APPLIES_TO,
+        HAS_OBSERVATION,
     }
 )
 
@@ -243,6 +272,8 @@ _ENTITY_SCHEMA_ALIGNMENT: Final[dict[str, str]] = {
     FILE: "schema.org/MediaObject",
     AGENT: "prov:Agent",
     ACTIVITY: "prov:Activity",
+    OBSERVATION: "schema.org/Observation",
+    MEASUREMENT: "schema.org/PropertyValue",
 }
 
 _EDGE_SCHEMA_ALIGNMENT: Final[dict[str, str]] = {
