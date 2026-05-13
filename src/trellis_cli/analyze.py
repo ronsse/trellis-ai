@@ -51,6 +51,7 @@ from trellis.retrieve.token_usage import analyze_token_usage
 from trellis.schemas.parameters import ParameterScope, ParameterSet
 from trellis.stores.advisory_store import AdvisoryStore
 from trellis.stores.base.parameter import ParameterStore
+from trellis_cli._meta_wiring import wrap_cli_meta_analysis
 from trellis_cli.config import get_config_dir
 from trellis_cli.stores import (
     get_document_store,
@@ -236,14 +237,29 @@ def context_effectiveness(
     days: int = typer.Option(30, help="Days of history to analyze"),
     min_appearances: int = typer.Option(2, help="Minimum item appearances to include"),
     output_format: str = typer.Option("text", "--format", help="Output format"),
+    no_meta_trace: bool = typer.Option(
+        False,
+        "--no-meta-trace",
+        help="Skip recording this run as a meta-Activity (Item 6 Phase 2).",
+    ),
 ) -> None:
     """Analyze which context items correlate with task success."""
     event_log = get_event_log()
-    report = analyze_effectiveness(
-        event_log,
-        days=days,
-        min_appearances=min_appearances,
-    )
+    with wrap_cli_meta_analysis(
+        agent_suffix="analyze",
+        analyzer_name="cli.analyze.context-effectiveness",
+        disabled=no_meta_trace,
+    ) as _meta_record:
+        report = analyze_effectiveness(
+            event_log,
+            days=days,
+            min_appearances=min_appearances,
+        )
+        if _meta_record.enabled and report.total_packs > 0:
+            _meta_record.produced_finding(
+                f"effectiveness-report-d{days}-m{min_appearances}",
+                finding_type="EffectivenessReport",
+            )
 
     if output_format == "json":
         print(json.dumps(report.model_dump()))
@@ -301,6 +317,11 @@ def apply_noise_tags(
     days: int = typer.Option(30, help="Days of history to analyze"),
     min_appearances: int = typer.Option(2, help="Minimum item appearances to score"),
     output_format: str = typer.Option("text", "--format", help="Output format"),
+    no_meta_trace: bool = typer.Option(
+        False,
+        "--no-meta-trace",
+        help="Skip recording this run as a meta-Activity (Item 6 Phase 2).",
+    ),
 ) -> None:
     """Analyze effectiveness AND apply noise tags to low-value items.
 
@@ -311,12 +332,22 @@ def apply_noise_tags(
     event_log = get_event_log()
     document_store = get_document_store()
 
-    report = run_effectiveness_feedback(
-        event_log,
-        document_store,
-        days=days,
-        min_appearances=min_appearances,
-    )
+    with wrap_cli_meta_analysis(
+        agent_suffix="analyze",
+        analyzer_name="cli.analyze.apply-noise-tags",
+        disabled=no_meta_trace,
+    ) as _meta_record:
+        report = run_effectiveness_feedback(
+            event_log,
+            document_store,
+            days=days,
+            min_appearances=min_appearances,
+        )
+        if _meta_record.enabled and report.noise_candidates:
+            _meta_record.produced_finding(
+                f"noise-tags-applied-d{days}",
+                finding_type="NoiseTagsApplied",
+            )
 
     if output_format == "json":
         print(json.dumps(report.model_dump()))
@@ -340,10 +371,25 @@ def apply_noise_tags(
 def token_usage(
     days: int = typer.Option(7, help="Days of history to analyze"),
     output_format: str = typer.Option("text", "--format", help="Output format"),
+    no_meta_trace: bool = typer.Option(
+        False,
+        "--no-meta-trace",
+        help="Skip recording this run as a meta-Activity (Item 6 Phase 2).",
+    ),
 ) -> None:
     """Analyze token usage across CLI, MCP, and SDK layers."""
     event_log = get_event_log()
-    report = analyze_token_usage(event_log, days=days)
+    with wrap_cli_meta_analysis(
+        agent_suffix="analyze",
+        analyzer_name="cli.analyze.token-usage",
+        disabled=no_meta_trace,
+    ) as _meta_record:
+        report = analyze_token_usage(event_log, days=days)
+        if _meta_record.enabled and report.total_responses > 0:
+            _meta_record.produced_finding(
+                f"token-usage-report-d{days}",
+                finding_type="TokenUsageReport",
+            )
 
     if output_format == "json":
         print(json.dumps(report.model_dump()))
@@ -430,6 +476,11 @@ def generate_advisories(
         0.15, "--min-effect", help="Min effect size to emit an advisory"
     ),
     output_format: str = typer.Option("text", "--format", help="Output format"),
+    no_meta_trace: bool = typer.Option(
+        False,
+        "--no-meta-trace",
+        help="Skip recording this run as a meta-Activity (Item 6 Phase 2).",
+    ),
 ) -> None:
     """Generate advisories from outcome data.
 
@@ -443,13 +494,23 @@ def generate_advisories(
     data_dir = get_data_dir()
     store = AdvisoryStore(data_dir / "advisories.json")
 
-    generator = AdvisoryGenerator(
-        event_log,
-        store,
-        min_sample_size=min_sample,
-        min_effect_size=min_effect,
-    )
-    report = generator.generate(days=days)
+    with wrap_cli_meta_analysis(
+        agent_suffix="analyze",
+        analyzer_name="cli.analyze.generate-advisories",
+        disabled=no_meta_trace,
+    ) as _meta_record:
+        generator = AdvisoryGenerator(
+            event_log,
+            store,
+            min_sample_size=min_sample,
+            min_effect_size=min_effect,
+        )
+        report = generator.generate(days=days)
+        if _meta_record.enabled and report.advisories_generated > 0:
+            _meta_record.produced_finding(
+                f"advisories-generated-d{days}",
+                finding_type="AdvisoryGenerationReport",
+            )
 
     if output_format == "json":
         print(json.dumps(report.model_dump(), indent=2, default=str))
@@ -510,6 +571,11 @@ def advisory_effectiveness(
         False, "--dry-run", help="Analyze without adjusting confidence"
     ),
     output_format: str = typer.Option("text", "--format", help="Output format"),
+    no_meta_trace: bool = typer.Option(
+        False,
+        "--no-meta-trace",
+        help="Skip recording this run as a meta-Activity (Item 6 Phase 2).",
+    ),
 ) -> None:
     """Analyze advisory effectiveness and adjust confidence.
 
@@ -527,22 +593,32 @@ def advisory_effectiveness(
     data_dir = get_data_dir()
     store = AdvisoryStore(data_dir / "advisories.json")
 
-    if dry_run:
-        report = analyze_advisory_effectiveness(
-            event_log,
-            store,
-            days=days,
-            min_presentations=min_presentations,
-        )
-    else:
-        report = run_advisory_fitness_loop(
-            event_log,
-            store,
-            days=days,
-            min_presentations=min_presentations,
-            suppress_below=suppress_below,
-            blend_weight=blend_weight,
-        )
+    with wrap_cli_meta_analysis(
+        agent_suffix="analyze",
+        analyzer_name="cli.analyze.advisory-effectiveness",
+        disabled=no_meta_trace,
+    ) as _meta_record:
+        if dry_run:
+            report = analyze_advisory_effectiveness(
+                event_log,
+                store,
+                days=days,
+                min_presentations=min_presentations,
+            )
+        else:
+            report = run_advisory_fitness_loop(
+                event_log,
+                store,
+                days=days,
+                min_presentations=min_presentations,
+                suppress_below=suppress_below,
+                blend_weight=blend_weight,
+            )
+        if _meta_record.enabled and report.advisory_scores:
+            _meta_record.produced_finding(
+                f"advisory-fitness-d{days}{'-dryrun' if dry_run else ''}",
+                finding_type="AdvisoryFitnessReport",
+            )
 
     if output_format == "json":
         print(json.dumps(report.model_dump(), indent=2, default=str))
@@ -603,6 +679,11 @@ def pack_sections(
         help="Flag sections whose empty rate meets or exceeds this value",
     ),
     output_format: str = typer.Option("text", "--format", help="Output format"),
+    no_meta_trace: bool = typer.Option(
+        False,
+        "--no-meta-trace",
+        help="Skip recording this run as a meta-Activity (Item 6 Phase 2).",
+    ),
 ) -> None:
     """Audit sectioned pack composition across recent assemblies.
 
@@ -612,11 +693,21 @@ def pack_sections(
     content or deliver far fewer items than their budget allows.
     """
     event_log = get_event_log()
-    report = analyze_pack_sections(
-        event_log,
-        days=days,
-        empty_rate_threshold=empty_rate_threshold,
-    )
+    with wrap_cli_meta_analysis(
+        agent_suffix="analyze",
+        analyzer_name="cli.analyze.pack-sections",
+        disabled=no_meta_trace,
+    ) as _meta_record:
+        report = analyze_pack_sections(
+            event_log,
+            days=days,
+            empty_rate_threshold=empty_rate_threshold,
+        )
+        if _meta_record.enabled and report.section_stats:
+            _meta_record.produced_finding(
+                f"pack-sections-report-d{days}",
+                finding_type="PackSectionsReport",
+            )
 
     if output_format == "json":
         rows = [
@@ -792,6 +883,11 @@ def pack_quality(
         ),
     ),
     output_format: str = typer.Option("text", "--format", help="Output format"),
+    no_meta_trace: bool = typer.Option(
+        False,
+        "--no-meta-trace",
+        help="Skip recording this run as a meta-Activity (Item 6 Phase 2).",
+    ),
 ) -> None:
     """Score packs against declared scenarios across 5 quality dimensions.
 
@@ -803,25 +899,35 @@ def pack_quality(
     scenarios = _load_scenarios(scenarios_path)
     profile = _resolve_profile(profile_name)
 
-    if not assemble:
-        if output_format == "json":
-            print(
-                json.dumps(
-                    {"scenarios": [s.model_dump() for s in scenarios]},
-                    default=str,
+    with wrap_cli_meta_analysis(
+        agent_suffix="analyze",
+        analyzer_name="cli.analyze.pack-quality",
+        disabled=no_meta_trace,
+    ) as _meta_record:
+        if not assemble:
+            if output_format == "json":
+                print(
+                    json.dumps(
+                        {"scenarios": [s.model_dump() for s in scenarios]},
+                        default=str,
+                    )
                 )
-            )
-        else:
-            console.print(f"[green]Parsed {len(scenarios)} scenario(s).[/green]")
-            for s in scenarios:
-                console.print(f"  - {s.name}: {s.intent[:60]}")
-        return
+            else:
+                console.print(f"[green]Parsed {len(scenarios)} scenario(s).[/green]")
+                for s in scenarios:
+                    console.print(f"  - {s.name}: {s.intent[:60]}")
+            return
 
-    reports: list[QualityReport] = []
-    for scenario in scenarios:
-        pack = _assemble_pack_for_scenario(scenario)
-        report = evaluate_pack(pack, scenario, profile=profile)  # type: ignore[arg-type]
-        reports.append(report)
+        reports: list[QualityReport] = []
+        for scenario in scenarios:
+            pack = _assemble_pack_for_scenario(scenario)
+            report = evaluate_pack(pack, scenario, profile=profile)  # type: ignore[arg-type]
+            reports.append(report)
+        if _meta_record.enabled and reports:
+            _meta_record.produced_finding(
+                f"pack-quality-report-{len(reports)}-scenarios",
+                finding_type="PackQualityReport",
+            )
 
     if output_format == "json":
         print(
@@ -905,6 +1011,11 @@ def dimension_predictiveness(
         0.5, help="Rating threshold to consider a pack successful"
     ),
     output_format: str = typer.Option("text", "--format", help="Output format"),
+    no_meta_trace: bool = typer.Option(
+        False,
+        "--no-meta-trace",
+        help="Skip recording this run as a meta-Activity (Item 6 Phase 2).",
+    ),
 ) -> None:
     """Validate which quality dimensions actually predict task success.
 
@@ -917,11 +1028,21 @@ def dimension_predictiveness(
     depends on this report as its substrate.
     """
     event_log = get_event_log()
-    report = analyze_dimension_predictiveness(
-        event_log,
-        days=days,
-        success_threshold=success_threshold,
-    )
+    with wrap_cli_meta_analysis(
+        agent_suffix="analyze",
+        analyzer_name="cli.analyze.dimension-predictiveness",
+        disabled=no_meta_trace,
+    ) as _meta_record:
+        report = analyze_dimension_predictiveness(
+            event_log,
+            days=days,
+            success_threshold=success_threshold,
+        )
+        if _meta_record.enabled and report.dimensions:
+            _meta_record.produced_finding(
+                f"dimension-predictiveness-d{days}",
+                finding_type="DimensionPredictivenessReport",
+            )
 
     if output_format == "json":
         print(json.dumps(report.model_dump(), default=str))
@@ -983,6 +1104,11 @@ def dimension_predictiveness(
 def pack_telemetry(
     days: int = typer.Option(7, help="Days of history to analyze"),
     output_format: str = typer.Option("text", "--format", help="Output format"),
+    no_meta_trace: bool = typer.Option(
+        False,
+        "--no-meta-trace",
+        help="Skip recording this run as a meta-Activity (Item 6 Phase 2).",
+    ),
 ) -> None:
     """Aggregate rejection / budget / strategy signals from PACK_ASSEMBLED.
 
@@ -992,7 +1118,17 @@ def pack_telemetry(
     strategy retire) can be made from data rather than intuition.
     """
     event_log = get_event_log()
-    report = analyze_pack_telemetry(event_log, days=days)
+    with wrap_cli_meta_analysis(
+        agent_suffix="analyze",
+        analyzer_name="cli.analyze.pack-telemetry",
+        disabled=no_meta_trace,
+    ) as _meta_record:
+        report = analyze_pack_telemetry(event_log, days=days)
+        if _meta_record.enabled and report.total_packs > 0:
+            _meta_record.produced_finding(
+                f"pack-telemetry-report-d{days}",
+                finding_type="PackTelemetryReport",
+            )
 
     if output_format == "json":
         print(json.dumps(report.model_dump()))
@@ -1089,6 +1225,11 @@ def pack_telemetry(
 def extractor_fallbacks(
     days: int = typer.Option(30, help="Days of history to analyze"),
     output_format: str = typer.Option("text", "--format", help="Output format"),
+    no_meta_trace: bool = typer.Option(
+        False,
+        "--no-meta-trace",
+        help="Skip recording this run as a meta-Activity (Item 6 Phase 2).",
+    ),
 ) -> None:
     """Summarize extractor fallback telemetry per source_hint.
 
@@ -1099,7 +1240,17 @@ def extractor_fallbacks(
     dominates) or audit (``prefer_tier_override`` dominates).
     """
     event_log = get_event_log()
-    report = analyze_extractor_fallbacks(event_log, days=days)
+    with wrap_cli_meta_analysis(
+        agent_suffix="analyze",
+        analyzer_name="cli.analyze.extractor-fallbacks",
+        disabled=no_meta_trace,
+    ) as _meta_record:
+        report = analyze_extractor_fallbacks(event_log, days=days)
+        if _meta_record.enabled and report.total_dispatches > 0:
+            _meta_record.produced_finding(
+                f"extractor-fallbacks-report-d{days}",
+                finding_type="ExtractorFallbackReport",
+            )
 
     if output_format == "json":
         print(json.dumps(report.model_dump()))
@@ -1194,6 +1345,11 @@ def learning_candidates(
         ),
     ),
     output_format: str = typer.Option("text", "--format", help="Output format"),
+    no_meta_trace: bool = typer.Option(
+        False,
+        "--no-meta-trace",
+        help="Skip recording this run as a meta-Activity (Item 6 Phase 2).",
+    ),
 ) -> None:
     """Score the EventLog into learning candidates for human review.
 
@@ -1213,14 +1369,24 @@ def learning_candidates(
     """
     event_log = get_event_log()
     registry = _build_learning_registry_or_exit()
-    observations = build_learning_observations_from_event_log(event_log, days=days)
-    report = analyze_learning_observations(
-        observations=observations,
-        registry=registry,
-        min_support=min_support,
-        artifacts_root=output_dir,
-    )
-    paths = write_learning_review_artifacts(report=report, output_dir=output_dir)
+    with wrap_cli_meta_analysis(
+        agent_suffix="analyze",
+        analyzer_name="cli.analyze.learning-candidates",
+        disabled=no_meta_trace,
+    ) as _meta_record:
+        observations = build_learning_observations_from_event_log(event_log, days=days)
+        report = analyze_learning_observations(
+            observations=observations,
+            registry=registry,
+            min_support=min_support,
+            artifacts_root=output_dir,
+        )
+        paths = write_learning_review_artifacts(report=report, output_dir=output_dir)
+        if _meta_record.enabled and report.get("candidate_count", 0) > 0:
+            _meta_record.produced_finding(
+                f"learning-candidates-d{days}-m{min_support}",
+                finding_type="LearningCandidatesReport",
+            )
 
     if output_format == "json":
         print(
@@ -1373,6 +1539,11 @@ def schema_evolution(
         "--format",
         help="Output format: text or json.",
     ),
+    no_meta_trace: bool = typer.Option(
+        False,
+        "--no-meta-trace",
+        help="Skip recording this run as a meta-Activity (Item 6 Phase 2).",
+    ),
 ) -> None:
     """Surface open-string types eligible for canonical promotion.
 
@@ -1404,13 +1575,24 @@ def schema_evolution(
     event_log = get_event_log()
     registry = _build_schema_evolution_registry()
 
-    candidates = analyze_well_known_candidates(
-        graph_store=graph_store,
-        event_log=event_log,
-        registry=registry,
-        candidate_kinds=parsed_kinds,  # type: ignore[arg-type]
-        emit_events=not no_emit,
-    )
+    with wrap_cli_meta_analysis(
+        agent_suffix="analyze",
+        analyzer_name="cli.analyze.schema-evolution",
+        disabled=no_meta_trace,
+    ) as _meta_record:
+        candidates = analyze_well_known_candidates(
+            graph_store=graph_store,
+            event_log=event_log,
+            registry=registry,
+            candidate_kinds=parsed_kinds,  # type: ignore[arg-type]
+            emit_events=not no_emit,
+        )
+        if _meta_record.enabled:
+            for cand in candidates:
+                _meta_record.produced_finding(
+                    cand.candidate_id,
+                    finding_type="WellKnownCandidate",
+                )
 
     if output_format == "json":
         print(
