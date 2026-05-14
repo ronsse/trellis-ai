@@ -182,6 +182,10 @@ class PrecedentMiner:
                     Message(role="user", content=prompt),
                 ],
             )
+        # GRACEFUL-DEGRADATION: precedent mining is a best-effort
+        # background pass — an LLM outage must not crash the miner job
+        # (workers run on cron); the empty list signals "no candidates
+        # this round" and the next run retries.
         except Exception:
             logger.exception("precedent_generation_llm_error")
             return []
