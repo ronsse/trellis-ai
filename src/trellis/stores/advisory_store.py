@@ -182,6 +182,9 @@ class AdvisoryStore:
                 advisory = Advisory.model_validate(entry)
                 self._advisories[advisory.advisory_id] = advisory
             logger.info("advisories_loaded", count=len(self._advisories))
+        # GRACEFUL-DEGRADATION: starting with an empty advisory set on a
+        # corrupted file is safer than crashing the registry — advisories
+        # are hint-only and the loud error preserves operator visibility.
         except Exception:
             logger.exception("advisory_load_failed", path=str(self._path))
 

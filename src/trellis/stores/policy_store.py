@@ -67,6 +67,10 @@ class PolicyStore:
                 policy = Policy.model_validate(entry)
                 self._policies[policy.policy_id] = policy
             logger.info("policies_loaded", count=len(self._policies))
+        # GRACEFUL-DEGRADATION: an unreadable policy file should not
+        # crash the registry — the MutationExecutor's policy stage
+        # falls back to deny-by-default semantics when no policies
+        # are loaded. The loud error preserves operator visibility.
         except Exception:
             logger.exception("policy_load_failed", path=str(self._path))
 
