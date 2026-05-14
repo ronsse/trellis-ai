@@ -4,18 +4,90 @@ All notable changes to Trellis will be documented in this file.
 
 ## [Unreleased]
 
-### Cleanup (C2 silent-fallback program)
+## [0.9.0] - 2026-05-13
 
-The silent-fallback cleanup track defined in [`docs/design/plan-cleanup-silent-fallbacks.md`](docs/design/plan-cleanup-silent-fallbacks.md) finished its scheduled phases. Each phase shipped as its own PR; Phase 7 is the closing verification.
+The second wave of the **self-improvement program** scoped in [`docs/design/plan-self-improvement-program.md`](docs/design/plan-self-improvement-program.md). 27 PRs landed across Items 1, 2, 6, 7 Cohort 1, all 8 phases of the C2 silent-fallback cleanup, and 7 follow-ups. Item 7 Cohort 2 (sandboxed Claude Code spawn) remains deferred per the plan.
 
-- **Phase 1.5** — retention malformed-date surfacing ([#116](https://github.com/ronsse/trellis-ai/pull/116))
-- **Phase 2** — StoreRegistry typed import errors with `trellis[<extra>]` install hints ([#118](https://github.com/ronsse/trellis-ai/pull/118))
-- **Phase 3** — MCP structured error protocol via the `_raise_*` helper family ([#119](https://github.com/ronsse/trellis-ai/pull/119))
-- **Phase 4** — `GraphMigrator` aggregate-error path + `PackBuilder` explicit `PackAssemblyError` / `strategy_failures` ([#120](https://github.com/ronsse/trellis-ai/pull/120))
-- **Phase 5** — telemetry / observability per-site review across `trellis_api/observability.py`, `feedback/recording.py`, `classify/refresh.py`, `extract/dispatcher.py` ([#122](https://github.com/ronsse/trellis-ai/pull/122))
-- **Phase 6** — CLI `typer.Exit` exit codes, `MutationExecutor` typed catches (`ValidationError` / `PolicyViolationError` / `IdempotencyError` / `(StoreError, TrellisError)`), SDK HTTP exception hierarchy ([#123](https://github.com/ronsse/trellis-ai/pull/123))
-- **Audit script** — helper-aware mode is now the default (recognises `_raise_*` helper indirection, `NoReturn` annotations, and `sys.exit` / `typer.Exit` / `click.Abort` stack-aborts); `--literal-only` retained for back-compat with the historical baseline ([#128](https://github.com/ronsse/trellis-ai/pull/128))
-- **Phase 7** — verification: DEFECT count in `src/` dropped from **113** to **85** in literal-only mode (apples-to-apples vs the 2026-05-12 baseline); the new authoritative helper-aware count is **67**. 33 of the 67 carry the canonical inline `# GRACEFUL-DEGRADATION:` / `# GUARD:` / `# AGGREGATE:` annotation; **34 unjustified survivors** remain (exceeds the original ≤ 10 target). Detailed per-file analysis lives in [`audit/silent_fallbacks_2026-05-12-final.md`](audit/silent_fallbacks_2026-05-12-final.md); a Phase 8 follow-up is warranted to either attach canonical annotations or replace handlers with explicit emit-then-raise.
+### Added — Self-improvement program
+
+**Item 1 — Observation / Measurement entity vocabulary**
+
+- **Phase 0:** Pydantic schemas `Observation` and `Measurement` + well-known registration (`HAS_OBSERVATION` edge kind, schema.org alignment URIs); well-known schema version `1.1.0` constant introduced. ([#121](https://github.com/ronsse/trellis-ai/pull/121))
+- **Phase 1:** Mutation handlers (`ObservationRecordHandler`, `MeasurementRecordHandler`), sync + async SDK methods, REST endpoints (`POST/GET /v1/observations`, same for measurements), MCP tools (Observation only — Measurement deferred from MCP). New event types `OBSERVATION_RECORDED` / `MEASUREMENT_RECORDED`. ([#124](https://github.com/ronsse/trellis-ai/pull/124))
+- **Phase 2:** `ObservationSearch` retrieval strategy (opt-in, confidence threshold + freshness decay per [`adr-importance-score-freshness.md`](docs/design/adr-importance-score-freshness.md)), `QueryPatternObserver` deterministic-tier extractor producing paired `Observation` + `Measurement` drafts from query logs, cross-backend eval scenario `eval/scenarios/observation_retrieval.py`. ([#125](https://github.com/ronsse/trellis-ai/pull/125))
+
+**Item 2 — Provenance columns**
+
+- **Schema half:** five provenance columns (`source_trace_id`, `agent_id`, `confidence`, `evidence_ref`, `extractor_tier`) added to the `edges` table on all four backends (SQLite, Postgres, Neo4j, ArcadeDB) via the shared `bolt_opencypher` base. Shared validator in `src/trellis/stores/base/edge_provenance.py`. ArcadeDB hardening: typed `STRING`/`FLOAT` properties with `MIN 0.0, MAX 1.0` constraint on `confidence`, idempotent `CREATE PROPERTY IF NOT EXISTS` over HTTP. ([#126](https://github.com/ronsse/trellis-ai/pull/126))
+- **DSL + CLI:** edge query DSL extended with `lt` / `lte` / `gt` / `gte` operators on the five provenance columns; new `EdgeQuery` dataclass mirrors `NodeQuery`. `trellis admin migrate-provenance` lifts legacy `properties`-JSON provenance into the typed columns (idempotent, batched, fail-loud above 1% malformed). 47 new tests (8 in the cross-backend contract suite × 4 backends). ([#127](https://github.com/ronsse/trellis-ai/pull/127))
+
+**Item 6 — Dogfooding meta-traces**
+
+- **Phase 0 primitive:** `record_meta_analysis()` context manager records `Activity` nodes with PROV-O edges (`wasAssociatedWith` / `wasInformedBy` / `wasGeneratedBy`). Uses Item 2's provenance columns on every edge. 5-minute merge window, deterministic reservoir sampling (first 10 + last 10 + reservoir 30), synthetic `Agent` factory under the reserved `trellis_meta_` prefix. `TRELLIS_META_TRACES=on|off` env var (default `on`; invalid raises). New package: `src/trellis/meta/`. ([#132](https://github.com/ronsse/trellis-ai/pull/132))
+- **Phases 1+2:** 12 `trellis analyze` subcommands + 3 analytical `admin` subcommands wrap their handlers in `record_meta_analysis()`. New `--no-meta-trace` flag disables per-invocation. `PackBuilder.assemble(..., include_meta=False)` is the new default — meta-Activities are filtered out; `meta_filtered_count` added to the `PACK_ASSEMBLED` event payload. Cross-backend eval scenario `eval/scenarios/meta_trace_round_trip.py`. ([#133](https://github.com/ronsse/trellis-ai/pull/133))
+
+**Item 7 Cohort 1 — Coding-agent self-improvement loop (proposal generation only)**
+
+- **Phase 0 generator:** `ProposalGenerator` clusters `EXTRACTION_FAILED` events by `(source_file, failure_class, time_window)` and folds `WELL_KNOWN_CANDIDATE` events in as single-event clusters; emits `PROPOSAL_DRAFTED` / `PROPOSAL_UPDATED` events. Stable `proposal_id` (SHA-256 of cluster signature) makes re-runs over the same window idempotent — no duplicate drafts. Each run wraps in `record_meta_analysis()`. New package: `src/trellis_workers/code_authoring/`. 37 new tests. ([#134](https://github.com/ronsse/trellis-ai/pull/134))
+- **Phase 1 CLI + eval:** `trellis admin generate-proposals` / `list-proposals` / `show-proposal` with `--format text|json` per the Trellis machine-output rule. First CLI surface to actually adopt the `EXIT_*` constants from #123. End-to-end eval scenario `eval/scenarios/proposal_generation.py`. ([#135](https://github.com/ronsse/trellis-ai/pull/135))
+
+**Cohort 2 deferred.** Sandboxed Claude Code spawn + GitHub PR proposer + budget ledger + file allowlist + secret scrubbing remain deferred per the plan — needs operator review of real Cohort 1 proposals first, then a separate ADR amendment authorizing autonomous spawn.
+
+### Added — Tooling
+
+- **`trellis.meta` package** (`src/trellis/meta/`) — public API: `record_meta_analysis`, `MetaAnalysisRecord`, `ensure_meta_agent`, `reservoir_sample`. ([#132](https://github.com/ronsse/trellis-ai/pull/132))
+- **`trellis_workers.code_authoring` package** — public API: `ProposalGenerator`, `Cluster`, `Proposal`, `cluster_failures`. ([#134](https://github.com/ronsse/trellis-ai/pull/134))
+- **`trellis.stores.base.edge_provenance`** — shared validator + `EDGE_PROVENANCE_FIELDS` tuple consumed by all four graph backends. ([#126](https://github.com/ronsse/trellis-ai/pull/126))
+
+### Changed (breaking — POC stage)
+
+- **`Observation.confidence` is now `float | None`** (was required `float`) per [`adr-observation-entity-type.md`](docs/design/adr-observation-entity-type.md). ([#136](https://github.com/ronsse/trellis-ai/pull/136))
+- **`Measurement` edges now use `hasMeasurement`** — a new canonical edge kind. Previously reused `hasObservation`. Well-known schema version bumped `1.1.0` → `1.2.0`. ([#136](https://github.com/ronsse/trellis-ai/pull/136))
+- **`PackBuilder.assemble()` / `build_sectioned()` default to `include_meta=False`** — meta-Activities are filtered out of agent-facing packs unless callers explicitly opt in. ([#133](https://github.com/ronsse/trellis-ai/pull/133))
+- **CLI exit codes follow [`adr-cli-exit-codes.md`](docs/design/adr-cli-exit-codes.md).** `2` now means *validation error*, never *critical operational finding* — those moved to `1` (`EXIT_INTERNAL`). Migration step errors are `5` (`EXIT_STORE`). Operators with CI gates around specific codes should re-read the ADR. ([#123](https://github.com/ronsse/trellis-ai/pull/123), [#139](https://github.com/ronsse/trellis-ai/pull/139))
+
+### Cleanup — C2 silent-fallback program (complete)
+
+The cleanup track defined in [`docs/design/plan-cleanup-silent-fallbacks.md`](docs/design/plan-cleanup-silent-fallbacks.md) finished all eight scheduled phases.
+
+- **Phase 1.5** — retention malformed-date surfacing with `RetentionDriftError` + 1% threshold ([#116](https://github.com/ronsse/trellis-ai/pull/116))
+- **Phase 2** — `StoreRegistry` `BackendNotInstalledError` with `trellis[<extra>]` install hints ([#118](https://github.com/ronsse/trellis-ai/pull/118))
+- **Phase 3** — MCP structured error protocol via the `_raise_*` helper family (19 of 31 flagged sites converted; 12 annotated as legitimate GRACEFUL / GUARD) ([#119](https://github.com/ronsse/trellis-ai/pull/119))
+- **Phase 4** — `MigrationStepError` + `PackAssemblyError` + `strategy_failures` field on `PACK_ASSEMBLED` event ([#120](https://github.com/ronsse/trellis-ai/pull/120))
+- **Phase 5** — telemetry per-site review across `trellis_api/observability.py`, `feedback/recording.py`, `classify/refresh.py`, `extract/dispatcher.py` (12 GRACEFUL annotated, 1 DEFECT fixed) ([#122](https://github.com/ronsse/trellis-ai/pull/122))
+- **Phase 6** — CLI `typer.Exit` exit codes + ADR + `MutationExecutor` narrowed typed catches + SDK HTTP exception hierarchy (`TrellisHttpError`, `TrellisClientError`, `TrellisServerError`, `TrellisRateLimitError`, `TrellisTransportError`) ([#123](https://github.com/ronsse/trellis-ai/pull/123))
+- **Audit script helper-awareness** — `_raise_*` / `NoReturn` / `sys.exit` / `typer.Exit` / `click.Abort` now recognized as "raises"; `--literal-only` retained for back-compat with the historical baseline ([#128](https://github.com/ronsse/trellis-ai/pull/128))
+- **Phase 7** — verification PR captures the post-cleanup audit state ([#129](https://github.com/ronsse/trellis-ai/pull/129))
+- **Phase 8** — final closeout: every DEFECT site in `src/` now carries a canonical inline justification or has been fixed. **34 unjustified survivors → 0** (target was ≤ 10). 1 FIX (`budget_config.from_dict`), 41 GRACEFUL annotations (28 new + 13 promotions from informal to canonical form), 6 GUARD, 7 AGGREGATE. ([#140](https://github.com/ronsse/trellis-ai/pull/140))
+
+Net DEFECT delta in `src/`: 113 literal-only → 85 literal-only / 67 helper-aware, of which **0 are unjustified**.
+
+### Fixed
+
+- **SQLite concurrent ingest race.** Partial fix in [#117](https://github.com/ronsse/trellis-ai/pull/117) (`busy_timeout=10s`) closed the named "database is locked" symptom; the deeper Python-level `sqlite3.ProgrammingError: cannot commit - no transaction is active` race remained. Full fix in [#131](https://github.com/ronsse/trellis-ai/pull/131): WAL mode + thread-local `Connection` pool via the existing `_conn` property forwarder; `_ensure_wal_mode` retry helper covers the Windows WAL-transition race that `busy_timeout` alone misses. `test_concurrent_ingests` goes from ~12% flaky to **100/100 deterministic** under tight repeat-loops.
+- **ArcadeDB registry-path schema-migration bypass.** The new typed-property + `FLOAT (MIN 0.0, MAX 1.0)` constraint installed only on the direct-construct test path; in production deployments using `StoreRegistry.from_config()` the server-side constraint never landed. Fixed in two passes: [#126](https://github.com/ronsse/trellis-ai/pull/126)'s reviewer caught the new-driver bypass (registry now runs the migration itself before injecting the driver); [#137](https://github.com/ronsse/trellis-ai/pull/137) closed the cached-driver short-circuit AND stopped stripping `http_url` from forwarded params (kept the `password` strip — preserves the constructor's driver-XOR-password mutex).
+- **Phase 5 test-ordering flake.** Seven tests in `test_dispatcher_phase5.py` / `test_recording_phase5.py` passed in isolation but failed in full-suite ordering. Root cause: `structlog.cache_logger_on_first_use=True` interacting with the CLI conftest's `TRELLIS_LOG_LEVEL=CRITICAL` monkeypatch — module-level loggers cached a CRITICAL-only bind on `BoundLoggerLazyProxy` that `structlog.configure()` and `reset_defaults()` do not evict. Fix: package-scoped autouse finalizer in `tests/unit/cli/conftest.py` walks `gc.get_objects()` for live proxies and evicts cached attrs at package teardown. 3/3 consecutive full-suite runs green. ([#138](https://github.com/ronsse/trellis-ai/pull/138))
+
+### Refactored
+
+- **`src/trellis/learning/observations.py` → `src/trellis/learning/pack_observations.py`.** Disambiguates the EventLog-bridge module (plural, dict-keyed on `pack_id`) from the new singular `Observation` entity type. One source import + three doc references updated; `git mv` preserves history. No back-compat shim per POC directive. ([#130](https://github.com/ronsse/trellis-ai/pull/130))
+- **`EXIT_*` constants adopted across 9 CLI modules** (47 sites converted). `admin.py`'s `code=2 "critical"` semantic conflict with the ADR's `2 = validation error` resolved per site: `graph-health` / `check-extractors` → `EXIT_INTERNAL`; migration step errors → `EXIT_STORE`; capacity-exceeded → `EXIT_INTERNAL`; config-file / YAML / graph-block input errors → `EXIT_VALIDATION`. Module-local `_EXIT_*` literals in `admin_migrate_provenance.py` replaced with imports. ([#139](https://github.com/ronsse/trellis-ai/pull/139))
+- **`PackBuilder._raise_if_blocking_strategy_failures` helper** extracted to dedup the required-strategy / all-strategies-failed raise logic between `build()` and `build_sectioned()` so the two surfaces stay in lockstep. ([#136](https://github.com/ronsse/trellis-ai/pull/136))
+
+### Documentation
+
+- **`docs/design/plan-cleanup-silent-fallbacks.md`** §5 updated with all phase PR cross-references and helper-aware DEFECT counts.
+- **`docs/design/adr-cli-exit-codes.md`** — new ADR (status: accepted), introduced in [#123](https://github.com/ronsse/trellis-ai/pull/123).
+- **`audit/silent_fallbacks_2026-05-12-baseline.md`** + **`audit/silent_fallbacks_2026-05-12-final.md`** + **`audit/silent_fallbacks_2026-05-13-phase8-final.md`** capture the rolling audit history (baseline → post-cleanup → post-Phase-8).
+- **`TODO.md`** — Self-improvement Cohort 1 items marked complete; new "Deferred / gated to next cycle" subsection captures Item 7 Cohort 2 + conditional Phase 8.1. ([#141](https://github.com/ronsse/trellis-ai/pull/141))
+
+### Notes for adopters
+
+- The `EXIT_*` constants are now the canonical exit-code surface for the CLI. Operators wiring CI gates around exit codes should read [`docs/design/adr-cli-exit-codes.md`](docs/design/adr-cli-exit-codes.md).
+- `Observation.confidence` is now optional; if you were relying on the field being present, set a default at the consumer.
+- `Measurement` edges now use `hasMeasurement`; downstream graph queries that filtered on `hasObservation` for measurement nodes must update.
+- Meta-Activities filtered from packs by default. To surface them (e.g., when debugging the meta-analysis loop), pass `include_meta=True` to `PackBuilder.assemble()`.
+- Item 7 Cohort 2 (autonomous Claude Code spawn) is deferred. Proposal generation in this release is markdown-only; nothing in this release writes code on the user's behalf.
 
 ## [0.8.0] - 2026-05-12
 
