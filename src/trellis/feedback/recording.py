@@ -175,7 +175,7 @@ def record_feedback(
                     payload=feedback.to_event_payload(pack_id=pack_id),
                 )
                 event_log_emitted = True
-        # GRACEFUL-DEGRADATION (C2 Phase 5): JSONL append is durable; EventLog
+        # GRACEFUL-DEGRADATION: JSONL append is durable; EventLog
         # bridge is best-effort. Failure surfaces to caller via
         # FeedbackRecordResult.event_log_error so a retry/reconcile can run.
         # TODO(c2-phase5): add metrics.telemetry_failures counter (structlog-only).
@@ -199,7 +199,7 @@ def record_feedback(
                 component_id=component_id,
             )
             outcome_emitted = True
-        # GRACEFUL-DEGRADATION (C2 Phase 5): JSONL append is durable; OutcomeStore
+        # GRACEFUL-DEGRADATION: JSONL append is durable; OutcomeStore
         # bridge is best-effort. Failure surfaces via
         # FeedbackRecordResult.outcome_error.
         # TODO(c2-phase5): add metrics.telemetry_failures counter (structlog-only).
@@ -283,7 +283,7 @@ def reconcile_feedback_log_to_event_log(
                 payload=fb.to_event_payload(pack_id=pack_id),
             )
             result.emitted += 1
-        # GRACEFUL-DEGRADATION (C2 Phase 5): reconciliation loop must drain the
+        # GRACEFUL-DEGRADATION: reconciliation loop must drain the
         # JSONL log; per-row failures are recorded on ReconcileResult so the
         # caller can retry the missing ids.
         # TODO(c2-phase5): add metrics.telemetry_failures counter (structlog-only).
