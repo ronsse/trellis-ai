@@ -118,6 +118,9 @@ class ParameterRegistry:
             return self._cache[key]
         try:
             snapshot = self._store.resolve(scope)
+        # GRACEFUL-DEGRADATION: a broken parameter store must fall back
+        # to the caller's hardcoded defaults so tuning is opt-in and
+        # store outages never block governed components.
         except Exception:
             logger.warning(
                 "parameter_registry.resolve_failed",

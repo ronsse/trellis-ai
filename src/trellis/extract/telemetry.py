@@ -326,10 +326,10 @@ def emit_extraction_failure(
             source="extraction_failure_helper",
             payload=payload,
         )
+    # GRACEFUL-DEGRADATION: a broken event log must not break the
+    # extractor's emit-then-raise contract. The caller will still raise;
+    # the log already captured the failure at WARN.
     except Exception:
-        # Fail-soft on the event-log side: a broken event log must not
-        # break the extractor's emit-then-raise contract. The caller will
-        # still raise; the log already captured the failure at WARN.
         logger.exception(
             "extraction_failure_emit_failed",
             extractor_id=extractor_id,

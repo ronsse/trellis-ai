@@ -87,6 +87,8 @@ def record_outcome(
     event = OutcomeEvent(**kwargs)
     try:
         store.append(event)
+    # GRACEFUL-DEGRADATION: outcome recording is advisory telemetry; a
+    # broken store must not break the hot path (see docstring contract).
     except Exception:
         logger.exception(
             "record_outcome.append_failed",

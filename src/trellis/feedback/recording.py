@@ -322,7 +322,9 @@ def _parse_timestamp(raw: str) -> datetime | None:
         return None
     try:
         return datetime.fromisoformat(raw)
-    # DEFECT (Phase 5 fix): previously swallowed silently; malformed timestamps now log.
+    # GRACEFUL-DEGRADATION: bridge contract is fail-soft (JSONL is the
+    # audit trail); the loud warning closes the silent-fallback gap so
+    # operators see corrupted rows. See function docstring.
     except (TypeError, ValueError):
         logger.warning(
             "feedback_timestamp_parse_failed",
