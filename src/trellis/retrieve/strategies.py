@@ -723,6 +723,9 @@ def build_strategies(
                 )
             )
             logger.info("semantic_search_enabled")
+        # GRACEFUL-DEGRADATION: semantic search is optional; a vector
+        # backend that fails init must not block keyword + graph search
+        # — log and continue without it.
         except Exception:
             logger.warning("semantic_search_init_failed", exc_info=True)
 

@@ -202,11 +202,10 @@ class SemanticSeedExtractor:
         vector = self._embedding_fn(intent)
         try:
             hits = self._store.query(vector, top_k=self._top_k)
+        # GRACEFUL-DEGRADATION: vector-store failure must not block pack
+        # assembly; caller falls back to other seed sources (mirrors
+        # PackBuilder's per-strategy aggregator handling).
         except Exception:
-            # Vector-store failures are logged but never block pack
-            # assembly — the caller falls back to its other seed
-            # sources. This mirrors PackBuilder's per-strategy
-            # exception handling.
             logger.exception(
                 "semantic_seed_extractor_query_failed",
                 top_k=self._top_k,
