@@ -206,6 +206,9 @@ def _safe_json(resp: httpx.Response) -> Any:
 
     try:
         return resp.json()
+    # GUARD: parser-only catch (see docstring); the caller falls back
+    # to ``resp.text`` for the diagnostic message. Unrelated bugs in
+    # the response pipeline still propagate.
     except (ValueError, _json.JSONDecodeError, UnicodeDecodeError):
         return None
 
@@ -234,6 +237,8 @@ def _parse_retry_after(header: str | None) -> float | None:
     # HTTP-date form.
     try:
         when = parsedate_to_datetime(stripped)
+    # GUARD: parse helper — unparseable Retry-After returns None so
+    # the caller falls back to its default backoff (see docstring).
     except (TypeError, ValueError):
         return None
     if when.tzinfo is None:

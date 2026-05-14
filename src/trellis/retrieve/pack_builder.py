@@ -305,14 +305,11 @@ class PackBuilder:
                 logger.debug(
                     "strategy_completed", strategy=strategy.name, items=len(items)
                 )
+            # AGGREGATE: collected and re-raised post-loop by
+            # _raise_if_blocking_strategy_failures (required-strategy +
+            # all-failed cases) or surfaced in PACK_ASSEMBLED payload
+            # under strategy_failures (partial-failure case).
             except Exception as exc:
-                # NOT silent: each captured failure is surfaced post-loop
-                # via ``PackAssemblyError`` (required-strategy + all-failed
-                # cases) or in the ``PACK_ASSEMBLED`` event payload under
-                # ``strategy_failures`` (partial-failure case). The audit
-                # heuristic flags this except handler because the raise
-                # happens conditionally outside the block — see the
-                # ``raise PackAssemblyError(...)`` below.
                 logger.exception("strategy_failed", strategy=strategy.name)
                 strategy_failures.append(
                     StrategyFailure(
@@ -542,11 +539,11 @@ class PackBuilder:
                 candidates_found += len(items)
                 all_items.extend(items)
                 strategies_used.append(strategy.name)
+            # AGGREGATE: collected and re-raised post-loop by
+            # _raise_if_blocking_strategy_failures (see matching note
+            # in :meth:`build`); partial failures surface in the
+            # PACK_ASSEMBLED event payload.
             except Exception as exc:
-                # NOT silent — see the matching note in :meth:`build`.
-                # Required- and all-fail cases raise ``PackAssemblyError``
-                # below; partial failures are surfaced in the
-                # ``PACK_ASSEMBLED`` event payload.
                 logger.exception("strategy_failed", strategy=strategy.name)
                 strategy_failures.append(
                     StrategyFailure(

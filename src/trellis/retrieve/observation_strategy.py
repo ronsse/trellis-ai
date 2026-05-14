@@ -313,6 +313,9 @@ class ObservationSearch(SearchStrategy):
                         direction="outgoing",
                         edge_type=edge_kind,
                     )
+                # GRACEFUL-DEGRADATION: a backend error on one
+                # (subject, edge_kind) pair must not collapse the whole
+                # search; skip and continue (see docstring contract).
                 except Exception:  # pragma: no cover — backend errors are logged
                     logger.exception(
                         "observation_search_edge_lookup_failed",
@@ -340,6 +343,9 @@ class ObservationSearch(SearchStrategy):
             bulk_rows: list[dict[str, Any]] | None
             try:
                 bulk_rows = bulk(node_ids)
+            # GRACEFUL-DEGRADATION: bulk-get failure falls back to the
+            # per-id loop below so unit-test fakes that only implement
+            # get_node continue to work.
             except Exception:  # pragma: no cover
                 logger.exception("observation_search_bulk_get_failed")
                 bulk_rows = None
@@ -350,6 +356,8 @@ class ObservationSearch(SearchStrategy):
         for node_id in node_ids:
             try:
                 row = self._store.get_node(node_id)
+            # GRACEFUL-DEGRADATION: a backend error on one node id must
+            # not collapse the load; skip it and keep the rest.
             except Exception:  # pragma: no cover
                 logger.exception(
                     "observation_search_get_node_failed", node_id=node_id,
@@ -373,6 +381,9 @@ def _parse_datetime(value: Any) -> datetime | None:
     if isinstance(value, str):
         try:
             ts = datetime.fromisoformat(value)
+        # GUARD: parser helper; callers skip freshness filters when None
+        # is returned (see docstring) — no logging to avoid noise on
+        # routine missing-data paths.
         except ValueError:
             return None
         return ts if ts.tzinfo else ts.replace(tzinfo=UTC)
@@ -390,6 +401,9 @@ def _coerce_confidence(value: Any) -> float | None:
         return None
     try:
         conf = float(value)
+    # GUARD: malformed confidence resolves to None so the threshold
+    # filter behaves predictably (see docstring) — missing data is
+    # never silently treated as "passes the threshold".
     except (TypeError, ValueError):
         return None
     if conf < 0.0 or conf > 1.0:

@@ -120,6 +120,10 @@ class PgVectorStore(PostgresStoreBase, VectorStore):
         # skip the check rather than block construction.
         try:
             existing_dim = int(existing_type.split("(", 1)[1].rstrip(")"))
+        # GUARD: future pgvector releases may change the type-literal
+        # format; skipping the dim-check is safer than refusing to
+        # construct the store (a real dim mismatch will still fail
+        # loud on the first upsert with DataException).
         except (IndexError, ValueError):
             return
         if existing_dim != self._dimensions:

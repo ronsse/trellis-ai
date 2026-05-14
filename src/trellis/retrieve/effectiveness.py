@@ -916,6 +916,9 @@ def _emit_fitness_event(
             entity_type="advisory",
             payload=payload,
         )
+    # GRACEFUL-DEGRADATION: store writes are the source of truth;
+    # the event emit is an audit side-effect and must not block the
+    # underlying advisory update (see docstring).
     except Exception:
         logger.exception(
             "advisory_fitness_event_emit_failed",

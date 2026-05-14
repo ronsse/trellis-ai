@@ -203,6 +203,9 @@ def _migrate_one_edge(
             **legacy,
         )
         report.edges_migrated += 1
+    # AGGREGATE: per-edge failures are collected into ``report.errors``
+    # so a single bad edge doesn't halt the rest of the migration; the
+    # final report surfaces the failure count to the operator.
     except Exception as exc:
         report.errors.append(
             f"edge:{edge.get('edge_id')}: upsert failed: "
@@ -320,6 +323,9 @@ def migrate_provenance_command(
     store = get_graph_store()
     try:
         event_log: EventLog | None = get_event_log()
+    # GRACEFUL-DEGRADATION: event_log is optional for the migration
+    # CLI — emits a MIGRATION_RECORDED event when available, otherwise
+    # the run still completes and the report is rendered to stdout.
     except Exception:
         event_log = None
 

@@ -1567,6 +1567,9 @@ def record_observation(
             evidence_ref=evidence_ref,
             metadata=metadata or {},
         )
+    # GRACEFUL-DEGRADATION: MCP tool surface — never raises to the
+    # client (see docstring). Returns structured {"status": "error"}
+    # JSON so the caller can branch on the response.
     except Exception as exc:
         return json.dumps(
             {"status": "error", "message": f"Invalid observation: {exc}"}
@@ -1582,6 +1585,9 @@ def record_observation(
         )
         executor = build_curate_executor(_get_registry())
         result = executor.execute(command)
+    # GRACEFUL-DEGRADATION: MCP tool surface — never raises to the
+    # client; execution failure is logged + surfaced as a structured
+    # error response.
     except Exception as exc:
         logger.exception("record_observation_failed")
         return json.dumps(
@@ -1636,6 +1642,9 @@ def query_observations(
             properties=props or None,
             limit=limit,
         )
+    # GRACEFUL-DEGRADATION: MCP tool surface — never raises to the
+    # client; backend errors are logged and surfaced as a structured
+    # error response.
     except Exception as exc:
         logger.exception("query_observations_failed")
         return json.dumps(

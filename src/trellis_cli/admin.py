@@ -780,6 +780,9 @@ def _memory_prompt_available() -> bool:
         from trellis.extract.prompts.extraction import (  # noqa: F401, PLC0415
             MEMORY_EXTRACTION_V1,
         )
+    # GRACEFUL-DEGRADATION: forward-compat sentinel — see docstring.
+    # A future refactor that moves the prompt behind an extra surfaces
+    # here as False, not as a runtime ImportError inside the MCP server.
     except ImportError as exc:
         structlog.get_logger(__name__).debug(
             "memory_prompt_import_failed",
@@ -1405,6 +1408,8 @@ def _safe_json(response: httpx.Response) -> Any:
     """
     try:
         return response.json()
+    # GRACEFUL-DEGRADATION: smoke probes accept plain text/HTML error
+    # responses; a JSON parse failure is not a bug — see docstring.
     except (ValueError, json.JSONDecodeError) as exc:
         structlog.get_logger(__name__).debug(
             "smoke_check_body_not_json",
@@ -1756,6 +1761,9 @@ def _evidence_span_days(first_seen: str, last_seen: str) -> int:
     try:
         f = datetime.fromisoformat(first_seen)
         l_ = datetime.fromisoformat(last_seen)
+    # GRACEFUL-DEGRADATION: ADR draft helper — timestamps are
+    # informational; ``0 day(s)`` is acceptable for the operator to
+    # correct manually (see docstring contract).
     except (TypeError, ValueError) as exc:
         structlog.get_logger(__name__).debug(
             "evidence_span_parse_failed",

@@ -286,7 +286,7 @@ def _default_context_builder(doc: dict[str, Any]) -> ClassificationContext:
 
         try:
             existing_tags = ContentTags.model_validate(existing_tags_raw)
-        # GRACEFUL-DEGRADATION (C2 Phase 5): refresh tolerates malformed pre-1.1
+        # GRACEFUL-DEGRADATION: refresh tolerates malformed pre-1.1
         # tags by re-classifying from scratch; warn so corrupt rows remain
         # observable to operators.
         # TODO(c2-phase5): add metrics.telemetry_failures counter (structlog-only).
@@ -325,7 +325,7 @@ def _parse_classified_at(raw: Any) -> datetime | None:
         return None
     try:
         parsed = datetime.fromisoformat(raw)
-    # GRACEFUL-DEGRADATION (C2 Phase 5): caller treats None as "always stale" so
+    # GRACEFUL-DEGRADATION: caller treats None as "always stale" so
     # the empty return is the intended signal; log on malformed input so
     # corrupt stamps remain observable.
     # TODO(c2-phase5): add metrics.telemetry_failures counter (structlog-only).
@@ -359,7 +359,7 @@ def _emit_tags_refreshed(
                 "classified_by": after.get("classified_by", []),
             },
         )
-    # GRACEFUL-DEGRADATION (C2 Phase 5): tags already persisted to document_store;
+    # GRACEFUL-DEGRADATION: tags already persisted to document_store;
     # this event emit is post-success telemetry and must not roll back the write.
     # TODO(c2-phase5): add metrics.telemetry_failures counter (structlog-only).
     except Exception:

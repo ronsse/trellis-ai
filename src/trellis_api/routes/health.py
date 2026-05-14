@@ -47,6 +47,9 @@ def _probe(name: str, fn: Callable[[], Any]) -> dict[str, Any]:
     start_ns = time.monotonic_ns()
     try:
         fn()
+    # GRACEFUL-DEGRADATION: probe contract is "return per-backend
+    # status, don't raise" — readyz aggregates probes and flips the
+    # overall response to 503 when any backend is degraded.
     except Exception as exc:
         latency_ms = (time.monotonic_ns() - start_ns) / 1_000_000
         logger.warning(

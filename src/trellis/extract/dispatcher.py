@@ -293,7 +293,7 @@ class ExtractionDispatcher:
                     "reason": reason,
                 },
             )
-        # GRACEFUL-DEGRADATION (C2 Phase 5): dispatch decision already made;
+        # GRACEFUL-DEGRADATION: dispatch decision already made;
         # EXTRACTOR_FALLBACK is post-decision telemetry — emit failure must
         # not derail extraction.
         # TODO(c2-phase5): add metrics.telemetry_failures counter (structlog-only).
@@ -315,7 +315,7 @@ class ExtractionDispatcher:
         for validator in self._validators:
             try:
                 findings = validator.validate(result, source_hint=source_hint)
-            # GRACEFUL-DEGRADATION (C2 Phase 5): a buggy validator is converted
+            # GRACEFUL-DEGRADATION: a buggy validator is converted
             # into a synthetic 'validator_error' finding that forces rejection
             # — failure is loud (logged + appended to findings + drives
             # EXTRACTION_REJECTED), never silently passes.
@@ -473,7 +473,7 @@ class ExtractionDispatcher:
                     "findings": [finding.__dict__ for finding in findings],
                 },
             )
-        # GRACEFUL-DEGRADATION (C2 Phase 5): rejection already enforced in-memory
+        # GRACEFUL-DEGRADATION: rejection already enforced in-memory
         # (empty result returned to caller); EXTRACTION_REJECTED is post-decision
         # telemetry — emit failure must not undo the rejection.
         # TODO(c2-phase5): add metrics.telemetry_failures counter (structlog-only).

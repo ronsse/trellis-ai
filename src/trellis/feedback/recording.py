@@ -175,7 +175,7 @@ def record_feedback(
                     payload=feedback.to_event_payload(pack_id=pack_id),
                 )
                 event_log_emitted = True
-        # GRACEFUL-DEGRADATION (C2 Phase 5): JSONL append is durable; EventLog
+        # GRACEFUL-DEGRADATION: JSONL append is durable; EventLog
         # bridge is best-effort. Failure surfaces to caller via
         # FeedbackRecordResult.event_log_error so a retry/reconcile can run.
         # TODO(c2-phase5): add metrics.telemetry_failures counter (structlog-only).
@@ -199,7 +199,7 @@ def record_feedback(
                 component_id=component_id,
             )
             outcome_emitted = True
-        # GRACEFUL-DEGRADATION (C2 Phase 5): JSONL append is durable; OutcomeStore
+        # GRACEFUL-DEGRADATION: JSONL append is durable; OutcomeStore
         # bridge is best-effort. Failure surfaces via
         # FeedbackRecordResult.outcome_error.
         # TODO(c2-phase5): add metrics.telemetry_failures counter (structlog-only).
@@ -283,7 +283,7 @@ def reconcile_feedback_log_to_event_log(
                 payload=fb.to_event_payload(pack_id=pack_id),
             )
             result.emitted += 1
-        # GRACEFUL-DEGRADATION (C2 Phase 5): reconciliation loop must drain the
+        # GRACEFUL-DEGRADATION: reconciliation loop must drain the
         # JSONL log; per-row failures are recorded on ReconcileResult so the
         # caller can retry the missing ids.
         # TODO(c2-phase5): add metrics.telemetry_failures counter (structlog-only).
@@ -322,7 +322,9 @@ def _parse_timestamp(raw: str) -> datetime | None:
         return None
     try:
         return datetime.fromisoformat(raw)
-    # DEFECT (Phase 5 fix): previously swallowed silently; malformed timestamps now log.
+    # GRACEFUL-DEGRADATION: bridge contract is fail-soft (JSONL is the
+    # audit trail); the loud warning closes the silent-fallback gap so
+    # operators see corrupted rows. See function docstring.
     except (TypeError, ValueError):
         logger.warning(
             "feedback_timestamp_parse_failed",

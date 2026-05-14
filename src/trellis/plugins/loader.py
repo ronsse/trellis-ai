@@ -154,6 +154,8 @@ def discover(group: str) -> list[PluginSpec]:
     specs: list[PluginSpec] = []
     try:
         eps = entry_points(group=group)
+    # GRACEFUL-DEGRADATION: function contract is "never raises" so one
+    # broken installation cannot take down the registry (see docstring).
     except Exception:
         logger.exception("plugin_entry_points_lookup_failed", group=group)
         return []
@@ -173,6 +175,8 @@ def load_class(spec: PluginSpec) -> type[Any] | None:
     """
     try:
         module = importlib.import_module(spec.module)
+    # GRACEFUL-DEGRADATION: returns None on import error so the SDK
+    # never fails hard for a broken plugin (see docstring contract).
     except Exception:
         logger.exception(
             "plugin_module_import_failed",

@@ -161,6 +161,11 @@ class EnrichmentService:
                 max_tokens=500,
                 model=self.model,
             )
+        # GRACEFUL-DEGRADATION: EnrichmentResult is the success/failure
+        # contract — callers branch on ``result.success`` rather than
+        # try/except. Broad catch is the right shape: any LLM-pipeline
+        # failure must surface as a non-success result, not crash the
+        # extractor caller.
         except Exception as e:
             logger.exception("enrichment_failed", title=title)
             return EnrichmentResult(success=False, error=str(e))

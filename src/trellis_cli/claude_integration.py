@@ -37,6 +37,8 @@ def read_claude_settings(path: Path) -> dict:
     """
     try:
         text = path.read_text().strip()
+    # GRACEFUL-DEGRADATION: ``trellis admin init`` bootstraps from no
+    # file — see docstring; empty-dict return is the expected branch.
     except FileNotFoundError:
         _logger.debug("claude_settings_not_found", path=str(path))
         return {}

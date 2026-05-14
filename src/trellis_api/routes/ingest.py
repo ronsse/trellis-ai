@@ -110,7 +110,16 @@ def upsert_vectors(body: dict[str, Any]) -> dict[str, Any]:
         try:
             vector_store.upsert(item_id=item_id, vector=vector, metadata=metadata)
             upserted += 1
+        # AGGREGATE: per-row failures are counted and surfaced in the
+        # response's ``errors`` field so a single bad row does not block
+        # the rest of the batch. Each failure is logged so operators
+        # can diagnose patterns across rows.
         except Exception:
+            logger.warning(
+                "ingest_vectors_upsert_failed",
+                item_id=item_id,
+                exc_info=True,
+            )
             errors += 1
 
     return {"status": "ok", "upserted": upserted, "errors": errors}
@@ -292,6 +301,10 @@ def ingest_bulk(req: BulkIngestRequest) -> BulkIngestResponse:
                     message=f"Alias bound to entity {alias.entity_id}",
                 )
             )
+        # AGGREGATE: per-alias failures are collected into
+        # ``response.aliases.results`` with status="failed" and the
+        # error message; STOP_ON_ERROR mode halts the rest of the
+        # batch via the ``halted`` flag above.
         except Exception as exc:
             logger.warning(
                 "bulk_alias_failed",

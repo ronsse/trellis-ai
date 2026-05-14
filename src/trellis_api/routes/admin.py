@@ -150,7 +150,12 @@ def reset_vectors() -> dict[str, Any]:
             vector_store._conn.execute("DROP TABLE IF EXISTS vectors")
             vector_store._conn.commit()
         vector_store._init_schema()
+    # GRACEFUL-DEGRADATION: admin operator endpoint surfaces failure as
+    # a structured JSON response (rather than a 5xx) so the caller can
+    # display the message in the admin UI. Exception is logged for
+    # operator visibility.
     except Exception as exc:
+        logger.exception("vectors_reset_failed")
         return {"status": "error", "message": str(exc)}
     else:
         dims = vector_store._dimensions

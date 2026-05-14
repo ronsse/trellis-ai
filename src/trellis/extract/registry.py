@@ -97,6 +97,8 @@ class ExtractorRegistry:
             try:
                 extractor = target() if callable(target) else target
                 self.register(extractor)
+            # GRACEFUL-DEGRADATION: one broken plugin must not block the
+            # rest of the registry; failure is logged and the loop continues.
             except Exception:
                 logger.exception("extractor_plugin_init_failed", name=spec.name)
                 continue

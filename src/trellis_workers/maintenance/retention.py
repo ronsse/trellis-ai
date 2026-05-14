@@ -137,6 +137,10 @@ class RetentionWorker:
                                 ),
                             },
                         )
+                # AGGREGATE: per-trace failures are collected into
+                # ``report.errors``; the caller inspects the returned
+                # report after the loop so one bad trace doesn't halt
+                # the rest of the retention pass.
                 except Exception as e:
                     report.errors.append(f"Error pruning {trace.trace_id}: {e}")
                     continue

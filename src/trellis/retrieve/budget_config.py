@@ -32,10 +32,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import Field
+import structlog
+from pydantic import Field, ValidationError
 
 from trellis.core.base import TrellisModel
 from trellis.schemas.pack import PackBudget
+
+logger = structlog.get_logger(__name__)
 
 # Hardcoded fallbacks if nothing is configured
 _FALLBACK_MAX_TOKENS = 4000
@@ -77,7 +80,14 @@ class BudgetConfig(TrellisModel):
             return cls()
         try:
             return cls.model_validate(data)
-        except Exception:
+        # GRACEFUL-DEGRADATION: malformed retrieval.budgets config falls
+        # back to hardcoded defaults rather than blocking startup; the
+        # loud warning ensures operators see the misconfiguration.
+        except ValidationError:
+            logger.warning(
+                "budget_config_validation_failed",
+                exc_info=True,
+            )
             return cls()
 
     def resolve(

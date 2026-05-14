@@ -48,6 +48,9 @@ def _ensure_wal_mode(conn: sqlite3.Connection) -> None:
         # connection — handle both tuple and Row shapes.
         try:
             value = row[0]
+        # GUARD: row may be a tuple or sqlite3.Row depending on whether
+        # row_factory was set before this helper ran — accept either
+        # shape (see comment above).
         except (IndexError, KeyError):
             return ""
         return str(value).lower()
@@ -227,10 +230,10 @@ class SQLiteStoreBase:
         for conn in connections:
             try:
                 conn.close()
+            # GRACEFUL-DEGRADATION: a single misbehaving connection
+            # should not block the rest of the close pass; matches
+            # StoreRegistry.close()'s log-and-continue contract.
             except Exception as exc:
-                # A single misbehaving connection should not block the
-                # rest. Match StoreRegistry.close()'s log-and-continue
-                # contract.
                 self._logger.warning(
                     "store_close_connection_failed",
                     db_path=str(self._db_path),
