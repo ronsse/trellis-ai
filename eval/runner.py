@@ -81,7 +81,12 @@ class ScenarioReport:
         means the scenario was deliberately not exercised (e.g. a
         backend not configured in the registry).
     metrics:
-        Free-form numeric metrics. Keys are stable; values are scalars.
+        Free-form scalar metrics. Keys are stable; values are usually
+        ``float``, with ``str`` allowed for path-like grep-targets
+        (e.g. ``chart_path`` on the ``program_convergence`` master
+        scenario when ``render_chart=True``). Reports treat
+        non-numeric metrics as opaque values — no arithmetic is
+        applied to them.
     findings:
         Human-readable observations, severity-tagged.
     decision:
@@ -90,17 +95,28 @@ class ScenarioReport:
         decisions, not metrics — this field is what a human reads first.
     duration_seconds:
         Wall time spent inside the scenario's ``run()`` call.
+    convergence_stats:
+        Optional in-memory payload a scenario can attach for downstream
+        callers (e.g. the ``program_convergence`` master scenario sets
+        this to the ``_MultiAxisStats`` instance it built so a post-hoc
+        caller can re-render the chart without re-running the loop).
+        Typed as ``Any`` to keep the runner free of scenario-specific
+        imports. Excluded from :meth:`to_dict` to keep the JSON report
+        slim — operators consume this field in-process, not from disk.
     """
 
     name: str
     status: ScenarioStatus
-    metrics: dict[str, float] = field(default_factory=dict)
+    metrics: dict[str, float | str] = field(default_factory=dict)
     findings: list[Finding] = field(default_factory=list)
     decision: str = ""
     duration_seconds: float = 0.0
+    convergence_stats: Any = None
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        payload.pop("convergence_stats", None)
+        return payload
 
 
 # ---------------------------------------------------------------------------

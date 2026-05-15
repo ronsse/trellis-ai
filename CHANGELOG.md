@@ -4,6 +4,16 @@ All notable changes to Trellis will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **`matplotlib>=3.8`** — dev-only dependency added for the
+  ``program_convergence`` master scenario's PNG chart renderer at
+  ``eval/reports/program_convergence_chart.py`` (9-axis 3x3 subplot
+  grid). Headless `Agg` backend; selected before any pyplot import so
+  CI / containers without an X server render correctly. Imported only
+  from the eval package; core library and CLI runtime have no
+  matplotlib dependency.
+
 ## [0.9.0] - 2026-05-13
 
 The second wave of the **self-improvement program** scoped in [`docs/design/plan-self-improvement-program.md`](docs/design/plan-self-improvement-program.md). 27 PRs landed across Items 1, 2, 6, 7 Cohort 1, all 8 phases of the C2 silent-fallback cleanup, and 7 follow-ups. Item 7 Cohort 2 (sandboxed Claude Code spawn) remains deferred per the plan.
