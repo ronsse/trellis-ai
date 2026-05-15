@@ -2,6 +2,7 @@
 
 **Status:** Proposed
 **Date:** 2026-04-13
+**Amended:** 2026-05-14 — §8 rejects the file-only JSONL promote path; renumbered References → §9.
 **Deciders:** Trellis core
 **Related:**
 - [`./adr-deferred-cognition.md`](./adr-deferred-cognition.md) — Deterministic writes, deferred intelligence
@@ -270,7 +271,23 @@ This can be implemented incrementally and delivers value before the full advisor
 - **Multi-agent advisory.** Should advisories distinguish between agent types? A data-pipeline agent and a code-review agent might need different advice even in the same domain. The `agent_id` field on traces enables this, but the generator doesn't use it yet.
 - **Advisory delivery format for non-MCP agents.** MCP tools return markdown. SDK returns structured data. What about agents that consume context via plain-text files (e.g., Claude Code CLAUDE.md)? Advisory injection into skill files is a potential path.
 
-## 8. References
+## 8. Rejected: file-only JSONL promote path
+
+Added 2026-05-14 per [`plan-cleanup-dead-code.md`](./plan-cleanup-dead-code.md) §C1.1.
+
+`record_feedback()` writes every signal to `pack_feedback.jsonl` and (when an `event_log` is provided) emits a matching `FEEDBACK_RECORDED` event. A symmetrical *file-only* variant — read `pack_feedback.jsonl` without an EventLog and still drive the `learning.scoring` promote half — was considered and **rejected**.
+
+Reason: [`PackFeedback`](../../src/trellis/feedback/models.py) carries `items_served` and `items_referenced` (item_ids only) but **not** the per-item `item_type` / `source_strategy` / `category` fields that [`analyze_learning_observations`](../../src/trellis/learning/scoring.py) needs to score promotion candidates. The EventLog-driven bridge ([`build_learning_observations_from_event_log`](../../src/trellis/learning/pack_observations.py)) gets those fields from the joined `PACK_ASSEMBLED` payload; the file-only path has nowhere to join them from. Extending `PackFeedback` to carry per-item shape would bloat every JSONL row to support a path no caller asks for.
+
+Operational rule:
+
+- **EventLog is the authoritative path** for both demote (effectiveness + advisory fitness) and promote (`learning.scoring`) halves. There is one decision path, not two.
+- **`pack_feedback.jsonl` is an audit log**. Consumed by ad-hoc `compute_item_effectiveness` runs and by `reconcile_feedback_log_to_event_log()` for backfilling missing events.
+- A deployment that *only* writes JSONL gets the audit trail but does not drive promotion. That is by design.
+
+This closes option (c) of the [TODO.md "File-only JSONL → `learning.scoring` bridge"](../../TODO.md) entry: the dual-path framing is removed; the JSONL schema is not extended.
+
+## 9. References
 
 - [Imbue: LLM-based Evolution as a Universal Optimizer](https://imbue.com/research/2026-02-27-darwinian-evolver/) — Population-based evolutionary optimization framework
 - [Imbue: Darwinian Evolver (GitHub)](https://github.com/imbue-ai/darwinian_evolver) — Open-source implementation

@@ -40,7 +40,7 @@ The planes ADR introduces **substrate** as "the blessed default backend per plan
 ### Non-collisions worth locking in
 
 - **Advisory / feedback loop / dual-path** — CLAUDE.md already disambiguates EventLog (authoritative) vs JSONL (file-based) paths. This ADR reaffirms; no new decisions needed.
-- **"Self-learning"** — zero occurrences in code or docs today. When it appears in issues or discussion, map to the established terms.
+- **"Self-learning"** — not a project term. The canonical phrase is *feedback loop* (see §2.6). A small carve-out documented there: the term survives in `docs/design/plan-self-improvement-program.md` and sibling self-improvement plan/ADR files because that is the framing the user used when scoping the program. New code, ADRs, and agent-guide docs should use *feedback loop* / *advisory loop*. Three legacy docstrings under `src/` (`schemas/outcome.py`, `stores/base/tuner_state.py`, `ops/__init__.py`) still use the term; rewriting them is deferred until those modules are next touched for substantive work.
 
 ---
 
@@ -107,7 +107,7 @@ The single deliberate exception: the legacy `entity_type="domain"` is **not** al
 | `AdvisoryGenerator` | Produces deterministic, evidence-backed suggestions from outcome data. |
 | **Advisory** | An individual suggestion produced by the generator. Schema in `schemas/advisory.py`. |
 | **Effectiveness analysis** | The grading step that reads feedback from the EventLog and computes retrieval effectiveness metrics. |
-| **Self-learning** | **Not a project term.** Map to *feedback loop* + *advisory generator* when encountered in discussion or the issue tracker. |
+| **Self-learning** | **Not a project term.** Map to *feedback loop* + *advisory generator* when encountered in discussion or the issue tracker. Carve-out: `plan-self-improvement-program.md` and sibling self-improvement plan/ADR files retain the word because that was the user's framing when scoping the program; the term should not spread to new files. |
 
 ---
 
