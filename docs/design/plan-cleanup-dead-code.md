@@ -1,6 +1,6 @@
 # Plan: Cleanup — dead-code removal
 
-**Status:** Proposed 2026-05-11
+**Status:** Proposed 2026-05-11; landed 2026-05-15 (4-unit swarm + rollup PR — per-sub-item closures noted inline below)
 **Owner:** swarm-pickable (decomposable into N independent units)
 **ADR:** none — cleanup
 **Program:** [`plan-self-improvement-program.md`](./plan-self-improvement-program.md) cleanup track C1
@@ -25,6 +25,8 @@ Each item below is **independently decidable and independently shippable**. A sw
 
 ### C1.1 — Delete the JSONL→learning.scoring file-only bridge
 
+**Status:** Closed 2026-05-15 (C1 swarm Unit A, rollup PR).
+
 **Current state:** [`TODO.md`](../../TODO.md) line ~70 documents this: the "file-only" path is **structurally underspecified** because `PackFeedback` JSONL lacks per-item shape that `analyze_learning_observations` needs. Today the JSONL is demote-only de facto; CLAUDE.md still describes a "dual-loop" promote path that nobody runs.
 
 **Action:**
@@ -36,20 +38,19 @@ Each item below is **independently decidable and independently shippable**. A sw
 **Estimated size:** ~30 LOC code delete + ~50 LOC docs/ADR updates.
 **Tests required:** verify `tests/unit/feedback/` and `tests/unit/learning/` still pass; any test that asserted the file-only bridge gets deleted along with the code.
 
-### C1.2 — Delete `Operation.TRACE_INGEST` stub
+### C1.2 — Delete `Operation.TRACE_INGEST` stub — **STALE — DO NOT EXECUTE**
 
-**Current state:** [`TODO.md`](../../TODO.md) "Operation.TRACE_INGEST exists in the registry but has no handler." Per the roadmap A.1 gotcha, the actual data flow uses `ENTITY_CREATE` / `LINK_CREATE` directly. The TRACE_INGEST enum value is a lie that will trip someone.
+**Status:** Premise is wrong as of 2026-05-15. Discovered by C1 swarm Unit A when it refused to delete the enum.
 
-**Action:**
-- Remove `Operation.TRACE_INGEST` from the `Operation` enum in `src/trellis/mutate/operations.py`.
-- Remove any tests that reference it.
-- Verify no extractor or worker emits a Command with this operation — grep + mypy.
-- Update CLAUDE.md governed-mutation section to remove the implication that traces flow through MutationExecutor.
+**Why this entry is stale:** `TraceIngestHandler` was wired into the governed pipeline by `swarm/d1-trace-ingest-decision` (commit `ec478c1`) and trace ingestion was routed through `MutationExecutor` by `swarm2/b-7-trace-bypass-sites` (commit `b143e84`). The handler at [`src/trellis/mutate/handlers.py:26`](../../src/trellis/mutate/handlers.py:26) implements the full validate → idempotency → store → emit `TRACE_INGESTED` pipeline, and three production surfaces submit `Operation.TRACE_INGEST` Commands today: [`src/trellis_cli/ingest.py:67`](../../src/trellis_cli/ingest.py:67), [`src/trellis_api/routes/ingest.py:47`](../../src/trellis_api/routes/ingest.py:47), [`src/trellis/mcp/server.py:641`](../../src/trellis/mcp/server.py:641).
 
-**Estimated size:** ~30 LOC delete + ~20 LOC test cleanup.
-**Risk:** if any external integration relies on this enum value, removing it is breaking. Mitigate by grepping all SDK + worker code. POC stage: no external integrations exist, so this is greenfield.
+The plan also pointed at the wrong file path: the `Operation` enum lives at [`src/trellis/mutate/commands.py:19`](../../src/trellis/mutate/commands.py:19), not `mutate/operations.py` (which does not exist). Recorded here so the next sweep doesn't waste a grep cycle.
+
+**Action: NONE. Do not delete the enum.** Deletion would break all three production surfaces and contradict the Hard Rule that all mutations flow through `MutationExecutor`.
 
 ### C1.3 — Delete hard-coded learning thresholds
+
+**Status:** Closed by PR #109 (commit `e672ef5`, 2026-05-12). Verified by C1 swarm Unit B at base SHA `2ca9584`: zero grep hits for `_NOISE_SUCCESS_THRESHOLD` / `_NOISE_RETRY_THRESHOLD` / `_lookup_threshold_from_registry` in `src/`. The scoring module now uses `_resolve_required_threshold(registry, scope, key)` — the loud, no-fallback path required by the POC directive.
 
 **Dependency:** Item 3 ([`plan-parameter-registry-wiring.md`](./plan-parameter-registry-wiring.md)) must land first.
 
@@ -85,6 +86,8 @@ Each item below is **independently decidable and independently shippable**. A sw
 
 ### C1.5 — Audit and remove duplicated `_parse_candidates` patterns
 
+**Status:** Closed 2026-05-15 by C1 swarm Unit C. Remediation was already complete on `origin/main` at base SHA `2ca9584` (PR #110 plus the C2 sweep PRs #115-#140). The C1 rollup PR adds the audit trail at [`audit/silent_fallbacks_2026-05-14-c1-5-extraction-slice.md`](../../audit/silent_fallbacks_2026-05-14-c1-5-extraction-slice.md): 13 in-scope sites — 4 emit-then-raise, 8 `# GRACEFUL-DEGRADATION:` annotated, 1 loud env-var parser. Two M-severity follow-ups in `EnrichmentService` ([`src/trellis_workers/enrichment/service.py:169,228,233`](../../src/trellis_workers/enrichment/service.py:169)) recorded in TODO.md under "Follow-ups surfaced by C1 swarm 2026-05-15".
+
 **Dependency:** Item 4 ([`plan-extraction-failure-analyzer.md`](./plan-extraction-failure-analyzer.md)) Phase 1 must land first.
 
 **Current state:** Item 4 Phase 1 replaces silent except in two known sites (`src/trellis/extract/llm.py`, `src/trellis_workers/learning/miner.py`). A wider audit may surface 3-5 more.
@@ -113,6 +116,8 @@ Listed here so the swarm doesn't pick it up by mistake. **Do not delete.**
 
 ### C1.8 — Remove now-stale "self-learning" framing in CLAUDE.md and docs
 
+**Status:** Closed 2026-05-15 (C1 swarm Unit A, rollup PR). CLAUDE.md normalized; carve-out for the self-improvement program docs recorded in [`adr-terminology.md`](./adr-terminology.md) §2.6. Three `src/` docstring leftovers (`src/trellis/schemas/outcome.py`, `src/trellis/stores/base/tuner_state.py`, `src/trellis/ops/__init__.py`) deferred to "next substantive touch" per the carve-out; tracked in TODO.md under "Follow-ups surfaced by C1 swarm 2026-05-15".
+
 **Current state:** Per the project's terminology ADR ([`adr-terminology.md`](./adr-terminology.md)), "self-learning" is not a project term — the canonical phrase is "feedback loop." CLAUDE.md uses both. Drift.
 
 **Action:**
@@ -122,6 +127,8 @@ Listed here so the swarm doesn't pick it up by mistake. **Do not delete.**
 **Estimated size:** ~20 LOC docs delta.
 
 ### C1.9 — Audit `src/trellis_workers/` for orphan modules
+
+**Status:** Audit landed 2026-05-15 (C1 swarm Unit D, rollup PR) at [`docs/design/audit-trellis-workers-orphans-2026-05-14.md`](./audit-trellis-workers-orphans-2026-05-14.md). Three orphan-suspect modules surfaced (876 LOC combined): `extract/query_pattern_observer.py`, `learning/miner.py`, `maintenance/retention.py`. Per the C1.6/C1.7 discipline, deletion deferred until a human decision attaches.
 
 **Current state:** Several worker modules may exist without callers after recent simplifications. Grep for modules under `src/trellis_workers/` whose only test reference is `tests/unit/workers/*` and whose `__init__.py` doesn't export them.
 
