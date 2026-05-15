@@ -257,3 +257,43 @@ def test_run_without_render_chart_omits_chart_path(
     # convergence_stats is still set — post-hoc rendering is supported
     # even when the run didn't auto-render.
     assert report.convergence_stats is not None
+
+
+def test_axis_g_emits_candidate_before_round_thirty(
+    sqlite_registry: StoreRegistry,
+) -> None:
+    """Phase 5A — axis G must surface >=1 candidate before round 30.
+
+    The Phase 4 calibration lowered ``well_known_count_threshold`` from
+    10 to 3 but axis G stayed at 0 because the master scenario bypassed
+    the governed mutation pipeline — no ``MUTATION_EXECUTED`` events
+    were written, so ``_index_mutation_extractors`` returned an empty
+    map and the analyzer's distinct-extractors gate tripped on every
+    seed type. Phase 5A synthesises those events at seed time and
+    decorates seed nodes with ``content_tags`` so the distinct-domains
+    gate also passes. This test locks in the fix.
+    """
+    report = run(
+        sqlite_registry,
+        seed=0,
+        rounds=30,
+        analyzer_cadence=5,
+        traces_per_domain=6,
+        entities_per_trace=3,
+    )
+
+    stats = report.convergence_stats
+    assert stats is not None
+    track = stats.axes["G_schema_evolution_candidates"]
+    nonzero = [r for r in track.records if r.value > 0]
+    assert nonzero, (
+        "axis G must emit >=1 candidate before round 30; "
+        f"actual track: {[r.value for r in track.records]}"
+    )
+    # First non-zero round should land on the first cadence pass after
+    # seeding (cadence=5 → round index 4 is the first analyzer run).
+    first_emit = nonzero[0]
+    assert first_emit.round_index < 30, (
+        f"axis G first emission must be before round 30, got round "
+        f"{first_emit.round_index}"
+    )
