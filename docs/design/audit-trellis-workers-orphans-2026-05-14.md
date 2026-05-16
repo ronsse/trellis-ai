@@ -52,7 +52,7 @@ decision.
 | `src/trellis_workers/extract/__init__.py` | 22 | (n/a — package init) | (n/a) | (n/a) | active |
 | `src/trellis_workers/extract/dbt_manifest.py` | 153 | `src/trellis_cli/demo.py` line 1170, `src/trellis_cli/extract_refresh.py` line 66, `src/trellis_cli/ingest.py` line 217 (all via package re-export `from trellis_workers.extract import …`) | `tests/unit/workers/test_ingestion.py` | yes (`DbtManifestExtractor`) | active |
 | `src/trellis_workers/extract/openlineage.py` | 174 | `src/trellis_cli/demo.py` line 1170, `src/trellis_cli/extract_refresh.py` line 66, `src/trellis_cli/ingest.py` line 295 (all via package re-export) | `tests/unit/workers/test_ingestion.py` | yes (`OpenLineageExtractor`) | active |
-| `src/trellis_workers/extract/query_pattern_observer.py` | 384 | **none in production** — re-exported from `extract/__init__.py` but no consumer of `QueryPatternObserver` / `QueryLogRecord` outside the re-export itself (grep against `src/trellis`, `src/trellis_cli`, `src/trellis_api`, `src/trellis_sdk` returns zero hits) | `tests/unit/workers/extract/test_query_pattern_observer.py` | yes (`QueryLogRecord`, `QueryPatternObserver`) — **but the re-export has no production consumer** | **orphan-suspect (heightened)** — re-exported but no production caller; tests only |
+| `src/trellis_workers/extract/query_pattern_observer.py` | 384 | **none in production** — re-exported from `extract/__init__.py` but no consumer of `QueryPatternObserver` / `QueryLogRecord` outside the re-export itself (grep against `src/trellis`, `src/trellis_cli`, `src/trellis_api`, `src/trellis_sdk` returns zero hits). **Context:** this module is the deliberate Phase 3 *sample extractor* shipped under [`plan-observation-entity-type.md`](./plan-observation-entity-type.md) §6 (Item 1, landed via PR #125) — the plan describes it as "the simplest end-to-end demonstration" of the Observation entity-type pipeline. "No production caller" is consistent with the plan; do not delete without re-reading Item 1's Phase 3 contract first. | `tests/unit/workers/extract/test_query_pattern_observer.py` | yes (`QueryLogRecord`, `QueryPatternObserver`) | **orphan-suspect (heightened)** — re-exported but no production caller; tests only. See plan context above before any deletion decision. |
 | `src/trellis_workers/learning/__init__.py` | 1 | (n/a — package init, no exports) | (n/a) | (n/a) | parent of an orphan-suspect |
 | `src/trellis_workers/learning/miner.py` | 272 | **none** — `PrecedentMiner` appears only inside its own module (`miner.py`) and in *prose docstrings* of `src/trellis/extract/telemetry.py` line 13 and `src/trellis/stores/base/event_log.py` line 129 (those are comments referencing the class, not imports) | `tests/unit/workers/learning/test_miner.py` | no | **orphan-suspect** — zero production callers; tests only |
 | `src/trellis_workers/maintenance/__init__.py` | 1 | (n/a — package init, no exports) | (n/a) | (n/a) | parent of an orphan-suspect |
@@ -75,7 +75,7 @@ By classification:
 
 ### Orphan-suspect modules — names for the next human reviewer
 
-- `src/trellis_workers/extract/query_pattern_observer.py` (384 LOC)
+- `src/trellis_workers/extract/query_pattern_observer.py` (384 LOC) — **Phase 3 sample extractor of [`plan-observation-entity-type.md`](./plan-observation-entity-type.md) (Item 1, landed PR #125).** "No production caller" is by plan design; deletion needs more signal than the audit grep.
 - `src/trellis_workers/learning/miner.py` (272 LOC)
 - `src/trellis_workers/maintenance/retention.py` (220 LOC)
 
@@ -89,9 +89,10 @@ Per C1.9's "validate before deleting" discipline:
 1. **Do NOT delete any orphan-suspect module in this audit PR.** The
    decision per-module belongs to a human and requires a signal beyond
    "no current caller." Examples of signals that would justify deletion:
-   - The roadmap explicitly drops the use case (e.g.,
-     `QueryPatternObserver` was the read-side of a query-log ingestion
-     path that has since been replaced — confirm with the maintainer).
+   - The roadmap explicitly drops the use case (e.g., a maintainer
+     decides the Phase 3 sample extractor of an already-landed plan has
+     served its demonstration purpose and the sample can move to
+     `eval/` or be retired).
    - The module is superseded by a `trellis/` core implementation that
      subsumes it.
 2. **Confirm `engine/thinking.py` and `enrichment/service.py`** remain

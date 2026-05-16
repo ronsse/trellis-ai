@@ -39,7 +39,7 @@ The planes ADR introduces **substrate** as "the blessed default backend per plan
 
 ### Non-collisions worth locking in
 
-- **Advisory / feedback loop / dual-path** — CLAUDE.md already disambiguates EventLog (authoritative) vs JSONL (file-based) paths. This ADR reaffirms; no new decisions needed.
+- **Advisory / feedback loop / dual-path** — CLAUDE.md describes a single authoritative path: EventLog drives both demote and promote halves; `pack_feedback.jsonl` is an audit log only. The file-only promote variant was considered and rejected — see [`adr-dual-loop-evolution.md`](./adr-dual-loop-evolution.md) §8. This ADR reaffirms; no new decisions needed.
 - **"Self-learning"** — not a project term. The canonical phrase is *feedback loop* (see §2.6). A small carve-out documented there: the term survives in `docs/design/plan-self-improvement-program.md` and sibling self-improvement plan/ADR files because that is the framing the user used when scoping the program. New code, ADRs, and agent-guide docs should use *feedback loop* / *advisory loop*. Three legacy docstrings under `src/` (`schemas/outcome.py`, `stores/base/tuner_state.py`, `ops/__init__.py`) still use the term; rewriting them is deferred until those modules are next touched for substantive work.
 
 ---
