@@ -55,6 +55,17 @@ logger = structlog.get_logger(__name__)
 #: Canonical failure kinds for :func:`emit_extraction_failure`. The
 #: ``Literal`` mirrors the ADR §2.1 event schema verbatim. Keep this in
 #: sync with the analyzer that aggregates by ``failure_kind`` (Phase 2).
+#:
+#: ``batch_collector_error`` is the one slug that does *not* originate
+#: inside the extraction pipeline. It is emitted by
+#: :meth:`trellis_workers.enrichment.service.EnrichmentService.batch_enrich`
+#: when ``asyncio.gather(..., return_exceptions=True)`` returns a raw
+#: ``Exception`` from a task that bubbled past the per-item ``enrich``
+#: failure-handling. We reuse :attr:`EventType.EXTRACTION_FAILED` rather
+#: than minting a new event type so existing failure analyzers see these
+#: rare collector-level escapes for free; analyzers that care about
+#: pipeline-only failures can filter on
+#: ``payload.failure_kind != "batch_collector_error"``.
 ExtractionFailureKind = Literal[
     "parse_error",
     "validation_error",
@@ -63,6 +74,7 @@ ExtractionFailureKind = Literal[
     "tier_fallback",
     "model_error",
     "budget_exhausted",
+    "batch_collector_error",
 ]
 
 ExtractionTier = Literal["deterministic", "hybrid", "llm"]

@@ -491,3 +491,89 @@ class TestEnrichmentFailureTelemetry:
         result = await service.enrich(content="x")
         assert result.success is False
         assert "boom" in result.error
+
+
+# ---------------------------------------------------------------------------
+# batch_enrich — gather-collector telemetry
+# ---------------------------------------------------------------------------
+
+
+class TestBatchEnrichCollectorTelemetry:
+    """When ``asyncio.gather`` returns a raw Exception for a task (i.e. a
+    failure escaped ``enrich``'s broad-except), ``batch_enrich`` must emit
+    an ``EXTRACTION_FAILED`` event with ``failure_kind="batch_collector_error"``
+    and the exception type + message in the payload.
+
+    These failures used to vanish into the list-comprehension that wrapped
+    raw exceptions into ``EnrichmentResult(success=False, error=str(r))``
+    without any telemetry — invisible to downstream analyzers.
+    """
+
+    async def test_collector_exception_emits_batch_collector_error(
+        self, tmp_path, monkeypatch
+    ):
+        from pathlib import Path
+
+        from trellis.extract.telemetry import reset_extraction_failure_state
+        from trellis.stores.base.event_log import EventType
+        from trellis.stores.sqlite.event_log import SQLiteEventLog
+
+        reset_extraction_failure_state()
+        # Disable sampling so we get the full event without LRU state
+        # leaking across test ordering.
+        monkeypatch.setenv("EXTRACTION_FAILURE_NO_SAMPLE", "1")
+        try:
+            log = SQLiteEventLog(Path(tmp_path) / "events.db")
+            service = EnrichmentService(
+                llm=_make_llm(VALID_JSON),
+                event_log=log,
+                model="test-model",
+            )
+
+            # Patch ``enrich`` to raise — simulating an exception that
+            # bubbles past ``_with_sem``'s try/except (the broad-except in
+            # ``enrich`` is gone; e.g. CancelledError, semaphore poisoning,
+            # asyncio internals). ``return_exceptions=True`` on the
+            # surrounding ``gather`` turns this into a raw Exception value
+            # in the results list.
+            async def _boom(*_args, **_kwargs):
+                msg = "collector escape"
+                raise RuntimeError(msg)
+
+            service.enrich = _boom  # type: ignore[method-assign]
+
+            results = await service.batch_enrich(
+                [{"content": "anything", "title": "T"}]
+            )
+            assert len(results) == 1
+            assert results[0].success is False
+            assert "collector escape" in (results[0].error or "")
+
+            events = log.get_events(event_type=EventType.EXTRACTION_FAILED)
+            assert len(events) == 1
+            payload = events[0].payload
+            assert payload["failure_kind"] == "batch_collector_error"
+            assert payload["extractor_id"] == "EnrichmentService.batch_enrich"
+            assert payload["extractor_tier"] == "llm"
+            assert payload["error_class"] == "RuntimeError"
+            assert "collector escape" in payload["error_excerpt"]
+            assert payload["model"] == "test-model"
+            log.close()
+        finally:
+            reset_extraction_failure_state()
+
+    async def test_collector_exception_without_event_log_is_silent(self):
+        """No event_log => no event. Matches the optional-event-log pattern
+        used across the codebase: emit is a no-op rather than a crash."""
+
+        service = EnrichmentService(llm=_make_llm(VALID_JSON))
+        # No event_log wired — emit_extraction_failure should be a no-op.
+
+        async def _boom(*_args, **_kwargs):
+            msg = "unwired"
+            raise RuntimeError(msg)
+
+        service.enrich = _boom  # type: ignore[method-assign]
+        results = await service.batch_enrich([{"content": "x"}])
+        assert results[0].success is False
+        assert "unwired" in (results[0].error or "")

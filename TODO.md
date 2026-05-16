@@ -131,6 +131,17 @@ Hidden-work tracked here so the Cohort 1 / C2 PR list doesn't look thinner than 
 - **#136** — Item 1 review followup: `Observation.confidence` made optional per ADR (not required at draft time).
 - **#138** — Phase 5 test-ordering flake closed (structlog `BoundLoggerLazyProxy` cache eviction).
 - **#139** — `EXIT_*` constants adopted across 9 CLI modules (47 sites + `code=2` ADR conflicts resolved).
+- **#152** — Post-C1.5 cleanup: `EnrichmentService` broad-except + two `_parse_response` JSON-decode branches now emit `EXTRACTION_FAILED` (was silently swallowed). 4 failure-injection tests.
+- **#155** — Closes both M-severity follow-ups from #152: `batch_enrich` emits `EXTRACTION_FAILED` with new `failure_kind="batch_collector_error"` on gather-collector escapes; `LLMFacetClassifier` emits new `EventType.CLASSIFICATION_DEGRADED` event when degrading to `needs_llm_review=True`. 6 new tests.
+
+### Deferred follow-ups from #155 — observability gaps to revisit
+
+Surfaced by review of the M-severity follow-ups landed in #155. Tracked here so they don't fall on the floor across stacked PRs:
+
+- **[M] `batch_enrich` collector-emit passes `source_hint=None`.** `EnrichmentService.batch_enrich` now emits `EXTRACTION_FAILED` with `failure_kind="batch_collector_error"`, but it has no per-item identifier to populate `source_hint`. The proposal-generator clustering path ([`src/trellis_workers/code_authoring/clustering.py`](src/trellis_workers/code_authoring/clustering.py)) silently skips events missing `source_hint`/`failure_kind` (debug-log only), so collector escapes will be invisible to the coding-agent loop. Once `batch_enrich` callers thread an item-level identifier (doc_id, correlation_id), pass it through to the emit so collector escapes don't all collapse into a single `<none>` bucket — or update the clustering docstring to note batch-collector events are intentionally excluded.
+- **[M] `LLMFacetClassifier._emit_degraded` only knows the generic `"enrichment_failure"` slug.** `EnrichmentResult` exposes `error: str | None` but not a structured `failure_kind` field, so the classifier can't mirror the upstream's specific kind (`"parse_error"`, `"model_error"`). Once #152's emit sites are in active use, add a structured `failure_kind: ExtractionFailureKind | None = None` field to `EnrichmentResult` (the model already uses `extra="forbid"` — additive change is safe) and thread it into `_emit_degraded` so `CLASSIFICATION_DEGRADED.upstream_failure_kind` carries the same slug the upstream emitted. Closes the timestamp-join workaround documented in the `EventType.CLASSIFICATION_DEGRADED` docstring.
+- **[L] `LLMFacetClassifier` is not yet wired with an `event_log` in production.** Tests are the only callers passing `event_log=` today; the registry / classifier-pipeline builder doesn't thread the operational-plane EventLog into the constructor. New telemetry is dormant in production until that wiring lands.
+- **[L] `tests/unit/classify/test_llm.py` and `tests/unit/classify/test_llm_classifier.py` overlap.** Slimmer FakeLLM-free `test_llm.py` vs. heavier `test_llm_classifier.py`. Consider consolidating into one path once #155's tests have stabilized.
 
 ## Knowledge graph foundations — research + ADR
 

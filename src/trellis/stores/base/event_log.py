@@ -87,6 +87,29 @@ class EventType(StrEnum):
 
     # Classification refresh (stale-tag reclassification — see Gap 1.1)
     TAGS_REFRESHED = "tags.refreshed"
+    #: Emitted by a classifier when its upstream signal source fails and
+    #: the classifier degrades to a sentinel result (rather than raising)
+    #: so callers can keep flowing through the pipeline. First user:
+    #: :class:`~trellis.classify.classifiers.llm.LLMFacetClassifier`,
+    #: which emits this event when
+    #: :class:`~trellis_workers.enrichment.service.EnrichmentService`
+    #: returns ``result.success=False`` and the classifier returns
+    #: ``ClassificationResult(needs_llm_review=True, tags={}, confidence=0.0)``.
+    #: Payload schema (all keys required when ``event_log`` is wired):
+    #: ``{classifier_id, upstream_failure_kind, subject_entity_id,
+    #: degraded_to}``. ``classifier_id`` is the classifier's stable
+    #: ``name`` property (e.g. ``"llm_facet"``). ``upstream_failure_kind``
+    #: is a short slug describing why the upstream signal was unusable
+    #: (e.g. ``"enrichment_failure"`` when the only signal is
+    #: ``EnrichmentResult.success=False`` with no further structure).
+    #: ``subject_entity_id`` identifies the item being classified — falls
+    #: back to ``None`` when the caller did not supply one.
+    #: ``degraded_to`` names the sentinel outcome the classifier chose
+    #: (today: ``"needs_llm_review"``); analyzers can join on this value
+    #: to count degradation modes per classifier. Joins to
+    #: :attr:`EXTRACTION_FAILED` via ``subject_entity_id`` + timestamp
+    #: when the upstream emitted its own failure event.
+    CLASSIFICATION_DEGRADED = "classification.degraded"
 
     # Memory (save_memory MCP tool / unstructured observation ingestion)
     MEMORY_STORED = "memory.stored"

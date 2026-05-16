@@ -124,10 +124,15 @@ class EnrichmentService:
         self.temperature = temperature
         self.model = model
         # Why: enrichment is opt-in, but its failures must still be loud.
-        # When wired, JSON-decode and broad-except sites emit
-        # EXTRACTION_FAILED so the failure-telemetry analyzer can see them;
-        # when unwired, emit_extraction_failure is a no-op (post-C1.5
-        # cleanup, ADR-extraction-failure-telemetry).
+        # Two emit paths use this sink:
+        # 1. enrich() — JSON-decode and broad-except sites emit
+        #    EXTRACTION_FAILED so the failure-telemetry analyzer sees them
+        #    (post-C1.5 cleanup, ADR-extraction-failure-telemetry).
+        # 2. batch_enrich() — gather-collector exceptions that bubble past
+        #    per-item handling emit EXTRACTION_FAILED with
+        #    failure_kind="batch_collector_error".
+        # When None, emit_extraction_failure is a no-op (optional-event-log
+        # pattern: no wiring → no event).
         self._event_log = event_log
 
     async def enrich(
@@ -231,12 +236,39 @@ class EnrichmentService:
             return_exceptions=True,
         )
 
-        return [
-            r
-            if isinstance(r, EnrichmentResult)
-            else EnrichmentResult(success=False, error=str(r))
-            for r in results
-        ]
+        normalized: list[EnrichmentResult] = []
+        for r in results:
+            if isinstance(r, EnrichmentResult):
+                normalized.append(r)
+                continue
+            # ``return_exceptions=True`` converted a raw Exception into a
+            # value. ``_with_sem`` already lets ``enrich``'s broad-except
+            # collapse LLM-pipeline errors into ``EnrichmentResult(success=
+            # False)`` — anything that reaches this branch is a *batch-level*
+            # escape (cancellation, semaphore corruption, asyncio internals).
+            # Emit a distinct ``failure_kind`` so analyzers can tell these
+            # rare collector failures apart from the common per-item
+            # enrichment failures. ``emit_extraction_failure`` is total when
+            # ``event_log`` is ``None`` — no special-casing needed.
+            exc = r if isinstance(r, BaseException) else None
+            error_class = type(r).__name__ if exc is not None else "object"
+            error_excerpt = str(r) if exc is not None else repr(r)
+            logger.warning(
+                "batch_enrich_collector_exception",
+                error_class=error_class,
+                error=error_excerpt[:200],
+            )
+            emit_extraction_failure(
+                event_log=self._event_log,
+                extractor_id="EnrichmentService.batch_enrich",
+                extractor_tier="llm",
+                failure_kind="batch_collector_error",
+                error_class=error_class,
+                error_excerpt=error_excerpt,
+                model=self.model,
+            )
+            normalized.append(EnrichmentResult(success=False, error=error_excerpt))
+        return normalized
 
     def _parse_response(self, response: str) -> EnrichmentResult:
         """Parse LLM JSON response."""
