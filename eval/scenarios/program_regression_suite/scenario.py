@@ -15,6 +15,14 @@ The suite is the **CI gate** — its return status flips to ``regress``
 on any threshold violation, which the runner translates to exit code 1.
 Strict-mode determinism: same seed → same outputs → same pass/fail.
 
+Axis A is profile-dependent — see ``CorpusProfile`` and
+``THRESHOLD_A_DELTA_BY_PROFILE``. The default ``"synthetic"`` profile
+uses a 0.05 lift threshold (calibrated to the deterministic corpus's
+~0.0545 observed ceiling); operators driving the suite against a real
+corpus pass ``profile="real"`` to assert the plan §4.2 0.15 target.
+The other 8 thresholds are profile-agnostic by construction (absolute
+or trend-based).
+
 POC directives applied:
 
 * Strict-mode propagation — the master raises
@@ -666,6 +674,14 @@ def run(
     ``"real"`` uses the plan §4.2 0.15 target for operators driving the
     suite against an actual corpus. An invalid profile string raises
     ``ValueError`` — no silent fallback to synthetic.
+
+    Today ``profile`` is **programmatic-only**: :mod:`eval.runner`
+    invokes scenarios via ``module.run(registry)`` with no kwargs, so
+    operators driving the suite under a non-default profile must import
+    this ``run`` directly (e.g. from a harness script) rather than
+    going through ``python -m eval.runner``. A ``--scenario-arg``
+    pass-through on the runner is logged as a TODO follow-up; this
+    docstring is the canonical pointer until that lands.
     """
     if rounds < REGRESSION_ROUNDS:
         msg = (
