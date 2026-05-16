@@ -265,9 +265,17 @@ def test_structlog_routes_to_stderr_not_stdout(
     json-decode breaks). ``admin stats`` is the simplest command that
     forces store init, which emits ``store_instantiated`` /
     ``store_initialized`` log lines for every backing store.
+
+    The CLI defaults to ``TRELLIS_LOG_LEVEL=WARNING`` (see
+    ``trellis_cli.main._root`` and PR #101), which would filter out the
+    INFO-level ``store_instantiated`` event this test relies on. Set
+    ``TRELLIS_LOG_LEVEL=INFO`` explicitly so the test asserts the
+    *routing* contract (stderr vs stdout) independently of whatever
+    default level the CLI chooses today.
     """
+    env = {**initialized_cli_env, "TRELLIS_LOG_LEVEL": "INFO"}
     completed, payload = cli_runner(
-        ["admin", "stats", "--format", "json"], initialized_cli_env
+        ["admin", "stats", "--format", "json"], env
     )
     assert payload["status"] == "ok"
     stderr = completed.stderr.decode(errors="replace")
