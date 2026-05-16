@@ -6,13 +6,18 @@ import asyncio
 import json
 import re
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
 from pydantic import Field
 
 from trellis.core.base import TrellisModel
+from trellis.core.hashing import content_hash
+from trellis.extract.telemetry import emit_extraction_failure
 from trellis.llm import LLMClient, LLMResponse, Message, TokenUsage
+
+if TYPE_CHECKING:
+    from trellis.stores.base.event_log import EventLog
 
 logger = structlog.get_logger(__name__)
 
@@ -111,12 +116,19 @@ class EnrichmentService:
         max_content_length: int = 4000,
         temperature: float = 0.3,
         model: str | None = None,
+        event_log: EventLog | None = None,
     ) -> None:
         self._llm = llm
         self.classifications = classifications or list(DEFAULT_CLASSIFICATIONS)
         self.max_content_length = max_content_length
         self.temperature = temperature
         self.model = model
+        # Why: enrichment is opt-in, but its failures must still be loud.
+        # When wired, JSON-decode and broad-except sites emit
+        # EXTRACTION_FAILED so the failure-telemetry analyzer can see them;
+        # when unwired, emit_extraction_failure is a no-op (post-C1.5
+        # cleanup, ADR-extraction-failure-telemetry).
+        self._event_log = event_log
 
     async def enrich(
         self,
@@ -162,11 +174,25 @@ class EnrichmentService:
                 model=self.model,
             )
         # GRACEFUL-DEGRADATION: EnrichmentResult is the success/failure
-        # contract — callers branch on ``result.success`` rather than
-        # try/except. Broad catch is the right shape: any LLM-pipeline
-        # failure must surface as a non-success result, not crash the
-        # extractor caller.
+        # contract — callers (e.g. LLMFacetClassifier) branch on
+        # ``result.success`` rather than try/except. Broad catch is the
+        # right shape: any LLM-pipeline failure must surface as a
+        # non-success result, not crash the extractor caller. Post-C1.5
+        # cleanup: failure is no longer silent — we emit
+        # EXTRACTION_FAILED so the failure-telemetry analyzer can see
+        # it (no-op when ``event_log`` is unwired).
         except Exception as e:
+            emit_extraction_failure(
+                event_log=self._event_log,
+                extractor_id="EnrichmentService",
+                extractor_tier="llm",
+                failure_kind="model_error",
+                source_hint="enrichment",
+                source_excerpt_hash=content_hash(content) if content else None,
+                model=self.model,
+                error_class=type(e).__name__,
+                error_excerpt=str(e),
+            )
             logger.exception("enrichment_failed", title=title)
             return EnrichmentResult(success=False, error=str(e))
         else:
@@ -230,13 +256,44 @@ class EnrichmentService:
             if match:
                 try:
                     data = json.loads(match.group())
-                except json.JSONDecodeError:
+                except json.JSONDecodeError as inner_exc:
+                    # GRACEFUL-DEGRADATION: enrichment failure stays in
+                    # the EnrichmentResult contract (callers handle
+                    # ``success=False``), but we emit EXTRACTION_FAILED
+                    # so the failure isn't silent — post-C1.5 cleanup.
+                    emit_extraction_failure(
+                        event_log=self._event_log,
+                        extractor_id="EnrichmentService",
+                        extractor_tier="llm",
+                        failure_kind="parse_error",
+                        source_hint="enrichment",
+                        source_excerpt_hash=(
+                            content_hash(response) if response else None
+                        ),
+                        model=self.model,
+                        error_class=type(inner_exc).__name__,
+                        error_excerpt=str(inner_exc),
+                    )
                     return EnrichmentResult(
                         success=False,
                         error=f"Invalid JSON: {e}",
                         raw_response=response,
                     )
             else:
+                # GRACEFUL-DEGRADATION: see sibling branch above.
+                emit_extraction_failure(
+                    event_log=self._event_log,
+                    extractor_id="EnrichmentService",
+                    extractor_tier="llm",
+                    failure_kind="parse_error",
+                    source_hint="enrichment",
+                    source_excerpt_hash=(
+                        content_hash(response) if response else None
+                    ),
+                    model=self.model,
+                    error_class=type(e).__name__,
+                    error_excerpt=str(e),
+                )
                 return EnrichmentResult(
                     success=False,
                     error=f"No JSON found: {e}",

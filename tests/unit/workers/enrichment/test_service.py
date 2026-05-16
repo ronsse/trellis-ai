@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import json
+import os
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
 
 from trellis.llm import LLMResponse, Message, TokenUsage
+from trellis.stores.base.event_log import EventType
+from trellis.stores.sqlite.event_log import SQLiteEventLog
 from trellis_workers.enrichment.service import (
     EnrichmentResult,
     EnrichmentService,
@@ -339,3 +343,151 @@ class TestBatchEnrich:
         assert results[0].success is True
         assert results[1].success is False
         assert results[2].success is True
+
+
+# ---------------------------------------------------------------------------
+# Failure-injection: EXTRACTION_FAILED emission (post-C1.5 cleanup)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def event_log(tmp_path: Any) -> SQLiteEventLog:
+    log = SQLiteEventLog(tmp_path / "events.db")
+    yield log  # type: ignore[misc]
+    log.close()
+
+
+@pytest.fixture(autouse=True)
+def _bypass_extraction_failure_sampling():
+    """Disable sampling so per-call assertions are deterministic.
+
+    The telemetry helper samples emitted events by default (LRU-capped
+    per ``(extractor_id, prompt_hash, failure_kind)`` cluster); tests
+    need every call to fire a full event.
+    """
+    from trellis.extract.telemetry import reset_extraction_failure_state
+
+    reset_extraction_failure_state()
+    os.environ["EXTRACTION_FAILURE_NO_SAMPLE"] = "1"
+    try:
+        yield
+    finally:
+        os.environ.pop("EXTRACTION_FAILURE_NO_SAMPLE", None)
+        reset_extraction_failure_state()
+
+
+class TestEnrichmentFailureTelemetry:
+    """ADR-extraction-failure-telemetry / post-C1.5 cleanup:
+
+    The three previously-silent failure sites in ``EnrichmentService``
+    now emit ``EXTRACTION_FAILED`` events before returning a degraded
+    ``EnrichmentResult(success=False, ...)``. This keeps the documented
+    graceful-degradation contract that ``LLMFacetClassifier`` relies on
+    while making the failure visible to the failure-telemetry analyzer.
+    """
+
+    async def test_broad_except_emits_extraction_failed(
+        self, event_log: SQLiteEventLog
+    ) -> None:
+        """``enrich``'s top-level ``except Exception`` path emits."""
+
+        class BrokenLLM:
+            async def generate(
+                self,
+                *,
+                messages: list[Message],
+                temperature: float = 0.3,
+                max_tokens: int = 500,
+                model: str | None = None,
+            ) -> LLMResponse:
+                msg = "LLM unreachable"
+                raise RuntimeError(msg)
+
+        service = EnrichmentService(llm=BrokenLLM(), event_log=event_log)
+        result = await service.enrich(content="some content", title="t")
+
+        # Graceful-degradation contract preserved.
+        assert result.success is False
+        assert "LLM unreachable" in result.error
+
+        # And the failure is no longer silent.
+        events = event_log.get_events(event_type=EventType.EXTRACTION_FAILED)
+        assert len(events) == 1
+        payload = events[0].payload
+        assert payload["extractor_id"] == "EnrichmentService"
+        assert payload["extractor_tier"] == "llm"
+        assert payload["failure_kind"] == "model_error"
+        assert payload["source_hint"] == "enrichment"
+        assert payload["error_class"] == "RuntimeError"
+        assert "LLM unreachable" in payload["error_excerpt"]
+        # Source-excerpt hash present so the analyzer can cluster.
+        assert payload["source_excerpt_hash"] is not None
+
+    async def test_parse_no_json_emits_extraction_failed(
+        self, event_log: SQLiteEventLog
+    ) -> None:
+        """``_parse_response`` "no JSON found" branch emits."""
+        # LLM returns plain text — no ``{`` anywhere => "No JSON found" branch.
+        llm = _make_llm("not json at all just prose")
+        service = EnrichmentService(llm=llm, event_log=event_log)
+        result = await service.enrich(content="x")
+
+        assert result.success is False
+        assert "No JSON found" in result.error
+
+        events = event_log.get_events(event_type=EventType.EXTRACTION_FAILED)
+        assert len(events) == 1
+        payload = events[0].payload
+        assert payload["extractor_id"] == "EnrichmentService"
+        assert payload["failure_kind"] == "parse_error"
+        assert payload["error_class"] == "JSONDecodeError"
+
+    async def test_parse_brace_substring_invalid_emits_extraction_failed(
+        self, event_log: SQLiteEventLog
+    ) -> None:
+        """``_parse_response`` inner ``json.loads`` failure path emits.
+
+        A response containing ``{ ... }`` matches the regex but is still
+        malformed JSON — this hits the inner ``except json.JSONDecodeError``
+        on line ~259 (the sibling case the C1.5 audit called out).
+        """
+        # Outer json.loads fails; the {...} regex matches the broken brace
+        # block; inner json.loads also fails => second emit site.
+        llm = _make_llm("preface {tags: bad, no_quotes: true} suffix")
+        service = EnrichmentService(llm=llm, event_log=event_log)
+        result = await service.enrich(content="x")
+
+        assert result.success is False
+        assert "Invalid JSON" in result.error
+
+        events = event_log.get_events(event_type=EventType.EXTRACTION_FAILED)
+        assert len(events) == 1
+        payload = events[0].payload
+        assert payload["extractor_id"] == "EnrichmentService"
+        assert payload["failure_kind"] == "parse_error"
+        assert payload["error_class"] == "JSONDecodeError"
+
+    async def test_no_event_log_is_a_noop(self) -> None:
+        """Without ``event_log`` wired, behavior is unchanged.
+
+        Existing callers that don't pass an event_log must still get the
+        same ``EnrichmentResult(success=False, ...)`` contract — the
+        emit helper is a no-op in that case.
+        """
+
+        class BrokenLLM:
+            async def generate(
+                self,
+                *,
+                messages: list[Message],
+                temperature: float = 0.3,
+                max_tokens: int = 500,
+                model: str | None = None,
+            ) -> LLMResponse:
+                msg = "boom"
+                raise RuntimeError(msg)
+
+        service = EnrichmentService(llm=BrokenLLM())  # no event_log
+        result = await service.enrich(content="x")
+        assert result.success is False
+        assert "boom" in result.error
