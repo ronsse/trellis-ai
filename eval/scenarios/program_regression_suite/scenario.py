@@ -329,6 +329,27 @@ def _assert_delta_threshold(
     )
 
 
+def _assert_axis_a(
+    rounds: list[_RoundResult], *, profile: CorpusProfile
+) -> _AxisAssertionResult:
+    """Axis A pack-quality lift ≥ profile-specific threshold over the run.
+
+    Thin wrapper around :func:`_assert_delta_threshold` that builds the
+    multi-axis stats from the per-round results, looks up the
+    profile-specific threshold, and delegates. Exposed as a stable
+    function so unit tests can pin Phase 5B's profile-split behaviour
+    without re-deriving the stats themselves.
+    """
+    threshold = THRESHOLD_A_DELTA_BY_PROFILE[profile]
+    stats = _build_multi_axis_stats([r.to_nine_axis() for r in rounds])
+    return _assert_delta_threshold(
+        stats.axes["A_pack_quality"],
+        "A_pack_quality",
+        threshold,
+        profile=profile,
+    )
+
+
 def _assert_last_quarter_threshold(
     track: _AxisTrack, label: str, threshold: float
 ) -> _AxisAssertionResult:
