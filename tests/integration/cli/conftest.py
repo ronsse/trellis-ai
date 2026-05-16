@@ -62,6 +62,12 @@ def cli_env(tmp_path: Path) -> dict[str, str]:
             # silently steer the CLI off SQLite.
             "TRELLIS_KNOWLEDGE_PG_DSN": "",
             "TRELLIS_OPERATIONAL_PG_DSN": "",
+            # Why: PR #101 made the CLI default to WARNING for UX, which
+            # silently filters INFO-level events from any test asserting on
+            # stderr-routed structlog output. Override per fixture so tests
+            # see the routing contract (stderr vs stdout) at INFO+ level.
+            # Individual tests can override this further if needed.
+            "TRELLIS_LOG_LEVEL": "INFO",
         }
     )
     return env

@@ -116,6 +116,14 @@ def _query_results(
     graph_store = knowledge.graph_store
     vector_store = knowledge.vector_store
 
+    # Why: this scenario seeds nodes with node_type="entity" via GeneratedGraph
+    # and validates that the type-index returns the same set across backends.
+    # If a future scenario shares this registry while seeding under a different
+    # node_type (e.g., program_convergence uses "eval_seed_entity"), this query
+    # will silently exclude those nodes. Cross-scenario contamination isn't
+    # possible today (each scenario uses an isolated tmp_path registry), but if
+    # registry-sharing is ever introduced, parameterise node_type from the
+    # graph's seed metadata.
     type_query_ids = {
         row["node_id"] for row in graph_store.query(node_type="entity", limit=10_000)
     }

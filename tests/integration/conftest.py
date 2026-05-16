@@ -18,11 +18,16 @@ from typing import Any
 
 import pytest
 
-pytest.importorskip("neo4j")
-
 URI = os.environ.get("TRELLIS_TEST_NEO4J_URI", "")
 USER = os.environ.get("TRELLIS_TEST_NEO4J_USER", "neo4j")
 PASSWORD = os.environ.get("TRELLIS_TEST_NEO4J_PASSWORD", "")
+
+# Why: only require the neo4j package when an instance URI is configured. The
+# session-level skipif on `not URI` below covers the "no URI" case; gating the
+# importorskip behind URI lets sibling integration tests (e.g. cli/) collect
+# cleanly on machines without the neo4j driver installed.
+if URI:
+    pytest.importorskip("neo4j")
 # AuraDB Free hosts user data under the instance ID, not under the
 # canonical "neo4j" name. Match the unit-suite default.
 DATABASE = os.environ.get("TRELLIS_TEST_NEO4J_DATABASE", "neo4j")
