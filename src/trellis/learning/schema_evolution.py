@@ -470,13 +470,29 @@ def _index_mutation_extractors(
     return out
 
 
+# Top-level keys reserved for ``ContentTags`` content. If any of these
+# appear as a top-level attribute on a node row (instead of nested under
+# ``properties``), the analyzer treats it as a shape-contract violation
+# and raises — silent empty domains would let axis G stay at 0 with no
+# diagnostic. See ``_summarize_tags`` for the contract.
+_RESERVED_TAG_KEYS_AT_TOP_LEVEL: tuple[str, ...] = ("content_tags", "tags")
+
+
 def _extract_content_tags(node: dict[str, Any]) -> dict[str, Any] | None:
     """Pull a ``ContentTags`` dict out of a node record if present.
 
     Convention across the codebase: tags live under
     ``properties["content_tags"]`` (or ``properties["tags"]`` for older
-    rows). Neither shape is enforced at the store layer, so we accept
-    either and return ``None`` when neither key exists.
+    rows). The store ABC pins this shape (see
+    :class:`trellis.stores.base.graph.GraphStore`) so every backend
+    surfaces tags through the same path.
+
+    Returns ``None`` when ``properties`` exists but carries no tag dict
+    (a legitimate "this node was never classified" case — typically
+    structural nodes). The shape-violation path (top-level
+    ``content_tags`` instead of nested) raises in
+    :func:`_summarize_tags` rather than silently returning ``None`` here,
+    so the diagnostic is one frame closer to the caller.
     """
     props = node.get("properties") or {}
     if not isinstance(props, dict):
@@ -491,17 +507,54 @@ def _extract_content_tags(node: dict[str, Any]) -> dict[str, Any] | None:
 def _summarize_tags(
     nodes_or_edges: Iterable[dict[str, Any]],
 ) -> tuple[tuple[str, ...], str]:
-    """Return (distinct_domains, avg_signal_quality) across items.
+    """Return ``(distinct_domains, avg_signal_quality)`` across items.
+
+    **Shape contract.** Every item MUST expose its ``ContentTags`` as a
+    dict at ``item["properties"]["content_tags"]`` (or ``["tags"]`` for
+    legacy rows). Top-level columns are reserved for graph-invariant
+    metadata (``node_type``, ``valid_from``, ``created_at``, ...) — see
+    :class:`trellis.stores.base.graph.GraphStore` for the ABC-level
+    pin. Backends that put ``content_tags`` outside ``properties`` would
+    leave the analyzer with empty domains and no diagnostic, so this
+    function raises :class:`TypeError` on detected violations: a
+    top-level ``content_tags`` / ``tags`` key on a node row is the
+    canonical footgun (Phase 5A finding). Genuinely untagged nodes
+    (``properties`` present, no tag key) are tolerated silently because
+    structural nodes legitimately ship without classification.
 
     The "avg" is the *minimum* signal quality observed — a single
     noisy item drags the bucket down to its level. This is conservative
     by design: promotion criteria want to surface types that are
     *reliably* useful, not types where the median item happens to be
     high-signal but the tail is full of noise.
+
+    Raises:
+        TypeError: when an item carries a top-level ``content_tags`` or
+            ``tags`` key. That's a backend-shape violation, not a data
+            problem the analyzer can paper over — surface it loud per
+            the POC directive (no silent fallbacks).
     """
     domains: set[str] = set()
     qualities: list[str] = []
     for item in nodes_or_edges:
+        # Loud on shape mismatch: a top-level ``content_tags`` /
+        # ``tags`` attribute means some backend bypassed the
+        # ``properties`` bag. Returning empty domains here would mask
+        # the misconfiguration; raise instead so callers see the cause.
+        for reserved in _RESERVED_TAG_KEYS_AT_TOP_LEVEL:
+            if reserved in item:
+                node_id = item.get("node_id") or item.get("edge_id") or "<unknown>"
+                msg = (
+                    f"_summarize_tags: item {node_id!r} carries top-level "
+                    f"{reserved!r} key — ContentTags must live under "
+                    f"item['properties']['content_tags'] per the GraphStore "
+                    f"ABC. A backend that promotes tags to a top-level "
+                    f"column would silently return zero domains here and "
+                    f"axis G of the well-known analyzer would stay at 0 "
+                    f"with no diagnostic. Fix the backend's read path to "
+                    f"return tags nested under 'properties'."
+                )
+                raise TypeError(msg)
         tags = _extract_content_tags(item)
         if tags is None:
             continue
@@ -527,6 +580,15 @@ def _summarize_tags(
 
 def _first_last_seen(items: Iterable[dict[str, Any]]) -> tuple[datetime, datetime]:
     """Return the earliest and latest ``valid_from`` across items.
+
+    **Shape contract.** Reads ``item["valid_from"]`` (and ``created_at``
+    as legacy fallback) as top-level keys on the node / edge row. This
+    is the inverse of the ``content_tags`` contract pinned in
+    :func:`_summarize_tags`: SCD-2 temporal columns live at the top
+    level of the row dict, while retrieval-shaping tags live nested
+    inside ``properties``. The GraphStore ABC fixes both shapes — see
+    :meth:`trellis.stores.base.graph.GraphStore.get_node` for the
+    return-dict schema.
 
     ``valid_from`` is populated by every backend's SCD-2 write path.
     Falls back to ``created_at`` for items that pre-date the SCD

@@ -19,6 +19,7 @@ from trellis.learning.schema_evolution import (
     WellKnownCandidate,
     _compute_candidate_id,
     _detect_naming_collision,
+    _summarize_tags,
     analyze_well_known_candidates,
     suggest_canonical_name,
 )
@@ -758,3 +759,133 @@ def test_candidate_to_event_payload_round_trip() -> None:
     }
     assert set(payload.keys()) == expected_keys
     assert payload["candidate_id"] == "wkc_ent_abcdef0123456789"
+
+
+# ---------------------------------------------------------------------------
+# Shape-contract regression — content_tags at top level (Phase 5A footgun)
+# ---------------------------------------------------------------------------
+#
+# The well-known analyzer reads ContentTags via
+# ``node["properties"]["content_tags"]`` (per the GraphStore ABC
+# row-shape contract). If a backend hypothetically promoted
+# ``content_tags`` to a top-level column on the row dict, the analyzer
+# would silently see zero domains and the candidate would be filtered
+# out by the distinct_domains threshold — axis G of the well-known
+# promotion analyzer stays at 0 with no diagnostic. Phase 5A flagged
+# this footgun; the POC directive says no silent fallbacks, so
+# ``_summarize_tags`` raises TypeError when it detects the wrong shape.
+
+
+def test_summarize_tags_raises_on_top_level_content_tags() -> None:
+    """Loud on shape mismatch — a top-level ``content_tags`` key is
+    a backend-shape violation, not a "no tags" case.
+
+    The analyzer's expected shape is
+    ``node["properties"]["content_tags"]``. A row that puts the dict
+    at the top level instead would silently produce zero domains.
+    Per the POC directive (no silent fallbacks), surface the violation
+    by raising rather than papering over it.
+    """
+    bad_node: dict[str, object] = {
+        "node_id": "metric_42",
+        "node_type": "metric",
+        # WRONG: content_tags promoted to a top-level column instead of
+        # nested under properties. This is the Phase 5A footgun.
+        "content_tags": {
+            "domain": ["analytics"],
+            "signal_quality": "standard",
+        },
+        "properties": {},
+    }
+    with pytest.raises(TypeError, match="top-level 'content_tags'"):
+        _summarize_tags([bad_node])
+
+
+def test_summarize_tags_raises_on_top_level_tags_legacy_alias() -> None:
+    """The legacy ``tags`` alias is equally reserved at the top level.
+
+    Both ``content_tags`` and ``tags`` are valid nested-under-properties
+    keys (``tags`` is the pre-rename alias). Either one at the top
+    level is a shape violation — raise on both.
+    """
+    bad_node: dict[str, object] = {
+        "node_id": "metric_99",
+        "node_type": "metric",
+        "tags": {"domain": ["finance"], "signal_quality": "high"},
+        "properties": {},
+    }
+    with pytest.raises(TypeError, match="top-level 'tags'"):
+        _summarize_tags([bad_node])
+
+
+def test_summarize_tags_tolerates_missing_content_tags() -> None:
+    """Genuinely untagged nodes don't raise — structural nodes
+    legitimately ship without a ``ContentTags`` dict.
+
+    The contract is "tags MUST live under properties when present", not
+    "tags MUST always be present". Missing tags fall back to the
+    "no classification signal" path (avg_signal_quality = "standard",
+    no domains).
+    """
+    untagged: dict[str, object] = {
+        "node_id": "scaffold_1",
+        "node_type": "scaffold",
+        "properties": {},
+    }
+    domains, avg = _summarize_tags([untagged])
+    assert domains == ()
+    # ADR §2.1: absence of tags defaults to "standard" (the threshold
+    # floor) so it neither helps nor blocks promotion on its own.
+    assert avg == "standard"
+
+
+def test_analyze_raises_when_backend_promotes_content_tags_to_top_level(
+    graph_store: SQLiteGraphStore,
+    event_log: SQLiteEventLog,
+    param_store: SQLiteParameterStore,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """End-to-end regression: a hypothetical backend that returns
+    ``content_tags`` as a top-level column makes the analyzer raise.
+
+    Trips every other gate so the only thing left to test is the
+    shape-mismatch detection in ``_summarize_tags``. We monkeypatch
+    the store's ``query`` method to swap ``content_tags`` from
+    ``properties`` to the top level — simulating a backend that
+    deviated from the row-dict shape contract.
+    """
+    registry = _seed_registry(
+        param_store, overrides={"well_known_count_threshold": 20}
+    )
+    _insert_meeting_thresholds(graph_store, event_log, count=30)
+
+    real_query = graph_store.query
+
+    def _shape_violating_query(
+        node_type: str | None = None,
+        properties: dict[str, object] | None = None,
+        limit: int = 50,
+        as_of: datetime | None = None,
+    ) -> list[dict[str, object]]:
+        rows = real_query(
+            node_type=node_type,
+            properties=properties,
+            limit=limit,
+            as_of=as_of,
+        )
+        # Promote content_tags out of `properties` and onto the top
+        # level — the exact footgun the contract pin guards against.
+        for row in rows:
+            props = row.get("properties") or {}
+            if isinstance(props, dict) and "content_tags" in props:
+                row["content_tags"] = props.pop("content_tags")
+        return rows
+
+    monkeypatch.setattr(graph_store, "query", _shape_violating_query)
+
+    with pytest.raises(TypeError, match="top-level 'content_tags'"):
+        analyze_well_known_candidates(
+            graph_store=graph_store,
+            event_log=event_log,
+            registry=registry,
+        )
