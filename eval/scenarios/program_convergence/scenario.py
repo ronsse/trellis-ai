@@ -888,7 +888,10 @@ def run(
     )
 
     findings: list[Finding] = []
-    metrics: dict[str, float] = {
+    # Widened to ``float | str`` because this scenario sets a string
+    # ``chart_path`` metric on the resulting report when
+    # ``render_chart=True``; every other key stays float.
+    metrics: dict[str, float | str] = {
         "rounds": float(rounds),
         "feedback_batch_size": float(feedback_batch_size),
         "domain_count": float(len(DOMAIN_TEMPLATES)),
@@ -969,11 +972,9 @@ def run(
     findings.append(_composite_convergence_finding(stats))
 
     resolved_invocation_id = invocation_id or run_id
-    chart_path = (
-        _render_chart(stats, invocation_id=resolved_invocation_id)
-        if render_chart
-        else None
-    )
+    if render_chart:
+        chart_path = _render_chart(stats, invocation_id=resolved_invocation_id)
+        metrics["chart_path"] = str(chart_path)
 
     decision = (
         "Master program_convergence scenario ran nine axes end-to-end on "
@@ -989,7 +990,7 @@ def run(
     # ProgramConvergenceError propagates up to the runner as "fail".
     status: ScenarioStatus = "pass"
 
-    report = ScenarioReport(
+    return ScenarioReport(
         name=SCENARIO_NAME,
         status=status,
         metrics=metrics,
@@ -997,9 +998,6 @@ def run(
         decision=decision,
         convergence_stats=stats,
     )
-    if chart_path is not None:
-        report.metrics["chart_path"] = str(chart_path)
-    return report
 
 
 # ---------------------------------------------------------------------------

@@ -28,7 +28,7 @@ import json
 import pkgutil
 import sys
 import traceback
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -86,7 +86,12 @@ class ScenarioReport:
         (e.g. ``chart_path`` on the ``program_convergence`` master
         scenario when ``render_chart=True``). Reports treat
         non-numeric metrics as opaque values — no arithmetic is
-        applied to them.
+        applied to them. Typed as :class:`Mapping` (covariant in the
+        value type) so existing scenarios that declare their local
+        ``metrics`` dict as ``dict[str, float]`` remain assignable —
+        ``dict`` is invariant, so a ``dict[str, float | str]`` field
+        annotation would force every scenario to widen its local
+        annotation.
     findings:
         Human-readable observations, severity-tagged.
     decision:
@@ -107,7 +112,7 @@ class ScenarioReport:
 
     name: str
     status: ScenarioStatus
-    metrics: dict[str, float | str] = field(default_factory=dict)
+    metrics: Mapping[str, float | str] = field(default_factory=dict)
     findings: list[Finding] = field(default_factory=list)
     decision: str = ""
     duration_seconds: float = 0.0
