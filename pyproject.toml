@@ -58,6 +58,7 @@ dev = [
     "mypy==2.0.0",           # pinned: matches .pre-commit-config.yaml
     "types-PyYAML>=6.0",
     "pre-commit>=4.0",
+    "matplotlib>=3.8",       # eval/reports/program_convergence_chart.py — 9-axis PNG renderer
 ]
 cloud = [
     "psycopg[binary]>=3.1",
