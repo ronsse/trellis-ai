@@ -131,8 +131,7 @@ def _quarter_means(values: list[float]) -> tuple[float, float]:
 def _convergence_stats(rounds: Sequence[_RoundOutcome]) -> _ConvergenceStats:
     weighted = [r.weighted_score for r in rounds]
     useful = [
-        (r.items_referenced / r.items_served) if r.items_served else 0.0
-        for r in rounds
+        (r.items_referenced / r.items_served) if r.items_served else 0.0 for r in rounds
     ]
     w_first, w_last = _quarter_means(weighted)
     u_first, u_last = _quarter_means(useful)
@@ -155,12 +154,8 @@ def _convergence_metrics(c: _ConvergenceStats) -> dict[str, float]:
             c.weighted_last_quarter_mean, 4
         ),
         "convergence.weighted_delta": round(c.weighted_delta, 4),
-        "convergence.useful_first_quarter_mean": round(
-            c.useful_first_quarter_mean, 4
-        ),
-        "convergence.useful_last_quarter_mean": round(
-            c.useful_last_quarter_mean, 4
-        ),
+        "convergence.useful_first_quarter_mean": round(c.useful_first_quarter_mean, 4),
+        "convergence.useful_last_quarter_mean": round(c.useful_last_quarter_mean, 4),
         "convergence.useful_delta": round(c.useful_delta, 4),
     }
 
@@ -349,3 +344,174 @@ def _validate_basic_kwargs(*, rounds: int, feedback_batch_size: int) -> None:
     if feedback_batch_size <= 0:
         msg = "feedback_batch_size must be positive"
         raise ValueError(msg)
+
+
+# ---------------------------------------------------------------------------
+# Multi-axis tracking — used by the program_convergence master scenario
+# (plan-program-level-eval.md §4.1).
+#
+# These dataclasses **compose** the single-axis helpers above; they do not
+# replace them. ``_AxisTrack`` accumulates per-round scalars for one axis;
+# ``_NineAxisRound`` captures the nine axis values plus the
+# :class:`_RoundOutcome` shape so :func:`_convergence_stats` continues to
+# work unchanged. Existing convergence scenarios keep using their own
+# scenario-local ``_RoundResult`` dataclasses — only the master uses these.
+# ---------------------------------------------------------------------------
+
+#: Canonical axis labels from the plan §2.1 table. Order is the chart
+#: legend order — keep this tuple stable so axis indices remain
+#: backward-compatible across runs.
+NINE_AXIS_LABELS: tuple[str, ...] = (
+    "A_pack_quality",
+    "B_useful_item_fraction",
+    "C_advisory_hit_rate",
+    "D_observation_enrichment",
+    "E_provenance_queryability",
+    "F_extraction_failure_clusters",
+    "G_schema_evolution_candidates",
+    "H_meta_trace_density",
+    "I_self_authored_proposals",
+)
+
+
+@dataclass(frozen=True)
+class _AxisRecord:
+    """A single axis value at one round.
+
+    Frozen so accumulator code accidentally appending the same record
+    twice cannot silently mutate prior history.
+    """
+
+    axis: str
+    round_index: int
+    value: float
+
+
+@dataclass
+class _AxisTrack:
+    """Accumulator for one axis across rounds.
+
+    Provides the same first-vs-last-quarter math :func:`_quarter_means`
+    runs for the single-axis convergence stats, so the master scenario
+    surfaces nine deltas with identical semantics to the legacy curve.
+    """
+
+    axis: str
+    records: list[_AxisRecord] = field(default_factory=list)
+
+    def record(self, round_index: int, value: float) -> None:
+        self.records.append(
+            _AxisRecord(axis=self.axis, round_index=round_index, value=value)
+        )
+
+    def values(self) -> list[float]:
+        return [r.value for r in self.records]
+
+    def first_quarter_mean(self) -> float:
+        return _quarter_means(self.values())[0]
+
+    def last_quarter_mean(self) -> float:
+        return _quarter_means(self.values())[1]
+
+    def delta(self) -> float:
+        first, last = _quarter_means(self.values())
+        return last - first
+
+
+@dataclass
+class _NineAxisRound:
+    """Per-round snapshot of every axis the master scenario tracks.
+
+    Implements the :class:`_RoundOutcome` Protocol so
+    :func:`_convergence_stats` can consume a list of these unchanged.
+    The Protocol fields (``weighted_score`` / ``items_served`` /
+    ``items_referenced`` / ``coverage_fraction`` / ``success``) map
+    onto the dual-loop story: weighted_score is axis A, the
+    items_referenced / items_served ratio is axis B. The remaining
+    seven axes are additive — they extend the picture but never
+    overwrite the legacy A+B curve.
+    """
+
+    round_index: int
+    weighted_score: float
+    items_served: int
+    items_referenced: int
+    coverage_fraction: float
+    success: bool
+    axis_pack_quality: float
+    axis_useful_item_fraction: float
+    axis_advisory_hit_rate: float
+    axis_observation_enrichment: float
+    axis_provenance_queryability: float
+    axis_extraction_failure_clusters: float
+    axis_schema_evolution_candidates: float
+    axis_meta_trace_density: float
+    axis_self_authored_proposals: float
+
+
+@dataclass
+class _MultiAxisStats:
+    """Composite — single-axis convergence stats + nine per-axis tracks.
+
+    The single-axis stats keep working for the dual-loop A+B story
+    (existing chart). The nine ``_AxisTrack`` instances carry the new
+    program-level signal. Consumers reading both never duplicate work —
+    axis A is the same number on both sides; we just expose it twice
+    so the chart renderer can emit nine lines side-by-side without
+    juggling two stats containers.
+    """
+
+    convergence: _ConvergenceStats
+    axes: dict[str, _AxisTrack] = field(default_factory=dict)
+
+    def ensure_axis(self, axis_label: str) -> _AxisTrack:
+        track = self.axes.get(axis_label)
+        if track is None:
+            track = _AxisTrack(axis=axis_label)
+            self.axes[axis_label] = track
+        return track
+
+
+def _build_multi_axis_stats(rounds: Sequence[_NineAxisRound]) -> _MultiAxisStats:
+    """Compose nine per-axis tracks plus the legacy single-axis stats.
+
+    ``rounds`` is consumed once: the legacy ``_convergence_stats`` reads
+    the :class:`_RoundOutcome` shape, while each axis track is fed from
+    the matching ``axis_*`` field. The two views never disagree because
+    they read from the same per-round snapshot.
+    """
+    stats = _MultiAxisStats(convergence=_convergence_stats(rounds))
+    field_by_label = {
+        "A_pack_quality": "axis_pack_quality",
+        "B_useful_item_fraction": "axis_useful_item_fraction",
+        "C_advisory_hit_rate": "axis_advisory_hit_rate",
+        "D_observation_enrichment": "axis_observation_enrichment",
+        "E_provenance_queryability": "axis_provenance_queryability",
+        "F_extraction_failure_clusters": "axis_extraction_failure_clusters",
+        "G_schema_evolution_candidates": "axis_schema_evolution_candidates",
+        "H_meta_trace_density": "axis_meta_trace_density",
+        "I_self_authored_proposals": "axis_self_authored_proposals",
+    }
+    for label in NINE_AXIS_LABELS:
+        track = stats.ensure_axis(label)
+        attr = field_by_label[label]
+        for r in rounds:
+            track.record(r.round_index, float(getattr(r, attr)))
+    return stats
+
+
+def _multi_axis_metrics(stats: _MultiAxisStats) -> dict[str, float]:
+    """Flatten the nine axis deltas into the metric dict shape.
+
+    Keys follow the ``axis.<label>.<aggregate>`` pattern so downstream
+    consumers can pivot to a per-axis row with a string-split. The
+    legacy ``convergence.*`` metrics are emitted separately via
+    :func:`_convergence_metrics` — both live in the same report.
+    """
+    out: dict[str, float] = {}
+    for label in NINE_AXIS_LABELS:
+        track = stats.axes[label]
+        out[f"axis.{label}.first_quarter_mean"] = round(track.first_quarter_mean(), 4)
+        out[f"axis.{label}.last_quarter_mean"] = round(track.last_quarter_mean(), 4)
+        out[f"axis.{label}.delta"] = round(track.delta(), 4)
+    return out
