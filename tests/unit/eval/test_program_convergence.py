@@ -188,3 +188,72 @@ def test_axis_record_is_frozen() -> None:
     record = _AxisRecord(axis="x", round_index=0, value=1.0)
     with pytest.raises((AttributeError, Exception)):  # FrozenInstanceError
         record.value = 2.0  # type: ignore[misc]
+
+
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+
+
+def test_run_with_render_chart_writes_png_and_sets_metric(
+    sqlite_registry: StoreRegistry,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``render_chart=True`` produces a PNG, surfaces it on the report.
+
+    The helper writes to ``Path("eval/reports")`` (CWD-relative), so we
+    ``chdir`` to ``tmp_path`` for the duration of the run and assert the
+    PNG lands under ``tmp_path/eval/reports/``. Also confirms the
+    in-memory ``_MultiAxisStats`` is attached to
+    ``ScenarioReport.convergence_stats`` and excluded from
+    ``to_dict()``.
+    """
+    monkeypatch.chdir(tmp_path)
+
+    report = run(
+        sqlite_registry,
+        seed=0,
+        rounds=4,
+        feedback_batch_size=4,
+        analyzer_cadence=4,
+        traces_per_domain=2,
+        render_chart=True,
+    )
+
+    assert report.status == "pass"
+    chart_path_str = report.metrics.get("chart_path")
+    assert isinstance(chart_path_str, str), (
+        f"render_chart=True must surface a string chart_path metric; "
+        f"got {chart_path_str!r}"
+    )
+    chart_path = Path(chart_path_str)
+    # _render_chart writes to ``Path("eval/reports")`` (CWD-relative).
+    assert chart_path == Path("eval/reports") / chart_path.name
+    written = tmp_path / chart_path
+    assert written.exists(), f"expected PNG at {written}, found nothing"
+    assert written.read_bytes().startswith(_PNG_SIGNATURE)
+
+    # convergence_stats is the in-memory _MultiAxisStats payload, set
+    # whether or not the chart was rendered. ``to_dict()`` strips it
+    # so the JSON report stays slim.
+    assert report.convergence_stats is not None
+    assert hasattr(report.convergence_stats, "axes")
+    assert "convergence_stats" not in report.to_dict()
+
+
+def test_run_without_render_chart_omits_chart_path(
+    sqlite_registry: StoreRegistry,
+) -> None:
+    """Default ``render_chart=False`` must not touch metrics['chart_path']."""
+    report = run(
+        sqlite_registry,
+        seed=0,
+        rounds=4,
+        feedback_batch_size=4,
+        analyzer_cadence=4,
+        traces_per_domain=2,
+    )
+
+    assert "chart_path" not in report.metrics
+    # convergence_stats is still set — post-hoc rendering is supported
+    # even when the run didn't auto-render.
+    assert report.convergence_stats is not None

@@ -117,7 +117,10 @@ DEFAULT_ENTITIES_PER_TRACE = 3
 
 # Master-scenario specific knobs.
 DEFAULT_ANALYZER_CADENCE = 5  # rounds between Item-5 / Item-6 / Item-7 passes
-DEFAULT_OBSERVATION_BATCH = 2  # observations seeded per round per seed entity
+# Why: synthetic profile — Phase 2's regression suite asserts >=10 observations
+# per seed by round 25 (~22 seeds * 10 / 25 ~= 8.8/round); real corpora seed
+# observations from query logs at a lower rate.
+DEFAULT_OBSERVATION_BATCH = 10  # observations seeded per round per seed entity
 DEFAULT_FAILURE_BATCH = 3  # synthetic EXTRACTION_FAILED events per round
 DEFAULT_PROPOSAL_WINDOW_HOURS = 24
 
@@ -810,6 +813,32 @@ def _validate_run_kwargs(*, rounds: int, feedback_batch_size: int) -> None:
     _validate_basic_kwargs(rounds=rounds, feedback_batch_size=feedback_batch_size)
 
 
+def _render_chart(stats: object, *, invocation_id: str) -> Path:
+    """Render the 9-axis PNG via the eval-reports renderer.
+
+    Lazy-imported so a registry that runs the scenario without
+    ``render_chart=True`` never pulls matplotlib at import time. Any
+    error from the renderer (missing matplotlib, invalid args) is left
+    to propagate — the scenario's success/failure status does not
+    depend on whether the chart rendered.
+    """
+    from eval.reports.program_convergence_chart import (  # noqa: PLC0415
+        render_program_convergence_chart,
+    )
+
+    chart_path = render_program_convergence_chart(
+        stats,  # type: ignore[arg-type]
+        output_dir=Path("eval/reports"),
+        invocation_id=invocation_id,
+    )
+    logger.info(
+        "program_convergence_chart_written",
+        chart_path=str(chart_path),
+        invocation_id=invocation_id,
+    )
+    return chart_path
+
+
 def run(
     registry: StoreRegistry,
     *,
@@ -821,12 +850,27 @@ def run(
     success_coverage_threshold: float = DEFAULT_SUCCESS_COVERAGE_THRESHOLD,
     advisory_min_sample_size: int = DEFAULT_ADVISORY_MIN_SAMPLE_SIZE,
     analyzer_cadence: int = DEFAULT_ANALYZER_CADENCE,
+    render_chart: bool = False,
+    invocation_id: str | None = None,
 ) -> ScenarioReport:
     """Execute the program-level master scenario.
 
     See the module docstring for the axis table and POC directives.
     The runner-supplied ``registry`` is used as-is; tests pass a fresh
     in-memory SQLite registry.
+
+    When ``render_chart=True`` the in-memory ``_MultiAxisStats`` payload
+    is passed to ``render_program_convergence_chart`` from
+    ``eval.reports.program_convergence_chart`` and the resulting PNG
+    path is logged at info level and surfaced in
+    ``ScenarioReport.metrics['chart_path']``. The rendered ``stats`` is
+    also attached to ``ScenarioReport.convergence_stats`` so a post-hoc
+    caller can re-render without re-running the loop.
+
+    ``invocation_id`` defaults to ``program_convergence_{seed:04d}`` —
+    the same identifier used as the per-run ``run_id`` for feedback
+    file partitioning. Operators driving the scenario from a parent
+    harness may override to align with their own ID space.
     """
     _validate_run_kwargs(rounds=rounds, feedback_batch_size=feedback_batch_size)
 
@@ -844,7 +888,10 @@ def run(
     )
 
     findings: list[Finding] = []
-    metrics: dict[str, float] = {
+    # Widened to ``float | str`` because this scenario sets a string
+    # ``chart_path`` metric on the resulting report when
+    # ``render_chart=True``; every other key stays float.
+    metrics: dict[str, float | str] = {
         "rounds": float(rounds),
         "feedback_batch_size": float(feedback_batch_size),
         "domain_count": float(len(DOMAIN_TEMPLATES)),
@@ -924,6 +971,11 @@ def run(
     findings.extend(_per_axis_findings(stats))
     findings.append(_composite_convergence_finding(stats))
 
+    resolved_invocation_id = invocation_id or run_id
+    if render_chart:
+        chart_path = _render_chart(stats, invocation_id=resolved_invocation_id)
+        metrics["chart_path"] = str(chart_path)
+
     decision = (
         "Master program_convergence scenario ran nine axes end-to-end on "
         f"{rounds} synthetic rounds. Inspect per-axis deltas in the "
@@ -944,6 +996,7 @@ def run(
         metrics=metrics,
         findings=findings,
         decision=decision,
+        convergence_stats=stats,
     )
 
 
@@ -1012,12 +1065,14 @@ def _seed_well_known_parameters(param_store: SQLiteParameterStore) -> None:
 
     Forces ``well_known_window_days=0`` so synthetic same-instant data
     isn't gated by the evidence-span filter (matches the satellite
-    scenario's seed). Forces ``well_known_count_threshold=10`` so the
+    scenario's seed). Forces ``well_known_count_threshold=3`` so the
     cap fires on the small synthetic graph this scenario produces.
     """
     values: dict[str, float | int | str | bool] = dict(RECOMMENDED_SEED_VALUES)
     values["well_known_window_days"] = 0
-    values["well_known_count_threshold"] = 10
+    # Why: synthetic profile — the master scenario produces a small graph;
+    # real corpora keep the production threshold of 10.
+    values["well_known_count_threshold"] = 3
     param_store.put(
         ParameterSet(
             scope=ParameterScope(component_id=PARAM_COMPONENT_ID),

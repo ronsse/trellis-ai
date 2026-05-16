@@ -233,9 +233,13 @@ def _run_against_backend(
         convergence_delta_regress_threshold=-1.0,
     )
     elapsed = time.perf_counter() - start
+    # ``ScenarioReport.metrics`` is ``Mapping[str, float | str]`` — narrow
+    # to float-only here because the cross-backend diff only compares
+    # numeric metrics. ``agent_loop_convergence`` emits all-float metrics
+    # in practice, so this is a guard, not a transformation.
     return _BackendRun(
         name=handle.name,
-        metrics=dict(report.metrics),
+        metrics={k: v for k, v in report.metrics.items() if isinstance(v, float)},
         duration_seconds=elapsed,
     )
 
