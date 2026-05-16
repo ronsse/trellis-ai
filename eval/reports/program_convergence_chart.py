@@ -21,9 +21,13 @@ this function from the same Python session.
 POC directives applied:
 - No silent fallback. If ``matplotlib`` is not installed the module
   raises :class:`ImportError` at import time. No try/except wrapper.
-- The output PNG path is deterministic given
-  ``(timestamp, invocation_id)`` — re-rendering with the same inputs
-  overwrites the prior PNG, so a re-invocation is idempotent.
+- The output PNG filename is deterministic given ``timestamp`` alone
+  (``invocation_id`` appears only in the chart title, not the
+  filename) — re-rendering with the same ``timestamp`` overwrites the
+  prior PNG at the same path, so a re-invocation is idempotent. Two
+  distinct invocations rendered at the same wall-clock second will
+  collide on the same filename; pass a distinct ``timestamp`` if you
+  want both PNGs side-by-side.
 - Empty axes (a track with zero records) render as a labelled-but-blank
   subplot rather than raising; the chart's job is to surface the gap,
   not crash on it. A track with a single round renders as a single
@@ -118,9 +122,13 @@ def render_program_convergence_chart(
             paths should "just work".
         invocation_id: Run-identifier surfaced in the chart title. The
             same identifier the runner emits in ``ScenarioReport``.
+            Note: not encoded in the filename — see module docstring.
         timestamp: When the chart is being rendered. Defaults to
-            ``datetime.now(UTC)``. Exposed so tests can pin the value
-            and the re-render-overwrites property is observable.
+            ``datetime.now(UTC)``. The filename derives from this
+            value alone, so re-rendering with the same ``timestamp``
+            overwrites the prior PNG (idempotent re-invocation).
+            Exposed so tests can pin the value and the
+            re-render-overwrites property is observable.
 
     Returns:
         Absolute path to the written PNG.
