@@ -1,4 +1,4 @@
-"""Ops helpers — raw signal recording for the self-learning loop.
+"""Ops helpers — raw signal recording for the feedback loop.
 
 The ``ops`` layer is the thin wiring between tuneable components and
 the ops-tier stores (:class:`OutcomeStore`, :class:`ParameterStore`,

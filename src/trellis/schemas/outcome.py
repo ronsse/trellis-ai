@@ -1,7 +1,7 @@
-"""OutcomeEvent schema — per-call signal for the self-learning loop.
+"""OutcomeEvent schema — per-call signal for the feedback loop.
 
 OutcomeEvents are the raw, high-volume signal stream consumed by the
-self-learning loop's tuners (parameter optimization, advisory fitness,
+feedback loop's tuners (parameter optimization, advisory fitness,
 precedent promotion).  They are deliberately separate from the audit
 EventLog: the EventLog holds a curated trail of governance-visible events
 (``PARAMS_UPDATED``, ``TUNER_PROPOSAL_CREATED``, etc.) while raw call-

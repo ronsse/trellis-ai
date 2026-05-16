@@ -1,4 +1,4 @@
-"""TunerStateStore — mutable working state for the self-learning loop.
+"""TunerStateStore — mutable working state for the feedback loop.
 
 Holds tuner proposals, canary assignments, and cursors.  Distinct from
 :class:`ParameterStore` which holds immutable versioned snapshots, and
