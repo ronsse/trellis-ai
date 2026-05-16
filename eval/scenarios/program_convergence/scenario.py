@@ -115,6 +115,26 @@ SCENARIO_NAME = "program_convergence"
 DEFAULT_TRACES_PER_DOMAIN = 6
 DEFAULT_ENTITIES_PER_TRACE = 3
 
+# Why: open-string ``node_type`` the well-known analyzer treats as a
+# promotion candidate (not canonical, not aliased in
+# ``ENTITY_TYPE_ALIASES``). The PascalCase canonical-name suggestion
+# (``EvalSeedEntity``) is non-trivial, exercising the naming heuristic.
+_SEED_NODE_TYPE: str = "eval_seed_entity"
+
+# Why: well-known analyzer requires >= 2 distinct ``requested_by`` values
+# per ``entity_type`` for axis G (PARAM_DISTINCT_EXTRACTORS default
+# from ``RECOMMENDED_SEED_VALUES``). Cycle through 5 identifiers so the
+# gate clears with margin under reseed, and all five live outside
+# ``META_AGENT_PREFIX`` so the analyzer's meta-namespace filter does
+# not exclude them.
+_SYNTH_EXTRACTORS: tuple[str, ...] = (
+    "eval.synth_extractor_a",
+    "eval.synth_extractor_b",
+    "eval.synth_extractor_c",
+    "eval.synth_extractor_d",
+    "eval.synth_extractor_e",
+)
+
 # Master-scenario specific knobs.
 DEFAULT_ANALYZER_CADENCE = 5  # rounds between Item-5 / Item-6 / Item-7 passes
 # Why: synthetic profile — Phase 2's regression suite asserts >=10 observations
@@ -219,10 +239,28 @@ def _ingest_traces(registry: StoreRegistry, corpus: GeneratedCorpus) -> int:
 def _populate_entity_documents(
     registry: StoreRegistry, corpus: GeneratedCorpus
 ) -> list[str]:
-    """Seed graph + document store; return the list of seed entity ids."""
+    """Seed graph + document store; return the list of seed entity ids.
+
+    Each seed node is written with ``node_type=_SEED_NODE_TYPE`` (an
+    open-string type the well-known analyzer can promote) plus inline
+    ``content_tags`` carrying the seed's domain and a ``standard``
+    signal-quality marker — without those tags the analyzer's
+    distinct-domains and avg-signal-quality gates would skip every seed.
+
+    A synthesised :data:`EventType.MUTATION_EXECUTED` event is emitted
+    alongside each upsert with ``entity_type`` matching the node type
+    and a varied ``requested_by`` drawn from :data:`_SYNTH_EXTRACTORS`.
+    This is the pragmatic axis G fix called out in the Phase 4 deferred
+    finding — the master scenario bypasses the governed mutation
+    pipeline for performance, so we synthesise the audit event the
+    pipeline would have emitted. Mirrors the seed-events pattern
+    :func:`_seed_extraction_failures` already uses.
+    """
     knowledge = registry.knowledge
+    operational = registry.operational
     graph_store = knowledge.graph_store
     document_store = knowledge.document_store
+    event_log = operational.event_log
 
     by_entity: dict[str, list[GeneratedTrace]] = {}
     for gt in corpus.traces:
@@ -230,12 +268,43 @@ def _populate_entity_documents(
             by_entity.setdefault(entity, []).append(gt)
 
     seed_entities: list[str] = []
-    for entity, traces in by_entity.items():
+    for index, (entity, traces) in enumerate(by_entity.items()):
         domain = traces[0].domain
+        # Why: ``_summarize_tags`` reads ``properties["content_tags"]`` for
+        # distinct_domains + signal_quality. Without these on the node
+        # the analyzer's distinct-domains gate always trips at 0.
+        content_tags = {
+            "domain": [domain],
+            "signal_quality": "standard",
+        }
         graph_store.upsert_node(
             node_id=entity,
-            node_type="entity",
-            properties={"name": entity, "domain": domain},
+            node_type=_SEED_NODE_TYPE,
+            properties={
+                "name": entity,
+                "domain": domain,
+                "content_tags": content_tags,
+            },
+        )
+        # Why: synthesise the ``MUTATION_EXECUTED`` audit event the
+        # governed pipeline would have emitted. Cycle through synthetic
+        # extractor identifiers so ``_index_mutation_extractors``
+        # records >= ``PARAM_DISTINCT_EXTRACTORS`` distinct emitters
+        # for this entity_type.
+        extractor_id = _SYNTH_EXTRACTORS[index % len(_SYNTH_EXTRACTORS)]
+        event_log.emit(
+            EventType.MUTATION_EXECUTED,
+            source="eval.program_convergence",
+            entity_id=entity,
+            entity_type=_SEED_NODE_TYPE,
+            payload={
+                "command_id": f"eval-seed-{entity}",
+                "operation": "ENTITY_UPSERT",
+                "status": "success",
+                "message": "synthetic seed entity upsert",
+                "requested_by": extractor_id,
+                "idempotency_key": f"eval-seed-{entity}",
+            },
         )
         intents = sorted({t.trace.intent for t in traces})
         content = (
