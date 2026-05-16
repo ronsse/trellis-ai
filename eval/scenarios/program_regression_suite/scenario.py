@@ -49,13 +49,15 @@ from typing import Any
 
 import structlog
 
-from eval.runner import Finding, ScenarioReport, ScenarioStatus
+from eval.runner import Finding, ScenarioReport, ScenarioStatus, Severity
 from eval.scenarios._convergence_common import (
     DEFAULT_ADVISORY_MIN_SAMPLE_SIZE,
     DEFAULT_FEEDBACK_BATCH_SIZE,
     DEFAULT_SUCCESS_COVERAGE_THRESHOLD,
+    _AxisTrack,
     _build_multi_axis_stats,
     _LoopStats,
+    _MultiAxisStats,
     _run_periodic_loops,
 )
 from eval.scenarios.program_convergence.scenario import (
@@ -96,6 +98,13 @@ ROUND_I_CUTOFF = 40
 #: Plan §4.2 numeric thresholds — exposed as module-level constants so
 #: a follow-up that retunes the suite (see TODO axis C tighten) edits
 #: one spot rather than chasing magic numbers through assertions.
+#:
+#: All values are plan-§4.2 verbatim. Axis A's 0.15 / B's 0.10 are
+#: "round 50 ≥ round 5 + delta" lift targets — phrased as quarter-mean
+#: delta here per plan §4.1 + the synthetic-noise note in §8 (see
+#: TODO.md for the calibration follow-up). Axis F has no numeric
+#: constant: the plan expression "≤ round 25" is a relative-trend
+#: assertion handled inline in :func:`_assert_axis_f`.
 THRESHOLD_A_DELTA = 0.15
 THRESHOLD_B_DELTA = 0.10
 THRESHOLD_C_LAST_QUARTER = 0.6
@@ -242,24 +251,23 @@ def _drive_master(
 # ---------------------------------------------------------------------------
 
 
-def _assert_axis_a(rounds: list[_RoundResult]) -> _AxisAssertionResult:
-    """Axis A: pack quality lift ≥ ``THRESHOLD_A_DELTA`` over the run.
+def _assert_delta_threshold(
+    track: _AxisTrack, label: str, threshold: float
+) -> _AxisAssertionResult:
+    """Quarter-mean delta assertion shared by axes A and B.
 
-    Quarter-mean delta is the metric the plan §4.1 + the master scenario
-    emit for axis A; "round 50 ≥ round 5 + 0.15" maps to the same
-    last-quarter-mean minus first-quarter-mean shape. We avoid sampling
-    a single round (round 5 / round 50) because per-round pack quality
-    is noisy on synthetic corpora — the quarter-mean is the signal.
+    The plan §4.2 wording is "round 50 ≥ round 5 + delta"; we read this
+    as quarter-mean(last) minus quarter-mean(first) ≥ delta. Per-round
+    sampling on synthetic corpora is noisy; the quarter-mean smooths it
+    out. The shape difference vs. plan-literal round-N sampling is
+    documented in TODO.md (axis-A calibration follow-up).
     """
-    nine_rounds = [r.to_nine_axis() for r in rounds]
-    stats = _build_multi_axis_stats(nine_rounds)
-    track = stats.axes["A_pack_quality"]
     delta = track.delta()
     return _AxisAssertionResult(
-        label="A_pack_quality",
-        passed=delta >= THRESHOLD_A_DELTA,
+        label=label,
+        passed=delta >= threshold,
         actual=round(delta, 4),
-        expected_message=f"delta ≥ {THRESHOLD_A_DELTA}",
+        expected_message=f"delta ≥ {threshold}",
         detail={
             "first_quarter_mean": round(track.first_quarter_mean(), 4),
             "last_quarter_mean": round(track.last_quarter_mean(), 4),
@@ -268,41 +276,23 @@ def _assert_axis_a(rounds: list[_RoundResult]) -> _AxisAssertionResult:
     )
 
 
-def _assert_axis_b(rounds: list[_RoundResult]) -> _AxisAssertionResult:
-    nine_rounds = [r.to_nine_axis() for r in rounds]
-    stats = _build_multi_axis_stats(nine_rounds)
-    track = stats.axes["B_useful_item_fraction"]
-    delta = track.delta()
-    return _AxisAssertionResult(
-        label="B_useful_item_fraction",
-        passed=delta >= THRESHOLD_B_DELTA,
-        actual=round(delta, 4),
-        expected_message=f"delta ≥ {THRESHOLD_B_DELTA}",
-        detail={
-            "first_quarter_mean": round(track.first_quarter_mean(), 4),
-            "last_quarter_mean": round(track.last_quarter_mean(), 4),
-            "delta": round(delta, 4),
-        },
-    )
+def _assert_last_quarter_threshold(
+    track: _AxisTrack, label: str, threshold: float
+) -> _AxisAssertionResult:
+    """Absolute last-quarter-mean assertion shared by axes C and E.
 
-
-def _assert_axis_c(rounds: list[_RoundResult]) -> _AxisAssertionResult:
-    """Axis C: advisory hit rate at round 50 ≥ ``THRESHOLD_C_LAST_QUARTER``.
-
-    The plan defines this absolute threshold against the current
-    *proxy* axis C — a domain-coarse hit rate. When the proxy is
-    tightened (see TODO.md axis-C-tighten follow-up) this threshold
-    needs revisiting.
+    The plan expresses these as "at round 50 ≥ X" / "1.0 after Item 2";
+    both reduce to "the last-quarter mean of this axis must clear the
+    bar". For axis C the threshold is currently against the domain-coarse
+    *proxy*; tightening the proxy (see TODO.md axis-C-tighten) implies
+    re-baselining this threshold.
     """
-    nine_rounds = [r.to_nine_axis() for r in rounds]
-    stats = _build_multi_axis_stats(nine_rounds)
-    track = stats.axes["C_advisory_hit_rate"]
     last_q = track.last_quarter_mean()
     return _AxisAssertionResult(
-        label="C_advisory_hit_rate",
-        passed=last_q >= THRESHOLD_C_LAST_QUARTER,
+        label=label,
+        passed=last_q >= threshold,
         actual=round(last_q, 4),
-        expected_message=f"last_quarter_mean ≥ {THRESHOLD_C_LAST_QUARTER}",
+        expected_message=f"last_quarter_mean ≥ {threshold}",
         detail={
             "first_quarter_mean": round(track.first_quarter_mean(), 4),
             "last_quarter_mean": round(last_q, 4),
@@ -345,28 +335,6 @@ def _assert_axis_d(
             "total_observations_by_r25": round(total, 4),
             "seed_entity_count": seed_entity_count,
             "per_seed_average": round(per_seed, 4),
-        },
-    )
-
-
-def _assert_axis_e(rounds: list[_RoundResult]) -> _AxisAssertionResult:
-    """Axis E: provenance queryability holds at 1.0 in the final quarter.
-
-    The master scenario emits 1.0 every round once Item 2 lands; the
-    last-quarter mean must therefore meet ``THRESHOLD_E_LAST_QUARTER``.
-    """
-    nine_rounds = [r.to_nine_axis() for r in rounds]
-    stats = _build_multi_axis_stats(nine_rounds)
-    track = stats.axes["E_provenance_queryability"]
-    last_q = track.last_quarter_mean()
-    return _AxisAssertionResult(
-        label="E_provenance_queryability",
-        passed=last_q >= THRESHOLD_E_LAST_QUARTER,
-        actual=round(last_q, 4),
-        expected_message=f"last_quarter_mean ≥ {THRESHOLD_E_LAST_QUARTER}",
-        detail={
-            "first_quarter_mean": round(track.first_quarter_mean(), 4),
-            "last_quarter_mean": round(last_q, 4),
         },
     )
 
@@ -502,13 +470,35 @@ def _all_axis_assertions(
     *,
     seed_entity_count: int,
 ) -> list[_AxisAssertionResult]:
-    """Run every per-axis assertion in plan §4.2 order."""
+    """Run every per-axis assertion in plan §4.2 order.
+
+    Builds the nine-axis stats container exactly once, then dispatches
+    each quarter-mean / last-quarter helper against the corresponding
+    track. Axes D/F/G/H/I read per-round fields directly off
+    ``_RoundResult`` because their thresholds reference specific cutoffs
+    (round 25 / 30 / 40) the quarter-mean shape erases.
+    """
+    stats: _MultiAxisStats = _build_multi_axis_stats([r.to_nine_axis() for r in rounds])
     return [
-        _assert_axis_a(rounds),
-        _assert_axis_b(rounds),
-        _assert_axis_c(rounds),
+        _assert_delta_threshold(
+            stats.axes["A_pack_quality"], "A_pack_quality", THRESHOLD_A_DELTA
+        ),
+        _assert_delta_threshold(
+            stats.axes["B_useful_item_fraction"],
+            "B_useful_item_fraction",
+            THRESHOLD_B_DELTA,
+        ),
+        _assert_last_quarter_threshold(
+            stats.axes["C_advisory_hit_rate"],
+            "C_advisory_hit_rate",
+            THRESHOLD_C_LAST_QUARTER,
+        ),
         _assert_axis_d(rounds, seed_entity_count=seed_entity_count),
-        _assert_axis_e(rounds),
+        _assert_last_quarter_threshold(
+            stats.axes["E_provenance_queryability"],
+            "E_provenance_queryability",
+            THRESHOLD_E_LAST_QUARTER,
+        ),
         _assert_axis_f(rounds),
         _assert_axis_g(rounds),
         _assert_axis_h(rounds),
@@ -562,8 +552,12 @@ def _call_satellite(module_name: str) -> tuple[bool, dict[str, Any]]:
     # parameter_registry_passthrough shape) or a plain dict
     # (observation_retrieval + proposal_generation shape). Both are
     # valid; we surface a status field if available so the suite report
-    # carries the satellite's own pass/fail signal.
-    status: str = "pass"
+    # carries the satellite's own pass/fail signal. ``str(...)`` instead
+    # of a ScenarioStatus narrowing because the dict shape doesn't pin
+    # the value to the Literal — a satellite returning ``"error"`` (not
+    # in ScenarioStatus) still gets surfaced as a fail rather than
+    # silently coerced to pass.
+    status = "pass"
     if isinstance(result, ScenarioReport):
         status = str(result.status)
     elif isinstance(result, dict) and "status" in result:
@@ -582,24 +576,13 @@ def _satellite_findings(
 ) -> list[Finding]:
     findings: list[Finding] = []
     for passed, detail in satellite_outcomes:
-        severity: str = "info" if passed else "fail"
         module = detail.get("module", "<unknown>")
+        severity: Severity = "info" if passed else "fail"
         if passed:
-            findings.append(
-                Finding(
-                    severity=severity,  # type: ignore[arg-type]
-                    message=f"satellite {module} {detail.get('status', 'pass')}",
-                    detail=detail,
-                )
-            )
+            message = f"satellite {module} {detail.get('status', 'pass')}"
         else:
-            findings.append(
-                Finding(
-                    severity=severity,  # type: ignore[arg-type]
-                    message=f"satellite {module} FAILED at {detail.get('stage')}",
-                    detail=detail,
-                )
-            )
+            message = f"satellite {module} FAILED at {detail.get('stage')}"
+        findings.append(Finding(severity=severity, message=message, detail=detail))
     return findings
 
 
