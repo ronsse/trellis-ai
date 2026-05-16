@@ -87,7 +87,7 @@ Per-axis wiring is gated on the corresponding item landing. As each item lands, 
 
 **Regression assertions** (the lines `--strict` mode gates against):
 
-- Axis A: pack quality at round 50 ≥ axis A at round 5 + 0.15 (15-point lift).
+- Axis A: pack quality at round 50 ≥ axis A at round 5 + 0.15 (15-point lift). **Profile-dependent — see below.**
 - Axis B: useful-item fraction at round 50 ≥ axis B at round 5 + 0.10.
 - Axis C: advisory hit rate at round 50 ≥ 0.6 (absolute threshold).
 - Axis D: ≥ 10 observations per seed entity by round 25.
@@ -98,6 +98,8 @@ Per-axis wiring is gated on the corresponding item landing. As each item lands, 
 - Axis I: ≥ 1 proposal per surfaced cluster by round 40.
 
 A scenario run that violates any threshold exits 1; CI gates against this.
+
+**Corpus profile split on axis A (Phase 5B).** The 0.15 axis A target is calibrated for a **real corpus** with noisy ground truth. The deterministic synthetic corpus the master scenario generates today starts at ~0.94 pack quality and converges to ~1.0, so the observed lift ceiling is ~0.0545 — well below 0.15. The regression suite resolves this with a profile selector: `THRESHOLD_A_DELTA_BY_PROFILE = {"synthetic": 0.05, "real": 0.15}`, `DEFAULT_CORPUS_PROFILE = "synthetic"`. CI runs under `synthetic`; operators driving the suite against a real corpus pass `profile="real"`. Axis A is the only profile-dependent threshold — the other 8 are either absolute (axes C, E, G, H, I) or trend-based (axes B, D, F), so the synthetic-vs-real distinction does not affect them. An invalid profile string raises `ValueError` (no silent fallback). The `profile` kwarg is programmatic-only today; surfacing it on the CLI runner is logged as a follow-up.
 
 **Estimated size:** ~300 LOC.
 
