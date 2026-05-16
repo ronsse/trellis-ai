@@ -183,6 +183,27 @@ class GraphStore(ABC):
 
     Supports SCD Type 2 temporal versioning via ``valid_from``/``valid_to``
     columns.  Pass ``as_of`` to read methods to time-travel.
+
+    **Row-dict shape contract.** Read methods (``get_node``, ``query``,
+    ``get_edges``, ...) return dicts with a fixed set of top-level keys
+    — see :meth:`get_node` for the canonical schema. Two conventions
+    that downstream code relies on:
+
+    * **SCD-2 temporal columns** (``valid_from``, ``valid_to``,
+      ``created_at``, ``updated_at``) are **top-level** keys on the row
+      dict.  Backends MUST surface them at this position; nesting them
+      inside ``properties`` would break ``as_of`` consumers and the
+      well-known promotion analyzer.
+    * **Retrieval-shaping tags** (``content_tags`` per
+      :class:`trellis.schemas.classification.ContentTags`) belong
+      **nested under** ``properties``, i.e. reachable as
+      ``row["properties"]["content_tags"]``.  Backends MUST NOT promote
+      ``content_tags`` (or its legacy alias ``tags``) to a top-level
+      column on the row dict — :func:`trellis.learning.schema_evolution._summarize_tags`
+      raises ``TypeError`` when it detects that footgun.  The
+      rationale: an analyzer that reads tags via the wrong path would
+      silently return empty domains and the well-known promotion
+      analyzer's axis G would stay at 0 with no diagnostic.
     """
 
     @abstractmethod
