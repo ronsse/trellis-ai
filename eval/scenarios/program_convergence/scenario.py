@@ -103,6 +103,7 @@ from trellis.stores.advisory_store import AdvisoryStore
 from trellis.stores.base.event_log import EventType
 from trellis.stores.base.graph_query import EdgeQuery, FilterClause
 from trellis.stores.registry import StoreRegistry
+from trellis.stores.sqlite.parameter import SQLiteParameterStore
 
 logger = structlog.get_logger(__name__)
 
@@ -402,15 +403,14 @@ def _seed_observations(
         )
         # ``confidence`` lives on the edge's provenance column on every
         # built-in backend (Item 2). The ABC signature does not yet
-        # declare the five provenance kwargs, so we use dict-spread to
-        # avoid forcing every call site through ``# type: ignore`` —
-        # same pattern as ``trellis.meta.recorder`` and
+        # declare the five provenance kwargs, so call sites carry a
+        # type-ignore — same pattern as ``trellis.meta.recorder`` and
         # ``trellis_cli.admin_migrate_provenance``.
-        graph_store.upsert_edge(
+        graph_store.upsert_edge(  # type: ignore[call-arg]
             source_id=pick,
             target_id=obs_id,
             edge_type=wk.HAS_OBSERVATION,
-            **{"confidence": confidence},  # type: ignore[arg-type]
+            confidence=confidence,
         )
         attached += 1
     return attached
@@ -540,7 +540,7 @@ def _count_open_failure_clusters(registry: StoreRegistry) -> int:
 def _run_well_known_analyzer(
     registry: StoreRegistry,
     *,
-    param_store: object | None,
+    param_store: SQLiteParameterStore,
 ) -> int:
     """Item 5 — run the well-known analyzer once, return new candidates.
 
@@ -551,22 +551,6 @@ def _run_well_known_analyzer(
     """
     operational = registry.operational
     knowledge = registry.knowledge
-
-    # Use the SQLite parameter store path the registry exposes when
-    # available; fall back to a dedicated temp store so the scenario
-    # works against a registry that doesn't carry a parameter plane.
-    from trellis.stores.sqlite.parameter import (  # noqa: PLC0415
-        SQLiteParameterStore,
-    )
-
-    if param_store is None:
-        msg = (
-            "param_store must be provided — axis G requires a "
-            "ParameterRegistry-backed substrate. Refusing to silently "
-            "emit zero for the schema-evolution axis."
-        )
-        raise ProgramConvergenceError(msg)
-    assert isinstance(param_store, SQLiteParameterStore)
     param_registry = ParameterRegistry(param_store)
 
     before_count = len(
@@ -711,7 +695,7 @@ def _execute_round(
     corpus: GeneratedCorpus,
     builder: PackBuilder,
     advisory_store: AdvisoryStore,
-    param_store: object,
+    param_store: SQLiteParameterStore,
     seed_entities: list[str],
     round_results: list[_RoundResult],
     loop_stats: _LoopStats,
@@ -881,10 +865,6 @@ def run(
     # the analyzer requires every required key to be present, and the
     # registry's default seed leaves them unset.
     param_store_holder = tempfile.TemporaryDirectory()
-    from trellis.stores.sqlite.parameter import (  # noqa: PLC0415
-        SQLiteParameterStore,
-    )
-
     param_store = SQLiteParameterStore(Path(param_store_holder.name) / "params.db")
     _seed_well_known_parameters(param_store)
 
@@ -1027,7 +1007,7 @@ def _composite_convergence_finding(stats: object) -> Finding:
 # ---------------------------------------------------------------------------
 
 
-def _seed_well_known_parameters(param_store: object) -> None:
+def _seed_well_known_parameters(param_store: SQLiteParameterStore) -> None:
     """Persist the well-known thresholds the analyzer requires.
 
     Forces ``well_known_window_days=0`` so synthetic same-instant data
@@ -1038,7 +1018,7 @@ def _seed_well_known_parameters(param_store: object) -> None:
     values: dict[str, float | int | str | bool] = dict(RECOMMENDED_SEED_VALUES)
     values["well_known_window_days"] = 0
     values["well_known_count_threshold"] = 10
-    param_store.put(  # type: ignore[attr-defined]
+    param_store.put(
         ParameterSet(
             scope=ParameterScope(component_id=PARAM_COMPONENT_ID),
             values=values,

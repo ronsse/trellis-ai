@@ -122,6 +122,16 @@ def test_run_raises_when_event_log_missing() -> None:
         run(fake_registry, rounds=1)
 
 
+def test_run_raises_when_graph_store_missing() -> None:
+    """Strict mode — registry without a GraphStore must fail loud, not silently."""
+    fake_registry = MagicMock()
+    fake_registry.operational.event_log = MagicMock()
+    fake_registry.knowledge.graph_store = None
+
+    with pytest.raises(ProgramConvergenceError, match="GraphStore"):
+        run(fake_registry, rounds=1)
+
+
 def test_axis_track_first_last_delta() -> None:
     """``_AxisTrack`` math matches ``_quarter_means`` semantics.
 
