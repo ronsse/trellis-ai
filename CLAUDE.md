@@ -17,7 +17,7 @@ See [`docs/design/adr-terminology.md`](docs/design/adr-terminology.md) for the c
 - **Enrichment** means the LLM-backed pipeline mode and the `EnrichmentService` class — nothing else. Use *tag* / *annotate* / *label* for generic prose.
 - **Knowledge Plane** = agent-facing stores (graph, vector, document, blob). **Operational Plane** = Trellis-internal stores (trace, event log).
 - **Substrate** = the blessed default backend per plane (one per store). **Backend** = any implementation class in `_BUILTIN_BACKENDS`. They are not synonyms.
-- **Feedback loop** = the EventLog-authoritative + JSONL-file-based dual-path system (see below). **"Self-learning"** is not a project term.
+- **Feedback loop** = the EventLog-authoritative path described below. `pack_feedback.jsonl` is an on-disk audit log of the same signal, not a second promote/demote path. **"Self-learning"** is not a project term.
 
 ## Hard Rules
 
@@ -64,6 +64,8 @@ All packages depend on `trellis` (core library) and share configuration via `Sto
 
 Every write flows through `MutationExecutor` in 5 stages: validate → policy check → idempotency check → execute → emit event. Handlers and policy gates are Protocol-based (injected, not hardcoded). Batch execution supports `SEQUENTIAL`, `STOP_ON_ERROR`, and `CONTINUE_ON_ERROR` strategies.
 
+**Sanctioned exception — eval-scenario seeding.** Eval scenarios under `eval/scenarios/` may synthesize audit events directly via `event_log.emit(...)` when seeding test data (e.g., `_seed_extraction_failures`, `_populate_entity_documents`). The pipeline's per-row policy + idempotency checks are uneconomical at the volume eval scenarios produce, and the events the pipeline *would* have emitted are reproducible from the synthetic seed. This is scenario-local; **production code paths must use `MutationExecutor`**.
+
 ### Store Abstraction (`src/trellis/stores/`)
 
 Six ABCs in `stores/base/`: TraceStore, DocumentStore, GraphStore, VectorStore, EventLog, BlobStore. `StoreRegistry` uses `importlib` for late-binding dynamic module loading — config determines which backend class to instantiate at runtime.
@@ -109,16 +111,16 @@ Raw sources → `EntityDraft`/`EdgeDraft` records routed through `MutationExecut
 
 Provider-agnostic protocols: `LLMClient`, `EmbedderClient`. Reference implementations for OpenAI / Anthropic live in `trellis.llm.providers` behind `[llm-openai]` / `[llm-anthropic]` optional extras so core stays dependency-free. See [`docs/design/adr-llm-client-abstraction.md`](docs/design/adr-llm-client-abstraction.md).
 
-### Two feedback paths — EventLog (authoritative) vs JSONL (file-based)
+### Feedback path — EventLog authoritative, JSONL audit log
 
-Context curation runs a variation → selection loop: extraction produces candidate context items, feedback grades them, the advisory + learning loops propagate or suppress. Feedback reaches the analytics layer through **two paths** that do **not** duplicate each other — they serve different deployment contexts:
+Context curation runs a variation → selection loop: extraction produces candidate context items, feedback grades them, the advisory + learning loops propagate or suppress. The **EventLog is the single authoritative path** for that loop. `record_feedback()` always appends a `PackFeedback` row to `pack_feedback.jsonl` and, when given an `event_log` kwarg, also emits a `FEEDBACK_RECORDED` event; the file is durable, the event is what drives behavior.
 
 | Path | Wire format | Persistence | Consumer | Role |
 |---|---|---|---|---|
-| EventLog | `FEEDBACK_RECORDED` event | store backend | `AdvisoryGenerator`, `effectiveness.analyze_*`, `run_advisory_fitness_loop` | **Authoritative.** Automated continuous loops, MCP-driven agent flows. Auto-suppresses noise. |
-| JSONL | `PackFeedback` dataclass | `pack_feedback.jsonl` on disk | `compute_item_effectiveness`, `learning.scoring` (human-reviewed promotions) | File-based workflows extracted from fd-poc. Batch analysis, human-in-the-loop precedent promotion. |
+| EventLog | `FEEDBACK_RECORDED` event | store backend | `AdvisoryGenerator`, `effectiveness.analyze_*`, `run_advisory_fitness_loop`, `build_learning_observations_from_event_log` → `analyze_learning_observations` | **Authoritative.** Drives both demote (auto-suppress) and promote (human-reviewed `learning.scoring`) halves of the loop. |
+| `pack_feedback.jsonl` | `PackFeedback` dataclass | on disk per run | `compute_item_effectiveness` (ad-hoc), `reconcile_feedback_log_to_event_log` (backfill into EventLog) | **Audit log only.** Durable file record of every pack signal. Not a second decision path. |
 
-Bridge: `PackFeedback.to_event_payload()` plus the optional `event_log` / `pack_id` kwargs on `record_feedback()` let a file-based capture also emit into the authoritative EventLog. Dual-loop demotes; `learning.scoring` promotes — complementary halves of the same loop, not duplicates.
+`PackFeedback.to_event_payload()` shapes the file row into the event payload; `reconcile_feedback_log_to_event_log()` replays rows missing from the EventLog. A file-only promote path was considered and **rejected** (see [`adr-dual-loop-evolution.md`](docs/design/adr-dual-loop-evolution.md) §8) — `PackFeedback` does not carry the per-item `item_type` / `source_strategy` / `category` fields `analyze_learning_observations` needs, so promotion runs strictly off the EventLog join in `learning/pack_observations.py`.
 
 ### Test Structure
 

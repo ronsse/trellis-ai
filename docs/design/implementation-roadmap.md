@@ -105,7 +105,7 @@ Each entry below is **fully scoped**: scope, files to touch, contract for "done"
 
 * `ENTITY_CREATE` / `LINK_CREATE` through `MutationExecutor` land rows + edges in Neo4j (read back via `GraphStore.get_node` / `get_edges`).
 * `MutationExecutor` emits both `MUTATION_EXECUTED` and `ENTITY_CREATED` to the operational `EventLog`.
-* `JSONRulesExtractor` → `result_to_batch` → `MutationExecutor.execute_batch` → Neo4j rows (verified via direct graph reads). Note: `Operation.TRACE_INGEST` exists in the registry but has no handler — traces still go straight to `TraceStore.append`. The test path uses the real `ENTITY_CREATE` / `LINK_CREATE` handlers instead, which is the actual production data flow.
+* `JSONRulesExtractor` → `result_to_batch` → `MutationExecutor.execute_batch` → Neo4j rows (verified via direct graph reads).
 * `PackBuilder.build()` with `GraphSearch` over a Neo4j-backed graph store assembles a pack and emits `PACK_ASSEMBLED`.
 * `vector.upsert(node_id, embedding)` on the shape #2 store, then `SemanticSearch` through `PackBuilder`, returns the node — exercising the shared `:Node` row across both stores.
 
