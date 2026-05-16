@@ -116,14 +116,16 @@ def _query_results(
     graph_store = knowledge.graph_store
     vector_store = knowledge.vector_store
 
-    # Why: this scenario seeds nodes with node_type="entity" via GeneratedGraph
-    # and validates that the type-index returns the same set across backends.
-    # If a future scenario shares this registry while seeding under a different
-    # node_type (e.g., program_convergence uses "eval_seed_entity"), this query
-    # will silently exclude those nodes. Cross-scenario contamination isn't
-    # possible today (each scenario uses an isolated tmp_path registry), but if
-    # registry-sharing is ever introduced, parameterise node_type from the
-    # graph's seed metadata.
+    # Why: ``"entity"`` is one of seven weighted ``node_type`` values that
+    # ``GeneratedGraph`` emits (see ``eval/generators/graph_generator.py``
+    # ``NODE_TYPES`` — ~35% weight). The query intentionally probes a *subset*
+    # of seeded nodes to exercise the type-index path; cross-backend
+    # equivalence holds because the same generator + same seed produces the
+    # same subset on every backend. If the generator's type mix ever changes
+    # so that ``"entity"`` drops out (or another scenario reuses this query
+    # function with a different generator), the query will return zero rows
+    # and the equivalence diff will pass vacuously — parameterise
+    # ``node_type`` from the graph's seed metadata then.
     type_query_ids = {
         row["node_id"] for row in graph_store.query(node_type="entity", limit=10_000)
     }
