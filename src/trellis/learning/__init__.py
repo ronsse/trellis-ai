@@ -4,6 +4,9 @@ from trellis.learning.pack_observations import (
     build_learning_observations_from_event_log,
 )
 from trellis.learning.schema_evolution import (
+    PARAM_COMPONENT_ID as SCHEMA_EVOLUTION_PARAM_COMPONENT_ID,
+)
+from trellis.learning.schema_evolution import (
     RECOMMENDED_SEED_VALUES,
     WellKnownCandidate,
     analyze_well_known_candidates,
@@ -36,6 +39,7 @@ __all__ = [
     "RECOMMENDED_SEED_VALUES",
     "REQUIRED_LEARNING_PARAMETER_KEYS",
     "REQUIRED_SCHEMA_EVOLUTION_PARAM_KEYS",
+    "SCHEMA_EVOLUTION_PARAM_COMPONENT_ID",
     "WellKnownCandidate",
     "analyze_learning_observations",
     "analyze_well_known_candidates",
