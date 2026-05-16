@@ -89,3 +89,109 @@ class TestEdgeCaseEnrichmentFailure:
         assert result.confidence == 0.0
         assert result.needs_llm_review is True
         assert result.classifier_name == "llm_facet"
+
+
+class TestClassificationDegradedTelemetry:
+    """When the enrichment upstream fails AND an ``event_log`` is wired,
+    the classifier emits a ``CLASSIFICATION_DEGRADED`` event with the
+    documented payload shape so analyzers can correlate the degradation
+    with the upstream ``EXTRACTION_FAILED`` event by timestamp +
+    ``subject_entity_id``.
+
+    Without an event_log the classifier silently degrades (matches the
+    optional-event-log pattern across the codebase).
+    """
+
+    def test_failure_emits_classification_degraded(self, tmp_path) -> None:
+        from pathlib import Path
+
+        from trellis.stores.base.event_log import EventType
+        from trellis.stores.sqlite.event_log import SQLiteEventLog
+
+        log = SQLiteEventLog(Path(tmp_path) / "events.db")
+        try:
+            svc = MagicMock(spec=EnrichmentService)
+            svc.enrich = AsyncMock(return_value=_failure_result())
+
+            c = LLMFacetClassifier(enrichment_service=svc, event_log=log)
+            ctx = ClassificationContext(node_id="node-42", title="Auth Notes")
+            result = asyncio.run(c.classify_async("anything", context=ctx))
+
+            # Sentinel result still returned — telemetry is additive.
+            assert result.needs_llm_review is True
+            assert result.confidence == 0.0
+            assert result.classifier_name == "llm_facet"
+
+            events = log.get_events(event_type=EventType.CLASSIFICATION_DEGRADED)
+            assert len(events) == 1
+            event = events[0]
+            assert event.source == "llm_facet"
+            assert event.entity_id == "node-42"
+            payload = event.payload
+            assert payload["classifier_id"] == "llm_facet"
+            assert payload["upstream_failure_kind"] == "enrichment_failure"
+            assert payload["subject_entity_id"] == "node-42"
+            assert payload["degraded_to"] == "needs_llm_review"
+        finally:
+            log.close()
+
+    def test_failure_without_event_log_is_silent(self) -> None:
+        """No event_log => no event. Mirrors EnrichmentService's
+        optional-telemetry contract."""
+
+        svc = MagicMock(spec=EnrichmentService)
+        svc.enrich = AsyncMock(return_value=_failure_result())
+
+        # Default constructor — no event_log wired.
+        c = LLMFacetClassifier(enrichment_service=svc)
+        result = asyncio.run(c.classify_async("anything"))
+
+        # Still degrades — telemetry is additive, not load-bearing.
+        assert result.needs_llm_review is True
+        assert result.confidence == 0.0
+
+    def test_failure_without_context_records_none_subject(self, tmp_path) -> None:
+        """``subject_entity_id`` falls back to ``None`` when context isn't
+        supplied — documented in the EventType docstring."""
+
+        from pathlib import Path
+
+        from trellis.stores.base.event_log import EventType
+        from trellis.stores.sqlite.event_log import SQLiteEventLog
+
+        log = SQLiteEventLog(Path(tmp_path) / "events.db")
+        try:
+            svc = MagicMock(spec=EnrichmentService)
+            svc.enrich = AsyncMock(return_value=_failure_result())
+
+            c = LLMFacetClassifier(enrichment_service=svc, event_log=log)
+            asyncio.run(c.classify_async("anything"))
+
+            events = log.get_events(event_type=EventType.CLASSIFICATION_DEGRADED)
+            assert len(events) == 1
+            assert events[0].payload["subject_entity_id"] is None
+            assert events[0].entity_id is None
+        finally:
+            log.close()
+
+    def test_success_does_not_emit(self, tmp_path) -> None:
+        """Happy path never emits — zero noise for consumers that opt in."""
+
+        from pathlib import Path
+
+        from trellis.stores.base.event_log import EventType
+        from trellis.stores.sqlite.event_log import SQLiteEventLog
+
+        log = SQLiteEventLog(Path(tmp_path) / "events.db")
+        try:
+            svc = MagicMock(spec=EnrichmentService)
+            svc.enrich = AsyncMock(return_value=_success_result())
+
+            c = LLMFacetClassifier(enrichment_service=svc, event_log=log)
+            result = asyncio.run(c.classify_async("anything"))
+            assert result.needs_llm_review is False
+
+            events = log.get_events(event_type=EventType.CLASSIFICATION_DEGRADED)
+            assert events == []
+        finally:
+            log.close()
