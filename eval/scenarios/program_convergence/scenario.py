@@ -881,6 +881,128 @@ def _execute_round(
 
 
 # ---------------------------------------------------------------------------
+# Whole-run loop — shared by master ``run()`` and the regression suite's
+# ``_drive_master`` (Unit C2). Callers diverge only in what they do
+# with the returned data: master builds axes/findings, suite runs
+# threshold assertions.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _RunLoopResult:
+    """Bundle returned from :func:`_run_loop`. Suite consumes the first
+    two fields; master also needs ``traces_ingested`` + ``loop_stats``.
+    """
+
+    round_results: list[_RoundResult]
+    seed_entity_count: int
+    traces_ingested: int
+    loop_stats: _LoopStats
+
+
+def _run_loop(
+    registry: StoreRegistry,
+    *,
+    seed: int,
+    rounds: int,
+    feedback_batch_size: int,
+    traces_per_domain: int,
+    entities_per_trace: int,
+    success_coverage_threshold: float,
+    advisory_min_sample_size: int,
+    analyzer_cadence: int,
+    advisory_hit_lookback_rounds: int,
+    run_id: str,
+) -> _RunLoopResult:
+    """Drive corpus build + per-round loop + periodic-loops tail.
+
+    ``_verify_axis_machinery`` runs before round 0 — a missing axis
+    substrate raises :class:`ProgramConvergenceError` from here.
+    Tempdir-backed feedback / param stores are cleaned up in
+    ``finally``. The tail ``_run_periodic_loops`` only fires when
+    ``rounds % feedback_batch_size != 0`` (otherwise the per-round
+    loop already fired one on the last batch-aligned round).
+    ``run_id`` is caller-formatted so the master / suite prefix
+    divergence stays visible at the call site.
+    """
+    _verify_axis_machinery(registry)
+
+    rng = random.Random(seed ^ _RNG_SEED_OFFSET)  # noqa: S311 — synthetic
+    observed_at_base = datetime(2026, 5, 14, 12, 0, 0, tzinfo=UTC)
+    corpus = generate_corpus(
+        seed=seed,
+        traces_per_domain=traces_per_domain,
+        entities_per_trace=entities_per_trace,
+    )
+
+    traces_ingested = _ingest_traces(registry, corpus)
+    seed_entities = _populate_entity_documents(registry, corpus)
+
+    # Why: inline tempdir-backed param/feedback stores — registry's
+    # parameter plane leaves the well-known keys unset and we need
+    # every required key present.
+    feedback_dir_holder = tempfile.TemporaryDirectory()
+    feedback_dir = Path(feedback_dir_holder.name)
+    advisory_store = AdvisoryStore(
+        (registry.stores_dir or feedback_dir) / "advisories.json"
+    )
+    param_store_holder = tempfile.TemporaryDirectory()
+    param_store = SQLiteParameterStore(Path(param_store_holder.name) / "params.db")
+    _seed_well_known_parameters(param_store)
+
+    builder = PackBuilder(
+        strategies=[KeywordSearch(registry.knowledge.document_store)],
+        event_log=registry.operational.event_log,
+        advisory_store=advisory_store,
+    )
+    loop_stats = _LoopStats()
+    round_results: list[_RoundResult] = []
+
+    try:
+        for round_index in range(rounds):
+            _execute_round(
+                round_index=round_index,
+                registry=registry,
+                corpus=corpus,
+                builder=builder,
+                advisory_store=advisory_store,
+                param_store=param_store,
+                seed_entities=seed_entities,
+                round_results=round_results,
+                loop_stats=loop_stats,
+                rng=rng,
+                feedback_dir=feedback_dir,
+                run_id=run_id,
+                observed_at_base=observed_at_base,
+                success_coverage_threshold=success_coverage_threshold,
+                analyzer_cadence=analyzer_cadence,
+                feedback_batch_size=feedback_batch_size,
+                advisory_min_sample_size=advisory_min_sample_size,
+                advisory_hit_lookback_rounds=advisory_hit_lookback_rounds,
+            )
+    finally:
+        feedback_dir_holder.cleanup()
+        param_store.close()
+        param_store_holder.cleanup()
+
+    if rounds % feedback_batch_size != 0:
+        _run_periodic_loops(
+            registry=registry,
+            advisory_store=advisory_store,
+            stats=loop_stats,
+            generate_advisories=loop_stats.advisory_runs == 0,
+            advisory_min_sample_size=advisory_min_sample_size,
+        )
+
+    return _RunLoopResult(
+        round_results=round_results,
+        seed_entity_count=len(seed_entities),
+        traces_ingested=traces_ingested,
+        loop_stats=loop_stats,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -1028,17 +1150,19 @@ def run(
         advisory_hit_lookback_rounds=advisory_hit_lookback_rounds,
     )
 
-    # Verify every axis substrate is reachable BEFORE round 0 — better
-    # to fail loud at setup than to emit partial signal for 30 rounds.
-    _verify_axis_machinery(registry)
-
-    rng = random.Random(seed ^ _RNG_SEED_OFFSET)  # noqa: S311 — synthetic, not crypto
-    observed_at_base = datetime(2026, 5, 14, 12, 0, 0, tzinfo=UTC)
-
-    corpus = generate_corpus(
+    run_id = f"program_convergence_{seed:04d}"
+    loop_result = _run_loop(
+        registry,
         seed=seed,
+        rounds=rounds,
+        feedback_batch_size=feedback_batch_size,
         traces_per_domain=traces_per_domain,
         entities_per_trace=entities_per_trace,
+        success_coverage_threshold=success_coverage_threshold,
+        advisory_min_sample_size=advisory_min_sample_size,
+        analyzer_cadence=analyzer_cadence,
+        advisory_hit_lookback_rounds=advisory_hit_lookback_rounds,
+        run_id=run_id,
     )
 
     findings: list[Finding] = []
@@ -1050,79 +1174,18 @@ def run(
         "feedback_batch_size": float(feedback_batch_size),
         "domain_count": float(len(DOMAIN_TEMPLATES)),
         "analyzer_cadence": float(analyzer_cadence),
+        "traces_ingested": float(loop_result.traces_ingested),
+        "seed_entities": float(loop_result.seed_entity_count),
     }
 
-    metrics["traces_ingested"] = float(_ingest_traces(registry, corpus))
-    seed_entities = _populate_entity_documents(registry, corpus)
-    metrics["seed_entities"] = float(len(seed_entities))
-
-    feedback_dir_holder = tempfile.TemporaryDirectory()
-    feedback_dir = Path(feedback_dir_holder.name)
-    advisory_dir_root = registry.stores_dir or feedback_dir
-    advisory_store = AdvisoryStore(advisory_dir_root / "advisories.json")
-
-    # Parameter store for the well-known analyzer. We seed it inline
-    # rather than reaching into the registry's parameter plane because
-    # the analyzer requires every required key to be present, and the
-    # registry's default seed leaves them unset.
-    param_store_holder = tempfile.TemporaryDirectory()
-    param_store = SQLiteParameterStore(Path(param_store_holder.name) / "params.db")
-    _seed_well_known_parameters(param_store)
-
-    builder = PackBuilder(
-        strategies=[KeywordSearch(registry.knowledge.document_store)],
-        event_log=registry.operational.event_log,
-        advisory_store=advisory_store,
-    )
-
-    loop_stats = _LoopStats()
-    round_results: list[_RoundResult] = []
-    run_id = f"program_convergence_{seed:04d}"
-
-    try:
-        for round_index in range(rounds):
-            _execute_round(
-                round_index=round_index,
-                registry=registry,
-                corpus=corpus,
-                builder=builder,
-                advisory_store=advisory_store,
-                param_store=param_store,
-                seed_entities=seed_entities,
-                round_results=round_results,
-                loop_stats=loop_stats,
-                rng=rng,
-                feedback_dir=feedback_dir,
-                run_id=run_id,
-                observed_at_base=observed_at_base,
-                success_coverage_threshold=success_coverage_threshold,
-                analyzer_cadence=analyzer_cadence,
-                feedback_batch_size=feedback_batch_size,
-                advisory_min_sample_size=advisory_min_sample_size,
-                advisory_hit_lookback_rounds=advisory_hit_lookback_rounds,
-            )
-    finally:
-        feedback_dir_holder.cleanup()
-        param_store.close()
-        param_store_holder.cleanup()
-
-    if rounds % feedback_batch_size != 0:
-        _run_periodic_loops(
-            registry=registry,
-            advisory_store=advisory_store,
-            stats=loop_stats,
-            generate_advisories=loop_stats.advisory_runs == 0,
-            advisory_min_sample_size=advisory_min_sample_size,
-        )
-
-    nine_axis_rounds = [r.to_nine_axis() for r in round_results]
+    nine_axis_rounds = [r.to_nine_axis() for r in loop_result.round_results]
     stats = _build_multi_axis_stats(nine_axis_rounds)
 
-    metrics.update(_loop_metrics(loop_stats))
+    metrics.update(_loop_metrics(loop_result.loop_stats))
     metrics.update(_convergence_metrics(stats.convergence))
     metrics.update(_multi_axis_metrics(stats))
 
-    findings.append(_loops_summary_finding(loop_stats))
+    findings.append(_loops_summary_finding(loop_result.loop_stats))
     findings.extend(_per_axis_findings(stats))
     findings.append(_composite_convergence_finding(stats))
 
