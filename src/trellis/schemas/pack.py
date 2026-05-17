@@ -13,7 +13,17 @@ from trellis.schemas.advisory import Advisory
 
 
 class PackItem(VersionedModel):
-    """A single item included in a context pack."""
+    """A single item included in a context pack.
+
+    ``injected_advisory_ids`` (Unit C1, foundation for D1 axis C tightening)
+    records which advisories — by ``Advisory.advisory_id`` — influenced this
+    item's inclusion or ranking in the assembled pack. Empty list when no
+    advisory matched this item. Currently populated for advisories whose
+    ``entity_id`` equals the item's ``item_id`` (ENTITY / ANTI_PATTERN
+    categories); other advisory categories are pack-scoped, not item-scoped.
+    Lets downstream analyzers join ``advisory_id -> outcome`` per-item rather
+    than relying on the coarser domain-scope proxy.
+    """
 
     item_id: str
     item_type: str  # trace, evidence, precedent, entity
@@ -25,6 +35,7 @@ class PackItem(VersionedModel):
     score_breakdown: dict[str, float] = Field(default_factory=dict)
     estimated_tokens: int | None = None
     strategy_source: str | None = None
+    injected_advisory_ids: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 

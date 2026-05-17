@@ -574,19 +574,25 @@ def _make_advisory(
     scope: str = "global",
     category: AdvisoryCategory = AdvisoryCategory.ENTITY,
     confidence: float = 0.8,
+    entity_id: str | None = None,
+    advisory_id: str | None = None,
 ) -> Advisory:
-    return Advisory(
-        category=category,
-        confidence=confidence,
-        message=f"Test advisory ({category.value})",
-        evidence=AdvisoryEvidence(
+    kwargs: dict[str, object] = {
+        "category": category,
+        "confidence": confidence,
+        "message": f"Test advisory ({category.value})",
+        "evidence": AdvisoryEvidence(
             sample_size=10,
             success_rate_with=0.8,
             success_rate_without=0.4,
             effect_size=0.4,
         ),
-        scope=scope,
-    )
+        "scope": scope,
+        "entity_id": entity_id,
+    }
+    if advisory_id is not None:
+        kwargs["advisory_id"] = advisory_id
+    return Advisory(**kwargs)  # type: ignore[arg-type]
 
 
 class TestAdvisoryDelivery:
@@ -652,6 +658,179 @@ class TestAdvisoryDelivery:
         # Only the 0.5 confidence advisory should be delivered
         assert len(pack.advisories) == 1
         assert pack.advisories[0].confidence == 0.5
+
+
+# ---------------------------------------------------------------------------
+# Unit C1 — per-item advisory provenance (foundation for axis C tightening)
+# ---------------------------------------------------------------------------
+
+
+class TestAdvisoryProvenance:
+    """``PackItem.injected_advisory_ids`` records per-item advisory influence.
+
+    Foundation for D1 (axis C semantic tightening): downstream analyzers
+    can join ``advisory_id -> outcome`` per-item instead of using the
+    coarser domain-scope proxy. An advisory with ``entity_id`` set
+    influences the ``PackItem`` whose ``item_id`` matches; advisories
+    without ``entity_id`` are pack-scoped and never stamp items.
+    """
+
+    def test_default_field_is_empty_list(self) -> None:
+        """No advisories configured → field stays empty (preserves prior behavior)."""
+        s = _make_strategy("kw", [_item("d1", 0.9), _item("d2", 0.7)])
+        builder = PackBuilder(strategies=[s])
+        pack = builder.build("q")
+        assert all(item.injected_advisory_ids == [] for item in pack.items)
+
+    def test_advisory_without_entity_id_does_not_stamp_items(
+        self, tmp_path: Path
+    ) -> None:
+        """Pack-scoped advisories (APPROACH/SCOPE/QUERY) leave items untouched."""
+        store = AdvisoryStore(tmp_path / "adv.json")
+        store.put(_make_advisory(scope="global", category=AdvisoryCategory.APPROACH))
+        s = _make_strategy("kw", [_item("d1", 0.9)])
+        builder = PackBuilder(strategies=[s], advisory_store=store)
+        pack = builder.build("q")
+        assert len(pack.advisories) == 1
+        assert pack.items[0].injected_advisory_ids == []
+
+    def test_advisory_with_entity_id_stamps_matching_item(
+        self, tmp_path: Path
+    ) -> None:
+        """When ``advisory.entity_id == item.item_id``, the advisory ID is stamped."""
+        store = AdvisoryStore(tmp_path / "adv.json")
+        advisory = _make_advisory(
+            scope="global",
+            category=AdvisoryCategory.ENTITY,
+            entity_id="d1",
+        )
+        store.put(advisory)
+        s = _make_strategy("kw", [_item("d1", 0.9), _item("d2", 0.7)])
+        builder = PackBuilder(strategies=[s], advisory_store=store)
+        pack = builder.build("q")
+
+        d1 = next(i for i in pack.items if i.item_id == "d1")
+        d2 = next(i for i in pack.items if i.item_id == "d2")
+        assert d1.injected_advisory_ids == [advisory.advisory_id]
+        assert d2.injected_advisory_ids == []
+
+    def test_anti_pattern_advisory_stamps_matching_item(
+        self, tmp_path: Path
+    ) -> None:
+        """ANTI_PATTERN advisories also carry ``entity_id`` and influence items."""
+        store = AdvisoryStore(tmp_path / "adv.json")
+        advisory = _make_advisory(
+            scope="global",
+            category=AdvisoryCategory.ANTI_PATTERN,
+            entity_id="d1",
+        )
+        store.put(advisory)
+        s = _make_strategy("kw", [_item("d1", 0.9)])
+        builder = PackBuilder(strategies=[s], advisory_store=store)
+        pack = builder.build("q")
+        assert pack.items[0].injected_advisory_ids == [advisory.advisory_id]
+
+    def test_multiple_advisories_target_same_item(self, tmp_path: Path) -> None:
+        """Each matching advisory appends its ID; ordering matches iteration."""
+        store = AdvisoryStore(tmp_path / "adv.json")
+        a1 = _make_advisory(
+            scope="global",
+            category=AdvisoryCategory.ENTITY,
+            entity_id="d1",
+            advisory_id="adv-1",
+        )
+        a2 = _make_advisory(
+            scope="global",
+            category=AdvisoryCategory.ANTI_PATTERN,
+            entity_id="d1",
+            advisory_id="adv-2",
+        )
+        store.put(a1)
+        store.put(a2)
+        s = _make_strategy("kw", [_item("d1", 0.9)])
+        builder = PackBuilder(strategies=[s], advisory_store=store)
+        pack = builder.build("q")
+        # Both advisory IDs present; order is stable but not guaranteed
+        # (advisory_store sort order is implementation-detail).
+        assert set(pack.items[0].injected_advisory_ids) == {"adv-1", "adv-2"}
+
+    def test_no_advisories_configured_leaves_field_empty(self) -> None:
+        """No advisory store at all → field stays empty (default-empty contract)."""
+        s = _make_strategy("kw", [_item("d1", 0.9)])
+        builder = PackBuilder(strategies=[s])  # no advisory_store
+        pack = builder.build("q")
+        assert pack.advisories == []
+        assert pack.items[0].injected_advisory_ids == []
+
+    def test_advisory_for_nonexistent_item_no_op(self, tmp_path: Path) -> None:
+        """Advisory targeting an item_id absent from the pack does not error."""
+        store = AdvisoryStore(tmp_path / "adv.json")
+        store.put(
+            _make_advisory(
+                scope="global",
+                category=AdvisoryCategory.ENTITY,
+                entity_id="absent-id",
+            )
+        )
+        s = _make_strategy("kw", [_item("d1", 0.9)])
+        builder = PackBuilder(strategies=[s], advisory_store=store)
+        pack = builder.build("q")
+        assert pack.items[0].injected_advisory_ids == []
+
+    def test_sectioned_pack_stamps_per_item_advisory_provenance(
+        self, tmp_path: Path
+    ) -> None:
+        """``build_sectioned`` propagates advisory provenance into each section."""
+        store = AdvisoryStore(tmp_path / "adv.json")
+        advisory = _make_advisory(
+            scope="global",
+            category=AdvisoryCategory.ENTITY,
+            entity_id="d1",
+        )
+        store.put(advisory)
+        s = _make_strategy("kw", [_item("d1", 0.9), _item("d2", 0.7)])
+        builder = PackBuilder(strategies=[s], advisory_store=store)
+        pack = builder.build_sectioned(
+            "q",
+            sections=[SectionRequest(name="all")],
+        )
+        assert len(pack.advisories) == 1
+        # Find the stamped item across all sections.
+        d1_items = [i for s in pack.sections for i in s.items if i.item_id == "d1"]
+        d2_items = [i for s in pack.sections for i in s.items if i.item_id == "d2"]
+        assert len(d1_items) == 1
+        assert d1_items[0].injected_advisory_ids == [advisory.advisory_id]
+        assert all(i.injected_advisory_ids == [] for i in d2_items)
+
+    def test_pack_assembled_telemetry_includes_per_item_advisory_ids(
+        self, tmp_path: Path
+    ) -> None:
+        """``PACK_ASSEMBLED`` payload surfaces per-item advisory IDs for analyzers."""
+        store = AdvisoryStore(tmp_path / "adv.json")
+        advisory = _make_advisory(
+            scope="global",
+            category=AdvisoryCategory.ENTITY,
+            entity_id="d1",
+        )
+        store.put(advisory)
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        try:
+            s = _make_strategy(
+                "kw", [_item("d1", 0.9), _item("d2", 0.7)]
+            )
+            builder = PackBuilder(
+                strategies=[s], advisory_store=store, event_log=event_log
+            )
+            builder.build("q")
+            events = event_log.get_events(limit=10)
+            assert len(events) == 1
+            payload = events[0].payload
+            injected = payload["injected_items"]
+            by_id = {row["item_id"]: row for row in injected}
+            assert by_id["d1"]["injected_advisory_ids"] == [advisory.advisory_id]
+            assert by_id["d2"]["injected_advisory_ids"] == []
+        finally:
+            event_log.close()
 
 
 # ---------------------------------------------------------------------------
