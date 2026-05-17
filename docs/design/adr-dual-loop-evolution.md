@@ -3,6 +3,7 @@
 **Status:** Proposed
 **Date:** 2026-04-13
 **Amended:** 2026-05-14 — §8 rejects the file-only JSONL promote path; renumbered References → §9.
+**Addenda:** [`./adr-dual-loop-advisory-restoration.md`](./adr-dual-loop-advisory-restoration.md) (2026-05-16) — scopes the advisory restoration half of §2.4.
 **Deciders:** Trellis core
 **Related:**
 - [`./adr-deferred-cognition.md`](./adr-deferred-cognition.md) — Deterministic writes, deferred intelligence
