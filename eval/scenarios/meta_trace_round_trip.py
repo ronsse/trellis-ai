@@ -31,11 +31,11 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from collections.abc import Callable
 from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
-import pytest
 import structlog
 
 from eval._backends import (
@@ -50,6 +50,29 @@ from trellis.retrieve.strategies import GraphSearch
 from trellis.schemas import well_known as wk
 
 logger = structlog.get_logger(__name__)
+
+
+# ``pytest`` is a dev-only dependency. The satellite scenario is also
+# importable from prod (the eval runner calls its ``run()`` callable),
+# so we guard the import: pytest available → ``_pytest_fixture`` resolves
+# to ``pytest.fixture`` and pytest collects + runs the ``test_*`` functions;
+# pytest missing → ``_pytest_fixture`` is a no-op and the test functions
+# never execute (pytest is the only thing that would call them). The
+# ``pytest.skip(...)`` call inside ``test_cross_backend_equivalence`` is
+# guarded by a local import so it only fires under pytest. Closes the
+# Phase 2 L finding about prod-env import failures.
+def _identity_decorator(func: Callable[..., Any]) -> Callable[..., Any]:
+    """No-op stand-in for ``pytest.fixture`` when pytest is absent."""
+    return func
+
+
+try:
+    import pytest as _pytest_mod  # noqa: PT013 — module alias for optional dev dep
+
+    _pytest_fixture: Callable[..., Any] = _pytest_mod.fixture
+except ImportError:  # pragma: no cover — pytest is a dev dep
+    _pytest_fixture = _identity_decorator
+
 
 #: Cross-backend assertions only kick in when at least two backends are
 #: available. SQLite is always present; Postgres / Neo4j depend on env.
@@ -89,9 +112,7 @@ def _seed_meta_activity(handle: BackendHandle) -> str:
             node_type=SCENARIO_FINDING_TYPE,
             properties={"name": SCENARIO_FINDING_ID},
         )
-        record.produced_finding(
-            SCENARIO_FINDING_ID, finding_type=SCENARIO_FINDING_TYPE
-        )
+        record.produced_finding(SCENARIO_FINDING_ID, finding_type=SCENARIO_FINDING_TYPE)
         return record.activity_id
 
 
@@ -212,7 +233,7 @@ def _build_backends(stack: ExitStack, tmp_dir: Path) -> list[BackendHandle]:
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture
+@_pytest_fixture
 def sqlite_handle(tmp_path: Path) -> Any:
     """Seeded SQLite backend. Always available; no env gating."""
     with ExitStack() as stack:
@@ -247,8 +268,7 @@ def test_default_filter_excludes_meta_sqlite(sqlite_handle: BackendHandle) -> No
     item_ids = {item.item_id for item in pack.items}
     # The non-meta (user-authored) Activity must remain.
     assert NON_META_ACTIVITY_ID in item_ids, (
-        "non-meta Activity was incorrectly filtered: "
-        f"item_ids={item_ids}"
+        f"non-meta Activity was incorrectly filtered: item_ids={item_ids}"
     )
     # No item_id should match the meta-Activity (we don't know its ULID,
     # but the synthetic agent_id is on the metadata).
@@ -262,9 +282,7 @@ def test_default_filter_excludes_meta_sqlite(sqlite_handle: BackendHandle) -> No
 def test_opt_in_includes_meta_sqlite(sqlite_handle: BackendHandle) -> None:
     """include_meta=True surfaces the meta-Activity."""
     pack = _build_pack(sqlite_handle, include_meta=True)
-    meta_agents_seen = [
-        (item.metadata or {}).get("agent_id") for item in pack.items
-    ]
+    meta_agents_seen = [(item.metadata or {}).get("agent_id") for item in pack.items]
     assert DEFAULT_META_AGENT_ID in meta_agents_seen, (
         f"meta-Activity missing with include_meta=True: "
         f"seen agent_ids={meta_agents_seen}"
@@ -285,18 +303,16 @@ def test_pack_assembled_event_records_meta_filtered_count_sqlite(
         event_type=EventType.PACK_ASSEMBLED, order="desc", limit=1
     )
     assert default_events, "no PACK_ASSEMBLED event emitted for default build"
-    assert default_events[0].payload["meta_filtered_count"] == 1, (
-        default_events[0].payload
-    )
+    assert default_events[0].payload["meta_filtered_count"] == 1, default_events[
+        0
+    ].payload
 
     _ = _build_pack(sqlite_handle, include_meta=True)
     optin_events = event_log.get_events(
         event_type=EventType.PACK_ASSEMBLED, order="desc", limit=1
     )
     assert optin_events, "no PACK_ASSEMBLED event emitted for opt-in build"
-    assert optin_events[0].payload["meta_filtered_count"] == 0, (
-        optin_events[0].payload
-    )
+    assert optin_events[0].payload["meta_filtered_count"] == 0, optin_events[0].payload
 
 
 def test_cross_backend_equivalence(tmp_path: Path) -> None:
@@ -304,6 +320,8 @@ def test_cross_backend_equivalence(tmp_path: Path) -> None:
     with ExitStack() as stack:
         handles = _build_backends(stack, tmp_path)
         if len(handles) < _MIN_BACKENDS_FOR_CROSS_CHECK:
+            import pytest  # noqa: PLC0415 — pytest is dev-only; test bodies run under pytest
+
             pytest.skip(
                 "cross-backend assertions require at least "
                 f"{_MIN_BACKENDS_FOR_CROSS_CHECK} backends; "

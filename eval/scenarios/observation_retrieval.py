@@ -32,13 +32,13 @@ from __future__ import annotations
 
 import os
 import tempfile
+from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-import pytest
 import structlog
 
 from eval._backends import (
@@ -52,6 +52,29 @@ from trellis.retrieve.observation_strategy import ObservationSearch
 from trellis.schemas.well_known import HAS_OBSERVATION, MEASUREMENT, OBSERVATION
 
 logger = structlog.get_logger(__name__)
+
+
+# ``pytest`` is a dev-only dependency. The satellite scenario is also
+# importable from prod (the eval runner calls its ``run()`` callable),
+# so we guard the import: pytest available → ``_pytest_fixture`` resolves
+# to ``pytest.fixture`` and pytest collects + runs the ``test_*`` functions;
+# pytest missing → ``_pytest_fixture`` is a no-op and the test functions
+# never execute (pytest is the only thing that would call them). The
+# ``pytest.skip(...)`` call inside ``test_cross_backend_equivalence`` is
+# guarded by a local import so it only fires under pytest. Closes the
+# Phase 2 L finding about prod-env import failures.
+def _identity_decorator(func: Callable[..., Any]) -> Callable[..., Any]:
+    """No-op stand-in for ``pytest.fixture`` when pytest is absent."""
+    return func
+
+
+try:
+    import pytest as _pytest_mod  # noqa: PT013 — module alias for optional dev dep
+
+    _pytest_fixture: Callable[..., Any] = _pytest_mod.fixture
+except ImportError:  # pragma: no cover — pytest is a dev dep
+    _pytest_fixture = _identity_decorator
+
 
 #: ``test_cross_backend_equivalence`` requires at least this many backends
 #: to do anything meaningful. SQLite is always present; Postgres / Neo4j
@@ -262,7 +285,7 @@ def _build_backends(stack: ExitStack, tmp_dir: Path) -> list[BackendHandle]:
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture
+@_pytest_fixture
 def sqlite_handle(tmp_path: Path) -> Any:
     """Seeded SQLite backend. Always available, no env gating."""
     with ExitStack() as stack:
@@ -323,6 +346,8 @@ def test_cross_backend_equivalence(tmp_path: Path) -> None:
     with ExitStack() as stack:
         handles = _build_backends(stack, tmp_path)
         if len(handles) < _MIN_BACKENDS_FOR_CROSS_CHECK:
+            import pytest  # noqa: PLC0415 — pytest is dev-only; test bodies run under pytest
+
             pytest.skip(
                 "cross-backend assertions require at least "
                 f"{_MIN_BACKENDS_FOR_CROSS_CHECK} backends; "

@@ -29,10 +29,10 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-import pytest
 import structlog
 
 from eval.runner import Finding, ScenarioReport
@@ -49,6 +49,27 @@ from trellis.schemas.parameters import ParameterScope, ParameterSet
 from trellis.stores.sqlite.parameter import SQLiteParameterStore
 
 logger = structlog.get_logger(__name__)
+
+
+# ``pytest`` is a dev-only dependency. The satellite scenario is also
+# importable from prod (the eval runner calls its ``run()`` callable
+# directly — pytest never enters that path), so we guard the import:
+# pytest available → ``_pytest_fixture`` resolves to ``pytest.fixture``
+# and pytest collects + runs the ``test_*`` functions; pytest missing →
+# ``_pytest_fixture`` is a no-op and the test functions never execute
+# (pytest is the only thing that would call them). Closes the Phase 2 L
+# finding about prod-env import failures.
+def _identity_decorator(func: Callable[..., Any]) -> Callable[..., Any]:
+    """No-op stand-in for ``pytest.fixture`` when pytest is absent."""
+    return func
+
+
+try:
+    import pytest as _pytest_mod  # noqa: PT013 — module alias for optional dev dep
+
+    _pytest_fixture: Callable[..., Any] = _pytest_mod.fixture
+except ImportError:  # pragma: no cover — pytest is a dev dep
+    _pytest_fixture = _identity_decorator
 
 
 SCENARIO_NAME = "parameter_registry_passthrough"
@@ -171,7 +192,7 @@ def _summarise(candidates: list[dict[str, Any]]) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture
+@_pytest_fixture
 def param_store_path(tmp_path: Path) -> Path:
     """A throw-away SQLite parameter-store path."""
     return tmp_path / "params.db"
