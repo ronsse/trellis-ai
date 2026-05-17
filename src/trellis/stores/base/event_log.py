@@ -198,6 +198,28 @@ class EventType(StrEnum):
 
     # Token tracking
     TOKEN_TRACKED = "token.tracked"
+    #: Emitted by a real-LLM-bearing context (today: the
+    #: ``program_convergence_real_llm`` eval scenario — Unit E3) to record
+    #: the total token + dollar cost of a single bounded run against a
+    #: real provider. Payload schema (all keys required):
+    #: ``{tokens_consumed: int, dollars_estimated: float, provider: str,
+    #: model: str}``. ``provider`` is a short slug (``"openai"``,
+    #: ``"anthropic"``) identifying which vendor the cost is billed
+    #: against; ``model`` is the specific model identifier (e.g.,
+    #: ``"text-embedding-3-small"``). One event per ``run()`` invocation,
+    #: emitted unconditionally — including when the run aborts mid-loop on
+    #: a hard cost cap — so operators always see the bill.
+    #:
+    #: Cohort 2's coding-agent loop (see
+    #: ``docs/design/plan-coding-agent-loop-cohort2.md`` §5) reserves a
+    #: richer payload variant carrying ``run_id`` / ``proposal_id`` /
+    #: ``loc_delta`` etc. When that path lands it joins this same enum
+    #: value; the payload union is documented in that plan's §5 schema.
+    #: Consumers MUST tolerate both shapes (key on ``source``: the eval
+    #: scenario emits with ``source="eval.program_convergence_real_llm"``,
+    #: the coding-agent loop emits with
+    #: ``source="trellis_workers.code_authoring.budget"``).
+    BUDGET_CONSUMED = "budget.consumed"
 
     # Feedback-driven parameter tuning — audit trail of governance
     # decisions on ParameterStore snapshots (not raw OutcomeEvents;
