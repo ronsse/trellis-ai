@@ -107,6 +107,8 @@ def render_program_convergence_chart(
     output_dir: Path,
     invocation_id: str,
     timestamp: datetime | None = None,
+    figsize: tuple[float, float] | None = None,
+    dpi: int | None = None,
 ) -> Path:
     """Render the 9-axis convergence chart to a PNG and return its path.
 
@@ -129,6 +131,15 @@ def render_program_convergence_chart(
             overwrites the prior PNG (idempotent re-invocation).
             Exposed so tests can pin the value and the
             re-render-overwrites property is observable.
+        figsize: ``(width_inches, height_inches)`` for the matplotlib
+            figure. Defaults to the module-level ``_FIGSIZE_INCHES``
+            (15.0, 11.0) when ``None`` — the only size the 3x3 grid
+            has been laid out against. Operators wanting a denser
+            chart for slide decks (e.g. ``(10.0, 7.5)``) override.
+        dpi: Pixels-per-inch passed to both ``plt.subplots`` and
+            ``fig.savefig``. Defaults to the module-level ``_DPI``
+            (100) when ``None``. Higher values produce sharper PNGs
+            at the cost of file size.
 
     Returns:
         Absolute path to the written PNG.
@@ -148,6 +159,9 @@ def render_program_convergence_chart(
         msg = "timestamp must be timezone-aware (UTC); got naive datetime"
         raise ValueError(msg)
 
+    resolved_figsize = figsize if figsize is not None else _FIGSIZE_INCHES
+    resolved_dpi = dpi if dpi is not None else _DPI
+
     output_dir.mkdir(parents=True, exist_ok=True)
     filename = f"program_convergence_{ts.strftime(_FILENAME_TIMESTAMP_FORMAT)}.png"
     output_path = output_dir / filename
@@ -158,8 +172,8 @@ def render_program_convergence_chart(
     fig, axes_grid = plt.subplots(
         nrows=_SUBPLOT_ROWS,
         ncols=_SUBPLOT_COLS,
-        figsize=_FIGSIZE_INCHES,
-        dpi=_DPI,
+        figsize=resolved_figsize,
+        dpi=resolved_dpi,
         squeeze=False,
     )
     fig.suptitle(
@@ -180,7 +194,7 @@ def render_program_convergence_chart(
         )
 
     fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.96))
-    fig.savefig(output_path, format="png", dpi=_DPI)
+    fig.savefig(output_path, format="png", dpi=resolved_dpi)
     plt.close(fig)
 
     logger.info(
@@ -189,6 +203,8 @@ def render_program_convergence_chart(
         invocation_id=invocation_id,
         rounds=rounds_count,
         timestamp=ts.isoformat(),
+        figsize=resolved_figsize,
+        dpi=resolved_dpi,
     )
     return output_path
 

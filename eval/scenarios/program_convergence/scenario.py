@@ -903,7 +903,33 @@ def _validate_run_kwargs(
         raise ValueError(msg)
 
 
-def _render_chart(stats: object, *, invocation_id: str) -> Path:
+def _default_chart_output_dir() -> Path:
+    """Repo-root-anchored default for ``output_dir`` when caller passes None.
+
+    The legacy default was ``Path("eval/reports")`` — a CWD-relative
+    literal that worked when an operator ran the scenario from the
+    repo root and produced a confusing ``./eval/reports/`` *under
+    whatever directory they happened to be in* otherwise. We anchor
+    against ``__file__`` so the same physical directory is used
+    regardless of CWD.
+
+    ``__file__`` lives at ``<repo>/eval/scenarios/program_convergence/
+    scenario.py``; four ``.parent`` hops land at the repo root. Then
+    ``/ "eval" / "reports"`` is the same path the legacy literal
+    referenced, just absolute.
+    """
+    repo_root = Path(__file__).resolve().parent.parent.parent.parent
+    return repo_root / "eval" / "reports"
+
+
+def _render_chart(
+    stats: object,
+    *,
+    invocation_id: str,
+    output_dir: Path | None = None,
+    figsize: tuple[float, float] | None = None,
+    dpi: int | None = None,
+) -> Path:
     """Render the 9-axis PNG via the eval-reports renderer.
 
     Lazy-imported so a registry that runs the scenario without
@@ -911,15 +937,32 @@ def _render_chart(stats: object, *, invocation_id: str) -> Path:
     error from the renderer (missing matplotlib, invalid args) is left
     to propagate — the scenario's success/failure status does not
     depend on whether the chart rendered.
+
+    Args:
+        stats: ``_MultiAxisStats`` payload from the master scenario.
+        invocation_id: Run-identifier surfaced in the chart title.
+        output_dir: Directory the PNG is written to. ``None`` (the
+            default) resolves to :func:`_default_chart_output_dir`,
+            which anchors against ``__file__`` rather than CWD.
+        figsize: Matplotlib ``(width, height)`` in inches; ``None``
+            preserves the renderer's hardcoded default.
+        dpi: Pixels-per-inch for the rendered PNG; ``None`` preserves
+            the renderer's hardcoded default.
     """
     from eval.reports.program_convergence_chart import (  # noqa: PLC0415
         render_program_convergence_chart,
     )
 
+    resolved_output_dir = (
+        output_dir if output_dir is not None else _default_chart_output_dir()
+    )
+
     chart_path = render_program_convergence_chart(
         stats,  # type: ignore[arg-type]
-        output_dir=Path("eval/reports"),
+        output_dir=resolved_output_dir,
         invocation_id=invocation_id,
+        figsize=figsize,
+        dpi=dpi,
     )
     logger.info(
         "program_convergence_chart_written",
@@ -943,6 +986,9 @@ def run(
     advisory_hit_lookback_rounds: int = DEFAULT_ADVISORY_HIT_LOOKBACK_ROUNDS,
     render_chart: bool = False,
     invocation_id: str | None = None,
+    chart_output_dir: Path | None = None,
+    chart_figsize: tuple[float, float] | None = None,
+    chart_dpi: int | None = None,
 ) -> ScenarioReport:
     """Execute the program-level master scenario.
 
@@ -968,6 +1014,13 @@ def run(
     successful rounds that align with active advisory scopes. Smaller
     values make axis C twitchier (a single failed round can drop the
     rate to zero); larger values smooth across runs. Must be >= 1.
+
+    ``chart_output_dir`` / ``chart_figsize`` / ``chart_dpi`` thread
+    through to :func:`render_program_convergence_chart` when
+    ``render_chart=True``. ``None`` defaults preserve the legacy
+    behavior: ``chart_output_dir`` resolves to the repo-anchored
+    ``<repo>/eval/reports/`` directory, ``chart_figsize`` stays at
+    ``(15.0, 11.0)``, and ``chart_dpi`` stays at ``100``.
     """
     _validate_run_kwargs(
         rounds=rounds,
@@ -1075,7 +1128,13 @@ def run(
 
     resolved_invocation_id = invocation_id or run_id
     if render_chart:
-        chart_path = _render_chart(stats, invocation_id=resolved_invocation_id)
+        chart_path = _render_chart(
+            stats,
+            invocation_id=resolved_invocation_id,
+            output_dir=chart_output_dir,
+            figsize=chart_figsize,
+            dpi=chart_dpi,
+        )
         metrics["chart_path"] = str(chart_path)
 
     decision = (
