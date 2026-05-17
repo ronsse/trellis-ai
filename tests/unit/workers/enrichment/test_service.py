@@ -74,6 +74,8 @@ class TestEnrichmentResult:
         assert result.usage is None
         assert result.success is True
         assert result.error is None
+        # B1: new structured failure_kind field defaults to None on success.
+        assert result.failure_kind is None
 
     def test_extra_fields_forbidden(self):
         with pytest.raises(ValueError):
@@ -90,6 +92,22 @@ class TestEnrichmentResult:
         )
         assert result.auto_tags == ["python", "ai"]
         assert result.auto_importance == 0.75
+
+    def test_failure_kind_accepts_extraction_failure_kind_slugs(self):
+        """B1: failure_kind must accept the canonical
+        ``ExtractionFailureKind`` slugs (closed set defined in
+        ``trellis.extract.telemetry``)."""
+        # Sample a few of the legal slugs — Literal validation is enforced
+        # by pydantic.
+        for slug in ("model_error", "parse_error", "batch_collector_error"):
+            result = EnrichmentResult(success=False, failure_kind=slug)
+            assert result.failure_kind == slug
+
+    def test_failure_kind_rejects_unknown_slug(self):
+        """The Literal closed set must reject made-up slugs so downstream
+        consumers can rely on the value being one of the documented kinds."""
+        with pytest.raises(ValueError):
+            EnrichmentResult(success=False, failure_kind="enrichment_failure")
 
 
 # ---------------------------------------------------------------------------
@@ -409,6 +427,8 @@ class TestEnrichmentFailureTelemetry:
         # Graceful-degradation contract preserved.
         assert result.success is False
         assert "LLM unreachable" in result.error
+        # B1: structured failure_kind mirrors the emitted event slug.
+        assert result.failure_kind == "model_error"
 
         # And the failure is no longer silent.
         events = event_log.get_events(event_type=EventType.EXTRACTION_FAILED)
@@ -434,6 +454,8 @@ class TestEnrichmentFailureTelemetry:
 
         assert result.success is False
         assert "No JSON found" in result.error
+        # B1: structured failure_kind mirrors the emitted event slug.
+        assert result.failure_kind == "parse_error"
 
         events = event_log.get_events(event_type=EventType.EXTRACTION_FAILED)
         assert len(events) == 1
@@ -459,6 +481,8 @@ class TestEnrichmentFailureTelemetry:
 
         assert result.success is False
         assert "Invalid JSON" in result.error
+        # B1: structured failure_kind mirrors the emitted event slug.
+        assert result.failure_kind == "parse_error"
 
         events = event_log.get_events(event_type=EventType.EXTRACTION_FAILED)
         assert len(events) == 1
@@ -548,6 +572,9 @@ class TestBatchEnrichCollectorTelemetry:
             assert len(results) == 1
             assert results[0].success is False
             assert "collector escape" in (results[0].error or "")
+            # B1: structured failure_kind also surfaces on the per-item
+            # result, not just on the emitted event.
+            assert results[0].failure_kind == "batch_collector_error"
 
             events = log.get_events(event_type=EventType.EXTRACTION_FAILED)
             assert len(events) == 1
@@ -558,6 +585,10 @@ class TestBatchEnrichCollectorTelemetry:
             assert payload["error_class"] == "RuntimeError"
             assert "collector escape" in payload["error_excerpt"]
             assert payload["model"] == "test-model"
+            # No item_id/correlation_id on the input => source_hint=None
+            # (pre-B2 behavior preserved when caller doesn't opt in).
+            assert payload["source_hint"] is None
+            assert payload["correlation_id"] is None
             log.close()
         finally:
             reset_extraction_failure_state()
@@ -577,3 +608,143 @@ class TestBatchEnrichCollectorTelemetry:
         results = await service.batch_enrich([{"content": "x"}])
         assert results[0].success is False
         assert "unwired" in (results[0].error or "")
+        # B1: failure_kind populated on the result even when the emit is
+        # a no-op — downstream consumers can still branch on it.
+        assert results[0].failure_kind == "batch_collector_error"
+
+    async def test_collector_exception_forwards_item_id_as_source_hint(
+        self, tmp_path, monkeypatch
+    ):
+        """B2: when the caller supplies ``"item_id"`` on a batch item, the
+        gather-collector emit must flow it through as ``source_hint`` so
+        downstream clustering can bucket the failure instead of skipping
+        it (see ``trellis_workers.code_authoring.clustering`` ~158-164).
+        """
+        from pathlib import Path
+
+        from trellis.extract.telemetry import reset_extraction_failure_state
+        from trellis.stores.base.event_log import EventType
+        from trellis.stores.sqlite.event_log import SQLiteEventLog
+
+        reset_extraction_failure_state()
+        monkeypatch.setenv("EXTRACTION_FAILURE_NO_SAMPLE", "1")
+        try:
+            log = SQLiteEventLog(Path(tmp_path) / "events.db")
+            service = EnrichmentService(
+                llm=_make_llm(VALID_JSON),
+                event_log=log,
+                model="test-model",
+            )
+
+            async def _boom(*_args, **_kwargs):
+                msg = "escape"
+                raise RuntimeError(msg)
+
+            service.enrich = _boom  # type: ignore[method-assign]
+
+            results = await service.batch_enrich(
+                [
+                    {"content": "a", "item_id": "doc:42"},
+                    {"content": "b", "item_id": "doc:43"},
+                ],
+            )
+            assert len(results) == 2
+            assert all(r.success is False for r in results)
+
+            events = log.get_events(event_type=EventType.EXTRACTION_FAILED)
+            assert len(events) == 2
+            source_hints = {e.payload["source_hint"] for e in events}
+            assert source_hints == {"doc:42", "doc:43"}
+            log.close()
+        finally:
+            reset_extraction_failure_state()
+
+    async def test_collector_exception_forwards_correlation_id_when_no_item_id(
+        self, tmp_path, monkeypatch
+    ):
+        """B2: ``"correlation_id"`` is used as the fallback for ``source_hint``
+        when ``"item_id"`` is absent, and is also forwarded as the event's
+        own ``correlation_id`` payload field."""
+        from pathlib import Path
+
+        from trellis.extract.telemetry import reset_extraction_failure_state
+        from trellis.stores.base.event_log import EventType
+        from trellis.stores.sqlite.event_log import SQLiteEventLog
+
+        reset_extraction_failure_state()
+        monkeypatch.setenv("EXTRACTION_FAILURE_NO_SAMPLE", "1")
+        try:
+            log = SQLiteEventLog(Path(tmp_path) / "events.db")
+            service = EnrichmentService(
+                llm=_make_llm(VALID_JSON),
+                event_log=log,
+                model="test-model",
+            )
+
+            async def _boom(*_args, **_kwargs):
+                msg = "escape"
+                raise RuntimeError(msg)
+
+            service.enrich = _boom  # type: ignore[method-assign]
+
+            results = await service.batch_enrich(
+                [{"content": "x", "correlation_id": "trace-7"}],
+            )
+            assert results[0].success is False
+
+            events = log.get_events(event_type=EventType.EXTRACTION_FAILED)
+            assert len(events) == 1
+            payload = events[0].payload
+            assert payload["source_hint"] == "trace-7"
+            assert payload["correlation_id"] == "trace-7"
+            log.close()
+        finally:
+            reset_extraction_failure_state()
+
+    async def test_collector_exception_item_id_wins_over_correlation_id(
+        self, tmp_path, monkeypatch
+    ):
+        """B2: when both are present, ``item_id`` takes precedence for
+        ``source_hint`` and ``correlation_id`` still flows to its own
+        payload field (the analyzer can use either)."""
+        from pathlib import Path
+
+        from trellis.extract.telemetry import reset_extraction_failure_state
+        from trellis.stores.base.event_log import EventType
+        from trellis.stores.sqlite.event_log import SQLiteEventLog
+
+        reset_extraction_failure_state()
+        monkeypatch.setenv("EXTRACTION_FAILURE_NO_SAMPLE", "1")
+        try:
+            log = SQLiteEventLog(Path(tmp_path) / "events.db")
+            service = EnrichmentService(
+                llm=_make_llm(VALID_JSON),
+                event_log=log,
+                model="test-model",
+            )
+
+            async def _boom(*_args, **_kwargs):
+                msg = "escape"
+                raise RuntimeError(msg)
+
+            service.enrich = _boom  # type: ignore[method-assign]
+
+            results = await service.batch_enrich(
+                [
+                    {
+                        "content": "x",
+                        "item_id": "doc:99",
+                        "correlation_id": "trace-99",
+                    }
+                ],
+            )
+            assert results[0].success is False
+
+            events = log.get_events(event_type=EventType.EXTRACTION_FAILED)
+            assert len(events) == 1
+            payload = events[0].payload
+            assert payload["source_hint"] == "doc:99"
+            assert payload["correlation_id"] == "trace-99"
+            log.close()
+        finally:
+            reset_extraction_failure_state()

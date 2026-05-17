@@ -13,7 +13,7 @@ from pydantic import Field
 
 from trellis.core.base import TrellisModel
 from trellis.core.hashing import content_hash
-from trellis.extract.telemetry import emit_extraction_failure
+from trellis.extract.telemetry import ExtractionFailureKind, emit_extraction_failure
 from trellis.llm import LLMClient, LLMResponse, Message, TokenUsage
 
 if TYPE_CHECKING:
@@ -55,6 +55,15 @@ class EnrichmentResult(TrellisModel):
     #: to stamp) or on failure paths. See
     #: ``docs/design/adr-importance-score-freshness.md`` §3.5.
     importance_scored_at: datetime | None = None
+    #: Structured failure category mirroring the ``failure_kind`` slug on
+    #: the emitted ``EXTRACTION_FAILED`` event. Populated only on failure
+    #: paths (``success=False``); ``None`` on success. Downstream consumers
+    #: (e.g. :class:`~trellis.classify.classifiers.llm.LLMFacetClassifier`
+    #: ``_emit_degraded``) read this to forward the specific upstream
+    #: ``failure_kind`` instead of a generic ``enrichment_failure`` slug.
+    #: See ``docs/design/adr-extraction-failure-telemetry.md`` for the
+    #: closed set of legal slugs.
+    failure_kind: ExtractionFailureKind | None = None
 
 
 ENRICHMENT_SYSTEM_PROMPT = """\
@@ -199,7 +208,11 @@ class EnrichmentService:
                 error_excerpt=str(e),
             )
             logger.exception("enrichment_failed", title=title)
-            return EnrichmentResult(success=False, error=str(e))
+            return EnrichmentResult(
+                success=False,
+                error=str(e),
+                failure_kind="model_error",
+            )
         else:
             result = self._parse_response(response.content)
             result.raw_response = response.content
@@ -219,7 +232,31 @@ class EnrichmentService:
         concurrency: int = 3,
         include_summary: bool = True,
     ) -> list[EnrichmentResult]:
-        """Enrich multiple items in parallel with semaphore."""
+        """Enrich multiple items in parallel with semaphore.
+
+        Each ``item`` is a dict with these recognized keys:
+
+        * ``"content"`` (str, default ``""``) — body to enrich.
+        * ``"title"`` (str, default ``""``) — optional title for prompt.
+        * ``"tags"`` (list[str], default ``[]``) — caller-supplied tags.
+        * ``"include_summary"`` (bool, default = ``include_summary`` arg) —
+          per-item override of the summary instruction.
+        * ``"item_id"`` (str, optional) — stable upstream identifier for the
+          item. When the gather-collector emits ``EXTRACTION_FAILED`` for a
+          per-item escape (a raw ``Exception`` that bubbles past ``enrich``'s
+          broad-except into ``asyncio.gather(return_exceptions=True)``),
+          this value flows through as ``source_hint`` so downstream
+          clustering (``trellis_workers.code_authoring.clustering``) can
+          bucket the failure by source instead of dropping it for a missing
+          hint.
+        * ``"correlation_id"`` (str, optional) — fallback used when
+          ``item_id`` is absent; passed through as the
+          ``correlation_id`` field on the emitted event.
+
+        When neither ``item_id`` nor ``correlation_id`` is set, the
+        collector-error event is emitted with ``source_hint=None`` (the
+        prior behavior).
+        """
         semaphore = asyncio.Semaphore(concurrency)
 
         async def _with_sem(item: dict[str, Any]) -> EnrichmentResult:
@@ -237,7 +274,9 @@ class EnrichmentService:
         )
 
         normalized: list[EnrichmentResult] = []
-        for r in results:
+        # Iterate with index so we can correlate each result back to the
+        # originating ``items[i]`` for source-hint plumbing.
+        for index, r in enumerate(results):
             if isinstance(r, EnrichmentResult):
                 normalized.append(r)
                 continue
@@ -253,21 +292,41 @@ class EnrichmentService:
             exc = r if isinstance(r, BaseException) else None
             error_class = type(r).__name__ if exc is not None else "object"
             error_excerpt = str(r) if exc is not None else repr(r)
+            # Forward per-item identifiers when the caller supplied them so
+            # the downstream clustering pipeline
+            # (``trellis_workers.code_authoring.clustering`` ~line 158-164)
+            # sees a non-None ``source_hint`` and can bucket this failure
+            # instead of skipping it. ``item_id`` takes precedence over
+            # ``correlation_id`` for ``source_hint`` — the latter is also
+            # forwarded as the event's ``correlation_id`` field when set.
+            originating_item = items[index] if index < len(items) else {}
+            item_id = originating_item.get("item_id")
+            correlation_id = originating_item.get("correlation_id")
+            source_hint: str | None = item_id or correlation_id
             logger.warning(
                 "batch_enrich_collector_exception",
                 error_class=error_class,
                 error=error_excerpt[:200],
+                source_hint=source_hint,
             )
             emit_extraction_failure(
                 event_log=self._event_log,
                 extractor_id="EnrichmentService.batch_enrich",
                 extractor_tier="llm",
                 failure_kind="batch_collector_error",
+                source_hint=source_hint,
+                correlation_id=correlation_id,
                 error_class=error_class,
                 error_excerpt=error_excerpt,
                 model=self.model,
             )
-            normalized.append(EnrichmentResult(success=False, error=error_excerpt))
+            normalized.append(
+                EnrichmentResult(
+                    success=False,
+                    error=error_excerpt,
+                    failure_kind="batch_collector_error",
+                )
+            )
         return normalized
 
     def _parse_response(self, response: str) -> EnrichmentResult:
@@ -310,6 +369,7 @@ class EnrichmentService:
                         success=False,
                         error=f"Invalid JSON: {e}",
                         raw_response=response,
+                        failure_kind="parse_error",
                     )
             else:
                 # GRACEFUL-DEGRADATION: see sibling branch above.
@@ -330,6 +390,7 @@ class EnrichmentService:
                     success=False,
                     error=f"No JSON found: {e}",
                     raw_response=response,
+                    failure_kind="parse_error",
                 )
 
         tags = data.get("tags", [])
