@@ -64,6 +64,12 @@ SCENARIO_NAME = "schema_evolution_candidate_emergence"
 #: nodes with ``node_type="metric"``").
 NODE_COUNT = 1000
 
+#: Minimum required distinct extractors / distinct domains for a
+#: well-known-promotion candidate to qualify. Mirrors the seed thresholds
+#: documented on EXTRACTORS / DOMAINS above.
+_MIN_DISTINCT_EXTRACTORS = 2
+_MIN_DISTINCT_DOMAINS = 2
+
 #: Distinct extractor identifiers writing the same open-string type —
 #: must be ≥ the seed threshold of 2.
 EXTRACTORS: tuple[str, ...] = (
@@ -88,7 +94,9 @@ class _Stores:
     params: ParameterStore
 
 
-def _resolve_stores(registry: StoreRegistry | None) -> tuple[_Stores, TemporaryDirectory]:
+def _resolve_stores(
+    registry: StoreRegistry | None,
+) -> tuple[_Stores, TemporaryDirectory]:
     """Return isolated scenario stores in a tmp dir.
 
     Unlike the other eval scenarios (synthetic_traces, etc.) which
@@ -189,7 +197,7 @@ def _assert_candidate(candidate: WellKnownCandidate) -> list[Finding]:
                     message=f"{name}: expected {expected!r}, got {actual!r}",
                 )
             )
-    if len(set(candidate.distinct_extractors)) < 2:
+    if len(set(candidate.distinct_extractors)) < _MIN_DISTINCT_EXTRACTORS:
         findings.append(
             Finding(
                 severity="fail",
@@ -199,7 +207,7 @@ def _assert_candidate(candidate: WellKnownCandidate) -> list[Finding]:
                 ),
             )
         )
-    if len(set(candidate.distinct_domains)) < 2:
+    if len(set(candidate.distinct_domains)) < _MIN_DISTINCT_DOMAINS:
         findings.append(
             Finding(
                 severity="fail",
@@ -217,7 +225,7 @@ def run(registry: StoreRegistry | None = None) -> ScenarioReport:
     stores, tmp_holder = _resolve_stores(registry)
     findings: list[Finding] = []
     metrics: dict[str, float] = {}
-    try:  # noqa: PLR1702 — single try/finally for tmp cleanup
+    try:
         param_registry = _seed_registry(stores.params)
         _insert_synthetic_corpus(stores)
         metrics["nodes_inserted"] = float(NODE_COUNT)

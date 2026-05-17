@@ -13,13 +13,14 @@ import sys
 import tempfile
 from pathlib import Path
 
+# Force stdout to UTF-8 for Windows compatibility before any unicode-emitting import.
 sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
 
-from eval.corpora.github_trellis.loader import (
+from eval.corpora.github_trellis.loader import (  # noqa: E402,I001 — must follow stdout reconfigure
     build_pr_name_index,
     load_github_corpus,
 )
-from trellis.stores.registry import StoreRegistry
+from trellis.stores.registry import StoreRegistry  # noqa: E402
 
 
 SQLITE_REGISTRY_CONFIG = {

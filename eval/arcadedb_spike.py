@@ -49,11 +49,13 @@ import traceback
 from typing import Any
 
 from neo4j import GraphDatabase
-from neo4j.exceptions import ClientError, DatabaseError, Neo4jError
+from neo4j.exceptions import Neo4jError
 
 URI = "bolt://localhost:7687"
 USER = "root"
-PASSWORD = "playwithdata"
+PASSWORD = "playwithdata"  # noqa: S105 — local-only ArcadeDB spike credential, not a secret
+# Expected version count after upsert v1 then upsert v2 — one closed row + one open row.
+_SCD2_EXPECTED_VERSIONS = 2
 # ArcadeDB Bolt protocol uses a per-database session; the "database" in
 # the driver is the ArcadeDB database name. Default is "graph" for
 # the GremlinServerPlugin's default; we'll create our own.
@@ -82,7 +84,7 @@ def section(name: str) -> None:
     print(f"\n=== {name} ===")
 
 
-def main() -> int:
+def main() -> int:  # noqa: PLR0912,PLR0915 — single-file Phase-0 spike, linear probe-and-report flow
     print(f"Connecting to {URI} as {USER!r}...")
     driver = GraphDatabase.driver(URI, auth=(USER, PASSWORD))
     try:
@@ -100,13 +102,13 @@ def main() -> int:
     # session-level `database` selection assumes the database already
     # exists. We use the system-database "system" workaround OR call
     # the HTTP API. Try HTTP first since it's the documented path.
-    import urllib.error
-    import urllib.request
-    import base64
+    import base64  # noqa: PLC0415 — deferred to keep import block adjacent to the only call site
+    import urllib.error  # noqa: PLC0415
+    import urllib.request  # noqa: PLC0415
 
     auth_header = base64.b64encode(f"{USER}:{PASSWORD}".encode()).decode()
     req = urllib.request.Request(
-        f"http://localhost:2480/api/v1/server",
+        "http://localhost:2480/api/v1/server",
         data=(f'{{"command": "create database {DATABASE}"}}').encode(),
         headers={
             "Authorization": f"Basic {auth_header}",
@@ -115,7 +117,7 @@ def main() -> int:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=10) as resp:  # noqa: S310 — fixed local http:// URL to the ArcadeDB HTTP API
             ok("create database via HTTP", resp.read().decode()[:120])
     except urllib.error.HTTPError as exc:
         body = exc.read().decode() if exc.fp else ""
@@ -197,7 +199,8 @@ def main() -> int:
         ),
         (
             "CREATE INDEX alias_entity_idx",
-            "CREATE INDEX alias_entity_idx IF NOT EXISTS FOR (a:Alias) ON (a.entity_id)",
+            "CREATE INDEX alias_entity_idx IF NOT EXISTS "
+            "FOR (a:Alias) ON (a.entity_id)",
         ),
         (
             "CREATE INDEX alias_lookup_idx (composite)",
@@ -264,8 +267,13 @@ def main() -> int:
     )
 
     # Second insert — should close v1 and create v2
-    props_v2 = {**props_v1, "version_id": "v2", "properties_json": '{"k": "v2"}',
-                "valid_from": "2026-05-11T01:00:00", "updated_at": "2026-05-11T01:00:00"}
+    props_v2 = {
+        **props_v1,
+        "version_id": "v2",
+        "properties_json": '{"k": "v2"}',
+        "valid_from": "2026-05-11T01:00:00",
+        "updated_at": "2026-05-11T01:00:00",
+    }
     run(
         "upsert v2 (close v1, create v2)",
         upsert_cypher,
@@ -285,7 +293,11 @@ def main() -> int:
     if success and rows:
         history = [(r["v"], r["to"]) for r in rows]
         print(f"        history: {history}")
-        if len(history) == 2 and history[0][1] is not None and history[1][1] is None:
+        if (
+            len(history) == _SCD2_EXPECTED_VERSIONS
+            and history[0][1] is not None
+            and history[1][1] is None
+        ):
             ok("SCD-2 versions correctly closed + open")
         else:
             fail("SCD-2 invariant", AssertionError(f"unexpected: {history}"))
@@ -316,8 +328,10 @@ def main() -> int:
         "UNWIND $rows AS row CREATE (n:Node) SET n = row.props",
         rows=rows,
     )
-    success, recs = query("count after bulk insert",
-                          "MATCH (n:Node) WHERE n.valid_to IS NULL RETURN count(n) AS cnt")
+    success, recs = query(
+        "count after bulk insert",
+        "MATCH (n:Node) WHERE n.valid_to IS NULL RETURN count(n) AS cnt",
+    )
     if success:
         cnt = recs[0]["cnt"]
         print(f"        count = {cnt}")
@@ -335,8 +349,17 @@ def main() -> int:
     SET n = row.props
     SET n.created_at = created_at_carry
     """
-    rows_v2 = [{"node_id": f"bulk-{i}", "props": {**rows[i]["props"], "version_id": f"vbulk-{i}-r2",
-                "valid_from": "2026-05-11T02:00:00"}} for i in range(5)]
+    rows_v2 = [
+        {
+            "node_id": f"bulk-{i}",
+            "props": {
+                **rows[i]["props"],
+                "version_id": f"vbulk-{i}-r2",
+                "valid_from": "2026-05-11T02:00:00",
+            },
+        }
+        for i in range(5)
+    ]
     run("UNWIND cold path (close + create)", cold_cypher, rows=rows_v2)
 
     # ------------------------------------------------------------------
@@ -391,7 +414,9 @@ def main() -> int:
         print(f"        reachable from a (depth 3): {rows[0]['reachable']}")
 
     run("DETACH DELETE node a", "MATCH (n:Node {node_id: 'a'}) DETACH DELETE n")
-    success, rows = query("count remaining nodes", "MATCH (n:Node) RETURN count(n) AS cnt")
+    success, rows = query(
+        "count remaining nodes", "MATCH (n:Node) RETURN count(n) AS cnt"
+    )
     if success and rows:
         print(f"        remaining = {rows[0]['cnt']}")
 

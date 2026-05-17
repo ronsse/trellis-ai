@@ -9,18 +9,18 @@ SemanticSearch.
 Mapping per
 [`adr-graph-ontology.md`](../../../docs/design/adr-graph-ontology.md):
 
-| Source               | entity_type    | canonical              | schema_alignment       |
-|----------------------|----------------|------------------------|------------------------|
-| Merged PR            | ``github_pr``  | ``CreativeWork``       | ``schema.org/CreativeWork`` |
-| Author               | ``github_user``| ``Person`` / ``Agent`` | ``schema.org/Person``  |
+| Source    | entity_type     | canonical              | schema_alignment       |
+|-----------|-----------------|------------------------|------------------------|
+| Merged PR | ``github_pr``   | ``CreativeWork``       | ``schema.org/CreativeWork`` |
+| Author    | ``github_user`` | ``Person`` / ``Agent`` | ``schema.org/Person``  |
 
 Edges (canonical PROV-O verbs emitted directly — no loader-side
 canonicalization needed, unlike the dbt extractor):
 
-| From | Edge              | To   | Source                                     |
-|------|-------------------|------|--------------------------------------------|
+| From | Edge                | To   | Source                                   |
+|------|---------------------|------|------------------------------------------|
 | PR   | ``wasAttributedTo`` | User | ``author.login`` from snapshot           |
-| PR   | ``wasInformedBy``   | PR   | Cross-references (``#NNN``) parsed from body |
+| PR   | ``wasInformedBy``   | PR   | Cross-refs (``#NNN``) parsed from body   |
 
 Cross-reference parsing: PR bodies in this project frequently mention
 other PRs by ``#NNN``. The loader scans bodies with a regex, validates
@@ -70,6 +70,11 @@ DEFAULT_SNAPSHOT_PATH = Path(__file__).parent / "snapshot_raw.json"
 # carries the canonical mapping for downstream consumers.
 ENTITY_TYPE_PR = "github_pr"
 ENTITY_TYPE_USER = "github_user"
+
+# PR numbers below this are skipped from the bare-number lookup index —
+# single- and low-double-digit numbers collide too easily with line/section
+# references in PR bodies (e.g., "see #3" matching unrelated PR 3).
+_MIN_PR_NUMBER_FOR_NUMERIC_INDEX = 10
 
 # Edge kinds — re-exported from trellis.schemas.well_known so the
 # canonical-PROV-O claim in the module docstring is statically enforced
@@ -392,10 +397,11 @@ def _title_tokens_and_phrases(title: str) -> tuple[list[str], list[str]]:
     cleaned = re.sub(r"\\x[0-9a-f]{2}", " ", title.lower())
     cleaned = re.sub(r"[^a-z0-9\s\-_./]+", " ", cleaned)
     words = cleaned.split()
-    tokens: list[str] = []
-    for w in words:
-        if len(w) >= _MIN_TOKEN_LEN and w not in _PHRASE_STOPWORDS:
-            tokens.append(w)
+    tokens: list[str] = [
+        w
+        for w in words
+        if len(w) >= _MIN_TOKEN_LEN and w not in _PHRASE_STOPWORDS
+    ]
     phrases: list[str] = []
     for i in range(len(words) - 1):
         a, b = words[i], words[i + 1]
@@ -470,7 +476,10 @@ def build_pr_name_index(registry: StoreRegistry) -> dict[str, str]:
         node_type = node.get("node_type", "")
         if node_type == ENTITY_TYPE_PR:
             pr_num = properties.get("pr_number")
-            if pr_num is not None and pr_num >= 10:
+            if (
+                pr_num is not None
+                and pr_num >= _MIN_PR_NUMBER_FOR_NUMERIC_INDEX
+            ):
                 index.setdefault(str(pr_num), entity_id)
             title = properties.get("title", "")
             tokens, phrases = _title_tokens_and_phrases(title)

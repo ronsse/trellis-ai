@@ -14,11 +14,15 @@ import sys
 import tempfile
 from pathlib import Path
 
-# Force stdout to UTF-8 for Windows compatibility (parity with phase_a_smoke)
+# Force stdout to UTF-8 for Windows compatibility (parity with phase_a_smoke).
+# Must run before any non-stdlib import that may emit unicode at module-level.
 sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
 
-from eval.corpora.dbt_loader import load_jaffle_shop_corpus
-from trellis.stores.registry import StoreRegistry
+from eval.corpora.dbt_loader import load_jaffle_shop_corpus  # noqa: E402,I001 — must follow stdout reconfigure above
+from trellis.stores.registry import StoreRegistry  # noqa: E402
+
+# Description preview cutoff for sample-entity output.
+_DESCRIPTION_PREVIEW_CHARS = 80
 
 
 SQLITE_REGISTRY_CONFIG = {
@@ -35,7 +39,7 @@ SQLITE_REGISTRY_CONFIG = {
 }
 
 
-def main() -> int:
+def main() -> int:  # noqa: PLR0912 — top-level demo orchestrator, single linear flow
     with tempfile.TemporaryDirectory() as stores_dir, StoreRegistry(
         config=SQLITE_REGISTRY_CONFIG, stores_dir=Path(stores_dir)
     ) as registry:
@@ -75,7 +79,12 @@ def main() -> int:
                 desc = (node.get("properties") or {}).get("description", "")
                 print(f"  {entity_id}:")
                 print(f"    type: {node.get('node_type')}")
-                print(f"    description: {desc[:80]}{'...' if len(desc) > 80 else ''}")
+                truncated = (
+                    "..." if len(desc) > _DESCRIPTION_PREVIEW_CHARS else ""
+                )
+                print(
+                    f"    description: {desc[:_DESCRIPTION_PREVIEW_CHARS]}{truncated}"
+                )
             else:
                 print(f"  {entity_id}: NOT FOUND")
         print()
@@ -107,7 +116,10 @@ def main() -> int:
             "model.jaffle_shop.customers", direction="outgoing"
         )
         for e in customers_edges:
-            print(f"  {e.get('source_id')} -[{e.get('edge_type')}]-> {e.get('target_id')}")
+            print(
+                f"  {e.get('source_id')} -[{e.get('edge_type')}]-> "
+                f"{e.get('target_id')}"
+            )
         print()
 
         # Document store check.

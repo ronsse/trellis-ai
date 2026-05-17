@@ -49,6 +49,10 @@ from trellis_workers.extract import DbtManifestExtractor
 
 logger = structlog.get_logger(__name__)
 
+# Minimum dot count in a dbt test ``entity_id`` for ``split(".")[-2]``
+# (the segment carrying the test-type prefix) to be safe to index.
+_DBT_TEST_ID_MIN_DOTS = 2
+
 
 DEFAULT_MANIFEST_PATH = (
     Path(__file__).parent / "jaffle_shop" / "manifest.json"
@@ -271,7 +275,9 @@ def _index_descriptions(
     document_store = registry.knowledge.document_store
     indexed = 0
     for entity in result.entities:
-        description = entity.properties.get("description", "") if entity.properties else ""
+        description = (
+            entity.properties.get("description", "") if entity.properties else ""
+        )
         if not description:
             continue
         # Tag content with signal_quality="standard" so PackBuilder's
@@ -459,7 +465,13 @@ def build_category_index(
                 # hash, not the test name. In dbt manifests the test
                 # name precedes the hash so the second-to-last segment
                 # carries the prefix; check both.
-                for candidate in (short, entity_id.split(".")[-2] if entity_id.count(".") >= 2 else ""):
+                has_test_type_segment = (
+                    entity_id.count(".") >= _DBT_TEST_ID_MIN_DOTS
+                )
+                test_type_segment = (
+                    entity_id.split(".")[-2] if has_test_type_segment else ""
+                )
+                for candidate in (short, test_type_segment):
                     if candidate.startswith(prefix + "_") or candidate == prefix:
                         test_type_buckets.setdefault(prefix, []).append(entity_id)
                         break
@@ -680,9 +692,9 @@ def extract_category_seeds(
 @functools.lru_cache(maxsize=4096)
 def _word_boundary_pattern(name: str) -> re.Pattern[str]:
     """Cached compile of ``\\b{escaped(name)}\\b`` for the lower-cased
-    short-name. Without this, the github name_index (1154 entries) ×
-    rounds × scenarios drives ~6-figure recompiles per session at
-    ~10µs each. The cache is keyed on the lower-cased short-name so
+    short-name. Without this, the github name_index (1154 entries) x
+    rounds x scenarios drives ~6-figure recompiles per session at
+    ~10us each. The cache is keyed on the lower-cased short-name so
     a stable name_index pays at most once.
 
     The cache is process-global. This is sound across corpora because

@@ -29,8 +29,8 @@ from pathlib import Path
 # don't crash on Windows' default cp1252. Has to happen before any print.
 sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
 
-from eval.scenarios.agent_loop_convergence_real_llm.scenario import run as run_scenario
-from trellis.stores.registry import StoreRegistry
+from eval.scenarios.agent_loop_convergence_real_llm.scenario import run as run_scenario  # noqa: E402,I001 — must follow stdout reconfigure above
+from trellis.stores.registry import StoreRegistry  # noqa: E402
 
 SQLITE_REGISTRY_CONFIG = {
     "knowledge": {

@@ -26,11 +26,11 @@ fix: ## Auto-fix everything pre-commit can fix (ruff format + ruff --fix + white
 	@echo "Any remaining failures above need manual attention."
 
 lint: ## Run linting
-	ruff check src/ tests/
+	ruff check src/ tests/ eval/
 
 format: ## Format code
-	ruff format src/ tests/
-	ruff check --fix src/ tests/
+	ruff format src/ tests/ eval/
+	ruff check --fix src/ tests/ eval/
 
 typecheck: ## Run type checking
 	mypy src/
