@@ -20,12 +20,21 @@ from eval.scenarios._convergence_common import (
     _NineAxisRound,
 )
 from eval.scenarios.program_convergence.scenario import (
+    DEFAULT_ADVISORY_HIT_LOOKBACK_ROUNDS,
     DEFAULT_ANALYZER_CADENCE,
     SCENARIO_NAME,
     ProgramConvergenceError,
+    _compute_advisory_hit_rate,
+    _RoundResult,
     run,
 )
 
+from trellis.schemas.advisory import (
+    Advisory,
+    AdvisoryCategory,
+    AdvisoryEvidence,
+)
+from trellis.stores.advisory_store import AdvisoryStore
 from trellis.stores.registry import StoreRegistry
 
 
@@ -76,10 +85,7 @@ def test_run_against_sqlite_emits_all_nine_axes(
             assert key in report.metrics, f"missing metric {key!r}"
 
     # Composite finding must carry every axis delta in detail.
-    composite = next(
-        f for f in report.findings
-        if "multi-axis summary" in f.message
-    )
+    composite = next(f for f in report.findings if "multi-axis summary" in f.message)
     assert set(composite.detail["axis_deltas"]) == set(NINE_AXIS_LABELS)
 
 
@@ -103,12 +109,8 @@ def test_run_is_deterministic(sqlite_registry: StoreRegistry, tmp_path: Path) ->
     with StoreRegistry(config=config, stores_dir=tmp_path / "second") as reg2:
         rep2 = run(reg2, seed=7, rounds=6, traces_per_domain=3)
 
-    axis_metrics_1 = {
-        k: v for k, v in rep1.metrics.items() if k.startswith("axis.")
-    }
-    axis_metrics_2 = {
-        k: v for k, v in rep2.metrics.items() if k.startswith("axis.")
-    }
+    axis_metrics_1 = {k: v for k, v in rep1.metrics.items() if k.startswith("axis.")}
+    axis_metrics_2 = {k: v for k, v in rep2.metrics.items() if k.startswith("axis.")}
     assert axis_metrics_1 == axis_metrics_2
 
 
@@ -297,3 +299,160 @@ def test_axis_g_emits_candidate_before_round_thirty(
         f"axis G first emission must be before round 30, got round "
         f"{first_emit.round_index}"
     )
+
+
+# ---------------------------------------------------------------------------
+# advisory_hit_lookback_rounds kwarg coverage (Unit A2)
+# ---------------------------------------------------------------------------
+
+
+def _make_round(*, round_index: int, domain: str, success: bool) -> _RoundResult:
+    """Build a minimally-populated _RoundResult for axis-C slicing tests.
+
+    Only ``round_index``, ``domain`` and ``success`` matter for
+    ``_compute_advisory_hit_rate``; the other axis fields are stubbed to
+    zero so the dataclass instantiates cleanly.
+    """
+    return _RoundResult(
+        round_index=round_index,
+        domain=domain,
+        pack_id=f"pack:{round_index}",
+        items_served=0,
+        items_referenced=0,
+        coverage_fraction=0.0,
+        weighted_score=0.0,
+        success=success,
+        axis_pack_quality=0.0,
+        axis_useful_item_fraction=0.0,
+        axis_advisory_hit_rate=0.0,
+        axis_observation_enrichment=0.0,
+        axis_provenance_queryability=0.0,
+        axis_extraction_failure_clusters=0.0,
+        axis_schema_evolution_candidates=0.0,
+        axis_meta_trace_density=0.0,
+        axis_self_authored_proposals=0.0,
+    )
+
+
+def _make_advisory(scope: str) -> Advisory:
+    """Build a minimal active Advisory scoped to ``scope``.
+
+    Values are placeholders — ``_compute_advisory_hit_rate`` only reads
+    ``scope`` and ``status`` (via ``AdvisoryStore.list()``'s active-only
+    filter), not category / confidence / evidence.
+    """
+    return Advisory(
+        category=AdvisoryCategory.ENTITY,
+        confidence=0.9,
+        message=f"test advisory for {scope}",
+        scope=scope,
+        evidence=AdvisoryEvidence(
+            sample_size=10,
+            success_rate_with=0.8,
+            success_rate_without=0.4,
+            effect_size=0.4,
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("lookback", "expected_hit_rate"),
+    [
+        # Last 3 rounds are all failures on a different scope — the
+        # "finance" advisory has no successful recent rounds in scope,
+        # so axis C drops to 0.0.
+        (3, 0.0),
+        # 10-round lookback pulls in rounds 0-6 (all finance successes),
+        # so the advisory's scope appears in success_refs and the rate
+        # climbs to 1.0. Same advisory, same round history — only the
+        # window changed. This is the proof the kwarg flows through.
+        (10, 1.0),
+    ],
+)
+def test_compute_advisory_hit_rate_respects_lookback(
+    tmp_path: Path,
+    lookback: int,
+    expected_hit_rate: float,
+) -> None:
+    """Axis C must read only the last ``lookback`` rounds.
+
+    Builds a 10-round history where the first 7 rounds succeed on the
+    advisory's scope and the trailing 3 fail on a different scope. With
+    a short window the advisory looks dead (hit_rate=0.0); with a long
+    window it looks healthy (hit_rate=1.0). The two values must differ,
+    which proves :func:`run` is not silently ignoring the kwarg.
+    """
+    advisory_store = AdvisoryStore(tmp_path / "advisories.json")
+    advisory_store.put(_make_advisory(scope="finance"))
+
+    # 10-round synthetic history. Rounds 0-6: finance + success.
+    # Rounds 7-9: health + failure. Slicing with [-lookback:] picks the
+    # tail, so a 3-round window sees only failures.
+    full_history = [
+        _make_round(round_index=i, domain="finance", success=True) for i in range(7)
+    ] + [
+        _make_round(round_index=i, domain="health", success=False) for i in range(7, 10)
+    ]
+
+    sliced = full_history[-lookback:]
+    hit_rate = _compute_advisory_hit_rate(
+        advisory_store=advisory_store,
+        recent_rounds=sliced,
+    )
+    assert hit_rate == pytest.approx(expected_hit_rate), (
+        f"lookback={lookback} should yield hit_rate={expected_hit_rate}; "
+        f"got {hit_rate}. Sliced rounds: "
+        f"{[(r.round_index, r.domain, r.success) for r in sliced]}"
+    )
+
+
+def test_run_accepts_advisory_hit_lookback_rounds_kwarg(
+    sqlite_registry: StoreRegistry,
+) -> None:
+    """``run()`` accepts the new kwarg and completes successfully.
+
+    Smoke test only — the slicing math is covered by the parametrized
+    test above. This locks in the public surface so a future refactor
+    that drops the kwarg from ``run()`` trips a clear failure.
+    """
+    report = run(
+        sqlite_registry,
+        seed=0,
+        rounds=4,
+        feedback_batch_size=4,
+        analyzer_cadence=4,
+        traces_per_domain=2,
+        advisory_hit_lookback_rounds=3,
+    )
+    assert report.status == "pass"
+
+
+def test_run_rejects_invalid_advisory_hit_lookback_rounds(
+    sqlite_registry: StoreRegistry,
+) -> None:
+    """``advisory_hit_lookback_rounds`` must be >= 1; zero raises loudly.
+
+    POC directive: loud on misuse. ``[-0:]`` slices to the full list
+    and would silently change axis C's semantics, so we refuse it at
+    entry rather than letting the bug ride.
+    """
+    with pytest.raises(ValueError, match="advisory_hit_lookback_rounds"):
+        run(
+            sqlite_registry,
+            seed=0,
+            rounds=2,
+            feedback_batch_size=2,
+            analyzer_cadence=2,
+            traces_per_domain=2,
+            advisory_hit_lookback_rounds=0,
+        )
+
+
+def test_default_advisory_hit_lookback_rounds_matches_prior_constant() -> None:
+    """Backwards-compat anchor — default must stay at 5 after the refactor.
+
+    Prior to Unit A2 this lived as a module-level ``_ADVISORY_HIT_LOOKBACK_ROUNDS = 5``
+    constant; the kwarg default must match so existing callers see no
+    behavior change.
+    """
+    assert DEFAULT_ADVISORY_HIT_LOOKBACK_ROUNDS == 5

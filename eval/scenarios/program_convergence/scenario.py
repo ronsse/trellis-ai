@@ -158,7 +158,11 @@ _PROVENANCE_PROBE_CONFIDENCE: float = 0.5
 # a successful round in the current batch. Looser than the prose
 # definition in the plan; tight enough that a misfiring advisory drops
 # the rate. See ``_compute_advisory_hit_rate``.
-_ADVISORY_HIT_LOOKBACK_ROUNDS = 5
+#
+# Exposed as the default for ``run(advisory_hit_lookback_rounds=...)``;
+# operators tuning axis C sensitivity (longer windows smooth the
+# signal, shorter windows make it twitchier) pass an explicit value.
+DEFAULT_ADVISORY_HIT_LOOKBACK_ROUNDS = 5
 
 #: Seed for the per-round RNG. Combined with the ``seed`` kwarg so
 #: re-running with the same seed produces byte-identical numbers (POC
@@ -781,6 +785,7 @@ def _execute_round(
     analyzer_cadence: int,
     feedback_batch_size: int,
     advisory_min_sample_size: int,
+    advisory_hit_lookback_rounds: int,
 ) -> None:
     """One round of context build → grade → feedback → axis capture.
 
@@ -819,7 +824,7 @@ def _execute_round(
 
     axis_e = _probe_provenance_queryability(registry, seed_entities=seed_entities)
     axis_f = _count_open_failure_clusters(registry)
-    lookback = round_results[-_ADVISORY_HIT_LOOKBACK_ROUNDS:]
+    lookback = round_results[-advisory_hit_lookback_rounds:]
     axis_c = _compute_advisory_hit_rate(
         advisory_store=advisory_store,
         recent_rounds=lookback,
@@ -880,8 +885,22 @@ def _execute_round(
 # ---------------------------------------------------------------------------
 
 
-def _validate_run_kwargs(*, rounds: int, feedback_batch_size: int) -> None:
+def _validate_run_kwargs(
+    *,
+    rounds: int,
+    feedback_batch_size: int,
+    advisory_hit_lookback_rounds: int,
+) -> None:
     _validate_basic_kwargs(rounds=rounds, feedback_batch_size=feedback_batch_size)
+    # POC directive: loud on misuse. Zero/negative lookback would
+    # silently degenerate ``round_results[-N:]`` into the full list
+    # (``-0`` slices to everything) and quietly change axis C's shape.
+    if advisory_hit_lookback_rounds < 1:
+        msg = (
+            "advisory_hit_lookback_rounds must be >= 1; got "
+            f"{advisory_hit_lookback_rounds}"
+        )
+        raise ValueError(msg)
 
 
 def _render_chart(stats: object, *, invocation_id: str) -> Path:
@@ -921,6 +940,7 @@ def run(
     success_coverage_threshold: float = DEFAULT_SUCCESS_COVERAGE_THRESHOLD,
     advisory_min_sample_size: int = DEFAULT_ADVISORY_MIN_SAMPLE_SIZE,
     analyzer_cadence: int = DEFAULT_ANALYZER_CADENCE,
+    advisory_hit_lookback_rounds: int = DEFAULT_ADVISORY_HIT_LOOKBACK_ROUNDS,
     render_chart: bool = False,
     invocation_id: str | None = None,
 ) -> ScenarioReport:
@@ -942,8 +962,18 @@ def run(
     the same identifier used as the per-run ``run_id`` for feedback
     file partitioning. Operators driving the scenario from a parent
     harness may override to align with their own ID space.
+
+    ``advisory_hit_lookback_rounds`` (default 5) sets the rolling
+    window over which :func:`_compute_advisory_hit_rate` searches for
+    successful rounds that align with active advisory scopes. Smaller
+    values make axis C twitchier (a single failed round can drop the
+    rate to zero); larger values smooth across runs. Must be >= 1.
     """
-    _validate_run_kwargs(rounds=rounds, feedback_batch_size=feedback_batch_size)
+    _validate_run_kwargs(
+        rounds=rounds,
+        feedback_batch_size=feedback_batch_size,
+        advisory_hit_lookback_rounds=advisory_hit_lookback_rounds,
+    )
 
     # Verify every axis substrate is reachable BEFORE round 0 — better
     # to fail loud at setup than to emit partial signal for 30 rounds.
@@ -1016,6 +1046,7 @@ def run(
                 analyzer_cadence=analyzer_cadence,
                 feedback_batch_size=feedback_batch_size,
                 advisory_min_sample_size=advisory_min_sample_size,
+                advisory_hit_lookback_rounds=advisory_hit_lookback_rounds,
             )
     finally:
         feedback_dir_holder.cleanup()
