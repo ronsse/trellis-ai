@@ -58,7 +58,8 @@ async def main() -> int:
     embed_ms = int((time.monotonic() - started) * 1000)
     print(f"  model:     {embed_response.model}")
     print(f"  dimension: {len(embed_response.embedding)}")
-    print(f"  first_3:   {[round(float(x), 4) for x in embed_response.embedding[:3]]}")
+    first_3 = [round(float(x), 4) for x in embed_response.embedding[:3]]
+    print(f"  first_3:   {first_3}")
     print(f"  usage:     {embed_response.usage}")
     print(f"  latency:   {embed_ms}ms")
     print()
@@ -76,7 +77,10 @@ async def main() -> int:
     print(f"  count:     {len(batch_response)}")
     print(f"  dim/each:  {len(batch_response[0].embedding)}")
     print(f"  usage[0]:  {batch_response[0].usage}")
-    print(f"  usage[1]:  {batch_response[1].usage}  (None expected — batch attributes total to [0])")
+    print(
+        f"  usage[1]:  {batch_response[1].usage}  "
+        "(None expected — batch attributes total to [0])"
+    )
     print(f"  latency:   {batch_ms}ms")
     print()
 
@@ -90,7 +94,10 @@ async def main() -> int:
         )
         return 1
 
-    print("All Trellis client wrappers PASS. Phase A factories ready to wire into scenarios.")
+    print(
+        "All Trellis client wrappers PASS. "
+        "Phase A factories ready to wire into scenarios."
+    )
     return 0
 
 

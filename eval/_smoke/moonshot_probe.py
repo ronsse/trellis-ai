@@ -55,7 +55,7 @@ def _present(s: str | None) -> str:
 
 async def probe_chat() -> dict[str, Any]:
     """Single small chat call. Validates auth + endpoint + model availability."""
-    from openai import AsyncOpenAI
+    from openai import AsyncOpenAI  # noqa: PLC0415,I001 — deferred so the probe stays importable without the [llm-openai] extra installed
 
     api_key = os.environ.get("MOONSHOT_API_KEY", "")
     if not api_key:
@@ -94,7 +94,7 @@ async def probe_chat() -> dict[str, Any]:
 
 async def probe_embedding(model: str) -> dict[str, Any]:
     """Single small embedding call. Validates the embeddings endpoint exists."""
-    from openai import AsyncOpenAI
+    from openai import AsyncOpenAI  # noqa: PLC0415,I001 — deferred so the probe stays importable without the [llm-openai] extra installed
 
     api_key = os.environ.get("MOONSHOT_API_KEY", "")
     if not api_key:
@@ -128,7 +128,7 @@ async def probe_embedding(model: str) -> dict[str, Any]:
 
 async def probe_openai_embedding_fallback() -> dict[str, Any]:
     """OpenAI text-embedding-3-small fallback — only run if Moonshot embeddings fail."""
-    from openai import AsyncOpenAI
+    from openai import AsyncOpenAI  # noqa: PLC0415,I001 — deferred so the probe stays importable without the [llm-openai] extra installed
 
     api_key = os.environ.get("OPENAI_API_KEY", "")
     if not api_key:
@@ -194,18 +194,31 @@ async def main() -> int:
 
     print()
     print("=== Summary ===")
-    print(f"  Chat (Moonshot {CHAT_MODEL}): {'PASS' if chat_result.get('ok') else 'FAIL'}")
+    chat_status = "PASS" if chat_result.get("ok") else "FAIL"
+    print(f"  Chat (Moonshot {CHAT_MODEL}): {chat_status}")
     if moonshot_embed_ok:
-        print(f"  Embedding (Moonshot, dim={moonshot_embed_dim}): PASS — use Moonshot for both")
-        print("  Decision: Phase A uses Moonshot for chat AND embeddings (single provider).")
+        print(
+            f"  Embedding (Moonshot, dim={moonshot_embed_dim}): "
+            "PASS — use Moonshot for both"
+        )
+        print(
+            "  Decision: Phase A uses Moonshot for chat AND embeddings "
+            "(single provider)."
+        )
         return 0 if chat_result.get("ok") else 1
     fallback_ok = "fallback_result" in dir() and fallback_result.get("ok")
     print("  Embedding (Moonshot): FAIL")
     print(f"  Embedding (OpenAI fallback): {'PASS' if fallback_ok else 'FAIL'}")
     if fallback_ok:
-        print("  Decision: Phase A uses Moonshot for chat, OpenAI for embeddings (split provider).")
+        print(
+            "  Decision: Phase A uses Moonshot for chat, OpenAI for "
+            "embeddings (split provider)."
+        )
         return 0 if chat_result.get("ok") else 1
-    print("  Decision: BOTH embedding paths failed. Need to investigate before Phase A.")
+    print(
+        "  Decision: BOTH embedding paths failed. "
+        "Need to investigate before Phase A."
+    )
     return 1
 
 

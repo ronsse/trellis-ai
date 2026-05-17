@@ -69,7 +69,7 @@ GROUND_TRUTH_QUERIES: list[GitHubPRQuery] = [
         difficulty="medium",
         skill="topic_content",
         rationale=(
-            "PR #16 'Graph ontology Phase 0–2, Neo4j backends, canonical "
+            "PR #16 'Graph ontology Phase 0-2, Neo4j backends, canonical "
             "DSL, e2e suite' covers this verbatim. Distractors include "
             "ADR PRs (#3, #4, #5) which are also ontology-shaped but "
             "earlier and narrower in scope."

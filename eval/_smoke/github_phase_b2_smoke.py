@@ -3,7 +3,8 @@
 Run via::
 
     op run --env-file=.env -- uv run python -m eval._smoke.github_phase_b2_smoke
-    op run --env-file=.env -- uv run python -m eval._smoke.github_phase_b2_smoke --rounds 100 --feedback-batch-size 10
+    op run --env-file=.env -- uv run python -m eval._smoke.github_phase_b2_smoke \\
+        --rounds 100 --feedback-batch-size 10
 
 Cost: under $0.001 per run (embeddings only).
 """
@@ -17,10 +18,11 @@ import tempfile
 from dataclasses import asdict
 from pathlib import Path
 
+# Force stdout to UTF-8 for Windows compatibility before any unicode-emitting import.
 sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
 
-from eval.scenarios.github_corpus_convergence.scenario import run as run_scenario
-from trellis.stores.registry import StoreRegistry
+from eval.scenarios.github_corpus_convergence.scenario import run as run_scenario  # noqa: E402,I001 — must follow stdout reconfigure
+from trellis.stores.registry import StoreRegistry  # noqa: E402
 
 
 SQLITE_REGISTRY_CONFIG = {

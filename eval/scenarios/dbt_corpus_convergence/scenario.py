@@ -400,7 +400,7 @@ def _per_difficulty_round_metrics(
 # ---------------------------------------------------------------------------
 
 
-def run(  # noqa: PLR0915 — orchestrates many stages, single coherent run flow
+def run(  # noqa: PLR0915,PLR0912 — orchestrates many stages, single coherent run flow
     registry: StoreRegistry,
     *,
     seed: int = 0,

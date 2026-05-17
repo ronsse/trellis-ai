@@ -127,7 +127,9 @@ class _Telemetry:
 
     calls: list[_CallRecord] = field(default_factory=list)
 
-    def record_chat(self, model: str, in_tok: int, out_tok: int, latency_ms: int) -> None:
+    def record_chat(
+        self, model: str, in_tok: int, out_tok: int, latency_ms: int
+    ) -> None:
         self.calls.append(_CallRecord("chat", model, in_tok, out_tok, latency_ms))
 
     def record_embed(self, model: str, in_tok: int, latency_ms: int) -> None:
@@ -197,7 +199,9 @@ _SUMMARY_SYSTEM_PROMPT = (
 )
 
 
-def _build_summary_prompt(entity: str, domain: str, intents: list[str]) -> list[Message]:
+def _build_summary_prompt(
+    entity: str, domain: str, intents: list[str]
+) -> list[Message]:
     """Build the messages list for one entity-summary generation."""
     sample_intents = "; ".join(intents[:5]) if intents else "(no sampled intents)"
     user = (
@@ -457,7 +461,7 @@ def _build_pack_with_semantic(builder: PackBuilder, query: EvalQuery) -> Pack:
 # ---------------------------------------------------------------------------
 
 
-def run(
+def run(  # noqa: PLR0915 — top-level orchestrator; one coherent run flow, parity with the synthetic baseline scenario
     registry: StoreRegistry,
     *,
     seed: int = 0,
