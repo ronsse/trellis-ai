@@ -270,3 +270,70 @@ def test_png_dimensions_match_configured_figsize(tmp_path: Path) -> None:
     width, height = struct.unpack(">II", header[16:24])
     assert width == 1500
     assert height == 1100
+
+
+def test_render_honors_custom_figsize_kwarg(tmp_path: Path) -> None:
+    """A non-default ``figsize`` overrides ``_FIGSIZE_INCHES`` end-to-end.
+
+    Locks in the B4 contract: caller-supplied ``figsize`` (in inches)
+    multiplied by the active ``dpi`` reaches the PNG header. With
+    ``figsize=(10.0, 7.5)`` and ``dpi=100``, the IHDR chunk reports
+    1000 x 750 pixels.
+    """
+    stats = _build_full_stats(rounds=4)
+    output_path = render_program_convergence_chart(
+        stats,
+        output_dir=tmp_path,
+        invocation_id="custom-figsize",
+        timestamp=datetime(2026, 5, 15, 16, 0, 0, tzinfo=UTC),
+        figsize=(10.0, 7.5),
+    )
+    header = output_path.read_bytes()[:24]
+    width, height = struct.unpack(">II", header[16:24])
+    assert width == 1000
+    assert height == 750
+
+
+def test_render_honors_custom_dpi_kwarg(tmp_path: Path) -> None:
+    """A non-default ``dpi`` scales the PNG pixel dimensions.
+
+    Same figsize (15.0, 11.0) at dpi=50 yields 750 x 550 pixels —
+    half the default at dpi=100. Proves ``dpi`` flows into both
+    ``plt.subplots`` and ``fig.savefig``.
+    """
+    stats = _build_full_stats(rounds=4)
+    output_path = render_program_convergence_chart(
+        stats,
+        output_dir=tmp_path,
+        invocation_id="custom-dpi",
+        timestamp=datetime(2026, 5, 15, 17, 0, 0, tzinfo=UTC),
+        dpi=50,
+    )
+    header = output_path.read_bytes()[:24]
+    width, height = struct.unpack(">II", header[16:24])
+    assert width == 750
+    assert height == 550
+
+
+def test_render_default_figsize_and_dpi_unchanged(tmp_path: Path) -> None:
+    """``figsize=None`` + ``dpi=None`` preserve the legacy hardcoded values.
+
+    Backwards-compat anchor: callers that don't pass the new kwargs
+    must keep getting 1500 x 1100 pixel PNGs. Same shape as
+    ``test_png_dimensions_match_configured_figsize`` but with the
+    kwargs explicitly set to ``None`` rather than omitted, to lock in
+    the None-means-default contract.
+    """
+    stats = _build_full_stats(rounds=4)
+    output_path = render_program_convergence_chart(
+        stats,
+        output_dir=tmp_path,
+        invocation_id="default-kwargs",
+        timestamp=datetime(2026, 5, 15, 18, 0, 0, tzinfo=UTC),
+        figsize=None,
+        dpi=None,
+    )
+    header = output_path.read_bytes()[:24]
+    width, height = struct.unpack(">II", header[16:24])
+    assert width == 1500
+    assert height == 1100

@@ -25,6 +25,7 @@ from eval.scenarios.program_convergence.scenario import (
     SCENARIO_NAME,
     ProgramConvergenceError,
     _compute_advisory_hit_rate,
+    _default_chart_output_dir,
     _RoundResult,
     run,
 )
@@ -198,19 +199,16 @@ _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 def test_run_with_render_chart_writes_png_and_sets_metric(
     sqlite_registry: StoreRegistry,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """``render_chart=True`` produces a PNG, surfaces it on the report.
 
-    The helper writes to ``Path("eval/reports")`` (CWD-relative), so we
-    ``chdir`` to ``tmp_path`` for the duration of the run and assert the
-    PNG lands under ``tmp_path/eval/reports/``. Also confirms the
-    in-memory ``_MultiAxisStats`` is attached to
+    Passes an explicit ``chart_output_dir=tmp_path`` to keep the test
+    isolated from the repo-anchored default — that default behavior is
+    locked in by ``test_render_chart_default_output_dir_anchors_to_file``.
+    Also confirms the in-memory ``_MultiAxisStats`` is attached to
     ``ScenarioReport.convergence_stats`` and excluded from
     ``to_dict()``.
     """
-    monkeypatch.chdir(tmp_path)
-
     report = run(
         sqlite_registry,
         seed=0,
@@ -219,6 +217,7 @@ def test_run_with_render_chart_writes_png_and_sets_metric(
         analyzer_cadence=4,
         traces_per_domain=2,
         render_chart=True,
+        chart_output_dir=tmp_path,
     )
 
     assert report.status == "pass"
@@ -228,11 +227,10 @@ def test_run_with_render_chart_writes_png_and_sets_metric(
         f"got {chart_path_str!r}"
     )
     chart_path = Path(chart_path_str)
-    # _render_chart writes to ``Path("eval/reports")`` (CWD-relative).
-    assert chart_path == Path("eval/reports") / chart_path.name
-    written = tmp_path / chart_path
-    assert written.exists(), f"expected PNG at {written}, found nothing"
-    assert written.read_bytes().startswith(_PNG_SIGNATURE)
+    # Caller-supplied output_dir flows through the helper untouched.
+    assert chart_path.parent == tmp_path
+    assert chart_path.exists(), f"expected PNG at {chart_path}, found nothing"
+    assert chart_path.read_bytes().startswith(_PNG_SIGNATURE)
 
     # convergence_stats is the in-memory _MultiAxisStats payload, set
     # whether or not the chart was rendered. ``to_dict()`` strips it
@@ -456,3 +454,159 @@ def test_default_advisory_hit_lookback_rounds_matches_prior_constant() -> None:
     behavior change.
     """
     assert DEFAULT_ADVISORY_HIT_LOOKBACK_ROUNDS == 5
+
+
+# ---------------------------------------------------------------------------
+# Chart kwargs + default-output-dir anchor (Units B4 + B5)
+# ---------------------------------------------------------------------------
+
+
+def test_default_chart_output_dir_is_absolute_and_anchored() -> None:
+    """``_default_chart_output_dir`` must be absolute and end in ``eval/reports``.
+
+    This is the B5 contract: the legacy ``Path("eval/reports")`` literal
+    was CWD-relative, so an operator running the scenario from a
+    nested directory wrote the PNG into ``<nested>/eval/reports/``.
+    The anchor flips that to an absolute path under the repo root.
+    """
+    resolved = _default_chart_output_dir()
+    assert resolved.is_absolute(), (
+        f"default output dir must be absolute (anchored against __file__); "
+        f"got {resolved}"
+    )
+    assert resolved.parts[-2:] == ("eval", "reports"), (
+        f"default output dir must end in eval/reports; got {resolved}"
+    )
+
+
+def test_default_chart_output_dir_does_not_track_cwd(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Changing CWD must NOT change the default output dir.
+
+    Before B5, the helper used ``Path("eval/reports")`` which silently
+    re-anchored when the operator ``chdir``-ed. Lock in the new
+    behavior: the resolved default is identical regardless of CWD.
+    """
+    before = _default_chart_output_dir()
+    monkeypatch.chdir(tmp_path)
+    after = _default_chart_output_dir()
+    assert before == after, (
+        f"default chart output_dir must not depend on CWD; before={before} "
+        f"after={after}"
+    )
+    # And the anchored path must not live inside ``tmp_path``.
+    assert tmp_path not in after.parents, (
+        f"default output dir leaked CWD ({tmp_path}); resolved to {after}"
+    )
+
+
+def test_run_render_chart_custom_output_dir_kwarg(
+    sqlite_registry: StoreRegistry,
+    tmp_path: Path,
+) -> None:
+    """``chart_output_dir=`` overrides the repo-anchored default.
+
+    Operators wanting a different drop location (CI artifact dir,
+    slide-deck folder, etc.) pass it through ``run()``. This locks in
+    that the kwarg actually flows into the renderer.
+    """
+    custom_dir = tmp_path / "ci_artifacts" / "convergence"
+    assert not custom_dir.exists()
+
+    report = run(
+        sqlite_registry,
+        seed=0,
+        rounds=4,
+        feedback_batch_size=4,
+        analyzer_cadence=4,
+        traces_per_domain=2,
+        render_chart=True,
+        chart_output_dir=custom_dir,
+    )
+
+    chart_path_str = report.metrics["chart_path"]
+    assert isinstance(chart_path_str, str)
+    chart_path = Path(chart_path_str)
+    assert chart_path.parent == custom_dir
+    assert chart_path.exists()
+    assert chart_path.read_bytes().startswith(_PNG_SIGNATURE)
+
+
+def test_run_render_chart_custom_figsize_and_dpi_kwargs(
+    sqlite_registry: StoreRegistry,
+    tmp_path: Path,
+) -> None:
+    """``chart_figsize`` + ``chart_dpi`` thread through to the PNG header.
+
+    With ``figsize=(8.0, 6.0)`` and ``dpi=75`` the resulting PNG must
+    be 600 x 450 pixels (figsize_inches * dpi). Both kwargs travelled
+    from ``run()`` through ``_render_chart()`` into
+    ``render_program_convergence_chart``.
+    """
+    import struct
+
+    report = run(
+        sqlite_registry,
+        seed=0,
+        rounds=4,
+        feedback_batch_size=4,
+        analyzer_cadence=4,
+        traces_per_domain=2,
+        render_chart=True,
+        chart_output_dir=tmp_path,
+        chart_figsize=(8.0, 6.0),
+        chart_dpi=75,
+    )
+
+    chart_path = Path(report.metrics["chart_path"])  # type: ignore[arg-type]
+    header = chart_path.read_bytes()[:24]
+    width, height = struct.unpack(">II", header[16:24])
+    assert width == 600, f"expected 600 px wide (8.0in * 75dpi); got {width}"
+    assert height == 450, f"expected 450 px tall (6.0in * 75dpi); got {height}"
+
+
+def test_run_render_chart_default_output_dir_anchors_to_file(
+    sqlite_registry: StoreRegistry,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``chart_output_dir=None`` ignores CWD and lands at the repo-anchored dir.
+
+    The B5 contract — chdir-ing into ``tmp_path`` and rendering with
+    no explicit output dir must not produce a PNG under
+    ``tmp_path/eval/reports/``. The PNG lands at the absolute repo
+    location resolved by :func:`_default_chart_output_dir`.
+
+    Cleanup: we delete the resolved PNG at end-of-test because the
+    default dir is a real on-disk location under the repo and we
+    don't want test artifacts piling up there.
+    """
+    monkeypatch.chdir(tmp_path)
+    expected_dir = _default_chart_output_dir()
+
+    report = run(
+        sqlite_registry,
+        seed=0,
+        rounds=4,
+        feedback_batch_size=4,
+        analyzer_cadence=4,
+        traces_per_domain=2,
+        render_chart=True,
+    )
+
+    chart_path = Path(report.metrics["chart_path"])  # type: ignore[arg-type]
+    try:
+        assert chart_path.is_absolute()
+        assert chart_path.parent == expected_dir, (
+            f"render_chart default must anchor against __file__; "
+            f"got {chart_path.parent}, expected {expected_dir}"
+        )
+        # CWD was tmp_path; the PNG must NOT live under tmp_path.
+        assert tmp_path not in chart_path.parents, (
+            f"PNG leaked into CWD; ended up under {tmp_path}"
+        )
+        assert chart_path.exists()
+    finally:
+        chart_path.unlink(missing_ok=True)
