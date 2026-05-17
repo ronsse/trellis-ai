@@ -14,6 +14,7 @@ from trellis.classify.protocol import (
 
 if TYPE_CHECKING:
     from trellis.stores.base.event_log import EventLog
+    from trellis.stores.registry import StoreRegistry
     from trellis_workers.enrichment.service import EnrichmentService
 
 logger = structlog.get_logger(__name__)
@@ -187,3 +188,48 @@ class LLMFacetClassifier:
                 classifier_id=self.name,
                 upstream_failure_kind=upstream_failure_kind,
             )
+
+
+def build_llm_facet_classifier(
+    registry: StoreRegistry,
+    *,
+    enrichment_service: EnrichmentService,
+) -> LLMFacetClassifier:
+    """Build an :class:`LLMFacetClassifier` wired to the registry's EventLog.
+
+    Canonical production constructor: callers who build the enrichment-mode
+    :class:`~trellis.classify.pipeline.ClassifierPipeline` from a
+    :class:`~trellis.stores.registry.StoreRegistry` should go through this
+    builder rather than the bare ``LLMFacetClassifier(...)`` constructor so
+    the :attr:`~trellis.stores.base.event_log.EventType.CLASSIFICATION_DEGRADED`
+    telemetry actually fires in deployed systems. The bare constructor
+    leaves ``event_log=None`` and silently no-ops the emit (matching the
+    optional-event-log pattern), which is the right default for tests and
+    library callers that don't have a registry — but is dormant in
+    production.
+
+    The EnrichmentService is taken pre-built rather than constructed here
+    because its dependencies (an ``LLMClient`` and optional classification
+    vocabulary) are caller policy, not registry state. Pass through the
+    same registry's operational EventLog to ``EnrichmentService`` separately
+    if you want its ``EXTRACTION_FAILED`` telemetry too — the two emits
+    correlate by timestamp + ``subject_entity_id`` per the
+    :attr:`~trellis.stores.base.event_log.EventType.CLASSIFICATION_DEGRADED`
+    contract.
+
+    Args:
+        registry: A :class:`StoreRegistry`. The operational plane's
+            ``event_log`` is threaded into the classifier.
+        enrichment_service: A pre-constructed :class:`EnrichmentService`
+            wrapping the desired :class:`~trellis.llm.LLMClient`.
+
+    Returns:
+        An :class:`LLMFacetClassifier` with ``event_log`` populated from
+        the registry. Calling :meth:`~LLMFacetClassifier.classify_async`
+        on a failure path will emit ``CLASSIFICATION_DEGRADED`` to the
+        registry's operational EventLog.
+    """
+    return LLMFacetClassifier(
+        enrichment_service=enrichment_service,
+        event_log=registry.operational.event_log,
+    )
