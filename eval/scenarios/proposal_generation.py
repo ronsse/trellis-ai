@@ -31,11 +31,11 @@ import hashlib
 import json
 import os
 import tempfile
+from collections.abc import Callable
 from contextlib import ExitStack
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import pytest
 import structlog
 from typer.testing import CliRunner
 
@@ -50,7 +50,33 @@ from trellis_cli.exit_codes import EXIT_OK
 from trellis_workers.code_authoring import ProposalGenerator
 
 if TYPE_CHECKING:
+    import pytest
+
     from trellis_workers.code_authoring import Proposal
+
+
+# ``pytest`` is a dev-only dependency. The satellite scenario is also
+# importable from prod (the eval runner calls its ``run()`` callable),
+# so we guard the import: pytest available → ``_pytest_fixture`` resolves
+# to ``pytest.fixture`` and pytest collects + runs the ``test_*`` functions;
+# pytest missing → ``_pytest_fixture`` is a no-op and the test functions
+# never execute (pytest is the only thing that would call them).
+# ``pytest.MonkeyPatch`` parameter annotations stay valid under
+# ``from __future__ import annotations`` (PEP 563 — string at runtime).
+# The ``pytest.skip(...)`` call inside ``test_cross_backend_equivalence``
+# is guarded by a local import so it only fires under pytest. Closes the
+# Phase 2 L finding about prod-env import failures.
+def _identity_decorator(func: Callable[..., Any]) -> Callable[..., Any]:
+    """No-op stand-in for ``pytest.fixture`` when pytest is absent."""
+    return func
+
+
+try:
+    import pytest as _pytest_mod  # noqa: PT013 — module alias for optional dev dep
+
+    _pytest_fixture: Callable[..., Any] = _pytest_mod.fixture
+except ImportError:  # pragma: no cover — pytest is a dev dep
+    _pytest_fixture = _identity_decorator
 
 logger = structlog.get_logger(__name__)
 
@@ -209,7 +235,7 @@ def _build_backends(stack: ExitStack, tmp_dir: Path) -> list[BackendHandle]:
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture
+@_pytest_fixture
 def sqlite_handle(tmp_path: Path) -> Any:
     """Seeded SQLite backend. Always available; no env gating."""
     with ExitStack() as stack:
@@ -236,8 +262,7 @@ def test_first_run_returns_one_proposal_sqlite(
     proposal = proposals[0]
     expected_id = _expected_proposal_id()
     assert proposal.proposal_id == expected_id, (
-        f"proposal_id drift: got {proposal.proposal_id!r}, "
-        f"expected {expected_id!r}"
+        f"proposal_id drift: got {proposal.proposal_id!r}, expected {expected_id!r}"
     )
     assert proposal.source_event_ids
     assert len(proposal.source_event_ids) == SCENARIO_FAILURE_COUNT
@@ -261,20 +286,12 @@ def test_rerun_emits_zero_new_drafted_sqlite(
     generator without spamming the EventLog with duplicate proposals.
     """
     _run_generator(sqlite_handle)
-    drafted_after_first = _count_events(
-        sqlite_handle, EventType.PROPOSAL_DRAFTED
-    )
-    updated_after_first = _count_events(
-        sqlite_handle, EventType.PROPOSAL_UPDATED
-    )
+    drafted_after_first = _count_events(sqlite_handle, EventType.PROPOSAL_DRAFTED)
+    updated_after_first = _count_events(sqlite_handle, EventType.PROPOSAL_UPDATED)
 
     _run_generator(sqlite_handle)
-    drafted_after_second = _count_events(
-        sqlite_handle, EventType.PROPOSAL_DRAFTED
-    )
-    updated_after_second = _count_events(
-        sqlite_handle, EventType.PROPOSAL_UPDATED
-    )
+    drafted_after_second = _count_events(sqlite_handle, EventType.PROPOSAL_DRAFTED)
+    updated_after_second = _count_events(sqlite_handle, EventType.PROPOSAL_UPDATED)
 
     assert drafted_after_second == drafted_after_first, (
         "second run emitted a new PROPOSAL_DRAFTED — idempotency broken: "
@@ -344,9 +361,7 @@ def test_cli_list_proposals_surfaces_the_proposal_sqlite(
     from trellis_cli.main import app as root_app  # noqa: PLC0415
 
     runner = CliRunner()
-    result = runner.invoke(
-        root_app, ["admin", "list-proposals", "--format", "json"]
-    )
+    result = runner.invoke(root_app, ["admin", "list-proposals", "--format", "json"])
     assert result.exit_code == EXIT_OK, result.output
     data = json.loads(result.stdout.strip())
     assert data["count"] == 1
@@ -391,6 +406,8 @@ def test_cross_backend_equivalence(tmp_path: Path) -> None:
     with ExitStack() as stack:
         handles = _build_backends(stack, tmp_path)
         if len(handles) < _MIN_BACKENDS_FOR_CROSS_CHECK:
+            import pytest  # noqa: PLC0415 — pytest is dev-only; test bodies run under pytest
+
             pytest.skip(
                 "cross-backend assertions require at least "
                 f"{_MIN_BACKENDS_FOR_CROSS_CHECK} backends; "
@@ -408,12 +425,8 @@ def test_cross_backend_equivalence(tmp_path: Path) -> None:
                 "first_id": first[0].proposal_id if first else None,
                 "second_count": len(second),
                 "second_id": second[0].proposal_id if second else None,
-                "drafted": _count_events(
-                    handle, EventType.PROPOSAL_DRAFTED
-                ),
-                "updated": _count_events(
-                    handle, EventType.PROPOSAL_UPDATED
-                ),
+                "drafted": _count_events(handle, EventType.PROPOSAL_DRAFTED),
+                "updated": _count_events(handle, EventType.PROPOSAL_UPDATED),
             }
 
         baseline = next(iter(outcomes.values()))
