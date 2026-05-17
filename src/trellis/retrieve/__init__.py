@@ -16,6 +16,8 @@ from trellis.retrieve.evaluate import (
     QualityDimension,
     QualityReport,
     RelevanceScorer,
+    ShapeCompositionScorer,
+    ShapeConstraint,
     analyze_dimension_predictiveness,
     evaluate_pack,
 )
@@ -75,6 +77,8 @@ __all__ = [
     "SearchStrategy",
     "SemanticDedupConfig",
     "SemanticSearch",
+    "ShapeCompositionScorer",
+    "ShapeConstraint",
     "StrategyContribution",
     "StrategyFailure",
     "TierMapper",

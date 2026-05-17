@@ -10,7 +10,7 @@ Both loops are independent and neither subsumes the other. See the matrix at the
 trellis analyze pack-quality --scenarios ./scenarios.yaml --profile code_generation
 ```
 
-Each scenario declares an intent, optional domain, required coverage keywords, and expected content categories. The CLI assembles a pack via the live `PackBuilder`, scores it on five dimensions, and prints the per-dimension scores plus any missing coverage or low-score findings.
+Each scenario declares an intent, optional domain, required coverage keywords, and expected content categories. The CLI assembles a pack via the live `PackBuilder`, scores it on six dimensions, and prints the per-dimension scores plus any missing coverage or low-score findings.
 
 For programmatic use:
 
@@ -32,7 +32,7 @@ report = evaluate_pack(pack, scenario, profile=CODE_GENERATION_PROFILE)
 print(report.weighted_score, report.missing_coverage, report.findings)
 ```
 
-## The five dimensions
+## The six dimensions
 
 All dimensions are deterministic and return values in `[0, 1]`. Higher is better.
 
@@ -43,8 +43,9 @@ All dimensions are deterministic and return values in `[0, 1]`. Higher is better
 | `noise` | How much of the pack is on-domain | `1 - (mismatched / scored)` where "scored" is items with a tagged domain and "mismatched" is items whose domain is neither the scenario's nor `"all"`. Untagged items are excluded from both sides. No scenario domain → 1.0. |
 | `breadth` | Variety of content types represented | `hits / len(expected_categories)` where a hit is any item with that `content_type`. Empty `expected_categories` → 1.0. |
 | `efficiency` | Fraction of pack tokens carrying useful content | `useful_tokens / total_tokens` where "useful" = item excerpt mentions at least one required keyword. Empty `required_coverage` → 1.0. Empty pack → 0.0. |
+| `shape_composition` | Whether the pack's `item_type` distribution matches declared shape constraints | Per-shape mean of a min-side and max-side score. `expected_shapes=None` → 1.0 (no-op, default). |
 
-### Why these five
+### Why these six
 
 Each dimension isolates a different failure mode visible only at assembly time:
 
@@ -53,8 +54,34 @@ Each dimension isolates a different failure mode visible only at assembly time:
 - Low **noise** means the domain filter or tag coverage is broken — an ingestion / classification problem.
 - Low **breadth** means the pack has depth but not variety — classification gaps or under-fetching one of the retrieval tiers.
 - Low **efficiency** means budget is being spent on tangentially-relevant items — often a ranking problem downstream of strong recall.
+- Low **shape_composition** means the pack's `item_type` mix diverges from what the scenario declared it expects — too few entities, too many vector hits, missing summaries — typically a strategy-budget or strategy-mix problem.
 
 These failure modes produce different follow-up fixes, so collapsing them into a single number hides the signal. The per-dimension breakdown is the point; the weighted aggregate is a convenience for trending and gating.
+
+### Opting into `shape_composition`
+
+`shape_composition` is the only dimension that is **opt-in per scenario**. Scenarios that leave `expected_shapes=None` (the default) score 1.0 on this dimension — no behavior change from before the dimension existed. To opt in, declare an `expected_shapes` map keyed by `PackItem.item_type`:
+
+```python
+from trellis.retrieve import EvaluationScenario, ShapeConstraint
+
+scenario = EvaluationScenario(
+    name="entity_rich",
+    intent="Investigate the customer onboarding pipeline",
+    expected_shapes={
+        # At least two documents, no upper cap.
+        "document": ShapeConstraint(min_count=2),
+        # Exactly one entity.
+        "entity": ShapeConstraint(min_count=1, max_count=1),
+        # No more than three vector hits — keeps the pack from over-indexing on semantic.
+        "vector": ShapeConstraint(min_count=0, max_count=3),
+    },
+)
+```
+
+The score is the mean across declared constraints of `(min_score + max_score) / 2`. `min_score` is `1.0` when the actual count meets `min_count`, else a linear ramp `actual / min_count`. `max_score` is `1.0` when `max_count` is `None` or `actual ≤ max_count`, else a linear excess penalty. Items whose `item_type` is not declared are ignored — `shape_composition` judges the declared shapes, not novelty.
+
+Today the strategy-stamped values are `"document"` (KeywordSearch), `"vector"` (SemanticSearch), and `"entity"` (GraphSearch). Built-in profiles do **not** weight `shape_composition`, so opting a scenario in changes the per-dimension report but not the profile-weighted aggregate. The dimension is scaffolding for the typed-shape vocabulary work tracked under *Item-type semantics + summary-generation path* in [TODO.md](../../TODO.md); the policy of which shapes a real production scenario should expect is deliberately deferred pending real-agent signal.
 
 ## Built-in profiles
 
@@ -161,7 +188,7 @@ report = evaluate_pack(
 )
 ```
 
-The five built-in scorers are pure functions of the pack + scenario — no I/O, no store access, no LLM calls. Custom scorers that hit external services should handle their own failure modes; `evaluate_pack` does not wrap them in try/except.
+The six built-in scorers are pure functions of the pack + scenario — no I/O, no store access, no LLM calls. Custom scorers that hit external services should handle their own failure modes; `evaluate_pack` does not wrap them in try/except.
 
 ## Optional live wiring
 

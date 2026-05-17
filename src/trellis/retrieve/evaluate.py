@@ -16,7 +16,8 @@ Entry points:
   weighted by an :class:`EvaluationProfile`.
 * :class:`QualityDimension` — Protocol for custom scorers.
 * Built-in scorers: :class:`CompletenessScorer`, :class:`RelevanceScorer`,
-  :class:`NoiseScorer`, :class:`BreadthScorer`, :class:`EfficiencyScorer`.
+  :class:`NoiseScorer`, :class:`BreadthScorer`, :class:`EfficiencyScorer`,
+  :class:`ShapeCompositionScorer`.
 * Built-in profiles: :data:`CODE_GENERATION_PROFILE`,
   :data:`DOMAIN_CONTEXT_PROFILE`.
 
@@ -50,11 +51,48 @@ _LOW_RELEVANCE_THRESHOLD = 0.3
 _CLEAN_NOISE_THRESHOLD = 0.7
 _BREADTH_GAP_THRESHOLD = 0.5
 _LOW_EFFICIENCY_THRESHOLD = 0.3
+_LOW_SHAPE_COMPOSITION_THRESHOLD = 0.5
 
 
 # ---------------------------------------------------------------------------
 # Models
 # ---------------------------------------------------------------------------
+
+
+class ShapeConstraint(TrellisModel):
+    """A count constraint on a single :attr:`PackItem.item_type` value.
+
+    Used by :class:`EvaluationScenario.expected_shapes` to declare the mix
+    of item types the pack should contain. ``min_count`` is the lower bound
+    (inclusive); ``max_count`` is an optional upper bound (inclusive).
+    ``max_count=None`` means "no cap".
+
+    Constraint:
+
+    * ``min_count >= 0``.
+    * When ``max_count`` is set, ``max_count >= min_count``.
+
+    Scenarios that don't care about composition leave
+    ``EvaluationScenario.expected_shapes`` as ``None`` (the default) — the
+    :class:`ShapeCompositionScorer` then returns 1.0 (no-op), preserving
+    baseline behavior for every existing scenario.
+    """
+
+    min_count: int = 0
+    max_count: int | None = None
+
+    @model_validator(mode="after")
+    def _validate_bounds(self) -> ShapeConstraint:
+        if self.min_count < 0:
+            msg = f"ShapeConstraint.min_count must be >= 0, got {self.min_count}"
+            raise ValueError(msg)
+        if self.max_count is not None and self.max_count < self.min_count:
+            msg = (
+                f"ShapeConstraint.max_count ({self.max_count}) must be "
+                f">= min_count ({self.min_count})"
+            )
+            raise ValueError(msg)
+        return self
 
 
 class EvaluationScenario(TrellisModel):
@@ -63,6 +101,16 @@ class EvaluationScenario(TrellisModel):
     Scenarios are defined by downstream projects (domain-specific fixtures)
     and consumed by the generic scorers here. Everything is optional except
     ``intent`` so partial scenarios still score what they can.
+
+    ``expected_shapes`` (optional) declares the mix of
+    :attr:`PackItem.item_type` values the pack should contain — keyed by
+    item_type, valued by :class:`ShapeConstraint`. Consumed by the
+    :class:`ShapeCompositionScorer`. When ``None`` (the default), shape
+    composition is not scored (the scorer returns 1.0). Today the
+    strategy-stamped item_type values are ``"document"`` (KeywordSearch),
+    ``"vector"`` (SemanticSearch), and ``"entity"`` (GraphSearch). See the
+    "Item-type semantics" TODO.md entry for the broader shape-vocabulary
+    work this dimension is scaffolding for.
     """
 
     name: str
@@ -71,6 +119,7 @@ class EvaluationScenario(TrellisModel):
     seed_entity_ids: list[str] = Field(default_factory=list)
     required_coverage: list[str] = Field(default_factory=list)
     expected_categories: list[str] = Field(default_factory=list)
+    expected_shapes: dict[str, ShapeConstraint] | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -297,12 +346,92 @@ class EfficiencyScorer:
         return useful / total
 
 
+class ShapeCompositionScorer:
+    """Fraction of declared shape constraints the pack satisfies.
+
+    Measures whether the pack contains the expected mix of
+    :attr:`PackItem.item_type` values per the scenario's ``expected_shapes``
+    declaration. When the scenario leaves ``expected_shapes`` as ``None``
+    the dimension returns 1.0 (no-op) — preserves baseline behavior for
+    scenarios that haven't opted in.
+
+    For each declared constraint, the score combines two halves:
+
+    * **Min-side score** — ``1.0`` if ``actual >= min_count``, else
+      ``actual / min_count`` (linear ramp). With ``min_count == 0`` the
+      min side is trivially ``1.0``.
+    * **Max-side score** — ``1.0`` if ``max_count is None`` or
+      ``actual <= max_count``. Otherwise a linear excess penalty:
+      ``max(0.0, 1.0 - (actual - max_count) / max(max_count, 1))``. With
+      ``max_count == 0`` any item of that shape drives the score toward 0.
+
+    The constraint score is the **product** of the two halves — a fully
+    violated bound zeroes the shape, so "entity required but missing"
+    does not earn 0.5 credit for not over-filling. The dimension
+    returns the mean across all declared constraints. Items whose
+    ``item_type`` is not declared in ``expected_shapes`` are ignored —
+    the dimension only judges declared shapes, not novelty.
+
+    Today the strategy-stamped item_type values are ``"document"``
+    (KeywordSearch), ``"vector"`` (SemanticSearch), and ``"entity"``
+    (GraphSearch). Summaries ride as ``item_type="document"`` with
+    ``metadata["content_type"] = "entity_summary"``. The
+    `ShapeCompositionScorer` does not interpret content_type — it works
+    purely on the strategy-stamped shape. Richer typed-shape vocabularies
+    (summary / precedent / full_doc) are deferred pending real-agent
+    signal; see the "Item-type semantics" TODO.md entry.
+    """
+
+    name = "shape_composition"
+
+    def score(self, pack: Pack, scenario: EvaluationScenario) -> float:
+        expected = scenario.expected_shapes
+        if not expected:
+            return 1.0
+        counts: dict[str, int] = defaultdict(int)
+        for item in pack.items:
+            counts[item.item_type] += 1
+        per_shape_scores: list[float] = []
+        for shape, constraint in expected.items():
+            actual = counts.get(shape, 0)
+            per_shape_scores.append(_score_shape(actual, constraint))
+        if not per_shape_scores:
+            return 1.0
+        return sum(per_shape_scores) / len(per_shape_scores)
+
+
+def _score_shape(actual: int, constraint: ShapeConstraint) -> float:
+    """Combine min-side and max-side scores for a single shape constraint.
+
+    Returns the product of the min-side and max-side sub-scores so that a
+    fully-violated bound (either way) drives the shape score to 0.0 — a
+    pack that is missing a required shape entirely should not earn 0.5
+    credit for "no over-fill at least." The penalty is multiplicative on
+    purpose: small slips compound, full violations zero out.
+    """
+    if constraint.min_count <= 0 or actual >= constraint.min_count:
+        min_score = 1.0
+    else:
+        min_score = actual / constraint.min_count
+
+    if constraint.max_count is None or actual <= constraint.max_count:
+        max_score = 1.0
+    else:
+        # Excess penalty: 1.0 - (actual - max) / max(max, 1). When max == 0,
+        # any extra item drives the score down by 1.0 per item (clamped).
+        denom = max(constraint.max_count, 1)
+        max_score = max(0.0, 1.0 - (actual - constraint.max_count) / denom)
+
+    return min_score * max_score
+
+
 DEFAULT_DIMENSIONS: tuple[QualityDimension, ...] = (
     CompletenessScorer(),
     RelevanceScorer(),
     NoiseScorer(),
     BreadthScorer(),
     EfficiencyScorer(),
+    ShapeCompositionScorer(),
 )
 
 
@@ -365,7 +494,33 @@ def evaluate_pack(
         reported per-dimension but excluded from the weighted aggregate.
     dimensions:
         Optional override for the set of scorers to apply. Defaults to
-        the five built-in scorers.
+        the six built-in scorers.
+
+    Dimensions
+    ----------
+    The default set covers six dimensions:
+
+    * ``completeness`` — fraction of ``required_coverage`` keywords hit.
+    * ``relevance`` — mean item ``relevance_score``.
+    * ``noise`` — fraction of tagged items inside the scenario ``domain``.
+    * ``breadth`` — fraction of ``expected_categories`` present via
+      item ``content_type``.
+    * ``efficiency`` — fraction of pack tokens carried by items that touch
+      a required keyword.
+    * ``shape_composition`` — opt-in. When the scenario sets
+      ``expected_shapes`` (a ``dict[str, ShapeConstraint]`` keyed by
+      :attr:`PackItem.item_type`), this scores how well the pack's
+      item_type count distribution matches the declared min / max
+      constraints. When ``expected_shapes`` is ``None`` (the default), the
+      dimension returns 1.0 — every existing scenario that doesn't opt in
+      keeps its baseline score.
+
+    Built-in profiles weight only the original five dimensions;
+    ``shape_composition`` is reported per-dimension but doesn't influence
+    weighted aggregates unless a custom profile pulls it in. This is
+    deliberate — see the "Item-type semantics" TODO.md entry for the
+    typed-shape vocabulary work that has to validate against real
+    agent-pack signal before shape_composition becomes weight-bearing.
     """
     dims = dimensions if dimensions is not None else list(DEFAULT_DIMENSIONS)
     scores: dict[str, float] = {}
@@ -449,6 +604,14 @@ def _build_findings(
         findings.append(
             "efficiency: less than 30% of pack tokens reference required "
             "keywords — budget may be spent on tangential items"
+        )
+    if (
+        scenario.expected_shapes
+        and scores.get("shape_composition", 1.0) < _LOW_SHAPE_COMPOSITION_THRESHOLD
+    ):
+        findings.append(
+            "shape_composition: pack item_type distribution diverges from "
+            "expected_shapes — check strategy mix or per-strategy budgets"
         )
     return findings
 
@@ -714,6 +877,8 @@ __all__ = [
     "QualityDimension",
     "QualityReport",
     "RelevanceScorer",
+    "ShapeCompositionScorer",
+    "ShapeConstraint",
     "analyze_dimension_predictiveness",
     "evaluate_pack",
 ]

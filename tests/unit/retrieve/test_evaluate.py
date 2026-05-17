@@ -16,6 +16,8 @@ from trellis.retrieve.evaluate import (
     NoiseScorer,
     QualityDimension,
     RelevanceScorer,
+    ShapeCompositionScorer,
+    ShapeConstraint,
     evaluate_pack,
 )
 from trellis.schemas.pack import Pack, PackItem
@@ -32,10 +34,11 @@ def _item(
     relevance: float = 0.0,
     tokens: int | None = None,
     metadata: dict | None = None,
+    item_type: str = "evidence",
 ) -> PackItem:
     return PackItem(
         item_id=item_id,
-        item_type="evidence",
+        item_type=item_type,
         excerpt=excerpt,
         relevance_score=relevance,
         estimated_tokens=tokens,
@@ -276,6 +279,146 @@ class TestEfficiencyScorer:
 
 
 # ---------------------------------------------------------------------------
+# ShapeConstraint + ShapeCompositionScorer
+# ---------------------------------------------------------------------------
+
+
+class TestShapeConstraint:
+    def test_default_constraint_is_min_zero_no_max(self) -> None:
+        c = ShapeConstraint()
+        assert c.min_count == 0
+        assert c.max_count is None
+
+    def test_negative_min_count_rejected(self) -> None:
+        with pytest.raises(ValueError, match="min_count must be >= 0"):
+            ShapeConstraint(min_count=-1)
+
+    def test_max_below_min_rejected(self) -> None:
+        with pytest.raises(ValueError, match="must be >= min_count"):
+            ShapeConstraint(min_count=3, max_count=1)
+
+
+class TestShapeCompositionScorer:
+    def test_no_expected_shapes_returns_one(self) -> None:
+        """Regression guard — scenarios without expected_shapes score 1.0."""
+        scenario = EvaluationScenario(name="s", intent="i")
+        pack = _make_pack([_item("a", item_type="document")])
+        assert ShapeCompositionScorer().score(pack, scenario) == 1.0
+
+    def test_empty_expected_shapes_dict_returns_one(self) -> None:
+        scenario = EvaluationScenario(name="s", intent="i", expected_shapes={})
+        pack = _make_pack([_item("a", item_type="document")])
+        assert ShapeCompositionScorer().score(pack, scenario) == 1.0
+
+    def test_all_constraints_satisfied(self) -> None:
+        scenario = EvaluationScenario(
+            name="s",
+            intent="i",
+            expected_shapes={
+                "document": ShapeConstraint(min_count=2),
+                "entity": ShapeConstraint(min_count=1, max_count=1),
+            },
+        )
+        pack = _make_pack(
+            [
+                _item("d1", item_type="document"),
+                _item("d2", item_type="document"),
+                _item("e1", item_type="entity"),
+            ]
+        )
+        assert ShapeCompositionScorer().score(pack, scenario) == 1.0
+
+    def test_missing_required_shape_drops_score(self) -> None:
+        scenario = EvaluationScenario(
+            name="s",
+            intent="i",
+            expected_shapes={
+                "document": ShapeConstraint(min_count=2),
+                "entity": ShapeConstraint(min_count=1, max_count=1),
+            },
+        )
+        pack = _make_pack(
+            [
+                _item("d1", item_type="document"),
+                _item("d2", item_type="document"),
+                # missing entity
+            ]
+        )
+        # document: 2/2 → 1.0 min x 1.0 max = 1.0.
+        # entity: 0/1 → 0.0 min x 1.0 max = 0.0.
+        # Mean across 2 shapes: (1.0 + 0.0) / 2 = 0.5.
+        assert ShapeCompositionScorer().score(pack, scenario) == pytest.approx(0.5)
+
+    def test_below_min_count_partial_credit(self) -> None:
+        scenario = EvaluationScenario(
+            name="s",
+            intent="i",
+            expected_shapes={"document": ShapeConstraint(min_count=4)},
+        )
+        pack = _make_pack(
+            [
+                _item("d1", item_type="document"),
+                _item("d2", item_type="document"),
+            ]
+        )
+        # 2/4 → 0.5 min x 1.0 max → 0.5.
+        assert ShapeCompositionScorer().score(pack, scenario) == pytest.approx(0.5)
+
+    def test_exceeding_max_count_drops_score(self) -> None:
+        scenario = EvaluationScenario(
+            name="s",
+            intent="i",
+            expected_shapes={"entity": ShapeConstraint(min_count=0, max_count=2)},
+        )
+        pack = _make_pack(
+            [
+                _item("e1", item_type="entity"),
+                _item("e2", item_type="entity"),
+                _item("e3", item_type="entity"),
+                _item("e4", item_type="entity"),
+            ]
+        )
+        # min_count=0 → 1.0 min.
+        # max excess: 1.0 - (4 - 2) / 2 = 0.0 max.
+        # Product: 0.0.
+        assert ShapeCompositionScorer().score(pack, scenario) == pytest.approx(0.0)
+
+    def test_max_count_zero_penalizes_any_item(self) -> None:
+        scenario = EvaluationScenario(
+            name="s",
+            intent="i",
+            expected_shapes={"vector": ShapeConstraint(min_count=0, max_count=0)},
+        )
+        pack = _make_pack(
+            [
+                _item("v1", item_type="vector"),
+                _item("v2", item_type="vector"),
+            ]
+        )
+        # min_count=0 → 1.0 min. max=0, actual=2 → 1 - 2/1 = -1 → clamped 0.0.
+        # Product: 0.0.
+        assert ShapeCompositionScorer().score(pack, scenario) == pytest.approx(0.0)
+
+    def test_undeclared_shapes_ignored(self) -> None:
+        """Items with item_type outside expected_shapes don't affect score."""
+        scenario = EvaluationScenario(
+            name="s",
+            intent="i",
+            expected_shapes={"document": ShapeConstraint(min_count=1)},
+        )
+        pack = _make_pack(
+            [
+                _item("d1", item_type="document"),
+                # These three "evidence" items are not declared — ignored.
+                _item("x1", item_type="evidence"),
+                _item("x2", item_type="evidence"),
+                _item("x3", item_type="evidence"),
+            ]
+        )
+        assert ShapeCompositionScorer().score(pack, scenario) == 1.0
+
+
+# ---------------------------------------------------------------------------
 # EvaluationProfile
 # ---------------------------------------------------------------------------
 
@@ -327,7 +470,8 @@ class TestEvaluatePack:
         assert report.scenario_name == "s"
         assert report.pack_id == pack.pack_id
         assert report.profile_name is None
-        # All five dimensions score 1.0 on this pack → mean = 1.0.
+        # All six dimensions score 1.0 on this pack (shape_composition is 1.0
+        # by default when expected_shapes is None) → mean = 1.0.
         assert report.weighted_score == pytest.approx(1.0)
         assert set(report.dimensions) == {
             "completeness",
@@ -335,6 +479,7 @@ class TestEvaluatePack:
             "noise",
             "breadth",
             "efficiency",
+            "shape_composition",
         }
 
     def test_weighted_aggregation_with_profile(self) -> None:
@@ -413,6 +558,98 @@ class TestEvaluatePack:
         # Only completeness is covered; its weight (0.6) renormalizes to 1.0,
         # so weighted_score equals the completeness score itself.
         assert report.weighted_score == pytest.approx(1.0)
+
+    def test_shape_composition_dimension_present_with_default_one(self) -> None:
+        """Regression guard — adding the dimension didn't shift baseline scores.
+
+        With ``expected_shapes=None`` (default), shape_composition is 1.0,
+        so existing scenarios — which all leave it unset — preserve their
+        per-dimension scores and any profile-weighted aggregate that doesn't
+        include shape_composition.
+        """
+        scenario = EvaluationScenario(name="s", intent="i")
+        pack = _make_pack([_item("a", "anything", item_type="document")])
+        report = evaluate_pack(pack, scenario)
+        assert "shape_composition" in report.dimensions
+        assert report.dimensions["shape_composition"] == 1.0
+
+    def test_shape_composition_matching_pack_high_score(self) -> None:
+        scenario = EvaluationScenario(
+            name="s",
+            intent="i",
+            expected_shapes={
+                "document": ShapeConstraint(min_count=2),
+                "entity": ShapeConstraint(min_count=1, max_count=1),
+            },
+        )
+        pack = _make_pack(
+            [
+                _item("d1", item_type="document"),
+                _item("d2", item_type="document"),
+                _item("e1", item_type="entity"),
+            ]
+        )
+        report = evaluate_pack(pack, scenario)
+        assert report.dimensions["shape_composition"] == pytest.approx(1.0)
+
+    def test_shape_composition_missing_entity_lower_score(self) -> None:
+        scenario = EvaluationScenario(
+            name="s",
+            intent="i",
+            expected_shapes={
+                "document": ShapeConstraint(min_count=2),
+                "entity": ShapeConstraint(min_count=1, max_count=1),
+            },
+        )
+        pack = _make_pack(
+            [
+                _item("d1", item_type="document"),
+                _item("d2", item_type="document"),
+            ]
+        )
+        report = evaluate_pack(pack, scenario)
+        # See TestShapeCompositionScorer.test_missing_required_shape_drops_score
+        # for the arithmetic — document satisfied (1.0), entity missing (0.0),
+        # mean is 0.5.
+        assert report.dimensions["shape_composition"] == pytest.approx(0.5)
+
+    def test_shape_composition_excess_lower_score(self) -> None:
+        scenario = EvaluationScenario(
+            name="s",
+            intent="i",
+            expected_shapes={"entity": ShapeConstraint(min_count=0, max_count=2)},
+        )
+        pack = _make_pack(
+            [
+                _item("e1", item_type="entity"),
+                _item("e2", item_type="entity"),
+                _item("e3", item_type="entity"),
+                _item("e4", item_type="entity"),
+            ]
+        )
+        report = evaluate_pack(pack, scenario)
+        # See TestShapeCompositionScorer.test_exceeding_max_count_drops_score:
+        # max-side hits 0.0 so the product is 0.0.
+        assert report.dimensions["shape_composition"] == pytest.approx(0.0)
+
+    def test_shape_composition_finding_emitted_when_low(self) -> None:
+        scenario = EvaluationScenario(
+            name="s",
+            intent="i",
+            expected_shapes={"entity": ShapeConstraint(min_count=3)},
+        )
+        pack = _make_pack([_item("d1", item_type="document")])
+        # entity: 0/3 = 0.0 min, 1.0 max, product 0.0. Below the 0.5
+        # threshold, so the finding fires.
+        report = evaluate_pack(pack, scenario)
+        assert report.dimensions["shape_composition"] == pytest.approx(0.0)
+        assert any("shape_composition" in f for f in report.findings)
+
+    def test_shape_composition_finding_suppressed_when_no_expected_shapes(self) -> None:
+        scenario = EvaluationScenario(name="s", intent="i")
+        pack = _make_pack([_item("a")])
+        report = evaluate_pack(pack, scenario)
+        assert not any("shape_composition" in f for f in report.findings)
 
     def test_custom_dimension_via_protocol(self) -> None:
         class ConstantScorer:
