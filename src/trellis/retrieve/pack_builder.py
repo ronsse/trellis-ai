@@ -33,6 +33,7 @@ from trellis.retrieve.rerankers.base import Reranker
 from trellis.retrieve.strategies import SearchStrategy
 from trellis.retrieve.tier_mapping import TierMapper
 from trellis.retrieve.token_counting import DEFAULT_TOKEN_COUNTER, TokenCounter
+from trellis.schemas.advisory import Advisory
 from trellis.schemas.pack import (
     BudgetStep,
     Pack,
@@ -461,8 +462,10 @@ class PackBuilder:
             budget_trace=budget_trace,
         )
 
-        # Attach matching advisories
+        # Attach matching advisories and stamp per-item provenance
+        # (Unit C1, foundation for D1 axis C semantic tightening).
         advisories = self._get_matching_advisories(domain)
+        selected = self._attach_advisory_provenance(selected, advisories)
 
         pack = Pack(
             intent=intent,
@@ -687,6 +690,14 @@ class PackBuilder:
 
         advisories = self._get_matching_advisories(domain)
 
+        # Stamp per-item advisory provenance across all sections
+        # (Unit C1, foundation for D1 axis C semantic tightening).
+        if advisories:
+            for section in pack_sections:
+                section.items = self._attach_advisory_provenance(
+                    section.items, advisories
+                )
+
         sectioned_pack = SectionedPack(
             intent=intent,
             sections=pack_sections,
@@ -745,6 +756,9 @@ class PackBuilder:
                         "name": s.name,
                         "items_count": len(s.items),
                         "item_ids": [i.item_id for i in s.items],
+                        "injected_advisory_ids": [
+                            list(i.injected_advisory_ids) for i in s.items
+                        ],
                     }
                     for s in pack.sections
                 ],
@@ -871,6 +885,7 @@ class PackBuilder:
                         "score_breakdown": item.score_breakdown,
                         "estimated_tokens": item.estimated_tokens,
                         "strategy_source": item.strategy_source,
+                        "injected_advisory_ids": list(item.injected_advisory_ids),
                     }
                     for item in pack.items
                 ],
@@ -1041,6 +1056,65 @@ class PackBuilder:
             # advisories and the failure is logged for follow-up.
             logger.exception("advisory_retrieval_failed")
             return []
+
+    @staticmethod
+    def _attach_advisory_provenance(
+        items: list[PackItem],
+        advisories: list[Advisory],
+    ) -> list[PackItem]:
+        """Stamp ``injected_advisory_ids`` on items influenced by an advisory.
+
+        Foundation for D1 (axis C semantic tightening): records which
+        advisory (by ``advisory_id``) influenced each item's presence in
+        the pack so downstream analyzers can join
+        ``advisory_id -> outcome`` per-item instead of relying on the
+        coarser domain-scope proxy.
+
+        Influence rule (Unit C1): an advisory influences ``PackItem`` X
+        when ``advisory.entity_id == X.item_id``. This covers the two
+        item-scoped advisory categories — :attr:`AdvisoryCategory.ENTITY`
+        and :attr:`AdvisoryCategory.ANTI_PATTERN` — which carry an
+        ``entity_id`` field. The remaining categories (APPROACH, SCOPE,
+        QUERY) are pack-scoped and stay on ``pack.advisories``; they
+        deliberately do not stamp individual items.
+
+        Multiple advisories can target the same item; the IDs are
+        appended in the order ``advisories`` was iterated (typically
+        descending confidence from the store). The list is left empty
+        when no advisory matched — the default state preserves prior
+        behavior for callers that don't ship advisories at all.
+        """
+        if not advisories or not items:
+            return items
+
+        # Build item_id -> [advisory_id] index.
+        per_item: dict[str, list[str]] = {}
+        for advisory in advisories:
+            entity_id = advisory.entity_id
+            if entity_id is None:
+                # Pack-scoped advisory; no per-item stamping.
+                continue
+            per_item.setdefault(entity_id, []).append(advisory.advisory_id)
+
+        if not per_item:
+            return items
+
+        annotated: list[PackItem] = []
+        for item in items:
+            advisory_ids = per_item.get(item.item_id)
+            if not advisory_ids:
+                annotated.append(item)
+                continue
+            # Preserve any IDs the strategy stamped pre-build; dedup
+            # while keeping insertion order so the audit trail is stable.
+            existing = list(item.injected_advisory_ids)
+            for aid in advisory_ids:
+                if aid not in existing:
+                    existing.append(aid)
+            annotated.append(
+                item.model_copy(update={"injected_advisory_ids": existing})
+            )
+        return annotated
 
     @staticmethod
     def _is_meta_activity(item: PackItem) -> bool:
