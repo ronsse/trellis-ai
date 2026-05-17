@@ -21,7 +21,7 @@ A single scenario that runs the full loop over N rounds and produces a multi-axi
 
 | Axis | Source signal | What climbs / falls |
 |---|---|---|
-| **A. Pack quality** | existing 5-dim `evaluate_pack` (coverage, relevance, density, diversity, freshness) | rises monotonically as the dual-loop demotes noise and promotes precedents |
+| **A. Pack quality** | existing 6-dim `evaluate_pack` (completeness, relevance, noise, breadth, efficiency, plus opt-in `shape_composition` keyed off `EvaluationScenario.expected_shapes`) | rises monotonically as the dual-loop demotes noise and promotes precedents |
 | **B. Useful-item fraction** | `items_referenced / items_served` from feedback | rises as PackBuilder learns what the agent actually uses |
 | **C. Advisory hit rate** | fraction of injected advisories whose recommendation was followed AND outcome was success | rises as `run_advisory_fitness_loop` suppresses misfiring advisories and reinforces good ones |
 | **D. Observation enrichment** | count of `Observation`/`Measurement` nodes per round attached to seed entities | rises as Item 1's sample extractor produces stats; should plateau when the query log is exhausted |
@@ -155,6 +155,7 @@ If any of those lines is the wrong shape, the program has a bug — and we can s
 - **Stability under load.** A run that hits AuraDB Free's connection caps will produce noisy timing. The master scenario records latency but does not gate on it — that's `plan-neo4j-hardening.md` §5's job. Quality axes (A, B, C, etc.) are timing-independent.
 - **Per-axis baseline drift.** As the program evolves, the absolute thresholds in §4.3 may need to be re-baselined. Use `--update-baseline` mode (the same shape the existing convergence scenarios use) to capture a new baseline; commit only with explicit human review.
 - **Why nine axes and not one summary score.** A summary score hides which loop is misbehaving. The 9-axis view forces "if axis F is regressing, look at Item 4's extractor or analyzer." Composability over compressed metrics.
+- **`shape_composition` is opt-in on axis A.** The 6th pack-quality dimension (`shape_composition`, added in Unit E1) is scenario-gated by `EvaluationScenario.expected_shapes`. The convergence scenarios in this plan deliberately leave `expected_shapes=None` — the dimension scores 1.0 and the profile-weighted axis A is unchanged from the 5-dimension baseline. The dimension is scaffolding for the typed-shape vocabulary work tracked in [TODO.md](../../TODO.md) under *Item-type semantics + summary-generation path*. Wire `expected_shapes` into a convergence scenario only after a real-corpus shape distribution is validated; until then the per-dimension report still surfaces shape_composition for inspection, but the regression-suite axis A thresholds calibrated against the 5-dim profile are preserved.
 
 ## 9. Risks
 

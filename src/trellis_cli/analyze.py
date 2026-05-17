@@ -888,12 +888,13 @@ def pack_quality(
         help="Skip recording this run as a meta-Activity (Item 6 Phase 2).",
     ),
 ) -> None:
-    """Score packs against declared scenarios across 5 quality dimensions.
+    """Score packs against declared scenarios across 6 quality dimensions.
 
     Scenario mode only: loads ``EvaluationScenario`` fixtures, assembles
     packs via ``PackBuilder``, and scores each on completeness, relevance,
-    noise, breadth, and efficiency. Event-log mode (joining to
-    ``PACK_ASSEMBLED`` events) is tracked as follow-up work.
+    noise, breadth, efficiency, and (opt-in via ``expected_shapes``)
+    shape_composition. Event-log mode (joining to ``PACK_ASSEMBLED``
+    events) is tracked as follow-up work.
     """
     scenarios = _load_scenarios(scenarios_path)
     profile = _resolve_profile(profile_name)
