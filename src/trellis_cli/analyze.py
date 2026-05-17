@@ -19,6 +19,7 @@ from trellis.learning import (
     LEARNING_PROMOTE_SUCCESS_KEY,
     LEARNING_SCORING_COMPONENT,
     REQUIRED_LEARNING_PARAMETER_KEYS,
+    SCHEMA_EVOLUTION_PARAM_COMPONENT_ID,
     analyze_learning_observations,
     analyze_well_known_candidates,
     build_learning_observations_from_event_log,
@@ -26,9 +27,6 @@ from trellis.learning import (
 )
 from trellis.learning import (
     RECOMMENDED_SEED_VALUES as SCHEMA_EVOLUTION_SEED_DEFAULTS,
-)
-from trellis.learning.schema_evolution import (
-    PARAM_COMPONENT_ID as SCHEMA_EVOLUTION_COMPONENT_ID,
 )
 from trellis.ops import ParameterRegistry
 from trellis.retrieve.advisory_generator import AdvisoryGenerator
@@ -1482,14 +1480,14 @@ def _build_schema_evolution_registry() -> ParameterRegistry:
     persistent_store = get_parameter_store()
     persistent_registry = ParameterRegistry(persistent_store)
     persistent_snapshot = persistent_registry.get_values(
-        ParameterScope(component_id=SCHEMA_EVOLUTION_COMPONENT_ID)
+        ParameterScope(component_id=SCHEMA_EVOLUTION_PARAM_COMPONENT_ID)
     )
     if all(k in persistent_snapshot for k in SCHEMA_EVOLUTION_SEED_DEFAULTS):
         return persistent_registry
 
     logger.warning(
         "schema_evolution.parameter_registry.seeded_defaults",
-        component=SCHEMA_EVOLUTION_COMPONENT_ID,
+        component=SCHEMA_EVOLUTION_PARAM_COMPONENT_ID,
         defaults=dict(SCHEMA_EVOLUTION_SEED_DEFAULTS),
         remediation=(
             "seed via ParameterStore.put() with a ParameterSet "
@@ -1500,7 +1498,7 @@ def _build_schema_evolution_registry() -> ParameterRegistry:
     store = _InMemoryParameterStore()
     store.put(
         ParameterSet(
-            scope=ParameterScope(component_id=SCHEMA_EVOLUTION_COMPONENT_ID),
+            scope=ParameterScope(component_id=SCHEMA_EVOLUTION_PARAM_COMPONENT_ID),
             values=dict(SCHEMA_EVOLUTION_SEED_DEFAULTS),
             source="cli:analyze",
             notes="seeded by trellis_cli.analyze._build_schema_evolution_registry",
@@ -1567,8 +1565,7 @@ def schema_evolution(
     invalid = [k for k in parsed_kinds if k not in valid_kinds]
     if invalid:
         msg = (
-            f"--kinds: invalid value(s) {invalid!r}; "
-            f"choose from {sorted(valid_kinds)}"
+            f"--kinds: invalid value(s) {invalid!r}; choose from {sorted(valid_kinds)}"
         )
         raise typer.BadParameter(msg)
 
@@ -1616,7 +1613,7 @@ def schema_evolution(
             console.print(
                 "[dim]No open-string types crossed the promotion thresholds. "
                 "Adjust thresholds via the ParameterRegistry "
-                f"('{SCHEMA_EVOLUTION_COMPONENT_ID}' component) if this is "
+                f"('{SCHEMA_EVOLUTION_PARAM_COMPONENT_ID}' component) if this is "
                 "unexpected.[/dim]"
             )
         else:
@@ -1644,9 +1641,7 @@ def schema_evolution(
             console.print(table)
             for c in candidates:
                 if c.notes:
-                    console.print(
-                        f"[dim]{c.candidate_id}: {'; '.join(c.notes)}[/dim]"
-                    )
+                    console.print(f"[dim]{c.candidate_id}: {'; '.join(c.notes)}[/dim]")
 
     if strict and candidates:
         raise typer.Exit(code=EXIT_INTERNAL)
