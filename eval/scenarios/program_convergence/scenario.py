@@ -139,7 +139,9 @@ _SYNTH_EXTRACTORS: tuple[str, ...] = (
 DEFAULT_ANALYZER_CADENCE = 5  # rounds between Item-5 / Item-6 / Item-7 passes
 # Why: synthetic profile — Phase 2's regression suite asserts >=10 observations
 # per seed by round 25 (~22 seeds * 10 / 25 ~= 8.8/round); real corpora seed
-# observations from query logs at a lower rate.
+# observations from query logs at a lower rate (~2/round). See
+# ``docs/design/plan-program-level-eval.md`` §4.2 ("Synthetic-profile
+# calibration on axes D + G") for the full calibration rationale.
 DEFAULT_OBSERVATION_BATCH = 10  # observations seeded per round per seed entity
 DEFAULT_FAILURE_BATCH = 3  # synthetic EXTRACTION_FAILED events per round
 DEFAULT_PROPOSAL_WINDOW_HOURS = 24
@@ -1139,8 +1141,11 @@ def _seed_well_known_parameters(param_store: SQLiteParameterStore) -> None:
     """
     values: dict[str, float | int | str | bool] = dict(RECOMMENDED_SEED_VALUES)
     values["well_known_window_days"] = 0
-    # Why: synthetic profile — the master scenario produces a small graph;
-    # real corpora keep the production threshold of 10.
+    # Why: synthetic profile — the master scenario produces a small graph
+    # (~22 seeds across 3 domains), so the production threshold of 10
+    # would never fire. Real corpora keep the production value. See
+    # ``docs/design/plan-program-level-eval.md`` §4.2 ("Synthetic-profile
+    # calibration on axes D + G") for the full calibration rationale.
     values["well_known_count_threshold"] = 3
     param_store.put(
         ParameterSet(
