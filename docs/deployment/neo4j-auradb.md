@@ -211,10 +211,23 @@ How Trellis handles this:
   share a persistent index named `trellis_test_node_embeddings` at
   `dim=3` so the suite doesn't pay the AuraDB async-provisioning cost
   on every run.
-* **Eval scenarios** ([`eval/scenarios/`](../../eval/)) and the
-  [`scripts/load_eval_dataset_to_aura.py`](../../scripts/load_eval_dataset_to_aura.py)
-  loader use the production default name (`trellis_node_embeddings`)
-  but at the eval-default dim (16). The loader **drops the test index
+* **Eval scenarios** ([`eval/scenarios/`](../../eval/)) use the production
+  default name (`trellis_node_embeddings`) at `dim=3` —
+  `DEFAULT_EMBEDDING_DIM` in
+  [`multi_backend_equivalence/scenario.py`](../../eval/scenarios/multi_backend_equivalence/scenario.py)
+  and [`populated_graph_performance/scenario.py`](../../eval/scenarios/populated_graph_performance/scenario.py)
+  is deliberately aligned with the contract suite's `DIMS = 3` so the
+  shared pgvector `vectors` table on the Neon test DB carries one
+  consistent column dim across unit-test and eval workloads. (Same rule
+  motivates matching the index dim across the two on Neo4j.) Cosine
+  similarity at dim=3 is enough to surface cross-backend equivalence
+  drift — vector quality is not what 5.1 measures. Override per-run via
+  the scenario kwarg if a workload needs higher fidelity.
+* **The `scripts/load_eval_dataset_to_aura.py` loader** is the exception:
+  its `--embedding-dim` CLI flag defaults to **16** (not 3) for backwards
+  compatibility with existing Aura snapshots. Pass `--embedding-dim 3` to
+  match the eval scenarios, or take the default if you only ever run the
+  loader against this Aura instance. The loader **drops the test index
   first** so the eval slot is free; running the loader therefore
   invalidates the unit-test fixture until a unit test recreates it.
 
@@ -232,12 +245,18 @@ unit tests + production.
 
 ### Diagnosing and fixing a stuck index slot
 
-The dimensions also collide: the unit-test fixture creates the index at
-`dim=3` (`tests/unit/stores/contracts/vector_store_contract.py` —
-`DIMS = 3` so every backend exercises the same vector shape), eval
-scenarios load embeddings at `dim=16`, and a real OpenAI corpus would
-sit at `dim=1536`. Even if the names matched, the dims don't — and the
-silent-no-op + 30s-timeout failure mode is the same.
+The dimensions can also collide if you cross workloads. The unit-test
+fixture creates the index at `dim=3`
+(`tests/unit/stores/contracts/vector_store_contract.py` — `DIMS = 3` so
+every backend exercises the same vector shape), eval scenarios likewise
+default to `dim=3` (aligned with the contract suite), the loader script's
+`--embedding-dim` CLI flag defaults to `dim=16`, and a real OpenAI corpus
+would sit at `dim=1536` (`text-embedding-3-small`) or `dim=3072`
+(`text-embedding-3-large`). Where the names match but dims differ, the
+silent-no-op + 30s-timeout failure mode is the same as the name-collision
+case: the second `CREATE VECTOR INDEX … IF NOT EXISTS` is a no-op against
+the existing index, and the ONLINE-wait times out waiting for a different
+index that will never exist.
 
 If a vector test or scenario load hangs for ~30s and then surfaces
 `VectorIndexNotOnlineError`, list what's actually present:
@@ -262,10 +281,11 @@ The eval loader does this automatically — see
 [`scripts/load_eval_dataset_to_aura.py`](../../scripts/load_eval_dataset_to_aura.py)
 lines 103–117 (`_wipe_and_drop_test_index`), which wipes the database
 and drops `trellis_test_node_embeddings` before re-creating
-`trellis_node_embeddings` at the eval-default dim. There is no
-equivalent helper on the unit-test side: the contract suite assumes a
-clean instance, so if you've just run the loader the first vector test
-pays the async-provisioning wait while the test index is recreated.
+`trellis_node_embeddings` at the `--embedding-dim` value (default `16`,
+pass `3` to match the scenario defaults). There is no equivalent helper
+on the unit-test side: the contract suite assumes a clean instance, so
+if you've just run the loader the first vector test pays the
+async-provisioning wait while the test index is recreated.
 
 **Recommended shape** for anyone running both the unit-test suite and
 eval/production scenarios against AuraDB: provision **two AuraDB Free
