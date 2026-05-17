@@ -162,8 +162,18 @@ def _load_scenario(name: str) -> Callable[[StoreRegistry], ScenarioReport]:
 # ---------------------------------------------------------------------------
 
 
-def run_scenario(name: str, registry: StoreRegistry) -> ScenarioReport:
+def run_scenario(
+    name: str,
+    registry: StoreRegistry,
+    **scenario_kwargs: Any,
+) -> ScenarioReport:
     """Run a single scenario by name.
+
+    ``scenario_kwargs`` are forwarded as keyword arguments to the
+    scenario's ``run`` callable. If the scenario does not accept a
+    given kwarg, the resulting ``TypeError`` is captured as a ``fail``
+    report finding (same loud-failure path as any other scenario
+    exception) — the runner does not silently drop unknown kwargs.
 
     Exceptions raised by the scenario are caught and turned into a
     ``fail`` report with a ``finding`` containing the traceback — the
@@ -174,7 +184,7 @@ def run_scenario(name: str, registry: StoreRegistry) -> ScenarioReport:
     started = datetime.now(UTC)
     try:
         run = _load_scenario(name)
-        report = run(registry)
+        report = run(registry, **scenario_kwargs)
     except Exception as exc:
         elapsed = (datetime.now(UTC) - started).total_seconds()
         logger.exception("eval.scenario_crashed", scenario=name)
@@ -198,10 +208,19 @@ def run_scenario(name: str, registry: StoreRegistry) -> ScenarioReport:
 
 
 def run_scenarios(
-    names: Iterable[str], registry: StoreRegistry
+    names: Iterable[str],
+    registry: StoreRegistry,
+    **scenario_kwargs: Any,
 ) -> list[ScenarioReport]:
-    """Run multiple scenarios in order against the same registry."""
-    return [run_scenario(name, registry) for name in names]
+    """Run multiple scenarios in order against the same registry.
+
+    ``scenario_kwargs`` are forwarded unchanged to every scenario. When
+    multiple scenarios are run in one invocation the same kwargs apply
+    to all of them — a scenario that doesn't accept a given kwarg will
+    fail loudly via the same ``TypeError`` path as any other scenario
+    exception.
+    """
+    return [run_scenario(name, registry, **scenario_kwargs) for name in names]
 
 
 # ---------------------------------------------------------------------------
@@ -300,6 +319,19 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Print results to stdout but do not write files under eval/reports/.",
     )
+    parser.add_argument(
+        "--scenario-arg",
+        action="append",
+        default=None,
+        metavar="NAME=VALUE",
+        help=(
+            "Keyword argument to forward to the scenario's run() callable. "
+            "Repeatable, e.g. '--scenario-arg profile=real --scenario-arg "
+            "rounds=20'. Values are coerced int -> float -> bool -> str (bool "
+            "accepts true/false case-insensitive). Unknown kwargs surface as a "
+            "loud scenario failure, not a silent drop."
+        ),
+    )
     return parser
 
 
@@ -307,6 +339,64 @@ def _resolve_names(arg: str) -> list[str]:
     if arg == "all":
         return list_scenarios()
     return [n.strip() for n in arg.split(",") if n.strip()]
+
+
+def _coerce_scenario_value(raw: str) -> Any:
+    """Coerce a CLI string value to int -> float -> bool -> str.
+
+    Booleans accept ``true`` / ``false`` case-insensitive. All other
+    strings fall through to ``str``. Empty strings are returned as
+    empty strings (not coerced) — the caller already validated the
+    name half of ``name=value``; an empty value is a deliberate
+    scenario-side choice (e.g. ``--scenario-arg comment=``).
+    """
+    # int first — ``int("1.0")`` raises, so floats fall through to the
+    # next branch. ``int("true")`` raises too, so bools fall through.
+    try:
+        return int(raw)
+    except ValueError:
+        pass
+    try:
+        return float(raw)
+    except ValueError:
+        pass
+    lowered = raw.lower()
+    if lowered == "true":
+        return True
+    if lowered == "false":
+        return False
+    return raw
+
+
+def _parse_scenario_args(items: Iterable[str] | None) -> dict[str, Any]:
+    """Parse repeated ``NAME=VALUE`` flags into a ``dict[str, Any]``.
+
+    Raises ``ValueError`` on a missing ``=`` separator or an empty /
+    non-identifier name. Loud-on-parse-failure is the contract — we
+    never want a typo'd flag to silently become a string-valued kwarg.
+    Later occurrences of the same name overwrite earlier ones (argparse
+    ``action="append"`` preserves order, so the right-most wins).
+    """
+    parsed: dict[str, Any] = {}
+    if not items:
+        return parsed
+    for item in items:
+        if "=" not in item:
+            msg = (
+                f"--scenario-arg expected NAME=VALUE; got {item!r} "
+                f"(missing '=' separator)"
+            )
+            raise ValueError(msg)
+        name, _, value = item.partition("=")
+        name = name.strip()
+        if not name or not name.isidentifier():
+            msg = (
+                f"--scenario-arg name must be a non-empty Python identifier; "
+                f"got {name!r} from {item!r}"
+            )
+            raise ValueError(msg)
+        parsed[name] = _coerce_scenario_value(value)
+    return parsed
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -322,8 +412,13 @@ def main(argv: list[str] | None = None) -> int:
     if not names:
         parser.error("--scenario must name at least one scenario")
 
+    try:
+        scenario_kwargs = _parse_scenario_args(args.scenario_arg)
+    except ValueError as exc:
+        parser.error(str(exc))
+
     with StoreRegistry.from_config_dir(args.config_dir, args.data_dir) as registry:
-        reports = run_scenarios(names, registry)
+        reports = run_scenarios(names, registry, **scenario_kwargs)
 
     if not args.no_write:
         json_path, md_path = write_report(reports)
