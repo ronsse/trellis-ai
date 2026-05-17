@@ -292,13 +292,23 @@ def test_assert_axis_b_regresses_when_lift_below_threshold() -> None:
 # ---------------------------------------------------------------------------
 # Axis C — advisory hit rate via _assert_last_quarter_threshold
 # Axis C has no named helper; it routes through _assert_last_quarter_threshold
-# with the C track + THRESHOLD_C_LAST_QUARTER (0.6). The contract under
-# test is "last-quarter mean clears the absolute bar".
+# with the C track + THRESHOLD_C_LAST_QUARTER. The contract under test is
+# "last-quarter mean clears the absolute bar". Unit D1 (2026-05-16)
+# dropped the threshold to 0.0 — see the constant's docstring for the
+# rationale (synthetic corpus doesn't yet exercise the per-item
+# provenance path that the tightened axis C measures).
 # ---------------------------------------------------------------------------
 
 
 def test_assert_axis_c_passes_when_last_quarter_clears_threshold() -> None:
-    """Last-quarter mean of 0.8 clears the axis-C 0.6 absolute bar."""
+    """Last-quarter mean of 0.8 clears the axis-C threshold (post-D1: 0.0).
+
+    The synthetic baseline lands at 0.0 today (no advisories carry the
+    ``entity_id`` C1 provenance needs to stamp items), so the threshold
+    is 0.0 and any non-negative last-quarter mean passes. A 0.85 mean
+    locks in that the helper still asserts ``last_quarter_mean >=
+    threshold`` rather than equality.
+    """
     track = _track_from_values(
         "C_advisory_hit_rate", [0.2, 0.3, 0.4, 0.5, 0.7, 0.75, 0.8, 0.85]
     )
@@ -310,16 +320,27 @@ def test_assert_axis_c_passes_when_last_quarter_clears_threshold() -> None:
     assert result.detail["last_quarter_mean"] >= THRESHOLD_C_LAST_QUARTER
 
 
-def test_assert_axis_c_regresses_when_last_quarter_below_threshold() -> None:
-    """Last-quarter mean of ~0.35 fails the axis-C 0.6 bar."""
+def test_assert_axis_c_regresses_when_last_quarter_below_explicit_bar() -> None:
+    """Helper still flips ``passed=False`` when an explicit bar isn't met.
+
+    With ``THRESHOLD_C_LAST_QUARTER`` now at 0.0, the synthetic value
+    can no longer naturally fall below the production bar — so this
+    test exercises the helper's regress branch directly by passing an
+    explicit non-zero threshold (matching the pre-D1 0.6 calibration).
+    Locks in that ``_assert_last_quarter_threshold`` continues to drive
+    the regress finding when a downstream consumer (e.g., the
+    operator-supplied stricter bar mooted in TODO.md) feeds in a higher
+    threshold.
+    """
+    explicit_higher_bar = 0.6
     track = _track_from_values(
         "C_advisory_hit_rate", [0.3, 0.32, 0.34, 0.33, 0.35, 0.36, 0.34, 0.35]
     )
     result = _assert_last_quarter_threshold(
-        track, "C_advisory_hit_rate", THRESHOLD_C_LAST_QUARTER
+        track, "C_advisory_hit_rate", explicit_higher_bar
     )
     assert result.passed is False
-    assert result.detail["last_quarter_mean"] < THRESHOLD_C_LAST_QUARTER
+    assert result.detail["last_quarter_mean"] < explicit_higher_bar
 
 
 # ---------------------------------------------------------------------------
