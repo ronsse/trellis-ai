@@ -567,6 +567,40 @@ def test_run_render_chart_custom_figsize_and_dpi_kwargs(
     assert height == 450, f"expected 450 px tall (6.0in * 75dpi); got {height}"
 
 
+def test_run_render_chart_style_overlay_threads_through(
+    sqlite_registry: StoreRegistry,
+    tmp_path: Path,
+) -> None:
+    """``chart_style="overlay"`` flows from ``run()`` into the renderer.
+
+    Confirms the kwarg is plumbed end-to-end and the resulting PNG is
+    written + surfaced as a ``chart_path`` metric. The renderer-level
+    contract (overlay vs grid byte layout) is locked in by
+    ``test_program_convergence_chart.py``; this test only checks the
+    plumbing.
+    """
+    report = run(
+        sqlite_registry,
+        seed=0,
+        rounds=4,
+        feedback_batch_size=4,
+        analyzer_cadence=4,
+        traces_per_domain=2,
+        render_chart=True,
+        chart_output_dir=tmp_path,
+        chart_style="overlay",
+    )
+
+    chart_path_str = report.metrics.get("chart_path")
+    assert isinstance(chart_path_str, str)
+    chart_path = Path(chart_path_str)
+    assert chart_path.exists()
+    assert chart_path.parent == tmp_path
+    # PNG signature — sanity check the overlay renderer actually wrote
+    # a valid file rather than half-rendering and leaving an empty stub.
+    assert chart_path.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+
+
 def test_run_render_chart_default_output_dir_anchors_to_file(
     sqlite_registry: StoreRegistry,
     tmp_path: Path,

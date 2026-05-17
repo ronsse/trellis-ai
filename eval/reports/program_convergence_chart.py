@@ -36,9 +36,10 @@ POC directives applied:
 
 from __future__ import annotations
 
+import statistics
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import matplotlib as mpl
 
@@ -48,6 +49,7 @@ import matplotlib as mpl
 # import is the documented matplotlib pattern.
 mpl.use("Agg")
 
+import matplotlib.lines as mlines
 import matplotlib.pyplot as plt
 import structlog
 
@@ -100,6 +102,41 @@ _AXIS_EXPECTED_SHAPE: dict[str, str] = {
     "I_self_authored_proposals": "expected: rises",
 }
 
+#: Short arrow glyph per axis summarising the expected direction. Used
+#: in the overlay legend where the full ``expected: ...`` phrase would
+#: clutter a nine-line legend box. ``↑`` = rises (improvement), ``↓``
+#: = falls (improvement), ``≈`` = flat (no expected motion). Keys match
+#: ``NINE_AXIS_LABELS`` exactly.
+_AXIS_EXPECTED_ARROW: dict[str, str] = {
+    "A_pack_quality": "↑",
+    "B_useful_item_fraction": "↑",
+    "C_advisory_hit_rate": "↑",
+    "D_observation_enrichment": "↑",
+    "E_provenance_queryability": "≈",
+    "F_extraction_failure_clusters": "↓",
+    "G_schema_evolution_candidates": "↑",
+    "H_meta_trace_density": "≈",
+    "I_self_authored_proposals": "↑",
+}
+
+#: Valid ``style`` values. Listed here so the validator and the docstring
+#: agree on the exact spelling.
+ChartStyle = Literal["grid", "overlay"]
+_VALID_STYLES: tuple[str, ...] = ("grid", "overlay")
+
+#: Quarter-window divisor used by the overlay baseline. Mirrors
+#: ``ROUND_WINDOW_FRACTION`` in ``eval.scenarios._convergence_common`` —
+#: kept as a module-local constant rather than imported to avoid an
+#: import cycle (the renderer is supposed to be the leaf node).
+_OVERLAY_QUARTER_DIVISOR = 4
+
+#: Threshold below which a first-quarter baseline is treated as zero
+#: for normalization. Anything inside this magnitude divides into
+#: ``inf`` or near-inf and isn't a useful relative baseline; tracks
+#: with a baseline this small render as "no baseline" entries in the
+#: legend rather than producing nonsense lines.
+_OVERLAY_BASELINE_EPSILON = 1e-12
+
 
 def render_program_convergence_chart(
     stats: _MultiAxisStats,
@@ -109,6 +146,7 @@ def render_program_convergence_chart(
     timestamp: datetime | None = None,
     figsize: tuple[float, float] | None = None,
     dpi: int | None = None,
+    style: ChartStyle = "grid",
 ) -> Path:
     """Render the 9-axis convergence chart to a PNG and return its path.
 
@@ -140,15 +178,31 @@ def render_program_convergence_chart(
             ``fig.savefig``. Defaults to the module-level ``_DPI``
             (100) when ``None``. Higher values produce sharper PNGs
             at the cost of file size.
+        style: Layout style. ``"grid"`` (default) renders the 3x3
+            subplot grid — one axes object per of the nine tracks,
+            preserving each axis's natural units. ``"overlay"`` renders
+            a single-figure 9-line plot with each axis's series
+            normalized against its own first-quarter mean (so 1.0 =
+            baseline, >1.0 = improvement relative to baseline, <1.0 =
+            regression). The overlay variant trades absolute units for
+            cross-axis comparability — useful for an at-a-glance "did
+            everything move the right direction?" check; the grid
+            variant remains authoritative for shape inspection.
 
     Returns:
         Absolute path to the written PNG.
 
     Raises:
-        ValueError: If ``invocation_id`` is empty / whitespace, or
-            ``output_dir`` is not a directory we can create.
+        ValueError: If ``invocation_id`` is empty / whitespace,
+            ``timestamp`` is naive, or ``style`` is not one of
+            ``"grid"`` / ``"overlay"``.
     """
-    from eval.scenarios._convergence_common import NINE_AXIS_LABELS  # noqa: PLC0415
+    if style not in _VALID_STYLES:
+        msg = (
+            f"style must be one of {_VALID_STYLES!r}; got {style!r}. "
+            "POC directive: loud on misuse rather than silent fallback."
+        )
+        raise ValueError(msg)
 
     if not invocation_id or not invocation_id.strip():
         msg = "invocation_id must be a non-empty string"
@@ -168,12 +222,63 @@ def render_program_convergence_chart(
 
     rounds_count = _infer_rounds_count(stats)
 
+    if style == "grid":
+        _render_grid(
+            stats=stats,
+            output_path=output_path,
+            invocation_id=invocation_id,
+            rounds_count=rounds_count,
+            figsize=resolved_figsize,
+            dpi=resolved_dpi,
+        )
+    else:  # style == "overlay" — exhaustive after the validator above.
+        _render_overlay(
+            stats=stats,
+            output_path=output_path,
+            invocation_id=invocation_id,
+            rounds_count=rounds_count,
+            figsize=resolved_figsize,
+            dpi=resolved_dpi,
+        )
+
+    logger.info(
+        "program_convergence_chart_rendered",
+        output_path=str(output_path),
+        invocation_id=invocation_id,
+        rounds=rounds_count,
+        timestamp=ts.isoformat(),
+        figsize=resolved_figsize,
+        dpi=resolved_dpi,
+        style=style,
+    )
+    return output_path
+
+
+def _render_grid(
+    *,
+    stats: _MultiAxisStats,
+    output_path: Path,
+    invocation_id: str,
+    rounds_count: int,
+    figsize: tuple[float, float],
+    dpi: int,
+) -> None:
+    """Render the 3x3 subplot grid — one axes object per axis label.
+
+    Extracted from ``render_program_convergence_chart`` to make the
+    ``style`` dispatch readable. Behavior identical to the pre-D2
+    implementation; the grid variant is the regression anchor and must
+    stay byte-for-byte compatible with the prior renderer for any
+    given input.
+    """
+    from eval.scenarios._convergence_common import NINE_AXIS_LABELS  # noqa: PLC0415
+
     palette = plt.get_cmap("tab10")
     fig, axes_grid = plt.subplots(
         nrows=_SUBPLOT_ROWS,
         ncols=_SUBPLOT_COLS,
-        figsize=resolved_figsize,
-        dpi=resolved_dpi,
+        figsize=figsize,
+        dpi=dpi,
         squeeze=False,
     )
     fig.suptitle(
@@ -194,19 +299,159 @@ def render_program_convergence_chart(
         )
 
     fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.96))
-    fig.savefig(output_path, format="png", dpi=resolved_dpi)
+    fig.savefig(output_path, format="png", dpi=dpi)
     plt.close(fig)
 
-    logger.info(
-        "program_convergence_chart_rendered",
-        output_path=str(output_path),
-        invocation_id=invocation_id,
-        rounds=rounds_count,
-        timestamp=ts.isoformat(),
-        figsize=resolved_figsize,
-        dpi=resolved_dpi,
+
+def _render_overlay(
+    *,
+    stats: _MultiAxisStats,
+    output_path: Path,
+    invocation_id: str,
+    rounds_count: int,
+    figsize: tuple[float, float],
+    dpi: int,
+) -> None:
+    """Render a single-axes plot with all 9 tracks normalized to baselines.
+
+    Each track is normalized against its own first-quarter mean (the
+    same ``_quarter_means`` window the convergence finding uses); the
+    resulting series is ``value / baseline`` so 1.0 means "no change
+    vs. early-run baseline", >1.0 means "improved", <1.0 means
+    "regressed". An axis with a zero (or near-zero) first-quarter mean
+    has no meaningful relative baseline; we render those tracks with
+    label ``"(no baseline)"`` and skip plotting their data points,
+    rather than fabricating a synthetic baseline or hitting
+    div-by-zero. Same ``tab10`` colour-per-axis-index ordering as the
+    grid variant so an operator switching between styles sees the same
+    colour for each axis.
+    """
+    from eval.scenarios._convergence_common import NINE_AXIS_LABELS  # noqa: PLC0415
+
+    palette = plt.get_cmap("tab10")
+    fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
+    fig.suptitle(
+        f"Program convergence (overlay) — {rounds_count} rounds — {invocation_id}",
+        fontsize=14,
+        fontweight="bold",
     )
-    return output_path
+
+    ax.set_xlabel("round", fontsize=9)
+    ax.set_ylabel("value / first-quarter-mean baseline", fontsize=9)
+    ax.tick_params(labelsize=8)
+    ax.grid(visible=True, alpha=0.3)
+    # 1.0 = baseline reference. Dashed horizontal line so eye snaps to
+    # "above this line is improvement, below is regression".
+    ax.axhline(1.0, color="#888888", linestyle="--", linewidth=0.8, alpha=0.7)
+
+    legend_handles: list[mlines.Line2D] = []
+    legend_labels: list[str] = []
+
+    for index, label in enumerate(NINE_AXIS_LABELS):
+        track = stats.axes.get(label)
+        color = palette(index)
+        title = _AXIS_DISPLAY_TITLES.get(label, label)
+        arrow = _AXIS_EXPECTED_ARROW.get(label, "")
+        legend_label = f"{title} ({arrow})" if arrow else title
+
+        if track is None or not track.records:
+            legend_handles.append(_make_legend_proxy(color))
+            legend_labels.append(f"{legend_label} — no data")
+            continue
+
+        baseline = _first_quarter_baseline(track)
+        if baseline is None:
+            legend_handles.append(_make_legend_proxy(color))
+            legend_labels.append(f"{legend_label} — no baseline")
+            continue
+
+        x_values = [record.round_index for record in track.records]
+        y_values = [record.value / baseline for record in track.records]
+        (line,) = ax.plot(
+            x_values,
+            y_values,
+            color=color,
+            marker="o",
+            linewidth=1.5,
+            markersize=4,
+            label=legend_label,
+        )
+        legend_handles.append(line)
+        legend_labels.append(legend_label)
+
+    # ``ax.legend()`` would only pick up handles for plotted lines;
+    # build the legend explicitly so empty / baseline-less axes still
+    # surface in the legend with their colour swatch.
+    ax.legend(
+        legend_handles,
+        legend_labels,
+        loc="center left",
+        bbox_to_anchor=(1.02, 0.5),
+        fontsize=8,
+        frameon=True,
+    )
+
+    # Right-side legend takes ~25% of the figure width; leave room.
+    fig.tight_layout(rect=(0.0, 0.0, 0.78, 0.94))
+    fig.savefig(output_path, format="png", dpi=dpi)
+    plt.close(fig)
+
+
+def _first_quarter_baseline(track: object) -> float | None:
+    """Compute the first-quarter mean baseline for overlay normalization.
+
+    Returns ``None`` when the baseline is too close to zero to use as
+    a divisor — overlay normalization is value-over-baseline, and a
+    zero baseline either means the axis genuinely sat at zero through
+    the first quarter (legitimately "no baseline to compare against")
+    or the track is empty. Either way, dividing into it produces
+    nonsense; the caller skips plotting those tracks rather than
+    hitting ``ZeroDivisionError`` or rendering an ``inf``.
+
+    The threshold (``1e-12``) is tight on purpose — we want to skip
+    only literal-zero baselines, not legitimate small values; an axis
+    with first-quarter mean 0.001 is still a real baseline for an
+    operator's "did we double?" eyeball check.
+    """
+    records = getattr(track, "records", None)
+    if not records:
+        return None
+    values = [r.value for r in records]
+    if not values:
+        return None
+    # Match ``_quarter_means`` window semantics: rounds < 4 fall back
+    # to the full-sample mean rather than a (potentially noisier)
+    # one-sample window. Keeps the overlay baseline consistent with
+    # the convergence-finding baseline an operator already trusts.
+    if len(values) < _OVERLAY_QUARTER_DIVISOR:
+        baseline = statistics.fmean(values)
+    else:
+        window = max(1, len(values) // _OVERLAY_QUARTER_DIVISOR)
+        baseline = statistics.fmean(values[:window])
+    if abs(baseline) < _OVERLAY_BASELINE_EPSILON:
+        return None
+    return baseline
+
+
+def _make_legend_proxy(
+    color: tuple[float, float, float, float],
+) -> mlines.Line2D:
+    """Build an invisible-data Line2D for legend rows with no plotted series.
+
+    Tracks with zero records or a zero baseline still appear in the
+    legend so an operator can see at a glance which axes contributed
+    no data. Matplotlib's auto-legend skips lines that were never
+    plotted; the workaround is a zero-length proxy with the same
+    colour and marker as the real line would have used.
+    """
+    return mlines.Line2D(
+        [],
+        [],
+        color=color,
+        marker="o",
+        linewidth=1.5,
+        markersize=4,
+    )
 
 
 def _render_axis(

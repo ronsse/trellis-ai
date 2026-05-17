@@ -51,6 +51,7 @@ import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Literal
 
 import structlog
 
@@ -1051,6 +1052,7 @@ def _render_chart(
     output_dir: Path | None = None,
     figsize: tuple[float, float] | None = None,
     dpi: int | None = None,
+    style: Literal["grid", "overlay"] = "grid",
 ) -> Path:
     """Render the 9-axis PNG via the eval-reports renderer.
 
@@ -1070,6 +1072,10 @@ def _render_chart(
             preserves the renderer's hardcoded default.
         dpi: Pixels-per-inch for the rendered PNG; ``None`` preserves
             the renderer's hardcoded default.
+        style: ``"grid"`` (default) renders the 3x3 subplot grid;
+            ``"overlay"`` renders a single-axes 9-line plot with each
+            axis normalized against its own first-quarter mean. See
+            :func:`eval.reports.program_convergence_chart.render_program_convergence_chart`.
     """
     from eval.reports.program_convergence_chart import (  # noqa: PLC0415
         render_program_convergence_chart,
@@ -1085,11 +1091,13 @@ def _render_chart(
         invocation_id=invocation_id,
         figsize=figsize,
         dpi=dpi,
+        style=style,
     )
     logger.info(
         "program_convergence_chart_written",
         chart_path=str(chart_path),
         invocation_id=invocation_id,
+        style=style,
     )
     return chart_path
 
@@ -1111,6 +1119,7 @@ def run(
     chart_output_dir: Path | None = None,
     chart_figsize: tuple[float, float] | None = None,
     chart_dpi: int | None = None,
+    chart_style: Literal["grid", "overlay"] = "grid",
 ) -> ScenarioReport:
     """Execute the program-level master scenario.
 
@@ -1143,6 +1152,11 @@ def run(
     behavior: ``chart_output_dir`` resolves to the repo-anchored
     ``<repo>/eval/reports/`` directory, ``chart_figsize`` stays at
     ``(15.0, 11.0)``, and ``chart_dpi`` stays at ``100``.
+
+    ``chart_style`` selects the layout: ``"grid"`` (default) keeps the
+    pre-D2 3x3 subplot grid; ``"overlay"`` renders a single-axes
+    9-line plot with each axis normalized against its own first-quarter
+    mean for cross-axis comparability.
     """
     _validate_run_kwargs(
         rounds=rounds,
@@ -1197,6 +1211,7 @@ def run(
             output_dir=chart_output_dir,
             figsize=chart_figsize,
             dpi=chart_dpi,
+            style=chart_style,
         )
         metrics["chart_path"] = str(chart_path)
 
