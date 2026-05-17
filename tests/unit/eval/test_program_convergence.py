@@ -304,12 +304,19 @@ def test_axis_g_emits_candidate_before_round_thirty(
 # ---------------------------------------------------------------------------
 
 
-def _make_round(*, round_index: int, domain: str, success: bool) -> _RoundResult:
+def _make_round(
+    *,
+    round_index: int,
+    domain: str,
+    success: bool,
+    advisory_ids_per_item: list[list[str]] | None = None,
+) -> _RoundResult:
     """Build a minimally-populated _RoundResult for axis-C slicing tests.
 
-    Only ``round_index``, ``domain`` and ``success`` matter for
-    ``_compute_advisory_hit_rate``; the other axis fields are stubbed to
-    zero so the dataclass instantiates cleanly.
+    ``advisory_ids_per_item`` populates the Unit D1 provenance field —
+    one inner list per ``PackItem`` in the round's pack, empty when the
+    builder didn't stamp the item. ``None`` (the default) leaves it
+    empty, matching the pre-advisory-loop state.
     """
     return _RoundResult(
         round_index=round_index,
@@ -329,15 +336,17 @@ def _make_round(*, round_index: int, domain: str, success: bool) -> _RoundResult
         axis_schema_evolution_candidates=0.0,
         axis_meta_trace_density=0.0,
         axis_self_authored_proposals=0.0,
+        injected_advisory_ids_per_item=advisory_ids_per_item or [],
     )
 
 
 def _make_advisory(scope: str) -> Advisory:
     """Build a minimal active Advisory scoped to ``scope``.
 
-    Values are placeholders — ``_compute_advisory_hit_rate`` only reads
-    ``scope`` and ``status`` (via ``AdvisoryStore.list()``'s active-only
-    filter), not category / confidence / evidence.
+    Pre-D1 this fed ``_compute_advisory_hit_rate``'s ``advisory_store``
+    kwarg directly; the D1 implementation no longer reads the store but
+    the kwarg is preserved for backward compatibility, so the fixture
+    stays useful for the ``advisory_store=`` smoke-test.
     """
     return Advisory(
         category=AdvisoryCategory.ENTITY,
@@ -356,52 +365,220 @@ def _make_advisory(scope: str) -> Advisory:
 @pytest.mark.parametrize(
     ("lookback", "expected_hit_rate"),
     [
-        # Last 3 rounds are all failures on a different scope — the
-        # "finance" advisory has no successful recent rounds in scope,
-        # so axis C drops to 0.0.
+        # Last 3 rounds are all failures with advisory_ids stamped on
+        # every item — denominator = 6 (3 rounds * 2 advisories), hits = 0.
         (3, 0.0),
-        # 10-round lookback pulls in rounds 0-6 (all finance successes),
-        # so the advisory's scope appears in success_refs and the rate
-        # climbs to 1.0. Same advisory, same round history — only the
-        # window changed. This is the proof the kwarg flows through.
-        (10, 1.0),
+        # 10-round lookback pulls in rounds 0-6 (all successes carrying
+        # the same advisory_ids) plus rounds 7-9 (all failures). Hits =
+        # 14 (7 rounds * 2 advisories), denominator = 20 (10 rounds * 2),
+        # so hit_rate = 0.7. Same history, only the window changed —
+        # proves the kwarg flows through to the aggregator.
+        (10, 0.7),
     ],
 )
 def test_compute_advisory_hit_rate_respects_lookback(
-    tmp_path: Path,
     lookback: int,
     expected_hit_rate: float,
 ) -> None:
-    """Axis C must read only the last ``lookback`` rounds.
+    """Axis C must read only the last ``lookback`` rounds (Unit D1 semantics).
 
-    Builds a 10-round history where the first 7 rounds succeed on the
-    advisory's scope and the trailing 3 fail on a different scope. With
-    a short window the advisory looks dead (hit_rate=0.0); with a long
-    window it looks healthy (hit_rate=1.0). The two values must differ,
-    which proves :func:`run` is not silently ignoring the kwarg.
+    Builds a 10-round history where the first 7 rounds succeed and the
+    trailing 3 fail. Every round carries the same two advisory_ids on a
+    single item, so the lookback window changes the denominator AND the
+    hits count proportionally. With a short window of trailing failures
+    the rate drops to 0.0; with a long window the success-weighted
+    portion of the window lifts it back up.
     """
-    advisory_store = AdvisoryStore(tmp_path / "advisories.json")
-    advisory_store.put(_make_advisory(scope="finance"))
-
-    # 10-round synthetic history. Rounds 0-6: finance + success.
-    # Rounds 7-9: health + failure. Slicing with [-lookback:] picks the
-    # tail, so a 3-round window sees only failures.
+    ids = ["adv-A", "adv-B"]
     full_history = [
-        _make_round(round_index=i, domain="finance", success=True) for i in range(7)
+        _make_round(
+            round_index=i,
+            domain="finance",
+            success=True,
+            advisory_ids_per_item=[list(ids)],
+        )
+        for i in range(7)
     ] + [
-        _make_round(round_index=i, domain="health", success=False) for i in range(7, 10)
+        _make_round(
+            round_index=i,
+            domain="health",
+            success=False,
+            advisory_ids_per_item=[list(ids)],
+        )
+        for i in range(7, 10)
     ]
 
     sliced = full_history[-lookback:]
-    hit_rate = _compute_advisory_hit_rate(
-        advisory_store=advisory_store,
-        recent_rounds=sliced,
-    )
+    hit_rate = _compute_advisory_hit_rate(recent_rounds=sliced)
+    rounds_repr = [
+        (r.round_index, r.success, r.injected_advisory_ids_per_item) for r in sliced
+    ]
     assert hit_rate == pytest.approx(expected_hit_rate), (
         f"lookback={lookback} should yield hit_rate={expected_hit_rate}; "
-        f"got {hit_rate}. Sliced rounds: "
-        f"{[(r.round_index, r.domain, r.success) for r in sliced]}"
+        f"got {hit_rate}. Sliced rounds: {rounds_repr}"
     )
+
+
+# ---------------------------------------------------------------------------
+# advisory_hit_rate provenance-based aggregator (Unit D1)
+# ---------------------------------------------------------------------------
+
+
+def test_compute_advisory_hit_rate_all_success_all_stamped() -> None:
+    """Every item stamped, every round successful → hit rate is 1.0.
+
+    Three rounds, two items each, two advisory_ids per item. Total
+    presented = 3 * 2 * 2 = 12; hits = 12 (every round succeeded);
+    ratio = 1.0. This is the plan-prose "advisories whose recommendation
+    was followed AND outcome=success" upper bound.
+    """
+    rounds = [
+        _make_round(
+            round_index=i,
+            domain="finance",
+            success=True,
+            advisory_ids_per_item=[["adv-A", "adv-B"], ["adv-A", "adv-C"]],
+        )
+        for i in range(3)
+    ]
+    hit_rate = _compute_advisory_hit_rate(recent_rounds=rounds)
+    assert hit_rate == pytest.approx(1.0)
+
+
+def test_compute_advisory_hit_rate_all_failure_all_stamped() -> None:
+    """Every item stamped, every round failed → hit rate is 0.0.
+
+    Same shape as the all-success case but with ``success=False``
+    everywhere — denominator is identical (12), hits is 0. The plan-
+    prose lower bound: a misfiring advisory whose recommendations land
+    in failing rounds drags axis C to the floor.
+    """
+    rounds = [
+        _make_round(
+            round_index=i,
+            domain="finance",
+            success=False,
+            advisory_ids_per_item=[["adv-A", "adv-B"], ["adv-A", "adv-C"]],
+        )
+        for i in range(3)
+    ]
+    hit_rate = _compute_advisory_hit_rate(recent_rounds=rounds)
+    assert hit_rate == pytest.approx(0.0)
+
+
+def test_compute_advisory_hit_rate_mixed_success_fraction() -> None:
+    """Mixed success → ``hits / total_presented``.
+
+    Four rounds, one item each, one advisory per item. Two succeed,
+    two fail → 2 hits / 4 presented = 0.5. Locks in the proportional-
+    aggregation rule (every advisory_id occurrence counts once on the
+    denominator and on the hits side iff the round succeeded).
+    """
+    rounds = [
+        _make_round(
+            round_index=0,
+            domain="finance",
+            success=True,
+            advisory_ids_per_item=[["adv-A"]],
+        ),
+        _make_round(
+            round_index=1,
+            domain="finance",
+            success=False,
+            advisory_ids_per_item=[["adv-A"]],
+        ),
+        _make_round(
+            round_index=2,
+            domain="finance",
+            success=True,
+            advisory_ids_per_item=[["adv-A"]],
+        ),
+        _make_round(
+            round_index=3,
+            domain="finance",
+            success=False,
+            advisory_ids_per_item=[["adv-A"]],
+        ),
+    ]
+    hit_rate = _compute_advisory_hit_rate(recent_rounds=rounds)
+    assert hit_rate == pytest.approx(0.5)
+
+
+def test_compute_advisory_hit_rate_no_advisories_stamped() -> None:
+    """No item carries an advisory_id → hit rate is 0.0 (documented contract).
+
+    Pre-advisory-loop runs (and any future regression that stops the
+    PackBuilder from stamping items) land here. The plan-prose
+    contract is "0.0", not NaN — the regression suite's
+    ``THRESHOLD_C_LAST_QUARTER`` still bites when the stamping path
+    breaks.
+    """
+    rounds = [
+        _make_round(
+            round_index=i,
+            domain="finance",
+            success=True,
+            advisory_ids_per_item=[[], [], []],
+        )
+        for i in range(5)
+    ]
+    hit_rate = _compute_advisory_hit_rate(recent_rounds=rounds)
+    assert hit_rate == pytest.approx(0.0)
+
+
+def test_compute_advisory_hit_rate_empty_rounds_window() -> None:
+    """An empty lookback window degenerates to 0.0, not a ZeroDivisionError."""
+    hit_rate = _compute_advisory_hit_rate(recent_rounds=[])
+    assert hit_rate == pytest.approx(0.0)
+
+
+def test_compute_advisory_hit_rate_partial_item_coverage() -> None:
+    """Items with empty advisory_ids skip the denominator.
+
+    Three items per round; only the first carries an advisory. The
+    blank inner lists must not inflate the denominator — otherwise a
+    pack with 50 items and one stamped one would dilute axis C
+    artificially. Hits = 2 (both rounds succeeded), presented = 2 →
+    ratio = 1.0.
+    """
+    rounds = [
+        _make_round(
+            round_index=i,
+            domain="finance",
+            success=True,
+            advisory_ids_per_item=[["adv-A"], [], []],
+        )
+        for i in range(2)
+    ]
+    hit_rate = _compute_advisory_hit_rate(recent_rounds=rounds)
+    assert hit_rate == pytest.approx(1.0)
+
+
+def test_compute_advisory_hit_rate_ignores_advisory_store(
+    tmp_path: Path,
+) -> None:
+    """Back-compat — ``advisory_store=`` is accepted but no longer consulted.
+
+    Unit D1 derives axis C entirely from per-item provenance, but
+    Unit A2 introduced the keyword and operator scripts may still pass
+    it. The implementation must accept the kwarg without behaviour
+    change. A populated store + an empty round window should still
+    return 0.0 (no items presented means no hits, no denominator).
+    """
+    advisory_store = AdvisoryStore(tmp_path / "advisories.json")
+    advisory_store.put(_make_advisory(scope="finance"))
+    advisory_store.put(_make_advisory(scope="health"))
+
+    # Two successful rounds, no advisory_ids stamped — D1 should return 0.0
+    # regardless of how many actives the store carries.
+    rounds = [
+        _make_round(round_index=i, domain="finance", success=True) for i in range(2)
+    ]
+    hit_rate = _compute_advisory_hit_rate(
+        advisory_store=advisory_store,
+        recent_rounds=rounds,
+    )
+    assert hit_rate == pytest.approx(0.0)
 
 
 def test_run_accepts_advisory_hit_lookback_rounds_kwarg(

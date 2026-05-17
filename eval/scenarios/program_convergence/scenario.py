@@ -48,7 +48,7 @@ from __future__ import annotations
 
 import random
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -153,11 +153,12 @@ DEFAULT_PROPOSAL_WINDOW_HOURS = 24
 # erroring on the predicate compile).
 _PROVENANCE_PROBE_CONFIDENCE: float = 0.5
 
-# Advisory hit rate observation window — fraction of *recently
-# referenced* item_ids the active advisory recommends that ALSO map to
-# a successful round in the current batch. Looser than the prose
-# definition in the plan; tight enough that a misfiring advisory drops
-# the rate. See ``_compute_advisory_hit_rate``.
+# Advisory hit rate observation window — number of trailing rounds the
+# axis C aggregator joins together. Unit D1 tightened the semantics:
+# each ``PackItem.injected_advisory_ids`` entry in the window
+# contributes a "presented advisory"; entries that land in a successful
+# round count as "hits"; the ratio is axis C. See
+# :func:`_compute_advisory_hit_rate` for the contract.
 #
 # Exposed as the default for ``run(advisory_hit_lookback_rounds=...)``;
 # operators tuning axis C sensitivity (longer windows smooth the
@@ -208,6 +209,16 @@ class _RoundResult:
     axis_schema_evolution_candidates: float
     axis_meta_trace_density: float
     axis_self_authored_proposals: float
+    #: Per-item ``injected_advisory_ids`` captured from this round's pack
+    #: (Unit D1). One inner list per ``PackItem`` in the order the items
+    #: were assembled; empty inner lists mark items the PackBuilder did
+    #: not stamp with advisory provenance. Drives
+    #: :func:`_compute_advisory_hit_rate` — total advisories presented
+    #: across the lookback window is ``sum(len(ids) for round_result in
+    #: window for ids in round_result.injected_advisory_ids_per_item)``.
+    #: Default ``list`` keeps existing fixtures (regression-suite tests,
+    #: synthetic constructors) working without a per-call override.
+    injected_advisory_ids_per_item: list[list[str]] = field(default_factory=list)
 
     def to_nine_axis(self) -> _NineAxisRound:
         return _NineAxisRound(
@@ -711,52 +722,58 @@ def _run_proposal_generator(registry: StoreRegistry) -> int:
 
 def _compute_advisory_hit_rate(
     *,
-    advisory_store: AdvisoryStore,
     recent_rounds: list[_RoundResult],
+    advisory_store: AdvisoryStore | None = None,  # noqa: ARG001 — kept for back-compat
 ) -> float:
-    """Axis C — fraction of active advisories whose entity recommendation
-    co-occurred with at least one successful recent round.
+    """Axis C — fraction of presented advisories whose round succeeded.
 
-    The plan defines axis C as "advisories whose recommendation was
-    followed AND outcome=success". We operationalise it as: walk every
-    active advisory, look up its ``entity_id`` (the canonical
-    recommendation target), and count it as a hit if at least one
-    recent round both **referenced** the entity (or the doc derived
-    from it) and **succeeded**. Suppressed advisories don't count
-    against the rate — they're correctly retired and shouldn't drag
-    the fitness metric.
+    Plan-prose definition (Unit D1): "advisories whose recommendation was
+    *followed* AND outcome=success". Operationalised against C1's
+    :attr:`PackItem.injected_advisory_ids` provenance: walk every
+    ``PackItem`` across the lookback window, count an
+    ``advisory_id`` as a **hit** when the item carrying it landed in a
+    round whose ``success`` flag is ``True``. The denominator is the
+    total advisory_id occurrences across the window (one item carrying
+    two advisory_ids counts twice on both sides of the ratio).
 
-    Returns 0.0 when there are no active advisories yet (pre-first-pass).
+    Per the C1 deferred [M] finding (PR #171 body): provenance fires only
+    on ``entity_id`` match — ``injected_advisory_ids`` records "this
+    advisory influenced presence/ranking of this item", not "this item
+    was strictly recommended by this advisory". Treating the field as
+    influence-tagged is the deliberate read; tightening the join to
+    item_id==entity_id equality is a follow-up.
+
+    Contract:
+
+    * Empty lookback window → ``0.0`` (degenerate; no work happened yet).
+    * Lookback window with **zero advisory_ids stamped on any item** →
+      ``0.0`` (axis C measures advisory effectiveness; with nothing
+      presented, the natural read is "no positive evidence" rather than
+      ``NaN``). The same number a pre-advisory-loop run produces, so the
+      regression suite's ``THRESHOLD_C_LAST_QUARTER`` still bites if the
+      PackBuilder stops stamping items.
+    * All success rounds, all items stamped → ``1.0``.
+    * All failure rounds, all items stamped → ``0.0``.
+    * Mixed → ``hits / total_advisories_presented``.
+
+    ``advisory_store`` is accepted as a keyword for backward
+    compatibility (call-site contract introduced in Unit A2); the new
+    implementation derives axis C entirely from per-item provenance and
+    no longer reads the store.
     """
-    # advisory_store.list() defaults to active-only — suppressed
-    # advisories are correctly retired and shouldn't drag axis C.
-    actives = advisory_store.list()
-    if not actives:
-        return 0.0
     if not recent_rounds:
         return 0.0
-    success_refs: set[str] = set()
-    for r in recent_rounds:
-        if r.success:
-            # ``items_referenced`` is a count on _RoundResult; the
-            # underlying item_ids are baked into the pack but we don't
-            # carry them on the dataclass to keep it slim. As a proxy,
-            # we count an advisory as "hit" when at least one recent
-            # round succeeded for the same domain. This is the same
-            # semantic the dual-loop scenarios use to grade per-domain
-            # success; the master scenario doesn't need finer grain.
-            success_refs.add(r.domain)
+    total_presented = 0
     hits = 0
-    for adv in actives:
-        # ``scope`` carries the domain on entity-scoped advisories;
-        # "global" advisories count as a hit when any recent round
-        # succeeded (they're not domain-restricted).
-        scope = adv.scope or "global"
-        if scope == "global":
-            hits += 1 if success_refs else 0
-        elif scope in success_refs:
-            hits += 1
-    return hits / len(actives)
+    for round_result in recent_rounds:
+        for advisory_ids in round_result.injected_advisory_ids_per_item:
+            count = len(advisory_ids)
+            total_presented += count
+            if round_result.success:
+                hits += count
+    if total_presented == 0:
+        return 0.0
+    return hits / total_presented
 
 
 # ---------------------------------------------------------------------------
@@ -824,14 +841,21 @@ def _execute_round(
 
     axis_e = _probe_provenance_queryability(registry, seed_entities=seed_entities)
     axis_f = _count_open_failure_clusters(registry)
-    lookback = round_results[-advisory_hit_lookback_rounds:]
-    axis_c = _compute_advisory_hit_rate(
-        advisory_store=advisory_store,
-        recent_rounds=lookback,
-    )
 
+    # Capture per-item advisory provenance for the current round before
+    # axis C reads the lookback window. Carries an empty inner list per
+    # item when the PackBuilder didn't stamp it — keeps the denominator
+    # in :func:`_compute_advisory_hit_rate` honest.
+    injected_advisory_ids_per_item = [
+        list(item.injected_advisory_ids) for item in pack.items
+    ]
+
+    # Build the provisional _RoundResult so the lookback slice for axis C
+    # includes this round's pack — matches the plan-prose definition of
+    # advisory hit rate graded over the trailing window including the
+    # round just assembled. axis C is back-filled in place once the
+    # aggregator runs against the now-current history.
     useful_fraction = len(referenced) / len(pack.items) if pack.items else 0.0
-
     round_results.append(
         _RoundResult(
             round_index=round_index,
@@ -844,15 +868,22 @@ def _execute_round(
             success=success,
             axis_pack_quality=weighted,
             axis_useful_item_fraction=useful_fraction,
-            axis_advisory_hit_rate=axis_c,
+            axis_advisory_hit_rate=0.0,  # back-filled below
             axis_observation_enrichment=float(axis_d_round),
             axis_provenance_queryability=axis_e,
             axis_extraction_failure_clusters=float(axis_f),
             axis_schema_evolution_candidates=float(axis_g_round),
             axis_meta_trace_density=float(axis_h_round),
             axis_self_authored_proposals=float(axis_i_round),
+            injected_advisory_ids_per_item=injected_advisory_ids_per_item,
         )
     )
+    lookback = round_results[-advisory_hit_lookback_rounds:]
+    axis_c = _compute_advisory_hit_rate(
+        advisory_store=advisory_store,
+        recent_rounds=lookback,
+    )
+    round_results[-1].axis_advisory_hit_rate = axis_c
 
     _record_round_feedback(
         feedback_log_dir=feedback_dir,
@@ -1132,10 +1163,11 @@ def run(
     harness may override to align with their own ID space.
 
     ``advisory_hit_lookback_rounds`` (default 5) sets the rolling
-    window over which :func:`_compute_advisory_hit_rate` searches for
-    successful rounds that align with active advisory scopes. Smaller
-    values make axis C twitchier (a single failed round can drop the
-    rate to zero); larger values smooth across runs. Must be >= 1.
+    window over which :func:`_compute_advisory_hit_rate` aggregates
+    per-item ``injected_advisory_ids`` provenance against round
+    success. Smaller values make axis C twitchier (a single failed
+    round can drop the rate to zero); larger values smooth across
+    runs. Must be >= 1.
 
     ``chart_output_dir`` / ``chart_figsize`` / ``chart_dpi`` thread
     through to :func:`render_program_convergence_chart` when
