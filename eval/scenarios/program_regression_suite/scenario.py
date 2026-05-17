@@ -2,8 +2,10 @@
 
 Per ``docs/design/plan-program-level-eval.md`` §4.2, this scenario:
 
-1. Runs the master :mod:`eval.scenarios.program_convergence` at 50 rounds
-   and captures every per-round :class:`_RoundResult`.
+1. Runs the master :mod:`eval.scenarios.program_convergence`'s shared
+   ``_run_loop`` helper at 50 rounds and captures every per-round
+   :class:`_RoundResult`. The same helper backs the master's ``run()``,
+   so the suite cannot drift from the master's per-round semantics.
 2. Calls every satellite scenario's ``run()`` for liveness — failures
    here mean a satellite's machinery is broken, not the master's
    thresholds.
@@ -46,13 +48,9 @@ Out of scope:
 from __future__ import annotations
 
 import importlib
-import random
-import tempfile
 import traceback
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any, Literal
 
 import structlog
@@ -64,26 +62,15 @@ from eval.scenarios._convergence_common import (
     DEFAULT_SUCCESS_COVERAGE_THRESHOLD,
     _AxisTrack,
     _build_multi_axis_stats,
-    _LoopStats,
     _MultiAxisStats,
-    _run_periodic_loops,
 )
 from eval.scenarios.program_convergence.scenario import (
+    DEFAULT_ADVISORY_HIT_LOOKBACK_ROUNDS,
     DEFAULT_ANALYZER_CADENCE,
-    DEFAULT_ENTITIES_PER_TRACE,
-    DEFAULT_TRACES_PER_DOMAIN,
-    _execute_round,
-    _ingest_traces,
-    _populate_entity_documents,
     _RoundResult,
-    _seed_well_known_parameters,
-    _verify_axis_machinery,
+    _run_loop,
 )
-from trellis.retrieve.pack_builder import PackBuilder
-from trellis.retrieve.strategies import KeywordSearch
-from trellis.stores.advisory_store import AdvisoryStore
 from trellis.stores.registry import StoreRegistry
-from trellis.stores.sqlite.parameter import SQLiteParameterStore
 
 logger = structlog.get_logger(__name__)
 
@@ -180,12 +167,11 @@ class _AxisAssertionResult:
 
 
 # ---------------------------------------------------------------------------
-# Master scenario driver — re-runs master's per-round loop using its
-# exposed helpers. Replicates the master's ``run()`` body so per-round
-# ``_RoundResult`` data is visible to the regression assertions. The
-# alternative — calling master's ``run()`` and reading its ScenarioReport
-# metrics — only exposes quarter-mean aggregates, which can't answer
-# round-N-specific thresholds (axes D, G, H, I).
+# Master scenario driver — delegates to the master's shared ``_run_loop``
+# helper so the suite cannot drift from the master's per-round semantics.
+# Calling master's ``run()`` instead would only expose quarter-mean
+# aggregates from the ScenarioReport; we need direct per-round
+# :class:`_RoundResult` data for axis D/F/G/H/I cutoff thresholds.
 # ---------------------------------------------------------------------------
 
 
@@ -198,88 +184,36 @@ def _drive_master(
     advisory_min_sample_size: int,
     analyzer_cadence: int,
 ) -> tuple[list[_RoundResult], int]:
-    """Run the master's per-round loop and return the round results.
+    """Run the master's shared per-round loop and return per-round results.
 
-    Re-imports the master's helpers at call time so a Phase 0 change to
-    the master picks up here automatically — no copy of its loop logic
-    lives in this module.
-
-    Returns ``(round_results, seed_entity_count)``. The seed entity
-    count feeds axis D's "per seed entity by round 25" denominator.
+    Thin wrapper over :func:`_run_loop` so the suite stays in lockstep
+    with the master's per-round semantics by construction. The suite
+    passes the master's corpus defaults so plan §4.2 thresholds
+    evaluate against the master's default shape; the master's
+    ``loop_stats`` + ``traces_ingested`` are discarded here because
+    the suite reports only axis thresholds.
     """
-    from eval.generators.trace_generator import generate_corpus  # noqa: PLC0415
-
-    _verify_axis_machinery(registry)
-
-    rng = random.Random(  # noqa: S311 — synthetic, not crypto
-        seed ^ 0xC0FFEE
+    # Lazy import keeps this module's import-time cost equivalent to
+    # the legacy direct-driver shape under CI's many-scenarios sweep.
+    from eval.scenarios.program_convergence.scenario import (  # noqa: PLC0415
+        DEFAULT_ENTITIES_PER_TRACE,
+        DEFAULT_TRACES_PER_DOMAIN,
     )
-    observed_at_base = datetime(2026, 5, 14, 12, 0, 0, tzinfo=UTC)
 
-    corpus = generate_corpus(
+    loop_result = _run_loop(
+        registry,
         seed=seed,
+        rounds=rounds,
+        feedback_batch_size=feedback_batch_size,
         traces_per_domain=DEFAULT_TRACES_PER_DOMAIN,
         entities_per_trace=DEFAULT_ENTITIES_PER_TRACE,
+        success_coverage_threshold=DEFAULT_SUCCESS_COVERAGE_THRESHOLD,
+        advisory_min_sample_size=advisory_min_sample_size,
+        analyzer_cadence=analyzer_cadence,
+        advisory_hit_lookback_rounds=DEFAULT_ADVISORY_HIT_LOOKBACK_ROUNDS,
+        run_id=f"program_regression_{seed:04d}",
     )
-
-    _ingest_traces(registry, corpus)
-    seed_entities = _populate_entity_documents(registry, corpus)
-
-    feedback_dir_holder = tempfile.TemporaryDirectory()
-    feedback_dir = Path(feedback_dir_holder.name)
-    advisory_dir_root = registry.stores_dir or feedback_dir
-    advisory_store = AdvisoryStore(advisory_dir_root / "advisories.json")
-
-    param_store_holder = tempfile.TemporaryDirectory()
-    param_store = SQLiteParameterStore(Path(param_store_holder.name) / "params.db")
-    _seed_well_known_parameters(param_store)
-
-    builder = PackBuilder(
-        strategies=[KeywordSearch(registry.knowledge.document_store)],
-        event_log=registry.operational.event_log,
-        advisory_store=advisory_store,
-    )
-
-    loop_stats = _LoopStats()
-    round_results: list[_RoundResult] = []
-    run_id = f"program_regression_{seed:04d}"
-
-    try:
-        for round_index in range(rounds):
-            _execute_round(
-                round_index=round_index,
-                registry=registry,
-                corpus=corpus,
-                builder=builder,
-                advisory_store=advisory_store,
-                param_store=param_store,
-                seed_entities=seed_entities,
-                round_results=round_results,
-                loop_stats=loop_stats,
-                rng=rng,
-                feedback_dir=feedback_dir,
-                run_id=run_id,
-                observed_at_base=observed_at_base,
-                success_coverage_threshold=DEFAULT_SUCCESS_COVERAGE_THRESHOLD,
-                analyzer_cadence=analyzer_cadence,
-                feedback_batch_size=feedback_batch_size,
-                advisory_min_sample_size=advisory_min_sample_size,
-            )
-    finally:
-        feedback_dir_holder.cleanup()
-        param_store.close()
-        param_store_holder.cleanup()
-
-    if rounds % feedback_batch_size != 0:
-        _run_periodic_loops(
-            registry=registry,
-            advisory_store=advisory_store,
-            stats=loop_stats,
-            generate_advisories=loop_stats.advisory_runs == 0,
-            advisory_min_sample_size=advisory_min_sample_size,
-        )
-
-    return round_results, len(seed_entities)
+    return loop_result.round_results, loop_result.seed_entity_count
 
 
 # ---------------------------------------------------------------------------
