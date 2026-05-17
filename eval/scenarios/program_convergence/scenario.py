@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import random
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -96,7 +97,7 @@ from trellis.retrieve.evaluate import (
     evaluate_pack,
 )
 from trellis.retrieve.pack_builder import PackBuilder
-from trellis.retrieve.strategies import KeywordSearch
+from trellis.retrieve.strategies import KeywordSearch, SearchStrategy
 from trellis.schemas import well_known as wk
 from trellis.schemas.pack import Pack, PackBudget
 from trellis.schemas.parameters import ParameterScope, ParameterSet
@@ -945,6 +946,8 @@ def _run_loop(
     analyzer_cadence: int,
     advisory_hit_lookback_rounds: int,
     run_id: str,
+    extra_strategies: list[SearchStrategy] | None = None,
+    post_populate_hook: Callable[[StoreRegistry, list[str]], None] | None = None,
 ) -> _RunLoopResult:
     """Drive corpus build + per-round loop + periodic-loops tail.
 
@@ -956,6 +959,20 @@ def _run_loop(
     loop already fired one on the last batch-aligned round).
     ``run_id`` is caller-formatted so the master / suite prefix
     divergence stays visible at the call site.
+
+    ``extra_strategies`` — optional list of :class:`SearchStrategy`
+    instances appended to the default ``[KeywordSearch]`` before the
+    builder is constructed. Lets the real-LLM fork (Unit E3) layer
+    ``SemanticSearch`` on top without forking the loop body. ``None``
+    keeps the legacy keyword-only behavior.
+
+    ``post_populate_hook`` — optional callback invoked once after
+    :func:`_populate_entity_documents` writes the synthetic docs +
+    nodes but before the per-round loop starts. The hook receives
+    ``(registry, seed_entities)`` and is responsible for any
+    additional setup the caller wants (e.g., the real-LLM fork uses
+    this slot to pre-embed every seed doc into the vector store so
+    ``SemanticSearch`` has a populated index from round 0).
     """
     _verify_axis_machinery(registry)
 
@@ -969,6 +986,8 @@ def _run_loop(
 
     traces_ingested = _ingest_traces(registry, corpus)
     seed_entities = _populate_entity_documents(registry, corpus)
+    if post_populate_hook is not None:
+        post_populate_hook(registry, seed_entities)
 
     # Why: inline tempdir-backed param/feedback stores — registry's
     # parameter plane leaves the well-known keys unset and we need
@@ -982,8 +1001,13 @@ def _run_loop(
     param_store = SQLiteParameterStore(Path(param_store_holder.name) / "params.db")
     _seed_well_known_parameters(param_store)
 
+    strategies: list[SearchStrategy] = [
+        KeywordSearch(registry.knowledge.document_store)
+    ]
+    if extra_strategies:
+        strategies.extend(extra_strategies)
     builder = PackBuilder(
-        strategies=[KeywordSearch(registry.knowledge.document_store)],
+        strategies=strategies,
         event_log=registry.operational.event_log,
         advisory_store=advisory_store,
     )

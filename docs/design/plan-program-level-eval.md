@@ -118,6 +118,35 @@ Neither value is the production default. Both are intentional synthetic-profile 
 
 **Estimated size:** ~200 LOC.
 
+### 4.5 Phase 5 — Real-LLM fork (Unit E3)
+
+**Files:**
+- `eval/scenarios/program_convergence_real_llm/scenario.py` (new) — fork of the synthetic master that swaps the keyword-only retrieval substrate for ``SemanticSearch`` backed by real OpenAI embeddings.
+- `tests/unit/eval/test_program_convergence_real_llm.py` (extended) — credential gating, mock-API smoke, hard-cap enforcement.
+- New ``BUDGET_CONSUMED`` member on :class:`~trellis.stores.base.event_log.EventType`.
+
+**What the fork changes vs. the synthetic master:** the per-round loop body is identical (delegated to ``program_convergence.scenario._run_loop`` via the ``extra_strategies`` + ``post_populate_hook`` slots C2 carved out). The only deltas are (1) seed-doc embedding at setup time, (2) per-round query embedding via ``SemanticSearch``, (3) one ``BUDGET_CONSUMED`` event with the run's totals at end of run, (4) a per-run hard cost cap (``run_hard_cost_cap_usd``, default $2.00).
+
+**Cost calibration formula.** Per-run cost is
+
+```
+dollars_estimated = tokens_consumed * USD_PER_TOKEN
+
+where USD_PER_TOKEN = OPENAI_EMBED_3_SMALL_USD_PER_M / 1_000_000
+                   = $0.02 / 1_000_000
+                   = $2e-8 per token
+```
+
+``OPENAI_EMBED_3_SMALL_USD_PER_M = $0.02`` per million input tokens is the OpenAI ``text-embedding-3-small`` price as of 2026-04, vended through ``eval._real_llm.OPENAI_EMBED_3_SMALL_USD_PER_M`` so cost arithmetic shares one source of truth across all real-LLM scenarios. Token totals are reported by the OpenAI batch response's aggregate usage; the mock embedder approximates as ``len(text.split())`` so the cost path is exercised under CI without real API calls.
+
+**Calibration check against E3-prep's $0.50/run plan figure.** PR #170's prep doc estimated ~$0.50/run at 50 rounds × N seeds × 1 embed/seed × $0.00002/token, assuming ~1K tokens per summary + 30 distractors + per-round query embed. The actual ``program_convergence_real_llm`` scenario uses the synthetic corpus's smaller doc shape — ~22 seed-entity summaries averaging ~30 tokens each (~660 setup tokens) plus one ~10-token query embed per round. At the default 50 rounds the realised token total is ``660 + 50*10 = 1160`` tokens, costing ``1160 * 2e-8 = $0.0000232`` per run — **two orders of magnitude below the prep estimate** because the prep assumed a larger doc shape that the scenario does not actually produce. The $0.50 figure is preserved in the E3-prep skeleton's module docstring as the cost envelope for forward planning (real-corpus scenarios or operator-supplied corpora will pay closer to it); the realised cost on the synthetic corpus is the floor.
+
+**Hard cost cap rationale.** The cap stays at $2.00 (~86,000x the realised cost on the default synthetic corpus) to absorb pricing regressions, operator-supplied larger corpora, or runaway-loop bugs without surprising the operator. Mid-loop overruns raise ``RunBudgetError`` after the ``BUDGET_CONSUMED`` event has been emitted, so operators always see the bill — including on abort.
+
+**CI exercise.** The mock embedder (``TRELLIS_EVAL_REAL_LLM_MOCK=1``) swaps the real OpenAI client for a deterministic in-memory hash-based vectorizer. CI runs the full nine-axis loop + ``BUDGET_CONSUMED`` emit path under the mock; real-credentials runs are operator-gated and never invoked from CI.
+
+**Estimated size:** ~500 LOC code + ~250 LOC tests + this doc paragraph.
+
 ## 5. Total size estimate
 
 | Phase | LOC code | LOC docs |
