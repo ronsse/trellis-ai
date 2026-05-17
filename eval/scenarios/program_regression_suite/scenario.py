@@ -696,13 +696,12 @@ def run(
     suite against an actual corpus. An invalid profile string raises
     ``ValueError`` — no silent fallback to synthetic.
 
-    Today ``profile`` is **programmatic-only**: :mod:`eval.runner`
-    invokes scenarios via ``module.run(registry)`` with no kwargs, so
-    operators driving the suite under a non-default profile must import
-    this ``run`` directly (e.g. from a harness script) rather than
-    going through ``python -m eval.runner``. A ``--scenario-arg``
-    pass-through on the runner is logged as a TODO follow-up; this
-    docstring is the canonical pointer until that lands.
+    Operators can pass ``profile`` via the runner CLI using the
+    ``--scenario-arg`` flag (closes the L finding in the Phase 5B
+    rollup)::
+
+        python -m eval.runner --scenario program_regression_suite \\
+            --scenario-arg profile=real --scenario-arg rounds=60
     """
     if rounds < REGRESSION_ROUNDS:
         msg = (
