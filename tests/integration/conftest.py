@@ -23,8 +23,8 @@ USER = os.environ.get("TRELLIS_TEST_NEO4J_USER", "neo4j")
 PASSWORD = os.environ.get("TRELLIS_TEST_NEO4J_PASSWORD", "")
 
 # Why: only require the neo4j package when an instance URI is configured. The
-# session-level skipif on `not URI` below covers the "no URI" case; gating the
-# importorskip behind URI lets sibling integration tests (e.g. cli/) collect
+# per-fixture `pytest.skip(...)` calls below cover the "no URI" case; gating
+# the importorskip behind URI lets sibling integration tests (e.g. cli/) collect
 # cleanly on machines without the neo4j driver installed.
 if URI:
     pytest.importorskip("neo4j")
@@ -32,10 +32,14 @@ if URI:
 # canonical "neo4j" name. Match the unit-suite default.
 DATABASE = os.environ.get("TRELLIS_TEST_NEO4J_DATABASE", "neo4j")
 
-pytestmark = [
-    pytest.mark.neo4j,
-    pytest.mark.skipif(not URI, reason="TRELLIS_TEST_NEO4J_URI not set"),
-]
+# Why: `pytest.mark.neo4j` lets the suite filter neo4j-dependent tests by
+# marker, but the skipif on URI lives inside each fixture body rather than
+# at module scope. A module-level skipif on `pytestmark` propagates through
+# sub-directory conftests (e.g. ``tests/integration/cli/``) and would skip
+# CLI tests that never touch Neo4j when the env var is unset. Per-fixture
+# skip means: tests that pull ``registry``/``executor`` skip cleanly; tests
+# that don't (cli/, api/ minus live_api_server, etc.) collect and run.
+pytestmark = [pytest.mark.neo4j]
 
 
 #: Vector index name matching the production default on AuraDB.
@@ -92,7 +96,17 @@ def registry(tmp_path: Path) -> Iterator[Any]:
     Embedding dimensions are pinned to ``INTEGRATION_VECTOR_DIMS`` to
     match the shared vector index — see that constant's docstring for
     the rationale.
+
+    Skipping lives inside the fixture body (not on a module-level
+    ``pytestmark``) so that sibling integration tests under
+    ``tests/integration/cli/`` etc., which don't pull this fixture,
+    still collect and run when the live-Neo4j URI is unset. A future
+    test that *does* request ``registry`` without the env set will see
+    a clean skip instead of a connection error.
     """
+    if not URI:
+        pytest.skip("TRELLIS_TEST_NEO4J_URI not set")
+
     from trellis.stores.registry import StoreRegistry
 
     _wipe_neo4j()
