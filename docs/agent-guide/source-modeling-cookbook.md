@@ -440,7 +440,7 @@ Authoritative source for Databricks-platform table shape. Treat it as a *snapsho
 | `Schema` | One per UC schema within a catalog. |
 | `Dataset` (or `UC_TABLE` if you prefer the namespaced shape) | One per table / view / materialized view / streaming table. |
 
-**Do NOT emit a node per column.** Columns are properties on `Dataset` (see *Schema explosion* anti-pattern in [modeling-guide.md](modeling-guide.md)). The exception: regulated columns with their own PII / governance lifecycle — see the modeling guide's worked example #1 for the structural-node pattern.
+**Do NOT emit a node per column.** Columns are properties on `Dataset` (see *Schema explosion* anti-pattern in [modeling-guide.md](modeling-guide.md)). For the dual-key property shape that keeps columns searchable without exploding them into structural nodes, see [Searchable columns without column nodes](#searchable-columns-without-column-nodes) below. The exception remains: regulated columns with their own PII / governance lifecycle — see the modeling guide's worked example #1 for the structural-node pattern.
 
 ### Edges
 
@@ -455,7 +455,7 @@ Authoritative source for Databricks-platform table shape. Treat it as a *snapsho
 | Field | Where |
 |---|---|
 | Routing properties (`source_system="databricks"`, `database_name`, `schema_name`, `physical_uri="databricks://workspace/<catalog>/<schema>/<table>"`) | Properties on `Dataset`. **Required for query routing.** |
-| Column list (name, type, nullable, comment, tags) | JSON array as `Dataset.properties.columns`. |
+| Column list (name, type, nullable, comment, tags) | JSON array as `Dataset.properties.columns`. Pair with a denormalised `Dataset.properties.column_names` (flat list of strings) for exact-match column search — see [Searchable columns without column nodes](#searchable-columns-without-column-nodes). |
 | Partition keys, clustering keys | Properties on `Dataset`. |
 | Row count, table size, last_modified | Properties — but refresh-volatile. Consider tracking the `last_seen_at` timestamp so consumers know how fresh the metric is. |
 | Table comment | Inline if short; document store + `described_by` edge if it's long-form. |
@@ -585,6 +585,72 @@ Every source needs a refresh story. Codify it once — see [freshness-and-curati
 ### Routing properties are the cross-source contract
 
 Every dataset-shaped entity across the recipes above carries `source_system`, `database_name`, `schema_name`, and `physical_uri` per [modeling-guide.md](modeling-guide.md#cross-database-routing-properties-for-queryable-datasets). A `mentions` edge from a Confluence page to a UC dataset becomes useful precisely *because* the routing properties on the dataset tell the agent how to query it.
+
+### Searchable columns without column nodes
+
+Every table-shaped recipe above tells you to keep columns as properties on the table, not as their own nodes. That's the right default — wide warehouses produce 100K+ columns where each one is one property among many on its parent, and promoting each to a node bloats the graph without improving retrieval. But it leaves an obvious question open: how do agents find a table *by column name* if columns aren't searchable nodes?
+
+The answer is a dual-key property shape:
+
+```python
+EntityDraft(
+    entity_type="unity_catalog.table",
+    name="analytics.marts.fct_orders",
+    properties={
+        # Structured metadata — the canonical source of truth.
+        "columns": [
+            {"name": "user_id",     "data_type": "BIGINT",       "nullable": False},
+            {"name": "email",       "data_type": "STRING",       "nullable": True},
+            {"name": "order_total", "data_type": "DECIMAL(18,2)"},
+        ],
+        # Denormalised flat index of column names — same names, same
+        # order, plain list of strings.
+        "column_names": ["user_id", "email", "order_total"],
+    },
+)
+```
+
+Both keys carry the same names. `columns` is the structured record an agent reads when it retrieves the table; `column_names` exists purely to make the *search* path cheap. The two must stay in lock-step — when the extractor adds a column, both keys grow by one; when a column is renamed, both rename. Treat them as a single atomic write.
+
+This denormalisation is deliberate. See [`adr-source-modeling-discipline.md`](../design/adr-source-modeling-discipline.md) for the full rationale. The short version: in a normalised graph, "find tables with a `user_id` column" requires either column nodes (which the schema-explosion anti-pattern rejects) or backend-specific JSON-array queries that the canonical DSL doesn't expose. A flat denormalised list lets the standard `in` filter do the work, at the cost of a duplicate fact that the extractor maintains.
+
+The intended query, once the canonical DSL grows JSON-array semantics:
+
+```python
+from trellis.stores.base.graph_query import FilterClause, NodeQuery
+
+# "What tables have a column named user_id?"
+results = graph_store.execute_node_query(
+    NodeQuery(filters=(
+        FilterClause("properties.column_names", "in", ("user_id",)),
+    ))
+)
+```
+
+A `GraphSearch` wrapper around the same shape lives in `src/trellis/retrieve/strategies.py`; once the query path works, callers can pass `filters={"column_names": ["user_id"]}` (or whatever the strategy's surface settles on) and skip the DSL boilerplate.
+
+#### Current limitation — read this before relying on the recipe
+
+As of Track G, the canonical DSL's `in` operator does **not** match JSON-array property values on the SQLite graph backend. `SQLiteGraphStore` compiles `FilterClause("properties.column_names", "in", ("user_id",))` to `json_extract(properties_json, '$.column_names') IN (?)`, which compares the *entire array as JSON text* against the scalar `"user_id"` and never matches. Postgres works by accident — JSONB's containment operator special-cases scalar-in-array — and Neo4j fails the same way SQLite does (the Python-side predicate uses set membership against the list value).
+
+A working SQLite query exists, it just isn't reachable through the DSL today:
+
+```sql
+SELECT node_id FROM nodes
+WHERE valid_to IS NULL
+  AND EXISTS (
+    SELECT 1 FROM json_each(json_extract(properties_json, '$.column_names'))
+    WHERE json_each.value = ?
+  )
+```
+
+The fix is a new DSL operator (a `contains` or `has_value` over JSON-array properties) plus a SQLite compile branch that emits the `json_each` form. See `tests/unit/retrieve/test_strategies_column_search.py` for a strict-xfail regression net: when the DSL grows the new op, that test starts passing and the gap closes. Until then, the recipe is still the right shape to *write* — extractors should emit the dual-key properties today so the search side has data to query against once the backend catches up.
+
+#### When you genuinely need column nodes (regulated columns)
+
+The dual-key shape is for the common case: columns that travel as a unit with their parent table. Some data products have real column-level requirements — regulated columns with their own PII classification history, dbt exposures with per-column grants, privacy tooling that needs per-column audit trails. For those, promote the columns that earn it to `node_role="structural"` and rely on the standard graph-search path; the modeling guide's [worked example #1](modeling-guide.md) shows the pattern.
+
+Sibling Unit G1 of Track G is adding an explicit `allow_structural_leaf=True` opt-in on `EntityRule` / `EntityDraft` so this is a deliberate, validator-checked decision rather than an accidental schema explosion. Use it sparingly — most column populations don't earn it.
 
 ---
 

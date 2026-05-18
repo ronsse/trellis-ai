@@ -26,7 +26,32 @@ Typical shape::
                 EntityDraft(
                     entity_type="unity_catalog.table",
                     name=t.full_name,
-                    properties={"columns": t.columns, "owner": t.owner},
+                    properties={
+                        # Structured column metadata — the canonical
+                        # source of truth. Each entry is a dict carrying
+                        # name / data_type / description / nullable / tags
+                        # so an agent retrieving the table gets the full
+                        # schema in one hop.
+                        "columns": [
+                            {
+                                "name": c.name,
+                                "data_type": c.data_type,
+                                "description": c.description,
+                                "nullable": c.nullable,
+                            }
+                            for c in t.columns
+                        ],
+                        # Flat denormalised index of column names. Lets
+                        # callers ask "which tables have a `user_id`
+                        # column?" via the canonical graph query DSL
+                        # without exploding columns into their own
+                        # structural nodes. Must stay in lock-step with
+                        # the order of ``columns`` above — the cookbook
+                        # 'Searchable columns without column nodes'
+                        # recipe relies on this invariant.
+                        "column_names": [c.name for c in t.columns],
+                        "owner": t.owner,
+                    },
                 )
                 for t in uc_metadata.tables
             ]
