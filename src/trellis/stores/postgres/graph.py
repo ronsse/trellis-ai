@@ -1192,6 +1192,17 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
             return f"{column} IN ({placeholders})", list(clause.value)
         if op == "exists":
             return f"{column} IS NOT NULL", []
+        if op == "contains":
+            # Top-level columns are scalar TEXT (node_type / edge
+            # provenance columns etc.), not JSONB arrays — ``contains``
+            # against them is nonsense.  Reject explicitly to match the
+            # SQLite path's error rather than silently degrade.
+            msg = (
+                f"FilterClause op='contains' requires a 'properties.<key>' "
+                f"path; got {clause.field!r}.  Top-level columns are "
+                "scalar TEXT, not JSONB arrays."
+            )
+            raise ValueError(msg)
         sql_op = RANGE_OP_GLYPH.get(op)
         if sql_op is None:
             msg = f"Unknown filter op {clause.op!r}"
@@ -1211,6 +1222,22 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
             )
         if clause.op == "exists":
             return "properties ? %s", [key]
+        if clause.op == "contains":
+            # ``contains`` asks: is the scalar value a member of the
+            # JSON array at ``properties->key``?  JSONB's ``@>`` has an
+            # array-special-case that matches scalar-in-array, but it
+            # *also* matches scalar-equals-scalar — so a naked ``@>``
+            # would silently treat ``properties.column = "x"`` as a hit
+            # for ``contains "x"``.  Guard with ``jsonb_typeof`` so the
+            # operator only fires when the property is an array.  The
+            # key text and the value JSON are bound as parameters; the
+            # key still needs a literal in ``->`` because the operand
+            # there isn't a bindable position.
+            return (
+                f"(jsonb_typeof(properties->{_pg_text_lit(key)}) = 'array' "
+                f"AND properties @> %s::jsonb)",
+                [json.dumps({key: clause.value})],
+            )
         sql_op = RANGE_OP_GLYPH.get(clause.op)
         if sql_op is not None:
             # JSON-path range comparisons need the JSONB ``->>`` text

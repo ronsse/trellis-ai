@@ -1191,6 +1191,20 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             return f"{var}.{column} IN ${pname}", {pname: list(clause.value)}
         if op == "exists":
             return f"{var}.{column} IS NOT NULL", {}
+        if op == "contains":
+            # Top-level Cypher properties on ``:Node`` / ``:EDGE`` are
+            # scalar values (the SCD-2 row carries node_type / node_id /
+            # edge provenance columns as strings).  ``contains`` against
+            # a scalar is nonsense — match Postgres / SQLite by rejecting
+            # explicitly rather than silently degrading.  List-typed
+            # property values live inside ``properties_json`` and are
+            # routed through the client-side predicate path.
+            msg = (
+                f"FilterClause op='contains' requires a 'properties.<key>' "
+                f"path; got {clause.field!r}.  Top-level Cypher properties "
+                "are scalar values, not lists."
+            )
+            raise ValueError(msg)
         cypher_op = RANGE_OP_GLYPH.get(op)
         if cypher_op is None:
             msg = f"Unknown filter op {clause.op!r}"
@@ -1211,6 +1225,19 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             return lambda node: node["properties"].get(key) in allowed
         if op == "exists":
             return lambda node: node["properties"].get(key) is not None
+        if op == "contains":
+            # ``contains`` asks: is the scalar ``value`` an element of
+            # the list at ``properties[key]``?  Guard against non-list
+            # property values so a scalar / missing / dict / None value
+            # cleanly evaluates ``False`` rather than raising ``TypeError``
+            # on ``in`` against a non-iterable.  ``str`` is iterable but
+            # is NOT a list of characters in this contract — guard
+            # ``isinstance(prop, list)`` explicitly.
+            target = clause.value
+            return lambda node, _t=target, _k=key: (
+                isinstance(node["properties"].get(_k), list)
+                and _t in node["properties"][_k]
+            )
         cmp_fn = _PY_RANGE_CMPS.get(op)
         if cmp_fn is None:
             msg = f"Unknown filter op {clause.op!r}"
@@ -1292,6 +1319,15 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             return lambda edge: edge["properties"].get(key) in allowed
         if op == "exists":
             return lambda edge: edge["properties"].get(key) is not None
+        if op == "contains":
+            # Mirrors :meth:`_compile_property_predicate` ``contains``
+            # branch: scalar membership against a list-typed property,
+            # ``False`` for non-list / missing / scalar properties.
+            target = clause.value
+            return lambda edge, _t=target, _k=key: (
+                isinstance(edge["properties"].get(_k), list)
+                and _t in edge["properties"][_k]
+            )
         cmp_fn = _PY_RANGE_CMPS.get(op)
         if cmp_fn is None:
             msg = f"Unknown filter op {clause.op!r}"
