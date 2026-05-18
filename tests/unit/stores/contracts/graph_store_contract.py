@@ -882,6 +882,164 @@ class GraphStoreContractTests:
         assert {r["node_id"] for r in results} == {"a"}
 
     # ------------------------------------------------------------------
+    # DSL — `contains` operator (Phase 3, Track G)
+    #
+    # "scalar value is a member of a list-typed property at <path>".
+    # Backends differ in JSON-storage shape (SQLite ``json_each``,
+    # Postgres JSONB ``@>`` with ``jsonb_typeof`` guard, Cypher
+    # client-side ``in`` over decoded list), so the contract pins
+    # behaviour rather than wire shape.
+    # ------------------------------------------------------------------
+
+    def test_contains_matches_member_of_list_property(
+        self, store: GraphStore
+    ) -> None:
+        from trellis.stores.base.graph_query import (
+            FilterClause,
+            NodeQuery,
+        )
+
+        store.upsert_node(
+            "a",
+            "service",
+            {"column_names": ["user_id", "email", "order_total"]},
+        )
+        store.upsert_node("b", "service", {"column_names": ["product_id"]})
+        results = store.execute_node_query(
+            NodeQuery(
+                filters=(
+                    FilterClause("properties.column_names", "contains", "user_id"),
+                )
+            )
+        )
+        assert {r["node_id"] for r in results} == {"a"}
+
+    def test_contains_matches_single_element_list(
+        self, store: GraphStore
+    ) -> None:
+        """``contains`` matches when the list has exactly one element."""
+        from trellis.stores.base.graph_query import (
+            FilterClause,
+            NodeQuery,
+        )
+
+        store.upsert_node("a", "service", {"tags": ["only_one"]})
+        results = store.execute_node_query(
+            NodeQuery(
+                filters=(
+                    FilterClause("properties.tags", "contains", "only_one"),
+                )
+            )
+        )
+        assert {r["node_id"] for r in results} == {"a"}
+
+    def test_contains_no_match_when_value_absent(
+        self, store: GraphStore
+    ) -> None:
+        from trellis.stores.base.graph_query import (
+            FilterClause,
+            NodeQuery,
+        )
+
+        store.upsert_node("a", "service", {"column_names": ["user_id", "email"]})
+        results = store.execute_node_query(
+            NodeQuery(
+                filters=(
+                    FilterClause(
+                        "properties.column_names", "contains", "not_present"
+                    ),
+                )
+            )
+        )
+        assert results == []
+
+    def test_contains_skips_scalar_property(self, store: GraphStore) -> None:
+        """A scalar property value at the path returns ``False`` — never matches.
+
+        This is the contract that closes the door on the silent
+        false-positive Postgres ``@>`` exhibits without the
+        ``jsonb_typeof`` guard.  ``properties.team = "platform"`` must
+        NOT match ``contains "platform"``.
+        """
+        from trellis.stores.base.graph_query import (
+            FilterClause,
+            NodeQuery,
+        )
+
+        store.upsert_node("a", "service", {"team": "platform"})
+        store.upsert_node(
+            "b", "service", {"team": ["platform", "growth"]}
+        )
+        results = store.execute_node_query(
+            NodeQuery(
+                filters=(
+                    FilterClause("properties.team", "contains", "platform"),
+                )
+            )
+        )
+        # Only the list-typed property matches; the scalar property is skipped.
+        assert {r["node_id"] for r in results} == {"b"}
+
+    def test_contains_skips_missing_property(self, store: GraphStore) -> None:
+        from trellis.stores.base.graph_query import (
+            FilterClause,
+            NodeQuery,
+        )
+
+        store.upsert_node("a", "service", {"other_key": ["x"]})
+        results = store.execute_node_query(
+            NodeQuery(
+                filters=(
+                    FilterClause("properties.column_names", "contains", "x"),
+                )
+            )
+        )
+        assert results == []
+
+    def test_contains_combined_with_other_filters(
+        self, store: GraphStore
+    ) -> None:
+        """``contains`` composes with other operators under AND."""
+        from trellis.stores.base.graph_query import (
+            FilterClause,
+            NodeQuery,
+        )
+
+        store.upsert_node(
+            "a", "service", {"column_names": ["user_id"]}
+        )
+        store.upsert_node(
+            "b", "person", {"column_names": ["user_id"]}
+        )
+        results = store.execute_node_query(
+            NodeQuery(
+                filters=(
+                    FilterClause("node_type", "eq", "service"),
+                    FilterClause("properties.column_names", "contains", "user_id"),
+                )
+            )
+        )
+        assert {r["node_id"] for r in results} == {"a"}
+
+    def test_contains_integer_value_in_int_list(
+        self, store: GraphStore
+    ) -> None:
+        """``contains`` is type-aware: integer ``42`` matches list of ints."""
+        from trellis.stores.base.graph_query import (
+            FilterClause,
+            NodeQuery,
+        )
+
+        store.upsert_node("a", "service", {"ids": [1, 42, 100]})
+        store.upsert_node("b", "service", {"ids": [2, 3]})
+        results = store.execute_node_query(
+            NodeQuery(
+                filters=(FilterClause("properties.ids", "contains", 42),)
+            )
+        )
+        assert {r["node_id"] for r in results} == {"a"}
+
+    # ------------------------------------------------------------------
     # Edge provenance — round-trip + NULL semantics (Phase 1 of Item 2)
     # ------------------------------------------------------------------
 

@@ -21,6 +21,18 @@ Phase 2 — range comparisons (added for provenance filtering on edges,
   the inequality matches).  Operator vocabulary is short-form
   (``lt`` etc.) for parity with the Phase 1 ops.
 
+Phase 3 — list-membership (added for searchability over list-typed
+properties such as ``properties.column_names``, Track G ADR
+``adr-searchability-recipe.md``):
+
+* ``contains`` — the scalar value is a member of a list-typed property
+  at the given path.  The DSL value is a single scalar; the property at
+  ``field`` is expected to be a JSON array.  If the property is scalar,
+  missing, or any non-list value, the predicate evaluates ``False`` for
+  that row (no exception).  Inverted from ``in``: ``in`` asks "is the
+  property's scalar value in this set?"; ``contains`` asks "is this
+  scalar value an element of the property's list?".
+
 Operators still out of scope: regex match, full-text search (the
 ``DocumentStore`` owns that), nested-path traversal beyond one level.
 
@@ -57,7 +69,9 @@ from typing import Literal
 # alongside provenance-column filtering on edges; backends may reject
 # them on string-typed fields, but the DSL itself does not gate by
 # dtype — translation is the backend's responsibility.
-FilterOp = Literal["eq", "in", "exists", "lt", "lte", "gt", "gte"]
+# ``contains`` (Phase 3, Track G) asks list-membership: the scalar
+# value is an element of the list-typed property at ``field``.
+FilterOp = Literal["eq", "in", "exists", "lt", "lte", "gt", "gte", "contains"]
 
 #: Range operators — used by backends to branch SQL/Cypher emission and
 #: by the FilterClause invariant check.  Kept as a module constant so
@@ -83,9 +97,14 @@ class FilterClause:
     Args:
         field: Dotted path. Top-level columns or ``properties.<key>``.
         op: One of ``"eq"``, ``"in"``, ``"exists"``, ``"lt"``, ``"lte"``,
-            ``"gt"``, ``"gte"``.
-        value: Scalar for ``eq`` and range ops; tuple of scalars for
-            ``in``; ignored for ``exists`` (pass ``None``).
+            ``"gt"``, ``"gte"``, ``"contains"``.
+        value: Scalar for ``eq``, range ops, and ``contains``; tuple of
+            scalars for ``in``; ignored for ``exists`` (pass ``None``).
+
+    ``contains`` semantics: "the scalar ``value`` is a member of the
+    list-typed property at ``field``."  The property is expected to be
+    a JSON array; if it's scalar, missing, or a non-list value, the
+    predicate evaluates ``False`` for that row (no exception is raised).
     """
 
     field: str
@@ -105,6 +124,28 @@ class FilterClause:
         if self.op == "exists" and self.value is not None:
             msg = "FilterClause op='exists' must have value=None"
             raise ValueError(msg)
+        if self.op == "contains":
+            # ``contains`` takes a single scalar.  Tuples, lists, dicts,
+            # and ``None`` are nonsense for "is this element a member of
+            # the list-typed property?" — reject early so the backend
+            # compiler never has to second-guess.  Unlike the range ops,
+            # ``bool`` is accepted here (a list of booleans is a legal
+            # property shape; ``contains True`` is a meaningful query).
+            if isinstance(self.value, tuple):
+                msg = (
+                    "FilterClause op='contains' must use a scalar value, "
+                    "not a tuple"
+                )
+                raise TypeError(msg)
+            if self.value is None:
+                msg = "FilterClause op='contains' must have a scalar value, not None"
+                raise ValueError(msg)
+            if not isinstance(self.value, str | int | float | bool):
+                msg = (
+                    f"FilterClause op='contains' value must be a scalar "
+                    f"(str / int / float / bool), got {type(self.value).__name__}"
+                )
+                raise TypeError(msg)
         if self.op in _RANGE_OPS:
             # Range ops take a scalar.  Tuples and ``None`` are nonsense
             # for ``confidence < ?``-style predicates; reject early so
