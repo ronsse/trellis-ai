@@ -144,6 +144,70 @@ Surfaced by review of the M-severity follow-ups landed in #155. Tracked here so 
 - **[L] `LLMFacetClassifier` is not yet wired with an `event_log` in production.** Tests are the only callers passing `event_log=` today; the registry / classifier-pipeline builder doesn't thread the operational-plane EventLog into the constructor. New telemetry is dormant in production until that wiring lands.
 - **[L] `tests/unit/classify/test_llm.py` and `tests/unit/classify/test_llm_classifier.py` overlap.** Slimmer FakeLLM-free `test_llm.py` vs. heavier `test_llm_classifier.py`. Consider consolidating into one path once #155's tests have stabilized.
 
+## Phase F — Inner agent loop / curation loop (proposed 2026-05-18)
+
+Sibling to the Self-Improvement Program. Closes the gap surfaced 2026-05-18: solid data + outcome-evaluation infrastructure exists, but no inner agent loop runs curation, summarization, or other graph-side operations on Trellis's own data. See [`docs/design/adr-graph-skill-harness.md`](docs/design/adr-graph-skill-harness.md) for the harness contract and [`docs/design/adr-inner-curation-loop.md`](docs/design/adr-inner-curation-loop.md) for the first concrete skill (curator).
+
+### Phases
+
+| # | Scope | Status |
+|---|---|---|
+| **F0** | ADRs + reserved names + scaffolding (harness + curator + eval skeleton); WorkflowEngine cleanup | Wave 1 in flight (4 PRs, base SHA `af374d2`) |
+| **F1** | Harness implementation: skill loader, tool registry, agent loop, 5 tools, budgets, telemetry | gated on Wave 1 merge |
+| **F2** | Curator skill: explicit + detected triggers, under-population detector, `CurationScheduler` | gated on F1 |
+| **F3** | On-retrieval lazy enrichment hook in `PackBuilder` (async fan-out) | gated on F2 |
+| **F4** | Skill outcome feedback (`curation.feedback_recorded`) | gated on F2 + F3 events |
+| **F5** | Score-based evolver interface + stub (`ScoreBasedEvolver` Protocol); McCoy port deferred | gated on ≥30 days of F4 signal |
+| **F6** | `eval/scenarios/skill_loop_convergence/` end-to-end implementation | grows alongside F1–F5 |
+
+### Wave 1 deferred follow-ups (2026-05-18)
+
+**From the harness ADR (Unit A):**
+- **[M][scope:F1]** Add five `SKILL_*` values to `EventType` (`skill.dispatched`, `skill.step`, `skill.completed`, `skill.failed`, `skill.outcome_recorded`).
+- **[M][scope:F1]** Amend `BUDGET_CONSUMED` payload variant docstring in `event_log.py` to discriminate the harness emitter (`source="trellis_workers.agent.harness"`).
+- **[L][scope:F1]** `tool_args_hash` canonicalization spec — sorted-key JSON via `model_dump_json`, matching `code_authoring/clustering.py`.
+- **[L][scope:F2-F5]** Skill-domain reservation lookup table (`curator.*` / `retrieval.*` / `outcome.*` / `evolver.*`); today it's a gentleman's agreement.
+- **[L][scope:follow-up]** `read_node(..., as_of=...)` for SCD-2 time-travel reads. Defer until a consumer asks.
+
+**From the curator ADR (Unit B):**
+- **[M][scope:F2]** `EnrichmentService.enrich()` returns single `auto_summary`; curator wants `summary` + `description`. Curator ADR §3.4 argues *not* to wrap `EnrichmentService` — flag here so a future cohort considers a shared "structured-summary" primitive below both callers.
+- **[L][scope:F3]** `PackBuilder` couples to curator skill name in the pre-committed design. Cleaner: emit generic `pack.under_populated_node_observed`, let a small subscriber translate. Raise during F3 implementation review.
+- **[L][scope:F4]** Sampled human-quality CLI (`trellis admin curation sample`) referenced in curator §2.5 but unspecified. Belongs in F4 evaluator's plan.
+- **[L][scope:F2]** Add a one-line note to curator §2.4: `ENTITY_UPDATE` overwrites are versioned in SCD-2; prior `description` survives via `get_node_history()`.
+
+**From the engine disposition (Unit C):**
+- **[M][scope:follow-up]** Stale doc references to `WorkflowEngine` to update in a follow-up PR:
+  - `TODO.md` line 305 (existing C1.6 entry — mark closed)
+  - `docs/design/audit-trellis-workers-orphans-2026-05-14.md` engine/* table rows
+  - `docs/design/plan-cleanup-dead-code.md` C1.6 section
+  - `docs/design/plan-evaluation-strategy.md` lines 62, 208
+  - `docs/design/plan-next-swarm-wave.md` line 305
+  - `docs/design/adr-llm-client-abstraction.md` lines 60, 185, 219, 259
+  - `eval/scenarios/agent_loop_convergence/README.md` line 49
+- **[L][scope:follow-up]** Three other 2026-05-16-audited orphan-suspects still in `KEEP — VALIDATE`: `extract/query_pattern_observer.py`, `learning/miner.py`, `maintenance/retention.py` (~876 LOC total). Re-evaluate if any align with Phase F skill or evolver needs.
+- **[L][scope:follow-up]** `docs/design/implementation-roadmap.md` is dated 2026-04-27 and predates Items 1–7 + Phase F. CLAUDE.md positions it as the canonical agent-entry doc; refresh the "State of the project" table.
+
+**From the F6 eval skeleton (Unit D):**
+- **[M][scope:F1+F2+F5]** Add `node.enriched`, `curation.feedback_recorded`, and an evolver round-scored event type to `EventType`. F1/F2/F5 own the enum delta in their respective PRs.
+- **[M][scope:F5]** Decide whether `_Telemetry` (private to `program_convergence_real_llm.scenario`) is extracted to a shared `eval/` module or reused locally by `skill_loop_convergence`. Decision belongs to F5.
+- **[L][scope:F3]** `curation.feedback_recorded` and `pack_feedback.jsonl` symmetry: should F3 write feedback to the JSONL audit log via `record_feedback()` for parity with `PackFeedback`?
+- **[L][scope:F1]** Scenario kwargs (`periods`, `nodes_per_period`, `periods_per_evolution`, `initial_variant_pool`) are conservative guesses; revise once F1 has measured curator wall-time.
+
+### Wave 2 — F1 harness implementation
+
+Triggers once all 4 Wave 1 PRs merge. Estimated 6–8 sub-units, ~1500–2000 LOC across parallel work:
+
+- skill loader + frontmatter validator (`harness.py`, `skill.py`)
+- tool registry + allowlist enforcement (`tools.py`)
+- agent loop runner (planner call → tool dispatch → observation, with `max_steps` + budget caps)
+- 5 tool implementations (`read_node`, `read_document`, `search_graph`, `propose_mutation`, `emit_event`)
+- budget tracker + telemetry (`SKILL_*` event types added to `EventType`)
+- CLI: `trellis admin run-skill <skill_id>`
+- contract test suite for skill loaders (mirrors `GraphStoreContractTests` discipline)
+- import-lint rule per harness ADR §4.1 (skills must not import `trellis.stores.*`, `trellis.mutate.executor`, or `trellis.llm.providers.*`)
+
+F2 (curator) follows F1; F3 (lazy enrichment) and F4 (feedback) can run in parallel after F2.
+
 ## Knowledge graph foundations — research + ADR
 
 - [x] **Live-test the Neo4j backends (validated against AuraDB Free, 2026-04-25)** — **110/110 tests pass live**: 33 graph + 19 vector (shape #2) + 58 contract suite. Cypher correctness, HNSW index ordering, SCD-2 close-then-insert versioning, `as_of` time-travel, alias resolution, `compact_versions`, the DSL compiler (eq / in / exists × top-level / properties), and the "embeddings on `:Node` excludes historical versions" test all work as designed. **One drift caught:** AuraDB Free hosts the user database under the instance ID (`<id>.databases.neo4j.io` ↔ database name `<id>`), not the canonical `"neo4j"`. The store's `database="neo4j"` default is fine for self-hosted but wrong for AuraDB; fixed by adding a `TRELLIS_TEST_NEO4J_DATABASE` env var to the three Neo4j test fixtures (defaults to `"neo4j"`). Production users on AuraDB must pass `database=<instance_id>` to `Neo4jGraphStore` / `Neo4jVectorStore` — already a documented constructor kwarg, no code change needed.
