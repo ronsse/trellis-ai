@@ -46,7 +46,13 @@ The harness owns the loop: `dispatch_skill("curator", node_id) → SKILL_DISPATC
 A node is **under-populated** when:
 
 ```python
-def is_under_populated(node: dict, threshold: int = 80) -> bool:
+def is_under_populated(
+    node: dict,
+    threshold: int = 80,
+    excluded_roles: tuple[str, ...] = ("curated",),
+) -> bool:
+    if node.get("node_role") in excluded_roles:
+        return False
     docs = node.get("document_ids") or []
     desc = (node.get("properties") or {}).get("description") or ""
     return len(docs) > 0 and len(desc) < threshold
@@ -54,7 +60,9 @@ def is_under_populated(node: dict, threshold: int = 80) -> bool:
 
 Threshold default: **80 characters**. Lives in [`ParameterRegistry`](../../src/trellis/ops/registry.py) under scope `component_id="curator"`, key `under_population_threshold_chars`. Tuneable by Item 3's parameter-promotion flow without redeploys.
 
-The heuristic is deliberately crude. v1 does not look at `summary`, `properties` density, edge count, or `node_role`. Adding those is a follow-up once we have feedback signal (§2.5) telling us whether the simple rule under- or over-fires.
+`excluded_roles` defaults to `("curated",)`. A node whose `node_role="curated"` was set deliberately by a human reviewer or a prior curator pass should not be re-enriched on top — overwriting intentional output is a safety regression, not a feature. The exclusion list lives in the same `ParameterRegistry` scope under key `under_population_excluded_roles`. Adding `"semantic"` or other structural-only roles is a follow-up once feedback signal tells us whether the v1 list under- or over-fires.
+
+The heuristic is otherwise deliberately crude. v1 does not look at `summary`, `properties` density, or edge count. Adding those is a follow-up once we have feedback signal (§2.5) telling us whether the simple rule under- or over-fires.
 
 ### 2.3 Three trigger paths
 
