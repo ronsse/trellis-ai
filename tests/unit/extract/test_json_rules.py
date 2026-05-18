@@ -93,6 +93,7 @@ class TestEntityWalking:
                     entity_type="column",
                     id_field="id",
                     property_fields={"type": "data_type"},
+                    allow_structural_leaf=True,  # regulated-column exception
                 ),
             ],
         )
@@ -382,6 +383,7 @@ class TestAncestorEdgeRules:
                     path=["tables", "*", "columns", "*"],
                     entity_type="column",
                     id_field="id",
+                    allow_structural_leaf=True,  # regulated-column exception
                 ),
             ],
             edge_rules=[
@@ -478,6 +480,7 @@ class TestAncestorEdgeRules:
                     path=["tables", "*", "columns", "*"],
                     entity_type="column",
                     id_field="id",
+                    allow_structural_leaf=True,  # regulated-column exception
                 ),
             ],
             edge_rules=[
