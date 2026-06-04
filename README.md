@@ -252,6 +252,36 @@ pip install "trellis-ai[llm-anthropic]"   # + Anthropic
 pip install "trellis-ai[all]"             # everything
 ```
 
+### Git-pinned installs (consumers vendoring Trellis from a SHA)
+
+Published-package extras (`trellis-ai[arcadedb]`) work as above. If instead you pin Trellis
+**directly from Git**, the intuitive PEP 508 extras-on-a-URL form is awkward and some build
+tooling (pip resolver edge cases, older Poetry, certain lockfile generators) rejects it:
+
+```text
+# Often rejected / awkward depending on tooling:
+trellis-ai[arcadedb] @ git+https://github.com/ronsse/trellis-ai.git@<sha>
+```
+
+The portable workaround is to pin Trellis by direct URL **without** the extra, and declare the
+underlying driver dependency yourself. The extras are thin — each just pulls one driver:
+
+| Extra | Add this dependency directly |
+|---|---|
+| `[arcadedb]` | `neo4j>=5.20` (ArcadeDB speaks the Neo4j Bolt wire protocol) |
+| `[neo4j]` | `neo4j>=5.20` |
+| `[cloud]` | `psycopg[binary]>=3.1`, `psycopg-pool>=3.1`, `pgvector>=0.3`, `boto3>=1.34` |
+
+```toml
+# pyproject.toml — Git-pinned consumer
+dependencies = [
+  "trellis-ai @ git+https://github.com/ronsse/trellis-ai.git@<sha>",
+  "neo4j>=5.20",   # what [arcadedb]/[neo4j] would have pulled
+]
+```
+
+See [#198](https://github.com/ronsse/trellis-ai/issues/198) for context.
+
 ## Interfaces
 
 **CLI** — `trellis` for humans and scripts. Every command has `--format json`.

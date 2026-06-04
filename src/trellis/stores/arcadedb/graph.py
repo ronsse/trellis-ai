@@ -7,6 +7,17 @@ everything else to the parent. See
 :mod:`trellis.stores.bolt_opencypher.graph` for the SCD-2 + Cypher
 contract and :class:`ArcadeDBVectorStore` for the paired vector path
 (SQL over HTTP, not Cypher).
+
+Self-hosting note: this store connects over Bolt (default port 7687),
+which a stock self-hosted ArcadeDB does **not** expose by default — only
+the HTTP endpoint (2480) is on. Start the server (or build the image)
+with the Bolt plugin enabled::
+
+    -Darcadedb.server.plugins=Bolt:com.arcadedb.bolt.BoltProtocolPlugin
+
+A connection-refused on 7687 while 2480 answers means the plugin flag is
+missing. See ``docs/design/adr-arcadedb-blessed-substrate.md``
+("Self-hosting requirement") for the full deployment note.
 """
 
 from __future__ import annotations
