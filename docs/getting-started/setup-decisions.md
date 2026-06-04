@@ -10,6 +10,12 @@ The point of this page is so that **nothing on this list gets skipped by
 accident.** Each item says *when* it matters, *where* the decision is recorded,
 and links the issue / ADR that owns the detail.
 
+> **Will Trellis enforce these, or just document them?** Both, by tier. The
+> enforcement model — fail-closed startup invariants, a `trellis doctor`
+> pre-deploy lint that turns this checklist into one executable command, and
+> runtime policy gates — is [`adr-setup-enforcement-model.md`](../design/adr-setup-enforcement-model.md).
+> Until those land, the statuses below tell you what's enforced today.
+
 ## How to read the status column
 
 Trellis ships the open-string core today; several governance features below are
