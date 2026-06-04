@@ -73,6 +73,12 @@ trellis retrieve pack --intent "deploy staging for user-api"   # assembled conte
 
 Every CLI command supports `--format json` for machine output.
 
+> **Setting up for a team, a data platform, or production?** Local single-user
+> needs no decisions. Beyond that, a few choices are yours to make and easy to
+> miss — domains & ontology, domain ownership, and API security. They're laid
+> out as a checklist in
+> [docs/getting-started/setup-decisions.md](docs/getting-started/setup-decisions.md).
+
 ## Architecture at a glance
 
 ```mermaid
