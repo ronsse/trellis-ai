@@ -243,3 +243,71 @@ def test_from_config_dir_reads_plane_split(tmp_path: Path) -> None:
     # Internal flat representation preserved for backward-compat in _resolve_backend
     assert "graph" in registry._config
     assert "trace" in registry._config
+
+
+# -- from_config_dict integration ----------------------------------------
+
+
+def test_from_config_dict_reads_plane_split() -> None:
+    """In-memory plane-split dict resolves like ``from_config_dir``."""
+    registry = StoreRegistry.from_config_dict(
+        {
+            "knowledge": {
+                "graph": {"backend": "neo4j", "uri": "bolt://example:7687"},
+            },
+            "operational": {"trace": {"backend": "postgres"}},
+        }
+    )
+    backend, params = registry._resolve_backend("graph")
+    assert backend == "neo4j"
+    assert params["uri"] == "bolt://example:7687"
+    backend, _ = registry._resolve_backend("trace")
+    assert backend == "postgres"
+
+
+def test_from_config_dict_accepts_flat_store_dict() -> None:
+    """A bare flat ``{store_type: cfg}`` dict is honoured too."""
+    registry = StoreRegistry.from_config_dict(
+        {"graph": {"backend": "sqlite"}, "trace": {"backend": "sqlite"}}
+    )
+    assert registry._resolve_backend("graph")[0] == "sqlite"
+
+
+def test_from_config_dict_peels_document_sections(tmp_path: Path) -> None:
+    """Document-level sections are split off the store config."""
+    data_dir = tmp_path / "trellis-from-dict"
+    registry = StoreRegistry.from_config_dict(
+        {
+            "knowledge": {"graph": {"backend": "sqlite"}},
+            "embeddings": {"provider": "openai"},
+            "retrieval": {"max_items": 7},
+            "llm": {"provider": "anthropic"},
+            "data_dir": str(data_dir),
+        }
+    )
+    assert registry._embedding_config == {"provider": "openai"}
+    assert registry._retrieval_config == {"max_items": 7}
+    assert registry._llm_config == {"provider": "anthropic"}
+    assert registry.stores_dir == data_dir / "stores"
+    # Document-level sections must not leak into the store config.
+    assert "embeddings" not in registry._config
+    assert registry._resolve_backend("graph")[0] == "sqlite"
+
+
+def test_from_config_dict_empty_uses_defaults() -> None:
+    """No config = SQLite defaults, same as the bare constructor."""
+    registry = StoreRegistry.from_config_dict()
+    assert registry._resolve_backend("graph")[0] == "sqlite"
+
+
+def test_from_config_dict_does_not_mutate_input() -> None:
+    """The caller's mapping must be left intact."""
+    config = {
+        "knowledge": {"graph": {"backend": "sqlite"}},
+        "embeddings": {"provider": "openai"},
+    }
+    StoreRegistry.from_config_dict(config)
+    assert config == {
+        "knowledge": {"graph": {"backend": "sqlite"}},
+        "embeddings": {"provider": "openai"},
+    }

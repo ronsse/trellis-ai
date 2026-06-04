@@ -21,6 +21,9 @@ class TestAdminInit:
         assert result.exit_code == 0
         assert (tmp_path / "config" / "config.yaml").exists()
         assert (tmp_path / "data" / "stores").exists()
+        # Surfaces the human-decision setup pointer so team/enterprise
+        # setups don't silently skip domains/ontology/security choices.
+        assert "setup-decisions.md" in result.stdout
 
     def test_init_custom_data_dir(self, tmp_path, monkeypatch):
         monkeypatch.setenv("TRELLIS_CONFIG_DIR", str(tmp_path / "config"))
@@ -51,6 +54,7 @@ class TestAdminInit:
         assert result.exit_code == 0
         data = json.loads(result.stdout.strip())
         assert data["status"] == "initialized"
+        assert data["next_steps_doc"] == "docs/getting-started/setup-decisions.md"
 
 
 class TestAdminHealth:

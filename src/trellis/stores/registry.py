@@ -754,6 +754,56 @@ class StoreRegistry:
             llm_config=llm_config,
         )
 
+    @classmethod
+    def from_config_dict(
+        cls,
+        config: dict[str, Any] | None = None,
+        *,
+        data_dir: Path | None = None,
+    ) -> StoreRegistry:
+        """Create a registry from an in-memory config dict.
+
+        The in-memory counterpart of :meth:`from_config_dir`. Accepts the same
+        document shape as ``config.yaml`` — either plane-split store config
+        (``knowledge:`` / ``operational:`` blocks) or already-flat store config
+        (``graph:`` / ``vector:`` / ...), optionally wrapped with document-level
+        ``embeddings`` / ``retrieval`` / ``llm`` / ``data_dir`` sections. Use it
+        when configuration is built programmatically (tests, notebooks, embedded
+        use) rather than read from a config directory.
+
+        Equivalent for store config to constructing ``StoreRegistry(config=...)``
+        directly; the convenience is that it also peels off the document-level
+        ``embeddings`` / ``retrieval`` / ``llm`` / ``data_dir`` sections the way
+        :meth:`from_config_dir` does for ``config.yaml``::
+
+            registry = StoreRegistry.from_config_dict(
+                {
+                    "knowledge": {"graph": {"backend": "sqlite"}},
+                    "operational": {"event_log": {"backend": "sqlite"}},
+                    "embeddings": {"provider": "openai"},
+                }
+            )
+
+        The passed mapping is not mutated.
+        """
+        data = dict(config or {})
+        embedding_config = data.pop("embeddings", {}) or {}
+        retrieval_config = data.pop("retrieval", {}) or {}
+        llm_config = data.pop("llm", {}) or {}
+        doc_data_dir = data.pop("data_dir", None)
+        if doc_data_dir:
+            data_dir = Path(doc_data_dir)
+        # ``data`` now holds only store config (plane-split or flat); the
+        # constructor normalises both shapes.
+        stores_dir = (data_dir / "stores") if data_dir is not None else None
+        return cls(
+            config=data,
+            stores_dir=stores_dir,
+            embedding_config=embedding_config,
+            retrieval_config=retrieval_config,
+            llm_config=llm_config,
+        )
+
     def _resolve_backend(self, store_type: str) -> tuple[str, dict[str, Any]]:
         """Resolve backend name and params for a store type."""
         store_cfg = self._config.get(store_type, {})

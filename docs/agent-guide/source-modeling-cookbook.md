@@ -6,6 +6,8 @@
 
 > **Before you read this:** make sure you've internalized [modeling-guide.md](modeling-guide.md). Especially the four-question test, the four-store split, and the cross-database routing convention. The recipes below assume you understand those.
 
+> **Building a data-platform / enterprise graph?** The query-history recipes here are intentionally conservative about promotion — see [`adr-query-history-promotion.md`](../design/adr-query-history-promotion.md) (#218) for the behavioral-evidence → accepted-fact ladder and [`adr-enterprise-ontology-capability-framing.md`](../design/adr-enterprise-ontology-capability-framing.md) (#217) for how these recipes fit the wider ontology stack.
+
 ---
 
 ## How to use this cookbook
