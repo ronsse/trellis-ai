@@ -96,7 +96,7 @@ from typing import Protocol, runtime_checkable
 
 @dataclass(frozen=True)
 class MemoryItem:
-    item_id: str                    # stable ID; becomes a graph node's document_id
+    item_id: str                    # stable ID; joins a graph node's document_ids list
     content: str                    # the markdown/text body
     metadata: dict[str, object]
     updated_at: str                 # ISO-8601; drives change detection
@@ -144,6 +144,8 @@ Any store satisfying this contract can be the Memory Layer — mirroring Trellis
 
 **`DocumentStore` fate (resolved).** Rather than bypass it, `DocumentStore` gains a thin **read-through backend** over the `MemoryLayer` interface, registered like any other backend so `PackBuilder`, retrieval, and the contract tests are unchanged: `get`/`search` delegate to `MemoryLayer.read`/`search`; raw writes are out-of-band (agents write the Memory Layer directly), so the backend's write path is reserved for `write_back` of curated artifacts (§2.8). This keeps the ABC contract intact while moving content *ownership* outward.
 
+**On the Hard Rule.** CLAUDE.md's "all mutations go through the governed pipeline; no direct store writes" binds *Trellis-owned* stores. The Memory Layer is **external** (like a dbt project or Unity Catalog), so an agent writing to it is out of scope of that rule — exactly as an upstream source write is. Every write to Trellis's *own* stores still goes through the pipeline: the graph derivation in §2.6 routes through `MutationExecutor` unchanged.
+
 ### 2.4 Chained curation, not competing curation
 
 The two curations run in **sequence**, not in competition:
@@ -152,6 +154,8 @@ The two curations run in **sequence**, not in competition:
 2. **Trellis curates second** — those candidates enter the existing pipeline (validate → policy → idempotency → execute → emit) and the promotion ladder, becoming shared, governed, *connected* knowledge.
 
 The promotion ladder's *origin* moves down into the Memory Layer. Trellis does not re-implement recency/salience; the Memory Layer does not implement governance/relationships.
+
+> **Vocabulary.** Three staged-refinement framings now coexist and are *orthogonal*, not competing: the **dual loop** ([`adr-dual-loop-evolution.md`](./adr-dual-loop-evolution.md)) is Trellis's system-improvement vs agent-advisory split; the **promotion ladder** ([`adr-query-history-promotion.md`](./adr-query-history-promotion.md)) is the evidence→accepted epistemic gate *within* Trellis; **chained curation** (this section) is the cross-tier hand-off from the Memory Layer up into Trellis. They compose rather than conflict — chained curation delivers a candidate that enters the promotion ladder at the Observation rung (§2.8), and the dual loop scores it thereafter.
 
 ### 2.5 Freshness and sync
 
@@ -172,6 +176,8 @@ Memory Layer  --(list_changed_since / read)-->  MemorySource / MarkdownVaultExtr
 
 No change to the `GraphStore` ABC, the canonical layer, or `MutationExecutor`. Extraction gains a source; governance is unchanged.
 
+**Not a new cross-plane bridge.** [`adr-planes-and-substrates.md`](./adr-planes-and-substrates.md) §2.5 requires an ADR before any *third* cross-plane bridge. This seam introduces none: the read path reuses the existing **`MutationExecutor`** bridge with the Memory Layer as an external *source*, and gives the Knowledge-Plane `DocumentStore` an external *backend* (§2.3). Both stay inside the Knowledge Plane and the two already-sanctioned bridges; no new plane-crossing data flow is created.
+
 ### 2.7 Retrieval: one assembler, dedup, precedence, corroboration-as-metadata
 
 Even with content stored once, the same fact can surface twice at retrieval — once as the agent's raw note (Memory Layer), once as the governed claim derived from it (graph). Beyond token waste, **repetition biases LLM attention**: a duplicated fact is over-weighted and crowds out other context. Resolution, in priority order:
@@ -191,7 +197,7 @@ The unit that crosses from Memory Layer to Trellis is **not a raw note but a dis
 - **Link.** The summary lands as a graph node — naturally an **Observation** ([`adr-observation-entity-type.md`](./adr-observation-entity-type.md)) — carrying **provenance edges** to its source Memory-Layer IDs (via `document_ids`) and **semantic edges** to the entities it concerns. The links are what make it more than a note: connected, traversable, and auditable back to its evidence.
 - **Prioritize.** These promoted summaries carry high importance, so `PackBuilder` surfaces them preferentially within the `max_items`/`max_tokens` budget, and the §2.7 precedence rule makes the *summary* (not a raw duplicate) the representation that reaches the agent — annotated with corroboration rather than repeated.
 
-So "important context points" becomes a concrete object: a high-salience, summarized, link-rich Observation whose creation *is* the promotion event and whose retrieval priority reflects its proven value. Optionally, `write_back` (§2.2) mirrors the summary back down into the Memory Layer as a file, so the human/Obsidian view also gains the distilled version.
+So "important context points" becomes a concrete object: a high-salience, summarized, link-rich Observation whose creation *is* the promotion event and whose retrieval priority reflects its proven value. Optionally, `write_back` (§2.2) mirrors the summary back down into the Memory Layer as a file, so the human/Obsidian view also gains the distilled version. This `write_back` does **not** route through `MutationExecutor`: the governed mutation already happened when the Observation node was created above; `write_back` only projects that already-audited artifact outward — directly analogous to the effectiveness loop writing `content_tags` back onto Document records ([`adr-planes-and-substrates.md`](./adr-planes-and-substrates.md) §2.5, bridge 2).
 
 ### 2.9 What is NOT in scope
 

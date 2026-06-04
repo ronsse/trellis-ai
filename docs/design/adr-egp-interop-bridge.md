@@ -56,7 +56,7 @@ Each EGP concept maps to one Trellis concept, with the **source-authority** rule
 
 ### 2.1 Why Node→Entity and not Node→a new type
 
-Trellis's `Entity` already carries `properties`, `metadata`, `node_role`, and SCD-2 versioning (`valid_from`/`valid_to`). An EGP node is structurally an `Entity` with extra provenance. Inventing an `EGPNode` type would fork the retrieval surface (PackBuilder strategies, classification, alias resolution all key off `Entity`) for no semantic gain. The EGP-ness lives in `metadata`, not in the type.
+Trellis's `Entity` already carries `properties`, `metadata`, and `node_role`, and its graph nodes are SCD-2 versioned at the `GraphStore` layer (`valid_from`/`valid_to` are storage-layer columns in [`stores/base/graph.py`](../../src/trellis/stores/base/graph.py), not `Entity` model fields). An EGP node is structurally an `Entity` with extra provenance. Inventing an `EGPNode` type would fork the retrieval surface (PackBuilder strategies, classification, alias resolution all key off `Entity`) for no semantic gain. The EGP-ness lives in `metadata`, not in the type.
 
 ### 2.2 Why Candidate→Observation and not Candidate→Edge
 
