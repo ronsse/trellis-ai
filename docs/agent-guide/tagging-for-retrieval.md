@@ -8,10 +8,10 @@ Every piece of content in the graph can carry a `retrieval_affinity` tag — a m
 
 | Affinity | What It Means | Examples |
 |----------|--------------|---------|
-| `domain_knowledge` | Business concepts, ownership, governance, conventions | "Sportsbook uses _v{N} versioning", "PII requires restricted catalog" |
+| `domain_knowledge` | Business concepts, ownership, governance, conventions | "The orders domain uses _v{N} versioning", "PII requires restricted catalog" |
 | `technical_pattern` | How-to, code patterns, SQL idioms, templates | "ROW_NUMBER/QUALIFY for dedup", "CTE decomposition style" |
 | `operational` | Execution traces, incidents, error history, debug info | "Last run failed at struct navigation", "Timeout on large table scan" |
-| `reference` | Entity metadata, schemas, configurations, lookup data | "bets_v7 has 12 columns", "UC table owner: data-eng@fanduel.com" |
+| `reference` | Entity metadata, schemas, configurations, lookup data | "orders_v7 has 12 columns", "UC table owner: data-eng@example.com" |
 
 Content can have **multiple affinities**. A "Foundation Deduplication Pattern" precedent is both `domain_knowledge` (it's a business convention) and `technical_pattern` (it's a code pattern).
 
@@ -98,8 +98,8 @@ If the answer is "multiple of the above," use multiple affinities.
 After tagging content, run the pack analysis to verify content lands in expected sections:
 
 ```bash
-# From fd-data-architecture-poc:
-python -m fd_poc.trellis.pack_analysis
+# From the consumer deployment repo:
+python -m <consumer_package>.trellis.pack_analysis
 
 # Check: does the "ownership" gap still appear?
 # If retrieval_affinity: [domain_knowledge] is set on ownership.md,

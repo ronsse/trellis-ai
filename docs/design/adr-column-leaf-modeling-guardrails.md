@@ -17,15 +17,15 @@
 
 Trellis's storage and API layers accept **any string** as an entity type or edge kind, and the graph store applies SCD Type 2 versioning to every node ([`adr-graph-ontology.md`](./adr-graph-ontology.md) §5). That flexibility is a strength, but it has a predictable failure mode at the leaf level: builders model *every* fine-grained leaf of a hierarchical source — database columns, nested struct fields, function parameters, file lines, config keys — as a first-class graph node with a containment edge back to its parent.
 
-The temptation is sharpest for builders coming from EGP-style graph platforms. EGP (the Enterprise Graph Platform reference implementation under `fd-data-architecture-poc/solutions/egp`) mints **one `Column` graph node per physical column** and reports **195K column nodes today, projected toward O(1M)** at full scale; its own UI hides columns by default because they swamp the graph (`solutions/egp/docs/DEMO_PLAYBOOK.md`). Column-level lineage is then modeled as `derived_from` edges *between* column nodes, which compounds the node and edge counts further. A builder porting that schema into Trellis verbatim inherits the same explosion — and, because Trellis versions every node forever, a far heavier long-term obligation.
+The temptation is sharpest for builders coming from enterprise graph (EG) platforms. One EG reference implementation the authors studied mints **one `Column` graph node per physical column** and reports **195K column nodes today, projected toward O(1M)** at full scale; its own UI hides columns by default because they swamp the graph (its demo playbook documents this). Column-level lineage is then modeled as `derived_from` edges *between* column nodes, which compounds the node and edge counts further. A builder porting that schema into Trellis verbatim inherits the same explosion — and, because Trellis versions every node forever, a far heavier long-term obligation.
 
-The [`modeling-guide.md`](../agent-guide/modeling-guide.md) already names this anti-pattern ("Schema explosion", "Cardinality explosion from implicit joins"), already ships the four-question node test, and already documents `node_role=structural` as the escape valve. The [`source-modeling-cookbook.md`](../agent-guide/source-modeling-cookbook.md) Unity Catalog recipe already says "**Do NOT emit a node per column.**" This ADR does not invent that guidance — it **elevates it to a decision**, ties it explicitly to EGP-style ontology construction, and scopes the follow-up tooling that would make the guidance enforceable.
+The [`modeling-guide.md`](../agent-guide/modeling-guide.md) already names this anti-pattern ("Schema explosion", "Cardinality explosion from implicit joins"), already ships the four-question node test, and already documents `node_role=structural` as the escape valve. The [`source-modeling-cookbook.md`](../agent-guide/source-modeling-cookbook.md) Unity Catalog recipe already says "**Do NOT emit a node per column.**" This ADR does not invent that guidance — it **elevates it to a decision**, ties it explicitly to EG-style ontology construction, and scopes the follow-up tooling that would make the guidance enforceable.
 
 ### What goes wrong if columns become nodes by default
 
 | Failure | Mechanism |
 |---|---|
-| Graph size grows 10–100× | One node + one containment edge per leaf; column counts dwarf table counts (EGP: 195K → O(1M)). |
+| Graph size grows 10–100× | One node + one containment edge per leaf; column counts dwarf table counts (the EG reference implementation: 195K → O(1M)). |
 | Retrieval pollution | Structural leaf nodes compete with semantic parents for token budget unless filtered. |
 | SCD-2 churn | Every column add/drop/type/comment change becomes a new versioned row to maintain forever. |
 | Source-of-truth drift | The leaf's authoritative history already lives in the source system (catalog, git); the graph duplicates it. |
@@ -58,10 +58,10 @@ The placement convention reuses the `Dataset.properties.columns` shape already d
 
 | Alternative | Reason rejected |
 |---|---|
-| **Model every column as a node (EGP-style default)** | The whole failure mode in §1. Pays the maintenance cost for metadata that almost never traverses. |
+| **Model every column as a node (EG-style default)** | The whole failure mode in §1. Pays the maintenance cost for metadata that almost never traverses. |
 | **Close the type system to forbid column nodes** | Breaks the open-string contract and the legitimate exceptions (regulated columns, column-level lineage). Trellis does not close vocabularies ([`adr-graph-ontology.md`](./adr-graph-ontology.md) §8.5). |
 | **Write-time enforcement (reject column nodes at the mutation pipeline)** | Too blunt — there is no source-neutral signal that distinguishes "a justified structural column node" from "schema explosion" at write time. Enforcement belongs in advisory tooling (§6), not the hot path. |
-| **Say nothing; rely on the existing anti-pattern note** | The existing note is correct but buried among five anti-patterns. EGP-style builders need the default stated as a *rule* and reconciled with the schema they're porting from. |
+| **Say nothing; rely on the existing anti-pattern note** | The existing note is correct but buried among five anti-patterns. EG-style builders need the default stated as a *rule* and reconciled with the schema they're porting from. |
 
 ## 4. Exception criteria — when column nodes ARE justified
 
@@ -71,7 +71,7 @@ Model a leaf as a graph node only when **at least one** of these is true. These 
 2. **Cross-parent query requirement** — questions like "which regulated columns feed this dashboard?" are run often enough that a property scan over `Dataset.properties.columns` is not sufficient.
 3. **Independent evidence or policy** — evidence, classification, approval, or policy attaches to the column *independently* of the table (the column and its metadata do not always move as a unit).
 4. **Independent lifecycle** — the column has its own lifecycle: ownership, governance state, SLA, deprecation, or review workflow distinct from its parent.
-5. **Regulated / high-risk field** — PII, payment, responsible-gaming, or compliance-sensitive fields where explicit graph traversal has concrete operational value (e.g., "audit every consent-gated column").
+5. **Regulated / high-risk field** — PII, payment, or regulated-vertical compliance fields where explicit graph traversal has concrete operational value (e.g., "audit every consent-gated column").
 
 If none hold, it is a property or a document. Model **only the specific leaves that earn it** — not the whole schema. The worked example in [`modeling-guide.md`](../agent-guide/modeling-guide.md) (~100 PII column nodes, not 500K) is the canonical "right size" for an exception.
 
@@ -96,14 +96,14 @@ For a column modeled as a node, that means:
 
 Modeling columns as `Dataset.properties.columns` turns N column changes into **one** property-diff event on the parent's history — the granularity that matches how the data is actually queried — while still preserving full auditability. The SCD-2 churn argument is the reason the default is "property", and it is the line the strengthened guide must call out explicitly (Acceptance Criterion AC-2).
 
-## 7. Reconciliation with EGP's column-node examples
+## 7. Reconciliation with the EG's column-node examples
 
-EGP and Trellis are **not in conflict** — they make different defaults for different jobs:
+The EG and Trellis are **not in conflict** — they make different defaults for different jobs:
 
-- **EGP may legitimately create `Column` nodes** for demo storytelling, UI drilldown, and column-level lineage. Its column-lineage product *needs* column-to-column `derived_from` edges; that is a genuine traversal requirement (§4.1) for EGP's use case, and EGP's UI already hides columns by default to manage the volume.
-- **Trellis builders default to properties / docs.** A builder porting an EGP-style schema into Trellis should **not** carry the per-column-node default across. They adopt `Dataset.properties.columns` unless their *own* workload meets one of the §4 exception criteria — most commonly genuine column traversal or an independent column lifecycle.
+- **An EG may legitimately create `Column` nodes** for demo storytelling, UI drilldown, and column-level lineage. Its column-lineage product *needs* column-to-column `derived_from` edges; that is a genuine traversal requirement (§4.1) for the EG's use case, and the EG's UI already hides columns by default to manage the volume.
+- **Trellis builders default to properties / docs.** A builder porting an EG-style schema into Trellis should **not** carry the per-column-node default across. They adopt `Dataset.properties.columns` unless their *own* workload meets one of the §4 exception criteria — most commonly genuine column traversal or an independent column lifecycle.
 
-The reconciliation rule, stated for a builder: *"EGP mints column nodes because its column-lineage UI traverses them. Unless your Trellis workload also traverses columns (or attaches independent evidence/lifecycle to them), keep columns as properties. If it does, model only the columns that traverse, as `node_role=structural`, excluded from retrieval."* This keeps all guidance source-neutral — no EGP/FanDuel specifics leak into Trellis core; EGP is referenced only as the motivating example.
+The reconciliation rule, stated for a builder: *"The EG mints column nodes because its column-lineage UI traverses them. Unless your Trellis workload also traverses columns (or attaches independent evidence/lifecycle to them), keep columns as properties. If it does, model only the columns that traverse, as `node_role=structural`, excluded from retrieval."* This keeps all guidance source-neutral — no source-platform specifics leak into Trellis core; the EG is referenced only as the motivating example.
 
 ## 8. Implementation options (follow-up plan — not committed here)
 
@@ -119,7 +119,7 @@ This ADR commits to the **docs-only guardrail (option 1)**. Options 2–4 are a 
 ## 9. Consequences
 
 ### 9.1 What this enables
-- A clear, citable default for builders porting EGP-style schemas: columns are properties, not nodes.
+- A clear, citable default for builders porting EG-style schemas: columns are properties, not nodes.
 - A bounded, documented exception path that keeps the open-string contract intact.
 - A scoped follow-up plan (profile defaults, advisory linter) that can be built once and shared with [#219](https://github.com/ronsse/trellis-ai/issues/219).
 
@@ -127,17 +127,17 @@ This ADR commits to the **docs-only guardrail (option 1)**. Options 2–4 are a 
 - Does not add canonical entity types, edge kinds, or validation.
 - Does not enforce anything at write time — column nodes remain creatable.
 - Does not implement the linter, profile defaults, or bulk-ingest warnings (§8 options 2–4 are a plan).
-- Does not change EGP — EGP keeps its column-node model; only the *Trellis default* is asserted.
+- Does not change the EG — the EG keeps its column-node model; only the *Trellis default* is asserted.
 
 ### 9.3 What this costs
 - One strengthened guide section + this ADR.
-- A standing reconciliation note that must be revisited if EGP's column model and Trellis's defaults are ever expected to converge.
+- A standing reconciliation note that must be revisited if the EG's column model and Trellis's defaults are ever expected to converge.
 
 ## 10. Acceptance criteria
 
 - **AC-1.** [`modeling-guide.md`](../agent-guide/modeling-guide.md) contains a strengthened "Column and leaf metadata policy" section stating the default rule (§2) and the five exception criteria (§4).
 - **AC-2.** That section explicitly calls out the maintenance cost of column-level change tracking — specifically SCD-2 churn (§6).
-- **AC-3.** The guidance reconciles EGP's column-node examples with the Trellis default (§7): EGP may create column nodes for demo/UI/column-lineage; Trellis builders default to properties/docs unless they need column traversal or independent lifecycle.
+- **AC-3.** The guidance reconciles the EG's column-node examples with the Trellis default (§7): the EG may create column nodes for demo/UI/column-lineage; Trellis builders default to properties/docs unless they need column traversal or independent lifecycle.
 - **AC-4.** The "when column nodes ARE used" requirements (§5) are documented: `node_role=structural`, excluded from default retrieval, source identifiers + freshness, retention/compaction strategy.
 - **AC-5.** A follow-up implementation plan exists for a linter / profile-based warning (§8), explicitly *not* claimed as implemented and noted as overlapping [#219](https://github.com/ronsse/trellis-ai/issues/219).
 - **AC-6.** The guidance does not imply that every referenced column should become a node — the query-history column-usage path routes to an `Observation`/`Measurement` on the parent, not a node per column (§2.1). The existing query-log recipe in [`source-modeling-cookbook.md`](../agent-guide/source-modeling-cookbook.md) already conforms (no per-column nodes).
@@ -151,4 +151,4 @@ This ADR commits to the **docs-only guardrail (option 1)**. Options 2–4 are a 
 - [`source-modeling-cookbook.md`](../agent-guide/source-modeling-cookbook.md) — Unity Catalog recipe ("Do NOT emit a node per column") and SQL query-log recipe.
 - `src/trellis/schemas/enums.py` — `NodeRole.STRUCTURAL`.
 - `src/trellis/schemas/well_known.py` — `DATASET_ROUTING_PROPERTIES`.
-- EGP reference implementation — `fd-data-architecture-poc/solutions/egp` (195K → O(1M) column nodes; UI hides columns by default). Motivating example only; no EGP specifics in Trellis core.
+- EG reference implementation (195K → O(1M) column nodes; UI hides columns by default). Motivating example only; no EG specifics in Trellis core.

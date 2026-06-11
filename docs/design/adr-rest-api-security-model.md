@@ -36,7 +36,7 @@ deployment beyond a developer's loopback:
 | 193 | [`registry.py`](../../src/trellis/stores/registry.py) resolves the ArcadeDB store from `TRELLIS_ARCADEDB_USER`/`_PASSWORD`, defaulting `user` to `"root"`, and calls `ensure_database` (DDL) on first driver build. Long-running runtime paths therefore hold **admin** credentials that are only needed for init/migration. |
 | 194 | [`DataClassification`](../../src/trellis/schemas/classification.py) exists but, per its own docstring, "no classifier populates it and no policy gate enforces it yet." The [`DefaultPolicyGate`](../../src/trellis/mutate/policy_gate.py) matches on scope/operation, never on `sensitivity`. PackBuilder applies no classification filter. |
 | 206 | The structured-error path is partly in place — [`middleware.py`](../../src/trellis_api/middleware.py) already strips internals from the 500 envelope — but route-level JSON error payloads for commands that touch external metadata systems still risk echoing raw exception text carrying SQL, emails, or token-shaped values. |
-| 207 | A SQL statement-type classifier (on the unmerged `fd-knowledge-graph` branch) transformed an unrecognized first token straight into a `statement_type` value with no allowlist, so an email-like or display-name-like token could leak into curator-safe artifacts. |
+| 207 | A SQL statement-type classifier (on an unmerged consumer-integration branch) transformed an unrecognized first token straight into a `statement_type` value with no allowlist, so an email-like or display-name-like token could leak into curator-safe artifacts. |
 
 These are not eight unrelated bugs. They are five **layers** of one security
 model that was never drawn as a whole: where the API may listen, who may call

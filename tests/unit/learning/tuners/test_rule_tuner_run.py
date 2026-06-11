@@ -43,7 +43,7 @@ def _seed_outcomes(
     *,
     successes: int,
     failures: int,
-    domain: str = "sportsbook",
+    domain: str = "orders",
     component_id: str = "retrieve.strategies.KeywordSearch",
     base_time: datetime | None = None,
 ) -> None:
@@ -89,7 +89,7 @@ def test_run_produces_proposals_and_advances_cursor(stores):
     assert len(result) == 1
     proposal = result[0]
     assert proposal.scope.component_id == "retrieve.strategies.KeywordSearch"
-    assert proposal.scope.domain == "sportsbook"
+    assert proposal.scope.domain == "orders"
     assert proposal.proposed_values == {"recency_half_life_days": 15.0}
     assert proposal.sample_size == 10
 

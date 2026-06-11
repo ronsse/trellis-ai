@@ -1117,7 +1117,7 @@ def get_objective_context(
 
     Args:
         intent: The user's original business objective in their own words.
-        domain: Optional domain filter (e.g., "sportsbook", "data-pipeline").
+        domain: Optional domain filter (e.g., "orders", "data-pipeline").
         max_tokens: Token budget override. Pass ``0`` (default) to use the
             configured budget from ``retrieval.budgets`` in ``config.yaml``;
             pass a positive value to override.

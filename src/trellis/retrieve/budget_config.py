@@ -24,7 +24,7 @@ Example config::
           get_task_context:
             max_tokens: 2500
         by_domain:
-          sportsbook:
+          orders:
             max_tokens_multiplier: 1.25
 """
 

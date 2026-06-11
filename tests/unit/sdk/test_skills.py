@@ -67,7 +67,7 @@ def test_get_recent_activity_with_traces(client: TrellisClient):
 
 
 def test_get_objective_context_for_workflow_empty(client: TrellisClient) -> None:
-    result = get_objective_context_for_workflow(client, "build GGR pipeline")
+    result = get_objective_context_for_workflow(client, "build revenue pipeline")
     assert isinstance(result, str)
     # Either the intent is echoed, or a "no results" shape is rendered.
     assert result != ""
@@ -76,7 +76,7 @@ def test_get_objective_context_for_workflow_empty(client: TrellisClient) -> None
 def test_get_task_context_for_step_empty(client: TrellisClient) -> None:
     result = get_task_context_for_step(
         client,
-        "generate SQL for casino_sessions",
-        entity_ids=["uc://foundation.casino.game_rounds"],
+        "generate SQL for domain_c_sessions",
+        entity_ids=["uc://analytics.domain_c.events"],
     )
     assert isinstance(result, str)

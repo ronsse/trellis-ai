@@ -16,7 +16,7 @@
 
 ## 1. Context
 
-The `fd-knowledge-graph` integration package (an external consumer that populates a
+The `consumer-kg` integration package (an external consumer that populates a
 Trellis Knowledge Plane from Unity Catalog metadata, Databricks query history, and a
 Docusaurus docs repo) was the first heavy, real-world driver of the
 extraction→mutation path. Building it surfaced seven behaviors that the package had to
@@ -63,7 +63,7 @@ design document; nothing below is claimed as implemented.**
 ### 2.1 #185 — canonical draft→command helper · **Promote to core**
 
 **Ruling: Promote to core.** Trellis owns the draft and command schemas, so Trellis owns
-the mapping between them. The `fd-knowledge-graph` `_draft_to_command()` copied
+the mapping between them. The `consumer-kg` `_draft_to_command()` copied
 `entity_id` / `entity_type` / `name` / `properties` but dropped `node_role` and
 `generation_spec`, silently demoting structural and curated nodes to the default
 `NodeRole.SEMANTIC`. That is a *schema-fidelity* bug, and schema fidelity is a core
@@ -105,7 +105,7 @@ fields *arrive* at that boundary. `requested_by` follows the existing
 
 Integration packages are then expected to call the helper instead of hand-rolling, and
 the extractor-authoring docs (Playbook 13, referenced by
-[`adr-plugin-contract.md`](./adr-plugin-contract.md)) point at it. `fd-knowledge-graph`
+[`adr-plugin-contract.md`](./adr-plugin-contract.md)) point at it. `consumer-kg`
 deletes its local `_draft_to_command()`.
 
 ### 2.2 #195 — edge dedup on re-ingest · **Core contract + completeness fix (bug)**
@@ -167,7 +167,7 @@ The *capability* is there; what is missing is a **sanctioned builder** —
 ([`src/trellis/mutate/__init__.py:23-36`](../../src/trellis/mutate/__init__.py)), so a
 graph-only consumer either hits a configuration error or hand-rolls
 `MutationExecutor(event_log=None, handlers=...)` and bypasses the wiring — which is
-exactly the monkey-patch `fd-knowledge-graph` was forced into for its first EKS ingest.
+exactly the monkey-patch `consumer-kg` was forced into for its first EKS ingest.
 
 **Why this does not violate "EventLog authoritative."** Per
 [`adr-planes-and-substrates.md`](./adr-planes-and-substrates.md) §2.1, the EventLog is
@@ -207,7 +207,7 @@ These two issues are the same root cause: a curator/ingest path tries to write a
 to a target table node that has no current version, and the bolt/HTTP graph adapter
 refuses (`"... has no current version"`,
 [`graph.py:730-735`](../../src/trellis/stores/bolt_opencypher/graph.py)). #215 already
-worked around it in `fd-knowledge-graph` by **materializing a minimal `uc_table` stub**
+worked around it in `consumer-kg` by **materializing a minimal `uc_table` stub**
 before the edge write; #211 enumerates the three candidate contracts.
 
 **Ruling: define ONE explicit core contract for what happens when an edge's referenced
@@ -246,7 +246,7 @@ The one enforced contract, in priority order:
   from a parseable three-part table name is Unity-Catalog-specific domain knowledge: how
   to parse the name, which `node_type` and `node_role` the stub gets, whether to set
   `document_ids`, how to avoid clobbering an existing node. None of that belongs in
-  core graph mutation. `fd-knowledge-graph` keeps `run_source_ingest`'s stub-creation
+  core graph mutation. `consumer-kg` keeps `run_source_ingest`'s stub-creation
   pre-pass; it just emits the stub as a *first-class* `ENTITY_CREATE` through the same
   executor (so the stub is audited and idempotent) and then issues the
   `LINK_CREATE` with the endpoint now present — rather than relying on `allow_dangling`
@@ -264,7 +264,7 @@ of an edge write.
 
 ### 2.5 #214 — MDX/Docusaurus sanitizer · **Keep in integration; promote only the generic primitive**
 
-**Ruling: Keep the MDX/Docusaurus-specific sanitizer in `fd-knowledge-graph`. Promote
+**Ruling: Keep the MDX/Docusaurus-specific sanitizer in `consumer-kg`. Promote
 nothing MDX-shaped to core now; *consider* later promoting a small, format-agnostic
 text-sanitization primitive if (and only if) a second ingestion flow needs it.**
 
@@ -318,7 +318,7 @@ neither suppresses the other, the consuming agent reconciles).
 **Shape / recommendation.**
 
 - `transformation_logic` (entity type + retrieval bucket + "keep separate from
-  `query_pattern`" warning) stays in `fd-knowledge-graph`.
+  `query_pattern`" warning) stays in `consumer-kg`.
 - The integration is encouraged to express construction-vs-usage as the existing
   empirical-evidence shapes where they fit (`Observation` for narrative construction
   claims, `Measurement` for query-frequency scalars) so the separation rides on core
@@ -342,7 +342,7 @@ neither suppresses the other, the consuming agent reconciles).
 | #214 MDX sanitizer | **Keep in integration** | package keeps un-chroming; optional generic text helper later |
 | #224 transformation_logic vs usage | **Keep type in integration; principle is core-aligned** | integration type; lean on `Observation`/`Measurement` separation |
 
-## 4. Cross-cutting principle — when does an `fd-knowledge-graph` behavior graduate to core?
+## 4. Cross-cutting principle — when does an `consumer-kg` behavior graduate to core?
 
 The seven rulings follow one test. A behavior discovered in an integration package
 **graduates to core** only when *all* of the following hold:
@@ -384,7 +384,7 @@ A future implementation of this ADR is complete when:
 - **#185** — A core conversion helper round-trips `node_role`, `generation_spec`,
   `allow_dangling`, `properties`, and `entity_id` from drafts into `ENTITY_CREATE` /
   `LINK_CREATE` commands; a batch helper orders entity creates before dependent edge
-  creates; tests fail if a new draft field is not threaded through. `fd-knowledge-graph`
+  creates; tests fail if a new draft field is not threaded through. `consumer-kg`
   deletes its local `_draft_to_command()`.
 - **#195** — The `GraphStore` contract documents `(source_id, edge_kind, target_id)` as
   canonical edge identity; a `GraphStoreContractTests` re-ingest case keeps node and
@@ -397,9 +397,9 @@ A future implementation of this ADR is complete when:
   (no silent re-imposition); `allow_dangling=False` fails review-first with a
   per-endpoint `orphan_edge` rejection and no partial write; retrieval warns when an
   anchor has no current node; the `uc_table` stub pre-pass remains in
-  `fd-knowledge-graph` and emits stubs as audited `ENTITY_CREATE` commands.
+  `consumer-kg` and emits stubs as audited `ENTITY_CREATE` commands.
 - **#214** — MDX/Docusaurus un-chroming and the possessive-redaction fix remain in
-  `fd-knowledge-graph`; the §4 graduation trigger for a generic text-sanitization
+  `consumer-kg`; the §4 graduation trigger for a generic text-sanitization
   helper is recorded but not pre-built.
 - **#224** — `transformation_logic` remains an integration-defined type; core
   well-known defaults are unchanged; the construction-vs-usage separation is documented

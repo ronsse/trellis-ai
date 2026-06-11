@@ -88,17 +88,17 @@ doc is [`adr-enterprise-ontology-capability-framing.md`](../design/adr-enterpris
 
 | # | Decision | Status | Where / how | Issue / ADR |
 |---|---|---|---|---|
-| 3.1 | **Define your domains.** What are the named domains (e.g. `product-analytics`, `customer360`)? | **Convention** | `context.domain` on traces/items; domain list in an ontology profile | [#217](https://github.com/ronsse/trellis-ai/issues/217) |
-| 3.2 | **Assign domain ownership.** Which domain owns each dataset? Generic tables (e.g. `landing.application_events.events`) need an explicit owner or they fall outside every curator scope. | **Convention** | Decide per dataset; record in the profile / enrichment config before curation | [#205](https://github.com/ronsse/trellis-ai/issues/205), [#204](https://github.com/ronsse/trellis-ai/issues/204), [#200](https://github.com/ronsse/trellis-ai/issues/200) |
+| 3.1 | **Define your domains.** What are the named domains (e.g. `product-analytics`, `customer-360`)? | **Convention** | `context.domain` on traces/items; domain list in an ontology profile | [#217](https://github.com/ronsse/trellis-ai/issues/217) |
+| 3.2 | **Assign domain ownership.** Which domain owns each dataset? Generic tables (e.g. `landing.raw_events.events`) need an explicit owner or they fall outside every curator scope. | **Convention** | Decide per dataset; record in the profile / enrichment config before curation | [#205](https://github.com/ronsse/trellis-ai/issues/205), [#204](https://github.com/ronsse/trellis-ai/issues/204), [#200](https://github.com/ronsse/trellis-ai/issues/200) |
 | 3.3 | **Adopt an ontology profile (optional).** Declare allowed entity types, edge kinds, source authority, node-role defaults, required/forbidden properties, and projections for this deployment. | **Planned** | A `*.profile.yaml`, validated by a CLI linter (no runtime change) | [#219](https://github.com/ronsse/trellis-ai/issues/219) |
 | 3.4 | **Set query-history promotion gates.** What stays behavioral evidence vs becomes a curated pattern vs an accepted fact? Who reviews promotions? | **Convention** | Promotion ladder + review gate; pipeline vs analyst usage kept separate | [#218](https://github.com/ronsse/trellis-ai/issues/218), [#200](https://github.com/ronsse/trellis-ai/issues/200), [#213](https://github.com/ronsse/trellis-ai/issues/213), [#216](https://github.com/ronsse/trellis-ai/issues/216) |
 | 3.5 | **Column / leaf modeling stance.** Default columns to `Dataset` properties; declare the explicit exceptions where column *nodes* are justified. | **Convention** | Follow [modeling-guide.md → "Column and leaf metadata policy"](../agent-guide/modeling-guide.md); profile can set `Column.node_role_default=structural` | [#221](https://github.com/ronsse/trellis-ai/issues/221) |
-| 3.6 | **EGP / enterprise-graph interop (if applicable).** How do accepted enterprise facts flow in, and which Trellis candidates flow out after review? | **Planned** | Bridge mapping + fact states as profile metadata | [#220](https://github.com/ronsse/trellis-ai/issues/220) |
+| 3.6 | **Enterprise graph (EG) interop (if applicable).** How do accepted enterprise facts flow in, and which Trellis candidates flow out after review? | **Planned** | Bridge mapping + fact states as profile metadata | [#220](https://github.com/ronsse/trellis-ai/issues/220) |
 
 ### Why 3.2 keeps coming up
 
 The recurring "decision needed" in the issue tracker (#205, #204) is a dataset —
-typically a generic one like `application_events` — that no configured domain
+typically a generic one like `raw_events` — that no configured domain
 claims. Trellis won't guess: a curator scoped to enrichment domains finds zero
 candidates for an unowned table, while a scope-only scout finds it. **Decide
 ownership explicitly** (add it to a domain, create a new domain, or deliberately

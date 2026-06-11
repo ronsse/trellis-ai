@@ -182,7 +182,7 @@ class TestFormatSectionedPack:
                 ],
             },
         ]
-        result = format_sectioned_pack_as_markdown(sections, "plan sportsbook pipeline")
+        result = format_sectioned_pack_as_markdown(sections, "plan orders pipeline")
         assert "## Domain Knowledge" in result
         assert "## Patterns" in result
         assert "ownership rules" in result

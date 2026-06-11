@@ -68,7 +68,7 @@ def test_outcome_event_full_axes():
     event = OutcomeEvent(
         component_id="retrieve.pack_builder.PackBuilder",
         params_version="01HF...",
-        domain="sportsbook",
+        domain="orders",
         intent_family="diagnose",
         tool_name="get_task_context",
         phase="assemble",
@@ -83,7 +83,7 @@ def test_outcome_event_full_axes():
         segment="us",
         metadata={"note": "canary cohort"},
     )
-    assert event.domain == "sportsbook"
+    assert event.domain == "orders"
     assert event.intent_family == "diagnose"
     assert event.cohort == "A"
 
