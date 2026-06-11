@@ -114,6 +114,8 @@ This ADR commits to the **docs-only guardrail (option 1)**. Options 2–4 are a 
 3. **CLI linter (advisory, opt-in, no write-time enforcement).** A `trellis admin graph-health`–style check that warns on: (a) a high structural-node ratio, (b) `Column`/leaf nodes with no outbound edges beyond a containment edge, and (c) structural nodes included in default retrieval. This can build on the declarative shape layer in [`adr-graph-shape-constraints.md`](./adr-graph-shape-constraints.md) and **overlaps the linter scoped for [#219](https://github.com/ronsse/trellis-ai/issues/219) — build it once.**
 4. **Bulk-ingest advisory warnings.** When a bulk ingest contains many `Column`/leaf nodes, return advisory warnings unless the request/profile marks them as intentional structural nodes. Advisory only — never a rejection.
 
+> **Follow-up decision (2026-06-11):** the advisory-warning path is now decided and specified in [`adr-source-modeling-discipline.md`](./adr-source-modeling-discipline.md), which authorizes a warn-only, opt-in-flagged validator at extraction time (Track G G1) plus the `column_names` searchability recipe and the no-name-match lineage rule. That ADR is the implementation companion to this one; this ADR remains the policy authority.
+
 ## 9. Consequences
 
 ### 9.1 What this enables
