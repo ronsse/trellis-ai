@@ -34,6 +34,7 @@ def test_plane_of_covers_all_known_stores() -> None:
         "outcome": "operational",
         "parameter": "operational",
         "tuner_state": "operational",
+        "api_key": "operational",
     }
 
 

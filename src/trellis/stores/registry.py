@@ -11,6 +11,7 @@ import structlog
 
 from trellis.errors import BackendNotInstalledError, ConfigError, ValidationError
 from trellis.stores.base import (
+    ApiKeyStore,
     BlobStore,
     DocumentStore,
     EventLog,
@@ -129,6 +130,16 @@ _BUILTIN_BACKENDS: dict[str, dict[str, dict[str, tuple[str, str]]]] = {
             "sqlite": (
                 "trellis.stores.sqlite.tuner_state",
                 "SQLiteTunerStateStore",
+            ),
+        },
+        # Scoped REST API credentials (operational plane: consumed by
+        # Trellis itself to authenticate API callers, never agent-facing
+        # knowledge). See docs/design/implementation-roadmap.md §E.5.
+        "api_key": {
+            "sqlite": ("trellis.stores.sqlite.api_key", "SQLiteApiKeyStore"),
+            "postgres": (
+                "trellis.stores.postgres.api_key",
+                "PostgresApiKeyStore",
             ),
         },
     },
@@ -586,6 +597,11 @@ class _OperationalPlane:
         """Working state (proposals, cursors) for tuner components."""
         return self._registry._get("tuner_state")  # type: ignore[no-any-return]
 
+    @property
+    def api_key_store(self) -> ApiKeyStore:
+        """Scoped REST API credentials checked by ``trellis_api.auth``."""
+        return self._registry._get("api_key")  # type: ignore[no-any-return]
+
 
 # Per-backend URI validation rules. Each entry maps the backend name
 # to the param key that carries the URI/DSN and the set of schemes
@@ -859,6 +875,7 @@ class StoreRegistry:
                 "outcome": "outcomes.db",
                 "parameter": "parameters.db",
                 "tuner_state": "tuner_state.db",
+                "api_key": "api_keys.db",
             }
             params["db_path"] = self._stores_dir / db_names[store_type]
 
