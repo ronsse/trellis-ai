@@ -770,6 +770,37 @@
         }
         .fade-in { animation: fadeIn 0.25s ease-out; }
 
+        /* API key banner */
+        .key-banner {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.6rem 1.5rem;
+            background: var(--surface);
+            border-bottom: 1px solid var(--border);
+            font-size: 0.85rem;
+            flex-wrap: wrap;
+        }
+        .key-banner .key-banner-msg { color: var(--warn); }
+        .key-banner input {
+            flex: 1;
+            min-width: 220px;
+            max-width: 420px;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            color: var(--text);
+            padding: 0.4rem 0.75rem;
+            border-radius: 6px;
+            font-size: 0.85rem;
+            outline: none;
+            transition: border-color var(--transition), box-shadow var(--transition);
+        }
+        .key-banner input:focus {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px var(--accent-glow);
+        }
+        .key-banner .key-status { color: var(--text-dim); font-size: 0.75rem; }
+
         /* Scrollbar */
         ::-webkit-scrollbar { width: 6px; height: 6px; }
         ::-webkit-scrollbar-track { background: var(--bg); }
@@ -812,7 +843,18 @@
             <a href="#" data-view="precedents">Precedents</a>
         </div>
         <span class="shortcuts-hint"><kbd>/</kbd> Search &middot; <kbd>1</kbd>-<kbd>5</kbd> Views &middot; <kbd>Esc</kbd> Close</span>
+        <button class="btn-icon" id="api-key-toggle" title="API key" onclick="toggleKeyBanner()">&#x1F511;</button>
     </nav>
+
+    <!-- API key banner (shown on demand or after a 401) -->
+    <div class="key-banner" id="key-banner" style="display:none">
+        <span class="key-banner-msg" id="key-banner-msg"></span>
+        <input type="password" id="api-key-input" placeholder="API key (trellis_ak_...)" autocomplete="off"
+               onkeydown="if(event.key==='Enter')saveApiKey()">
+        <button class="btn btn-sm" onclick="saveApiKey()">Save</button>
+        <button class="btn btn-ghost btn-sm" onclick="clearApiKey()">Clear</button>
+        <span class="key-status" id="key-status"></span>
+    </div>
 
     <!-- Node tooltip (shared) -->
     <div class="node-tooltip" id="node-tooltip">
@@ -975,9 +1017,51 @@
     <script>
         const API = '/api/v1';
 
+        // -- API key (localStorage; sent as X-API-Key on every fetch) --
+        const API_KEY_STORAGE = 'trellis_api_key';
+
+        function getApiKey() {
+            try { return localStorage.getItem(API_KEY_STORAGE) || ''; } catch { return ''; }
+        }
+
+        function showKeyBanner(msg) {
+            const banner = document.getElementById('key-banner');
+            banner.style.display = 'flex';
+            document.getElementById('key-banner-msg').textContent = msg || '';
+            document.getElementById('key-status').textContent =
+                getApiKey() ? 'A key is stored in this browser.' : 'No key stored.';
+            document.getElementById('api-key-input').focus();
+        }
+
+        function toggleKeyBanner() {
+            const banner = document.getElementById('key-banner');
+            if (banner.style.display === 'none') showKeyBanner('');
+            else banner.style.display = 'none';
+        }
+
+        function saveApiKey() {
+            const value = document.getElementById('api-key-input').value.trim();
+            if (!value) return;
+            try { localStorage.setItem(API_KEY_STORAGE, value); } catch { /* private mode */ }
+            location.reload();
+        }
+
+        function clearApiKey() {
+            try { localStorage.removeItem(API_KEY_STORAGE); } catch { /* private mode */ }
+            location.reload();
+        }
+
         // -- Helpers --
         async function fetchJSON(path) {
-            const res = await fetch(API + path);
+            const headers = {};
+            const key = getApiKey();
+            if (key) headers['X-API-Key'] = key;
+            const res = await fetch(API + path, { headers });
+            if (res.status === 401) {
+                showKeyBanner(key ? 'Stored API key was rejected — enter a valid key.'
+                                  : 'This API requires a key — enter one to continue.');
+                throw new Error('401 Unauthorized (API key required)');
+            }
             if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
             return res.json();
         }

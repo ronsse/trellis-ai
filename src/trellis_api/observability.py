@@ -15,9 +15,11 @@ the same as not-installed for telemetry cost.
 **Prometheus.** Mounts ``/metrics`` via
 ``prometheus-fastapi-instrumentator``. Per-route latency histograms
 and counters out of the box; operators add custom counters if they
-need them. The endpoint stays unauthenticated for the same reason
-``/healthz`` and ``/readyz`` do — orchestrator scrape jobs (Prometheus
-server, k8s ServiceMonitor) need it open.
+need them. The endpoint is unauthenticated by default for the same
+reason ``/healthz`` and ``/readyz`` are — orchestrator scrape jobs
+(Prometheus server, k8s ServiceMonitor) need it open. Deployments
+whose scraper can carry a credential set
+``TRELLIS_METRICS_PUBLIC=false`` to require one (401 otherwise).
 """
 
 from __future__ import annotations
@@ -26,6 +28,10 @@ import os
 from typing import TYPE_CHECKING
 
 import structlog
+from fastapi import Depends
+
+from trellis.errors import ConfigError
+from trellis_api.auth import AuthContext, _raise_401, authenticate_optional
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
@@ -37,9 +43,55 @@ logger = structlog.get_logger(__name__)
 #: them disabled. Any non-empty value disables both OTel + Prometheus.
 DISABLE_ENV = "TRELLIS_DISABLE_OBSERVABILITY"
 
+#: ``true`` (default) — /metrics is open for credential-less scrape
+#: jobs (current behavior). ``false`` — /metrics requires a valid
+#: credential (any scope). Anything else refuses to start.
+METRICS_PUBLIC_ENV = "TRELLIS_METRICS_PUBLIC"
+
 
 def _enabled() -> bool:
     return not os.environ.get(DISABLE_ENV)
+
+
+def resolve_metrics_public() -> bool:
+    """Return whether /metrics is open to credential-less callers.
+
+    Unset / empty env var → ``True`` (preserves existing scrape-job
+    behavior). Only ``true`` / ``false`` (case-insensitive) are
+    accepted — anything else raises so a typo crashes uvicorn at
+    startup instead of silently picking an exposure posture.
+    """
+    raw = os.environ.get(METRICS_PUBLIC_ENV)
+    if raw is None or not raw.strip():
+        return True
+    value = raw.strip().lower()
+    if value == "true":
+        return True
+    if value == "false":
+        return False
+    msg = (
+        f"Invalid {METRICS_PUBLIC_ENV}={raw!r}; expected 'true' or 'false'."
+        " Refusing to guess an exposure posture."
+    )
+    raise ConfigError(msg, setting=METRICS_PUBLIC_ENV)
+
+
+def _require_metrics_access(
+    ctx: AuthContext | None = Depends(authenticate_optional),  # noqa: B008 — FastAPI DI idiom
+) -> None:
+    """Gate /metrics per ``TRELLIS_METRICS_PUBLIC`` (read per request).
+
+    Public (default) → always pass. Gated → require an authenticated
+    caller; :func:`authenticate_optional` resolves ``None`` only in
+    auth mode ``required`` with no credential presented, so in modes
+    ``off`` / ``optional`` the endpoint stays reachable (matching the
+    rest of the API's posture in those modes). A presented-but-invalid
+    credential 401s inside ``authenticate_optional`` itself.
+    """
+    if resolve_metrics_public():
+        return
+    if ctx is None:
+        _raise_401("metrics_requires_credential")
 
 
 def _install_otel() -> bool:
@@ -97,11 +149,15 @@ def _install_prometheus(app: FastAPI) -> bool:
         )
         return False
 
+    # ``expose`` forwards extra kwargs to ``app.get`` — the least
+    # invasive hook for attaching the TRELLIS_METRICS_PUBLIC gate as a
+    # plain FastAPI dependency on the instrumentator's own endpoint.
     Instrumentator().instrument(app).expose(
         app,
         endpoint="/metrics",
         include_in_schema=False,
         tags=["observability"],
+        dependencies=[Depends(_require_metrics_access)],
     )
     return True
 
@@ -113,6 +169,11 @@ def install_observability(app: FastAPI) -> dict[str, bool]:
     up. Safe to call when extras aren't installed — each piece
     silently no-ops on ImportError.
     """
+    # Validate the exposure env up front (even when observability is
+    # disabled or the extra is missing) — a typo'd value is operator
+    # misuse and must crash startup, not lurk until the extra lands.
+    resolve_metrics_public()
+
     if not _enabled():
         logger.info("observability_disabled_via_env", env=DISABLE_ENV)
         return {"otel": False, "prometheus": False, "fastapi": False}
