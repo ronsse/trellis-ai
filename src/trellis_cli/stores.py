@@ -6,6 +6,7 @@ import structlog
 import typer
 
 from trellis.stores.base import (
+    ApiKeyStore,
     DocumentStore,
     EventLog,
     GraphStore,
@@ -97,3 +98,8 @@ def get_parameter_store() -> ParameterStore:
 def get_tuner_state_store() -> TunerStateStore:
     """Open (or create) the operational-plane tuner-state store."""
     return _get_registry().operational.tuner_state_store
+
+
+def get_api_key_store() -> ApiKeyStore:
+    """Open (or create) the operational-plane API-key store."""
+    return _get_registry().operational.api_key_store

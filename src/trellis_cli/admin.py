@@ -1962,3 +1962,16 @@ from trellis_cli.admin_proposals import (  # noqa: E402
 )
 
 _register_proposals(admin_app)
+
+
+# ---------------------------------------------------------------------------
+# api-keys create / list / revoke — roadmap item E.5 (issue #191)
+# ---------------------------------------------------------------------------
+# Registration hook mirrors the modules above so the scoped-credential
+# CLI stays in its own module and admin.py only carries the wiring.
+
+from trellis_cli.admin_api_keys import (  # noqa: E402
+    register as _register_api_keys,
+)
+
+_register_api_keys(admin_app)

@@ -728,6 +728,81 @@ Shows total tokens, average per response, breakdown by layer and operation, and 
 
 ---
 
+## API Authentication
+
+The REST API authenticates with scoped API keys (roadmap item E.5, issue #191).
+
+### Modes
+
+`TRELLIS_AUTH_MODE` controls the posture:
+
+| Mode | No credential | Invalid credential | Valid credential |
+|------|---------------|--------------------|------------------|
+| `off` | passes, all scopes | passes, all scopes | passes, all scopes |
+| `optional` | passes, all scopes (migration mode) | 401 | scoped |
+| `required` | 401 | 401 | scoped |
+
+When `TRELLIS_AUTH_MODE` is **unset**, the mode is inferred for backwards
+compatibility: `required` if `TRELLIS_API_KEY` is set, else `off`. An invalid
+value crashes at startup — there is no silent fallback. `off` and `optional`
+log a loud startup warning.
+
+### Token format and headers
+
+Tokens look like `trellis_ak_<key_id>.<secret>` — `key_id` is 12 hex chars,
+the secret half is never stored (only its SHA-256). Present a token on either
+header (`X-API-Key` wins when both are sent):
+
+```
+X-API-Key: trellis_ak_4f3a2b1c0d9e.zJx...
+Authorization: Bearer trellis_ak_4f3a2b1c0d9e.zJx...
+```
+
+**Legacy shared secret:** a token exactly matching `TRELLIS_API_KEY` is
+granted all scopes, so single-secret deployments keep working while
+migrating to scoped keys.
+
+### Scopes
+
+Four scopes: `read`, `ingest`, `mutate`, `admin`. `admin` implies all
+others. The router → scope map:
+
+| Router (`/api/v1`) | Required scope |
+|--------------------|----------------|
+| `retrieve` (search, packs, entities, traces, precedents) | `read` |
+| `ingest` (traces, evidence, vectors, bulk) | `ingest` |
+| `mutations` (`/commands/batch`) | `mutate` |
+| `curate` (precedents, links, entities, documents, feedback) | `mutate` |
+| `extract` (`/extract/drafts`) | `mutate` |
+| `admin` (health, stats, effectiveness, advisories, vector reset) | `admin` |
+| `observations` GETs | `read` |
+| `observations` POSTs (`/observations`, `/measurements`) | `mutate` |
+| `policies` GETs | `read` |
+| `policies` POST / DELETE | `admin` |
+
+`/healthz`, `/readyz`, `/api/version`, `/metrics`, and `/ui` stay
+unauthenticated. A valid key lacking the required scope gets 403; missing or
+invalid credentials get an undifferentiated 401 (the failure category is
+logged server-side only).
+
+### Managing keys
+
+```bash
+# Mint a key — the token is printed ONCE and never stored
+trellis admin api-keys create --name ci-reader --scopes read --format json
+
+# Multiple scopes
+trellis admin api-keys create --name ingest-bot --scopes read,ingest
+
+# List keys (key_id, name, scopes, created_at, revoked — never the hash)
+trellis admin api-keys list --format json
+
+# Revoke (exits non-zero if unknown or already revoked)
+trellis admin api-keys revoke <KEY_ID> --format json
+```
+
+---
+
 ## REST API
 
 Start with `trellis admin serve` or `trellis-api`. Base path: `/api/v1/`.

@@ -19,8 +19,9 @@ from __future__ import annotations
 from typing import Any
 
 import structlog
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
+from trellis.auth import SCOPE_MUTATE
 from trellis.mutate import (
     Command,
     CommandStatus,
@@ -31,6 +32,7 @@ from trellis.schemas.measurement import Measurement
 from trellis.schemas.observation import Observation
 from trellis.schemas.well_known import MEASUREMENT, OBSERVATION
 from trellis_api.app import get_registry
+from trellis_api.auth import require_scope
 
 logger = structlog.get_logger(__name__)
 
@@ -54,7 +56,13 @@ def _projected_node(node: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-@router.post("/observations", status_code=201)
+@router.post(
+    "/observations",
+    status_code=201,
+    # Router-level dependency is ``read``; writes additionally require
+    # ``mutate`` (see the router→scope map in trellis_api.app).
+    dependencies=[Depends(require_scope(SCOPE_MUTATE))],
+)
 def record_observation(body: dict[str, Any]) -> dict[str, Any]:
     """Record an :class:`Observation` through the governed pipeline.
 
@@ -115,7 +123,11 @@ def list_observations(
     return {"observations": [_projected_node(r) for r in rows]}
 
 
-@router.post("/measurements", status_code=201)
+@router.post(
+    "/measurements",
+    status_code=201,
+    dependencies=[Depends(require_scope(SCOPE_MUTATE))],
+)
 def record_measurement(body: dict[str, Any]) -> dict[str, Any]:
     """Record a :class:`Measurement` through the governed pipeline."""
     try:
