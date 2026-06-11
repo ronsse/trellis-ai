@@ -37,7 +37,14 @@ data-platform types) define their own values in their own packages.
 
 from __future__ import annotations
 
-from typing import Final
+from typing import TYPE_CHECKING, Final
+
+import structlog
+
+from trellis.schemas.enums import NodeRole
+
+if TYPE_CHECKING:
+    from structlog.stdlib import BoundLogger
 
 # ---------------------------------------------------------------------------
 # Version of the canonical registry
@@ -409,3 +416,120 @@ def expand_edge_kind_query(value: str) -> tuple[str, ...]:
     canonical = canonicalize_edge_kind(value)
     aliases = EDGE_KIND_ALIAS_INVERSE.get(canonical, frozenset())
     return (canonical, *sorted(aliases))
+
+
+# ---------------------------------------------------------------------------
+# Anti-pattern blocklist — soft enforcement (Track G)
+# ---------------------------------------------------------------------------
+#
+# Per ``adr-source-modeling-discipline.md`` (sibling Unit G0 — reference by
+# path; do not assume content beyond the policy summarised here), per-column
+# entities are an anti-pattern in the Trellis graph: they shred a single
+# Dataset / Table into thousands of structural leaves, blow up the node
+# count without adding retrieval signal, and force every downstream
+# operation (pack assembly, importance scoring, alias matching) to filter
+# them out. The recommended shape is a single Dataset / Table entity with
+# columns stored as a list in ``properties.columns``.
+#
+# The blocklist is *soft enforcement*: emitting one of these types logs a
+# structlog WARNING that the operator should switch to the properties shape.
+# Operators with a genuine need for column-level nodes (e.g., regulated
+# PII columns that must carry their own access-control policies and trace
+# attachments) can opt in by setting **both** ``allow_structural_leaf=True``
+# *and* ``node_role=NodeRole.STRUCTURAL`` on the producing
+# :class:`~trellis.extract.json_rules.EntityRule` or
+# :class:`~trellis.schemas.extraction.EntityDraft` (two-signal exception,
+# adr-source-modeling-discipline.md §2.5). Either signal alone still warns —
+# ``allow_structural_leaf=True`` with ``node_role=SEMANTIC`` means the
+# operator opted out of the policy but did not declare the column
+# structural, which is almost certainly a mistake. The opt-in path emits a
+# structlog INFO so audit logs still show the deliberate choice.
+#
+# This is *advisory only* — the validator never raises and never rejects a
+# mutation. ``MutationExecutor`` and policy gates are explicitly out of
+# scope (open-string contract preserved per CLAUDE.md). Closing the set
+# would break domain integrations and the well-known module documents
+# the same openness rationale above.
+
+ENTITY_TYPE_ANTI_PATTERNS: Final[frozenset[str]] = frozenset(
+    {
+        "Column",
+        "column",
+        "TableColumn",
+        "table_column",
+    }
+)
+
+# Path reference carried on every anti-pattern WARNING / INFO event so
+# operators reading aggregated logs can jump straight to the policy
+# (adr-source-modeling-discipline.md §2.3 requires the warning to name
+# the governing ADR).
+ENTITY_TYPE_ANTI_PATTERN_ADR: Final = "docs/design/adr-source-modeling-discipline.md"
+
+
+def validate_entity_type_not_anti_pattern(
+    entity_type: str,
+    *,
+    allow_structural_leaf: bool = False,
+    node_role: NodeRole | str | None = None,
+    logger: BoundLogger | None = None,
+) -> None:
+    """Warn (or acknowledge) when *entity_type* is on the anti-pattern blocklist.
+
+    Soft enforcement for the per-column anti-pattern documented in
+    ``adr-source-modeling-discipline.md``. The check is advisory: this
+    function never raises, never rejects, and never mutates the value.
+
+    The regulated-column exception is **two-signal** (ADR §2.5): the
+    operator must set ``allow_structural_leaf=True`` *and* declare the
+    node ``node_role=STRUCTURAL``. Either signal alone still warns —
+    ``allow_structural_leaf=True`` with ``node_role=SEMANTIC`` means the
+    operator opted out of the policy but did not declare the column
+    structural, which is almost certainly a mistake.
+
+    Behaviour:
+
+    * ``entity_type`` not in :data:`ENTITY_TYPE_ANTI_PATTERNS` — silent.
+    * ``entity_type`` in :data:`ENTITY_TYPE_ANTI_PATTERNS` and
+      ``allow_structural_leaf=True`` and ``node_role=STRUCTURAL`` —
+      emits a ``structlog`` INFO under event
+      ``entity_type_anti_pattern_opt_in_acknowledged`` confirming the
+      operator opted in deliberately.
+    * ``entity_type`` in :data:`ENTITY_TYPE_ANTI_PATTERNS` otherwise
+      (no signal, or only one of the two) — emits a ``structlog``
+      WARNING under event ``entity_type_anti_pattern_warning`` with a
+      ``recommendation`` field pointing the operator at the properties
+      shape and the two-signal opt-in.
+
+    Both events carry an ``adr`` field referencing
+    :data:`ENTITY_TYPE_ANTI_PATTERN_ADR` plus the offending
+    ``entity_type``. Pass ``logger`` to bind structured context (rule
+    name, extractor name, batch ID, etc.); when ``None`` a fresh logger
+    is fetched via ``structlog.get_logger(__name__)``.
+    """
+    if entity_type not in ENTITY_TYPE_ANTI_PATTERNS:
+        return
+    log = logger if logger is not None else structlog.get_logger(__name__)
+    role_value = str(node_role) if node_role is not None else None
+    if allow_structural_leaf and node_role == NodeRole.STRUCTURAL:
+        log.info(
+            "entity_type_anti_pattern_opt_in_acknowledged",
+            entity_type=entity_type,
+            node_role=role_value,
+            adr=ENTITY_TYPE_ANTI_PATTERN_ADR,
+        )
+        return
+    log.warning(
+        "entity_type_anti_pattern_warning",
+        entity_type=entity_type,
+        allow_structural_leaf=allow_structural_leaf,
+        node_role=role_value,
+        adr=ENTITY_TYPE_ANTI_PATTERN_ADR,
+        recommendation=(
+            "Use a property on the parent entity "
+            "(e.g., properties.columns = [...]); "
+            "set both allow_structural_leaf=True and "
+            "node_role=STRUCTURAL if you genuinely need the "
+            "regulated-column exception."
+        ),
+    )

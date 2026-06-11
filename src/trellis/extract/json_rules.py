@@ -47,6 +47,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+import structlog
 from pydantic import Field, model_validator
 
 from trellis.core.base import TrellisModel
@@ -63,6 +64,7 @@ from trellis.schemas.well_known import (
     canonicalize_entity_type,
     schema_alignment_for_edge_kind,
     schema_alignment_for_entity_type,
+    validate_entity_type_not_anti_pattern,
 )
 
 if TYPE_CHECKING:
@@ -75,6 +77,18 @@ class EntityRule(TrellisModel):
     ``path`` walks into the raw input; ``id_field`` / ``name_field`` /
     ``property_fields`` read from each matched item.  All field paths are
     dotted (``"depends_on.nodes"``).
+
+    ``allow_structural_leaf`` is the per-rule opt-in for the regulated-
+    column exception documented in ``adr-source-modeling-discipline.md``
+    (Track G). The exception is two-signal (ADR §2.5): it is forwarded
+    together with ``node_role`` to
+    :func:`~trellis.schemas.well_known.validate_entity_type_not_anti_pattern`
+    at construction time, so rules emitting anti-pattern entity types
+    (``Column`` / ``column`` / ``TableColumn`` / ``table_column``) produce
+    a ``structlog`` WARNING unless **both** ``allow_structural_leaf=True``
+    *and* ``node_role=NodeRole.STRUCTURAL`` are set. Both fields also
+    propagate to every :class:`EntityDraft` this rule emits, so consumers
+    reading a stream of drafts know which ones were deliberate.
     """
 
     name: str
@@ -85,6 +99,25 @@ class EntityRule(TrellisModel):
     node_role: NodeRole = NodeRole.SEMANTIC
     property_fields: dict[str, str] = Field(default_factory=dict)
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    allow_structural_leaf: bool = False
+
+    @model_validator(mode="after")
+    def _warn_on_anti_pattern_entity_type(self) -> EntityRule:
+        """Emit advisory warning / opt-in ack for anti-pattern entity types.
+
+        Soft enforcement only — never raises.  See
+        :func:`~trellis.schemas.well_known.validate_entity_type_not_anti_pattern`
+        for the exact behaviour.
+        """
+        # Bind the rule name so the WARNING / INFO event identifies which
+        # declarative rule produced the anti-pattern type (ADR §2.3).
+        validate_entity_type_not_anti_pattern(
+            self.entity_type,
+            allow_structural_leaf=self.allow_structural_leaf,
+            node_role=self.node_role,
+            logger=structlog.get_logger(__name__).bind(rule_name=self.name),
+        )
+        return self
 
 
 class EdgeRule(TrellisModel):
@@ -231,6 +264,7 @@ class JSONRulesExtractor:
                 properties=properties,
                 node_role=rule.node_role,
                 confidence=rule.confidence,
+                allow_structural_leaf=rule.allow_structural_leaf,
             )
             matches.append(
                 _EntityMatch(draft=draft, raw=item, id_value=id_value, trail=trail)

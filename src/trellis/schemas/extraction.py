@@ -12,11 +12,12 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from trellis.core.base import TrellisModel, utc_now
 from trellis.schemas.entity import GenerationSpec
 from trellis.schemas.enums import NodeRole
+from trellis.schemas.well_known import validate_entity_type_not_anti_pattern
 
 
 class EntityDraft(TrellisModel):
@@ -25,6 +26,16 @@ class EntityDraft(TrellisModel):
     Field names mirror :class:`~trellis.schemas.entity.Entity` so the
     draft-to-command conversion is a direct field copy.  ``entity_id`` is
     optional: omit to let the alias/ID system assign one at create-time.
+
+    ``allow_structural_leaf`` is the per-draft opt-in for the regulated-
+    column exception documented in ``adr-source-modeling-discipline.md``
+    (Track G).  The exception is two-signal (ADR §2.5): constructing a
+    draft whose ``entity_type`` is on the anti-pattern blocklist
+    (``Column`` / ``column`` / ``TableColumn`` / ``table_column``) emits a
+    ``structlog`` WARNING unless **both** ``allow_structural_leaf=True``
+    *and* ``node_role=NodeRole.STRUCTURAL`` are set, in which case it
+    emits an INFO acknowledging the deliberate opt-in.  Either signal
+    alone still warns.  Soft enforcement only — never raises.
     """
 
     entity_id: str | None = None
@@ -34,6 +45,22 @@ class EntityDraft(TrellisModel):
     node_role: NodeRole = NodeRole.SEMANTIC
     generation_spec: GenerationSpec | None = None
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    allow_structural_leaf: bool = False
+
+    @model_validator(mode="after")
+    def _warn_on_anti_pattern_entity_type(self) -> EntityDraft:
+        """Emit advisory warning / opt-in ack for anti-pattern entity types.
+
+        Soft enforcement only — never raises.  See
+        :func:`~trellis.schemas.well_known.validate_entity_type_not_anti_pattern`
+        for the exact behaviour.
+        """
+        validate_entity_type_not_anti_pattern(
+            self.entity_type,
+            allow_structural_leaf=self.allow_structural_leaf,
+            node_role=self.node_role,
+        )
+        return self
 
 
 class EdgeDraft(TrellisModel):
