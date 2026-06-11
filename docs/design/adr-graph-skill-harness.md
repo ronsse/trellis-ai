@@ -19,7 +19,7 @@ The Self-Improvement Program (Items 1–7, shipped 2026-05-11 → 2026-05-16) pr
 
 What none of those items do — and what Phase F (inner agent loop / curation loop) needs — is **run a bounded LLM-backed loop against the graph itself**. Item 7's `code_authoring/` spawns Claude Code SDK against a markdown proposal; that path is filesystem-and-git shaped (read files, edit files, `git diff`, open a draft PR). It works for "draft a code change for human review." It does not work for "read the entity, look at its neighbors, decide whether to write a `hasObservation` edge through `MutationExecutor`." Claude Code's tool surface is filesystem + git; the curator's tool surface is `read_node` + `search_graph` + `propose_mutation`.
 
-The four follow-on Phase F units (F2 curator, F3 retrieval lazy enrichment, F4 outcome feedback, F5 score-based evolver) each need to **dispatch a small LLM-backed agent against a triggering event, give it bounded access to the graph, and capture what it did**. They each need the same substrate. This ADR defines that substrate — the harness for running bounded *graph skills* against Trellis data, sibling to but distinct from `code_authoring/`.
+The four follow-on Phase F units (F2 curator, F3 retrieval lazy curation, F4 outcome feedback, F5 score-based evolver) each need to **dispatch a small LLM-backed agent against a triggering event, give it bounded access to the graph, and capture what it did**. They each need the same substrate. This ADR defines that substrate — the harness for running bounded *graph skills* against Trellis data, sibling to but distinct from `code_authoring/`.
 
 Building it badly creates two distinct failure modes: an unbounded harness loops on every event and balloons cost; an under-secured harness lets a skill bypass `MutationExecutor` and write directly to a store, ducking policy + idempotency. The design below addresses both by making the tool surface a fixed allowlist and the only write path the same governed pipeline every other Trellis writer uses.
 
@@ -226,7 +226,7 @@ The security model from §2.5 in concrete operational terms:
 
 ### 5.1 What this enables
 
-- **F1 lands.** The harness substrate is in tree; F2 (curator), F3 (retrieval lazy enrichment), F4 (outcome feedback), and F5 (score-based evolver) can each ship a concrete skill against a stable contract.
+- **F1 lands.** The harness substrate is in tree; F2 (curator), F3 (retrieval lazy curation), F4 (outcome feedback), and F5 (score-based evolver) can each ship a concrete skill against a stable contract.
 - **Skills compose naturally with the existing program.** A curator skill that emits `propose_mutation(ENTITY_UPDATE)` triggers the existing `MUTATION_EXECUTED` event the rest of the system already consumes — the dogfooded analyses, the advisory generator, the effectiveness loop. No new bridges.
 - **Dual-provider day one.** Both Anthropic and OpenAI skills work because both `LLMClient` implementations already ship. A team running Anthropic in prod and OpenAI in dev needs zero harness changes.
 - **The "what is the agent doing right now" question becomes queryable.** `SKILL_STEP` events, joined to `SKILL_DISPATCHED`, give operators a per-loop trace of every autonomous run. This is the substrate the eval scenario in `eval/scenarios/skill_loop_convergence/` (Wave 1 Unit D, parallel) needs.

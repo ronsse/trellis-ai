@@ -119,6 +119,7 @@ Phase F (inner agent loop / curation loop, proposed 2026-05-18) introduces a sec
 | **Skill** | In-doc shorthand used inside [`adr-graph-skill-harness.md`](./adr-graph-skill-harness.md) and [`adr-inner-curation-loop.md`](./adr-inner-curation-loop.md). Means *graph skill* in context; prose summarising across surfaces should prefer *graph skill*. |
 | **Graph-skill harness** | The runtime substrate in `src/trellis_workers/agent/` that loads a skill artifact (markdown + YAML frontmatter), dispatches its allowlisted graph-internal tools (`read_node`, `read_document`, `search_graph`, `propose_mutation`, `emit_event`), enforces per-invocation + weekly LLM-spend caps, and emits `SKILL_*` telemetry. All writes route through `MutationExecutor`. |
 | **Coding-agent harness** | The runtime in `src/trellis_workers/code_authoring/` that spawns Claude Code SDK against a proposal markdown to draft code changes. Filesystem + git tool surface; output is a draft PR. Different security model. The two harnesses do not merge — see [`adr-graph-skill-harness.md`](./adr-graph-skill-harness.md) §3.1 and §6 for the rejected-merge rationale. |
+| **Skills (raw)** | [`adr-memory-layer-interop.md`](./adr-memory-layer-interop.md) uses this for agent skill *files* stored in the external Memory Layer. Those are content the memory layer holds, not graph skills — no relation to the harness above. |
 
 ---
 
