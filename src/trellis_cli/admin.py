@@ -105,6 +105,11 @@ def init(
     # See docs/agent-guide/playbooks.md "Configuring LLM extraction".
     config_path.write_text(config_path.read_text() + _LLM_CONFIG_TEMPLATE)
 
+    # Pointer to the human decisions the default install never prompts for
+    # (domains/ontology, domain ownership, API security). Surfaced here so a
+    # team / data-platform / production setup doesn't silently skip them.
+    setup_decisions_doc = "docs/getting-started/setup-decisions.md"
+
     if output_format == "json":
         # Plain ``print`` (not ``console.print``) so Rich's terminal
         # width soft-wrap never splits the JSON across lines — long
@@ -115,6 +120,7 @@ def init(
                     "status": "initialized",
                     "config_dir": str(config_dir),
                     "data_dir": str(actual_data_dir),
+                    "next_steps_doc": setup_decisions_doc,
                 }
             )
         )
@@ -122,6 +128,15 @@ def init(
         console.print("[green]Initialized Trellis[/green]")
         console.print(f"  Config: {config_path}")
         console.print(f"  Data:   {actual_data_dir}")
+        console.print(
+            "\n[dim]Local single-user setup is done. Setting up for a team,"
+            " a data platform, or production?[/dim]"
+        )
+        console.print(
+            "[dim]Make the human decisions the default install skips"
+            " (domains & ontology, domain ownership, API security):[/dim]"
+        )
+        console.print(f"  [cyan]{setup_decisions_doc}[/cyan]")
 
 
 @admin_app.command("init-learning-params")

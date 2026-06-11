@@ -6,6 +6,8 @@
 
 > **What this is not:** an API reference. For schema fields and method signatures see [schemas.md](schemas.md). For operational commands see [operations.md](operations.md).
 
+> **Designing an enterprise/EGP-style graph?** Read the capability-framing ADR [`adr-enterprise-ontology-capability-framing.md`](../design/adr-enterprise-ontology-capability-framing.md) first — it places this guide's node/property/document decision inside the wider stack (canonical identity, lineage, governed profiles, agent memory) and links the column-guardrails ([`adr-column-leaf-modeling-guardrails.md`](../design/adr-column-leaf-modeling-guardrails.md)) and ontology-profiles ([`adr-ontology-profiles.md`](../design/adr-ontology-profiles.md)) ADRs.
+
 ---
 
 ## The core tension
@@ -219,6 +221,45 @@ A query-engine agent gets this entity in a pack, reads `physical_uri`, looks up 
 **What extractors are responsible for**: populating the properties they can derive from the source. dbt manifests provide `adapter_type`, `database`, `schema`, `name` — everything except `connection_ref`. OpenLineage namespaces provide a URI scheme that becomes `source_system`. Unity Catalog provides all five parts directly. Markdown docs and git repos provide nothing — they're not queryable datasets and shouldn't claim the convention.
 
 **What curators are responsible for**: filling `connection_ref` when an entity is meant to be queried interactively. This is the only field that requires deployment-specific knowledge (which env var holds the connection string), so it's the one a curator typically adds rather than an extractor.
+
+---
+
+## Column and leaf metadata policy
+
+This is the single decision most likely to wreck a graph at scale, so it gets its own rule. It specializes the [four-question test](#the-four-question-test) to the leaf level and is the subject of [`adr-column-leaf-modeling-guardrails.md`](../design/adr-column-leaf-modeling-guardrails.md).
+
+> **Default rule:** columns, nested struct fields, function parameters, file lines, config keys, and other leaf metadata live as **properties on the parent** (`Dataset.properties.columns` and friends) or as **rendered schema documentation** — **not** as first-class graph nodes.
+
+EGP-style enterprise graph platforms mint one `Column` node per physical column (one such reference platform reports 195K column nodes today, projected toward ~1M, and hides columns in its UI by default because they swamp the graph). That is a legitimate choice *for a column-lineage UI that traverses columns*. It is the wrong default to carry into Trellis. A builder porting that schema should collapse columns to properties unless their own workload meets an exception below.
+
+### Preferred placement
+
+| Information | Default placement |
+|---|---|
+| Column name / type / nullability / comment / tags | `Dataset.properties.columns` (JSON array) or a linked schema document via `described_by`. |
+| Full schema dump | Document (rendered markdown), or blob pointer when large/binary. |
+| Column-level PII / governance tag | Property on the parent — unless it has independent lifecycle, policy, or evidence (then see below). |
+| Query-history column-usage statistics | An `Observation` / `Measurement` attached to the parent `Dataset` — **not** a node per referenced column. |
+| Column-level lineage | Structural `Column` nodes only when column traversal is genuinely required. |
+| Frequent schema diffs | Source-system pointer + summarized document; let `TAGS_REFRESHED` carry the structured diff, not per-node churn. |
+
+### When a column *does* earn node status
+
+Model a leaf as a node only when **at least one** of these holds — and then model **only the specific leaves that earn it**, not the whole schema:
+
+1. **Traversal requirement** — you traverse *from* the column to other columns, policies, metrics, or downstream assets (not merely from its parent to it).
+2. **Cross-parent query** — "which regulated columns feed this dashboard?" is run often enough that a scan over `Dataset.properties.columns` is not enough.
+3. **Independent evidence or policy** — classification, approval, or policy attaches to the column independently of the table (the column and its metadata do not always move as a unit).
+4. **Independent lifecycle** — the column has its own ownership, governance state, SLA, deprecation, or review workflow.
+5. **Regulated / high-risk field** — PII, payment, responsible-gaming, or compliance-sensitive fields where explicit graph traversal has concrete operational value.
+
+When a column node is justified it must be `node_role="structural"` (excluded from default retrieval), carry source identifiers (`source_system`, `physical_uri`) and a freshness marker, and have a retention/compaction strategy. See worked example #1 above for the right-sized exception (~100 PII column nodes, not 500K).
+
+### Why the default is "property": the SCD-2 maintenance cost
+
+The decisive reason is not graph size — it is the standing maintenance obligation. Trellis applies SCD Type 2 to **every** node, so every node you create is a commitment to track its history forever. Model a column as a node and *every* column add / drop / type-change / comment-edit / tag-change mints a new versioned row — history that is almost always redundant with the source system's own (catalog, git, Unity Catalog) and almost never queried by time at column granularity.
+
+Model the same columns as `Dataset.properties.columns` and those N changes collapse into **one** property-diff event on the parent's history — the granularity operators actually query ("the table's schema changed on 2026-03-15") — while preserving full auditability. Column-level change tracking as nodes is SCD-2 churn you pay for forever and rarely read; that is the line that makes "property" the default and "node" the justified exception.
 
 ---
 

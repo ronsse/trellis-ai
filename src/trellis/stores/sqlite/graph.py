@@ -1235,6 +1235,8 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
     @staticmethod
     def _compile_clause_sqlite(clause: Any) -> tuple[str, list[Any]]:
         """Translate one node-side :class:`FilterClause` to a SQLite WHERE fragment."""
+        if clause.op == "contains":
+            return SQLiteGraphStore._render_contains_sqlite(clause.field, clause)
         column = SQLiteGraphStore._field_to_sql_expr(clause.field)
         return SQLiteGraphStore._render_clause_sqlite(column, clause)
 
@@ -1244,7 +1246,10 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
 
         Shared between node and edge compilation so the operator
         surface (``eq`` / ``in`` / ``exists`` / range) is implemented
-        in exactly one place.
+        in exactly one place.  ``contains`` is handled one level up in
+        :meth:`_compile_clause_sqlite` / :meth:`_compile_edge_query`
+        because it needs the raw JSON path, not a pre-rendered
+        ``json_extract`` expression.
         """
         op = clause.op
         if op == "eq":
@@ -1259,6 +1264,61 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
             msg = f"Unknown filter op {clause.op!r}"
             raise ValueError(msg)
         return f"{column} {sql_op} ?", [clause.value]
+
+    @staticmethod
+    def _render_contains_sqlite(field: str, clause: Any) -> tuple[str, list[Any]]:
+        """Render the ``contains`` operator as a ``json_each`` EXISTS subquery.
+
+        SQLite's ``json_extract`` on a JSON array returns the array as
+        JSON *text*, so the naïve ``IN (?)`` translation never matches.
+        Mirror the ``json_each`` EXISTS pattern from
+        :mod:`trellis.stores.sqlite.document` (which uses it for
+        list-typed content tag facets): iterate the array elements and
+        match the scalar value.
+
+        ``json_each`` raises ``malformed JSON`` when handed a scalar
+        string value (e.g. ``"platform"`` rather than an array).  AND
+        short-circuiting at the boolean level doesn't help — the SQL
+        planner evaluates the EXISTS subquery's table-valued function
+        regardless.  Coerce the input with ``CASE … json_type(…) =
+        'array' … ELSE '[]' END`` so non-array values become an empty
+        array inside ``json_each`` and the EXISTS predicate cleanly
+        evaluates ``False``.  Missing keys give ``json_type → NULL``
+        which also routes to the ``'[]'`` branch.
+
+        Only ``properties.<key>`` paths are accepted here; top-level
+        TEXT columns aren't JSON arrays so ``contains`` against them
+        is nonsense.
+        """
+        if not field.startswith("properties."):
+            msg = (
+                f"FilterClause op='contains' requires a 'properties.<key>' "
+                f"path; got {field!r}.  Top-level columns are scalar TEXT, "
+                "not JSON arrays."
+            )
+            raise ValueError(msg)
+        key = field.split(".", 1)[1]
+        # The JSON path is constructed from the DSL field, not raw user
+        # input — same convention as :meth:`_field_to_sql_expr`.
+        #
+        # Subtlety: ``json_type(json_extract(j, '$.k'))`` raises
+        # "malformed JSON" when the extracted value is a scalar string,
+        # because ``json_extract`` returns the raw scalar TEXT and
+        # ``json_type`` then tries to re-parse it.  The two-argument
+        # form ``json_type(j, '$.k')`` walks the path itself and
+        # returns the type string ('text' / 'array' / etc.) or NULL
+        # for missing keys — exactly the guard we need.
+        json_extract_expr = f"json_extract(properties_json, '$.{key}')"
+        json_type_expr = f"json_type(properties_json, '$.{key}')"
+        safe_array = (
+            f"(CASE WHEN {json_type_expr} = 'array' "
+            f"THEN {json_extract_expr} ELSE '[]' END)"
+        )
+        return (
+            f"EXISTS (SELECT 1 FROM json_each({safe_array}) "
+            f"WHERE json_each.value = ?)",
+            [clause.value],
+        )
 
     @staticmethod
     def _field_to_sql_expr(field: str) -> str:
@@ -1303,6 +1363,13 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
         where_parts: list[str] = [self._temporal_filter(query.as_of)]
         params: list[Any] = list(self._temporal_params(query.as_of))
         for clause in query.filters:
+            if clause.op == "contains":
+                frag, p = SQLiteGraphStore._render_contains_sqlite(
+                    clause.field, clause
+                )
+                where_parts.append(frag)
+                params.extend(p)
+                continue
             column = SQLiteGraphStore._edge_field_to_sql_expr(clause.field)
             frag, p = SQLiteGraphStore._render_clause_sqlite(column, clause)
             where_parts.append(frag)
