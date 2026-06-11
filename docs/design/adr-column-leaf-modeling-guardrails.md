@@ -1,7 +1,7 @@
 # ADR: Column and leaf metadata modeling guardrails
 
 **Status:** Proposed
-**Date:** 2026-06-03
+**Date:** 2026-06-03 (amended 2026-06-11: domain scope + empirical promotion path)
 **Deciders:** Trellis core
 **Resolves:** [#221](https://github.com/ronsse/trellis-ai/issues/221)
 **Related:**
@@ -54,6 +54,10 @@ This is the *default rule*. It does not close the type system: column nodes rema
 
 The placement convention reuses the `Dataset.properties.columns` shape already documented in [`modeling-guide.md`](../agent-guide/modeling-guide.md) ("Cross-database routing properties for queryable datasets" and worked example #1). Nothing new to learn.
 
+### 2.2 Domain scope (amended 2026-06-11)
+
+This ADR's default rule and exception criteria are written for **data-platform-shaped domains** — datasets/tables/columns, pipelines, BI assets — where leaf metadata is high-cardinality, source-system-versioned, and rarely traversed. It is the template, not the law, for other domains: a domain whose leaves carry materially different economics (code symbols with compiler-derived edges, infrastructure resources with per-resource policy attachments, etc.) defines its own leaf-modeling convention in its own ADR, using this one as the starting point. Absent such a domain ADR, this one's default applies.
+
 ## 3. Why this shape, not the alternatives
 
 | Alternative | Reason rejected |
@@ -74,6 +78,17 @@ Model a leaf as a graph node only when **at least one** of these is true. These 
 5. **Regulated / high-risk field** — PII, payment, or regulated-vertical compliance fields where explicit graph traversal has concrete operational value (e.g., "audit every consent-gated column").
 
 If none hold, it is a property or a document. Model **only the specific leaves that earn it** — not the whole schema. The worked example in [`modeling-guide.md`](../agent-guide/modeling-guide.md) (~100 PII column nodes, not 500K) is the canonical "right size" for an exception.
+
+### Empirical promotion path (amended 2026-06-11)
+
+The five criteria above are *prospective* — a builder judges them up front. This amendment adds the *retrospective* path: a leaf that did not justify a node at ingest time can **earn** one from observed usage. A key column that is joined or referenced frequently across a domain is exactly the leaf the criteria intend to admit; the promotion path notices it from telemetry instead of relying on the builder to predict it.
+
+- **Signal.** Usage telemetry accumulates as `Observation`/`Measurement` on the **parent** (per §2.1) — retrieval demand (pack items referencing the leaf), cross-parent reference frequency (the same key appearing across N parents in a domain), query-evidence references. No node is minted to record the signal.
+- **Candidate surfacing.** An analyzer (§8 option 5) flags leaves whose telemetry crosses thresholds (occurrence count + parent-diversity + observation window), mirroring the criteria discipline of [`adr-well-known-promotion-loop.md`](./adr-well-known-promotion-loop.md): candidates are *surfaced*, never auto-applied.
+- **Human-gated minting.** An operator approves; the promotion process mints the node satisfying all §5 requirements and stamps the two-signal opt-in (`allow_structural_leaf=True`, `node_role=STRUCTURAL`) from [`adr-source-modeling-discipline.md`](./adr-source-modeling-discipline.md) §2.5 — the extraction validator acknowledges rather than warns.
+- **Demotion on decay.** Promotion is not a ratchet — a one-way path would just recreate schema explosion slowly. If the telemetry that justified the node stays below threshold for a full observation window, the node is end-dated (SCD-2 `valid_to`) and the leaf folds back to the parent property. History is preserved; the standing maintenance commitment (§6) stops.
+
+**Status:** mechanism contract only. The analyzer is gated on a production deployment generating real usage telemetry; until then this section defines the contract a future implementation must honour.
 
 ## 5. When column nodes ARE used — requirements
 
@@ -113,6 +128,7 @@ This ADR commits to the **docs-only guardrail (option 1)**. Options 2–4 are a 
 2. **Ontology-profile defaults.** A profile ([`adr-ontology-profiles.md`](./adr-ontology-profiles.md)) may declare `Column.node_role_default=structural` and recommend `Dataset.properties.columns` as the default placement — so a data-platform profile bakes the guardrail into its defaults. *Gated on the profiles ADR landing.*
 3. **CLI linter (advisory, opt-in, no write-time enforcement).** A `trellis admin graph-health`–style check that warns on: (a) a high structural-node ratio, (b) `Column`/leaf nodes with no outbound edges beyond a containment edge, and (c) structural nodes included in default retrieval. This can build on the declarative shape layer in [`adr-graph-shape-constraints.md`](./adr-graph-shape-constraints.md) and **overlaps the linter scoped for [#219](https://github.com/ronsse/trellis-ai/issues/219) — build it once.**
 4. **Bulk-ingest advisory warnings.** When a bulk ingest contains many `Column`/leaf nodes, return advisory warnings unless the request/profile marks them as intentional structural nodes. Advisory only — never a rejection.
+5. **Leaf-promotion analyzer (amended 2026-06-11).** Reads leaf-usage `Observation`/`Measurement` rows and surfaces promotion candidates per the "Empirical promotion path" in §4 — human-gated like the well-known promotion loop, never auto-mutating, with the demotion-on-decay check in the same pass. *Gated on a production deployment generating real usage telemetry.*
 
 > **Follow-up decision (2026-06-11):** the advisory-warning path is now decided and specified in [`adr-source-modeling-discipline.md`](./adr-source-modeling-discipline.md), which authorizes a warn-only, opt-in-flagged validator at extraction time (Track G G1) plus the `column_names` searchability recipe and the no-name-match lineage rule. That ADR is the implementation companion to this one; this ADR remains the policy authority.
 
