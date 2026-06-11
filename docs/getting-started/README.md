@@ -10,6 +10,7 @@ A 5-10 minute on-ramp. Pick the path that matches what you want to do.
 | Use the Python SDK in your own agent | [../../examples/sdk_local_demo.py](../../examples/sdk_local_demo.py) |
 | Wrap Trellis tools in LangGraph | [../../examples/integrations/langgraph/README.md](../../examples/integrations/langgraph/README.md) |
 | Run the REST API as a shared service | see "Remote Mode" below |
+| Set up for a team / data platform / production | [setup-decisions.md](setup-decisions.md) — the human decisions to make |
 | Browse all macro tools and CLI commands | [../agent-guide/operations.md](../agent-guide/operations.md) |
 
 ## What is Trellis?
@@ -32,6 +33,8 @@ trellis admin stats            # confirm everything wired up
 ```
 
 You now have a working substrate. Add `--scope project` to `init` if you'd rather have stores in `./.trellis/` next to your code.
+
+> Going past a local sandbox? Before a team / data-platform / production setup, walk [setup-decisions.md](setup-decisions.md) — the choices (domains & ontology, domain ownership, API security) that the default install never prompts for.
 
 ## Hands-on: 5-minute walkthrough
 
@@ -103,6 +106,7 @@ trellis admin serve --port 8420
 
 ## Next steps
 
+- **Make the setup decisions** in [setup-decisions.md](setup-decisions.md) before any team / data-platform / production rollout — domains & ontology, domain ownership, API security.
 - **Read the playbooks** in [../agent-guide/playbooks.md](../agent-guide/playbooks.md) — task-shaped recipes for the most common workflows.
 - **Skim the schemas** in [../agent-guide/schemas.md](../agent-guide/schemas.md) so you know what shape data takes.
 - **Run an example** from [../../examples/](../../examples/).

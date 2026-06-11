@@ -73,6 +73,14 @@ VectorStore (ABC)                      ← unchanged
 
 **ArcadeDB has two protocols on the same engine.** The graph store talks Cypher via the Bolt port (7687); the vector store talks SQL via the HTTP REST endpoint (2480). Both see the same `(:Node)` rows because ArcadeDB serializes both protocols against the same storage. The vector store can't piggyback on the Bolt session because ArcadeDB's vector index DDL and `vectorNeighbors` function are SQL-only.
 
+> **Self-hosting requirement — the Bolt plugin is not enabled by default.** A stock self-hosted ArcadeDB exposes only the HTTP endpoint (2480); the Bolt port (7687) the `ArcadeDBGraphStore` depends on is opened by a plugin that must be enabled explicitly. Start the server (or build the container image) with:
+>
+> ```
+> -Darcadedb.server.plugins=Bolt:com.arcadedb.bolt.BoltProtocolPlugin
+> ```
+>
+> If multiple plugins are configured, comma-separate them in the same flag. **Troubleshooting:** a connection-refused on `7687` while `2480` answers normally almost always means the Bolt plugin flag is missing from the server JVM args — the graph store will fail to connect even though `admin verify` can reach HTTP. (Surfaced building the EKS ArcadeDB wrapper image — see [#197](https://github.com/ronsse/trellis-ai/issues/197).)
+
 **Driver cache is shared** across Bolt backends. The `_neo4j_drivers` dict on `StoreRegistry` was renamed to `_bolt_drivers`; future Bolt-speaking backends (a Neptune adapter, for example) join the same cache. ArcadeDB graph + vector stores in the same registry share a single Bolt driver pool for the graph side and a stateless HTTP connection for the vector side.
 
 ## The seam contract
