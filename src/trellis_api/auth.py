@@ -202,6 +202,31 @@ def authenticate(
     )
 
 
+def authenticate_optional(
+    api_key: str | None = Security(_API_KEY_HEADER),
+    authorization: str | None = Security(_AUTHORIZATION_HEADER),
+) -> AuthContext | None:
+    """Like :func:`authenticate`, but a *missing* credential resolves to
+    ``None`` instead of 401.
+
+    For endpoints that are public-but-minimal and reveal extra detail to
+    authenticated callers (``/readyz`` backend breakdown, gated
+    ``/metrics``). Orchestrator probes send no credential and must keep
+    working; callers that *present* a credential must present a valid
+    one — an invalid token still raises 401, never silently downgraded
+    to anonymous.
+
+    Mode semantics follow :func:`authenticate`: in ``off`` every request
+    resolves to a full-scope context, and in ``optional`` a request
+    without a credential resolves to the anonymous full-scope context —
+    only ``required`` mode produces ``None`` here.
+    """
+    mode = resolve_auth_mode()
+    if mode == AUTH_MODE_REQUIRED and _extract_token(api_key, authorization) is None:
+        return None
+    return authenticate(api_key, authorization)
+
+
 def require_scope(scope: str) -> Callable[..., AuthContext]:
     """Dependency factory: require ``scope`` (or ``admin``) on the caller.
 

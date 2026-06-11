@@ -780,10 +780,11 @@ others. The router → scope map:
 | `policies` GETs | `read` |
 | `policies` POST / DELETE | `admin` |
 
-`/healthz`, `/readyz`, `/api/version`, `/metrics`, and `/ui` stay
-unauthenticated. A valid key lacking the required scope gets 403; missing or
-invalid credentials get an undifferentiated 401 (the failure category is
-logged server-side only).
+`/healthz`, `/readyz`, `/api/version`, `/metrics`, and `/ui` stay reachable
+without a credential by default (see [Production exposure](#production-exposure)
+for what `/readyz` and `/metrics` reveal to anonymous callers). A valid key
+lacking the required scope gets 403; missing or invalid credentials get an
+undifferentiated 401 (the failure category is logged server-side only).
 
 ### Managing keys
 
@@ -800,6 +801,36 @@ trellis admin api-keys list --format json
 # Revoke (exits non-zero if unknown or already revoked)
 trellis admin api-keys revoke <KEY_ID> --format json
 ```
+
+### Production exposure
+
+Three env toggles control what an unauthenticated caller can reach.
+All three validate at startup — an unrecognized value crashes
+`create_app` rather than guessing a posture.
+
+| Env var | Values | Default | Effect |
+|---------|--------|---------|--------|
+| `TRELLIS_UI_ENABLED` | `true` / `false` | `true` | `false`: `/ui` is not mounted and `/` redirects to `/api/version` instead of `/ui/`. |
+| `TRELLIS_OPS_DETAIL` | `authenticated` / `public` | `authenticated` | Who sees the per-backend `/readyz` breakdown (backend names, latencies, raw error strings). The `{"status": ...}` line is always public, so orchestrator probes need zero credentials. `public` restores the pre-gating full body for everyone. |
+| `TRELLIS_METRICS_PUBLIC` | `true` / `false` | `true` | `false`: `/metrics` requires a valid credential (any scope) and returns 401 otherwise. `true` keeps it open for credential-less Prometheus scrape jobs. |
+
+"Authenticated" for `/readyz` detail and gated `/metrics` means
+*any* valid credential — no specific scope is required. The check
+follows the effective `TRELLIS_AUTH_MODE`: in `off` every request
+counts as authenticated (dev behavior unchanged), in `optional`
+anonymous callers pass with full scopes, so the gates only bite in
+`required` mode. A presented-but-invalid credential always gets 401
+on these endpoints — it is never silently downgraded to the
+anonymous minimal response.
+
+**UI key flow.** The static UI at `/ui` stores an API key in browser
+`localStorage` and sends it as `X-API-Key` on every API fetch. Use the
+key icon in the nav bar to set or clear the key; when any API call
+returns 401, the UI surfaces the key-entry banner automatically. Mint
+a key with `trellis admin api-keys create` — the dashboard's stats /
+health / effectiveness cards are `admin`-scoped, while the graph,
+traces, and precedents views need `read`, so an `admin` key covers the
+whole UI.
 
 ---
 
