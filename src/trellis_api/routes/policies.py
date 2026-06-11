@@ -4,13 +4,15 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from trellis.auth import SCOPE_ADMIN
 from trellis.schemas.enums import Enforcement, PolicyType
 from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
 from trellis.stores.policy_store import PolicyStore
 from trellis_api.app import get_registry
+from trellis_api.auth import require_scope
 
 router = APIRouter()
 
@@ -67,7 +69,12 @@ def get_policy(policy_id: str) -> dict[str, Any]:
     return {"policy": policy.model_dump(mode="json")}
 
 
-@router.post("/policies")
+@router.post(
+    "/policies",
+    # Router-level dependency is ``read``; policy writes additionally
+    # require ``admin`` (see the router→scope map in trellis_api.app).
+    dependencies=[Depends(require_scope(SCOPE_ADMIN))],
+)
 def create_policy(body: CreatePolicyRequest) -> dict[str, Any]:
     """Create a governance policy."""
     store = _get_policy_store()
@@ -85,7 +92,10 @@ def create_policy(body: CreatePolicyRequest) -> dict[str, Any]:
     }
 
 
-@router.delete("/policies/{policy_id}")
+@router.delete(
+    "/policies/{policy_id}",
+    dependencies=[Depends(require_scope(SCOPE_ADMIN))],
+)
 def delete_policy(policy_id: str) -> dict[str, Any]:
     """Delete a governance policy."""
     store = _get_policy_store()

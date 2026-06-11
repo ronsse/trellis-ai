@@ -13,8 +13,9 @@ from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from trellis.auth import SCOPE_ADMIN, SCOPE_INGEST, SCOPE_MUTATE, SCOPE_READ
 from trellis.stores.registry import StoreRegistry
-from trellis_api.auth import require_api_key, warn_if_unauthenticated
+from trellis_api.auth import require_scope, warn_if_unauthenticated
 from trellis_api.middleware import (
     request_id_middleware,
     unhandled_exception_handler,
@@ -108,36 +109,56 @@ def create_app() -> FastAPI:
     # without holding the API secret.
     app.include_router(health.router, tags=["health"])
 
-    # Every ``/api/v1`` router gates on the API key when ``TRELLIS_API_KEY``
-    # is set. When the env var is unset the dependency is a no-op so dev /
-    # CI workflows stay frictionless.
-    auth = [Depends(require_api_key)]
+    # Every ``/api/v1`` router requires one scope, enforced by
+    # ``require_scope`` per the effective ``TRELLIS_AUTH_MODE`` (off /
+    # optional / required — see ``trellis_api.auth``). The map:
+    #
+    #   retrieve                     -> read
+    #   ingest                       -> ingest
+    #   mutations / curate / extract -> mutate
+    #   admin                        -> admin
+    #   observations                 -> read, plus mutate on its two
+    #                                   POST endpoints (route-level deps
+    #                                   in routes/observations.py)
+    #   policies                     -> read, plus admin on POST/DELETE
+    #                                   (route-level deps in
+    #                                   routes/policies.py)
+    #
+    # ``admin`` implies every other scope; the legacy ``TRELLIS_API_KEY``
+    # shared secret is granted all scopes for backwards compatibility.
+    read_auth = [Depends(require_scope(SCOPE_READ))]
+    ingest_auth = [Depends(require_scope(SCOPE_INGEST))]
+    mutate_auth = [Depends(require_scope(SCOPE_MUTATE))]
+    admin_auth = [Depends(require_scope(SCOPE_ADMIN))]
     app.include_router(
-        admin.router, prefix="/api/v1", tags=["admin"], dependencies=auth
+        admin.router, prefix="/api/v1", tags=["admin"], dependencies=admin_auth
     )
     app.include_router(
-        ingest.router, prefix="/api/v1", tags=["ingest"], dependencies=auth
+        ingest.router, prefix="/api/v1", tags=["ingest"], dependencies=ingest_auth
     )
     app.include_router(
-        retrieve.router, prefix="/api/v1", tags=["retrieve"], dependencies=auth
+        retrieve.router, prefix="/api/v1", tags=["retrieve"], dependencies=read_auth
     )
     app.include_router(
-        curate.router, prefix="/api/v1", tags=["curate"], dependencies=auth
+        curate.router, prefix="/api/v1", tags=["curate"], dependencies=mutate_auth
     )
     app.include_router(
-        mutations.router, prefix="/api/v1", tags=["mutations"], dependencies=auth
+        mutations.router,
+        prefix="/api/v1",
+        tags=["mutations"],
+        dependencies=mutate_auth,
     )
     app.include_router(
-        policies.router, prefix="/api/v1", tags=["policies"], dependencies=auth
+        policies.router, prefix="/api/v1", tags=["policies"], dependencies=read_auth
     )
     app.include_router(
-        extract.router, prefix="/api/v1", tags=["extract"], dependencies=auth
+        extract.router, prefix="/api/v1", tags=["extract"], dependencies=mutate_auth
     )
     app.include_router(
         observations.router,
         prefix="/api/v1",
         tags=["observations"],
-        dependencies=auth,
+        dependencies=read_auth,
     )
 
     # Static UI at /ui — stays unauthenticated; the UI calls /api/v1
