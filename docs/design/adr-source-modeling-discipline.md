@@ -105,6 +105,8 @@ Either flag alone is not enough. `allow_structural_leaf=True` with `node_role=SE
 
 The validator MAY emit a softer informational log when both signals are set, confirming the exception is recognised. G1 owns that policy choice.
 
+Leaves can also *earn* node status retrospectively: the guardrails ADR's empirical promotion path (amended 2026-06-11) surfaces heavily-used leaves from usage telemetry, human-gated, and the promotion process stamps this same two-signal opt-in on the minted node — so promoted nodes pass the validator by construction.
+
 ### 2.6 Column-level lineage policy — no name-match
 
 Column-level lineage edges between tables are governed by one rule: **the extractor must possess stable column identifiers — `(table_id, column_position)` or `(table_id, column_name)` where column names are guaranteed unique within the table AND the extractor has access to a stable mapping that survives source schema changes.** Without such a mapping, column-level lineage at the cross-table granularity is forbidden.
