@@ -29,11 +29,13 @@ class EntityDraft(TrellisModel):
 
     ``allow_structural_leaf`` is the per-draft opt-in for the regulated-
     column exception documented in ``adr-source-modeling-discipline.md``
-    (Track G).  When ``False`` (default), constructing a draft whose
-    ``entity_type`` is on the anti-pattern blocklist
+    (Track G).  The exception is two-signal (ADR §2.5): constructing a
+    draft whose ``entity_type`` is on the anti-pattern blocklist
     (``Column`` / ``column`` / ``TableColumn`` / ``table_column``) emits a
-    ``structlog`` WARNING; with ``True`` it emits an INFO acknowledging
-    the deliberate opt-in.  Soft enforcement only — never raises.
+    ``structlog`` WARNING unless **both** ``allow_structural_leaf=True``
+    *and* ``node_role=NodeRole.STRUCTURAL`` are set, in which case it
+    emits an INFO acknowledging the deliberate opt-in.  Either signal
+    alone still warns.  Soft enforcement only — never raises.
     """
 
     entity_id: str | None = None
@@ -56,6 +58,7 @@ class EntityDraft(TrellisModel):
         validate_entity_type_not_anti_pattern(
             self.entity_type,
             allow_structural_leaf=self.allow_structural_leaf,
+            node_role=self.node_role,
         )
         return self
 
