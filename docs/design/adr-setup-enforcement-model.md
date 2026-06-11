@@ -136,7 +136,7 @@ trellis doctor [--strict] [--scope read|ingest|curate|serve] [--format text|json
 | `ONT-PROMOTION` | Pipeline-only query history being promoted as analyst usage | curation config | warn | no | #218, #216 |
 
 The catalog is open — checks register through a small `Check` protocol so plugin
-packages (e.g. an EGP integration) can add deployment-specific checks, mirroring
+packages (e.g. an enterprise graph (EG) integration) can add deployment-specific checks, mirroring
 the open-string / plugin posture of the rest of Trellis.
 
 ### 2.5 Mapping every setup decision to a mechanism
@@ -154,7 +154,7 @@ the open-string / plugin posture of the rest of Trellis.
 | §3.4 Promotion gates (#218) | T2 `ONT-PROMOTION` + T3 gate | warn; review-gated promotion |
 | §3.5 Column stance (#221) | T2 `ONT-COLUMNS` | warn on smell |
 | §3.1 Define domains (#217) | *documented judgment* | Not enforceable; `ONT-OWNERSHIP` flags the symptom |
-| §3.6 EGP interop (#220) | *documented judgment* | Not enforceable |
+| §3.6 EG interop (#220) | *documented judgment* | Not enforceable |
 
 ## 3. What this ADR does *not* do
 

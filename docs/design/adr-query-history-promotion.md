@@ -7,7 +7,7 @@
 **Related:**
 - [`./adr-enterprise-ontology-capability-framing.md`](./adr-enterprise-ontology-capability-framing.md) — #217, the enterprise-ontology umbrella this ADR sits under
 - [`./adr-ontology-profiles.md`](./adr-ontology-profiles.md) — #219, profile mechanism that scopes which pattern/fact types a deployment admits
-- [`./adr-egp-interop-bridge.md`](./adr-egp-interop-bridge.md) — #220, the accepted-facts handoff to an external Enterprise Graph Platform
+- [`./adr-enterprise-graph-interop-bridge.md`](./adr-enterprise-graph-interop-bridge.md) — #220, the accepted-facts handoff to an external enterprise graph platform (EG)
 - [`./adr-observation-entity-type.md`](./adr-observation-entity-type.md) — existing `Observation` / `Measurement` home this ADR builds on
 - [`./adr-graph-ontology.md`](./adr-graph-ontology.md) — sets the schema.org / PROV-O alignment + open-string contract this ADR inherits
 
@@ -29,13 +29,13 @@ Trellis already has the right primitives to model this correctly without inventi
 - `GenerationSpec` ([`src/trellis/schemas/entity.py`](../../src/trellis/schemas/entity.py)) — `generator_name` / `generator_version` / `generated_at` / `source_node_ids` / `source_trace_ids` / `parameters`, exactly the provenance a derived pattern node needs.
 - `EntityDraft` / `EdgeDraft` ([`src/trellis/schemas/extraction.py`](../../src/trellis/schemas/extraction.py)) carry `node_role` and `generation_spec`, so the tiered extractor path can emit curated drafts directly.
 
-This ADR defines the **layered promotion model** that maps each tier of query-history derivation onto those existing primitives, the **hard safety rules** that govern what may and may not be stored or inferred, and the **promotion gates** that separate states safe for Trellis retrieval from states eligible for external EGP publication.
+This ADR defines the **layered promotion model** that maps each tier of query-history derivation onto those existing primitives, the **hard safety rules** that govern what may and may not be stored or inferred, and the **promotion gates** that separate states safe for Trellis retrieval from states eligible for external EG publication.
 
 ## 2. Decision
 
 Adopt a six-state promotion ladder. Each state is a distinct level of epistemic commitment, and each maps onto an existing Trellis primitive. Promotion between states is **monotonic and gated** — a higher state never silently overwrites the lower-state evidence it was derived from; the lower state remains as provenance.
 
-| # | State | Trellis primitive | `node_role` | Retrieval? | EGP publish? |
+| # | State | Trellis primitive | `node_role` | Retrieval? | EG publish? |
 |---|---|---|---|---|---|
 | 1 | Raw execution evidence | trace / `Evidence` row, short retention | n/a (off-graph) | No (default) | No |
 | 2 | Measurement | `Measurement` node + `hasMeasurement` edge | `semantic` | Yes (via `ObservationSearch`) | No |
@@ -95,18 +95,18 @@ These are `node_role="curated"` and **must** carry a `GenerationSpec` (`generato
 
 ### 2.5 State 5 — Candidate enterprise fact
 
-A pattern node *proposes* a semantic fact — e.g., "the `JoinPattern` between `fct_orders` and `dim_customer` suggests a real foreign-key relationship." That proposal is recorded as a candidate: a `curated` `Entity`/`Edge` with `metadata["fact_state"]="candidate"` and a `metadata["candidate_for"]` pointer to the semantic edge it would become. Candidates are retrievable but **always surfaced labeled as candidate/inferred**, never as accepted truth, and never published to EGP.
+A pattern node *proposes* a semantic fact — e.g., "the `JoinPattern` between `fct_orders` and `dim_customer` suggests a real foreign-key relationship." That proposal is recorded as a candidate: a `curated` `Entity`/`Edge` with `metadata["fact_state"]="candidate"` and a `metadata["candidate_for"]` pointer to the semantic edge it would become. Candidates are retrievable but **always surfaced labeled as candidate/inferred**, never as accepted truth, and never published to the EG.
 
 ### 2.6 State 6 — Accepted enterprise fact
 
-A candidate becomes accepted **only** after a promotion gate clears (§5): human/domain-owner review, or corroboration from an authoritative source (a catalog-declared FK, a dbt relationship test). On acceptance the fact carries `metadata["fact_state"]="accepted"`, `metadata["accepted_by"]`, and `metadata["accepted_at"]`. Accepted facts are the **only** state eligible for EGP publication via the bridge in [`adr-egp-interop-bridge.md`](./adr-egp-interop-bridge.md) (#220).
+A candidate becomes accepted **only** after a promotion gate clears (§5): human/domain-owner review, or corroboration from an authoritative source (a catalog-declared FK, a dbt relationship test). On acceptance the fact carries `metadata["fact_state"]="accepted"`, `metadata["accepted_by"]`, and `metadata["accepted_at"]`. Accepted facts are the **only** state eligible for EG publication via the bridge in [`adr-enterprise-graph-interop-bridge.md`](./adr-enterprise-graph-interop-bridge.md) (#220).
 
-## 3. Retrieval vs EGP publication
+## 3. Retrieval vs EG publication
 
 Two different consumers, two different bars.
 
 - **Trellis retrieval** is advisory context for an agent that will reason about it. States 2–5 are all retrievable, because the consuming agent reconciles signal against truth (the same principle as [`adr-observation-entity-type.md`](./adr-observation-entity-type.md) §2.4: empirical observations coexist with structural facts; Trellis does not adjudicate). Candidate facts (state 5) are retrievable **only when labeled** so the agent knows the claim is inferred, not accepted.
-- **EGP publication** writes into a shared, governed enterprise ontology that *other* systems treat as truth. Only **accepted** facts (state 6) cross that boundary. Raw evidence, measurements, observations, pattern nodes, and candidates **never** publish to EGP.
+- **EG publication** writes into a shared, governed enterprise ontology that *other* systems treat as truth. Only **accepted** facts (state 6) cross that boundary. Raw evidence, measurements, observations, pattern nodes, and candidates **never** publish to the EG.
 
 State 1 (raw evidence) is not retrieved by default at all — it exists for audit and for re-derivation of higher states, behind classification gating.
 
@@ -131,7 +131,7 @@ These are non-negotiable. A producer that violates one is a bug, not a tuning ch
 | 3 → 4 | Stability threshold: the signal persists across ≥ K consecutive windows, and the deployment's ontology profile ([#219](./adr-ontology-profiles.md)) admits the pattern type. Automatic. Emits `curated` node with `GenerationSpec`. |
 | 4 → 5 | A pattern crosses a *semantic-proposal* threshold (configurable, profile-scoped). Recorded as `fact_state="candidate"`. Automatic, but the candidate is **only ever surfaced labeled** and **never** published. |
 | 5 → 6 | **Review-gated.** Domain-owner approval **or** corroboration by an authoritative declared source (catalog FK, dbt relationship test). Never automatic. Records `accepted_by` / `accepted_at`. |
-| 6 → EGP | Accepted facts only, via [`adr-egp-interop-bridge.md`](./adr-egp-interop-bridge.md). |
+| 6 → EG | Accepted facts only, via [`adr-enterprise-graph-interop-bridge.md`](./adr-enterprise-graph-interop-bridge.md). |
 
 The only fully manual gate is **5 → 6**; everything below it is automatic but monotonic and fully provenanced, so any automatic promotion can be audited and re-derived from the state beneath it.
 
@@ -145,7 +145,7 @@ The only fully manual gate is **5 → 6**; everything below it is automatic but 
 - State 3: `Observation(content="fct_orders is usually joined to dim_customer on customer_id", confidence=0.9, wasDerivedFrom=...)`.
 - State 4: `Entity(entity_type="JoinPattern", node_role="curated", generation_spec=...)` linking the two datasets.
 - State 5: candidate `relatedTo` / foreign-key edge, `fact_state="candidate"`, surfaced labeled.
-- State 6: **only** after a domain owner confirms (or a dbt `relationships` test corroborates) does it become an accepted semantic edge eligible for EGP. Per Rule 6, the join count alone never makes this leap.
+- State 6: **only** after a domain owner confirms (or a dbt `relationships` test corroborates) does it become an accepted semantic edge eligible for the EG. Per Rule 6, the join count alone never makes this leap.
 
 ### 6.2 High query count becomes a `HotDataset` ranking signal
 
@@ -153,7 +153,7 @@ The only fully manual gate is **5 → 6**; everything below it is automatic but 
 
 - State 2: `Measurement(metric_name="query_count", metric_value=...)`.
 - State 4: `Entity(entity_type="HotDataset", node_role="curated", generation_spec=...)`.
-- This is used by retrieval as a **ranking signal** (hot datasets surface earlier in packs) — no semantic claim, no candidate fact, no EGP publication. It never needs to climb past state 4.
+- This is used by retrieval as a **ranking signal** (hot datasets surface earlier in packs) — no semantic claim, no candidate fact, no EG publication. It never needs to climb past state 4.
 
 ### 6.3 Manual SQL becomes PROV-style `Action` evidence
 
@@ -174,17 +174,17 @@ A human runs ad-hoc SQL that creates `tmp_revenue_rollup`.
 When this ADR's intent is implemented, the following must hold:
 
 1. Trellis docs (this ADR + the query-history recipe) define all six fact states and their backing primitives.
-2. The recipe states explicitly which states are retrievable (2–5, candidates labeled) and which publish to EGP (6 only).
+2. The recipe states explicitly which states are retrievable (2–5, candidates labeled) and which publish to the EG (6 only).
 3. The worked examples in §6 are reproduced in the agent-guide recipe: repeated join stays `JoinPattern` until reviewed; high query count → `HotDataset` ranking signal; manual SQL → PROV-style `Activity` evidence; query author does not become owner.
 4. The recipe documents redaction, actor hashing, and the no-raw-SQL-by-default rule.
-5. The promotion-gate table (§5) and the review requirement before any EGP accepted write are documented.
+5. The promotion-gate table (§5) and the review requirement before any EG accepted write are documented.
 6. Measurements, observations, pattern nodes, and candidates carry source window, sample size, method, confidence, and generator version — enforced by the no-silent-defaults discipline.
 
 ## 8. Non-goals
 
 - **No new schema.** This ADR reuses `Measurement`, `Observation`, `NodeRole`, and `GenerationSpec`. It does not add fields, does not register new well-known canonicals, and does not introduce a `fact_state` enum in core — `fact_state` is a metadata-key convention (`candidate` / `accepted`), consistent with the open `metadata` bag on `Entity`.
 - **No extractor implementation.** The `query_history_promoter` generator, its thresholds, and the pattern-type extension package are the consuming plan's work, not this ADR's.
-- **No EGP wire format.** How accepted facts serialize onto the bridge is owned by [`adr-egp-interop-bridge.md`](./adr-egp-interop-bridge.md) (#220).
+- **No EG wire format.** How accepted facts serialize onto the bridge is owned by [`adr-enterprise-graph-interop-bridge.md`](./adr-enterprise-graph-interop-bridge.md) (#220).
 - **No profile mechanism.** Which pattern/fact types a deployment admits is owned by [`adr-ontology-profiles.md`](./adr-ontology-profiles.md) (#219).
 - **No retention/redaction engine.** This ADR sets the *rules*; the redaction implementation and short-retention enforcement for state-1 evidence are deployment-infrastructure concerns.
 - **No automatic semantic acceptance.** State 6 is never reached without the 5 → 6 review gate. There is deliberately no "high enough confidence auto-accepts" path.
@@ -193,5 +193,5 @@ When this ADR's intent is implemented, the following must hold:
 
 - [`adr-observation-entity-type.md`](./adr-observation-entity-type.md) — the `Observation` / `Measurement` home this ADR builds on.
 - [`adr-graph-ontology.md`](./adr-graph-ontology.md) — schema.org / PROV-O alignment + open-string contract.
-- [`adr-enterprise-ontology-capability-framing.md`](./adr-enterprise-ontology-capability-framing.md) (#217), [`adr-ontology-profiles.md`](./adr-ontology-profiles.md) (#219), [`adr-egp-interop-bridge.md`](./adr-egp-interop-bridge.md) (#220) — sibling enterprise-ontology ADRs.
+- [`adr-enterprise-ontology-capability-framing.md`](./adr-enterprise-ontology-capability-framing.md) (#217), [`adr-ontology-profiles.md`](./adr-ontology-profiles.md) (#219), [`adr-enterprise-graph-interop-bridge.md`](./adr-enterprise-graph-interop-bridge.md) (#220) — sibling enterprise-ontology ADRs.
 - PROV-O `wasGeneratedBy` / `wasAssociatedWith` / `wasAttributedTo` — https://www.w3.org/TR/prov-o/

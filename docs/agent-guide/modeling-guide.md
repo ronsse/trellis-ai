@@ -6,7 +6,7 @@
 
 > **What this is not:** an API reference. For schema fields and method signatures see [schemas.md](schemas.md). For operational commands see [operations.md](operations.md).
 
-> **Designing an enterprise/EGP-style graph?** Read the capability-framing ADR [`adr-enterprise-ontology-capability-framing.md`](../design/adr-enterprise-ontology-capability-framing.md) first — it places this guide's node/property/document decision inside the wider stack (canonical identity, lineage, governed profiles, agent memory) and links the column-guardrails ([`adr-column-leaf-modeling-guardrails.md`](../design/adr-column-leaf-modeling-guardrails.md)) and ontology-profiles ([`adr-ontology-profiles.md`](../design/adr-ontology-profiles.md)) ADRs.
+> **Designing an enterprise graph (EG)-style ontology?** Read the capability-framing ADR [`adr-enterprise-ontology-capability-framing.md`](../design/adr-enterprise-ontology-capability-framing.md) first — it places this guide's node/property/document decision inside the wider stack (canonical identity, lineage, governed profiles, agent memory) and links the column-guardrails ([`adr-column-leaf-modeling-guardrails.md`](../design/adr-column-leaf-modeling-guardrails.md)) and ontology-profiles ([`adr-ontology-profiles.md`](../design/adr-ontology-profiles.md)) ADRs.
 
 ---
 
@@ -230,7 +230,7 @@ This is the single decision most likely to wreck a graph at scale, so it gets it
 
 > **Default rule:** columns, nested struct fields, function parameters, file lines, config keys, and other leaf metadata live as **properties on the parent** (`Dataset.properties.columns` and friends) or as **rendered schema documentation** — **not** as first-class graph nodes.
 
-EGP-style enterprise graph platforms mint one `Column` node per physical column (one such reference platform reports 195K column nodes today, projected toward ~1M, and hides columns in its UI by default because they swamp the graph). That is a legitimate choice *for a column-lineage UI that traverses columns*. It is the wrong default to carry into Trellis. A builder porting that schema should collapse columns to properties unless their own workload meets an exception below.
+EG-style enterprise graph platforms mint one `Column` node per physical column (one such reference platform reports 195K column nodes today, projected toward ~1M, and hides columns in its UI by default because they swamp the graph). That is a legitimate choice *for a column-lineage UI that traverses columns*. It is the wrong default to carry into Trellis. A builder porting that schema should collapse columns to properties unless their own workload meets an exception below.
 
 ### Preferred placement
 
@@ -251,7 +251,7 @@ Model a leaf as a node only when **at least one** of these holds — and then mo
 2. **Cross-parent query** — "which regulated columns feed this dashboard?" is run often enough that a scan over `Dataset.properties.columns` is not enough.
 3. **Independent evidence or policy** — classification, approval, or policy attaches to the column independently of the table (the column and its metadata do not always move as a unit).
 4. **Independent lifecycle** — the column has its own ownership, governance state, SLA, deprecation, or review workflow.
-5. **Regulated / high-risk field** — PII, payment, responsible-gaming, or compliance-sensitive fields where explicit graph traversal has concrete operational value.
+5. **Regulated / high-risk field** — PII, payment, or regulated-vertical compliance fields where explicit graph traversal has concrete operational value.
 
 When a column node is justified it must be `node_role="structural"` (excluded from default retrieval), carry source identifiers (`source_system`, `physical_uri`) and a freshness marker, and have a retention/compaction strategy. See worked example #1 above for the right-sized exception (~100 PII column nodes, not 500K).
 
@@ -414,7 +414,7 @@ These are the over-modeling patterns we've actually seen in the wild. Each has a
 
 ## Worked example 1: Database catalog ingestion
 
-This is the anti-pattern that motivated this guide. A data platform team was ingesting a Unity Catalog with ~500K columns across ~10K tables and modeling every column as a graph node.
+This is the anti-pattern that motivated this guide. A data platform ingesting a Unity Catalog on the order of 10K tables / 500K columns was modeling every column as a graph node.
 
 ### The wrong shape
 
@@ -767,10 +767,10 @@ Curated nodes are the least obvious of the three roles. A thing should be `node_
 1. **It's synthesized, not ingested.** The node's content is derived from other nodes in the graph, from LLM output, from clustering analysis, or from human synthesis — not pulled from an external source-of-truth.
 2. **It's regeneratable.** You could run the generator again and produce a new version with the same structure (possibly different content). If the node is a one-shot artifact that can't be recreated, it's probably semantic with metadata noting its origin.
 3. **It's meant to be edited or refined.** Humans should be able to improve the content without breaking the system's assumptions about ingested data.
-4. **It's valuable for broad/strategic retrieval.** Curated nodes exist to answer questions that ingested nodes can't answer directly — "what's the Sportsbook domain about?", "what patterns succeed most often in SQL generation?", "what are the most frequently co-accessed tables?"
+4. **It's valuable for broad/strategic retrieval.** Curated nodes exist to answer questions that ingested nodes can't answer directly — "what is the orders domain about?", "what patterns succeed most often in SQL generation?", "what are the most frequently co-accessed tables?"
 
 Common examples:
-- **Domain rollups** — a `CURATED` node named `domain:sportsbook` with a summary synthesized from all entities tagged with that domain
+- **Domain rollups** — a `CURATED` node named `domain:orders` with a summary synthesized from all entities tagged with that domain
 - **Community cluster summaries** — a `CURATED` node per graph community produced by label propagation, with an LLM-generated description
 - **Promoted precedents** — a `CURATED` node created by the precedent promotion worker from successful trace patterns
 - **Popular-entity indexes** — a `CURATED` node listing the most-queried or most-touched entities in a domain, regenerated daily

@@ -9,38 +9,38 @@ results fed back to the graph.
 
 ## Background
 
-The `trellis-platform` consumer repo (`fd-data-architecture-poc/trellis-platform`) built
-these patterns as one-off implementations to integrate the fd-poc pipeline's Claude
+The consumer deployment repo built
+these patterns as one-off implementations to integrate its pipeline's Claude
 Code workers with the Trellis experience graph. They work, but they're hardcoded to
-fd-poc's session/dispatch model. The patterns are generic and should live in the
+the consumer pipeline's session/dispatch model. The patterns are generic and should live in the
 core library.
 
-### What Exists Today (in fd-poc, NOT in this repo)
+### What Exists Today (in the consumer deployment repo, NOT in this repo)
 
-**`fd-data-architecture-poc/src/fd_poc/agents/graph_context.py`**
+**`<consumer-repo>/src/<consumer_package>/agents/graph_context.py`**
 - `fetch_entity_context(entity_ids, intent, domain, max_tokens) -> str`
 - Calls `POST /api/v1/packs` for rich context, falls back to per-entity
   `GET /api/v1/entities/{id}` and `GET /api/v1/search`
 - Returns markdown string injected into worker prompt's `context_brief`
 - Graceful degradation: WARNING log + empty string if API unreachable
 
-**`fd-data-architecture-poc/src/fd_poc/agents/trace_recorder.py`**
+**`<consumer-repo>/src/<consumer_package>/agents/trace_recorder.py`**
 - `record_worker_trace(skill_name, run_id, entity_ids, status, duration_ms, ...) -> trace_id | None`
 - Calls `POST /api/v1/traces` with Trace schema (source=workflow, steps, outcome, context)
 - Records success AND failure (failure traces enable learning from mistakes)
 - Fire-and-forget: WARNING log + None if API unreachable
 
-**`fd-data-architecture-poc/src/fd_poc/agents/result_feedback.py`**
+**`<consumer-repo>/src/<consumer_package>/agents/result_feedback.py`**
 - `record_generation_result(layer_name, target_table, success, sql_content, ...) -> None`
 - On success: `POST /api/v1/entities` (DOCUMENT node) + `POST /api/v1/links` (DESCRIBED_BY edge)
 - On failure: no-op (failure captured in trace)
 - Fire-and-forget: WARNING log if API unreachable
 
-### How They're Wired (in fd-poc)
+### How They're Wired (in the consumer deployment repo)
 
 ```python
 # workflow.py — pre-dispatch
-from fd_poc.agents.graph_context import fetch_entity_context
+from consumer_package.agents.graph_context import fetch_entity_context
 
 context_brief = {
     "run_id": run_id,
@@ -50,7 +50,7 @@ context_brief = {
 session = AgentSession(..., context_brief=context_brief)
 
 # workflow.py — post-dispatch (inside _dispatch_skill)
-from fd_poc.agents.trace_recorder import record_worker_trace
+from consumer_package.agents.trace_recorder import record_worker_trace
 
 record_worker_trace(
     skill_name=step.name,
@@ -154,6 +154,6 @@ class ResultFeedback:
 - All hooks MUST degrade gracefully (WARNING log, no exceptions)
 - All hooks MUST work with both remote `TrellisClient(base_url=...)` and
   local `TrellisClient(registry=...)` modes
-- No fd-poc specific types — use plain dicts, strings, and the SDK's
+- No consumer-specific types — use plain dicts, strings, and the SDK's
   existing Trace/Entity schemas
 - Token budgets should be configurable and respected

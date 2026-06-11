@@ -38,7 +38,7 @@ def test_record_outcome_all_axes(store: SQLiteOutcomeStore):
         success=True,
         latency_ms=250.0,
         params_version="v42",
-        domain="sportsbook",
+        domain="orders",
         intent_family="plan",
         tool_name="get_task_context",
         phase="assemble",
@@ -54,11 +54,11 @@ def test_record_outcome_all_axes(store: SQLiteOutcomeStore):
         metadata={"note": "hot path"},
         cohort="canary",
     )
-    assert event.domain == "sportsbook"
+    assert event.domain == "orders"
     assert event.outcome.metrics["precision"] == 0.75
     assert event.cohort == "canary"
 
-    results = store.query(domain="sportsbook", intent_family="plan")
+    results = store.query(domain="orders", intent_family="plan")
     assert len(results) == 1
 
 

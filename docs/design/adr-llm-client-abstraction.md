@@ -172,7 +172,7 @@ A `CrossEncoderClient` Protocol was defined in Phase 1 (`score_pairs(query, cand
 
 ### Option A: Status quo — consumers bring everything
 
-**How it works:** `LLMCallable` stays. Each consumer (fd-poc, trellis-platform, etc.) instantiates their own OpenAI/Anthropic client and wraps it in a callable. Core ships no LLM code beyond the bare protocol.
+**How it works:** `LLMCallable` stays. Each downstream consumer instantiates their own OpenAI/Anthropic client and wraps it in a callable. Core ships no LLM code beyond the bare protocol.
 
 **Pros:**
 - Zero core complexity and maintenance burden

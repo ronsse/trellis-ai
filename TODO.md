@@ -376,7 +376,7 @@ The advisory fitness loop just shipped but we have no operational visibility and
 
 ### Sprint B — Unblock platform integration
 
-- [x] **`POST /api/v1/ingest/bulk` endpoint (P0)** — shipped 2026-04-15. Accepts `entities` + `edges` + `aliases` in one request; entities and edges flow through `MutationExecutor` (audit events, per-item idempotency key); aliases route directly to `graph_store.upsert_alias` (no alias mutation operation exists yet). Strategies: `continue_on_error` (default, backfill-friendly), `stop_on_error` (halts across groups), `sequential`. Processing order entities → edges → aliases. Response reports per-group counts (`total`/`succeeded`/`failed`/`rejected`/`duplicates`/`skipped`) + per-item results. See [BulkIngestRequest](src/trellis_api/models.py) and [ingest_bulk()](src/trellis_api/routes/ingest.py). Unblocks trellis-platform EKS deploy.
+- [x] **`POST /api/v1/ingest/bulk` endpoint (P0)** — shipped 2026-04-15. Accepts `entities` + `edges` + `aliases` in one request; entities and edges flow through `MutationExecutor` (audit events, per-item idempotency key); aliases route directly to `graph_store.upsert_alias` (no alias mutation operation exists yet). Strategies: `continue_on_error` (default, backfill-friendly), `stop_on_error` (halts across groups), `sequential`. Processing order entities → edges → aliases. Response reports per-group counts (`total`/`succeeded`/`failed`/`rejected`/`duplicates`/`skipped`) + per-item results. See [BulkIngestRequest](src/trellis_api/models.py) and [ingest_bulk()](src/trellis_api/routes/ingest.py). Unblocks the consumer deployment's EKS deploy.
 - [x] **EntityType/EdgeKind enum role clarification** — resolved 2026-04-15. `Entity.entity_type` and `Edge.edge_kind` relaxed from StrEnum to open `str` (previously silently rejected domain-specific values like `uc_table`, `dbt_model`, contradicting CLAUDE.md's "any string" claim). Enums retained in `schemas/enums.py` as named constants for well-known agent-centric values. Locked in by `TestEntityTypeIsOpenString` and `TestEdgeKindIsOpenString`. Docs updated: `schemas.md`, `playbooks.md`, `client-layer-inventory.md`.
 
 ### Sprint C — LLM abstraction decision (ADR, not code) — COMPLETE (2026-04-15)
@@ -1191,7 +1191,7 @@ The mutation pipeline produces every signal we'd want. A UI layer on top turns o
 
 ### Tiered Context Retrieval — Sectioned Pack Assembly
 
-> **Problem discovered (2026-04-05):** In fd-poc's multi-agent pipeline, each agent constructs a narrow, task-scoped retrieval intent ("SQL generation for layer casino_sessions"). This misses strategic context (who owns this data? what already exists? what failed before?) because keyword retrieval only surfaces content with vocabulary overlap to the technical task. The user's business objective gets decomposed into a structured spec before context retrieval happens, so no agent ever asks the *strategic* question.
+> **Problem discovered (2026-04-05):** In the consumer deployment's multi-agent pipeline, each agent constructs a narrow, task-scoped retrieval intent ("SQL generation for layer domain_c_sessions"). This misses strategic context (who owns this data? what already exists? what failed before?) because keyword retrieval only surfaces content with vocabulary overlap to the technical task. The user's business objective gets decomposed into a structured spec before context retrieval happens, so no agent ever asks the *strategic* question.
 >
 > **Solution:** Tiered pack assembly. The graph provides sectioned retrieval where each section targets a different *kind* of knowledge with its own budget and retrieval strategy. Applications define which sections each agent phase needs. Some sections (objective/domain) are assembled once and shared across all phases; others (tactical/entity) are assembled per-step.
 
@@ -1288,11 +1288,11 @@ Surfaced while refining README messaging. Two gaps between the current `PackBuil
 
 Generic pack evaluation that works on synthetic scenarios *and* real event log data. Extends the existing `effectiveness.py` / `token_usage.py` pattern with richer scoring dimensions.
 
-#### Background: What We Built & Learned (fd-poc, 2026-04-05)
+#### Background: What We Built & Learned (consumer deployment, 2026-04-05)
 
-Built a project-specific pack analysis in `fd-data-architecture-poc/src/fd_poc/trellis/pack_analysis.py` (40 passing tests). The implementation:
+Built a project-specific pack analysis in the consumer deployment repo (40 passing tests). The implementation:
 
-1. **5 domain scenarios** (sportsbook, snowplow, casino, reg_reporting, reference) with synthetic entity fixtures and knowledge base items loaded from `trellis-platform/knowledge/`.
+1. **5 domain scenarios** (domain-a, domain-b, domain-c, domain-d, reference) with synthetic entity fixtures and knowledge base items loaded from the consumer deployment repo's `knowledge/` directory.
 2. **5 scoring dimensions**: completeness (coverage checklist hit rate), relevance (mean PackItem.relevance_score), noise ratio (cross-domain items / total), coverage breadth (distinct content categories / expected), token efficiency (useful tokens / total).
 3. **2 use-case weight profiles** — pipeline generation (technical depth) vs business domain context (organizational breadth) — same pack, different weights, meaningfully different scores.
 4. **Synthetic pack assembly** — reads knowledge .md files (frontmatter + body), splits multi-section docs, loads precedent .yaml, builds entity fixtures, scores via keyword overlap (Jaccard + tag bonus), applies domain filter + budget. Mirrors `ContextProvider` logic without live stores.
@@ -1304,7 +1304,7 @@ Built a project-specific pack analysis in `fd-data-architecture-poc/src/fd_poc/t
 - **Noise ratio is 0.000 everywhere** — domain filter works well (knowledge items tagged `domain: all` pass through), but the metric only catches metadata-tagged cross-domain contamination, not topical irrelevance.
 - **Pipeline gen scores higher (0.805) than business context (0.758)** — knowledge base is stronger on technical patterns than organizational context.
 
-**What's domain-specific (stays in fd-poc):** scenario definitions, FanDuel entity fixtures, knowledge base loading, use-case weight profiles.
+**What's domain-specific (stays in the consumer deployment):** scenario definitions, domain-specific entity fixtures, knowledge base loading, use-case weight profiles.
 
 **What's generic (belongs here):** scoring dimensions, evaluator protocol, report structures, CLI surface, pack diff/replay, strategy ablation, event integration.
 
@@ -1357,7 +1357,7 @@ Built a project-specific pack analysis in `fd-data-architecture-poc/src/fd_poc/t
       weights: dict[str, float]  # dimension_name -> weight (must sum to 1.0)
   ```
 
-  Ship 2 built-in profiles (from fd-poc learnings):
+  Ship 2 built-in profiles (from downstream-consumer learnings):
   - `code_generation`: completeness=0.35, relevance=0.25, noise=0.20, breadth=0.10, efficiency=0.10
   - `domain_context`: completeness=0.20, relevance=0.20, noise=0.15, breadth=0.30, efficiency=0.15
 
@@ -1417,7 +1417,7 @@ Built a project-specific pack analysis in `fd-data-architecture-poc/src/fd_poc/t
 - [x] **P0:** `POST /api/v1/ingest/bulk` endpoint accepting entities + edges + aliases in one request — shipped 2026-04-15 (see Sprint B entry above)
 - [ ] **P1:** Clarify EntityType/EdgeKind enum role — either remove from schemas or document as "well-known types" (storage layer already accepts any string)
 - [ ] **P2:** Add `GET /api/v1/sync/status` for recent backfill run tracking
-- [ ] Reference: trellis-platform is at `fd-data-architecture-poc/trellis-platform/` — runners already work against GraphStore directly, need API mode for EKS deployment
+- [ ] Reference: the consumer deployment repo — runners already work against GraphStore directly, need API mode for EKS deployment
 
 ### Storage Backend Guidance & 3-Layer Architecture
 - [ ] Add a "Choosing Backends" section to README and/or agent guide that explains the 3-layer architecture and why each tool exists:
@@ -1464,9 +1464,9 @@ Currently all content routing is hardcoded — each worker/tool decides where co
 
 ### Workflow Integration Hooks (context in, traces out, results back)
 
-Proven patterns from trellis-platform/fd-poc that should be generalized into the core library. These enable any workflow engine (not just fd-poc) to integrate with the experience graph.
+Proven patterns from the consumer deployment that should be generalized into the core library. These enable any workflow engine (not just that deployment) to integrate with the experience graph.
 
-Reference implementation: `fd-data-architecture-poc/src/fd_poc/agents/{graph_context,trace_recorder,result_feedback}.py`
+Reference implementation: the consumer deployment repo's `agents/{graph_context,trace_recorder,result_feedback}.py`
 
 #### Context Injection (pre-dispatch)
 - [ ] **`ContextInjector` class** — generic pre-dispatch hook that assembles graph context for a worker/agent. Takes entity IDs + intent, returns formatted context (markdown or structured).
@@ -1795,14 +1795,14 @@ The current design already supports arbitrary string entity types and edge types
   - How domain categories evolve: start with `general`, split into `data_pattern`, `convention`, `architecture`, etc. as usage reveals natural groupings
   - How `retrieval_affinity` tags bridge domain-specific content to the generic retrieval tier system
   - When to add a new entity type vs. using metadata on an existing type (decision criteria: does it have its own identity? do agents query for it by type? does it participate in typed edges?)
-  - Example: trellis-platform defines `UC_TABLE`, `DBT_MODEL`, `EXEMPLAR`, `PRECEDENT` — another deployment might define `API_ENDPOINT`, `RUNBOOK`, `INCIDENT`, `PLAYBOOK`
+  - Example: one consumer deployment defines `UC_TABLE`, `DBT_MODEL`, `EXEMPLAR`, `PRECEDENT` — another deployment might define `API_ENDPOINT`, `RUNBOOK`, `INCIDENT`, `PLAYBOOK`
 
 - [ ] **Per-implementation skill context** — how agents learn what entity types and categories exist in *their* deployment:
   - Agents should be able to discover available types via graph introspection (e.g., `trellis retrieve entity-types` → list of types with counts)
   - Skill definitions (MCP tool descriptions, agent system prompts) should be generated or enriched from the graph's actual content, not hardcoded
   - The graph teaches the agent what to ask for — if an agent sees `EXEMPLAR` entities exist, it can request exemplars; if they don't, it doesn't waste tokens asking
 
-- [ ] **Starter templates** — provide a minimal `knowledge/` scaffold and sample `ingestion-rules.yaml` that new deployments can copy and customize, rather than starting from scratch or copying trellis-platform's domain-specific setup
+- [ ] **Starter templates** — provide a minimal `knowledge/` scaffold and sample `ingestion-rules.yaml` that new deployments can copy and customize, rather than starting from scratch or copying a consumer deployment's domain-specific setup
 
 ### Graph Modeling Guidance, Node Roles & Curation
 
@@ -2183,7 +2183,7 @@ Graphiti is a **1-D specialist** (conversational memory with temporal facts, hea
 
 - [ ] **Contradiction detection on upsert** — When `upsert_node` receives properties that conflict with existing properties from a different `source_of_truth`, flag it rather than silently overwriting. Store both versions with temporal validity. Requires the `source_of_truth` field proposed in the cross-store reference model. Start simple: detect numeric/date/enum conflicts; ignore free-text differences.
 
-- [ ] **Community detection** — Auto-cluster entities into domain groups using graph structure (Louvain, Leiden, or label propagation). Creates community cluster nodes with summary embeddings. Enables: "tell me about the sportsbook domain" → returns pre-computed cluster summary rather than individual entity lookups. Evaluate: does this provide value over manual `domain` metadata tags? Where does it discover structure that manual tagging misses? **Implementation note:** community nodes should use `node_role=CURATED` with `generation_spec.generator_name="community_detection_<algorithm>"` from the "Graph Modeling Guidance, Node Roles & Curation" framework — do not introduce a parallel `COMMUNITY` entity type or a separate regeneration mechanism. The curated-node framework already covers regeneration, freshness tracking, and retrieval boosting.
+- [ ] **Community detection** — Auto-cluster entities into domain groups using graph structure (Louvain, Leiden, or label propagation). Creates community cluster nodes with summary embeddings. Enables: "tell me about the orders domain" → returns pre-computed cluster summary rather than individual entity lookups. Evaluate: does this provide value over manual `domain` metadata tags? Where does it discover structure that manual tagging misses? **Implementation note:** community nodes should use `node_role=CURATED` with `generation_spec.generator_name="community_detection_<algorithm>"` from the "Graph Modeling Guidance, Node Roles & Curation" framework — do not introduce a parallel `COMMUNITY` entity type or a separate regeneration mechanism. The curated-node framework already covers regeneration, freshness tracking, and retrieval boosting.
 
 - [ ] **Workflow/saga entity** — Promote workflow runs from implicit (`workflow_id` on traces) to explicit first-class entities. A `WORKFLOW_RUN` node links to its traces via ordered edges. Enables: "show me all runs of the SQL generation workflow", "what was the last successful run?", "compare run 5 vs run 6." Natural fit for the multi-agent pipeline use case. **Role:** workflow runs are `node_role=SEMANTIC` (they are real things that happened, not synthesis) — do not confuse with curated nodes.
 

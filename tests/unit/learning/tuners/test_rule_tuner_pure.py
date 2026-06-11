@@ -21,7 +21,7 @@ def _event(
     *,
     success: bool = True,
     latency_ms: float = 10.0,
-    domain: str | None = "sportsbook",
+    domain: str | None = "orders",
     intent_family: str | None = "plan",
     tool_name: str | None = None,
     items_served: int | None = None,
@@ -304,7 +304,7 @@ def test_apply_rules_produces_proposals_per_firing():
 
 def test_proposal_id_is_deterministic():
     scope = ParameterScope(
-        component_id="retrieve.strategies.KeywordSearch", domain="sportsbook"
+        component_id="retrieve.strategies.KeywordSearch", domain="orders"
     )
     rule = DEFAULT_RULES[0]
     id_a = _deterministic_proposal_id(rule, scope)

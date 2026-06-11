@@ -27,7 +27,7 @@ builder = PackBuilder(strategies=[keyword_search, graph_search])
 
 # Assemble objective context once
 objective_pack = builder.build_sectioned(
-    intent="Build daily GGR reporting from sportsbook bet events",
+    intent="Build daily revenue reporting from order events",
     sections=[
         SectionRequest(
             name="Domain Knowledge",
@@ -42,7 +42,7 @@ objective_pack = builder.build_sectioned(
             max_items=8,
         ),
     ],
-    domain="sportsbook",
+    domain="orders",
 )
 
 # Assemble task context per step
@@ -57,11 +57,11 @@ task_pack = builder.build_sectioned(
         SectionRequest(
             name="Entity Metadata",
             retrieval_affinities=["reference"],
-            entity_ids=["uc://foundation.sportsbook.bets_v7"],
+            entity_ids=["uc://analytics.orders.orders_v7"],
             max_tokens=2000,
         ),
     ],
-    domain="sportsbook",
+    domain="orders",
 )
 ```
 
@@ -70,7 +70,7 @@ task_pack = builder.build_sectioned(
 If your agents use the Trellis MCP server:
 
 ```
-get_objective_context(intent="Build daily GGR from sportsbook", domain="sportsbook")
+get_objective_context(intent="Build daily revenue from orders", domain="orders")
 get_task_context(intent="Generate SQL for session aggregation", entity_ids=["uc://table"])
 ```
 
@@ -83,13 +83,13 @@ from trellis_sdk.skills import (
 )
 
 # Once at workflow start
-objective = get_objective_context_for_workflow(client, "Build daily GGR from sportsbook")
+objective = get_objective_context_for_workflow(client, "Build daily revenue from orders")
 
 # Per step
 task = get_task_context_for_step(
     client,
     "Generate SQL for session aggregation",
-    entity_ids=["uc://foundation.sportsbook.bets_v7"],
+    entity_ids=["uc://analytics.orders.orders_v7"],
 )
 ```
 

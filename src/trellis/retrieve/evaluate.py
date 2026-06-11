@@ -436,7 +436,7 @@ DEFAULT_DIMENSIONS: tuple[QualityDimension, ...] = (
 
 
 # ---------------------------------------------------------------------------
-# Built-in profiles (from fd-poc learnings, 2026-04-05)
+# Built-in profiles (from downstream-consumer learnings, 2026-04-05)
 # ---------------------------------------------------------------------------
 
 

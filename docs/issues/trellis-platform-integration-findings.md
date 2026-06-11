@@ -1,6 +1,6 @@
 # Integration Findings from trellis-platform Backfill
 
-Issues discovered while building the Trellis graph backfill in fd-data-architecture-poc.
+Issues discovered while building the Trellis graph backfill in the consumer deployment repo.
 Each item is a gap in the trellis-ai core that caused friction.
 
 ## P0 — Blocks correct usage
@@ -32,8 +32,8 @@ with batch transaction semantics.
 ## P1 — Causes friction
 
 ### 3. Document store FTS only indexed content, not metadata
-**Impact:** 561 query pattern documents had doc_ids like `query_pattern://foundation.sportsbook.bet_events`
-but searching "bet_events" returned 0 results because the tsvector only indexed the content body.
+**Impact:** 561 query pattern documents had doc_ids like `query_pattern://analytics.orders.order_events`
+but searching "order_events" returned 0 results because the tsvector only indexed the content body.
 
 **Fix:** (DONE in v0.2.4) Weighted tsvector: `doc_id` (A) + `metadata.title` (A) + `metadata.domain` (B) + `content` (C).
 Auto-migration in `_init_schema()`.
@@ -54,12 +54,12 @@ auto-generated and callers should not supply them.
 **Fix:** (Added to TODO) Document the sidecar pattern + `.mcp.json` config.
 
 ### 10. Pack builder GraphSearch doesn't filter by domain — returns noise
-**Impact:** `POST /api/v1/packs` with `domain=sportsbook` returns trellis-ai
+**Impact:** `POST /api/v1/packs` with `domain=orders` returns trellis-ai
 test files (`git://trellis-ai/tests/unit/...`) with score=1.0, drowning out
 relevant query pattern documents (score=0.67). The graph strategy returns the most
 recently created nodes without domain filtering.
 
-**Document search works correctly** — `GET /api/v1/search?q=sportsbook+bet` returns
+**Document search works correctly** — `GET /api/v1/search?q=order+events` returns
 10 highly relevant query pattern documents. The issue is ONLY in the pack builder's
 graph strategy.
 
@@ -70,8 +70,8 @@ c. Use relevance scoring based on property matching, not just recency
 d. Respect the `domain` field in node properties
 
 ### 11. UC/dbt entities have no document store entries — invisible to keyword search
-**Impact:** 10,845 UC table entities and 2,819 dbt model entities are ONLY in the
-graph store. Searching for "bet_events" only finds 2 knowledge docs, not the actual
+**Impact:** ~10K UC table entities and ~3K dbt model entities are ONLY in the
+graph store. Searching for "order_events" only finds 2 knowledge docs, not the actual
 UC_TABLE entity. The entity exists as a node but has no document store representation.
 
 **Fix:** During ingestion, entities with descriptions (UC `comment` field, dbt `description`
@@ -128,7 +128,7 @@ c. Implement `POST /api/v1/ingest/bulk` (P0 #2) which can create nodes and edges
 
 ### 11. PG proxy on bastion not functional
 **Impact:** Direct PostgreSQL access via the bastion's port 5432 fails with "server closed
-the connection unexpectedly". Only the REST API on port 8420 works from outside VPC. This
+the connection unexpectedly". Only the REST API works from outside the VPC. This
 limits operations that need direct PG (vectorization, bulk ingestion via `PostgresGraphStore`).
 
 **Workaround:** Use REST API endpoints or SSH tunnel to bastion.

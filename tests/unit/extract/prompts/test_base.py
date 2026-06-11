@@ -112,14 +112,14 @@ class TestShippedTemplates:
     def test_memory_extraction_renders(self) -> None:
         msgs = render(
             MEMORY_EXTRACTION_V1,
-            text="casino_sessions owner is alice",
+            text="domain_c_sessions owner is alice",
             entity_type_hints=["person", "dataset"],
             domain="data_eng",
         )
         assert msgs[0].role == "system"
         assert "memories" in msgs[0].content
         assert "Memory:" in msgs[1].content
-        assert "casino_sessions" in msgs[1].content
+        assert "domain_c_sessions" in msgs[1].content
 
     def test_entity_extraction_schema_mentions_json(self) -> None:
         """Sanity: system prompt documents JSON output."""

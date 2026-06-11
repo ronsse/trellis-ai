@@ -81,7 +81,7 @@ def test_keyword_search_honours_registry_half_life(
         ParameterSet(
             scope=ParameterScope(
                 component_id="retrieve.strategies.KeywordSearch",
-                domain="sportsbook",
+                domain="orders",
             ),
             # Setting a very short half-life causes steep decay for an
             # old document — score drops far below the no-override case.
@@ -96,10 +96,10 @@ def test_keyword_search_honours_registry_half_life(
         "updated_at": "2000-01-01T00:00:00+00:00",
     }
     baseline = KeywordSearch(_FakeDocStore([doc])).search(
-        "hello", filters={"domain": "sportsbook"}
+        "hello", filters={"domain": "orders"}
     )
     tuned = KeywordSearch(_FakeDocStore([doc]), registry=reg).search(
-        "hello", filters={"domain": "sportsbook"}
+        "hello", filters={"domain": "orders"}
     )
     assert tuned[0].relevance_score < baseline[0].relevance_score
 
@@ -113,25 +113,25 @@ def test_graph_search_domain_match_boost_overridable(
             "node_id": "n1",
             "node_type": "entity",
             "node_role": "semantic",
-            "properties": {"domain": "sportsbook", "name": "match-a"},
+            "properties": {"domain": "orders", "name": "match-a"},
         },
     ]
     # Baseline uses hardcoded GRAPH_DOMAIN_MATCH_BOOST (1.3).
     baseline = GraphSearch(_FakeGraphStore(nodes)).search(
-        "irrelevant", filters={"domain": "sportsbook"}
+        "irrelevant", filters={"domain": "orders"}
     )
     # Override the domain-match boost down to 1.0 (neutral).
     param_store.put(
         ParameterSet(
             scope=ParameterScope(
                 component_id="retrieve.strategies.GraphSearch",
-                domain="sportsbook",
+                domain="orders",
             ),
             values={"domain_match_boost": 1.0},
         )
     )
     tuned = GraphSearch(_FakeGraphStore(nodes), registry=reg).search(
-        "irrelevant", filters={"domain": "sportsbook"}
+        "irrelevant", filters={"domain": "orders"}
     )
     # Same node, lower boost → lower score.
     assert tuned[0].relevance_score < baseline[0].relevance_score

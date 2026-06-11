@@ -844,7 +844,7 @@ retrieval:
       get_sectioned_context:
         max_tokens: 8000
     by_domain:
-      sportsbook:
+      orders:
         max_tokens_multiplier: 1.25
 ```
 

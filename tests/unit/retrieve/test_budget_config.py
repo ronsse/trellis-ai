@@ -57,11 +57,11 @@ class TestFromDict:
         cfg = BudgetConfig.from_dict(
             {
                 "by_domain": {
-                    "sportsbook": {"max_tokens_multiplier": 1.5},
+                    "orders": {"max_tokens_multiplier": 1.5},
                 },
             }
         )
-        budget = cfg.resolve(tool="any", domain="sportsbook")
+        budget = cfg.resolve(tool="any", domain="orders")
         assert budget.max_tokens == 6000  # 4000 * 1.5
         assert budget.max_items == 30  # default, multiplier = 1.0
 
@@ -95,12 +95,12 @@ class TestResolutionHierarchy:
                 "get_task_context": BudgetSpec(max_tokens=2000, max_items=10),
             },
             by_domain={
-                "sportsbook": DomainBudgetSpec(
+                "orders": DomainBudgetSpec(
                     max_tokens_multiplier=1.25, max_items_multiplier=2.0
                 ),
             },
         )
-        budget = cfg.resolve(tool="get_task_context", domain="sportsbook")
+        budget = cfg.resolve(tool="get_task_context", domain="orders")
         assert budget.max_tokens == 2500  # 2000 * 1.25
         assert budget.max_items == 20  # 10 * 2.0
 
@@ -234,7 +234,7 @@ class TestRegistryIntegration:
                                 "get_task_context": {"max_tokens": 2000},
                             },
                             "by_domain": {
-                                "sportsbook": {"max_tokens_multiplier": 1.5},
+                                "orders": {"max_tokens_multiplier": 1.5},
                             },
                         }
                     }
@@ -249,7 +249,7 @@ class TestRegistryIntegration:
         assert tool_budget.max_tokens == 2000
 
         domain_budget = registry.budget_config.resolve(
-            tool="get_task_context", domain="sportsbook"
+            tool="get_task_context", domain="orders"
         )
         assert domain_budget.max_tokens == 3000  # 2000 * 1.5
 

@@ -63,7 +63,7 @@ def _seed_failing_outcomes(
     *,
     n: int = 40,
     component_id: str = "retrieve.strategies.KeywordSearch",
-    domain: str = "sportsbook",
+    domain: str = "orders",
 ) -> None:
     base = datetime.now(UTC) - timedelta(hours=1)
     for i in range(n):

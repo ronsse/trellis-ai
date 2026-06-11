@@ -7,7 +7,7 @@
 **Related:**
 - [`./adr-enterprise-ontology-capability-framing.md`](./adr-enterprise-ontology-capability-framing.md) — #217, the umbrella capability framing this profile concept sits under
 - [`./adr-query-history-promotion.md`](./adr-query-history-promotion.md) — #218, candidate→accepted promotion of query-derived edges (consumes the `candidate_only` / `promotion_requires_review` profile fields defined here)
-- [`./adr-egp-interop-bridge.md`](./adr-egp-interop-bridge.md) — #220, the EGP interop bridge whose example profile motivates §2
+- [`./adr-enterprise-graph-interop-bridge.md`](./adr-enterprise-graph-interop-bridge.md) — #220, the enterprise graph (EG) interop bridge whose example profile motivates §2
 - [`./adr-column-leaf-modeling-guardrails.md`](./adr-column-leaf-modeling-guardrails.md) — #221, column-vs-dataset modeling guidance that a profile's `node_role_default` / `recommendation` fields encode
 - [`./adr-plugin-contract.md`](./adr-plugin-contract.md) — existing; plugins may ship profiles (§6, Phase D)
 - [`./adr-graph-ontology.md`](./adr-graph-ontology.md) — sets the "small well-known core + open-string extension" policy this ADR overlays without changing
@@ -33,7 +33,7 @@ That openness is necessary for a reusable library. But it is *insufficient* for 
 - which inferred or LLM-curated facts are still `candidate` versus `accepted`,
 - which projections (named cross-domain query paths) a node or edge participates in.
 
-Without such a layer, an enterprise graph degrades into a bag of correctly-stored strings: structurally valid, semantically drifting. The issue (#219) frames this as the strongest borrowable idea from EGP — not the graph itself (Trellis already has one) but the *governed ontology overlay*.
+Without such a layer, an enterprise graph degrades into a bag of correctly-stored strings: structurally valid, semantically drifting. The issue (#219) frames this as the strongest borrowable idea from the EG — not the graph itself (Trellis already has one) but the *governed ontology overlay*.
 
 ### 1.2 The tension to resolve
 
@@ -65,12 +65,12 @@ A profile expresses exactly the constraints #219 enumerates, and no more:
 | Candidate vs accepted | `status: candidate_only`, `promotion_requires_review` | Facts (typically inferred / query-derived) that are not yet accepted; promotion is governed by #218. |
 | Projection membership | `projections.<name>.allowed_paths` | Named cross-domain query shapes and the entity→edge→entity paths permitted to answer them. |
 
-### 2.2 The profile shape (EGP-inspired example)
+### 2.2 The profile shape (EG-inspired example)
 
 This is the file shape from #219, used as the worked example. It is illustrative of the schema, not a shipped artifact.
 
 ```yaml
-profile_id: fanduel.egp.data-platform.v1
+profile_id: acme.eg.data-platform.v1
 owner: data-architecture
 description: Data-platform and enterprise graph construction profile.
 
@@ -196,7 +196,7 @@ Four phases, each independently shippable and each strictly opt-in. **Recommenda
 | **A — Docs-only convention** | Document the profile concept and the recommended shape in the agent guide; deployments hand-maintain a profile as documentation. | None | None — this ADR + a doc page. Lowest cost; does not prevent drift (that's the point of moving to B). |
 | **B — Profile schema + CLI linter** *(recommended landing zone)* | `OntologyProfile` Pydantic schema + `trellis validate ontology-profile` + `trellis validate graph --profile`. CI-runnable, JSON output. | **None.** Linting is read-only; no write path changes. | This ADR accepted. |
 | **C — Optional MutationExecutor policy enforcement** | A profile-backed `PolicyGate` (the `PolicyGate` Protocol in [`src/trellis/mutate/executor.py`](../../src/trellis/mutate/executor.py), per the `DefaultPolicyGate` pattern in [`src/trellis/mutate/policy_gate.py`](../../src/trellis/mutate/policy_gate.py)) that a deployment installs to `warn` or `deny` writes violating the active profile. Reuses the existing `Enforcement` (`WARN` / `ENFORCE` / `AUDIT_ONLY`) levels — no new enforcement vocabulary. | Opt-in only. Off by default; never installed by `trellis admin init`. | A specific deployment wants write-time enforcement. |
-| **D — Plugin-provided profiles** | Integration packages ship a profile (e.g., `trellis_uc.profile.yaml`, `fanduel_egp.profile.yaml`), discovered via the entry-point mechanism in [`adr-plugin-contract.md`](./adr-plugin-contract.md). A reserved `trellis.ontology_profiles` group would advertise them to `check-plugins`. | None beyond whichever of B/C the deployment has opted into. | A plugin author wants to ship a profile; wire the consumer only when the first one appears (the deferred-wiring policy from [`adr-plugin-contract.md`](./adr-plugin-contract.md)). |
+| **D — Plugin-provided profiles** | Integration packages ship a profile (e.g., `trellis_uc.profile.yaml`, `acme_eg.profile.yaml`), discovered via the entry-point mechanism in [`adr-plugin-contract.md`](./adr-plugin-contract.md). A reserved `trellis.ontology_profiles` group would advertise them to `check-plugins`. | None beyond whichever of B/C the deployment has opted into. | A plugin author wants to ship a profile; wire the consumer only when the first one appears (the deferred-wiring policy from [`adr-plugin-contract.md`](./adr-plugin-contract.md)). |
 
 The phases compose: a deployment can sit at B forever (lint in CI), move to C for production write enforcement, and pick up D's vendor profile as a starting template — without any phase forcing the next.
 
@@ -213,7 +213,7 @@ Tracking #219's stated acceptance criteria:
 - [x] **A design doc/ADR defines the Ontology Profile concept and explains why it is optional.** This document; §2.3 and §5.
 - [x] **The profile can express:** domains (§2.1 `domains`), entity types (`entity_types`), edge kinds (`edge_kinds`), source authority (`source_authority`), required/recommended/forbidden properties (`required_properties` / `recommended_properties` / `forbidden_properties`), node-role defaults (`node_role_default`), cross-domain requirements (`cross_domain` / `requires_declared_by`), candidate vs accepted status (`status: candidate_only` / `promotion_requires_review`), projection membership (`projections`).
 - [x] **The design explicitly preserves the open-string core.** §2.3, §5, and the `unknown_types` escape hatch.
-- [x] **Includes an EGP-inspired example profile.** §2.2.
+- [x] **Includes an EG-inspired example profile.** §2.2.
 - [x] **Includes a migration path** (docs-only → CLI linter → optional mutation-policy enforcement → plugin-provided). §6.
 - [x] **Explains how this differs from RDF/OWL and why it is lighter.** §4.
 
@@ -233,5 +233,5 @@ A future implementation ADR (or a phase landing under this one) will additionall
 - **Not a runtime change at the recommended landing zone (Phase B).** The linter is read-only. Write-time enforcement (Phase C) is a separate, deliberate opt-in.
 - **Not defining the promotion mechanics for candidate→accepted facts.** The profile *marks* `candidate_only` / `promotion_requires_review`; the promotion loop itself is [`adr-query-history-promotion.md`](./adr-query-history-promotion.md) (#218).
 - **Not defining column-vs-dataset modeling rules.** The profile can *encode* such a guardrail (`Column.recommendation`, `node_role_default`); the guidance itself is [`adr-column-leaf-modeling-guardrails.md`](./adr-column-leaf-modeling-guardrails.md) (#221).
-- **Not an interop/export format.** Consuming Trellis graphs from external EGP tooling is [`adr-egp-interop-bridge.md`](./adr-egp-interop-bridge.md) (#220); the `schema_alignment` field already serves RDF/JSON-LD export ([`adr-graph-ontology.md`](./adr-graph-ontology.md) §3.4). A profile is governance-in, not export-out.
+- **Not an interop/export format.** Consuming Trellis graphs from external EG tooling is [`adr-enterprise-graph-interop-bridge.md`](./adr-enterprise-graph-interop-bridge.md) (#220); the `schema_alignment` field already serves RDF/JSON-LD export ([`adr-graph-ontology.md`](./adr-graph-ontology.md) §3.4). A profile is governance-in, not export-out.
 - **Not claiming any code is implemented.** This ADR is **Proposed**; no `OntologyProfile` schema, `validate` command, or `ProfilePolicyGate` exists yet.

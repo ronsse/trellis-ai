@@ -129,7 +129,7 @@ def record_feedback(
             (e.g. ``artifacts/runs/{run_id}/experience/``).
         event_log: Optional event log to also emit ``FEEDBACK_RECORDED``
             to.  When ``None`` (default), behavior is file-only —
-            matching fd-poc-style workflows that consume the JSONL log
+            matching consumer workflows that consume the JSONL log
             directly.
         outcome_store: Optional :class:`OutcomeStore` to dual-emit an
             ``OutcomeEvent`` bridging PackFeedback into the ops tier.

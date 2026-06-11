@@ -29,13 +29,13 @@ def _make(**overrides) -> OutcomeEvent:
 
 
 def test_append_and_query(store: SQLiteOutcomeStore):
-    event = _make(domain="sportsbook", intent_family="plan")
+    event = _make(domain="orders", intent_family="plan")
     store.append(event)
 
     results = store.query()
     assert len(results) == 1
     assert results[0].event_id == event.event_id
-    assert results[0].domain == "sportsbook"
+    assert results[0].domain == "orders"
     assert results[0].outcome.success is True
 
 
