@@ -11,6 +11,9 @@
 - [`../../src/trellis/stores/base/graph.py`](../../src/trellis/stores/base/graph.py) `validate_document_ids` (lines 118–155) — structural contract the curator dereferences.
 - [`../../src/trellis_workers/enrichment/service.py`](../../src/trellis_workers/enrichment/service.py) — pre-existing summarization capability the curator deliberately does **not** wrap.
 - [`../../src/trellis/ops/registry.py`](../../src/trellis/ops/registry.py) `ParameterRegistry` — where the under-population threshold lives.
+- [`./adr-memory-layer-interop.md`](./adr-memory-layer-interop.md) — in the delegate variant, `document_ids` point at external Memory-Layer item IDs and `DocumentStore` becomes a read-through backend. The curator is unaffected structurally (it reads through the same `read_document` tool), but "read the documents" may then be a cross-system read, and refs dangling after Memory-Layer GC surface as the `documents_unreadable` failure mode in §2.6.
+
+**Terminology note — three "curation" senses.** This ADR's *inner curation loop* (a graph skill populating sparse node descriptions) is distinct from the dual-loop feedback *curation* of pack content ([`adr-dual-loop-evolution.md`](./adr-dual-loop-evolution.md)) and from the Memory Layer's *chained curation* of stored items ([`adr-memory-layer-interop.md`](./adr-memory-layer-interop.md)). None of the three subsumes another.
 
 ---
 
@@ -60,7 +63,7 @@ def is_under_populated(
 
 Threshold default: **80 characters**. Lives in [`ParameterRegistry`](../../src/trellis/ops/registry.py) under scope `component_id="curator"`, key `under_population_threshold_chars`. Tuneable by Item 3's parameter-promotion flow without redeploys.
 
-`excluded_roles` defaults to `("curated",)`. A node whose `node_role="curated"` was set deliberately by a human reviewer or a prior curator pass should not be re-enriched on top — overwriting intentional output is a safety regression, not a feature. The exclusion list lives in the same `ParameterRegistry` scope under key `under_population_excluded_roles`. Adding `"semantic"` or other structural-only roles is a follow-up once feedback signal tells us whether the v1 list under- or over-fires.
+`excluded_roles` defaults to `("curated",)`. A node whose `node_role="curated"` was set deliberately by a human reviewer or a prior curator pass should not be re-curated on top — overwriting intentional output is a safety regression, not a feature. The exclusion list lives in the same `ParameterRegistry` scope under key `under_population_excluded_roles`. Adding `"semantic"` or other structural-only roles is a follow-up once feedback signal tells us whether the v1 list under- or over-fires.
 
 The heuristic is otherwise deliberately crude. v1 does not look at `summary`, `properties` density, or edge count. Adding those is a follow-up once we have feedback signal (§2.5) telling us whether the simple rule under- or over-fires.
 
@@ -88,7 +91,7 @@ The Command goes through `MutationExecutor` (`src/trellis/mutate/`) — same pip
 The curator does **not**:
 
 - Invent new edges (`EDGE_UPSERT`). Edge proposals are a future relationship-discoverer skill.
-- Create new entities (`ENTITY_CREATE`). The curator only enriches what extraction already produced.
+- Create new entities (`ENTITY_CREATE`). The curator only curates what extraction already produced.
 - Touch any property other than `description` and `summary`. No `importance`, no `auto_tags`, no `content_tags` — those have their own owners.
 - Modify `node_role`, `generation_spec`, `document_ids`, or any structural property.
 
@@ -100,13 +103,13 @@ The curator emits one event on success, one on failure, and consumes one downstr
 
 | Event | When | Payload (highlights) |
 |---|---|---|
-| `node.enriched` | After successful `ENTITY_UPDATE` | `node_id`, `pre_description_len`, `post_description_len`, `summary`, `document_ids_read`, `tokens_used`, `cost_cents`, `proposal_hash`, `skill_run_id` |
+| `node.curated` | After successful `ENTITY_UPDATE` | `node_id`, `pre_description_len`, `post_description_len`, `summary`, `document_ids_read`, `tokens_used`, `cost_cents`, `proposal_hash`, `skill_run_id` |
 | `curation.deferred` | On any non-success exit | `node_id`, `reason_code` (one of `documents_unreadable`, `policy_rejected`, `idempotent_short_circuit`, `budget_exceeded`, `llm_error`), `error_excerpt`, `skill_run_id` |
-| `curation.feedback_recorded` | Authored externally by F4 evaluator | `node_id`, `enrichment_event_id`, `appeared_in_pack` (bool), `pack_feedback_delta` (numeric), `coverage_delta`, `human_quality` (optional 0–1) |
+| `curation.feedback_recorded` | Authored externally by F4 evaluator | `node_id`, `curation_event_id`, `appeared_in_pack` (bool), `pack_feedback_delta` (numeric), `coverage_delta`, `human_quality` (optional 0–1) |
 
 Three signals drive the F5 score-based evolver:
 
-1. **Pack reuse with positive feedback** — did an enriched node appear in a later assembled pack, and was that pack rated positively? Joined via `node_id` against `pack.assembled` + `feedback.recorded` from the existing effectiveness loop.
+1. **Pack reuse with positive feedback** — did a curated node appear in a later assembled pack, and was that pack rated positively? Joined via `node_id` against `pack.assembled` + `feedback.recorded` from the existing effectiveness loop.
 2. **Coverage delta** — percentage of nodes meeting `is_under_populated()` that became populated in a rolling window. Computed from the EventLog.
 3. **Sampled human quality** — optional CLI `trellis admin curation sample --n 20 --rate` for periodic human review. Default off; intended for evolver training cycles.
 
@@ -139,7 +142,7 @@ A service would be a longer-lived process with its own state, its own retry poli
 
 ### 3.2 Why hard-bound write scope
 
-A general-purpose enrichment agent that could write any property would drift. It would start with `description`, learn the model writes useful `importance` scores, gain a tag-rewrite mode, become a competing classifier, and eventually we'd be debating whether the curator or the tagging pipeline owns `content_tags`. v1 says: two property keys, one Command type, full stop. The policy gate enforcing this is one Pydantic validator on the `ENTITY_UPDATE` payload. Lifting the scope is a single ADR amendment later; locking it now prevents the drift and gives us a clean baseline for the F4 evaluator to score against.
+A general-purpose curation agent that could write any property would drift. It would start with `description`, learn the model writes useful `importance` scores, gain a tag-rewrite mode, become a competing classifier, and eventually we'd be debating whether the curator or the tagging pipeline owns `content_tags`. v1 says: two property keys, one Command type, full stop. The policy gate enforcing this is one Pydantic validator on the `ENTITY_UPDATE` payload. Lifting the scope is a single ADR amendment later; locking it now prevents the drift and gives us a clean baseline for the F4 evaluator to score against.
 
 ### 3.3 Why opt-in scheduler default
 
@@ -155,17 +158,17 @@ This is the pre-committed call worth defending. Two viable shapes:
 
 We pick A for three reasons:
 
-1. **`EnrichmentService` shape mismatch.** Its output is `EnrichmentResult` — a classification-shaped record with `auto_tags`, `auto_class`, `auto_importance`, `auto_summary`. The curator wants `{summary, description}` for a *node*, not a *document*. Wrapping `EnrichmentService` means either ignoring 80% of its return value or pretending node-level enrichment is document-level enrichment.
-2. **Coupling cost.** `EnrichmentService` is currently load-bearing for the classification path. Adding a node-enrichment caller doubles the set of consumers reading from its prompt + result schema; either we constrain `EnrichmentService` to keep the curator happy (slowing classification work) or we fork it (two summarization paths to maintain).
+1. **`EnrichmentService` shape mismatch.** Its output is `EnrichmentResult` — a classification-shaped record with `auto_tags`, `auto_class`, `auto_importance`, `auto_summary`. The curator wants `{summary, description}` for a *node*, not a *document*. Wrapping `EnrichmentService` means either ignoring 80% of its return value or pretending node-level curation is document-level enrichment.
+2. **Coupling cost.** `EnrichmentService` is currently load-bearing for the classification path. Adding a node-curation caller doubles the set of consumers reading from its prompt + result schema; either we constrain `EnrichmentService` to keep the curator happy (slowing classification work) or we fork it (two summarization paths to maintain).
 3. **Harness ergonomics.** The harness already exposes `read_document` as an allowlisted tool with telemetry. The model deciding *which* documents to read deeply and which to skim is exactly the kind of decision an LLM is good at and an iterator is not. Option B's per-doc loop loses that.
 
 Option B's only advantage is that `EnrichmentService` is already there. That is a sunk-cost argument; the maintenance surface of Option A is one prompt template living next to the skill that uses it.
 
-### 3.5 Why async lazy enrichment in F3
+### 3.5 Why async lazy curation in F3
 
 When `PackBuilder` notices an under-populated node mid-assembly, two designs are possible:
 
-- **Sync:** block pack assembly while the curator runs. The returned pack reflects the enriched description.
+- **Sync:** block pack assembly while the curator runs. The returned pack reflects the curated description.
 - **Async:** emit `curation.requested`, return the current pack unblocked, let the worker pick it up. The *next* pack against the same node benefits.
 
 We default async. A sync curator runs for tens of seconds (LLM round-trip + document fetch); pack assembly is on the agent's hot path. Blocking would change the latency profile from "Trellis returns in under a second" to "Trellis returns whenever its LLM provider feels like it." Async preserves the latency contract, gives the curator the freedom to defer/retry/batch, and accepts that the first agent to encounter an under-populated node pays no benefit. Convergence to a fully-populated graph is the F4 metric; first-touch latency is not.
@@ -189,7 +192,7 @@ The curator must **never**:
 ### 5.1 What this enables
 
 - **Closes the `adr-planes-and-substrates.md` Phase 4 deferred story.** `document_ids` stops being a structural link with no consumer; the curator is the consumer.
-- **Gives F4/F5 the signal source for the evolver.** `node.enriched` + `curation.feedback_recorded` is the joint surface against which the score-based evolver tunes the threshold, the budget, and the prompt-template version. Without this loop, F5 has nothing to score.
+- **Gives F4/F5 the signal source for the evolver.** `node.curated` + `curation.feedback_recorded` is the joint surface against which the score-based evolver tunes the threshold, the budget, and the prompt-template version. Without this loop, F5 has nothing to score.
 - **Reusable skill pattern.** Curator is the first concrete graph skill on the harness. Its shape — narrow write scope, opt-in scheduler, idempotent proposal hash — is the template future skills (relationship-discoverer, claim-verifier) follow.
 - **Convergence-eval ready.** The parallel `eval/scenarios/skill_loop_convergence/` scenario can use the curator as its primary skill subject without further design work.
 
@@ -209,9 +212,9 @@ The curator must **never**:
 ## 6. Alternatives considered
 
 - **Call `EnrichmentService.summarize()` directly without a skill.** Rejected. No tool allowlist, no harness telemetry, no per-call budget, no idempotency hash. We would either be reinventing the harness inside the enrichment package or accepting that a load-bearing LLM caller has no observability. Both are worse than reusing the harness.
-- **Auto-run the curator on every `ENTITY_CREATE`.** Rejected. At POC stage, an ingestion pipeline that fires an LLM on every new entity is a runaway-cost risk. Detected (scheduler) and Lazy (pack-time) gate enrichment on actual demand — only nodes that *are* under-populated *and* matter (to a scheduler scan or a real assembled pack) trigger work. Auto-on-create is the kind of decision that looks fine in isolation and turns into a postmortem when a backfill job creates a million entities.
+- **Auto-run the curator on every `ENTITY_CREATE`.** Rejected. At POC stage, an ingestion pipeline that fires an LLM on every new entity is a runaway-cost risk. Detected (scheduler) and Lazy (pack-time) gate curation on actual demand — only nodes that *are* under-populated *and* matter (to a scheduler scan or a real assembled pack) trigger work. Auto-on-create is the kind of decision that looks fine in isolation and turns into a postmortem when a backfill job creates a million entities.
 - **Store the summary as a separate node, not a property.** Rejected. Doubles graph storage for no read-side benefit; every read of "what is this node" would need a one-hop traversal. The property-on-the-node shape matches what every retrieval surface already does.
-- **Run the curator as a separate worker package, not a skill on the harness.** Rejected. Splits the agent-loop abstraction in two: the harness for "agents that read the graph," another package for "agents that enrich the graph." The harness is general enough; forking is premature.
+- **Run the curator as a separate worker package, not a skill on the harness.** Rejected. Splits the agent-loop abstraction in two: the harness for "agents that read the graph," another package for "agents that curate the graph." The harness is general enough; forking is premature.
 - **Skip `MutationExecutor`, write directly to the graph store.** Rejected outright. Project hard rule. Restated here so future skill authors see it in this ADR.
 
 ## 7. References
