@@ -116,6 +116,59 @@ class TestSubgraphResult:
         assert len(r.edges) == 1
 
 
+class TestFilterClauseContainsOp:
+    """Phase 3 ``contains`` operator — list-membership.
+
+    The DSL validation is the only thing the pure-value-object can pin;
+    behaviour against an actual list-typed property lives in the
+    backend contract suite.
+    """
+
+    def test_contains_with_string_scalar_ok(self) -> None:
+        clause = FilterClause("properties.column_names", "contains", "user_id")
+        assert clause.value == "user_id"
+        assert clause.op == "contains"
+
+    def test_contains_with_int_scalar_ok(self) -> None:
+        clause = FilterClause("properties.ids", "contains", 42)
+        assert clause.value == 42
+
+    def test_contains_with_float_scalar_ok(self) -> None:
+        clause = FilterClause("properties.thresholds", "contains", 0.5)
+        assert clause.value == 0.5
+
+    def test_contains_with_bool_scalar_ok(self) -> None:
+        """``bool`` is a legitimate list element type, unlike for range ops."""
+        clause = FilterClause("properties.flags", "contains", True)
+        assert clause.value is True
+
+    def test_contains_rejects_tuple_value(self) -> None:
+        """A tuple of values is the ``in`` shape; ``contains`` takes one."""
+        with pytest.raises(TypeError, match="scalar"):
+            FilterClause("properties.column_names", "contains", ("a", "b"))
+
+    def test_contains_rejects_none_value(self) -> None:
+        with pytest.raises(ValueError, match="scalar"):
+            FilterClause("properties.column_names", "contains", None)
+
+    def test_contains_rejects_list_value(self) -> None:
+        """List is not in the FilterClause value union; mypy + runtime reject."""
+        with pytest.raises(TypeError, match="scalar"):
+            FilterClause(
+                "properties.column_names",
+                "contains",
+                ["a", "b"],  # type: ignore[arg-type]
+            )
+
+    def test_contains_rejects_dict_value(self) -> None:
+        with pytest.raises(TypeError, match="scalar"):
+            FilterClause(
+                "properties.column_names",
+                "contains",
+                {"k": "v"},  # type: ignore[arg-type]
+            )
+
+
 class TestFilterClauseRangeOps:
     """Phase 2 range operators — added for provenance filtering."""
 
@@ -237,3 +290,137 @@ class TestSQLiteEdgeCompiler:
 
         with pytest.raises(ValueError, match="Unsupported DSL edge field"):
             SQLiteGraphStore._edge_field_to_sql_expr("not_a_real_field")
+
+
+class TestSQLiteContainsCompiler:
+    """Pure-compile tests for the SQLite ``contains`` compiler path.
+
+    Verifies the ``json_each`` EXISTS shape and parameter binding.
+    Behavioural coverage lives in the contract suite.
+    """
+
+    def test_contains_compiles_to_json_each_exists(self) -> None:
+        from trellis.stores.sqlite.graph import SQLiteGraphStore
+
+        clause = FilterClause("properties.column_names", "contains", "user_id")
+        sql, params = SQLiteGraphStore._render_contains_sqlite(
+            clause.field, clause
+        )
+        # The ``CASE WHEN json_type(...) = 'array' THEN ... ELSE '[]' END``
+        # guard coerces non-array values to an empty array so
+        # ``json_each`` never raises on scalar properties.
+        assert "json_type" in sql
+        assert "= 'array'" in sql
+        assert "ELSE '[]'" in sql
+        assert "json_each" in sql
+        assert "EXISTS" in sql
+        assert "json_extract(properties_json, '$.column_names')" in sql
+        assert params == ["user_id"]
+
+    def test_contains_rejects_top_level_field(self) -> None:
+        """SQLite top-level columns are TEXT — ``contains`` is nonsense there."""
+        from trellis.stores.sqlite.graph import SQLiteGraphStore
+
+        clause = FilterClause("node_type", "contains", "service")
+        with pytest.raises(ValueError, match=r"properties\.<key>"):
+            SQLiteGraphStore._render_contains_sqlite(clause.field, clause)
+
+    def test_contains_with_int_value_binds_correctly(self) -> None:
+        from trellis.stores.sqlite.graph import SQLiteGraphStore
+
+        clause = FilterClause("properties.ids", "contains", 42)
+        sql, params = SQLiteGraphStore._render_contains_sqlite(
+            clause.field, clause
+        )
+        assert params == [42]
+        # The scalar value lands as a parameter binding on
+        # ``json_each.value = ?`` inside the EXISTS subquery.
+        assert "json_each.value = ?" in sql
+
+
+class TestPostgresContainsCompiler:
+    """Pure-compile tests for the Postgres ``contains`` compiler path.
+
+    Verifies the ``jsonb_typeof`` guard + ``@>`` containment shape.
+    Behavioural coverage lives in the contract suite (env-gated).
+
+    ``PostgresGraphStore`` pulls ``psycopg_pool`` at import; tests skip
+    cleanly when the ``[postgres]`` optional extra isn't installed,
+    mirroring the contract-suite gating pattern.
+    """
+
+    def test_contains_compiles_to_jsonb_typeof_plus_containment(self) -> None:
+        pytest.importorskip(
+            "psycopg_pool", reason="Postgres optional extras not installed"
+        )
+        import json as _json
+
+        from trellis.stores.postgres.graph import PostgresGraphStore
+
+        clause = FilterClause("properties.column_names", "contains", "user_id")
+        sql, params = PostgresGraphStore._compile_properties_clause(clause)
+        # The typeof guard rules out scalar-valued properties; the @>
+        # containment carries the array-special-case.
+        assert "jsonb_typeof(properties->'column_names') = 'array'" in sql
+        assert "properties @> %s::jsonb" in sql
+        # Nested-level @> requires the scalar wrapped in an array —
+        # '{"a": ["x"]}' @> '{"a": "x"}' is FALSE in PostgreSQL.
+        assert params == [_json.dumps({"column_names": ["user_id"]})]
+
+    def test_contains_top_level_field_rejected(self) -> None:
+        pytest.importorskip(
+            "psycopg_pool", reason="Postgres optional extras not installed"
+        )
+        from trellis.stores.postgres.graph import PostgresGraphStore
+
+        clause = FilterClause("node_type", "contains", "service")
+        with pytest.raises(ValueError, match=r"properties\.<key>"):
+            PostgresGraphStore._render_top_level_clause("node_type", clause)
+
+
+class TestBoltOpenCypherContainsCompiler:
+    """Pure-compile tests for the BoltOpenCypher ``contains`` predicate.
+
+    Verifies the Python-side predicate behaviour without a live driver.
+    """
+
+    def test_contains_list_property_matches(self) -> None:
+        from trellis.stores.bolt_opencypher.graph import (
+            BoltOpenCypherGraphStore,
+        )
+
+        clause = FilterClause("properties.column_names", "contains", "user_id")
+        pred = BoltOpenCypherGraphStore._compile_property_predicate(clause)
+        assert pred({"properties": {"column_names": ["user_id", "email"]}}) is True
+        assert pred({"properties": {"column_names": ["email"]}}) is False
+
+    def test_contains_scalar_property_skipped(self) -> None:
+        """Scalar property at the path must NOT match — list-only contract."""
+        from trellis.stores.bolt_opencypher.graph import (
+            BoltOpenCypherGraphStore,
+        )
+
+        clause = FilterClause("properties.team", "contains", "platform")
+        pred = BoltOpenCypherGraphStore._compile_property_predicate(clause)
+        assert pred({"properties": {"team": "platform"}}) is False
+
+    def test_contains_missing_property_skipped(self) -> None:
+        from trellis.stores.bolt_opencypher.graph import (
+            BoltOpenCypherGraphStore,
+        )
+
+        clause = FilterClause("properties.column_names", "contains", "user_id")
+        pred = BoltOpenCypherGraphStore._compile_property_predicate(clause)
+        assert pred({"properties": {}}) is False
+        assert pred({"properties": {"other_key": ["x"]}}) is False
+
+    def test_contains_top_level_field_rejected(self) -> None:
+        from trellis.stores.bolt_opencypher.graph import (
+            BoltOpenCypherGraphStore,
+        )
+
+        clause = FilterClause("node_type", "contains", "service")
+        with pytest.raises(ValueError, match=r"properties\.<key>"):
+            BoltOpenCypherGraphStore._compile_native_cypher_clause(
+                "n", "node_type", clause, 0
+            )

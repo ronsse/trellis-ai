@@ -1192,6 +1192,17 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
             return f"{column} IN ({placeholders})", list(clause.value)
         if op == "exists":
             return f"{column} IS NOT NULL", []
+        if op == "contains":
+            # Top-level columns are scalar TEXT (node_type / edge
+            # provenance columns etc.), not JSONB arrays — ``contains``
+            # against them is nonsense.  Reject explicitly to match the
+            # SQLite path's error rather than silently degrade.
+            msg = (
+                f"FilterClause op='contains' requires a 'properties.<key>' "
+                f"path; got {clause.field!r}.  Top-level columns are "
+                "scalar TEXT, not JSONB arrays."
+            )
+            raise ValueError(msg)
         sql_op = RANGE_OP_GLYPH.get(op)
         if sql_op is None:
             msg = f"Unknown filter op {clause.op!r}"
@@ -1211,6 +1222,25 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
             )
         if clause.op == "exists":
             return "properties ? %s", [key]
+        if clause.op == "contains":
+            # ``contains`` asks: is the scalar value a member of the
+            # JSON array at ``properties->key``?  JSONB's ``@>``
+            # array-contains-primitive exception applies ONLY at the
+            # top level — ``'{"a": ["x"]}' @> '{"a": "x"}'`` is FALSE.
+            # At nested levels structure must match, so the scalar must
+            # be wrapped in an array: ``{"key": [value]}``.  The
+            # ``jsonb_typeof`` guard keeps scalar-valued properties from
+            # ever matching (``'{"a": "x"}' @> '{"a": ["x"]}'`` is
+            # already false, but the guard documents the list-only
+            # contract and protects against future shape drift).  The
+            # value JSON is bound as a parameter; the key still needs a
+            # literal in ``->`` because that operand isn't a bindable
+            # position.
+            return (
+                f"(jsonb_typeof(properties->{_pg_text_lit(key)}) = 'array' "
+                f"AND properties @> %s::jsonb)",
+                [json.dumps({key: [clause.value]})],
+            )
         sql_op = RANGE_OP_GLYPH.get(clause.op)
         if sql_op is not None:
             # JSON-path range comparisons need the JSONB ``->>`` text

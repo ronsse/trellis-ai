@@ -4,6 +4,9 @@
 **Date:** 2026-04-24 (Phase 0 docs completed 2026-04-25)
 **Deciders:** Trellis core
 **Related:**
+- [`./adr-enterprise-ontology-capability-framing.md`](./adr-enterprise-ontology-capability-framing.md) — umbrella framing (#217) that situates this open-string ontology alongside EGP profiles, lineage, and agent memory
+- [`./adr-ontology-profiles.md`](./adr-ontology-profiles.md) — optional governed profiles (#219) that overlay validation on this open-string core without closing it
+- [`./adr-column-leaf-modeling-guardrails.md`](./adr-column-leaf-modeling-guardrails.md) — column/leaf nodes-vs-properties guardrails (#221)
 - [`./adr-tag-vocabulary-split.md`](./adr-tag-vocabulary-split.md) — same "well-known defaults vs open extension" axis applied to content tags
 - [`./adr-terminology.md`](./adr-terminology.md) — canonical term map; this ADR adds entity/edge naming
 - [`../../src/trellis/schemas/enums.py`](../../src/trellis/schemas/enums.py) — `EntityType`, `EdgeKind`, `NodeRole` (today: 10 entity types, 11 edge kinds)
