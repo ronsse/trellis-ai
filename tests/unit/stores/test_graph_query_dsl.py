@@ -322,7 +322,7 @@ class TestSQLiteContainsCompiler:
         from trellis.stores.sqlite.graph import SQLiteGraphStore
 
         clause = FilterClause("node_type", "contains", "service")
-        with pytest.raises(ValueError, match="properties.<key>"):
+        with pytest.raises(ValueError, match=r"properties\.<key>"):
             SQLiteGraphStore._render_contains_sqlite(clause.field, clause)
 
     def test_contains_with_int_value_binds_correctly(self) -> None:
@@ -363,7 +363,9 @@ class TestPostgresContainsCompiler:
         # containment carries the array-special-case.
         assert "jsonb_typeof(properties->'column_names') = 'array'" in sql
         assert "properties @> %s::jsonb" in sql
-        assert params == [_json.dumps({"column_names": "user_id"})]
+        # Nested-level @> requires the scalar wrapped in an array —
+        # '{"a": ["x"]}' @> '{"a": "x"}' is FALSE in PostgreSQL.
+        assert params == [_json.dumps({"column_names": ["user_id"]})]
 
     def test_contains_top_level_field_rejected(self) -> None:
         pytest.importorskip(
@@ -372,7 +374,7 @@ class TestPostgresContainsCompiler:
         from trellis.stores.postgres.graph import PostgresGraphStore
 
         clause = FilterClause("node_type", "contains", "service")
-        with pytest.raises(ValueError, match="properties.<key>"):
+        with pytest.raises(ValueError, match=r"properties\.<key>"):
             PostgresGraphStore._render_top_level_clause("node_type", clause)
 
 
@@ -418,7 +420,7 @@ class TestBoltOpenCypherContainsCompiler:
         )
 
         clause = FilterClause("node_type", "contains", "service")
-        with pytest.raises(ValueError, match="properties.<key>"):
+        with pytest.raises(ValueError, match=r"properties\.<key>"):
             BoltOpenCypherGraphStore._compile_native_cypher_clause(
                 "n", "node_type", clause, 0
             )

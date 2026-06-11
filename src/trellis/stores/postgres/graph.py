@@ -1224,19 +1224,22 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
             return "properties ? %s", [key]
         if clause.op == "contains":
             # ``contains`` asks: is the scalar value a member of the
-            # JSON array at ``properties->key``?  JSONB's ``@>`` has an
-            # array-special-case that matches scalar-in-array, but it
-            # *also* matches scalar-equals-scalar — so a naked ``@>``
-            # would silently treat ``properties.column = "x"`` as a hit
-            # for ``contains "x"``.  Guard with ``jsonb_typeof`` so the
-            # operator only fires when the property is an array.  The
-            # key text and the value JSON are bound as parameters; the
-            # key still needs a literal in ``->`` because the operand
-            # there isn't a bindable position.
+            # JSON array at ``properties->key``?  JSONB's ``@>``
+            # array-contains-primitive exception applies ONLY at the
+            # top level — ``'{"a": ["x"]}' @> '{"a": "x"}'`` is FALSE.
+            # At nested levels structure must match, so the scalar must
+            # be wrapped in an array: ``{"key": [value]}``.  The
+            # ``jsonb_typeof`` guard keeps scalar-valued properties from
+            # ever matching (``'{"a": "x"}' @> '{"a": ["x"]}'`` is
+            # already false, but the guard documents the list-only
+            # contract and protects against future shape drift).  The
+            # value JSON is bound as a parameter; the key still needs a
+            # literal in ``->`` because that operand isn't a bindable
+            # position.
             return (
                 f"(jsonb_typeof(properties->{_pg_text_lit(key)}) = 'array' "
                 f"AND properties @> %s::jsonb)",
-                [json.dumps({key: clause.value})],
+                [json.dumps({key: [clause.value]})],
             )
         sql_op = RANGE_OP_GLYPH.get(clause.op)
         if sql_op is not None:
