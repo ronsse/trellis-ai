@@ -764,6 +764,37 @@ trellis analyze token-usage [--days N] [--format text|json]
 
 Shows total tokens, average per response, breakdown by layer and operation, and over-budget alerts.
 
+### `trellis analyze domains`
+
+Read-only usage report for the primary retrieval slice, `domain`. Joins observed
+domain values across three sources — `TraceContext.domain` (TraceStore),
+`ContentTags.domain` in document metadata (DocumentStore), and pack + feedback
+events (EventLog, grouped by the pack payload's `domain`).
+
+```bash
+trellis analyze domains [--days N] [--limit N] [--format text|json]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--days` | `30` | Days of pack/feedback history to analyze |
+| `--limit` | `1000` | Max traces, documents, and events per source to scan |
+
+Per domain it reports: document count, trace count, packs served, graded packs,
+and success rate from `FEEDBACK_RECORDED`. Items, traces, and packs with **no**
+domain are surfaced under `(none)` so coverage gaps stay visible. Text mode
+prints a Rich table sorted by document count descending; JSON mode emits
+`{"status": "ok", "days": N, "domains": [...]}`.
+
+Use this to decide which domains to seed in
+[`classify.domain_keywords`](tagging-for-retrieval.md#seeding-your-own-domains).
+
+> **Out of scope:** automatic domain discovery/clustering and a domain
+> *promotion* analyzer. Those follow the column-leaf pattern (contract first,
+> gated on production telemetry) — see
+> [`adr-column-leaf-modeling-guardrails.md`](../design/adr-column-leaf-modeling-guardrails.md)
+> and [`adr-autonomy-ladder.md`](../design/adr-autonomy-ladder.md) tier 2.
+
 ---
 
 ## Worker Commands

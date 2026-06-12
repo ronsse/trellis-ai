@@ -56,6 +56,38 @@ class TestAdminInit:
         assert data["status"] == "initialized"
         assert data["next_steps_doc"] == "docs/getting-started/setup-decisions.md"
 
+    def test_init_writes_classify_domain_keywords_example(self, tmp_path, monkeypatch):
+        """The generated config carries a commented classify.domain_keywords
+        example, and uncommenting it yields a config the pipeline can load.
+        """
+        import yaml
+
+        monkeypatch.setenv("TRELLIS_CONFIG_DIR", str(tmp_path / "config"))
+        monkeypatch.setenv("TRELLIS_DATA_DIR", str(tmp_path / "data"))
+        result = runner.invoke(app, ["admin", "init"])
+        assert result.exit_code == 0
+        config_path = tmp_path / "config" / "config.yaml"
+        text = config_path.read_text()
+        # Example block present, but commented out (not active config).
+        assert "# classify:" in text
+        assert "#   domain_keywords:" in text
+        loaded = yaml.safe_load(text) or {}
+        assert "classify" not in loaded
+
+        # Uncommenting the block produces a config the ingestion pipeline
+        # accepts and the custom domain is assigned.
+        from trellis.stores.registry import StoreRegistry
+
+        config_path.write_text(
+            text
+            + "\nclassify:\n  domain_keywords:\n"
+            + "    payments:\n      - stripe\n      - invoice\n      - chargeback\n"
+        )
+        registry = StoreRegistry.from_config_dir(config_dir=tmp_path / "config")
+        pipeline = registry.build_ingestion_pipeline()
+        merged = pipeline.classify("stripe invoice chargeback reconciliation")
+        assert "payments" in merged.tags.get("domain", [])
+
 
 class TestAdminHealth:
     def test_health_uninitialized(self, tmp_path, monkeypatch):

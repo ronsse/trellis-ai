@@ -82,6 +82,55 @@ If content has no `retrieval_affinity` tag, the `TierMapper` applies heuristic r
 
 Explicit tags are always preferred over heuristics. If you want content to land in a specific tier reliably, tag it.
 
+## Seeding Your Own Domains
+
+`domain` is the primary retrieval slice. During deterministic ingestion, the
+`KeywordDomainClassifier` assigns a `domain` when at least two of that domain's
+keywords appear in an item's content. The built-in keyword map covers
+agent-centric defaults (`data-pipeline`, `infrastructure`, `api`, `frontend`,
+`backend`, `ml-ops`, `security`, `testing`, `observability`).
+
+To register a domain specific to your deployment, add a
+`classify.domain_keywords` section to `~/.trellis/config.yaml` — no code change.
+`trellis admin init` writes a commented-out example you can uncomment:
+
+```yaml
+classify:
+  domain_keywords:
+    payments:
+      - stripe
+      - invoice
+      - chargeback
+      - refund
+    compliance-workflow:
+      - audit
+      - attestation
+      - soc2
+      - evidence
+```
+
+Rules:
+
+- **Domains stay free strings.** There is no enum, registry, or allow-list — any
+  string is a valid domain name, consistent with the type-extensibility stance.
+- **Config merges over the built-in defaults**, config winning on key collision.
+  A colliding key (e.g. `api`) *replaces* the built-in keyword list for that
+  domain rather than extending it. The `extra_domains` constructor argument of
+  `KeywordDomainClassifier` merges last (after config) for programmatic callers.
+- **Reserved policy namespaces are rejected loudly.** Domain names that collide
+  with a reserved namespace (`sensitivity`, `regulatory`, `lifecycle`,
+  `jurisdiction`, `authority`, `retention`, `redaction`) raise at config load
+  time — those dimensions belong to `DataClassification` / `Lifecycle` or the
+  policy system, not the `domain` facet. See
+  [`adr-tag-vocabulary-split.md`](../design/adr-tag-vocabulary-split.md).
+
+The ingestion pipeline picks the config up automatically via
+`StoreRegistry.build_ingestion_pipeline()`; operators do not wire anything.
+
+To see which domains actually exist in a deployment, run
+[`trellis analyze domains`](operations.md#analyze-domains) — a read-only usage
+report across traces, documents, and pack feedback.
+
 ## Choosing the Right Affinity
 
 Ask: **"When would an agent need this content?"**

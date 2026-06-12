@@ -407,6 +407,94 @@ class TestLearningParameterRegistry:
         )
 
 
+class TestAnalyzeDomains:
+    """`trellis analyze domains` — domain usage report (WP7)."""
+
+    def _seed(self, registry: StoreRegistry) -> None:
+        from trellis.schemas.enums import TraceSource
+        from trellis.schemas.trace import Trace, TraceContext
+
+        trace_store = registry.operational.trace_store
+        document_store = registry.knowledge.document_store
+        event_log = registry.operational.event_log
+
+        for _ in range(2):
+            trace_store.append(
+                Trace(
+                    source=TraceSource.AGENT,
+                    intent="x",
+                    steps=[],
+                    context=TraceContext(agent_id="a", domain="payments"),
+                )
+            )
+        trace_store.append(
+            Trace(
+                source=TraceSource.AGENT,
+                intent="x",
+                steps=[],
+                context=TraceContext(agent_id="a", domain=None),
+            )
+        )
+        document_store.put("d1", "doc", {"content_tags": {"domain": ["payments"]}})
+        document_store.put("d2", "doc", {"author": "alice"})
+
+        for pid in ("p1", "p2"):
+            event_log.emit(
+                EventType.PACK_ASSEMBLED,
+                source="test",
+                entity_id=pid,
+                entity_type="pack",
+                payload={"domain": "payments", "intent": "x"},
+            )
+        event_log.emit(
+            EventType.FEEDBACK_RECORDED,
+            source="test",
+            entity_id="p1",
+            entity_type="pack",
+            payload={"pack_id": "p1", "success": True},
+        )
+        event_log.emit(
+            EventType.FEEDBACK_RECORDED,
+            source="test",
+            entity_id="p2",
+            entity_type="pack",
+            payload={"pack_id": "p2", "success": False},
+        )
+
+    def test_empty_text(self) -> None:
+        result = runner.invoke(app, ["analyze", "domains"])
+        assert result.exit_code == 0, result.output
+        assert "Domains observed: 0" in result.stdout
+
+    def test_json_shape_and_counts(self, temp_stores: StoreRegistry) -> None:
+        self._seed(temp_stores)
+        result = runner.invoke(app, ["analyze", "domains", "--format", "json"])
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout.strip())
+        assert data["status"] == "ok"
+        rows = {row["domain"]: row for row in data["domains"]}
+
+        payments = rows["payments"]
+        assert payments["trace_count"] == 2
+        assert payments["document_count"] == 1
+        assert payments["packs_served"] == 2
+        assert payments["graded_packs"] == 2
+        assert payments["graded_successes"] == 1
+        assert payments["success_rate"] == 0.5
+
+        none_row = rows["(none)"]
+        assert none_row["trace_count"] == 1
+        assert none_row["document_count"] == 1
+        assert none_row["success_rate"] is None
+
+    def test_text_table_renders(self, temp_stores: StoreRegistry) -> None:
+        self._seed(temp_stores)
+        result = runner.invoke(app, ["analyze", "domains"])
+        assert result.exit_code == 0, result.output
+        assert "payments" in result.stdout
+        assert "(none)" in result.stdout
+
+
 class TestAnalyzeHelp:
     def test_help(self) -> None:
         result = runner.invoke(app, ["analyze", "--help"])
@@ -417,6 +505,7 @@ class TestAnalyzeHelp:
             "token-usage",
             "advisory-effectiveness",
             "pack-sections",
+            "domains",
             "learning-candidates",
             "schema-evolution",
         ]:

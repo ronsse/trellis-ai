@@ -655,6 +655,7 @@ class StoreRegistry:
         embedding_config: dict[str, Any] | None = None,
         retrieval_config: dict[str, Any] | None = None,
         llm_config: dict[str, Any] | None = None,
+        classify_config: dict[str, Any] | None = None,
     ) -> None:
         # Accept two input shapes equivalently:
         #   * plane-split  ``{"knowledge": {...}, "operational": {...}}``
@@ -672,6 +673,7 @@ class StoreRegistry:
         self._embedding_config = embedding_config or {}
         self._retrieval_config = retrieval_config or {}
         self._llm_config = llm_config or {}
+        self._classify_config = classify_config or {}
         self._cache: dict[str, Any] = {}
         self._embedding_fn_cache: Callable[[str], list[float]] | None = _UNSET
         self._budget_config_cache: Any = _UNSET
@@ -734,6 +736,7 @@ class StoreRegistry:
         embedding_config: dict[str, Any] = {}
         retrieval_config: dict[str, Any] = {}
         llm_config: dict[str, Any] = {}
+        classify_config: dict[str, Any] = {}
         config_path = config_dir / "config.yaml"
         if config_path.exists():
             import yaml  # noqa: PLC0415
@@ -758,6 +761,7 @@ class StoreRegistry:
             embedding_config = data.get("embeddings", {})
             retrieval_config = data.get("retrieval", {})
             llm_config = data.get("llm", {})
+            classify_config = data.get("classify", {})
             if data.get("data_dir"):
                 data_dir = Path(data["data_dir"])
 
@@ -768,6 +772,7 @@ class StoreRegistry:
             embedding_config=embedding_config,
             retrieval_config=retrieval_config,
             llm_config=llm_config,
+            classify_config=classify_config,
         )
 
     @classmethod
@@ -806,6 +811,7 @@ class StoreRegistry:
         embedding_config = data.pop("embeddings", {}) or {}
         retrieval_config = data.pop("retrieval", {}) or {}
         llm_config = data.pop("llm", {}) or {}
+        classify_config = data.pop("classify", {}) or {}
         doc_data_dir = data.pop("data_dir", None)
         if doc_data_dir:
             data_dir = Path(doc_data_dir)
@@ -818,6 +824,7 @@ class StoreRegistry:
             embedding_config=embedding_config,
             retrieval_config=retrieval_config,
             llm_config=llm_config,
+            classify_config=classify_config,
         )
 
     def _resolve_backend(self, store_type: str) -> tuple[str, dict[str, Any]]:
@@ -1792,6 +1799,32 @@ class StoreRegistry:
         budgets_data = self._retrieval_config.get("budgets")
         self._budget_config_cache = BudgetConfig.from_dict(budgets_data)
         return self._budget_config_cache
+
+    def build_ingestion_pipeline(self) -> Any:
+        """Construct the default deterministic ingestion ClassifierPipeline.
+
+        Reads the ``classify:`` section of ``config.yaml``::
+
+            classify:
+              domain_keywords:
+                payments:
+                  - stripe
+                  - invoice
+                  - chargeback
+
+        The ``domain_keywords`` map merges over the built-in domain defaults
+        (config wins on key collision), so an operator can register a custom
+        domain by editing ``config.yaml`` alone — no code change. Reserved
+        policy-namespace domain names are rejected loudly here. Returns a
+        deterministic-only pipeline (no LLM); the enrichment worker wires the
+        LLM fallback separately. See
+        :func:`trellis.classify.factory.build_ingestion_pipeline`.
+        """
+        from trellis.classify.factory import (  # noqa: PLC0415
+            build_ingestion_pipeline,
+        )
+
+        return build_ingestion_pipeline(self._classify_config)
 
     def build_llm_client(self) -> LLMClient | None:
         """Construct an ``LLMClient`` from the ``llm:`` config block, if present.

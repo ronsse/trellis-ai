@@ -61,6 +61,35 @@ _LLM_CONFIG_TEMPLATE = """
 #   #   model: text-embedding-3-small
 """
 
+# Commented-out ``classify:`` block appended to a freshly-initialized
+# ``config.yaml``. Lets an operator register a custom retrieval domain by
+# editing config alone — the ingestion pipeline (built via
+# ``StoreRegistry.build_ingestion_pipeline``) merges these over the built-in
+# domain keyword defaults, config winning on key collision. Domains stay free
+# strings; only reserved policy namespaces (sensitivity, regulatory, lifecycle,
+# jurisdiction, authority, retention, redaction) are rejected. See
+# docs/agent-guide/tagging-for-retrieval.md.
+_CLASSIFY_CONFIG_TEMPLATE = """
+# classify:
+#   # Seed the keyword -> domain map for the deterministic ingestion pipeline.
+#   # Each domain maps to keywords; an item is tagged with the domain when at
+#   # least two of its keywords appear in the content. These MERGE over the
+#   # built-in defaults (data-pipeline, infrastructure, api, frontend, backend,
+#   # ml-ops, security, testing, observability) — a colliding key replaces the
+#   # built-in keyword list for that domain.
+#   domain_keywords:
+#     payments:
+#       - stripe
+#       - invoice
+#       - chargeback
+#       - refund
+#     compliance-workflow:
+#       - audit
+#       - attestation
+#       - soc2
+#       - evidence
+"""
+
 admin_app = typer.Typer(no_args_is_help=True)
 console = Console()
 logger = structlog.get_logger(__name__)
@@ -105,7 +134,9 @@ def init(
     # Append a commented-out ``llm:`` block so operators have an
     # in-place template for enabling the memory-extraction pipeline.
     # See docs/agent-guide/playbooks.md "Configuring LLM extraction".
-    config_path.write_text(config_path.read_text() + _LLM_CONFIG_TEMPLATE)
+    config_path.write_text(
+        config_path.read_text() + _LLM_CONFIG_TEMPLATE + _CLASSIFY_CONFIG_TEMPLATE
+    )
 
     # Pointer to the human decisions the default install never prompts for
     # (domains/ontology, domain ownership, API security). Surfaced here so a

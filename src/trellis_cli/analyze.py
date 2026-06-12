@@ -11,6 +11,7 @@ import yaml
 from rich.console import Console
 from rich.table import Table
 
+from trellis.analyze.domains import analyze_domains
 from trellis.extract.telemetry import analyze_extractor_fallbacks
 from trellis.learning import (
     LEARNING_NOISE_RETRY_KEY,
@@ -52,11 +53,13 @@ from trellis.stores.base.parameter import ParameterStore
 from trellis_cli._meta_wiring import wrap_cli_meta_analysis
 from trellis_cli.config import get_config_dir
 from trellis_cli.exit_codes import EXIT_INTERNAL
+from trellis_cli.output import emit_json
 from trellis_cli.stores import (
     get_document_store,
     get_event_log,
     get_graph_store,
     get_parameter_store,
+    get_trace_store,
 )
 
 logger = structlog.get_logger(__name__)
@@ -1318,6 +1321,114 @@ def extractor_fallbacks(
         console.print("[bold]Findings[/bold]")
         for finding in report.findings:
             console.print(f"  [yellow]- {finding}[/yellow]")
+
+
+# ---------------------------------------------------------------------------
+# Domain Usage (WP7 — observability for the primary retrieval slice)
+# ---------------------------------------------------------------------------
+
+
+@analyze_app.command("domains")
+def domains(
+    days: int = typer.Option(30, help="Days of pack/feedback history to analyze"),
+    limit: int = typer.Option(
+        1000, help="Max traces, documents, and events per source to scan"
+    ),
+    output_format: str = typer.Option("text", "--format", help="Output format"),
+    no_meta_trace: bool = typer.Option(
+        False,
+        "--no-meta-trace",
+        help="Skip recording this run as a meta-Activity (Item 6 Phase 2).",
+    ),
+) -> None:
+    """Report observed ``domain`` usage across traces, documents, and packs.
+
+    ``domain`` is the primary retrieval slice. This read-only report joins the
+    three places a domain surfaces — ``TraceContext.domain`` (TraceStore),
+    ``ContentTags.domain`` in document metadata (DocumentStore), and pack +
+    feedback events (EventLog, grouped by the pack payload's domain) — and
+    tallies, per domain: document count, trace count, packs served, graded
+    packs, and success rate from ``FEEDBACK_RECORDED``. Items, traces, and
+    packs with no domain are surfaced under ``(none)`` so coverage gaps stay
+    visible.
+
+    **Out of scope:** automatic domain discovery / clustering and a domain
+    *promotion* analyzer. Those follow the column-leaf pattern (contract
+    first, gated on production telemetry) — see
+    ``docs/design/adr-column-leaf-modeling-guardrails.md`` and
+    ``docs/design/adr-autonomy-ladder.md`` tier 2. This report is the empirical
+    substrate a future ADR amendment would build on.
+    """
+    trace_store = get_trace_store()
+    document_store = get_document_store()
+    event_log = get_event_log()
+
+    with wrap_cli_meta_analysis(
+        agent_suffix="analyze",
+        analyzer_name="cli.analyze.domains",
+        disabled=no_meta_trace,
+    ) as _meta_record:
+        report = analyze_domains(
+            trace_store,
+            document_store,
+            event_log,
+            days=days,
+            scan_limit=limit,
+        )
+        if _meta_record.enabled and report.domains:
+            _meta_record.produced_finding(
+                f"domain-usage-report-d{days}",
+                finding_type="DomainUsageReport",
+            )
+
+    if output_format == "json":
+        emit_json(report.to_payload())
+        return
+
+    console.print(f"[bold]Domain Usage Report[/bold] (last {days} days)")
+    console.print(f"  Domains observed: {len(report.domains)}")
+
+    if not report.domains:
+        console.print()
+        console.print(
+            "[dim]No domains observed. Ingest traces or documents that carry a"
+            " domain, or run 'trellis demo load' to populate sample data.[/dim]"
+        )
+        return
+
+    console.print()
+    table = Table(title="Per-Domain Usage")
+    table.add_column("Domain", style="cyan")
+    table.add_column("Documents", justify="right")
+    table.add_column("Traces", justify="right")
+    table.add_column("Packs served", justify="right")
+    table.add_column("Graded packs", justify="right")
+    table.add_column("Success rate", justify="right")
+
+    for entry in report.domains:
+        if entry.success_rate is None:
+            rate_cell = "[dim]-[/dim]"
+        else:
+            rate_style = (
+                "green"
+                if entry.success_rate >= _RATE_GREEN
+                else "yellow"
+                if entry.success_rate >= _RATE_YELLOW
+                else "red"
+            )
+            rate_cell = f"[{rate_style}]{entry.success_rate:.1%}[/{rate_style}]"
+        domain_cell = (
+            f"[dim]{entry.domain}[/dim]" if entry.domain == "(none)" else entry.domain
+        )
+        table.add_row(
+            domain_cell,
+            str(entry.document_count),
+            str(entry.trace_count),
+            str(entry.packs_served),
+            str(entry.graded_packs),
+            rate_cell,
+        )
+    console.print(table)
 
 
 # ---------------------------------------------------------------------------
