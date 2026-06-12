@@ -21,14 +21,14 @@ Read before starting any package: `CLAUDE.md` (hard rules, terminology), `docs/d
 | WP4 | Feedback reconcile CLI command | ~80 LOC + tests | — | ✅ folded into WP3 (`trellis admin reconcile-feedback`) |
 | WP5 | Scheduler recipes + curation runbook | docs only | WP3, WP4 | ✅ landed on `wp5-scheduler-recipes` (`28ffe6f`, includes WP3/WP9) |
 | WP6 | Trace→graph extraction stage | ~400 LOC + tests | — | ✅ landed on `wp6-trace-extraction` (`4482380`) |
-| WP7 | Domain config + observability | ~250 LOC + tests | — | P1 |
-| WP8 | Docker compose smoke test (roadmap E.1) | test/runbook | — | P2 (Docker now available on the dev host) |
+| WP7 | Domain config + observability | ~250 LOC + tests | — | ✅ landed on `wp7-domain-config` (`8c0648a`) |
+| WP8 | Docker compose smoke test (roadmap E.1) | test/runbook | — | ✅ landed on `wp8-compose-smoke` (`ba3f4a0`) — deployment path verified working; docs-only fixes |
 | WP9 | Autonomy-ladder ADR + tier-1 auto-promotion | ADR + ~200 LOC | — | ✅ landed on `wp9-autonomy-ladder` (`4a0fb65`) |
 | WP10 | Review Queue UI (human-decision inbox) | ~600 LOC UI+API | WP9 ADR | ✅ landed on `wp10-review-queue-ui` (`ef51128`) |
 | WP11 | Improvement-metrics dashboard | ~400 LOC UI+API | WP10 (same UI file) | ✅ landed on `wp11-metrics-dashboard` (`d555057`, includes WP10) |
 | WP12 | Quickstart `--with-skills` + integrate-your-agent front door | ~150 LOC + docs | — | ✅ landed on `wp12-quickstart-onboarding` (`8ee883c`) |
 
-**All packages landed 2026-06-12.** Merge order onto main: `wp1-sdk-hooks` (subsumes WP2) → `wp6-trace-extraction` → `wp3-worker-commands` (subsumes WP9) → `wp5-scheduler-recipes` → `wp10-review-queue-ui` → `wp11-metrics-dashboard` → `wp12-quickstart-onboarding`. Known integration follow-ups for the merge train: (1) WP11's `parameter_promotions` metric was built without WP9 in its tree — extend it to count `PARAMS_AUTO_PROMOTED` / `PARAMS_AUTO_ROLLED_BACK` once both are on main; (2) expected small conflicts in `operations.md`, `main.py`/`admin.py`, `index.html`; (3) add the integrate-your-agent ↔ running-trellis cross-links (WP5/WP12 landed on parallel branches); (4) WP11's endpoint is `/api/v1/metrics/timeseries` (admin router has no `/admin` segment — docs already corrected).
+**All 13 packages landed 2026-06-12 — the plan is complete.** WP7/WP8 merged in a second wave after the first eleven. Original merge order onto main: `wp1-sdk-hooks` (subsumes WP2) → `wp6-trace-extraction` → `wp3-worker-commands` (subsumes WP9) → `wp5-scheduler-recipes` → `wp10-review-queue-ui` → `wp11-metrics-dashboard` → `wp12-quickstart-onboarding`. Known integration follow-ups for the merge train: (1) WP11's `parameter_promotions` metric was built without WP9 in its tree — extend it to count `PARAMS_AUTO_PROMOTED` / `PARAMS_AUTO_ROLLED_BACK` once both are on main; (2) expected small conflicts in `operations.md`, `main.py`/`admin.py`, `index.html`; (3) add the integrate-your-agent ↔ running-trellis cross-links (WP5/WP12 landed on parallel branches); (4) WP11's endpoint is `/api/v1/metrics/timeseries` (admin router has no `/admin` segment — docs already corrected).
 
 **WP5 scope expansion (2026-06-12):** WP5 now also delivers `docs/getting-started/running-trellis.md` — the operating runbook for everything that runs server-side: `trellis admin serve` (API + UI), every `trellis worker` command from WP3/WP9 (`curate`, `tune`, `enrich`, `mine-precedents`, `--interval` loop mode), what each loop does, recommended cadences, and how the scheduler recipes invoke them. WP5 remains gated on WP3 landing.
 
