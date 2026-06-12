@@ -21,6 +21,8 @@ from trellis.errors import BackendNotInstalledError
 from trellis_cli._meta_wiring import wrap_cli_meta_analysis
 from trellis_cli.claude_integration import (
     get_claude_settings_path,
+    get_skills_target_dir,
+    install_skills,
     merge_mcp_server,
     read_claude_settings,
     write_claude_settings,
@@ -677,11 +679,30 @@ def _ensure_gitignore(project_dir: Path) -> str | None:
     return "gitignore_updated"
 
 
+def _print_skills_summary(
+    skills: list[dict[str, str]], skills_dir: Path | None
+) -> None:
+    """Print the per-skill install lines for quickstart / install-skills."""
+    if skills_dir is None:
+        return
+    console.print(f"  [cyan]Skills installed to:[/cyan] {skills_dir}")
+    for entry in skills:
+        name, status = entry["name"], entry["status"]
+        if status == "skipped":
+            console.print(
+                f"    [dim]skipped[/dim] {name} (already present; --force to overwrite)"
+            )
+        else:
+            console.print(f"    [green]{status}[/green] {name}")
+
+
 def _print_quickstart_summary(
     steps: list[str],
     config_path: Path,
     settings_path: Path,
     mcp_on_path: bool,
+    skills: list[dict[str, str]] | None = None,
+    skills_dir: Path | None = None,
 ) -> None:
     """Print human-readable quickstart summary."""
     console.print("[green]Quickstart complete![/green]\n")
@@ -696,6 +717,8 @@ def _print_quickstart_summary(
             f"  [dim]MCP server already registered:[/dim]"
             f" {settings_path} (use --force to overwrite)"
         )
+    if skills is not None:
+        _print_skills_summary(skills, skills_dir)
     if not mcp_on_path:
         console.print(
             "\n  [yellow]Warning:[/yellow] trellis-mcp not found on PATH."
@@ -714,13 +737,31 @@ def _print_quickstart_summary(
 def quickstart(
     scope: str = typer.Option("root", help="root (global) or project (local)"),
     force: bool = typer.Option(
-        False, "--force", help="Overwrite existing MCP server entry"
+        False, "--force", help="Overwrite existing MCP server entry and skills"
+    ),
+    with_skills: str | None = typer.Option(
+        None,
+        "--with-skills",
+        help=(
+            "Also install the drop-in agent skills. "
+            "'user' -> ~/.claude/skills/, 'project' -> ./.claude/skills/. "
+            "Omit to skip skill installation."
+        ),
     ),
     output_format: str = typer.Option(
         "text", "--format", help="Output format: text or json"
     ),
 ) -> None:
     """Initialize stores and register MCP server with Claude Code."""
+    if with_skills is not None and with_skills not in ("user", "project"):
+        msg = (
+            f"--with-skills must be 'user' or 'project', got {with_skills!r}"
+        )
+        if output_format == "json":
+            typer.echo(json.dumps({"status": "error", "error": msg}))
+        else:
+            console.print(f"[red]Error:[/red] {msg}")
+        raise typer.Exit(EXIT_VALIDATION)
     config_path = get_config_dir() / "config.yaml"
     steps: list[str] = [_init_stores_if_needed(config_path)]
 
@@ -756,7 +797,68 @@ def quickstart(
         if gi_step:
             steps.append(gi_step)
 
+    # Optional skill installation
+    skills_results: list[dict[str, str]] | None = None
+    skills_dir: Path | None = None
+    if with_skills is not None:
+        skills_dir = get_skills_target_dir(
+            with_skills,
+            project_dir=project_dir if with_skills == "project" else None,
+        )
+        skills_results = install_skills(skills_dir, force=force)
+        steps.append("skills_installed")
+
     mcp_on_path = shutil.which("trellis-mcp") is not None
+
+    if output_format == "json":
+        payload: dict[str, Any] = {
+            "status": "ok",
+            "scope": scope,
+            "steps": steps,
+            "settings_path": str(settings_path),
+            "mcp_on_path": mcp_on_path,
+        }
+        if skills_results is not None:
+            payload["skills"] = skills_results
+            payload["skills_dir"] = str(skills_dir)
+        typer.echo(json.dumps(payload))
+    else:
+        _print_quickstart_summary(
+            steps,
+            config_path,
+            settings_path,
+            mcp_on_path,
+            skills=skills_results,
+            skills_dir=skills_dir,
+        )
+
+
+@admin_app.command("install-skills")
+def install_skills_cmd(
+    scope: str = typer.Argument(
+        "user", help="user (~/.claude/skills/) or project (./.claude/skills/)"
+    ),
+    force: bool = typer.Option(
+        False, "--force", help="Overwrite skill directories that already exist"
+    ),
+    output_format: str = typer.Option(
+        "text", "--format", help="Output format: text or json"
+    ),
+) -> None:
+    """Install the drop-in agent skills into a Claude Code skills directory."""
+    if scope not in ("user", "project"):
+        msg = f"scope must be 'user' or 'project', got {scope!r}"
+        if output_format == "json":
+            typer.echo(json.dumps({"status": "error", "error": msg}))
+        else:
+            console.print(f"[red]Error:[/red] {msg}")
+        raise typer.Exit(EXIT_VALIDATION)
+
+    skills_dir = get_skills_target_dir(
+        scope,
+        project_dir=Path.cwd() if scope == "project" else None,
+    )
+    results = install_skills(skills_dir, force=force)
 
     if output_format == "json":
         typer.echo(
@@ -764,19 +866,14 @@ def quickstart(
                 {
                     "status": "ok",
                     "scope": scope,
-                    "steps": steps,
-                    "settings_path": str(settings_path),
-                    "mcp_on_path": mcp_on_path,
+                    "skills_dir": str(skills_dir),
+                    "skills": results,
                 }
             )
         )
     else:
-        _print_quickstart_summary(
-            steps,
-            config_path,
-            settings_path,
-            mcp_on_path,
-        )
+        console.print("[green]Skills install complete![/green]\n")
+        _print_skills_summary(results, skills_dir)
 
 
 def _memory_prompt_available() -> bool:

@@ -18,9 +18,19 @@ trellis admin quickstart
 
 1. Initializes SQLite stores under `~/.config/trellis/`.
 2. Locates your Claude Code `settings.json` (`~/.claude/settings.json` on macOS/Linux, `%USERPROFILE%\.claude\settings.json` on Windows).
-3. Adds an `mcpServers.trellis-ai` entry pointing at `trellis-mcp`.
+3. Adds an `mcpServers.trellis` entry pointing at `trellis-mcp`.
 
 Restart Claude Code after `quickstart` so it picks up the new server.
+
+To install the drop-in agent skills at the same time, add `--with-skills user`
+(global, `~/.claude/skills/`) or `--with-skills project` (`./.claude/skills/`):
+
+```bash
+trellis admin quickstart --with-skills user
+```
+
+See [skills/](../../skills/) for what each skill does and
+`trellis admin install-skills --help` to install or update them on their own.
 
 ## Per-project install
 
@@ -39,7 +49,7 @@ If you'd rather edit settings yourself, add this to `~/.claude/settings.json`:
 ```json
 {
   "mcpServers": {
-    "trellis-ai": {
+    "trellis": {
       "command": "trellis-mcp",
       "args": []
     }
@@ -52,7 +62,7 @@ For project scope, also set the env var:
 ```json
 {
   "mcpServers": {
-    "trellis-ai": {
+    "trellis": {
       "command": "trellis-mcp",
       "args": [],
       "env": { "TRELLIS_CONFIG_DIR": "${workspaceFolder}/.trellis" }

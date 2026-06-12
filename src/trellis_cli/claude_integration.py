@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import json
+import shutil
+from importlib.resources import as_file, files
 from pathlib import Path
 
 import structlog
+
+from trellis_cli.skills import SKILL_NAMES
 
 _logger = structlog.get_logger(__name__)
 
@@ -73,3 +77,71 @@ def write_claude_settings(path: Path, settings: dict) -> None:
     """Write settings dict as formatted JSON, creating parent dirs as needed."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(settings, indent=2) + "\n")
+
+
+# ---------------------------------------------------------------------------
+# Skill installation
+# ---------------------------------------------------------------------------
+
+
+def get_skills_target_dir(scope: str, project_dir: Path | None = None) -> Path:
+    """Return the Claude Code skills directory for the given scope.
+
+    Args:
+        scope: "user" for ``~/.claude/skills/``, "project" for
+               ``<project_dir>/.claude/skills/``.
+        project_dir: Required when scope is "project". Defaults to the
+            current working directory when omitted.
+
+    Raises:
+        ValueError: If ``scope`` is not "user" or "project".
+    """
+    if scope == "user":
+        return Path.home() / ".claude" / "skills"
+    if scope == "project":
+        base = project_dir if project_dir is not None else Path.cwd()
+        return base / ".claude" / "skills"
+    msg = f"unknown skills scope {scope!r} (expected 'user' or 'project')"
+    raise ValueError(msg)
+
+
+def install_skills(
+    target_dir: Path, *, force: bool = False
+) -> list[dict[str, str]]:
+    """Copy the bundled skill templates into ``target_dir``.
+
+    Reads the canonical skill directories from the ``trellis_cli.skills``
+    package via :mod:`importlib.resources`, so this works from an
+    installed wheel as well as a repo checkout. Idempotent: a skill whose
+    destination directory already exists is skipped unless ``force`` is
+    set, in which case it is replaced.
+
+    Args:
+        target_dir: Destination skills directory (e.g.
+            ``~/.claude/skills``). Created if missing.
+        force: Overwrite skill directories that already exist.
+
+    Returns:
+        One result dict per skill, each with ``name`` and ``status``
+        (``"installed"``, ``"overwritten"``, or ``"skipped"``).
+    """
+    target_dir.mkdir(parents=True, exist_ok=True)
+    results: list[dict[str, str]] = []
+    skills_root = files("trellis_cli.skills")
+    for name in SKILL_NAMES:
+        dest = target_dir / name
+        if dest.exists() and not force:
+            _logger.debug("skill_install_skipped", skill=name, dest=str(dest))
+            results.append({"name": name, "status": "skipped"})
+            continue
+        status = "overwritten" if dest.exists() else "installed"
+        if dest.exists():
+            shutil.rmtree(dest)
+        # ``as_file`` materializes the packaged resource as a real path
+        # (a no-op for filesystem-backed installs, an extraction for
+        # zipped wheels), which ``shutil.copytree`` needs.
+        with as_file(skills_root / name) as src:
+            shutil.copytree(src, dest)
+        _logger.debug("skill_installed", skill=name, dest=str(dest), force=force)
+        results.append({"name": name, "status": status})
+    return results
