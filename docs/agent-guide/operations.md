@@ -728,6 +728,62 @@ Shows total tokens, average per response, breakdown by layer and operation, and 
 
 ---
 
+## Worker Commands
+
+Unattended learning/curation workers. See [`../design/adr-autonomy-ladder.md`](../design/adr-autonomy-ladder.md) for the four-tier autonomy model these commands operate under.
+
+> WP3 will add `curate` / `enrich` / `mine-precedents` subcommands to this group.
+
+### `trellis worker tune`
+
+Run one `RuleTuner` pass and, when **Tier-1 auto-promotion** is enabled, auto-promote every qualifying proposal through the same governance pipeline `trellis metrics promote --commit` uses — then arm post-promotion monitoring so degradation auto-rolls-back.
+
+```bash
+trellis worker tune [--tuner-name NAME] [--since-days N] [--dry-run] [--format text|json]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--tuner-name` | `rule_tuner` | Logical tuner name (cursor + proposal scope). |
+| `--since-days` | (cursor) | Force a rescan of the last N days, ignoring the tuner cursor. |
+| `--dry-run` | off | Report what *would* auto-promote without mutating stores or emitting events. |
+| `--format` | `text` | `text` or `json`. |
+
+**Default behaviour is a pure tuner pass.** Auto-promotion is **off by default** (global default OFF, per Tier-1 invariant (d)). With it disabled, `worker tune` is byte-identical to `trellis metrics tune`: it produces/refreshes proposals and promotes nothing. Non-qualifying proposals always stay `pending` for manual review via `trellis metrics promote` — they are reported, never rejected.
+
+#### Enabling Tier-1 auto-promotion
+
+Add a `learning.auto_promote` section to `~/.trellis/config.yaml` (or `$TRELLIS_CONFIG_DIR/config.yaml`):
+
+```yaml
+learning:
+  auto_promote:
+    enabled: true              # default false — master switch, global default OFF
+    min_sample_size: 30        # stricter than manual promote (5); must be >= 5
+    min_effect_size: 0.25      # stricter than manual promote (0.15); must be >= 0.15
+    require_baseline: true      # no baseline => nothing to roll back to => left for a human
+    post_min_samples: 20        # min post-promotion outcomes before a degradation verdict
+    post_regression_threshold: 0.10  # success-rate drop (abs) that triggers auto-rollback
+    post_lookback_days: 7       # monitoring window on either side of the promotion
+```
+
+The auto thresholds **must be at least as strict as the manual-promote defaults** — the config loader (and `AutoPromotePolicy`) rejects looser values loudly rather than silently weakening the autonomous gate. Monitoring is always armed (`auto_demote` is forced on); you cannot auto-promote without an armed rollback.
+
+#### Audit trail
+
+Each autonomous action emits a **dedicated, self-identifying** event in addition to the normal governance event:
+
+| Event | Emitted when |
+|-------|--------------|
+| `parameters.auto_promoted` (`PARAMS_AUTO_PROMOTED`) | A qualifying proposal is auto-promoted (alongside `PARAMS_UPDATED`). |
+| `parameters.auto_rolled_back` (`PARAMS_AUTO_ROLLED_BACK`) | Post-promotion monitoring demotes a degraded snapshot (alongside the rollback's `PARAMS_UPDATED` and `PARAMETERS_DEGRADED`). |
+
+Degradation that accrues *after* the promoting pass is caught on a later pass: each `worker tune` run re-monitors recent auto-promotions and rolls back any that have since degraded.
+
+The manual `trellis metrics promote` path is unchanged and emits only `PARAMS_UPDATED` — the dedicated events distinguish "a human promoted this" from "the system promoted this on its own."
+
+---
+
 ## API Authentication
 
 The REST API authenticates with scoped API keys (roadmap item E.5, issue #191).

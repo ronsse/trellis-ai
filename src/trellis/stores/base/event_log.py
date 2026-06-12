@@ -234,6 +234,19 @@ class EventType(StrEnum):
     #: noisy outcomes can't silently unwind deliberate promotions.
     #: Closes Gap 2.2.
     PARAMETERS_DEGRADED = "parameters.degraded"
+    #: Tier-1 autonomy events (see
+    #: ``docs/design/adr-autonomy-ladder.md``). Distinct from the
+    #: ``PARAMS_UPDATED`` emitted by a *manual* ``metrics promote --commit``
+    #: so the audit trail makes the autonomous path self-identifying. A
+    #: ``trellis worker tune`` run that auto-applies a qualifying proposal
+    #: emits ``PARAMS_AUTO_PROMOTED`` *in addition to* the underlying
+    #: ``PARAMS_UPDATED`` (same governance path, no new mutation route);
+    #: when post-promotion monitoring later rolls that snapshot back, it
+    #: emits ``PARAMS_AUTO_ROLLED_BACK`` alongside the rollback's own
+    #: ``PARAMS_UPDATED``. The dedicated events are tier-1 invariant (c) —
+    #: every autonomous action leaves a self-identifying audit record.
+    PARAMS_AUTO_PROMOTED = "parameters.auto_promoted"
+    PARAMS_AUTO_ROLLED_BACK = "parameters.auto_rolled_back"
 
 
 class Event(VersionedModel):
