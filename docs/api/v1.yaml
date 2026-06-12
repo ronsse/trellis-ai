@@ -353,6 +353,54 @@ components:
       - status
       title: BulkItemResult
       type: object
+    CodeProposalListResponse:
+      additionalProperties: false
+      description: List of code-authoring proposals (read-only).
+      properties:
+        count:
+          default: 0
+          title: Count
+          type: integer
+        proposals:
+          items:
+            $ref: '#/components/schemas/CodeProposalSummary'
+          title: Proposals
+          type: array
+      title: CodeProposalListResponse
+      type: object
+    CodeProposalSummary:
+      additionalProperties: false
+      description: One PROPOSAL_DRAFTED event as surfaced in the Review queue.
+      properties:
+        cluster_signature:
+          default: ''
+          title: Cluster Signature
+          type: string
+        generated_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Generated At
+        markdown_preview:
+          default: ''
+          title: Markdown Preview
+          type: string
+        proposal_id:
+          title: Proposal Id
+          type: string
+        source_event_count:
+          default: 0
+          title: Source Event Count
+          type: integer
+        source_file:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Source File
+      required:
+      - proposal_id
+      title: CodeProposalSummary
+      type: object
     CommandResponse:
       additionalProperties: false
       description: Response after executing a mutation command.
@@ -401,6 +449,26 @@ components:
       - scope
       - rules
       title: CreatePolicyRequest
+      type: object
+    DraftAdrResponse:
+      additionalProperties: false
+      description: Rendered promotion-ADR markdown for a schema-evolution candidate.
+      properties:
+        candidate_id:
+          title: Candidate Id
+          type: string
+        markdown:
+          title: Markdown
+          type: string
+        suggested_canonical_name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Suggested Canonical Name
+      required:
+      - candidate_id
+      - markdown
+      title: DraftAdrResponse
       type: object
     DraftSubmissionRequest:
       additionalProperties: false
@@ -760,6 +828,136 @@ components:
           title: Trace Id
       title: IngestResponse
       type: object
+    LearningCandidateListResponse:
+      additionalProperties: false
+      description: Most-recent learning-candidate artifact, or an empty hint.
+      properties:
+        candidate_count:
+          default: 0
+          title: Candidate Count
+          type: integer
+        candidates:
+          items:
+            additionalProperties: true
+            type: object
+          title: Candidates
+          type: array
+        generated_at_utc:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Generated At Utc
+        hint:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Hint
+        status:
+          default: ok
+          title: Status
+          type: string
+      title: LearningCandidateListResponse
+      type: object
+    LearningPromotionDecision:
+      additionalProperties: false
+      description: One per-candidate decision in a learning-promotion submission.
+      properties:
+        approved:
+          default: false
+          title: Approved
+          type: boolean
+        candidate_id:
+          title: Candidate Id
+          type: string
+        promotion_name:
+          default: ''
+          title: Promotion Name
+          type: string
+        rationale:
+          default: ''
+          title: Rationale
+          type: string
+      required:
+      - candidate_id
+      title: LearningPromotionDecision
+      type: object
+    LearningPromotionRequest:
+      additionalProperties: false
+      description: 'Body for ``POST /api/v1/learning/promotions``.
+
+
+        Carries per-candidate decisions. The server joins these against the
+
+        most-recent candidate artifact, builds the entity/edge payloads via
+
+        ``prepare_learning_promotions``, and submits each approved promotion
+
+        through the governed :class:`MutationExecutor` pipeline.'
+      properties:
+        decisions:
+          items:
+            $ref: '#/components/schemas/LearningPromotionDecision'
+          title: Decisions
+          type: array
+      title: LearningPromotionRequest
+      type: object
+    LearningPromotionResponse:
+      additionalProperties: false
+      description: Aggregate outcome of a learning-promotion submission.
+      properties:
+        approved_count:
+          default: 0
+          title: Approved Count
+          type: integer
+        promoted_count:
+          default: 0
+          title: Promoted Count
+          type: integer
+        ready_count:
+          default: 0
+          title: Ready Count
+          type: integer
+        results:
+          items:
+            $ref: '#/components/schemas/LearningPromotionResultRow'
+          title: Results
+          type: array
+        status:
+          default: ok
+          title: Status
+          type: string
+      title: LearningPromotionResponse
+      type: object
+    LearningPromotionResultRow:
+      additionalProperties: false
+      description: Per-candidate outcome of a learning-promotion submission.
+      properties:
+        candidate_id:
+          title: Candidate Id
+          type: string
+        entity_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Entity Id
+        message:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Message
+        node_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Node Id
+        status:
+          title: Status
+          type: string
+      required:
+      - candidate_id
+      - status
+      title: LearningPromotionResultRow
+      type: object
     LinkRequest:
       additionalProperties: false
       description: Request to create a graph edge.
@@ -785,6 +983,45 @@ components:
       - target_id
       title: LinkRequest
       type: object
+    MetricsTimeseriesResponse:
+      additionalProperties: false
+      description: 'Response for ``GET /api/v1/metrics/timeseries``.
+
+
+        Echoes the request parameters (``metric`` / ``bucket`` / ``group_by``
+
+        / ``days``) so the client can label the chart without re-deriving
+
+        them, and carries one series per resolved group key. An empty store
+
+        (or a metric with no events in the window) yields an empty
+
+        ``series`` list.'
+      properties:
+        bucket:
+          default: day
+          title: Bucket
+          type: string
+        days:
+          default: 30
+          title: Days
+          type: integer
+        group_by:
+          default: none
+          title: Group By
+          type: string
+        metric:
+          title: Metric
+          type: string
+        series:
+          items:
+            $ref: '#/components/schemas/TimeseriesSeriesResponse'
+          title: Series
+          type: array
+      required:
+      - metric
+      title: MetricsTimeseriesResponse
+      type: object
     NodeRole:
       description: 'Graph node role.
 
@@ -796,6 +1033,108 @@ components:
       - curated
       title: NodeRole
       type: string
+    PackFeedbackRequest:
+      additionalProperties: false
+      description: 'Request to record element-level feedback on a context pack.
+
+
+        Mirrors the MCP ``record_feedback`` tool''s surface so the SDK,
+
+        REST, and MCP feedback paths share one payload shape. Routes
+
+        through :func:`trellis.feedback.recording.record_feedback`, which
+
+        appends the durable ``pack_feedback.jsonl`` row and emits the
+
+        authoritative ``FEEDBACK_RECORDED`` event.'
+      properties:
+        comment:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Comment
+        followed_advisory_ids:
+          items:
+            type: string
+          title: Followed Advisory Ids
+          type: array
+        helpful_item_ids:
+          items:
+            type: string
+          title: Helpful Item Ids
+          type: array
+        rating:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Rating
+        success:
+          title: Success
+          type: boolean
+        target_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Target Id
+        unhelpful_item_ids:
+          items:
+            type: string
+          title: Unhelpful Item Ids
+          type: array
+      required:
+      - success
+      title: PackFeedbackRequest
+      type: object
+    PackFeedbackResponse:
+      additionalProperties: false
+      description: 'Result of recording pack feedback.
+
+
+        ``event_log_in_sync`` surfaces the
+
+        :attr:`trellis.feedback.recording.FeedbackRecordResult.event_log_in_sync`
+
+        semantics: ``True`` when the authoritative ``FEEDBACK_RECORDED``
+
+        event reached the EventLog (emitted now, or already present from a
+
+        prior call). ``False`` means only the durable JSONL row was written
+
+        and a reconcile is owed — callers must not treat the signal as
+
+        having driven behavior yet.'
+      properties:
+        event_log_emitted:
+          title: Event Log Emitted
+          type: boolean
+        event_log_in_sync:
+          title: Event Log In Sync
+          type: boolean
+        event_log_skipped_as_duplicate:
+          title: Event Log Skipped As Duplicate
+          type: boolean
+        feedback:
+          title: Feedback
+          type: string
+        feedback_id:
+          title: Feedback Id
+          type: string
+        pack_id:
+          title: Pack Id
+          type: string
+        status:
+          default: ok
+          title: Status
+          type: string
+      required:
+      - pack_id
+      - feedback_id
+      - feedback
+      - event_log_in_sync
+      - event_log_emitted
+      - event_log_skipped_as_duplicate
+      title: PackFeedbackResponse
+      type: object
     PackRequest:
       additionalProperties: false
       description: Request to assemble a context pack.
@@ -973,6 +1312,151 @@ components:
       - description
       title: PromoteRequest
       type: object
+    ProposalDecisionResponse:
+      additionalProperties: false
+      description: Outcome of an approve / reject action on a proposal.
+      properties:
+        effect_size:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Effect Size
+        params_version:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Params Version
+        proposal_id:
+          title: Proposal Id
+          type: string
+        reason:
+          title: Reason
+          type: string
+        status:
+          title: Status
+          type: string
+      required:
+      - proposal_id
+      - status
+      - reason
+      title: ProposalDecisionResponse
+      type: object
+    ProposalPreviewResponse:
+      additionalProperties: false
+      description: Dry-run forecast for a single proposal promotion.
+      properties:
+        baseline_values:
+          additionalProperties: true
+          title: Baseline Values
+          type: object
+        effect_size:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Effect Size
+        predicted_status:
+          title: Predicted Status
+          type: string
+        proposal_id:
+          title: Proposal Id
+          type: string
+        proposed_values:
+          additionalProperties: true
+          title: Proposed Values
+          type: object
+        reason:
+          title: Reason
+          type: string
+        sample_size:
+          default: 0
+          title: Sample Size
+          type: integer
+      required:
+      - proposal_id
+      - predicted_status
+      - reason
+      title: ProposalPreviewResponse
+      type: object
+    ProposalRejectRequest:
+      additionalProperties: false
+      description: Body for ``POST /api/v1/proposals/{id}/reject`` — optional rationale.
+      properties:
+        reason:
+          default: rejected_by_reviewer
+          title: Reason
+          type: string
+      title: ProposalRejectRequest
+      type: object
+    SchemaEvolutionCandidate:
+      additionalProperties: false
+      description: One WELL_KNOWN_CANDIDATE event as surfaced in the Review queue.
+      properties:
+        candidate_id:
+          title: Candidate Id
+          type: string
+        candidate_kind:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Candidate Kind
+        count:
+          default: 0
+          title: Count
+          type: integer
+        distinct_domains:
+          items:
+            type: string
+          title: Distinct Domains
+          type: array
+        distinct_extractors:
+          items:
+            type: string
+          title: Distinct Extractors
+          type: array
+        first_seen:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: First Seen
+        last_seen:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Last Seen
+        open_string_value:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Open String Value
+        recorded_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Recorded At
+        suggested_canonical_name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Suggested Canonical Name
+      required:
+      - candidate_id
+      title: SchemaEvolutionCandidate
+      type: object
+    SchemaEvolutionListResponse:
+      additionalProperties: false
+      description: List of schema-evolution candidates.
+      properties:
+        candidates:
+          items:
+            $ref: '#/components/schemas/SchemaEvolutionCandidate'
+          title: Candidates
+          type: array
+        count:
+          default: 0
+          title: Count
+          type: integer
+      title: SchemaEvolutionListResponse
+      type: object
     StatsResponse:
       additionalProperties: false
       description: Store statistics response.
@@ -1002,6 +1486,138 @@ components:
           title: Traces
           type: integer
       title: StatsResponse
+      type: object
+    TimeseriesPointResponse:
+      additionalProperties: false
+      description: 'One bucket''s value for one series.
+
+
+        ``bucket_start`` is a UTC calendar-day key (``"YYYY-MM-DD"``).
+
+        ``value`` is the metric value for that bucket; ``sample_count`` is
+
+        the number of underlying observations (packs, items, or events —
+
+        metric-dependent) so clients can dim low-confidence points.
+
+
+        Buckets with no contributing events are **omitted** from a series
+
+        rather than zero-filled — clients infer gaps from the missing
+
+        ``bucket_start`` keys (an absent day means "no signal", not "zero").'
+      properties:
+        bucket_start:
+          title: Bucket Start
+          type: string
+        sample_count:
+          default: 0
+          title: Sample Count
+          type: integer
+        value:
+          title: Value
+          type: number
+      required:
+      - bucket_start
+      - value
+      title: TimeseriesPointResponse
+      type: object
+    TimeseriesSeriesResponse:
+      additionalProperties: false
+      description: 'One group''s ordered list of buckets.
+
+
+        ``group_key`` is the resolved grouping value: a domain, an
+
+        intent_family, ``"all"`` when ungrouped, or — for
+
+        ``parameter_promotions`` — the governance event type. Points are
+
+        sorted by ``bucket_start`` ascending and omit empty buckets (see
+
+        :class:`TimeseriesPointResponse`).'
+      properties:
+        group_key:
+          title: Group Key
+          type: string
+        points:
+          items:
+            $ref: '#/components/schemas/TimeseriesPointResponse'
+          title: Points
+          type: array
+      required:
+      - group_key
+      title: TimeseriesSeriesResponse
+      type: object
+    TunerProposalListResponse:
+      additionalProperties: false
+      description: List of pending tuner proposals.
+      properties:
+        count:
+          default: 0
+          title: Count
+          type: integer
+        proposals:
+          items:
+            $ref: '#/components/schemas/TunerProposalSummary'
+          title: Proposals
+          type: array
+      title: TunerProposalListResponse
+      type: object
+    TunerProposalSummary:
+      additionalProperties: false
+      description: One pending tuner proposal as surfaced in the Review queue.
+      properties:
+        baseline_values:
+          additionalProperties: true
+          title: Baseline Values
+          type: object
+        component_id:
+          title: Component Id
+          type: string
+        domain:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Domain
+        effect_size:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Effect Size
+        intent_family:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Intent Family
+        proposal_id:
+          title: Proposal Id
+          type: string
+        proposed_values:
+          additionalProperties: true
+          title: Proposed Values
+          type: object
+        sample_size:
+          default: 0
+          title: Sample Size
+          type: integer
+        status:
+          title: Status
+          type: string
+        tool_name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Tool Name
+        tuner:
+          title: Tuner
+          type: string
+      required:
+      - proposal_id
+      - tuner
+      - status
+      - component_id
+      title: TunerProposalSummary
       type: object
     ValidationError:
       properties:
@@ -1084,7 +1700,7 @@ components:
   securitySchemes:
     APIKeyHeader:
       in: header
-      name: X-API-Key
+      name: Authorization
       type: apiKey
 info:
   description: Structured memory and learning for AI agents
@@ -1191,6 +1807,45 @@ paths:
       security:
       - APIKeyHeader: []
       summary: Generate Advisories
+      tags:
+      - admin
+  /api/v1/code-proposals:
+    get:
+      description: 'List recent ``PROPOSAL_DRAFTED`` events with their markdown preview.
+
+
+        Read-only surface — the Review view shows these for visibility but
+
+        exposes no action. Mirrors the read in ``trellis admin
+
+        list-proposals`` / ``show-proposal``.'
+      operationId: list_code_proposals_api_v1_code_proposals_get
+      parameters:
+      - description: Max PROPOSAL_DRAFTED events to return
+        in: query
+        name: limit
+        required: false
+        schema:
+          default: 50
+          description: Max PROPOSAL_DRAFTED events to return
+          title: Limit
+          type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CodeProposalListResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - APIKeyHeader: []
+      summary: List Code Proposals
       tags:
       - admin
   /api/v1/commands/batch:
@@ -1668,6 +2323,76 @@ paths:
       summary: Ingest Bulk
       tags:
       - ingest
+  /api/v1/learning/candidates:
+    get:
+      description: 'Serve the most-recent ``intent_learning_candidates.json`` artifact.
+
+
+        The CLI writes this file via ``trellis analyze learning-candidates
+
+        --output-dir <dir>``. We resolve ``<dir>`` from
+
+        ``TRELLIS_LEARNING_ARTIFACTS_DIR`` (or ``<data_dir>/learning``). When
+
+        no artifact is found we return an empty list plus a ``hint`` telling
+
+        the operator how to generate one — never a 5xx.'
+      operationId: list_learning_candidates_api_v1_learning_candidates_get
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LearningCandidateListResponse'
+          description: Successful Response
+      security:
+      - APIKeyHeader: []
+      summary: List Learning Candidates
+      tags:
+      - admin
+  /api/v1/learning/promotions:
+    post:
+      description: 'Promote approved learning candidates through the governed pipeline.
+
+
+        Builds the decisions payload from the request body, joins it against
+
+        the most-recent candidate artifact via
+
+        :func:`trellis.learning.prepare_learning_promotions`, then submits
+
+        each approved promotion as ``ENTITY_CREATE`` + per-target
+
+        ``LINK_CREATE`` commands through :class:`MutationExecutor` — exactly
+
+        the path ``trellis curate promote-learning`` uses. A
+
+        ``REVIEW_DECISION_RECORDED`` event records the reviewer identity.'
+      operationId: promote_learning_candidates_api_v1_learning_promotions_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LearningPromotionRequest'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LearningPromotionResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - APIKeyHeader: []
+      summary: Promote Learning Candidates
+      tags:
+      - admin
   /api/v1/links:
     post:
       description: Create a graph edge between two entities.
@@ -1787,6 +2512,77 @@ paths:
       summary: Record Measurement
       tags:
       - observations
+  /api/v1/metrics/timeseries:
+    get:
+      description: 'Compute an improvement metric as a daily time series.
+
+
+        Read-only — the aggregation in
+
+        :func:`trellis.retrieve.metrics_timeseries.compute_timeseries` reads
+
+        the EventLog and never mutates a store. Buckets with no data are
+
+        omitted (not zero-filled). An unknown ``metric`` / ``group_by`` /
+
+        ``bucket`` (or a non-positive ``days``) returns 422 rather than a
+
+        silent empty result, so a typo surfaces loudly.'
+      operationId: metrics_timeseries_api_v1_metrics_timeseries_get
+      parameters:
+      - description: One of the five improvement metrics
+        in: query
+        name: metric
+        required: true
+        schema:
+          description: One of the five improvement metrics
+          title: Metric
+          type: string
+      - description: Look-back window in days
+        in: query
+        name: days
+        required: false
+        schema:
+          default: 30
+          description: Look-back window in days
+          title: Days
+          type: integer
+      - description: Bucket granularity (only 'day')
+        in: query
+        name: bucket
+        required: false
+        schema:
+          default: day
+          description: Bucket granularity (only 'day')
+          title: Bucket
+          type: string
+      - description: 'Grouping axis: domain | intent_family | none'
+        in: query
+        name: group_by
+        required: false
+        schema:
+          default: none
+          description: 'Grouping axis: domain | intent_family | none'
+          title: Group By
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MetricsTimeseriesResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - APIKeyHeader: []
+      summary: Metrics Timeseries
+      tags:
+      - admin
   /api/v1/observations:
     get:
       description: 'Query Observation nodes by subject and/or observer.
@@ -1912,7 +2708,20 @@ paths:
       - retrieve
   /api/v1/packs/{pack_id}/feedback:
     post:
-      description: Record feedback on a specific context pack.
+      description: 'Record element-level feedback on a specific context pack.
+
+
+        Routes through :func:`trellis.feedback.recording.record_feedback`,
+
+        which appends the durable ``pack_feedback.jsonl`` row and emits the
+
+        authoritative ``FEEDBACK_RECORDED`` event to the operational
+
+        EventLog. The response surfaces whether that event reached the log
+
+        (``event_log_in_sync``) so callers can detect soft-failed emissions
+
+        rather than silently treating a JSONL-only write as fully recorded.'
       operationId: pack_feedback_api_v1_packs__pack_id__feedback_post
       parameters:
       - in: path
@@ -1921,32 +2730,18 @@ paths:
         schema:
           title: Pack Id
           type: string
-      - description: Whether the context was helpful
-        in: query
-        name: success
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PackFeedbackRequest'
         required: true
-        schema:
-          description: Whether the context was helpful
-          title: Success
-          type: boolean
-      - description: Optional notes
-        in: query
-        name: notes
-        required: false
-        schema:
-          anyOf:
-          - type: string
-          - type: 'null'
-          description: Optional notes
-          title: Notes
       responses:
         '200':
           content:
             application/json:
               schema:
-                additionalProperties: true
-                title: Response Pack Feedback Api V1 Packs  Pack Id  Feedback Post
-                type: object
+                $ref: '#/components/schemas/PackFeedbackResponse'
           description: Successful Response
         '422':
           content:
@@ -2134,6 +2929,254 @@ paths:
       summary: Promote
       tags:
       - curate
+  /api/v1/proposals:
+    get:
+      description: 'List pending tuner proposals awaiting a human approve / reject.
+
+
+        Surfaces effect_size / sample_size / baseline / proposed_values per
+
+        proposal so the operator can judge each one. Mirrors the read in
+
+        ``trellis metrics proposals --status pending`` but enriches each row
+
+        with the resolved baseline values (what the proposal is measured
+
+        against).'
+      operationId: list_pending_proposals_api_v1_proposals_get
+      parameters:
+      - description: Max proposals to return
+        in: query
+        name: limit
+        required: false
+        schema:
+          default: 100
+          description: Max proposals to return
+          title: Limit
+          type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TunerProposalListResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - APIKeyHeader: []
+      summary: List Pending Proposals
+      tags:
+      - admin
+  /api/v1/proposals/{proposal_id}/preview:
+    get:
+      description: 'Dry-run a proposal promotion — predict the decision, mutate nothing.
+
+
+        Backs the UI confirm step: the operator sees the predicted
+
+        promote / reject outcome (and why) before committing. Wraps the same
+
+        :func:`trellis.learning.tuners.preview_promotion` the CLI dry-run uses.'
+      operationId: preview_proposal_api_v1_proposals__proposal_id__preview_get
+      parameters:
+      - in: path
+        name: proposal_id
+        required: true
+        schema:
+          title: Proposal Id
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProposalPreviewResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - APIKeyHeader: []
+      summary: Preview Proposal
+      tags:
+      - admin
+  /api/v1/proposals/{proposal_id}/promote:
+    post:
+      description: 'Promote a tuner proposal through the governed promotion pipeline.
+
+
+        Wraps the same :func:`trellis.learning.tuners.promote_proposal` logic
+
+        as ``trellis metrics promote --commit`` — validate, policy gate,
+
+        write the new ``ParameterSet``, and emit ``PARAMS_UPDATED`` (or
+
+        ``TUNER_PROPOSAL_REJECTED`` on a policy rejection). A second
+
+        ``REVIEW_DECISION_RECORDED`` event records the reviewer identity.'
+      operationId: promote_proposal_route_api_v1_proposals__proposal_id__promote_post
+      parameters:
+      - in: path
+        name: proposal_id
+        required: true
+        schema:
+          title: Proposal Id
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProposalDecisionResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - APIKeyHeader: []
+      summary: Promote Proposal Route
+      tags:
+      - admin
+  /api/v1/proposals/{proposal_id}/reject:
+    post:
+      description: 'Reject a tuner proposal (human-gated tier-2 decision).
+
+
+        Marks the proposal ``rejected`` and emits ``TUNER_PROPOSAL_REJECTED``
+
+        via :func:`trellis.learning.tuners.reject_proposal`, then records a
+
+        ``REVIEW_DECISION_RECORDED`` event with the reviewer identity.'
+      operationId: reject_proposal_route_api_v1_proposals__proposal_id__reject_post
+      parameters:
+      - in: path
+        name: proposal_id
+        required: true
+        schema:
+          title: Proposal Id
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              anyOf:
+              - $ref: '#/components/schemas/ProposalRejectRequest'
+              - type: 'null'
+              title: Req
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProposalDecisionResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - APIKeyHeader: []
+      summary: Reject Proposal Route
+      tags:
+      - admin
+  /api/v1/schema-evolution/candidates:
+    get:
+      description: 'List the latest ``WELL_KNOWN_CANDIDATE`` event per ``candidate_id``.
+
+
+        Reuses the EventLog query the CLI''s draft-promotion-adr path reads
+
+        from. The only action exposed on these candidates is drafting the ADR
+
+        markdown — promotion is a one-way ADR commitment with no machine
+
+        write path.'
+      operationId: list_schema_evolution_candidates_api_v1_schema_evolution_candidates_get
+      parameters:
+      - description: Max WELL_KNOWN_CANDIDATE events to scan
+        in: query
+        name: limit
+        required: false
+        schema:
+          default: 200
+          description: Max WELL_KNOWN_CANDIDATE events to scan
+          title: Limit
+          type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SchemaEvolutionListResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - APIKeyHeader: []
+      summary: List Schema Evolution Candidates
+      tags:
+      - admin
+  /api/v1/schema-evolution/{candidate_id}/draft-adr:
+    post:
+      description: 'Render the promotion-ADR markdown for one schema-evolution candidate.
+
+
+        The ONLY schema-evolution action — there is no approve/promote
+
+        endpoint, because promoting a well-known type is a one-way ADR
+
+        commitment (the ADR author edits ``well_known.py`` by hand after
+
+        review). Reuses the CLI''s template-rendering helpers
+
+        (``_lookup_candidate_payload`` + ``_render_promotion_adr``) so the
+
+        UI markdown matches what ``trellis admin draft-promotion-adr`` writes
+
+        — but returns the markdown to the caller instead of writing a file.'
+      operationId: draft_schema_evolution_adr_api_v1_schema_evolution__candidate_id__draft_adr_post
+      parameters:
+      - in: path
+        name: candidate_id
+        required: true
+        schema:
+          title: Candidate Id
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DraftAdrResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - APIKeyHeader: []
+      summary: Draft Schema Evolution Adr
+      tags:
+      - admin
   /api/v1/search:
     get:
       description: Full-text search across documents.

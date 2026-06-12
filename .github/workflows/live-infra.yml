@@ -64,7 +64,10 @@ jobs:
           TRELLIS_TEST_PG_DSN: ${{ secrets.TRELLIS_TEST_PG_DSN }}
           # Backend-marked tests are deselected by default (tests/conftest.py);
           # these toggles opt the gated suites in — without them this job
-          # collects 0 tests and exits 5.
+          # collects 0 tests and exits 5. The loop suites are marked
+          # live + slow + neo4j + postgres, so ALL FOUR toggles are needed.
+          TRELLIS_TEST_LIVE: "1"
+          TRELLIS_TEST_SLOW: "1"
           TRELLIS_TEST_NEO: "1"
           TRELLIS_TEST_POSTGRES: "1"
         run: |
