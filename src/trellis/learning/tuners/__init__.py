@@ -9,8 +9,11 @@ cursor, aggregate per learning-axis cell, apply a rule set, and emit
 
 from trellis.learning.tuners.promotion import (
     PromotionPolicy,
+    PromotionPreview,
     PromotionResult,
+    preview_promotion,
     promote_proposal,
+    reject_proposal,
 )
 from trellis.learning.tuners.rollback import (
     PostPromotionPolicy,
@@ -33,12 +36,15 @@ __all__ = [
     "PostPromotionPolicy",
     "PostPromotionReport",
     "PromotionPolicy",
+    "PromotionPreview",
     "PromotionResult",
     "RuleTuner",
     "TuningRule",
     "aggregate_outcomes",
     "apply_rules",
     "monitor_post_promotion",
+    "preview_promotion",
     "promote_proposal",
+    "reject_proposal",
     "run_post_promotion_sweep",
 ]

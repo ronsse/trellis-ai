@@ -874,6 +874,53 @@ Start with `trellis admin serve` or `trellis-api`. Base path: `/api/v1/`.
 | GET | `/stats` | Store statistics |
 | GET | `/effectiveness` | Context effectiveness report |
 
+### Review queue (admin scope)
+
+The Review view in the static UI (`/ui/` → **Review**) is a human-decision
+inbox. Every endpoint below is on the admin router, so it requires the
+`admin` scope, respects `TRELLIS_UI_ENABLED` / ops-gating, and — for the
+write actions — emits a `REVIEW_DECISION_RECORDED` audit event stamped
+with the authenticated key identity (in addition to the surface-specific
+event the underlying pipeline already emits). The autonomy tiers that
+decide which surfaces are human-gated are described in
+`docs/design/adr-autonomy-ladder.md`.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/proposals` | List pending tuner proposals with `effect_size` / `sample_size` / `baseline_values` / `proposed_values` |
+| GET | `/proposals/{id}/preview` | Dry-run a promotion — predict promote/reject, mutate nothing |
+| POST | `/proposals/{id}/promote` | Promote through the governed pipeline (same logic as `trellis metrics promote --commit`) |
+| POST | `/proposals/{id}/reject` | Reject (human-gated); body `{reason?}` |
+| GET | `/learning/candidates` | Serve the most-recent `intent_learning_candidates.json` artifact (empty + `hint` when none found) |
+| POST | `/learning/promotions` | Promote approved candidates via `MutationExecutor`; body `{decisions: [{candidate_id, approved, rationale?}]}` |
+| GET | `/schema-evolution/candidates` | List latest `WELL_KNOWN_CANDIDATE` event per `candidate_id` |
+| POST | `/schema-evolution/{id}/draft-adr` | Render the promotion-ADR markdown (copyable/downloadable in the UI). **Only** action — there is no promote endpoint; promotion is a one-way ADR commitment |
+| GET | `/code-proposals` | List recent `PROPOSAL_DRAFTED` events with `markdown_preview` (read-only) |
+
+**Sections in the UI.** The Review view has four collapsible queue sections,
+each with a live count:
+
+1. **Tuner proposals** — Approve / Reject buttons. Approve first runs the
+   dry-run preview and shows the predicted decision before a confirm step.
+   Approve wraps `promote_proposal`; Reject wraps `reject_proposal`. The
+   CLI (`trellis metrics promote`) keeps working identically — both share
+   `trellis.learning.tuners.preview_promotion`.
+2. **Learning promotion candidates** — candidate cards with metrics, an
+   approve checkbox + rationale field, and a single submit that runs the
+   existing `prepare_learning_promotions` → `MutationExecutor` path.
+3. **Schema-evolution candidates** — only a **Draft ADR** action, which
+   returns the rendered ADR markdown in a copyable / downloadable panel.
+   No approve/promote button (a tooltip explains why).
+4. **Code-authoring proposals** — read-only list with markdown preview.
+
+**Learning artifacts directory.** `GET /learning/candidates` and `POST
+/learning/promotions` read the `intent_learning_candidates.json` artifact
+that `trellis analyze learning-candidates --output-dir <dir>` writes. The
+server resolves `<dir>` from `TRELLIS_LEARNING_ARTIFACTS_DIR`, falling back
+to `<data_dir>/learning`. When no artifact is found, the list endpoint
+returns an empty list plus a `hint`, and the promote endpoint returns
+`409`.
+
 ---
 
 ## MCP Macro Tools

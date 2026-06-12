@@ -30,6 +30,7 @@ from trellis.learning.tuners import (
     PromotionPolicy,
     RuleTuner,
     aggregate_outcomes,
+    preview_promotion,
     promote_proposal,
 )
 from trellis.schemas.parameters import ParameterScope
@@ -397,70 +398,58 @@ def _dry_run_promote(
     force: bool,
     output_format: str,
 ) -> None:
-    """Report what ``promote --commit`` would do without mutating anything."""
-    proposal = tuner_state.get_proposal(proposal_id)
-    if proposal is None:
-        msg = "proposal_not_found"
-        payload = {
-            "proposal_id": proposal_id,
-            "status": "skipped",
-            "reason": msg,
-            "dry_run": True,
-        }
+    """Report what ``promote --commit`` would do without mutating anything.
+
+    Delegates the forecast to :func:`trellis.learning.tuners.preview_promotion`
+    so the CLI dry-run and the API Review-queue confirm step share one
+    decision path.
+    """
+    preview = preview_promotion(
+        proposal_id,
+        tuner_state=tuner_state,
+        parameter_store=params,
+        policy=policy,
+        force=force,
+    )
+
+    if preview.status == "skipped":
         if output_format == "json":
-            _emit_json(payload)
+            _emit_json(
+                {
+                    "proposal_id": proposal_id,
+                    "status": "skipped",
+                    "reason": preview.reason,
+                    "dry_run": True,
+                }
+            )
         else:
-            console.print(f"[yellow]SKIPPED[/yellow] {proposal_id}: {msg}")
+            console.print(
+                f"[yellow]SKIPPED[/yellow] {proposal_id}: {preview.reason}"
+            )
         return
-
-    baseline = params.resolve(proposal.scope)
-    baseline_values = baseline.values if baseline else None
-
-    # Preview the policy decision by importing the helper.
-    from trellis.learning.tuners.promotion import (  # noqa: PLC0415
-        _apply_policy,
-        _compute_effect_size,
-    )
-
-    effect, has_non_numeric = _compute_effect_size(
-        proposal.proposed_values, baseline_values
-    )
-    effective_policy = policy or PromotionPolicy()
-    reason = (
-        None
-        if force
-        else _apply_policy(
-            proposal=proposal,
-            policy=effective_policy,
-            baseline_values=baseline_values,
-            effect=effect,
-            has_non_numeric=has_non_numeric,
-        )
-    )
-    predicted_status = "rejected" if reason else "promoted"
 
     if output_format == "json":
         _emit_json(
             {
                 "proposal_id": proposal_id,
                 "dry_run": True,
-                "predicted_status": predicted_status,
-                "reason": reason or "ok",
-                "proposed_values": dict(proposal.proposed_values),
-                "baseline_values": dict(baseline_values or {}),
-                "effect_size": effect,
-                "sample_size": proposal.sample_size,
+                "predicted_status": preview.status,
+                "reason": preview.reason,
+                "proposed_values": preview.proposed_values,
+                "baseline_values": preview.baseline_values,
+                "effect_size": preview.effect_size,
+                "sample_size": preview.sample_size,
             }
         )
         return
 
-    color = "green" if predicted_status == "promoted" else "red"
+    color = "green" if preview.status == "promoted" else "red"
     console.print("[dim](dry run — pass --commit to apply)[/dim]")
     console.print(
-        f"[{color}]WOULD {predicted_status.upper()}[/{color}] {proposal_id}: "
-        f"{reason or 'policy gate would pass'}"
+        f"[{color}]WOULD {preview.status.upper()}[/{color}] {proposal_id}: "
+        f"{preview.reason if preview.reason != 'ok' else 'policy gate would pass'}"
     )
-    console.print(f"  proposed: {json.dumps(proposal.proposed_values)}")
-    console.print(f"  baseline: {json.dumps(baseline_values or {})}")
-    if effect is not None:
-        console.print(f"  effect_size: {effect:.4f}")
+    console.print(f"  proposed: {json.dumps(preview.proposed_values)}")
+    console.print(f"  baseline: {json.dumps(preview.baseline_values)}")
+    if preview.effect_size is not None:
+        console.print(f"  effect_size: {preview.effect_size:.4f}")

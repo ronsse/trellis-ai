@@ -90,6 +90,28 @@ class PromotionResult:
     baseline_values: dict[str, Any] | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class PromotionPreview:
+    """Read-only forecast of what :func:`promote_proposal` would decide.
+
+    Produced by :func:`preview_promotion` without mutating any store or
+    emitting any event. Both the ``trellis metrics promote`` dry-run and
+    the API Review-queue confirm step render this so the operator sees the
+    predicted decision before committing. ``status`` is one of
+    ``"promoted"`` / ``"rejected"`` / ``"skipped"`` — the same vocabulary
+    :class:`PromotionResult.status` uses, so the confirm UI and the commit
+    result speak the same language.
+    """
+
+    proposal_id: str
+    status: str  # "promoted" | "rejected" | "skipped"
+    reason: str
+    proposed_values: dict[str, Any]
+    baseline_values: dict[str, Any]
+    effect_size: float | None = None
+    sample_size: int = 0
+
+
 def _compute_effect_size(
     proposed: dict[str, Any], baseline: dict[str, Any] | None
 ) -> tuple[float | None, bool]:
@@ -291,6 +313,144 @@ def promote_proposal(
         params_version=stored.params_version,
         effect_size=effect,
         baseline_values=baseline_values,
+    )
+
+
+def preview_promotion(
+    proposal_id: str,
+    *,
+    tuner_state: TunerStateStore,
+    parameter_store: ParameterStore,
+    policy: PromotionPolicy | None = None,
+    force: bool = False,
+) -> PromotionPreview:
+    """Forecast :func:`promote_proposal` without mutating or emitting.
+
+    Runs validate + the policy gate exactly as :func:`promote_proposal`
+    would, but writes nothing and emits no event. Returns a
+    :class:`PromotionPreview` describing the *predicted* decision so a
+    caller (the CLI dry-run, the API confirm step) can show the operator
+    what would happen before they commit.
+
+    The predicted ``status`` matches what a subsequent
+    :func:`promote_proposal` call with the same ``policy`` / ``force``
+    would produce, modulo store state changing in between.
+    """
+    effective_policy = policy or PromotionPolicy()
+
+    proposal = tuner_state.get_proposal(proposal_id)
+    if proposal is None:
+        return PromotionPreview(
+            proposal_id=proposal_id,
+            status="skipped",
+            reason="proposal_not_found",
+            proposed_values={},
+            baseline_values={},
+        )
+
+    if proposal.status in {"promoted", "rejected"}:
+        return PromotionPreview(
+            proposal_id=proposal_id,
+            status="skipped",
+            reason=f"proposal_already_{proposal.status}",
+            proposed_values=dict(proposal.proposed_values),
+            baseline_values={},
+            sample_size=proposal.sample_size,
+        )
+
+    baseline_snapshot = parameter_store.resolve(proposal.scope)
+    baseline_values = baseline_snapshot.values if baseline_snapshot else None
+
+    effect, has_non_numeric = _compute_effect_size(
+        proposal.proposed_values, baseline_values
+    )
+    reason = (
+        None
+        if force
+        else _apply_policy(
+            proposal=proposal,
+            policy=effective_policy,
+            baseline_values=baseline_values,
+            effect=effect,
+            has_non_numeric=has_non_numeric,
+        )
+    )
+    predicted_status = "rejected" if reason else "promoted"
+    return PromotionPreview(
+        proposal_id=proposal_id,
+        status=predicted_status,
+        reason=reason or "ok",
+        proposed_values=dict(proposal.proposed_values),
+        baseline_values=dict(baseline_values or {}),
+        effect_size=effect,
+        sample_size=proposal.sample_size,
+    )
+
+
+def reject_proposal(
+    proposal_id: str,
+    *,
+    tuner_state: TunerStateStore,
+    event_log: EventLog,
+    reason: str = "rejected_by_reviewer",
+    source: str = "tuner.promotion",
+) -> PromotionResult:
+    """Human-gated rejection of a pending proposal.
+
+    The tier-2 review surface (see ``docs/design/adr-autonomy-ladder.md``)
+    lets an operator reject a proposal outright rather than promote it.
+    This follows the same ``validate → update_status → emit`` shape as the
+    policy-rejection branch of :func:`promote_proposal`, emitting a
+    :class:`EventType.TUNER_PROPOSAL_REJECTED` event so the audit trail
+    captures the manual decision.
+
+    Args:
+        proposal_id: The proposal to reject.
+        tuner_state: Store holding the proposal record and its status.
+        event_log: Destination for the
+            :class:`EventType.TUNER_PROPOSAL_REJECTED` audit event.
+        reason: Human-supplied rejection rationale; recorded on both the
+            proposal's ``notes`` and the event payload.
+        source: Event source label.
+    """
+    proposal = tuner_state.get_proposal(proposal_id)
+    if proposal is None:
+        return PromotionResult(
+            proposal_id=proposal_id,
+            status="skipped",
+            reason="proposal_not_found",
+        )
+    if proposal.status in {"promoted", "rejected"}:
+        return PromotionResult(
+            proposal_id=proposal_id,
+            status="skipped",
+            reason=f"proposal_already_{proposal.status}",
+        )
+
+    tuner_state.update_status(proposal_id, "rejected", notes=reason)
+    event_log.emit(
+        EventType.TUNER_PROPOSAL_REJECTED,
+        source=source,
+        entity_id=proposal_id,
+        entity_type="parameter_proposal",
+        payload={
+            "proposal_id": proposal_id,
+            "scope": list(proposal.scope.key()),
+            "proposed_values": dict(proposal.proposed_values),
+            "sample_size": proposal.sample_size,
+            "reason": reason,
+            "manual": True,
+        },
+    )
+    logger.info(
+        "tuner.promotion.manual_rejected",
+        proposal_id=proposal_id,
+        reason=reason,
+    )
+    return PromotionResult(
+        proposal_id=proposal_id,
+        status="rejected",
+        reason=reason,
     )
 
 

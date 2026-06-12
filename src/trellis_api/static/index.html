@@ -125,6 +125,112 @@
         }
         .status-row:last-child { border-bottom: none; }
 
+        /* Review queue */
+        .review-section {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            margin: 1rem 0;
+            overflow: hidden;
+        }
+        .review-section > summary {
+            cursor: pointer;
+            padding: 1rem 1.5rem;
+            font-size: 1rem;
+            font-weight: 600;
+            list-style: none;
+            display: flex;
+            align-items: center;
+            gap: 0.6rem;
+            user-select: none;
+        }
+        .review-section > summary::-webkit-details-marker { display: none; }
+        .review-section > summary::before {
+            content: '\25B8';
+            color: var(--text-dim);
+            transition: transform var(--transition);
+        }
+        .review-section[open] > summary::before { transform: rotate(90deg); }
+        .review-section > summary:hover { color: var(--accent); }
+        .review-count {
+            background: var(--surface-2);
+            color: var(--text-dim);
+            border-radius: 10px;
+            padding: 0.05rem 0.55rem;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+        .review-body { padding: 0 1.5rem 1.25rem; }
+        .review-card {
+            background: var(--surface-2);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 1rem;
+            margin-bottom: 0.85rem;
+        }
+        .review-card h4 { font-size: 0.95rem; margin-bottom: 0.4rem; word-break: break-word; }
+        .review-card .review-meta {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.4rem 1rem;
+            font-size: 0.78rem;
+            color: var(--text-dim);
+            margin: 0.5rem 0;
+        }
+        .review-card .review-actions {
+            display: flex;
+            gap: 0.5rem;
+            margin-top: 0.75rem;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+        .review-kv { font-family: ui-monospace, monospace; font-size: 0.78rem; }
+        .review-predict {
+            font-size: 0.78rem;
+            margin-top: 0.5rem;
+            padding: 0.5rem 0.75rem;
+            border-radius: 4px;
+            background: var(--bg);
+            border: 1px solid var(--border);
+        }
+        button.btn-danger {
+            border-color: var(--error);
+            color: var(--error);
+            background: transparent;
+        }
+        button.btn-danger:hover { background: #350a0a; }
+        .review-rationale {
+            width: 100%;
+            margin-top: 0.5rem;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            color: var(--text);
+            padding: 0.5rem;
+            font-size: 0.82rem;
+            font-family: inherit;
+            resize: vertical;
+            min-height: 2.2rem;
+        }
+        .adr-panel {
+            margin-top: 0.75rem;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 0.75rem;
+            max-height: 320px;
+            overflow: auto;
+            white-space: pre-wrap;
+            font-family: ui-monospace, monospace;
+            font-size: 0.75rem;
+            color: var(--text-dim);
+        }
+        .review-tooltip {
+            cursor: help;
+            border-bottom: 1px dotted var(--text-dim);
+            color: var(--text-dim);
+        }
+
         /* Badges */
         .badge {
             display: inline-block;
@@ -837,12 +943,13 @@
         </span>
         <div class="nav-links">
             <a href="#" class="active" data-view="dashboard">Dashboard</a>
+            <a href="#" data-view="review">Review</a>
             <a href="#" data-view="evolution">Evolution</a>
             <a href="#" data-view="graph">Graph</a>
             <a href="#" data-view="traces">Traces</a>
             <a href="#" data-view="precedents">Precedents</a>
         </div>
-        <span class="shortcuts-hint"><kbd>/</kbd> Search &middot; <kbd>1</kbd>-<kbd>5</kbd> Views &middot; <kbd>Esc</kbd> Close</span>
+        <span class="shortcuts-hint"><kbd>/</kbd> Search &middot; <kbd>1</kbd>-<kbd>6</kbd> Views &middot; <kbd>Esc</kbd> Close</span>
         <button class="btn-icon" id="api-key-toggle" title="API key" onclick="toggleKeyBanner()">&#x1F511;</button>
     </nav>
 
@@ -875,6 +982,44 @@
                 <h2>Store Health</h2>
                 <div id="health-rows"></div>
             </div>
+        </div>
+
+        <!-- ============ Review (human-decision inbox) ============ -->
+        <div id="view-review" style="display:none">
+            <div class="section-header">
+                <h2>Review Queue</h2>
+                <div class="search-bar" style="margin:0">
+                    <button onclick="loadReview()">Refresh</button>
+                </div>
+            </div>
+            <p style="font-size:0.8rem; color:var(--text-dim); margin-bottom:1rem;">
+                Human-decision inbox. Approving or rejecting items here is gated to operators —
+                see the autonomy ladder for which surfaces are human-gated.
+            </p>
+
+            <!-- Section 1: Tuner proposals -->
+            <details class="review-section" id="review-proposals" open>
+                <summary>Tuner proposals <span class="review-count" id="review-proposals-count">0</span></summary>
+                <div class="review-body" id="review-proposals-body"></div>
+            </details>
+
+            <!-- Section 2: Learning-promotion candidates -->
+            <details class="review-section" id="review-learning">
+                <summary>Learning promotion candidates <span class="review-count" id="review-learning-count">0</span></summary>
+                <div class="review-body" id="review-learning-body"></div>
+            </details>
+
+            <!-- Section 3: Schema-evolution candidates -->
+            <details class="review-section" id="review-schema">
+                <summary>Schema-evolution candidates <span class="review-count" id="review-schema-count">0</span></summary>
+                <div class="review-body" id="review-schema-body"></div>
+            </details>
+
+            <!-- Section 4: Code-authoring proposals (read-only) -->
+            <details class="review-section" id="review-code">
+                <summary>Code-authoring proposals <span class="review-count" id="review-code-count">0</span></summary>
+                <div class="review-body" id="review-code-body"></div>
+            </details>
         </div>
 
         <!-- ============ Evolution ============ -->
@@ -1066,6 +1211,28 @@
             return res.json();
         }
 
+        async function postJSON(path, body) {
+            const headers = { 'Content-Type': 'application/json' };
+            const key = getApiKey();
+            if (key) headers['X-API-Key'] = key;
+            const res = await fetch(API + path, {
+                method: 'POST',
+                headers,
+                body: body === undefined ? undefined : JSON.stringify(body)
+            });
+            if (res.status === 401) {
+                showKeyBanner(key ? 'Stored API key was rejected — enter a valid key.'
+                                  : 'This API requires a key — enter one to continue.');
+                throw new Error('401 Unauthorized (API key required)');
+            }
+            if (!res.ok) {
+                let detail = `${res.status} ${res.statusText}`;
+                try { const j = await res.json(); if (j && j.detail) detail = j.detail; } catch { /* non-JSON */ }
+                throw new Error(detail);
+            }
+            return res.json();
+        }
+
         function timeAgo(iso) {
             if (!iso) return '';
             const d = new Date(iso);
@@ -1104,7 +1271,7 @@
         }
 
         // -- View switching --
-        const views = ['dashboard', 'evolution', 'graph', 'traces', 'precedents'];
+        const views = ['dashboard', 'review', 'evolution', 'graph', 'traces', 'precedents'];
         const viewLoaded = {};
         document.querySelectorAll('nav a[data-view]').forEach(link => {
             link.addEventListener('click', e => {
@@ -1122,6 +1289,7 @@
             });
             if (!viewLoaded[name]) {
                 viewLoaded[name] = true;
+                if (name === 'review') loadReview();
                 if (name === 'evolution') loadEvolution();
                 if (name === 'traces') loadTraces();
                 if (name === 'precedents') loadPrecedents();
@@ -1149,7 +1317,7 @@
                     document.getElementById('trace-domain').focus();
                 }
             }
-            if (e.key >= '1' && e.key <= '5') {
+            if (e.key >= '1' && e.key <= '6') {
                 switchView(views[parseInt(e.key) - 1]);
             }
             if (e.key === 'Escape') {
@@ -1175,6 +1343,262 @@
             const label = ok ? 'OK' : 'DOWN';
             div.innerHTML = `<span>${escHtml(name)}</span><span class="badge ${cls}">${label}</span>`;
             return div;
+        }
+
+        // ============================================================
+        //  REVIEW (human-decision inbox)
+        // ============================================================
+        function setCount(id, n) {
+            document.getElementById(id).textContent = n;
+        }
+
+        function reviewEmpty(msg) {
+            return `<div class="empty-state"><p style="color:var(--text-dim)">${escHtml(msg)}</p></div>`;
+        }
+
+        function reviewError(msg) {
+            return `<div class="empty-state"><p style="color:var(--error)">${escHtml(msg)}</p></div>`;
+        }
+
+        async function loadReview() {
+            // Load all four sections independently so one failure doesn't
+            // blank the others.
+            loadReviewProposals();
+            loadReviewLearning();
+            loadReviewSchema();
+            loadReviewCode();
+        }
+
+        // -- Section 1: Tuner proposals --
+        async function loadReviewProposals() {
+            const body = document.getElementById('review-proposals-body');
+            body.innerHTML = loadingHtml('Loading tuner proposals...');
+            try {
+                const data = await fetchJSON('/admin/proposals');
+                const items = data.proposals || [];
+                setCount('review-proposals-count', items.length);
+                if (items.length === 0) { body.innerHTML = reviewEmpty('No pending proposals.'); return; }
+                body.innerHTML = items.map(p => `
+                    <div class="review-card fade-in" id="proposal-${escHtml(p.proposal_id)}">
+                        <h4>${escHtml(p.component_id)} <span class="badge badge-accent">${escHtml(p.tuner)}</span></h4>
+                        <div class="review-meta">
+                            ${p.domain ? `<span>domain: ${escHtml(p.domain)}</span>` : ''}
+                            ${p.intent_family ? `<span>intent: ${escHtml(p.intent_family)}</span>` : ''}
+                            <span>sample_size: ${escHtml(p.sample_size)}</span>
+                            <span>effect_size: ${p.effect_size == null ? '—' : escHtml(Number(p.effect_size).toFixed(4))}</span>
+                        </div>
+                        <div class="review-kv">proposed: ${escHtml(JSON.stringify(p.proposed_values))}</div>
+                        <div class="review-kv">baseline: ${escHtml(JSON.stringify(p.baseline_values))}</div>
+                        <div class="review-predict" id="predict-${escHtml(p.proposal_id)}" style="display:none"></div>
+                        <div class="review-actions">
+                            <button class="btn btn-sm" onclick="confirmPromoteProposal('${escHtml(p.proposal_id)}')">Approve</button>
+                            <button class="btn btn-sm btn-danger" onclick="rejectProposal('${escHtml(p.proposal_id)}')">Reject</button>
+                        </div>
+                    </div>`).join('');
+            } catch (err) {
+                setCount('review-proposals-count', 0);
+                body.innerHTML = reviewError('Failed to load proposals: ' + err.message);
+            }
+        }
+
+        async function confirmPromoteProposal(id) {
+            // Show the dry-run prediction first, then swap the Approve button
+            // into a confirm action.
+            const card = document.getElementById('proposal-' + id);
+            const predict = document.getElementById('predict-' + id);
+            try {
+                const pv = await fetchJSON(`/admin/proposals/${encodeURIComponent(id)}/preview`);
+                const ok = pv.predicted_status === 'promoted';
+                predict.style.display = 'block';
+                predict.innerHTML =
+                    `<strong style="color:${ok ? 'var(--success)' : 'var(--error)'}">` +
+                    `Predicted: ${escHtml(pv.predicted_status)}</strong> — ${escHtml(pv.reason)}` +
+                    (pv.effect_size == null ? '' : ` (effect_size ${escHtml(Number(pv.effect_size).toFixed(4))})`);
+                const actions = card.querySelector('.review-actions');
+                actions.innerHTML =
+                    `<button class="btn btn-sm" onclick="promoteProposal('${escHtml(id)}')">Confirm approve</button>` +
+                    `<button class="btn btn-ghost btn-sm" onclick="loadReviewProposals()">Cancel</button>`;
+            } catch (err) {
+                predict.style.display = 'block';
+                predict.innerHTML = `<span style="color:var(--error)">Preview failed: ${escHtml(err.message)}</span>`;
+            }
+        }
+
+        async function promoteProposal(id) {
+            try {
+                const r = await postJSON(`/admin/proposals/${encodeURIComponent(id)}/promote`);
+                toastReview(`Proposal ${r.status}: ${r.reason}`, r.status === 'promoted');
+            } catch (err) {
+                toastReview('Promote failed: ' + err.message, false);
+            }
+            loadReviewProposals();
+        }
+
+        async function rejectProposal(id) {
+            try {
+                const r = await postJSON(`/admin/proposals/${encodeURIComponent(id)}/reject`, { reason: 'rejected_by_reviewer' });
+                toastReview(`Proposal ${r.status}: ${r.reason}`, false);
+            } catch (err) {
+                toastReview('Reject failed: ' + err.message, false);
+            }
+            loadReviewProposals();
+        }
+
+        function toastReview(msg, ok) {
+            const error = document.getElementById('error');
+            error.style.display = 'block';
+            error.style.color = ok ? 'var(--success)' : 'var(--error)';
+            error.textContent = msg;
+            setTimeout(() => { error.style.display = 'none'; error.style.color = ''; }, 4000);
+        }
+
+        // -- Section 2: Learning-promotion candidates --
+        async function loadReviewLearning() {
+            const body = document.getElementById('review-learning-body');
+            body.innerHTML = loadingHtml('Loading learning candidates...');
+            try {
+                const data = await fetchJSON('/admin/learning/candidates');
+                const items = data.candidates || [];
+                setCount('review-learning-count', items.length);
+                if (items.length === 0) {
+                    body.innerHTML = reviewEmpty(data.hint || 'No learning candidates found.');
+                    return;
+                }
+                const cards = items.map((c, i) => {
+                    const m = c.metrics || {};
+                    const cid = c.candidate_id || ('cand-' + i);
+                    return `
+                    <div class="review-card fade-in" data-candidate="${escHtml(cid)}">
+                        <h4>${escHtml(c.precedent_name || c.title || cid)}</h4>
+                        <div class="review-meta">
+                            <span>intent: ${escHtml(c.intent_family || '—')}</span>
+                            <span>recommendation: ${escHtml(c.recommendation_type || '—')}</span>
+                            <span>success_rate: ${m.success_rate == null ? '—' : escHtml(m.success_rate)}</span>
+                            <span>retry_rate: ${m.retry_rate == null ? '—' : escHtml(m.retry_rate)}</span>
+                            <span>served: ${m.times_served == null ? '—' : escHtml(m.times_served)}</span>
+                        </div>
+                        <label style="font-size:0.82rem; display:flex; align-items:center; gap:0.4rem;">
+                            <input type="checkbox" class="learn-approve" data-candidate="${escHtml(cid)}"> Approve
+                        </label>
+                        <textarea class="review-rationale" data-candidate="${escHtml(cid)}" placeholder="Rationale (optional)"></textarea>
+                    </div>`;
+                }).join('');
+                body.innerHTML = cards +
+                    `<div class="review-actions">
+                        <button class="btn btn-sm" onclick="submitLearningPromotions()">Submit approved promotions</button>
+                     </div>`;
+            } catch (err) {
+                setCount('review-learning-count', 0);
+                body.innerHTML = reviewError('Failed to load learning candidates: ' + err.message);
+            }
+        }
+
+        async function submitLearningPromotions() {
+            const body = document.getElementById('review-learning-body');
+            const decisions = [];
+            body.querySelectorAll('.learn-approve').forEach(cb => {
+                const cid = cb.dataset.candidate;
+                const ta = body.querySelector(`textarea.review-rationale[data-candidate="${CSS.escape(cid)}"]`);
+                decisions.push({ candidate_id: cid, approved: cb.checked, rationale: ta ? ta.value : '' });
+            });
+            try {
+                const r = await postJSON('/admin/learning/promotions', { decisions });
+                toastReview(`Promoted ${r.promoted_count}/${r.approved_count} approved candidate(s).`, r.promoted_count > 0);
+            } catch (err) {
+                toastReview('Learning promotion failed: ' + err.message, false);
+            }
+            loadReviewLearning();
+        }
+
+        // -- Section 3: Schema-evolution candidates --
+        async function loadReviewSchema() {
+            const body = document.getElementById('review-schema-body');
+            body.innerHTML = loadingHtml('Loading schema-evolution candidates...');
+            try {
+                const data = await fetchJSON('/admin/schema-evolution/candidates');
+                const items = data.candidates || [];
+                setCount('review-schema-count', items.length);
+                if (items.length === 0) { body.innerHTML = reviewEmpty('No schema-evolution candidates.'); return; }
+                body.innerHTML = items.map(c => `
+                    <div class="review-card fade-in" data-candidate="${escHtml(c.candidate_id)}">
+                        <h4>${escHtml(c.open_string_value || c.candidate_id)}
+                            <span class="badge badge-accent">${escHtml(c.candidate_kind || 'type')}</span></h4>
+                        <div class="review-meta">
+                            <span>count: ${escHtml(c.count)}</span>
+                            <span>extractors: ${(c.distinct_extractors || []).length}</span>
+                            <span>domains: ${(c.distinct_domains || []).length}</span>
+                            ${c.suggested_canonical_name ? `<span>canonical: ${escHtml(c.suggested_canonical_name)}</span>` : ''}
+                        </div>
+                        <div class="review-actions">
+                            <button class="btn btn-sm" onclick="draftAdr('${escHtml(c.candidate_id)}')">Draft ADR</button>
+                            <span class="review-tooltip" title="Promotion is a one-way ADR commitment: edit well_known.py by hand after the ADR is reviewed. There is deliberately no approve button here.">Why no approve?</span>
+                        </div>
+                        <div class="adr-panel" id="adr-${escHtml(c.candidate_id)}" style="display:none"></div>
+                    </div>`).join('');
+            } catch (err) {
+                setCount('review-schema-count', 0);
+                body.innerHTML = reviewError('Failed to load schema-evolution candidates: ' + err.message);
+            }
+        }
+
+        async function draftAdr(id) {
+            const panel = document.getElementById('adr-' + id);
+            panel.style.display = 'block';
+            panel.textContent = 'Rendering ADR...';
+            try {
+                const r = await postJSON(`/admin/schema-evolution/${encodeURIComponent(id)}/draft-adr`);
+                panel.textContent = r.markdown;
+                // Prepend copy/download controls
+                const controls = document.createElement('div');
+                controls.className = 'review-actions';
+                controls.style.marginBottom = '0.5rem';
+                controls.innerHTML =
+                    `<button class="btn btn-ghost btn-sm" onclick="copyAdr('${escHtml(id)}')">Copy</button>` +
+                    `<button class="btn btn-ghost btn-sm" onclick="downloadAdr('${escHtml(id)}')">Download</button>`;
+                panel.parentNode.insertBefore(controls, panel);
+            } catch (err) {
+                panel.textContent = 'Draft ADR failed: ' + err.message;
+            }
+        }
+
+        function copyAdr(id) {
+            const text = document.getElementById('adr-' + id).textContent;
+            navigator.clipboard && navigator.clipboard.writeText(text);
+        }
+
+        function downloadAdr(id) {
+            const text = document.getElementById('adr-' + id).textContent;
+            const blob = new Blob([text], { type: 'text/markdown' });
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = `adr-promote-${id}.md`;
+            a.click();
+            URL.revokeObjectURL(a.href);
+        }
+
+        // -- Section 4: Code-authoring proposals (read-only) --
+        async function loadReviewCode() {
+            const body = document.getElementById('review-code-body');
+            body.innerHTML = loadingHtml('Loading code proposals...');
+            try {
+                const data = await fetchJSON('/admin/code-proposals');
+                const items = data.proposals || [];
+                setCount('review-code-count', items.length);
+                if (items.length === 0) { body.innerHTML = reviewEmpty('No code-authoring proposals.'); return; }
+                body.innerHTML = items.map(p => `
+                    <div class="review-card fade-in">
+                        <h4>${escHtml(p.source_file || p.proposal_id)}</h4>
+                        <div class="review-meta">
+                            <span class="mono" style="font-size:0.7rem">${escHtml(p.proposal_id)}</span>
+                            <span>events: ${escHtml(p.source_event_count)}</span>
+                            <span title="${escHtml(fmtDate(p.generated_at))}">${timeAgo(p.generated_at)}</span>
+                        </div>
+                        ${p.markdown_preview ? `<div class="adr-panel">${escHtml(p.markdown_preview)}</div>` : ''}
+                    </div>`).join('');
+            } catch (err) {
+                setCount('review-code-count', 0);
+                body.innerHTML = reviewError('Failed to load code proposals: ' + err.message);
+            }
         }
 
         // ============================================================
