@@ -228,3 +228,72 @@ class TestQuickstart:
         settings = json.loads(settings_path.read_text())
         assert "other-server" in settings["mcpServers"]
         assert "trellis" in settings["mcpServers"]
+
+    def test_no_skills_by_default(self):
+        """Skills are not installed unless --with-skills is passed."""
+        result = runner.invoke(app, ["admin", "quickstart", "--format", "json"])
+        assert result.exit_code == 0
+        data = json.loads(result.stdout.strip())
+        assert "skills" not in data
+        assert "skills_installed" not in data["steps"]
+        assert not (self.tmp / "home" / ".claude" / "skills").exists()
+
+    def test_with_skills_user(self):
+        result = runner.invoke(
+            app,
+            ["admin", "quickstart", "--with-skills", "user", "--format", "json"],
+        )
+        assert result.exit_code == 0
+        data = json.loads(result.stdout.strip())
+        assert "skills_installed" in data["steps"]
+        statuses = {s["name"]: s["status"] for s in data["skills"]}
+        assert statuses == {
+            "retrieve-before-task": "installed",
+            "record-after-task": "installed",
+            "link-evidence": "installed",
+        }
+        skills_dir = self.tmp / "home" / ".claude" / "skills"
+        for name in statuses:
+            assert (skills_dir / name / "SKILL.md").exists()
+
+    def test_with_skills_project(self, monkeypatch):
+        project_dir = self.tmp / "myproject"
+        project_dir.mkdir()
+        monkeypatch.chdir(project_dir)
+
+        result = runner.invoke(
+            app,
+            [
+                "admin",
+                "quickstart",
+                "--scope",
+                "project",
+                "--with-skills",
+                "project",
+                "--format",
+                "json",
+            ],
+        )
+        assert result.exit_code == 0
+        data = json.loads(result.stdout.strip())
+        assert data["skills_dir"] == str(project_dir / ".claude" / "skills")
+        assert (
+            project_dir / ".claude" / "skills" / "retrieve-before-task" / "SKILL.md"
+        ).exists()
+
+    def test_with_skills_text_output(self):
+        result = runner.invoke(
+            app, ["admin", "quickstart", "--with-skills", "user"]
+        )
+        assert result.exit_code == 0
+        assert "Skills installed to:" in result.stdout
+        assert "retrieve-before-task" in result.stdout
+
+    def test_with_skills_invalid_scope(self):
+        result = runner.invoke(
+            app,
+            ["admin", "quickstart", "--with-skills", "bogus", "--format", "json"],
+        )
+        assert result.exit_code != 0
+        data = json.loads(result.stdout.strip())
+        assert data["status"] == "error"
