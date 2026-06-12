@@ -227,11 +227,9 @@ Phase 0 (reserved-namespace validator + schema definitions) was landed in earlie
 
 ### E — Operations / infrastructure (from `TODO.md`)
 
-#### E.1 — Docker + compose smoke test
+#### E.1 — Docker + compose smoke test ✅ landed 2026-06-12
 
-**Scope:** run `docker compose up --build` against the existing compose file, verify `/healthz`, `/readyz`, `/api/version`, `/ui/`, `trellis demo load` against the containerized API. Proves the Postgres+pgvector path works under the same Dockerfile ECS will use.
-
-**Gating:** Docker available on the dev host. **Currently not installed.**
+**What landed:** built and ran the compose stack end-to-end (`docker compose up --build`) — image, Postgres+pgvector init, and all four probes (`/healthz`, `/readyz` with per-backend latencies, `/api/version`, `/ui/`) came up green first try, the skills package data and static UI ship in the image, and a trace round-trips through the containerized Postgres path via the REST API (`POST/GET /api/v1/traces`, `POST /api/v1/packs`). `deploy/smoke.sh` passes 10/10. Corrected `docs/deployment/local-compose.md`: `trellis demo load`/`trellis retrieve` are local-only (no `TRELLIS_API_URL` remote target), so the verification loop now drives the REST API directly; documented the UI-gating / `TRELLIS_AUTH_MODE=off` / Postgres-vs-SQLite env shape with real pasted outputs.
 
 #### E.2 — Uvicorn log unification ✅ landed 2026-04-25
 
@@ -271,7 +269,8 @@ If picking up cold, work the list top-down. Each item's gating is satisfied by t
 | 2 | **B.1 + B.2** Ontology Phase 1 + 2 (extractor canonical names + retrieval bucketing) | ✅ Landed 2026-04-25 | Small, well-scoped, no gating delays. Makes agent-facing graph queries less fragile. |
 | 3 | **E.2 + E.3** Uvicorn log unification + fail-fast config validation | ✅ Landed 2026-04-25 | Operational hygiene before the AWS dry-run. ~110 lines combined. |
 | 4 | **A.2** pgvector + Postgres live tests | ✅ Landed 2026-04-25 | Drift surface validated for the second cloud backend; Neon free tier provisioned. |
-| 5 | **E.1 + E.4** Docker compose smoke test + AWS dry-run | Need infra access | Ships the deployment story end-to-end. |
+| 5 | **E.1** Docker compose smoke test | ✅ Landed 2026-06-12 | Postgres+pgvector deployment path proven under the ECS Dockerfile; runbook written with real outputs. |
+| 5b | **E.4** AWS ECS+RDS dry-run | Need infra access | Catches IAM / VPC / Secrets Manager wiring the compose stack can't see. |
 | 6 | **B.3** Provenance columns | Wait for signal | Real cost; speculative without a consumer. |
 | 7 | **C.1** Vector DSL Phase 4 | Wait for signal | No drift surfaced; speculative. |
 | 8 | **D.1-5** Tag vocabulary phases | Wait for design partner | All design-partner-gated. |
