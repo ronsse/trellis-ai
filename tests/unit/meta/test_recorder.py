@@ -149,9 +149,7 @@ def test_merge_window_reuses_activity_within_5_min(
     assert first_id == second_id
 
     # Exactly one Activity present after both invocations.
-    activities = registry.knowledge.graph_store.query(
-        node_type=wk.ACTIVITY, limit=10
-    )
+    activities = registry.knowledge.graph_store.query(node_type=wk.ACTIVITY, limit=10)
     assert len(activities) == 1
 
 
@@ -185,9 +183,7 @@ def test_merge_window_expired_creates_new_activity(
         second_id = rec_b.activity_id
 
     assert first_id != second_id
-    activities = registry.knowledge.graph_store.query(
-        node_type=wk.ACTIVITY, limit=10
-    )
+    activities = registry.knowledge.graph_store.query(node_type=wk.ACTIVITY, limit=10)
     assert len(activities) == 2
 
 
@@ -214,9 +210,7 @@ def test_different_analyzer_names_dont_merge(
         second_id = rec_b.activity_id
 
     assert first_id != second_id
-    activities = registry.knowledge.graph_store.query(
-        node_type=wk.ACTIVITY, limit=10
-    )
+    activities = registry.knowledge.graph_store.query(node_type=wk.ACTIVITY, limit=10)
     assert len(activities) == 2
 
 
@@ -241,9 +235,7 @@ def test_env_var_off_no_activity_written(
         rec.produced_finding("finding-1", finding_type="Observation")
 
     # No Activity / Agent / provenance edges materialised.
-    activities = registry.knowledge.graph_store.query(
-        node_type=wk.ACTIVITY, limit=10
-    )
+    activities = registry.knowledge.graph_store.query(node_type=wk.ACTIVITY, limit=10)
     assert activities == []
     assert registry.knowledge.graph_store.get_node(DEFAULT_META_AGENT_ID) is None
 
@@ -282,9 +274,7 @@ def test_env_var_on_explicit(
         assert rec.enabled is True
         rec.consumed_event("evt-1")
 
-    activities = registry.knowledge.graph_store.query(
-        node_type=wk.ACTIVITY, limit=10
-    )
+    activities = registry.knowledge.graph_store.query(node_type=wk.ACTIVITY, limit=10)
     assert len(activities) == 1
 
 
@@ -367,7 +357,5 @@ def test_include_meta_kwarg_currently_no_op(registry: StoreRegistry) -> None:
     ) as rec:
         rec.consumed_event("evt-1")
 
-    activities = registry.knowledge.graph_store.query(
-        node_type=wk.ACTIVITY, limit=10
-    )
+    activities = registry.knowledge.graph_store.query(node_type=wk.ACTIVITY, limit=10)
     assert len(activities) == 1

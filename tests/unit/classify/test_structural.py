@@ -69,9 +69,7 @@ class TestConfigurationFromFilePath:
 
     def test_yaml_path_yields_configuration(self) -> None:
         ctx = ClassificationContext(file_path="deploy/values.yaml")
-        result = StructuralClassifier().classify(
-            "key: value\nother: 42\n", context=ctx
-        )
+        result = StructuralClassifier().classify("key: value\nother: 42\n", context=ctx)
         assert result.tags.get("content_type") == ["configuration"]
         assert "reference" in result.tags.get("retrieval_affinity", [])
 

@@ -72,9 +72,7 @@ class TestApplyImportanceFreshness:
         meta = {
             "auto_importance": 0.9,
             "content_tags": {
-                "importance_scored_at": (
-                    self._NOW - timedelta(days=10)
-                ).isoformat(),
+                "importance_scored_at": (self._NOW - timedelta(days=10)).isoformat(),
             },
         }
         assert _apply_importance(1.0, meta, now=self._NOW) == pytest.approx(1.9)
@@ -88,9 +86,7 @@ class TestApplyImportanceFreshness:
         meta = {
             "auto_importance": 0.9,
             "content_tags": {
-                "importance_scored_at": (
-                    self._NOW - timedelta(days=210)
-                ).isoformat(),
+                "importance_scored_at": (self._NOW - timedelta(days=210)).isoformat(),
             },
         }
         result = _apply_importance(1.0, meta, now=self._NOW)
@@ -105,9 +101,7 @@ class TestApplyImportanceFreshness:
         meta = {
             "auto_importance": 1.0,
             "content_tags": {
-                "importance_scored_at": (
-                    self._NOW - timedelta(days=10000)
-                ).isoformat(),
+                "importance_scored_at": (self._NOW - timedelta(days=10000)).isoformat(),
             },
         }
         result = _apply_importance(1.0, meta, now=self._NOW)

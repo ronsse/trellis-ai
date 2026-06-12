@@ -131,9 +131,7 @@ class TestFastapiInstrumentExceptionGraceful:
 
         assert result == {"otel": True, "prometheus": False, "fastapi": False}
         events = _events_with_key(log_output, "otel_fastapi_instrument_failed")
-        assert events, (
-            f"expected 'otel_fastapi_instrument_failed' in {log_output!r}"
-        )
+        assert events, f"expected 'otel_fastapi_instrument_failed' in {log_output!r}"
         # logger.exception should have escalated to error level + exc_info.
         assert events[0].get("log_level") == "error"
         # exc_info is rendered as the structlog 'exception' key or similar;

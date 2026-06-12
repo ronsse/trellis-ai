@@ -28,9 +28,7 @@ def client(tmp_path):
 
     app = FastAPI(lifespan=noop_lifespan)
     app.include_router(curate.router, prefix="/api/v1", tags=["curate"])
-    app.include_router(
-        observations.router, prefix="/api/v1", tags=["observations"]
-    )
+    app.include_router(observations.router, prefix="/api/v1", tags=["observations"])
     with TestClient(app) as c:
         yield c
     registry.close()
@@ -62,9 +60,7 @@ def test_post_then_get_observation(client) -> None:
     observation_id = resp.json()["observation_id"]
     assert observation_id
 
-    resp = client.get(
-        "/api/v1/observations", params={"subject_entity_id": subject_id}
-    )
+    resp = client.get("/api/v1/observations", params={"subject_entity_id": subject_id})
     assert resp.status_code == 200
     rows = resp.json()["observations"]
     assert len(rows) == 1
@@ -101,9 +97,7 @@ def test_post_then_get_measurement(client) -> None:
     measurement_id = resp.json()["measurement_id"]
     assert measurement_id
 
-    resp = client.get(
-        "/api/v1/measurements", params={"metric_name": "null_rate"}
-    )
+    resp = client.get("/api/v1/measurements", params={"metric_name": "null_rate"})
     assert resp.status_code == 200
     rows = resp.json()["measurements"]
     assert len(rows) == 1

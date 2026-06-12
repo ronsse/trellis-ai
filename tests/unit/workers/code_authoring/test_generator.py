@@ -117,9 +117,7 @@ def test_empty_window_returns_empty_list_and_emits_no_events(
     assert _drafted_events(registry) == []
     assert _updated_events(registry) == []
     # The empty-run short-circuit avoids materialising an Activity.
-    activities = registry.knowledge.graph_store.query(
-        node_type=wk.ACTIVITY, limit=10
-    )
+    activities = registry.knowledge.graph_store.query(node_type=wk.ACTIVITY, limit=10)
     assert activities == []
 
 
@@ -316,9 +314,7 @@ def test_run_writes_was_informed_by_edges_per_consumed_event(
         limit=10,
     )
     activity_id = activities[0]["node_id"]
-    edges = registry.knowledge.graph_store.get_edges(
-        activity_id, direction="outgoing"
-    )
+    edges = registry.knowledge.graph_store.get_edges(activity_id, direction="outgoing")
     informed = [e for e in edges if e["edge_type"] == wk.WAS_INFORMED_BY]
     targets = {e["target_id"] for e in informed}
     assert targets == {e1.event_id, e2.event_id}
@@ -335,10 +331,6 @@ def test_meta_traces_off_short_circuits_activity_writes(
     # Proposal is still produced (the event-log side is authoritative).
     assert len(proposals) == 1
     # But no Activity / Agent landed in the graph.
-    activities = registry.knowledge.graph_store.query(
-        node_type=wk.ACTIVITY, limit=10
-    )
+    activities = registry.knowledge.graph_store.query(node_type=wk.ACTIVITY, limit=10)
     assert activities == []
-    assert (
-        registry.knowledge.graph_store.get_node(PROPOSAL_GENERATOR_AGENT_ID) is None
-    )
+    assert registry.knowledge.graph_store.get_node(PROPOSAL_GENERATOR_AGENT_ID) is None

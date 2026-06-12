@@ -37,9 +37,7 @@ runner = CliRunner()
 
 
 @pytest.fixture
-def temp_stores(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> StoreRegistry:
+def temp_stores(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> StoreRegistry:
     """Wire the CLI at ``tmp_path`` and return a direct-access registry."""
     data_dir = tmp_path / "data"
     stores_dir = data_dir / "stores"
@@ -76,9 +74,7 @@ class TestCliMetaAgentId:
 
 
 class TestWrapCliMetaAnalysisHelper:
-    def test_disabled_yields_noop_record(
-        self, temp_stores: StoreRegistry
-    ) -> None:
+    def test_disabled_yields_noop_record(self, temp_stores: StoreRegistry) -> None:
         """``disabled=True`` short-circuits to a no-op record."""
         with wrap_cli_meta_analysis(
             agent_suffix="analyze",
@@ -128,9 +124,7 @@ class TestWrapCliMetaAnalysisHelper:
 # ---------------------------------------------------------------------------
 
 
-def _activities_for(
-    registry: StoreRegistry, analyzer_name: str
-) -> list[dict]:
+def _activities_for(registry: StoreRegistry, analyzer_name: str) -> list[dict]:
     return registry.knowledge.graph_store.query(
         node_type=wk.ACTIVITY,
         properties={"analyzer_name": analyzer_name},
@@ -141,9 +135,7 @@ def _activities_for(
 class TestAnalyzeContextEffectivenessWiring:
     """Spot-check the analyze wiring against ``context-effectiveness``."""
 
-    def test_records_activity_by_default(
-        self, temp_stores: StoreRegistry
-    ) -> None:
+    def test_records_activity_by_default(self, temp_stores: StoreRegistry) -> None:
         # Emit some PACK_ASSEMBLED + FEEDBACK_RECORDED so the analyzer
         # has something to crunch (otherwise ``produced_finding`` skips,
         # but the Activity itself is still recorded).
@@ -177,19 +169,11 @@ class TestAnalyzeContextEffectivenessWiring:
         assert "total_packs" in payload
 
         # An Activity was recorded under the CLI agent.
-        activities = _activities_for(
-            temp_stores, "cli.analyze.context-effectiveness"
-        )
-        assert len(activities) == 1, (
-            f"expected exactly 1 Activity; got {activities}"
-        )
-        assert activities[0]["properties"]["agent_id"].startswith(
-            META_AGENT_PREFIX
-        )
+        activities = _activities_for(temp_stores, "cli.analyze.context-effectiveness")
+        assert len(activities) == 1, f"expected exactly 1 Activity; got {activities}"
+        assert activities[0]["properties"]["agent_id"].startswith(META_AGENT_PREFIX)
 
-    def test_no_meta_trace_disables_recording(
-        self, temp_stores: StoreRegistry
-    ) -> None:
+    def test_no_meta_trace_disables_recording(self, temp_stores: StoreRegistry) -> None:
         result = runner.invoke(
             app,
             [
@@ -202,9 +186,7 @@ class TestAnalyzeContextEffectivenessWiring:
         )
         assert result.exit_code == 0, result.output
 
-        activities = _activities_for(
-            temp_stores, "cli.analyze.context-effectiveness"
-        )
+        activities = _activities_for(temp_stores, "cli.analyze.context-effectiveness")
         assert activities == [], (
             f"--no-meta-trace must skip recording; got {activities}"
         )
@@ -239,9 +221,7 @@ class TestAnalyzeContextEffectivenessWiring:
 class TestAnalyzeSchemaEvolutionWiring:
     """Spot-check that schema-evolution records an Activity too."""
 
-    def test_records_activity_in_dry_run(
-        self, temp_stores: StoreRegistry
-    ) -> None:
+    def test_records_activity_in_dry_run(self, temp_stores: StoreRegistry) -> None:
         result = runner.invoke(
             app,
             [
@@ -307,9 +287,7 @@ class TestAdminDraftPromotionADRWiring:
         # Side effect: the ADR was actually written.
         assert output_path.exists()
 
-        activities = _activities_for(
-            temp_stores, "cli.admin.draft-promotion-adr"
-        )
+        activities = _activities_for(temp_stores, "cli.admin.draft-promotion-adr")
         assert len(activities) == 1
 
     def test_no_meta_trace_disables_recording(
@@ -331,9 +309,7 @@ class TestAdminDraftPromotionADRWiring:
         assert result.exit_code == 0, result.output
         assert output_path.exists()
 
-        activities = _activities_for(
-            temp_stores, "cli.admin.draft-promotion-adr"
-        )
+        activities = _activities_for(temp_stores, "cli.admin.draft-promotion-adr")
         assert activities == []
 
 
@@ -354,9 +330,7 @@ class TestMetaTraceEnvOff:
         )
         assert result.exit_code == 0, result.output
 
-        activities = _activities_for(
-            temp_stores, "cli.analyze.context-effectiveness"
-        )
+        activities = _activities_for(temp_stores, "cli.analyze.context-effectiveness")
         assert activities == [], (
             f"TRELLIS_META_TRACES=off must skip recording; got {activities}"
         )

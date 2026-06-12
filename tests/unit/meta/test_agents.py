@@ -51,9 +51,7 @@ def test_multiple_distinct_meta_agent_ids_supported(
 ) -> None:
     """The namespace supports more than the default agent."""
     tuner_id = ensure_meta_agent(registry, agent_id="trellis_meta_tuner")
-    promoter_id = ensure_meta_agent(
-        registry, agent_id="trellis_meta_promoter"
-    )
+    promoter_id = ensure_meta_agent(registry, agent_id="trellis_meta_promoter")
     assert tuner_id == "trellis_meta_tuner"
     assert promoter_id == "trellis_meta_promoter"
 

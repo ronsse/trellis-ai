@@ -70,9 +70,7 @@ class TestRunMigrateProvenance:
                 },
             )
 
-            report = run_migrate_provenance(
-                store, dry_run=True, batch_size=10
-            )
+            report = run_migrate_provenance(store, dry_run=True, batch_size=10)
 
             assert report.edges_scanned == 1
             assert report.edges_migrated == 1
@@ -101,9 +99,7 @@ class TestRunMigrateProvenance:
                 },
             )
 
-            report = run_migrate_provenance(
-                store, dry_run=False, batch_size=10
-            )
+            report = run_migrate_provenance(store, dry_run=False, batch_size=10)
 
             assert report.edges_migrated == 1
             assert report.edges_malformed == 0
@@ -164,9 +160,7 @@ class TestRunMigrateProvenance:
         finally:
             store.close()
 
-    def test_malformed_legacy_value_skips_and_emits_event(
-        self, tmp_path: Path
-    ) -> None:
+    def test_malformed_legacy_value_skips_and_emits_event(self, tmp_path: Path) -> None:
         """Malformed legacy values emit ``EXTRACTION_FAILED`` and skip the row."""
         import os
 
@@ -203,8 +197,7 @@ class TestRunMigrateProvenance:
                 event_type=EventType.EXTRACTION_FAILED, limit=10
             )
             assert any(
-                (e.payload or {}).get("failure_kind") == "parse_error"
-                for e in events
+                (e.payload or {}).get("failure_kind") == "parse_error" for e in events
             )
         finally:
             os.environ.pop("EXTRACTION_FAILURE_NO_SAMPLE", None)

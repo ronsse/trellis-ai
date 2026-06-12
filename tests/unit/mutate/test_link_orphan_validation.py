@@ -50,8 +50,8 @@ def _registry_with_known_nodes(*known: str) -> tuple[Any, MagicMock, MagicMock]:
     """
     graph_store = MagicMock(spec=GraphStore)
     known_set = set(known)
-    graph_store.get_node.side_effect = (
-        lambda nid, *_a, **_kw: _node(nid) if nid in known_set else None
+    graph_store.get_node.side_effect = lambda nid, *_a, **_kw: (
+        _node(nid) if nid in known_set else None
     )
     graph_store.query.return_value = []
     graph_store.upsert_edge.return_value = "edge-1"

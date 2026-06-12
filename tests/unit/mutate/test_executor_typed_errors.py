@@ -84,9 +84,7 @@ class TestExecutorTypedExceptionRouting:
         monkeypatch.setattr(bound_logger, "exception", _exception)
         # Patch logger.bind to return our bound stub so .exception is
         # captured.
-        monkeypatch.setattr(
-            executor_module.logger, "bind", lambda **_: bound_logger
-        )
+        monkeypatch.setattr(executor_module.logger, "bind", lambda **_: bound_logger)
 
         event_log = MagicMock()
         executor = MutationExecutor(

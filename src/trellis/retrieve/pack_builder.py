@@ -81,9 +81,7 @@ class PackAssemblyError(RuntimeError):
     the failure records).
     """
 
-    def __init__(
-        self, message: str, strategy_failures: list[StrategyFailure]
-    ) -> None:
+    def __init__(self, message: str, strategy_failures: list[StrategyFailure]) -> None:
         super().__init__(message)
         self.strategy_failures = list(strategy_failures)
 
@@ -327,7 +325,9 @@ class PackBuilder:
         # 2. Multiple configured strategies and *all* of them failed:
         #    we cannot make progress, raise.
         _raise_if_blocking_strategy_failures(
-            strategy_failures, len(self._strategies), pack_kind="pack",
+            strategy_failures,
+            len(self._strategies),
+            pack_kind="pack",
         )
 
         # Promote metadata["source_strategy"] → strategy_source field

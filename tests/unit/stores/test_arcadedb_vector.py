@@ -212,9 +212,7 @@ def test_query_with_metadata_filter(stores):
         _make_node(graph, nid)
     vector.upsert("a", _vec(0.1, 0.2, 0.3), metadata={"kind": "doc"})
     vector.upsert("b", _vec(0.4, 0.5, 0.6), metadata={"kind": "code"})
-    results = vector.query(
-        _vec(0.1, 0.2, 0.3), top_k=10, filters={"kind": "doc"}
-    )
+    results = vector.query(_vec(0.1, 0.2, 0.3), top_k=10, filters={"kind": "doc"})
     assert all(r["metadata"]["kind"] == "doc" for r in results)
 
 

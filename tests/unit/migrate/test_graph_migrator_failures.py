@@ -44,11 +44,14 @@ class TestDefaultRaisesOnStepFailure:
         self, source_store: SQLiteGraphStore, dest_store: SQLiteGraphStore
     ) -> None:
         migrator = GraphMigrator(source_store, dest_store)
-        with patch.object(
-            dest_store,
-            "upsert_node",
-            side_effect=RuntimeError("dest disk full"),
-        ), pytest.raises(MigrationStepError) as excinfo:
+        with (
+            patch.object(
+                dest_store,
+                "upsert_node",
+                side_effect=RuntimeError("dest disk full"),
+            ),
+            pytest.raises(MigrationStepError) as excinfo,
+        ):
             migrator.run()
         # Step + entity preserved, original chained via __cause__.
         assert excinfo.value.step == "upsert_node"
@@ -60,9 +63,14 @@ class TestDefaultRaisesOnStepFailure:
         self, source_store: SQLiteGraphStore, dest_store: SQLiteGraphStore
     ) -> None:
         migrator = GraphMigrator(source_store, dest_store)
-        with patch.object(
-            dest_store, "get_node", side_effect=RuntimeError("destination unreachable")
-        ), pytest.raises(MigrationStepError) as excinfo:
+        with (
+            patch.object(
+                dest_store,
+                "get_node",
+                side_effect=RuntimeError("destination unreachable"),
+            ),
+            pytest.raises(MigrationStepError) as excinfo,
+        ):
             migrator.run()
         assert excinfo.value.step == "get_node"
 
@@ -72,9 +80,10 @@ class TestDefaultRaisesOnStepFailure:
         src = SQLiteGraphStore(db_path=tmp_path / "src.db")
         src.upsert_node("n1", node_type="X", properties={})
         migrator = GraphMigrator(src, dest_store)
-        with patch.object(
-            src, "query", side_effect=RuntimeError("source closed")
-        ), pytest.raises(MigrationStepError) as excinfo:
+        with (
+            patch.object(src, "query", side_effect=RuntimeError("source closed")),
+            pytest.raises(MigrationStepError) as excinfo,
+        ):
             migrator.run()
         assert excinfo.value.step == "read_nodes"
         # Entity id is None for the top-level read step.
@@ -198,9 +207,10 @@ class TestSequentialIsTreatedLikeStopOnError:
         self, source_store: SQLiteGraphStore, dest_store: SQLiteGraphStore
     ) -> None:
         migrator = GraphMigrator(source_store, dest_store)
-        with patch.object(
-            dest_store, "upsert_node", side_effect=RuntimeError("nope")
-        ), pytest.raises(MigrationStepError):
+        with (
+            patch.object(dest_store, "upsert_node", side_effect=RuntimeError("nope")),
+            pytest.raises(MigrationStepError),
+        ):
             migrator.run(strategy=BatchStrategy.SEQUENTIAL)
 
 

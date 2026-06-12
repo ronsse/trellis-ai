@@ -76,9 +76,7 @@ class DocumentStoreContractTests:
     def test_get_returns_none_for_missing(self, store: DocumentStore) -> None:
         assert store.get("does_not_exist") is None
 
-    def test_put_with_no_metadata_yields_empty_dict(
-        self, store: DocumentStore
-    ) -> None:
+    def test_put_with_no_metadata_yields_empty_dict(self, store: DocumentStore) -> None:
         store.put("d1", "content")
         doc = store.get("d1")
         assert doc is not None
@@ -255,9 +253,7 @@ class DocumentStoreContractTests:
         assert found["doc_id"] == "d1"
         assert found["content"] == "unique content"
 
-    def test_get_by_hash_returns_none_for_missing(
-        self, store: DocumentStore
-    ) -> None:
+    def test_get_by_hash_returns_none_for_missing(self, store: DocumentStore) -> None:
         assert store.get_by_hash("nonexistent_hash") is None
 
     def test_get_by_hash_after_overwrite_uses_new_content(
@@ -285,15 +281,11 @@ class DocumentStoreContractTests:
     # search — minimal contract (per-backend tokenizers tested elsewhere)
     # ------------------------------------------------------------------
 
-    def test_search_empty_query_returns_empty_list(
-        self, store: DocumentStore
-    ) -> None:
+    def test_search_empty_query_returns_empty_list(self, store: DocumentStore) -> None:
         store.put("d1", "indexed content")
         assert store.search("") == []
 
-    def test_search_empty_store_returns_empty_list(
-        self, store: DocumentStore
-    ) -> None:
+    def test_search_empty_store_returns_empty_list(self, store: DocumentStore) -> None:
         assert store.search("anything") == []
 
     def test_search_results_carry_rank(self, store: DocumentStore) -> None:

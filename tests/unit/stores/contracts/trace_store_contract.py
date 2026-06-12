@@ -79,9 +79,7 @@ class TraceStoreContractTests:
         tid = store.append(trace)
         assert tid == trace.trace_id
 
-    def test_append_then_get_round_trips_all_fields(
-        self, store: TraceStore
-    ) -> None:
+    def test_append_then_get_round_trips_all_fields(self, store: TraceStore) -> None:
         trace = _make_trace(
             intent="deploy auth service",
             context=TraceContext(agent_id="agent-7", domain="platform"),
@@ -130,9 +128,7 @@ class TraceStoreContractTests:
         with pytest.raises(StoreError):
             store.append(trace)
 
-    def test_append_duplicate_does_not_overwrite(
-        self, store: TraceStore
-    ) -> None:
+    def test_append_duplicate_does_not_overwrite(self, store: TraceStore) -> None:
         original = _make_trace(intent="original intent")
         store.append(original)
         # Build a *different* Trace object that re-uses the same trace_id.
@@ -151,9 +147,7 @@ class TraceStoreContractTests:
     # query — empty store
     # ------------------------------------------------------------------
 
-    def test_query_empty_store_returns_empty_list(
-        self, store: TraceStore
-    ) -> None:
+    def test_query_empty_store_returns_empty_list(self, store: TraceStore) -> None:
         results = store.query()
         assert results == []
         assert isinstance(results, list)
@@ -304,9 +298,7 @@ class TraceStoreContractTests:
         assert store.count(domain="platform") == 2
         assert store.count(domain="data") == 1
 
-    def test_count_unknown_filter_value_returns_zero(
-        self, store: TraceStore
-    ) -> None:
+    def test_count_unknown_filter_value_returns_zero(self, store: TraceStore) -> None:
         store.append(_make_trace())
         assert store.count(source="ghost") == 0
         assert store.count(domain="ghost") == 0

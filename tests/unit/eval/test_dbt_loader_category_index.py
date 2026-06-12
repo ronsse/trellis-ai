@@ -183,9 +183,7 @@ def test_pack_build_proxy_covers_multi_hop_lineage_required(
     # for cross-strategy dedup; the scenario's grader accepts both.
     pack_ids = {item.item_id for item in pack.items}
     covered = sum(
-        1
-        for eid in _REQUIRED_UPSTREAM
-        if eid in pack_ids or f"doc:{eid}" in pack_ids
+        1 for eid in _REQUIRED_UPSTREAM if eid in pack_ids or f"doc:{eid}" in pack_ids
     )
     coverage = covered / len(_REQUIRED_UPSTREAM)
     assert coverage == 1.0, (

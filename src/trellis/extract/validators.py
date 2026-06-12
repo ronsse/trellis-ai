@@ -104,8 +104,7 @@ class EmptyResultValidator:
                 validator_name=self.name,
                 code="empty_result",
                 message=(
-                    "extractor produced zero entities and zero edges; "
-                    "nothing to ingest"
+                    "extractor produced zero entities and zero edges; nothing to ingest"
                 ),
             )
         ]

@@ -44,7 +44,9 @@ def _make_store(
     del store.get_nodes_bulk
 
     def _get_edges(
-        node_id: str, direction: str = "both", edge_type: str | None = None,
+        node_id: str,
+        direction: str = "both",
+        edge_type: str | None = None,
     ) -> list[dict[str, Any]]:
         del direction, edge_type  # the strategy always asks for outgoing/hasObservation
         return edges_by_subject.get(node_id, [])
@@ -106,7 +108,8 @@ def test_returns_empty_when_no_subject_supplied() -> None:
         edges_by_subject={"dataset:x": [{"target_id": "obs1"}]},
         nodes_by_id={
             "obs1": _make_observation_node(
-                "obs1", subject_entity_id="dataset:x",
+                "obs1",
+                subject_entity_id="dataset:x",
             ),
         },
     )
@@ -125,13 +128,19 @@ def test_filters_by_subject_entity_id() -> None:
         },
         nodes_by_id={
             "obs1": _make_observation_node(
-                "obs1", subject_entity_id="dataset:x", observed_at=NOW,
+                "obs1",
+                subject_entity_id="dataset:x",
+                observed_at=NOW,
             ),
             "obs2": _make_observation_node(
-                "obs2", subject_entity_id="dataset:x", observed_at=NOW,
+                "obs2",
+                subject_entity_id="dataset:x",
+                observed_at=NOW,
             ),
             "obs3": _make_observation_node(
-                "obs3", subject_entity_id="dataset:y", observed_at=NOW,
+                "obs3",
+                subject_entity_id="dataset:y",
+                observed_at=NOW,
             ),
         },
     )
@@ -149,10 +158,14 @@ def test_accepts_seed_ids_list() -> None:
         },
         nodes_by_id={
             "obs1": _make_observation_node(
-                "obs1", subject_entity_id="dataset:x", observed_at=NOW,
+                "obs1",
+                subject_entity_id="dataset:x",
+                observed_at=NOW,
             ),
             "obs2": _make_observation_node(
-                "obs2", subject_entity_id="dataset:y", observed_at=NOW,
+                "obs2",
+                subject_entity_id="dataset:y",
+                observed_at=NOW,
             ),
         },
     )
@@ -177,11 +190,15 @@ def test_confidence_threshold_drops_low_scoring_observations() -> None:
         },
         nodes_by_id={
             "obs_high": _make_observation_node(
-                "obs_high", subject_entity_id="dataset:x", confidence=0.9,
+                "obs_high",
+                subject_entity_id="dataset:x",
+                confidence=0.9,
                 observed_at=NOW,
             ),
             "obs_low": _make_observation_node(
-                "obs_low", subject_entity_id="dataset:x", confidence=0.2,
+                "obs_low",
+                subject_entity_id="dataset:x",
+                confidence=0.2,
                 observed_at=NOW,
             ),
         },
@@ -237,11 +254,15 @@ def test_freshness_ordering_newest_first() -> None:
         },
         nodes_by_id={
             "obs_old": _make_observation_node(
-                "obs_old", subject_entity_id="dataset:x", confidence=0.8,
+                "obs_old",
+                subject_entity_id="dataset:x",
+                confidence=0.8,
                 observed_at=older,
             ),
             "obs_new": _make_observation_node(
-                "obs_new", subject_entity_id="dataset:x", confidence=0.8,
+                "obs_new",
+                subject_entity_id="dataset:x",
+                confidence=0.8,
                 observed_at=newer,
             ),
         },
@@ -266,10 +287,14 @@ def test_observed_after_filter_drops_stale_rows() -> None:
         },
         nodes_by_id={
             "obs_stale": _make_observation_node(
-                "obs_stale", subject_entity_id="dataset:x", observed_at=old,
+                "obs_stale",
+                subject_entity_id="dataset:x",
+                observed_at=old,
             ),
             "obs_fresh": _make_observation_node(
-                "obs_fresh", subject_entity_id="dataset:x", observed_at=fresh,
+                "obs_fresh",
+                subject_entity_id="dataset:x",
+                observed_at=fresh,
             ),
         },
     )
@@ -297,7 +322,9 @@ def test_measurements_included_by_default() -> None:
         },
         nodes_by_id={
             "obs1": _make_observation_node(
-                "obs1", subject_entity_id="dataset:x", observed_at=NOW,
+                "obs1",
+                subject_entity_id="dataset:x",
+                observed_at=NOW,
             ),
             "meas1": _make_observation_node(
                 "meas1",
@@ -324,7 +351,9 @@ def test_measurements_excluded_when_flag_disabled() -> None:
         },
         nodes_by_id={
             "obs1": _make_observation_node(
-                "obs1", subject_entity_id="dataset:x", observed_at=NOW,
+                "obs1",
+                subject_entity_id="dataset:x",
+                observed_at=NOW,
             ),
             "meas1": _make_observation_node(
                 "meas1",
@@ -358,7 +387,9 @@ def test_limit_caps_result_size() -> None:
     edges = [{"target_id": f"obs{i}"} for i in range(10)]
     nodes = {
         f"obs{i}": _make_observation_node(
-            f"obs{i}", subject_entity_id="dataset:x", observed_at=NOW,
+            f"obs{i}",
+            subject_entity_id="dataset:x",
+            observed_at=NOW,
         )
         for i in range(10)
     }
@@ -368,7 +399,9 @@ def test_limit_caps_result_size() -> None:
     )
     strategy = ObservationSearch(graph_store=store)
     result = strategy.search(
-        "", limit=3, filters={"subject_entity_id": "dataset:x"},
+        "",
+        limit=3,
+        filters={"subject_entity_id": "dataset:x"},
     )
     assert len(result) == 3
 
@@ -387,7 +420,9 @@ def test_strategy_uses_canonical_edge_kinds() -> None:
         edges_by_subject={"dataset:x": [{"target_id": "obs1"}]},
         nodes_by_id={
             "obs1": _make_observation_node(
-                "obs1", subject_entity_id="dataset:x", observed_at=NOW,
+                "obs1",
+                subject_entity_id="dataset:x",
+                observed_at=NOW,
             ),
         },
     )
@@ -407,7 +442,9 @@ def test_strategy_skips_has_measurement_when_measurements_disabled() -> None:
         edges_by_subject={"dataset:x": [{"target_id": "obs1"}]},
         nodes_by_id={
             "obs1": _make_observation_node(
-                "obs1", subject_entity_id="dataset:x", observed_at=NOW,
+                "obs1",
+                subject_entity_id="dataset:x",
+                observed_at=NOW,
             ),
         },
     )

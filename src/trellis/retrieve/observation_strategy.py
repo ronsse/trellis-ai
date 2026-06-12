@@ -173,13 +173,15 @@ class ObservationSearch(SearchStrategy):
         )
 
         confidence_threshold = filters.get(
-            "confidence_threshold", self._confidence_threshold,
+            "confidence_threshold",
+            self._confidence_threshold,
         )
         observed_after = _parse_datetime(filters.get("observed_after"))
         include_measurements = bool(filters.get("include_measurements", True))
 
         observation_ids = self._collect_observation_ids(
-            seed_ids, include_measurements=include_measurements,
+            seed_ids,
+            include_measurements=include_measurements,
         )
         if not observation_ids:
             return []
@@ -215,8 +217,10 @@ class ObservationSearch(SearchStrategy):
                 or node.get("updated_at")
                 or node.get("created_at"),
             )
-            if observed_after is not None and observed_at is not None and (
-                observed_at < observed_after
+            if (
+                observed_after is not None
+                and observed_at is not None
+                and (observed_at < observed_after)
             ):
                 continue
 
@@ -288,7 +292,10 @@ class ObservationSearch(SearchStrategy):
         return ordered
 
     def _collect_observation_ids(
-        self, seed_ids: list[str], *, include_measurements: bool,
+        self,
+        seed_ids: list[str],
+        *,
+        include_measurements: bool,
     ) -> list[str]:
         """Walk outbound ``hasObservation`` / ``hasMeasurement`` edges.
 
@@ -360,7 +367,8 @@ class ObservationSearch(SearchStrategy):
             # not collapse the load; skip it and keep the rest.
             except Exception:  # pragma: no cover
                 logger.exception(
-                    "observation_search_get_node_failed", node_id=node_id,
+                    "observation_search_get_node_failed",
+                    node_id=node_id,
                 )
                 continue
             if row is not None:

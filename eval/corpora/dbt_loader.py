@@ -54,9 +54,7 @@ logger = structlog.get_logger(__name__)
 _DBT_TEST_ID_MIN_DOTS = 2
 
 
-DEFAULT_MANIFEST_PATH = (
-    Path(__file__).parent / "jaffle_shop" / "manifest.json"
-)
+DEFAULT_MANIFEST_PATH = Path(__file__).parent / "jaffle_shop" / "manifest.json"
 
 
 @dataclass
@@ -264,9 +262,7 @@ def _execute_through_governed_pipeline(
     return nodes, edges
 
 
-def _index_descriptions(
-    registry: StoreRegistry, result: ExtractionResult
-) -> int:
+def _index_descriptions(registry: StoreRegistry, result: ExtractionResult) -> int:
     """Index entity descriptions into the document store.
 
     Uses the same id scheme as the synthetic baseline (``doc:{entity_id}``)
@@ -365,11 +361,17 @@ _DBT_TEST_TYPE_PREFIXES: Final = {
     "not_null": ["not null", "not-null", "no-null", "no null", "non-null"],
     "unique": ["unique", "uniqueness", "unique-key"],
     "relationships": [
-        "relationships test", "relationship test", "foreign-key",
-        "foreign key", "relationship between",
+        "relationships test",
+        "relationship test",
+        "foreign-key",
+        "foreign key",
+        "relationship between",
     ],
     "accepted_values": [
-        "accepted values", "accepted-values", "enum test", "value check",
+        "accepted values",
+        "accepted-values",
+        "enum test",
+        "value check",
     ],
 }
 
@@ -465,9 +467,7 @@ def build_category_index(
                 # hash, not the test name. In dbt manifests the test
                 # name precedes the hash so the second-to-last segment
                 # carries the prefix; check both.
-                has_test_type_segment = (
-                    entity_id.count(".") >= _DBT_TEST_ID_MIN_DOTS
-                )
+                has_test_type_segment = entity_id.count(".") >= _DBT_TEST_ID_MIN_DOTS
                 test_type_segment = (
                     entity_id.split(".")[-2] if has_test_type_segment else ""
                 )

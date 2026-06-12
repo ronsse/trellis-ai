@@ -70,9 +70,7 @@ class TestTraceIngestHandler:
         created_id, _message = handler.handle(cmd)
         assert created_id == trace.trace_id
 
-    def test_idempotent_on_duplicate_trace_id(
-        self, registry: StoreRegistry
-    ) -> None:
+    def test_idempotent_on_duplicate_trace_id(self, registry: StoreRegistry) -> None:
         """Submitting the same trace twice returns the existing id without
         re-emitting an event — the handler's race-recovery / idempotency path."""
         handler = TraceIngestHandler(registry)

@@ -226,9 +226,7 @@ def test_local_default_shape_validates_against_real_neo4j(tmp_path: Path) -> Non
 
 @pytest.mark.live
 @pytest.mark.arcadedb
-@pytest.mark.skipif(
-    not ARCADE_URI, reason="TRELLIS_TEST_ARCADEDB_URI not set"
-)
+@pytest.mark.skipif(not ARCADE_URI, reason="TRELLIS_TEST_ARCADEDB_URI not set")
 def test_arcadedb_blessed_shape_validates_end_to_end(tmp_path: Path) -> None:
     """Construct the blessed ArcadeDB-everywhere registry and exercise
     the full ``validate(check_connectivity=True)`` path against a live

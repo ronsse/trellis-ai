@@ -891,9 +891,7 @@ class GraphStoreContractTests:
     # behaviour rather than wire shape.
     # ------------------------------------------------------------------
 
-    def test_contains_matches_member_of_list_property(
-        self, store: GraphStore
-    ) -> None:
+    def test_contains_matches_member_of_list_property(self, store: GraphStore) -> None:
         from trellis.stores.base.graph_query import (
             FilterClause,
             NodeQuery,
@@ -914,9 +912,7 @@ class GraphStoreContractTests:
         )
         assert {r["node_id"] for r in results} == {"a"}
 
-    def test_contains_matches_single_element_list(
-        self, store: GraphStore
-    ) -> None:
+    def test_contains_matches_single_element_list(self, store: GraphStore) -> None:
         """``contains`` matches when the list has exactly one element."""
         from trellis.stores.base.graph_query import (
             FilterClause,
@@ -926,16 +922,12 @@ class GraphStoreContractTests:
         store.upsert_node("a", "service", {"tags": ["only_one"]})
         results = store.execute_node_query(
             NodeQuery(
-                filters=(
-                    FilterClause("properties.tags", "contains", "only_one"),
-                )
+                filters=(FilterClause("properties.tags", "contains", "only_one"),)
             )
         )
         assert {r["node_id"] for r in results} == {"a"}
 
-    def test_contains_no_match_when_value_absent(
-        self, store: GraphStore
-    ) -> None:
+    def test_contains_no_match_when_value_absent(self, store: GraphStore) -> None:
         from trellis.stores.base.graph_query import (
             FilterClause,
             NodeQuery,
@@ -945,9 +937,7 @@ class GraphStoreContractTests:
         results = store.execute_node_query(
             NodeQuery(
                 filters=(
-                    FilterClause(
-                        "properties.column_names", "contains", "not_present"
-                    ),
+                    FilterClause("properties.column_names", "contains", "not_present"),
                 )
             )
         )
@@ -967,14 +957,10 @@ class GraphStoreContractTests:
         )
 
         store.upsert_node("a", "service", {"team": "platform"})
-        store.upsert_node(
-            "b", "service", {"team": ["platform", "growth"]}
-        )
+        store.upsert_node("b", "service", {"team": ["platform", "growth"]})
         results = store.execute_node_query(
             NodeQuery(
-                filters=(
-                    FilterClause("properties.team", "contains", "platform"),
-                )
+                filters=(FilterClause("properties.team", "contains", "platform"),)
             )
         )
         # Only the list-typed property matches; the scalar property is skipped.
@@ -989,28 +975,20 @@ class GraphStoreContractTests:
         store.upsert_node("a", "service", {"other_key": ["x"]})
         results = store.execute_node_query(
             NodeQuery(
-                filters=(
-                    FilterClause("properties.column_names", "contains", "x"),
-                )
+                filters=(FilterClause("properties.column_names", "contains", "x"),)
             )
         )
         assert results == []
 
-    def test_contains_combined_with_other_filters(
-        self, store: GraphStore
-    ) -> None:
+    def test_contains_combined_with_other_filters(self, store: GraphStore) -> None:
         """``contains`` composes with other operators under AND."""
         from trellis.stores.base.graph_query import (
             FilterClause,
             NodeQuery,
         )
 
-        store.upsert_node(
-            "a", "service", {"column_names": ["user_id"]}
-        )
-        store.upsert_node(
-            "b", "person", {"column_names": ["user_id"]}
-        )
+        store.upsert_node("a", "service", {"column_names": ["user_id"]})
+        store.upsert_node("b", "person", {"column_names": ["user_id"]})
         results = store.execute_node_query(
             NodeQuery(
                 filters=(
@@ -1021,9 +999,7 @@ class GraphStoreContractTests:
         )
         assert {r["node_id"] for r in results} == {"a"}
 
-    def test_contains_integer_value_in_int_list(
-        self, store: GraphStore
-    ) -> None:
+    def test_contains_integer_value_in_int_list(self, store: GraphStore) -> None:
         """``contains`` is type-aware: integer ``42`` matches list of ints."""
         from trellis.stores.base.graph_query import (
             FilterClause,
@@ -1033,9 +1009,7 @@ class GraphStoreContractTests:
         store.upsert_node("a", "service", {"ids": [1, 42, 100]})
         store.upsert_node("b", "service", {"ids": [2, 3]})
         results = store.execute_node_query(
-            NodeQuery(
-                filters=(FilterClause("properties.ids", "contains", 42),)
-            )
+            NodeQuery(filters=(FilterClause("properties.ids", "contains", 42),))
         )
         assert {r["node_id"] for r in results} == {"a"}
 
@@ -1111,9 +1085,7 @@ class GraphStoreContractTests:
         store.upsert_node("a", "service", {})
         store.upsert_node("b", "service", {})
         for i, conf in enumerate([0.1, 0.3, 0.5, 0.7, 0.9]):
-            store.upsert_edge(
-                "a", "b", f"edge_kind_{i}", confidence=conf
-            )
+            store.upsert_edge("a", "b", f"edge_kind_{i}", confidence=conf)
         results = store.execute_edge_query(
             EdgeQuery(filters=(FilterClause("confidence", "lt", 0.5),))
         )
@@ -1148,9 +1120,7 @@ class GraphStoreContractTests:
         store.upsert_edge("a", "b", "edge_hyb", extractor_tier="HYBRID")
         store.upsert_edge("a", "b", "edge_llm", extractor_tier="LLM")
         results = store.execute_edge_query(
-            EdgeQuery(
-                filters=(FilterClause("extractor_tier", "eq", "DETERMINISTIC"),)
-            )
+            EdgeQuery(filters=(FilterClause("extractor_tier", "eq", "DETERMINISTIC"),))
         )
         assert {r["edge_type"] for r in results} == {"edge_det"}
 

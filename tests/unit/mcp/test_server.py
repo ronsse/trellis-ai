@@ -640,12 +640,8 @@ class TestGetObjectiveContext:
     def test_session_dedup_across_calls(self, temp_registry: StoreRegistry) -> None:
         # Just exercise the session_id path; semantic dedup is covered by
         # PackBuilder unit tests. Here we only assert the call shape works.
-        first = get_objective_context(
-            "objective dedup probe", session_id="sess-obj-1"
-        )
-        second = get_objective_context(
-            "objective dedup probe", session_id="sess-obj-1"
-        )
+        first = get_objective_context("objective dedup probe", session_id="sess-obj-1")
+        second = get_objective_context("objective dedup probe", session_id="sess-obj-1")
         assert isinstance(first, str)
         assert isinstance(second, str)
 
@@ -1116,9 +1112,7 @@ class TestStructuredErrorContract:
 
         # Force the seed-from-docs path to blow up — the constructor
         # itself is happy; the seed loop is where the error appears.
-        monkeypatch.setattr(
-            temp_registry.knowledge.document_store, "search", _boom
-        )
+        monkeypatch.setattr(temp_registry.knowledge.document_store, "search", _boom)
 
         with pytest.raises(McpError) as excinfo:
             save_memory("content that triggers minhash seed")

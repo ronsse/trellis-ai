@@ -84,9 +84,7 @@ def test_run_skips_when_only_anthropic_set(
 
     assert report.status == "skip"
     info_findings = [f for f in report.findings if f.severity == "info"]
-    assert any(
-        "OPENAI_API_KEY required" in f.message for f in info_findings
-    )
+    assert any("OPENAI_API_KEY required" in f.message for f in info_findings)
     registry.assert_not_called()
 
 

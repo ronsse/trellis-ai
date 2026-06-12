@@ -26,9 +26,7 @@ SCRIPT_PATH = REPO_ROOT / "scripts" / "audit_silent_fallbacks.py"
 
 
 def _load_audit_module() -> ModuleType:
-    spec = importlib.util.spec_from_file_location(
-        "audit_silent_fallbacks", SCRIPT_PATH
-    )
+    spec = importlib.util.spec_from_file_location("audit_silent_fallbacks", SCRIPT_PATH)
     if spec is None or spec.loader is None:
         msg = f"could not load spec for {SCRIPT_PATH}"
         raise RuntimeError(msg)

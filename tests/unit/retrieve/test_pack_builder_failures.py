@@ -77,7 +77,8 @@ class TestRequiredStrategyFailureRaises:
         builder = PackBuilder(strategies=[bad])
         with pytest.raises(PackAssemblyError):
             builder.build_sectioned(
-                "q", sections=[SectionRequest(name="default")],
+                "q",
+                sections=[SectionRequest(name="default")],
             )
 
 
@@ -107,9 +108,7 @@ class TestPartialStrategyFailureRecorded:
         good_a = _make_strategy("kw", [_item("d1", 0.9)])
         bad = _failing_strategy("sem", RuntimeError("embedder down"))
         good_b = _make_strategy("graph", [_item("e1", 0.7)])
-        builder = PackBuilder(
-            strategies=[good_a, bad, good_b], event_log=event_log
-        )
+        builder = PackBuilder(strategies=[good_a, bad, good_b], event_log=event_log)
         pack = builder.build("q")
 
         # Survivor strategies returned items.
@@ -152,9 +151,7 @@ class TestPartialStrategyFailureRecorded:
         # Empty list (not missing) — schema consistency for downstream consumers.
         assert payload.get("strategy_failures") == []
 
-    def test_sectioned_event_carries_strategy_failures(
-        self, tmp_path: Path
-    ) -> None:
+    def test_sectioned_event_carries_strategy_failures(self, tmp_path: Path) -> None:
         event_log = SQLiteEventLog(db_path=tmp_path / "events.db")
         good = _make_strategy("kw", [_item("d1", 0.9)])
         bad = _failing_strategy("sem", RuntimeError("oops"))
@@ -187,9 +184,7 @@ class TestStrategyFailureSerialization:
     """``StrategyFailure.to_event_payload`` produces JSON-serializable dicts."""
 
     def test_to_event_payload_shape(self) -> None:
-        f = StrategyFailure(
-            strategy="kw", error_class="RuntimeError", message="boom"
-        )
+        f = StrategyFailure(strategy="kw", error_class="RuntimeError", message="boom")
         assert f.to_event_payload() == {
             "strategy": "kw",
             "error_class": "RuntimeError",

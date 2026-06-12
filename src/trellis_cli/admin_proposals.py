@@ -320,9 +320,7 @@ def list_proposals_command(
         # Typer's min= validation handles this on the registered
         # wrapper, but the programmatic entry-point may also be
         # exercised in tests; be loud either way.
-        console.print(
-            "[red]--limit must be a positive integer[/red]"
-        )
+        console.print("[red]--limit must be a positive integer[/red]")
         raise typer.Exit(code=EXIT_INTERNAL)
     capped_limit = min(limit, _LIST_LIMIT_CEILING)
 
@@ -420,20 +418,17 @@ def show_proposal_command(
                     {
                         "error": "not_found",
                         "message": (
-                            f"No PROPOSAL_DRAFTED event for "
-                            f"proposal_id={proposal_id!r}"
+                            f"No PROPOSAL_DRAFTED event for proposal_id={proposal_id!r}"
                         ),
                     }
                 )
             )
         else:
             console.print(
-                f"[red]No PROPOSAL_DRAFTED event for "
-                f"proposal_id={proposal_id!r}.[/red]"
+                f"[red]No PROPOSAL_DRAFTED event for proposal_id={proposal_id!r}.[/red]"
             )
             console.print(
-                "[dim]Run 'trellis admin list-proposals' to see "
-                "available IDs.[/dim]"
+                "[dim]Run 'trellis admin list-proposals' to see available IDs.[/dim]"
             )
         raise typer.Exit(code=EXIT_INTERNAL)
 
@@ -453,14 +448,10 @@ def show_proposal_command(
                     "proposal_id": str(
                         payload.get("proposal_id") or event.entity_id or ""
                     ),
-                    "cluster_signature": str(
-                        payload.get("cluster_signature") or ""
-                    ),
+                    "cluster_signature": str(payload.get("cluster_signature") or ""),
                     "markdown": markdown_preview,
                     "markdown_truncated": True,
-                    "source_event_count": int(
-                        payload.get("source_event_count") or 0
-                    ),
+                    "source_event_count": int(payload.get("source_event_count") or 0),
                     "generated_at": event.occurred_at.isoformat(),
                 }
             )
@@ -544,8 +535,7 @@ def register(admin_app: typer.Typer) -> None:
             None,
             "--since",
             help=(
-                "ISO-8601 datetime lower bound. Naive timestamps "
-                "are coerced to UTC."
+                "ISO-8601 datetime lower bound. Naive timestamps are coerced to UTC."
             ),
         ),
         output_format: str = typer.Option(

@@ -86,9 +86,7 @@ def _expected_proposal_id(source_file: str, failure_kind: str) -> str:
     can assert against a stable ID without importing the generator into
     the assertion path.
     """
-    signature = hashlib.sha256(
-        f"{source_file}|{failure_kind}".encode()
-    ).hexdigest()
+    signature = hashlib.sha256(f"{source_file}|{failure_kind}".encode()).hexdigest()
     return hashlib.sha256(signature.encode()).hexdigest()
 
 
@@ -113,10 +111,7 @@ class TestParseSourceFile:
             "# Proposal: address parse_error in src/trellis/extract/llm.py\n"
             "\n## Cluster summary\n"
         )
-        assert (
-            _parse_source_file_from_preview(preview)
-            == "src/trellis/extract/llm.py"
-        )
+        assert _parse_source_file_from_preview(preview) == "src/trellis/extract/llm.py"
 
     def test_returns_none_for_empty(self) -> None:
         assert _parse_source_file_from_preview("") is None
@@ -263,9 +258,7 @@ class TestListProposals:
         _emit_extraction_failures(count=1, source_file="b.py")
         _invoke(["generate-proposals", "--format", "json"])
 
-        result = _invoke(
-            ["list-proposals", "--format", "json", "--limit", "1"]
-        )
+        result = _invoke(["list-proposals", "--format", "json", "--limit", "1"])
         assert result.exit_code == EXIT_OK, result.output
         data = json.loads(result.stdout.strip())
         assert data["count"] == 1
@@ -289,9 +282,7 @@ class TestShowProposal:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _init_stores(tmp_path, monkeypatch)
-        result = _invoke(
-            ["show-proposal", "deadbeef", "--format", "json"]
-        )
+        result = _invoke(["show-proposal", "deadbeef", "--format", "json"])
         assert result.exit_code == EXIT_INTERNAL, result.output
         data = json.loads(result.stdout.strip())
         assert data["error"] == "not_found"
@@ -304,13 +295,9 @@ class TestShowProposal:
         _emit_extraction_failures(count=2)
         _invoke(["generate-proposals", "--format", "json"])
 
-        proposal_id = _expected_proposal_id(
-            "src/trellis/extract/llm.py", "parse_error"
-        )
+        proposal_id = _expected_proposal_id("src/trellis/extract/llm.py", "parse_error")
 
-        result = _invoke(
-            ["show-proposal", proposal_id, "--format", "json"]
-        )
+        result = _invoke(["show-proposal", proposal_id, "--format", "json"])
         assert result.exit_code == EXIT_OK, result.output
         data = json.loads(result.stdout.strip())
         assert data["proposal_id"] == proposal_id
@@ -325,9 +312,7 @@ class TestShowProposal:
         _emit_extraction_failures(count=1)
         _invoke(["generate-proposals", "--format", "json"])
 
-        proposal_id = _expected_proposal_id(
-            "src/trellis/extract/llm.py", "parse_error"
-        )
+        proposal_id = _expected_proposal_id("src/trellis/extract/llm.py", "parse_error")
         result = _invoke(["show-proposal", proposal_id])
         assert result.exit_code == EXIT_OK, result.output
         # Plain print emits the markdown body directly to stdout.
@@ -400,9 +385,7 @@ class TestExitCodeRouting:
             "trellis_cli.admin_proposals.get_event_log",
             _boom,
         )
-        result = _invoke(
-            ["show-proposal", "anything", "--format", "json"]
-        )
+        result = _invoke(["show-proposal", "anything", "--format", "json"])
         assert result.exit_code == EXIT_STORE, result.output
         data = json.loads(result.stdout.strip())
         assert data["error"] == "store_error"

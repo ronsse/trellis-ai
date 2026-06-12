@@ -251,10 +251,7 @@ class _DeterministicMockEmbedder:
         digest = hashlib.sha256(text.encode("utf-8")).digest()
         # Cycle the 32-byte digest across the 1536-dim vector.
         # Normalize bytes to [-1.0, 1.0] so cosine similarity is well-behaved.
-        return [
-            (digest[i % len(digest)] - 128) / 128.0
-            for i in range(self._dim)
-        ]
+        return [(digest[i % len(digest)] - 128) / 128.0 for i in range(self._dim)]
 
     @staticmethod
     def _approx_tokens(text: str) -> int:
@@ -262,9 +259,7 @@ class _DeterministicMockEmbedder:
         # behaviour closely enough for cost arithmetic exercise.
         return max(1, len(text.split()))
 
-    async def embed(
-        self, text: str, *, model: str | None = None
-    ) -> EmbeddingResponse:
+    async def embed(self, text: str, *, model: str | None = None) -> EmbeddingResponse:
         return EmbeddingResponse(
             embedding=self._vectorize(text),
             model=model or self._model,
@@ -613,13 +608,9 @@ def run(  # noqa: PLR0915 — top-level orchestrator; one coherent run flow, par
     # Wrap the embedding callable so the mid-loop cap watcher fires
     # immediately after each per-round query embed. Setup-time
     # embedding is checked once after the batch returns.
-    embedding_fn = _make_embedding_fn(
-        embedder, telemetry, on_call=_check_budget_cap
-    )
+    embedding_fn = _make_embedding_fn(embedder, telemetry, on_call=_check_budget_cap)
     post_populate_hook = _make_post_populate_hook(embedder, telemetry)
-    semantic_strategy = SemanticSearch(
-        registry.knowledge.vector_store, embedding_fn
-    )
+    semantic_strategy = SemanticSearch(registry.knowledge.vector_store, embedding_fn)
 
     budget_error: RunBudgetError | None = None
     loop_result = None

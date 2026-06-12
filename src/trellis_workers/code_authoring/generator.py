@@ -151,9 +151,7 @@ class ProposalGenerator:
             window=self._window,
             now=run.started_at,
         )
-        wk_clusters = [
-            _well_known_event_to_cluster(event) for event in wk_events
-        ]
+        wk_clusters = [_well_known_event_to_cluster(event) for event in wk_events]
         all_clusters = failure_clusters + wk_clusters
 
         if not all_clusters:

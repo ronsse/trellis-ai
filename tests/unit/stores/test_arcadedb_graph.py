@@ -235,17 +235,11 @@ class TestArcadeDBEdgeProvenance:
         try:
             graph_store = registry.knowledge.graph_store
             # Clean rows from prior tests in this class.
-            with graph_store._driver.session(
-                database=graph_store._database
-            ) as session:
-                session.run(
-                    "MATCH (n) WHERE n:Node OR n:Alias DETACH DELETE n"
-                )
+            with graph_store._driver.session(database=graph_store._database) as session:
+                session.run("MATCH (n) WHERE n:Node OR n:Alias DETACH DELETE n")
             graph_store.upsert_node("a", "service", {})
             graph_store.upsert_node("b", "service", {})
-            graph_store.upsert_edge(
-                "a", "b", "depends_on", confidence=0.5
-            )
+            graph_store.upsert_edge("a", "b", "depends_on", confidence=0.5)
             # Server-side FLOAT MIN/MAX must reject an out-of-range
             # raw-SQL update — proof the typed-property migration
             # installed via the registry path. Pre-fix, this UPDATE
@@ -257,10 +251,7 @@ class TestArcadeDBEdgeProvenance:
                     USER,
                     PASSWORD,
                     DATABASE,
-                    "UPDATE EDGE SET confidence = 2.5 "
-                    "WHERE edge_type = 'depends_on'",
+                    "UPDATE EDGE SET confidence = 2.5 WHERE edge_type = 'depends_on'",
                 )
         finally:
             registry.close()
-
-

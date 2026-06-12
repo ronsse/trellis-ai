@@ -26,9 +26,7 @@ import time
 from typing import Any
 
 # Endpoints — international (.ai) preferred for the user's setup
-MOONSHOT_BASE_URL = os.environ.get(
-    "MOONSHOT_BASE_URL", "https://api.moonshot.ai/v1"
-)
+MOONSHOT_BASE_URL = os.environ.get("MOONSHOT_BASE_URL", "https://api.moonshot.ai/v1")
 CHAT_MODEL = os.environ.get("MOONSHOT_CHAT_MODEL", "kimi-k2-0905-preview")
 # Embedding model name is the unknown — try this first, fall through to alternates
 EMBEDDING_MODEL_CANDIDATES = [
@@ -216,8 +214,7 @@ async def main() -> int:
         )
         return 0 if chat_result.get("ok") else 1
     print(
-        "  Decision: BOTH embedding paths failed. "
-        "Need to investigate before Phase A."
+        "  Decision: BOTH embedding paths failed. Need to investigate before Phase A."
     )
     return 1
 

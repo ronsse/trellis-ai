@@ -174,9 +174,7 @@ class EventLogContractTests:
     def test_empty_get_events_is_empty_list(self, store: EventLog) -> None:
         assert store.get_events() == []
 
-    def test_empty_get_events_with_filter_is_empty_list(
-        self, store: EventLog
-    ) -> None:
+    def test_empty_get_events_with_filter_is_empty_list(self, store: EventLog) -> None:
         assert store.get_events(event_type=EventType.TRACE_INGESTED) == []
         assert store.get_events(entity_id="missing") == []
         assert store.get_events(source="missing") == []
@@ -189,9 +187,7 @@ class EventLogContractTests:
     # Filter by event_type
     # ------------------------------------------------------------------
 
-    def test_filter_by_event_type_returns_only_matching(
-        self, store: EventLog
-    ) -> None:
+    def test_filter_by_event_type_returns_only_matching(self, store: EventLog) -> None:
         store.emit(EventType.TRACE_INGESTED, "a")
         store.emit(EventType.ENTITY_CREATED, "b")
         store.emit(EventType.TRACE_INGESTED, "c")
@@ -214,9 +210,7 @@ class EventLogContractTests:
     # Filter by entity_id
     # ------------------------------------------------------------------
 
-    def test_filter_by_entity_id_returns_only_matching(
-        self, store: EventLog
-    ) -> None:
+    def test_filter_by_entity_id_returns_only_matching(self, store: EventLog) -> None:
         store.emit(EventType.TRACE_INGESTED, "src", entity_id="t1")
         store.emit(EventType.TRACE_INGESTED, "src", entity_id="t2")
         store.emit(EventType.TRACE_INGESTED, "src", entity_id="t1")
@@ -289,9 +283,7 @@ class EventLogContractTests:
             store.emit(EventType.TRACE_INGESTED, f"src-{i}")
             _sleep_for_ordering()
         rows = store.get_events(order="desc")
-        assert [e.source for e in rows] == [
-            f"src-{i}" for i in reversed(range(5))
-        ]
+        assert [e.source for e in rows] == [f"src-{i}" for i in reversed(range(5))]
 
     def test_limit_with_asc_keeps_oldest_n(self, store: EventLog) -> None:
         for i in range(10):
@@ -340,15 +332,11 @@ class EventLogContractTests:
     # Combined filters
     # ------------------------------------------------------------------
 
-    def test_combined_type_and_entity_filters_are_anded(
-        self, store: EventLog
-    ) -> None:
+    def test_combined_type_and_entity_filters_are_anded(self, store: EventLog) -> None:
         store.emit(EventType.TRACE_INGESTED, "src", entity_id="t1")
         store.emit(EventType.ENTITY_CREATED, "src", entity_id="t1")
         store.emit(EventType.TRACE_INGESTED, "src", entity_id="t2")
-        rows = store.get_events(
-            event_type=EventType.TRACE_INGESTED, entity_id="t1"
-        )
+        rows = store.get_events(event_type=EventType.TRACE_INGESTED, entity_id="t1")
         assert len(rows) == 1
         assert rows[0].event_type == EventType.TRACE_INGESTED
         assert rows[0].entity_id == "t1"

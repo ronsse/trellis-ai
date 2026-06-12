@@ -232,9 +232,7 @@ def test_eligible_candidate_surfaces_and_emits_event(
     event_log: SQLiteEventLog,
     param_store: SQLiteParameterStore,
 ):
-    registry = _seed_registry(
-        param_store, overrides={"well_known_count_threshold": 20}
-    )
+    registry = _seed_registry(param_store, overrides={"well_known_count_threshold": 20})
     _insert_meeting_thresholds(graph_store, event_log, count=30)
 
     candidates = analyze_well_known_candidates(
@@ -273,9 +271,7 @@ def test_cooldown_suppresses_immediate_re_emission(
     event_log: SQLiteEventLog,
     param_store: SQLiteParameterStore,
 ):
-    registry = _seed_registry(
-        param_store, overrides={"well_known_count_threshold": 20}
-    )
+    registry = _seed_registry(param_store, overrides={"well_known_count_threshold": 20})
     _insert_meeting_thresholds(graph_store, event_log, count=30)
 
     first = analyze_well_known_candidates(
@@ -294,9 +290,7 @@ def test_cooldown_suppresses_immediate_re_emission(
     assert second == []
 
     # Exactly one WELL_KNOWN_CANDIDATE event remains.
-    events = event_log.get_events(
-        event_type=EventType.WELL_KNOWN_CANDIDATE, limit=10
-    )
+    events = event_log.get_events(event_type=EventType.WELL_KNOWN_CANDIDATE, limit=10)
     assert len(events) == 1
 
 
@@ -351,9 +345,7 @@ def test_growth_trigger_re_emits_inside_cooldown(
     event_log: SQLiteEventLog,
     param_store: SQLiteParameterStore,
 ):
-    registry = _seed_registry(
-        param_store, overrides={"well_known_count_threshold": 20}
-    )
+    registry = _seed_registry(param_store, overrides={"well_known_count_threshold": 20})
     _insert_meeting_thresholds(graph_store, event_log, count=30)
 
     base_now = datetime.now(tz=UTC)
@@ -414,9 +406,7 @@ def test_canonical_type_does_not_surface(
     event_log: SQLiteEventLog,
     param_store: SQLiteParameterStore,
 ):
-    registry = _seed_registry(
-        param_store, overrides={"well_known_count_threshold": 5}
-    )
+    registry = _seed_registry(param_store, overrides={"well_known_count_threshold": 5})
     # ``"Person"`` is canonical — should never appear in candidates
     # even at very high counts.
     _insert_nodes(
@@ -469,9 +459,7 @@ def test_single_extractor_not_eligible(
     event_log: SQLiteEventLog,
     param_store: SQLiteParameterStore,
 ):
-    registry = _seed_registry(
-        param_store, overrides={"well_known_count_threshold": 10}
-    )
+    registry = _seed_registry(param_store, overrides={"well_known_count_threshold": 10})
     _insert_nodes(
         graph_store,
         node_type="metric",
@@ -529,9 +517,7 @@ def test_naming_collision_flagged(
     event_log: SQLiteEventLog,
     param_store: SQLiteParameterStore,
 ):
-    registry = _seed_registry(
-        param_store, overrides={"well_known_count_threshold": 5}
-    )
+    registry = _seed_registry(param_store, overrides={"well_known_count_threshold": 5})
     # ``"persons"`` is NOT canonical (singular is); but it canonicalizes
     # via the suggestion heuristic to ``"Persons"`` — which is *also*
     # not canonical. To force a collision we use an open string whose
@@ -601,9 +587,7 @@ def test_meta_extractor_writes_filtered_from_extractor_count(
     ``requested_by`` is ``trellis_meta_<something>``, they must NOT
     inflate the extractor count.
     """
-    registry = _seed_registry(
-        param_store, overrides={"well_known_count_threshold": 5}
-    )
+    registry = _seed_registry(param_store, overrides={"well_known_count_threshold": 5})
     # Two distinct extractors needed; one is real, one is meta — net
     # one real extractor → below threshold.
     _insert_nodes(
@@ -655,9 +639,7 @@ def test_emit_events_false_returns_candidates_without_event(
     event_log: SQLiteEventLog,
     param_store: SQLiteParameterStore,
 ):
-    registry = _seed_registry(
-        param_store, overrides={"well_known_count_threshold": 20}
-    )
+    registry = _seed_registry(param_store, overrides={"well_known_count_threshold": 20})
     _insert_meeting_thresholds(graph_store, event_log, count=30)
 
     candidates = analyze_well_known_candidates(
@@ -668,9 +650,7 @@ def test_emit_events_false_returns_candidates_without_event(
     )
     assert len(candidates) == 1
     # No WELL_KNOWN_CANDIDATE event was emitted.
-    events = event_log.get_events(
-        event_type=EventType.WELL_KNOWN_CANDIDATE, limit=5
-    )
+    events = event_log.get_events(event_type=EventType.WELL_KNOWN_CANDIDATE, limit=5)
     assert events == []
 
 
@@ -854,9 +834,7 @@ def test_analyze_raises_when_backend_promotes_content_tags_to_top_level(
     ``properties`` to the top level — simulating a backend that
     deviated from the row-dict shape contract.
     """
-    registry = _seed_registry(
-        param_store, overrides={"well_known_count_threshold": 20}
-    )
+    registry = _seed_registry(param_store, overrides={"well_known_count_threshold": 20})
     _insert_meeting_thresholds(graph_store, event_log, count=30)
 
     real_query = graph_store.query

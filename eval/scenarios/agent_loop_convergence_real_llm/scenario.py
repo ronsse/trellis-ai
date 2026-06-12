@@ -162,12 +162,8 @@ class _Telemetry:
         embed_lat = [c.latency_ms for c in embed_calls]
         return {
             "llm.calls_total": float(len(chat_calls)),
-            "llm.input_tokens_total": float(
-                sum(c.input_tokens for c in chat_calls)
-            ),
-            "llm.output_tokens_total": float(
-                sum(c.output_tokens for c in chat_calls)
-            ),
+            "llm.input_tokens_total": float(sum(c.input_tokens for c in chat_calls)),
+            "llm.output_tokens_total": float(sum(c.output_tokens for c in chat_calls)),
             "embedder.calls_total": float(len(embed_calls)),
             "embedder.input_tokens_total": float(
                 sum(c.input_tokens for c in embed_calls)
@@ -408,9 +404,7 @@ def _populate_distractor_documents_real_llm(
 # ---------------------------------------------------------------------------
 
 
-def _make_embedding_fn(
-    embedder: EmbedderClient, telemetry: _Telemetry
-) -> object:
+def _make_embedding_fn(embedder: EmbedderClient, telemetry: _Telemetry) -> object:
     """Return a sync ``callable(str) -> list[float]`` for SemanticSearch.
 
     SemanticSearch invokes ``embedding_fn(query_text)`` synchronously

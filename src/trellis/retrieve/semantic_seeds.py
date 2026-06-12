@@ -239,9 +239,7 @@ class SemanticSeedExtractor:
         return seeds
 
     @staticmethod
-    def _resolve_entity_id(
-        hit: dict[str, Any], metadata: dict[str, Any]
-    ) -> str | None:
+    def _resolve_entity_id(hit: dict[str, Any], metadata: dict[str, Any]) -> str | None:
         """Pull the underlying ``entity_id`` from a vector-store hit.
 
         Preference order:

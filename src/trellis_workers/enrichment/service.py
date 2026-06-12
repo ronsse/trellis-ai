@@ -379,9 +379,7 @@ class EnrichmentService:
                     extractor_tier="llm",
                     failure_kind="parse_error",
                     source_hint="enrichment",
-                    source_excerpt_hash=(
-                        content_hash(response) if response else None
-                    ),
+                    source_excerpt_hash=(content_hash(response) if response else None),
                     model=self.model,
                     error_class=type(e).__name__,
                     error_excerpt=str(e),

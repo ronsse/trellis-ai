@@ -75,9 +75,7 @@ def test_distractor_doc_ids_are_disjoint_from_real_entities() -> None:
     """
     from eval.generators.trace_generator import DOMAIN_TEMPLATES
 
-    real_doc_ids = {
-        f"doc:{entity}" for t in DOMAIN_TEMPLATES for entity in t.entities
-    }
+    real_doc_ids = {f"doc:{entity}" for t in DOMAIN_TEMPLATES for entity in t.entities}
     distractor_ids = {
         doc_id for docs in _DISTRACTOR_DOCS.values() for doc_id, _ in docs
     }
@@ -122,9 +120,7 @@ def test_short_run_produces_expected_metric_shape(
     assert report.status in {"pass", "regress"}
     assert report.metrics["rounds"] == 40.0
     assert report.metrics["pack_max_items"] == 4.0
-    expected_distractors = float(
-        DEFAULT_DISTRACTORS_PER_DOMAIN * len(_DISTRACTOR_DOCS)
-    )
+    expected_distractors = float(DEFAULT_DISTRACTORS_PER_DOMAIN * len(_DISTRACTOR_DOCS))
     assert report.metrics["distractors_planted"] == expected_distractors
 
     for key in (
@@ -164,8 +160,7 @@ def test_default_run_demonstrates_useful_fraction_climb(
     )
     assert report.metrics["convergence.useful_delta"] >= USEFUL_DELTA_CLIMB_THRESHOLD
     assert report.metrics["loops.noise_items_tagged_total"] > 0, (
-        "no noise items were tagged — the climb (if any) wasn't the "
-        "loop's doing"
+        "no noise items were tagged — the climb (if any) wasn't the loop's doing"
     )
 
 
@@ -183,9 +178,9 @@ def test_per_domain_useful_fraction_metrics_present(
         useful_delta_climb_threshold=-1.0,
     )
     for domain in ("software_engineering", "data_pipeline", "customer_support"):
-        assert (
-            f"per_domain.{domain}.useful_fraction_mean" in report.metrics
-        ), f"missing per_domain.{domain}.useful_fraction_mean"
+        assert f"per_domain.{domain}.useful_fraction_mean" in report.metrics, (
+            f"missing per_domain.{domain}.useful_fraction_mean"
+        )
 
 
 # ---------------------------------------------------------------------------

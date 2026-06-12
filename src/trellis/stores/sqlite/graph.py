@@ -1315,8 +1315,7 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
             f"THEN {json_extract_expr} ELSE '[]' END)"
         )
         return (
-            f"EXISTS (SELECT 1 FROM json_each({safe_array}) "
-            f"WHERE json_each.value = ?)",
+            f"EXISTS (SELECT 1 FROM json_each({safe_array}) WHERE json_each.value = ?)",
             [clause.value],
         )
 
@@ -1364,9 +1363,7 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
         params: list[Any] = list(self._temporal_params(query.as_of))
         for clause in query.filters:
             if clause.op == "contains":
-                frag, p = SQLiteGraphStore._render_contains_sqlite(
-                    clause.field, clause
-                )
+                frag, p = SQLiteGraphStore._render_contains_sqlite(clause.field, clause)
                 where_parts.append(frag)
                 params.extend(p)
                 continue

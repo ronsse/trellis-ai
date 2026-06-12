@@ -103,8 +103,7 @@ def test_multiple_events_same_key_collapse_into_one_cluster() -> None:
     """Five events with the same ``(file, class)`` → one cluster of size 5."""
     base = datetime(2026, 5, 1, 12, 0, 0, tzinfo=UTC)
     events = [
-        _make_failure_event(occurred_at=base + timedelta(minutes=i))
-        for i in range(5)
+        _make_failure_event(occurred_at=base + timedelta(minutes=i)) for i in range(5)
     ]
     clusters = cluster_failures(events, window=timedelta(hours=24))
     assert len(clusters) == 1
