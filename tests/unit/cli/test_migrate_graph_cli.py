@@ -109,7 +109,7 @@ def test_migrate_graph_json_output(tmp_path: Path, runner: CliRunner) -> None:
         ],
     )
     assert result.exit_code == 0
-    payload = json.loads(result.output)
+    payload = json.loads(result.stdout)
     assert payload["nodes_read"] == 1
     assert payload["nodes_written"] == 1
     assert payload["dry_run"] is False

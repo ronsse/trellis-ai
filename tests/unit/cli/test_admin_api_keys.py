@@ -43,7 +43,7 @@ def _create_key(scopes: str = "read", name: str = "ci") -> dict:
         ["api-keys", "create", "--name", name, "--scopes", scopes, "--format", "json"]
     )
     assert result.exit_code == EXIT_OK, result.output
-    return json.loads(result.output)
+    return json.loads(result.stdout)
 
 
 # ---------------------------------------------------------------------------
@@ -90,7 +90,7 @@ class TestCreate:
             ]
         )
         assert result.exit_code == EXIT_VALIDATION, result.output
-        payload = json.loads(result.output)
+        payload = json.loads(result.stdout)
         assert payload["error"] == "validation_error"
         assert "write" in payload["message"]
 
@@ -112,7 +112,7 @@ class TestList:
         _init_stores(tmp_path, monkeypatch)
         result = _invoke(["api-keys", "list", "--format", "json"])
         assert result.exit_code == EXIT_OK, result.output
-        payload = json.loads(result.output)
+        payload = json.loads(result.stdout)
         assert payload == {"keys": [], "count": 0}
 
     def test_list_shows_keys_but_never_hash_or_token(
@@ -122,7 +122,7 @@ class TestList:
         created = _create_key("admin", name="root-key")
         result = _invoke(["api-keys", "list", "--format", "json"])
         assert result.exit_code == EXIT_OK, result.output
-        payload = json.loads(result.output)
+        payload = json.loads(result.stdout)
         assert payload["count"] == 1
         row = payload["keys"][0]
         assert row["key_id"] == created["key_id"]
@@ -147,11 +147,11 @@ class TestRevoke:
         created = _create_key()
         result = _invoke(["api-keys", "revoke", created["key_id"], "--format", "json"])
         assert result.exit_code == EXIT_OK, result.output
-        assert json.loads(result.output) == {
+        assert json.loads(result.stdout) == {
             "status": "revoked",
             "key_id": created["key_id"],
         }
-        listing = json.loads(_invoke(["api-keys", "list", "--format", "json"]).output)
+        listing = json.loads(_invoke(["api-keys", "list", "--format", "json"]).stdout)
         assert listing["keys"][0]["revoked"] is True
 
     def test_revoke_unknown_key_is_loud(
@@ -160,7 +160,7 @@ class TestRevoke:
         _init_stores(tmp_path, monkeypatch)
         result = _invoke(["api-keys", "revoke", "000000000000", "--format", "json"])
         assert result.exit_code == EXIT_VALIDATION, result.output
-        payload = json.loads(result.output)
+        payload = json.loads(result.stdout)
         assert payload["error"] == "unknown_key_id"
 
     def test_revoke_twice_is_loud(
@@ -172,5 +172,5 @@ class TestRevoke:
         assert first.exit_code == EXIT_OK, first.output
         second = _invoke(["api-keys", "revoke", created["key_id"], "--format", "json"])
         assert second.exit_code == EXIT_VALIDATION, second.output
-        payload = json.loads(second.output)
+        payload = json.loads(second.stdout)
         assert payload["error"] == "already_revoked"

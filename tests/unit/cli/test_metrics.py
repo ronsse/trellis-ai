@@ -88,7 +88,7 @@ def test_metrics_outcomes_json(cli_env):
 
     result = runner.invoke(app, ["metrics", "outcomes", "--format", "json"])
     assert result.exit_code == 0, result.output
-    payload = json.loads(result.output)
+    payload = json.loads(result.stdout)
     assert payload["outcomes_scanned"] == 40
     assert len(payload["cells"]) == 1
     cell = payload["cells"][0]
@@ -100,7 +100,7 @@ def test_metrics_outcomes_json(cli_env):
 def test_metrics_outcomes_empty(cli_env):
     result = runner.invoke(app, ["metrics", "outcomes", "--format", "json"])
     assert result.exit_code == 0
-    payload = json.loads(result.output)
+    payload = json.loads(result.stdout)
     assert payload["outcomes_scanned"] == 0
     assert payload["cells"] == []
 
@@ -115,7 +115,7 @@ def test_metrics_tune_emits_proposals(cli_env):
 
     result = runner.invoke(app, ["metrics", "tune", "--format", "json"])
     assert result.exit_code == 0, result.output
-    payload = json.loads(result.output)
+    payload = json.loads(result.stdout)
     assert payload["tuner_name"] == "rule_tuner"
     assert payload["proposals_persisted"] >= 1
     first = payload["proposals"][0]
@@ -133,7 +133,7 @@ def test_metrics_proposals_lists_stored(cli_env):
 
     result = runner.invoke(app, ["metrics", "proposals", "--format", "json"])
     assert result.exit_code == 0
-    payload = json.loads(result.output)
+    payload = json.loads(result.stdout)
     assert isinstance(payload, list)
     assert len(payload) >= 1
 
@@ -146,7 +146,7 @@ def test_metrics_proposals_status_filter(cli_env):
         app, ["metrics", "proposals", "--status", "pending", "--format", "json"]
     )
     assert result.exit_code == 0
-    payload = json.loads(result.output)
+    payload = json.loads(result.stdout)
     assert all(p["status"] == "pending" for p in payload)
 
 
@@ -167,7 +167,7 @@ def test_metrics_versions_for_scope_without_history(cli_env):
         ],
     )
     assert result.exit_code == 0
-    payload = json.loads(result.output)
+    payload = json.loads(result.stdout)
     assert payload["active_version"] is None
     assert payload["versions"] == []
 
@@ -194,7 +194,7 @@ def test_metrics_versions_after_seed(cli_env):
         ],
     )
     assert result.exit_code == 0
-    payload = json.loads(result.output)
+    payload = json.loads(result.stdout)
     assert payload["active_version"] is not None
     assert len(payload["versions"]) == 1
 
@@ -207,11 +207,11 @@ def test_metrics_versions_after_seed(cli_env):
 def test_metrics_promote_dry_run_by_default(cli_env):
     _seed_failing_outcomes(cli_env["outcome_store"])
     tune_result = runner.invoke(app, ["metrics", "tune", "--format", "json"])
-    proposal_id = json.loads(tune_result.output)["proposals"][0]["proposal_id"]
+    proposal_id = json.loads(tune_result.stdout)["proposals"][0]["proposal_id"]
 
     result = runner.invoke(app, ["metrics", "promote", proposal_id, "--format", "json"])
     assert result.exit_code == 0
-    payload = json.loads(result.output)
+    payload = json.loads(result.stdout)
     assert payload["dry_run"] is True
 
     # Proposal should still be pending (no mutation).
@@ -221,7 +221,7 @@ def test_metrics_promote_dry_run_by_default(cli_env):
 def test_metrics_promote_commit_changes_state(cli_env):
     _seed_failing_outcomes(cli_env["outcome_store"])
     tune_result = runner.invoke(app, ["metrics", "tune", "--format", "json"])
-    proposal_id = json.loads(tune_result.output)["proposals"][0]["proposal_id"]
+    proposal_id = json.loads(tune_result.stdout)["proposals"][0]["proposal_id"]
 
     result = runner.invoke(
         app,
@@ -239,7 +239,7 @@ def test_metrics_promote_commit_changes_state(cli_env):
         ],
     )
     assert result.exit_code == 0, result.output
-    payload = json.loads(result.output)
+    payload = json.loads(result.stdout)
     assert payload["status"] == "promoted"
     assert payload["params_version"] is not None
 
@@ -259,6 +259,6 @@ def test_metrics_promote_missing_proposal(cli_env):
         ],
     )
     assert result.exit_code == 0
-    payload = json.loads(result.output)
+    payload = json.loads(result.stdout)
     assert payload["status"] == "skipped"
     assert payload["reason"] == "proposal_not_found"
