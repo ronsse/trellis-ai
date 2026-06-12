@@ -389,6 +389,30 @@ Refresh is the variation-side input. Feedback + `apply_noise_tags` is the select
 
 Two feedback paths exist for historical reasons; see [CLAUDE.md](../../CLAUDE.md#two-feedback-paths--eventlog-authoritative-vs-jsonl-file-based) for the EventLog-authoritative vs JSONL-file-based split. Refresh consumes neither directly — but extractors that re-extract over time benefit from `apply_noise_tags` having already demoted historically-irrelevant items.
 
+### Running the selection-side loop: `trellis worker curate`
+
+The selection-side half (effectiveness feedback → advisory generation → advisory fitness → learning candidates) runs as one operational command:
+
+```bash
+trellis worker curate --output-dir ./review --days 30
+# or unattended, every 6 hours, until SIGINT/SIGTERM:
+trellis worker curate --output-dir ./review --interval 21600
+```
+
+It calls the curation library functions directly and writes the promote-half review artifacts to `--output-dir`. **Promotion stays human-gated** — review `promotion_decisions.template.json`, approve rows, then run `trellis curate promote-learning` (Tier-2 of [`../design/adr-autonomy-ladder.md`](../design/adr-autonomy-ladder.md)). `--interval` is a plain-sleep convenience; Trellis introduces no scheduler dependency. See [operations.md](operations.md#trellis-worker-curate) for the full flag table. Per-stage `--skip-*` toggles let you run just the demote half (`--skip-advisories --skip-learning`) or just the promote-half scan.
+
+> **Running this server-side?** [`../getting-started/running-trellis.md`](../getting-started/running-trellis.md) is the operating runbook for every Trellis process — `admin serve` plus each `worker` command, their autonomy tiers, and the human-in-the-loop steps. For scheduler recipes (cron / systemd / GitHub Actions / K8s CronJob) and a recommended-cadence table, see [`../deployment/scheduled-curation.md`](../deployment/scheduled-curation.md).
+
+### Reconciling the JSONL audit log: `trellis admin reconcile-feedback`
+
+The curate cycle reads the **EventLog-authoritative** signal. When the `FEEDBACK_RECORDED` event failed to emit (sink unavailable, crash between the JSONL append and the event emit, file-only capture being promoted into the governed pipeline) the row lives only in `pack_feedback.jsonl` and the cycle never sees it. Backfill those rows into the EventLog:
+
+```bash
+trellis admin reconcile-feedback --log-dir ./data [--dry-run] [--format json]
+```
+
+This wraps `reconcile_feedback_log_to_event_log`: it scans `pack_feedback.jsonl`, matches each row against the EventLog by `feedback_id`, and emits only the missing ones — safe to run repeatedly. The JSON output reports `scanned` / `already_present` / `emitted` / `failed` counts (`--dry-run` reports `would_emit` and touches nothing). `worker curate --reconcile-first` runs this same backfill immediately before a cycle, so a scheduled curate pass never misses file-only feedback. The JSONL remains an **audit log, not a second decision path** — reconciliation feeds the authoritative EventLog; it does not create a parallel promote/demote route.
+
 ---
 
 ## Operational signals to watch

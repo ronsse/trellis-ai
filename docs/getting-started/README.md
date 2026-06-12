@@ -10,6 +10,7 @@ A 5-10 minute on-ramp. Pick the path that matches what you want to do.
 | Use the Python SDK in your own agent | [../../examples/sdk_local_demo.py](../../examples/sdk_local_demo.py) |
 | Wrap Trellis tools in LangGraph | [../../examples/integrations/langgraph/README.md](../../examples/integrations/langgraph/README.md) |
 | Run the REST API as a shared service | see "Remote Mode" below |
+| Run Trellis server-side (API/UI + curation workers) | [running-trellis.md](running-trellis.md) — the operating runbook |
 | Set up for a team / data platform / production | [setup-decisions.md](setup-decisions.md) — the human decisions to make |
 | Browse all macro tools and CLI commands | [../agent-guide/operations.md](../agent-guide/operations.md) |
 
@@ -106,6 +107,7 @@ trellis admin serve --port 8420
 
 ## Next steps
 
+- **Run it server-side** with [running-trellis.md](running-trellis.md) — the operating runbook for the API/UI and the curation/learning workers, their autonomy tiers, the human-in-the-loop steps, and a minimal single-host setup with a verification checklist. Scheduler recipes live in [../deployment/scheduled-curation.md](../deployment/scheduled-curation.md).
 - **Make the setup decisions** in [setup-decisions.md](setup-decisions.md) before any team / data-platform / production rollout — domains & ontology, domain ownership, API security.
 - **Read the playbooks** in [../agent-guide/playbooks.md](../agent-guide/playbooks.md) — task-shaped recipes for the most common workflows.
 - **Skim the schemas** in [../agent-guide/schemas.md](../agent-guide/schemas.md) so you know what shape data takes.

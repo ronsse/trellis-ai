@@ -211,6 +211,17 @@ three are idempotent and safe to schedule on independent cadences.
 Reconciliation is a separate **recovery operation**, not a steady-state
 loop — see [Recovery operations](#recovery-operations) below.
 
+> **One command for all three.** `trellis worker curate` runs the
+> advisory, noise-demote, and learning-candidate stages in a single
+> governed cycle (and `--reconcile-first` folds in the reconciliation
+> step below). For the worker-command operating model — each process,
+> its autonomy tier, and the human-in-the-loop steps — read
+> [`../getting-started/running-trellis.md`](../getting-started/running-trellis.md).
+> For scheduler recipes and a recommended-cadence table, see
+> [`scheduled-curation.md`](scheduled-curation.md). The per-loop
+> commands below remain valid for operators who want to schedule the
+> stages independently.
+
 | Loop                | Surface                                              | Suggested cadence       |
 |---------------------|------------------------------------------------------|-------------------------|
 | Advisory generation | `trellis analyze generate-advisories` / `POST /api/v1/advisories/generate` | Hourly                  |
