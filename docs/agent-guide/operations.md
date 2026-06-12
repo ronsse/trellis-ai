@@ -993,11 +993,13 @@ After restarting OpenClaw, the agent has access to all 11 macro tools above. See
 ```python
 from trellis_sdk import TrellisClient
 
-# Local mode (no server needed)
-client = TrellisClient()
-
-# Remote mode (via REST API)
+# HTTP client against a running trellis-api
 client = TrellisClient(base_url="http://localhost:8420")
+
+# Tests: in-process ASGI client, no network listener
+from trellis.testing import in_memory_client
+with in_memory_client(tmp_path / "stores") as client:
+    ...
 ```
 
 ### Client Methods
@@ -1012,7 +1014,17 @@ client = TrellisClient(base_url="http://localhost:8420")
 | `get_entity(entity_id)` | `dict \| None` | Get entity |
 | `create_entity(name, entity_type?, properties?)` | `str` (node_id) | Create entity |
 | `create_link(source_id, target_id, edge_kind?)` | `str` (edge_id) | Create edge |
+| `record_feedback(pack_id, success, helpful_item_ids?, unhelpful_item_ids?, followed_advisory_ids?, target_id?, rating?, comment?)` | `PackFeedbackResponse` | Record element-level pack feedback |
 | `close()` | — | Release resources |
+
+`record_feedback` mirrors the MCP `record_feedback` tool and routes through
+`trellis.feedback.recording.record_feedback` server-side: it appends the durable
+`pack_feedback.jsonl` audit row and emits the authoritative `FEEDBACK_RECORDED`
+event to the operational EventLog. The returned `PackFeedbackResponse` carries
+`event_log_in_sync` — check it to confirm the event reached the log. `False`
+means only the JSONL row landed and a reconcile is owed (the emission
+soft-failed); the SDK does not swallow that signal. `AsyncTrellisClient` exposes
+the same method as a coroutine.
 
 ### Skill Functions
 
