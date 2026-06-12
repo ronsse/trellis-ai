@@ -18,8 +18,11 @@ from trellis.learning.tuners.auto_promote import (
 )
 from trellis.learning.tuners.promotion import (
     PromotionPolicy,
+    PromotionPreview,
     PromotionResult,
+    preview_promotion,
     promote_proposal,
+    reject_proposal,
 )
 from trellis.learning.tuners.rollback import (
     PostPromotionPolicy,
@@ -47,13 +50,16 @@ __all__ = [
     "PostPromotionPolicy",
     "PostPromotionReport",
     "PromotionPolicy",
+    "PromotionPreview",
     "PromotionResult",
     "RuleTuner",
     "TuningRule",
     "aggregate_outcomes",
     "apply_rules",
     "monitor_post_promotion",
+    "preview_promotion",
     "promote_proposal",
+    "reject_proposal",
     "report_to_dict",
     "run_auto_promotion",
     "run_post_promotion_sweep",

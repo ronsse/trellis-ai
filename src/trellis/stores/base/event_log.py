@@ -196,6 +196,20 @@ class EventType(StrEnum):
     MUTATION_EXECUTED = "mutation.executed"
     MUTATION_REJECTED = "mutation.rejected"
 
+    #: Emitted by the API Review-queue endpoints (WP10) whenever a human
+    #: operator acts on a governance surface from the UI inbox — approving
+    #: or rejecting a tuner proposal, promoting learning candidates, or
+    #: drafting a schema-evolution ADR. This is an *audit-of-the-reviewer*
+    #: record that complements (never replaces) the surface-specific event
+    #: the underlying pipeline already emits (e.g. ``PARAMS_UPDATED``). The
+    #: payload always carries the authenticated key identity so the audit
+    #: trail attributes the decision to a credential. Payload schema:
+    #: ``{surface: str, action: str, key_id: str | None, key_name: str |
+    #: None, ...surface-specific detail}``. See
+    #: ``docs/design/adr-autonomy-ladder.md`` for which surfaces are
+    #: human-gated.
+    REVIEW_DECISION_RECORDED = "review.decision_recorded"
+
     # Token tracking
     TOKEN_TRACKED = "token.tracked"
     #: Emitted by a real-LLM-bearing context (today: the

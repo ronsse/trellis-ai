@@ -1035,6 +1035,107 @@ Start with `trellis admin serve` or `trellis-api`. Base path: `/api/v1/`.
 | GET | `/health` | Health check |
 | GET | `/stats` | Store statistics |
 | GET | `/effectiveness` | Context effectiveness report |
+| GET | `/metrics/timeseries` | Improvement-metric trend series (see below) |
+
+### Review queue (admin scope)
+
+The Review view in the static UI (`/ui/` → **Review**) is a human-decision
+inbox. Every endpoint below is on the admin router, so it requires the
+`admin` scope, respects `TRELLIS_UI_ENABLED` / ops-gating, and — for the
+write actions — emits a `REVIEW_DECISION_RECORDED` audit event stamped
+with the authenticated key identity (in addition to the surface-specific
+event the underlying pipeline already emits). The autonomy tiers that
+decide which surfaces are human-gated are described in
+`docs/design/adr-autonomy-ladder.md`.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/proposals` | List pending tuner proposals with `effect_size` / `sample_size` / `baseline_values` / `proposed_values` |
+| GET | `/proposals/{id}/preview` | Dry-run a promotion — predict promote/reject, mutate nothing |
+| POST | `/proposals/{id}/promote` | Promote through the governed pipeline (same logic as `trellis metrics promote --commit`) |
+| POST | `/proposals/{id}/reject` | Reject (human-gated); body `{reason?}` |
+| GET | `/learning/candidates` | Serve the most-recent `intent_learning_candidates.json` artifact (empty + `hint` when none found) |
+| POST | `/learning/promotions` | Promote approved candidates via `MutationExecutor`; body `{decisions: [{candidate_id, approved, rationale?}]}` |
+| GET | `/schema-evolution/candidates` | List latest `WELL_KNOWN_CANDIDATE` event per `candidate_id` |
+| POST | `/schema-evolution/{id}/draft-adr` | Render the promotion-ADR markdown (copyable/downloadable in the UI). **Only** action — there is no promote endpoint; promotion is a one-way ADR commitment |
+| GET | `/code-proposals` | List recent `PROPOSAL_DRAFTED` events with `markdown_preview` (read-only) |
+
+**Sections in the UI.** The Review view has four collapsible queue sections,
+each with a live count:
+
+1. **Tuner proposals** — Approve / Reject buttons. Approve first runs the
+   dry-run preview and shows the predicted decision before a confirm step.
+   Approve wraps `promote_proposal`; Reject wraps `reject_proposal`. The
+   CLI (`trellis metrics promote`) keeps working identically — both share
+   `trellis.learning.tuners.preview_promotion`.
+2. **Learning promotion candidates** — candidate cards with metrics, an
+   approve checkbox + rationale field, and a single submit that runs the
+   existing `prepare_learning_promotions` → `MutationExecutor` path.
+3. **Schema-evolution candidates** — only a **Draft ADR** action, which
+   returns the rendered ADR markdown in a copyable / downloadable panel.
+   No approve/promote button (a tooltip explains why).
+4. **Code-authoring proposals** — read-only list with markdown preview.
+
+**Learning artifacts directory.** `GET /learning/candidates` and `POST
+/learning/promotions` read the `intent_learning_candidates.json` artifact
+that `trellis analyze learning-candidates --output-dir <dir>` writes. The
+server resolves `<dir>` from `TRELLIS_LEARNING_ARTIFACTS_DIR`, falling back
+to `<data_dir>/learning`. When no artifact is found, the list endpoint
+returns an empty list plus a `hint`, and the promote endpoint returns
+`409`.
+
+### Improvement-metrics dashboard (admin scope)
+
+The **Metrics** view in the static UI (`/ui/` → **Metrics**) charts five
+improvement metrics over time. Every series is computed **server-side from
+the EventLog on read** — there is no new storage and no caching layer (POC
+scale). The endpoint is on the admin router, so it requires the `admin`
+scope and respects `TRELLIS_UI_ENABLED` / ops-gating like the rest of
+admin. It is read-only and never mutates a store.
+
+```
+GET /api/v1/metrics/timeseries?metric=<name>&days=<n>&bucket=day&group_by=<axis>
+```
+
+| Param | Values | Default | Notes |
+|-------|--------|---------|-------|
+| `metric` | one of the five below | — (required) | Unknown value → `422` |
+| `days` | positive int | `30` | Look-back window; non-positive → `422` |
+| `bucket` | `day` | `day` | Only daily buckets are implemented; anything else → `422` |
+| `group_by` | `domain` \| `intent_family` \| `none` | `none` | Unknown value → `422` |
+
+The five metrics (priority order; each a named `metric` value):
+
+| Metric | Definition |
+|--------|------------|
+| `pack_success_rate` | Share of graded packs with a positive outcome per bucket (`PACK_ASSEMBLED ⋈ FEEDBACK_RECORDED` on `pack_id`, same join as `learning/pack_observations.py`). |
+| `reference_rate` | `items_referenced / items_served` per bucket — the best "are packs getting better" proxy. Pooled per bucket (sum referenced / sum served). |
+| `advisory_fitness` | Mean advisory confidence per bucket (from the fitness loop's `ADVISORY_SUPPRESSED` / `ADVISORY_RESTORED` `new_confidence`); `sample_count` is the suppressed-advisory count. |
+| `noise_tag_volume` | Items flipped to `signal_quality="noise"` per bucket, counted from `TAGS_REFRESHED` audit events whose `after` tags carry the noise label. |
+| `parameter_promotions` | Governance event counts per bucket (`PARAMS_UPDATED` + `TUNER_PROPOSAL_CREATED` / `_REJECTED` + `PARAMETERS_DEGRADED`). There are no `PARAMS_AUTO_*` events in this tree; `parameter_promotions` groups by event **type**, not by `domain` / `intent_family`. |
+
+**Response shape.** A list of series, each with a `group_key` and a list of
+`{bucket_start, value, sample_count}` points sorted ascending. **Buckets with
+no data are omitted** (not zero-filled) — clients infer gaps from the missing
+`bucket_start` keys (an absent day means "no signal", not "zero"). Grouping
+resolves `domain` from the `PACK_ASSEMBLED` payload and `intent_family` from
+the `FEEDBACK_RECORDED` payload; events lacking the requested dimension fall
+under `"all"`. The aggregation lives in
+`trellis.retrieve.metrics_timeseries.compute_timeseries` (the route is a thin
+adapter).
+
+**Definitional parity.** Where a metric overlaps with the agent-loop
+convergence scenario, the formula matches that scenario's helpers in
+`eval/scenarios/_convergence_common.py` (`pack_success_rate` ↔
+`round_success_rate`; `reference_rate` ↔ the useful-fraction in
+`_base_round_metrics` / `_convergence_stats`; `advisory_fitness`'s suppressed
+count ↔ `advisories_suppressed_total`). Each shared formula is cross-referenced
+in a code comment at its call site.
+
+**UI.** Metrics 1–4 render as inline-SVG line charts (zero dependencies, no
+build step); `parameter_promotions` renders as an annotated events strip
+(grouped bars by event type). A domain / intent-family group-by selector and a
+day-window selector drive all charts.
 
 ---
 

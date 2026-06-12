@@ -106,6 +106,48 @@
         .card .value { font-size: 2rem; font-weight: 700; }
         .card .sub { font-size: 0.8rem; color: var(--text-dim); margin-top: 0.25rem; }
 
+        /* Metric charts (improvement-metrics dashboard) */
+        .metric-charts {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
+            gap: 1rem;
+            margin: 1.5rem 0;
+        }
+        .metric-chart {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1.25rem;
+        }
+        .metric-chart h3 {
+            font-size: 0.95rem;
+            margin-bottom: 0.15rem;
+        }
+        .metric-chart .chart-sub {
+            font-size: 0.75rem;
+            color: var(--text-dim);
+            margin-bottom: 0.75rem;
+        }
+        .metric-chart svg { width: 100%; height: auto; display: block; }
+        .metric-chart .chart-empty {
+            color: var(--text-dim);
+            font-size: 0.8rem;
+            padding: 2rem 0;
+            text-align: center;
+        }
+        .metric-legend {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.5rem 1rem;
+            margin-top: 0.6rem;
+            font-size: 0.72rem;
+            color: var(--text-dim);
+        }
+        .metric-legend .legend-item { display: flex; align-items: center; gap: 0.3rem; }
+        .metric-legend .legend-swatch {
+            width: 10px; height: 10px; border-radius: 2px; display: inline-block;
+        }
+
         /* Status section */
         .status-section {
             background: var(--surface);
@@ -124,6 +166,112 @@
             font-size: 0.9rem;
         }
         .status-row:last-child { border-bottom: none; }
+
+        /* Review queue */
+        .review-section {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            margin: 1rem 0;
+            overflow: hidden;
+        }
+        .review-section > summary {
+            cursor: pointer;
+            padding: 1rem 1.5rem;
+            font-size: 1rem;
+            font-weight: 600;
+            list-style: none;
+            display: flex;
+            align-items: center;
+            gap: 0.6rem;
+            user-select: none;
+        }
+        .review-section > summary::-webkit-details-marker { display: none; }
+        .review-section > summary::before {
+            content: '\25B8';
+            color: var(--text-dim);
+            transition: transform var(--transition);
+        }
+        .review-section[open] > summary::before { transform: rotate(90deg); }
+        .review-section > summary:hover { color: var(--accent); }
+        .review-count {
+            background: var(--surface-2);
+            color: var(--text-dim);
+            border-radius: 10px;
+            padding: 0.05rem 0.55rem;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+        .review-body { padding: 0 1.5rem 1.25rem; }
+        .review-card {
+            background: var(--surface-2);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 1rem;
+            margin-bottom: 0.85rem;
+        }
+        .review-card h4 { font-size: 0.95rem; margin-bottom: 0.4rem; word-break: break-word; }
+        .review-card .review-meta {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.4rem 1rem;
+            font-size: 0.78rem;
+            color: var(--text-dim);
+            margin: 0.5rem 0;
+        }
+        .review-card .review-actions {
+            display: flex;
+            gap: 0.5rem;
+            margin-top: 0.75rem;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+        .review-kv { font-family: ui-monospace, monospace; font-size: 0.78rem; }
+        .review-predict {
+            font-size: 0.78rem;
+            margin-top: 0.5rem;
+            padding: 0.5rem 0.75rem;
+            border-radius: 4px;
+            background: var(--bg);
+            border: 1px solid var(--border);
+        }
+        button.btn-danger {
+            border-color: var(--error);
+            color: var(--error);
+            background: transparent;
+        }
+        button.btn-danger:hover { background: #350a0a; }
+        .review-rationale {
+            width: 100%;
+            margin-top: 0.5rem;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            color: var(--text);
+            padding: 0.5rem;
+            font-size: 0.82rem;
+            font-family: inherit;
+            resize: vertical;
+            min-height: 2.2rem;
+        }
+        .adr-panel {
+            margin-top: 0.75rem;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 0.75rem;
+            max-height: 320px;
+            overflow: auto;
+            white-space: pre-wrap;
+            font-family: ui-monospace, monospace;
+            font-size: 0.75rem;
+            color: var(--text-dim);
+        }
+        .review-tooltip {
+            cursor: help;
+            border-bottom: 1px dotted var(--text-dim);
+            color: var(--text-dim);
+        }
 
         /* Badges */
         .badge {
@@ -837,12 +985,14 @@
         </span>
         <div class="nav-links">
             <a href="#" class="active" data-view="dashboard">Dashboard</a>
+            <a href="#" data-view="metrics">Metrics</a>
+            <a href="#" data-view="review">Review</a>
             <a href="#" data-view="evolution">Evolution</a>
             <a href="#" data-view="graph">Graph</a>
             <a href="#" data-view="traces">Traces</a>
             <a href="#" data-view="precedents">Precedents</a>
         </div>
-        <span class="shortcuts-hint"><kbd>/</kbd> Search &middot; <kbd>1</kbd>-<kbd>5</kbd> Views &middot; <kbd>Esc</kbd> Close</span>
+        <span class="shortcuts-hint"><kbd>/</kbd> Search &middot; <kbd>1</kbd>-<kbd>7</kbd> Views &middot; <kbd>Esc</kbd> Close</span>
         <button class="btn-icon" id="api-key-toggle" title="API key" onclick="toggleKeyBanner()">&#x1F511;</button>
     </nav>
 
@@ -875,6 +1025,70 @@
                 <h2>Store Health</h2>
                 <div id="health-rows"></div>
             </div>
+        </div>
+
+        <!-- ============ Metrics (improvement-metrics dashboard) ============ -->
+        <div id="view-metrics" style="display:none">
+            <div class="section-header">
+                <h2>Improvement Metrics</h2>
+                <div class="search-bar" style="margin:0">
+                    <select id="metrics-days">
+                        <option value="7">Last 7 days</option>
+                        <option value="30" selected>Last 30 days</option>
+                        <option value="90">Last 90 days</option>
+                    </select>
+                    <select id="metrics-group-by">
+                        <option value="none" selected>No grouping</option>
+                        <option value="domain">By domain</option>
+                        <option value="intent_family">By intent family</option>
+                    </select>
+                    <button onclick="loadMetrics()">Refresh</button>
+                </div>
+            </div>
+            <p style="font-size:0.8rem; color:var(--text-dim); margin-bottom:1rem;">
+                Trends computed from the EventLog on read. Each metric shares its
+                definition with the agent-loop convergence scenario. Buckets with no
+                data are omitted (gaps mean "no signal", not zero).
+            </p>
+            <div class="metric-charts" id="metric-charts"></div>
+        </div>
+
+        <!-- ============ Review (human-decision inbox) ============ -->
+        <div id="view-review" style="display:none">
+            <div class="section-header">
+                <h2>Review Queue</h2>
+                <div class="search-bar" style="margin:0">
+                    <button onclick="loadReview()">Refresh</button>
+                </div>
+            </div>
+            <p style="font-size:0.8rem; color:var(--text-dim); margin-bottom:1rem;">
+                Human-decision inbox. Approving or rejecting items here is gated to operators —
+                see the autonomy ladder for which surfaces are human-gated.
+            </p>
+
+            <!-- Section 1: Tuner proposals -->
+            <details class="review-section" id="review-proposals" open>
+                <summary>Tuner proposals <span class="review-count" id="review-proposals-count">0</span></summary>
+                <div class="review-body" id="review-proposals-body"></div>
+            </details>
+
+            <!-- Section 2: Learning-promotion candidates -->
+            <details class="review-section" id="review-learning">
+                <summary>Learning promotion candidates <span class="review-count" id="review-learning-count">0</span></summary>
+                <div class="review-body" id="review-learning-body"></div>
+            </details>
+
+            <!-- Section 3: Schema-evolution candidates -->
+            <details class="review-section" id="review-schema">
+                <summary>Schema-evolution candidates <span class="review-count" id="review-schema-count">0</span></summary>
+                <div class="review-body" id="review-schema-body"></div>
+            </details>
+
+            <!-- Section 4: Code-authoring proposals (read-only) -->
+            <details class="review-section" id="review-code">
+                <summary>Code-authoring proposals <span class="review-count" id="review-code-count">0</span></summary>
+                <div class="review-body" id="review-code-body"></div>
+            </details>
         </div>
 
         <!-- ============ Evolution ============ -->
@@ -1066,6 +1280,28 @@
             return res.json();
         }
 
+        async function postJSON(path, body) {
+            const headers = { 'Content-Type': 'application/json' };
+            const key = getApiKey();
+            if (key) headers['X-API-Key'] = key;
+            const res = await fetch(API + path, {
+                method: 'POST',
+                headers,
+                body: body === undefined ? undefined : JSON.stringify(body)
+            });
+            if (res.status === 401) {
+                showKeyBanner(key ? 'Stored API key was rejected — enter a valid key.'
+                                  : 'This API requires a key — enter one to continue.');
+                throw new Error('401 Unauthorized (API key required)');
+            }
+            if (!res.ok) {
+                let detail = `${res.status} ${res.statusText}`;
+                try { const j = await res.json(); if (j && j.detail) detail = j.detail; } catch { /* non-JSON */ }
+                throw new Error(detail);
+            }
+            return res.json();
+        }
+
         function timeAgo(iso) {
             if (!iso) return '';
             const d = new Date(iso);
@@ -1104,7 +1340,7 @@
         }
 
         // -- View switching --
-        const views = ['dashboard', 'evolution', 'graph', 'traces', 'precedents'];
+        const views = ['dashboard', 'metrics', 'review', 'evolution', 'graph', 'traces', 'precedents'];
         const viewLoaded = {};
         document.querySelectorAll('nav a[data-view]').forEach(link => {
             link.addEventListener('click', e => {
@@ -1122,6 +1358,8 @@
             });
             if (!viewLoaded[name]) {
                 viewLoaded[name] = true;
+                if (name === 'metrics') loadMetrics();
+                if (name === 'review') loadReview();
                 if (name === 'evolution') loadEvolution();
                 if (name === 'traces') loadTraces();
                 if (name === 'precedents') loadPrecedents();
@@ -1149,7 +1387,7 @@
                     document.getElementById('trace-domain').focus();
                 }
             }
-            if (e.key >= '1' && e.key <= '5') {
+            if (e.key >= '1' && e.key <= '7') {
                 switchView(views[parseInt(e.key) - 1]);
             }
             if (e.key === 'Escape') {
@@ -1175,6 +1413,497 @@
             const label = ok ? 'OK' : 'DOWN';
             div.innerHTML = `<span>${escHtml(name)}</span><span class="badge ${cls}">${label}</span>`;
             return div;
+        }
+
+        // ============================================================
+        //  METRICS (improvement-metrics dashboard)
+        // ============================================================
+        // Inline SVG rendering — no chart framework, no build step. Trend
+        // metrics (1-4) render as line charts; parameter_promotions (5)
+        // renders as an annotated events strip (grouped bars by event type).
+
+        // Series palette — stable order so a group keeps its colour across refreshes.
+        const SERIES_COLORS = [
+            '#6366f1', '#22c55e', '#f59e0b', '#3b82f6', '#ec4899',
+            '#14b8a6', '#a78bfa', '#ef4444', '#84cc16', '#f97316'
+        ];
+
+        // Trend metrics (line charts). Each: title + sub describing the formula.
+        const TREND_METRICS = [
+            { metric: 'pack_success_rate', title: 'Pack success rate',
+              sub: 'share of graded packs with a positive outcome', pct: true },
+            { metric: 'reference_rate', title: 'Reference rate',
+              sub: 'items_referenced / items_served (best "are packs improving" proxy)', pct: true },
+            { metric: 'advisory_fitness', title: 'Advisory fitness',
+              sub: 'mean advisory confidence (point); suppressed count in tooltip', pct: false },
+            { metric: 'noise_tag_volume', title: 'Noise-tag volume',
+              sub: 'items flipped to signal_quality="noise" per day', pct: false }
+        ];
+
+        function metricColor(i) { return SERIES_COLORS[i % SERIES_COLORS.length]; }
+
+        async function loadMetrics() {
+            const container = document.getElementById('metric-charts');
+            const days = document.getElementById('metrics-days').value;
+            const groupBy = document.getElementById('metrics-group-by').value;
+            container.innerHTML = loadingHtml('Loading metrics...');
+
+            // Fetch all five in parallel; one failure shouldn't blank the rest.
+            const trendFetches = TREND_METRICS.map(m =>
+                fetchJSON(`/admin/metrics/timeseries?metric=${m.metric}&days=${days}&bucket=day&group_by=${groupBy}`)
+                    .then(data => ({ data })).catch(err => ({ err })));
+            const stripFetch = fetchJSON(
+                `/admin/metrics/timeseries?metric=parameter_promotions&days=${days}&bucket=day&group_by=${groupBy}`)
+                .then(data => ({ data })).catch(err => ({ err }));
+
+            const [trendResults, stripResult] = await Promise.all([
+                Promise.all(trendFetches), stripFetch
+            ]);
+
+            container.innerHTML = '';
+            TREND_METRICS.forEach((m, i) => {
+                container.appendChild(renderTrendChart(m, trendResults[i]));
+            });
+            container.appendChild(renderEventsStrip(stripResult));
+        }
+
+        function chartCard(title, sub) {
+            const card = document.createElement('div');
+            card.className = 'metric-chart fade-in';
+            card.innerHTML = `<h3>${escHtml(title)}</h3><div class="chart-sub">${escHtml(sub)}</div>`;
+            return card;
+        }
+
+        function chartEmpty(card, msg) {
+            const div = document.createElement('div');
+            div.className = 'chart-empty';
+            div.textContent = msg;
+            card.appendChild(div);
+            return card;
+        }
+
+        function renderLegend(series) {
+            const legend = document.createElement('div');
+            legend.className = 'metric-legend';
+            series.forEach((s, i) => {
+                const item = document.createElement('span');
+                item.className = 'legend-item';
+                item.innerHTML = `<span class="legend-swatch" style="background:${metricColor(i)}"></span>${escHtml(s.group_key)}`;
+                legend.appendChild(item);
+            });
+            return legend;
+        }
+
+        // Line chart for a trend metric. SVG viewBox is fixed; the card
+        // CSS scales it responsively.
+        function renderTrendChart(meta, result) {
+            const card = chartCard(meta.title, meta.sub);
+            if (result.err) return chartEmpty(card, 'Could not load: ' + result.err.message);
+            const series = (result.data.series || []).filter(s => s.points.length > 0);
+            if (series.length === 0) return chartEmpty(card, 'No data in this window yet.');
+
+            const W = 360, H = 160, padL = 34, padR = 10, padT = 12, padB = 22;
+            const plotW = W - padL - padR, plotH = H - padT - padB;
+
+            // X domain = union of all bucket_start dates (sorted). Y domain
+            // = [0, max] for counts, [0, 1] for percentage metrics.
+            const allDates = Array.from(new Set(
+                series.flatMap(s => s.points.map(p => p.bucket_start)))).sort();
+            const xIndex = {};
+            allDates.forEach((d, i) => { xIndex[d] = i; });
+            const xMax = Math.max(1, allDates.length - 1);
+            let yMax = meta.pct ? 1 : 0;
+            if (!meta.pct) {
+                for (const s of series) for (const p of s.points) yMax = Math.max(yMax, p.value);
+                yMax = yMax || 1;
+            }
+            const xPos = d => padL + (allDates.length === 1 ? plotW / 2 : (xIndex[d] / xMax) * plotW);
+            const yPos = v => padT + plotH - (v / yMax) * plotH;
+
+            const ns = 'http://www.w3.org/2000/svg';
+            const svg = document.createElementNS(ns, 'svg');
+            svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+
+            // Axes (baseline + left tick labels at 0, mid, max).
+            const axisColor = 'var(--border)';
+            const tick = (v) => {
+                const y = yPos(v);
+                const line = document.createElementNS(ns, 'line');
+                line.setAttribute('x1', padL); line.setAttribute('x2', W - padR);
+                line.setAttribute('y1', y); line.setAttribute('y2', y);
+                line.setAttribute('stroke', axisColor); line.setAttribute('stroke-width', '0.5');
+                svg.appendChild(line);
+                const lbl = document.createElementNS(ns, 'text');
+                lbl.setAttribute('x', padL - 4); lbl.setAttribute('y', y + 3);
+                lbl.setAttribute('text-anchor', 'end'); lbl.setAttribute('font-size', '8');
+                lbl.setAttribute('fill', 'var(--text-dim)');
+                lbl.textContent = meta.pct ? Math.round(v * 100) + '%' : (Math.round(v * 10) / 10);
+                svg.appendChild(lbl);
+            };
+            tick(0); tick(yMax / 2); tick(yMax);
+
+            // X end-labels (first + last date).
+            const xLabel = (d, anchor, x) => {
+                const t = document.createElementNS(ns, 'text');
+                t.setAttribute('x', x); t.setAttribute('y', H - 6);
+                t.setAttribute('text-anchor', anchor); t.setAttribute('font-size', '8');
+                t.setAttribute('fill', 'var(--text-dim)');
+                t.textContent = d.slice(5); // MM-DD
+                svg.appendChild(t);
+            };
+            xLabel(allDates[0], 'start', padL);
+            if (allDates.length > 1) xLabel(allDates[allDates.length - 1], 'end', W - padR);
+
+            series.forEach((s, i) => {
+                const color = metricColor(i);
+                const pts = s.points.slice().sort((a, b) => a.bucket_start < b.bucket_start ? -1 : 1);
+                const coords = pts.map(p => [xPos(p.bucket_start), yPos(p.value)]);
+                if (coords.length > 1) {
+                    const poly = document.createElementNS(ns, 'polyline');
+                    poly.setAttribute('points', coords.map(c => c.join(',')).join(' '));
+                    poly.setAttribute('fill', 'none');
+                    poly.setAttribute('stroke', color);
+                    poly.setAttribute('stroke-width', '1.5');
+                    svg.appendChild(poly);
+                }
+                pts.forEach((p, j) => {
+                    const c = document.createElementNS(ns, 'circle');
+                    c.setAttribute('cx', coords[j][0]); c.setAttribute('cy', coords[j][1]);
+                    c.setAttribute('r', '2.5'); c.setAttribute('fill', color);
+                    const title = document.createElementNS(ns, 'title');
+                    const shown = meta.pct ? (p.value * 100).toFixed(1) + '%' : p.value;
+                    title.textContent = `${s.group_key} · ${p.bucket_start}: ${shown} (n=${p.sample_count})`;
+                    c.appendChild(title);
+                    svg.appendChild(c);
+                });
+            });
+
+            card.appendChild(svg);
+            card.appendChild(renderLegend(series));
+            return card;
+        }
+
+        // Annotated events strip for parameter_promotions — grouped bars by
+        // event type per day. A count metric, so it's a strip not a line.
+        function renderEventsStrip(result) {
+            const card = chartCard('Parameter promotions',
+                'governance events per day — promote / created / rejected / degraded counts');
+            if (result.err) return chartEmpty(card, 'Could not load: ' + result.err.message);
+            const series = (result.data.series || []).filter(s => s.points.length > 0);
+            if (series.length === 0) return chartEmpty(card, 'No governance events in this window yet.');
+
+            const allDates = Array.from(new Set(
+                series.flatMap(s => s.points.map(p => p.bucket_start)))).sort();
+            const W = 360, H = 160, padL = 24, padR = 10, padT = 12, padB = 22;
+            const plotW = W - padL - padR, plotH = H - padT - padB;
+            let yMax = 0;
+            for (const s of series) for (const p of s.points) yMax = Math.max(yMax, p.value);
+            yMax = yMax || 1;
+
+            const ns = 'http://www.w3.org/2000/svg';
+            const svg = document.createElementNS(ns, 'svg');
+            svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+
+            // baseline
+            const base = document.createElementNS(ns, 'line');
+            base.setAttribute('x1', padL); base.setAttribute('x2', W - padR);
+            base.setAttribute('y1', padT + plotH); base.setAttribute('y2', padT + plotH);
+            base.setAttribute('stroke', 'var(--border)'); base.setAttribute('stroke-width', '0.5');
+            svg.appendChild(base);
+
+            const slotW = plotW / allDates.length;
+            const barW = Math.max(2, Math.min(10, (slotW - 4) / series.length));
+            allDates.forEach((d, di) => {
+                const slotX = padL + di * slotW + 2;
+                series.forEach((s, si) => {
+                    const point = s.points.find(p => p.bucket_start === d);
+                    if (!point || point.value <= 0) return;
+                    const h = (point.value / yMax) * plotH;
+                    const rect = document.createElementNS(ns, 'rect');
+                    rect.setAttribute('x', slotX + si * barW);
+                    rect.setAttribute('y', padT + plotH - h);
+                    rect.setAttribute('width', Math.max(1, barW - 1));
+                    rect.setAttribute('height', h);
+                    rect.setAttribute('fill', metricColor(si));
+                    const title = document.createElementNS(ns, 'title');
+                    title.textContent = `${s.group_key} · ${d}: ${point.value}`;
+                    rect.appendChild(title);
+                    svg.appendChild(rect);
+                });
+            });
+
+            // X end-labels
+            const xt = (d, anchor, x) => {
+                const t = document.createElementNS(ns, 'text');
+                t.setAttribute('x', x); t.setAttribute('y', H - 6);
+                t.setAttribute('text-anchor', anchor); t.setAttribute('font-size', '8');
+                t.setAttribute('fill', 'var(--text-dim)');
+                t.textContent = d.slice(5);
+                svg.appendChild(t);
+            };
+            xt(allDates[0], 'start', padL);
+            if (allDates.length > 1) xt(allDates[allDates.length - 1], 'end', W - padR);
+
+            card.appendChild(svg);
+            // Strip legend shows the short event-type tail (e.g. "parameters.updated").
+            card.appendChild(renderLegend(series));
+            return card;
+        }
+
+        // ============================================================
+        //  REVIEW (human-decision inbox)
+        // ============================================================
+        function setCount(id, n) {
+            document.getElementById(id).textContent = n;
+        }
+
+        function reviewEmpty(msg) {
+            return `<div class="empty-state"><p style="color:var(--text-dim)">${escHtml(msg)}</p></div>`;
+        }
+
+        function reviewError(msg) {
+            return `<div class="empty-state"><p style="color:var(--error)">${escHtml(msg)}</p></div>`;
+        }
+
+        async function loadReview() {
+            // Load all four sections independently so one failure doesn't
+            // blank the others.
+            loadReviewProposals();
+            loadReviewLearning();
+            loadReviewSchema();
+            loadReviewCode();
+        }
+
+        // -- Section 1: Tuner proposals --
+        async function loadReviewProposals() {
+            const body = document.getElementById('review-proposals-body');
+            body.innerHTML = loadingHtml('Loading tuner proposals...');
+            try {
+                const data = await fetchJSON('/admin/proposals');
+                const items = data.proposals || [];
+                setCount('review-proposals-count', items.length);
+                if (items.length === 0) { body.innerHTML = reviewEmpty('No pending proposals.'); return; }
+                body.innerHTML = items.map(p => `
+                    <div class="review-card fade-in" id="proposal-${escHtml(p.proposal_id)}">
+                        <h4>${escHtml(p.component_id)} <span class="badge badge-accent">${escHtml(p.tuner)}</span></h4>
+                        <div class="review-meta">
+                            ${p.domain ? `<span>domain: ${escHtml(p.domain)}</span>` : ''}
+                            ${p.intent_family ? `<span>intent: ${escHtml(p.intent_family)}</span>` : ''}
+                            <span>sample_size: ${escHtml(p.sample_size)}</span>
+                            <span>effect_size: ${p.effect_size == null ? '—' : escHtml(Number(p.effect_size).toFixed(4))}</span>
+                        </div>
+                        <div class="review-kv">proposed: ${escHtml(JSON.stringify(p.proposed_values))}</div>
+                        <div class="review-kv">baseline: ${escHtml(JSON.stringify(p.baseline_values))}</div>
+                        <div class="review-predict" id="predict-${escHtml(p.proposal_id)}" style="display:none"></div>
+                        <div class="review-actions">
+                            <button class="btn btn-sm" onclick="confirmPromoteProposal('${escHtml(p.proposal_id)}')">Approve</button>
+                            <button class="btn btn-sm btn-danger" onclick="rejectProposal('${escHtml(p.proposal_id)}')">Reject</button>
+                        </div>
+                    </div>`).join('');
+            } catch (err) {
+                setCount('review-proposals-count', 0);
+                body.innerHTML = reviewError('Failed to load proposals: ' + err.message);
+            }
+        }
+
+        async function confirmPromoteProposal(id) {
+            // Show the dry-run prediction first, then swap the Approve button
+            // into a confirm action.
+            const card = document.getElementById('proposal-' + id);
+            const predict = document.getElementById('predict-' + id);
+            try {
+                const pv = await fetchJSON(`/admin/proposals/${encodeURIComponent(id)}/preview`);
+                const ok = pv.predicted_status === 'promoted';
+                predict.style.display = 'block';
+                predict.innerHTML =
+                    `<strong style="color:${ok ? 'var(--success)' : 'var(--error)'}">` +
+                    `Predicted: ${escHtml(pv.predicted_status)}</strong> — ${escHtml(pv.reason)}` +
+                    (pv.effect_size == null ? '' : ` (effect_size ${escHtml(Number(pv.effect_size).toFixed(4))})`);
+                const actions = card.querySelector('.review-actions');
+                actions.innerHTML =
+                    `<button class="btn btn-sm" onclick="promoteProposal('${escHtml(id)}')">Confirm approve</button>` +
+                    `<button class="btn btn-ghost btn-sm" onclick="loadReviewProposals()">Cancel</button>`;
+            } catch (err) {
+                predict.style.display = 'block';
+                predict.innerHTML = `<span style="color:var(--error)">Preview failed: ${escHtml(err.message)}</span>`;
+            }
+        }
+
+        async function promoteProposal(id) {
+            try {
+                const r = await postJSON(`/admin/proposals/${encodeURIComponent(id)}/promote`);
+                toastReview(`Proposal ${r.status}: ${r.reason}`, r.status === 'promoted');
+            } catch (err) {
+                toastReview('Promote failed: ' + err.message, false);
+            }
+            loadReviewProposals();
+        }
+
+        async function rejectProposal(id) {
+            try {
+                const r = await postJSON(`/admin/proposals/${encodeURIComponent(id)}/reject`, { reason: 'rejected_by_reviewer' });
+                toastReview(`Proposal ${r.status}: ${r.reason}`, false);
+            } catch (err) {
+                toastReview('Reject failed: ' + err.message, false);
+            }
+            loadReviewProposals();
+        }
+
+        function toastReview(msg, ok) {
+            const error = document.getElementById('error');
+            error.style.display = 'block';
+            error.style.color = ok ? 'var(--success)' : 'var(--error)';
+            error.textContent = msg;
+            setTimeout(() => { error.style.display = 'none'; error.style.color = ''; }, 4000);
+        }
+
+        // -- Section 2: Learning-promotion candidates --
+        async function loadReviewLearning() {
+            const body = document.getElementById('review-learning-body');
+            body.innerHTML = loadingHtml('Loading learning candidates...');
+            try {
+                const data = await fetchJSON('/admin/learning/candidates');
+                const items = data.candidates || [];
+                setCount('review-learning-count', items.length);
+                if (items.length === 0) {
+                    body.innerHTML = reviewEmpty(data.hint || 'No learning candidates found.');
+                    return;
+                }
+                const cards = items.map((c, i) => {
+                    const m = c.metrics || {};
+                    const cid = c.candidate_id || ('cand-' + i);
+                    return `
+                    <div class="review-card fade-in" data-candidate="${escHtml(cid)}">
+                        <h4>${escHtml(c.precedent_name || c.title || cid)}</h4>
+                        <div class="review-meta">
+                            <span>intent: ${escHtml(c.intent_family || '—')}</span>
+                            <span>recommendation: ${escHtml(c.recommendation_type || '—')}</span>
+                            <span>success_rate: ${m.success_rate == null ? '—' : escHtml(m.success_rate)}</span>
+                            <span>retry_rate: ${m.retry_rate == null ? '—' : escHtml(m.retry_rate)}</span>
+                            <span>served: ${m.times_served == null ? '—' : escHtml(m.times_served)}</span>
+                        </div>
+                        <label style="font-size:0.82rem; display:flex; align-items:center; gap:0.4rem;">
+                            <input type="checkbox" class="learn-approve" data-candidate="${escHtml(cid)}"> Approve
+                        </label>
+                        <textarea class="review-rationale" data-candidate="${escHtml(cid)}" placeholder="Rationale (optional)"></textarea>
+                    </div>`;
+                }).join('');
+                body.innerHTML = cards +
+                    `<div class="review-actions">
+                        <button class="btn btn-sm" onclick="submitLearningPromotions()">Submit approved promotions</button>
+                     </div>`;
+            } catch (err) {
+                setCount('review-learning-count', 0);
+                body.innerHTML = reviewError('Failed to load learning candidates: ' + err.message);
+            }
+        }
+
+        async function submitLearningPromotions() {
+            const body = document.getElementById('review-learning-body');
+            const decisions = [];
+            body.querySelectorAll('.learn-approve').forEach(cb => {
+                const cid = cb.dataset.candidate;
+                const ta = body.querySelector(`textarea.review-rationale[data-candidate="${CSS.escape(cid)}"]`);
+                decisions.push({ candidate_id: cid, approved: cb.checked, rationale: ta ? ta.value : '' });
+            });
+            try {
+                const r = await postJSON('/admin/learning/promotions', { decisions });
+                toastReview(`Promoted ${r.promoted_count}/${r.approved_count} approved candidate(s).`, r.promoted_count > 0);
+            } catch (err) {
+                toastReview('Learning promotion failed: ' + err.message, false);
+            }
+            loadReviewLearning();
+        }
+
+        // -- Section 3: Schema-evolution candidates --
+        async function loadReviewSchema() {
+            const body = document.getElementById('review-schema-body');
+            body.innerHTML = loadingHtml('Loading schema-evolution candidates...');
+            try {
+                const data = await fetchJSON('/admin/schema-evolution/candidates');
+                const items = data.candidates || [];
+                setCount('review-schema-count', items.length);
+                if (items.length === 0) { body.innerHTML = reviewEmpty('No schema-evolution candidates.'); return; }
+                body.innerHTML = items.map(c => `
+                    <div class="review-card fade-in" data-candidate="${escHtml(c.candidate_id)}">
+                        <h4>${escHtml(c.open_string_value || c.candidate_id)}
+                            <span class="badge badge-accent">${escHtml(c.candidate_kind || 'type')}</span></h4>
+                        <div class="review-meta">
+                            <span>count: ${escHtml(c.count)}</span>
+                            <span>extractors: ${(c.distinct_extractors || []).length}</span>
+                            <span>domains: ${(c.distinct_domains || []).length}</span>
+                            ${c.suggested_canonical_name ? `<span>canonical: ${escHtml(c.suggested_canonical_name)}</span>` : ''}
+                        </div>
+                        <div class="review-actions">
+                            <button class="btn btn-sm" onclick="draftAdr('${escHtml(c.candidate_id)}')">Draft ADR</button>
+                            <span class="review-tooltip" title="Promotion is a one-way ADR commitment: edit well_known.py by hand after the ADR is reviewed. There is deliberately no approve button here.">Why no approve?</span>
+                        </div>
+                        <div class="adr-panel" id="adr-${escHtml(c.candidate_id)}" style="display:none"></div>
+                    </div>`).join('');
+            } catch (err) {
+                setCount('review-schema-count', 0);
+                body.innerHTML = reviewError('Failed to load schema-evolution candidates: ' + err.message);
+            }
+        }
+
+        async function draftAdr(id) {
+            const panel = document.getElementById('adr-' + id);
+            panel.style.display = 'block';
+            panel.textContent = 'Rendering ADR...';
+            try {
+                const r = await postJSON(`/admin/schema-evolution/${encodeURIComponent(id)}/draft-adr`);
+                panel.textContent = r.markdown;
+                // Prepend copy/download controls
+                const controls = document.createElement('div');
+                controls.className = 'review-actions';
+                controls.style.marginBottom = '0.5rem';
+                controls.innerHTML =
+                    `<button class="btn btn-ghost btn-sm" onclick="copyAdr('${escHtml(id)}')">Copy</button>` +
+                    `<button class="btn btn-ghost btn-sm" onclick="downloadAdr('${escHtml(id)}')">Download</button>`;
+                panel.parentNode.insertBefore(controls, panel);
+            } catch (err) {
+                panel.textContent = 'Draft ADR failed: ' + err.message;
+            }
+        }
+
+        function copyAdr(id) {
+            const text = document.getElementById('adr-' + id).textContent;
+            navigator.clipboard && navigator.clipboard.writeText(text);
+        }
+
+        function downloadAdr(id) {
+            const text = document.getElementById('adr-' + id).textContent;
+            const blob = new Blob([text], { type: 'text/markdown' });
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = `adr-promote-${id}.md`;
+            a.click();
+            URL.revokeObjectURL(a.href);
+        }
+
+        // -- Section 4: Code-authoring proposals (read-only) --
+        async function loadReviewCode() {
+            const body = document.getElementById('review-code-body');
+            body.innerHTML = loadingHtml('Loading code proposals...');
+            try {
+                const data = await fetchJSON('/admin/code-proposals');
+                const items = data.proposals || [];
+                setCount('review-code-count', items.length);
+                if (items.length === 0) { body.innerHTML = reviewEmpty('No code-authoring proposals.'); return; }
+                body.innerHTML = items.map(p => `
+                    <div class="review-card fade-in">
+                        <h4>${escHtml(p.source_file || p.proposal_id)}</h4>
+                        <div class="review-meta">
+                            <span class="mono" style="font-size:0.7rem">${escHtml(p.proposal_id)}</span>
+                            <span>events: ${escHtml(p.source_event_count)}</span>
+                            <span title="${escHtml(fmtDate(p.generated_at))}">${timeAgo(p.generated_at)}</span>
+                        </div>
+                        ${p.markdown_preview ? `<div class="adr-panel">${escHtml(p.markdown_preview)}</div>` : ''}
+                    </div>`).join('');
+            } catch (err) {
+                setCount('review-code-count', 0);
+                body.innerHTML = reviewError('Failed to load code proposals: ' + err.message);
+            }
         }
 
         // ============================================================
