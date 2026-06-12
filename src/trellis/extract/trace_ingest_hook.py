@@ -55,6 +55,30 @@ def trace_extraction_enabled() -> bool:
     return os.environ.get(TRACE_EXTRACTION_FLAG, "").strip().lower() in _TRUTHY
 
 
+def extract_trace_batch(
+    trace: Trace,
+    *,
+    requested_by: str,
+) -> tuple[Any, Any | None]:
+    """Extract one stored trace and build its governed batch.
+
+    The single shared core of trace→graph extraction — the live ingest
+    hook and the ``trellis extract traces`` backfill both call this, so
+    the extractor wiring (``source_hint``, batch construction,
+    ``requested_by`` stamping) cannot drift between the two paths.
+
+    Returns ``(result, batch)``; ``batch`` is ``None`` when the trace
+    produced no drafts.
+    """
+    extractor = TraceExtractor()
+    result = asyncio.run(
+        extractor.extract(trace, source_hint=TRACE_SOURCE_HINT),
+    )
+    if not result.entities and not result.edges:
+        return result, None
+    return result, result_to_batch(result, requested_by=requested_by)
+
+
 def run_trace_extraction(
     registry: StoreRegistry,
     trace: Trace,
@@ -84,16 +108,12 @@ def run_trace_extraction(
     from trellis.mutate import build_curate_executor  # noqa: PLC0415
 
     try:
-        extractor = TraceExtractor()
-        result = asyncio.run(
-            extractor.extract(trace, source_hint=TRACE_SOURCE_HINT),
-        )
+        result, batch = extract_trace_batch(trace, requested_by=requested_by)
         entity_count = len(result.entities)
         edge_count = len(result.edges)
-        if entity_count == 0 and edge_count == 0:
+        if batch is None:
             return {"entities": 0, "edges": 0, "executed": False}
 
-        batch = result_to_batch(result, requested_by=requested_by)
         build_curate_executor(registry).execute_batch(batch)
     except Exception as exc:
         # GRACEFUL-DEGRADATION: trace ingest's success contract is "the

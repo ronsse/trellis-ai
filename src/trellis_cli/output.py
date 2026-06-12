@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import typer
+
 
 def filter_fields(
     items: list[dict[str, Any]], fields: str | None
@@ -91,3 +93,8 @@ def format_output(
         wrapper["count"] = len(items)
         return json.dumps(wrapper)
     return json.dumps(items)
+
+
+def emit_json(payload: Any) -> None:
+    """Write JSON via ``typer.echo`` so Rich doesn't line-wrap long values."""
+    typer.echo(json.dumps(payload))

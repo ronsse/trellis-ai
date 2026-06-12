@@ -108,47 +108,18 @@ For the weekly jobs use `OnCalendar=Sun *-*-* 05:00:00 UTC`. `Persistent=true` r
 
 ## Recipe 3 — GitHub Actions
 
-A checked-in workflow matching this doc lives at [`../../examples/integrations/github-actions/curation.yml`](../../examples/integrations/github-actions/curation.yml). The core:
+The runnable workflow lives at [`examples/integrations/github-actions/curation.yml`](../../examples/integrations/github-actions/curation.yml) — copy that file. The two schedules and the commands they run:
 
 ```yaml
-# .github/workflows/curation.yml
-name: Trellis curation
 on:
   schedule:
-    - cron: "30 2 * * *"   # daily 02:30 UTC — curate + tune
-    - cron: "0 5 * * 0"    # weekly Sun 05:00 UTC — mine-precedents + schema-evolution
-  workflow_dispatch: {}
-
-jobs:
-  curate:
-    if: github.event.schedule == '30 2 * * *' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    env:
-      TRELLIS_CONFIG_DIR: ${{ github.workspace }}/.trellis/config
-      TRELLIS_DATA_DIR: ${{ github.workspace }}/.trellis/data
-      # Point the operational stores at your shared backend so the runner
-      # curates production data, not an empty sandbox:
-      TRELLIS_OPERATIONAL_PG_DSN: ${{ secrets.TRELLIS_OPERATIONAL_PG_DSN }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: "3.13" }
-      - run: pip install trellis-ai
-      - name: Reconcile feedback then curate
-        run: |
-          trellis admin reconcile-feedback --log-dir "$TRELLIS_DATA_DIR" --format json
-          trellis worker curate --output-dir "$TRELLIS_DATA_DIR/review" --days 30 --format json
-      - name: Tuner pass (no-op unless learning.auto_promote.enabled)
-        run: trellis worker tune --format json
-      - name: Upload learning-candidate review artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: learning-candidates
-          path: ${{ env.TRELLIS_DATA_DIR }}/review/*.json
-          if-no-files-found: ignore
+    - cron: "30 2 * * *"   # daily 02:30 UTC — reconcile-feedback, worker curate, worker tune
+    - cron: "0 5 * * 0"    # weekly Sun 05:00 UTC — worker mine-precedents, analyze schema-evolution
 ```
 
-The weekly `mine-precedents` + `schema-evolution` job lives in the full example file. **Promotion stays human-gated** — the workflow uploads `intent_learning_candidates.json` / `promotion_decisions.template.json` as build artifacts; a person downloads them, approves rows, and runs `trellis curate promote-learning` locally or in a separate gated workflow.
+The daily job reconciles feedback, runs the curation cycle, runs the tuner pass (a no-op unless `learning.auto_promote.enabled`), and uploads the learning-candidate review artifacts. The env/secrets wiring, checkout/install steps, and the weekly job are in the example file — copy it rather than this doc, so there is exactly one source to keep current.
+
+**Promotion stays human-gated** — the workflow uploads `intent_learning_candidates.json` / `promotion_decisions.template.json` as build artifacts; a person downloads them, approves rows, and runs `trellis curate promote-learning` locally or in a separate gated workflow.
 
 ---
 

@@ -16,7 +16,7 @@ from trellis.mutate.commands import (
     Operation,
 )
 from trellis.mutate.executor import MutationExecutor
-from trellis_cli.curate import _submit_promotion
+from trellis.learning import submit_learning_promotion
 from trellis_cli.main import app
 
 runner = CliRunner()
@@ -338,7 +338,7 @@ class TestCuratePromoteLearning:
 
 
 class TestSubmitPromotion:
-    """Direct unit tests for the _submit_promotion helper.
+    """Direct unit tests for the shared submit_learning_promotion helper.
 
     These exercise branches that are awkward to reach through the CLI
     runner (entity create rejected, edge create after a successful
@@ -372,10 +372,11 @@ class TestSubmitPromotion:
             message="entity_type 'precedent' not registered",
         )
 
-        outcome = _submit_promotion(
+        outcome = submit_learning_promotion(
             executor,
             self._entity_payload(),
             [self._edge_payload("doc:t1"), self._edge_payload("doc:t2")],
+            requested_by="cli:promote-learning",
         )
 
         assert outcome["status"] == "entity_failed"
@@ -408,10 +409,11 @@ class TestSubmitPromotion:
             ),
         ]
 
-        outcome = _submit_promotion(
+        outcome = submit_learning_promotion(
             executor,
             self._entity_payload(),
             [self._edge_payload("doc:t1"), self._edge_payload("doc:t2")],
+            requested_by="cli:promote-learning",
         )
 
         assert outcome["status"] == "promoted"
@@ -430,7 +432,12 @@ class TestSubmitPromotion:
             created_id="precedent://learning/test",
         )
 
-        _submit_promotion(executor, self._entity_payload(), [])
+        submit_learning_promotion(
+            executor,
+            self._entity_payload(),
+            [],
+            requested_by="cli:promote-learning",
+        )
 
         submitted: Command = executor.execute.call_args.args[0]
         assert submitted.operation == Operation.ENTITY_CREATE

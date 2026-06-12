@@ -26,9 +26,9 @@ Read before starting any package: `CLAUDE.md` (hard rules, terminology), `docs/d
 | WP9 | Autonomy-ladder ADR + tier-1 auto-promotion | ADR + ~200 LOC | — | ✅ landed on `wp9-autonomy-ladder` (`4a0fb65`) |
 | WP10 | Review Queue UI (human-decision inbox) | ~600 LOC UI+API | WP9 ADR | ✅ landed on `wp10-review-queue-ui` (`ef51128`) |
 | WP11 | Improvement-metrics dashboard | ~400 LOC UI+API | WP10 (same UI file) | ✅ landed on `wp11-metrics-dashboard` (`d555057`, includes WP10) |
+| WP12 | Quickstart `--with-skills` + integrate-your-agent front door | ~150 LOC + docs | — | ✅ landed on `wp12-quickstart-onboarding` (`8ee883c`) |
 
 **All packages landed 2026-06-12.** Merge order onto main: `wp1-sdk-hooks` (subsumes WP2) → `wp6-trace-extraction` → `wp3-worker-commands` (subsumes WP9) → `wp5-scheduler-recipes` → `wp10-review-queue-ui` → `wp11-metrics-dashboard` → `wp12-quickstart-onboarding`. Known integration follow-ups for the merge train: (1) WP11's `parameter_promotions` metric was built without WP9 in its tree — extend it to count `PARAMS_AUTO_PROMOTED` / `PARAMS_AUTO_ROLLED_BACK` once both are on main; (2) expected small conflicts in `operations.md`, `main.py`/`admin.py`, `index.html`; (3) add the integrate-your-agent ↔ running-trellis cross-links (WP5/WP12 landed on parallel branches); (4) WP11's endpoint is `/api/v1/metrics/timeseries` (admin router has no `/admin` segment — docs already corrected).
-| WP12 | Quickstart `--with-skills` + integrate-your-agent front door | ~150 LOC + docs | — | ✅ landed on `wp12-quickstart-onboarding` (`8ee883c`) |
 
 **WP5 scope expansion (2026-06-12):** WP5 now also delivers `docs/getting-started/running-trellis.md` — the operating runbook for everything that runs server-side: `trellis admin serve` (API + UI), every `trellis worker` command from WP3/WP9 (`curate`, `tune`, `enrich`, `mine-precedents`, `--interval` loop mode), what each loop does, recommended cadences, and how the scheduler recipes invoke them. WP5 remains gated on WP3 landing.
 
@@ -198,7 +198,7 @@ The ADR must state the invariants for tier 1: a change may only auto-apply if (a
 **Why:** the improvement signal exists (success_rate, reference_rate, advisory fitness, post-promotion baselines, schema-evolution evidence) but is only visible as point-in-time CLI tables. "Is Trellis making agents better?" needs a trend line, and it's also the instrument Step 3 (quality/impact assessment) will read.
 
 **Decisions locked in:**
-- Extend the existing Dashboard view (or a sibling `Metrics` view) with time-series charts computed server-side from the EventLog/OutcomeStore — new read-only endpoint `GET /api/v1/admin/metrics/timeseries?metric=...&days=...&group_by=domain|intent_family`, no new storage; aggregate on read, acceptable at POC scale.
+- Extend the existing Dashboard view (or a sibling `Metrics` view) with time-series charts computed server-side from the EventLog/OutcomeStore — new read-only endpoint `GET /api/v1/metrics/timeseries?metric=...&days=...&group_by=domain|intent_family`, no new storage; aggregate on read, acceptable at POC scale.
 - Charts, in priority order: (1) pack success rate over time, per domain; (2) reference rate (items_referenced / items_served) over time — the single best "are packs getting better" proxy; (3) advisory fitness (confidence trajectories, suppression count); (4) noise-tag volume per cycle; (5) post-promotion baseline-vs-current per promoted parameter scope, annotated with promote/rollback events.
 - Keep the no-framework constraint; use a small chart lib or inline SVG consistent with the existing UI's zero-build approach.
 - Reuse/expose the same aggregations the eval scenarios compute (`eval/scenarios/agent_loop_convergence`) so dashboard numbers and eval numbers are definitionally identical.

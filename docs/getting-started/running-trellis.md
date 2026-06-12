@@ -145,19 +145,7 @@ Verified shape with auto-promote disabled (the default), demo data:
 
 ### Enabling Tier-1 auto-promotion
 
-Add to `$TRELLIS_CONFIG_DIR/config.yaml` (default `~/.trellis/config.yaml`):
-
-```yaml
-learning:
-  auto_promote:
-    enabled: true              # default false — master switch, global default OFF
-    min_sample_size: 30        # stricter than manual promote (5); must be >= 5
-    min_effect_size: 0.25      # stricter than manual promote (0.15); must be >= 0.15
-    require_baseline: true     # no baseline => nothing to roll back to => left for a human
-    post_min_samples: 20       # min post-promotion outcomes before a degradation verdict
-    post_regression_threshold: 0.10  # success-rate drop (abs) that triggers auto-rollback
-    post_lookback_days: 7      # monitoring window
-```
+Add a `learning.auto_promote` block with `enabled: true` to `$TRELLIS_CONFIG_DIR/config.yaml` (default `~/.trellis/config.yaml`). The full key list with defaults and threshold semantics lives in the canonical reference — [operations.md § Enabling Tier-1 auto-promotion](../agent-guide/operations.md#enabling-tier-1-auto-promotion); this runbook deliberately doesn't duplicate it.
 
 The auto thresholds **must be at least as strict as the manual-promote defaults** — the loader rejects looser values loudly. Monitoring is always armed; you cannot auto-promote without an armed rollback (Tier-1 invariant (b)).
 

@@ -27,7 +27,6 @@ moved here. ``main`` imports it from this module.
 from __future__ import annotations
 
 import asyncio
-import json
 import signal
 import time
 from dataclasses import dataclass, field
@@ -63,6 +62,7 @@ from trellis_cli._meta_wiring import wrap_cli_meta_analysis
 from trellis_cli.analyze import _build_learning_registry_or_exit
 from trellis_cli.config import get_config_dir, get_data_dir
 from trellis_cli.exit_codes import EXIT_INTERNAL
+from trellis_cli.output import emit_json
 from trellis_cli.stores import (
     _get_registry,
     get_document_store,
@@ -91,11 +91,6 @@ console = Console()
 CONFIG_FILENAME = "config.yaml"
 AUTO_PROMOTE_CONFIG_SECTION = "auto_promote"
 LEARNING_CONFIG_SECTION = "learning"
-
-
-def _emit_json(payload: Any) -> None:
-    """Write JSON via ``typer.echo`` so Rich doesn't line-wrap long values."""
-    typer.echo(json.dumps(payload))
 
 
 @dataclass(frozen=True, slots=True)
@@ -295,8 +290,9 @@ def tune_cmd(
 
     if output_format == "json":
         payload = report_to_dict(report)
+        payload["status"] = "ok"
         payload["tuner_name"] = tuner_name
-        _emit_json(payload)
+        emit_json(payload)
         return
 
     _render_text(report, tuner_name=tuner_name)
@@ -722,7 +718,7 @@ def _run_curate_loop(
         )
         logger.info("worker_curate.cycle", cycle=cycle, **result.to_dict())
         if output_format == "json":
-            _emit_json({"cycle": cycle, **result.to_dict()})
+            emit_json({"status": "ok", "cycle": cycle, **result.to_dict()})
         else:
             _render_cycle_text(result)
 
@@ -836,7 +832,7 @@ def curate_cmd(
     )
 
     if output_format == "json":
-        _emit_json({"status": "ok", **result.to_dict()})
+        emit_json({"status": "ok", **result.to_dict()})
         return
     _render_cycle_text(result)
 
@@ -912,7 +908,7 @@ def enrich_cmd(
 
     if dry_run:
         if output_format == "json":
-            _emit_json(
+            emit_json(
                 {
                     "status": "ok",
                     "dry_run": True,
@@ -938,7 +934,7 @@ def enrich_cmd(
     )
 
     if output_format == "json":
-        _emit_json(
+        emit_json(
             {
                 "status": "ok",
                 "dry_run": False,
@@ -1106,7 +1102,7 @@ def mine_precedents_cmd(
     if dry_run:
         in_scope = _count_failure_traces(trace_store, domain=domain, limit=limit)
         if output_format == "json":
-            _emit_json(
+            emit_json(
                 {
                     "status": "ok",
                     "dry_run": True,
@@ -1134,7 +1130,7 @@ def mine_precedents_cmd(
     )
 
     if output_format == "json":
-        _emit_json(
+        emit_json(
             {
                 "status": "ok",
                 "dry_run": False,

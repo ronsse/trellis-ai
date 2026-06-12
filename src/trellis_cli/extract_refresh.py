@@ -38,7 +38,7 @@ from trellis.extract.commands import result_to_batch
 from trellis.extract.dispatcher import ExtractionDispatcher
 from trellis.extract.registry import ExtractorRegistry
 from trellis.extract.sources import SourceEntry, load_sources
-from trellis.extract.trace import TRACE_SOURCE_HINT, TraceExtractor
+from trellis.extract.trace_ingest_hook import extract_trace_batch
 from trellis.mutate import build_curate_executor
 from trellis.schemas.extraction import ExtractionResult
 from trellis.stores.base.event_log import EventType
@@ -508,10 +508,10 @@ def traces(
     """Backfill the graph from already-ingested traces.
 
     Iterates traces from the TraceStore (filtered by ``--since`` days and
-    optional ``--domain``), runs the deterministic :class:`TraceExtractor`
-    over each, and routes the resulting drafts through the same
-    ``result_to_batch`` -> ``MutationExecutor`` path the live ingest hook
-    uses. Reports per-trace draft counts.
+    optional ``--domain``) and runs each through
+    :func:`trellis.extract.trace_ingest_hook.extract_trace_batch` — the
+    same extraction core the live ingest hook uses — then executes the
+    governed batch. Reports per-trace draft counts.
 
     With ``--dry-run`` the drafts are tallied and printed but no batch is
     executed -- useful to preview the graph a backfill would create.
@@ -532,7 +532,6 @@ def traces(
             console.print(f"[red]Trace query failed: {exc}[/red]")
         raise typer.Exit(code=EXIT_INTERNAL) from None
 
-    extractor = TraceExtractor()
     executor = build_curate_executor(registry)
 
     per_trace: list[dict[str, Any]] = []
@@ -540,9 +539,7 @@ def traces(
     total_edges = 0
 
     for trace in stored_traces:
-        result: ExtractionResult = asyncio.run(
-            extractor.extract(trace, source_hint=TRACE_SOURCE_HINT),
-        )
+        result, batch = extract_trace_batch(trace, requested_by="cli:extract-traces")
         n_entities = len(result.entities)
         n_edges = len(result.edges)
         total_entities += n_entities
@@ -555,8 +552,7 @@ def traces(
                 "edges": n_edges,
             }
         )
-        if not dry_run and (n_entities or n_edges):
-            batch = result_to_batch(result, requested_by="cli:extract-traces")
+        if not dry_run and batch is not None:
             executor.execute_batch(batch)
 
     summary: dict[str, Any] = {

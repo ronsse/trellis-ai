@@ -105,9 +105,7 @@ def get_skills_target_dir(scope: str, project_dir: Path | None = None) -> Path:
     raise ValueError(msg)
 
 
-def install_skills(
-    target_dir: Path, *, force: bool = False
-) -> list[dict[str, str]]:
+def install_skills(target_dir: Path, *, force: bool = False) -> list[dict[str, str]]:
     """Copy the bundled skill templates into ``target_dir``.
 
     Reads the canonical skill directories from the ``trellis_cli.skills``
@@ -123,7 +121,11 @@ def install_skills(
 
     Returns:
         One result dict per skill, each with ``name`` and ``status``
-        (``"installed"``, ``"overwritten"``, or ``"skipped"``).
+        (``"installed"``, ``"overwritten"``, ``"skipped"``, or
+        ``"failed"`` with an ``error`` field). A copy failure on one
+        skill (disk full, permissions) is captured per-skill rather
+        than raised, so the report always covers every skill and the
+        caller's structured output stays accurate on partial installs.
     """
     target_dir.mkdir(parents=True, exist_ok=True)
     results: list[dict[str, str]] = []
@@ -135,13 +137,18 @@ def install_skills(
             results.append({"name": name, "status": "skipped"})
             continue
         status = "overwritten" if dest.exists() else "installed"
-        if dest.exists():
-            shutil.rmtree(dest)
-        # ``as_file`` materializes the packaged resource as a real path
-        # (a no-op for filesystem-backed installs, an extraction for
-        # zipped wheels), which ``shutil.copytree`` needs.
-        with as_file(skills_root / name) as src:
-            shutil.copytree(src, dest)
+        try:
+            if dest.exists():
+                shutil.rmtree(dest)
+            # ``as_file`` materializes the packaged resource as a real
+            # path (a no-op for filesystem-backed installs, an
+            # extraction for zipped wheels), which ``copytree`` needs.
+            with as_file(skills_root / name) as src:
+                shutil.copytree(src, dest)
+        except OSError as exc:
+            _logger.warning("skill_install_failed", skill=name, error=str(exc))
+            results.append({"name": name, "status": "failed", "error": str(exc)})
+            continue
         _logger.debug("skill_installed", skill=name, dest=str(dest), force=force)
         results.append({"name": name, "status": status})
     return results

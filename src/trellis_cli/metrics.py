@@ -34,6 +34,7 @@ from trellis.learning.tuners import (
     promote_proposal,
 )
 from trellis.schemas.parameters import ParameterScope
+from trellis_cli.output import emit_json
 from trellis_cli.stores import (
     get_event_log,
     get_outcome_store,
@@ -43,11 +44,6 @@ from trellis_cli.stores import (
 
 metrics_app = typer.Typer(no_args_is_help=True)
 console = Console()
-
-
-def _emit_json(payload: Any) -> None:
-    """Write JSON via ``typer.echo`` so Rich doesn't line-wrap long values."""
-    typer.echo(json.dumps(payload))
 
 
 # ---------------------------------------------------------------------------
@@ -79,7 +75,7 @@ def outcomes_cmd(
     aggs = aggregate_outcomes(outcomes)
 
     if output_format == "json":
-        _emit_json(
+        emit_json(
             {
                 "window_days": days,
                 "outcomes_scanned": len(outcomes),
@@ -136,7 +132,7 @@ def proposals_cmd(
     proposals = store.list_proposals(tuner=tuner, status=status, limit=limit)
 
     if output_format == "json":
-        _emit_json([p.model_dump(mode="json") for p in proposals])
+        emit_json([p.model_dump(mode="json") for p in proposals])
         return
 
     console.print(
@@ -195,7 +191,7 @@ def versions_cmd(
     active = store.get_active(scope)
 
     if output_format == "json":
-        _emit_json(
+        emit_json(
             {
                 "scope": list(scope.key()),
                 "active_version": active.params_version if active else None,
@@ -258,7 +254,7 @@ def tune_cmd(
     proposals = tuner.run(since=since)
 
     if output_format == "json":
-        _emit_json(
+        emit_json(
             {
                 "tuner_name": tuner_name,
                 "proposals_persisted": len(proposals),
@@ -336,7 +332,7 @@ def promote_cmd(
     )
 
     if output_format == "json":
-        _emit_json(
+        emit_json(
             {
                 "proposal_id": result.proposal_id,
                 "status": result.status,
@@ -414,7 +410,7 @@ def _dry_run_promote(
 
     if preview.status == "skipped":
         if output_format == "json":
-            _emit_json(
+            emit_json(
                 {
                     "proposal_id": proposal_id,
                     "status": "skipped",
@@ -423,13 +419,11 @@ def _dry_run_promote(
                 }
             )
         else:
-            console.print(
-                f"[yellow]SKIPPED[/yellow] {proposal_id}: {preview.reason}"
-            )
+            console.print(f"[yellow]SKIPPED[/yellow] {proposal_id}: {preview.reason}")
         return
 
     if output_format == "json":
-        _emit_json(
+        emit_json(
             {
                 "proposal_id": proposal_id,
                 "dry_run": True,

@@ -412,7 +412,7 @@ class ProposalDecisionResponse(WireModel):
 
 
 class ProposalRejectRequest(WireRequestModel):
-    """Body for ``POST /admin/proposals/{id}/reject`` — optional rationale."""
+    """Body for ``POST /api/v1/proposals/{id}/reject`` — optional rationale."""
 
     reason: str = "rejected_by_reviewer"
 
@@ -437,7 +437,7 @@ class LearningPromotionDecision(WireRequestModel):
 
 
 class LearningPromotionRequest(WireRequestModel):
-    """Body for ``POST /admin/learning/promotions``.
+    """Body for ``POST /api/v1/learning/promotions``.
 
     Carries per-candidate decisions. The server joins these against the
     most-recent candidate artifact, builds the entity/edge payloads via
@@ -518,7 +518,7 @@ class CodeProposalListResponse(WireModel):
 
 # -- Metrics dashboard (WP11) --
 #
-# DTOs backing ``GET /admin/metrics/timeseries`` — server-computed
+# DTOs backing ``GET /api/v1/metrics/timeseries`` — server-computed
 # improvement-metric trends read from the EventLog (no new storage). The
 # aggregation lives in ``trellis.retrieve.metrics_timeseries``; these
 # DTOs are the wire projection of its result dataclasses.
@@ -557,7 +557,7 @@ class TimeseriesSeriesResponse(WireModel):
 
 
 class MetricsTimeseriesResponse(WireModel):
-    """Response for ``GET /admin/metrics/timeseries``.
+    """Response for ``GET /api/v1/metrics/timeseries``.
 
     Echoes the request parameters (``metric`` / ``bucket`` / ``group_by``
     / ``days``) so the client can label the chart without re-deriving

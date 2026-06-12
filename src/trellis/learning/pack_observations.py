@@ -31,7 +31,7 @@ import structlog
 from trellis.stores.base.event_log import EventType
 
 if TYPE_CHECKING:
-    from trellis.stores.base.event_log import EventLog
+    from trellis.stores.base.event_log import Event, EventLog
 
 logger = structlog.get_logger(__name__)
 
@@ -76,23 +76,9 @@ def build_learning_observations_from_event_log(
     """
     since = datetime.now(tz=UTC) - timedelta(days=days)
 
-    pack_events = event_log.get_events(
-        event_type=EventType.PACK_ASSEMBLED,
-        since=since,
-        limit=limit,
+    feedback_events, pack_payloads = join_pack_feedback(
+        event_log, since=since, limit=limit
     )
-    feedback_events = event_log.get_events(
-        event_type=EventType.FEEDBACK_RECORDED,
-        since=since,
-        limit=limit,
-    )
-
-    # pack_id → PACK_ASSEMBLED.payload
-    pack_payloads: dict[str, dict[str, Any]] = {}
-    for event in pack_events:
-        pack_id = event.entity_id
-        if pack_id:
-            pack_payloads[pack_id] = event.payload
 
     observations: list[dict[str, Any]] = []
     for event in feedback_events:
@@ -108,11 +94,35 @@ def build_learning_observations_from_event_log(
     logger.debug(
         "learning_observations_built",
         observations=len(observations),
-        pack_events=len(pack_events),
+        packs=len(pack_payloads),
         feedback_events=len(feedback_events),
         days=days,
     )
     return observations
+
+
+def join_pack_feedback(
+    event_log: EventLog, *, since: datetime, limit: int
+) -> tuple[list[Event], dict[str, dict[str, Any]]]:
+    """Return ``(feedback_events, pack_payload_by_pack_id)``.
+
+    The canonical ``PACK_ASSEMBLED`` ⋈ ``FEEDBACK_RECORDED`` join: the
+    key is the pack_id — ``PACK_ASSEMBLED.entity_id`` on one side,
+    ``FEEDBACK_RECORDED.payload["pack_id"]`` on the other. Shared by
+    the learning-observation builder and the metrics timeseries module
+    so the join semantics cannot drift between consumers.
+    """
+    pack_events = event_log.get_events(
+        event_type=EventType.PACK_ASSEMBLED, since=since, limit=limit
+    )
+    feedback_events = event_log.get_events(
+        event_type=EventType.FEEDBACK_RECORDED, since=since, limit=limit
+    )
+    pack_payloads: dict[str, dict[str, Any]] = {}
+    for event in pack_events:
+        if event.entity_id:
+            pack_payloads[event.entity_id] = event.payload or {}
+    return feedback_events, pack_payloads
 
 
 def _join_one(

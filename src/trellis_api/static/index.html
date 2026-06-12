@@ -1450,10 +1450,10 @@
 
             // Fetch all five in parallel; one failure shouldn't blank the rest.
             const trendFetches = TREND_METRICS.map(m =>
-                fetchJSON(`/admin/metrics/timeseries?metric=${m.metric}&days=${days}&bucket=day&group_by=${groupBy}`)
+                fetchJSON(`/metrics/timeseries?metric=${m.metric}&days=${days}&bucket=day&group_by=${groupBy}`)
                     .then(data => ({ data })).catch(err => ({ err })));
             const stripFetch = fetchJSON(
-                `/admin/metrics/timeseries?metric=parameter_promotions&days=${days}&bucket=day&group_by=${groupBy}`)
+                `/metrics/timeseries?metric=parameter_promotions&days=${days}&bucket=day&group_by=${groupBy}`)
                 .then(data => ({ data })).catch(err => ({ err }));
 
             const [trendResults, stripResult] = await Promise.all([
@@ -1679,7 +1679,7 @@
             const body = document.getElementById('review-proposals-body');
             body.innerHTML = loadingHtml('Loading tuner proposals...');
             try {
-                const data = await fetchJSON('/admin/proposals');
+                const data = await fetchJSON('/proposals');
                 const items = data.proposals || [];
                 setCount('review-proposals-count', items.length);
                 if (items.length === 0) { body.innerHTML = reviewEmpty('No pending proposals.'); return; }
@@ -1712,7 +1712,7 @@
             const card = document.getElementById('proposal-' + id);
             const predict = document.getElementById('predict-' + id);
             try {
-                const pv = await fetchJSON(`/admin/proposals/${encodeURIComponent(id)}/preview`);
+                const pv = await fetchJSON(`/proposals/${encodeURIComponent(id)}/preview`);
                 const ok = pv.predicted_status === 'promoted';
                 predict.style.display = 'block';
                 predict.innerHTML =
@@ -1731,7 +1731,7 @@
 
         async function promoteProposal(id) {
             try {
-                const r = await postJSON(`/admin/proposals/${encodeURIComponent(id)}/promote`);
+                const r = await postJSON(`/proposals/${encodeURIComponent(id)}/promote`);
                 toastReview(`Proposal ${r.status}: ${r.reason}`, r.status === 'promoted');
             } catch (err) {
                 toastReview('Promote failed: ' + err.message, false);
@@ -1741,7 +1741,7 @@
 
         async function rejectProposal(id) {
             try {
-                const r = await postJSON(`/admin/proposals/${encodeURIComponent(id)}/reject`, { reason: 'rejected_by_reviewer' });
+                const r = await postJSON(`/proposals/${encodeURIComponent(id)}/reject`, { reason: 'rejected_by_reviewer' });
                 toastReview(`Proposal ${r.status}: ${r.reason}`, false);
             } catch (err) {
                 toastReview('Reject failed: ' + err.message, false);
@@ -1762,7 +1762,7 @@
             const body = document.getElementById('review-learning-body');
             body.innerHTML = loadingHtml('Loading learning candidates...');
             try {
-                const data = await fetchJSON('/admin/learning/candidates');
+                const data = await fetchJSON('/learning/candidates');
                 const items = data.candidates || [];
                 setCount('review-learning-count', items.length);
                 if (items.length === 0) {
@@ -1807,7 +1807,7 @@
                 decisions.push({ candidate_id: cid, approved: cb.checked, rationale: ta ? ta.value : '' });
             });
             try {
-                const r = await postJSON('/admin/learning/promotions', { decisions });
+                const r = await postJSON('/learning/promotions', { decisions });
                 toastReview(`Promoted ${r.promoted_count}/${r.approved_count} approved candidate(s).`, r.promoted_count > 0);
             } catch (err) {
                 toastReview('Learning promotion failed: ' + err.message, false);
@@ -1820,7 +1820,7 @@
             const body = document.getElementById('review-schema-body');
             body.innerHTML = loadingHtml('Loading schema-evolution candidates...');
             try {
-                const data = await fetchJSON('/admin/schema-evolution/candidates');
+                const data = await fetchJSON('/schema-evolution/candidates');
                 const items = data.candidates || [];
                 setCount('review-schema-count', items.length);
                 if (items.length === 0) { body.innerHTML = reviewEmpty('No schema-evolution candidates.'); return; }
@@ -1851,7 +1851,7 @@
             panel.style.display = 'block';
             panel.textContent = 'Rendering ADR...';
             try {
-                const r = await postJSON(`/admin/schema-evolution/${encodeURIComponent(id)}/draft-adr`);
+                const r = await postJSON(`/schema-evolution/${encodeURIComponent(id)}/draft-adr`);
                 panel.textContent = r.markdown;
                 // Prepend copy/download controls
                 const controls = document.createElement('div');
@@ -1886,7 +1886,7 @@
             const body = document.getElementById('review-code-body');
             body.innerHTML = loadingHtml('Loading code proposals...');
             try {
-                const data = await fetchJSON('/admin/code-proposals');
+                const data = await fetchJSON('/code-proposals');
                 const items = data.proposals || [];
                 setCount('review-code-count', items.length);
                 if (items.length === 0) { body.innerHTML = reviewEmpty('No code-authoring proposals.'); return; }

@@ -28,16 +28,6 @@ from langchain_core.tools import tool
 from trellis_sdk import TrellisClient
 from trellis_sdk.skills import get_context_for_task, get_recent_activity
 
-_client: TrellisClient | None = None
-
-
-def _get_client(base_url: str | None = None) -> TrellisClient:
-    """Get or create a module-level TrellisClient."""
-    global _client  # noqa: PLW0603
-    if _client is None:
-        _client = TrellisClient(base_url=base_url)
-    return _client
-
 
 def create_trellis_tools(
     base_url: str | None = None,

@@ -45,6 +45,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from trellis.learning.pack_observations import join_pack_feedback
 from trellis.stores.base.event_log import EventType
 
 if TYPE_CHECKING:
@@ -197,30 +198,6 @@ class _CountBucket:
     count: int = 0
 
 
-def _join_pack_feedback(
-    event_log: EventLog, *, since: datetime, limit: int
-) -> tuple[list[Event], dict[str, dict[str, object]]]:
-    """Return ``(feedback_events, pack_payload_by_pack_id)``.
-
-    The join key is ``pack_id`` read from ``FEEDBACK_RECORDED.payload``
-    (falling back to ``entity_id``), matched against ``PACK_ASSEMBLED``
-    whose ``entity_id`` is the pack_id — identical to the join in
-    :func:`trellis.learning.pack_observations.build_learning_observations_from_event_log`
-    and :func:`trellis.retrieve.effectiveness.analyze_effectiveness`.
-    """
-    pack_events = event_log.get_events(
-        event_type=EventType.PACK_ASSEMBLED, since=since, limit=limit
-    )
-    feedback_events = event_log.get_events(
-        event_type=EventType.FEEDBACK_RECORDED, since=since, limit=limit
-    )
-    pack_payloads: dict[str, dict[str, object]] = {}
-    for event in pack_events:
-        if event.entity_id:
-            pack_payloads[event.entity_id] = event.payload or {}
-    return feedback_events, pack_payloads
-
-
 def _feedback_pack_id(feedback: Event) -> str | None:
     payload = feedback.payload or {}
     pack_id = payload.get("pack_id") or feedback.entity_id
@@ -248,7 +225,7 @@ def _compute_pack_success_rate(
     FEEDBACK_RECORDED payload (the only event carrying it), matching the
     pack_observations join precedence.
     """
-    feedback_events, pack_payloads = _join_pack_feedback(
+    feedback_events, pack_payloads = join_pack_feedback(
         event_log, since=since, limit=limit
     )
     buckets: dict[str, dict[str, _RatioBucket]] = defaultdict(
@@ -301,7 +278,7 @@ def _compute_reference_rate(
     ``items_served`` it falls back to the joined PACK_ASSEMBLED
     ``injected_item_ids`` so older feedback rows still count.
     """
-    feedback_events, pack_payloads = _join_pack_feedback(
+    feedback_events, pack_payloads = join_pack_feedback(
         event_log, since=since, limit=limit
     )
     buckets: dict[str, dict[str, _RatioBucket]] = defaultdict(
@@ -313,9 +290,7 @@ def _compute_reference_rate(
             continue
         fb_payload = feedback.payload or {}
         pack_payload = pack_payloads[pack_id]
-        served = fb_payload.get("items_served") or pack_payload.get(
-            "injected_item_ids"
-        )
+        served = fb_payload.get("items_served") or pack_payload.get("injected_item_ids")
         served_count = len(served) if isinstance(served, list) else 0
         if served_count == 0:
             continue
@@ -454,9 +429,7 @@ def _compute_parameter_promotions(
         lambda: defaultdict(_CountBucket)
     )
     for event_type in _PROMOTION_EVENT_TYPES:
-        events = event_log.get_events(
-            event_type=event_type, since=since, limit=limit
-        )
+        events = event_log.get_events(event_type=event_type, since=since, limit=limit)
         series_key = event_type.value
         for event in events:
             buckets[series_key][_bucket_key(event.occurred_at)].count += 1
@@ -476,9 +449,7 @@ def _ratio_series(
         points = [
             TimeseriesPoint(
                 bucket_start=bucket_start,
-                value=round(b.numerator / b.denominator, 4)
-                if b.denominator
-                else 0.0,
+                value=round(b.numerator / b.denominator, 4) if b.denominator else 0.0,
                 sample_count=b.samples,
             )
             for bucket_start, b in sorted(by_bucket.items())

@@ -10,11 +10,10 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from trellis.learning import prepare_learning_promotions
+from trellis.learning import prepare_learning_promotions, submit_learning_promotion
 from trellis.mutate import (
     Command,
     CommandStatus,
-    MutationExecutor,
     Operation,
     build_curate_executor,
 )
@@ -227,66 +226,6 @@ def feedback(
 # ---------------------------------------------------------------------------
 
 
-def _submit_promotion(
-    executor: MutationExecutor,
-    entity_payload: dict[str, Any],
-    edge_payloads: list[dict[str, Any]],
-) -> dict[str, Any]:
-    """Submit one approved promotion. A failed entity short-circuits the edges.
-
-    ``entity_payload`` and ``edge_payloads`` come from
-    :func:`trellis.learning.scoring.build_learning_promotion_payloads`,
-    which always sets ``entity_id`` and a non-empty ``properties`` dict
-    on both — this function trusts that contract rather than re-guarding.
-    """
-    entity_cmd = Command(
-        operation=Operation.ENTITY_CREATE,
-        args={
-            "entity_type": entity_payload["entity_type"],
-            "entity_id": entity_payload["entity_id"],
-            "name": entity_payload["name"],
-            "properties": dict(entity_payload["properties"]),
-        },
-        target_type="entity",
-        requested_by="cli:promote-learning",
-    )
-    entity_result = executor.execute(entity_cmd)
-    if entity_result.status != CommandStatus.SUCCESS:
-        return {
-            "status": "entity_failed",
-            "entity_status": entity_result.status.value,
-            "message": entity_result.message,
-        }
-
-    edge_outcomes = []
-    for edge in edge_payloads:
-        edge_cmd = Command(
-            operation=Operation.LINK_CREATE,
-            args={
-                "source_id": edge["source_id"],
-                "target_id": edge["target_id"],
-                "edge_kind": edge["edge_kind"],
-                "properties": dict(edge["properties"]),
-            },
-            target_id=edge["source_id"],
-            target_type="entity",
-            requested_by="cli:promote-learning",
-        )
-        edge_result = executor.execute(edge_cmd)
-        edge_outcomes.append(
-            {
-                "edge_kind": edge["edge_kind"],
-                "target_id": edge["target_id"],
-                "status": edge_result.status.value,
-            }
-        )
-    return {
-        "status": "promoted",
-        "node_id": entity_result.created_id,
-        "edges": edge_outcomes,
-    }
-
-
 @curate_app.command("promote-learning")
 def promote_learning(
     candidates: Path = typer.Option(  # noqa: B008 - typer option default
@@ -384,10 +323,11 @@ def promote_learning(
         if entry["status"] != "ready":
             submission_results.append({"candidate_id": entry["candidate_id"], **entry})
             continue
-        outcome = _submit_promotion(
+        outcome = submit_learning_promotion(
             executor,
             entry["entity_payload"],
             entry["edge_payloads"],
+            requested_by="cli:promote-learning",
         )
         submission_results.append(
             {

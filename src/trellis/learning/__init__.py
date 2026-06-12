@@ -26,6 +26,7 @@ from trellis.learning.scoring import (
     build_learning_promotion_payloads,
     normalize_intent_family,
     prepare_learning_promotions,
+    submit_learning_promotion,
     write_learning_review_artifacts,
 )
 
@@ -47,5 +48,6 @@ __all__ = [
     "build_learning_promotion_payloads",
     "normalize_intent_family",
     "prepare_learning_promotions",
+    "submit_learning_promotion",
     "write_learning_review_artifacts",
 ]

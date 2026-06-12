@@ -22,7 +22,10 @@ from typing import Any
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from trellis.learning.scoring import prepare_learning_promotions
+from trellis.learning.scoring import (
+    prepare_learning_promotions,
+    submit_learning_promotion,
+)
 from trellis.learning.tuners import (
     preview_promotion,
     promote_proposal,
@@ -383,9 +386,7 @@ def list_pending_proposals(
     return TunerProposalListResponse(count=len(rows), proposals=rows)
 
 
-@router.get(
-    "/proposals/{proposal_id}/preview", response_model=ProposalPreviewResponse
-)
+@router.get("/proposals/{proposal_id}/preview", response_model=ProposalPreviewResponse)
 def preview_proposal(proposal_id: str) -> ProposalPreviewResponse:
     """Dry-run a proposal promotion — predict the decision, mutate nothing.
 
@@ -591,10 +592,11 @@ def promote_learning_candidates(
                 )
             )
             continue
-        outcome = _submit_learning_promotion(
+        outcome = submit_learning_promotion(
             executor,
             entry["entity_payload"],
             entry["edge_payloads"],
+            requested_by="api:review.promote-learning",
         )
         if outcome["status"] == "promoted":
             promoted_count += 1
@@ -627,54 +629,6 @@ def promote_learning_candidates(
         promoted_count=promoted_count,
         results=rows,
     )
-
-
-def _submit_learning_promotion(
-    executor: Any,
-    entity_payload: dict[str, Any],
-    edge_payloads: list[dict[str, Any]],
-) -> dict[str, Any]:
-    """Submit one approved learning promotion through the executor.
-
-    Mirrors ``trellis_cli.curate._submit_promotion`` — an entity create
-    followed by per-target link creates; a failed entity short-circuits
-    the edges.
-    """
-    from trellis.mutate import Command, CommandStatus, Operation  # noqa: PLC0415
-
-    entity_cmd = Command(
-        operation=Operation.ENTITY_CREATE,
-        args={
-            "entity_type": entity_payload["entity_type"],
-            "entity_id": entity_payload["entity_id"],
-            "name": entity_payload["name"],
-            "properties": dict(entity_payload["properties"]),
-        },
-        target_type="entity",
-        requested_by="api:review.promote-learning",
-    )
-    entity_result = executor.execute(entity_cmd)
-    if entity_result.status != CommandStatus.SUCCESS:
-        return {
-            "status": "entity_failed",
-            "message": entity_result.message,
-        }
-
-    for edge in edge_payloads:
-        edge_cmd = Command(
-            operation=Operation.LINK_CREATE,
-            args={
-                "source_id": edge["source_id"],
-                "target_id": edge["target_id"],
-                "edge_kind": edge["edge_kind"],
-                "properties": dict(edge["properties"]),
-            },
-            target_id=edge["source_id"],
-            target_type="entity",
-            requested_by="api:review.promote-learning",
-        )
-        executor.execute(edge_cmd)
-    return {"status": "promoted", "node_id": entity_result.created_id}
 
 
 # -- Section 3: Schema-evolution candidates --------------------------------
@@ -761,8 +715,7 @@ def draft_schema_evolution_adr(
         raise HTTPException(
             status_code=404,
             detail=(
-                "No WELL_KNOWN_CANDIDATE event with "
-                f"candidate_id={candidate_id!r}."
+                f"No WELL_KNOWN_CANDIDATE event with candidate_id={candidate_id!r}."
             ),
         ) from exc
 

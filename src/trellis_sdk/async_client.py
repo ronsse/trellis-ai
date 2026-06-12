@@ -31,6 +31,7 @@ from trellis_sdk._http import (
     raise_for_status,
     wrap_transport_error,
 )
+from trellis_sdk.exceptions import TrellisProtocolError
 from trellis_wire import (
     BatchStrategy,
     DraftSubmissionRequest,
@@ -418,12 +419,15 @@ class AsyncTrellisClient:
             rating=rating,
             comment=comment,
         )
-        resp = await self._request(
-            "POST",
-            f"/api/v1/packs/{pack_id}/feedback",
-            json=body.model_dump(mode="json"),
-        )
-        return PackFeedbackResponse.model_validate(resp.json())
+        path = f"/api/v1/packs/{pack_id}/feedback"
+        resp = await self._request("POST", path, json=body.model_dump(mode="json"))
+        try:
+            return PackFeedbackResponse.model_validate(resp.json())
+        except Exception as exc:  # JSONDecodeError / pydantic.ValidationError
+            # A malformed 2xx body must stay inside the TrellisError
+            # hierarchy — hooks' degradation contract depends on it.
+            msg = f"unexpected response body for {path}: {exc}"
+            raise TrellisProtocolError(msg, request_path=path) from exc
 
     # -- Observations + Measurements (Item 1 Phase 1) --
 

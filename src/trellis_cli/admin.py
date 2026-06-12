@@ -775,6 +775,8 @@ def _print_skills_summary(
             console.print(
                 f"    [dim]skipped[/dim] {name} (already present; --force to overwrite)"
             )
+        elif status == "failed":
+            console.print(f"    [red]failed[/red] {name}: {entry.get('error', '')}")
         else:
             console.print(f"    [green]{status}[/green] {name}")
 
@@ -837,9 +839,7 @@ def quickstart(
 ) -> None:
     """Initialize stores and register MCP server with Claude Code."""
     if with_skills is not None and with_skills not in ("user", "project"):
-        msg = (
-            f"--with-skills must be 'user' or 'project', got {with_skills!r}"
-        )
+        msg = f"--with-skills must be 'user' or 'project', got {with_skills!r}"
         if output_format == "json":
             typer.echo(json.dumps({"status": "error", "error": msg}))
         else:
@@ -889,7 +889,8 @@ def quickstart(
             project_dir=project_dir if with_skills == "project" else None,
         )
         skills_results = install_skills(skills_dir, force=force)
-        steps.append("skills_installed")
+        any_failed = any(r["status"] == "failed" for r in skills_results)
+        steps.append("skills_install_partial" if any_failed else "skills_installed")
 
     mcp_on_path = shutil.which("trellis-mcp") is not None
 
@@ -942,12 +943,13 @@ def install_skills_cmd(
         project_dir=Path.cwd() if scope == "project" else None,
     )
     results = install_skills(skills_dir, force=force)
+    failed = [r for r in results if r["status"] == "failed"]
 
     if output_format == "json":
         typer.echo(
             json.dumps(
                 {
-                    "status": "ok",
+                    "status": "partial" if failed else "ok",
                     "scope": scope,
                     "skills_dir": str(skills_dir),
                     "skills": results,
@@ -955,8 +957,16 @@ def install_skills_cmd(
             )
         )
     else:
-        console.print("[green]Skills install complete![/green]\n")
+        if failed:
+            console.print(
+                f"[yellow]Skills install completed with "
+                f"{len(failed)} failure(s).[/yellow]\n"
+            )
+        else:
+            console.print("[green]Skills install complete![/green]\n")
         _print_skills_summary(results, skills_dir)
+    if failed:
+        raise typer.Exit(EXIT_INTERNAL)
 
 
 def _memory_prompt_available() -> bool:
