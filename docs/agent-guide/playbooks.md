@@ -403,11 +403,12 @@ Args: {"trace_id": "01JRK5N7QF", "success": true, "notes": "Clean implementation
 ```python
 from trellis_sdk import TrellisClient
 
-# Local mode (no server needed)
-client = TrellisClient()
+# The SDK is HTTP-only — point it at a running trellis-api server.
+client = TrellisClient(base_url="http://127.0.0.1:8420")
 
-# Remote mode (against REST API)
-client = TrellisClient(base_url="http://localhost:8420")
+# For tests/examples without a network listener, use the in-process client:
+#   from trellis.testing import in_memory_client
+#   with in_memory_client(tmp_path / "stores") as client: ...
 ```
 
 2. Get pre-summarized context for a task:
@@ -818,4 +819,70 @@ Stay client-side unless you need:
 Those run in the API process — they're the plugin-loader path from Step 5 (tracked in [TODO.md](../../TODO.md)), not this playbook.
 
 See [examples/trellis_example_extractor/](../../examples/trellis_example_extractor/) for a complete working skeleton.
+
+## Playbook 14: Wiring workflow hooks (context in, trace + feedback out)
+
+**When to use:** When a workflow engine (or any custom agent loop) should
+inject prior art before each step and record a trace + feedback after,
+without crashing the host task if Trellis is down.
+
+### Steps
+
+1. Construct the three hooks once per run, sharing one HTTP client:
+
+```python
+from trellis_sdk import ContextInjector, TraceRecorder, ResultFeedback, TrellisClient
+
+client = TrellisClient(base_url="http://127.0.0.1:8420")
+injector = ContextInjector(client)
+recorder = TraceRecorder(client, workflow_id=run_id, agent_id="planner", domain="backend")
+feedback = ResultFeedback(client)
+```
+
+2. **Pre-step** — inject context into the agent's prompt:
+
+```python
+brief = injector.for_intent(step_intent, domain="backend")  # "" if unavailable
+prompt = f"{step_intent}\n\n{brief}" if brief else step_intent
+```
+
+3. Run the step (your agent / tool / LLM call), timing it.
+
+4. **Post-step** — record the trace (success *and* failure) and the result:
+
+```python
+trace_id = recorder.record(
+    step_name="plan", status="success" if ok else "failure",
+    duration_ms=elapsed_ms, summary=summary, error=None if ok else err,
+)
+if ok:
+    feedback.record_success(
+        target_entity_id=entity_id, result_name="plan output",
+        summary=summary, pack_id=pack_id, helpful_item_ids=helpful,
+    )
+else:
+    feedback.record_failure(
+        target_entity_id=entity_id, error_summary=err,
+        trace_id=trace_id, pack_id=pack_id, unhelpful_item_ids=noise,
+    )
+```
+
+### Key Points
+
+- **No exception ever escapes a hook** by default. Failures log a warning and
+  return a sentinel (`""`, `None`, or `HookResult(ok=False)`). Pass
+  `raise_errors=True` to any hook constructor to opt into exceptions.
+- Pass `pack_id` to `record_success` / `record_failure` to grade the
+  supporting pack in the same call — it routes through the authoritative
+  `record_feedback` EventLog path.
+- Record failures, not just successes — failure traces are how the graph
+  learns from mistakes.
+
+### If It Fails
+
+If the server is unreachable the step still completes — context comes back
+empty and the post-step writes are no-ops. Reconcile later once the server is
+back; nothing is lost on the host side. See
+[examples/hooks_generic_workflow.py](../../examples/hooks_generic_workflow.py)
+for a runnable end-to-end demo.
 

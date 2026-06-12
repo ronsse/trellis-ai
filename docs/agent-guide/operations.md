@@ -147,6 +147,44 @@ EOF
 - Invalid JSON: exit code 1, prints parse error
 - Schema validation failure: exit code 1, prints Pydantic validation error
 
+#### Trace → graph extraction (opt-in)
+
+By default trace ingestion is write-only to the TraceStore — the trace is stored but no graph nodes/edges are created. Set the environment variable `TRELLIS_ENABLE_TRACE_EXTRACTION=1` (also accepts `true`/`yes`/`on`) to turn on a **post-ingest** deterministic extraction stage that mines the trace's structured fields into the knowledge graph through the governed `MutationExecutor`.
+
+The flag applies identically across all three trace-ingest paths: the CLI `trellis ingest trace`, the REST `POST /api/v1/traces`, and the MCP `save_experience` tool. Extraction always runs *after* the trace is durably stored, only ever *reads* the trace (traces stay immutable), and is fully fail-soft — a broken extraction is logged and swallowed, never failing the ingest.
+
+What gets extracted (deterministic, structured fields only) is documented in [trace-format.md → Graph Extraction](trace-format.md#graph-extraction-opt-in). Every emitted node and edge carries property-based provenance: `source_trace_id`, `agent_id`, and `extractor_tier`.
+
+When the flag is on, the CLI JSON output gains an `extraction` block:
+
+```json
+{"status": "ingested", "trace_id": "01JRK5...", "source": "agent", "intent": "...", "extraction": {"entities": 5, "edges": 4, "executed": true}}
+```
+
+### `trellis extract traces` (backfill)
+
+Backfill the graph from traces that were already ingested before the flag was enabled (or that need re-extraction). Iterates the TraceStore and runs the same `TraceExtractor` + governed-batch path the live hook uses.
+
+```bash
+trellis extract traces [--since <days>] [--domain <name>] [--limit <n>] [--dry-run] [--format text|json]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--since` | `7` | Backfill traces ingested within the last N days. |
+| `--domain` | (none) | Optional `TraceContext.domain` filter. |
+| `--limit` | `1000` | Max traces to scan. |
+| `--dry-run` | off | Tally and print per-trace draft counts without executing the mutation batch. |
+| `--format` | `text` | `text` or `json`. |
+
+This command does **not** require the `TRELLIS_ENABLE_TRACE_EXTRACTION` flag — it is the explicit, operator-driven backfill path. `--dry-run` previews the graph a real run would create without writing anything.
+
+**JSON output:**
+
+```json
+{"status": "backfilled", "traces_scanned": 12, "total_entities": 58, "total_edges": 44, "dry_run": false, "per_trace": [{"trace_id": "01JRK5...", "domain": "backend", "entities": 5, "edges": 4}]}
+```
+
 ### `trellis ingest evidence`
 
 Ingest evidence from a JSON file.
@@ -728,6 +766,130 @@ Shows total tokens, average per response, breakdown by layer and operation, and 
 
 ---
 
+## Worker Commands
+
+Unattended learning/curation workers. See [`../design/adr-autonomy-ladder.md`](../design/adr-autonomy-ladder.md) for the four-tier autonomy model these commands operate under.
+
+### `trellis worker tune`
+
+Run one `RuleTuner` pass and, when **Tier-1 auto-promotion** is enabled, auto-promote every qualifying proposal through the same governance pipeline `trellis metrics promote --commit` uses — then arm post-promotion monitoring so degradation auto-rolls-back.
+
+```bash
+trellis worker tune [--tuner-name NAME] [--since-days N] [--dry-run] [--format text|json]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--tuner-name` | `rule_tuner` | Logical tuner name (cursor + proposal scope). |
+| `--since-days` | (cursor) | Force a rescan of the last N days, ignoring the tuner cursor. |
+| `--dry-run` | off | Report what *would* auto-promote without mutating stores or emitting events. |
+| `--format` | `text` | `text` or `json`. |
+
+**Default behaviour is a pure tuner pass.** Auto-promotion is **off by default** (global default OFF, per Tier-1 invariant (d)). With it disabled, `worker tune` is byte-identical to `trellis metrics tune`: it produces/refreshes proposals and promotes nothing. Non-qualifying proposals always stay `pending` for manual review via `trellis metrics promote` — they are reported, never rejected.
+
+#### Enabling Tier-1 auto-promotion
+
+Add a `learning.auto_promote` section to `~/.trellis/config.yaml` (or `$TRELLIS_CONFIG_DIR/config.yaml`):
+
+```yaml
+learning:
+  auto_promote:
+    enabled: true              # default false — master switch, global default OFF
+    min_sample_size: 30        # stricter than manual promote (5); must be >= 5
+    min_effect_size: 0.25      # stricter than manual promote (0.15); must be >= 0.15
+    require_baseline: true      # no baseline => nothing to roll back to => left for a human
+    post_min_samples: 20        # min post-promotion outcomes before a degradation verdict
+    post_regression_threshold: 0.10  # success-rate drop (abs) that triggers auto-rollback
+    post_lookback_days: 7       # monitoring window on either side of the promotion
+```
+
+The auto thresholds **must be at least as strict as the manual-promote defaults** — the config loader (and `AutoPromotePolicy`) rejects looser values loudly rather than silently weakening the autonomous gate. Monitoring is always armed (`auto_demote` is forced on); you cannot auto-promote without an armed rollback.
+
+#### Audit trail
+
+Each autonomous action emits a **dedicated, self-identifying** event in addition to the normal governance event:
+
+| Event | Emitted when |
+|-------|--------------|
+| `parameters.auto_promoted` (`PARAMS_AUTO_PROMOTED`) | A qualifying proposal is auto-promoted (alongside `PARAMS_UPDATED`). |
+| `parameters.auto_rolled_back` (`PARAMS_AUTO_ROLLED_BACK`) | Post-promotion monitoring demotes a degraded snapshot (alongside the rollback's `PARAMS_UPDATED` and `PARAMETERS_DEGRADED`). |
+
+Degradation that accrues *after* the promoting pass is caught on a later pass: each `worker tune` run re-monitors recent auto-promotions and rolls back any that have since degraded.
+
+The manual `trellis metrics promote` path is unchanged and emits only `PARAMS_UPDATED` — the dedicated events distinguish "a human promoted this" from "the system promoted this on its own."
+
+### `trellis worker curate`
+
+Run one **full curation cycle** (Tier-2). Calls the curation library functions directly — no shelling out — in this fixed order:
+
+1. **effectiveness feedback** (`run_effectiveness_feedback`) — demote: noise-tag low-value items;
+2. **advisory generation** (`AdvisoryGenerator.generate`);
+3. **advisory fitness loop** (`run_advisory_fitness_loop`) — adjust confidence / suppress weak advisories;
+4. **learning candidates** (`build_learning_observations_from_event_log` → `analyze_learning_observations` → `write_learning_review_artifacts`) — writes promote-half review artifacts to `--output-dir`.
+
+```bash
+trellis worker curate --output-dir DIR [--days N] [--interval SECONDS] \
+  [--dry-run] [--reconcile-first] \
+  [--skip-noise-tags] [--skip-advisories] [--skip-learning] \
+  [--format text|json]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--output-dir` / `-o` | (required) | Directory for the learning-candidate review artifacts. |
+| `--days` | `30` | Days of EventLog history to scan. |
+| `--interval` | (off) | Loop mode: re-run the cycle every N seconds until SIGINT/SIGTERM. Plain sleep — **no scheduler dependency** (APScheduler/Celery deliberately rejected). |
+| `--dry-run` | off | Analyze only — no noise tags, no advisory mutations, no artifacts written. |
+| `--reconcile-first` | off | Backfill `pack_feedback.jsonl` into the EventLog (`reconcile_feedback_log_to_event_log`) before the cycle. |
+| `--skip-noise-tags` | off | Skip stage 1. |
+| `--skip-advisories` | off | Skip stages 2 + 3. |
+| `--skip-learning` | off | Skip stage 4. |
+| `--format` | `text` | `text` or `json`. |
+
+**Promotion stays human-gated.** This command writes learning candidates for review and **never promotes** (Tier-2 invariant). To promote, review the emitted `promotion_decisions.template.json`, set `approved: true` on the rows you want, then run `trellis curate promote-learning`. In `--interval` mode each cycle logs one structured `worker_curate.cycle` line with the headline counts (noise-tagged, advisories generated/suppressed, candidates written); SIGINT/SIGTERM drains the current cycle and exits cleanly.
+
+### `trellis worker enrich`
+
+Batch-enrich under-tagged documents via the LLM `EnrichmentService`, writing the suggested tags / classification / importance back into each document's `metadata.content_tags`.
+
+```bash
+trellis worker enrich [--concurrency N] [--limit N] \
+  [--confidence-threshold F] [--dry-run] [--format text|json]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--concurrency` | `3` | Parallel enrichment requests. |
+| `--limit` | `50` | Max documents to enrich this run. |
+| `--confidence-threshold` | `0.5` | Re-enrich documents whose `content_tags.tag_confidence` is below this value. |
+| `--dry-run` | off | Select + report candidates without calling the LLM. |
+| `--format` | `text` | `text` or `json`. |
+
+**Selection predicate.** A document is a candidate when its `metadata.content_tags` is missing/empty, **or** it carries no `tag_confidence` stamp, **or** that stamp is strictly below `--confidence-threshold`. Documents already tagged at/above the threshold are skipped.
+
+**Requires an LLM extra.** Enrichment needs a configured `llm:` block plus the matching `[llm-openai]` / `[llm-anthropic]` extra. With no buildable client the command **exits non-zero with an actionable message** naming the missing config/extra — it never silently no-ops.
+
+### `trellis worker mine-precedents`
+
+Mine precedent candidates from failure / partial traces (wraps `PrecedentMiner.generate_precedent_candidates`).
+
+```bash
+trellis worker mine-precedents [--domain D] [--min-traces N] \
+  [--limit N] [--dry-run] [--format text|json]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--domain` | (all) | Restrict mining to this trace domain. |
+| `--min-traces` | `3` | Minimum failure/partial traces required to mine. |
+| `--limit` | `100` | Max traces to analyze. |
+| `--dry-run` | off | Report how many failure/partial traces are in scope without calling the LLM. |
+| `--format` | `text` | `text` or `json`. |
+
+Candidates are **surfaced** (the miner emits `PRECEDENT_PROMOTED` events as it intends) but **not auto-promoted** into the graph — review before acting. Like `enrich`, this requires an LLM extra and exits loudly when none is configured.
+
+---
+
 ## API Authentication
 
 The REST API authenticates with scoped API keys (roadmap item E.5, issue #191).
@@ -873,6 +1035,107 @@ Start with `trellis admin serve` or `trellis-api`. Base path: `/api/v1/`.
 | GET | `/health` | Health check |
 | GET | `/stats` | Store statistics |
 | GET | `/effectiveness` | Context effectiveness report |
+| GET | `/metrics/timeseries` | Improvement-metric trend series (see below) |
+
+### Review queue (admin scope)
+
+The Review view in the static UI (`/ui/` → **Review**) is a human-decision
+inbox. Every endpoint below is on the admin router, so it requires the
+`admin` scope, respects `TRELLIS_UI_ENABLED` / ops-gating, and — for the
+write actions — emits a `REVIEW_DECISION_RECORDED` audit event stamped
+with the authenticated key identity (in addition to the surface-specific
+event the underlying pipeline already emits). The autonomy tiers that
+decide which surfaces are human-gated are described in
+`docs/design/adr-autonomy-ladder.md`.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/proposals` | List pending tuner proposals with `effect_size` / `sample_size` / `baseline_values` / `proposed_values` |
+| GET | `/proposals/{id}/preview` | Dry-run a promotion — predict promote/reject, mutate nothing |
+| POST | `/proposals/{id}/promote` | Promote through the governed pipeline (same logic as `trellis metrics promote --commit`) |
+| POST | `/proposals/{id}/reject` | Reject (human-gated); body `{reason?}` |
+| GET | `/learning/candidates` | Serve the most-recent `intent_learning_candidates.json` artifact (empty + `hint` when none found) |
+| POST | `/learning/promotions` | Promote approved candidates via `MutationExecutor`; body `{decisions: [{candidate_id, approved, rationale?}]}` |
+| GET | `/schema-evolution/candidates` | List latest `WELL_KNOWN_CANDIDATE` event per `candidate_id` |
+| POST | `/schema-evolution/{id}/draft-adr` | Render the promotion-ADR markdown (copyable/downloadable in the UI). **Only** action — there is no promote endpoint; promotion is a one-way ADR commitment |
+| GET | `/code-proposals` | List recent `PROPOSAL_DRAFTED` events with `markdown_preview` (read-only) |
+
+**Sections in the UI.** The Review view has four collapsible queue sections,
+each with a live count:
+
+1. **Tuner proposals** — Approve / Reject buttons. Approve first runs the
+   dry-run preview and shows the predicted decision before a confirm step.
+   Approve wraps `promote_proposal`; Reject wraps `reject_proposal`. The
+   CLI (`trellis metrics promote`) keeps working identically — both share
+   `trellis.learning.tuners.preview_promotion`.
+2. **Learning promotion candidates** — candidate cards with metrics, an
+   approve checkbox + rationale field, and a single submit that runs the
+   existing `prepare_learning_promotions` → `MutationExecutor` path.
+3. **Schema-evolution candidates** — only a **Draft ADR** action, which
+   returns the rendered ADR markdown in a copyable / downloadable panel.
+   No approve/promote button (a tooltip explains why).
+4. **Code-authoring proposals** — read-only list with markdown preview.
+
+**Learning artifacts directory.** `GET /learning/candidates` and `POST
+/learning/promotions` read the `intent_learning_candidates.json` artifact
+that `trellis analyze learning-candidates --output-dir <dir>` writes. The
+server resolves `<dir>` from `TRELLIS_LEARNING_ARTIFACTS_DIR`, falling back
+to `<data_dir>/learning`. When no artifact is found, the list endpoint
+returns an empty list plus a `hint`, and the promote endpoint returns
+`409`.
+
+### Improvement-metrics dashboard (admin scope)
+
+The **Metrics** view in the static UI (`/ui/` → **Metrics**) charts five
+improvement metrics over time. Every series is computed **server-side from
+the EventLog on read** — there is no new storage and no caching layer (POC
+scale). The endpoint is on the admin router, so it requires the `admin`
+scope and respects `TRELLIS_UI_ENABLED` / ops-gating like the rest of
+admin. It is read-only and never mutates a store.
+
+```
+GET /api/v1/metrics/timeseries?metric=<name>&days=<n>&bucket=day&group_by=<axis>
+```
+
+| Param | Values | Default | Notes |
+|-------|--------|---------|-------|
+| `metric` | one of the five below | — (required) | Unknown value → `422` |
+| `days` | positive int | `30` | Look-back window; non-positive → `422` |
+| `bucket` | `day` | `day` | Only daily buckets are implemented; anything else → `422` |
+| `group_by` | `domain` \| `intent_family` \| `none` | `none` | Unknown value → `422` |
+
+The five metrics (priority order; each a named `metric` value):
+
+| Metric | Definition |
+|--------|------------|
+| `pack_success_rate` | Share of graded packs with a positive outcome per bucket (`PACK_ASSEMBLED ⋈ FEEDBACK_RECORDED` on `pack_id`, same join as `learning/pack_observations.py`). |
+| `reference_rate` | `items_referenced / items_served` per bucket — the best "are packs getting better" proxy. Pooled per bucket (sum referenced / sum served). |
+| `advisory_fitness` | Mean advisory confidence per bucket (from the fitness loop's `ADVISORY_SUPPRESSED` / `ADVISORY_RESTORED` `new_confidence`); `sample_count` is the suppressed-advisory count. |
+| `noise_tag_volume` | Items flipped to `signal_quality="noise"` per bucket, counted from `TAGS_REFRESHED` audit events whose `after` tags carry the noise label. |
+| `parameter_promotions` | Governance event counts per bucket (`PARAMS_UPDATED` + `TUNER_PROPOSAL_CREATED` / `_REJECTED` + `PARAMETERS_DEGRADED`). There are no `PARAMS_AUTO_*` events in this tree; `parameter_promotions` groups by event **type**, not by `domain` / `intent_family`. |
+
+**Response shape.** A list of series, each with a `group_key` and a list of
+`{bucket_start, value, sample_count}` points sorted ascending. **Buckets with
+no data are omitted** (not zero-filled) — clients infer gaps from the missing
+`bucket_start` keys (an absent day means "no signal", not "zero"). Grouping
+resolves `domain` from the `PACK_ASSEMBLED` payload and `intent_family` from
+the `FEEDBACK_RECORDED` payload; events lacking the requested dimension fall
+under `"all"`. The aggregation lives in
+`trellis.retrieve.metrics_timeseries.compute_timeseries` (the route is a thin
+adapter).
+
+**Definitional parity.** Where a metric overlaps with the agent-loop
+convergence scenario, the formula matches that scenario's helpers in
+`eval/scenarios/_convergence_common.py` (`pack_success_rate` ↔
+`round_success_rate`; `reference_rate` ↔ the useful-fraction in
+`_base_round_metrics` / `_convergence_stats`; `advisory_fitness`'s suppressed
+count ↔ `advisories_suppressed_total`). Each shared formula is cross-referenced
+in a code comment at its call site.
+
+**UI.** Metrics 1–4 render as inline-SVG line charts (zero dependencies, no
+build step); `parameter_promotions` renders as an annotated events strip
+(grouped bars by event type). A domain / intent-family group-by selector and a
+day-window selector drive all charts.
 
 ---
 
@@ -993,11 +1256,13 @@ After restarting OpenClaw, the agent has access to all 11 macro tools above. See
 ```python
 from trellis_sdk import TrellisClient
 
-# Local mode (no server needed)
-client = TrellisClient()
-
-# Remote mode (via REST API)
+# HTTP client against a running trellis-api
 client = TrellisClient(base_url="http://localhost:8420")
+
+# Tests: in-process ASGI client, no network listener
+from trellis.testing import in_memory_client
+with in_memory_client(tmp_path / "stores") as client:
+    ...
 ```
 
 ### Client Methods
@@ -1012,7 +1277,17 @@ client = TrellisClient(base_url="http://localhost:8420")
 | `get_entity(entity_id)` | `dict \| None` | Get entity |
 | `create_entity(name, entity_type?, properties?)` | `str` (node_id) | Create entity |
 | `create_link(source_id, target_id, edge_kind?)` | `str` (edge_id) | Create edge |
+| `record_feedback(pack_id, success, helpful_item_ids?, unhelpful_item_ids?, followed_advisory_ids?, target_id?, rating?, comment?)` | `PackFeedbackResponse` | Record element-level pack feedback |
 | `close()` | — | Release resources |
+
+`record_feedback` mirrors the MCP `record_feedback` tool and routes through
+`trellis.feedback.recording.record_feedback` server-side: it appends the durable
+`pack_feedback.jsonl` audit row and emits the authoritative `FEEDBACK_RECORDED`
+event to the operational EventLog. The returned `PackFeedbackResponse` carries
+`event_log_in_sync` — check it to confirm the event reached the log. `False`
+means only the JSONL row landed and a reconcile is owed (the emission
+soft-failed); the SDK does not swallow that signal. `AsyncTrellisClient` exposes
+the same method as a coroutine.
 
 ### Skill Functions
 
@@ -1030,3 +1305,53 @@ context = get_context_for_task(client, "implement retry logic", domain="backend"
 ```
 
 All skill functions return `str` (markdown), not data objects.
+
+### Workflow Integration Hooks
+
+`trellis_sdk.hooks` packages the pre-task / post-task integration points a
+workflow engine needs into three classes. Each wraps a `TrellisClient` and
+**degrades gracefully** — a hook method never raises into the host workflow.
+On a Trellis outage (server down, 4xx, version mismatch, mid-call drop) the
+hook logs a `structlog` warning and returns a sentinel, so the host agent's
+task never fails because Trellis is down. Pass `raise_errors=True` to the
+constructor to opt into exceptions instead.
+
+| Class | When | Key method(s) | Sentinel on failure |
+|-------|------|---------------|---------------------|
+| `ContextInjector` | pre-task | `for_intent(intent, domain?, max_tokens?)`, `for_entities(entity_ids, intent?, domain?, max_tokens?)` | `""` (empty markdown) |
+| `TraceRecorder` | post-task | `record(step_name, status, duration_ms, entity_ids?, summary?, metrics?, error?, domain?)` | `None` (no trace_id) |
+| `ResultFeedback` | post-task | `record_success(target_entity_id, result_name, summary, full_content?, metadata?, pack_id?, helpful_item_ids?)`, `record_failure(target_entity_id, error_summary, trace_id?, pack_id?, unhelpful_item_ids?)` | `HookResult(ok=False)` |
+
+```python
+from trellis_sdk import ContextInjector, TraceRecorder, ResultFeedback, TrellisClient
+
+client = TrellisClient(base_url="http://127.0.0.1:8420")
+injector = ContextInjector(client)
+recorder = TraceRecorder(client, workflow_id="run-42", agent_id="planner")
+feedback = ResultFeedback(client)
+
+brief = injector.for_intent("add rate limiting", domain="backend")   # -> markdown
+trace_id = recorder.record("plan", "success", 1200, summary="done")   # -> trace_id | None
+result = feedback.record_success(                                     # -> HookResult
+    target_entity_id="entity:orders-api",
+    result_name="rate-limit config",
+    summary="token bucket",
+    pack_id="pack:abc",          # also grades the supporting pack (positive)
+    helpful_item_ids=["doc:1"],
+)
+```
+
+`ContextInjector` calls `assemble_pack` and falls back to per-entity lookups
+(`for_entities`) when the pack is empty, splitting the token budget across
+included entities. `TraceRecorder` builds a `source="workflow"` trace tying
+every step to `workflow_id` and records failures as well as successes
+(`status` is coerced to `unknown` if not one of `success|failure|partial`).
+`ResultFeedback` creates a `DOCUMENT` entity + `DESCRIBED_BY` edge on success
+and routes pack grading through the SDK's `record_feedback` method (the
+authoritative EventLog path) — never a hand-rolled HTTP call. An
+`AsyncResultFeedback` variant wraps `AsyncTrellisClient`.
+
+Because the SDK is HTTP-only, the hooks require a running `trellis-api`
+server. For tests and examples without a network listener, construct the
+hooks against the in-process client from `trellis.testing.in_memory_client`.
+A runnable end-to-end demo lives at `examples/hooks_generic_workflow.py`.

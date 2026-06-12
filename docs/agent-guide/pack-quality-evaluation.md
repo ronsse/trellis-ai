@@ -265,6 +265,10 @@ for dim in report.dimensions:
 
 The report is **read-only** — it never mutates profiles, scorers, or classifier state. Auto-calibration of profile weights from these correlations (e.g., reducing weight on `noise`-classified dimensions) is deliberately a separate step tracked in [TODO.md](../../TODO.md) under *Pack Quality P3 — Feedback-driven dimension calibration*. The reason for the split: automatic weight tuning without operator review can drive the scorer into a local minimum that looks good by current outcomes but masks a regression. The separation lets you inspect the signal before acting on it.
 
+### Relationship to the improvement-metrics dashboard
+
+The admin UI's **Metrics** view (`/ui/` → **Metrics**, backed by `GET /api/v1/metrics/timeseries` — see [operations.md](operations.md#improvement-metrics-dashboard-admin-scope)) is the *runtime-outcome* counterpart to this assembly-time scoring. Its `pack_success_rate` and `reference_rate` metrics **share their definitions with the agent-loop convergence scenario**'s helpers in `eval/scenarios/_convergence_common.py` (`round_success_rate` and the useful-fraction in `_base_round_metrics` / `_convergence_stats` respectively) — the dashboard and the convergence scenario compute the same formula on the same `PACK_ASSEMBLED ⋈ FEEDBACK_RECORDED` join, so a trend read off the dashboard and a delta the scenario reports are definitionally the same quantity. The dashboard aggregation (`trellis.retrieve.metrics_timeseries`) cross-references each shared formula in a code comment at its call site.
+
 ### When the report is unusable
 
 - **Zero events** — no evaluator is wired on any `PackBuilder`. Wire one per the section above.

@@ -152,6 +152,46 @@ class FeedbackRequest(WireRequestModel):
     pack_id: str | None = None  # Link feedback to a context pack
 
 
+class PackFeedbackRequest(WireRequestModel):
+    """Request to record element-level feedback on a context pack.
+
+    Mirrors the MCP ``record_feedback`` tool's surface so the SDK,
+    REST, and MCP feedback paths share one payload shape. Routes
+    through :func:`trellis.feedback.recording.record_feedback`, which
+    appends the durable ``pack_feedback.jsonl`` row and emits the
+    authoritative ``FEEDBACK_RECORDED`` event.
+    """
+
+    success: bool
+    helpful_item_ids: list[str] = Field(default_factory=list)
+    unhelpful_item_ids: list[str] = Field(default_factory=list)
+    followed_advisory_ids: list[str] = Field(default_factory=list)
+    target_id: str | None = None  # trace/entity the pack supported, if any
+    rating: float | None = None  # explicit 0.0-1.0 score; defaults from success
+    comment: str | None = None  # free-text notes
+
+
+class PackFeedbackResponse(WireModel):
+    """Result of recording pack feedback.
+
+    ``event_log_in_sync`` surfaces the
+    :attr:`trellis.feedback.recording.FeedbackRecordResult.event_log_in_sync`
+    semantics: ``True`` when the authoritative ``FEEDBACK_RECORDED``
+    event reached the EventLog (emitted now, or already present from a
+    prior call). ``False`` means only the durable JSONL row was written
+    and a reconcile is owed — callers must not treat the signal as
+    having driven behavior yet.
+    """
+
+    status: str = "ok"
+    pack_id: str
+    feedback_id: str
+    feedback: str  # "positive" | "negative"
+    event_log_in_sync: bool
+    event_log_emitted: bool
+    event_log_skipped_as_duplicate: bool
+
+
 class CommandResponse(WireModel):
     """Response after executing a mutation command."""
 
@@ -314,3 +354,220 @@ class StatsResponse(WireModel):
     nodes: int = 0
     edges: int = 0
     events: int = 0
+
+
+# -- Review queue (WP10) --
+#
+# DTOs backing the admin Review view (human-decision inbox). The four
+# queue surfaces are: tuner proposals, learning-promotion candidates,
+# schema-evolution candidates, and code-authoring proposals. Per
+# ``docs/design/adr-autonomy-ladder.md`` the approve/reject/promote
+# actions are human-gated; schema-evolution exposes *only* a draft-ADR
+# action (no machine promote path).
+
+
+class TunerProposalSummary(WireModel):
+    """One pending tuner proposal as surfaced in the Review queue."""
+
+    proposal_id: str
+    tuner: str
+    status: str
+    component_id: str
+    domain: str | None = None
+    intent_family: str | None = None
+    tool_name: str | None = None
+    proposed_values: dict[str, Any] = Field(default_factory=dict)
+    baseline_values: dict[str, Any] = Field(default_factory=dict)
+    sample_size: int = 0
+    effect_size: float | None = None
+
+
+class TunerProposalListResponse(WireModel):
+    """List of pending tuner proposals."""
+
+    count: int = 0
+    proposals: list[TunerProposalSummary] = Field(default_factory=list)
+
+
+class ProposalPreviewResponse(WireModel):
+    """Dry-run forecast for a single proposal promotion."""
+
+    proposal_id: str
+    predicted_status: str
+    reason: str
+    proposed_values: dict[str, Any] = Field(default_factory=dict)
+    baseline_values: dict[str, Any] = Field(default_factory=dict)
+    effect_size: float | None = None
+    sample_size: int = 0
+
+
+class ProposalDecisionResponse(WireModel):
+    """Outcome of an approve / reject action on a proposal."""
+
+    proposal_id: str
+    status: str  # "promoted" | "rejected" | "skipped"
+    reason: str
+    params_version: str | None = None
+    effect_size: float | None = None
+
+
+class ProposalRejectRequest(WireRequestModel):
+    """Body for ``POST /api/v1/proposals/{id}/reject`` — optional rationale."""
+
+    reason: str = "rejected_by_reviewer"
+
+
+class LearningCandidateListResponse(WireModel):
+    """Most-recent learning-candidate artifact, or an empty hint."""
+
+    status: str = "ok"
+    generated_at_utc: str | None = None
+    candidate_count: int = 0
+    candidates: list[dict[str, Any]] = Field(default_factory=list)
+    hint: str | None = None
+
+
+class LearningPromotionDecision(WireRequestModel):
+    """One per-candidate decision in a learning-promotion submission."""
+
+    candidate_id: str
+    approved: bool = False
+    promotion_name: str = ""
+    rationale: str = ""
+
+
+class LearningPromotionRequest(WireRequestModel):
+    """Body for ``POST /api/v1/learning/promotions``.
+
+    Carries per-candidate decisions. The server joins these against the
+    most-recent candidate artifact, builds the entity/edge payloads via
+    ``prepare_learning_promotions``, and submits each approved promotion
+    through the governed :class:`MutationExecutor` pipeline.
+    """
+
+    decisions: list[LearningPromotionDecision] = Field(default_factory=list)
+
+
+class LearningPromotionResultRow(WireModel):
+    """Per-candidate outcome of a learning-promotion submission."""
+
+    candidate_id: str
+    status: str
+    entity_id: str | None = None
+    node_id: str | None = None
+    message: str | None = None
+
+
+class LearningPromotionResponse(WireModel):
+    """Aggregate outcome of a learning-promotion submission."""
+
+    status: str = "ok"
+    approved_count: int = 0
+    ready_count: int = 0
+    promoted_count: int = 0
+    results: list[LearningPromotionResultRow] = Field(default_factory=list)
+
+
+class SchemaEvolutionCandidate(WireModel):
+    """One WELL_KNOWN_CANDIDATE event as surfaced in the Review queue."""
+
+    candidate_id: str
+    candidate_kind: str | None = None
+    open_string_value: str | None = None
+    suggested_canonical_name: str | None = None
+    count: int = 0
+    distinct_extractors: list[str] = Field(default_factory=list)
+    distinct_domains: list[str] = Field(default_factory=list)
+    first_seen: str | None = None
+    last_seen: str | None = None
+    recorded_at: str | None = None
+
+
+class SchemaEvolutionListResponse(WireModel):
+    """List of schema-evolution candidates."""
+
+    count: int = 0
+    candidates: list[SchemaEvolutionCandidate] = Field(default_factory=list)
+
+
+class DraftAdrResponse(WireModel):
+    """Rendered promotion-ADR markdown for a schema-evolution candidate."""
+
+    candidate_id: str
+    markdown: str
+    suggested_canonical_name: str | None = None
+
+
+class CodeProposalSummary(WireModel):
+    """One PROPOSAL_DRAFTED event as surfaced in the Review queue."""
+
+    proposal_id: str
+    cluster_signature: str = ""
+    source_file: str | None = None
+    source_event_count: int = 0
+    markdown_preview: str = ""
+    generated_at: str | None = None
+
+
+class CodeProposalListResponse(WireModel):
+    """List of code-authoring proposals (read-only)."""
+
+    count: int = 0
+    proposals: list[CodeProposalSummary] = Field(default_factory=list)
+
+
+# -- Metrics dashboard (WP11) --
+#
+# DTOs backing ``GET /api/v1/metrics/timeseries`` — server-computed
+# improvement-metric trends read from the EventLog (no new storage). The
+# aggregation lives in ``trellis.retrieve.metrics_timeseries``; these
+# DTOs are the wire projection of its result dataclasses.
+
+
+class TimeseriesPointResponse(WireModel):
+    """One bucket's value for one series.
+
+    ``bucket_start`` is a UTC calendar-day key (``"YYYY-MM-DD"``).
+    ``value`` is the metric value for that bucket; ``sample_count`` is
+    the number of underlying observations (packs, items, or events —
+    metric-dependent) so clients can dim low-confidence points.
+
+    Buckets with no contributing events are **omitted** from a series
+    rather than zero-filled — clients infer gaps from the missing
+    ``bucket_start`` keys (an absent day means "no signal", not "zero").
+    """
+
+    bucket_start: str
+    value: float
+    sample_count: int = 0
+
+
+class TimeseriesSeriesResponse(WireModel):
+    """One group's ordered list of buckets.
+
+    ``group_key`` is the resolved grouping value: a domain, an
+    intent_family, ``"all"`` when ungrouped, or — for
+    ``parameter_promotions`` — the governance event type. Points are
+    sorted by ``bucket_start`` ascending and omit empty buckets (see
+    :class:`TimeseriesPointResponse`).
+    """
+
+    group_key: str
+    points: list[TimeseriesPointResponse] = Field(default_factory=list)
+
+
+class MetricsTimeseriesResponse(WireModel):
+    """Response for ``GET /api/v1/metrics/timeseries``.
+
+    Echoes the request parameters (``metric`` / ``bucket`` / ``group_by``
+    / ``days``) so the client can label the chart without re-deriving
+    them, and carries one series per resolved group key. An empty store
+    (or a metric with no events in the window) yields an empty
+    ``series`` list.
+    """
+
+    metric: str
+    bucket: str = "day"
+    group_by: str = "none"
+    days: int = 30
+    series: list[TimeseriesSeriesResponse] = Field(default_factory=list)

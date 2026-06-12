@@ -15,19 +15,33 @@ from trellis_sdk.exceptions import (
     TrellisClientError,
     TrellisError,
     TrellisHttpError,
+    TrellisProtocolError,
     TrellisRateLimitError,
     TrellisServerError,
     TrellisTransportError,
     TrellisVersionMismatchError,
 )
+from trellis_sdk.hooks import (
+    AsyncResultFeedback,
+    ContextInjector,
+    HookResult,
+    ResultFeedback,
+    TraceRecorder,
+)
 
 __all__ = [
+    "AsyncResultFeedback",
     "AsyncTrellisClient",
+    "ContextInjector",
+    "HookResult",
+    "ResultFeedback",
+    "TraceRecorder",
     "TrellisAPIError",
     "TrellisClient",
     "TrellisClientError",
     "TrellisError",
     "TrellisHttpError",
+    "TrellisProtocolError",
     "TrellisRateLimitError",
     "TrellisServerError",
     "TrellisTransportError",

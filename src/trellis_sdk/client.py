@@ -28,11 +28,14 @@ from trellis_sdk._http import (
     raise_for_status,
     wrap_transport_error,
 )
+from trellis_sdk.exceptions import TrellisProtocolError
 from trellis_wire import (
     BatchStrategy,
     DraftSubmissionRequest,
     DraftSubmissionResult,
     ExtractionBatch,
+    PackFeedbackRequest,
+    PackFeedbackResponse,
 )
 
 if TYPE_CHECKING:
@@ -356,6 +359,68 @@ class TrellisClient:
         }
         resp = self._request("POST", "/api/v1/links", json=payload)
         return cast("str", resp.json()["edge_id"])
+
+    def record_feedback(
+        self,
+        pack_id: str,
+        success: bool,
+        *,
+        helpful_item_ids: list[str] | None = None,
+        unhelpful_item_ids: list[str] | None = None,
+        followed_advisory_ids: list[str] | None = None,
+        target_id: str | None = None,
+        rating: float | None = None,
+        comment: str | None = None,
+    ) -> PackFeedbackResponse:
+        """Record element-level feedback on a context pack.
+
+        Mirrors the MCP ``record_feedback`` tool and
+        ``POST /api/v1/packs/{pack_id}/feedback``. The server routes the
+        signal through :func:`trellis.feedback.recording.record_feedback`,
+        which appends the durable ``pack_feedback.jsonl`` row and emits
+        the authoritative ``FEEDBACK_RECORDED`` event to the operational
+        EventLog — the event is what drives the advisory and learning
+        loops; the file is the audit log.
+
+        Args:
+            pack_id: Pack whose items are being graded (the ``pack_id``
+                shown in the pack response header).
+            success: Whether the task the pack supported succeeded.
+            helpful_item_ids: Pack ``item_id``s that actually helped.
+                Recorded as the positive ``items_referenced`` signal.
+            unhelpful_item_ids: Pack ``item_id``s that were noise or
+                misleading.
+            followed_advisory_ids: ``advisory_id``s the agent followed.
+            target_id: Trace or entity the pack supported, if any. Used
+                as the feedback ``run_id`` when present.
+            rating: Explicit 0.0-1.0 score; defaults to derive from
+                ``success`` server-side.
+            comment: Free-text notes about what worked or didn't.
+
+        Returns:
+            :class:`~trellis_wire.PackFeedbackResponse`. Check
+            ``event_log_in_sync`` to confirm the authoritative event
+            reached the log — ``False`` means only the JSONL audit row
+            landed and a reconcile is owed (the emission soft-failed).
+        """
+        body = PackFeedbackRequest(
+            success=success,
+            helpful_item_ids=helpful_item_ids or [],
+            unhelpful_item_ids=unhelpful_item_ids or [],
+            followed_advisory_ids=followed_advisory_ids or [],
+            target_id=target_id,
+            rating=rating,
+            comment=comment,
+        )
+        path = f"/api/v1/packs/{pack_id}/feedback"
+        resp = self._request("POST", path, json=body.model_dump(mode="json"))
+        try:
+            return PackFeedbackResponse.model_validate(resp.json())
+        except Exception as exc:  # JSONDecodeError / pydantic.ValidationError
+            # A malformed 2xx body must stay inside the TrellisError
+            # hierarchy — hooks' degradation contract depends on it.
+            msg = f"unexpected response body for {path}: {exc}"
+            raise TrellisProtocolError(msg, request_path=path) from exc
 
     # -- Observations + Measurements (Item 1 Phase 1) --
     #

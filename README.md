@@ -73,6 +73,12 @@ trellis retrieve pack --intent "deploy staging for user-api"   # assembled conte
 
 Every CLI command supports `--format json` for machine output.
 
+> **Wiring an external agent system into Trellis?** Start at the one-page
+> decision tree:
+> [docs/getting-started/integrate-your-agent.md](https://github.com/ronsse/trellis-ai/blob/main/docs/getting-started/integrate-your-agent.md).
+> MCP-speaking agents get the whole setup — stores, MCP server, and the
+> drop-in skills — in one command: `trellis admin quickstart --with-skills user`.
+
 > **Setting up for a team, a data platform, or production?** Local single-user
 > needs no decisions. Beyond that, a few choices are yours to make and easy to
 > miss — domains & ontology, domain ownership, and API security. They're laid
@@ -444,6 +450,8 @@ Raw sources (agent messages, dbt manifests, OpenLineage events, …) flow throug
 
 ## Integrations
 
+New here? The [**integrate-your-agent**](https://github.com/ronsse/trellis-ai/blob/main/docs/getting-started/integrate-your-agent.md) decision tree picks the right path (MCP / Python SDK / REST) and gives each a verification step.
+
 The Claude Code / Cursor / Claude Desktop rows are first-class — `trellis-mcp` ships with the package. The bottom three are reference templates under [`examples/integrations/`](https://github.com/ronsse/trellis-ai/tree/main/examples/integrations) — copy the file into your own project rather than depending on it as a library.
 
 | | |
@@ -458,7 +466,7 @@ The Claude Code / Cursor / Claude Desktop rows are first-class — `trellis-mcp`
 ## Examples & skill templates
 
 - [**examples/**](https://github.com/ronsse/trellis-ai/tree/main/examples) — runnable scripts: SDK local + remote, retrieve→act→record loop, custom extractor, custom classifier, LangGraph agent, batch ingest.
-- [**skills/**](https://github.com/ronsse/trellis-ai/tree/main/skills) — drop-in Claude Code skills: `retrieve-before-task`, `record-after-task`, `link-evidence`.
+- [**skills/**](https://github.com/ronsse/trellis-ai/tree/main/skills) — drop-in Claude Code skills: `retrieve-before-task`, `record-after-task`, `link-evidence`. Install with `trellis admin install-skills user` (or `trellis admin quickstart --with-skills user`).
 - [**docs/getting-started/**](https://github.com/ronsse/trellis-ai/tree/main/docs/getting-started) — IDE-specific MCP setup walkthroughs.
 
 ## Development

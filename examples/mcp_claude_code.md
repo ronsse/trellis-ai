@@ -78,7 +78,7 @@ quality loop learns.
 ## Troubleshooting
 
 - **Server didn't start**: run `trellis-mcp --help` directly. If `command not found`, the install didn't put it on `$PATH` — `pip install -e ".[dev]"` from the repo root will fix it.
-- **Tools don't appear in Claude Code**: confirm the entry exists in `~/.claude/settings.json` under `mcpServers.trellis-ai`, then restart Claude Code.
+- **Tools don't appear in Claude Code**: confirm the entry exists in `~/.claude/settings.json` under `mcpServers.trellis`, then restart Claude Code.
 - **`get_context` returns nothing**: load demo data with `trellis demo load` so retrieval has something to chew on, or ingest some real traces first.
 
 See [docs/getting-started/mcp-claude-code.md](../docs/getting-started/mcp-claude-code.md) for a deeper setup reference.

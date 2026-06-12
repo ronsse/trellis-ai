@@ -21,6 +21,8 @@ from trellis.errors import BackendNotInstalledError
 from trellis_cli._meta_wiring import wrap_cli_meta_analysis
 from trellis_cli.claude_integration import (
     get_claude_settings_path,
+    get_skills_target_dir,
+    install_skills,
     merge_mcp_server,
     read_claude_settings,
     write_claude_settings,
@@ -345,6 +347,90 @@ def stats(
         for name, count in counts.items():
             table.add_row(name, str(count))
         console.print(table)
+
+
+@admin_app.command("reconcile-feedback")
+def reconcile_feedback(
+    log_dir: Path = typer.Option(  # noqa: B008 - typer option default
+        ...,
+        "--log-dir",
+        help="Directory containing pack_feedback.jsonl to reconcile.",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Report counts without emitting any FEEDBACK_RECORDED events.",
+    ),
+    output_format: str = typer.Option(
+        "text", "--format", help="Output format: text or json"
+    ),
+) -> None:
+    """Backfill file-only feedback rows into the EventLog.
+
+    Replays ``pack_feedback.jsonl`` rows from ``--log-dir`` that are
+    missing a matching ``FEEDBACK_RECORDED`` event, closing the divergence
+    where the JSONL audit log was written but the governed event was not
+    (sink unavailable, crash between writes, file-only capture). Safe to
+    run repeatedly — already-present rows are left alone.
+
+    ``--dry-run`` scans the log and reports how many rows *would* be
+    emitted without touching the EventLog.
+    """
+    from trellis.feedback.recording import (  # noqa: PLC0415
+        load_feedback_log,
+        reconcile_feedback_log_to_event_log,
+    )
+
+    payload: dict[str, Any]
+    if dry_run:
+        signals = load_feedback_log(log_dir)
+        event_log = get_event_log()
+        from trellis.feedback.recording import (  # noqa: PLC0415
+            _feedback_id_in_event_log,
+        )
+
+        already_present = sum(
+            1 for fb in signals if _feedback_id_in_event_log(event_log, fb.feedback_id)
+        )
+        scanned = len(signals)
+        payload = {
+            "status": "ok",
+            "dry_run": True,
+            "scanned": scanned,
+            "already_present": already_present,
+            "would_emit": scanned - already_present,
+            "failed": 0,
+        }
+    else:
+        result = reconcile_feedback_log_to_event_log(log_dir, get_event_log())
+        payload = {
+            "status": "ok",
+            "dry_run": False,
+            "scanned": result.scanned,
+            "already_present": result.already_present,
+            "emitted": result.emitted,
+            "failed": result.failed,
+            "missing_feedback_ids": result.missing_feedback_ids,
+        }
+
+    if output_format == "json":
+        print(json.dumps(payload))
+        return
+
+    console.print(f"[bold]Reconcile Feedback[/bold] ({log_dir})")
+    console.print(f"  Scanned: {payload['scanned']}")
+    console.print(f"  Already present: {payload['already_present']}")
+    if dry_run:
+        console.print(f"  Would emit: {payload['would_emit']}")
+    else:
+        console.print(f"  [green]Emitted: {payload['emitted']}[/green]")
+        if payload["failed"]:
+            console.print(f"  [red]Failed: {payload['failed']}[/red]")
+            for fid in payload["missing_feedback_ids"]:
+                console.print(f"    - {fid}")
 
 
 @admin_app.command("graph-health")
@@ -676,11 +762,32 @@ def _ensure_gitignore(project_dir: Path) -> str | None:
     return "gitignore_updated"
 
 
+def _print_skills_summary(
+    skills: list[dict[str, str]], skills_dir: Path | None
+) -> None:
+    """Print the per-skill install lines for quickstart / install-skills."""
+    if skills_dir is None:
+        return
+    console.print(f"  [cyan]Skills installed to:[/cyan] {skills_dir}")
+    for entry in skills:
+        name, status = entry["name"], entry["status"]
+        if status == "skipped":
+            console.print(
+                f"    [dim]skipped[/dim] {name} (already present; --force to overwrite)"
+            )
+        elif status == "failed":
+            console.print(f"    [red]failed[/red] {name}: {entry.get('error', '')}")
+        else:
+            console.print(f"    [green]{status}[/green] {name}")
+
+
 def _print_quickstart_summary(
     steps: list[str],
     config_path: Path,
     settings_path: Path,
     mcp_on_path: bool,
+    skills: list[dict[str, str]] | None = None,
+    skills_dir: Path | None = None,
 ) -> None:
     """Print human-readable quickstart summary."""
     console.print("[green]Quickstart complete![/green]\n")
@@ -695,6 +802,8 @@ def _print_quickstart_summary(
             f"  [dim]MCP server already registered:[/dim]"
             f" {settings_path} (use --force to overwrite)"
         )
+    if skills is not None:
+        _print_skills_summary(skills, skills_dir)
     if not mcp_on_path:
         console.print(
             "\n  [yellow]Warning:[/yellow] trellis-mcp not found on PATH."
@@ -713,13 +822,29 @@ def _print_quickstart_summary(
 def quickstart(
     scope: str = typer.Option("root", help="root (global) or project (local)"),
     force: bool = typer.Option(
-        False, "--force", help="Overwrite existing MCP server entry"
+        False, "--force", help="Overwrite existing MCP server entry and skills"
+    ),
+    with_skills: str | None = typer.Option(
+        None,
+        "--with-skills",
+        help=(
+            "Also install the drop-in agent skills. "
+            "'user' -> ~/.claude/skills/, 'project' -> ./.claude/skills/. "
+            "Omit to skip skill installation."
+        ),
     ),
     output_format: str = typer.Option(
         "text", "--format", help="Output format: text or json"
     ),
 ) -> None:
     """Initialize stores and register MCP server with Claude Code."""
+    if with_skills is not None and with_skills not in ("user", "project"):
+        msg = f"--with-skills must be 'user' or 'project', got {with_skills!r}"
+        if output_format == "json":
+            typer.echo(json.dumps({"status": "error", "error": msg}))
+        else:
+            console.print(f"[red]Error:[/red] {msg}")
+        raise typer.Exit(EXIT_VALIDATION)
     config_path = get_config_dir() / "config.yaml"
     steps: list[str] = [_init_stores_if_needed(config_path)]
 
@@ -755,27 +880,93 @@ def quickstart(
         if gi_step:
             steps.append(gi_step)
 
+    # Optional skill installation
+    skills_results: list[dict[str, str]] | None = None
+    skills_dir: Path | None = None
+    if with_skills is not None:
+        skills_dir = get_skills_target_dir(
+            with_skills,
+            project_dir=project_dir if with_skills == "project" else None,
+        )
+        skills_results = install_skills(skills_dir, force=force)
+        any_failed = any(r["status"] == "failed" for r in skills_results)
+        steps.append("skills_install_partial" if any_failed else "skills_installed")
+
     mcp_on_path = shutil.which("trellis-mcp") is not None
 
     if output_format == "json":
-        typer.echo(
-            json.dumps(
-                {
-                    "status": "ok",
-                    "scope": scope,
-                    "steps": steps,
-                    "settings_path": str(settings_path),
-                    "mcp_on_path": mcp_on_path,
-                }
-            )
-        )
+        payload: dict[str, Any] = {
+            "status": "ok",
+            "scope": scope,
+            "steps": steps,
+            "settings_path": str(settings_path),
+            "mcp_on_path": mcp_on_path,
+        }
+        if skills_results is not None:
+            payload["skills"] = skills_results
+            payload["skills_dir"] = str(skills_dir)
+        typer.echo(json.dumps(payload))
     else:
         _print_quickstart_summary(
             steps,
             config_path,
             settings_path,
             mcp_on_path,
+            skills=skills_results,
+            skills_dir=skills_dir,
         )
+
+
+@admin_app.command("install-skills")
+def install_skills_cmd(
+    scope: str = typer.Argument(
+        "user", help="user (~/.claude/skills/) or project (./.claude/skills/)"
+    ),
+    force: bool = typer.Option(
+        False, "--force", help="Overwrite skill directories that already exist"
+    ),
+    output_format: str = typer.Option(
+        "text", "--format", help="Output format: text or json"
+    ),
+) -> None:
+    """Install the drop-in agent skills into a Claude Code skills directory."""
+    if scope not in ("user", "project"):
+        msg = f"scope must be 'user' or 'project', got {scope!r}"
+        if output_format == "json":
+            typer.echo(json.dumps({"status": "error", "error": msg}))
+        else:
+            console.print(f"[red]Error:[/red] {msg}")
+        raise typer.Exit(EXIT_VALIDATION)
+
+    skills_dir = get_skills_target_dir(
+        scope,
+        project_dir=Path.cwd() if scope == "project" else None,
+    )
+    results = install_skills(skills_dir, force=force)
+    failed = [r for r in results if r["status"] == "failed"]
+
+    if output_format == "json":
+        typer.echo(
+            json.dumps(
+                {
+                    "status": "partial" if failed else "ok",
+                    "scope": scope,
+                    "skills_dir": str(skills_dir),
+                    "skills": results,
+                }
+            )
+        )
+    else:
+        if failed:
+            console.print(
+                f"[yellow]Skills install completed with "
+                f"{len(failed)} failure(s).[/yellow]\n"
+            )
+        else:
+            console.print("[green]Skills install complete![/green]\n")
+        _print_skills_summary(results, skills_dir)
+    if failed:
+        raise typer.Exit(EXIT_INTERNAL)
 
 
 def _memory_prompt_available() -> bool:

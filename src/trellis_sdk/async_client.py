@@ -31,11 +31,14 @@ from trellis_sdk._http import (
     raise_for_status,
     wrap_transport_error,
 )
+from trellis_sdk.exceptions import TrellisProtocolError
 from trellis_wire import (
     BatchStrategy,
     DraftSubmissionRequest,
     DraftSubmissionResult,
     ExtractionBatch,
+    PackFeedbackRequest,
+    PackFeedbackResponse,
 )
 
 if TYPE_CHECKING:
@@ -379,6 +382,52 @@ class AsyncTrellisClient:
         }
         resp = await self._request("POST", "/api/v1/links", json=payload)
         return cast("str", resp.json()["edge_id"])
+
+    async def record_feedback(
+        self,
+        pack_id: str,
+        success: bool,
+        *,
+        helpful_item_ids: list[str] | None = None,
+        unhelpful_item_ids: list[str] | None = None,
+        followed_advisory_ids: list[str] | None = None,
+        target_id: str | None = None,
+        rating: float | None = None,
+        comment: str | None = None,
+    ) -> PackFeedbackResponse:
+        """Async variant of :meth:`TrellisClient.record_feedback`.
+
+        Records element-level feedback on a context pack. The server
+        routes the signal through
+        :func:`trellis.feedback.recording.record_feedback`, appending the
+        durable ``pack_feedback.jsonl`` row and emitting the authoritative
+        ``FEEDBACK_RECORDED`` event to the operational EventLog. See the
+        sync docstring for full parameter semantics.
+
+        Returns:
+            :class:`~trellis_wire.PackFeedbackResponse`. Check
+            ``event_log_in_sync`` to confirm the authoritative event
+            reached the log — ``False`` means only the JSONL audit row
+            landed and a reconcile is owed.
+        """
+        body = PackFeedbackRequest(
+            success=success,
+            helpful_item_ids=helpful_item_ids or [],
+            unhelpful_item_ids=unhelpful_item_ids or [],
+            followed_advisory_ids=followed_advisory_ids or [],
+            target_id=target_id,
+            rating=rating,
+            comment=comment,
+        )
+        path = f"/api/v1/packs/{pack_id}/feedback"
+        resp = await self._request("POST", path, json=body.model_dump(mode="json"))
+        try:
+            return PackFeedbackResponse.model_validate(resp.json())
+        except Exception as exc:  # JSONDecodeError / pydantic.ValidationError
+            # A malformed 2xx body must stay inside the TrellisError
+            # hierarchy — hooks' degradation contract depends on it.
+            msg = f"unexpected response body for {path}: {exc}"
+            raise TrellisProtocolError(msg, request_path=path) from exc
 
     # -- Observations + Measurements (Item 1 Phase 1) --
 

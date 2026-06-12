@@ -143,6 +143,32 @@ class TrellisTransportError(TrellisHttpError):
         )
 
 
+class TrellisProtocolError(TrellisHttpError):
+    """A 2xx response whose body was not the expected wire shape.
+
+    Raised when response parsing fails after a successful HTTP exchange
+    — a proxy/interstitial returning HTML, or SDK↔server wire-schema
+    skew the version handshake didn't catch. Wraps the underlying
+    decode/validation exception via ``__cause__``. Kept inside the
+    :class:`TrellisError` hierarchy so degradation-contract callers
+    (e.g. ``trellis_sdk.hooks``) catch it like every other SDK failure.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        request_path: str | None = None,
+        body: object = None,
+    ) -> None:
+        super().__init__(
+            message,
+            status_code=None,
+            body=body,
+            request_path=request_path,
+        )
+
+
 class TrellisAPIError(TrellisHttpError):
     """Legacy class for non-2xx HTTP responses — **not caught by new code paths**.
 

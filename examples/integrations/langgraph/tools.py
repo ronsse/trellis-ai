@@ -9,8 +9,8 @@ and import from there:
 
     from myproject.trellis_tools import create_trellis_tools
 
-    tools = create_trellis_tools()                                 # local mode
-    tools = create_trellis_tools(base_url="http://localhost:8420") # remote mode
+    # The SDK is HTTP-only — pass the base_url of a running trellis-api server.
+    tools = create_trellis_tools(base_url="http://127.0.0.1:8420")
     agent = create_react_agent(model, tools)
 
 Provides LangGraph-compatible tool functions that wrap the Trellis SDK,
@@ -28,16 +28,6 @@ from langchain_core.tools import tool
 from trellis_sdk import TrellisClient
 from trellis_sdk.skills import get_context_for_task, get_recent_activity
 
-_client: TrellisClient | None = None
-
-
-def _get_client(base_url: str | None = None) -> TrellisClient:
-    """Get or create a module-level TrellisClient."""
-    global _client  # noqa: PLW0603
-    if _client is None:
-        _client = TrellisClient(base_url=base_url)
-    return _client
-
 
 def create_trellis_tools(
     base_url: str | None = None,
@@ -45,7 +35,8 @@ def create_trellis_tools(
     """Create LangGraph-compatible Trellis tools.
 
     Args:
-        base_url: Optional REST API URL. If None, uses local stores.
+        base_url: REST API URL of a running ``trellis-api`` server. The SDK
+            is HTTP-only, so this must point at a live server.
 
     Returns:
         List of tool functions for use with LangGraph agents.

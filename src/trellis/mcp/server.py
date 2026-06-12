@@ -37,6 +37,7 @@ from fastmcp import FastMCP
 from mcp.shared.exceptions import McpError
 from mcp.types import INTERNAL_ERROR, INVALID_PARAMS, ErrorData
 
+from trellis.extract.trace_ingest_hook import run_trace_extraction
 from trellis.logging import configure_stderr_logging
 from trellis.mutate import (
     Command,
@@ -635,7 +636,8 @@ def save_experience(trace_json: str) -> str:
             data={"field": "trace_json", "error_class": type(exc).__name__},
         )
 
-    executor = build_curate_executor(_get_registry())
+    registry = _get_registry()
+    executor = build_curate_executor(registry)
     result = executor.execute(
         Command(
             operation=Operation.TRACE_INGEST,
@@ -654,6 +656,12 @@ def save_experience(trace_json: str) -> str:
                 "message": result.message,
             },
         )
+
+    # Feature-flagged post-ingest trace->graph extraction
+    # (TRELLIS_ENABLE_TRACE_EXTRACTION=1). Runs the deterministic
+    # TraceExtractor through the governed MutationExecutor after the trace
+    # is durably stored. Fail-soft inside the hook -- never blocks the save.
+    run_trace_extraction(registry, trace, requested_by="mcp:save_experience")
 
     return f"Trace saved: {result.created_id}"
 

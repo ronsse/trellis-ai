@@ -1,0 +1,110 @@
+# Trellis scheduled curation — GitHub Actions example.
+#
+# Copy to .github/workflows/curation.yml in your deployment repo.
+#
+# What it runs (see docs/getting-started/running-trellis.md for tiers):
+#   - daily 02:30 UTC : reconcile-feedback -> worker curate -> worker tune
+#   - weekly Sun 05:00: worker mine-precedents + analyze schema-evolution
+#
+# Promotion stays HUMAN-GATED. This workflow never promotes learning
+# candidates or schema-evolution candidates into the graph/ontology. It
+# uploads the review artifacts; a person approves them and runs
+# `trellis curate promote-learning` (Tier 2) or authors an ADR amendment
+# via `trellis admin draft-promotion-adr` (Tier 3) out of band.
+#
+# Prerequisites:
+#   - Point the operational stores at your shared backend via secrets, or
+#     the runner curates an empty sandbox.
+#   - `worker enrich` / `worker mine-precedents` need an llm: block + the
+#     matching [llm-openai] / [llm-anthropic] extra; they exit non-zero
+#     without one. mine-precedents is included below — drop it until an
+#     LLM is configured.
+#   - `worker tune` is a no-op unless learning.auto_promote.enabled: true.
+
+name: Trellis curation
+
+on:
+  schedule:
+    - cron: "30 2 * * *"   # daily 02:30 UTC — curate + tune
+    - cron: "0 5 * * 0"    # weekly Sun 05:00 UTC — mine-precedents + schema-evolution
+  workflow_dispatch: {}     # allow manual runs
+
+permissions:
+  contents: read
+
+env:
+  TRELLIS_CONFIG_DIR: ${{ github.workspace }}/.trellis/config
+  TRELLIS_DATA_DIR: ${{ github.workspace }}/.trellis/data
+  # Curate production data by pointing the operational stores at your shared
+  # backend. Without this the runner operates on an empty local sandbox.
+  TRELLIS_OPERATIONAL_PG_DSN: ${{ secrets.TRELLIS_OPERATIONAL_PG_DSN }}
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Daily: reconcile the feedback log, run the curation cycle, tuner pass.
+  # ---------------------------------------------------------------------------
+  daily-curate:
+    if: github.event.schedule == '30 2 * * *' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install Trellis
+        run: pip install trellis-ai
+
+      - name: Initialize config dir
+        run: trellis admin init --format json
+
+      - name: Reconcile feedback log into the EventLog
+        run: trellis admin reconcile-feedback --log-dir "$TRELLIS_DATA_DIR" --format json
+
+      - name: Run curation cycle (Tier 0 demote + Tier 2 prepare)
+        run: |
+          trellis worker curate \
+            --output-dir "$TRELLIS_DATA_DIR/review" \
+            --days 30 \
+            --format json
+
+      - name: Tuner pass (no-op unless learning.auto_promote.enabled)
+        run: trellis worker tune --format json
+
+      - name: Upload learning-candidate review artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: learning-candidates
+          path: ${{ env.TRELLIS_DATA_DIR }}/review/*.json
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------
+  # Weekly: mine precedent candidates + scan for schema-evolution candidates.
+  # Both are surface-only — they never promote into the graph/ontology.
+  # ---------------------------------------------------------------------------
+  weekly-mining:
+    if: github.event.schedule == '0 5 * * 0' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install Trellis
+        run: pip install trellis-ai
+
+      - name: Initialize config dir
+        run: trellis admin init --format json
+
+      # Requires an LLM client (llm: block + [llm-openai]/[llm-anthropic]).
+      # Remove this step until one is configured — it exits non-zero otherwise.
+      - name: Mine precedent candidates (surfaced for review, not promoted)
+        run: trellis worker mine-precedents --min-traces 3 --format json
+
+      - name: Scan for schema-evolution candidates (surface-only)
+        run: trellis analyze schema-evolution --format json
+</content>
+</invoke>

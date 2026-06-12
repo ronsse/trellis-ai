@@ -240,6 +240,42 @@ A `Trace` is the primary record of an agent or workflow execution. Every trace i
 
 ---
 
+## Graph Extraction (opt-in)
+
+By default, ingesting a trace stores it in the TraceStore but does **not** populate the knowledge graph. Setting `TRELLIS_ENABLE_TRACE_EXTRACTION=1` turns on a deterministic, post-ingest extraction stage that mines the trace's *structured* fields into graph nodes and edges through the governed mutation pipeline. The flag works identically across the CLI (`trellis ingest trace`), REST (`POST /api/v1/traces`), and MCP (`save_experience`) paths. Extraction runs after the trace is durably stored, reads the trace without mutating it, and never fails the ingest if it errors.
+
+Already-ingested traces can be backfilled with `trellis extract traces --since <days>` (see [operations.md](operations.md#trellis-extract-traces-backfill)).
+
+### What gets extracted
+
+Only structured fields are mined — free-text prose (`intent`, `step.args`/`step.result` payloads, `outcome.summary`) is deliberately left for a future opt-in LLM residue pass. Entity types and edge kinds are canonicalized to the well-known vocabulary (schema.org entity types, PROV-O edge verbs).
+
+| Source field | Entity (id scheme) | Canonical type |
+|--------------|--------------------|----------------|
+| The trace itself | `trace:<trace_id>` | `Activity` |
+| `context.agent_id` | `agent:<agent_id>` | `Agent` |
+| `context.team` | `team:<team>` | `Team` |
+| `context.domain` | `domain:<domain>` | `Concept` |
+| `tool_call` step `name` | `tool:<name>` | `SoftwareApplication` |
+| `evidence_used[].evidence_id` | `evidence:<id>` | `Dataset` |
+| `artifacts_produced[].artifact_id` | `artifact:<id>` | `File` (for `file`/`document` types) or `CreativeWork` |
+
+| Edge | PROV-aligned kind |
+|------|-------------------|
+| Activity → Agent | `wasAttributedTo` |
+| Activity → Team | `wasAssociatedWith` |
+| Activity → domain Concept | `appliesTo` |
+| Activity → tool SoftwareApplication | `used` |
+| Activity → evidence Dataset | `used` |
+| artifact File/CreativeWork → Activity | `wasGeneratedBy` |
+| Activity → parent Activity (`context.parent_trace_id`) | `wasInformedBy` |
+
+Every emitted node and edge stamps property-based provenance: `source_trace_id`, `agent_id`, and `extractor_tier` (`"deterministic"`). Edges are emitted with `allow_dangling=True` because trace graphs are inherently cross-batch (e.g. a parent trace's Activity or shared evidence is extracted by a different run).
+
+For example, ingesting Example 1 above with the flag on produces an `Activity` node (`trace:<id>`), an `Agent` node (`agent:code-orchestrator`), a `Concept` node (`domain:backend`), and two `SoftwareApplication` nodes (`tool:search_codebase`, `tool:edit_file`), wired with `wasAttributedTo`, `appliesTo`, and two `used` edges.
+
+---
+
 ## Ingestion
 
 ### From a File

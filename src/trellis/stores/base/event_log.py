@@ -196,6 +196,20 @@ class EventType(StrEnum):
     MUTATION_EXECUTED = "mutation.executed"
     MUTATION_REJECTED = "mutation.rejected"
 
+    #: Emitted by the API Review-queue endpoints (WP10) whenever a human
+    #: operator acts on a governance surface from the UI inbox — approving
+    #: or rejecting a tuner proposal, promoting learning candidates, or
+    #: drafting a schema-evolution ADR. This is an *audit-of-the-reviewer*
+    #: record that complements (never replaces) the surface-specific event
+    #: the underlying pipeline already emits (e.g. ``PARAMS_UPDATED``). The
+    #: payload always carries the authenticated key identity so the audit
+    #: trail attributes the decision to a credential. Payload schema:
+    #: ``{surface: str, action: str, key_id: str | None, key_name: str |
+    #: None, ...surface-specific detail}``. See
+    #: ``docs/design/adr-autonomy-ladder.md`` for which surfaces are
+    #: human-gated.
+    REVIEW_DECISION_RECORDED = "review.decision_recorded"
+
     # Token tracking
     TOKEN_TRACKED = "token.tracked"
     #: Emitted by a real-LLM-bearing context (today: the
@@ -234,6 +248,19 @@ class EventType(StrEnum):
     #: noisy outcomes can't silently unwind deliberate promotions.
     #: Closes Gap 2.2.
     PARAMETERS_DEGRADED = "parameters.degraded"
+    #: Tier-1 autonomy events (see
+    #: ``docs/design/adr-autonomy-ladder.md``). Distinct from the
+    #: ``PARAMS_UPDATED`` emitted by a *manual* ``metrics promote --commit``
+    #: so the audit trail makes the autonomous path self-identifying. A
+    #: ``trellis worker tune`` run that auto-applies a qualifying proposal
+    #: emits ``PARAMS_AUTO_PROMOTED`` *in addition to* the underlying
+    #: ``PARAMS_UPDATED`` (same governance path, no new mutation route);
+    #: when post-promotion monitoring later rolls that snapshot back, it
+    #: emits ``PARAMS_AUTO_ROLLED_BACK`` alongside the rollback's own
+    #: ``PARAMS_UPDATED``. The dedicated events are tier-1 invariant (c) —
+    #: every autonomous action leaves a self-identifying audit record.
+    PARAMS_AUTO_PROMOTED = "parameters.auto_promoted"
+    PARAMS_AUTO_ROLLED_BACK = "parameters.auto_rolled_back"
 
 
 class Event(VersionedModel):

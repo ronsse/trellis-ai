@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any
 from trellis.schemas.parameters import ParameterScope
 
 if TYPE_CHECKING:
+    from trellis.mutate import MutationExecutor
     from trellis.ops.registry import ParameterRegistry
 
 _LEARNING_ARTIFACT_VERSION = "1.0"
@@ -414,6 +415,76 @@ def build_learning_promotion_payloads(
     }
 
 
+def submit_learning_promotion(
+    executor: MutationExecutor,
+    entity_payload: Mapping[str, Any],
+    edge_payloads: Sequence[Mapping[str, Any]],
+    *,
+    requested_by: str,
+) -> dict[str, Any]:
+    """Submit one approved promotion through the governed pipeline.
+
+    Single write path shared by every surface that executes a reviewed
+    learning promotion (CLI ``curate promote-learning``, API review
+    queue) — an ``ENTITY_CREATE`` followed by per-target
+    ``LINK_CREATE``; a failed entity short-circuits the edges.
+    ``requested_by`` is the only thing that varies per surface.
+
+    ``entity_payload`` / ``edge_payloads`` come from
+    :func:`build_learning_promotion_payloads`, which always sets
+    ``entity_id`` and a non-empty ``properties`` dict on both — this
+    function trusts that contract rather than re-guarding.
+    """
+    from trellis.mutate import Command, CommandStatus, Operation  # noqa: PLC0415
+
+    entity_cmd = Command(
+        operation=Operation.ENTITY_CREATE,
+        args={
+            "entity_type": entity_payload["entity_type"],
+            "entity_id": entity_payload["entity_id"],
+            "name": entity_payload["name"],
+            "properties": dict(entity_payload["properties"]),
+        },
+        target_type="entity",
+        requested_by=requested_by,
+    )
+    entity_result = executor.execute(entity_cmd)
+    if entity_result.status != CommandStatus.SUCCESS:
+        return {
+            "status": "entity_failed",
+            "entity_status": entity_result.status.value,
+            "message": entity_result.message,
+        }
+
+    edge_outcomes = []
+    for edge in edge_payloads:
+        edge_cmd = Command(
+            operation=Operation.LINK_CREATE,
+            args={
+                "source_id": edge["source_id"],
+                "target_id": edge["target_id"],
+                "edge_kind": edge["edge_kind"],
+                "properties": dict(edge["properties"]),
+            },
+            target_id=edge["source_id"],
+            target_type="entity",
+            requested_by=requested_by,
+        )
+        edge_result = executor.execute(edge_cmd)
+        edge_outcomes.append(
+            {
+                "edge_kind": edge["edge_kind"],
+                "target_id": edge["target_id"],
+                "status": edge_result.status.value,
+            }
+        )
+    return {
+        "status": "promoted",
+        "node_id": entity_result.created_id,
+        "edges": edge_outcomes,
+    }
+
+
 #: Recommendation values that flow through ``prepare_learning_promotions``
 #: into ENTITY_CREATE payloads. The CLI surface checks the candidate's
 #: ``recommendation_type`` against this set to decide whether to surface
@@ -529,5 +600,6 @@ __all__ = [
     "build_learning_promotion_payloads",
     "normalize_intent_family",
     "prepare_learning_promotions",
+    "submit_learning_promotion",
     "write_learning_review_artifacts",
 ]

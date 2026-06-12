@@ -2,14 +2,21 @@
 
 A 5-10 minute on-ramp. Pick the path that matches what you want to do.
 
+> **Wiring an external agent system into Trellis?** Start at
+> [integrate-your-agent.md](integrate-your-agent.md) — the one-page decision
+> tree (MCP / Python SDK / REST), each path with concrete steps and a
+> "how you know it worked" check.
+
 | If you want to... | Start here |
 |---|---|
+| **Integrate any agent (decision tree)** | **[integrate-your-agent.md](integrate-your-agent.md)** |
 | Plug Trellis into Claude Code | [mcp-claude-code.md](mcp-claude-code.md) |
 | Plug Trellis into Cursor | [mcp-cursor.md](mcp-cursor.md) |
 | Plug Trellis into Claude Desktop | [mcp-claude-desktop.md](mcp-claude-desktop.md) |
 | Use the Python SDK in your own agent | [../../examples/sdk_local_demo.py](../../examples/sdk_local_demo.py) |
 | Wrap Trellis tools in LangGraph | [../../examples/integrations/langgraph/README.md](../../examples/integrations/langgraph/README.md) |
-| Run the REST API as a shared service | see "Remote Mode" below |
+| Run the REST API as a shared service | see "Running a shared server" below |
+| Run Trellis server-side (API/UI + curation workers) | [running-trellis.md](running-trellis.md) — the operating runbook |
 | Set up for a team / data platform / production | [setup-decisions.md](setup-decisions.md) — the human decisions to make |
 | Browse all macro tools and CLI commands | [../agent-guide/operations.md](../agent-guide/operations.md) |
 
@@ -72,23 +79,29 @@ You now have a working substrate. Add `--scope project` to `init` if you'd rathe
    trellis retrieve pack \
      --intent "improve transient failure handling" \
      --domain backend \
-     --max-tokens 1500 \
+     --max-items 20 \
      --format json
    ```
 
 5. **Wire it into your agent.** Pick an integration above (MCP, SDK, LangGraph) and follow the linked guide.
 
-## Local mode vs. Remote mode
+## In-process MCP vs. running a shared server
 
-| | Local | Remote |
+| | In-process MCP | Shared server |
 |---|---|---|
-| Use the SDK directly with no server | yes | — |
 | MCP server in Claude Code (single user) | recommended | possible |
+| SDK / REST clients (scripts, CI, Python agents) | — | required |
 | Multiple agents share one substrate | — | recommended |
-| Stores on Postgres / pgvector / S3 | — | required |
+| Stores on Postgres / pgvector / S3 | possible | recommended |
 | Process isolation between agent and store | — | yes |
 
-Default is local SQLite. Switch backends in `~/.config/trellis/config.yaml`:
+The MCP server (`trellis-mcp`) opens the stores **in-process** — no separate
+server needed for a single Claude Code user. The **SDK is HTTP-only**: it always
+talks to a running `trellis admin serve` (there is no in-process SDK mode), so
+scripts, CI, and Python agent frameworks need the shared server.
+
+Default stores are local SQLite. Switch backends in
+`~/.config/trellis/config.yaml`:
 
 ```yaml
 knowledge:
@@ -98,7 +111,7 @@ operational:
   trace: { backend: postgres, dsn: ${TRELLIS_OPERATIONAL_PG_DSN} }
 ```
 
-Start the REST API with:
+Start the REST API (and web UI) with:
 
 ```bash
 trellis admin serve --port 8420
@@ -106,8 +119,10 @@ trellis admin serve --port 8420
 
 ## Next steps
 
+- **Run it server-side** with [running-trellis.md](running-trellis.md) — the operating runbook for the API/UI and the curation/learning workers, their autonomy tiers, the human-in-the-loop steps, and a minimal single-host setup with a verification checklist. Scheduler recipes live in [../deployment/scheduled-curation.md](../deployment/scheduled-curation.md).
 - **Make the setup decisions** in [setup-decisions.md](setup-decisions.md) before any team / data-platform / production rollout — domains & ontology, domain ownership, API security.
 - **Read the playbooks** in [../agent-guide/playbooks.md](../agent-guide/playbooks.md) — task-shaped recipes for the most common workflows.
 - **Skim the schemas** in [../agent-guide/schemas.md](../agent-guide/schemas.md) so you know what shape data takes.
 - **Run an example** from [../../examples/](../../examples/).
-- **Drop the template skills** in [../../skills/](../../skills/) into your Claude Code or Cursor setup.
+- **Install the template skills** with `trellis admin install-skills user` (or
+  `trellis admin quickstart --with-skills user`) — see [../../skills/](../../skills/).

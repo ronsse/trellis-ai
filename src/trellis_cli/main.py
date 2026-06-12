@@ -17,6 +17,7 @@ from trellis_cli.metrics import metrics_app
 from trellis_cli.policy import policy_app
 from trellis_cli.retrieve import retrieve_app
 from trellis_cli.serve import serve_app
+from trellis_cli.worker import worker_app
 
 app = typer.Typer(
     name="trellis",
@@ -49,8 +50,6 @@ def _root(
 
 # Register command groups
 app.add_typer(admin_app, name="admin", help="Administration and setup")
-
-worker_app = typer.Typer(help="Run curation workers", no_args_is_help=True)
 
 app.add_typer(ingest_app, name="ingest")
 app.add_typer(

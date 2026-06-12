@@ -6,16 +6,17 @@ The inside-out version of these loops already exists in
 ``eval/scenarios/agent_loop_convergence/``; the loop tests under this
 directory port the assertions to the user-facing surface.
 
-Today's REST API exposes ``POST /api/v1/packs/{pack_id}/feedback``
-with ``success`` / ``notes`` only — no per-item ``helpful_item_ids``
-support. The MCP ``record_feedback`` tool already accepts those
-fields and emits a ``FEEDBACK_RECORDED`` event with them in the
-payload, which is exactly what
+The REST API exposes ``POST /api/v1/packs/{pack_id}/feedback`` with a
+``PackFeedbackRequest`` body carrying ``success`` plus per-item
+``helpful_item_ids`` / ``unhelpful_item_ids`` / ``followed_advisory_ids``;
+the MCP ``record_feedback`` tool accepts the same fields. Both surfaces
+emit a ``FEEDBACK_RECORDED`` event with those ids in the payload, which
+is exactly what
 :func:`trellis.retrieve.effectiveness.analyze_effectiveness` reads.
-The cleanest *outside-in* path that doesn't add new product surface
-is to drive feedback through the MCP client and everything else
-through REST. Both are real public surfaces; both are spawned against
-the same live Neon + AuraDB backend so they observe the same events.
+Some loop tests still drive feedback through the MCP client and
+everything else through REST — both are real public surfaces, and both
+are spawned against the same live Neon + AuraDB backend so they observe
+the same events.
 
 **Single-token intents.** Loop tests use single-token ``_INTENT``
 markers (e.g. ``"reconcile"``, ``"learnpromote"``) rather than

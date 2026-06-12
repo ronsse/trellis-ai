@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -32,10 +33,12 @@ import structlog
 import typer
 from rich.console import Console
 
+from trellis.core.base import utc_now
 from trellis.extract.commands import result_to_batch
 from trellis.extract.dispatcher import ExtractionDispatcher
 from trellis.extract.registry import ExtractorRegistry
 from trellis.extract.sources import SourceEntry, load_sources
+from trellis.extract.trace_ingest_hook import extract_trace_batch
 from trellis.mutate import build_curate_executor
 from trellis.schemas.extraction import ExtractionResult
 from trellis.stores.base.event_log import EventType
@@ -474,6 +477,108 @@ def refresh(  # noqa: PLR0912, PLR0915 - CLI dispatch with explicit branching by
                 console.print(f"      [red]-[/red] {key}")
             for key, (b, a) in (diff.get("changed") or {}).items():
                 console.print(f"      [yellow]~[/yellow] {key}: {b!r} -> {a!r}")
+
+
+@extract_app.command("traces")
+def traces(
+    since: int = typer.Option(
+        7,
+        "--since",
+        help="Backfill traces ingested within the last N days.",
+    ),
+    domain: str = typer.Option(
+        None,
+        "--domain",
+        help="Optional domain filter (matches TraceContext.domain).",
+    ),
+    limit: int = typer.Option(
+        1000,
+        "--limit",
+        help="Maximum number of traces to scan.",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Print drafts without executing the governed mutation batch.",
+    ),
+    output_format: str = typer.Option(
+        "text", "--format", help="Output format: text or json."
+    ),
+) -> None:
+    """Backfill the graph from already-ingested traces.
+
+    Iterates traces from the TraceStore (filtered by ``--since`` days and
+    optional ``--domain``) and runs each through
+    :func:`trellis.extract.trace_ingest_hook.extract_trace_batch` — the
+    same extraction core the live ingest hook uses — then executes the
+    governed batch. Reports per-trace draft counts.
+
+    With ``--dry-run`` the drafts are tallied and printed but no batch is
+    executed -- useful to preview the graph a backfill would create.
+    """
+    registry = _get_registry()
+    since_dt = utc_now() - timedelta(days=since)
+
+    try:
+        stored_traces = registry.operational.trace_store.query(
+            domain=domain,
+            since=since_dt,
+            limit=limit,
+        )
+    except Exception as exc:
+        if output_format == "json":
+            print(json.dumps({"status": "error", "message": str(exc)}))
+        else:
+            console.print(f"[red]Trace query failed: {exc}[/red]")
+        raise typer.Exit(code=EXIT_INTERNAL) from None
+
+    executor = build_curate_executor(registry)
+
+    per_trace: list[dict[str, Any]] = []
+    total_entities = 0
+    total_edges = 0
+
+    for trace in stored_traces:
+        result, batch = extract_trace_batch(trace, requested_by="cli:extract-traces")
+        n_entities = len(result.entities)
+        n_edges = len(result.edges)
+        total_entities += n_entities
+        total_edges += n_edges
+        per_trace.append(
+            {
+                "trace_id": trace.trace_id,
+                "domain": trace.context.domain,
+                "entities": n_entities,
+                "edges": n_edges,
+            }
+        )
+        if not dry_run and batch is not None:
+            executor.execute_batch(batch)
+
+    summary: dict[str, Any] = {
+        "traces_scanned": len(stored_traces),
+        "total_entities": total_entities,
+        "total_edges": total_edges,
+        "dry_run": dry_run,
+        "per_trace": per_trace,
+    }
+
+    if output_format == "json":
+        print(json.dumps({"status": "backfilled", **summary}))
+        return
+
+    verb = "Would extract" if dry_run else "Extracted"
+    console.print(f"[green]Trace backfill ({since} days)[/green]")
+    console.print(f"  Traces scanned:  {summary['traces_scanned']}")
+    console.print(f"  {verb}:        {total_entities} entities, {total_edges} edges")
+    if dry_run:
+        console.print("  [yellow]dry-run -- no mutations executed[/yellow]")
+    for row in per_trace:
+        if row["entities"] or row["edges"]:
+            console.print(
+                f"    - {row['trace_id']} ({row['domain'] or '-'}): "
+                f"{row['entities']} entities, {row['edges']} edges"
+            )
 
 
 if __name__ == "__main__":  # pragma: no cover
