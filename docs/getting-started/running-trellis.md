@@ -4,7 +4,7 @@
 
 > **What this covers:** every long-running or scheduled process Trellis ships (`trellis admin serve` and each `trellis worker` command), the autonomy tier each one operates under, exactly which decisions wait for a human, and a minimal single-host setup with a verification checklist.
 
-> **What this is not:** a backend-selection guide (see [`../deployment/recommended-config.yaml`](../deployment/recommended-config.yaml)), a scheduler cookbook (see [`../deployment/scheduled-curation.md`](../deployment/scheduled-curation.md) for crontab / systemd / GHA / K8s recipes), or the full CLI reference ([`../agent-guide/operations.md`](../agent-guide/operations.md)).
+> **What this is not:** a backend-selection guide (see [`../deployment/recommended-config.yaml`](../deployment/recommended-config.yaml)), a scheduler cookbook (see [`../deployment/scheduled-curation.md`](../deployment/scheduled-curation.md) for crontab / systemd / GHA / K8s recipes), the full CLI reference ([`../agent-guide/operations.md`](../agent-guide/operations.md)), or the agent-side onboarding story (see [integrate-your-agent.md](integrate-your-agent.md)).
 
 ---
 

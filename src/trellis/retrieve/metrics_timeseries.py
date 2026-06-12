@@ -18,8 +18,9 @@ order, are:
   ``after`` tags carry the noise label.
 * ``parameter_promotions`` — promote / reject / degrade governance
   event counts per bucket (``PARAMS_UPDATED`` + ``TUNER_PROPOSAL_*`` +
-  ``PARAMETERS_DEGRADED``; there are no ``PARAMS_AUTO_*`` events in this
-  tree — see :class:`trellis.stores.base.event_log.EventType`).
+  ``PARAMETERS_DEGRADED`` + ``PARAMS_AUTO_*``; the tier-1 auto events
+  ride alongside the underlying promote/degrade events — see
+  :class:`trellis.stores.base.event_log.EventType`).
 
 **Definitional parity with the convergence scenario.** Where a metric
 overlaps with what ``eval/scenarios/agent_loop_convergence`` computes,
@@ -416,18 +417,21 @@ def _after_is_noise(payload: dict[str, object]) -> bool:
     )
 
 
-#: Governance events counted by ``parameter_promotions``. ``PARAMS_AUTO_*``
-#: do not exist in this tree (checked against
-#: :class:`trellis.stores.base.event_log.EventType`); the audit trail
+#: Governance events counted by ``parameter_promotions``. The audit trail
 #: distinguishes promote (``PARAMS_UPDATED``), proposal lifecycle
-#: (``TUNER_PROPOSAL_CREATED`` / ``_REJECTED``), and the
-#: post-promotion degrade signal (``PARAMETERS_DEGRADED``, the closest
-#: thing to a rollback trigger).
+#: (``TUNER_PROPOSAL_CREATED`` / ``_REJECTED``), the post-promotion
+#: degrade signal (``PARAMETERS_DEGRADED``), and the tier-1 autonomous
+#: actions (``PARAMS_AUTO_PROMOTED`` / ``PARAMS_AUTO_ROLLED_BACK`` — see
+#: ``docs/design/adr-autonomy-ladder.md``; emitted *in addition to* the
+#: underlying ``PARAMS_UPDATED`` / degrade events, so the strip shows
+#: both the action and its autonomous provenance).
 _PROMOTION_EVENT_TYPES: tuple[EventType, ...] = (
     EventType.PARAMS_UPDATED,
     EventType.TUNER_PROPOSAL_CREATED,
     EventType.TUNER_PROPOSAL_REJECTED,
     EventType.PARAMETERS_DEGRADED,
+    EventType.PARAMS_AUTO_PROMOTED,
+    EventType.PARAMS_AUTO_ROLLED_BACK,
 )
 
 

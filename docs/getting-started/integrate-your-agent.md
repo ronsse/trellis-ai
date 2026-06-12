@@ -94,11 +94,6 @@ trellis admin health        # stores are healthy
 
 ## Path 2 — Python agent framework
 
-> **Status: landing shortly.** The `trellis_sdk.hooks` module described below
-> lands on branch `wp1-sdk-hooks`. It is **not on `main` yet** — use Path 3
-> (REST + CLI) today if you need to integrate before that branch merges. The
-> steps here document the target shape so you can plan for it.
-
 For LangGraph, CrewAI, or a custom Python loop, integrate through the SDK and
 its task hooks rather than MCP. The hooks are deliberately thin wrappers around
 the same REST surface.
@@ -235,11 +230,6 @@ set `TRELLIS_API_HOST=0.0.0.0` (or `--host 0.0.0.0`) for container deployments.
 
 ### The curation loops — `trellis worker`
 
-> **Status: landing shortly.** The `trellis worker` commands
-> (`curate`, `tune`, `enrich`, `mine-precedents`) land on branch
-> `wp3-worker-commands` and are **not on `main` yet**. The concepts they
-> automate already exist — see below — but the scheduled-loop CLI is forthcoming.
-
 These are the background loops that keep the substrate useful as production
 moves: demoting noisy items, tuning retrieval weights from feedback
 attribution, enriching items with LLM-derived tags, and mining recurring traces
@@ -247,7 +237,7 @@ into reusable precedents. They consume the same EventLog-authoritative feedback
 signal that the skills and hooks produce. For the concepts — refresh modes,
 schedule boundaries, and curator workflows — see
 [docs/agent-guide/freshness-and-curation.md](../agent-guide/freshness-and-curation.md).
-A dedicated operations guide, `running-trellis.md`, is forthcoming.
+For how to run them — flags, autonomy tiers, scheduling — see the operating runbook: [running-trellis.md](running-trellis.md) and [scheduled-curation.md](../deployment/scheduled-curation.md).
 
 ---
 
