@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 import pytest
 from typer.testing import CliRunner
 
+from trellis.learning import submit_learning_promotion
 from trellis.mutate.commands import (
     Command,
     CommandResult,
@@ -16,7 +17,6 @@ from trellis.mutate.commands import (
     Operation,
 )
 from trellis.mutate.executor import MutationExecutor
-from trellis.learning import submit_learning_promotion
 from trellis_cli.main import app
 
 runner = CliRunner()
