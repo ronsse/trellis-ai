@@ -395,7 +395,11 @@ needs a human in the loop to review candidates before promotion.
 
 ## Validating a deployment
 
-The single-command path:
+For the local docker-compose stack specifically, the dependency-free
+[`deploy/smoke.sh`](../../deploy/smoke.sh) probe runs the full
+endpoint + Postgres round-trip checklist — see
+[local-compose.md](local-compose.md#smoke-test--verification-checklist).
+For any deployment (cloud included), the single-command path:
 
 ```bash
 trellis admin smoke-test --url http://localhost:8420 \

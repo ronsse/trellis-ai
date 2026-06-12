@@ -208,6 +208,8 @@ The pattern is identical each time: **the machine prepares, the human commits.**
 
 The smallest real deployment is two processes on one host: the API/UI in one, a curation loop in the other. SQLite stores are fine for a single host; switch backends per [`../deployment/recommended-config.yaml`](../deployment/recommended-config.yaml) when you outgrow it.
 
+> Want the containerized Postgres + pgvector shape instead — an offline rehearsal of the AWS ECS + RDS deployment? See [`../deployment/local-compose.md`](../deployment/local-compose.md) for the one-command `docker compose up` path and its smoke checklist.
+
 ```bash
 # One-time setup
 trellis admin init                 # creates config.yaml + SQLite stores
