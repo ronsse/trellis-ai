@@ -37,6 +37,7 @@ from trellis.extract.telemetry import (
     analyze_extraction_validation,
     analyze_extractor_fallbacks,
 )
+from trellis.extract.trace import TRACE_SOURCE_HINT, TraceExtractor
 from trellis.extract.validators import (
     DraftLocalReferenceValidator,
     EmptyResultValidator,
@@ -68,8 +69,10 @@ __all__ = [
     "NoExtractorAvailableError",
     "OrphanProvenanceValidator",
     "ResidueSelector",
+    "TRACE_SOURCE_HINT",
     "SourceFallbackStats",
     "SourceValidationStats",
+    "TraceExtractor",
     "ValidationFinding",
     "analyze_extraction_validation",
     "analyze_extractor_fallbacks",

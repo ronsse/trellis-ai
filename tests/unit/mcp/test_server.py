@@ -162,6 +162,52 @@ class TestSaveExperience:
         result = save_experience(json.dumps(trace))
         assert result.startswith("Trace saved:")
 
+    def _rich_trace(self) -> dict:
+        return {
+            "source": "agent",
+            "intent": "fix the import",
+            "context": {"agent_id": "test-agent", "domain": "backend"},
+            "steps": [{"step_type": "tool_call", "name": "grep"}],
+            "outcome": {"status": "success"},
+        }
+
+    def test_extraction_flag_off_leaves_graph_empty(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("TRELLIS_ENABLE_TRACE_EXTRACTION", raising=False)
+        save_experience(json.dumps(self._rich_trace()))
+        assert temp_registry.knowledge.graph_store.count_nodes() == 0
+
+    def test_extraction_flag_on_populates_graph(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("TRELLIS_ENABLE_TRACE_EXTRACTION", "1")
+        result = save_experience(json.dumps(self._rich_trace()))
+        trace_id = result.split("Trace saved:")[1].strip()
+
+        graph = temp_registry.knowledge.graph_store
+        assert graph.count_nodes() > 0
+        assert graph.get_node(f"trace:{trace_id}") is not None
+        edges = graph.get_edges(f"trace:{trace_id}", direction="outgoing")
+        assert edges
+        for edge in edges:
+            assert edge.get("properties", {}).get("source_trace_id") == trace_id
+
+    def test_extraction_failure_does_not_fail_save(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("TRELLIS_ENABLE_TRACE_EXTRACTION", "1")
+        import trellis.extract.trace_ingest_hook as hook
+
+        def _boom(*_a: object, **_k: object) -> object:
+            msg = "boom"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(hook, "result_to_batch", _boom)
+        # Save must still succeed even though extraction explodes.
+        result = save_experience(json.dumps(self._rich_trace()))
+        assert result.startswith("Trace saved:")
+
 
 # ---------------------------------------------------------------------------
 # save_knowledge

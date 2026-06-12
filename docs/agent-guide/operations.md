@@ -147,6 +147,44 @@ EOF
 - Invalid JSON: exit code 1, prints parse error
 - Schema validation failure: exit code 1, prints Pydantic validation error
 
+#### Trace → graph extraction (opt-in)
+
+By default trace ingestion is write-only to the TraceStore — the trace is stored but no graph nodes/edges are created. Set the environment variable `TRELLIS_ENABLE_TRACE_EXTRACTION=1` (also accepts `true`/`yes`/`on`) to turn on a **post-ingest** deterministic extraction stage that mines the trace's structured fields into the knowledge graph through the governed `MutationExecutor`.
+
+The flag applies identically across all three trace-ingest paths: the CLI `trellis ingest trace`, the REST `POST /api/v1/traces`, and the MCP `save_experience` tool. Extraction always runs *after* the trace is durably stored, only ever *reads* the trace (traces stay immutable), and is fully fail-soft — a broken extraction is logged and swallowed, never failing the ingest.
+
+What gets extracted (deterministic, structured fields only) is documented in [trace-format.md → Graph Extraction](trace-format.md#graph-extraction-opt-in). Every emitted node and edge carries property-based provenance: `source_trace_id`, `agent_id`, and `extractor_tier`.
+
+When the flag is on, the CLI JSON output gains an `extraction` block:
+
+```json
+{"status": "ingested", "trace_id": "01JRK5...", "source": "agent", "intent": "...", "extraction": {"entities": 5, "edges": 4, "executed": true}}
+```
+
+### `trellis extract traces` (backfill)
+
+Backfill the graph from traces that were already ingested before the flag was enabled (or that need re-extraction). Iterates the TraceStore and runs the same `TraceExtractor` + governed-batch path the live hook uses.
+
+```bash
+trellis extract traces [--since <days>] [--domain <name>] [--limit <n>] [--dry-run] [--format text|json]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--since` | `7` | Backfill traces ingested within the last N days. |
+| `--domain` | (none) | Optional `TraceContext.domain` filter. |
+| `--limit` | `1000` | Max traces to scan. |
+| `--dry-run` | off | Tally and print per-trace draft counts without executing the mutation batch. |
+| `--format` | `text` | `text` or `json`. |
+
+This command does **not** require the `TRELLIS_ENABLE_TRACE_EXTRACTION` flag — it is the explicit, operator-driven backfill path. `--dry-run` previews the graph a real run would create without writing anything.
+
+**JSON output:**
+
+```json
+{"status": "backfilled", "traces_scanned": 12, "total_entities": 58, "total_edges": 44, "dry_run": false, "per_trace": [{"trace_id": "01JRK5...", "domain": "backend", "entities": 5, "edges": 4}]}
+```
+
 ### `trellis ingest evidence`
 
 Ingest evidence from a JSON file.

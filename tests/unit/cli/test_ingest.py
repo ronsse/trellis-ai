@@ -81,6 +81,96 @@ class TestIngestTrace:
         assert result.exit_code == 1
 
 
+def _rich_trace_json() -> str:
+    """A trace exercising agent / domain / tool / evidence / artifact."""
+    return json.dumps(
+        {
+            "source": "agent",
+            "intent": "Find and fix the broken import in auth_service.py",
+            "steps": [
+                {"step_type": "tool_call", "name": "search_codebase"},
+                {"step_type": "tool_call", "name": "edit_file"},
+            ],
+            "evidence_used": [{"evidence_id": "ev_123", "role": "reference"}],
+            "artifacts_produced": [{"artifact_id": "pr_847", "artifact_type": "pr"}],
+            "outcome": {"status": "success"},
+            "context": {"agent_id": "code-orchestrator", "domain": "backend"},
+        }
+    )
+
+
+class TestIngestTraceExtraction:
+    """Feature-flagged TRELLIS_ENABLE_TRACE_EXTRACTION post-ingest hook."""
+
+    def test_flag_off_writes_no_graph(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Flag absent -> behaviour byte-identical to today: trace stored,
+        # graph untouched.
+        monkeypatch.delenv("TRELLIS_ENABLE_TRACE_EXTRACTION", raising=False)
+        f = tmp_path / "trace.json"
+        f.write_text(_rich_trace_json())
+        result = runner.invoke(app, ["ingest", "trace", str(f), "--format", "json"])
+        assert result.exit_code == 0
+        data = json.loads(result.stdout.strip())
+        assert data["status"] == "ingested"
+        assert "extraction" not in data
+
+        from trellis_cli.stores import get_graph_store
+
+        assert get_graph_store().count_nodes() == 0
+
+    def test_flag_on_populates_graph_with_provenance(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("TRELLIS_ENABLE_TRACE_EXTRACTION", "1")
+        f = tmp_path / "trace.json"
+        f.write_text(_rich_trace_json())
+        result = runner.invoke(app, ["ingest", "trace", str(f), "--format", "json"])
+        assert result.exit_code == 0
+        data = json.loads(result.stdout.strip())
+        assert data["status"] == "ingested"
+        assert data["extraction"]["executed"] is True
+        assert data["extraction"]["entities"] > 0
+        assert data["extraction"]["edges"] > 0
+
+        from trellis_cli.stores import get_graph_store
+
+        graph = get_graph_store()
+        assert graph.count_nodes() > 0
+        trace_id = data["trace_id"]
+        # Activity node is retrievable by its stable id.
+        activity = graph.get_node(f"trace:{trace_id}")
+        assert activity is not None
+        # Every edge carries source_trace_id provenance.
+        edges = graph.get_edges(f"trace:{trace_id}", direction="outgoing")
+        assert edges
+        for edge in edges:
+            props = edge.get("properties", {})
+            assert props.get("source_trace_id") == trace_id
+
+    def test_extraction_failure_does_not_fail_ingest(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("TRELLIS_ENABLE_TRACE_EXTRACTION", "1")
+        f = tmp_path / "trace.json"
+        f.write_text(_rich_trace_json())
+        # Force the extraction batch to blow up; ingest must still succeed.
+        import trellis.extract.trace_ingest_hook as hook
+
+        def _boom(*_a: object, **_k: object) -> object:
+            msg = "extraction exploded"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(hook, "result_to_batch", _boom)
+        result = runner.invoke(app, ["ingest", "trace", str(f), "--format", "json"])
+        assert result.exit_code == 0
+        data = json.loads(result.stdout.strip())
+        assert data["status"] == "ingested"
+        assert data["extraction"]["executed"] is False
+        assert "extraction exploded" in data["extraction"]["error"]
+
+
 class TestIngestEvidence:
     def test_ingest_evidence_from_file(self, tmp_path: Path) -> None:
         f = tmp_path / "evidence.json"
