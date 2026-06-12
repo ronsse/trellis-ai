@@ -732,8 +732,6 @@ Shows total tokens, average per response, breakdown by layer and operation, and 
 
 Unattended learning/curation workers. See [`../design/adr-autonomy-ladder.md`](../design/adr-autonomy-ladder.md) for the four-tier autonomy model these commands operate under.
 
-> WP3 will add `curate` / `enrich` / `mine-precedents` subcommands to this group.
-
 ### `trellis worker tune`
 
 Run one `RuleTuner` pass and, when **Tier-1 auto-promotion** is enabled, auto-promote every qualifying proposal through the same governance pipeline `trellis metrics promote --commit` uses — then arm post-promotion monitoring so degradation auto-rolls-back.
@@ -781,6 +779,76 @@ Each autonomous action emits a **dedicated, self-identifying** event in addition
 Degradation that accrues *after* the promoting pass is caught on a later pass: each `worker tune` run re-monitors recent auto-promotions and rolls back any that have since degraded.
 
 The manual `trellis metrics promote` path is unchanged and emits only `PARAMS_UPDATED` — the dedicated events distinguish "a human promoted this" from "the system promoted this on its own."
+
+### `trellis worker curate`
+
+Run one **full curation cycle** (Tier-2). Calls the curation library functions directly — no shelling out — in this fixed order:
+
+1. **effectiveness feedback** (`run_effectiveness_feedback`) — demote: noise-tag low-value items;
+2. **advisory generation** (`AdvisoryGenerator.generate`);
+3. **advisory fitness loop** (`run_advisory_fitness_loop`) — adjust confidence / suppress weak advisories;
+4. **learning candidates** (`build_learning_observations_from_event_log` → `analyze_learning_observations` → `write_learning_review_artifacts`) — writes promote-half review artifacts to `--output-dir`.
+
+```bash
+trellis worker curate --output-dir DIR [--days N] [--interval SECONDS] \
+  [--dry-run] [--reconcile-first] \
+  [--skip-noise-tags] [--skip-advisories] [--skip-learning] \
+  [--format text|json]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--output-dir` / `-o` | (required) | Directory for the learning-candidate review artifacts. |
+| `--days` | `30` | Days of EventLog history to scan. |
+| `--interval` | (off) | Loop mode: re-run the cycle every N seconds until SIGINT/SIGTERM. Plain sleep — **no scheduler dependency** (APScheduler/Celery deliberately rejected). |
+| `--dry-run` | off | Analyze only — no noise tags, no advisory mutations, no artifacts written. |
+| `--reconcile-first` | off | Backfill `pack_feedback.jsonl` into the EventLog (`reconcile_feedback_log_to_event_log`) before the cycle. |
+| `--skip-noise-tags` | off | Skip stage 1. |
+| `--skip-advisories` | off | Skip stages 2 + 3. |
+| `--skip-learning` | off | Skip stage 4. |
+| `--format` | `text` | `text` or `json`. |
+
+**Promotion stays human-gated.** This command writes learning candidates for review and **never promotes** (Tier-2 invariant). To promote, review the emitted `promotion_decisions.template.json`, set `approved: true` on the rows you want, then run `trellis curate promote-learning`. In `--interval` mode each cycle logs one structured `worker_curate.cycle` line with the headline counts (noise-tagged, advisories generated/suppressed, candidates written); SIGINT/SIGTERM drains the current cycle and exits cleanly.
+
+### `trellis worker enrich`
+
+Batch-enrich under-tagged documents via the LLM `EnrichmentService`, writing the suggested tags / classification / importance back into each document's `metadata.content_tags`.
+
+```bash
+trellis worker enrich [--concurrency N] [--limit N] \
+  [--confidence-threshold F] [--dry-run] [--format text|json]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--concurrency` | `3` | Parallel enrichment requests. |
+| `--limit` | `50` | Max documents to enrich this run. |
+| `--confidence-threshold` | `0.5` | Re-enrich documents whose `content_tags.tag_confidence` is below this value. |
+| `--dry-run` | off | Select + report candidates without calling the LLM. |
+| `--format` | `text` | `text` or `json`. |
+
+**Selection predicate.** A document is a candidate when its `metadata.content_tags` is missing/empty, **or** it carries no `tag_confidence` stamp, **or** that stamp is strictly below `--confidence-threshold`. Documents already tagged at/above the threshold are skipped.
+
+**Requires an LLM extra.** Enrichment needs a configured `llm:` block plus the matching `[llm-openai]` / `[llm-anthropic]` extra. With no buildable client the command **exits non-zero with an actionable message** naming the missing config/extra — it never silently no-ops.
+
+### `trellis worker mine-precedents`
+
+Mine precedent candidates from failure / partial traces (wraps `PrecedentMiner.generate_precedent_candidates`).
+
+```bash
+trellis worker mine-precedents [--domain D] [--min-traces N] \
+  [--limit N] [--dry-run] [--format text|json]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--domain` | (all) | Restrict mining to this trace domain. |
+| `--min-traces` | `3` | Minimum failure/partial traces required to mine. |
+| `--limit` | `100` | Max traces to analyze. |
+| `--dry-run` | off | Report how many failure/partial traces are in scope without calling the LLM. |
+| `--format` | `text` | `text` or `json`. |
+
+Candidates are **surfaced** (the miner emits `PRECEDENT_PROMOTED` events as it intends) but **not auto-promoted** into the graph — review before acting. Like `enrich`, this requires an LLM extra and exits loudly when none is configured.
 
 ---
 

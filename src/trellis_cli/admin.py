@@ -172,8 +172,7 @@ def init_learning_params(
             print(json.dumps({"status": "exists", "path": str(target)}))
         else:
             console.print(
-                f"[yellow]Already exists: {target}."
-                " Pass --force to overwrite.[/yellow]"
+                f"[yellow]Already exists: {target}. Pass --force to overwrite.[/yellow]"
             )
         raise typer.Exit(code=EXIT_OK)
 
@@ -346,6 +345,90 @@ def stats(
         for name, count in counts.items():
             table.add_row(name, str(count))
         console.print(table)
+
+
+@admin_app.command("reconcile-feedback")
+def reconcile_feedback(
+    log_dir: Path = typer.Option(  # noqa: B008 - typer option default
+        ...,
+        "--log-dir",
+        help="Directory containing pack_feedback.jsonl to reconcile.",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Report counts without emitting any FEEDBACK_RECORDED events.",
+    ),
+    output_format: str = typer.Option(
+        "text", "--format", help="Output format: text or json"
+    ),
+) -> None:
+    """Backfill file-only feedback rows into the EventLog.
+
+    Replays ``pack_feedback.jsonl`` rows from ``--log-dir`` that are
+    missing a matching ``FEEDBACK_RECORDED`` event, closing the divergence
+    where the JSONL audit log was written but the governed event was not
+    (sink unavailable, crash between writes, file-only capture). Safe to
+    run repeatedly — already-present rows are left alone.
+
+    ``--dry-run`` scans the log and reports how many rows *would* be
+    emitted without touching the EventLog.
+    """
+    from trellis.feedback.recording import (  # noqa: PLC0415
+        load_feedback_log,
+        reconcile_feedback_log_to_event_log,
+    )
+
+    payload: dict[str, Any]
+    if dry_run:
+        signals = load_feedback_log(log_dir)
+        event_log = get_event_log()
+        from trellis.feedback.recording import (  # noqa: PLC0415
+            _feedback_id_in_event_log,
+        )
+
+        already_present = sum(
+            1 for fb in signals if _feedback_id_in_event_log(event_log, fb.feedback_id)
+        )
+        scanned = len(signals)
+        payload = {
+            "status": "ok",
+            "dry_run": True,
+            "scanned": scanned,
+            "already_present": already_present,
+            "would_emit": scanned - already_present,
+            "failed": 0,
+        }
+    else:
+        result = reconcile_feedback_log_to_event_log(log_dir, get_event_log())
+        payload = {
+            "status": "ok",
+            "dry_run": False,
+            "scanned": result.scanned,
+            "already_present": result.already_present,
+            "emitted": result.emitted,
+            "failed": result.failed,
+            "missing_feedback_ids": result.missing_feedback_ids,
+        }
+
+    if output_format == "json":
+        print(json.dumps(payload))
+        return
+
+    console.print(f"[bold]Reconcile Feedback[/bold] ({log_dir})")
+    console.print(f"  Scanned: {payload['scanned']}")
+    console.print(f"  Already present: {payload['already_present']}")
+    if dry_run:
+        console.print(f"  Would emit: {payload['would_emit']}")
+    else:
+        console.print(f"  [green]Emitted: {payload['emitted']}[/green]")
+        if payload["failed"]:
+            console.print(f"  [red]Failed: {payload['failed']}[/red]")
+            for fid in payload["missing_feedback_ids"]:
+                console.print(f"    - {fid}")
 
 
 @admin_app.command("graph-health")
@@ -1693,7 +1776,7 @@ def _render_promotion_adr(
         alignment_diff_block = (
             "Add to `_ENTITY_SCHEMA_ALIGNMENT` (or `_EDGE_SCHEMA_ALIGNMENT`):\n"
             "\n```python\n"
-            f"{well_known_constant_name}: \"{alignment_uri}\",\n"
+            f'{well_known_constant_name}: "{alignment_uri}",\n'
             "```"
         )
     else:
@@ -1715,9 +1798,7 @@ def _render_promotion_adr(
         count=candidate.get("count", 0),
         count_threshold=int(thresholds["well_known_count_threshold"]),
         distinct_extractors_count=len(extractors),
-        distinct_extractors_threshold=int(
-            thresholds["well_known_distinct_extractors"]
-        ),
+        distinct_extractors_threshold=int(thresholds["well_known_distinct_extractors"]),
         distinct_extractors_block=(
             "\n".join(f"- `{e}`" for e in extractors) or "- _none recorded_"
         ),
@@ -1727,9 +1808,7 @@ def _render_promotion_adr(
             "\n".join(f"- `{d}`" for d in domains) or "- _none recorded_"
         ),
         avg_signal_quality=candidate.get("avg_signal_quality", ""),
-        min_signal_quality_threshold=str(
-            thresholds["well_known_min_signal_quality"]
-        ),
+        min_signal_quality_threshold=str(thresholds["well_known_min_signal_quality"]),
         evidence_window_days_observed=_evidence_span_days(first_seen, last_seen),
         window_days_threshold=int(thresholds["well_known_window_days"]),
         first_seen=first_seen,
@@ -1877,9 +1956,7 @@ def draft_promotion_adr(
     open_string = str(candidate.get("open_string_value", "unknown"))
     slug = "".join(c if c.isalnum() else "_" for c in open_string).strip("_").lower()
     output_path = (
-        output
-        if output is not None
-        else Path("docs/design") / f"adr-promote-{slug}.md"
+        output if output is not None else Path("docs/design") / f"adr-promote-{slug}.md"
     )
 
     if output_path.exists() and not force:
@@ -1900,9 +1977,7 @@ def draft_promotion_adr(
             path=str(output_path),
             candidate_id=candidate_id,
         )
-        console.print(
-            f"[yellow]Overwriting existing file at {output_path}.[/yellow]"
-        )
+        console.print(f"[yellow]Overwriting existing file at {output_path}.[/yellow]")
 
     drafted_date = datetime.now(tz=UTC).date().isoformat()
     rendered = _render_promotion_adr(
