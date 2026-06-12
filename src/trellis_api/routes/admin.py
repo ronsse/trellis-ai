@@ -34,6 +34,7 @@ from trellis.retrieve.effectiveness import (
     analyze_effectiveness,
     run_effectiveness_feedback,
 )
+from trellis.retrieve.metrics_timeseries import compute_timeseries
 from trellis.stores.advisory_store import AdvisoryStore
 from trellis.stores.base.event_log import EventLog, EventType
 from trellis_api.app import get_registry
@@ -47,12 +48,15 @@ from trellis_wire.dtos import (
     LearningPromotionRequest,
     LearningPromotionResponse,
     LearningPromotionResultRow,
+    MetricsTimeseriesResponse,
     ProposalDecisionResponse,
     ProposalPreviewResponse,
     ProposalRejectRequest,
     SchemaEvolutionCandidate,
     SchemaEvolutionListResponse,
     StatsResponse,
+    TimeseriesPointResponse,
+    TimeseriesSeriesResponse,
     TunerProposalListResponse,
     TunerProposalSummary,
 )
@@ -118,6 +122,67 @@ def apply_noise_tags(
         "noise_candidates_tagged": len(report.noise_candidates),
         **report.model_dump(),
     }
+
+
+# -- Improvement-metrics dashboard (WP11) --
+
+
+@router.get("/metrics/timeseries", response_model=MetricsTimeseriesResponse)
+def metrics_timeseries(
+    metric: str = Query(..., description="One of the five improvement metrics"),
+    days: int = Query(30, description="Look-back window in days"),
+    bucket: str = Query("day", description="Bucket granularity (only 'day')"),
+    group_by: str = Query(
+        "none", description="Grouping axis: domain | intent_family | none"
+    ),
+) -> MetricsTimeseriesResponse:
+    """Compute an improvement metric as a daily time series.
+
+    Read-only — the aggregation in
+    :func:`trellis.retrieve.metrics_timeseries.compute_timeseries` reads
+    the EventLog and never mutates a store. Buckets with no data are
+    omitted (not zero-filled). An unknown ``metric`` / ``group_by`` /
+    ``bucket`` (or a non-positive ``days``) returns 422 rather than a
+    silent empty result, so a typo surfaces loudly.
+    """
+    if bucket != "day":
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unsupported bucket {bucket!r}; only 'day' is implemented.",
+        )
+    registry = get_registry()
+    try:
+        result = compute_timeseries(
+            registry.operational.event_log,
+            metric=metric,
+            days=days,
+            group_by=group_by,
+        )
+    except ValueError as exc:
+        # Unknown metric / group_by / non-positive days — a client input
+        # error, surfaced as 422 (not a 500).
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    return MetricsTimeseriesResponse(
+        metric=result.metric,
+        bucket=result.bucket,
+        group_by=result.group_by,
+        days=result.days,
+        series=[
+            TimeseriesSeriesResponse(
+                group_key=s.group_key,
+                points=[
+                    TimeseriesPointResponse(
+                        bucket_start=p.bucket_start,
+                        value=p.value,
+                        sample_count=p.sample_count,
+                    )
+                    for p in s.points
+                ],
+            )
+            for s in result.series
+        ],
+    )
 
 
 # -- Advisories --

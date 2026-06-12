@@ -474,3 +474,60 @@ class CodeProposalListResponse(WireModel):
 
     count: int = 0
     proposals: list[CodeProposalSummary] = Field(default_factory=list)
+
+
+# -- Metrics dashboard (WP11) --
+#
+# DTOs backing ``GET /admin/metrics/timeseries`` — server-computed
+# improvement-metric trends read from the EventLog (no new storage). The
+# aggregation lives in ``trellis.retrieve.metrics_timeseries``; these
+# DTOs are the wire projection of its result dataclasses.
+
+
+class TimeseriesPointResponse(WireModel):
+    """One bucket's value for one series.
+
+    ``bucket_start`` is a UTC calendar-day key (``"YYYY-MM-DD"``).
+    ``value`` is the metric value for that bucket; ``sample_count`` is
+    the number of underlying observations (packs, items, or events —
+    metric-dependent) so clients can dim low-confidence points.
+
+    Buckets with no contributing events are **omitted** from a series
+    rather than zero-filled — clients infer gaps from the missing
+    ``bucket_start`` keys (an absent day means "no signal", not "zero").
+    """
+
+    bucket_start: str
+    value: float
+    sample_count: int = 0
+
+
+class TimeseriesSeriesResponse(WireModel):
+    """One group's ordered list of buckets.
+
+    ``group_key`` is the resolved grouping value: a domain, an
+    intent_family, ``"all"`` when ungrouped, or — for
+    ``parameter_promotions`` — the governance event type. Points are
+    sorted by ``bucket_start`` ascending and omit empty buckets (see
+    :class:`TimeseriesPointResponse`).
+    """
+
+    group_key: str
+    points: list[TimeseriesPointResponse] = Field(default_factory=list)
+
+
+class MetricsTimeseriesResponse(WireModel):
+    """Response for ``GET /admin/metrics/timeseries``.
+
+    Echoes the request parameters (``metric`` / ``bucket`` / ``group_by``
+    / ``days``) so the client can label the chart without re-deriving
+    them, and carries one series per resolved group key. An empty store
+    (or a metric with no events in the window) yields an empty
+    ``series`` list.
+    """
+
+    metric: str
+    bucket: str = "day"
+    group_by: str = "none"
+    days: int = 30
+    series: list[TimeseriesSeriesResponse] = Field(default_factory=list)

@@ -873,6 +873,7 @@ Start with `trellis admin serve` or `trellis-api`. Base path: `/api/v1/`.
 | GET | `/health` | Health check |
 | GET | `/stats` | Store statistics |
 | GET | `/effectiveness` | Context effectiveness report |
+| GET | `/metrics/timeseries` | Improvement-metric trend series (see below) |
 
 ### Review queue (admin scope)
 
@@ -920,6 +921,59 @@ server resolves `<dir>` from `TRELLIS_LEARNING_ARTIFACTS_DIR`, falling back
 to `<data_dir>/learning`. When no artifact is found, the list endpoint
 returns an empty list plus a `hint`, and the promote endpoint returns
 `409`.
+
+### Improvement-metrics dashboard (admin scope)
+
+The **Metrics** view in the static UI (`/ui/` → **Metrics**) charts five
+improvement metrics over time. Every series is computed **server-side from
+the EventLog on read** — there is no new storage and no caching layer (POC
+scale). The endpoint is on the admin router, so it requires the `admin`
+scope and respects `TRELLIS_UI_ENABLED` / ops-gating like the rest of
+admin. It is read-only and never mutates a store.
+
+```
+GET /api/v1/metrics/timeseries?metric=<name>&days=<n>&bucket=day&group_by=<axis>
+```
+
+| Param | Values | Default | Notes |
+|-------|--------|---------|-------|
+| `metric` | one of the five below | — (required) | Unknown value → `422` |
+| `days` | positive int | `30` | Look-back window; non-positive → `422` |
+| `bucket` | `day` | `day` | Only daily buckets are implemented; anything else → `422` |
+| `group_by` | `domain` \| `intent_family` \| `none` | `none` | Unknown value → `422` |
+
+The five metrics (priority order; each a named `metric` value):
+
+| Metric | Definition |
+|--------|------------|
+| `pack_success_rate` | Share of graded packs with a positive outcome per bucket (`PACK_ASSEMBLED ⋈ FEEDBACK_RECORDED` on `pack_id`, same join as `learning/pack_observations.py`). |
+| `reference_rate` | `items_referenced / items_served` per bucket — the best "are packs getting better" proxy. Pooled per bucket (sum referenced / sum served). |
+| `advisory_fitness` | Mean advisory confidence per bucket (from the fitness loop's `ADVISORY_SUPPRESSED` / `ADVISORY_RESTORED` `new_confidence`); `sample_count` is the suppressed-advisory count. |
+| `noise_tag_volume` | Items flipped to `signal_quality="noise"` per bucket, counted from `TAGS_REFRESHED` audit events whose `after` tags carry the noise label. |
+| `parameter_promotions` | Governance event counts per bucket (`PARAMS_UPDATED` + `TUNER_PROPOSAL_CREATED` / `_REJECTED` + `PARAMETERS_DEGRADED`). There are no `PARAMS_AUTO_*` events in this tree; `parameter_promotions` groups by event **type**, not by `domain` / `intent_family`. |
+
+**Response shape.** A list of series, each with a `group_key` and a list of
+`{bucket_start, value, sample_count}` points sorted ascending. **Buckets with
+no data are omitted** (not zero-filled) — clients infer gaps from the missing
+`bucket_start` keys (an absent day means "no signal", not "zero"). Grouping
+resolves `domain` from the `PACK_ASSEMBLED` payload and `intent_family` from
+the `FEEDBACK_RECORDED` payload; events lacking the requested dimension fall
+under `"all"`. The aggregation lives in
+`trellis.retrieve.metrics_timeseries.compute_timeseries` (the route is a thin
+adapter).
+
+**Definitional parity.** Where a metric overlaps with the agent-loop
+convergence scenario, the formula matches that scenario's helpers in
+`eval/scenarios/_convergence_common.py` (`pack_success_rate` ↔
+`round_success_rate`; `reference_rate` ↔ the useful-fraction in
+`_base_round_metrics` / `_convergence_stats`; `advisory_fitness`'s suppressed
+count ↔ `advisories_suppressed_total`). Each shared formula is cross-referenced
+in a code comment at its call site.
+
+**UI.** Metrics 1–4 render as inline-SVG line charts (zero dependencies, no
+build step); `parameter_promotions` renders as an annotated events strip
+(grouped bars by event type). A domain / intent-family group-by selector and a
+day-window selector drive all charts.
 
 ---
 

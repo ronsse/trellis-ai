@@ -106,6 +106,48 @@
         .card .value { font-size: 2rem; font-weight: 700; }
         .card .sub { font-size: 0.8rem; color: var(--text-dim); margin-top: 0.25rem; }
 
+        /* Metric charts (improvement-metrics dashboard) */
+        .metric-charts {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
+            gap: 1rem;
+            margin: 1.5rem 0;
+        }
+        .metric-chart {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1.25rem;
+        }
+        .metric-chart h3 {
+            font-size: 0.95rem;
+            margin-bottom: 0.15rem;
+        }
+        .metric-chart .chart-sub {
+            font-size: 0.75rem;
+            color: var(--text-dim);
+            margin-bottom: 0.75rem;
+        }
+        .metric-chart svg { width: 100%; height: auto; display: block; }
+        .metric-chart .chart-empty {
+            color: var(--text-dim);
+            font-size: 0.8rem;
+            padding: 2rem 0;
+            text-align: center;
+        }
+        .metric-legend {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.5rem 1rem;
+            margin-top: 0.6rem;
+            font-size: 0.72rem;
+            color: var(--text-dim);
+        }
+        .metric-legend .legend-item { display: flex; align-items: center; gap: 0.3rem; }
+        .metric-legend .legend-swatch {
+            width: 10px; height: 10px; border-radius: 2px; display: inline-block;
+        }
+
         /* Status section */
         .status-section {
             background: var(--surface);
@@ -943,13 +985,14 @@
         </span>
         <div class="nav-links">
             <a href="#" class="active" data-view="dashboard">Dashboard</a>
+            <a href="#" data-view="metrics">Metrics</a>
             <a href="#" data-view="review">Review</a>
             <a href="#" data-view="evolution">Evolution</a>
             <a href="#" data-view="graph">Graph</a>
             <a href="#" data-view="traces">Traces</a>
             <a href="#" data-view="precedents">Precedents</a>
         </div>
-        <span class="shortcuts-hint"><kbd>/</kbd> Search &middot; <kbd>1</kbd>-<kbd>6</kbd> Views &middot; <kbd>Esc</kbd> Close</span>
+        <span class="shortcuts-hint"><kbd>/</kbd> Search &middot; <kbd>1</kbd>-<kbd>7</kbd> Views &middot; <kbd>Esc</kbd> Close</span>
         <button class="btn-icon" id="api-key-toggle" title="API key" onclick="toggleKeyBanner()">&#x1F511;</button>
     </nav>
 
@@ -982,6 +1025,32 @@
                 <h2>Store Health</h2>
                 <div id="health-rows"></div>
             </div>
+        </div>
+
+        <!-- ============ Metrics (improvement-metrics dashboard) ============ -->
+        <div id="view-metrics" style="display:none">
+            <div class="section-header">
+                <h2>Improvement Metrics</h2>
+                <div class="search-bar" style="margin:0">
+                    <select id="metrics-days">
+                        <option value="7">Last 7 days</option>
+                        <option value="30" selected>Last 30 days</option>
+                        <option value="90">Last 90 days</option>
+                    </select>
+                    <select id="metrics-group-by">
+                        <option value="none" selected>No grouping</option>
+                        <option value="domain">By domain</option>
+                        <option value="intent_family">By intent family</option>
+                    </select>
+                    <button onclick="loadMetrics()">Refresh</button>
+                </div>
+            </div>
+            <p style="font-size:0.8rem; color:var(--text-dim); margin-bottom:1rem;">
+                Trends computed from the EventLog on read. Each metric shares its
+                definition with the agent-loop convergence scenario. Buckets with no
+                data are omitted (gaps mean "no signal", not zero).
+            </p>
+            <div class="metric-charts" id="metric-charts"></div>
         </div>
 
         <!-- ============ Review (human-decision inbox) ============ -->
@@ -1271,7 +1340,7 @@
         }
 
         // -- View switching --
-        const views = ['dashboard', 'review', 'evolution', 'graph', 'traces', 'precedents'];
+        const views = ['dashboard', 'metrics', 'review', 'evolution', 'graph', 'traces', 'precedents'];
         const viewLoaded = {};
         document.querySelectorAll('nav a[data-view]').forEach(link => {
             link.addEventListener('click', e => {
@@ -1289,6 +1358,7 @@
             });
             if (!viewLoaded[name]) {
                 viewLoaded[name] = true;
+                if (name === 'metrics') loadMetrics();
                 if (name === 'review') loadReview();
                 if (name === 'evolution') loadEvolution();
                 if (name === 'traces') loadTraces();
@@ -1317,7 +1387,7 @@
                     document.getElementById('trace-domain').focus();
                 }
             }
-            if (e.key >= '1' && e.key <= '6') {
+            if (e.key >= '1' && e.key <= '7') {
                 switchView(views[parseInt(e.key) - 1]);
             }
             if (e.key === 'Escape') {
@@ -1343,6 +1413,241 @@
             const label = ok ? 'OK' : 'DOWN';
             div.innerHTML = `<span>${escHtml(name)}</span><span class="badge ${cls}">${label}</span>`;
             return div;
+        }
+
+        // ============================================================
+        //  METRICS (improvement-metrics dashboard)
+        // ============================================================
+        // Inline SVG rendering — no chart framework, no build step. Trend
+        // metrics (1-4) render as line charts; parameter_promotions (5)
+        // renders as an annotated events strip (grouped bars by event type).
+
+        // Series palette — stable order so a group keeps its colour across refreshes.
+        const SERIES_COLORS = [
+            '#6366f1', '#22c55e', '#f59e0b', '#3b82f6', '#ec4899',
+            '#14b8a6', '#a78bfa', '#ef4444', '#84cc16', '#f97316'
+        ];
+
+        // Trend metrics (line charts). Each: title + sub describing the formula.
+        const TREND_METRICS = [
+            { metric: 'pack_success_rate', title: 'Pack success rate',
+              sub: 'share of graded packs with a positive outcome', pct: true },
+            { metric: 'reference_rate', title: 'Reference rate',
+              sub: 'items_referenced / items_served (best "are packs improving" proxy)', pct: true },
+            { metric: 'advisory_fitness', title: 'Advisory fitness',
+              sub: 'mean advisory confidence (point); suppressed count in tooltip', pct: false },
+            { metric: 'noise_tag_volume', title: 'Noise-tag volume',
+              sub: 'items flipped to signal_quality="noise" per day', pct: false }
+        ];
+
+        function metricColor(i) { return SERIES_COLORS[i % SERIES_COLORS.length]; }
+
+        async function loadMetrics() {
+            const container = document.getElementById('metric-charts');
+            const days = document.getElementById('metrics-days').value;
+            const groupBy = document.getElementById('metrics-group-by').value;
+            container.innerHTML = loadingHtml('Loading metrics...');
+
+            // Fetch all five in parallel; one failure shouldn't blank the rest.
+            const trendFetches = TREND_METRICS.map(m =>
+                fetchJSON(`/admin/metrics/timeseries?metric=${m.metric}&days=${days}&bucket=day&group_by=${groupBy}`)
+                    .then(data => ({ data })).catch(err => ({ err })));
+            const stripFetch = fetchJSON(
+                `/admin/metrics/timeseries?metric=parameter_promotions&days=${days}&bucket=day&group_by=${groupBy}`)
+                .then(data => ({ data })).catch(err => ({ err }));
+
+            const [trendResults, stripResult] = await Promise.all([
+                Promise.all(trendFetches), stripFetch
+            ]);
+
+            container.innerHTML = '';
+            TREND_METRICS.forEach((m, i) => {
+                container.appendChild(renderTrendChart(m, trendResults[i]));
+            });
+            container.appendChild(renderEventsStrip(stripResult));
+        }
+
+        function chartCard(title, sub) {
+            const card = document.createElement('div');
+            card.className = 'metric-chart fade-in';
+            card.innerHTML = `<h3>${escHtml(title)}</h3><div class="chart-sub">${escHtml(sub)}</div>`;
+            return card;
+        }
+
+        function chartEmpty(card, msg) {
+            const div = document.createElement('div');
+            div.className = 'chart-empty';
+            div.textContent = msg;
+            card.appendChild(div);
+            return card;
+        }
+
+        function renderLegend(series) {
+            const legend = document.createElement('div');
+            legend.className = 'metric-legend';
+            series.forEach((s, i) => {
+                const item = document.createElement('span');
+                item.className = 'legend-item';
+                item.innerHTML = `<span class="legend-swatch" style="background:${metricColor(i)}"></span>${escHtml(s.group_key)}`;
+                legend.appendChild(item);
+            });
+            return legend;
+        }
+
+        // Line chart for a trend metric. SVG viewBox is fixed; the card
+        // CSS scales it responsively.
+        function renderTrendChart(meta, result) {
+            const card = chartCard(meta.title, meta.sub);
+            if (result.err) return chartEmpty(card, 'Could not load: ' + result.err.message);
+            const series = (result.data.series || []).filter(s => s.points.length > 0);
+            if (series.length === 0) return chartEmpty(card, 'No data in this window yet.');
+
+            const W = 360, H = 160, padL = 34, padR = 10, padT = 12, padB = 22;
+            const plotW = W - padL - padR, plotH = H - padT - padB;
+
+            // X domain = union of all bucket_start dates (sorted). Y domain
+            // = [0, max] for counts, [0, 1] for percentage metrics.
+            const allDates = Array.from(new Set(
+                series.flatMap(s => s.points.map(p => p.bucket_start)))).sort();
+            const xIndex = {};
+            allDates.forEach((d, i) => { xIndex[d] = i; });
+            const xMax = Math.max(1, allDates.length - 1);
+            let yMax = meta.pct ? 1 : 0;
+            if (!meta.pct) {
+                for (const s of series) for (const p of s.points) yMax = Math.max(yMax, p.value);
+                yMax = yMax || 1;
+            }
+            const xPos = d => padL + (allDates.length === 1 ? plotW / 2 : (xIndex[d] / xMax) * plotW);
+            const yPos = v => padT + plotH - (v / yMax) * plotH;
+
+            const ns = 'http://www.w3.org/2000/svg';
+            const svg = document.createElementNS(ns, 'svg');
+            svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+
+            // Axes (baseline + left tick labels at 0, mid, max).
+            const axisColor = 'var(--border)';
+            const tick = (v) => {
+                const y = yPos(v);
+                const line = document.createElementNS(ns, 'line');
+                line.setAttribute('x1', padL); line.setAttribute('x2', W - padR);
+                line.setAttribute('y1', y); line.setAttribute('y2', y);
+                line.setAttribute('stroke', axisColor); line.setAttribute('stroke-width', '0.5');
+                svg.appendChild(line);
+                const lbl = document.createElementNS(ns, 'text');
+                lbl.setAttribute('x', padL - 4); lbl.setAttribute('y', y + 3);
+                lbl.setAttribute('text-anchor', 'end'); lbl.setAttribute('font-size', '8');
+                lbl.setAttribute('fill', 'var(--text-dim)');
+                lbl.textContent = meta.pct ? Math.round(v * 100) + '%' : (Math.round(v * 10) / 10);
+                svg.appendChild(lbl);
+            };
+            tick(0); tick(yMax / 2); tick(yMax);
+
+            // X end-labels (first + last date).
+            const xLabel = (d, anchor, x) => {
+                const t = document.createElementNS(ns, 'text');
+                t.setAttribute('x', x); t.setAttribute('y', H - 6);
+                t.setAttribute('text-anchor', anchor); t.setAttribute('font-size', '8');
+                t.setAttribute('fill', 'var(--text-dim)');
+                t.textContent = d.slice(5); // MM-DD
+                svg.appendChild(t);
+            };
+            xLabel(allDates[0], 'start', padL);
+            if (allDates.length > 1) xLabel(allDates[allDates.length - 1], 'end', W - padR);
+
+            series.forEach((s, i) => {
+                const color = metricColor(i);
+                const pts = s.points.slice().sort((a, b) => a.bucket_start < b.bucket_start ? -1 : 1);
+                const coords = pts.map(p => [xPos(p.bucket_start), yPos(p.value)]);
+                if (coords.length > 1) {
+                    const poly = document.createElementNS(ns, 'polyline');
+                    poly.setAttribute('points', coords.map(c => c.join(',')).join(' '));
+                    poly.setAttribute('fill', 'none');
+                    poly.setAttribute('stroke', color);
+                    poly.setAttribute('stroke-width', '1.5');
+                    svg.appendChild(poly);
+                }
+                pts.forEach((p, j) => {
+                    const c = document.createElementNS(ns, 'circle');
+                    c.setAttribute('cx', coords[j][0]); c.setAttribute('cy', coords[j][1]);
+                    c.setAttribute('r', '2.5'); c.setAttribute('fill', color);
+                    const title = document.createElementNS(ns, 'title');
+                    const shown = meta.pct ? (p.value * 100).toFixed(1) + '%' : p.value;
+                    title.textContent = `${s.group_key} · ${p.bucket_start}: ${shown} (n=${p.sample_count})`;
+                    c.appendChild(title);
+                    svg.appendChild(c);
+                });
+            });
+
+            card.appendChild(svg);
+            card.appendChild(renderLegend(series));
+            return card;
+        }
+
+        // Annotated events strip for parameter_promotions — grouped bars by
+        // event type per day. A count metric, so it's a strip not a line.
+        function renderEventsStrip(result) {
+            const card = chartCard('Parameter promotions',
+                'governance events per day — promote / created / rejected / degraded counts');
+            if (result.err) return chartEmpty(card, 'Could not load: ' + result.err.message);
+            const series = (result.data.series || []).filter(s => s.points.length > 0);
+            if (series.length === 0) return chartEmpty(card, 'No governance events in this window yet.');
+
+            const allDates = Array.from(new Set(
+                series.flatMap(s => s.points.map(p => p.bucket_start)))).sort();
+            const W = 360, H = 160, padL = 24, padR = 10, padT = 12, padB = 22;
+            const plotW = W - padL - padR, plotH = H - padT - padB;
+            let yMax = 0;
+            for (const s of series) for (const p of s.points) yMax = Math.max(yMax, p.value);
+            yMax = yMax || 1;
+
+            const ns = 'http://www.w3.org/2000/svg';
+            const svg = document.createElementNS(ns, 'svg');
+            svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+
+            // baseline
+            const base = document.createElementNS(ns, 'line');
+            base.setAttribute('x1', padL); base.setAttribute('x2', W - padR);
+            base.setAttribute('y1', padT + plotH); base.setAttribute('y2', padT + plotH);
+            base.setAttribute('stroke', 'var(--border)'); base.setAttribute('stroke-width', '0.5');
+            svg.appendChild(base);
+
+            const slotW = plotW / allDates.length;
+            const barW = Math.max(2, Math.min(10, (slotW - 4) / series.length));
+            allDates.forEach((d, di) => {
+                const slotX = padL + di * slotW + 2;
+                series.forEach((s, si) => {
+                    const point = s.points.find(p => p.bucket_start === d);
+                    if (!point || point.value <= 0) return;
+                    const h = (point.value / yMax) * plotH;
+                    const rect = document.createElementNS(ns, 'rect');
+                    rect.setAttribute('x', slotX + si * barW);
+                    rect.setAttribute('y', padT + plotH - h);
+                    rect.setAttribute('width', Math.max(1, barW - 1));
+                    rect.setAttribute('height', h);
+                    rect.setAttribute('fill', metricColor(si));
+                    const title = document.createElementNS(ns, 'title');
+                    title.textContent = `${s.group_key} · ${d}: ${point.value}`;
+                    rect.appendChild(title);
+                    svg.appendChild(rect);
+                });
+            });
+
+            // X end-labels
+            const xt = (d, anchor, x) => {
+                const t = document.createElementNS(ns, 'text');
+                t.setAttribute('x', x); t.setAttribute('y', H - 6);
+                t.setAttribute('text-anchor', anchor); t.setAttribute('font-size', '8');
+                t.setAttribute('fill', 'var(--text-dim)');
+                t.textContent = d.slice(5);
+                svg.appendChild(t);
+            };
+            xt(allDates[0], 'start', padL);
+            if (allDates.length > 1) xt(allDates[allDates.length - 1], 'end', W - padR);
+
+            card.appendChild(svg);
+            // Strip legend shows the short event-type tail (e.g. "parameters.updated").
+            card.appendChild(renderLegend(series));
+            return card;
         }
 
         // ============================================================
