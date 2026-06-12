@@ -56,9 +56,7 @@ def _build_app(registry: StoreRegistry) -> FastAPI:
     app.include_router(mutations.router, prefix="/api/v1", tags=["mutations"])
     app.include_router(policies.router, prefix="/api/v1", tags=["policies"])
     app.include_router(extract.router, prefix="/api/v1", tags=["extract"])
-    app.include_router(
-        observations.router, prefix="/api/v1", tags=["observations"]
-    )
+    app.include_router(observations.router, prefix="/api/v1", tags=["observations"])
 
     # Wire the registry the routes pull from via get_registry().
     api_app_module._registry = registry

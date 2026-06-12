@@ -40,9 +40,12 @@ SQLITE_REGISTRY_CONFIG = {
 
 
 def main() -> int:  # noqa: PLR0912 — top-level demo orchestrator, single linear flow
-    with tempfile.TemporaryDirectory() as stores_dir, StoreRegistry(
-        config=SQLITE_REGISTRY_CONFIG, stores_dir=Path(stores_dir)
-    ) as registry:
+    with (
+        tempfile.TemporaryDirectory() as stores_dir,
+        StoreRegistry(
+            config=SQLITE_REGISTRY_CONFIG, stores_dir=Path(stores_dir)
+        ) as registry,
+    ):
         load_result = load_jaffle_shop_corpus(registry)
 
         print()
@@ -79,9 +82,7 @@ def main() -> int:  # noqa: PLR0912 — top-level demo orchestrator, single line
                 desc = (node.get("properties") or {}).get("description", "")
                 print(f"  {entity_id}:")
                 print(f"    type: {node.get('node_type')}")
-                truncated = (
-                    "..." if len(desc) > _DESCRIPTION_PREVIEW_CHARS else ""
-                )
+                truncated = "..." if len(desc) > _DESCRIPTION_PREVIEW_CHARS else ""
                 print(
                     f"    description: {desc[:_DESCRIPTION_PREVIEW_CHARS]}{truncated}"
                 )
@@ -117,8 +118,7 @@ def main() -> int:  # noqa: PLR0912 — top-level demo orchestrator, single line
         )
         for e in customers_edges:
             print(
-                f"  {e.get('source_id')} -[{e.get('edge_type')}]-> "
-                f"{e.get('target_id')}"
+                f"  {e.get('source_id')} -[{e.get('edge_type')}]-> {e.get('target_id')}"
             )
         print()
 

@@ -34,14 +34,11 @@ _READYZ_OK_BODY = {
 }
 
 _METRICS_PROMETHEUS_BODY = (
-    "# HELP http_requests_total Total HTTP requests\n"
-    "http_requests_total 1\n"
+    "# HELP http_requests_total Total HTTP requests\nhttp_requests_total 1\n"
 )
 
 
-def _advisories_response(
-    request: httpx.Request, api_key: str | None
-) -> httpx.Response:
+def _advisories_response(request: httpx.Request, api_key: str | None) -> httpx.Response:
     """Mirror ``require_api_key`` in ``trellis_api.auth``."""
     if api_key is None:
         return httpx.Response(200, json={"advisories": []})

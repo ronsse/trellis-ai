@@ -387,9 +387,7 @@ class TrellisClient:
         if observer_agent_id is not None:
             params["observer_agent_id"] = observer_agent_id
         resp = self._request("GET", "/api/v1/observations", params=params)
-        return cast(
-            "list[dict[str, Any]]", resp.json().get("observations", [])
-        )
+        return cast("list[dict[str, Any]]", resp.json().get("observations", []))
 
     def record_measurement(self, measurement: dict[str, Any]) -> str:
         """POST /api/v1/measurements. Returns the new ``measurement_id``."""
@@ -413,9 +411,7 @@ class TrellisClient:
         if observer_agent_id is not None:
             params["observer_agent_id"] = observer_agent_id
         resp = self._request("GET", "/api/v1/measurements", params=params)
-        return cast(
-            "list[dict[str, Any]]", resp.json().get("measurements", [])
-        )
+        return cast("list[dict[str, Any]]", resp.json().get("measurements", []))
 
     # -- Extract (client-side extractor contract) --
 

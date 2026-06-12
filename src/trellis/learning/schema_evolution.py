@@ -235,9 +235,7 @@ def _resolve_thresholds(registry: ParameterRegistry) -> _Thresholds:
     values = registry.get_values(scope)
     missing = [key for key in REQUIRED_PARAM_KEYS if key not in values]
     if missing:
-        seed_hint = ", ".join(
-            f"{k}={RECOMMENDED_SEED_VALUES[k]!r}" for k in missing
-        )
+        seed_hint = ", ".join(f"{k}={RECOMMENDED_SEED_VALUES[k]!r}" for k in missing)
         msg = (
             f"ParameterRegistry is missing required schema-evolution "
             f"thresholds: {sorted(missing)!r}. Seed defaults are: "
@@ -332,9 +330,7 @@ def _suggest_alignment_uri(canonical_name: str, kind: CandidateKind) -> str | No
     return None
 
 
-def _detect_naming_collision(
-    canonical_name: str, kind: CandidateKind
-) -> bool:
+def _detect_naming_collision(canonical_name: str, kind: CandidateKind) -> bool:
     """``True`` if ``canonical_name`` is already in the well-known registry.
 
     Case-insensitive match across the canonical set AND legacy alias
@@ -351,9 +347,7 @@ def _detect_naming_collision(
         )
     else:
         canonicals = wk.CANONICAL_EDGE_KINDS
-        aliases = set(wk.EDGE_KIND_ALIASES.keys()) | set(
-            wk.EDGE_KIND_ALIASES.values()
-        )
+        aliases = set(wk.EDGE_KIND_ALIASES.keys()) | set(wk.EDGE_KIND_ALIASES.values())
     haystack = {name.lower() for name in canonicals} | {a.lower() for a in aliases}
     return lowered in haystack
 
@@ -779,9 +773,7 @@ def analyze_well_known_candidates(
     # ``recorded_at`` is microseconds past ``now``.
     event_scan_until = until if until is not None else eval_now + timedelta(days=1)
 
-    nodes_by_type = _enumerate_node_types(
-        graph_store, node_scan_limit=node_scan_limit
-    )
+    nodes_by_type = _enumerate_node_types(graph_store, node_scan_limit=node_scan_limit)
 
     extractors_by_entity_type = _index_mutation_extractors(
         event_log,

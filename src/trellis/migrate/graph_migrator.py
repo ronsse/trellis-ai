@@ -257,9 +257,7 @@ class GraphMigrator:
         )
         # Preserve the legacy `errors` list for backwards-compatible callers.
         legacy_key = f"{step}:{entity_id}" if entity_id is not None else step
-        report.errors.append(
-            (legacy_key, f"{type(exc).__name__}: {exc}")
-        )
+        report.errors.append((legacy_key, f"{type(exc).__name__}: {exc}"))
         report.step_failures.append(
             MigrationStepFailure(
                 step=step,

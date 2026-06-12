@@ -64,9 +64,7 @@ class TestRecordObservationTool:
 
 
 class TestQueryObservationsTool:
-    def test_returns_recorded_observations(
-        self, temp_registry: StoreRegistry
-    ) -> None:
+    def test_returns_recorded_observations(self, temp_registry: StoreRegistry) -> None:
         """SDK→MCP query consistency: the tool sees what the handler wrote."""
         subject_id = temp_registry.knowledge.graph_store.upsert_node(
             node_id=None, node_type="Dataset", properties={"name": "users"}
@@ -80,9 +78,7 @@ class TestQueryObservationsTool:
         )
         observation_id = json.loads(raw)["observation_id"]
 
-        result = json.loads(
-            query_observations(subject_entity_id=subject_id)
-        )
+        result = json.loads(query_observations(subject_entity_id=subject_id))
         assert result["status"] == "ok"
         assert len(result["observations"]) == 1
         assert result["observations"][0]["observation_id"] == observation_id

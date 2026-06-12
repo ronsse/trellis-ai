@@ -440,9 +440,7 @@ class TestBatchExecution:
 class TestBuildCurateExecutor:
     """The ``build_curate_executor`` factory wires every default handler."""
 
-    def test_round_trips_a_trace_through_the_pipeline(
-        self, tmp_path: Path
-    ) -> None:
+    def test_round_trips_a_trace_through_the_pipeline(self, tmp_path: Path) -> None:
         stores_dir = tmp_path / "stores"
         stores_dir.mkdir()
         registry = StoreRegistry(stores_dir=stores_dir)
@@ -464,4 +462,3 @@ class TestBuildCurateExecutor:
         assert result.status == CommandStatus.SUCCESS
         assert result.created_id == trace.trace_id
         assert registry.operational.trace_store.get(trace.trace_id) is not None
-

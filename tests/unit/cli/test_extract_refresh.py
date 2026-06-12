@@ -135,9 +135,7 @@ class TestRefreshCliValidation:
 
     def test_type_without_path_errors(self) -> None:
         runner.invoke(app, ["admin", "init"])
-        result = runner.invoke(
-            app, ["extract", "refresh", "--type", "dbt-manifest"]
-        )
+        result = runner.invoke(app, ["extract", "refresh", "--type", "dbt-manifest"])
         assert result.exit_code == 1
         assert "--path" in result.stdout
 
@@ -354,9 +352,7 @@ class TestRefreshEndToEnd:
         assert result.exit_code == 1
         assert "disabled" in result.stdout.lower()
 
-    def test_endpoint_source_refuses_with_helpful_message(
-        self, tmp_path: Path
-    ) -> None:
+    def test_endpoint_source_refuses_with_helpful_message(self, tmp_path: Path) -> None:
         runner.invoke(app, ["admin", "init"])
         sources_yaml = tmp_path / "sources.yaml"
         sources_yaml.write_text(

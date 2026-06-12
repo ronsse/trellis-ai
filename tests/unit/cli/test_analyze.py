@@ -499,9 +499,7 @@ class TestSchemaEvolutionCLI:
 
     def test_empty_graph_no_candidates_json(self, temp_stores: StoreRegistry) -> None:
         _override_schema_evolution_thresholds(temp_stores)
-        result = runner.invoke(
-            app, ["analyze", "schema-evolution", "--format", "json"]
-        )
+        result = runner.invoke(app, ["analyze", "schema-evolution", "--format", "json"])
         assert result.exit_code == 0, result.output
         data = json.loads(result.stdout.strip())
         assert data["status"] == "ok"
@@ -514,9 +512,7 @@ class TestSchemaEvolutionCLI:
     ) -> None:
         _override_schema_evolution_thresholds(temp_stores)
         _seed_schema_evolution_candidate(temp_stores)
-        result = runner.invoke(
-            app, ["analyze", "schema-evolution", "--format", "json"]
-        )
+        result = runner.invoke(app, ["analyze", "schema-evolution", "--format", "json"])
         assert result.exit_code == 0, result.output
         data = json.loads(result.stdout.strip())
         assert data["candidate_count"] == 1

@@ -159,9 +159,7 @@ class AsyncTrellisClient:
                     request_path="/api/version",
                     error=str(exc),
                 )
-                raise wrap_transport_error(
-                    exc, request_path="/api/version"
-                ) from exc
+                raise wrap_transport_error(exc, request_path="/api/version") from exc
             if resp.status_code != 200:  # noqa: PLR2004
                 # Older servers may not expose ``/api/version`` at all —
                 # documented graceful degradation: skip the version
@@ -386,9 +384,7 @@ class AsyncTrellisClient:
 
     async def record_observation(self, observation: dict[str, Any]) -> str:
         """POST /api/v1/observations. Returns the new ``observation_id``."""
-        resp = await self._request(
-            "POST", "/api/v1/observations", json=observation
-        )
+        resp = await self._request("POST", "/api/v1/observations", json=observation)
         return cast("str", resp.json()["observation_id"])
 
     async def query_observations(
@@ -405,15 +401,11 @@ class AsyncTrellisClient:
         if observer_agent_id is not None:
             params["observer_agent_id"] = observer_agent_id
         resp = await self._request("GET", "/api/v1/observations", params=params)
-        return cast(
-            "list[dict[str, Any]]", resp.json().get("observations", [])
-        )
+        return cast("list[dict[str, Any]]", resp.json().get("observations", []))
 
     async def record_measurement(self, measurement: dict[str, Any]) -> str:
         """POST /api/v1/measurements. Returns the new ``measurement_id``."""
-        resp = await self._request(
-            "POST", "/api/v1/measurements", json=measurement
-        )
+        resp = await self._request("POST", "/api/v1/measurements", json=measurement)
         return cast("str", resp.json()["measurement_id"])
 
     async def query_measurements(
@@ -432,12 +424,8 @@ class AsyncTrellisClient:
             params["metric_name"] = metric_name
         if observer_agent_id is not None:
             params["observer_agent_id"] = observer_agent_id
-        resp = await self._request(
-            "GET", "/api/v1/measurements", params=params
-        )
-        return cast(
-            "list[dict[str, Any]]", resp.json().get("measurements", [])
-        )
+        resp = await self._request("GET", "/api/v1/measurements", params=params)
+        return cast("list[dict[str, Any]]", resp.json().get("measurements", []))
 
     # -- Extract (client-side extractor contract) --
 

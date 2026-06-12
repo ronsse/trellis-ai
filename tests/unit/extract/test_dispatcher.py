@@ -344,9 +344,7 @@ class TestExtractionValidatorEnforcement:
     """ADR §5.3 — when validators fire, the dispatcher rejects the extraction:
     quarantine drafts in residue, emit EXTRACTION_REJECTED, return empty."""
 
-    async def test_no_validators_no_change(
-        self, event_log: SQLiteEventLog
-    ) -> None:
+    async def test_no_validators_no_change(self, event_log: SQLiteEventLog) -> None:
         reg = ExtractorRegistry()
         reg.register(
             _make_extractor("det", ExtractorTier.DETERMINISTIC, ["s"], entities=1)

@@ -132,10 +132,7 @@ class FilterClause:
             # ``bool`` is accepted here (a list of booleans is a legal
             # property shape; ``contains True`` is a meaningful query).
             if isinstance(self.value, tuple):
-                msg = (
-                    "FilterClause op='contains' must use a scalar value, "
-                    "not a tuple"
-                )
+                msg = "FilterClause op='contains' must use a scalar value, not a tuple"
                 raise TypeError(msg)
             if self.value is None:
                 msg = "FilterClause op='contains' must have a scalar value, not None"
@@ -152,8 +149,7 @@ class FilterClause:
             # the backend compiler never has to second-guess.
             if isinstance(self.value, tuple):
                 msg = (
-                    f"FilterClause op={self.op!r} must use a scalar value, "
-                    "not a tuple"
+                    f"FilterClause op={self.op!r} must use a scalar value, not a tuple"
                 )
                 raise TypeError(msg)
             if self.value is None:

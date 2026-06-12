@@ -147,8 +147,7 @@ GROUND_TRUTH_QUERIES: list[GitHubPRQuery] = [
     ),
     GitHubPRQuery(
         intent=(
-            "Find PRs that reference or build on PR #34 (the bulk upsert "
-            "introduction)."
+            "Find PRs that reference or build on PR #34 (the bulk upsert introduction)."
         ),
         required_coverage=[_pr(34), _pr(36), _pr(46), _pr(47)],
         difficulty="hard",
@@ -202,9 +201,7 @@ GROUND_TRUTH_QUERIES: list[GitHubPRQuery] = [
         required_coverage=[_pr(47)],
         difficulty="medium",
         skill="bug_fix_identification",
-        rationale=(
-            "PR #47 verbatim. Specific Neo4j feature, narrow query."
-        ),
+        rationale=("PR #47 verbatim. Specific Neo4j feature, narrow query."),
     ),
     # -----------------------------------------------------------------
     # Author attribution — testing the wasAttributedTo edges.

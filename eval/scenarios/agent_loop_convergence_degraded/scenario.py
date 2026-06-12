@@ -466,7 +466,8 @@ def _grade_round(
     required_doc_ids = {f"doc:{entity}" for entity in query.required_coverage}
     referenced = sorted(pack_doc_ids & required_doc_ids)
     coverage = (
-        1.0 if not query.required_coverage
+        1.0
+        if not query.required_coverage
         else len(referenced) / len(query.required_coverage)
     )
     return referenced, coverage, coverage >= coverage_threshold
@@ -507,8 +508,7 @@ def _quarter_trajectory(rounds: list[_RoundResult]) -> list[float]:
     if not rounds:
         return [0.0, 0.0, 0.0, 0.0]
     useful = [
-        (r.items_referenced / r.items_served) if r.items_served else 0.0
-        for r in rounds
+        (r.items_referenced / r.items_served) if r.items_served else 0.0 for r in rounds
     ]
     if len(useful) < ROUND_QUARTER_FRACTION:
         full = statistics.fmean(useful)

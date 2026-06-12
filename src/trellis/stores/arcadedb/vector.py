@@ -142,12 +142,8 @@ class ArcadeDBVectorStore(VectorStore):
         # creates the vertex type), but the LSM_VECTOR index requires
         # the property explicitly declared as ``LIST OF FLOAT``.
         self._sql("CREATE VERTEX TYPE Node IF NOT EXISTS")
-        self._sql(
-            "CREATE PROPERTY Node.embedding IF NOT EXISTS LIST OF FLOAT"
-        )
-        self._sql(
-            "CREATE PROPERTY Node.vector_metadata_json IF NOT EXISTS STRING"
-        )
+        self._sql("CREATE PROPERTY Node.embedding IF NOT EXISTS LIST OF FLOAT")
+        self._sql("CREATE PROPERTY Node.vector_metadata_json IF NOT EXISTS STRING")
         metadata = json.dumps(
             {
                 "dimensions": self._dimensions,
@@ -271,9 +267,7 @@ class ArcadeDBVectorStore(VectorStore):
             # cosine distance ∈ [0, 2]; similarity = 1 - distance.
             # euclidean distance ∈ [0, ∞); we negate so closer == higher.
             distance = float(row["distance"])
-            score = (
-                1.0 - distance if self._similarity == "cosine" else -distance
-            )
+            score = 1.0 - distance if self._similarity == "cosine" else -distance
             results.append(
                 {
                     "item_id": row["node_id"],

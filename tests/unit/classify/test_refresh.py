@@ -343,9 +343,7 @@ class TestReclassifyItem:
 
         persisted = store.get("doc-1")
         assert persisted is not None
-        assert (
-            persisted["metadata"]["content_tags"]["importance_scored_at"] == stamp
-        )
+        assert persisted["metadata"]["content_tags"]["importance_scored_at"] == stamp
 
     def test_refresh_recomputes_importance_with_prior_as_base(self) -> None:
         """Refresh re-derives ``auto_importance`` via compute_importance with

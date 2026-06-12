@@ -53,9 +53,12 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 
-    with tempfile.TemporaryDirectory() as stores_dir, StoreRegistry(
-        config=SQLITE_REGISTRY_CONFIG, stores_dir=Path(stores_dir)
-    ) as registry:
+    with (
+        tempfile.TemporaryDirectory() as stores_dir,
+        StoreRegistry(
+            config=SQLITE_REGISTRY_CONFIG, stores_dir=Path(stores_dir)
+        ) as registry,
+    ):
         report = run_scenario(
             registry,
             seed=args.seed,

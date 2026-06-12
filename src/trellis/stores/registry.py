@@ -1235,9 +1235,7 @@ class StoreRegistry:
                 database=database,
             )
 
-    def _resolve_arcadedb_vector_params(
-        self, params: dict[str, Any]
-    ) -> dict[str, Any]:
+    def _resolve_arcadedb_vector_params(self, params: dict[str, Any]) -> dict[str, Any]:
         """Resolve HTTP-side config for an ArcadeDB vector store.
 
         The vector store talks SQL over HTTP, not Cypher over Bolt, so
@@ -1267,9 +1265,7 @@ class StoreRegistry:
             "TRELLIS_ARCADEDB_HTTP_URL"
         )
         if not http_url:
-            bolt_uri = new_params.get("uri") or os.environ.get(
-                "TRELLIS_ARCADEDB_URI"
-            )
+            bolt_uri = new_params.get("uri") or os.environ.get("TRELLIS_ARCADEDB_URI")
             if bolt_uri:
                 http_url = derive_http_url_from_bolt(bolt_uri)
         if not http_url:
@@ -1281,13 +1277,10 @@ class StoreRegistry:
             raise ConfigError(msg, setting="stores.vector.http_url")
 
         user = (
-            new_params.get("user")
-            or os.environ.get("TRELLIS_ARCADEDB_USER")
-            or "root"
+            new_params.get("user") or os.environ.get("TRELLIS_ARCADEDB_USER") or "root"
         )
-        password = (
-            new_params.get("password")
-            or os.environ.get("TRELLIS_ARCADEDB_PASSWORD")
+        password = new_params.get("password") or os.environ.get(
+            "TRELLIS_ARCADEDB_PASSWORD"
         )
         if not password:
             msg = (

@@ -172,8 +172,7 @@ def init_learning_params(
             print(json.dumps({"status": "exists", "path": str(target)}))
         else:
             console.print(
-                f"[yellow]Already exists: {target}."
-                " Pass --force to overwrite.[/yellow]"
+                f"[yellow]Already exists: {target}. Pass --force to overwrite.[/yellow]"
             )
         raise typer.Exit(code=EXIT_OK)
 
@@ -1693,7 +1692,7 @@ def _render_promotion_adr(
         alignment_diff_block = (
             "Add to `_ENTITY_SCHEMA_ALIGNMENT` (or `_EDGE_SCHEMA_ALIGNMENT`):\n"
             "\n```python\n"
-            f"{well_known_constant_name}: \"{alignment_uri}\",\n"
+            f'{well_known_constant_name}: "{alignment_uri}",\n'
             "```"
         )
     else:
@@ -1715,9 +1714,7 @@ def _render_promotion_adr(
         count=candidate.get("count", 0),
         count_threshold=int(thresholds["well_known_count_threshold"]),
         distinct_extractors_count=len(extractors),
-        distinct_extractors_threshold=int(
-            thresholds["well_known_distinct_extractors"]
-        ),
+        distinct_extractors_threshold=int(thresholds["well_known_distinct_extractors"]),
         distinct_extractors_block=(
             "\n".join(f"- `{e}`" for e in extractors) or "- _none recorded_"
         ),
@@ -1727,9 +1724,7 @@ def _render_promotion_adr(
             "\n".join(f"- `{d}`" for d in domains) or "- _none recorded_"
         ),
         avg_signal_quality=candidate.get("avg_signal_quality", ""),
-        min_signal_quality_threshold=str(
-            thresholds["well_known_min_signal_quality"]
-        ),
+        min_signal_quality_threshold=str(thresholds["well_known_min_signal_quality"]),
         evidence_window_days_observed=_evidence_span_days(first_seen, last_seen),
         window_days_threshold=int(thresholds["well_known_window_days"]),
         first_seen=first_seen,
@@ -1877,9 +1872,7 @@ def draft_promotion_adr(
     open_string = str(candidate.get("open_string_value", "unknown"))
     slug = "".join(c if c.isalnum() else "_" for c in open_string).strip("_").lower()
     output_path = (
-        output
-        if output is not None
-        else Path("docs/design") / f"adr-promote-{slug}.md"
+        output if output is not None else Path("docs/design") / f"adr-promote-{slug}.md"
     )
 
     if output_path.exists() and not force:
@@ -1900,9 +1893,7 @@ def draft_promotion_adr(
             path=str(output_path),
             candidate_id=candidate_id,
         )
-        console.print(
-            f"[yellow]Overwriting existing file at {output_path}.[/yellow]"
-        )
+        console.print(f"[yellow]Overwriting existing file at {output_path}.[/yellow]")
 
     drafted_date = datetime.now(tz=UTC).date().isoformat()
     rendered = _render_promotion_adr(

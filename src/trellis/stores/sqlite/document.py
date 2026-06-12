@@ -58,8 +58,7 @@ def _build_tag_conditions(
             if operator == "not_in":
                 inner = f"NOT {inner}"
             conditions.append(
-                f"(json_extract(d.metadata_json, '{json_path}') IS NULL"
-                f" OR {inner})"
+                f"(json_extract(d.metadata_json, '{json_path}') IS NULL OR {inner})"
             )
             params.extend(values)
         else:

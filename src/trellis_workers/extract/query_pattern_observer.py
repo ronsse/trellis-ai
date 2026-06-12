@@ -279,7 +279,8 @@ class QueryPatternObserver:
             )
 
     def _aggregate(
-        self, records: list[QueryLogRecord],
+        self,
+        records: list[QueryLogRecord],
     ) -> list[_WindowedAggregate]:
         """Group records by subject and produce one aggregate per subject."""
         if not records:
@@ -410,10 +411,7 @@ def _parse_timestamp(value: Any, *, row_index: int) -> datetime:
     try:
         ts = datetime.fromisoformat(value)
     except ValueError as exc:
-        msg = (
-            f"row {row_index} 'timestamp' is not a valid ISO-8601 string: "
-            f"{value!r}"
-        )
+        msg = f"row {row_index} 'timestamp' is not a valid ISO-8601 string: {value!r}"
         raise ValueError(msg) from exc
     return ts if ts.tzinfo else ts.replace(tzinfo=UTC)
 

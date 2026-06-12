@@ -14,5 +14,6 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
-      - run: pip install ruff>=0.8
+      # Keep in sync with the ruff pin in pyproject.toml [dev] and .pre-commit-config.yaml
+      - run: pip install "ruff==0.15.16"
       - run: ruff check src/ tests/

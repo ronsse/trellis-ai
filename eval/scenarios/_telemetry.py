@@ -47,9 +47,7 @@ class _EmbedTelemetry:
             ),
             "cost.embed_usd": round(self.total_cost_usd(), 6),
             "cost.total_usd": round(self.total_cost_usd(), 6),
-            "latency.embed_ms_p50": (
-                round(statistics.median(lat), 1) if lat else 0.0
-            ),
+            "latency.embed_ms_p50": (round(statistics.median(lat), 1) if lat else 0.0),
             "latency.embed_ms_max": float(max(lat) if lat else 0),
         }
 

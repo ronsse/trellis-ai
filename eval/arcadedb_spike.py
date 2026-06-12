@@ -209,8 +209,7 @@ def main() -> int:  # noqa: PLR0912,PLR0915 — single-file Phase-0 spike, linea
         ),
         (
             "CREATE INDEX edge_id_idx (relationship)",
-            "CREATE INDEX edge_id_idx IF NOT EXISTS "
-            "FOR ()-[r:EDGE]-() ON (r.edge_id)",
+            "CREATE INDEX edge_id_idx IF NOT EXISTS FOR ()-[r:EDGE]-() ON (r.edge_id)",
         ),
         (
             "CREATE INDEX edge_type_idx (relationship)",
@@ -311,17 +310,21 @@ def main() -> int:  # noqa: PLR0912,PLR0915 — single-file Phase-0 spike, linea
 
     # Hot path — CREATE-only UNWIND
     rows = [
-        {"node_id": f"bulk-{i}", "props": {
+        {
             "node_id": f"bulk-{i}",
-            "version_id": f"vbulk-{i}",
-            "node_type": "doc",
-            "node_role": "semantic",
-            "properties_json": '{}',
-            "created_at": "2026-05-11T00:00:00",
-            "updated_at": "2026-05-11T00:00:00",
-            "valid_from": "2026-05-11T00:00:00",
-            "valid_to": None,
-        }} for i in range(5)
+            "props": {
+                "node_id": f"bulk-{i}",
+                "version_id": f"vbulk-{i}",
+                "node_type": "doc",
+                "node_role": "semantic",
+                "properties_json": "{}",
+                "created_at": "2026-05-11T00:00:00",
+                "updated_at": "2026-05-11T00:00:00",
+                "valid_from": "2026-05-11T00:00:00",
+                "valid_to": None,
+            },
+        }
+        for i in range(5)
     ]
     run(
         "UNWIND $rows AS row CREATE (n:Node) SET n = row.props (hot path)",
@@ -375,7 +378,9 @@ def main() -> int:  # noqa: PLR0912,PLR0915 — single-file Phase-0 spike, linea
             "CREATE (n:Node {node_id: $nid, node_type: 't', node_role: 'semantic', "
             "properties_json: '{}', created_at: $now, updated_at: $now, "
             "valid_from: $now, valid_to: null, version_id: $vid})",
-            nid=nid, now="2026-05-11T00:00:00", vid=f"v-{nid}",
+            nid=nid,
+            now="2026-05-11T00:00:00",
+            vid=f"v-{nid}",
         )
     edge_cypher = """
     MATCH (s:Node {node_id: $src}) WHERE s.valid_to IS NULL
@@ -389,7 +394,11 @@ def main() -> int:  # noqa: PLR0912,PLR0915 — single-file Phase-0 spike, linea
         run(
             f"create edge {s}->{d}",
             edge_cypher,
-            src=s, dst=d, eid=f"e-{s}{d}", now="2026-05-11T00:00:00", vid=f"v-{s}{d}",
+            src=s,
+            dst=d,
+            eid=f"e-{s}{d}",
+            now="2026-05-11T00:00:00",
+            vid=f"v-{s}{d}",
         )
 
     # Variable-length path — depth 2
@@ -429,12 +438,16 @@ def main() -> int:  # noqa: PLR0912,PLR0915 — single-file Phase-0 spike, linea
     # Try the Neo4j syntax first, then fall back to ArcadeDB's documented
     # vector type via SQL.
     run("wipe for vector tests", "MATCH (n) DETACH DELETE n")
-    run("insert node with embedding",
+    run(
+        "insert node with embedding",
         "CREATE (n:Node {node_id: 'v1', embedding: [0.1, 0.2, 0.3], "
-        "node_type: 't', valid_to: null, properties_json: '{}'})")
-    run("insert another node with embedding",
+        "node_type: 't', valid_to: null, properties_json: '{}'})",
+    )
+    run(
+        "insert another node with embedding",
         "CREATE (n:Node {node_id: 'v2', embedding: [0.9, 0.8, 0.7], "
-        "node_type: 't', valid_to: null, properties_json: '{}'})")
+        "node_type: 't', valid_to: null, properties_json: '{}'})",
+    )
 
     # Try Neo4j vector index syntax
     print("\n  -- Try Neo4j vector index syntax --")
@@ -447,10 +460,12 @@ def main() -> int:  # noqa: PLR0912,PLR0915 — single-file Phase-0 spike, linea
     run("CREATE VECTOR INDEX (Neo4j syntax)", try_neo4j_vector)
 
     # Try SEARCH ... IN VECTOR INDEX
-    run("SEARCH ... IN VECTOR INDEX (Cypher 25 syntax)",
+    run(
+        "SEARCH ... IN VECTOR INDEX (Cypher 25 syntax)",
         "MATCH (n:Node) SEARCH n IN VECTOR INDEX node_embedding "
         "FOR $vec LIMIT 5 SCORE AS score RETURN n.node_id, score",
-        vec=[0.1, 0.2, 0.3])
+        vec=[0.1, 0.2, 0.3],
+    )
 
     # ------------------------------------------------------------------
     # Summary

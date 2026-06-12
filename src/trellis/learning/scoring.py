@@ -463,9 +463,7 @@ def _recommend_learning_action(
     noise_success = _resolve_required_threshold(
         registry, scope, LEARNING_NOISE_SUCCESS_KEY
     )
-    noise_retry = _resolve_required_threshold(
-        registry, scope, LEARNING_NOISE_RETRY_KEY
-    )
+    noise_retry = _resolve_required_threshold(registry, scope, LEARNING_NOISE_RETRY_KEY)
 
     if success_rate >= promote_success and retry_rate <= promote_retry:
         if item_type == "precedent":

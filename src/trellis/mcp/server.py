@@ -1203,9 +1203,7 @@ def get_objective_context(
             )
         except Exception:
             # GRACEFUL-DEGRADATION: token tracking is post-success telemetry.
-            logger.exception(
-                "token_tracking_failed", operation="get_objective_context"
-            )
+            logger.exception("token_tracking_failed", operation="get_objective_context")
     except McpError:
         # Already structured by a deeper helper — let it propagate.
         raise
@@ -1457,9 +1455,7 @@ def get_sectioned_context(
             )
         except Exception:
             # GRACEFUL-DEGRADATION: token tracking is post-success telemetry.
-            logger.exception(
-                "token_tracking_failed", operation="get_sectioned_context"
-            )
+            logger.exception("token_tracking_failed", operation="get_sectioned_context")
     except McpError:
         raise
     except Exception as exc:
@@ -1571,9 +1567,7 @@ def record_observation(
     # client (see docstring). Returns structured {"status": "error"}
     # JSON so the caller can branch on the response.
     except Exception as exc:
-        return json.dumps(
-            {"status": "error", "message": f"Invalid observation: {exc}"}
-        )
+        return json.dumps({"status": "error", "message": f"Invalid observation: {exc}"})
 
     try:
         command = Command(
@@ -1590,9 +1584,7 @@ def record_observation(
     # error response.
     except Exception as exc:
         logger.exception("record_observation_failed")
-        return json.dumps(
-            {"status": "error", "message": f"Execution failed: {exc}"}
-        )
+        return json.dumps({"status": "error", "message": f"Execution failed: {exc}"})
 
     if result.status != CommandStatus.SUCCESS:
         return json.dumps(
@@ -1647,9 +1639,7 @@ def query_observations(
     # error response.
     except Exception as exc:
         logger.exception("query_observations_failed")
-        return json.dumps(
-            {"status": "error", "message": f"Query failed: {exc}"}
-        )
+        return json.dumps({"status": "error", "message": f"Query failed: {exc}"})
 
     projected: list[dict[str, Any]] = []
     for row in rows:

@@ -1364,18 +1364,14 @@ def load(  # noqa: PLR0912, PLR0915 - sequential fixture loading by section
                 error=str(exc),
                 exc_info=True,
             )
-            console.print(
-                f"  [yellow]![/yellow] Cold-start fixture failed: {exc}"
-            )
+            console.print(f"  [yellow]![/yellow] Cold-start fixture failed: {exc}")
         else:
             console.print(
                 f"  [green]+[/green] {cold_start_nodes} cold-start entities "
                 f"({cold_start_edges} edges) via extractor path"
             )
     else:
-        console.print(
-            "  [dim]·[/dim] cold-start fixture not bundled; skipping"
-        )
+        console.print("  [dim]·[/dim] cold-start fixture not bundled; skipping")
 
     # Emit summary event
     event_log.emit(

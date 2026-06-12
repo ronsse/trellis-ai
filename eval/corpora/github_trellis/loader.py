@@ -262,9 +262,7 @@ def _execute_through_governed_pipeline(
     return nodes, edges
 
 
-def _index_documents(
-    registry: StoreRegistry, result: ExtractionResult
-) -> int:
+def _index_documents(registry: StoreRegistry, result: ExtractionResult) -> int:
     """Index PR bodies into the document store as ``doc:<entity_id>``."""
     document_store = registry.knowledge.document_store
     indexed = 0
@@ -355,14 +353,63 @@ def load_github_corpus(
     return result
 
 
-_PHRASE_STOPWORDS = frozenset({
-    "the", "a", "an", "and", "or", "of", "to", "for", "in", "on", "at", "with",
-    "by", "from", "into", "over", "this", "that", "these", "those",
-    "is", "are", "was", "were", "be", "been", "being", "not", "no",
-    "can", "could", "should", "would", "may", "might", "do", "does", "did",
-    "have", "has", "had", "via", "per", "plus", "but", "if", "when",
-    "what", "which", "as", "its", "it", "s",
-})
+_PHRASE_STOPWORDS = frozenset(
+    {
+        "the",
+        "a",
+        "an",
+        "and",
+        "or",
+        "of",
+        "to",
+        "for",
+        "in",
+        "on",
+        "at",
+        "with",
+        "by",
+        "from",
+        "into",
+        "over",
+        "this",
+        "that",
+        "these",
+        "those",
+        "is",
+        "are",
+        "was",
+        "were",
+        "be",
+        "been",
+        "being",
+        "not",
+        "no",
+        "can",
+        "could",
+        "should",
+        "would",
+        "may",
+        "might",
+        "do",
+        "does",
+        "did",
+        "have",
+        "has",
+        "had",
+        "via",
+        "per",
+        "plus",
+        "but",
+        "if",
+        "when",
+        "what",
+        "which",
+        "as",
+        "its",
+        "it",
+        "s",
+    }
+)
 
 
 _MIN_TOKEN_LEN = 8
@@ -398,9 +445,7 @@ def _title_tokens_and_phrases(title: str) -> tuple[list[str], list[str]]:
     cleaned = re.sub(r"[^a-z0-9\s\-_./]+", " ", cleaned)
     words = cleaned.split()
     tokens: list[str] = [
-        w
-        for w in words
-        if len(w) >= _MIN_TOKEN_LEN and w not in _PHRASE_STOPWORDS
+        w for w in words if len(w) >= _MIN_TOKEN_LEN and w not in _PHRASE_STOPWORDS
     ]
     phrases: list[str] = []
     for i in range(len(words) - 1):
@@ -476,10 +521,7 @@ def build_pr_name_index(registry: StoreRegistry) -> dict[str, str]:
         node_type = node.get("node_type", "")
         if node_type == ENTITY_TYPE_PR:
             pr_num = properties.get("pr_number")
-            if (
-                pr_num is not None
-                and pr_num >= _MIN_PR_NUMBER_FOR_NUMERIC_INDEX
-            ):
+            if pr_num is not None and pr_num >= _MIN_PR_NUMBER_FOR_NUMERIC_INDEX:
                 index.setdefault(str(pr_num), entity_id)
             title = properties.get("title", "")
             tokens, phrases = _title_tokens_and_phrases(title)

@@ -261,9 +261,7 @@ class TestSQLiteEdgeCompiler:
         ("op", "expected"),
         [("lt", "<"), ("lte", "<="), ("gt", ">"), ("gte", ">=")],
     )
-    def test_range_op_compiles_to_sql_operator(
-        self, op: str, expected: str
-    ) -> None:
+    def test_range_op_compiles_to_sql_operator(self, op: str, expected: str) -> None:
         from trellis.stores.sqlite.graph import SQLiteGraphStore
 
         clause = FilterClause("confidence", op, 0.5)
@@ -276,9 +274,7 @@ class TestSQLiteEdgeCompiler:
     def test_in_with_extractor_tier(self) -> None:
         from trellis.stores.sqlite.graph import SQLiteGraphStore
 
-        clause = FilterClause(
-            "extractor_tier", "in", ("DETERMINISTIC", "HYBRID")
-        )
+        clause = FilterClause("extractor_tier", "in", ("DETERMINISTIC", "HYBRID"))
         sql, params = SQLiteGraphStore._render_clause_sqlite(
             SQLiteGraphStore._edge_field_to_sql_expr(clause.field), clause
         )
@@ -303,9 +299,7 @@ class TestSQLiteContainsCompiler:
         from trellis.stores.sqlite.graph import SQLiteGraphStore
 
         clause = FilterClause("properties.column_names", "contains", "user_id")
-        sql, params = SQLiteGraphStore._render_contains_sqlite(
-            clause.field, clause
-        )
+        sql, params = SQLiteGraphStore._render_contains_sqlite(clause.field, clause)
         # The ``CASE WHEN json_type(...) = 'array' THEN ... ELSE '[]' END``
         # guard coerces non-array values to an empty array so
         # ``json_each`` never raises on scalar properties.
@@ -329,9 +323,7 @@ class TestSQLiteContainsCompiler:
         from trellis.stores.sqlite.graph import SQLiteGraphStore
 
         clause = FilterClause("properties.ids", "contains", 42)
-        sql, params = SQLiteGraphStore._render_contains_sqlite(
-            clause.field, clause
-        )
+        sql, params = SQLiteGraphStore._render_contains_sqlite(clause.field, clause)
         assert params == [42]
         # The scalar value lands as a parameter binding on
         # ``json_each.value = ?`` inside the EXISTS subquery.

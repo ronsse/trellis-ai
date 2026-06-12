@@ -49,9 +49,7 @@ class TestConstruction:
 
     def test_zero_top_k_raises(self) -> None:
         with pytest.raises(ValueError, match="top_k"):
-            SemanticSeedExtractor(
-                MagicMock(), MagicMock(return_value=[0.1]), top_k=0
-            )
+            SemanticSeedExtractor(MagicMock(), MagicMock(return_value=[0.1]), top_k=0)
 
     def test_negative_cache_size_raises(self) -> None:
         with pytest.raises(ValueError, match="cache_size"):
@@ -62,9 +60,7 @@ class TestConstruction:
             )
 
     def test_default_top_k_exposed(self) -> None:
-        extractor = SemanticSeedExtractor(
-            MagicMock(), MagicMock(return_value=[0.1])
-        )
+        extractor = SemanticSeedExtractor(MagicMock(), MagicMock(return_value=[0.1]))
         assert extractor.top_k == DEFAULT_TOP_K
 
 
@@ -80,9 +76,7 @@ class TestExtraction:
         store.query.return_value = hits
         embed = MagicMock(return_value=[0.1, 0.2, 0.3])
         return (
-            SemanticSeedExtractor(
-                store, embed, top_k=top_k, cache_size=cache_size
-            ),
+            SemanticSeedExtractor(store, embed, top_k=top_k, cache_size=cache_size),
             store,
             embed,
         )
@@ -208,9 +202,7 @@ class TestExtraction:
     def test_vector_store_exception_returns_empty_seeds(self) -> None:
         store = MagicMock()
         store.query.side_effect = RuntimeError("vector backend down")
-        extractor = SemanticSeedExtractor(
-            store, MagicMock(return_value=[0.1, 0.2])
-        )
+        extractor = SemanticSeedExtractor(store, MagicMock(return_value=[0.1, 0.2]))
         # Failure must not propagate — pack assembly continues with
         # other seed sources.
         assert extractor.extract("intent") == []

@@ -25,6 +25,7 @@ def learning_registry() -> ParameterRegistry:
     """Default registry seeded with the historical learning thresholds."""
     return build_seeded_registry()
 
+
 # ---------------------------------------------------------------------------
 # normalize_intent_family
 # ---------------------------------------------------------------------------
@@ -145,9 +146,7 @@ def _make_item(
 
 
 class TestAnalyzeLearningObservations:
-    def test_empty_observations(
-        self, learning_registry: ParameterRegistry
-    ) -> None:
+    def test_empty_observations(self, learning_registry: ParameterRegistry) -> None:
         result = analyze_learning_observations(
             observations=[], registry=learning_registry
         )
@@ -253,9 +252,7 @@ class TestAnalyzeLearningObservations:
         # 3/5 = 0.6 success, retry_rate=0 => no action (between thresholds)
         assert result["candidate_count"] == 0
 
-    def test_artifacts_root_stored(
-        self, learning_registry: ParameterRegistry
-    ) -> None:
+    def test_artifacts_root_stored(self, learning_registry: ParameterRegistry) -> None:
         result = analyze_learning_observations(
             observations=[],
             registry=learning_registry,

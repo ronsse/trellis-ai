@@ -91,8 +91,7 @@ def _build_idf(documents: list[str]) -> dict[str, float]:
         for token in set(_tokenize(doc)):
             df[token] = df.get(token, 0) + 1
     return {
-        token: math.log((n_docs + 1) / (count + 1)) + 1.0
-        for token, count in df.items()
+        token: math.log((n_docs + 1) / (count + 1)) + 1.0 for token, count in df.items()
     }
 
 
@@ -337,18 +336,13 @@ def test_no_regression_on_explicit_pr_reference_seed_composition(
     )
     # Architectural contract:
     # 1. Literal seed (PR #66) is preserved.
-    assert "github.pr.66" in seed_ids, (
-        f"literal seed dropped from union: {seed_ids}"
-    )
+    assert "github.pr.66" in seed_ids, f"literal seed dropped from union: {seed_ids}"
     # 2. Total seed count obeys the SEM-1 cap.
     assert len(seed_ids) <= SEM1_MAX_TOTAL_SEEDS, (
-        f"seed list exceeded SEM1_MAX_TOTAL_SEEDS={SEM1_MAX_TOTAL_SEEDS}: "
-        f"{seed_ids}"
+        f"seed list exceeded SEM1_MAX_TOTAL_SEEDS={SEM1_MAX_TOTAL_SEEDS}: {seed_ids}"
     )
     # 3. Literal slot is at the head (priority preserved).
-    assert seed_ids[0] == "github.pr.66", (
-        f"literal seed lost head priority: {seed_ids}"
-    )
+    assert seed_ids[0] == "github.pr.66", f"literal seed lost head priority: {seed_ids}"
 
 
 def test_no_regression_on_topic_content_query(
@@ -379,9 +373,7 @@ def test_no_regression_on_topic_content_query(
     )
     pack_ids = {item.item_id for item in pack.items}
     required = set(query.required_coverage)
-    covered = sum(
-        1 for eid in required if eid in pack_ids or f"doc:{eid}" in pack_ids
-    )
+    covered = sum(1 for eid in required if eid in pack_ids or f"doc:{eid}" in pack_ids)
     coverage = covered / len(required) if required else 1.0
     assert coverage >= 0.6, (
         f"topic_content regressed: {coverage:.2%}, "

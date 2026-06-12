@@ -52,9 +52,7 @@ class TestRetrievalAffinity:
     def test_operational_affinity_from_error_keywords(self) -> None:
         c = KeywordDomainClassifier()
         # Two infrastructure hits + an operational keyword
-        result = c.classify(
-            "The kubernetes cluster failure caused a deploy timeout."
-        )
+        result = c.classify("The kubernetes cluster failure caused a deploy timeout.")
         assert "infrastructure" in result.tags.get("domain", [])
         assert "operational" in result.tags.get("retrieval_affinity", [])
 
@@ -63,9 +61,7 @@ class TestEdgeCaseEmptyContent:
     """Empty content flags llm_review with no matches."""
 
     def test_empty_content_returns_no_tags(self) -> None:
-        result = KeywordDomainClassifier().classify(
-            "", context=ClassificationContext()
-        )
+        result = KeywordDomainClassifier().classify("", context=ClassificationContext())
         assert result.tags == {}
         assert result.needs_llm_review is True
         assert result.confidence == 0.5

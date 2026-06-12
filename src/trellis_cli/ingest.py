@@ -73,9 +73,7 @@ def ingest_trace(
     )
     if result.status != CommandStatus.SUCCESS:
         if output_format == "json":
-            console.print(
-                json.dumps({"status": "error", "message": result.message})
-            )
+            console.print(json.dumps({"status": "error", "message": result.message}))
         else:
             console.print(f"[red]Failed to ingest trace: {result.message}[/red]")
         raise typer.Exit(code=EXIT_INTERNAL)

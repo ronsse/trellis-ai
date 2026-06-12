@@ -144,11 +144,7 @@ def _apply_importance(
     # canonical home; `metadata["importance_scored_at"]` is supported as
     # a flat alias for stores that flatten tags into top-level metadata.
     tags = metadata.get("content_tags") or {}
-    raw_stamp = (
-        tags.get("importance_scored_at")
-        if isinstance(tags, dict)
-        else None
-    )
+    raw_stamp = tags.get("importance_scored_at") if isinstance(tags, dict) else None
     if raw_stamp is None:
         raw_stamp = metadata.get("importance_scored_at")
     if raw_stamp is None:
@@ -340,7 +336,9 @@ class KeywordSearch(SearchStrategy):
             RECENCY_FLOOR,
         )
         importance_params = _resolve_importance_params(
-            self._registry, _KEYWORD_COMPONENT, domain,
+            self._registry,
+            _KEYWORD_COMPONENT,
+            domain,
         )
         results = self._store.search(query, limit=limit, filters=filters)
         items = []
@@ -413,7 +411,9 @@ class SemanticSearch(SearchStrategy):
             RECENCY_FLOOR,
         )
         importance_params = _resolve_importance_params(
-            self._registry, _SEMANTIC_COMPONENT, domain,
+            self._registry,
+            _SEMANTIC_COMPONENT,
+            domain,
         )
         query_vector = self._embedding_fn(query)
         results = self._store.query(query_vector, top_k=limit, filters=filters)
@@ -550,7 +550,9 @@ class GraphSearch(SearchStrategy):
             depth = filters.pop("depth", 2)
             edge_types = filters.pop("edge_types", None)
             subgraph = self._store.get_subgraph(
-                seed_ids, depth=depth, edge_types=edge_types,
+                seed_ids,
+                depth=depth,
+                edge_types=edge_types,
             )
             nodes = subgraph.get("nodes", [])
         else:
@@ -615,7 +617,9 @@ class GraphSearch(SearchStrategy):
             RECENCY_FLOOR,
         )
         importance_params = _resolve_importance_params(
-            self._registry, _GRAPH_COMPONENT, request_domain,
+            self._registry,
+            _GRAPH_COMPONENT,
+            request_domain,
         )
 
         items = []

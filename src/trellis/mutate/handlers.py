@@ -278,9 +278,7 @@ class LinkCreateHandler:
             return node_id_val
         return None
 
-    def _resolve_endpoints(
-        self, source_id: str, target_id: str
-    ) -> tuple[str, str]:
+    def _resolve_endpoints(self, source_id: str, target_id: str) -> tuple[str, str]:
         """Resolve both edge endpoints or raise :class:`ValidationError`.
 
         Centralises the FK-validation block so the happy-path of
@@ -368,9 +366,7 @@ class ObservationRecordHandler:
         raw = command.args["observation"]
         try:
             obs = (
-                raw
-                if isinstance(raw, Observation)
-                else Observation.model_validate(raw)
+                raw if isinstance(raw, Observation) else Observation.model_validate(raw)
             )
         except Exception as exc:
             # Loud-on-missing-required-field discipline. The executor
@@ -467,9 +463,7 @@ class MeasurementRecordHandler:
         raw = command.args["measurement"]
         try:
             meas = (
-                raw
-                if isinstance(raw, Measurement)
-                else Measurement.model_validate(raw)
+                raw if isinstance(raw, Measurement) else Measurement.model_validate(raw)
             )
         except Exception as exc:
             msg = f"Measurement validation failed: {exc}"

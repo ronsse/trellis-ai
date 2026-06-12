@@ -274,9 +274,7 @@ def test_structlog_routes_to_stderr_not_stdout(
     default level the CLI chooses today.
     """
     env = {**initialized_cli_env, "TRELLIS_LOG_LEVEL": "INFO"}
-    completed, payload = cli_runner(
-        ["admin", "stats", "--format", "json"], env
-    )
+    completed, payload = cli_runner(["admin", "stats", "--format", "json"], env)
     assert payload["status"] == "ok"
     stderr = completed.stderr.decode(errors="replace")
     assert "store_instantiated" in stderr, (

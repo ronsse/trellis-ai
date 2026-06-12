@@ -142,9 +142,7 @@ def reclassify_item(
     # using it as a tiebreaker would defeat the early-out). Importance is
     # checked against the existing metadata value.
     before_tags_no_stamp = {
-        k: v
-        for k, v in before_tags.items()
-        if k != "importance_scored_at"
+        k: v for k, v in before_tags.items() if k != "importance_scored_at"
     }
     fresh_tags_no_stamp = {
         k: v for k, v in fresh_tags.items() if k != "importance_scored_at"

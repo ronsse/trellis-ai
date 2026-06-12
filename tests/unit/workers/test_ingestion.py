@@ -411,9 +411,7 @@ class TestOpenLineageRoutingProperties:
         result = await OpenLineageExtractor().extract(events)
         ds = next(e for e in result.entities if e.entity_type == "dataset")
         assert ds.properties[wk.DATASET_PROP_SOURCE_SYSTEM] == "warehouse"
-        assert (
-            ds.properties[wk.DATASET_PROP_PHYSICAL_URI] == "warehouse:raw.events"
-        )
+        assert ds.properties[wk.DATASET_PROP_PHYSICAL_URI] == "warehouse:raw.events"
 
     async def test_routing_only_on_datasets_not_jobs(self) -> None:
         result = await OpenLineageExtractor().extract(SAMPLE_OL_EVENTS)

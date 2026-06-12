@@ -59,9 +59,7 @@ def _write_config(
     return config_dir
 
 
-def _block_imports(
-    monkeypatch: pytest.MonkeyPatch, blocked_names: set[str]
-) -> None:
+def _block_imports(monkeypatch: pytest.MonkeyPatch, blocked_names: set[str]) -> None:
     """Make ``import`` raise ``ModuleNotFoundError`` for selected modules.
 
     Matches an exact module name OR any submodule (``blocked.name``,
@@ -392,9 +390,7 @@ def test_from_config_dir_corrupt_yaml_raises(tmp_path: Path) -> None:
     config_dir.mkdir(parents=True, exist_ok=True)
     (config_dir / "config.yaml").write_text("not: valid: yaml: ::\n  -[ bad\n")
     with pytest.raises(ConfigError) as exc_info:
-        StoreRegistry.from_config_dir(
-            config_dir=config_dir, data_dir=tmp_path / "data"
-        )
+        StoreRegistry.from_config_dir(config_dir=config_dir, data_dir=tmp_path / "data")
     assert "config.yaml" in str(exc_info.value)
 
 

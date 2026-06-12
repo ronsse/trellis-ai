@@ -59,15 +59,11 @@ _T_NOT_NULL_STG_CUSTOMERS_ID = (
     "test.jaffle_shop.not_null_stg_customers_customer_id.e2cfb1f9aa"
 )
 _T_UNIQUE_STG_ORDERS_ID = "test.jaffle_shop.unique_stg_orders_order_id.e3b0c44298"
-_T_NOT_NULL_STG_ORDERS_ID = (
-    "test.jaffle_shop.not_null_stg_orders_order_id.81cfe2fe64"
-)
+_T_NOT_NULL_STG_ORDERS_ID = "test.jaffle_shop.not_null_stg_orders_order_id.81cfe2fe64"
 _T_ACCEPTED_VALUES_STG_ORDERS_STATUS = (
     "test.jaffle_shop.accepted_values_stg_orders_status.080fb20aad"
 )
-_T_UNIQUE_STG_PAYMENTS_ID = (
-    "test.jaffle_shop.unique_stg_payments_payment_id.3744510712"
-)
+_T_UNIQUE_STG_PAYMENTS_ID = "test.jaffle_shop.unique_stg_payments_payment_id.3744510712"
 _T_NOT_NULL_STG_PAYMENTS_ID = (
     "test.jaffle_shop.not_null_stg_payments_payment_id.c19cc50095"
 )
@@ -75,14 +71,10 @@ _T_ACCEPTED_VALUES_STG_PAYMENTS_METHOD = (
     "test.jaffle_shop.accepted_values_stg_payments_payment_method.e1bdf5d472"
 )
 _T_UNIQUE_CUSTOMERS_ID = "test.jaffle_shop.unique_customers_customer_id.c5af1ff4f7"
-_T_NOT_NULL_CUSTOMERS_ID = (
-    "test.jaffle_shop.not_null_customers_customer_id.3b4e0ddfc6"
-)
+_T_NOT_NULL_CUSTOMERS_ID = "test.jaffle_shop.not_null_customers_customer_id.3b4e0ddfc6"
 _T_UNIQUE_ORDERS_ID = "test.jaffle_shop.unique_orders_order_id.fed79b3a6e"
 _T_NOT_NULL_ORDERS_ID = "test.jaffle_shop.not_null_orders_order_id.cf6c17daed"
-_T_RELATIONSHIPS_ORDERS_CUSTOMER = (
-    "test.jaffle_shop.relationships_orders_customer_id__customer_id__ref_customers_.c6ec7f58f2"
-)
+_T_RELATIONSHIPS_ORDERS_CUSTOMER = "test.jaffle_shop.relationships_orders_customer_id__customer_id__ref_customers_.c6ec7f58f2"  # noqa: E501
 
 
 GROUND_TRUTH_QUERIES: list[JaffleShopQuery] = [
@@ -91,9 +83,7 @@ GROUND_TRUTH_QUERIES: list[JaffleShopQuery] = [
     # transform from the one that just contains the column name.
     # -----------------------------------------------------------------
     JaffleShopQuery(
-        intent=(
-            "Which model converts payment amounts from cents to dollars?"
-        ),
+        intent=("Which model converts payment amounts from cents to dollars?"),
         required_coverage=[_M_STG_PAYMENTS],
         difficulty="medium",
         skill="column_transformation",
@@ -107,9 +97,7 @@ GROUND_TRUTH_QUERIES: list[JaffleShopQuery] = [
         ),
     ),
     JaffleShopQuery(
-        intent=(
-            "Where is the paymentmethod field renamed to payment_method?"
-        ),
+        intent=("Where is the paymentmethod field renamed to payment_method?"),
         required_coverage=[_M_STG_PAYMENTS],
         difficulty="medium",
         skill="column_transformation",
@@ -121,9 +109,7 @@ GROUND_TRUTH_QUERIES: list[JaffleShopQuery] = [
         ),
     ),
     JaffleShopQuery(
-        intent=(
-            "Which model materializes the customer_lifetime_value column?"
-        ),
+        intent=("Which model materializes the customer_lifetime_value column?"),
         required_coverage=[_M_CUSTOMERS],
         difficulty="medium",
         skill="column_transformation",
@@ -199,9 +185,7 @@ GROUND_TRUTH_QUERIES: list[JaffleShopQuery] = [
         ),
     ),
     JaffleShopQuery(
-        intent=(
-            "If I change stg_orders, which models and tests are at risk?"
-        ),
+        intent=("If I change stg_orders, which models and tests are at risk?"),
         required_coverage=[
             _M_CUSTOMERS,
             _M_ORDERS,
@@ -222,8 +206,7 @@ GROUND_TRUTH_QUERIES: list[JaffleShopQuery] = [
     ),
     JaffleShopQuery(
         intent=(
-            "Trace the path from raw.payments to the customer_lifetime_value "
-            "column."
+            "Trace the path from raw.payments to the customer_lifetime_value column."
         ),
         required_coverage=[_S_RAW_PAYMENTS, _M_STG_PAYMENTS, _M_CUSTOMERS],
         difficulty="hard",

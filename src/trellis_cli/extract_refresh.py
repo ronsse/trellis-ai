@@ -383,9 +383,7 @@ def refresh(  # noqa: PLR0912, PLR0915 - CLI dispatch with explicit branching by
     emitted into the EventLog with the structured property diff.
     """
     if (source is None) == (extractor_type is None):
-        console.print(
-            "[red]Specify exactly one of --source or --type.[/red]"
-        )
+        console.print("[red]Specify exactly one of --source or --type.[/red]")
         raise typer.Exit(code=EXIT_INTERNAL)
 
     if extractor_type is not None and path is None:
@@ -396,9 +394,7 @@ def refresh(  # noqa: PLR0912, PLR0915 - CLI dispatch with explicit branching by
     if source is not None:
         sources_path = Path(sources_file)
         if not sources_path.exists():
-            console.print(
-                f"[red]sources.yaml not found: {sources_path}[/red]"
-            )
+            console.print(f"[red]sources.yaml not found: {sources_path}[/red]")
             raise typer.Exit(code=EXIT_INTERNAL)
         config = load_sources(sources_path)
         entry = config.find(source)

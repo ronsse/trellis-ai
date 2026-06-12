@@ -38,9 +38,12 @@ SQLITE_REGISTRY_CONFIG = {
 
 
 def main() -> int:
-    with tempfile.TemporaryDirectory() as stores_dir, StoreRegistry(
-        config=SQLITE_REGISTRY_CONFIG, stores_dir=Path(stores_dir)
-    ) as registry:
+    with (
+        tempfile.TemporaryDirectory() as stores_dir,
+        StoreRegistry(
+            config=SQLITE_REGISTRY_CONFIG, stores_dir=Path(stores_dir)
+        ) as registry,
+    ):
         load_result = load_github_corpus(registry)
 
         print()
@@ -93,9 +96,7 @@ def main() -> int:
             print(f"Spot-check — most recent PR (#{sample_num}): {sample_title[:60]}")
             outgoing = graph.get_edges(sample_id, direction="outgoing")
             for e in outgoing[:10]:
-                print(
-                    f"  {sample_id} -[{e.get('edge_type')}]-> {e.get('target_id')}"
-                )
+                print(f"  {sample_id} -[{e.get('edge_type')}]-> {e.get('target_id')}")
             print()
 
         # Name index — used later for seed extraction.
@@ -105,9 +106,7 @@ def main() -> int:
         print()
 
         # Document store smoke search.
-        documents = list(
-            registry.knowledge.document_store.search(query="advisory")
-        )
+        documents = list(registry.knowledge.document_store.search(query="advisory"))
         print(f"Document store: {len(documents)} matches for 'advisory'")
         for d in documents[:3]:
             print(f"  {d.get('doc_id')}: {(d.get('content') or '')[:80]}...")

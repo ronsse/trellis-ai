@@ -119,10 +119,7 @@ def build_moonshot_chat_client(config: RealLLMConfig | None = None) -> LLMClient
     try:
         from trellis.llm.providers.openai import OpenAIClient  # noqa: PLC0415
     except ModuleNotFoundError as exc:  # pragma: no cover — install guard
-        msg = (
-            "openai SDK not installed. "
-            "Run: uv pip install -e '.[llm-openai]'"
-        )
+        msg = "openai SDK not installed. Run: uv pip install -e '.[llm-openai]'"
         raise ModuleNotFoundError(msg) from exc
 
     return OpenAIClient(
@@ -152,10 +149,7 @@ def build_openai_embedder(config: RealLLMConfig | None = None) -> EmbedderClient
     try:
         from trellis.llm.providers.openai import OpenAIEmbedder  # noqa: PLC0415
     except ModuleNotFoundError as exc:  # pragma: no cover — install guard
-        msg = (
-            "openai SDK not installed. "
-            "Run: uv pip install -e '.[llm-openai]'"
-        )
+        msg = "openai SDK not installed. Run: uv pip install -e '.[llm-openai]'"
         raise ModuleNotFoundError(msg) from exc
 
     return OpenAIEmbedder(

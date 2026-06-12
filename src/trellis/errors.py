@@ -78,12 +78,8 @@ class BackendNotInstalledError(ConfigError):
         elif package_name:
             install_hint = f"Run: uv pip install {package_name}"
         else:
-            install_hint = (
-                "Install the matching optional dependency for this backend."
-            )
-        message = (
-            f"Backend {backend_name!r} is not installed. {install_hint}"
-        )
+            install_hint = "Install the matching optional dependency for this backend."
+        message = f"Backend {backend_name!r} is not installed. {install_hint}"
         super().__init__(message, setting=f"backend.{backend_name}")
         self.code = "BACKEND_NOT_INSTALLED"
 

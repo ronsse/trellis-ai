@@ -130,8 +130,7 @@ def _test_description(test_entity: dict[str, Any]) -> str:
         kind = "schema"
 
     return (
-        f"dbt test '{name}'. Validates {kind} constraint. "
-        f"Test entity_id={entity_id}."
+        f"dbt test '{name}'. Validates {kind} constraint. Test entity_id={entity_id}."
     )
 
 
@@ -261,9 +260,7 @@ def _build_pack(
     under the 8-item budget).
     """
     name_seeds = extract_seed_ids(query.intent, name_index)
-    expanded_seeds = expand_seeds_with_lineage(
-        name_seeds, query.intent, lineage_index
-    )
+    expanded_seeds = expand_seeds_with_lineage(name_seeds, query.intent, lineage_index)
     lineage_expanded = len(expanded_seeds) > len(name_seeds)
     category_seeds = extract_category_seeds(query.intent, category_index)
     seed_ids = list(dict.fromkeys(expanded_seeds + category_seeds))
@@ -309,9 +306,7 @@ def _grade_round(
         if doc_form in pack_item_ids or entity_id in pack_item_ids:
             referenced.append(doc_form if doc_form in pack_item_ids else entity_id)
     required_count = len(query.required_coverage)
-    coverage = (
-        1.0 if not required_count else len(referenced) / required_count
-    )
+    coverage = 1.0 if not required_count else len(referenced) / required_count
     return referenced, coverage, coverage >= coverage_threshold
 
 
@@ -574,9 +569,7 @@ def run(  # noqa: PLR0915,PLR0912 — orchestrates many stages, single coherent 
     metrics.update(telemetry.to_metrics())
     if rounds > 0:
         metrics["seed_extraction.rounds_with_seeds"] = float(seed_extraction_hits)
-        metrics["seed_extraction.hit_rate"] = round(
-            seed_extraction_hits / rounds, 4
-        )
+        metrics["seed_extraction.hit_rate"] = round(seed_extraction_hits / rounds, 4)
         metrics["seed_extraction.seeds_total"] = float(seed_ids_grand_total)
         metrics["seed_extraction.seeds_per_round_mean"] = round(
             seed_ids_grand_total / rounds, 4

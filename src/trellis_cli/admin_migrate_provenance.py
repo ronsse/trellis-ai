@@ -88,6 +88,7 @@ _DRIFT_THRESHOLD: float = 0.01
 #: console output finite when a misconfigured store rains errors.
 _ERROR_PREVIEW_LIMIT = 10
 
+
 class MigrationDriftError(RuntimeError):
     """Raised when too many edges have malformed legacy provenance.
 
@@ -208,8 +209,7 @@ def _migrate_one_edge(
     # final report surfaces the failure count to the operator.
     except Exception as exc:
         report.errors.append(
-            f"edge:{edge.get('edge_id')}: upsert failed: "
-            f"{type(exc).__name__}: {exc}"
+            f"edge:{edge.get('edge_id')}: upsert failed: {type(exc).__name__}: {exc}"
         )
         logger.exception(
             "migrate_provenance_upsert_failed",
@@ -279,10 +279,7 @@ def run_migrate_provenance(
 
     report.completed_at = time.time()
 
-    if (
-        report.edges_scanned > 0
-        and report.drift_rate > _DRIFT_THRESHOLD
-    ):
+    if report.edges_scanned > 0 and report.drift_rate > _DRIFT_THRESHOLD:
         raise MigrationDriftError(
             malformed_count=report.edges_malformed,
             scanned=report.edges_scanned,
@@ -417,10 +414,7 @@ def register(admin_app: typer.Typer) -> None:
         no_meta_trace: bool = typer.Option(
             False,
             "--no-meta-trace",
-            help=(
-                "Skip recording this migration as a meta-Activity "
-                "(Item 6 Phase 2)."
-            ),
+            help=("Skip recording this migration as a meta-Activity (Item 6 Phase 2)."),
         ),
     ) -> None:
         """Lift provenance from legacy ``properties`` JSON into typed columns.

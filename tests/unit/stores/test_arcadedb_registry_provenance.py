@@ -62,9 +62,7 @@ class TestRegistryRunsMigrationOnNewDriverPath:
         _silence_init_schema(monkeypatch)
 
         with (
-            patch(
-                "trellis.stores.arcadedb.base.build_arcadedb_driver"
-            ) as mock_build,
+            patch("trellis.stores.arcadedb.base.build_arcadedb_driver") as mock_build,
             patch("trellis.stores.arcadedb.base.ensure_database"),
             patch(
                 "trellis.stores.arcadedb.graph."
@@ -90,9 +88,7 @@ class TestRegistryRunsMigrationOnNewDriverPath:
         _silence_init_schema(monkeypatch)
 
         with (
-            patch(
-                "trellis.stores.arcadedb.base.build_arcadedb_driver"
-            ) as mock_build,
+            patch("trellis.stores.arcadedb.base.build_arcadedb_driver") as mock_build,
             patch("trellis.stores.arcadedb.base.ensure_database"),
             patch(
                 "trellis.stores.arcadedb.graph."
@@ -126,17 +122,13 @@ class TestRegistryForwardsHttpUrlToConstructor:
         # registry actually forwards to the store constructor).
         original = StoreRegistry._inject_arcadedb_driver
 
-        def _spy(
-            self: StoreRegistry, params: dict[str, object]
-        ) -> dict[str, object]:
+        def _spy(self: StoreRegistry, params: dict[str, object]) -> dict[str, object]:
             result = original(self, params)
             captured.update(result)
             return result
 
         with (
-            patch(
-                "trellis.stores.arcadedb.base.build_arcadedb_driver"
-            ) as mock_build,
+            patch("trellis.stores.arcadedb.base.build_arcadedb_driver") as mock_build,
             patch("trellis.stores.arcadedb.base.ensure_database"),
             patch(
                 "trellis.stores.arcadedb.graph."
@@ -242,9 +234,7 @@ class TestCachedDriverPathRunsMigration:
                 "trellis.stores.arcadedb.graph."
                 "ArcadeDBGraphStore._init_arcadedb_edge_provenance_schema"
             ) as mock_migrate,
-            patch(
-                "trellis.stores.registry.logger.warning"
-            ) as mock_warning,
+            patch("trellis.stores.registry.logger.warning") as mock_warning,
         ):
             # No password, no http_url in params. ``derive_http_url_
             # from_bolt`` parses "10.0.0.1" out of the URI but the
@@ -276,9 +266,7 @@ class TestConstructorBranchAcceptsRegistryPath:
         _silence_init_schema(monkeypatch)
         from trellis.stores.arcadedb.graph import ArcadeDBGraphStore
 
-        with patch(
-            "trellis.stores.arcadedb.graph.logger.warning"
-        ) as mock_warning:
+        with patch("trellis.stores.arcadedb.graph.logger.warning") as mock_warning:
             ArcadeDBGraphStore(
                 "bolt://x",
                 user="u",
@@ -303,14 +291,10 @@ class TestConstructorBranchAcceptsRegistryPath:
         _silence_init_schema(monkeypatch)
         from trellis.stores.arcadedb.graph import ArcadeDBGraphStore
 
-        with patch(
-            "trellis.stores.arcadedb.graph.logger.warning"
-        ) as mock_warning:
+        with patch("trellis.stores.arcadedb.graph.logger.warning") as mock_warning:
             ArcadeDBGraphStore("bolt://x", user="u", driver=MagicMock())
         warning_events = [
-            call.args[0]
-            for call in mock_warning.call_args_list
-            if call.args
+            call.args[0] for call in mock_warning.call_args_list if call.args
         ]
         assert (
             "arcadedb_provenance_schema_migration_skipped_injected_driver"

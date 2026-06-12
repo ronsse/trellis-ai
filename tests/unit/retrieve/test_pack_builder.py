@@ -694,9 +694,7 @@ class TestAdvisoryProvenance:
         assert len(pack.advisories) == 1
         assert pack.items[0].injected_advisory_ids == []
 
-    def test_advisory_with_entity_id_stamps_matching_item(
-        self, tmp_path: Path
-    ) -> None:
+    def test_advisory_with_entity_id_stamps_matching_item(self, tmp_path: Path) -> None:
         """When ``advisory.entity_id == item.item_id``, the advisory ID is stamped."""
         store = AdvisoryStore(tmp_path / "adv.json")
         advisory = _make_advisory(
@@ -714,9 +712,7 @@ class TestAdvisoryProvenance:
         assert d1.injected_advisory_ids == [advisory.advisory_id]
         assert d2.injected_advisory_ids == []
 
-    def test_anti_pattern_advisory_stamps_matching_item(
-        self, tmp_path: Path
-    ) -> None:
+    def test_anti_pattern_advisory_stamps_matching_item(self, tmp_path: Path) -> None:
         """ANTI_PATTERN advisories also carry ``entity_id`` and influence items."""
         store = AdvisoryStore(tmp_path / "adv.json")
         advisory = _make_advisory(
@@ -815,9 +811,7 @@ class TestAdvisoryProvenance:
         store.put(advisory)
         event_log = SQLiteEventLog(tmp_path / "events.db")
         try:
-            s = _make_strategy(
-                "kw", [_item("d1", 0.9), _item("d2", 0.7)]
-            )
+            s = _make_strategy("kw", [_item("d1", 0.9), _item("d2", 0.7)])
             builder = PackBuilder(
                 strategies=[s], advisory_store=store, event_log=event_log
             )
@@ -1576,9 +1570,7 @@ class TestMetaActivityFilter:
         assert "real-1" in item_ids
         assert "meta-1" not in item_ids
 
-    def test_meta_filtered_count_emitted_in_event(
-        self, tmp_path: Path
-    ) -> None:
+    def test_meta_filtered_count_emitted_in_event(self, tmp_path: Path) -> None:
         """PACK_ASSEMBLED payload includes ``meta_filtered_count``."""
         from trellis.stores.base.event_log import EventType
 
@@ -1594,17 +1586,13 @@ class TestMetaActivityFilter:
             )
             builder = PackBuilder(strategies=[s], event_log=event_log)
             builder.build("q")
-            events = event_log.get_events(
-                event_type=EventType.PACK_ASSEMBLED, limit=10
-            )
+            events = event_log.get_events(event_type=EventType.PACK_ASSEMBLED, limit=10)
             assert len(events) == 1
             assert events[0].payload["meta_filtered_count"] == 2
         finally:
             event_log.close()
 
-    def test_meta_filtered_count_zero_when_opt_in(
-        self, tmp_path: Path
-    ) -> None:
+    def test_meta_filtered_count_zero_when_opt_in(self, tmp_path: Path) -> None:
         """include_meta=True yields ``meta_filtered_count == 0`` (filter no-op)."""
         from trellis.stores.base.event_log import EventType
 
@@ -1616,16 +1604,12 @@ class TestMetaActivityFilter:
             )
             builder = PackBuilder(strategies=[s], event_log=event_log)
             builder.build("q", include_meta=True)
-            events = event_log.get_events(
-                event_type=EventType.PACK_ASSEMBLED, limit=10
-            )
+            events = event_log.get_events(event_type=EventType.PACK_ASSEMBLED, limit=10)
             assert events[0].payload["meta_filtered_count"] == 0
         finally:
             event_log.close()
 
-    def test_meta_filtered_count_in_sectioned_telemetry(
-        self, tmp_path: Path
-    ) -> None:
+    def test_meta_filtered_count_in_sectioned_telemetry(self, tmp_path: Path) -> None:
         """``build_sectioned`` also propagates ``meta_filtered_count``."""
         from trellis.stores.base.event_log import EventType
 
@@ -1640,9 +1624,7 @@ class TestMetaActivityFilter:
                 "q",
                 sections=[SectionRequest(name="default", max_items=5, max_tokens=200)],
             )
-            events = event_log.get_events(
-                event_type=EventType.PACK_ASSEMBLED, limit=10
-            )
+            events = event_log.get_events(event_type=EventType.PACK_ASSEMBLED, limit=10)
             assert len(events) == 1
             assert events[0].payload["meta_filtered_count"] == 1
         finally:
