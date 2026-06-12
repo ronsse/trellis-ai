@@ -82,6 +82,53 @@ def test_ingest_invalid_trace(client):
     assert resp.status_code == 422
 
 
+def _rich_trace():
+    return {
+        "source": "agent",
+        "intent": "fix the import",
+        "steps": [{"step_type": "tool_call", "name": "grep"}],
+        "context": {"agent_id": "a1", "domain": "backend"},
+    }
+
+
+def test_ingest_trace_extraction_flag_off(client, monkeypatch):
+    """Flag off -> trace stored, graph untouched (byte-identical to today)."""
+    monkeypatch.delenv("TRELLIS_ENABLE_TRACE_EXTRACTION", raising=False)
+    resp = client.post("/api/v1/traces", json=_rich_trace())
+    assert resp.status_code == 200
+    assert app_module._registry.knowledge.graph_store.count_nodes() == 0
+
+
+def test_ingest_trace_extraction_flag_on(client, monkeypatch):
+    """Flag on -> graph populated, edges carry source_trace_id."""
+    monkeypatch.setenv("TRELLIS_ENABLE_TRACE_EXTRACTION", "1")
+    resp = client.post("/api/v1/traces", json=_rich_trace())
+    assert resp.status_code == 200
+    trace_id = resp.json()["trace_id"]
+
+    graph = app_module._registry.knowledge.graph_store
+    assert graph.count_nodes() > 0
+    assert graph.get_node(f"trace:{trace_id}") is not None
+    edges = graph.get_edges(f"trace:{trace_id}", direction="outgoing")
+    assert edges
+    for edge in edges:
+        assert edge.get("properties", {}).get("source_trace_id") == trace_id
+
+
+def test_ingest_trace_extraction_failure_does_not_fail_request(client, monkeypatch):
+    """A broken extraction must never fail the ingest request."""
+    monkeypatch.setenv("TRELLIS_ENABLE_TRACE_EXTRACTION", "1")
+    import trellis.extract.trace_ingest_hook as hook
+
+    def _boom(*_a, **_k):
+        msg = "boom"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(hook, "result_to_batch", _boom)
+    resp = client.post("/api/v1/traces", json=_rich_trace())
+    assert resp.status_code == 200
+
+
 def test_search_empty(client):
     resp = client.get("/api/v1/search", params={"q": "test"})
     assert resp.status_code == 200

@@ -8,6 +8,7 @@ import structlog
 from fastapi import APIRouter, HTTPException
 
 from trellis.core.ids import generate_ulid
+from trellis.extract.trace_ingest_hook import run_trace_extraction
 from trellis.mutate import build_curate_executor
 from trellis.mutate.commands import (
     BatchStrategy,
@@ -41,7 +42,8 @@ def ingest_trace(body: dict[str, Any]) -> IngestResponse:
     except Exception as exc:
         raise HTTPException(status_code=422, detail=f"Invalid trace: {exc}") from exc
 
-    executor = build_curate_executor(get_registry())
+    registry = get_registry()
+    executor = build_curate_executor(registry)
     result = executor.execute(
         Command(
             operation=Operation.TRACE_INGEST,
@@ -55,6 +57,11 @@ def ingest_trace(body: dict[str, Any]) -> IngestResponse:
         # TraceStore.append raises StoreError on duplicate trace_id; the
         # handler propagates that as a FAILED status. 409 is the closest fit.
         raise HTTPException(status_code=409, detail=result.message)
+
+    # Feature-flagged post-ingest trace->graph extraction
+    # (TRELLIS_ENABLE_TRACE_EXTRACTION=1). Runs after the trace is durably
+    # stored; fail-soft inside the hook so it never fails the request.
+    run_trace_extraction(registry, trace, requested_by="api:ingest-trace")
 
     return IngestResponse(trace_id=result.created_id or trace.trace_id)
 

@@ -13,6 +13,7 @@ from rich.console import Console
 from trellis.extract.commands import result_to_batch
 from trellis.extract.dispatcher import ExtractionDispatcher
 from trellis.extract.registry import ExtractorRegistry
+from trellis.extract.trace_ingest_hook import run_trace_extraction
 from trellis.mutate import build_curate_executor
 from trellis.mutate.commands import (
     Command,
@@ -32,7 +33,7 @@ console = Console()
 
 
 @ingest_app.command("trace")
-def ingest_trace(
+def ingest_trace(  # noqa: PLR0912 - CLI dispatch with explicit format branching
     file: str = typer.Argument(None, help="Path to trace JSON file, or '-' for stdin"),
     output_format: str = typer.Option(
         "text", "--format", help="Output format: text or json"
@@ -61,7 +62,8 @@ def ingest_trace(
         raise typer.Exit(code=EXIT_INTERNAL) from None
 
     # Persist via the governed mutation pipeline
-    executor = build_curate_executor(_get_registry())
+    registry = _get_registry()
+    executor = build_curate_executor(registry)
     result = executor.execute(
         Command(
             operation=Operation.TRACE_INGEST,
@@ -80,21 +82,31 @@ def ingest_trace(
             console.print(f"[red]Failed to ingest trace: {result.message}[/red]")
         raise typer.Exit(code=EXIT_INTERNAL)
 
+    # Feature-flagged post-ingest trace->graph extraction
+    # (TRELLIS_ENABLE_TRACE_EXTRACTION=1). Runs the deterministic
+    # TraceExtractor through the governed MutationExecutor. Never blocks
+    # ingest success -- failures are logged and swallowed inside the hook.
+    extraction = run_trace_extraction(registry, trace, requested_by="cli:ingest-trace")
+
     if output_format == "json":
-        console.print(
-            json.dumps(
-                {
-                    "status": "ingested",
-                    "trace_id": trace.trace_id,
-                    "source": trace.source,
-                    "intent": trace.intent,
-                }
-            )
-        )
+        payload: dict[str, object] = {
+            "status": "ingested",
+            "trace_id": trace.trace_id,
+            "source": trace.source,
+            "intent": trace.intent,
+        }
+        if extraction is not None:
+            payload["extraction"] = extraction
+        console.print(json.dumps(payload))
     else:
         console.print(f"[green]Trace ingested[/green]: {trace.trace_id}")
         console.print(f"  Source: {trace.source}")
         console.print(f"  Intent: {trace.intent}")
+        if extraction is not None and extraction.get("executed"):
+            console.print(
+                f"  Extracted: {extraction['entities']} entities, "
+                f"{extraction['edges']} edges"
+            )
 
 
 @ingest_app.command("evidence")
