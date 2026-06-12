@@ -42,6 +42,8 @@ from trellis_wire.dtos import (
     HealthResponse,
     IngestResponse,
     LinkRequest,
+    PackFeedbackRequest,
+    PackFeedbackResponse,
     PackRequest,
     PackResponse,
     PromoteRequest,
@@ -83,6 +85,8 @@ __all__ = [
     "LinkRequest",
     "EntityCreateRequest",
     "FeedbackRequest",
+    "PackFeedbackRequest",
+    "PackFeedbackResponse",
     "CommandResponse",
     # Batch mutations
     "BatchCommandItem",

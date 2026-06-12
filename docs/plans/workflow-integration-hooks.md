@@ -1,5 +1,26 @@
 # Workflow Integration Hooks — Design Brief
 
+> **STATUS: IMPLEMENTED (2026-06-12).** Shipped as `src/trellis_sdk/hooks.py`
+> (`ContextInjector`, `TraceRecorder`, `ResultFeedback`, plus
+> `AsyncResultFeedback` and the `HookResult` sentinel), exported from
+> `trellis_sdk.__init__`. Tests: `tests/unit/sdk/test_hooks.py`. Example:
+> `examples/hooks_generic_workflow.py`. Docs: the "Workflow Integration
+> Hooks" section of [`../agent-guide/operations.md`](../agent-guide/operations.md)
+> and Playbook 14 of [`../agent-guide/playbooks.md`](../agent-guide/playbooks.md).
+> This brief is retained as the design record.
+>
+> **Superseded language — local mode.** This brief predates the HTTP-only SDK
+> architecture. The "local `TrellisClient(registry=...)` mode" referenced
+> below (see *Design Constraints*) **no longer exists**: the SDK talks only
+> to a running `trellis-api` over HTTP, and an isolation test
+> (`tests/unit/sdk/test_isolation.py`) forbids `trellis.*` imports inside
+> `trellis_sdk`. The hooks take a constructed `TrellisClient` /
+> `AsyncTrellisClient`; the supported "no server" path for tests and examples
+> is `trellis.testing.in_memory_client` (in-process ASGI), not in-process
+> registry access. The implementation also routes `ResultFeedback` pack
+> grading through the WP2 `client.record_feedback(...)` method rather than a
+> hand-rolled HTTP call.
+
 ## What This Is
 
 A prompt/design brief for implementing generic workflow integration hooks in the

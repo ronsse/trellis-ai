@@ -152,6 +152,46 @@ class FeedbackRequest(WireRequestModel):
     pack_id: str | None = None  # Link feedback to a context pack
 
 
+class PackFeedbackRequest(WireRequestModel):
+    """Request to record element-level feedback on a context pack.
+
+    Mirrors the MCP ``record_feedback`` tool's surface so the SDK,
+    REST, and MCP feedback paths share one payload shape. Routes
+    through :func:`trellis.feedback.recording.record_feedback`, which
+    appends the durable ``pack_feedback.jsonl`` row and emits the
+    authoritative ``FEEDBACK_RECORDED`` event.
+    """
+
+    success: bool
+    helpful_item_ids: list[str] = Field(default_factory=list)
+    unhelpful_item_ids: list[str] = Field(default_factory=list)
+    followed_advisory_ids: list[str] = Field(default_factory=list)
+    target_id: str | None = None  # trace/entity the pack supported, if any
+    rating: float | None = None  # explicit 0.0-1.0 score; defaults from success
+    comment: str | None = None  # free-text notes
+
+
+class PackFeedbackResponse(WireModel):
+    """Result of recording pack feedback.
+
+    ``event_log_in_sync`` surfaces the
+    :attr:`trellis.feedback.recording.FeedbackRecordResult.event_log_in_sync`
+    semantics: ``True`` when the authoritative ``FEEDBACK_RECORDED``
+    event reached the EventLog (emitted now, or already present from a
+    prior call). ``False`` means only the durable JSONL row was written
+    and a reconcile is owed — callers must not treat the signal as
+    having driven behavior yet.
+    """
+
+    status: str = "ok"
+    pack_id: str
+    feedback_id: str
+    feedback: str  # "positive" | "negative"
+    event_log_in_sync: bool
+    event_log_emitted: bool
+    event_log_skipped_as_duplicate: bool
+
+
 class CommandResponse(WireModel):
     """Response after executing a mutation command."""
 

@@ -4,21 +4,24 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException
 
+from trellis.feedback.models import PackFeedback
+from trellis.feedback.recording import record_feedback as record_pack_feedback
 from trellis.mutate import (
     Command,
     CommandStatus,
     Operation,
     build_curate_executor,
 )
-from trellis.stores.base.event_log import EventType
 from trellis_api.app import get_registry
 from trellis_wire.dtos import (
     CommandResponse,
     EntityCreateRequest,
     FeedbackRequest,
     LinkRequest,
+    PackFeedbackRequest,
+    PackFeedbackResponse,
     PromoteRequest,
 )
 
@@ -143,25 +146,64 @@ def record_feedback(req: FeedbackRequest) -> CommandResponse:
     return _execute_command(cmd)
 
 
-@router.post("/packs/{pack_id}/feedback")
-def pack_feedback(
-    pack_id: str,
-    success: bool = Query(..., description="Whether the context was helpful"),
-    notes: str | None = Query(None, description="Optional notes"),
-) -> dict[str, Any]:
-    """Record feedback on a specific context pack."""
+@router.post("/packs/{pack_id}/feedback", response_model=PackFeedbackResponse)
+def pack_feedback(pack_id: str, req: PackFeedbackRequest) -> PackFeedbackResponse:
+    """Record element-level feedback on a specific context pack.
+
+    Routes through :func:`trellis.feedback.recording.record_feedback`,
+    which appends the durable ``pack_feedback.jsonl`` row and emits the
+    authoritative ``FEEDBACK_RECORDED`` event to the operational
+    EventLog. The response surfaces whether that event reached the log
+    (``event_log_in_sync``) so callers can detect soft-failed emissions
+    rather than silently treating a JSONL-only write as fully recorded.
+    """
     registry = get_registry()
-    registry.operational.event_log.emit(
-        EventType.FEEDBACK_RECORDED,
-        source="api",
-        entity_id=pack_id,
-        entity_type="pack",
-        payload={
-            "pack_id": pack_id,
-            "success": success,
-            "notes": notes or "",
-            "rating": 1.0 if success else 0.0,
-        },
+    stores_dir = registry.stores_dir
+    if stores_dir is None:
+        raise HTTPException(
+            status_code=500,
+            detail="stores_dir is not configured; cannot record pack feedback",
+        )
+
+    # Map the element-level surface onto PackFeedback. helpful_item_ids
+    # become items_referenced (the positive signal to_event_payload
+    # promotes to helpful_item_ids); items_served is the union of cited
+    # items. The stronger "actively unhelpful" and "advisory followed"
+    # signals are not part of the served/referenced model, so they ride
+    # along in metadata where the fitness loops can read them.
+    helpful = list(req.helpful_item_ids)
+    unhelpful = list(req.unhelpful_item_ids)
+    items_served = list(dict.fromkeys([*helpful, *unhelpful]))
+    metadata: dict[str, Any] = {}
+    if unhelpful:
+        metadata["unhelpful_item_ids"] = unhelpful
+    if req.followed_advisory_ids:
+        metadata["followed_advisory_ids"] = list(req.followed_advisory_ids)
+    if req.rating is not None:
+        metadata["rating"] = req.rating
+    if req.comment:
+        metadata["notes"] = req.comment
+
+    feedback = PackFeedback(
+        run_id=req.target_id or pack_id,
+        phase="feedback",
+        intent="",
+        outcome="success" if req.success else "failure",
+        items_served=items_served,
+        items_referenced=helpful,
+        metadata=metadata,
     )
-    label = "positive" if success else "negative"
-    return {"status": "ok", "pack_id": pack_id, "feedback": label}
+    result = record_pack_feedback(
+        feedback,
+        log_dir=stores_dir / "feedback",
+        event_log=registry.operational.event_log,
+        pack_id=pack_id,
+    )
+    return PackFeedbackResponse(
+        pack_id=pack_id,
+        feedback_id=result.feedback_id,
+        feedback="positive" if req.success else "negative",
+        event_log_in_sync=result.event_log_in_sync,
+        event_log_emitted=result.event_log_emitted,
+        event_log_skipped_as_duplicate=result.event_log_skipped_as_duplicate,
+    )

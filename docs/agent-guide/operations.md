@@ -993,11 +993,13 @@ After restarting OpenClaw, the agent has access to all 11 macro tools above. See
 ```python
 from trellis_sdk import TrellisClient
 
-# Local mode (no server needed)
-client = TrellisClient()
-
-# Remote mode (via REST API)
+# HTTP client against a running trellis-api
 client = TrellisClient(base_url="http://localhost:8420")
+
+# Tests: in-process ASGI client, no network listener
+from trellis.testing import in_memory_client
+with in_memory_client(tmp_path / "stores") as client:
+    ...
 ```
 
 ### Client Methods
@@ -1012,7 +1014,17 @@ client = TrellisClient(base_url="http://localhost:8420")
 | `get_entity(entity_id)` | `dict \| None` | Get entity |
 | `create_entity(name, entity_type?, properties?)` | `str` (node_id) | Create entity |
 | `create_link(source_id, target_id, edge_kind?)` | `str` (edge_id) | Create edge |
+| `record_feedback(pack_id, success, helpful_item_ids?, unhelpful_item_ids?, followed_advisory_ids?, target_id?, rating?, comment?)` | `PackFeedbackResponse` | Record element-level pack feedback |
 | `close()` | — | Release resources |
+
+`record_feedback` mirrors the MCP `record_feedback` tool and routes through
+`trellis.feedback.recording.record_feedback` server-side: it appends the durable
+`pack_feedback.jsonl` audit row and emits the authoritative `FEEDBACK_RECORDED`
+event to the operational EventLog. The returned `PackFeedbackResponse` carries
+`event_log_in_sync` — check it to confirm the event reached the log. `False`
+means only the JSONL row landed and a reconcile is owed (the emission
+soft-failed); the SDK does not swallow that signal. `AsyncTrellisClient` exposes
+the same method as a coroutine.
 
 ### Skill Functions
 
@@ -1030,3 +1042,53 @@ context = get_context_for_task(client, "implement retry logic", domain="backend"
 ```
 
 All skill functions return `str` (markdown), not data objects.
+
+### Workflow Integration Hooks
+
+`trellis_sdk.hooks` packages the pre-task / post-task integration points a
+workflow engine needs into three classes. Each wraps a `TrellisClient` and
+**degrades gracefully** — a hook method never raises into the host workflow.
+On a Trellis outage (server down, 4xx, version mismatch, mid-call drop) the
+hook logs a `structlog` warning and returns a sentinel, so the host agent's
+task never fails because Trellis is down. Pass `raise_errors=True` to the
+constructor to opt into exceptions instead.
+
+| Class | When | Key method(s) | Sentinel on failure |
+|-------|------|---------------|---------------------|
+| `ContextInjector` | pre-task | `for_intent(intent, domain?, max_tokens?)`, `for_entities(entity_ids, intent?, domain?, max_tokens?)` | `""` (empty markdown) |
+| `TraceRecorder` | post-task | `record(step_name, status, duration_ms, entity_ids?, summary?, metrics?, error?, domain?)` | `None` (no trace_id) |
+| `ResultFeedback` | post-task | `record_success(target_entity_id, result_name, summary, full_content?, metadata?, pack_id?, helpful_item_ids?)`, `record_failure(target_entity_id, error_summary, trace_id?, pack_id?, unhelpful_item_ids?)` | `HookResult(ok=False)` |
+
+```python
+from trellis_sdk import ContextInjector, TraceRecorder, ResultFeedback, TrellisClient
+
+client = TrellisClient(base_url="http://127.0.0.1:8420")
+injector = ContextInjector(client)
+recorder = TraceRecorder(client, workflow_id="run-42", agent_id="planner")
+feedback = ResultFeedback(client)
+
+brief = injector.for_intent("add rate limiting", domain="backend")   # -> markdown
+trace_id = recorder.record("plan", "success", 1200, summary="done")   # -> trace_id | None
+result = feedback.record_success(                                     # -> HookResult
+    target_entity_id="entity:orders-api",
+    result_name="rate-limit config",
+    summary="token bucket",
+    pack_id="pack:abc",          # also grades the supporting pack (positive)
+    helpful_item_ids=["doc:1"],
+)
+```
+
+`ContextInjector` calls `assemble_pack` and falls back to per-entity lookups
+(`for_entities`) when the pack is empty, splitting the token budget across
+included entities. `TraceRecorder` builds a `source="workflow"` trace tying
+every step to `workflow_id` and records failures as well as successes
+(`status` is coerced to `unknown` if not one of `success|failure|partial`).
+`ResultFeedback` creates a `DOCUMENT` entity + `DESCRIBED_BY` edge on success
+and routes pack grading through the SDK's `record_feedback` method (the
+authoritative EventLog path) — never a hand-rolled HTTP call. An
+`AsyncResultFeedback` variant wraps `AsyncTrellisClient`.
+
+Because the SDK is HTTP-only, the hooks require a running `trellis-api`
+server. For tests and examples without a network listener, construct the
+hooks against the in-process client from `trellis.testing.in_memory_client`.
+A runnable end-to-end demo lives at `examples/hooks_generic_workflow.py`.

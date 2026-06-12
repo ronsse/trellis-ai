@@ -133,7 +133,7 @@ def _build_and_grade(
     pack = resp.json()
     feedback = client.post(
         f"/api/v1/packs/{pack['pack_id']}/feedback",
-        params={"success": success},
+        json={"success": success},
     )
     assert feedback.status_code == 200, feedback.text
     return pack
