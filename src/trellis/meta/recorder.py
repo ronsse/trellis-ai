@@ -232,6 +232,23 @@ class MetaAnalysisRecord:
         """
         if not self._enabled:
             return
+        # Some analyzers materialise the finding as a rich graph node
+        # (Advisory, Observation, WellKnownCandidate); others — like the
+        # ``learning-candidates`` report — produce a synthetic finding id
+        # for an on-disk artifact that never becomes a node. The
+        # ``wasGeneratedBy`` edge needs both endpoints to exist: SQLite
+        # silently tolerated the dangling edge, but the Bolt/openCypher
+        # backends reject it ("source/target has no current version").
+        # Create-if-absent keeps the dogfooding graph self-consistent on
+        # every backend without clobbering a real finding node's
+        # properties (an unconditional upsert would SCD-2 supersede it).
+        graph_store = self._registry.knowledge.graph_store
+        if graph_store.get_node(finding_id) is None:
+            graph_store.upsert_node(
+                node_id=finding_id,
+                node_type=finding_type,
+                properties={"name": finding_id},
+            )
         self._write_provenance_edge(
             source_id=finding_id,
             target_id=self._activity_id,
