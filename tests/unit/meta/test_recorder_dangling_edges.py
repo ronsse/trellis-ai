@@ -11,7 +11,7 @@ were green on SQLite while latently broken on the blessed substrate.
 
 :class:`_StrictEndpointGraphStore` wraps the real SQLite store and replicates
 the *single-row* Bolt endpoint check, so we can assert the recorder's
-materialise-or-skip behaviour against the rejecting-backend semantics without
+materialise-or-create behaviour against the rejecting-backend semantics without
 standing up a database. SQLite-tolerant behaviour stays covered by
 ``test_recorder.py``.
 """
@@ -122,15 +122,17 @@ def test_strict_store_rejects_dangling_edge_baseline(
         )
 
 
-def test_consumed_event_unmaterialised_target_is_skipped(
+def test_consumed_event_unmaterialised_target_is_created(
     strict_registry: StoreRegistry,
 ) -> None:
-    """``consumed_event`` to an absent event node skips, never raises.
+    """``consumed_event`` materialises an absent event node, never raises.
 
     Before the fix this raised ``"... has no current version"`` on the
-    rejecting backend (the recorder wrote the edge unconditionally). After
-    the fix the recorder skips the edge — the EventLog stays authoritative
-    for what was consumed.
+    rejecting backend (the recorder wrote the edge unconditionally against
+    an absent target). After the fix the recorder creates a minimal
+    ``Event`` node first, so the ``wasInformedBy`` edge lands on every
+    backend — preserving the graph-level provenance the code-authoring
+    generator relies on.
     """
     with record_meta_analysis(
         analyzer_name="context-effectiveness",
@@ -142,18 +144,20 @@ def test_consumed_event_unmaterialised_target_is_skipped(
         activity_id = rec.activity_id
 
     graph = strict_registry.knowledge.graph_store
+    # The event was materialised as a thin PROV-O Event node.
+    event_node = graph.get_node("evt-correlation-only")
+    assert event_node is not None
+    assert event_node["node_type"] == wk.EVENT
+    # ...and the wasInformedBy edge points at it.
     out_edges = graph.get_edges(activity_id, direction="outgoing")
     informed = [e for e in out_edges if e["edge_type"] == wk.WAS_INFORMED_BY]
-    # No wasInformedBy edge written — the dangling pointer was skipped.
-    assert informed == []
-    # The Activity + wasAssociatedWith edge still landed fine.
-    assert graph.get_node(activity_id) is not None
+    assert {e["target_id"] for e in informed} == {"evt-correlation-only"}
 
 
-def test_consumed_observation_unmaterialised_target_is_skipped(
+def test_consumed_observation_unmaterialised_target_is_created(
     strict_registry: StoreRegistry,
 ) -> None:
-    """An absent Observation target is skipped too (same dangling shape)."""
+    """An absent Observation target is materialised too (same shape)."""
     with record_meta_analysis(
         analyzer_name="context-effectiveness",
         agent_id=DEFAULT_META_AGENT_ID,
@@ -163,9 +167,12 @@ def test_consumed_observation_unmaterialised_target_is_skipped(
         activity_id = rec.activity_id
 
     graph = strict_registry.knowledge.graph_store
+    obs_node = graph.get_node("obs-missing")
+    assert obs_node is not None
+    assert obs_node["node_type"] == wk.OBSERVATION
     out_edges = graph.get_edges(activity_id, direction="outgoing")
     informed = [e for e in out_edges if e["edge_type"] == wk.WAS_INFORMED_BY]
-    assert informed == []
+    assert {e["target_id"] for e in informed} == {"obs-missing"}
 
 
 def test_consumed_observation_materialised_target_writes_edge(

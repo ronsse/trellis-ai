@@ -181,25 +181,18 @@ class MetaAnalysisRecord:
         """Record that this Activity consumed an operational event.
 
         Writes a ``wasInformedBy`` edge from the Activity node to the
-        event-correlation node identified by ``event_id`` — **but only
-        when that node already has a current version in the graph.** The
-        event node is deliberately **not** materialised here: the
-        operational EventLog owns the canonical record, and minting a
-        stub ``(:Node)`` for an event would invent a knowledge-plane
-        node for something the operational plane owns (the opposite of
-        the create-if-absent rule in :meth:`produced_finding`, where the
-        finding genuinely *is* a knowledge-plane node).
-
-        ``event_id`` is an EventLog correlation id, not a graph node id,
-        so in the common case the target is absent. SQLite tolerated the
-        resulting dangling edge silently; the Bolt/openCypher backends
-        (Neo4j, ArcadeDB) reject it ("source/target has no current
-        version"). Rather than materialise-or-clobber, we
-        **materialise-or-skip**: when the event has no current node we
-        log at debug and write no edge, keeping the dogfooding graph
-        self-consistent on every backend. The provenance is not lost —
-        the EventLog remains the authoritative record of what was
-        consumed.
+        event identified by ``event_id``. ``event_id`` is an EventLog
+        correlation id, not a graph node id, so in the common case no
+        ``(:Node)`` exists for it yet. SQLite silently tolerated the
+        resulting dangling edge; the Bolt/openCypher backends (Neo4j,
+        ArcadeDB) reject it ("source/target has no current version").
+        We therefore **materialise-or-create**: a minimal
+        :data:`~trellis.schemas.well_known.EVENT` node is created for
+        ``event_id`` when absent, then the edge is written — the same
+        create-if-absent discipline as :meth:`produced_finding`. The
+        EventLog remains the authoritative record of the event's
+        contents; the graph node is a thin PROV-O ``Event`` the
+        ``wasInformedBy`` edge can point at on every backend.
 
         Callers that pre-sample (e.g., via
         :func:`trellis.meta.sampling.reservoir_sample`) should pass the
@@ -208,30 +201,27 @@ class MetaAnalysisRecord:
         """
         if not self._enabled:
             return
-        self._write_consumed_edge(target_id=event_id, source_kind="event")
+        self._write_consumed_edge(target_id=event_id, node_type=wk.EVENT)
 
     def consumed_observation(self, observation_id: str) -> None:
         """Record that this Activity consumed an Observation node.
 
         Same edge kind as :meth:`consumed_event` (``wasInformedBy``) and
-        the same materialise-or-skip guard. The distinction is in the
-        kind of source: an event is a pointer into the operational
+        the same materialise-or-create discipline. The distinction is in
+        the kind of source: an event is a pointer into the operational
         plane, an observation is a first-class knowledge-plane node.
 
         Because the Observation is a real graph node owned by the
-        analyzer that produced it, in the normal case it *does* have a
-        current version and the edge is written. The recorder still does
-        **not** materialise it when absent — the Observation's lifecycle
-        belongs to its producer, not to this provenance pointer, so an
-        absent target signals an upstream anomaly that we log and skip
-        rather than paper over with a stub node (which would also be
-        rejected as dangling were we to point a real edge at a
-        non-current node on the Bolt backends).
+        analyzer that produced it, in the normal case it already has a
+        current version and the edge is simply written. When the target
+        is absent (the producer has not landed it, or it was superseded),
+        a minimal :data:`~trellis.schemas.well_known.OBSERVATION` node is
+        created so the edge is never dangling on the Bolt backends.
         """
         if not self._enabled:
             return
         self._write_consumed_edge(
-            target_id=observation_id, source_kind="observation"
+            target_id=observation_id, node_type=wk.OBSERVATION
         )
 
     def produced_finding(self, finding_id: str, finding_type: str) -> None:
@@ -280,29 +270,28 @@ class MetaAnalysisRecord:
     # Internals
     # ------------------------------------------------------------------
 
-    def _write_consumed_edge(self, *, target_id: str, source_kind: str) -> None:
-        """Write a ``wasInformedBy`` edge to a consumed source, or skip.
+    def _write_consumed_edge(self, *, target_id: str, node_type: str) -> None:
+        """Write a ``wasInformedBy`` edge to a consumed source.
 
-        Shared by :meth:`consumed_event` and
-        :meth:`consumed_observation`. The recorder owns the Activity and
-        the edge but not the consumed target node, so we never
-        materialise the target. When it has no current version, the
-        Bolt/openCypher backends would reject the edge as dangling — so
-        we log at debug and skip instead, leaving the edge unwritten.
-        SQLite never reaches the skip in practice (it tolerates the
-        edge), but the guard runs uniformly so behaviour matches across
-        backends.
+        Shared by :meth:`consumed_event` and :meth:`consumed_observation`.
+        Both endpoints of a provenance edge must be materialised nodes:
+        SQLite silently tolerates a dangling edge, but the Bolt/openCypher
+        backends (Neo4j, ArcadeDB) reject it ("source/target has no
+        current version"). The consumed source is frequently a pointer id
+        — an EventLog correlation id, or an Observation whose producer has
+        not landed it yet — so we **create-if-absent** a minimal node for
+        it before writing the edge, the same materialise-or-create
+        discipline :meth:`produced_finding` uses. An unconditional upsert
+        would SCD-2 supersede a real node's properties, so we create only
+        when the node is genuinely missing.
         """
         graph_store = self._registry.knowledge.graph_store
         if graph_store.get_node(target_id) is None:
-            logger.debug(
-                "meta_consumed_edge_skipped_no_current_version",
-                activity_id=self._activity_id,
-                target_id=target_id,
-                source_kind=source_kind,
-                edge_kind=wk.WAS_INFORMED_BY,
+            graph_store.upsert_node(
+                node_id=target_id,
+                node_type=node_type,
+                properties={"name": target_id},
             )
-            return
         self._write_provenance_edge(
             source_id=self._activity_id,
             target_id=target_id,
