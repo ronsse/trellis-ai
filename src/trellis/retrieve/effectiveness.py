@@ -23,6 +23,7 @@ import structlog
 from pydantic import Field
 
 from trellis.core.base import TrellisModel
+from trellis.learning.pack_observations import join_pack_feedback
 from trellis.schemas.advisory import DriftPattern
 from trellis.schemas.parameters import ParameterScope
 from trellis.stores.advisory_store import AdvisoryStore
@@ -266,26 +267,32 @@ def analyze_effectiveness(
 
     since = datetime.now(tz=UTC) - timedelta(days=days)
 
-    # Get all pack assembly events
-    pack_events = event_log.get_events(
-        event_type=EventType.PACK_ASSEMBLED,
-        since=since,
-        limit=1000,
+    # Canonical PACK_ASSEMBLED ⋈ FEEDBACK_RECORDED join (shared with the
+    # learning-observation builder, domains report, and metrics
+    # timeseries so the join semantics cannot drift between consumers).
+    feedback_events, pack_payloads = join_pack_feedback(
+        event_log, since=since, limit=1000
     )
 
-    # Get all feedback events
-    feedback_events = event_log.get_events(
-        event_type=EventType.FEEDBACK_RECORDED,
-        since=since,
-        limit=1000,
+    # ``total_packs`` reports the *raw* PACK_ASSEMBLED event count, which
+    # ``join_pack_feedback`` does not expose (it dedups by ``entity_id``
+    # and drops falsy ids). Read it directly so the count stays the
+    # number of assembly events, not distinct pack ids — same query, same
+    # window, identical result to the join's internal pack fetch.
+    pack_event_count = len(
+        event_log.get_events(
+            event_type=EventType.PACK_ASSEMBLED, since=since, limit=1000
+        )
     )
 
-    # Build pack_id -> injected_item_ids mapping
-    pack_items: dict[str, list[str]] = {}
-    for event in pack_events:
-        pack_id = event.entity_id
-        if pack_id:
-            pack_items[pack_id] = event.payload.get("injected_item_ids", [])
+    # Build pack_id -> injected_item_ids mapping from the joined pack
+    # payloads. Identical to reading ``event.payload.get(...)`` per pack
+    # event — ``join_pack_feedback`` keys ``pack_payloads`` on the same
+    # truthy ``entity_id`` gate.
+    pack_items: dict[str, list[str]] = {
+        pack_id: payload.get("injected_item_ids", [])
+        for pack_id, payload in pack_payloads.items()
+    }
 
     # Build pack_id -> feedback mapping. ``pack_helpful`` is keyed only
     # for packs whose feedback event explicitly carried a
@@ -320,7 +327,7 @@ def analyze_effectiveness(
     overall_rate = total_successes / total_feedback if total_feedback > 0 else 0.0
 
     return EffectivenessReport(
-        total_packs=len(pack_events),
+        total_packs=pack_event_count,
         total_feedback=total_feedback,
         success_rate=round(overall_rate, 3),
         item_scores=item_scores,
