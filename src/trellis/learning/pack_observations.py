@@ -76,7 +76,7 @@ def build_learning_observations_from_event_log(
     """
     since = datetime.now(tz=UTC) - timedelta(days=days)
 
-    feedback_events, pack_payloads = join_pack_feedback(
+    feedback_events, pack_payloads, _ = join_pack_feedback(
         event_log, since=since, limit=limit
     )
 
@@ -103,14 +103,19 @@ def build_learning_observations_from_event_log(
 
 def join_pack_feedback(
     event_log: EventLog, *, since: datetime, limit: int
-) -> tuple[list[Event], dict[str, dict[str, Any]]]:
-    """Return ``(feedback_events, pack_payload_by_pack_id)``.
+) -> tuple[list[Event], dict[str, dict[str, Any]], int]:
+    """Return ``(feedback_events, pack_payload_by_pack_id, pack_event_count)``.
 
     The canonical ``PACK_ASSEMBLED`` ⋈ ``FEEDBACK_RECORDED`` join: the
     key is the pack_id — ``PACK_ASSEMBLED.entity_id`` on one side,
     ``FEEDBACK_RECORDED.payload["pack_id"]`` on the other. Shared by
     the learning-observation builder and the metrics timeseries module
     so the join semantics cannot drift between consumers.
+
+    ``pack_event_count`` is the *raw* number of PACK_ASSEMBLED events in
+    the window — distinct from ``len(pack_payloads)``, which dedups by
+    ``entity_id`` and drops falsy ids. Returned so callers needing the
+    raw count (e.g. effectiveness ``total_packs``) don't re-scan.
     """
     pack_events = event_log.get_events(
         event_type=EventType.PACK_ASSEMBLED, since=since, limit=limit
@@ -122,7 +127,7 @@ def join_pack_feedback(
     for event in pack_events:
         if event.entity_id:
             pack_payloads[event.entity_id] = event.payload or {}
-    return feedback_events, pack_payloads
+    return feedback_events, pack_payloads, len(pack_events)
 
 
 def _join_one(

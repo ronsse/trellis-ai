@@ -183,16 +183,11 @@ class MetaAnalysisRecord:
         Writes a ``wasInformedBy`` edge from the Activity node to the
         event identified by ``event_id``. ``event_id`` is an EventLog
         correlation id, not a graph node id, so in the common case no
-        ``(:Node)`` exists for it yet. SQLite silently tolerated the
-        resulting dangling edge; the Bolt/openCypher backends (Neo4j,
-        ArcadeDB) reject it ("source/target has no current version").
-        We therefore **materialise-or-create**: a minimal
-        :data:`~trellis.schemas.well_known.EVENT` node is created for
-        ``event_id`` when absent, then the edge is written — the same
-        create-if-absent discipline as :meth:`produced_finding`. The
-        EventLog remains the authoritative record of the event's
-        contents; the graph node is a thin PROV-O ``Event`` the
-        ``wasInformedBy`` edge can point at on every backend.
+        ``(:Node)`` exists for it yet — a minimal PROV-O
+        :data:`~trellis.schemas.well_known.EVENT` node is materialised for
+        it first (see :meth:`_write_consumed_edge`). The EventLog remains
+        the authoritative record of the event's contents; the graph node
+        is just a thin endpoint the edge can point at on every backend.
 
         Callers that pre-sample (e.g., via
         :func:`trellis.meta.sampling.reservoir_sample`) should pass the
@@ -206,17 +201,13 @@ class MetaAnalysisRecord:
     def consumed_observation(self, observation_id: str) -> None:
         """Record that this Activity consumed an Observation node.
 
-        Same edge kind as :meth:`consumed_event` (``wasInformedBy``) and
-        the same materialise-or-create discipline. The distinction is in
-        the kind of source: an event is a pointer into the operational
-        plane, an observation is a first-class knowledge-plane node.
-
-        Because the Observation is a real graph node owned by the
-        analyzer that produced it, in the normal case it already has a
-        current version and the edge is simply written. When the target
-        is absent (the producer has not landed it, or it was superseded),
-        a minimal :data:`~trellis.schemas.well_known.OBSERVATION` node is
-        created so the edge is never dangling on the Bolt backends.
+        Same edge kind as :meth:`consumed_event` (``wasInformedBy``). The
+        distinction is the source: an event is a pointer into the
+        operational plane, an Observation is a first-class knowledge-plane
+        node that normally already has a current version, so the edge is
+        usually written directly. If the producer hasn't landed it, a
+        minimal :data:`~trellis.schemas.well_known.OBSERVATION` node is
+        materialised first (see :meth:`_write_consumed_edge`).
         """
         if not self._enabled:
             return
@@ -246,19 +237,9 @@ class MetaAnalysisRecord:
         # (Advisory, Observation, WellKnownCandidate); others — like the
         # ``learning-candidates`` report — produce a synthetic finding id
         # for an on-disk artifact that never becomes a node. The
-        # ``wasGeneratedBy`` edge needs both endpoints to exist: SQLite
-        # silently tolerated the dangling edge, but the Bolt/openCypher
-        # backends reject it ("source/target has no current version").
-        # Create-if-absent keeps the dogfooding graph self-consistent on
-        # every backend without clobbering a real finding node's
-        # properties (an unconditional upsert would SCD-2 supersede it).
-        graph_store = self._registry.knowledge.graph_store
-        if graph_store.get_node(finding_id) is None:
-            graph_store.upsert_node(
-                node_id=finding_id,
-                node_type=finding_type,
-                properties={"name": finding_id},
-            )
+        # ``wasGeneratedBy`` edge needs both endpoints to exist, so we
+        # create-if-absent (see :meth:`_materialise_node_if_absent`).
+        self._materialise_node_if_absent(finding_id, finding_type)
         self._write_provenance_edge(
             source_id=finding_id,
             target_id=self._activity_id,
@@ -270,28 +251,37 @@ class MetaAnalysisRecord:
     # Internals
     # ------------------------------------------------------------------
 
+    def _materialise_node_if_absent(self, node_id: str, node_type: str) -> None:
+        """Create a minimal ``(:Node)`` for ``node_id`` only when missing.
+
+        A provenance edge needs both endpoints to exist as current nodes:
+        SQLite silently tolerates a dangling edge, but the Bolt/openCypher
+        backends (Neo4j, ArcadeDB) reject it ("source/target has no current
+        version"). Create-if-absent keeps the dogfooding graph
+        self-consistent on every backend; we create *only* when the node is
+        genuinely missing, because an unconditional upsert would SCD-2
+        supersede a real node's properties. Shared by
+        :meth:`produced_finding` (the finding node) and
+        :meth:`_write_consumed_edge` (the consumed source).
+        """
+        graph_store = self._registry.knowledge.graph_store
+        if graph_store.get_node(node_id) is None:
+            graph_store.upsert_node(
+                node_id=node_id,
+                node_type=node_type,
+                properties={"name": node_id},
+            )
+
     def _write_consumed_edge(self, *, target_id: str, node_type: str) -> None:
         """Write a ``wasInformedBy`` edge to a consumed source.
 
         Shared by :meth:`consumed_event` and :meth:`consumed_observation`.
-        Both endpoints of a provenance edge must be materialised nodes:
-        SQLite silently tolerates a dangling edge, but the Bolt/openCypher
-        backends (Neo4j, ArcadeDB) reject it ("source/target has no
-        current version"). The consumed source is frequently a pointer id
-        — an EventLog correlation id, or an Observation whose producer has
-        not landed it yet — so we **create-if-absent** a minimal node for
-        it before writing the edge, the same materialise-or-create
-        discipline :meth:`produced_finding` uses. An unconditional upsert
-        would SCD-2 supersede a real node's properties, so we create only
-        when the node is genuinely missing.
+        The consumed source is frequently a pointer id — an EventLog
+        correlation id, or an Observation whose producer has not landed it
+        yet — so we materialise it if absent (see
+        :meth:`_materialise_node_if_absent`) before writing the edge.
         """
-        graph_store = self._registry.knowledge.graph_store
-        if graph_store.get_node(target_id) is None:
-            graph_store.upsert_node(
-                node_id=target_id,
-                node_type=node_type,
-                properties={"name": target_id},
-            )
+        self._materialise_node_if_absent(target_id, node_type)
         self._write_provenance_edge(
             source_id=self._activity_id,
             target_id=target_id,

@@ -299,14 +299,14 @@ def _seed_reference_advisories(
     composition, coverage, or the convergence deltas.
     """
     seen: set[str] = set()
-    seeded = 0
+    advisories: list[Advisory] = []
     for query in corpus.queries:
         for entity in query.required_coverage:
             doc_id = f"doc:{entity}"
             if doc_id in seen:
                 continue
             seen.add(doc_id)
-            advisory_store.put(
+            advisories.append(
                 Advisory(
                     category=AdvisoryCategory.ENTITY,
                     confidence=0.95,
@@ -324,8 +324,8 @@ def _seed_reference_advisories(
                     entity_id=doc_id,
                 )
             )
-            seeded += 1
-    return seeded
+    # One batched write — ``put`` rewrites the whole JSON file per call.
+    return advisory_store.put_many(advisories)
 
 
 # ---------------------------------------------------------------------------

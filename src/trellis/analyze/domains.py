@@ -169,7 +169,7 @@ def analyze_domains(
     # 3. Pack + feedback events — grouped by the pack payload's domain. Reuse
     #    the shared join so semantics can't drift from the learning loop.
     since = datetime.now(tz=UTC) - timedelta(days=days)
-    feedback_events, pack_payloads = join_pack_feedback(
+    feedback_events, pack_payloads, _ = join_pack_feedback(
         event_log, since=since, limit=scan_limit
     )
 

@@ -18,22 +18,23 @@ from eval.scenarios.agent_loop_convergence.scenario import (
 
 from trellis.stores.registry import StoreRegistry
 
+_SQLITE_CONFIG = {
+    "knowledge": {
+        "graph": {"backend": "sqlite"},
+        "vector": {"backend": "sqlite"},
+        "document": {"backend": "sqlite"},
+        "blob": {"backend": "local"},
+    },
+    "operational": {
+        "trace": {"backend": "sqlite"},
+        "event_log": {"backend": "sqlite"},
+    },
+}
+
 
 @pytest.fixture
 def sqlite_registry(tmp_path: Path):
-    config = {
-        "knowledge": {
-            "graph": {"backend": "sqlite"},
-            "vector": {"backend": "sqlite"},
-            "document": {"backend": "sqlite"},
-            "blob": {"backend": "local"},
-        },
-        "operational": {
-            "trace": {"backend": "sqlite"},
-            "event_log": {"backend": "sqlite"},
-        },
-    }
-    with StoreRegistry(config=config, stores_dir=tmp_path) as registry:
+    with StoreRegistry(config=_SQLITE_CONFIG, stores_dir=tmp_path) as registry:
         yield registry
 
 
@@ -111,23 +112,11 @@ def test_seed_reference_advisory_yields_positive_hit_rate(
     pure annotation) by comparing against the default run on an identical
     registry/seed.
     """
-    config = {
-        "knowledge": {
-            "graph": {"backend": "sqlite"},
-            "vector": {"backend": "sqlite"},
-            "document": {"backend": "sqlite"},
-            "blob": {"backend": "local"},
-        },
-        "operational": {
-            "trace": {"backend": "sqlite"},
-            "event_log": {"backend": "sqlite"},
-        },
-    }
     common = {"seed": 0, "rounds": 8, "feedback_batch_size": 4, "traces_per_domain": 4}
 
-    with StoreRegistry(config=config, stores_dir=tmp_path / "baseline") as reg:
+    with StoreRegistry(config=_SQLITE_CONFIG, stores_dir=tmp_path / "baseline") as reg:
         baseline = run(reg, **common)
-    with StoreRegistry(config=config, stores_dir=tmp_path / "seeded") as reg:
+    with StoreRegistry(config=_SQLITE_CONFIG, stores_dir=tmp_path / "seeded") as reg:
         seeded = run(reg, seed_reference_advisory=True, **common)
 
     assert seeded.metrics["reference_advisories_seeded"] >= 1.0

@@ -270,19 +270,11 @@ def analyze_effectiveness(
     # Canonical PACK_ASSEMBLED ⋈ FEEDBACK_RECORDED join (shared with the
     # learning-observation builder, domains report, and metrics
     # timeseries so the join semantics cannot drift between consumers).
-    feedback_events, pack_payloads = join_pack_feedback(
+    # ``pack_event_count`` is the raw PACK_ASSEMBLED count for
+    # ``total_packs`` — distinct from ``len(pack_payloads)``, which dedups
+    # by ``entity_id`` and drops falsy ids.
+    feedback_events, pack_payloads, pack_event_count = join_pack_feedback(
         event_log, since=since, limit=1000
-    )
-
-    # ``total_packs`` reports the *raw* PACK_ASSEMBLED event count, which
-    # ``join_pack_feedback`` does not expose (it dedups by ``entity_id``
-    # and drops falsy ids). Read it directly so the count stays the
-    # number of assembly events, not distinct pack ids — same query, same
-    # window, identical result to the join's internal pack fetch.
-    pack_event_count = len(
-        event_log.get_events(
-            event_type=EventType.PACK_ASSEMBLED, since=since, limit=1000
-        )
     )
 
     # Build pack_id -> injected_item_ids mapping from the joined pack

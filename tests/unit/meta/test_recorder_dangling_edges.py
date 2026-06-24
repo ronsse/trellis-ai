@@ -60,13 +60,10 @@ class _StrictEndpointGraphStore:
         edge_type: str,
         **kwargs: Any,
     ) -> str:
-        if self._inner.get_node(source_id) is None:
-            msg = (
-                f"Cannot upsert edge: source {source_id!r} or target "
-                f"{target_id!r} has no current version"
-            )
-            raise ValueError(msg)
-        if self._inner.get_node(target_id) is None:
+        if (
+            self._inner.get_node(source_id) is None
+            or self._inner.get_node(target_id) is None
+        ):
             msg = (
                 f"Cannot upsert edge: source {source_id!r} or target "
                 f"{target_id!r} has no current version"
@@ -95,9 +92,7 @@ def strict_registry(tmp_path: Path) -> StoreRegistry:
     # Prime the registry's lazy store cache with the strict wrapper so the
     # recorder (which reaches through ``registry.knowledge.graph_store``)
     # sees Bolt-style endpoint validation.
-    registry._cache["graph"] = _StrictEndpointGraphStore(
-        registry.knowledge.graph_store
-    )
+    registry._cache["graph"] = _StrictEndpointGraphStore(registry.knowledge.graph_store)
     return registry
 
 
@@ -108,8 +103,8 @@ def test_strict_store_rejects_dangling_edge_baseline(
 
     This is the semantics the recorder fix must accommodate — proves the
     test backend is rejecting, not tolerating, dangling edges. Without the
-    recorder's materialise-or-skip guard, ``consumed_event`` would surface
-    exactly this error on Neo4j/ArcadeDB.
+    recorder's materialise-or-create guard, ``consumed_event`` would
+    surface exactly this error on Neo4j/ArcadeDB.
     """
     graph = strict_registry.knowledge.graph_store
     graph.upsert_node(node_id="activity-x", node_type=wk.ACTIVITY, properties={})
@@ -180,9 +175,10 @@ def test_consumed_observation_materialised_target_writes_edge(
 ) -> None:
     """A real (current) Observation node yields the wasInformedBy edge.
 
-    The materialise-or-skip guard only suppresses the edge when the target
-    is genuinely absent — the normal path (the producing analyzer already
-    wrote the Observation) is unaffected on the rejecting backend.
+    The materialise-or-create guard only creates a node when the target is
+    genuinely absent — the normal path (the producing analyzer already
+    wrote the Observation) writes the edge directly on the rejecting
+    backend.
     """
     graph = strict_registry.knowledge.graph_store
     graph.upsert_node(

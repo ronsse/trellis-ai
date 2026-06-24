@@ -247,7 +247,7 @@ def _compute_pack_success_rate(
     the FEEDBACK_RECORDED payload (the only event carrying it), matching
     the pack_observations join precedence.
     """
-    feedback_events, pack_payloads = join_pack_feedback(
+    feedback_events, pack_payloads, _ = join_pack_feedback(
         event_log, since=since, limit=limit
     )
     buckets: dict[str, dict[str, _RatioBucket]] = defaultdict(
@@ -303,7 +303,7 @@ def _compute_reference_rate(
     ``items_served`` it falls back to the joined PACK_ASSEMBLED
     ``injected_item_ids`` so older feedback rows still count.
     """
-    feedback_events, pack_payloads = join_pack_feedback(
+    feedback_events, pack_payloads, _ = join_pack_feedback(
         event_log, since=since, limit=limit
     )
     buckets: dict[str, dict[str, _RatioBucket]] = defaultdict(
