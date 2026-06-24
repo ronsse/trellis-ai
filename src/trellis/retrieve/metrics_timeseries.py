@@ -32,7 +32,11 @@ two constructions diverge otherwise: this module buckets per UTC calendar
 day and drops un-joined feedback, whereas the eval metrics are single
 corpus-wide scalars computed from in-memory per-round records that never
 re-read the log (the eval math does not call ``join_pack_feedback`` at
-all). The remaining three metrics — ``advisory_fitness``,
+all). **This divergence is intentional, not a defect to reconcile:**
+per-day bucketing is the operational trend view an operator watches over
+time, while the eval scalar is a corpus-wide certification number for a
+single run — they answer different questions and coincide only under the
+conditions above. The remaining three metrics — ``advisory_fitness``,
 ``noise_tag_volume``, ``parameter_promotions`` — are **dashboard-only**:
 they count EventLog audit events and have no identical-by-construction
 eval formula (the eval side tracks cumulative in-loop tallies, or nothing

@@ -124,11 +124,11 @@ Captured numbers:
 
 ## 6. Open items / next moves
 
-**Instrument drift to fix (blocks "dashboard == eval" framing):**
-1. **Reconcile windowing.** Dashboard buckets per UTC day; eval is corpus-wide. Either expose a corpus-wide (single-bucket) dashboard view for parity, or document that per-day points equal the eval scalar only for single-UTC-day runs. (`metrics_timeseries.py:130-135` vs. `_convergence_common.py:194,197-199`.)
-2. **Reconcile the denominator.** Dashboard drops un-joined feedback (`metrics_timeseries.py:236-237`); eval uses all rounds. Decide which is canonical and align, or document the divergence on missing/pruned pack-assembly events.
-3. **Correct the docstrings.** `metrics_timeseries.py:320-326` (and the `pack_success_rate` / `reference_rate` docstrings) claim parity that holds only conditionally. Downgrade the language to "matches under single-UTC-day + fully-joined + served>0" so the assessment doesn't cite an overstated guarantee.
-4. **Stop implying `advisory_fitness`, `noise_tag_volume`, `parameter_promotions` mirror eval numbers** — they have no eval counterpart (or a different computation path). Either add the matching eval metric (e.g. a mean-confidence and an emitted-event count on the eval side) or label these dashboard-only.
+**Instrument drift (resolution decided 2026-06-24 — document as intentional, no behavior change):**
+1. **Windowing — RESOLVED (documented).** Dashboard buckets per UTC day; eval is corpus-wide. Decision: keep both as-is. Per-day bucketing is the operational trend view; the eval scalar is a single-run certification number — they answer different questions and coincide only for a single-UTC-day run. Framed as intentional in the `metrics_timeseries.py` module docstring. (`metrics_timeseries.py:130-135` vs. `_convergence_common.py:194,197-199`.)
+2. **Denominator — RESOLVED (documented).** Dashboard drops un-joined feedback (`metrics_timeseries.py:236-237`); eval counts all rounds. Decision: keep the dashboard's join-drop (an un-joined feedback row has no pack to attribute success to) and document the divergence rather than align. Noted in the `_compute_pack_success_rate` docstring.
+3. **Correct the docstrings — DONE.** `metrics_timeseries.py` module + `_compute_pack_success_rate` / `_compute_reference_rate` / `_compute_advisory_fitness` docstrings now state the conditional parity and point here. (Commit `f7e9d63`.)
+4. **Label dashboard-only metrics — DONE.** `advisory_fitness`, `noise_tag_volume`, `parameter_promotions` are now labeled dashboard-only (no eval counterpart) in their docstrings. (Commit `f7e9d63`.) Adding matching eval-side metrics is possible future work but not required for a defensible assessment.
 
 **Missing deterministic coverage:**
 5. **Single-point C3 axis-C risk.** The only deterministic advisory-hit-rate signal lives in `program_convergence` / `program_regression_suite`. Add a second deterministic source or accept the concentration explicitly.
@@ -136,5 +136,5 @@ Captured numbers:
 7. **`skill_loop_convergence` is a skeleton** (NotImplementedError, status=skip). Its intended C1 axis-Q retrieval-lift and C3 axis-R variant-survival signals are unavailable. Flag as not-yet-usable; do not cite for Step 3.
 
 **Blocking a fully defensible assessment:**
-8. **No real-LLM run has been executed.** Every number in Section 4 is deterministic/synthetic. Claims that *only* a real-LLM run can show — semantic-retrieval lift on real corpora, and the cost/latency envelope — are **open**. The dbt/github corpus scenarios **fail rather than skip** without `MOONSHOT_API_KEY` + `OPENAI_API_KEY`; `program_convergence_real_llm` skips cleanly and offers a `TRELLIS_EVAL_REAL_LLM_MOCK=1` hatch (a smoke path, not real substantiation). Running at least one real-LLM scenario within its cost cap ($1.00 / $2.00) is the next move to close C1/C2/C3 on real data.
+8. **No real-LLM run has been executed — deferred by choice (2026-06-24).** Every number in Section 4 is deterministic/synthetic. Claims that *only* a real-LLM run can show — semantic-retrieval lift on real corpora, and the cost/latency envelope — remain **open by decision**: the deterministic C1/C2/C3 claims already stand, so the real-LLM run was deferred rather than blocking. When picked up, run `program_convergence_real_llm` (cleanly skips/caps at $2) or `agent_loop_convergence_real_llm` with `MOONSHOT_API_KEY` + `OPENAI_API_KEY`; the dbt/github corpus scenarios **fail rather than skip** without those creds.
 9. **Dashboard parity is asserted, never rendered.** No live dashboard render against the eval event store has been done. Given the drift in Section 2, a literal render-and-compare on a single-UTC-day run is needed before claiming the operator sees the certified numbers.
