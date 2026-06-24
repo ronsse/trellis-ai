@@ -22,11 +22,24 @@ order, are:
   ride alongside the underlying promote/degrade events — see
   :class:`trellis.stores.base.event_log.EventType`).
 
-**Definitional parity with the convergence scenario.** Where a metric
-overlaps with what ``eval/scenarios/agent_loop_convergence`` computes,
-the formula matches that scenario's helpers in
-``eval/scenarios/_convergence_common.py``. Each shared formula is
-cross-referenced at its call site below.
+**Definitional parity with the convergence scenario — partial.** Only
+``pack_success_rate`` and ``reference_rate`` have a genuine eval
+counterpart (``round_success_rate`` and ``round_useful_fraction_overall``
+in ``eval/scenarios/_convergence_common.py``), and their arithmetic
+matches **only** when an entire eval run lands within a single UTC day
+**and** every FEEDBACK_RECORDED event joins a PACK_ASSEMBLED event. The
+two constructions diverge otherwise: this module buckets per UTC calendar
+day and drops un-joined feedback, whereas the eval metrics are single
+corpus-wide scalars computed from in-memory per-round records that never
+re-read the log (the eval math does not call ``join_pack_feedback`` at
+all). The remaining three metrics — ``advisory_fitness``,
+``noise_tag_volume``, ``parameter_promotions`` — are **dashboard-only**:
+they count EventLog audit events and have no identical-by-construction
+eval formula (the eval side tracks cumulative in-loop tallies, or nothing
+for parameter governance). See
+``docs/plans/2026-06-17-step3-assessment.md`` §2 for the metric-by-metric
+drift analysis. Each conditional parity is cross-referenced at its call
+site below.
 
 **Bucketing.** Buckets are UTC calendar days keyed by the event's
 ``occurred_at``. A bucket with no contributing events is **omitted**
@@ -217,13 +230,18 @@ def _compute_pack_success_rate(
 ) -> dict[str, dict[str, _RatioBucket]]:
     """share of graded packs with a positive outcome, per (group, bucket).
 
-    Parity: matches ``round_success_rate`` in
-    ``eval/scenarios/_convergence_common.py::_base_round_metrics`` —
-    ``successes / total_graded`` where a "success" is a pack-level
-    positive outcome. Grouping resolves ``domain`` from the
-    PACK_ASSEMBLED payload and ``intent_family`` from the
-    FEEDBACK_RECORDED payload (the only event carrying it), matching the
-    pack_observations join precedence.
+    Parity (conditional): equals ``round_success_rate`` in
+    ``eval/scenarios/_convergence_common.py::_base_round_metrics``
+    (``successes / total_graded``, a "success" being a pack-level
+    positive outcome) **only** for a run contained in one UTC day with
+    every feedback joined to a PACK_ASSEMBLED event. Here the denominator
+    counts joined feedback per UTC-day bucket and drops un-joined feedback
+    (the ``continue`` below), whereas the eval scalar is
+    ``successes / len(rounds)`` over all rounds, corpus-wide. See
+    ``docs/plans/2026-06-17-step3-assessment.md`` §2. Grouping resolves
+    ``domain`` from the PACK_ASSEMBLED payload and ``intent_family`` from
+    the FEEDBACK_RECORDED payload (the only event carrying it), matching
+    the pack_observations join precedence.
     """
     feedback_events, pack_payloads = join_pack_feedback(
         event_log, since=since, limit=limit
@@ -264,13 +282,16 @@ def _compute_reference_rate(
 ) -> dict[str, dict[str, _RatioBucket]]:
     """``items_referenced / items_served`` per (group, bucket).
 
-    Parity: matches the useful-fraction formula in
-    ``eval/scenarios/_convergence_common.py`` — both
-    ``round_useful_fraction_overall`` (sum referenced / sum served) in
-    ``_base_round_metrics`` and the per-round ratio in
-    ``_convergence_stats``. We aggregate corpus-wide per bucket: sum of
-    referenced over sum of served, so a bucket's rate is the pooled
-    useful fraction, not a mean of per-pack ratios.
+    Parity (conditional): equals ``round_useful_fraction_overall`` (sum
+    referenced / sum served) in
+    ``eval/scenarios/_convergence_common.py::_base_round_metrics``
+    **only** for a single-UTC-day, fully-joined run. The pooled
+    arithmetic — sum of referenced over sum of served per bucket, not a
+    mean of per-pack ratios — and 4dp rounding match, but here we bucket
+    per UTC day, drop un-joined feedback, and additionally skip feedback
+    with ``served_count == 0`` (the ``continue`` below), whereas the eval
+    metric is a single corpus-wide scalar over all rounds. See
+    ``docs/plans/2026-06-17-step3-assessment.md`` §2.
 
     ``items_served`` / ``helpful_item_ids`` are read from the
     FEEDBACK_RECORDED payload (``helpful_item_ids`` is
@@ -318,9 +339,13 @@ def _compute_advisory_fitness(
     :func:`trellis.retrieve.effectiveness.run_advisory_fitness_loop`.
     The bucket ``value`` is the mean of ``new_confidence``; the
     ``sample_count`` is the number of ADVISORY_SUPPRESSED events in the
-    bucket — the convergence scenario's ``advisories_suppressed_total``
-    signal (``eval/scenarios/_convergence_common.py::_loop_metrics``),
-    sliced per day.
+    bucket. **Dashboard-only — not identical to the eval by
+    construction:** the eval has no mean-confidence metric at all, and its
+    ``advisories_suppressed_total``
+    (``eval/scenarios/_convergence_common.py::_loop_metrics``) is a
+    cumulative in-loop ``len(...)`` tally, whereas this re-counts emitted
+    ADVISORY_SUPPRESSED events per UTC day — a different computation path
+    and window. See ``docs/plans/2026-06-17-step3-assessment.md`` §2.
 
     Advisory events carry no domain / intent_family, so they all land
     under ``"all"`` regardless of ``group_by``.
