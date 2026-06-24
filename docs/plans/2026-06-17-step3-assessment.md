@@ -120,7 +120,7 @@ Captured numbers:
 - Deterministic primary: `program_convergence` — `axis.C_advisory_hit_rate.delta` plus axes D–I (observation enrichment, provenance queryability, extraction-failure cluster decay, schema-evolution candidates, meta-trace density, self-authored proposals). This is the **only** deterministic axis-C source.
 - Deterministic supporting: `agent_loop_convergence` regime-shift mode (exercises the suppression branch end-to-end); `program_regression_suite` gates axes C–I; `multi_backend_feedback` proves promote/suppress counters are backend-independent.
 - Live `agent_loop_convergence` shows the boost half (`advisories_boosted_total=10`) but `suppressed=0` (default mode does not exercise suppression).
-**Real-LLM required?** **No** for the deterministic claim. **Open caveat:** the suppression branch is only exercised deterministically via opt-in regime-shift mode + unit tests — it has **not** been shown in a standard live run. A real-LLM corpus run (dbt/github) would strengthen C3's "durable on real data" framing but is not required to substantiate the core claim.
+**Real-LLM required?** **No** for the deterministic claim. **Open caveat (empirically confirmed 2026-06-24):** the suppression *count* is **not** demonstrable from any standard live run on the current corpus. A regime-shift run (`regime_shift_round=15`, `advisory_min_sample_size=2`, 30 rounds) drove `round_success_rate` to 0.5 and `useful_delta` to −0.0952 and adjusted advisory confidence *downward* (`lift=-0.6`, `new_confidence` 0.66→0.582) — yet `advisories_suppressed_total` stayed **0**. The demote *mechanism* is therefore observable live (downward confidence blending), but the demote *event* (suppression) is unit-test-only on this corpus by design (the §5.5.1 row-3 fix levels pre-shift per-domain success to 1.0, so anti-pattern advisories never form). A real-LLM corpus run would strengthen C3's "durable on real data" framing but is not required to substantiate the core claim.
 
 ## 6. Open items / next moves
 
@@ -132,7 +132,7 @@ Captured numbers:
 
 **Missing deterministic coverage:**
 5. **Single-point C3 axis-C risk.** The only deterministic advisory-hit-rate signal lives in `program_convergence` / `program_regression_suite`. Add a second deterministic source or accept the concentration explicitly.
-6. **Suppression branch not in any standard live run.** `advisories_suppressed_total` is exercised only via opt-in regime-shift mode + unit tests. To claim the demote half of C3 from a live run, execute the regime-shift mode and capture it.
+6. **Suppression branch not demonstrable live on the current corpus — confirmed.** Running regime-shift mode (2026-06-24) still yields `advisories_suppressed_total=0` (it produces downward confidence *adjustment*, `lift=-0.6`, but no suppression event), because the §5.5.1 row-3 fix levels pre-shift per-domain success to 1.0. To capture a non-zero live suppression count, a scenario variant with *non-uniform* pre-shift per-domain success is needed (pre-row-3 conditions); until then the demote half of C3 rests on `test_suppresses_failing_advisory` + the live downward-confidence signal, not a live suppression count.
 7. **`skill_loop_convergence` is a skeleton** (NotImplementedError, status=skip). Its intended C1 axis-Q retrieval-lift and C3 axis-R variant-survival signals are unavailable. Flag as not-yet-usable; do not cite for Step 3.
 
 **Blocking a fully defensible assessment:**
