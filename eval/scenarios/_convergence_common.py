@@ -76,6 +76,64 @@ class _RoundOutcome(Protocol):
 
 
 # ---------------------------------------------------------------------------
+# Advisory hit rate — axis C / loops.advisory_hit_rate (shared formula)
+# ---------------------------------------------------------------------------
+
+
+class _AdvisoryHitRound(Protocol):
+    """Per-round shape :func:`compute_advisory_hit_rate` needs.
+
+    ``injected_advisory_ids_per_item`` is the per-item advisory
+    provenance captured from :attr:`PackItem.injected_advisory_ids` for
+    the round's pack — one inner list per served item, empty when the
+    PackBuilder didn't stamp the item.
+    """
+
+    success: bool
+    injected_advisory_ids_per_item: Sequence[Sequence[str]]
+
+
+def compute_advisory_hit_rate(rounds: Sequence[_AdvisoryHitRound]) -> float:
+    """Fraction of presented advisories whose round succeeded.
+
+    Shared by ``program_convergence`` (axis C, ``axis.C_advisory_hit_rate``)
+    and ``agent_loop_convergence`` (``loops.advisory_hit_rate``) so both
+    scenarios substantiate the C3 advisory-effectiveness claim with the
+    *same* formula rather than two drifting reimplementations.
+
+    Operationalises the Unit-D1 plan-prose definition against
+    :attr:`PackItem.injected_advisory_ids` provenance: walk every item
+    across ``rounds`` and count an ``advisory_id`` occurrence as a **hit**
+    when the item carrying it landed in a round whose ``success`` is
+    ``True``. The denominator is the total advisory_id occurrences across
+    the window (an item carrying two advisory_ids counts twice on both
+    sides of the ratio).
+
+    Contract:
+
+    * Empty ``rounds`` → ``0.0`` (degenerate; no work happened yet).
+    * ``rounds`` with **zero advisory_ids stamped on any item** → ``0.0``
+      (no positive evidence rather than ``NaN`` — the same number a
+      pre-advisory-loop run produces).
+    * All-success, all items stamped → ``1.0``; all-failure → ``0.0``.
+    * Mixed → ``hits / total_advisories_presented``.
+    """
+    if not rounds:
+        return 0.0
+    total_presented = 0
+    hits = 0
+    for round_result in rounds:
+        for advisory_ids in round_result.injected_advisory_ids_per_item:
+            count = len(advisory_ids)
+            total_presented += count
+            if round_result.success:
+                hits += count
+    if total_presented == 0:
+        return 0.0
+    return hits / total_presented
+
+
+# ---------------------------------------------------------------------------
 # Loop stats — accumulator surfaced by :func:`_run_periodic_loops`
 # ---------------------------------------------------------------------------
 

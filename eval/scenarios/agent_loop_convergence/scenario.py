@@ -41,7 +41,7 @@ from __future__ import annotations
 import statistics
 import tempfile
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import structlog
@@ -74,6 +74,7 @@ from eval.scenarios._convergence_common import (
     _record_round_feedback,
     _run_periodic_loops,
     _validate_basic_kwargs,
+    compute_advisory_hit_rate,
 )
 from trellis.retrieve.evaluate import (
     BUILTIN_PROFILES,
@@ -176,6 +177,11 @@ class _RoundResult:
     coverage_fraction: float
     weighted_score: float
     success: bool
+    #: Per-item advisory provenance from ``PackItem.injected_advisory_ids``
+    #: for this round's pack (one inner list per served item). Feeds the
+    #: shared :func:`compute_advisory_hit_rate` — the same axis-C formula
+    #: ``program_convergence`` uses.
+    injected_advisory_ids_per_item: list[list[str]] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -493,6 +499,9 @@ def run(
                     coverage_fraction=coverage,
                     weighted_score=scores["weighted_score"],
                     success=success,
+                    injected_advisory_ids_per_item=[
+                        list(item.injected_advisory_ids) for item in pack.items
+                    ],
                 )
             )
             _record_round_feedback(
@@ -538,6 +547,24 @@ def run(
     metrics.update(_round_metrics(round_results))
     metrics.update(_loop_metrics(loop_stats))
     metrics.update(_convergence_metrics(convergence))
+    # Second deterministic source for the C3 advisory-hit-rate signal
+    # (the first is program_convergence axis C). Same shared formula,
+    # computed corpus-wide over every round: of all advisory presentations
+    # across the run, the fraction that landed in a successful round.
+    #
+    # NOTE: on the default corpus this is legitimately 0.0 — and so is
+    # program_convergence axis C. Item-scoped advisories only stamp an
+    # item when ``advisory.entity_id == item.item_id`` (ENTITY /
+    # ANTI_PATTERN categories); here the lone entity advisory targets a
+    # distractor doc that the effectiveness loop tags as noise and the
+    # PackBuilder then excludes, so no stamped item ever reaches a pack
+    # (total_presented == 0). The metric lights up only once an
+    # item-scoped advisory targets a doc that survives into packs — do
+    # not read 0.0 as "advisories don't help" (the boost/suppress counts
+    # carry the live C3 signal). See docs/plans/2026-06-17-step3-assessment.md §6.5.
+    metrics["loops.advisory_hit_rate"] = round(
+        compute_advisory_hit_rate(round_results), 4
+    )
     findings.extend(_convergence_findings(convergence, loop_stats))
 
     # ``useful_delta`` is the primary convergence signal — it tracks the

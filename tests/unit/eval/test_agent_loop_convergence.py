@@ -77,6 +77,27 @@ def test_run_emits_convergence_delta(sqlite_registry: StoreRegistry) -> None:
         assert key in report.metrics, f"missing convergence metric {key}"
 
 
+def test_emits_advisory_hit_rate(sqlite_registry: StoreRegistry) -> None:
+    """``loops.advisory_hit_rate`` is emitted as a valid ratio.
+
+    This is the second deterministic source for the C3 advisory-hit-rate
+    signal (the first is ``program_convergence`` axis C), computed by the
+    shared ``compute_advisory_hit_rate`` formula over the per-round
+    ``injected_advisory_ids`` provenance. We assert presence + range
+    rather than a specific value: on the default corpus the only
+    item-scoped advisory targets a noise-filtered distractor, so the rate
+    is legitimately 0.0 (see the scenario's emission-site note) — the
+    formula's correctness is covered by the contract tests in
+    ``test_program_convergence.py``.
+    """
+    report = run(
+        sqlite_registry, seed=0, rounds=8, feedback_batch_size=4, traces_per_domain=4
+    )
+    assert "loops.advisory_hit_rate" in report.metrics
+    rate = report.metrics["loops.advisory_hit_rate"]
+    assert 0.0 <= rate <= 1.0
+
+
 def test_periodic_loops_run_at_least_once(sqlite_registry: StoreRegistry) -> None:
     """With rounds == feedback_batch_size, exactly one periodic pass fires."""
     report = run(

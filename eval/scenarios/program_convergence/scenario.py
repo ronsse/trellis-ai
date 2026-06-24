@@ -83,6 +83,7 @@ from eval.scenarios._convergence_common import (
     _record_round_feedback,
     _run_periodic_loops,
     _validate_basic_kwargs,
+    compute_advisory_hit_rate,
 )
 from trellis.learning import (
     RECOMMENDED_SEED_VALUES,
@@ -729,14 +730,13 @@ def _compute_advisory_hit_rate(
 ) -> float:
     """Axis C — fraction of presented advisories whose round succeeded.
 
-    Plan-prose definition (Unit D1): "advisories whose recommendation was
-    *followed* AND outcome=success". Operationalised against C1's
-    :attr:`PackItem.injected_advisory_ids` provenance: walk every
-    ``PackItem`` across the lookback window, count an
-    ``advisory_id`` as a **hit** when the item carrying it landed in a
-    round whose ``success`` flag is ``True``. The denominator is the
-    total advisory_id occurrences across the window (one item carrying
-    two advisory_ids counts twice on both sides of the ratio).
+    Thin wrapper over
+    :func:`eval.scenarios._convergence_common.compute_advisory_hit_rate`
+    so program_convergence's ``axis.C_advisory_hit_rate`` and
+    agent_loop_convergence's ``loops.advisory_hit_rate`` are computed by
+    the *same* formula and cannot drift — see that function for the full
+    plan-prose (Unit D1) definition and the empty / zero-presented /
+    all-success / all-failure / mixed contract.
 
     Per the C1 deferred [M] finding (PR #171 body): provenance fires only
     on ``entity_id`` match — ``injected_advisory_ids`` records "this
@@ -745,37 +745,12 @@ def _compute_advisory_hit_rate(
     influence-tagged is the deliberate read; tightening the join to
     item_id==entity_id equality is a follow-up.
 
-    Contract:
-
-    * Empty lookback window → ``0.0`` (degenerate; no work happened yet).
-    * Lookback window with **zero advisory_ids stamped on any item** →
-      ``0.0`` (axis C measures advisory effectiveness; with nothing
-      presented, the natural read is "no positive evidence" rather than
-      ``NaN``). The same number a pre-advisory-loop run produces, so the
-      regression suite's ``THRESHOLD_C_LAST_QUARTER`` still bites if the
-      PackBuilder stops stamping items.
-    * All success rounds, all items stamped → ``1.0``.
-    * All failure rounds, all items stamped → ``0.0``.
-    * Mixed → ``hits / total_advisories_presented``.
-
     ``advisory_store`` is accepted as a keyword for backward
-    compatibility (call-site contract introduced in Unit A2); the new
-    implementation derives axis C entirely from per-item provenance and
-    no longer reads the store.
+    compatibility (call-site contract introduced in Unit A2); axis C
+    derives entirely from per-item provenance and no longer reads the
+    store.
     """
-    if not recent_rounds:
-        return 0.0
-    total_presented = 0
-    hits = 0
-    for round_result in recent_rounds:
-        for advisory_ids in round_result.injected_advisory_ids_per_item:
-            count = len(advisory_ids)
-            total_presented += count
-            if round_result.success:
-                hits += count
-    if total_presented == 0:
-        return 0.0
-    return hits / total_presented
+    return compute_advisory_hit_rate(recent_rounds)
 
 
 # ---------------------------------------------------------------------------
