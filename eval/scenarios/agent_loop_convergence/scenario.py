@@ -83,6 +83,7 @@ from trellis.retrieve.evaluate import (
 )
 from trellis.retrieve.pack_builder import PackBuilder
 from trellis.retrieve.strategies import KeywordSearch
+from trellis.schemas.advisory import Advisory, AdvisoryCategory, AdvisoryEvidence
 from trellis.schemas.pack import Pack, PackBudget
 from trellis.stores.advisory_store import AdvisoryStore
 from trellis.stores.registry import StoreRegistry
@@ -273,6 +274,60 @@ def _populate_distractor_documents(registry: StoreRegistry) -> int:
     return planted
 
 
+def _seed_reference_advisories(
+    advisory_store: AdvisoryStore, corpus: GeneratedCorpus
+) -> int:
+    """Seed one high-confidence ENTITY advisory per required-coverage doc.
+
+    Opt-in demo support (``seed_reference_advisory=True``). The default
+    corpus never organically forms an item-scoped advisory that survives
+    into packs — the lone entity advisory it produces targets a distractor
+    the effectiveness loop then noise-filters out — so
+    ``loops.advisory_hit_rate`` is structurally ``0.0``. Seeding a
+    recommendation for each *ground-truth* required entity
+    (``entity_id == "doc:{entity}" == PackItem.item_id``,
+    ``scope="global"`` so it is surfaced for every domain's pack) lets
+    those advisories stamp the required docs when they land in packs, so
+    successful rounds register as advisory hits and the metric exercises a
+    positive value end-to-end.
+
+    This demonstrates the *measurement path* (advisory → PackBuilder stamp
+    → per-round capture → ``compute_advisory_hit_rate``), not organic
+    advisory generation: the seeded advisories stand in for ones the
+    generator would form on a corpus with the right presence differential.
+    Provenance stamping is pure annotation, so seeding does not change pack
+    composition, coverage, or the convergence deltas.
+    """
+    seen: set[str] = set()
+    seeded = 0
+    for query in corpus.queries:
+        for entity in query.required_coverage:
+            doc_id = f"doc:{entity}"
+            if doc_id in seen:
+                continue
+            seen.add(doc_id)
+            advisory_store.put(
+                Advisory(
+                    category=AdvisoryCategory.ENTITY,
+                    confidence=0.95,
+                    message=(
+                        f"Entity {doc_id} is ground-truth context for "
+                        f"{query.domain}; include it."
+                    ),
+                    evidence=AdvisoryEvidence(
+                        sample_size=DEFAULT_ADVISORY_MIN_SAMPLE_SIZE,
+                        success_rate_with=1.0,
+                        success_rate_without=0.0,
+                        effect_size=1.0,
+                    ),
+                    scope="global",
+                    entity_id=doc_id,
+                )
+            )
+            seeded += 1
+    return seeded
+
+
 # ---------------------------------------------------------------------------
 # Per-round work
 # ---------------------------------------------------------------------------
@@ -414,6 +469,7 @@ def run(
     regime_shift_round: int | None = None,
     regime_shift_replacement_count: int = DEFAULT_REGIME_SHIFT_REPLACEMENT_COUNT,
     advisory_min_sample_size: int = DEFAULT_ADVISORY_MIN_SAMPLE_SIZE,
+    seed_reference_advisory: bool = False,
 ) -> ScenarioReport:
     """Execute the agent-loop convergence scenario.
 
@@ -427,6 +483,14 @@ def run(
     branch of ``run_advisory_fitness_loop`` end-to-end on a controlled
     corpus. Default kwargs leave both off so the convergence baseline
     is unchanged.
+
+    Opt-in advisory-hit demo: pass ``seed_reference_advisory=True`` to
+    pre-seed a high-confidence ENTITY advisory per required-coverage doc,
+    so ``loops.advisory_hit_rate`` exercises a positive value end-to-end
+    (the default corpus leaves it at ``0.0`` — see
+    :func:`_seed_reference_advisories`). Provenance stamping is pure
+    annotation, so this does not change pack composition or the
+    convergence deltas.
     """
     _validate_run_kwargs(
         rounds=rounds,
@@ -460,6 +524,10 @@ def run(
     feedback_dir = Path(feedback_dir_holder.name)
     advisory_dir_root = registry.stores_dir or feedback_dir
     advisory_store = AdvisoryStore(advisory_dir_root / "advisories.json")
+    if seed_reference_advisory:
+        metrics["reference_advisories_seeded"] = float(
+            _seed_reference_advisories(advisory_store, corpus)
+        )
 
     # PackBuilder reads ``advisory_store`` dynamically per-build, so
     # constructing it before the first generate() call is fine: the
@@ -561,7 +629,10 @@ def run(
     # (total_presented == 0). The metric lights up only once an
     # item-scoped advisory targets a doc that survives into packs — do
     # not read 0.0 as "advisories don't help" (the boost/suppress counts
-    # carry the live C3 signal). See docs/plans/2026-06-17-step3-assessment.md §6.5.
+    # carry the live C3 signal). Pass ``seed_reference_advisory=True`` to
+    # exercise a positive value end-to-end (see
+    # :func:`_seed_reference_advisories`). See
+    # docs/plans/2026-06-17-step3-assessment.md §6.5.
     metrics["loops.advisory_hit_rate"] = round(
         compute_advisory_hit_rate(round_results), 4
     )

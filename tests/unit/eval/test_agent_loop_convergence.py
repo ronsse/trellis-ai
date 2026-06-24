@@ -98,6 +98,47 @@ def test_emits_advisory_hit_rate(sqlite_registry: StoreRegistry) -> None:
     assert 0.0 <= rate <= 1.0
 
 
+def test_seed_reference_advisory_yields_positive_hit_rate(
+    tmp_path: Path,
+) -> None:
+    """The opt-in demo seeds helpful advisories → positive advisory-hit-rate.
+
+    Proves the advisory-hit-rate measurement path is not structurally
+    stuck at 0: with ``seed_reference_advisory=True`` an ENTITY advisory
+    per required doc is surfaced, stamps those docs when they land in
+    packs, and successful rounds register as hits. Also asserts the seed
+    does **not** perturb the convergence delta (provenance stamping is
+    pure annotation) by comparing against the default run on an identical
+    registry/seed.
+    """
+    config = {
+        "knowledge": {
+            "graph": {"backend": "sqlite"},
+            "vector": {"backend": "sqlite"},
+            "document": {"backend": "sqlite"},
+            "blob": {"backend": "local"},
+        },
+        "operational": {
+            "trace": {"backend": "sqlite"},
+            "event_log": {"backend": "sqlite"},
+        },
+    }
+    common = {"seed": 0, "rounds": 8, "feedback_batch_size": 4, "traces_per_domain": 4}
+
+    with StoreRegistry(config=config, stores_dir=tmp_path / "baseline") as reg:
+        baseline = run(reg, **common)
+    with StoreRegistry(config=config, stores_dir=tmp_path / "seeded") as reg:
+        seeded = run(reg, seed_reference_advisory=True, **common)
+
+    assert seeded.metrics["reference_advisories_seeded"] >= 1.0
+    assert seeded.metrics["loops.advisory_hit_rate"] > 0.0
+    assert baseline.metrics["loops.advisory_hit_rate"] == 0.0
+    # Seeding advisories must not move the convergence signal.
+    assert seeded.metrics["convergence.useful_delta"] == pytest.approx(
+        baseline.metrics["convergence.useful_delta"]
+    )
+
+
 def test_periodic_loops_run_at_least_once(sqlite_registry: StoreRegistry) -> None:
     """With rounds == feedback_batch_size, exactly one periodic pass fires."""
     report = run(
