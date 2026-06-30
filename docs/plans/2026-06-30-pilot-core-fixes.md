@@ -130,19 +130,25 @@ new graph-store semantics get a contract test, not just a backend test.
 - ruff per-file-ignore (ARG002) for the no-op stub.
 - Tests: 9 (`test_null_event_log.py`) + 3 end-to-end (`test_knowledge_plane_executor.py`).
 
-**#195 — edge re-ingest idempotency. DONE (no new logic needed).**
-- Finding: the dedup machinery the issue asks for **already exists** — SCD-2 collapses
-  the same `(source,target,type)` triplet to one current version (single + bulk, all
-  backends), and the shared base `_pre_validate_edges_bulk` already *rejects* in-batch
-  duplicate triplets. The consumer-kg 14→28 multiplication is **node-ID instability**
-  (auto-assigned ids vs deterministic `entity_id`), a caller contract already supported.
-  Verified empirically on SQLite (nodes 2→2, edges 1→1 on re-ingest).
-- Contribution: 2 cross-backend contract tests in `graph_store_contract.py`
-  (`test_upsert_edge_same_triplet_is_idempotent`, `test_reingest_same_graph_is_idempotent`)
-  locking the guarantee in for every backend incl. future ArcadeDB. Recommend closing
-  #195 as satisfied; the speculative `EdgeDraft.edge_id`/qualifier identity stays deferred
-  (no consumer needs same-pair multi-edges). #196 also obviates consumer-kg's custom
-  handlers (the workaround that bypassed the idempotent upsert), addressing the root cause.
+**#195 — edge re-ingest idempotency. DONE (two parts).**
+- Part 1 (commit `d6ce259`): added 2 cross-backend contract tests
+  (`test_upsert_edge_same_triplet_is_idempotent`, `test_reingest_same_graph_is_idempotent`).
+  On SQLite the guarantee already held (edges key off the node_id string), so I initially
+  judged "no new logic needed."
+- Part 2 — **the contract test then caught a real Bolt bug** when finally run against a
+  live Neo4j (the dead AuraDB had hidden it): re-ingesting an identical node+edge set
+  *multiplies* the edge count on the Bolt backends (Neo4j + the blessed ArcadeDB). Root
+  cause: Bolt stores each node version as a separate `:Node` row; `upsert_nodes_bulk`
+  re-versions a node even when unchanged, and the node's current edge stays
+  `valid_to=NULL` stranded on the now-closed old row — the next edge upsert misses it and
+  writes a duplicate. **This is the actual consumer-kg 14→28 mechanism** (they run on a
+  Bolt substrate). Fix: `upsert_nodes_bulk` is now version-preserving when content is
+  unchanged (`_node_spec_matches_current` on the base class; extends the existing
+  pre-fetch, no new round trip). Validated on a Neo4j 5.26 container — contract (49), e2e
+  (6), backend (39) green; SQLite/Postgres graph contracts (93/93) unchanged.
+- Lesson: the AuraDB outage had masked this; containerizing the live-infra CI (below)
+  and adding the contract suites to it means this class of cross-backend drift is now
+  caught on every push.
 
 **Verification:** full `ruff check src/ tests/` clean; full `mypy src/` clean (257 files);
 1496 passed / 13 skipped across stores+mutate+api+sdk+extract; OpenAPI stable. `uv.lock`

@@ -583,6 +583,36 @@ class GraphStore(ABC):
                     msg = f"{method_name}[{i}]: missing required key {key!r}"
                     raise ValueError(msg)
 
+    @staticmethod
+    def _node_spec_matches_current(
+        spec: dict[str, Any], current: dict[str, Any]
+    ) -> bool:
+        """True when an upsert ``spec`` carries content identical to the
+        ``current`` node version, so re-upserting it can be a
+        version-preserving no-op (issue #195).
+
+        Re-versioning an *unchanged* node is at best version spam; on the
+        Bolt backends it is actively harmful, because a new ``:Node`` row
+        strands the node's current edges on the old row (they keep
+        ``valid_to IS NULL`` but hang off a closed node), and the next edge
+        upsert — matching only current nodes — fails to find them and writes
+        a duplicate. Skipping the no-op upsert keeps re-ingest idempotent.
+
+        Conservative by construction: any field that differs, or any value
+        that does not compare cleanly, returns ``False`` so the caller
+        proceeds with a normal new version. ``current`` is a parsed node row
+        (the shape ``get_node`` returns); ``spec`` is a bulk upsert dict.
+        """
+        if spec.get("node_type") != current.get("node_type"):
+            return False
+        if spec.get("node_role", "semantic") != current.get("node_role", "semantic"):
+            return False
+        if (spec.get("properties") or {}) != (current.get("properties") or {}):
+            return False
+        if (spec.get("document_ids") or []) != (current.get("document_ids") or []):
+            return False
+        return spec.get("generation_spec") == current.get("generation_spec")
+
     def _pre_validate_nodes_bulk(self, nodes: list[dict[str, Any]]) -> None:
         """Run every per-row validator against ``nodes`` before any write.
 

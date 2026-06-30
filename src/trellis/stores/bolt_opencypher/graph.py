@@ -393,20 +393,32 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             # immutability validation. ``created_at`` is carried forward
             # in the write Cypher via ``coalesce`` so we don't need to
             # ship the prior timestamp back to Python.
-            existing_roles = self._fetch_current_node_roles(session, node_ids)
+            current_by_id = self._fetch_current_nodes(session, node_ids)
+            # Validate role immutability and skip version-preserving no-ops
+            # in one pass. An unchanged re-upsert must NOT create a new
+            # version (issue #195): on Bolt a fresh :Node row strands the
+            # node's current edges on the old row, and the next edge upsert
+            # — which only matches current nodes — then writes a duplicate.
+            write_specs: list[dict[str, Any]] = []
+            write_node_ids: list[str] = []
             for i, (spec, nid) in enumerate(zip(nodes, node_ids, strict=True)):
-                prior_role = existing_roles.get(nid)
-                if prior_role is None:
-                    continue
-                try:
-                    check_node_role_immutable(
-                        nid,
-                        {"node_role": prior_role},
-                        spec.get("node_role", "semantic"),
-                    )
-                except ValueError as exc:
-                    msg = f"upsert_nodes_bulk[{i}]: {exc}"
-                    raise ValueError(msg) from exc
+                current = current_by_id.get(nid)
+                if current is not None:
+                    try:
+                        check_node_role_immutable(
+                            nid, current, spec.get("node_role", "semantic")
+                        )
+                    except ValueError as exc:
+                        msg = f"upsert_nodes_bulk[{i}]: {exc}"
+                        raise ValueError(msg) from exc
+                    if self._node_spec_matches_current(spec, current):
+                        continue  # unchanged content — version-preserving no-op
+                write_specs.append(spec)
+                write_node_ids.append(nid)
+
+            # Every input node was an unchanged no-op — nothing to write.
+            if not write_specs:
+                return node_ids
 
             # Build the row payloads (mirrors ``upsert_node``'s
             # ``new_props``). ``created_at`` is included in Python so
@@ -416,7 +428,7 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             # (the coalesce result is what's correct when a prior row
             # exists).
             rows: list[dict[str, Any]] = []
-            for spec, nid in zip(nodes, node_ids, strict=True):
+            for spec, nid in zip(write_specs, write_node_ids, strict=True):
                 generation_spec = spec.get("generation_spec")
                 document_ids = spec.get("document_ids")
                 rows.append(
@@ -471,9 +483,8 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             # ``created_at`` is set in both shapes to the row's
             # ``valid_from`` (== ``now``); the cold path's coalesce
             # against ``old.created_at`` is what diverges. Skipping
-            # it in the hot path is safe because ``existing_roles``
-            # told us no prior current row exists for any of these
-            # node_ids.
+            # it in the hot path is safe because the pre-fetch told us
+            # no prior current row exists for any node we're writing.
             #
             # Race window: between the pre-fetch and the CREATE-only
             # write, a concurrent writer could create a current row
@@ -482,7 +493,11 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             # already-documented Community-edition concurrent-write
             # race in the module docstring — no regression for the
             # documented single-writer assumption.
-            if existing_roles:
+            #
+            # Cold path when any node we're actually writing already had
+            # a current version (unchanged no-ops were filtered out above).
+            has_prior = any(nid in current_by_id for nid in write_node_ids)
+            if has_prior:
                 cypher = """
                 UNWIND $rows AS row
                 OPTIONAL MATCH (old:Node {node_id: row.node_id})
@@ -510,23 +525,29 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         return node_ids
 
     @staticmethod
-    def _fetch_current_node_roles(session: Any, node_ids: list[str]) -> dict[str, str]:
-        """Single round trip on ``session``: ``{node_id: node_role}`` for
+    def _fetch_current_nodes(
+        session: Any, node_ids: list[str]
+    ) -> dict[str, dict[str, Any]]:
+        """Single round trip on ``session``: ``{node_id: parsed_node}`` for
         the subset of ``node_ids`` that currently exists.
 
-        Lighter than fetching full node payloads — bulk-write paths only
-        need ``node_role`` for atomic role-immutability validation;
-        ``created_at`` is carried forward in the write Cypher via
+        Returns the full parsed node (the ``get_node`` shape) so the bulk
+        write path can both validate role immutability and detect an
+        unchanged re-upsert (issue #195) without a second round trip.
+        ``created_at`` is still carried forward in the write Cypher via
         ``coalesce``.
         """
         if not node_ids:
             return {}
         cypher = (
-            "MATCH (n:Node) WHERE n.node_id IN $ids AND n.valid_to IS NULL "
-            "RETURN n.node_id AS node_id, n.node_role AS node_role"
+            "MATCH (n:Node) WHERE n.node_id IN $ids AND n.valid_to IS NULL RETURN n"
         )
         records = session.execute_read(lambda tx: list(tx.run(cypher, ids=node_ids)))
-        return {r["node_id"]: r["node_role"] for r in records}
+        result: dict[str, dict[str, Any]] = {}
+        for r in records:
+            parsed = _node_props_to_dict(dict(r["n"]))
+            result[parsed["node_id"]] = parsed
+        return result
 
     def get_node(
         self,
