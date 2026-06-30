@@ -115,6 +115,11 @@ _BUILTIN_BACKENDS: dict[str, dict[str, dict[str, tuple[str, str]]]] = {
                 "trellis.stores.postgres.event_log",
                 "PostgresEventLog",
             ),
+            # No-op log for knowledge-plane-only deployments: governed graph /
+            # vector mutations with no Operational-Plane persistence. Emission
+            # becomes a documented no-op. See issue #196 and
+            # trellis.stores.null.event_log.NullEventLog.
+            "null": ("trellis.stores.null.event_log", "NullEventLog"),
         },
         # Feedback-driven parameter-tuning stores (operational plane by
         # the planes-and-substrates ADR cutoff: "consumed by Trellis to

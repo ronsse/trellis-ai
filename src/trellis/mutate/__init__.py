@@ -27,6 +27,15 @@ def build_curate_executor(registry: StoreRegistry) -> MutationExecutor:
     used to repeat: import handlers, build the dict, attach the operational
     event log. New handlers added to ``create_curate_handlers`` flow through
     every caller without each surface having to update its wiring.
+
+    Knowledge-plane-only deployments: configure the ``event_log`` store with
+    ``{"backend": "null"}`` so ``registry.operational.event_log`` resolves to
+    :class:`~trellis.stores.null.event_log.NullEventLog`. Both the executor
+    *and* the curate handlers (which emit through
+    ``registry.operational.event_log``) then treat mutation-event emission as
+    an intentional no-op — governed graph / vector writes run with no
+    Operational-Plane persistence, no ``event_log=None`` special-casing, and
+    no downstream monkey patch. See issue #196.
     """
     from trellis.mutate.handlers import create_curate_handlers  # noqa: PLC0415
 

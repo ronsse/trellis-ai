@@ -167,6 +167,7 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["S101", "ANN", "PLR2004", "ARG001", "ARG002", "ARG005", "PT011", "PLC0415"]
 "src/trellis/stores/**/*.py" = ["S608", "S105"]  # parameterized SQL is safe; TOKEN_TRACKED is not a password
+"src/trellis/stores/null/event_log.py" = ["ARG002"]  # no-op stub deliberately ignores its EventLog filter args
 "src/trellis/stores/registry.py" = ["PLR0911", "PLR0912"]  # many early returns in LLM builders / backend branches
 "src/trellis/mutate/executor.py" = ["PLR0911"]  # pipeline method has many return points
 "src/trellis/mcp/**/*.py" = ["PLR0911"]  # many return paths in tool handlers
