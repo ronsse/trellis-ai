@@ -33,13 +33,17 @@ jobs:
     timeout-minutes: 20
 
     services:
-      # Neo4j 5.26 (community) — supports vector indexes (5.13+), which the
-      # shape #2 vector store needs. NEO4J_AUTH sets the initial password so
+      # Neo4j 2025.12 (community) — the version the shape #2 vector store
+      # documents for self-hosted use. Community runs the full graph + SCD-2
+      # suite. The one Cypher SEARCH vector-search test self-skips here: that
+      # clause is an AuraDB-grade feature absent from self-hosted Docker
+      # (community AND enterprise raise 51N26), so the e2e fixture probes for
+      # it and skips when unavailable. NEO4J_AUTH sets the initial password so
       # there's no forced first-login change. The credentials are a literal
       # throwaway pair: the container is reachable only on the runner's
       # loopback, so there is nothing to keep secret.
       neo4j:
-        image: neo4j:5.26
+        image: neo4j:2025.12
         env:
           NEO4J_AUTH: neo4j/trellistestpw
         ports:

@@ -331,14 +331,26 @@ def _fake_embedder(text: str) -> list[float]:
     return [v / norm for v in vec]
 
 
-def test_vector_upsert_and_semantic_pack(registry: Any, executor: Any) -> None:
+def test_vector_upsert_and_semantic_pack(
+    registry: Any, executor: Any, neo4j_vector_search_supported: bool
+) -> None:
     """Embeddings attached to graph nodes are reachable through PackBuilder.
 
     Validates the shape #2 contract end-to-end: ENTITY_CREATE lands the
     node, ``vector.upsert(node_id, ...)`` attaches an embedding to that
     same row, and SemanticSearch (via PackBuilder) returns the node
     against a similarity query.
+
+    Skips on a backend without the Cypher ``SEARCH`` vector clause (a
+    self-hosted Docker Neo4j); runs against AuraDB. See the
+    ``neo4j_vector_search_supported`` fixture.
     """
+    if not neo4j_vector_search_supported:
+        pytest.skip(
+            "Neo4j SEARCH vector clause unsupported on this backend "
+            "(self-hosted community/enterprise lacks it; requires AuraDB)"
+        )
+
     create = executor.execute(
         Command(
             operation=Operation.ENTITY_CREATE,
