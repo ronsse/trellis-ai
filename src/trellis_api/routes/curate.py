@@ -72,6 +72,7 @@ def create_link(req: LinkRequest) -> dict[str, Any]:
             "target_id": req.target_id,
             "edge_kind": req.edge_kind,
             "properties": req.properties,
+            "allow_dangling": req.allow_dangling,
         },
         target_id=req.source_id,
         target_type="entity",

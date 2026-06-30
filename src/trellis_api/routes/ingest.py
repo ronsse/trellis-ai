@@ -163,6 +163,7 @@ def _edge_command(item: BulkEdgeItem, requested_by: str) -> Command:
             "target_id": item.target_id,
             "edge_kind": item.edge_kind,
             "properties": dict(item.properties),
+            "allow_dangling": item.allow_dangling,
         },
         target_id=item.source_id,
         target_type="entity",

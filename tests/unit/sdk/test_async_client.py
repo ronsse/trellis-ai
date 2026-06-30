@@ -10,6 +10,7 @@ import pytest_asyncio
 
 from trellis.testing import in_memory_async_client
 from trellis_sdk.async_client import AsyncTrellisClient
+from trellis_sdk.exceptions import TrellisClientError
 
 
 @pytest_asyncio.fixture
@@ -82,6 +83,16 @@ class TestAsyncCurate:
         id1 = await client.create_entity("Async Service A")
         id2 = await client.create_entity("Async Service B")
         edge_id = await client.create_link(id1, id2, edge_kind="depends_on")
+        assert edge_id is not None
+
+    async def test_create_link_allow_dangling(self, client: AsyncTrellisClient):
+        """allow_dangling lets an edge write before its target exists (#211)."""
+        src = await client.create_entity("Async Source", entity_type="table")
+        with pytest.raises(TrellisClientError):
+            await client.create_link(src, "ghost", edge_kind="references_table")
+        edge_id = await client.create_link(
+            src, "ghost", edge_kind="references_table", allow_dangling=True
+        )
         assert edge_id is not None
 
 

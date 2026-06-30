@@ -8,6 +8,7 @@ import pytest
 
 from trellis.testing import in_memory_client
 from trellis_sdk.client import TrellisClient
+from trellis_sdk.exceptions import TrellisClientError
 
 
 @pytest.fixture
@@ -78,6 +79,19 @@ class TestCurate:
         id1 = client.create_entity("Service A")
         id2 = client.create_entity("Service B")
         edge_id = client.create_link(id1, id2, edge_kind="depends_on")
+        assert edge_id is not None
+
+    def test_create_link_allow_dangling(self, client):
+        """allow_dangling lets an edge write before its target exists (#211)."""
+        src = client.create_entity("Source Table", entity_type="table")
+        # Default: a link to a non-existent target is rejected by the FK
+        # pre-flight and surfaces as a 4xx client error.
+        with pytest.raises(TrellisClientError):
+            client.create_link(src, "ghost-target", edge_kind="references_table")
+        # Opt in: the same edge writes through.
+        edge_id = client.create_link(
+            src, "ghost-target", edge_kind="references_table", allow_dangling=True
+        )
         assert edge_id is not None
 
 

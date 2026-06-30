@@ -374,12 +374,18 @@ class AsyncTrellisClient:
         source_id: str,
         target_id: str,
         edge_kind: str = "entity_related_to",
+        *,
+        allow_dangling: bool = False,
     ) -> str:
-        payload = {
+        payload: dict[str, Any] = {
             "source_id": source_id,
             "target_id": target_id,
             "edge_kind": edge_kind,
         }
+        # Only send the flag when set so a new client stays compatible with
+        # an older server whose LinkRequest predates the field (extra=forbid).
+        if allow_dangling:
+            payload["allow_dangling"] = True
         resp = await self._request("POST", "/api/v1/links", json=payload)
         return cast("str", resp.json()["edge_id"])
 

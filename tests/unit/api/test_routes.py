@@ -197,6 +197,88 @@ def test_entity_not_found(client):
     assert resp.status_code == 404
 
 
+# -- Links / allow_dangling (issue #211) --
+
+
+def test_create_link_default_rejects_dangling_target(client):
+    """Without allow_dangling, a link to a non-existent target is rejected.
+
+    Mirrors the LinkCreateHandler FK pre-flight over the REST boundary:
+    the source exists, the target does not, so the orphan-edge check fires
+    and the route surfaces it as a 400.
+    """
+    src = client.post(
+        "/api/v1/entities",
+        json={"entity_type": "table", "name": "events", "entity_id": "tbl-events"},
+    )
+    assert src.status_code == 200
+
+    resp = client.post(
+        "/api/v1/links",
+        json={
+            "source_id": "tbl-events",
+            "target_id": "tbl-ghost",
+            "edge_kind": "references_table",
+        },
+    )
+    assert resp.status_code == 400
+    # Orphan-edge message names the missing endpoint.
+    assert "tbl-ghost" in resp.json()["detail"]
+
+
+def test_create_link_allow_dangling_writes_edge(client):
+    """allow_dangling=true lets a curator write an edge-before-node over HTTP.
+
+    The #211 path: a promoted table-reference edge whose target table has
+    not been materialised yet must be writable when the caller opts in.
+    """
+    src = client.post(
+        "/api/v1/entities",
+        json={"entity_type": "table", "name": "events", "entity_id": "tbl-events2"},
+    )
+    assert src.status_code == 200
+
+    resp = client.post(
+        "/api/v1/links",
+        json={
+            "source_id": "tbl-events2",
+            "target_id": "tbl-ghost2",
+            "edge_kind": "references_table",
+            "allow_dangling": True,
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "ok"
+    assert data["edge_id"] is not None
+
+
+def test_bulk_ingest_edge_allow_dangling(client):
+    """A bulk edge with allow_dangling=true survives a missing target node."""
+    resp = client.post(
+        "/api/v1/ingest/bulk",
+        json={
+            "entities": [
+                {"entity_type": "table", "name": "src", "entity_id": "tbl-src"},
+            ],
+            "edges": [
+                {
+                    "source_id": "tbl-src",
+                    "target_id": "tbl-not-yet",
+                    "edge_kind": "references_table",
+                    "allow_dangling": True,
+                },
+            ],
+            "strategy": "continue_on_error",
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["edges"]["total"] == 1
+    assert data["edges"]["succeeded"] == 1
+    assert data["edges"]["rejected"] == 0
+
+
 def test_assemble_pack(client):
     resp = client.post(
         "/api/v1/packs",

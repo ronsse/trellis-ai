@@ -126,12 +126,21 @@ class PromoteRequest(WireRequestModel):
 
 
 class LinkRequest(WireRequestModel):
-    """Request to create a graph edge."""
+    """Request to create a graph edge.
+
+    ``allow_dangling`` mirrors ``EdgeDraft.allow_dangling`` over the wire: it
+    opts the edge out of the ``LinkCreateHandler`` pre-flight FK check so an
+    edge can be written before its referenced node exists. Use it for
+    bootstrap / edge-before-node ingest (e.g. a curator promoting
+    table-reference edges to a table stub that has not been materialised yet).
+    Default ``False`` keeps strict FK semantics.
+    """
 
     source_id: str
     target_id: str
     edge_kind: str = "entity_related_to"
     properties: dict[str, Any] | None = None
+    allow_dangling: bool = False
 
 
 class EntityCreateRequest(WireRequestModel):
