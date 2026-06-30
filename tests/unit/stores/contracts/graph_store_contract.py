@@ -477,6 +477,66 @@ class GraphStoreContractTests:
             )
         assert store.count_edges() == before
 
+    def test_upsert_edge_same_triplet_is_idempotent(self, store: GraphStore) -> None:
+        """Re-upserting the same edge (single-row) keeps one current version.
+
+        ``(source_id, target_id, edge_type)`` is the edge's derived identity:
+        SCD-2 closes the prior version and opens a new current one, so the
+        edge never multiplies on re-write. See issue #195.
+        """
+        store.upsert_node("a", "service", {})
+        store.upsert_node("b", "service", {})
+        store.upsert_edge("a", "b", "depends_on", {"v": 1})
+        before = store.count_edges()
+        _sleep_for_ordering()
+        store.upsert_edge("a", "b", "depends_on", {"v": 2})
+
+        assert store.count_edges() == before
+        edges = store.get_edges("a", direction="outgoing", edge_type="depends_on")
+        assert len(edges) == 1
+        assert edges[0]["properties"]["v"] == 2
+
+    def test_reingest_same_graph_is_idempotent(self, store: GraphStore) -> None:
+        """Re-ingesting the same nodes + edges leaves both counts stable (#195).
+
+        The consumer-kg symptom was a re-run fixture multiplying edge counts.
+        With deterministic node ids (the caller's contract), node upserts
+        dedupe by ``node_id`` and edges dedupe by ``(source, target, type)``,
+        so re-running an ingestion fixture must not grow the graph. Asserted
+        on both ``count_nodes`` and ``count_edges`` across every backend.
+        """
+
+        def _ingest() -> None:
+            store.upsert_nodes_bulk(
+                [
+                    {"node_id": "tbl.events", "node_type": "table", "properties": {}},
+                    {"node_id": "tbl.users", "node_type": "table", "properties": {}},
+                ]
+            )
+            store.upsert_edges_bulk(
+                [
+                    {
+                        "source_id": "tbl.events",
+                        "target_id": "tbl.users",
+                        "edge_type": "references_table",
+                    },
+                ]
+            )
+
+        _ingest()
+        nodes_after_first = store.count_nodes()
+        edges_after_first = store.count_edges()
+        assert nodes_after_first == 2
+        assert edges_after_first == 1
+
+        _sleep_for_ordering()
+        _ingest()  # re-run the identical fixture
+
+        assert store.count_nodes() == nodes_after_first
+        assert store.count_edges() == edges_after_first
+        # The edge still resolves to exactly one current version.
+        assert len(store.get_edges("tbl.events", direction="outgoing")) == 1
+
     # ------------------------------------------------------------------
     # subgraph traversal
     # ------------------------------------------------------------------
