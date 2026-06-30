@@ -1,49 +1,71 @@
 name: Live infrastructure tests
 
-# Runs the integration suites that hit live cloud backends (Neo4j +
-# Postgres) so connection-pool, middleware, and wipe-helper
-# regressions surface in CI rather than during deploy validation.
-# Triggered:
+# Runs the suites that exercise a real Bolt/openCypher (Neo4j) + Postgres
+# backend so connection-pool, Cypher / SCD-2, vector-index, cross-store
+# wiring, and wipe-helper regressions surface in CI rather than at deploy
+# time. Both backends run as ephemeral **service containers**, so the job
+# is hermetic and depends on no external managed instance.
 #
-#   * on push to main — every merge runs the live suite, catching
-#     anything that slipped through PR review. Code changes are when
-#     regressions land; that's when we want the signal.
-#   * on workflow_dispatch — operators can run on demand from the
-#     Actions tab before a deploy.
+# Previously this job pointed at a managed Neo4j AuraDB Free instance + a
+# Neon Postgres project via repo secrets. AuraDB Free auto-deletes idle
+# instances, so the host silently stopped resolving and took the whole
+# suite red (DNS ServiceUnavailable) with no code regression. Containers
+# remove that dependency entirely.
 #
-# No periodic schedule. Live infra doesn't drift on its own; if there
-# are no merges there are no regressions to catch.
+# Coverage tradeoff: managed-cloud-only behaviour (AuraDB's async vector-
+# index provisioning, TLS bolt+s routing, Neon connection limits) is not
+# exercised here. The store fixtures already wait on db.awaitIndexes, so
+# the core wiring is covered; cloud-specific quirks are validated at
+# deploy time.
 #
-# Required repo secrets (set under Settings → Secrets and variables →
-# Actions). Without these the job runs but every test skips cleanly
-# because the test fixtures themselves gate on these env vars:
-#
-#   * TRELLIS_TEST_NEO4J_URI         bolt:// or neo4j+s:// URI
-#   * TRELLIS_TEST_NEO4J_USER        Neo4j user
-#   * TRELLIS_TEST_NEO4J_PASSWORD    Neo4j password
-#   * TRELLIS_TEST_NEO4J_DATABASE    database name (provider-specific —
-#                                    e.g. AuraDB uses the instance ID,
-#                                    self-hosted defaults to "neo4j")
-#   * TRELLIS_TEST_PG_DSN            postgresql:// DSN
+# Triggered on push to main and workflow_dispatch. No periodic schedule —
+# the containers are recreated each run, so there is nothing to drift.
 
 on:
   push:
     branches: [main]
   workflow_dispatch:
 
-# Serialize runs against shared live infra — wipe_live_state in the
-# loop fixtures truncates Postgres tables and clears Neo4j nodes, so
-# two concurrent runs would corrupt each other's state. Don't cancel
-# in-progress; let the previous run finish before the next one starts.
-concurrency:
-  group: live-infra
-  cancel-in-progress: false
-
 jobs:
   live-infra:
-    name: live-infra (AuraDB + Neon)
+    name: live-infra (containerized Neo4j + Postgres)
     runs-on: ubuntu-latest
     timeout-minutes: 20
+
+    services:
+      # Neo4j 5.26 (community) — supports vector indexes (5.13+), which the
+      # shape #2 vector store needs. NEO4J_AUTH sets the initial password so
+      # there's no forced first-login change. The credentials are a literal
+      # throwaway pair: the container is reachable only on the runner's
+      # loopback, so there is nothing to keep secret.
+      neo4j:
+        image: neo4j:5.26
+        env:
+          NEO4J_AUTH: neo4j/trellistestpw
+        ports:
+          - 7687:7687
+          - 7474:7474
+        options: >-
+          --health-cmd "cypher-shell -u neo4j -p trellistestpw 'RETURN 1'"
+          --health-interval 10s
+          --health-timeout 10s
+          --health-retries 30
+          --health-start-period 30s
+
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: trellis
+          POSTGRES_PASSWORD: trellis
+          POSTGRES_DB: trellis
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U trellis"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 15
+
     steps:
       - uses: actions/checkout@v6
 
@@ -55,20 +77,28 @@ jobs:
       - name: Install Trellis with live-infra extras
         run: pip install -e ".[dev,cloud,neo4j]"
 
-      - name: Run live integration suites
+      - name: Run live + contract suites against the containers
         env:
-          TRELLIS_TEST_NEO4J_URI: ${{ secrets.TRELLIS_TEST_NEO4J_URI }}
-          TRELLIS_TEST_NEO4J_USER: ${{ secrets.TRELLIS_TEST_NEO4J_USER }}
-          TRELLIS_TEST_NEO4J_PASSWORD: ${{ secrets.TRELLIS_TEST_NEO4J_PASSWORD }}
-          TRELLIS_TEST_NEO4J_DATABASE: ${{ secrets.TRELLIS_TEST_NEO4J_DATABASE }}
-          TRELLIS_TEST_PG_DSN: ${{ secrets.TRELLIS_TEST_PG_DSN }}
+          TRELLIS_TEST_NEO4J_URI: bolt://localhost:7687
+          TRELLIS_TEST_NEO4J_USER: neo4j
+          TRELLIS_TEST_NEO4J_PASSWORD: trellistestpw
+          TRELLIS_TEST_NEO4J_DATABASE: neo4j
+          TRELLIS_TEST_PG_DSN: postgresql://trellis:trellis@localhost:5432/trellis
           # Backend-marked tests are deselected by default (tests/conftest.py);
-          # these toggles opt the gated suites in — without them this job
-          # collects 0 tests and exits 5. The loop suites are marked
+          # these toggles opt the gated suites in. The loop suites are marked
           # live + slow + neo4j + postgres, so ALL FOUR toggles are needed.
           TRELLIS_TEST_LIVE: "1"
           TRELLIS_TEST_SLOW: "1"
           TRELLIS_TEST_NEO: "1"
           TRELLIS_TEST_POSTGRES: "1"
+        # The graph contract suites (tests/unit/stores/contracts/) run the
+        # GraphStoreContractTests against every configured backend — that's
+        # where cross-backend SCD-2 drift (e.g. issue #195 edge re-ingest)
+        # surfaces. pgvector's contract needs its own toggle + extension and
+        # stays deselected here.
         run: |
-          pytest tests/integration/test_neo4j_e2e.py tests/integration/loops/ -v
+          pytest \
+            tests/integration/test_neo4j_e2e.py \
+            tests/integration/loops/ \
+            tests/unit/stores/contracts/ \
+            -v
