@@ -98,6 +98,8 @@ class ArcadeDBGraphStore(BoltOpenCypherGraphStore):
         driver_config: BoltDriverConfig | None = None,
         http_url: str | None = None,
         ensure_database_exists: bool = True,
+        admin_user: str | None = None,
+        admin_password: str | None = None,
     ) -> None:
         """Initialize an ArcadeDB graph store.
 
@@ -107,9 +109,19 @@ class ArcadeDBGraphStore(BoltOpenCypherGraphStore):
             Bolt URI for the ArcadeDB server, e.g.
             ``bolt://arcadedb.internal:7687``.
         user, password
-            Basic-auth credentials. ``root`` is the conventional admin
-            user for ArcadeDB; production deployments should create a
-            dedicated user with the minimum required privileges.
+            Basic-auth credentials for **runtime** operations (the Bolt
+            connection that serves reads/writes). ``root`` is the
+            conventional admin user for ArcadeDB; production deployments
+            should create a dedicated least-privilege user and reserve
+            admin credentials for the ``admin_user`` / ``admin_password``
+            pair below (issue #193).
+        admin_user, admin_password
+            Optional privileged credentials used **only** for the
+            init/migration phase — database creation
+            (``ensure_database``) and the typed-property schema DDL.
+            When omitted, ``user`` / ``password`` are used for those
+            phases too (single-credential deployments keep working).
+            The Bolt runtime driver is never built with these.
         database
             Target ArcadeDB database name. Created on first boot if
             ``ensure_database_exists=True``.
@@ -139,6 +151,13 @@ class ArcadeDBGraphStore(BoltOpenCypherGraphStore):
         """
         check_driver_installed()
 
+        # Effective credentials for the privileged init/migration phase.
+        # Falls back to the runtime pair so single-credential deployments
+        # are unchanged; when the admin pair is set, runtime Bolt traffic
+        # never carries it (issue #193).
+        migration_user = admin_user or user
+        migration_password = admin_password if admin_password is not None else password
+
         # Injected-driver path: registry shared a driver across the
         # graph + future Bolt siblings. ``close()`` is a no-op.
         if driver is not None:
@@ -156,18 +175,19 @@ class ArcadeDBGraphStore(BoltOpenCypherGraphStore):
             # ran the migration before injecting the driver — log at
             # debug, no missing-constraint risk.
             #
-            # If both ``http_url`` and ``password`` are present (a
-            # direct caller bypassing the mutex check would not get
-            # past the guard above, so this is only the future-proof
-            # path where the constructor itself drives migration), run
-            # it here. Otherwise — no http_url at all — fall back to
-            # the warning: a direct caller missed credentials and the
-            # FLOAT MIN/MAX constraint will not be installed.
-            if http_url is not None and password is not None:
+            # If ``http_url`` plus a usable migration credential are
+            # present, run the migration here. The runtime ``password``
+            # can't appear alongside ``driver`` (mutex above), but the
+            # admin pair legitimately can — it never builds a driver, so
+            # a direct caller with an injected driver may still hand us
+            # DDL credentials. Otherwise — no http_url at all — fall
+            # back to the warning: a direct caller missed credentials
+            # and the FLOAT MIN/MAX constraint will not be installed.
+            if http_url is not None and migration_password is not None:
                 self._init_arcadedb_edge_provenance_schema(
                     http_url=http_url,
-                    user=user,
-                    password=password,
+                    user=migration_user,
+                    password=migration_password,
                     database=database,
                 )
             elif http_url is not None:
@@ -204,6 +224,10 @@ class ArcadeDBGraphStore(BoltOpenCypherGraphStore):
         if password is None:
             msg = "password is required when ``driver`` is not provided"
             raise ValueError(msg)
+        # Recompute now that ``password`` is narrowed to ``str`` — the
+        # early binding above is typed Optional for the injected-driver
+        # branch, but every privileged call below needs a real secret.
+        migration_password = admin_password if admin_password is not None else password
         if ensure_database_exists:
             if http_url is None:
                 msg = (
@@ -214,19 +238,20 @@ class ArcadeDBGraphStore(BoltOpenCypherGraphStore):
                     "pre-provisioned."
                 )
                 raise ValueError(msg)
-            ensure_database(http_url, user, password, database)
+            ensure_database(http_url, migration_user, migration_password, database)
         driver = build_arcadedb_driver(uri, user, password, config=driver_config)
         super().__init__(driver=driver, database=database, owns_driver=True)
         # Idempotently declare schema-typed properties for the
         # provenance columns + the FLOAT MIN/MAX constraint on
         # ``confidence``. Runs over HTTP SQL because openCypher does
         # not expose ArcadeDB's typed-property DDL. Safe to call on
-        # every boot — every statement is ``IF NOT EXISTS``.
+        # every boot — every statement is ``IF NOT EXISTS``. Uses the
+        # migration credential pair — the only DDL in the store's life.
         if http_url is not None:
             self._init_arcadedb_edge_provenance_schema(
                 http_url=http_url,
-                user=user,
-                password=password,
+                user=migration_user,
+                password=migration_password,
                 database=database,
             )
         else:

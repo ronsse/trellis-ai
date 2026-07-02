@@ -81,6 +81,8 @@ class ArcadeDBVectorStore(VectorStore):
         index_name: str = "trellis_node_embeddings",
         max_connections: int = 16,
         beam_width: int = 100,
+        admin_user: str | None = None,
+        admin_password: str | None = None,
     ) -> None:
         if similarity not in _VALID_SIMILARITY:
             msg = (
@@ -108,7 +110,15 @@ class ArcadeDBVectorStore(VectorStore):
         self._max_connections = max_connections
         self._beam_width = beam_width
 
-        self._init_schema()
+        # DDL (vertex type / properties / LSM_VECTOR index) runs once at
+        # init with the privileged pair when provided; every runtime SQL
+        # call sticks to the least-privilege ``user``/``password``
+        # (issue #193). Fallback keeps single-credential deployments
+        # working unchanged.
+        self._init_schema(
+            ddl_user=admin_user or user,
+            ddl_password=admin_password if admin_password is not None else password,
+        )
         logger.info(
             "arcadedb_vector_store_initialized",
             dimensions=dimensions,
@@ -137,13 +147,18 @@ class ArcadeDBVectorStore(VectorStore):
             params=params,
         )
 
-    def _init_schema(self) -> None:
+    def _init_schema(self, *, ddl_user: str, ddl_password: str) -> None:
         # The graph store creates :Node rows via Cypher (which auto-
         # creates the vertex type), but the LSM_VECTOR index requires
         # the property explicitly declared as ``LIST OF FLOAT``.
-        self._sql("CREATE VERTEX TYPE Node IF NOT EXISTS")
-        self._sql("CREATE PROPERTY Node.embedding IF NOT EXISTS LIST OF FLOAT")
-        self._sql("CREATE PROPERTY Node.vector_metadata_json IF NOT EXISTS STRING")
+        # Deliberately bypasses ``self._sql`` — DDL uses the migration
+        # credential pair, never the runtime one (issue #193).
+        def ddl(command: str) -> None:
+            execute_sql(self._http_url, ddl_user, ddl_password, self._database, command)
+
+        ddl("CREATE VERTEX TYPE Node IF NOT EXISTS")
+        ddl("CREATE PROPERTY Node.embedding IF NOT EXISTS LIST OF FLOAT")
+        ddl("CREATE PROPERTY Node.vector_metadata_json IF NOT EXISTS STRING")
         metadata = json.dumps(
             {
                 "dimensions": self._dimensions,
@@ -152,7 +167,7 @@ class ArcadeDBVectorStore(VectorStore):
                 "beamWidth": self._beam_width,
             }
         )
-        self._sql(
+        ddl(
             f"CREATE INDEX {self._index} IF NOT EXISTS ON Node(embedding) "
             f"LSM_VECTOR METADATA {metadata}"
         )

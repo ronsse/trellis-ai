@@ -649,6 +649,32 @@ def _validate_uri(
     return None
 
 
+def _parse_bolt_driver_config(raw_cfg: Any) -> Any:
+    """Coerce a config-supplied ``driver_config`` into a ``BoltDriverConfig``.
+
+    Accepts an existing :class:`~trellis.stores.bolt_opencypher.base.BoltDriverConfig`
+    instance, a plain mapping of its kwargs (the YAML-config shape), or
+    ``None``. Anything else is a caller error, reported with the actual
+    type name. Import stays local so core keeps its no-hard-dependency
+    posture on the Bolt extra.
+    """
+    if raw_cfg is None:
+        return None
+    from trellis.stores.bolt_opencypher.base import (  # noqa: PLC0415
+        BoltDriverConfig,
+    )
+
+    if isinstance(raw_cfg, BoltDriverConfig):
+        return raw_cfg
+    if isinstance(raw_cfg, dict):
+        return BoltDriverConfig(**raw_cfg)
+    msg = (
+        "driver_config must be a BoltDriverConfig, a dict, or omitted; "
+        f"got {type(raw_cfg).__name__}"
+    )
+    raise TypeError(msg)
+
+
 class StoreRegistry:
     """Lazily instantiates and caches store backends based on configuration."""
 
@@ -1026,9 +1052,6 @@ class StoreRegistry:
             derive_http_url_from_bolt,
             ensure_database,
         )
-        from trellis.stores.bolt_opencypher.base import (  # noqa: PLC0415
-            BoltDriverConfig,
-        )
 
         uri = params.get("uri") or os.environ.get("TRELLIS_ARCADEDB_URI")
         if not uri:
@@ -1046,19 +1069,40 @@ class StoreRegistry:
         )
         http_url = params.get("http_url") or os.environ.get("TRELLIS_ARCADEDB_HTTP_URL")
         ensure_db = params.get("ensure_database_exists", True)
+        # Privileged pair for the init/migration phase only (issue #193):
+        # database creation + typed-property DDL. Falls back to the
+        # runtime pair when unset. The Bolt driver below is always built
+        # with the runtime pair.
+        admin_user = (
+            params.get("admin_user")
+            or os.environ.get("TRELLIS_ARCADEDB_ADMIN_USER")
+            or user
+        )
+        admin_password = (
+            params.get("admin_password")
+            or os.environ.get("TRELLIS_ARCADEDB_ADMIN_PASSWORD")
+            or password
+        )
 
         key = (uri, user)
-        # Strip ``driver_config`` + ``ensure_database_exists`` from
-        # forwarded params — both are consumed here (driver build /
-        # database creation), not by the store. ``http_url`` is *kept*
-        # so the constructor's injected-driver branch can recognise the
-        # registry path (and suppress its "migration skipped" warning).
-        # ``password`` is stripped below alongside the driver injection
-        # to preserve the constructor's "driver XOR password" mutex.
+        # Strip ``driver_config`` + ``ensure_database_exists`` + the
+        # admin pair from forwarded params — all are consumed here
+        # (driver build / database creation / DDL migration), not by the
+        # store. ``http_url`` is *kept* so the constructor's
+        # injected-driver branch can recognise the registry path (and
+        # suppress its "migration skipped" warning). ``password`` is
+        # stripped below alongside the driver injection to preserve the
+        # constructor's "driver XOR password" mutex.
         new_params = {
             k: v
             for k, v in params.items()
-            if k not in {"driver_config", "ensure_database_exists"}
+            if k
+            not in {
+                "driver_config",
+                "ensure_database_exists",
+                "admin_user",
+                "admin_password",
+            }
         }
         new_params["uri"] = uri
         new_params["user"] = user
@@ -1069,8 +1113,8 @@ class StoreRegistry:
                 key=key,
                 http_url=http_url,
                 uri=uri,
-                user=user,
-                password=password,
+                user=admin_user,
+                password=admin_password,
                 database=database,
                 new_params=new_params,
             )
@@ -1084,20 +1128,12 @@ class StoreRegistry:
                 "TRELLIS_ARCADEDB_PASSWORD env var"
             )
             raise ConfigError(msg, setting="stores.graph.password")
+        # Re-narrow the admin secret now that ``password`` is a real
+        # string — the early binding stays Optional for the cached-driver
+        # branch (whose migration helper tolerates missing credentials).
+        admin_password = admin_password or password
 
-        raw_cfg = params.get("driver_config")
-        if raw_cfg is None:
-            cfg: BoltDriverConfig | None = None
-        elif isinstance(raw_cfg, BoltDriverConfig):
-            cfg = raw_cfg
-        elif isinstance(raw_cfg, dict):
-            cfg = BoltDriverConfig(**raw_cfg)
-        else:
-            msg = (
-                "driver_config must be a BoltDriverConfig, a dict, or omitted; "
-                f"got {type(raw_cfg).__name__}"
-            )
-            raise TypeError(msg)
+        cfg = _parse_bolt_driver_config(params.get("driver_config"))
 
         # Ensure the target database exists before the Bolt driver
         # binds to it. ``ensure_database`` is idempotent — a no-op when
@@ -1114,7 +1150,7 @@ class StoreRegistry:
                     "ensure_database_exists."
                 )
                 raise ConfigError(msg, setting="stores.graph.http_url")
-            ensure_database(http_url, user, password, database)
+            ensure_database(http_url, admin_user, admin_password, database)
 
         # Run the typed-property schema migration (Phase 3 of
         # adr-graph-ontology §6.4) over HTTP SQL while we still hold
@@ -1122,7 +1158,11 @@ class StoreRegistry:
         # only the injected ``driver`` (per the mutual-exclusion
         # contract) and so cannot run this migration itself. Idempotent.
         self._run_arcadedb_edge_provenance_migration(
-            http_url=http_url, uri=uri, user=user, password=password, database=database
+            http_url=http_url,
+            uri=uri,
+            user=admin_user,
+            password=admin_password,
+            database=database,
         )
         self._arcadedb_provenance_migrated.add(key)
 
@@ -1305,6 +1345,16 @@ class StoreRegistry:
             or os.environ.get("TRELLIS_ARCADEDB_DATABASE")
             or "trellis"
         )
+        # Optional privileged pair for the DDL phase (LSM_VECTOR index +
+        # typed properties) — issue #193. The constructor falls back to
+        # the runtime pair when these stay None, so only forward them
+        # when actually configured.
+        admin_user = new_params.get("admin_user") or os.environ.get(
+            "TRELLIS_ARCADEDB_ADMIN_USER"
+        )
+        admin_password = new_params.get("admin_password") or os.environ.get(
+            "TRELLIS_ARCADEDB_ADMIN_PASSWORD"
+        )
 
         # The vector store doesn't take a Bolt ``uri`` or ``driver`` —
         # strip them so the constructor doesn't complain.
@@ -1314,6 +1364,10 @@ class StoreRegistry:
         new_params["user"] = user
         new_params["password"] = password
         new_params["database"] = database
+        if admin_user:
+            new_params["admin_user"] = admin_user
+        if admin_password:
+            new_params["admin_password"] = admin_password
         return new_params
 
     def _get(self, store_type: str) -> Any:

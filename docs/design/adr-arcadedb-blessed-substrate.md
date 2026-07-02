@@ -124,6 +124,37 @@ Recommended deployment (informational, not part of this code change):
 - **Networking**: place inside a private subnet; expose the Bolt port (7687) and HTTP port (2480) only to the Trellis services that need them.
 - **Backups**: ArcadeDB's `AutoBackupSchedulerPlugin` writes timestamped backup files; pair with an S3 sync on the backup directory.
 
+## Credential split — admin vs. runtime (issue #193)
+
+Long-running application paths must not hold admin credentials after
+init/migration. Both ArcadeDB stores therefore accept an optional
+privileged pair alongside the runtime pair:
+
+| Credential | Config keys | Env fallback | Used for |
+|---|---|---|---|
+| Runtime (least privilege) | `user` / `password` | `TRELLIS_ARCADEDB_USER` / `TRELLIS_ARCADEDB_PASSWORD` | The Bolt driver serving all graph reads/writes; all runtime vector SQL over HTTP |
+| Admin (init/migration only) | `admin_user` / `admin_password` | `TRELLIS_ARCADEDB_ADMIN_USER` / `TRELLIS_ARCADEDB_ADMIN_PASSWORD` | `ensure_database` (HTTP database creation), the typed-property edge-provenance DDL, and the vector store's `CREATE VERTEX TYPE` / `CREATE PROPERTY` / `LSM_VECTOR` index DDL |
+
+When the admin pair is unset, the runtime pair is used for every phase —
+single-credential deployments (dev, docker-compose, the validation spike)
+keep working unchanged. When it is set, the admin secret is consumed by
+the registry during store construction and never reaches the Bolt driver,
+runtime SQL calls, or the store constructor's forwarded params.
+
+**Deployment order for a split-credential production rollout:**
+
+1. Provision the ArcadeDB server; create the least-privilege runtime user
+   with read/write access to the target database (ArcadeDB server-side
+   user management — `security.json` / server API — is out of Trellis's
+   scope).
+2. First boot (or an explicit migration run) supplies both pairs:
+   `admin_*` performs database creation + DDL; the runtime pair carries
+   all traffic thereafter.
+3. Steady state: deployments may omit `admin_*` entirely and set
+   `ensure_database_exists: false` — the store then never needs a
+   privileged credential, and DDL drift shows up as a loud boot error
+   rather than a silent escalation.
+
 ## Open questions
 
 - **Production load characterization.** The spike validated correctness, not throughput. A representative load test against ArcadeDB on ECS Fargate would be the next signal; until then we assume single-instance performance is comparable to or better than AuraDB Free (the prior reference).
