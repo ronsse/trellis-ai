@@ -124,7 +124,7 @@ def outcomes_cmd(
 def proposals_cmd(
     tuner: str | None = typer.Option(None, "--tuner"),
     status: str | None = typer.Option(None, "--status"),
-    limit: int = typer.Option(100),
+    limit: int = typer.Option(100, help="Maximum proposals to return."),
     output_format: str = typer.Option("text", "--format"),
 ) -> None:
     """List tuner proposals, optionally filtered by tuner / status."""
@@ -176,7 +176,7 @@ def versions_cmd(
     domain: str | None = typer.Option(None, "--domain"),
     intent: str | None = typer.Option(None, "--intent"),
     tool: str | None = typer.Option(None, "--tool"),
-    limit: int = typer.Option(20),
+    limit: int = typer.Option(20, help="Maximum snapshots to return."),
     output_format: str = typer.Option("text", "--format"),
 ) -> None:
     """List ParameterSet snapshots for a scope (most recent first)."""

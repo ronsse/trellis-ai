@@ -158,3 +158,85 @@ mypy bump (env rebuild side-effect) reverted — not part of this work.
 or reframing as core-support asks):** #212, #222, #223, #224, and #202's query-history
 matching — the symbols (`build_query_history_context`, `classify_query`, `defines_metric`)
 live in consumer-kg, not core `src/`.
+
+## Stream 2 — Pilot security floor (2026-07-02, commits `0e62aa5`/`d235e10`/`37d69e2`)
+
+Scoped the four security-labeled issues the same way (core vs. downstream first):
+
+**#206 — JSON error sanitization. DONE (`0e62aa5`).** New shared guard
+`trellis.core.error_sanitize`: `sanitize_error_message` (clean text passes through
+bounded; email / URL-with-credentials / secret-assignment / 40+ char token-run /
+raw-SQL shapes are replaced wholesale with a static marker) +
+`sanitized_error_payload` (status / error_type / sanitized message envelope).
+Applied to every JSON-mode CLI error site (ingest ×7, extract-refresh ×3, api-keys,
+migrate-provenance, skill install) and the API surfaces that embed exception text:
+`/readyz` per-backend probe errors (the DSN-leak path), metrics-timeseries 422
+detail, vectors-reset response. The unhandled-500 envelope was already generic;
+structlog keeps full detail on the operator channel. 14 heuristic tests + an
+end-to-end readyz credential-suppression test.
+
+**#193 — ArcadeDB credential split. DONE (`d235e10`).** Optional
+`admin_user`/`admin_password` (config or `TRELLIS_ARCADEDB_ADMIN_*` env) used ONLY
+for `ensure_database` + edge-provenance DDL + vector `LSM_VECTOR`/property DDL; the
+Bolt runtime driver and runtime HTTP SQL always use the least-privilege pair; the
+registry strips the admin pair from forwarded constructor params. Unset ⇒ full
+fallback to the runtime pair (backward compatible; all existing wiring tests pass
+unchanged). ADR gains a "Credential split" section w/ deployment order;
+`.env.example` documents the vars. 7 credential-routing unit tests.
+
+**#207 — SQL statement-type allowlist. CLOSED (no core path).** The fix shipped in
+consumer-kg; verified by grep that no SQL statement-type classification exists
+anywhere in core `src/` — nothing to allowlist. #206's raw-SQL suppression is a
+second net under this leak class.
+
+**#194 — classification enforcement. DEFERRED (comment on issue).** It's Tag-Vocab
+ADR Phases 1+4, explicitly design-partner-gated in the roadmap ("do not pre-build");
+`DataClassification` is unpopulated so enforcement would gate on data no producer
+writes. Left open as the tracking issue for that signal.
+
+**Also fixed in passing (`37d69e2`):** the neo4j-marked mock suite
+`test_neo4j_upsert_bulk_fast_path.py` still faked the pre-`ab36af6` pre-fetch record
+shape (`{node_id, node_role}` vs the new `RETURN n`) and failed with `KeyError: 'n'`
+on toggles-on runs — invisible to default CI (marker-deselected). Mocks updated;
+new test locks in the #195 unchanged-re-upsert-skips-write semantics at this level.
+
+**Verification:** full ruff + mypy clean; 1397 passed / 4 skipped across
+core+cli+api+stores.
+
+## Stream 3 — Backlog cleanup: docs cluster + consumer-kg triage (2026-07-02)
+
+**Docs cluster — all four closed, three were already satisfied on main:**
+- #197 (ArcadeDB Bolt plugin) — ADR "Self-hosting requirement" callout + module
+  docstring + connection-refused troubleshooting all pre-existed.
+- #198 (direct-URL extras) — README "Git-pinned installs" section pre-existed
+  (extras→driver table + pyproject example).
+- #199 (`from_config_dict`) — the method pre-existed (`fa03f4d`) with docstring
+  example + 4 tests in `test_registry_planes.py`.
+- #209 (CLI limit semantics) — the misleading text was consumer-kg's; core help
+  texts audited (per-command, precise); added help to the two unlabeled
+  `--limit` options in `trellis metrics proposals`/`versions`.
+
+**consumer-kg triage — 20 closed, 4 kept:**
+- Closed 13 stacked-branch change-records (#214 #225–#235 #239), 5 environment
+  findings (#204 #205 #213 #216 #236), #210 (their docs-repo task, executed
+  downstream), #215 (stub-materialization, fixed downstream).
+- Kept open as pilot-gated core capability asks, each with a boundary-analysis
+  comment: **#200** (usage families — guidance + gate primitives, types stay
+  open-string), **#201** (BI-metadata extractor — plausible home
+  `trellis_workers.extract`), **#202** (re-scoped to guidance + optional shared
+  predicate-validation helper), **#203** (aggregate-counts scouting primitive).
+
+**Correction recorded on #211/#215 + `LinkRequest` docs:** `allow_dangling`
+skips only the handler FK pre-flight. On Bolt/openCypher backends the store
+layer still requires both endpoint vertices (a relationship cannot exist
+without endpoints) — a true dangling edge is representable only on
+SQLite/Postgres. On Bolt substrates the supported pattern is
+materialize-a-stub-endpoint-first (what meta/recorder does in core and
+consumer-kg's `run_source_ingest` does downstream). `LinkRequest.allow_dangling`
+docstring + OpenAPI spec amended to state this.
+
+**Issue tracker after this stream: 9 open, every one gated** —
+#200/#201/#202/#203 (pilot-gated capability asks), #194 (partner-gated
+classification enforcement), #208 (blocked: needs ArcadeDB secret + AWS SSO),
+#248/#249 (eval build-outs, deliberately deferred / feature-scale), #250
+(operator credential hygiene). Everything actionable-now is done.

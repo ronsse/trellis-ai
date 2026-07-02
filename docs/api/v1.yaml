@@ -969,15 +969,26 @@ components:
 
         ``allow_dangling`` mirrors ``EdgeDraft.allow_dangling`` over the wire: it
 
-        opts the edge out of the ``LinkCreateHandler`` pre-flight FK check so an
+        opts the edge out of the ``LinkCreateHandler`` pre-flight FK check.
 
-        edge can be written before its referenced node exists. Use it for
+        Default ``False`` keeps strict FK semantics.
 
-        bootstrap / edge-before-node ingest (e.g. a curator promoting
 
-        table-reference edges to a table stub that has not been materialised yet).
+        Backend caveat: the flag skips the *handler* check only. On the
 
-        Default ``False`` keeps strict FK semantics.'
+        Bolt/openCypher backends (ArcadeDB, Neo4j) the store layer still requires
+
+        both endpoint vertices — a graph relationship cannot exist without its
+
+        endpoints — so an edge-before-node write fails there regardless of this
+
+        flag ("has no current version"). A true dangling edge is representable
+
+        only on the SQLite/Postgres backends, where edges are rows keyed by
+
+        node-id strings. On Bolt substrates, materialise a stub endpoint node
+
+        first (the pattern ``trellis.meta.recorder`` uses); see issues #211/#215.'
       properties:
         allow_dangling:
           default: false

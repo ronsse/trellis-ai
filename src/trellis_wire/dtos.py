@@ -129,11 +129,17 @@ class LinkRequest(WireRequestModel):
     """Request to create a graph edge.
 
     ``allow_dangling`` mirrors ``EdgeDraft.allow_dangling`` over the wire: it
-    opts the edge out of the ``LinkCreateHandler`` pre-flight FK check so an
-    edge can be written before its referenced node exists. Use it for
-    bootstrap / edge-before-node ingest (e.g. a curator promoting
-    table-reference edges to a table stub that has not been materialised yet).
+    opts the edge out of the ``LinkCreateHandler`` pre-flight FK check.
     Default ``False`` keeps strict FK semantics.
+
+    Backend caveat: the flag skips the *handler* check only. On the
+    Bolt/openCypher backends (ArcadeDB, Neo4j) the store layer still requires
+    both endpoint vertices — a graph relationship cannot exist without its
+    endpoints — so an edge-before-node write fails there regardless of this
+    flag ("has no current version"). A true dangling edge is representable
+    only on the SQLite/Postgres backends, where edges are rows keyed by
+    node-id strings. On Bolt substrates, materialise a stub endpoint node
+    first (the pattern ``trellis.meta.recorder`` uses); see issues #211/#215.
     """
 
     source_id: str
