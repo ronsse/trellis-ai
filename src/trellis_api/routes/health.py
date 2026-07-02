@@ -28,6 +28,7 @@ from typing import Any
 import structlog
 from fastapi import APIRouter, Depends, Response, status
 
+from trellis.core.error_sanitize import sanitize_error_message
 from trellis.errors import ConfigError
 from trellis_api.app import get_registry
 from trellis_api.auth import AuthContext, authenticate_optional
@@ -96,10 +97,14 @@ def _probe(name: str, fn: Callable[[], Any]) -> dict[str, Any]:
             error=str(exc),
             latency_ms=round(latency_ms, 2),
         )
+        # Response body gets the sanitized text only — driver connection
+        # errors can echo a DSN with credentials (issue #206). The
+        # structlog warning above keeps full detail on the operator
+        # channel.
         return {
             "status": "degraded",
             "latency_ms": round(latency_ms, 2),
-            "error": str(exc),
+            "error": sanitize_error_message(str(exc)),
         }
     latency_ms = (time.monotonic_ns() - start_ns) / 1_000_000
     return {"status": "ok", "latency_ms": round(latency_ms, 2)}

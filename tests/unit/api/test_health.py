@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 import trellis_api.app as app_module
 from trellis.auth import SCOPE_READ, generate_api_key
+from trellis.core.error_sanitize import SUPPRESSED_MARKER
 from trellis.errors import ConfigError
 from trellis.stores.registry import StoreRegistry
 from trellis_api.routes import health
@@ -112,6 +113,30 @@ class TestReadyz:
         assert "vector backend unreachable" in body["backends"]["vector_store"]["error"]
         # Other backends still report individually.
         assert body["backends"]["event_log"]["status"] == "ok"
+
+    def test_probe_error_with_credentials_is_suppressed(
+        self, client_ready, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A driver error echoing a credential-bearing DSN never reaches the
+        response body (issue #206) — the probe detail is sanitized while
+        the full text stays on the structlog operator channel."""
+        registry = app_module._registry
+        assert registry is not None
+
+        def _broken_count() -> int:
+            msg = (
+                "connection failed: could not connect to "
+                '"postgresql://trellis:s3cretpw@db.internal:5432/prod"'
+            )
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(registry.knowledge.vector_store, "count", _broken_count)
+
+        resp = client_ready.get("/readyz")
+        assert resp.status_code == 503
+        error_text = resp.json()["backends"]["vector_store"]["error"]
+        assert "s3cretpw" not in error_text
+        assert error_text == SUPPRESSED_MARKER
 
 
 class TestResolveOpsDetail:

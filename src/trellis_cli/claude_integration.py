@@ -9,6 +9,7 @@ from pathlib import Path
 
 import structlog
 
+from trellis.core.error_sanitize import sanitize_error_message
 from trellis_cli.skills import SKILL_NAMES
 
 _logger = structlog.get_logger(__name__)
@@ -147,7 +148,13 @@ def install_skills(target_dir: Path, *, force: bool = False) -> list[dict[str, s
                 shutil.copytree(src, dest)
         except OSError as exc:
             _logger.warning("skill_install_failed", skill=name, error=str(exc))
-            results.append({"name": name, "status": "failed", "error": str(exc)})
+            results.append(
+                {
+                    "name": name,
+                    "status": "failed",
+                    "error": sanitize_error_message(str(exc)),
+                }
+            )
             continue
         _logger.debug("skill_installed", skill=name, dest=str(dest), force=force)
         results.append({"name": name, "status": status})

@@ -22,6 +22,7 @@ from typing import Any
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from trellis.core.error_sanitize import sanitize_error_message
 from trellis.learning.scoring import (
     prepare_learning_promotions,
     submit_learning_promotion,
@@ -164,7 +165,9 @@ def metrics_timeseries(
     except ValueError as exc:
         # Unknown metric / group_by / non-positive days — a client input
         # error, surfaced as 422 (not a 500).
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=422, detail=sanitize_error_message(str(exc))
+        ) from exc
 
     return MetricsTimeseriesResponse(
         metric=result.metric,
@@ -265,7 +268,7 @@ def reset_vectors() -> dict[str, Any]:
     # operator visibility.
     except Exception as exc:
         logger.exception("vectors_reset_failed")
-        return {"status": "error", "message": str(exc)}
+        return {"status": "error", "message": sanitize_error_message(str(exc))}
     else:
         dims = vector_store._dimensions
         return {"status": "ok", "message": f"Recreated with {dims}D"}

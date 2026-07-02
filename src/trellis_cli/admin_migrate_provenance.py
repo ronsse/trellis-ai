@@ -59,6 +59,7 @@ import structlog
 import typer
 from rich.console import Console
 
+from trellis.core.error_sanitize import sanitize_error_message
 from trellis.extract.telemetry import emit_extraction_failure
 from trellis.stores.base.edge_provenance import (
     EDGE_PROVENANCE_FIELDS,
@@ -350,7 +351,7 @@ def migrate_provenance_command(
             # can see exactly what tripped the gate.
             payload = {
                 "error": "drift_threshold_exceeded",
-                "message": str(exc),
+                "message": sanitize_error_message(str(exc)),
                 "malformed_count": exc.malformed_count,
                 "scanned": exc.scanned,
                 "threshold": exc.threshold,

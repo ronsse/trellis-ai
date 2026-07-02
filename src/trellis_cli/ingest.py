@@ -10,6 +10,10 @@ from pathlib import Path
 import typer
 from rich.console import Console
 
+from trellis.core.error_sanitize import (
+    sanitize_error_message,
+    sanitized_error_payload,
+)
 from trellis.extract.commands import result_to_batch
 from trellis.extract.dispatcher import ExtractionDispatcher
 from trellis.extract.registry import ExtractorRegistry
@@ -56,7 +60,7 @@ def ingest_trace(  # noqa: PLR0912 - CLI dispatch with explicit format branching
         trace = Trace.model_validate(data)
     except Exception as exc:
         if output_format == "json":
-            console.print(json.dumps({"status": "error", "message": str(exc)}))
+            console.print(json.dumps(sanitized_error_payload(exc)))
         else:
             console.print(f"[red]Invalid trace: {exc}[/red]")
         raise typer.Exit(code=EXIT_INTERNAL) from None
@@ -75,7 +79,11 @@ def ingest_trace(  # noqa: PLR0912 - CLI dispatch with explicit format branching
     )
     if result.status != CommandStatus.SUCCESS:
         if output_format == "json":
-            console.print(json.dumps({"status": "error", "message": result.message}))
+            error_payload = {
+                "status": "error",
+                "message": sanitize_error_message(result.message),
+            }
+            console.print(json.dumps(error_payload))
         else:
             console.print(f"[red]Failed to ingest trace: {result.message}[/red]")
         raise typer.Exit(code=EXIT_INTERNAL)
@@ -125,7 +133,7 @@ def ingest_evidence(
         evidence = Evidence.model_validate(data)
     except Exception as exc:
         if output_format == "json":
-            console.print(json.dumps({"status": "error", "message": str(exc)}))
+            console.print(json.dumps(sanitized_error_payload(exc)))
         else:
             console.print(f"[red]Invalid evidence: {exc}[/red]")
         raise typer.Exit(code=EXIT_INTERNAL) from None
@@ -219,7 +227,7 @@ def ingest_dbt_manifest(
         manifest = json.loads(manifest_file.read_text())
     except Exception as exc:
         if output_format == "json":
-            console.print(json.dumps({"status": "error", "message": str(exc)}))
+            console.print(json.dumps(sanitized_error_payload(exc)))
         else:
             console.print(f"[red]Could not read manifest: {exc}[/red]")
         raise typer.Exit(code=EXIT_INTERNAL) from None
@@ -240,7 +248,7 @@ def ingest_dbt_manifest(
         )
     except Exception as exc:
         if output_format == "json":
-            console.print(json.dumps({"status": "error", "message": str(exc)}))
+            console.print(json.dumps(sanitized_error_payload(exc)))
         else:
             console.print(f"[red]dbt ingest failed: {exc}[/red]")
         raise typer.Exit(code=EXIT_INTERNAL) from None
@@ -297,7 +305,7 @@ def ingest_openlineage(
             events = [json.loads(line) for line in raw.splitlines() if line.strip()]
     except Exception as exc:
         if output_format == "json":
-            console.print(json.dumps({"status": "error", "message": str(exc)}))
+            console.print(json.dumps(sanitized_error_payload(exc)))
         else:
             console.print(f"[red]Could not read events file: {exc}[/red]")
         raise typer.Exit(code=EXIT_INTERNAL) from None
@@ -318,7 +326,7 @@ def ingest_openlineage(
         )
     except Exception as exc:
         if output_format == "json":
-            console.print(json.dumps({"status": "error", "message": str(exc)}))
+            console.print(json.dumps(sanitized_error_payload(exc)))
         else:
             console.print(f"[red]OpenLineage ingest failed: {exc}[/red]")
         raise typer.Exit(code=EXIT_INTERNAL) from None

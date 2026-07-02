@@ -31,6 +31,7 @@ from rich.console import Console
 from rich.table import Table
 
 from trellis.auth import ALL_SCOPES, generate_api_key
+from trellis.core.error_sanitize import sanitize_error_message
 from trellis.stores.base.api_key import ApiKeyRecord
 from trellis_cli.exit_codes import EXIT_OK, EXIT_STORE, EXIT_VALIDATION
 from trellis_cli.stores import get_api_key_store
@@ -108,7 +109,14 @@ def create_api_key_command(
         token, record = generate_api_key(name, scope_list)
     except ValueError as exc:
         if output_format == "json":
-            print(json.dumps({"error": "validation_error", "message": str(exc)}))
+            print(
+                json.dumps(
+                    {
+                        "error": "validation_error",
+                        "message": sanitize_error_message(str(exc)),
+                    }
+                )
+            )
         else:
             console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=EXIT_VALIDATION) from exc

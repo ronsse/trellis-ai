@@ -34,6 +34,7 @@ import typer
 from rich.console import Console
 
 from trellis.core.base import utc_now
+from trellis.core.error_sanitize import sanitized_error_payload
 from trellis.extract.commands import result_to_batch
 from trellis.extract.dispatcher import ExtractionDispatcher
 from trellis.extract.registry import ExtractorRegistry
@@ -419,7 +420,7 @@ def refresh(  # noqa: PLR0912, PLR0915 - CLI dispatch with explicit branching by
             raise typer.Exit(code=EXIT_INTERNAL) from None
         except Exception as exc:
             if output_format == "json":
-                print(json.dumps({"status": "error", "message": str(exc)}))
+                print(json.dumps(sanitized_error_payload(exc)))
             else:
                 console.print(f"[red]Refresh failed: {exc}[/red]")
             raise typer.Exit(code=EXIT_INTERNAL) from None
@@ -445,7 +446,7 @@ def refresh(  # noqa: PLR0912, PLR0915 - CLI dispatch with explicit branching by
             raise typer.Exit(code=EXIT_INTERNAL) from None
         except Exception as exc:
             if output_format == "json":
-                print(json.dumps({"status": "error", "message": str(exc)}))
+                print(json.dumps(sanitized_error_payload(exc)))
             else:
                 console.print(f"[red]Refresh failed: {exc}[/red]")
             raise typer.Exit(code=EXIT_INTERNAL) from None
@@ -527,7 +528,7 @@ def traces(
         )
     except Exception as exc:
         if output_format == "json":
-            print(json.dumps({"status": "error", "message": str(exc)}))
+            print(json.dumps(sanitized_error_payload(exc)))
         else:
             console.print(f"[red]Trace query failed: {exc}[/red]")
         raise typer.Exit(code=EXIT_INTERNAL) from None
