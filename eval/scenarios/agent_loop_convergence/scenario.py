@@ -190,6 +190,17 @@ class _RoundResult:
 # ---------------------------------------------------------------------------
 
 
+def _populate_corpus_stores(
+    registry: StoreRegistry,
+    corpus: GeneratedCorpus,
+    metrics: dict[str, float],
+) -> None:
+    """Seed traces + entity docs + distractors; stamp the setup metrics."""
+    metrics["traces_ingested"] = float(_ingest_traces(registry, corpus))
+    metrics["entities_upserted"] = float(_populate_entity_documents(registry, corpus))
+    metrics["distractors_planted"] = float(_populate_distractor_documents(registry))
+
+
 def _ingest_traces(registry: StoreRegistry, corpus: GeneratedCorpus) -> int:
     trace_store = registry.operational.trace_store
     for gt in corpus.traces:
@@ -326,6 +337,104 @@ def _seed_reference_advisories(
             )
     # One batched write — ``put`` rewrites the whole JSON file per call.
     return advisory_store.put_many(advisories)
+
+
+# ---------------------------------------------------------------------------
+# Organic-advisory staging mode (opt-in) — issue #248
+# ---------------------------------------------------------------------------
+
+#: The synthetic entity whose presence differential the staged mode
+#: manufactures. Its name appears nowhere else in the corpus, so its doc
+#: is retrieved exactly when the round intent mentions it.
+_ORGANIC_PROBE_ENTITY = "organic_probe_entity"
+
+#: The probe doc is present on every Nth visit to the staged domain
+#: (visit % N == 0). 3 keeps absent-round failures frequent enough that
+#: the with/without success differential clears the generator's
+#: ``_MIN_EFFECT_SIZE`` on a short run.
+_ORGANIC_PRESENCE_CADENCE = 3
+
+
+def _plant_organic_probe_document(registry: StoreRegistry, domain: str) -> None:
+    """Plant the staged mode's probe doc (absent from default runs).
+
+    Content mentions only the probe's own name plus neutral words — none
+    of the domain query's keywords — so KeywordSearch retrieves it *only*
+    on rounds whose intent explicitly names it. That on/off switch is
+    what manufactures the presence differential ``AdvisoryGenerator``
+    needs (see :func:`_stage_organic_query`).
+    """
+    registry.knowledge.document_store.put(
+        doc_id=f"doc:{_ORGANIC_PROBE_ENTITY}",
+        content=(
+            f"{_ORGANIC_PROBE_ENTITY} reference sheet. Curated background "
+            f"for the {domain} probe rounds."
+        ),
+        metadata={
+            "domain": domain,
+            "content_type": "entity_summary",
+            "domains": [domain],
+            "content_tags": {"signal_quality": "standard"},
+        },
+    )
+
+
+def _setup_organic_staging(
+    registry: StoreRegistry,
+    corpus: GeneratedCorpus,
+    metrics: dict[str, float],
+) -> str:
+    """Plant the probe doc + stamp the setup metric; return the staged domain."""
+    staged_domain = corpus.queries[0].domain
+    _plant_organic_probe_document(registry, staged_domain)
+    metrics["organic_probe_planted"] = 1.0
+    return staged_domain
+
+
+def _count_organic_advisories(advisory_store: AdvisoryStore) -> float:
+    """How many ENTITY advisories the generator formed for the probe doc.
+
+    Counts active + suppressed alike — formation is the claim under test
+    (issue #248); fitness is scored separately.
+    """
+    organic_doc_id = f"doc:{_ORGANIC_PROBE_ENTITY}"
+    return float(
+        sum(
+            1
+            for advisory in advisory_store.list(include_suppressed=True)
+            if advisory.category is AdvisoryCategory.ENTITY
+            and advisory.entity_id == organic_doc_id
+        )
+    )
+
+
+def _stage_organic_query(query: EvalQuery, visit_index: int) -> EvalQuery:
+    """Return the staged-domain round's query for organic-advisory mode.
+
+    Two edits relative to the canonical query:
+
+    - ``required_coverage`` always gains the probe entity, so with a
+      ``success_coverage_threshold`` above ``3/4`` the round succeeds
+      **iff** the probe doc landed in the pack.
+    - The intent mentions the probe's name only on every
+      ``_ORGANIC_PRESENCE_CADENCE``-th visit, so the doc lands in a
+      deterministic minority of packs.
+
+    Net effect on the joined pack/feedback dataset: the probe appears in
+    a handful of successful packs and is absent from failing ones — the
+    exact ``success_rate_with - success_rate_without`` differential the
+    ``AdvisoryGenerator`` requires to *organically* form an ENTITY
+    advisory (issue #248). Nothing is pre-seeded into the advisory
+    store; the generator does its own statistics over real events.
+    """
+    present = visit_index % _ORGANIC_PRESENCE_CADENCE == 0
+    return EvalQuery(
+        domain=query.domain,
+        intent=(
+            f"{query.intent} {_ORGANIC_PROBE_ENTITY}" if present else query.intent
+        ),
+        required_coverage=[*query.required_coverage, _ORGANIC_PROBE_ENTITY],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -470,6 +579,7 @@ def run(
     regime_shift_replacement_count: int = DEFAULT_REGIME_SHIFT_REPLACEMENT_COUNT,
     advisory_min_sample_size: int = DEFAULT_ADVISORY_MIN_SAMPLE_SIZE,
     seed_reference_advisory: bool = False,
+    stage_organic_advisory: bool = False,
 ) -> ScenarioReport:
     """Execute the agent-loop convergence scenario.
 
@@ -491,6 +601,19 @@ def run(
     :func:`_seed_reference_advisories`). Provenance stamping is pure
     annotation, so this does not change pack composition or the
     convergence deltas.
+
+    Opt-in organic-advisory staging (issue #248): pass
+    ``stage_organic_advisory=True`` to plant one probe doc and stage a
+    deterministic presence differential in the first domain (see
+    :func:`_stage_organic_query`), so the ``AdvisoryGenerator`` forms an
+    ENTITY advisory **organically** — from its own statistics over real
+    pack/feedback events, with nothing pre-seeded. Pair with
+    ``success_coverage_threshold`` in ``(0.75, 1.0]`` and a small
+    ``advisory_min_sample_size`` so the differential is resolvable on a
+    short run; the staged domain's absent-probe rounds *fail by design*,
+    so convergence deltas are meaningful only within this mode (defaults
+    leave the mode off and the baseline untouched). Not designed to
+    combine with ``regime_shift_round``.
     """
     _validate_run_kwargs(
         rounds=rounds,
@@ -512,9 +635,16 @@ def run(
         "domain_count": float(len(DOMAIN_TEMPLATES)),
     }
 
-    metrics["traces_ingested"] = float(_ingest_traces(registry, corpus))
-    metrics["entities_upserted"] = float(_populate_entity_documents(registry, corpus))
-    metrics["distractors_planted"] = float(_populate_distractor_documents(registry))
+    _populate_corpus_stores(registry, corpus, metrics)
+
+    # Organic-advisory staging (issue #248): one probe doc + a visit
+    # counter; everything else in the loop is the production path.
+    staged_domain = (
+        _setup_organic_staging(registry, corpus, metrics)
+        if stage_organic_advisory
+        else None
+    )
+    staged_visits = 0
 
     # Advisory store is file-based; keep it under the runner-supplied
     # stores_dir when present, else fall back to a tmpdir created here.
@@ -547,6 +677,9 @@ def run(
     try:
         for round_index in range(rounds):
             query = _round_query(corpus, round_index)
+            if staged_domain is not None and query.domain == staged_domain:
+                query = _stage_organic_query(query, staged_visits)
+                staged_visits += 1
             pack = _build_pack(builder, query)
             referenced, coverage, success = _grade_round(
                 pack,
@@ -636,6 +769,12 @@ def run(
     metrics["loops.advisory_hit_rate"] = round(
         compute_advisory_hit_rate(round_results), 4
     )
+    if stage_organic_advisory:
+        # Issue #248: did the AdvisoryGenerator form the probe's ENTITY
+        # advisory from its own statistics (nothing pre-seeded)?
+        metrics["organic_advisories_formed"] = _count_organic_advisories(
+            advisory_store
+        )
     findings.extend(_convergence_findings(convergence, loop_stats))
 
     # ``useful_delta`` is the primary convergence signal — it tracks the

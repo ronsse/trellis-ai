@@ -128,6 +128,61 @@ def test_seed_reference_advisory_yields_positive_hit_rate(
     )
 
 
+def test_stage_organic_advisory_forms_advisory_organically(
+    tmp_path: Path,
+) -> None:
+    """Issue #248: the AdvisoryGenerator forms an ENTITY advisory itself.
+
+    Unlike ``seed_reference_advisory`` (which injects a pre-built
+    advisory to prove the *measurement* path), the staged mode plants a
+    probe doc whose presence deterministically decides the staged
+    domain's round outcome — and then lets the generator do its own
+    statistics over the real pack/feedback event joins. Formation +
+    stamping + a positive hit rate here are all **organic**: nothing is
+    written to the advisory store by the scenario.
+
+    Knob rationale: cadence 3 on the staged domain gives, by the first
+    (and only) generation pass at round 12, two successful probe-present
+    packs and two probe-absent failures — sample 2 (≥ the
+    ``advisory_min_sample_size=2`` used here, matching the regime-shift
+    demo) with effect +0.20 ≥ the generator's 0.15 floor. The 0.8
+    threshold sits in (3/4, 1.0] so probe absence alone fails the round.
+    """
+    with StoreRegistry(config=_SQLITE_CONFIG, stores_dir=tmp_path / "staged") as reg:
+        report = run(
+            reg,
+            seed=0,
+            rounds=24,
+            feedback_batch_size=12,
+            traces_per_domain=4,
+            success_coverage_threshold=0.8,
+            advisory_min_sample_size=2,
+            stage_organic_advisory=True,
+        )
+
+    assert report.metrics["organic_probe_planted"] == 1.0
+    # The generator formed the probe's advisory from observed events.
+    assert report.metrics["organic_advisories_formed"] >= 1.0
+    # ...and it survived into later packs: organically positive hit rate.
+    assert report.metrics["loops.advisory_hit_rate"] > 0.0
+
+
+def test_default_run_has_no_organic_staging_artifacts(
+    sqlite_registry: StoreRegistry,
+) -> None:
+    """Default kwargs leave the staged mode fully off — no probe doc,
+    no staged metrics, baseline untouched."""
+    report = run(
+        sqlite_registry, seed=0, rounds=8, feedback_batch_size=4, traces_per_domain=4
+    )
+    assert "organic_probe_planted" not in report.metrics
+    assert "organic_advisories_formed" not in report.metrics
+    assert (
+        sqlite_registry.knowledge.document_store.get("doc:organic_probe_entity")
+        is None
+    )
+
+
 def test_periodic_loops_run_at_least_once(sqlite_registry: StoreRegistry) -> None:
     """With rounds == feedback_batch_size, exactly one periodic pass fires."""
     report = run(
