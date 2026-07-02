@@ -57,7 +57,7 @@ Six blocked features need LLM capabilities beyond what `LLMCallable` provides:
 | **LLM-assisted dedup** | Embedding similarity + LLM confirmation | No embedding support; needs both clients |
 | **Prompt library** | Versioned templates with usage aggregation | No usage reporting, no prompt identity |
 
-The `WorkflowEngine` (`trellis_workers/engine/thinking.py`) also defines `TierConfig` with model/temperature/max_tokens per cognition tier — configuration that has no client to target.
+The `WorkflowEngine` (`trellis_workers/engine/thinking.py`) also defines `TierConfig` with model/temperature/max_tokens per cognition tier — configuration that has no client to target. *(Historical note: the engine was retired in Phase F F0 (`1291210`, see `docs/research/workflow-engine-disposition.md`) with zero production callers; the tier-routing idea lives on in the Phase F harness budgets.)*
 
 ### The decision to make
 
@@ -182,7 +182,7 @@ A `CrossEncoderClient` Protocol was defined in Phase 1 (`score_pairs(query, cand
 **Cons:**
 - Every consumer reimplements: retries, token tracking, model routing, error normalization
 - Cannot ship standardized extractors (`LLMExtractor`, `SaveMemoryExtractor`) because they have no client to call — each consumer must wire them up from scratch
-- `WorkflowEngine.TierConfig` (model, temperature, max_tokens) has no client to target
+- `WorkflowEngine.TierConfig` (model, temperature, max_tokens) has no client to target *(engine since retired — F0 `1291210`)*
 - Embedding abstraction remains ad-hoc (`Callable[[str], list[float]]` in `StoreRegistry`)
 - The "bring your own" barrier delays adoption — new users must write glue code before enrichment works
 
@@ -216,7 +216,7 @@ A `CrossEncoderClient` Protocol was defined in Phase 1 (`score_pairs(query, cand
 - **Unblocks Sprint F.** `LLMExtractor`, `HybridJSONExtractor`, `SaveMemoryExtractor`, prompt library, and LLM-based reranking can all target `LLMClient` without waiting for consumers to invent their own wiring.
 - **Token tracking becomes standard.** `TokenUsage` on every response enables cost analysis, budget enforcement, and the `tokens_used` field on `ExtractionResult` without per-consumer plumbing.
 - **Embedding abstraction standardized.** `EmbedderClient` replaces the ad-hoc `Callable[[str], list[float]]` in `StoreRegistry`, and gains batch support and usage tracking.
-- **`TierConfig` connects to reality.** `WorkflowEngine` can route to different models via `LLMClient.generate(model=tier_config.model)`.
+- **`TierConfig` connects to reality.** `WorkflowEngine` can route to different models via `LLMClient.generate(model=tier_config.model)`. *(engine since retired — F0 `1291210`)*
 - **Core stays dependency-free.** `trellis.llm.protocol` and `trellis.llm.types` are pure Python + Pydantic. No SDK imports.
 
 ### Negative
@@ -256,7 +256,7 @@ Ordered for incremental delivery. Each phase is independently shippable.
 
 Deferred — not yet needed:
 - `StoreRegistry._build_openai_embedding_fn` still returns a sync `Callable[[str], list[float]]` because `SemanticSearch.search()` is sync. Migrating to `EmbedderClient` means making that call path async; out of scope until a consumer needs batch or usage tracking.
-- `WorkflowEngine.TierConfig` has no `LLMClient` plumbed yet. Wire it up when the first tier-routed feature lands.
+- ~~`WorkflowEngine.TierConfig` has no `LLMClient` plumbed yet. Wire it up when the first tier-routed feature lands.~~ **Closed:** the engine was retired in Phase F F0 (`1291210`, see `docs/research/workflow-engine-disposition.md`); tier routing, if it returns, targets the Phase F harness.
 
 ### Phase 4: Unblocked features (Sprint F)
 

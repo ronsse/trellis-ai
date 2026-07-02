@@ -59,7 +59,7 @@ From [`plan-neo4j-hardening.md`](./plan-neo4j-hardening.md) §5 plus the "explor
 | Graph compaction automation | `as_of` query latency degradation observed |
 | Tag filter OR / negation (Gap 3.3) | Retrieval use-case with actual OR-shaped queries |
 | Importance-score temporal decay (Gap 3.5) | Stale-score complaint on long-running deployments |
-| `WorkflowEngine` tier escalation | Confidence-gate failures observed in enrichment runs |
+| `WorkflowEngine` tier escalation *(engine since retired in Phase F F0 (`1291210`, see `docs/research/workflow-engine-disposition.md`); tier escalation now belongs to the Phase F harness budgets)* | Confidence-gate failures observed in enrichment runs |
 | Enrichment event-loop wiring | Sustained enrichment workload with measured trigger pattern |
 | Blob TTL / graph compaction automation | Real accumulation rates observed |
 
@@ -205,7 +205,7 @@ Order is intentional: each scenario unblocks one or more Phase 3 items, and earl
 
 **Decision unblocks**:
 * Advisory fitness loop validation — confirms or refutes the suppression / restoration semantics on a controlled corpus
-* `WorkflowEngine` tier escalation gating — if the agent loop produces measurable confidence-gate failures, escalation becomes justified
+* `WorkflowEngine` tier escalation gating — if the agent loop produces measurable confidence-gate failures, escalation becomes justified *(engine since retired in Phase F F0 (`1291210`, see `docs/research/workflow-engine-disposition.md`); any future escalation design targets the Phase F harness)*
 * Enrichment event-loop wiring — convergence requires sustained enrichment volume; this scenario *generates* that workload
 
 **Measured baselines (SQLite, 30 rounds)**:

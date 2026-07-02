@@ -30,7 +30,7 @@ A module is **orphan-suspect** when its only callers live under `tests/`
 module whose re-export has no consumer is treated as a heightened
 orphan-suspect (the re-export is dead code too).
 
-Per C1.6 / C1.7 plan guidance, `engine/thinking.py` (WorkflowEngine) and
+*(Post-audit note: `engine/thinking.py` was subsequently deleted in Phase F F0, `1291210`.)* Per C1.6 / C1.7 plan guidance, `engine/thinking.py` (WorkflowEngine) and
 `enrichment/service.py` (EnrichmentService's triggered-consumer stubs)
 are deliberately left in place pending real workload signal — they are
 annotated `deliberate-no-action` so this audit doesn't re-litigate that

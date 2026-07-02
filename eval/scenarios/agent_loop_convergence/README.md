@@ -46,9 +46,11 @@ Plan §5.4:
   `loops.advisories_suppressed_total > 0` and the weighted-delta is
   non-negative, the suppression / restoration semantics work on a
   controlled corpus.
-* **`WorkflowEngine` tier escalation** — track `round_success_rate`
-  over the run; sustained low coverage signals confidence-gate failure
-  patterns worth escalating.
+* **Tier escalation signal** — track `round_success_rate` over the
+  run; sustained low coverage signals confidence-gate failure patterns
+  worth escalating. (Originally framed for `WorkflowEngine`, which was
+  retired in Phase F F0 `1291210`; the signal now informs the Phase F
+  harness budget design instead.)
 * **Enrichment event-loop wiring** — this scenario *generates* the
   sustained-volume workload the plan calls for; pin a baseline of
   `convergence.weighted_delta` and watch for drift.

@@ -302,7 +302,7 @@ Plus an "operator-driven manual restore" baseline option. User picks the path.
 | Delete C1.9 orphan-suspect modules | A8 surfaces the decision frame; deletion is the user's call. |
 | Item 7 Cohort 2 implementation | E2 ships the scoping; implementation is the next wave after operator reviews proposals. |
 | Phase 8.1 loud-fail promotion | Conditional on real misconfig incident. |
-| WorkflowEngine / EnrichmentService event-loop / Blob TTL / Graph compaction wiring | Gated on production data signals. |
+| ~~WorkflowEngine~~ (retired in Phase F F0 (`1291210`, see `docs/research/workflow-engine-disposition.md`)) / EnrichmentService event-loop / Blob TTL / Graph compaction wiring | Gated on production data signals. |
 | Full ScenarioReport metric widening across 8 scenarios | Phase 4 widened `ScenarioReport.metrics` to `Mapping[str, float \| str]`; other scenarios' local `dict[str, float]` annotations still work but ideally narrow to match. Tracked as L follow-up. |
 
 All deferred items are explicitly "validate before designing" per the C1.6/C1.7 discipline.

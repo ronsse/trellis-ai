@@ -28,7 +28,7 @@ A program to close the dual-loop's promote half and add four new loops. Read [`d
   - **C1.3** (post-Item-3 dead thresholds) — **closed by PR #109** (commit `e672ef5`, 2026-05-12). Verified at base SHA `2ca9584`: zero grep hits for `_NOISE_*_THRESHOLD` / `_lookup_threshold_from_registry` in `src/`.
   - **C1.4** (eval scenario boilerplate consolidation) — **closed by commit `689c7ef`** (2026-05-09).
   - **C1.5** (post-Item-4 extract-layer audit) — **closed by PR #110 + C2 sweep.** Audit log added in this PR (`audit/silent_fallbacks_2026-05-14-c1-5-extraction-slice.md`) confirming 13 in-scope sites are correctly classified (4 emit-then-raise, 8 `# GRACEFUL-DEGRADATION:` annotated, 1 loud env-var parser).
-  - **C1.6** (WorkflowEngine) — **deliberate no-action** per "validate before deleting".
+  - **C1.6** (WorkflowEngine) — was "deliberate no-action per validate-before-deleting"; **superseded: DELETED in Phase F F0** (`1291210`, disposition memo `docs/research/workflow-engine-disposition.md`).
   - **C1.7** (EnrichmentService triggered-consumer stubs) — **deliberate no-action** per "validate before deleting". (`EnrichmentService` itself is wired in production via `LLMFacetClassifier`; only the triggered-consumer pattern is stub.)
   - **C1.8** ("self-learning" → "feedback loop" rename) — **closed in this PR.** CLAUDE.md + `adr-terminology.md` updated. Three `src/` docstring leftovers carved out as M-severity follow-up below.
   - **C1.9** (`trellis_workers/` orphan audit) — **audit document landed in this PR** (`docs/design/audit-trellis-workers-orphans-2026-05-14.md`). Three orphan-suspect modules surfaced (876 LOC combined); per the C1.6/C1.7 discipline, deletion deferred until a human decision attaches.
@@ -176,7 +176,7 @@ Sibling to the Self-Improvement Program. Closes the gap surfaced 2026-05-18: sol
 - **[L][scope:F2]** Add a one-line note to curator §2.4: `ENTITY_UPDATE` overwrites are versioned in SCD-2; prior `description` survives via `get_node_history()`.
 
 **From the engine disposition (Unit C):**
-- **[M][scope:follow-up]** Stale doc references to `WorkflowEngine` to update in a follow-up PR:
+- **[M][scope:follow-up]** ~~Stale doc references to `WorkflowEngine` to update in a follow-up PR~~ — **DONE 2026-07-02** (all files below annotated with the F0 retirement):
   - `TODO.md` line 305 (existing C1.6 entry — mark closed)
   - `docs/design/audit-trellis-workers-orphans-2026-05-14.md` engine/* table rows
   - `docs/design/plan-cleanup-dead-code.md` C1.6 section
@@ -185,7 +185,7 @@ Sibling to the Self-Improvement Program. Closes the gap surfaced 2026-05-18: sol
   - `docs/design/adr-llm-client-abstraction.md` lines 60, 185, 219, 259
   - `eval/scenarios/agent_loop_convergence/README.md` line 49
 - **[L][scope:follow-up]** Three other 2026-05-16-audited orphan-suspects still in `KEEP — VALIDATE`: `extract/query_pattern_observer.py`, `learning/miner.py`, `maintenance/retention.py` (~876 LOC total). Re-evaluate if any align with Phase F skill or evolver needs.
-- **[L][scope:follow-up]** `docs/design/implementation-roadmap.md` is dated 2026-04-27 and predates Items 1–7 + Phase F. CLAUDE.md positions it as the canonical agent-entry doc; refresh the "State of the project" table.
+- **[L][scope:follow-up]** ~~`docs/design/implementation-roadmap.md` is dated 2026-04-27 and predates Items 1–7 + Phase F. CLAUDE.md positions it as the canonical agent-entry doc; refresh the "State of the project" table.~~ — **DONE 2026-07-02**: §1 rewritten (current state + changed-since digest + container-based live-test reality), B.3/E.5 statuses corrected to landed, §4 rebalanced to the gate table, §5 hand-off updated (incl. the Bolt-substrate validation discipline).
 
 **From the F6 eval skeleton (Unit D):**
 - **[M][scope:F1+F2+F5]** Add `node.enriched`, `curation.feedback_recorded`, and an evolver round-scored event type to `EventType`. F1/F2/F5 own the enum delta in their respective PRs.

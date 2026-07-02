@@ -1,70 +1,53 @@
 # Implementation Roadmap
 
-**Last updated:** 2026-04-27 (eval strategy plan landed; most of the Neo4j hardening series deliberately deferred)
+**Last updated:** 2026-07-02 (backlog fully triaged — every open issue is gated; §1 rewritten, ADR-phase statuses corrected)
 **Purpose:** Single-page hand-off for any agent (fresh or returning) picking up Trellis implementation work. Self-contained. Read this top-to-bottom before touching code.
 
-> **Picking up evaluation work?** [`plan-evaluation-strategy.md`](./plan-evaluation-strategy.md) is the active plan for building the workload signal that unblocks Phase 3 of Neo4j hardening (and other gated items in `TODO.md`). Read it instead of jumping straight into this doc.
+> **Picking up evaluation work?** The eval harness and all planned scenarios are built — see [`../plans/2026-06-17-step3-assessment.md`](../plans/2026-06-17-step3-assessment.md) for what each scenario substantiates (its §6 evidence rules are authoritative). [`plan-evaluation-strategy.md`](./plan-evaluation-strategy.md) is the historical plan they grew from.
 >
-> **Picking up Neo4j-specific work?** [`plan-neo4j-hardening.md`](./plan-neo4j-hardening.md) defines the production-readiness checklist. Only the two items the eval harness needed (`StoreRegistry` context-manager protocol from Phase 1.2, vector-index ONLINE-wait from Phase 1.4) landed on main. The rest are deliberately deferred — see TODO.md "Deferred from the Neo4j hardening series" for what's missing and what each defers.
+> **Picking up the memory-layer work?** [`adr-memory-layer-interop.md`](./adr-memory-layer-interop.md) is Proposed with zero implementation, and is **deliberately parked** — the owner will open a dedicated session for it (which may start with an ADR revision). Do not start it from here.
+>
+> **Picking up Phase F (inner agent loop)?** TODO.md "Phase F" is the staged program (F1 harness ≈ 1500–2000 LOC; F5 gated on 30 days of F4 signal). The F6 eval scenario is already implemented with reference drivers at the F1–F5 plug-in seam (`eval/scenarios/skill_loop_convergence/`).
 
 ---
 
-## 1. State of the project — 2026-04-25
+## 1. State of the project — 2026-07-02
 
 ### What's live and tested
 
-* **All five storage planes wired:** trace / document / graph / vector / event_log / blob. `StoreRegistry` (`src/trellis/stores/registry.py`) constructs each from config or env vars.
-* **Three graph backends:** SQLite (default), Postgres, Neo4j. All three pass the `GraphStoreContractTests` suite. ArcadeDB is being added (graph + vector) as the new blessed substrate per the open ADR.
-* **Three vector backends:** SQLite (default), pgvector, Neo4j (shape #2 — embeddings as properties on `:Node` rows). The first two pass `VectorStoreContractTests`; Neo4j shape #2 has its own per-backend test file by design (its `upsert` requires an existing graph node). *LanceDB was removed in 2026-05 as part of the ArcadeDB consolidation.*
-* **Canonical query DSL** lives at `src/trellis/stores/base/graph_query.py`. `FilterClause` / `NodeQuery` / `SubgraphQuery` / `SubgraphResult` with `eq` / `in` / `exists` operators. Compiled to native dialect by each backend.
-* **Well-known type registry** at `src/trellis/schemas/well_known.py`. Schema.org-aligned entity types, PROV-O-aligned edge kinds, alias maps from legacy lowercase to canonical, `canonicalize_*` helpers.
+* **All storage planes wired** (trace / document / graph / vector / event_log / blob) via `StoreRegistry` (`src/trellis/stores/registry.py`), plus a **`null` event_log backend** for knowledge-plane-only deployments (governed graph mutations with no operational plane — issue #196).
+* **Four graph backends:** SQLite (default), Postgres, **ArcadeDB (blessed)**, Neo4j. ArcadeDB + Neo4j share the `BoltOpenCypherGraphStore` base. All pass `GraphStoreContractTests` — including the edge re-ingest idempotency tests that caught (and whose fix closed) a Bolt SCD-2 bug where re-upserting an unchanged node stranded its edges (#195, `ab36af6`).
+* **Vector backends:** SQLite, pgvector, ArcadeDB (SQL-over-HTTP, `LSM_VECTOR`), Neo4j shape #2. Note: the Neo4j vector `SEARCH` clause is **AuraDB-only** — self-hosted Docker (community *and* enterprise) lacks it; the e2e test self-skips there.
+* **Scoped REST auth landed** (`TRELLIS_AUTH_MODE=off|optional|required`, Bearer keys with read/write/admin scopes — PR #242) — the old §E.5 entry below is closed.
+* **Edge provenance as first-class columns** (`source_trace_id` / `agent_id` / `confidence` / `evidence_ref` / `extractor_tier`) across all backends — the old §B.3 entry below is closed.
+* **Security floor for machine surfaces:** leak-safe error payloads (`trellis.core.error_sanitize`, #206 — CLI JSON + `/readyz` + admin routes) and an ArcadeDB admin/runtime credential split (#193, `TRELLIS_ARCADEDB_ADMIN_*`).
+* **Wire-level `allow_dangling`** on LINK_CREATE (REST + SDK, #211) — with the recorded caveat that Bolt backends still require both endpoint vertices at the store layer; materialize-a-stub-endpoint-first is the supported pattern there (#215 discussion).
+* **Agent-integration surface complete** (2026-06-12 hand-off, all 13 WPs): HTTP-only SDK with `record_feedback` + hooks, trace→graph extraction, `trellis worker curate/tune/enrich/mine-precedents`, review-queue UI, metrics dashboard, `quickstart --with-skills`.
+* **Eval harness complete:** every planned scenario implemented, including `skill_loop_convergence` (reference-driver build, #249 — axis Q citable for C1; axis R measurement-path-only). Evidence rules live in the step-3 assessment §6.
 
-### Test counts (state at 2026-04-25)
+### Changed since the 2026-04-27 revision (digest)
 
-| Run mode | Pass | Skip | Notes |
-|---|---|---|---|
-| `pytest tests/unit/` | 653 | 118 | Default. SQLite live; Postgres / Neo4j / pgvector skip cleanly. (Counts predate LanceDB removal in 2026-05.) |
-| `+ TRELLIS_TEST_NEO4J_*` set | +110 | -54 | 33 graph + 19 vector + 58 contract. Validated against AuraDB Free 2026-04-25. |
-| `+ TRELLIS_TEST_PG_DSN` set | +44 | -28 | A.2: 14 PG store + 13 pgvector store + 11 PG-graph contract + 25 pgvector contract = 63 PG-gated tests, all green against Neon free tier 2026-04-25. |
-| Full unit suite, all extras + both env vars set | 2347 | 0 | Smoke baseline after A.2: zero skips, zero failures across SQLite / Neo4j / Postgres / pgvector / OpenAI / Anthropic / FastAPI / FastMCP. (Counts predate LanceDB removal in 2026-05.) |
-| `pytest tests/integration/test_neo4j_e2e.py` (env loaded) | 6 | 0 | A.1 e2e: ENTITY_CREATE / LINK_CREATE / audit-events / JSON extractor → Neo4j / PackBuilder→graph / SemanticSearch→shape #2 vector. Skips cleanly otherwise. |
-| `pytest tests/unit/schemas/test_well_known.py` | 85 | 0 | Phase 0 (41) + Phase 1/2 helpers (44 — alignment URIs, alias inverse, query expansion). |
-| `pytest tests/unit/extract/` | 147 | 0 | All 139 prior + 8 new Phase 1 canonicalisation tests in `TestCanonicalNameEmission`. |
-| `pytest tests/unit/retrieve/test_strategies.py` | 37 | 0 | All 32 prior + 5 new Phase 2 cross-bucket tests in `TestGraphSearchCanonicalBucketing`. |
-| `pytest tests/unit/api/test_logging.py` | 15 | 0 | E.2 — uvicorn ↔ structlog bridge: handler wiring, JSON / console rendering, level honoring. |
-| `pytest tests/unit/stores/test_registry_validation.py` | 9 | 0 | E.3 — `StoreRegistry.validate()` fail-fast: happy paths, missing DSN aggregation, error rendering. |
+| When | What | Where to read |
+|---|---|---|
+| 2026-05 | ArcadeDB blessed as the graph+vector substrate; LanceDB removed | [`adr-arcadedb-blessed-substrate.md`](./adr-arcadedb-blessed-substrate.md) |
+| 2026-05-18 | Phase F (inner agent loop) proposed; WorkflowEngine retired (`1291210`) | TODO.md "Phase F"; [`workflow-engine-disposition.md`](../research/workflow-engine-disposition.md) |
+| 2026-06-04 | Memory-layer interop ADR proposed (parked — dedicated session) | [`adr-memory-layer-interop.md`](./adr-memory-layer-interop.md) |
+| 2026-06-11 | Public-repo scrub; scoped API-key auth (#242) + UI key flow (#244) | strategy notes (private repo) |
+| 2026-06-12 | Agent-integration hand-off executed (13 WPs) | [`../plans/2026-06-12-agent-integration-handoff.md`](../plans/2026-06-12-agent-integration-handoff.md) |
+| 2026-06-17→24 | Step-3 assessment: dashboard↔eval parity resolved as intentional divergence; §6 items closed | [`../plans/2026-06-17-step3-assessment.md`](../plans/2026-06-17-step3-assessment.md) |
+| 2026-06-30→07-02 | Pilot core fixes (#211/#196/#195 + Bolt SCD-2 fix), CI de-AuraDB'd, security floor (#206/#193), backlog triage (35 issues closed), `skill_loop_convergence` implemented (#249) | [`../plans/2026-06-30-pilot-core-fixes.md`](../plans/2026-06-30-pilot-core-fixes.md) |
 
-### Live test credentials — `.env` is the source of truth
+### Test suite shape (2026-07-02)
 
-Local credentials (Neo4j AuraDB, Postgres DSN, etc.) live in `.env` at the repo root. **Gitignored** — see `.gitignore` lines 21-26 (`.env`, `.env.*`, with `!.env.example` exception). The committed `.env.example` documents every variable the test suite + production deployment recognises.
+`pytest tests/unit/ -q` collects **3962 tests by default** (4510 total; 548 backend-marked tests deselect without their env toggles). CI runs five required checks (Tests, Lint, Type Check, OpenAPI, CodeQL) plus **Live infrastructure tests** — which since `586aee6` runs against **ephemeral service containers** (`neo4j:2025.12`, `pgvector/pgvector:pg16`), needs **no external instance and no repo secrets**, and includes the storage contract suites.
 
-**Loading the file before running tests:**
+### Live test credentials — current reality
 
-```bash
-# Bash / zsh
-set -a && source .env && set +a
+* **The AuraDB free-tier instance is GONE** (auto-deleted; DNS-dead). Do **not** follow older instructions that say "leave it running". CI no longer needs it. For local live Neo4j/ArcadeDB tests, run containers — the fixture header of `tests/unit/stores/test_arcadedb_graph.py` and `.github/workflows/live-infra.yml` show the exact `docker run` incantations and `TRELLIS_TEST_*` variables.
+* **Repo-root `.env` no longer exists** (only `.env.example`, which documents every recognised variable). Recreate locally as needed.
+* Remaining credential hygiene (rotate dead AuraDB creds in 1Password, Neon status) is tracked in **#250** (operator-only).
 
-# PowerShell
-Get-Content .env | ForEach-Object {
-    if ($_ -match '^([^#=]+)=(.*)$') {
-        Set-Item -Path "env:$($matches[1])" -Value $matches[2]
-    }
-}
-```
-
-After loading, `pytest tests/unit/stores/test_neo4j_*.py` runs the live suites against whatever Neo4j / Postgres instance the file points at. Without `.env` loaded, the env-gated suites skip cleanly.
-
-**Provisioned for the project:**
-* Free-tier Neo4j AuraDB instance at `cfc3411f.databases.neo4j.io`. **Leave it running.**
-* Free-tier Neon Postgres project at `ep-lively-sun-an9d71ul.c-6.us-east-1.aws.neon.tech` (db `neondb`, role `neondb_owner`). pgvector 0.8.0 enabled on the default database 2026-04-25. **Leave it running.**
-
-Both passwords are in `.env`, *not* in this doc — agents working on the codebase load them via `source .env` rather than handling the credentials manually.
-
-**AuraDB-specific gotcha already caught:** the database name is the instance ID, not the canonical `"neo4j"`. Production users on AuraDB must pass `database=<instance_id>` to `Neo4jGraphStore` / `Neo4jVectorStore`. Test fixtures honour `TRELLIS_TEST_NEO4J_DATABASE` (default `"neo4j"`).
-
----
-
-## 2. Recently completed (this thread, 2026-04-23 → 2026-04-25)
+## 2. Recently completed (historical — the 2026-04-23 → 2026-04-25 thread)
 
 | Work | Files |
 |---|---|
@@ -173,7 +156,15 @@ Each entry below is **fully scoped**: scope, files to touch, contract for "done"
 * `src/trellis/retrieve/strategies.py` — +60 lines (`_query_nodes` helper, DSL routing, canonical-bucket metadata)
 * `tests/unit/retrieve/test_strategies.py` — +5 new tests in `TestGraphSearchCanonicalBucketing` + fixture update so existing test wires both `query` and `execute_node_query` mocks
 
-#### B.3 — Phase 3: provenance fields as columns (not properties)
+#### B.3 — Phase 3: provenance fields as columns ✅ landed (2026-05 series)
+
+> **Status correction (2026-07-02):** dedicated `source_trace_id` / `agent_id` /
+> `confidence` / `evidence_ref` / `extractor_tier` columns exist on every backend
+> (SQLite / Postgres / Bolt), validated per row and covered by contract tests
+> (`test_edge_provenance_round_trip` and friends). The original entry below is
+> retained for the historical scope statement.
+
+#### ~~B.3 — original scope statement~~
 
 **Scope:** promote `source_trace_id` / `agent_id` / `confidence` / `evidence_ref` / `extractor_tier` from edge `properties` JSON to dedicated columns on the `edges` table.
 
@@ -251,7 +242,14 @@ Phase 0 (reserved-namespace validator + schema definitions) was landed in earlie
 
 **Gating:** AWS sandbox account access.
 
-#### E.5 — Native API-key auth (Phase 1.5)
+#### E.5 — Native API-key auth ✅ landed 2026-06-11 (PR #242)
+
+> **Status correction (2026-07-02):** `TRELLIS_AUTH_MODE=off|optional|required`,
+> Bearer tokens against the `api_key` store, read/write/admin scopes via FastAPI
+> dependencies, plus the UI key flow (PR #244). The original gating note below is
+> historical.
+
+#### ~~E.5 — original scope statement~~
 
 **Scope:** `TRELLIS_AUTH_MODE=off|optional|required` env toggle, Bearer tokens validated against a new `trellis_api_keys` table, scopes `read`/`write`/`admin`, wired via FastAPI `Depends`.
 
@@ -261,20 +259,18 @@ Phase 0 (reserved-namespace validator + schema definitions) was landed in earlie
 
 ## 4. Recommended execution order for a fresh swarm
 
-If picking up cold, work the list top-down. Each item's gating is satisfied by the time you reach it.
+**As of 2026-07-02 there is no unblocked queue.** Every open GitHub issue is gated,
+and the ADR phases above are either landed or deliberately signal-gated. A fresh
+agent should NOT invent work from this table — pick up whichever gate has fired:
 
-| # | Item | Status | Why this slot |
-|---|---|---|---|
-| 1 | **A.1** End-to-end Neo4j integration test | ✅ Landed 2026-04-25 | Validates the integration the ADRs assume works. Closes the loop on the AuraDB live tests. |
-| 2 | **B.1 + B.2** Ontology Phase 1 + 2 (extractor canonical names + retrieval bucketing) | ✅ Landed 2026-04-25 | Small, well-scoped, no gating delays. Makes agent-facing graph queries less fragile. |
-| 3 | **E.2 + E.3** Uvicorn log unification + fail-fast config validation | ✅ Landed 2026-04-25 | Operational hygiene before the AWS dry-run. ~110 lines combined. |
-| 4 | **A.2** pgvector + Postgres live tests | ✅ Landed 2026-04-25 | Drift surface validated for the second cloud backend; Neon free tier provisioned. |
-| 5 | **E.1** Docker compose smoke test | ✅ Landed 2026-06-12 | Postgres+pgvector deployment path proven under the ECS Dockerfile; runbook written with real outputs. |
-| 5b | **E.4** AWS ECS+RDS dry-run | Need infra access | Catches IAM / VPC / Secrets Manager wiring the compose stack can't see. |
-| 6 | **B.3** Provenance columns | Wait for signal | Real cost; speculative without a consumer. |
-| 7 | **C.1** Vector DSL Phase 4 | Wait for signal | No drift surfaced; speculative. |
-| 8 | **D.1-5** Tag vocabulary phases | Wait for design partner | All design-partner-gated. |
-| 9 | **B.4 / E.5** RDF export, native API-key auth | Wait for signal | Last by design. |
+| Gate | Items | Fires when |
+|---|---|---|
+| Production pilot resumes | #200 (usage families) · #201 (BI-metadata extractor) · #202 (matching guardrails) · #203 (scouting primitive) | consumer-kg pilot restarts and produces real query-history flow |
+| Design partner asks | #194 / Tag-vocab phases 1–5 (§D) · B.4 RDF export | partner wants enforced classification / RDF interop |
+| Vector-contract drift | C.1 vector DSL | contract suite shows backend drift, or a plugin author asks |
+| Infra access | E.4 AWS ECS+RDS dry-run · #208 | sandbox account / ArcadeDB secret + SSO available |
+| Operator console access | #250 credential hygiene | 1Password / Neo4j console session |
+| Deliberate scheduling | Phase F waves F1–F5 (TODO.md) · memory-layer ADR (dedicated session) · #248 organic-generation corpus tuning | owner schedules them |
 
 ---
 
@@ -283,26 +279,26 @@ If picking up cold, work the list top-down. Each item's gating is satisfied by t
 Read in order:
 
 1. **`CLAUDE.md`** — project conventions, hard rules, terminology.
-2. **This file** — what's done, what's open, recommended order.
-3. **The ADR for the phase you're picking up.** Each phase entry above links the right one. *Don't* read every ADR cold; they're long.
-4. **The contract test suites under `tests/unit/stores/contracts/`** — these are the authoritative behavioural spec for the storage layer. New backend code is judged against them.
+2. **This file** — what's done, what's gated, where the gates are (§4).
+3. **The ADR / plan for whichever gate fired.** Don't read every ADR cold; they're long.
+4. **The contract test suites under `tests/unit/stores/contracts/`** — the authoritative behavioural spec for the storage layer. They run in CI against SQLite, Postgres, and a containerized Neo4j on every push to main.
 
 Before writing code:
 
-* Run `pytest tests/unit/ -q` → confirm 653 passing baseline (no env vars, default backends only). With `.env` loaded *and* the full extras installed (`uv pip install -e ".[dev,cloud,vectors,neo4j,llm-openai,llm-anthropic]"`), the same command should report **2347 passed / 0 skipped**.
-* If you're touching Neo4j: `set -a && source .env && set +a` then run `pytest tests/unit/stores/test_neo4j_*.py tests/unit/stores/contracts/test_neo4j_graph_contract.py -q` to confirm 110 live-tests still pass against AuraDB. If `.env` is missing, ask the user — credentials are in their local copy.
-* If you're touching Postgres or pgvector: same `.env` load, then `pytest tests/unit/stores/test_postgres_stores.py tests/unit/stores/test_pgvector.py tests/unit/stores/contracts/test_postgres_graph_contract.py tests/unit/stores/contracts/test_pgvector_contract.py -q` should report 63 passed / 0 skipped against Neon.
+* Run `pytest tests/unit/ -q` — expect ~3962 collected / green by default (548 backend-marked tests deselect cleanly without env toggles; exact counts drift as tests land — CI's Tests job is the source of truth).
+* Touching graph/vector backends? Spin up local containers and export the `TRELLIS_TEST_*` toggles — copy the incantations from `.github/workflows/live-infra.yml`. **There is no shared cloud instance anymore** (the AuraDB free-tier instance was auto-deleted; CI is container-based since `586aee6`).
+* **Bolt-substrate discipline** (hard-won, twice): the SQLite graph store tolerates behaviours the Bolt backends reject — dangling edges, and (pre-`ab36af6`) unchanged-node re-versioning that strands edges. Never validate Bolt-path changes on SQLite alone; run the contract suites against a Neo4j container, and run `tests/unit/stores/` with `TRELLIS_TEST_NEO=1` so the marker-deselected mock suites execute.
 * Read [`adr-terminology.md`](./adr-terminology.md) §2 if any term feels ambiguous.
 
 When picking up a phase:
 
-* The phase entry above is the contract. If scope is unclear, the ADR is the spec.
-* New phases must be ADR-amended before implementation. The "recommended order" table is the queue, not the spec.
-* Update this file when a phase lands. The "State" section at the top is the live truth.
+* The phase entry above (or the gated issue) is the contract. If scope is unclear, the ADR is the spec.
+* New phases must be ADR-amended before implementation. §4's gate table is the queue, not the spec.
+* Update this file when a phase lands. Section 1 is the live truth; §2 and §6 are historical records.
 
 ---
 
-## 6. File inventory — what this thread changed
+## 6. File inventory — what the 2026-04 thread changed (historical)
 
 For audit and rollback. Files added or modified between 2026-04-23 and 2026-04-25.
 

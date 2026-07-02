@@ -102,6 +102,12 @@ The plan also pointed at the wrong file path: the `Operation` enum lives at [`sr
 
 ### C1.6 — Decide on `WorkflowEngine`
 
+> **Resolved (2026-05-18):** the signal arrived via the Phase F engine-disposition
+> memo (`docs/research/workflow-engine-disposition.md`) — zero production callers,
+> superseded by the graph-skill harness design. **Deleted in `1291210`** (Phase F
+> F0 Wave 1). The validate-before-deleting posture below is retained as written
+> for the historical record.
+
 **Current state:** [`TODO.md`](../../TODO.md) "Workflow engine / tier-based escalation" — fully designed, unit-tested, **zero production callers**.
 
 **Action:** **Validate before deleting.** This plan does **not** delete. The TODO entry says "leave as-is until real workload signal tells us between (a) wire it up, (b) collapse, (c) delete." This cleanup plan **upholds that decision**. Cleanup-track items that lack signal are not in scope for C1.
