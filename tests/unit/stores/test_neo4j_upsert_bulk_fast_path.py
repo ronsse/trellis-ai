@@ -87,10 +87,19 @@ class TestUpsertNodesBulkFastPath:
         """Pre-fetch finds a prior row ⇒ keep OPTIONAL MATCH for SCD-2 semantics."""
         store, session = _build_store_with_mock_driver(monkeypatch)
 
-        # Pre-fetch returns one existing row — same node_id as the
-        # second input row, so SCD-2 must close-and-recreate that one.
+        # Pre-fetch returns one existing full row (``RETURN n`` shape) —
+        # same node_id as the second input row but with *different*
+        # content, so SCD-2 must close-and-recreate that one (identical
+        # content would be skipped as a version-preserving no-op, #195).
         session.execute_read.return_value = [
-            {"node_id": "existing-b", "node_role": "semantic"}
+            {
+                "n": {
+                    "node_id": "existing-b",
+                    "node_type": "doc",
+                    "node_role": "semantic",
+                    "properties_json": '{"v": 1}',
+                }
+            }
         ]
 
         store.upsert_nodes_bulk(
@@ -106,6 +115,32 @@ class TestUpsertNodesBulkFastPath:
         )
         assert "coalesce(old.created_at" in cypher
 
+    def test_unchanged_reupsert_skips_write_entirely(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A re-upsert with identical content is a version-preserving
+        no-op (#195): a fresh :Node row would strand the node's current
+        edges on the closed old row, so no write may run at all."""
+        store, session = _build_store_with_mock_driver(monkeypatch)
+
+        session.execute_read.return_value = [
+            {
+                "n": {
+                    "node_id": "same-a",
+                    "node_type": "doc",
+                    "node_role": "semantic",
+                    "properties_json": "{}",
+                }
+            }
+        ]
+
+        ids = store.upsert_nodes_bulk(
+            [{"node_id": "same-a", "node_type": "doc", "properties": {}}]
+        )
+
+        assert ids == ["same-a"]
+        session.execute_write.assert_not_called()
+
     def test_role_immutability_check_runs_before_fast_path(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -116,7 +151,14 @@ class TestUpsertNodesBulkFastPath:
         # Pre-fetch returns a structural row; user wants to upsert it
         # as semantic. The contract requires a precise per-row error.
         session.execute_read.return_value = [
-            {"node_id": "locked", "node_role": "structural"}
+            {
+                "n": {
+                    "node_id": "locked",
+                    "node_type": "doc",
+                    "node_role": "structural",
+                    "properties_json": "{}",
+                }
+            }
         ]
 
         with pytest.raises(ValueError, match=r"upsert_nodes_bulk\[1\]"):
