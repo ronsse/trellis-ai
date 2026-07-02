@@ -1,18 +1,18 @@
-"""Skill-loop convergence — F-phase inner-loop scenario (skeleton).
+"""Skill-loop convergence — F-phase inner-loop scenario.
 
-Wave 1, Unit D of Phase F. Scaffolded so F1-F5 can plug their
-implementations in without renegotiating the file layout.
+Wave 1, Unit D of Phase F, implemented as the reference-driver build
+(issue #249). The scenario measures whether the inner agent loop
+(curator + feedback + score-based evolver) converges over time:
+under-populated nodes get enriched (axis P), pack quality improves as a
+result (axis Q, measured on real PackBuilder / evaluate_pack /
+EventLog), and score-based pruning retains the variants that produced
+the lift (axis R — reference evolver; validates the measurement path,
+not a production F5).
 
-The scenario measures whether the inner agent loop (graph-skill harness
-+ curator skill + feedback + score-based evolver) converges over time:
-under-populated nodes get enriched, pack quality improves as a result,
-and the F5 evolver retains the prompt variants that produced the lift.
-
-Every callable here raises :class:`NotImplementedError` with a docstring
-naming the F-phase that fills it in. The runner discovers the scenario
-by name, but :func:`run` returns ``status="skip"`` until the F-phase
-machinery lands — see :mod:`scenario` for the gating contract.
-
-See the package README for the F-phase wiring table and the references
-to ``adr-graph-skill-harness.md`` / ``adr-inner-curation-loop.md``.
+The F2 curator skill and F5 evolver are stood in for by deterministic
+scenario-local drivers (``_ReferenceCurator`` / ``_ReferenceEvolver``
+in :mod:`scenario`); when the F-phase machinery lands it replaces those
+drivers and the seed helpers, panel, reducers, and report shape stay as
+they are. ``run()`` returns ``status="skip"`` unless
+``TRELLIS_EVAL_SKILL_LOOP`` is set — see the package README.
 """
