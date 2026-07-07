@@ -129,6 +129,76 @@ def test_ingest_trace_extraction_failure_does_not_fail_request(client, monkeypat
     assert resp.status_code == 200
 
 
+# ── embed-on-ingest (TRELLIS_ENABLE_EMBED_ON_INGEST) ────────────────────
+
+#: Dotted path handed to TRELLIS_EMBEDDING_FN; the registry resolves it
+#: lazily, so setting the env inside a test is picked up on first use.
+_EMBED_FN_PATH = "tests.unit.api.test_routes._fake_embed"
+
+
+def _fake_embed(text: str) -> list[float]:
+    return [1.0, 0.0, 0.5]
+
+
+def _broken_embed(text: str) -> list[float]:
+    msg = "embedder down"
+    raise RuntimeError(msg)
+
+
+def test_create_document_embed_flag_off(client, monkeypatch):
+    """Flag off -> document stored, vector store untouched."""
+    monkeypatch.delenv("TRELLIS_ENABLE_EMBED_ON_INGEST", raising=False)
+    resp = client.post("/api/v1/documents", json={"content": "hello world"})
+    assert resp.status_code == 200
+    assert app_module._registry.knowledge.vector_store.count() == 0
+
+
+def test_create_document_embed_flag_on(client, monkeypatch):
+    """Flag on -> vector upserted keyed by doc_id, metadata carries excerpt."""
+    monkeypatch.setenv("TRELLIS_ENABLE_EMBED_ON_INGEST", "1")
+    monkeypatch.setenv("TRELLIS_EMBEDDING_FN", _EMBED_FN_PATH)
+    resp = client.post(
+        "/api/v1/documents",
+        json={"content": "hello world", "metadata": {"domain": "backend"}},
+    )
+    assert resp.status_code == 200
+    doc_id = resp.json()["doc_id"]
+    row = app_module._registry.knowledge.vector_store.get(doc_id)
+    assert row is not None
+    assert row["metadata"]["content"] == "hello world"
+    assert row["metadata"]["domain"] == "backend"
+
+
+def test_create_document_embed_failure_does_not_fail_request(client, monkeypatch):
+    """A broken embedder must never fail the document write."""
+    monkeypatch.setenv("TRELLIS_ENABLE_EMBED_ON_INGEST", "1")
+    monkeypatch.setenv(
+        "TRELLIS_EMBEDDING_FN", "tests.unit.api.test_routes._broken_embed"
+    )
+    resp = client.post("/api/v1/documents", json={"content": "hello world"})
+    assert resp.status_code == 200
+    assert app_module._registry.knowledge.vector_store.count() == 0
+
+
+def test_ingest_evidence_embed_flag_on(client, monkeypatch):
+    """Evidence with content embeds under its evidence_id."""
+    monkeypatch.setenv("TRELLIS_ENABLE_EMBED_ON_INGEST", "1")
+    monkeypatch.setenv("TRELLIS_EMBEDDING_FN", _EMBED_FN_PATH)
+    resp = client.post(
+        "/api/v1/evidence",
+        json={
+            "evidence_type": "document",
+            "content": "the API contract says X",
+            "source_origin": "test",
+        },
+    )
+    assert resp.status_code == 200
+    evidence_id = resp.json()["evidence_id"]
+    row = app_module._registry.knowledge.vector_store.get(evidence_id)
+    assert row is not None
+    assert row["metadata"]["evidence_type"] == "document"
+
+
 def test_search_empty(client):
     resp = client.get("/api/v1/search", params={"q": "test"})
     assert resp.status_code == 200

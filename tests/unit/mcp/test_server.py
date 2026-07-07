@@ -312,6 +312,85 @@ class TestSaveMemory:
 
 
 # ---------------------------------------------------------------------------
+# save_memory — embed-on-ingest (feature-flagged)
+# ---------------------------------------------------------------------------
+
+#: Dotted path handed to TRELLIS_EMBEDDING_FN; the registry resolves it
+#: lazily, so per-test env vars are picked up on first use.
+_EMBED_FN_PATH = "tests.unit.mcp.test_server._fake_embed"
+
+
+def _fake_embed(text: str) -> list[float]:
+    return [1.0, 0.0, 0.5]
+
+
+class TestSemanticAxis:
+    """get_context / search gain a semantic axis when embeddings exist."""
+
+    def _seed_embedded_memory(self, monkeypatch: pytest.MonkeyPatch) -> str:
+        monkeypatch.setenv("TRELLIS_ENABLE_EMBED_ON_INGEST", "1")
+        monkeypatch.setenv("TRELLIS_EMBEDDING_FN", _EMBED_FN_PATH)
+        result = save_memory("the deployment runbook lives in the wiki")
+        return result.split(":", 1)[1].strip()
+
+    def test_get_context_returns_semantic_hit(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        doc_id = self._seed_embedded_memory(monkeypatch)
+        # A query with zero FTS keyword overlap — only the vector axis
+        # (constant fake embedding -> cosine 1.0) can surface the memory.
+        result = get_context("where do I find operational documentation")
+        assert doc_id in result
+        assert "deployment runbook" in result
+
+    def test_search_returns_semantic_hit(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        doc_id = self._seed_embedded_memory(monkeypatch)
+        result = search("where do I find operational documentation")
+        assert doc_id in result
+
+    def test_get_context_broken_embedder_degrades_gracefully(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A down embedder must not fail the tool — keyword axis still serves."""
+        monkeypatch.delenv("TRELLIS_ENABLE_EMBED_ON_INGEST", raising=False)
+        save_memory("keyword findable content")
+        monkeypatch.setenv(
+            "TRELLIS_EMBEDDING_FN", "tests.unit.mcp.test_server._broken_embed"
+        )
+        result = get_context("keyword findable content")
+        assert "keyword findable" in result
+
+
+def _broken_embed(text: str) -> list[float]:
+    msg = "embedder down"
+    raise RuntimeError(msg)
+
+
+class TestSaveMemoryEmbedOnIngest:
+    def test_flag_off_leaves_vector_store_untouched(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("TRELLIS_ENABLE_EMBED_ON_INGEST", raising=False)
+        save_memory("no embedding expected")
+        assert temp_registry.knowledge.vector_store.count() == 0
+
+    def test_flag_on_embeds_memory(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("TRELLIS_ENABLE_EMBED_ON_INGEST", "1")
+        monkeypatch.setenv("TRELLIS_EMBEDDING_FN", _EMBED_FN_PATH)
+        result = save_memory("embedded memory content", metadata={"domain": "ops"})
+        doc_id = result.split(":", 1)[1].strip()
+        row = temp_registry.knowledge.vector_store.get(doc_id)
+        assert row is not None
+        assert row["metadata"]["doc_id"] == doc_id
+        assert row["metadata"]["content"] == "embedded memory content"
+        assert row["metadata"]["domain"] == "ops"
+
+
+# ---------------------------------------------------------------------------
 # save_memory — tiered extraction (feature-flagged)
 # ---------------------------------------------------------------------------
 

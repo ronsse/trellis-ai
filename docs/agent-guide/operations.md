@@ -185,6 +185,40 @@ This command does **not** require the `TRELLIS_ENABLE_TRACE_EXTRACTION` flag —
 {"status": "backfilled", "traces_scanned": 12, "total_entities": 58, "total_edges": 44, "dry_run": false, "per_trace": [{"trace_id": "01JRK5...", "domain": "backend", "entities": 5, "edges": 4}]}
 ```
 
+#### Document → vector embedding (opt-in)
+
+By default document ingestion is write-only to the DocumentStore — the document is retrievable by keyword FTS but invisible to `SemanticSearch`, because nothing embeds it. Set `TRELLIS_ENABLE_EMBED_ON_INGEST=1` (also accepts `true`/`yes`/`on`) to turn on a **post-ingest** embedding stage that runs the stored content through the registry's configured `embedding_fn` and upserts a vector keyed by the document's `doc_id`.
+
+The flag applies identically across the three document-ingest paths: the REST `POST /api/v1/documents`, the REST `POST /api/v1/evidence`, and the MCP `save_memory` tool. It requires an `embeddings:` block in `config.yaml` (or `TRELLIS_EMBEDDING_FN`) *and* a configured vector store — when either is missing the hook logs a warning and no-ops. Embedding always runs *after* the document is durably stored and is fully fail-soft: a broken or unreachable embedder is logged and swallowed, never failing the ingest.
+
+The vector row's metadata carries a `content` excerpt (500 chars — what `SemanticSearch` renders as the pack excerpt), the document metadata, `doc_id`, and a `created_at` recency stamp. Note that metadata-only re-puts (e.g. enrichment tag writes) do not re-embed; run the backfill with `--force` to refresh vector metadata.
+
+On the retrieval side, embedded documents are visible to every `SemanticSearch`/`PackBuilder` consumer, and the MCP `get_context` and `search` macro tools gain a **semantic axis**: when the embedder + vector store pair is configured, the query is embedded and vector hits merge with the keyword/graph/trace results (deduplicated by `doc_id`). The axis is additive and degrades gracefully — a down embedder means keyword results only, never a failed tool call.
+
+### `trellis admin reindex-vectors` (backfill)
+
+Backfill embeddings for documents that were ingested before the flag was enabled (or that need re-embedding). Pages through the DocumentStore and builds the same vector rows the live hook writes.
+
+```bash
+trellis admin reindex-vectors [--batch-size <n>] [--limit <n>] [--force] [--dry-run] [--format text|json]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--batch-size` | `100` | Documents per page / vectors per bulk upsert. |
+| `--limit` | `0` (all) | Stop after scanning this many documents. |
+| `--force` | off | Re-embed documents that already have a vector. |
+| `--dry-run` | off | Count what would be embedded without calling the embedder. |
+| `--format` | `text` | `text` or `json`. |
+
+This command does **not** require the `TRELLIS_ENABLE_EMBED_ON_INGEST` flag — it is the explicit, operator-driven backfill path. It **does** require the embedder and vector store to be configured, and exits non-zero when they are not. Content-less documents are skipped; per-document embed failures are counted and logged, never fatal. Rerunning is always safe (rows are keyed by `doc_id`).
+
+**JSON output:**
+
+```json
+{"status": "ok", "scanned": 240, "embedded": 198, "skipped_existing": 30, "skipped_empty": 12, "errors": 0, "dry_run": false}
+```
+
 ### `trellis ingest evidence`
 
 Ingest evidence from a JSON file.

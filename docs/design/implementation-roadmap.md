@@ -1,6 +1,6 @@
 # Implementation Roadmap
 
-**Last updated:** 2026-07-02 (backlog fully triaged — every open issue is gated; §1 rewritten, ADR-phase statuses corrected)
+**Last updated:** 2026-07-07 (embed-on-ingest landed; skynet dogfood deployment live)
 **Purpose:** Single-page hand-off for any agent (fresh or returning) picking up Trellis implementation work. Self-contained. Read this top-to-bottom before touching code.
 
 > **Picking up evaluation work?** The eval harness and all planned scenarios are built — see [`../plans/2026-06-17-step3-assessment.md`](../plans/2026-06-17-step3-assessment.md) for what each scenario substantiates (its §6 evidence rules are authoritative). [`plan-evaluation-strategy.md`](./plan-evaluation-strategy.md) is the historical plan they grew from.
@@ -24,6 +24,7 @@
 * **Wire-level `allow_dangling`** on LINK_CREATE (REST + SDK, #211) — with the recorded caveat that Bolt backends still require both endpoint vertices at the store layer; materialize-a-stub-endpoint-first is the supported pattern there (#215 discussion).
 * **Agent-integration surface complete** (2026-06-12 hand-off, all 13 WPs): HTTP-only SDK with `record_feedback` + hooks, trace→graph extraction, `trellis worker curate/tune/enrich/mine-precedents`, review-queue UI, metrics dashboard, `quickstart --with-skills`.
 * **Eval harness complete:** every planned scenario implemented, including `skill_loop_convergence` (reference-driver build, #249 — axis Q citable for C1; axis R measurement-path-only). Evidence rules live in the step-3 assessment §6.
+* **Embed-on-ingest** (2026-07-07): documents ingested via MCP `save_memory` / REST `POST /documents` / `POST /evidence` embed into the vector store when `TRELLIS_ENABLE_EMBED_ON_INGEST=1` (fail-soft hook mirroring the trace-extraction hook), `trellis admin reindex-vectors` backfills, and the MCP `get_context`/`search` macro tools gained a semantic axis (previously FTS-only — they never consulted the vector store). Verified live against pgvector + Ollama `nomic-embed-text` on the skynet dogfood deployment. See [operations.md → Document → vector embedding](../agent-guide/operations.md).
 
 ### Changed since the 2026-04-27 revision (digest)
 
@@ -36,6 +37,7 @@
 | 2026-06-12 | Agent-integration hand-off executed (13 WPs) | [`../plans/2026-06-12-agent-integration-handoff.md`](../plans/2026-06-12-agent-integration-handoff.md) |
 | 2026-06-17→24 | Step-3 assessment: dashboard↔eval parity resolved as intentional divergence; §6 items closed | [`../plans/2026-06-17-step3-assessment.md`](../plans/2026-06-17-step3-assessment.md) |
 | 2026-06-30→07-02 | Pilot core fixes (#211/#196/#195 + Bolt SCD-2 fix), CI de-AuraDB'd, security floor (#206/#193), backlog triage (35 issues closed), `skill_loop_convergence` implemented (#249) | [`../plans/2026-06-30-pilot-core-fixes.md`](../plans/2026-06-30-pilot-core-fixes.md) |
+| 2026-07-06→07 | Skynet dogfood deployment (personal agent memory: compose stack, MCP into Claude Code + Hermes, corpus ingested, nightly curation + backups); first dogfood finding closed same-day as **embed-on-ingest** (`ea6113b`) | operations.md embedding section; deployment lives in the private skynet-hub repo |
 
 ### Test suite shape (2026-07-02)
 
