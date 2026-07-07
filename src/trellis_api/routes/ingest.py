@@ -16,6 +16,7 @@ from trellis.mutate.commands import (
     CommandStatus,
     Operation,
 )
+from trellis.retrieve.embed_ingest_hook import run_embed_on_ingest
 from trellis.schemas.evidence import Evidence
 from trellis.schemas.trace import Trace
 from trellis_api.app import get_registry
@@ -75,13 +76,24 @@ def ingest_evidence(body: dict[str, Any]) -> IngestResponse:
         raise HTTPException(status_code=422, detail=f"Invalid evidence: {exc}") from exc
 
     registry = get_registry()
+    evidence_metadata = {
+        "evidence_type": evidence.evidence_type,
+        "source_origin": evidence.source_origin,
+    }
     registry.knowledge.document_store.put(
         doc_id=evidence.evidence_id,
         content=evidence.content or "",
-        metadata={
-            "evidence_type": evidence.evidence_type,
-            "source_origin": evidence.source_origin,
-        },
+        metadata=evidence_metadata,
+    )
+
+    # Feature-flagged embedding (TRELLIS_ENABLE_EMBED_ON_INGEST=1). The hook
+    # skips content-less evidence and never fails the ingest.
+    run_embed_on_ingest(
+        registry,
+        evidence.evidence_id,
+        evidence.content or "",
+        evidence_metadata,
+        source="api:ingest-evidence",
     )
 
     return IngestResponse(evidence_id=evidence.evidence_id)

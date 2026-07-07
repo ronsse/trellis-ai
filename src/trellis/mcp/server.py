@@ -46,6 +46,7 @@ from trellis.mutate import (
     build_curate_executor,
 )
 from trellis.ops import ParameterRegistry
+from trellis.retrieve.embed_ingest_hook import run_embed_on_ingest
 from trellis.retrieve.formatters import (
     format_advisories_as_markdown,
     format_lessons_as_markdown,
@@ -522,6 +523,36 @@ def get_context(  # noqa: PLR0912, PLR0915
             data={"stage": "trace_search", "intent": intent},
         )
 
+    # Semantic search — only when an embedder + vector store are configured
+    # (the same pair the embed-on-ingest hook writes through). Unlike the
+    # three core axes above, this axis is additive and GRACEFUL-DEGRADATION:
+    # the embedder is an external network service, and retrieval follows the
+    # ``build_strategies`` precedent — a down embedder degrades to
+    # keyword/graph/trace results instead of failing the whole tool call.
+    # Vector hits share ``doc_id`` with document hits, so the dedup pass
+    # below merges the two axes; the FTS item (appended first) wins.
+    try:
+        embedding_fn = registry.embedding_fn
+        vector_store = getattr(registry.knowledge, "vector_store", None)
+        if embedding_fn is not None and vector_store is not None:
+            vec_filters: dict[str, Any] | None = (
+                {"domain": domain} if domain else None
+            )
+            hits = vector_store.query(
+                embedding_fn(intent), top_k=10, filters=vec_filters
+            )
+            items.extend(
+                {
+                    "item_id": hit["item_id"],
+                    "item_type": "document",
+                    "excerpt": hit.get("metadata", {}).get("content", "")[:500],
+                    "relevance_score": hit.get("score", 0.0),
+                }
+                for hit in hits
+            )
+    except Exception:
+        logger.exception("get_context_semantic_search_failed")
+
     # Session dedup: exclude items already served in this session.
     session_served: set[str] = set()
     if session_id:
@@ -845,6 +876,13 @@ def save_memory(
     if memory_extractor is not None:
         _run_memory_extraction(registry, memory_extractor, stored_id, content)
 
+    # Feature-flagged embedding (TRELLIS_ENABLE_EMBED_ON_INGEST=1) so
+    # SemanticSearch can retrieve the memory. Fail-soft inside the hook —
+    # a broken embedder never fails save_memory.
+    run_embed_on_ingest(
+        registry, stored_id, content, metadata, source="mcp:save_memory"
+    )
+
     return f"Memory saved: {stored_id}"
 
 
@@ -1082,6 +1120,35 @@ def search(
                     "relevance_score": 0.5,
                 }
             )
+
+    # Semantic search — additive axis, same shape and degradation contract
+    # as get_context's (see the comment there). Dedup below folds vector
+    # hits into the FTS hits sharing the same doc_id.
+    try:
+        embedding_fn = registry.embedding_fn
+        vector_store = getattr(registry.knowledge, "vector_store", None)
+        if embedding_fn is not None and vector_store is not None:
+            hits = vector_store.query(embedding_fn(query), top_k=limit)
+            items.extend(
+                {
+                    "item_id": hit["item_id"],
+                    "item_type": "document",
+                    "excerpt": hit.get("metadata", {}).get("content", "")[:300],
+                    "relevance_score": hit.get("score", 0.0),
+                }
+                for hit in hits
+            )
+    except Exception:
+        logger.exception("search_semantic_search_failed")
+
+    # Dedup by item_id (first occurrence wins — FTS before semantic).
+    seen: set[str] = set()
+    unique: list[dict[str, Any]] = []
+    for item in items:
+        if item["item_id"] not in seen:
+            seen.add(item["item_id"])
+            unique.append(item)
+    items = unique
 
     if not items:
         return f"No results found for: {query}"

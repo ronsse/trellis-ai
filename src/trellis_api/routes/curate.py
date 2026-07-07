@@ -14,6 +14,7 @@ from trellis.mutate import (
     Operation,
     build_curate_executor,
 )
+from trellis.retrieve.embed_ingest_hook import run_embed_on_ingest
 from trellis_api.app import get_registry
 from trellis_wire.dtos import (
     CommandResponse,
@@ -126,6 +127,11 @@ def create_document(body: dict[str, Any]) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="content is required")
     stored_id = registry.knowledge.document_store.put(
         doc_id=doc_id, content=content, metadata=metadata
+    )
+    # Feature-flagged embedding (TRELLIS_ENABLE_EMBED_ON_INGEST=1) so
+    # SemanticSearch can retrieve the document. Fail-soft inside the hook.
+    run_embed_on_ingest(
+        registry, stored_id, content, metadata, source="api:create-document"
     )
     return {"status": "ok", "doc_id": stored_id}
 

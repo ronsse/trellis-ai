@@ -2188,3 +2188,16 @@ from trellis_cli.admin_api_keys import (  # noqa: E402
 )
 
 _register_api_keys(admin_app)
+
+
+# ---------------------------------------------------------------------------
+# reindex-vectors — embed-on-ingest backfill
+# ---------------------------------------------------------------------------
+# Registration hook mirrors the modules above so the backfill logic stays
+# in its own module and admin.py only carries the wiring.
+
+from trellis_cli.admin_reindex_vectors import (  # noqa: E402
+    register as _register_reindex_vectors,
+)
+
+_register_reindex_vectors(admin_app)

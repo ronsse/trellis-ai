@@ -28,6 +28,21 @@ def _write_sqlite_config(tmp_path: Path, name: str) -> tuple[Path, Path]:
     return config_path, db_path
 
 
+@pytest.fixture(autouse=True)
+def _isolated_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the operator's real ~/.trellis out of these tests.
+
+    The command under test takes explicit --from-config/--to-config, but
+    the meta-trace wiring around every CLI invocation opens the *default*
+    registry — with a real config dir present (e.g. postgres backends and
+    no DSN in the test env) that construction fails and poisons the exit
+    code. Point the env at an empty tmp dir so the wiring degrades
+    gracefully instead.
+    """
+    monkeypatch.setenv("TRELLIS_CONFIG_DIR", str(tmp_path / "trellis-config"))
+    monkeypatch.setenv("TRELLIS_DATA_DIR", str(tmp_path / "trellis-data"))
+
+
 @pytest.fixture
 def runner() -> CliRunner:
     return CliRunner()

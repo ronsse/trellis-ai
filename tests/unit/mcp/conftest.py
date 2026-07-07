@@ -63,7 +63,13 @@ def temp_registry(tmp_path: Path) -> Iterator[StoreRegistry]:
     stores_dir.mkdir(parents=True)
     registry = StoreRegistry(stores_dir=stores_dir)
     server_mod._registry = registry
+    # The MinHash fuzzy-dedup index is a separate module-level cache built
+    # from whichever registry was live when it was first used — left in
+    # place it dedups memories against a *previous test's* stores. Reset
+    # alongside the registry on both sides of the test.
+    server_mod._minhash_index = None
     try:
         yield registry
     finally:
         server_mod._registry = None
+        server_mod._minhash_index = None
