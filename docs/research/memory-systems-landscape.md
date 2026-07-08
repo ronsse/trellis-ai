@@ -5,6 +5,8 @@
 
 > **Note (2026-05-11):** Substrate inventory captured below predates the ArcadeDB consolidation. LanceDB was removed from Trellis in 2026-05. Kuzu (now LadybugDB) and Neptune were evaluated as Trellis backends and not pursued. See the open ArcadeDB ADR for the current substrate decision.
 
+> **Note (2026-07-08):** The Trellis side of this comparison predates the memory-system pivot (`save_memory` dedup, embed-on-ingest, sectioned context, observations). See §13 for what changed and the refreshed gap list.
+
 **Sources (read directly during research):**
 - [getzep/graphiti](https://github.com/getzep/graphiti) — `graphiti_core/graphiti.py`, `nodes.py`, `edges.py`, `search/search_config.py`, `search/search_config_recipes.py`, `utils/maintenance/node_operations.py`, `utils/maintenance/edge_operations.py`, `utils/maintenance/community_operations.py`, `driver/`, `server/graph_service/`, `mcp_server/`
 - [Zep concepts](https://help.getzep.com/concepts), [getzep.com](https://www.getzep.com/)
@@ -346,7 +348,7 @@ No vector search. No similarity. Deterministic file-based context assembly with 
 
 | System | Storage unit | Write model | Retrieval | Temporal | Type system | Distinctive choice |
 |---|---|---|---|---|---|---|
-| **Trellis** | Trace + Document + Entity + Edge + Evidence + Pack, each in its own store; SCD Type 2 on nodes | Governed 5-stage pipeline (validate/policy/idempotency/execute/emit); deterministic classification with LLM fallback in enrichment mode | `PackBuilder` orchestrates pluggable `SearchStrategy` protocols; two-stage budget (items → tokens); `PACK_ASSEMBLED` telemetry; curated-node boost; structural filtering | SCD Type 2 on nodes with `as_of` queries; role immutable across versions; edges always current | Open strings at storage boundary; StrEnum defaults at schema boundary; `NodeRole` (structural/semantic/curated); `GenerationSpec` provenance | Governed writes + deterministic ingestion + effectiveness feedback loop |
+| **Trellis** | Trace + Document + Entity + Edge + Evidence + Pack, each in its own store; SCD Type 2 on nodes | Governed 5-stage pipeline (validate/policy/idempotency/execute/emit); deterministic classification with LLM fallback in enrichment mode; `save_memory` dedup (content-hash + MinHash) + embed-on-ingest (2026-07) | `PackBuilder` orchestrates pluggable `SearchStrategy` protocols (keyword + semantic + graph); RRF reranker; two-stage budget (items → tokens); `PACK_ASSEMBLED` telemetry; curated-node boost; structural filtering | SCD Type 2 on nodes with `as_of` queries; role immutable across versions; edges always current | Open strings at storage boundary; StrEnum defaults at schema boundary; `NodeRole` (structural/semantic/curated); `GenerationSpec` provenance | Governed writes + deterministic ingestion + effectiveness feedback loop |
 | **Graphiti** | EntityNode + EntityEdge + EpisodicNode + CommunityNode + SagaNode in one graph DB | LLM-heavy `add_episode` (4-5 LLM calls per episode: extract_nodes → resolve_nodes → extract_edges → resolve_contradictions → extract_attributes); no idempotency; no policy | `search_` with composable `SearchConfig` (methods × rerankers: RRF, MMR, cross_encoder, node_distance, episode_mentions); no pack assembler | Bi-temporal edges (`valid_at`/`invalid_at`/`expired_at`); nodes overwritten in place | Open via user-supplied Pydantic `entity_types`/`edge_types`/`edge_type_map` | LLM-extracted temporally-valid fact graph with sophisticated rerankers |
 | **Zep** | Entity nodes + fact edges (mutable validity) + raw messages + precomputed Context Block | LLM extracts entities/facts from dialogue; fact invalidation on contradiction; opinionated auto-pipeline | Hybrid graph+semantic, returns pre-assembled Context Block string (~200ms) | Bi-temporal (`valid_at`/`invalid_at` on edges); time-travel is headline | Open: custom entity/edge types via Pydantic; users/threads/graphs scoping | Dialogue-grade fact graph with temporal validity, delivered as a paste-ready context string |
 | **Mem0** | Flat text "memory" with embedding + metadata; mutable | LLM extraction → LLM arbiter emits ADD/UPDATE/DELETE/NOOP against existing memories | Vector similarity top-k, scoped by user/agent/session; no pack builder | Weak: `created_at`/`updated_at` + version history; no bi-temporal querying; DELETE destructive | Closed memory schema; scoping via `user_id`/`agent_id`/`run_id` metadata | LLM as the memory editor — four-op arbiter in the write path |
@@ -397,3 +399,64 @@ Ranked recommendations extracted from the comparison. Tier 1 are real gaps in Tr
 Trellis is:
 
 > **A governed, auditable experience graph for fleets of agents that need deterministic ingestion, pluggable storage, and budgeted retrieval — where Graphiti is an LLM-driven dialogue fact graph, Mem0 is an LLM memory editor, Letta is an agent operating its own memory, cognee is a knowledge ETL framework, Cursor is code search, and Claude Code is context-as-filesystem for one agent.**
+
+## 13. Addendum (2026-07): positioning after the memory-system pivot
+
+Everything above captures the 2026-04 baseline. Since then Trellis pivoted from
+"experience store for agent fleets" to a **full memory system — personal-agent
+and cross-agent — with flexible sources**, and shipped most of the §10 Tier-1/2
+recommendations. This section is the delta; the analysis of the *other* systems
+above has not been re-verified and should be treated as a 2026-04 snapshot.
+
+### 13.1 What changed in Trellis
+
+- **`save_memory` is now the memory-system heart** of the MCP surface (14 tools
+  total): content-hash + MinHash fuzzy dedup, `MEMORY_STORED` audit events, and
+  a flag-gated tiered-extraction pass (`TRELLIS_ENABLE_MEMORY_EXTRACTION`) that
+  mines prose into the graph through the governed pipeline — the LLM stays out
+  of the critical write path, per §10 Tier 3.
+- **Embed-on-ingest** (2026-07, `run_embed_on_ingest`): documents saved via
+  `save_memory`, `POST /documents`, or `POST /evidence` become semantically
+  retrievable immediately; `search`/`get_context` gained the semantic axis.
+- **§10 items closed since 2026-04:** async SDK (`AsyncTrellisClient`),
+  sectioned MCP context (`get_objective_context` / `get_task_context` /
+  `get_sectioned_context`), `POST /commands/batch`, policy CLI + API,
+  automated noise-tag demotion (nightly curation), RRF + MMR rerankers
+  (`trellis.retrieve.rerankers`), markdown-frontmatter skills
+  (`trellis admin quickstart --with-skills`), and a Memory Explorer
+  observability surface (documents / events / packs / node-history views).
+- **Dogfood:** Trellis runs live as personal agent memory for Claude Code
+  sessions on skynet (Postgres + pgvector, MCP over stdio, retrieve-before-task
+  / record-after-task skills).
+
+### 13.2 Refreshed gaps on the personal-memory axis
+
+Competing on the axis Mem0/Zep/Letta own means being honest about what is
+still missing:
+
+1. **No corpus ingestion pipeline.** A folder of markdown notes, a transcript,
+   or a PDF has no first-class path in — no directory loader, no format
+   handlers, no chunking (embedding input caps at 8,000 chars, so long
+   documents are semantically unretrievable past the cap), no idempotent
+   re-sync. This is the biggest gap vs. Mem0's add-anything ingestion and
+   cognee's ECL pipeline. **Decided direction:** importers into Trellis —
+   see [`../design/adr-corpus-ingestion.md`](../design/adr-corpus-ingestion.md),
+   which supersedes the parked external-memory-layer ADR.
+2. **No session-scoped working memory.** Letta's core blocks and Zep's
+   threads have no Trellis equivalent; packs are assembled per-call, not
+   maintained per-session.
+3. **No summarization / consolidation / forgetting.** Mem0's arbiter and
+   Zep's fact invalidation compress memory over time; Trellis has `Lifecycle`
+   staleness tags and noise demotion but nothing that rewrites or merges
+   stale memories (deliberate so far — traces are immutable — but the
+   document store will eventually need consolidation).
+
+### 13.3 Refreshed positioning statement
+
+> **A governed, auditable memory system for AI agents — personal or fleet —
+> with deterministic ingestion, item-level feedback attribution, pluggable
+> storage, and budgeted retrieval.** Where Mem0/Zep put an LLM arbiter in the
+> write path and attribute feedback to sessions, Trellis keeps writes
+> deterministic and attributes outcomes to the exact items served — the seam
+> that lets noise suppression, advisory fitness, and parameter tuning all run
+> off the same signal.

@@ -41,8 +41,8 @@ $ trellis admin version --format json | jq '{api_version, mcp_tools_version}'
 |---|---|---|---|
 | Ingest a trace | `POST /api/v1/traces` | `save_experience` | `client.ingest_trace` |
 | Ingest evidence | `POST /api/v1/evidence` | `save_knowledge` | `client.ingest_evidence` |
-| Save a memory / note | — | `save_memory` | — |
-| Full-text search | `GET /api/v1/search` | `search` | `client.search` |
+| Save a memory / note | `POST /api/v1/documents` | `save_memory` (adds dedup + optional extraction) | — |
+| Full-text + semantic search | `GET /api/v1/search` | `search` | `client.search` |
 | Assemble context pack | `POST /api/v1/packs` | `get_context` | `client.assemble_pack` |
 | Sectioned context pack | `POST /api/v1/packs/sectioned` | `get_sectioned_context` | `client.assemble_sectioned_pack` |
 | Objective context (markdown) | — | `get_objective_context` | `client.get_objective_context` |
@@ -50,13 +50,24 @@ $ trellis admin version --format json | jq '{api_version, mcp_tools_version}'
 | Get entity | `GET /api/v1/entities/{id}` | — | `client.get_entity` |
 | Create entity | `POST /api/v1/entities` | — | `client.create_entity` |
 | Graph subgraph | `GET /api/v1/graph/search` | `get_graph` | — |
+| Node version history (SCD-2) | `GET /api/v1/graph/history` | — | — |
+| Browse / search documents | `GET /api/v1/documents[/{id}]` | — | — |
+| Tail the event log | `GET /api/v1/events` | — | — |
+| Inspect pack telemetry | `GET /api/v1/packs[/{id}]` | — | — |
+| Record an observation | `POST /api/v1/observations` | `record_observation` | `client.record_observation` |
+| Query observations | `GET /api/v1/observations`, `GET /api/v1/measurements` | `query_observations` | — |
 | Advisories / lessons | `GET /api/v1/advisories` | `get_lessons` | — |
 | Record feedback | `POST /api/v1/feedback` | `record_feedback` | — |
 | Submit extraction drafts | `POST /api/v1/extract/drafts` | — | `client.submit_drafts` |
-| Batch mutations | `POST /api/v1/commands/batch` | — | — |
+| Batch mutations | `POST /api/v1/commands/batch` | `execute_mutation` | — |
 | Bulk ingest | `POST /api/v1/ingest/bulk` | — | — |
 | Policy CRUD | `/api/v1/policies[/...]` | — | — |
-| Stats / effectiveness | `/api/v1/stats`, `/api/v1/effectiveness` | — | — |
+| Stats / effectiveness | `/api/v1/stats`, `/api/v1/effectiveness`, `/api/v1/metrics/timeseries` | — | — |
+
+Retrieval carries a **semantic axis** when embeddings are configured:
+`search` / `get_context` blend keyword, vector, and graph results, and
+documents embed on ingest when `TRELLIS_ENABLE_EMBED_ON_INGEST=1`
+(see [operations.md](operations.md) — "Document → vector embedding").
 
 ## Why three surfaces?
 

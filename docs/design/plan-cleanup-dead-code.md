@@ -1,6 +1,9 @@
 # Plan: Cleanup — dead-code removal
 
 **Status:** Proposed 2026-05-11; landed 2026-05-15 (4-unit swarm + rollup PR — per-sub-item closures noted inline below)
+
+> *Historical note: references to WorkflowEngine below predate its retirement (2026-05-18); see `docs/research/workflow-engine-disposition.md`.*
+
 **Owner:** swarm-pickable (decomposable into N independent units)
 **ADR:** none — cleanup
 **Program:** [`plan-self-improvement-program.md`](./plan-self-improvement-program.md) cleanup track C1

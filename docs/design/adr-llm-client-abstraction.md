@@ -1,6 +1,9 @@
 # ADR: LLM Client Abstraction — Protocol in Core, Implementations Optional
 
 **Status:** Accepted
+
+> *Historical note: references to WorkflowEngine below predate its retirement (2026-05-18); see `docs/research/workflow-engine-disposition.md`.*
+
 **Date:** 2026-04-15
 **Deciders:** Trellis core
 **Related:**

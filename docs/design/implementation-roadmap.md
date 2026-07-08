@@ -1,11 +1,11 @@
 # Implementation Roadmap
 
-**Last updated:** 2026-07-07 (embed-on-ingest landed; skynet dogfood deployment live)
+**Last updated:** 2026-07-08 (Memory Explorer observability surface landed; corpus-ingestion ADR proposed; docs refreshed to memory-system framing)
 **Purpose:** Single-page hand-off for any agent (fresh or returning) picking up Trellis implementation work. Self-contained. Read this top-to-bottom before touching code.
 
 > **Picking up evaluation work?** The eval harness and all planned scenarios are built — see [`../plans/2026-06-17-step3-assessment.md`](../plans/2026-06-17-step3-assessment.md) for what each scenario substantiates (its §6 evidence rules are authoritative). [`plan-evaluation-strategy.md`](./plan-evaluation-strategy.md) is the historical plan they grew from.
 >
-> **Picking up the memory-layer work?** [`adr-memory-layer-interop.md`](./adr-memory-layer-interop.md) is Proposed with zero implementation, and is **deliberately parked** — the owner will open a dedicated session for it (which may start with an ADR revision). Do not start it from here.
+> **Picking up the memory-layer / corpus work?** [`adr-memory-layer-interop.md`](./adr-memory-layer-interop.md) is **Superseded**: the owner decided importers-into-Trellis instead of an external layer. The live design is [`adr-corpus-ingestion.md`](./adr-corpus-ingestion.md) — fully scoped in §G below and ready to execute.
 >
 > **Picking up Phase F (inner agent loop)?** TODO.md "Phase F" is the staged program (F1 harness ≈ 1500–2000 LOC; F5 gated on 30 days of F4 signal). The F6 eval scenario is already implemented with reference drivers at the F1–F5 plug-in seam (`eval/scenarios/skill_loop_convergence/`).
 
@@ -25,6 +25,7 @@
 * **Agent-integration surface complete** (2026-06-12 hand-off, all 13 WPs): HTTP-only SDK with `record_feedback` + hooks, trace→graph extraction, `trellis worker curate/tune/enrich/mine-precedents`, review-queue UI, metrics dashboard, `quickstart --with-skills`.
 * **Eval harness complete:** every planned scenario implemented, including `skill_loop_convergence` (reference-driver build, #249 — axis Q citable for C1; axis R measurement-path-only). Evidence rules live in the step-3 assessment §6.
 * **Embed-on-ingest** (2026-07-07): documents ingested via MCP `save_memory` / REST `POST /documents` / `POST /evidence` embed into the vector store when `TRELLIS_ENABLE_EMBED_ON_INGEST=1` (fail-soft hook mirroring the trace-extraction hook), `trellis admin reindex-vectors` backfills, and the MCP `get_context`/`search` macro tools gained a semantic axis (previously FTS-only — they never consulted the vector store). Verified live against pgvector + Ollama `nomic-embed-text` on the skynet dogfood deployment. See [operations.md → Document → vector embedding](../agent-guide/operations.md).
+* **Memory Explorer** (2026-07-08): read-only explore routes (`GET /documents[/{id}]`, `/events`, `/packs[/{id}]`, `/graph/history`) + three new UI views (Memories, Events, Packs) + SCD-2 History in the Graph detail panel — browse what's in memory, tail the audit log, and inspect what each pack injected/rejected and why. Same pass fixed two latent bugs: the SDK's `assemble_sectioned_pack` targeted a `POST /packs/sectioned` route that didn't exist (route added), and `/graph/search` misdetected Postgres backends as SQLite (`_conn` is a method on the PG store) and 500'd — broken on every Postgres deployment since the skynet migration. Verified live on skynet.
 
 ### Changed since the 2026-04-27 revision (digest)
 
@@ -38,6 +39,7 @@
 | 2026-06-17→24 | Step-3 assessment: dashboard↔eval parity resolved as intentional divergence; §6 items closed | [`../plans/2026-06-17-step3-assessment.md`](../plans/2026-06-17-step3-assessment.md) |
 | 2026-06-30→07-02 | Pilot core fixes (#211/#196/#195 + Bolt SCD-2 fix), CI de-AuraDB'd, security floor (#206/#193), backlog triage (35 issues closed), `skill_loop_convergence` implemented (#249) | [`../plans/2026-06-30-pilot-core-fixes.md`](../plans/2026-06-30-pilot-core-fixes.md) |
 | 2026-07-06→07 | Skynet dogfood deployment (personal agent memory: compose stack, MCP into Claude Code + Hermes, corpus ingested, nightly curation + backups); first dogfood finding closed same-day as **embed-on-ingest** (`ea6113b`) | operations.md embedding section; deployment lives in the private skynet-hub repo |
+| 2026-07-08 | **Memory Explorer** observability surface (explore routes + Memories/Events/Packs UI views + node History); `POST /packs/sectioned` route added (SDK had targeted a nonexistent route); Postgres `/graph/search` backend-detection bug fixed (latent since the skynet Postgres migration); docs refreshed to memory-system framing; corpus-ingestion ADR proposed, memory-layer ADR superseded | [`adr-corpus-ingestion.md`](./adr-corpus-ingestion.md); [surfaces.md](../agent-guide/surfaces.md) |
 
 ### Test suite shape (2026-07-02)
 
@@ -259,6 +261,22 @@ Phase 0 (reserved-namespace validator + schema definitions) was landed in earlie
 
 ---
 
+### G — Corpus ingestion ([`adr-corpus-ingestion.md`](./adr-corpus-ingestion.md))
+
+#### G.1 — `trellis ingest corpus`: reader + markdown handler + chunking + idempotent re-sync
+
+**Scope:** Phases 1–2 of the ADR's §7 sketch. Directory walker + pure format-handler registry (markdown with frontmatter→metadata and wikilink capture first), deterministic paragraph-aware chunker producing chunk documents (`{parent_doc_id, chunk_index, chunk_count, source_path, char_span}` metadata, chunks under the 8k embed cap), stable `doc_id = corpus:<source_system>:<sha1(relpath)>`, `content_hash` skip-unchanged re-sync, `get_by_hash` move detection, MinHash near-dup warnings, `--dry-run`/`--prune`/`--format json`, `MEMORY_STORED` per new doc.
+
+**Files:** `src/trellis/ingest_corpus/` (new package — walker, handlers, chunker, sync logic), `src/trellis_cli/ingest_corpus.py` registered on `ingest_app` in `src/trellis_cli/ingest.py`, tests under `tests/unit/ingest_corpus/` + a CLI test.
+
+**Done when:** second run over an unchanged tree performs zero writes; an edited file re-puts + re-embeds; chunker is deterministic (same input → same chunk ids/spans); `--dry-run` reports the full plan; chunks of a long doc are semantically retrievable via `search` once embedded.
+
+**Size:** one focused session (ADR estimates phases 1–2 together).
+
+**Gating signal:** skynet dogfood — ingest the owner's real notes vault, then judge retrieval quality through the Memory Explorer packs view. Transcript handler, `--extract` LLM pass, and PDF support are incremental follow-ups (ADR §7 phases 3–5); audio stays out of core (external transcription pre-step).
+
+---
+
 ## 4. Recommended execution order for a fresh swarm
 
 **As of 2026-07-02 there is no unblocked queue.** Every open GitHub issue is gated,
@@ -272,7 +290,7 @@ agent should NOT invent work from this table — pick up whichever gate has fire
 | Vector-contract drift | C.1 vector DSL | contract suite shows backend drift, or a plugin author asks |
 | Infra access | E.4 AWS ECS+RDS dry-run · #208 | sandbox account / ArcadeDB secret + SSO available |
 | Operator console access | #250 credential hygiene | 1Password / Neo4j console session |
-| Deliberate scheduling | Phase F waves F1–F5 (TODO.md) · memory-layer ADR (dedicated session) · #248 organic-generation corpus tuning | owner schedules them |
+| Deliberate scheduling | Phase F waves F1–F5 (TODO.md) · corpus ingestion §G ([`adr-corpus-ingestion.md`](./adr-corpus-ingestion.md), ready to execute) · #248 organic-generation corpus tuning | owner schedules them |
 
 ---
 

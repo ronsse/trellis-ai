@@ -2,11 +2,11 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-> **Picking up implementation work?** Read [`docs/design/implementation-roadmap.md`](docs/design/implementation-roadmap.md) first — it's the live, single-page hand-off doc with the state of the project, recommended execution order across all open ADR phases, and the live-test credential format for the AuraDB instance.
+> **Picking up implementation work?** Read [`docs/design/implementation-roadmap.md`](docs/design/implementation-roadmap.md) first — it's the live, single-page hand-off doc with the state of the project and the recommended execution order across all open ADR phases.
 
 ## What This Is
 
-A structured experience store for AI agents. Agents record traces of their work, build a shared knowledge graph of entities and evidence, and retrieve context packs before starting new tasks. The system provides governed mutations, immutable audit logging, and policy-based access control.
+A memory system for AI agents. Agents save memories (documents, deduplicated and embedded on ingest), record traces of their work, build a shared knowledge graph of entities and evidence, and retrieve token-budgeted context packs before starting new tasks. Feedback attributes outcomes to the specific items served, closing a learning loop over retrieval. The system provides governed mutations, immutable audit logging, and policy-based access control.
 
 ## Terminology
 

@@ -1,5 +1,7 @@
 # Audit — `src/trellis_workers/` orphan modules (2026-05-14)
 
+> *Historical note: references to WorkflowEngine below predate its retirement (2026-05-18); see `docs/research/workflow-engine-disposition.md`.*
+
 **Scope:** C1.9 of [`plan-cleanup-dead-code.md`](./plan-cleanup-dead-code.md) — a
 read-only audit of every module under `src/trellis_workers/` to identify
 orphans (no production callers, no `__init__.py` re-export) after the

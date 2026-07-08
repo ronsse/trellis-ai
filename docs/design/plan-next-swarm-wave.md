@@ -1,6 +1,9 @@
 # Plan: Next swarm wave — close M-severity backlog + L-severity sweep + 3 architectural follow-ups
 
 **Status:** Proposed 2026-05-16
+
+> *Historical note: references to WorkflowEngine below predate its retirement (2026-05-18); see `docs/research/workflow-engine-disposition.md`.*
+
 **Owner:** swarm-pickable (decomposable into 23 independent units across 5 waves)
 **Depends on:** main at `0e9e2de` or later (post 14-PR merge of the program_convergence + C1 cleanup work)
 **Estimated wall time:** 4-6 hours across 5 sequential waves with intra-wave parallelism

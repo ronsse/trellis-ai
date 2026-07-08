@@ -1,6 +1,9 @@
 # ADR: Graph-skill harness — bounded agent loops against Trellis data
 
 **Status:** Proposed
+
+> *Historical note: references to WorkflowEngine below predate its retirement (2026-05-18); see `docs/research/workflow-engine-disposition.md`.*
+
 **Date:** 2026-05-18
 **Deciders:** Trellis core
 **Related:**

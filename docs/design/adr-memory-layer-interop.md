@@ -1,6 +1,6 @@
 # ADR: Trellis over an External Memory Layer
 
-**Status:** Proposed
+**Status:** Superseded by [`adr-corpus-ingestion.md`](./adr-corpus-ingestion.md) (2026-07-08) — the import-into-Trellis direction won: corpus content becomes ordinary Trellis documents (chunked, deduplicated, embedded) rather than living in an external layer Trellis references. Kept for the analysis; do not implement.
 **Date:** 2026-06-04
 **Deciders:** Trellis core
 **Related:**

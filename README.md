@@ -11,7 +11,7 @@
 [![Python](https://img.shields.io/pypi/pyversions/trellis-ai.svg)](https://pypi.org/project/trellis-ai/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/ronsse/trellis-ai/blob/main/LICENSE)
 
-**A shared knowledge layer for AI agents.** Agents write what they did. Trellis builds a cross-agent graph, attributes outcomes back to the **exact context items** that produced them, and tunes retrieval under statistical governance. Multi-backend (SQLite, Postgres + pgvector, ArcadeDB, Neo4j, S3). Four interfaces (CLI, MCP, REST, Python SDK). One install.
+**A memory system for AI agents — personal and shared.** Agents save memories, experiences, and knowledge from flexible sources. Trellis deduplicates and embeds them on ingest for semantic retrieval, builds a cross-agent graph, attributes outcomes back to the **exact context items** that produced them, and tunes retrieval under statistical governance. Multi-backend (SQLite, Postgres + pgvector, ArcadeDB, Neo4j, S3). Four interfaces (CLI, MCP, REST, Python SDK). One install.
 
 ```
 agent reads pack ──► does work ──► writes trace + feedback ──► graph + audit log
@@ -41,7 +41,7 @@ Trellis ships all of that as one install. Started from a vector DB plus glue cod
 ### What Trellis is NOT
 
 - **Not a vector DB.** Vectors are one of six stores. Pluggable behind the same API (SQLite, pgvector, ArcadeDB, Neo4j HNSW).
-- **Not per-conversation memory.** The "memory" in Trellis is a *cross-agent graph* — multiple agents share the same substrate.
+- **Not a session blob.** Trellis *is* agent memory — personal-agent or cross-agent — but feedback attributes to the *specific items served*, not to a session or user, and multiple agents can share the same substrate.
 - **Not a RAG framework.** RAG is one access pattern; Trellis adds attribution, statistical governance, and an audit log around it.
 - **Not a managed service.** Self-hosted: local SQLite, or your Postgres / ArcadeDB / Neo4j. One `pip install` (or one Docker image).
 - **Not a prompt library.** Trellis stores *what happened* (traces) and *what was learned* (precedents + advisories) — not what to say.
@@ -314,25 +314,37 @@ trellis admin migrate-graph \
 | Method | Endpoint | Purpose |
 |--------|----------|---------|
 | POST | `/api/v1/traces` | Ingest a trace |
+| POST | `/api/v1/documents` | Store a document (embeds on ingest when enabled) |
 | POST | `/api/v1/packs` | Assemble a context pack |
+| POST | `/api/v1/packs/sectioned` | Assemble a sectioned pack (per-section budgets) |
 | GET | `/api/v1/entities/{id}` | Entity + neighborhood |
+| GET | `/api/v1/documents` | Browse/search stored documents |
+| GET | `/api/v1/events` | Tail the audit event log |
+| GET | `/api/v1/packs` | Inspect assembled-pack telemetry |
+| GET | `/api/v1/graph/history` | SCD-2 version history for a node |
 | POST | `/api/v1/feedback` | Record pack outcome |
 | GET | `/api/v1/effectiveness` | Pack effectiveness report |
 
-**MCP server** — `trellis-mcp`. Eleven macro tools (8 core + 3 sectioned-context) return token-budgeted **markdown**, not raw JSON, so context lands clean in the agent's window.
+**MCP server** — `trellis-mcp`. Fourteen macro tools return token-budgeted **markdown**, not raw JSON, so context lands clean in the agent's window.
 
 | Tool | Purpose |
 |------|---------|
-| `get_context` | Combined search → markdown pack |
+| `get_context` | Combined keyword + semantic + graph search → markdown pack |
+| `get_objective_context` | Objective-tier sectioned pack (domain + operational) |
+| `get_task_context` | Task-tier sectioned pack scoped to entities |
+| `get_sectioned_context` | Custom sectioned pack with per-section budgets |
 | `save_experience` | Ingest a trace |
 | `save_knowledge` | Create entity + optional relationship |
-| `save_memory` | Store a document (runs through tiered extraction) |
+| `save_memory` | Store a document: content-hash + MinHash dedup, embed-on-ingest; tiered extraction when `TRELLIS_ENABLE_MEMORY_EXTRACTION=1` |
+| `record_observation` | Record an empirical observation about an entity |
+| `query_observations` | Query recorded observations |
 | `get_lessons` | Precedents as markdown |
 | `get_graph` | Entity + neighborhood as markdown |
 | `record_feedback` | Record task success/failure |
-| `search` | Combined doc + graph search as markdown |
+| `search` | Combined doc (keyword + semantic) + graph search as markdown |
+| `execute_mutation` | Governed mutation escape hatch (validate → policy → execute → audit) |
 
-All tools accept `max_tokens` (default 2000).
+Retrieval tools accept `max_tokens` (default 2000). With `TRELLIS_ENABLE_EMBED_ON_INGEST=1` and an embedder configured, documents saved via `save_memory`, `POST /documents`, or `POST /evidence` become semantically retrievable immediately; backfill existing documents with `trellis admin reindex-vectors`.
 
 **Python SDK** — dual-mode (`import trellis_sdk`). Same API, flip `base_url` to go from in-process to HTTP.
 

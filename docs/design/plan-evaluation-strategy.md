@@ -1,6 +1,9 @@
 # Plan: Evaluation strategy
 
 **Status:** active 2026-04-26
+
+> *Historical note: references to WorkflowEngine below predate its retirement (2026-05-18); see `docs/research/workflow-engine-disposition.md`.*
+
 **Owner:** rotating
 **Self-contained:** yes — read this top to bottom; you do not need any prior conversation context.
 
