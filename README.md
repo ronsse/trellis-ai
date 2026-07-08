@@ -13,10 +13,26 @@
 
 **A memory system for AI agents — personal and shared.** Agents save memories, experiences, and knowledge from flexible sources. Trellis deduplicates and embeds them on ingest for semantic retrieval, builds a cross-agent graph, attributes outcomes back to the **exact context items** that produced them, and tunes retrieval under statistical governance. Multi-backend (SQLite, Postgres + pgvector, ArcadeDB, Neo4j, S3). Four interfaces (CLI, MCP, REST, Python SDK). One install.
 
-```
-agent reads pack ──► does work ──► writes trace + feedback ──► graph + audit log
-        ▲                                                              │
-        └──── better pack next time (noise demoted, weights tuned) ◄──┘
+```mermaid
+%%{init: {"flowchart": {"curve": "basis"}}}%%
+flowchart LR
+    Agent(["🤖 Agent"]) -->|reads| Pack("📦 Context pack")
+    Pack -->|grounds| Work("🛠️ Does work")
+    Work -->|writes| Trace("📝 Trace + feedback")
+    Trace --> Memory[("🧠 Graph +<br/>audit log")]
+    Memory -.->|"better pack next time — noise demoted, weights tuned"| Pack
+
+    classDef agent fill:#312e81,stroke:#818cf8,stroke-width:2px,color:#eef2ff;
+    classDef read fill:#064e3b,stroke:#34d399,stroke-width:2px,color:#ecfdf5;
+    classDef work fill:#1e293b,stroke:#60a5fa,stroke-width:2px,color:#eff6ff;
+    classDef write fill:#78350f,stroke:#fbbf24,stroke-width:2px,color:#fffbeb;
+    classDef store fill:#4a044e,stroke:#f472b6,stroke-width:2px,color:#fdf2f8;
+    class Agent agent;
+    class Pack read;
+    class Work work;
+    class Trace write;
+    class Memory store;
+    linkStyle 4 stroke:#34d399,stroke-width:2px;
 ```
 
 Most "agent memory" attributes feedback to a session or a user. Trellis attributes it to the **specific items served** in the pack. That's the seam that lets noise suppression, advisory fitness, and parameter promotion all work from the same signal — and lets multiple agents share a substrate where institutional knowledge compounds instead of evaporating at the end of each session.
@@ -89,83 +105,77 @@ Every CLI command supports `--format json` for machine output.
 
 ```mermaid
 flowchart TB
-    subgraph Interfaces["Interfaces"]
+    Users(["🤖 Agents + 🧑 Humans — Claude, LangGraph, scripts, CI"])
+
+    subgraph Interfaces["🔌 Interfaces"]
         direction LR
-        CLI["CLI<br/>trellis"]
-        MCP["MCP Server<br/>11 tools"]
-        REST["REST API<br/>FastAPI"]
-        SDK["Python SDK<br/>local + remote"]
-        UI["Web UI<br/>Cytoscape.js"]
-        Users["Agents + Humans<br/>Claude, LangGraph, …"]
+        CLI("CLI<br/>trellis") ~~~ MCP("MCP Server<br/>14 tools") ~~~ REST("REST API<br/>FastAPI") ~~~ SDK("Python SDK<br/>local + remote") ~~~ UI("Web UI<br/>Memory Explorer")
     end
 
-    subgraph Core["Core engine"]
+    subgraph Core["⚙️ Core engine"]
         direction LR
-        PB["Pack Builder<br/>keyword + semantic + graph<br/>dedupe · rank · token budget"]
-        GP["Governed Mutation Pipeline<br/>validate → policy → idempotency<br/>→ execute → emit event"]
-        CL["Classification<br/>4 deterministic classifiers<br/>LLM fallback (async)"]
-        WK["Workers<br/>enrichment · pattern mining<br/>maintenance · ingestion"]
+        PB("📦 Pack Builder<br/>keyword + semantic + graph<br/>dedupe · rerank · token budget") ~~~ GP{{"🛡️ Governed Mutations<br/>validate → policy → idempotency<br/>→ execute → emit event"}} ~~~ CL("🏷️ Classification<br/>4 deterministic classifiers<br/>LLM fallback (async)") ~~~ WK("🔄 Workers<br/>enrichment · pattern mining<br/>maintenance · curation")
     end
 
-    subgraph Data["Data layer"]
+    subgraph Data["🗄️ Data layer"]
         direction LR
-        TR["Traces<br/>immutable"]
-        GR["Graph<br/>SCD Type 2"]
-        DO["Documents<br/>full-text"]
-        VE["Vectors<br/>semantic"]
-        EL["Event Log<br/>audit"]
-        BL["Blobs<br/>files"]
+        TR[("Traces<br/>immutable")] ~~~ GR[("Graph<br/>SCD Type 2")] ~~~ DO[("Documents<br/>full-text")] ~~~ VE[("Vectors<br/>semantic")] ~~~ EL[("Event Log<br/>audit")] ~~~ BL[("Blobs<br/>files")]
     end
 
-    subgraph Backends["Pluggable backends"]
+    subgraph Backends["🧩 Pluggable backends"]
         direction LR
-        SQ["SQLite<br/>default / local"]
-        AR["ArcadeDB<br/>blessed: graph + vector"]
-        PG["Postgres + pgvector<br/>cloud alternative"]
-        S3["S3<br/>blob storage"]
+        SQ("SQLite<br/>default / local") ~~~ AR("ArcadeDB<br/>blessed: graph + vector") ~~~ PG("Postgres + pgvector<br/>cloud alternative") ~~~ S3("S3<br/>blob storage")
     end
 
-    Users --> CLI & MCP & REST & SDK & UI
-    Interfaces --> Core
-    Core --> Data
-    Data --> Backends
+    Users ==> Interfaces
+    Interfaces ==> Core
+    Core ==> Data
+    Data ==> Backends
 
-    classDef iface fill:#1f2937,stroke:#60a5fa,color:#e5e7eb;
-    classDef core fill:#0b3d2e,stroke:#34d399,color:#e5e7eb;
-    classDef data fill:#3b2f1c,stroke:#fbbf24,color:#e5e7eb;
-    classDef back fill:#3b1c36,stroke:#f472b6,color:#e5e7eb;
-    class CLI,MCP,REST,SDK,UI,Users iface;
+    classDef iface fill:#1e293b,stroke:#818cf8,stroke-width:2px,color:#eef2ff;
+    classDef agent fill:#312e81,stroke:#a5b4fc,stroke-width:2px,color:#eef2ff;
+    classDef core fill:#064e3b,stroke:#34d399,stroke-width:2px,color:#ecfdf5;
+    classDef data fill:#78350f,stroke:#fbbf24,stroke-width:2px,color:#fffbeb;
+    classDef back fill:#4a044e,stroke:#f472b6,stroke-width:2px,color:#fdf2f8;
+    class CLI,MCP,REST,SDK,UI iface;
+    class Users agent;
     class PB,GP,CL,WK core;
     class TR,GR,DO,VE,EL,BL data;
     class SQ,PG,S3,AR back;
+    style Interfaces fill:#0b1120,stroke:#6366f1,stroke-width:1px,stroke-dasharray:6 4,color:#a5b4fc;
+    style Core fill:#0b1120,stroke:#10b981,stroke-width:1px,stroke-dasharray:6 4,color:#6ee7b7;
+    style Data fill:#0b1120,stroke:#f59e0b,stroke-width:1px,stroke-dasharray:6 4,color:#fcd34d;
+    style Backends fill:#0b1120,stroke:#ec4899,stroke-width:1px,stroke-dasharray:6 4,color:#f9a8d4;
 ```
 
 ## What's in the substrate
 
 ```mermaid
+%%{init: {"flowchart": {"curve": "basis"}}}%%
 flowchart TB
-    subgraph Graph["Entity graph (temporally versioned)"]
+    subgraph Graph["🕸️ Entity graph — temporally versioned"]
         direction LR
-        A["service: auth-api"] -- depends_on --> B["service: user-db"]
-        A -- part_of --> C["team: platform"]
+        A("🧩 service<br/>auth-api") -- depends_on --> B("🧩 service<br/>user-db")
+        A -- part_of --> C("👥 team<br/>platform")
     end
 
-    T["trace: 'Added rate limiting to auth-api'<br/>• researched existing patterns<br/>• tool_call edit_file gateway.py<br/>• tool_call run_tests (42 passed)<br/>• outcome: success"]
-    E["evidence: 'RFC — API guidelines'<br/>uri: s3://…"]
-    P["precedent: 'Rate limiting pattern<br/>for API gateways'<br/>confidence: 0.85<br/>applies_to: [auth, payments]"]
+    T("📝 trace — 'Added rate limiting to auth-api'<br/>• researched existing patterns<br/>• tool_call edit_file gateway.py<br/>• tool_call run_tests ✅ 42 passed<br/>• outcome: success")
+    E("📄 evidence — 'RFC: API guidelines'<br/>uri: s3://…")
+    P("⭐ precedent — 'Rate limiting pattern<br/>for API gateways'<br/>confidence: 0.85<br/>applies_to: [auth, payments]")
 
-    A -- touched_entity --> T
+    A -. touched_entity .-> T
     T -- used_evidence --> E
-    T -- promoted_to_precedent --> P
+    T == promoted_to_precedent ==> P
 
-    classDef entity fill:#1f2937,stroke:#60a5fa,stroke-width:1px,color:#e5e7eb;
-    classDef trace fill:#0b3d2e,stroke:#34d399,stroke-width:1px,color:#e5e7eb;
-    classDef evidence fill:#3b2f1c,stroke:#fbbf24,stroke-width:1px,color:#e5e7eb;
-    classDef precedent fill:#3b1c36,stroke:#f472b6,stroke-width:1px,color:#e5e7eb;
+    classDef entity fill:#1e293b,stroke:#818cf8,stroke-width:2px,color:#eef2ff;
+    classDef trace fill:#064e3b,stroke:#34d399,stroke-width:2px,color:#ecfdf5;
+    classDef evidence fill:#78350f,stroke:#fbbf24,stroke-width:2px,color:#fffbeb;
+    classDef precedent fill:#4a044e,stroke:#f472b6,stroke-width:2px,color:#fdf2f8;
     class A,B,C entity;
     class T trace;
     class E evidence;
     class P precedent;
+    style Graph fill:#0b1120,stroke:#6366f1,stroke-width:1px,stroke-dasharray:6 4,color:#a5b4fc;
 ```
 
 > Every node carries `valid_from` / `valid_to` — query any past state with `as_of`.
@@ -191,61 +201,62 @@ Packs are assembled **fresh on every call** today — nothing is pregenerated or
 ## How the feedback loop works
 
 ```mermaid
+%%{init: {"flowchart": {"curve": "basis"}}}%%
 flowchart TB
-    subgraph Agents["Agents — read & write"]
-        direction LR
-        IF["CLI • MCP • REST • Python SDK"]
-    end
+    IF(["🤖 Agents — CLI • MCP • REST • Python SDK"])
 
-    Pack["Context Pack Builder<br/>keyword + semantic + graph<br/>dedupe → rerank → token-budget"]
-    Work["Agent does work<br/>emits trace + feedback"]
-    Mut["Governed Write Pipeline<br/>validate → policy → idempotency<br/>→ classify → execute → emit event"]
-    Store["Pluggable Storage<br/>SQLite · Postgres + pgvector · ArcadeDB · Neo4j · S3"]
+    Pack("📦 Context Pack Builder<br/>keyword + semantic + graph<br/>dedupe → rerank → token-budget")
+    Work("🛠️ Agent does work<br/>emits trace + feedback")
+    Mut{{"🛡️ Governed Write Pipeline<br/>validate → policy → idempotency<br/>→ classify → execute → emit event"}}
+    Store[("🗄️ Pluggable Storage<br/>SQLite · Postgres + pgvector<br/>ArcadeDB · Neo4j · S3")]
+    W("🔄 Background workers<br/>• noise tagging<br/>• advisory fitness<br/>• precedent promotion<br/>• extraction-tier graduation")
 
-    subgraph Workers["Background workers — analyze & curate"]
-        direction TB
-        W["Effectiveness analysis<br/>• noise tagging<br/>• advisory fitness<br/>• precedent promotion<br/>• extraction-tier graduation"]
-    end
-
-    IF --> Pack
-    Pack -- "markdown context" --> Work
-    Work --> Mut
-    Mut --> Store
+    IF ==> Pack
+    Pack == "markdown context" ==> Work
+    Work ==> Mut
+    Mut ==> Store
     Store --> W
-    W -. "tags, advisories, precedents" .-> Pack
+    W -. "tags · advisories · precedents" .-> Pack
 
-    classDef iface fill:#1f2937,stroke:#60a5fa,color:#e5e7eb;
-    classDef core fill:#0b3d2e,stroke:#34d399,color:#e5e7eb;
-    classDef store fill:#3b2f1c,stroke:#fbbf24,color:#e5e7eb;
-    classDef worker fill:#3b1c36,stroke:#f472b6,color:#e5e7eb;
+    classDef iface fill:#312e81,stroke:#a5b4fc,stroke-width:2px,color:#eef2ff;
+    classDef core fill:#064e3b,stroke:#34d399,stroke-width:2px,color:#ecfdf5;
+    classDef gate fill:#1e293b,stroke:#60a5fa,stroke-width:2px,color:#eff6ff;
+    classDef store fill:#78350f,stroke:#fbbf24,stroke-width:2px,color:#fffbeb;
+    classDef worker fill:#4a044e,stroke:#f472b6,stroke-width:2px,color:#fdf2f8;
     class IF iface;
-    class Pack,Work,Mut core;
+    class Pack,Work core;
+    class Mut gate;
     class Store store;
     class W worker;
+    linkStyle 5 stroke:#f472b6,stroke-width:2px;
 ```
 
 ### How a trace flows through Trellis
 
 ```mermaid
+%%{init: {"flowchart": {"curve": "basis"}}}%%
 flowchart LR
-    A["Agent<br/>does work"] --> I["Ingest<br/>validate schema"]
-    I --> PG["Policy Gate<br/>check rules"]
-    PG --> CL["Classify<br/>tag 4 facets"]
-    CL --> EX["Execute<br/>write to stores"]
-    EX --> EV["Emit event<br/>append to log"]
+    A(["🤖 Agent<br/>does work"]) ==> I("1️⃣ Ingest<br/>validate schema")
+    I ==> PG{{"2️⃣ Policy Gate<br/>check rules"}}
+    PG ==> CL("3️⃣ Classify<br/>tag 4 facets")
+    CL ==> EX[("4️⃣ Execute<br/>write to stores")]
+    EX ==> EV("5️⃣ Emit event<br/>append to log")
 
-    EV -. feedback .-> W["Workers<br/>effectiveness · noise<br/>precedent promotion"]
-    W -. tags, advisories .-> PBx["Pack Builder<br/>assembles next pack"]
-    PBx --> A2["Agent<br/>next task"]
+    EV -. feedback .-> W("🔄 Workers<br/>effectiveness · noise<br/>precedent promotion")
+    W -. "tags · advisories" .-> PBx("📦 Pack Builder<br/>assembles next pack")
+    PBx ==> A2(["🤖 Agent<br/>next task"])
 
-    classDef agent fill:#1f2937,stroke:#60a5fa,color:#e5e7eb;
-    classDef write fill:#3b2f1c,stroke:#fbbf24,color:#e5e7eb;
-    classDef read fill:#0b3d2e,stroke:#34d399,color:#e5e7eb;
-    classDef worker fill:#3b1c36,stroke:#f472b6,color:#e5e7eb;
+    classDef agent fill:#312e81,stroke:#a5b4fc,stroke-width:2px,color:#eef2ff;
+    classDef write fill:#78350f,stroke:#fbbf24,stroke-width:2px,color:#fffbeb;
+    classDef gate fill:#1e293b,stroke:#60a5fa,stroke-width:2px,color:#eff6ff;
+    classDef read fill:#064e3b,stroke:#34d399,stroke-width:2px,color:#ecfdf5;
+    classDef worker fill:#4a044e,stroke:#f472b6,stroke-width:2px,color:#fdf2f8;
     class A,A2 agent;
-    class I,PG,CL,EX,EV write;
+    class I,CL,EX,EV write;
+    class PG gate;
     class PBx read;
     class W worker;
+    linkStyle 5,6 stroke:#f472b6,stroke-width:2px;
 ```
 
 Packs carry `pack_id` and per-item refs; when the agent reports success or failure, feedback is attributed back to the exact items that were in the pack. Background workers aggregate that feedback into **noise tags** (so low-signal items drop out of future packs) and **advisory confidence adjustments** (so learned rules get sharper). Successful traces can be promoted to precedents, which then seed future packs for similar tasks.
@@ -373,57 +384,40 @@ Trellis separates **agent-facing** stores from **Trellis-internal** stores. Each
 
 ```mermaid
 flowchart LR
-    subgraph Knowledge["Knowledge Plane — agent-facing"]
+    subgraph Knowledge["🧠 Knowledge Plane — agent-facing"]
         direction TB
-        G["Graph<br/>entities + edges"]
-        D["Documents<br/>full-text"]
-        V["Vectors<br/>semantic similarity"]
-        B["Blobs<br/>files & artifacts"]
+        G[("Graph<br/>entities + edges")] ~~~ D[("Documents<br/>full-text")] ~~~ V[("Vectors<br/>semantic similarity")] ~~~ B[("Blobs<br/>files & artifacts")]
     end
 
-    subgraph Operational["Operational Plane — Trellis-internal"]
+    subgraph Operational["⚙️ Operational Plane — Trellis-internal"]
         direction TB
-        TR["Trace store<br/>immutable work records"]
-        EL["Event log<br/>mutation audit trail"]
+        TR[("Trace store<br/>immutable work records")] ~~~ EL[("Event log<br/>mutation audit trail")]
     end
 
-    subgraph Substrates["Substrates"]
+    subgraph Substrates["🧩 Substrates"]
         direction TB
-        SQ["SQLite — local default"]
-        AR["ArcadeDB<br/>blessed graph + vector<br/>(Apache 2.0)"]
-        PG["Postgres + pgvector<br/>cloud alternative"]
-        N4["Neo4j + AuraDB<br/>graph alternative"]
-        S3["S3 — blobs in cloud"]
+        SQ("SQLite<br/>local default — every store") ~~~ PG("Postgres + pgvector<br/>cloud — every store but blobs") ~~~ AR("ArcadeDB — blessed<br/>graph + vector (Apache 2.0)") ~~~ N4("Neo4j + AuraDB<br/>graph + vector alternative") ~~~ S3("S3<br/>blobs in cloud")
     end
 
-    G --- SQ
-    D --- SQ
-    V --- SQ
-    TR --- SQ
-    EL --- SQ
-    B --- SQ
-    G --- PG
-    D --- PG
-    V --- PG
-    TR --- PG
-    EL --- PG
-    G -.-> N4
-    V -.-> N4
-    B -.-> S3
-    G -.-> AR
-    V -.-> AR
+    Knowledge == "each store binds to a substrate<br/>via config.yaml" ==> Substrates
+    Operational == "same registry,<br/>own plane" ==> Substrates
 
-    classDef knowledge fill:#0b3d2e,stroke:#34d399,color:#e5e7eb;
-    classDef ops fill:#3b1c36,stroke:#f472b6,color:#e5e7eb;
-    classDef sub fill:#1f2937,stroke:#60a5fa,color:#e5e7eb;
-    classDef alt fill:#1f2937,stroke:#9ca3af,color:#9ca3af,stroke-dasharray: 5 5;
+    classDef knowledge fill:#064e3b,stroke:#34d399,stroke-width:2px,color:#ecfdf5;
+    classDef ops fill:#4a044e,stroke:#f472b6,stroke-width:2px,color:#fdf2f8;
+    classDef sub fill:#1e293b,stroke:#818cf8,stroke-width:2px,color:#eef2ff;
+    classDef blessed fill:#1e293b,stroke:#34d399,stroke-width:2px,color:#ecfdf5;
+    classDef alt fill:#1e293b,stroke:#94a3b8,stroke-width:2px,color:#cbd5e1,stroke-dasharray:5 5;
     class G,D,V,B knowledge;
     class TR,EL ops;
     class SQ,PG,S3 sub;
-    class N4,AR alt;
+    class AR blessed;
+    class N4 alt;
+    style Knowledge fill:#0b1120,stroke:#10b981,stroke-width:1px,stroke-dasharray:6 4,color:#6ee7b7;
+    style Operational fill:#0b1120,stroke:#ec4899,stroke-width:1px,stroke-dasharray:6 4,color:#f9a8d4;
+    style Substrates fill:#0b1120,stroke:#6366f1,stroke-width:1px,stroke-dasharray:6 4,color:#a5b4fc;
 ```
 
-Solid lines are blessed defaults (SQLite locally, Postgres + pgvector in cloud); dotted lines are alternate/exploratory substrates wired via `~/.config/trellis/config.yaml`. Choosing pgvector collocates keyword, semantic, and graph retrieval in a single Postgres transaction — one DSN, one consistency story. **Neo4j (and AuraDB)** is supported as a graph-native alternative for graph + vector when you want Cypher-native traversal or are already on a managed Neo4j instance.
+Each store binds to a substrate through `~/.config/trellis/config.yaml`; the table below has the exact store-by-store mapping. In the diagram, green-bordered substrates are blessed defaults and dashed ones are alternates. Choosing pgvector collocates keyword, semantic, and graph retrieval in a single Postgres transaction — one DSN, one consistency story. **Neo4j (and AuraDB)** is supported as a graph-native alternative for graph + vector when you want Cypher-native traversal or are already on a managed Neo4j instance.
 
 ## Storage — local or cloud
 
