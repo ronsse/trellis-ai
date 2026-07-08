@@ -1489,6 +1489,87 @@ components:
           type: integer
       title: SchemaEvolutionListResponse
       type: object
+    SectionedPackRequest:
+      additionalProperties: false
+      description: 'Request to assemble a sectioned context pack.
+
+
+        ``sections`` rows are ``SectionRequest``-shaped dicts (name,
+
+        retrieval_affinities, content_types, scopes, entity_ids,
+
+        max_tokens, max_items); kept as raw dicts here so the wire
+
+        package stays free of trellis-core imports — the server
+
+        validates them into ``SectionRequest`` models.'
+      properties:
+        agent_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Agent Id
+        domain:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Domain
+        intent:
+          title: Intent
+          type: string
+        sections:
+          items:
+            additionalProperties: true
+            type: object
+          title: Sections
+          type: array
+      required:
+      - intent
+      - sections
+      title: SectionedPackRequest
+      type: object
+    SectionedPackResponse:
+      additionalProperties: false
+      description: Response containing an assembled sectioned pack.
+      properties:
+        advisories:
+          items:
+            additionalProperties: true
+            type: object
+          title: Advisories
+          type: array
+        agent_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Agent Id
+        domain:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Domain
+        intent:
+          title: Intent
+          type: string
+        pack_id:
+          title: Pack Id
+          type: string
+        sections:
+          items:
+            additionalProperties: true
+            type: object
+          title: Sections
+          type: array
+        status:
+          default: ok
+          title: Status
+          type: string
+      required:
+      - pack_id
+      - intent
+      - sections
+      title: SectionedPackResponse
+      type: object
     StatsResponse:
       additionalProperties: false
       description: Store statistics response.
@@ -1919,6 +2000,61 @@ paths:
       tags:
       - mutations
   /api/v1/documents:
+    get:
+      description: List or search documents, returning previews only.
+      operationId: list_documents_api_v1_documents_get
+      parameters:
+      - description: Full-text search query
+        in: query
+        name: q
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: Full-text search query
+          title: Q
+      - description: Max results
+        in: query
+        name: limit
+        required: false
+        schema:
+          default: 50
+          description: Max results
+          maximum: 500
+          minimum: 1
+          title: Limit
+          type: integer
+      - description: Offset (ignored when q is set)
+        in: query
+        name: offset
+        required: false
+        schema:
+          default: 0
+          description: Offset (ignored when q is set)
+          minimum: 0
+          title: Offset
+          type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                title: Response List Documents Api V1 Documents Get
+                type: object
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - APIKeyHeader: []
+      summary: List Documents
+      tags:
+      - explore
     post:
       description: 'Write a document to the document store for FTS retrieval.
 
@@ -1953,6 +2089,37 @@ paths:
       summary: Create Document
       tags:
       - curate
+  /api/v1/documents/{doc_id}:
+    get:
+      description: Get a single document with full content and metadata.
+      operationId: get_document_api_v1_documents__doc_id__get
+      parameters:
+      - in: path
+        name: doc_id
+        required: true
+        schema:
+          title: Doc Id
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                title: Response Get Document Api V1 Documents  Doc Id  Get
+                type: object
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - APIKeyHeader: []
+      summary: Get Document
+      tags:
+      - explore
   /api/v1/effectiveness:
     get:
       description: Analyze context pack effectiveness.
@@ -2114,6 +2281,117 @@ paths:
       summary: Get Entity
       tags:
       - retrieve
+  /api/v1/events:
+    get:
+      description: 'Tail or filter the event log.
+
+
+        ``EventLog.get_events`` has no offset — page older history by
+
+        passing the oldest ``occurred_at`` you have as ``until``.'
+      operationId: list_events_api_v1_events_get
+      parameters:
+      - description: Filter by event type value
+        in: query
+        name: event_type
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: Filter by event type value
+          title: Event Type
+      - description: Filter by subject entity
+        in: query
+        name: entity_id
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: Filter by subject entity
+          title: Entity Id
+      - description: Filter by emitting component
+        in: query
+        name: source
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: Filter by emitting component
+          title: Source
+      - description: Lower bound (inclusive)
+        in: query
+        name: since
+        required: false
+        schema:
+          anyOf:
+          - format: date-time
+            type: string
+          - type: 'null'
+          description: Lower bound (inclusive)
+          title: Since
+      - description: Upper bound (inclusive)
+        in: query
+        name: until
+        required: false
+        schema:
+          anyOf:
+          - format: date-time
+            type: string
+          - type: 'null'
+          description: Upper bound (inclusive)
+          title: Until
+      - description: Max results
+        in: query
+        name: limit
+        required: false
+        schema:
+          default: 100
+          description: Max results
+          maximum: 500
+          minimum: 1
+          title: Limit
+          type: integer
+      - description: asc or desc (default desc = tail view)
+        in: query
+        name: order
+        required: false
+        schema:
+          default: desc
+          description: asc or desc (default desc = tail view)
+          title: Order
+          type: string
+      - description: Include full payloads (large for pack.assembled)
+        in: query
+        name: include_payload
+        required: false
+        schema:
+          default: false
+          description: Include full payloads (large for pack.assembled)
+          title: Include Payload
+          type: boolean
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                title: Response List Events Api V1 Events Get
+                type: object
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - APIKeyHeader: []
+      summary: List Events
+      tags:
+      - explore
   /api/v1/evidence:
     post:
       description: Ingest evidence.
@@ -2220,6 +2498,44 @@ paths:
       summary: Record Feedback
       tags:
       - curate
+  /api/v1/graph/history:
+    get:
+      description: 'All versions of a graph node, newest first (SCD-2 audit trail).
+
+
+        Query param rather than a path segment because
+
+        ``GET /entities/{entity_id:path}`` greedily matches any suffix.'
+      operationId: get_node_history_api_v1_graph_history_get
+      parameters:
+      - description: Node ID to fetch SCD-2 history for
+        in: query
+        name: entity_id
+        required: true
+        schema:
+          description: Node ID to fetch SCD-2 history for
+          title: Entity Id
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                title: Response Get Node History Api V1 Graph History Get
+                type: object
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - APIKeyHeader: []
+      summary: Get Node History
+      tags:
+      - explore
   /api/v1/graph/search:
     get:
       description: Search graph nodes by name or type.
@@ -2711,6 +3027,41 @@ paths:
       tags:
       - observations
   /api/v1/packs:
+    get:
+      description: List assembled context packs (newest first), summary fields only.
+      operationId: list_packs_api_v1_packs_get
+      parameters:
+      - description: Max results
+        in: query
+        name: limit
+        required: false
+        schema:
+          default: 50
+          description: Max results
+          maximum: 500
+          minimum: 1
+          title: Limit
+          type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                title: Response List Packs Api V1 Packs Get
+                type: object
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - APIKeyHeader: []
+      summary: List Packs
+      tags:
+      - explore
     post:
       description: Assemble a context pack.
       operationId: assemble_pack_api_v1_packs_post
@@ -2738,6 +3089,79 @@ paths:
       summary: Assemble Pack
       tags:
       - retrieve
+  /api/v1/packs/sectioned:
+    post:
+      description: 'Assemble a sectioned pack with independently budgeted sections.
+
+
+        The SDK''s ``assemble_sectioned_pack()`` targets this route; section
+
+        dicts are validated into ``SectionRequest`` models here (the wire
+
+        DTO keeps them untyped so trellis_wire stays core-free).'
+      operationId: assemble_sectioned_pack_api_v1_packs_sectioned_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SectionedPackRequest'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SectionedPackResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - APIKeyHeader: []
+      summary: Assemble Sectioned Pack
+      tags:
+      - retrieve
+  /api/v1/packs/{pack_id}:
+    get:
+      description: 'Full pack telemetry: what was injected, rejected, and why.
+
+
+        Joins related feedback the same way the learning loop does —
+
+        ``FEEDBACK_RECORDED.payload["pack_id"]`` (see
+
+        ``trellis.learning.pack_observations.join_pack_feedback``).'
+      operationId: get_pack_api_v1_packs__pack_id__get
+      parameters:
+      - in: path
+        name: pack_id
+        required: true
+        schema:
+          title: Pack Id
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                title: Response Get Pack Api V1 Packs  Pack Id  Get
+                type: object
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - APIKeyHeader: []
+      summary: Get Pack
+      tags:
+      - explore
   /api/v1/packs/{pack_id}/feedback:
     post:
       description: 'Record element-level feedback on a specific context pack.

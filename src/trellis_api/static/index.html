@@ -991,8 +991,11 @@
             <a href="#" data-view="graph">Graph</a>
             <a href="#" data-view="traces">Traces</a>
             <a href="#" data-view="precedents">Precedents</a>
+            <a href="#" data-view="memories">Memories</a>
+            <a href="#" data-view="events">Events</a>
+            <a href="#" data-view="packs">Packs</a>
         </div>
-        <span class="shortcuts-hint"><kbd>/</kbd> Search &middot; <kbd>1</kbd>-<kbd>7</kbd> Views &middot; <kbd>Esc</kbd> Close</span>
+        <span class="shortcuts-hint"><kbd>/</kbd> Search &middot; <kbd>1</kbd>-<kbd>0</kbd> Views &middot; <kbd>Esc</kbd> Close</span>
         <button class="btn-icon" id="api-key-toggle" title="API key" onclick="toggleKeyBanner()">&#x1F511;</button>
     </nav>
 
@@ -1226,6 +1229,101 @@
             </div>
             <div id="precedents-container"></div>
         </div>
+
+        <!-- ============ Memories ============ -->
+        <div id="view-memories" style="display:none">
+            <div class="search-bar">
+                <input type="text" id="mem-search" placeholder="Search documents (full-text)..."
+                       onkeydown="if(event.key==='Enter'){memOffset=0;loadMemories();}">
+                <select id="mem-limit" onchange="memOffset=0;loadMemories()">
+                    <option value="25">25 docs</option>
+                    <option value="50" selected>50 docs</option>
+                    <option value="100">100 docs</option>
+                </select>
+                <button onclick="memOffset=0;loadMemories()">Refresh</button>
+            </div>
+            <div class="status-section" style="padding:0; overflow:hidden">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Doc ID</th>
+                            <th>Preview</th>
+                            <th>Tags</th>
+                            <th>Size</th>
+                        </tr>
+                    </thead>
+                    <tbody id="memories-body"></tbody>
+                </table>
+            </div>
+            <div class="srp-pagination" id="mem-pagination" style="display:none">
+                <button id="mem-prev" onclick="memPage(-1)">&laquo; Prev</button>
+                <span id="mem-page-info"></span>
+                <button id="mem-next" onclick="memPage(1)">Next &raquo;</button>
+            </div>
+            <div id="memory-detail-container"></div>
+        </div>
+
+        <!-- ============ Events ============ -->
+        <div id="view-events" style="display:none">
+            <div class="search-bar">
+                <select id="event-type" onchange="loadEvents()">
+                    <option value="">All event types</option>
+                </select>
+                <input type="text" id="event-source" placeholder="Source filter..." style="max-width:220px"
+                       onkeydown="if(event.key==='Enter')loadEvents()">
+                <select id="event-limit" onchange="loadEvents()">
+                    <option value="50">50 events</option>
+                    <option value="100" selected>100 events</option>
+                    <option value="200">200 events</option>
+                </select>
+                <button onclick="loadEvents()">Refresh</button>
+            </div>
+            <div class="status-section" style="padding:0; overflow:hidden">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Type</th>
+                            <th>Source</th>
+                            <th>Entity</th>
+                            <th>Summary</th>
+                        </tr>
+                    </thead>
+                    <tbody id="events-body"></tbody>
+                </table>
+            </div>
+            <div id="event-detail-container"></div>
+        </div>
+
+        <!-- ============ Packs ============ -->
+        <div id="view-packs" style="display:none">
+            <div class="search-bar">
+                <select id="pack-limit" onchange="loadPacks()">
+                    <option value="25">25 packs</option>
+                    <option value="50" selected>50 packs</option>
+                    <option value="100">100 packs</option>
+                </select>
+                <button onclick="loadPacks()">Refresh</button>
+            </div>
+            <div class="status-section" style="padding:0; overflow:hidden">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Intent</th>
+                            <th>Domain</th>
+                            <th>Agent</th>
+                            <th>Items</th>
+                            <th>Candidates</th>
+                            <th>Strategies</th>
+                        </tr>
+                    </thead>
+                    <tbody id="packs-body"></tbody>
+                </table>
+            </div>
+            <div id="pack-detail-container"></div>
+        </div>
     </div>
 
     <script>
@@ -1340,7 +1438,7 @@
         }
 
         // -- View switching --
-        const views = ['dashboard', 'metrics', 'review', 'evolution', 'graph', 'traces', 'precedents'];
+        const views = ['dashboard', 'metrics', 'review', 'evolution', 'graph', 'traces', 'precedents', 'memories', 'events', 'packs'];
         const viewLoaded = {};
         document.querySelectorAll('nav a[data-view]').forEach(link => {
             link.addEventListener('click', e => {
@@ -1364,6 +1462,9 @@
                 if (name === 'traces') loadTraces();
                 if (name === 'precedents') loadPrecedents();
                 if (name === 'graph') initGraph();
+                if (name === 'memories') loadMemories();
+                if (name === 'events') loadEvents();
+                if (name === 'packs') loadPacks();
             }
             // Focus search when switching to graph
             if (name === 'graph' && graphInitialized) {
@@ -1385,10 +1486,15 @@
                     document.getElementById('graph-search').focus();
                 } else if (currentView === 'traces') {
                     document.getElementById('trace-domain').focus();
+                } else if (currentView === 'memories') {
+                    document.getElementById('mem-search').focus();
                 }
             }
-            if (e.key >= '1' && e.key <= '7') {
+            if (e.key >= '1' && e.key <= '9') {
                 switchView(views[parseInt(e.key) - 1]);
+            }
+            if (e.key === '0' && views.length >= 10) {
+                switchView(views[9]);
             }
             if (e.key === 'Escape') {
                 closeSearchPanel();
@@ -2641,8 +2747,10 @@
                 <div class="detail-actions">
                     <button class="btn btn-ghost btn-sm" onclick="loadEntity('${escHtml(nodeId)}')">Center on node</button>
                     <button class="btn btn-ghost btn-sm" onclick="loadEntity('${escHtml(nodeId)}', true)">Expand neighbors</button>
+                    <button class="btn btn-ghost btn-sm" onclick="loadNodeHistory('${escHtml(nodeId)}')">History</button>
                     <button class="btn btn-ghost btn-sm" onclick="copyToClipboard('${escHtml(nodeId)}')">Copy ID</button>
                 </div>
+                <div id="node-history"></div>
             `;
         }
 
@@ -2852,6 +2960,413 @@
                 `).join('')}</div>`;
             } catch (err) {
                 container.innerHTML = `<div class="empty-state"><p style="color:var(--error)">Failed to load precedents: ${escHtml(err.message)}</p></div>`;
+            }
+        }
+
+        // ============================================================
+        //  MEMORIES (documents)
+        // ============================================================
+        let memOffset = 0;
+
+        function tagChips(metadata) {
+            const tags = (metadata && metadata.tags) || {};
+            const chips = [];
+            for (const [facet, value] of Object.entries(tags)) {
+                const vals = Array.isArray(value) ? value : [value];
+                for (const v of vals) {
+                    if (v != null && v !== '') chips.push(`<span class="badge badge-info" title="${escHtml(facet)}">${escHtml(v)}</span>`);
+                }
+            }
+            return chips.join(' ');
+        }
+
+        async function loadMemories() {
+            const q = document.getElementById('mem-search').value.trim();
+            const limit = parseInt(document.getElementById('mem-limit').value);
+            const body = document.getElementById('memories-body');
+            body.innerHTML = `<tr><td colspan="5">${loadingHtml('Loading documents...')}</td></tr>`;
+            document.getElementById('memory-detail-container').innerHTML = '';
+
+            try {
+                let url = `/documents?limit=${limit}&offset=${memOffset}`;
+                if (q) url += `&q=${encodeURIComponent(q)}`;
+                const data = await fetchJSON(url);
+                const docs = data.documents || [];
+
+                if (docs.length === 0) {
+                    body.innerHTML = '<tr><td colspan="5"><div class="empty-state"><div class="icon">&#x1F4DA;</div><p>No documents found</p></div></td></tr>';
+                    document.getElementById('mem-pagination').style.display = 'none';
+                    return;
+                }
+
+                body.innerHTML = docs.map(d => `
+                    <tr class="clickable" onclick="loadMemoryDetail('${escHtml(d.doc_id)}')">
+                        <td title="${escHtml(fmtDate(d.created_at))}" style="white-space:nowrap">${escHtml(timeAgo(d.created_at))}</td>
+                        <td class="mono truncate" style="max-width:220px; font-size:0.78rem" title="${escHtml(d.doc_id)}">${escHtml(d.doc_id)}</td>
+                        <td class="truncate" style="max-width:420px" title="${escHtml(d.preview)}">${escHtml(d.preview)}</td>
+                        <td>${tagChips(d.metadata)}</td>
+                        <td style="white-space:nowrap">${(d.content_length / 1000).toFixed(1)}k</td>
+                    </tr>
+                `).join('');
+
+                // Pagination (search results are unpaged; list is offset-paged)
+                const pag = document.getElementById('mem-pagination');
+                if (q) {
+                    pag.style.display = 'none';
+                } else {
+                    const total = data.total || 0;
+                    pag.style.display = total > limit ? 'flex' : 'none';
+                    document.getElementById('mem-page-info').textContent =
+                        `${memOffset + 1}–${memOffset + docs.length} of ${total}`;
+                    document.getElementById('mem-prev').disabled = memOffset === 0;
+                    document.getElementById('mem-next').disabled = memOffset + docs.length >= total;
+                }
+            } catch (err) {
+                body.innerHTML = `<tr><td colspan="5" style="color:var(--error); text-align:center; padding:2rem">Failed to load documents: ${escHtml(err.message)}</td></tr>`;
+            }
+        }
+
+        function memPage(dir) {
+            const limit = parseInt(document.getElementById('mem-limit').value);
+            memOffset = Math.max(0, memOffset + dir * limit);
+            loadMemories();
+        }
+
+        async function loadMemoryDetail(docId) {
+            const container = document.getElementById('memory-detail-container');
+            container.innerHTML = `<div class="trace-detail">${loadingHtml('Loading document...')}</div>`;
+
+            try {
+                const data = await fetchJSON(`/documents/${encodeURIComponent(docId)}`);
+                const d = data.document;
+                if (!d) { container.innerHTML = ''; return; }
+
+                let metaHtml = '';
+                const meta = d.metadata || {};
+                if (Object.keys(meta).length > 0) {
+                    metaHtml = '<dl class="props">';
+                    for (const [k, v] of Object.entries(meta)) {
+                        const val = typeof v === 'object' ? JSON.stringify(v, null, 2) : String(v);
+                        metaHtml += `<dt>${escHtml(k)}</dt><dd>${escHtml(val)}</dd>`;
+                    }
+                    metaHtml += '</dl>';
+                }
+
+                container.innerHTML = `
+                    <div class="trace-detail fade-in">
+                        <h3>
+                            <span>Document</span>
+                            <span class="mono" style="font-size:0.75rem; color:var(--text-dim)">${escHtml(d.doc_id)}</span>
+                        </h3>
+                        <div style="font-size:0.8rem; color:var(--text-dim); margin-bottom:1rem">
+                            Created ${fmtDate(d.created_at)}${d.updated_at && d.updated_at !== d.created_at ? ` &middot; Updated ${fmtDate(d.updated_at)}` : ''}
+                            ${d.content_hash ? ` &middot; <span class="mono">${escHtml(String(d.content_hash).slice(0, 16))}…</span>` : ''}
+                        </div>
+                        ${metaHtml}
+                        <h4 style="font-size:0.9rem; margin:1rem 0 0.5rem">Content</h4>
+                        <pre style="white-space:pre-wrap; word-break:break-word; max-height:480px; overflow:auto; background:var(--surface-2); padding:1rem; border-radius:6px; font-size:0.82rem">${escHtml(d.content || '')}</pre>
+                    </div>
+                `;
+                container.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            } catch (err) {
+                container.innerHTML = `<div class="trace-detail"><p style="color:var(--error)">Failed to load document: ${escHtml(err.message)}</p></div>`;
+            }
+        }
+
+        // ============================================================
+        //  EVENTS (audit log tail)
+        // ============================================================
+        const EVENT_BADGE = {
+            'pack.assembled': 'badge-accent',
+            'feedback.recorded': 'badge-ok',
+            'memory.stored': 'badge-info',
+            'trace.ingested': 'badge-info',
+        };
+        let eventTypesLoaded = false;
+
+        function eventSummary(e) {
+            const s = e.payload_summary || {};
+            const parts = [];
+            if (s.intent) parts.push(escHtml(s.intent));
+            if (s.operation) parts.push(escHtml(s.operation));
+            if (s.rating != null) parts.push(`rating: ${escHtml(s.rating)}`);
+            if (s.items_count != null) parts.push(`${s.items_count} items`);
+            if (parts.length === 0 && e.payload_keys && e.payload_keys.length > 0) {
+                parts.push(`<span style="color:var(--text-dim)">${escHtml(e.payload_keys.slice(0, 5).join(', '))}</span>`);
+            }
+            return parts.join(' &middot; ');
+        }
+
+        async function loadEvents() {
+            const type = document.getElementById('event-type').value;
+            const source = document.getElementById('event-source').value.trim();
+            const limit = document.getElementById('event-limit').value;
+            const body = document.getElementById('events-body');
+            body.innerHTML = `<tr><td colspan="5">${loadingHtml('Loading events...')}</td></tr>`;
+            document.getElementById('event-detail-container').innerHTML = '';
+
+            try {
+                let url = `/events?limit=${limit}&order=desc`;
+                if (type) url += `&event_type=${encodeURIComponent(type)}`;
+                if (source) url += `&source=${encodeURIComponent(source)}`;
+                const data = await fetchJSON(url);
+                const events = data.events || [];
+
+                // Populate the type filter once from the server's enum
+                if (!eventTypesLoaded && data.event_types) {
+                    eventTypesLoaded = true;
+                    const sel = document.getElementById('event-type');
+                    const current = sel.value;
+                    sel.innerHTML = '<option value="">All event types</option>' +
+                        data.event_types.map(t => `<option value="${escHtml(t)}" ${t === current ? 'selected' : ''}>${escHtml(t)}</option>`).join('');
+                }
+
+                if (events.length === 0) {
+                    body.innerHTML = '<tr><td colspan="5"><div class="empty-state"><div class="icon">&#x1F4E1;</div><p>No events match</p></div></td></tr>';
+                    return;
+                }
+
+                body.innerHTML = events.map(e => {
+                    const badge = EVENT_BADGE[e.event_type] || 'badge-info';
+                    const entityCell = e.entity_id
+                        ? `<span class="mono truncate" style="max-width:200px; display:inline-block; font-size:0.75rem" title="${escHtml(e.entity_id)}">${escHtml(e.entity_id)}</span>`
+                        : '<span style="color:var(--text-dim)">-</span>';
+                    return `
+                    <tr class="clickable" onclick="loadEventDetail('${escHtml(e.event_id)}')">
+                        <td title="${escHtml(fmtDate(e.occurred_at))}" style="white-space:nowrap">${escHtml(timeAgo(e.occurred_at))}</td>
+                        <td><span class="badge ${badge}">${escHtml(e.event_type)}</span></td>
+                        <td style="font-size:0.8rem">${escHtml(e.source)}</td>
+                        <td>${entityCell}</td>
+                        <td style="font-size:0.8rem">${eventSummary(e)}</td>
+                    </tr>`;
+                }).join('');
+            } catch (err) {
+                body.innerHTML = `<tr><td colspan="5" style="color:var(--error); text-align:center; padding:2rem">Failed to load events: ${escHtml(err.message)}</td></tr>`;
+            }
+        }
+
+        async function loadEventDetail(eventId) {
+            const container = document.getElementById('event-detail-container');
+            container.innerHTML = `<div class="trace-detail">${loadingHtml('Loading event...')}</div>`;
+
+            try {
+                // No single-event endpoint: refetch the current window with
+                // payloads included and pick the event out client-side.
+                const type = document.getElementById('event-type').value;
+                const source = document.getElementById('event-source').value.trim();
+                const limit = document.getElementById('event-limit').value;
+                let url = `/events?limit=${limit}&order=desc&include_payload=true`;
+                if (type) url += `&event_type=${encodeURIComponent(type)}`;
+                if (source) url += `&source=${encodeURIComponent(source)}`;
+                const data = await fetchJSON(url);
+                const e = (data.events || []).find(ev => ev.event_id === eventId);
+                if (!e) { container.innerHTML = ''; return; }
+
+                const packLink = e.event_type === 'pack.assembled' && e.entity_id
+                    ? `<button class="btn btn-ghost btn-sm" onclick="navigateToPack('${escHtml(e.entity_id)}')">Inspect pack</button>`
+                    : '';
+
+                container.innerHTML = `
+                    <div class="trace-detail fade-in">
+                        <h3>
+                            <span><span class="badge ${EVENT_BADGE[e.event_type] || 'badge-info'}">${escHtml(e.event_type)}</span> ${escHtml(e.source)}</span>
+                            <span class="mono" style="font-size:0.75rem; color:var(--text-dim)">${escHtml(e.event_id)}</span>
+                        </h3>
+                        <div style="font-size:0.8rem; color:var(--text-dim); margin-bottom:1rem">
+                            ${fmtDate(e.occurred_at)}${e.entity_id ? ` &middot; Entity: <span class="mono">${escHtml(e.entity_id)}</span>` : ''}${e.entity_type ? ` (${escHtml(e.entity_type)})` : ''}
+                            ${packLink}
+                        </div>
+                        <h4 style="font-size:0.9rem; margin-bottom:0.5rem">Payload</h4>
+                        <pre style="white-space:pre-wrap; word-break:break-word; max-height:480px; overflow:auto; background:var(--surface-2); padding:1rem; border-radius:6px; font-size:0.78rem">${escHtml(JSON.stringify(e.payload || {}, null, 2))}</pre>
+                    </div>
+                `;
+                container.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            } catch (err) {
+                container.innerHTML = `<div class="trace-detail"><p style="color:var(--error)">Failed to load event: ${escHtml(err.message)}</p></div>`;
+            }
+        }
+
+        // ============================================================
+        //  PACKS (retrieval telemetry — what was injected and why)
+        // ============================================================
+        function navigateToPack(packId) {
+            switchView('packs');
+            setTimeout(() => loadPackDetail(packId), 100);
+        }
+
+        async function loadPacks() {
+            const limit = document.getElementById('pack-limit').value;
+            const body = document.getElementById('packs-body');
+            body.innerHTML = `<tr><td colspan="7">${loadingHtml('Loading packs...')}</td></tr>`;
+            document.getElementById('pack-detail-container').innerHTML = '';
+
+            try {
+                const data = await fetchJSON(`/packs?limit=${limit}`);
+                const packs = data.packs || [];
+
+                if (packs.length === 0) {
+                    body.innerHTML = '<tr><td colspan="7"><div class="empty-state"><div class="icon">&#x1F4E6;</div><p>No packs assembled yet</p><p style="font-size:0.8rem; color:var(--text-dim)">Packs appear here when agents call get_context or POST /packs</p></div></td></tr>';
+                    return;
+                }
+
+                body.innerHTML = packs.map(p => `
+                    <tr class="clickable" onclick="loadPackDetail('${escHtml(p.pack_id)}')">
+                        <td title="${escHtml(fmtDate(p.created_at))}" style="white-space:nowrap">${escHtml(timeAgo(p.created_at))}</td>
+                        <td class="truncate" style="max-width:320px" title="${escHtml(p.intent)}">${escHtml(p.intent)}</td>
+                        <td>${p.domain ? escHtml(p.domain) : '<span style="color:var(--text-dim)">-</span>'}</td>
+                        <td class="mono" style="font-size:0.78rem">${p.agent_id ? escHtml(p.agent_id) : '<span style="color:var(--text-dim)">-</span>'}</td>
+                        <td>${p.items_count != null ? p.items_count : '-'}</td>
+                        <td>${p.candidates_found != null ? p.candidates_found : '-'}</td>
+                        <td style="font-size:0.75rem">${(p.strategies_used || []).map(s => `<span class="badge badge-info">${escHtml(s)}</span>`).join(' ')}</td>
+                    </tr>
+                `).join('');
+            } catch (err) {
+                body.innerHTML = `<tr><td colspan="7" style="color:var(--error); text-align:center; padding:2rem">Failed to load packs: ${escHtml(err.message)}</td></tr>`;
+            }
+        }
+
+        function scoreBreakdownStr(sb) {
+            if (!sb || typeof sb !== 'object') return '';
+            return Object.entries(sb).map(([k, v]) =>
+                `${k}: ${typeof v === 'number' ? v.toFixed(3) : v}`).join(', ');
+        }
+
+        async function loadPackDetail(packId) {
+            const container = document.getElementById('pack-detail-container');
+            container.innerHTML = `<div class="trace-detail">${loadingHtml('Loading pack...')}</div>`;
+
+            try {
+                const data = await fetchJSON(`/packs/${encodeURIComponent(packId)}`);
+                const pack = data.pack || {};
+                const payload = pack.payload || {};
+                const injected = payload.injected_items || [];
+                const rejected = payload.rejected_items || [];
+                const budgetTrace = payload.budget_trace || [];
+                const feedback = data.feedback || [];
+
+                let metaHtml = '<div class="cards" style="margin:0 0 1rem 0">';
+                metaHtml += `<div class="card"><h3>Items</h3><div class="value">${payload.items_count != null ? payload.items_count : '-'}</div><div class="sub">of ${payload.candidates_found != null ? payload.candidates_found : '?'} candidates</div></div>`;
+                metaHtml += `<div class="card"><h3>Budget</h3><div class="value" style="font-size:1.1rem">${payload.budget_max_items || '-'} items</div><div class="sub">${payload.budget_max_tokens || '-'} tokens max</div></div>`;
+                metaHtml += `<div class="card"><h3>Strategies</h3><div class="value" style="font-size:0.95rem">${(payload.strategies_used || []).map(escHtml).join(', ') || '-'}</div>${payload.reranker ? `<div class="sub">reranker: ${escHtml(payload.reranker)}</div>` : ''}</div>`;
+                metaHtml += `<div class="card"><h3>Feedback</h3><div class="value">${feedback.length}</div><div class="sub">signals recorded</div></div>`;
+                metaHtml += '</div>';
+
+                let injectedHtml = '<p style="color:var(--text-dim); font-size:0.85rem">No items injected</p>';
+                if (injected.length > 0) {
+                    injectedHtml = `
+                    <div style="overflow-x:auto"><table>
+                        <thead><tr><th>#</th><th>Item</th><th>Type</th><th>Strategy</th><th>Reason</th><th>Scores</th><th>Tokens</th></tr></thead>
+                        <tbody>${injected.map(it => `
+                            <tr>
+                                <td>${it.rank != null ? it.rank : '-'}</td>
+                                <td class="mono truncate" style="max-width:240px; font-size:0.75rem" title="${escHtml(it.item_id)}">${escHtml(it.item_id)}</td>
+                                <td><span class="badge badge-info">${escHtml(it.item_type || '')}</span></td>
+                                <td style="font-size:0.78rem">${escHtml(it.strategy_source || '')}</td>
+                                <td style="font-size:0.78rem">${escHtml(it.selection_reason || '')}</td>
+                                <td style="font-size:0.72rem; color:var(--text-dim)">${escHtml(scoreBreakdownStr(it.score_breakdown))}</td>
+                                <td>${it.estimated_tokens != null ? it.estimated_tokens : '-'}</td>
+                            </tr>`).join('')}
+                        </tbody>
+                    </table></div>`;
+                }
+
+                let rejectedHtml = '';
+                if (rejected.length > 0) {
+                    rejectedHtml = `
+                    <details style="margin-top:1rem">
+                        <summary style="cursor:pointer; font-size:0.9rem; font-weight:600">Rejected items (${rejected.length})</summary>
+                        <div style="overflow-x:auto; margin-top:0.5rem"><table>
+                            <thead><tr><th>Item</th><th>Type</th><th>Strategy</th><th>Relevance</th><th>Reason</th></tr></thead>
+                            <tbody>${rejected.map(r => `
+                                <tr>
+                                    <td class="mono truncate" style="max-width:240px; font-size:0.75rem" title="${escHtml(r.item_id)}">${escHtml(r.item_id)}</td>
+                                    <td style="font-size:0.78rem">${escHtml(r.item_type || '')}</td>
+                                    <td style="font-size:0.78rem">${escHtml(r.strategy_source || '')}</td>
+                                    <td>${r.relevance_score != null ? Number(r.relevance_score).toFixed(3) : '-'}</td>
+                                    <td style="font-size:0.78rem">${escHtml(r.reason || '')}</td>
+                                </tr>`).join('')}
+                            </tbody>
+                        </table></div>
+                    </details>`;
+                }
+
+                let budgetHtml = '';
+                if (budgetTrace.length > 0) {
+                    budgetHtml = `
+                    <details style="margin-top:1rem">
+                        <summary style="cursor:pointer; font-size:0.9rem; font-weight:600">Budget trace (${budgetTrace.length})</summary>
+                        <div style="overflow-x:auto; margin-top:0.5rem"><table>
+                            <thead><tr><th>Item</th><th>Tokens</th><th>Running total</th><th>Included</th></tr></thead>
+                            <tbody>${budgetTrace.map(b => `
+                                <tr>
+                                    <td class="mono truncate" style="max-width:240px; font-size:0.75rem" title="${escHtml(b.item_id)}">${escHtml(b.item_id)}</td>
+                                    <td>${b.item_tokens}</td>
+                                    <td>${b.running_total}</td>
+                                    <td>${b.included ? '<span class="badge badge-ok">yes</span>' : '<span class="badge badge-err">no</span>'}</td>
+                                </tr>`).join('')}
+                            </tbody>
+                        </table></div>
+                    </details>`;
+                }
+
+                let feedbackHtml = '';
+                if (feedback.length > 0) {
+                    feedbackHtml = '<div style="margin-top:1rem"><h4 style="font-size:0.9rem; margin-bottom:0.5rem">Feedback</h4>';
+                    for (const f of feedback) {
+                        const fp = f.payload || {};
+                        feedbackHtml += `<div class="status-row">
+                            <span>${fp.rating != null ? `<span class="badge ${fp.rating > 0 ? 'badge-ok' : 'badge-err'}">rating: ${escHtml(fp.rating)}</span> ` : ''}${fp.comment ? escHtml(fp.comment) : ''}</span>
+                            <span style="font-size:0.75rem; color:var(--text-dim)">${timeAgo(f.occurred_at)}</span>
+                        </div>`;
+                    }
+                    feedbackHtml += '</div>';
+                }
+
+                container.innerHTML = `
+                    <div class="trace-detail fade-in">
+                        <h3>
+                            <span>${escHtml(pack.intent || '(no intent)')}</span>
+                            <span class="mono" style="font-size:0.75rem; color:var(--text-dim)">${escHtml(packId)}</span>
+                        </h3>
+                        <div style="font-size:0.8rem; color:var(--text-dim); margin-bottom:1rem">
+                            ${pack.domain ? `Domain: ${escHtml(pack.domain)} &middot; ` : ''}${pack.agent_id ? `Agent: ${escHtml(pack.agent_id)} &middot; ` : ''}${fmtDate(pack.created_at)}
+                        </div>
+                        ${metaHtml}
+                        <h4 style="font-size:0.9rem; margin-bottom:0.75rem">Injected items</h4>
+                        ${injectedHtml}
+                        ${rejectedHtml}
+                        ${budgetHtml}
+                        ${feedbackHtml}
+                    </div>
+                `;
+                container.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            } catch (err) {
+                container.innerHTML = `<div class="trace-detail"><p style="color:var(--error)">Failed to load pack: ${escHtml(err.message)}</p></div>`;
+            }
+        }
+
+        // ============================================================
+        //  NODE HISTORY (SCD-2 versions, from the graph detail panel)
+        // ============================================================
+        async function loadNodeHistory(nodeId) {
+            const el = document.getElementById('node-history');
+            if (!el) return;
+            el.innerHTML = loadingHtml('Loading history...');
+            try {
+                const data = await fetchJSON(`/graph/history?entity_id=${encodeURIComponent(nodeId)}`);
+                const versions = data.versions || [];
+                el.innerHTML = `
+                    <h4 style="font-size:0.85rem; margin:0.75rem 0 0.5rem">History (${versions.length} version${versions.length === 1 ? '' : 's'})</h4>
+                    ${versions.map(v => `
+                        <div style="border-left:2px solid ${v.valid_to ? 'var(--border)' : 'var(--accent)'}; padding:0.25rem 0 0.25rem 0.6rem; margin-bottom:0.5rem">
+                            <div style="font-size:0.75rem; color:var(--text-dim)">
+                                ${fmtDate(v.valid_from)} &rarr; ${v.valid_to ? fmtDate(v.valid_to) : '<span style="color:var(--accent)">current</span>'}
+                            </div>
+                            <pre style="white-space:pre-wrap; word-break:break-word; font-size:0.72rem; margin:0.25rem 0 0; max-height:120px; overflow:auto">${escHtml(JSON.stringify(v.properties || {}, null, 1))}</pre>
+                        </div>`).join('')}
+                `;
+            } catch (err) {
+                el.innerHTML = `<p style="color:var(--error); font-size:0.8rem">Failed to load history: ${escHtml(err.message)}</p>`;
             }
         }
 

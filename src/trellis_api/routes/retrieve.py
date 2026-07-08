@@ -5,18 +5,47 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
+from pydantic import ValidationError
 
 from trellis.ops import ParameterRegistry
 from trellis.retrieve.pack_builder import PackBuilder
 from trellis.retrieve.precedents import list_precedents as _list_precedents
 from trellis.retrieve.rerankers import build_reranker
 from trellis.retrieve.strategies import build_strategies
-from trellis.schemas.pack import PackBudget
+from trellis.schemas.pack import PackBudget, SectionRequest
 from trellis.stores.advisory_store import AdvisoryStore
 from trellis_api.app import get_registry
-from trellis_wire.dtos import PackRequest, PackResponse
+from trellis_wire.dtos import (
+    PackRequest,
+    PackResponse,
+    SectionedPackRequest,
+    SectionedPackResponse,
+)
 
 router = APIRouter()
+
+
+def _build_pack_builder(registry: Any) -> PackBuilder:
+    """Wire a PackBuilder the same way the MCP server does.
+
+    Advisories load lazily from the registry's stores_dir when a
+    generated advisories.json exists; PackBuilder filters by
+    ``_ADVISORY_MIN_CONFIDENCE`` and pack domain scope, so passing the
+    store unconditionally is safe.
+    """
+    param_registry = ParameterRegistry(registry.operational.parameter_store)
+    advisory_store: AdvisoryStore | None = None
+    stores_dir = registry.stores_dir
+    if stores_dir is not None:
+        adv_path = stores_dir / "advisories.json"
+        if adv_path.exists():
+            advisory_store = AdvisoryStore(adv_path)
+    return PackBuilder(
+        strategies=build_strategies(registry, parameter_registry=param_registry),
+        event_log=registry.operational.event_log,
+        advisory_store=advisory_store,
+        reranker=build_reranker("rrf", parameter_registry=param_registry),
+    )
 
 
 @router.get("/search")
@@ -38,24 +67,7 @@ def search(
 def assemble_pack(req: PackRequest) -> PackResponse:
     """Assemble a context pack."""
     registry = get_registry()
-
-    param_registry = ParameterRegistry(registry.operational.parameter_store)
-    # Mirror the MCP server's lazy advisory wiring: load from the
-    # registry's stores_dir if a generated advisories.json exists.
-    # PackBuilder filters by ``_ADVISORY_MIN_CONFIDENCE`` and pack
-    # domain scope, so passing the store unconditionally is safe.
-    advisory_store: AdvisoryStore | None = None
-    stores_dir = registry.stores_dir
-    if stores_dir is not None:
-        adv_path = stores_dir / "advisories.json"
-        if adv_path.exists():
-            advisory_store = AdvisoryStore(adv_path)
-    builder = PackBuilder(
-        strategies=build_strategies(registry, parameter_registry=param_registry),
-        event_log=registry.operational.event_log,
-        advisory_store=advisory_store,
-        reranker=build_reranker("rrf", parameter_registry=param_registry),
-    )
+    builder = _build_pack_builder(registry)
 
     budget = PackBudget(max_items=req.max_items, max_tokens=req.max_tokens)
     # Pass domain as a filter so strategies can use it for scoping
@@ -83,6 +95,43 @@ def assemble_pack(req: PackRequest) -> PackResponse:
     )
 
 
+@router.post("/packs/sectioned", response_model=SectionedPackResponse)
+def assemble_sectioned_pack(req: SectionedPackRequest) -> SectionedPackResponse:
+    """Assemble a sectioned pack with independently budgeted sections.
+
+    The SDK's ``assemble_sectioned_pack()`` targets this route; section
+    dicts are validated into ``SectionRequest`` models here (the wire
+    DTO keeps them untyped so trellis_wire stays core-free).
+    """
+    registry = get_registry()
+    try:
+        sections = [SectionRequest(**s) for s in req.sections]
+    except (ValidationError, TypeError) as exc:
+        raise HTTPException(
+            status_code=422, detail=f"Invalid section request: {exc}"
+        ) from exc
+
+    builder = _build_pack_builder(registry)
+    filters: dict[str, Any] | None = None
+    if req.domain:
+        filters = {"domain": req.domain}
+    pack = builder.build_sectioned(
+        req.intent,
+        sections=sections,
+        domain=req.domain,
+        agent_id=req.agent_id,
+        filters=filters,
+    )
+    return SectionedPackResponse(
+        pack_id=pack.pack_id,
+        intent=pack.intent,
+        domain=pack.domain,
+        agent_id=pack.agent_id,
+        sections=[s.model_dump(mode="json") for s in pack.sections],
+        advisories=[a.model_dump(mode="json") for a in pack.advisories],
+    )
+
+
 @router.get("/graph/search", summary="Search graph entities")
 def search_entities(
     q: str | None = Query(None, description="Name substring search (case-insensitive)"),
@@ -98,8 +147,12 @@ def search_entities(
     registry = get_registry()
     store = registry.knowledge.graph_store
 
-    # Detect backend by checking for SQLite vs Postgres connection
-    is_sqlite = hasattr(store, "_conn") and not hasattr(store, "conn")
+    # Detect backend by the shape of ``_conn``: SQLite stores hold a
+    # ``sqlite3.Connection`` object; the Postgres store's ``_conn`` is a
+    # *method* returning a pooled-connection context manager (used as
+    # ``with store._conn() as conn``), so callable means Postgres.
+    conn_attr = getattr(store, "_conn", None)
+    is_sqlite = conn_attr is not None and not callable(conn_attr)
 
     if is_sqlite:
         return _search_entities_sqlite(store, q, node_type, sort, order, limit, offset)

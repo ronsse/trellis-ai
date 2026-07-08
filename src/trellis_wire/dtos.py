@@ -113,6 +113,34 @@ class PackResponse(WireModel):
     retrieval_report: dict[str, Any] | None = None
 
 
+class SectionedPackRequest(WireRequestModel):
+    """Request to assemble a sectioned context pack.
+
+    ``sections`` rows are ``SectionRequest``-shaped dicts (name,
+    retrieval_affinities, content_types, scopes, entity_ids,
+    max_tokens, max_items); kept as raw dicts here so the wire
+    package stays free of trellis-core imports — the server
+    validates them into ``SectionRequest`` models.
+    """
+
+    intent: str
+    sections: list[dict[str, Any]]
+    domain: str | None = None
+    agent_id: str | None = None
+
+
+class SectionedPackResponse(WireModel):
+    """Response containing an assembled sectioned pack."""
+
+    status: str = "ok"
+    pack_id: str
+    intent: str
+    domain: str | None = None
+    agent_id: str | None = None
+    sections: list[dict[str, Any]]
+    advisories: list[dict[str, Any]] = Field(default_factory=list)
+
+
 # -- Curate --
 
 
