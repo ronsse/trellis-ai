@@ -160,11 +160,22 @@ is exactly the fragility we're trying to avoid.
 
 ### C. MCP-over-HTTP (remove in-process coupling)
 
-Deferred.  If a deployment needs MCP tools served from a separate
+~~Deferred.~~  **Accepted as an opt-in transport (2026-07-10)** — see
+[`./adr-mcp-http-transport.md`](./adr-mcp-http-transport.md).
+
+If a deployment needs MCP tools served from a separate
 process, wrapping them in an HTTP layer is a valid path — but the
 default stays in-process because most agent hosts (Claude Desktop,
 Cursor) prefer stdio MCP servers and wouldn't benefit from the
 extra hop.
+
+That default is unchanged: `TRELLIS_MCP_TRANSPORT` is `stdio` unless a
+deployment opts into `http`.  The accepted change moves only the
+**client↔server** hop onto a socket — the server still imports
+`StoreRegistry` and assembles packs in-process, so "MCP stays
+in-process" above stands as written.  The http transport authenticates
+with the same scoped `trellis_ak_*` credentials the REST surface uses
+and enforces a per-tool scope map.
 
 ## Versioning rules (reference)
 

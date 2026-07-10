@@ -356,9 +356,16 @@ serving; "denies" = HTTP 401/403 with a sanitized body.)
   *access*; it does not encrypt stored values.
 - **Rate limiting / quota / DoS protection.** Orthogonal; belongs in the
   ingress/proxy tier.
-- **MCP surface auth.** MCP is a separate, in-process contract
-  ([`adr-mcp-contract.md`](./adr-mcp-contract.md)) consumed over stdio by agent
-  hosts, not over the network; its auth model is out of scope here.
+- **MCP surface auth over stdio.** Under stdio, MCP is a separate,
+  in-process contract ([`adr-mcp-contract.md`](./adr-mcp-contract.md)) spawned by
+  the agent host, which is itself the trust boundary; there is no credential to
+  present and none is required.
+  **Amended 2026-07-10:** this non-goal originally read "MCP … consumed over
+  stdio by agent hosts, not over the network." That premise no longer holds for
+  every deployment — MCP now has an opt-in http transport, and over *that*
+  transport it is authenticated with the scoped API keys defined in Layer B
+  below. See [`adr-mcp-http-transport.md`](./adr-mcp-http-transport.md), which
+  also applies Layer A's fail-closed bind discipline to the MCP listener.
 - **Populating `DataClassification` automatically.** This ADR enforces
   classification where present and fails closed where absent; *which*
   classifier or extractor populates it is a separate decision (the schema
