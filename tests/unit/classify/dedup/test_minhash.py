@@ -1,5 +1,9 @@
 """Tests for MinHash/LSH fuzzy duplicate detection."""
 
+import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 
 from trellis.classify.dedup.minhash import MinHashIndex, _char_shingles
@@ -139,3 +143,107 @@ class TestMinHashIndex:
         matches = index.query("the quick brown fox jumps over the lazy dog today here")
         assert len(matches) >= 1
         assert matches[0][1] >= 0.95
+
+
+@pytest.fixture
+def _preempt_aggressively():
+    """Force the interpreter to switch threads often.
+
+    The races below live in two-bytecode check-then-act windows. At the
+    default 5ms switch interval they almost never interleave, so a test
+    without this passes against the unlocked implementation and proves
+    nothing.
+    """
+    original = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    yield
+    sys.setswitchinterval(original)
+
+
+@pytest.mark.usefixtures("_preempt_aggressively")
+class TestThreadSafety:
+    """A single index is shared across the worker threads of an
+    ``http``-transport MCP server, where concurrent ``save_memory``
+    calls interleave ``add()``, ``query()`` and ``remove()``.
+
+    Only :meth:`~MinHashIndex.stats` iterates shared mutable state at the
+    Python level, so it is the only method that raises today. The rest of
+    the index's check-then-act sequences are racy by construction but are
+    de facto serialised by the GIL — they are not de facto safe, and a
+    free-threaded interpreter removes that accident. The lock covers all
+    of them; only the ``stats`` test below fails against the unlocked
+    implementation.
+    """
+
+    def test_concurrent_add_of_colliding_content_keeps_every_doc(self):
+        """Concurrent adds of identical content must all reach the index.
+
+        Every document hashes to the same LSH bucket, so all threads race
+        the ``if band_hash not in bucket: bucket[band_hash] = set()``
+        check-then-act in ``add()``. ``num_bands=1`` removes the safety
+        net where ``query`` unions candidates across bands and recovers a
+        doc dropped from one of them.
+
+        This is an invariant guard, not a regression test: under the GIL
+        the two-bytecode window never opens wide enough to lose a doc, so
+        it passes against the unlocked implementation too. It exists to
+        catch a future refactor (or a free-threaded runtime) that widens
+        the window.
+        """
+        index = MinHashIndex(num_perm=32, num_bands=1, threshold=0.8)
+        n_docs = 64
+        content = "the quick brown fox jumps over the lazy dog in the park today"
+        barrier = threading.Barrier(n_docs)
+
+        def add_doc(i: int) -> None:
+            barrier.wait()
+            index.add(f"doc{i}", content)
+
+        with ThreadPoolExecutor(max_workers=n_docs) as pool:
+            list(pool.map(add_doc, range(n_docs)))
+
+        assert index.size == n_docs
+        matches = index.query(content)
+        assert len(matches) == n_docs, (
+            f"{n_docs - len(matches)} doc(s) dropped from the LSH bucket"
+        )
+
+    def test_concurrent_remove_and_stats(self):
+        """``stats()`` must not iterate a band dict that ``remove()`` mutates.
+
+        This is the real regression test. Unlocked,
+        ``sum(1 for s in band.values() ...)`` is a Python-level generator
+        over a dict view that yields between items, so a concurrent
+        ``del self._buckets[band_idx][band_hash]`` raises
+        ``RuntimeError: dictionary changed size during iteration`` —
+        which would surface as an ``INTERNAL_ERROR`` mid-tool-call.
+        Reproduces on every run against the unlocked implementation.
+        """
+        index = MinHashIndex(threshold=0.8)
+        n_docs = 128
+        for i in range(n_docs):
+            index.add(f"seed{i}", f"machine learning models for language tasks {i}")
+
+        errors: list[BaseException] = []
+        barrier = threading.Barrier(2)
+
+        def remover() -> None:
+            barrier.wait()
+            for i in range(n_docs):
+                index.remove(f"seed{i}")
+
+        def reader() -> None:
+            barrier.wait()
+            try:
+                for _ in range(n_docs):
+                    index.stats()
+            except BaseException as exc:
+                errors.append(exc)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(remover), pool.submit(reader)]
+            for f in futures:
+                f.result()
+
+        assert not errors, f"concurrent remove/stats raised: {errors[:3]}"
+        assert index.size == 0

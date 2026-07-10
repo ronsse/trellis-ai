@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import hashlib
 import struct
+import threading
 from typing import Any
 
 import structlog
@@ -83,6 +84,18 @@ class MinHashIndex:
         matches = index.query("The quikc brown fox jumps over the lazy dog")
         # matches == [("doc1", 0.92)]  # (doc_id, estimated_jaccard)
 
+    Mutating and reading methods are guarded by a re-entrant lock. A
+    single index is shared across the worker threads that serve an
+    ``http``-transport MCP server, where concurrent ``save_memory`` calls
+    interleave :meth:`add`, :meth:`query` and :meth:`remove`. Only
+    :meth:`stats` iterates shared state at the Python level, so it is the
+    only method that raises today (``dictionary changed size during
+    iteration``); the check-then-act in :meth:`add` and the set union in
+    :meth:`query` are racy by construction but currently serialised by
+    the GIL. Do not rely on that — it is an implementation accident that
+    a free-threaded interpreter removes. The lock is re-entrant because
+    :meth:`find_duplicate` delegates to :meth:`query`.
+
     Args:
         num_perm: Number of hash permutations (higher = more accurate, more RAM).
         num_bands: Number of LSH bands. ``num_perm`` must be divisible by this.
@@ -127,11 +140,13 @@ class MinHashIndex:
         self._signatures: dict[str, MinHashSignature] = {}
         # LSH buckets: band_index -> band_hash -> set of doc_ids
         self._buckets: list[dict[int, set[str]]] = [{} for _ in range(num_bands)]
+        self._lock = threading.RLock()
 
     @property
     def size(self) -> int:
         """Number of documents in the index."""
-        return len(self._signatures)
+        with self._lock:
+            return len(self._signatures)
 
     def _compute_signature(self, shingles: set[str]) -> tuple[int, ...]:
         """Compute MinHash signature from a set of shingles."""
@@ -168,31 +183,34 @@ class MinHashIndex:
             )
             return False
 
+        # Signature computation is pure and CPU-bound; keep it off the lock.
         sig_values = self._compute_signature(shingles)
         sig = MinHashSignature(doc_id, sig_values, self._num_bands)
-        self._signatures[doc_id] = sig
 
-        # Insert into LSH buckets
-        for band_idx, band_hash in enumerate(sig.bands):
-            bucket = self._buckets[band_idx]
-            if band_hash not in bucket:
-                bucket[band_hash] = set()
-            bucket[band_hash].add(doc_id)
+        with self._lock:
+            self._signatures[doc_id] = sig
+            # Insert into LSH buckets
+            for band_idx, band_hash in enumerate(sig.bands):
+                bucket = self._buckets[band_idx]
+                if band_hash not in bucket:
+                    bucket[band_hash] = set()
+                bucket[band_hash].add(doc_id)
 
         return True
 
     def remove(self, doc_id: str) -> bool:
         """Remove a document from the index. Returns ``True`` if it existed."""
-        sig = self._signatures.pop(doc_id, None)
-        if sig is None:
-            return False
-        for band_idx, band_hash in enumerate(sig.bands):
-            bucket = self._buckets[band_idx].get(band_hash)
-            if bucket is not None:
-                bucket.discard(doc_id)
-                if not bucket:
-                    del self._buckets[band_idx][band_hash]
-        return True
+        with self._lock:
+            sig = self._signatures.pop(doc_id, None)
+            if sig is None:
+                return False
+            for band_idx, band_hash in enumerate(sig.bands):
+                bucket = self._buckets[band_idx].get(band_hash)
+                if bucket is not None:
+                    bucket.discard(doc_id)
+                    if not bucket:
+                        del self._buckets[band_idx][band_hash]
+            return True
 
     def query(
         self, content: str, *, exclude_ids: set[str] | None = None
@@ -209,25 +227,34 @@ class MinHashIndex:
         sig_values = self._compute_signature(shingles)
         rows_per_band = self._num_perm // self._num_bands
 
-        # LSH candidate retrieval: collect doc_ids sharing any band
-        candidates: set[str] = set()
-        for band_idx in range(self._num_bands):
-            band_hash = hash(
-                sig_values[band_idx * rows_per_band : (band_idx + 1) * rows_per_band]
-            )
-            bucket = self._buckets[band_idx].get(band_hash)
-            if bucket:
-                candidates |= bucket
+        # Snapshot the candidate signatures under the lock. A concurrent
+        # add() mutates _buckets and _signatures, so iterating them
+        # unguarded raises "changed size during iteration". Signature
+        # objects are immutable once stored, so scoring can run outside.
+        with self._lock:
+            candidates: set[str] = set()
+            for band_idx in range(self._num_bands):
+                band_hash = hash(
+                    sig_values[
+                        band_idx * rows_per_band : (band_idx + 1) * rows_per_band
+                    ]
+                )
+                bucket = self._buckets[band_idx].get(band_hash)
+                if bucket:
+                    candidates |= bucket
 
-        if exclude_ids:
-            candidates -= exclude_ids
+            if exclude_ids:
+                candidates -= exclude_ids
+
+            candidate_sigs = [
+                (cid, sig)
+                for cid in candidates
+                if (sig := self._signatures.get(cid)) is not None
+            ]
 
         # Verify candidates against threshold
         matches: list[tuple[str, float]] = []
-        for cid in candidates:
-            csig = self._signatures.get(cid)
-            if csig is None:
-                continue
+        for cid, csig in candidate_sigs:
             jaccard = self._estimate_jaccard(sig_values, csig.values)
             if jaccard >= self._threshold:
                 matches.append((cid, jaccard))
@@ -248,11 +275,13 @@ class MinHashIndex:
 
     def stats(self) -> dict[str, Any]:
         """Return index statistics for diagnostics."""
-        non_empty_buckets = sum(
-            sum(1 for s in band.values() if s) for band in self._buckets
-        )
+        with self._lock:
+            non_empty_buckets = sum(
+                sum(1 for s in band.values() if s) for band in self._buckets
+            )
+            documents = len(self._signatures)
         return {
-            "documents": self.size,
+            "documents": documents,
             "num_perm": self._num_perm,
             "num_bands": self._num_bands,
             "threshold": self._threshold,
