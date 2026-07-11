@@ -4,6 +4,25 @@
 >
 > **Active program (2026-05-11; Cohort 1 landed 2026-05-13):** [`docs/design/plan-self-improvement-program.md`](docs/design/plan-self-improvement-program.md) — closes the loop on empirical observations, provenance, schema evolution, dogfooding, and a coding-agent self-improvement loop. Seven feature items + two cleanup tracks, swarm-decomposable. POC directive: no silent fallbacks; loud-on-misuse. **Status:** All seven feature items (Cohort 1) + C2 silent-fallback cleanup + C1 dead-code removal landed. C1 wrapped 2026-05-15 via a 4-unit swarm + bundled rollup PR (sub-item statuses in the C1 entry below). Cohort 2 of Item 7 (sandboxed Claude Code spawn) deferred to next cycle pending operator review of generated proposals + ADR amendment authorizing autonomous spawn. Section below.
 
+## Corpus ingestion & memory-system capture (2026-07-11)
+
+The importers-into-Trellis line (ADR [`adr-corpus-ingestion.md`](docs/design/adr-corpus-ingestion.md), roadmap §G). Capture real usage into memory + meter what it costs. **Landed this session** (all on `main`, CI green, CLI-only — no container rebuild): `trellis ingest corpus` (§G.1, `bb5a882`), `trellis ingest conversations` capturing claude.ai exports (§G.2, `0a7e482`), `trellis analyze cost` overhead metering (`5ea7cd5`), and `--extract` entity mining double-gated with `TRELLIS_ENABLE_MEMORY_EXTRACTION` (§G.3, `7431488`). Host convenience wrapper `~/.local/bin/trellis-skynet` runs the CLI against the prod pgvector stores.
+
+### Open follow-ups (potential next items)
+
+**Operator / deployment gates (not code — needed to produce the real signal):**
+
+- [ ] **Dogfood capture.** Export claude.ai data (Settings → Privacy → Export data), drop the `.zip` in `~/.trellis/inbox/`, run `trellis-skynet ingest conversations <export> --dry-run` then for real. Judge retrieval quality via the Memory Explorer Packs view; watch `trellis-skynet analyze cost --days 30` climb. **This is the gating signal for every §G.4 follow-up below** — pick them by observed need, not upfront.
+- [ ] **Enable `--extract` on skynet.** Add an `llm:` block to `~/.trellis/config.yaml` (local Hermes via the OpenAI-compatible Ollama endpoint keeps it free) + set `TRELLIS_ENABLE_MEMORY_EXTRACTION=1` in the `trellis-skynet` wrapper. Only `embeddings:` (nomic-embed-text) is configured today, so `--extract` currently no-ops there. Then `trellis-skynet ingest conversations <export> --extract` mines people/accounts/preferences into the graph.
+- [ ] **Nightly conversation re-sync (optional).** If dogfood proves valuable, add an export-refresh step to `stacks/trellis/curate-nightly.sh` (or a sibling) so new turns flow in without manual re-export. Depends on a stable export path — claude.ai export is manual/emailed, so this may stay a manual monthly `trellis-skynet ingest conversations` until an API-based capture exists.
+
+**§G.4 — code follow-ups (ADR §7 phases 3–5; gated on the dogfood signal above):**
+
+- [ ] **Transcript / plaintext file handler.** `.txt` + simple speaker-labelled transcripts in the `ingest corpus` handler registry (ADR §2). Audio stays out of core — transcription (Whisper on-host) is an external pre-step whose output enters through this handler.
+- [ ] **PDF handler behind an optional extra.** `ingest_corpus/handlers/pdf.py`, text-extraction only; scanned/image PDFs rejected with a clear error (ADR §7 phase 5).
+- [ ] **PackBuilder chunk rollup.** `PackBuilder` dedups by `item_id`, so two chunks of the same note/conversation can both enter a pack. Add a group-by-`parent_doc_id` rollup in the assembler (ADR §3 flags this as planned follow-up). Also: the explore/documents list view should default-filter `chunk_index` rows so chunks don't clutter the UI.
+- [ ] **Index the alias resolver before large-vault `--extract`.** `memory_ingest_hook._graph_alias_resolver` (and the MCP `save_memory` twin) is an O(n) full-graph scan capped at 2000 nodes — fine at dogfood scale, a bottleneck on a real vault. Replace with an indexed name→entity lookup (ADR §5 caveat, carried from the save_memory path).
+
 ## Self-improvement program — proposed 2026-05-11
 
 A program to close the dual-loop's promote half and add four new loops. Read [`docs/design/plan-self-improvement-program.md`](docs/design/plan-self-improvement-program.md) first (umbrella plan: ordering, dependencies, considerations, success criteria, security model). Each item below points to its own ADR + plan; each is a single swarm unit (or splittable into named phases).
