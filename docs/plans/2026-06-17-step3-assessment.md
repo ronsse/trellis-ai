@@ -138,3 +138,57 @@ Captured numbers:
 **Blocking a fully defensible assessment:**
 8. **No real-LLM run has been executed — deferred by choice (2026-06-24).** Every number in Section 4 is deterministic/synthetic. Claims that *only* a real-LLM run can show — semantic-retrieval lift on real corpora, and the cost/latency envelope — remain **open by decision**: the deterministic C1/C2/C3 claims already stand, so the real-LLM run was deferred rather than blocking. When picked up, run `program_convergence_real_llm` (cleanly skips/caps at $2) or `agent_loop_convergence_real_llm` with `MOONSHOT_API_KEY` + `OPENAI_API_KEY`; the dbt/github corpus scenarios **fail rather than skip** without those creds.
 9. **Dashboard parity — RENDERED AND CONFIRMED (commit `8bc319e`).** `tests/unit/eval/test_dashboard_eval_parity.py` now renders the dashboard (`compute_timeseries`) against the exact EventLog a convergence scenario emitted and asserts the values equal the eval's in-process metrics, on a non-trivial regime-shift run: eval `round_success_rate` 0.5 == dashboard `pack_success_rate` 0.5 (repooled across buckets), eval `round_useful_fraction_overall` ~0.43 == dashboard `reference_rate`. This upgrades §2's two matching metrics from parity-by-construction to parity-by-render under the single-UTC-day, fully-joined condition. (The three dashboard-only metrics still have no eval counterpart by design — §6 item 4.)
+
+## 7. Reproduction on current HEAD (2026-07-10)
+
+The §4 live run (2026-06-17) predates the MCP-over-HTTP work and the MinHash
+lock fix. Re-ran the full deterministic suite on branch
+`feat/mcp-http-transport` (HEAD `a8e5d88`) against **isolated scratch
+registries** (one fresh SQLite config+data dir per scenario — the live
+`~/.trellis` registry is the user's real agent memory and was **not** touched;
+the 2026-06-17 run's use of `~/.trellis` is not repeated). Command shape:
+`.venv/bin/python -m eval.runner --scenario <name> --config-dir <fresh> --data-dir <fresh>`.
+
+**Every deterministic scenario still passes, and the baseline numbers are
+byte-identical to §4** — the assessment is stable across the entire codebase
+move, which is exactly the "reproducible and defensible" bar Step 3 sets.
+
+| Scenario | Status | Key numbers (this run) | vs. prior |
+|---|---|---|---|
+| `agent_loop_convergence` (baseline) | `pass` (1.2s) | `useful_delta +0.5714`, `weighted_delta +0.0975`, served/ref 139/90, noise 100, boosted 10, suppressed 0, hit_rate 0.0 | **identical to §4** |
+| `agent_loop_convergence_degraded` | `pass` (1.2s) | `useful_delta +0.49` (gate +0.10), `success_rate 0.915`, `useful_fraction 0.7349`, noise 851, boosted 34 | consistent (strong C1+C2) |
+| `program_convergence` | `pass` (3.8s) | axis A +0.079, **axis B +0.500**, C 0.0 (vacuous, documented), D–I as designed; noise 73, boosted 5 | consistent |
+| `program_regression_suite` | `pass` (2.2s) | **all 9 axis gates PASS + 4 satellites PASS** (A 0.0545, B 0.3438, C 0.0 vacuous-pass, D 11.82, E 1.0, F 0.0, G 1.0, H 1.0, I 1.333) | consistent (CI gate green) |
+
+**C3 advisory-hit-rate — both opt-in demonstrations reconfirmed on HEAD** (the
+single weakest number in §5; §6 item 5's "measurement path proven, organic
+formation demonstrated" both re-verified live):
+- `seed_reference_advisory=true` → `loops.advisory_hit_rate` **0.0 → 1.0** with
+  `useful_delta` provably **unchanged at +0.5714** (provenance stamping is pure
+  annotation, does not move convergence).
+- `stage_organic_advisory=true` (`success_coverage_threshold=0.8`,
+  `advisory_min_sample_size=2`) → `organic_advisories_formed=1`,
+  `loops.advisory_hit_rate` **0.5962** organically (AdvisoryGenerator forms the
+  advisory from its own event statistics, nothing pre-seeded).
+
+**Net:** C1, C2, and C3 all stand deterministically on the shipping branch. The
+two documented zeros (`axis.C=0.0`, `suppressed_total=0` in default mode) remain
+corpus artifacts, not mechanism failures — both are driven positive by the
+opt-in knobs above / the unit tests, exactly as §6 items 5–6 describe.
+
+**Real-LLM status (open item #8) — still open, now with a concrete environment
+read.** No cloud creds are present in this environment (`OPENAI_API_KEY`,
+`MOONSHOT_API_KEY`, `ANTHROPIC_API_KEY` all unset). Local Ollama **is** up
+(`hermes3:8b` chat, `nomic-embed-text` embeddings, OpenAI-compatible at
+`localhost:11434/v1`). Three ways forward, in ascending cost/confidence:
+- **Leave deferred** — the deterministic C1/C2/C3 claims already stand; #8 only
+  adds "holds under real semantic retrieval on real corpora" + a cost envelope.
+- **Local-Ollama code-path smoke** (~free) — repoint the real-LLM factory's
+  chat + embedder `base_url` at Ollama and set `embedding_dim=768`
+  (`nomic-embed-text`). Proves the real-LLM path executes end-to-end against a
+  live model, but yields **no production-grade quality signal and no real cost
+  envelope** — the two things #8 actually wants. A smoke, not the evidence.
+- **Cloud run** ($1–2 capped) — the real evidence. `program_convergence_real_llm`
+  caps at $2 and skips cleanly; `agent_loop_convergence_real_llm` needs
+  `MOONSHOT_API_KEY` + `OPENAI_API_KEY`. **Requires a spend decision + creds via
+  1Password — a user call, not taken here.**
