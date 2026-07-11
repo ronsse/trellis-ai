@@ -50,7 +50,7 @@ pytest tests/unit/stores/test_graph_store.py::test_upsert_and_get_node -v
 
 ### Five Packages, One Core
 
-All packages depend on `trellis` (core library) and share configuration via `StoreRegistry.from_config_dir()` reading `~/.config/trellis/config.yaml` or env vars.
+All packages depend on `trellis` (core library) and share configuration via `StoreRegistry.from_config_dir()` reading `~/.trellis/config.yaml` (or `$TRELLIS_CONFIG_DIR/config.yaml`) or env vars.
 
 | Package | Entry Point | Access Pattern |
 |---------|-------------|----------------|
@@ -137,3 +137,8 @@ Detailed operational reference lives in `docs/agent-guide/`:
 | [operations.md](docs/agent-guide/operations.md) | Full CLI, REST API, MCP, and Python mutation API reference |
 | [playbooks.md](docs/agent-guide/playbooks.md) | Step-by-step procedures for common tasks |
 | [pack-quality-evaluation.md](docs/agent-guide/pack-quality-evaluation.md) | Assembly-time pack scoring (6 dimensions, one opt-in via `expected_shapes`), profiles, scenario fixtures, optional `PackBuilder(evaluator=...)` hook |
+
+## Product docs
+
+- `docs/PRD.md` — product thesis, adopter profiles, component disposition
+- `docs/ROADMAP-EDITS-2026-07-11.md` — proposed edit-set for `docs/design/implementation-roadmap.md` (which stays the authoritative roadmap)
