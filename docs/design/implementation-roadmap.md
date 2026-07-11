@@ -1,6 +1,6 @@
 # Implementation Roadmap
 
-**Last updated:** 2026-07-11 (corpus ingestion §G.1 landed — `trellis ingest corpus` with markdown handler, chunking, idempotent re-sync; MCP-over-HTTP transport merged #252)
+**Last updated:** 2026-07-11 (corpus §G.1 + **conversation capture** landed — `trellis ingest corpus` / `trellis ingest conversations`; **`trellis analyze cost`** meters Trellis's token/dollar overhead; MCP-over-HTTP transport merged #252)
 **Purpose:** Single-page hand-off for any agent (fresh or returning) picking up Trellis implementation work. Self-contained. Read this top-to-bottom before touching code.
 
 > **Picking up evaluation work?** The eval harness and all planned scenarios are built — see [`../plans/2026-06-17-step3-assessment.md`](../plans/2026-06-17-step3-assessment.md) for what each scenario substantiates (its §6 evidence rules are authoritative). [`plan-evaluation-strategy.md`](./plan-evaluation-strategy.md) is the historical plan they grew from.
@@ -42,6 +42,7 @@
 | 2026-07-08 | **Memory Explorer** observability surface (explore routes + Memories/Events/Packs UI views + node History); `POST /packs/sectioned` route added (SDK had targeted a nonexistent route); Postgres `/graph/search` backend-detection bug fixed (latent since the skynet Postgres migration); docs refreshed to memory-system framing; corpus-ingestion ADR proposed, memory-layer ADR superseded | [`adr-corpus-ingestion.md`](./adr-corpus-ingestion.md); [surfaces.md](../agent-guide/surfaces.md) |
 | 2026-07-10 | **MCP-over-HTTP transport** merged (#252): opt-in `TRELLIS_MCP_TRANSPORT=http` with scoped API-key auth, serving remote agents (omen) from the skynet deployment; MinHashIndex re-entrant lock fix | [`adr-mcp-http-transport.md`](./adr-mcp-http-transport.md) |
 | 2026-07-11 | **Corpus ingestion §G.1 landed**: `trellis ingest corpus` — walker + markdown handler (frontmatter→metadata, wikilink capture) + deterministic paragraph-aware chunker (chunk docs `<parent>#chunk-<i>` under the embed cap) + idempotent re-sync (`content_hash` skip, `get_by_hash` move re-key, per-chunk re-embed, `--prune`, near-dup warnings, `--dry-run`); new `CORPUS_SYNCED` event | [`adr-corpus-ingestion.md`](./adr-corpus-ingestion.md); [operations.md → `trellis ingest corpus`](../agent-guide/operations.md) |
+| 2026-07-11 | **Usage capture + cost metering** (the local-usability push): `trellis ingest conversations` imports claude.ai chat exports (one doc per conversation, speaker-labelled transcript, chunked + embedded, idempotent by uuid) — the personal corpus the Claude Code / MCP path never sees; sync core refactored to a record-oriented `sync_records` shared by files + conversations. `trellis analyze cost` prices Trellis's injected-context overhead in tokens + dollars (`token_pricing` family table, honest absolute-not-ratio framing) — the effectiveness denominator | [operations.md → `ingest conversations` / `analyze cost`](../agent-guide/operations.md) |
 
 ### Test suite shape (2026-07-02)
 
@@ -269,11 +270,27 @@ Phase 0 (reserved-namespace validator + schema definitions) was landed in earlie
 
 Phases 1–2 of the ADR's §7 sketch are implemented and tested: directory walker + pure format-handler registry (markdown: frontmatter→metadata, wikilink capture), deterministic paragraph-aware chunker (chunk docs `<parent>#chunk-<i>` with `{parent_doc_id, chunk_index, chunk_count, source_path, char_span}` metadata, every chunk under the 8k embed cap by construction), stable `doc_id = corpus:<source_system>:<sha1(relpath)>`, `content_hash` skip-unchanged re-sync (zero writes on an unchanged tree), per-chunk re-embed on edit, `get_by_hash` move re-keying, MinHash near-dup warnings (warn, never skip), `--dry-run`/`--prune`/`--format json`, `MEMORY_STORED` per new/changed doc + a `CORPUS_SYNCED` run summary event. Lives in `src/trellis/ingest_corpus/` + `src/trellis_cli/ingest_corpus.py`; 51 tests under `tests/unit/ingest_corpus/` + `tests/unit/cli/test_ingest_corpus.py`. Reference: [operations.md → `trellis ingest corpus`](../agent-guide/operations.md).
 
-#### G.2 — follow-up phases (ADR §7 phases 3–5)
+#### G.2 — conversation capture — **LANDED 2026-07-11**
 
-**Scope:** transcript/plaintext handler, `--extract` LLM pass (wired to `build_save_memory_extractor`, double-gated), PDF handler behind an optional extra. Audio stays out of core (external transcription pre-step).
+`trellis ingest conversations` imports a claude.ai data export
+(`conversations.json` / its `.zip`) into one document per conversation —
+speaker-labelled transcript, `doc_id = conversation:<sys>:<uuid>` (move
+detection off, uuids being content-independent), chunked + embedded,
+idempotent (a re-export with new turns re-puts). This is the **real
+usage-signal capture**: the personal corpus (preferences, people,
+decisions) the Claude Code / MCP path never produces. The sync core was
+refactored into a record-oriented `sync_records` shared by the file
+walker and the conversation reader (`SyncRecord` is the reader→core
+seam). Lives in `src/trellis/ingest_corpus/conversations.py` +
+`src/trellis_cli/ingest_conversations.py`; 30 tests. The `--extract`
+entity-mining pass (ADR §5) is the natural next enhancement — storing +
+embedding already makes conversations retrievable.
 
-**Gating signal:** skynet dogfood — ingest the owner's real notes vault with G.1, judge retrieval quality through the Memory Explorer packs view, then pick follow-ups by observed need. Retrieval-side chunk rollup (group-by-`parent_doc_id` in `PackBuilder`) is a planned follow-up the ADR §3 flags.
+#### G.3 — remaining follow-up phases (ADR §7 phases 3–5)
+
+**Scope:** `--extract` LLM pass over conversations/corpus (wired to `build_save_memory_extractor`, double-gated) to mine entities (people, accounts, preferences) into the graph; transcript/plaintext file handler; PDF handler behind an optional extra. Audio stays out of core (external transcription pre-step). Retrieval-side chunk rollup (group-by-`parent_doc_id` in `PackBuilder`) is a planned follow-up the ADR §3 flags.
+
+**Gating signal:** skynet dogfood — ingest the owner's real vault + Claude chat export, judge retrieval quality through the Memory Explorer packs view and the `trellis analyze cost` overhead figure, then pick follow-ups by observed need.
 
 ---
 
