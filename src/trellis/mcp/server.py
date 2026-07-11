@@ -30,6 +30,7 @@ that previously did ``if result.startswith("Error:")`` need to catch
 from __future__ import annotations
 
 import json
+import threading
 from typing import Any, NoReturn
 
 import structlog
@@ -164,6 +165,16 @@ def _build_pack_builder(registry: StoreRegistry) -> PackBuilder:
 
 
 _minhash_index: Any = None
+
+#: Serializes ``save_memory``'s dedup-and-store critical section. The
+#: MinHashIndex lock makes each index call atomic, but the dedup DECISION
+#: spans exact-hash check → fuzzy find → document_store.put → index add,
+#: which the per-method lock cannot make atomic. Without this, two http
+#: worker threads saving the same (or near-identical) content both miss
+#: dedup and both persist. save_memory is a write, not a hot path, so
+#: serializing its dedup section is cheap. Held only around the decision;
+#: event emit / extraction / embedding run outside it.
+_save_memory_lock = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -801,59 +812,66 @@ def save_memory(
     registry = _get_registry()
     metadata = metadata or {}
 
-    # Dedup stage 1: exact content hash match.
     chash = content_hash(content)
-    existing = registry.knowledge.document_store.get_by_hash(chash)
-    if existing is not None:
-        existing_id = existing["doc_id"]
-        logger.debug("save_memory_dedup_exact", doc_id=existing_id, content_hash=chash)
-        return f"Memory already exists: {existing_id}"
 
-    # Dedup stage 2: fuzzy MinHash/LSH match (catches typos, casing, punctuation).
-    try:
-        minhash_index = _get_minhash_index(registry)
-        if minhash_index is not None:
-            match = minhash_index.find_duplicate(content)
-            if match is not None:
-                match_id, similarity = match
-                logger.debug(
-                    "save_memory_dedup_fuzzy",
-                    match_id=match_id,
-                    similarity=round(similarity, 3),
-                )
-                return f"Fuzzy duplicate (similarity {similarity:.0%}): {match_id}"
-    except McpError:
-        # _get_minhash_index already wrapped the cause structurally.
-        raise
-    except Exception as exc:
-        logger.exception("save_memory_minhash_failed")
-        _raise_internal(
-            f"fuzzy dedup query failed: {exc}",
-            cause=exc,
-            data={"stage": "minhash_find"},
+    # Dedup decision + store, serialized so concurrent http workers can't
+    # both pass the checks and both persist. The returns for an existing
+    # exact or fuzzy match release the lock on the way out.
+    with _save_memory_lock:
+        # Dedup stage 1: exact content hash match.
+        existing = registry.knowledge.document_store.get_by_hash(chash)
+        if existing is not None:
+            existing_id = existing["doc_id"]
+            logger.debug(
+                "save_memory_dedup_exact", doc_id=existing_id, content_hash=chash
+            )
+            return f"Memory already exists: {existing_id}"
+
+        # Dedup stage 2: fuzzy MinHash/LSH (catches typos, casing, punctuation).
+        try:
+            minhash_index = _get_minhash_index(registry)
+            if minhash_index is not None:
+                match = minhash_index.find_duplicate(content)
+                if match is not None:
+                    match_id, similarity = match
+                    logger.debug(
+                        "save_memory_dedup_fuzzy",
+                        match_id=match_id,
+                        similarity=round(similarity, 3),
+                    )
+                    return f"Fuzzy duplicate (similarity {similarity:.0%}): {match_id}"
+        except McpError:
+            # _get_minhash_index already wrapped the cause structurally.
+            raise
+        except Exception as exc:
+            logger.exception("save_memory_minhash_failed")
+            _raise_internal(
+                f"fuzzy dedup query failed: {exc}",
+                cause=exc,
+                data={"stage": "minhash_find"},
+            )
+
+        stored_id = registry.knowledge.document_store.put(
+            doc_id, content, metadata=metadata
         )
 
-    stored_id = registry.knowledge.document_store.put(
-        doc_id, content, metadata=metadata
-    )
-
-    # Add to MinHash index for future fuzzy dedup. The write already
-    # succeeded; an index-add failure means future calls won't see this
-    # doc in fuzzy lookups but the doc itself is persisted — surface as
-    # a real error so operators can diagnose the dedup drift.
-    try:
-        minhash_index = _get_minhash_index(registry)
-        if minhash_index is not None:
-            minhash_index.add(stored_id, content)
-    except McpError:
-        raise
-    except Exception as exc:
-        logger.exception("save_memory_minhash_index_add_failed", doc_id=stored_id)
-        _raise_internal(
-            f"failed to index stored memory for fuzzy dedup: {exc}",
-            cause=exc,
-            data={"stage": "minhash_add", "doc_id": stored_id},
-        )
+        # Add to MinHash index for future fuzzy dedup. The write already
+        # succeeded; an index-add failure means future calls won't see this
+        # doc in fuzzy lookups but the doc itself is persisted — surface as
+        # a real error so operators can diagnose the dedup drift.
+        try:
+            minhash_index = _get_minhash_index(registry)
+            if minhash_index is not None:
+                minhash_index.add(stored_id, content)
+        except McpError:
+            raise
+        except Exception as exc:
+            logger.exception("save_memory_minhash_index_add_failed", doc_id=stored_id)
+            _raise_internal(
+                f"failed to index stored memory for fuzzy dedup: {exc}",
+                cause=exc,
+                data={"stage": "minhash_add", "doc_id": stored_id},
+            )
 
     # Emit MEMORY_STORED so enrichment / promotion workers can react.
     try:
@@ -1875,20 +1893,7 @@ def _install_shutdown_signal_handlers() -> None:
         if signum == signal.SIGINT:
             raise KeyboardInterrupt
 
-    for sig_name in ("SIGTERM", "SIGINT"):
-        sig = getattr(signal, sig_name, None)
-        if sig is None:
-            continue
-        try:
-            signal.signal(sig, _handler)
-        except (AttributeError, ValueError, OSError):
-            # GRACEFUL-DEGRADATION: best-effort signal handler install.
-            # ValueError: signal only works in main thread / not supported
-            # OSError: same on some platforms
-            # AttributeError: defensive, in case of platform stubbing.
-            # Falling back to the default handler is correct — the
-            # stdio-EOF shutdown path still works.
-            logger.debug("mcp_server_signal_unsupported", signal=sig_name)
+    _install_signal_handlers(_handler)
 
 
 def _install_http_shutdown_signal_handlers() -> None:
@@ -1909,46 +1914,84 @@ def _install_http_shutdown_signal_handlers() -> None:
     ours, so they never suppress the shutdown itself — uvicorn's handler
     is what's bound while the server is actually serving.
     """
-    import signal  # noqa: PLC0415
 
     def _handler(signum: int, _frame: Any) -> None:
         logger.info("mcp_server_shutdown_signal", signal=signum)
+
+    _install_signal_handlers(_handler)
+
+
+def _install_signal_handlers(handler: Any) -> None:
+    """Best-effort install of ``handler`` for SIGTERM and SIGINT.
+
+    Shared by the stdio and http shutdown paths, which differ only in
+    what the handler does. Tolerates platforms where a signal is absent
+    or ``signal.signal`` refuses (not the main thread, Windows SIGTERM):
+    falling back to the default handler is correct in both callers.
+    """
+    import signal  # noqa: PLC0415
 
     for sig_name in ("SIGTERM", "SIGINT"):
         sig = getattr(signal, sig_name, None)
         if sig is None:
             continue
         try:
-            signal.signal(sig, _handler)
+            signal.signal(sig, handler)
         except (AttributeError, ValueError, OSError):
-            # GRACEFUL-DEGRADATION: best-effort install, as for stdio. The
-            # cost of falling back to the default handler is an ungraceful
-            # registry close, not a hang.
             logger.debug("mcp_server_signal_unsupported", signal=sig_name)
 
 
-#: Stores whose lazy ``_get`` is a lock-free check-then-act. Building
-#: them on the main thread before uvicorn accepts a request keeps two
-#: worker threads from each instantiating one (the loser leaks its
-#: connection pool and re-runs ``_init_schema``).
-_KNOWLEDGE_STORES = ("document_store", "graph_store", "vector_store", "blob_store")
-_OPERATIONAL_STORES = ("trace_store", "event_log", "parameter_store", "api_key_store")
+#: Stores a tool cannot work without. A broken one SHOULD crash http boot
+#: loudly, like the REST API's readiness gate — not surface as a per-request
+#: 500. Built on the main thread so concurrent worker threads never race the
+#: lock-free lazy init in ``StoreRegistry._get`` (the loser would leak its
+#: connection pool and re-run ``_init_schema``). ``blob_store`` is absent on
+#: purpose: no MCP tool touches it, so forcing it would make e.g. a missing
+#: ``[s3]`` extra a hard boot dependency for a store the surface never uses.
+_REQUIRED_KNOWLEDGE_STORES = ("document_store", "graph_store")
+_REQUIRED_OPERATIONAL_STORES = (
+    "trace_store",
+    "event_log",
+    "parameter_store",
+    "api_key_store",
+)
 
 
 def _prewarm_registry(registry: StoreRegistry) -> None:
-    """Force every lazily-cached singleton to build, single-threaded.
+    """Force lazily-cached singletons to build, single-threaded.
 
-    Only needed for the ``http`` transport, where one process serves
-    many concurrent sessions. Under stdio there is one process per
-    session and nothing is ever contended.
+    Only for the ``http`` transport, where one process serves many
+    concurrent sessions and ``StoreRegistry._get`` plus the module-level
+    ``_get_*`` caches are lock-free check-then-act. Under stdio there is
+    one process per session and nothing is ever contended.
+
+    Required stores build eagerly and fail loud. The degradable
+    singletons below build best-effort: winning the init race is worth
+    it, but a build failure must NOT sink the server — the tool paths
+    already fall back (semantic search → keyword/graph, embed-on-ingest
+    is fail-soft, memory extraction is feature-flagged). Forcing them to
+    succeed would turn graceful degradation into a hard http boot
+    dependency the stdio path never had.
     """
-    for name in _KNOWLEDGE_STORES:
+    for name in _REQUIRED_KNOWLEDGE_STORES:
         getattr(registry.knowledge, name)
-    for name in _OPERATIONAL_STORES:
+    for name in _REQUIRED_OPERATIONAL_STORES:
         getattr(registry.operational, name)
-    _ = registry.embedding_fn
     _ = registry.budget_config
     _get_minhash_index(registry)
+
+    for label, build in (
+        ("vector_store", lambda: registry.knowledge.vector_store),
+        ("embedding_fn", lambda: registry.embedding_fn),
+        ("memory_extractor", lambda: _get_memory_extractor(registry)),
+    ):
+        try:
+            build()
+        except Exception:
+            # GRACEFUL-DEGRADATION: log the component, not the exception —
+            # the same fail-soft posture the call sites take at runtime.
+            logger.warning("mcp_prewarm_optional_unavailable", component=label)
+
     logger.info("mcp_registry_prewarmed")
 
 

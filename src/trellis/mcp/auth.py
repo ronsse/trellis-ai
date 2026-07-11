@@ -112,23 +112,33 @@ class HttpSettings:
         return self.auth_mode == AUTH_MODE_REQUIRED
 
 
+def _resolve_enum_env(env_var: str, valid: frozenset[str], default: str) -> str:
+    """Resolve a lowercase-enum env var, raising loudly on a bad value.
+
+    Unset / empty → ``default``. Any other unrecognised value is a
+    ``ConfigError`` rather than a silent guess — the shared skeleton
+    behind :func:`resolve_transport` and :func:`resolve_mcp_auth_mode`.
+    """
+    raw = os.environ.get(env_var)
+    if raw is None or not raw.strip():
+        return default
+    value = raw.strip().lower()
+    if value not in valid:
+        msg = (
+            f"Invalid {env_var}={raw!r}; expected one of"
+            f" {sorted(valid)}. Refusing to guess."
+        )
+        raise ConfigError(msg, setting=env_var)
+    return value
+
+
 def resolve_transport() -> str:
     """Return the effective transport, raising loudly on a bad value.
 
     Unset / empty → ``stdio``, preserving the historical behaviour of a
     bare ``trellis-mcp`` invocation.
     """
-    raw = os.environ.get(TRANSPORT_ENV)
-    if raw is None or not raw.strip():
-        return TRANSPORT_STDIO
-    transport = raw.strip().lower()
-    if transport not in _VALID_TRANSPORTS:
-        msg = (
-            f"Invalid {TRANSPORT_ENV}={raw!r}; expected one of"
-            f" {sorted(_VALID_TRANSPORTS)}. Refusing to guess a transport."
-        )
-        raise ConfigError(msg, setting=TRANSPORT_ENV)
-    return transport
+    return _resolve_enum_env(TRANSPORT_ENV, _VALID_TRANSPORTS, TRANSPORT_STDIO)
 
 
 def resolve_mcp_auth_mode() -> str:
@@ -139,22 +149,17 @@ def resolve_mcp_auth_mode() -> str:
     socket; defaulting that to unauthenticated would be the wrong way
     round.
     """
-    raw = os.environ.get(AUTH_MODE_ENV)
-    if raw is None or not raw.strip():
-        return AUTH_MODE_REQUIRED
-    mode = raw.strip().lower()
-    if mode not in _VALID_AUTH_MODES:
-        msg = (
-            f"Invalid {AUTH_MODE_ENV}={raw!r}; expected one of"
-            f" {sorted(_VALID_AUTH_MODES)}. Refusing to guess an auth posture."
-        )
-        raise ConfigError(msg, setting=AUTH_MODE_ENV)
-    return mode
+    return _resolve_enum_env(AUTH_MODE_ENV, _VALID_AUTH_MODES, AUTH_MODE_REQUIRED)
 
 
 def _is_loopback(host: str) -> bool:
-    """Whether ``host`` names only the local machine."""
-    if host in ("localhost", ""):
+    """Whether ``host`` names only the local machine.
+
+    ``""`` is deliberately NOT loopback: an empty bind host means
+    ``INADDR_ANY`` (all interfaces), the most exposed bind, so the
+    fail-closed check must treat it as routable.
+    """
+    if host == "localhost":
         return True
     try:
         return ipaddress.ip_address(host).is_loopback
@@ -248,11 +253,6 @@ def set_auth_enforced(*, enforced: bool) -> None:
     """
     _auth_state.enforced = enforced
     _auth_state.warned_anonymous = False
-
-
-def is_auth_enforced() -> bool:
-    """Whether :func:`trellis_scope` checks currently enforce scopes."""
-    return _auth_state.enforced
 
 
 def _warn_anonymous_once() -> None:

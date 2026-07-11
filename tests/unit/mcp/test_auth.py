@@ -24,6 +24,7 @@ from trellis.mcp.auth import (
     DEFAULT_PORT,
     TRANSPORT_HTTP,
     TRANSPORT_STDIO,
+    HttpSettings,
     TrellisApiKeyVerifier,
     resolve_http_settings,
     resolve_mcp_auth_mode,
@@ -31,7 +32,7 @@ from trellis.mcp.auth import (
     set_auth_enforced,
     trellis_scope,
 )
-from trellis.mcp.server import mcp
+from trellis.mcp.server import _configure_http_auth, mcp
 
 from .conftest import mint
 
@@ -367,3 +368,45 @@ class TestToolScopeMap:
             if t.auth(_ctx(_token(SCOPE_ADMIN)))  # type: ignore[attr-defined]
         }
         assert visible == set(EXPECTED_TOOL_SCOPES)
+
+
+# ---------------------------------------------------------------------------
+# The verifier ↔ enforcement wiring (_configure_http_auth)
+# ---------------------------------------------------------------------------
+
+
+def _settings(auth_mode: str) -> HttpSettings:
+    return HttpSettings(host="127.0.0.1", port=8421, path="/mcp", auth_mode=auth_mode)
+
+
+class TestConfigureHttpAuth:
+    """The security-critical glue that pairs the token verifier with the
+    scope-enforcement flag. The two are separate switches (FastMCP reads
+    ``mcp.auth`` for authentication; ``trellis_scope`` reads the enforced
+    flag for authorization); this asserts they can only be set in agreement,
+    so a regression that enabled one without the other — the fail-open case
+    a read-scoped key invoking a mutate tool — is caught.
+    """
+
+    def test_required_attaches_verifier_and_enforces(self) -> None:
+        _configure_http_auth(_settings(AUTH_MODE_REQUIRED))
+        assert isinstance(mcp.auth, TrellisApiKeyVerifier)
+        # Enforcement ON: an anonymous caller is denied every scope...
+        assert trellis_scope(SCOPE_READ)(_ctx(None)) is False
+        # ...and a scoped token is held to its scope (no silent bypass).
+        assert trellis_scope(SCOPE_MUTATE)(_ctx(_token(SCOPE_READ))) is False
+        assert trellis_scope(SCOPE_READ)(_ctx(_token(SCOPE_READ))) is True
+
+    def test_off_detaches_verifier_and_skips_enforcement(self) -> None:
+        _configure_http_auth(_settings(AUTH_MODE_OFF))
+        assert mcp.auth is None
+        # Enforcement OFF: the loopback-only, operator-chosen posture — an
+        # anonymous caller passes, matching mcp.auth being absent.
+        assert trellis_scope(SCOPE_MUTATE)(_ctx(None)) is True
+
+    def test_required_after_off_re_enforces(self) -> None:
+        """Reconfiguring must flip BOTH switches, not leave a stale one."""
+        _configure_http_auth(_settings(AUTH_MODE_OFF))
+        _configure_http_auth(_settings(AUTH_MODE_REQUIRED))
+        assert isinstance(mcp.auth, TrellisApiKeyVerifier)
+        assert trellis_scope(SCOPE_READ)(_ctx(None)) is False
