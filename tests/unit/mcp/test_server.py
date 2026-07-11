@@ -310,6 +310,45 @@ class TestSaveMemory:
         assert event.payload["metadata"] == {"domain": "ops"}
         assert "content_hash" in event.payload
 
+    def test_concurrent_identical_saves_persist_once(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        """The dedup decision must be atomic across concurrent http workers.
+
+        The MinHashIndex lock makes each index call atomic, but the
+        decision spans exact-hash check → fuzzy find → put → index add.
+        Under the http transport those run in parallel worker threads;
+        without ``_save_memory_lock`` two identical saves both miss the
+        check-then-act and both persist. Asserting a single MEMORY_STORED
+        event is the discriminator — it fails against an unlocked section.
+        """
+        import sys
+        import threading
+        from concurrent.futures import ThreadPoolExecutor
+
+        from trellis.stores.base.event_log import EventType
+
+        n_threads = 16
+        barrier = threading.Barrier(n_threads)
+        original = sys.getswitchinterval()
+        sys.setswitchinterval(1e-6)  # widen the check-then-act window
+
+        def save() -> str:
+            barrier.wait()
+            return save_memory("the same memory saved many times at once")
+
+        try:
+            with ThreadPoolExecutor(max_workers=n_threads) as pool:
+                results = list(pool.map(lambda _: save(), range(n_threads)))
+        finally:
+            sys.setswitchinterval(original)
+
+        events = temp_registry.operational.event_log.get_events(
+            event_type=EventType.MEMORY_STORED, limit=100
+        )
+        assert len(events) == 1, f"{len(events)} documents persisted, expected 1"
+        assert sum(r.startswith("Memory saved:") for r in results) == 1
+
 
 # ---------------------------------------------------------------------------
 # save_memory — embed-on-ingest (feature-flagged)

@@ -30,6 +30,7 @@ that previously did ``if result.startswith("Error:")`` need to catch
 from __future__ import annotations
 
 import json
+import threading
 from typing import Any, NoReturn
 
 import structlog
@@ -37,8 +38,18 @@ from fastmcp import FastMCP
 from mcp.shared.exceptions import McpError
 from mcp.types import INTERNAL_ERROR, INVALID_PARAMS, ErrorData
 
+from trellis.auth import SCOPE_INGEST, SCOPE_MUTATE, SCOPE_READ
 from trellis.extract.trace_ingest_hook import run_trace_extraction
 from trellis.logging import configure_stderr_logging
+from trellis.mcp.auth import (
+    TRANSPORT_HTTP,
+    HttpSettings,
+    TrellisApiKeyVerifier,
+    resolve_http_settings,
+    resolve_transport,
+    set_auth_enforced,
+    trellis_scope,
+)
 from trellis.mutate import (
     Command,
     CommandStatus,
@@ -154,6 +165,16 @@ def _build_pack_builder(registry: StoreRegistry) -> PackBuilder:
 
 
 _minhash_index: Any = None
+
+#: Serializes ``save_memory``'s dedup-and-store critical section. The
+#: MinHashIndex lock makes each index call atomic, but the dedup DECISION
+#: spans exact-hash check → fuzzy find → document_store.put → index add,
+#: which the per-method lock cannot make atomic. Without this, two http
+#: worker threads saving the same (or near-identical) content both miss
+#: dedup and both persist. save_memory is a write, not a hot path, so
+#: serializing its dedup section is cheap. Held only around the decision;
+#: event emit / extraction / embedding run outside it.
+_save_memory_lock = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -422,7 +443,7 @@ def _get_minhash_index(registry: StoreRegistry) -> Any:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(auth=trellis_scope(SCOPE_READ))
 def get_context(  # noqa: PLR0912, PLR0915
     intent: str,
     domain: str | None = None,
@@ -535,9 +556,7 @@ def get_context(  # noqa: PLR0912, PLR0915
         embedding_fn = registry.embedding_fn
         vector_store = getattr(registry.knowledge, "vector_store", None)
         if embedding_fn is not None and vector_store is not None:
-            vec_filters: dict[str, Any] | None = (
-                {"domain": domain} if domain else None
-            )
+            vec_filters: dict[str, Any] | None = {"domain": domain} if domain else None
             hits = vector_store.query(
                 embedding_fn(intent), top_k=10, filters=vec_filters
             )
@@ -646,7 +665,7 @@ def get_context(  # noqa: PLR0912, PLR0915
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(auth=trellis_scope(SCOPE_INGEST))
 def save_experience(trace_json: str) -> str:
     """Save an experience trace to the graph.
 
@@ -702,7 +721,7 @@ def save_experience(trace_json: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(auth=trellis_scope(SCOPE_INGEST))
 def save_knowledge(
     name: str,
     entity_type: str = "concept",
@@ -764,7 +783,7 @@ def save_knowledge(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(auth=trellis_scope(SCOPE_INGEST))
 def save_memory(
     content: str,
     metadata: dict[str, Any] | None = None,
@@ -793,59 +812,66 @@ def save_memory(
     registry = _get_registry()
     metadata = metadata or {}
 
-    # Dedup stage 1: exact content hash match.
     chash = content_hash(content)
-    existing = registry.knowledge.document_store.get_by_hash(chash)
-    if existing is not None:
-        existing_id = existing["doc_id"]
-        logger.debug("save_memory_dedup_exact", doc_id=existing_id, content_hash=chash)
-        return f"Memory already exists: {existing_id}"
 
-    # Dedup stage 2: fuzzy MinHash/LSH match (catches typos, casing, punctuation).
-    try:
-        minhash_index = _get_minhash_index(registry)
-        if minhash_index is not None:
-            match = minhash_index.find_duplicate(content)
-            if match is not None:
-                match_id, similarity = match
-                logger.debug(
-                    "save_memory_dedup_fuzzy",
-                    match_id=match_id,
-                    similarity=round(similarity, 3),
-                )
-                return f"Fuzzy duplicate (similarity {similarity:.0%}): {match_id}"
-    except McpError:
-        # _get_minhash_index already wrapped the cause structurally.
-        raise
-    except Exception as exc:
-        logger.exception("save_memory_minhash_failed")
-        _raise_internal(
-            f"fuzzy dedup query failed: {exc}",
-            cause=exc,
-            data={"stage": "minhash_find"},
+    # Dedup decision + store, serialized so concurrent http workers can't
+    # both pass the checks and both persist. The returns for an existing
+    # exact or fuzzy match release the lock on the way out.
+    with _save_memory_lock:
+        # Dedup stage 1: exact content hash match.
+        existing = registry.knowledge.document_store.get_by_hash(chash)
+        if existing is not None:
+            existing_id = existing["doc_id"]
+            logger.debug(
+                "save_memory_dedup_exact", doc_id=existing_id, content_hash=chash
+            )
+            return f"Memory already exists: {existing_id}"
+
+        # Dedup stage 2: fuzzy MinHash/LSH (catches typos, casing, punctuation).
+        try:
+            minhash_index = _get_minhash_index(registry)
+            if minhash_index is not None:
+                match = minhash_index.find_duplicate(content)
+                if match is not None:
+                    match_id, similarity = match
+                    logger.debug(
+                        "save_memory_dedup_fuzzy",
+                        match_id=match_id,
+                        similarity=round(similarity, 3),
+                    )
+                    return f"Fuzzy duplicate (similarity {similarity:.0%}): {match_id}"
+        except McpError:
+            # _get_minhash_index already wrapped the cause structurally.
+            raise
+        except Exception as exc:
+            logger.exception("save_memory_minhash_failed")
+            _raise_internal(
+                f"fuzzy dedup query failed: {exc}",
+                cause=exc,
+                data={"stage": "minhash_find"},
+            )
+
+        stored_id = registry.knowledge.document_store.put(
+            doc_id, content, metadata=metadata
         )
 
-    stored_id = registry.knowledge.document_store.put(
-        doc_id, content, metadata=metadata
-    )
-
-    # Add to MinHash index for future fuzzy dedup. The write already
-    # succeeded; an index-add failure means future calls won't see this
-    # doc in fuzzy lookups but the doc itself is persisted — surface as
-    # a real error so operators can diagnose the dedup drift.
-    try:
-        minhash_index = _get_minhash_index(registry)
-        if minhash_index is not None:
-            minhash_index.add(stored_id, content)
-    except McpError:
-        raise
-    except Exception as exc:
-        logger.exception("save_memory_minhash_index_add_failed", doc_id=stored_id)
-        _raise_internal(
-            f"failed to index stored memory for fuzzy dedup: {exc}",
-            cause=exc,
-            data={"stage": "minhash_add", "doc_id": stored_id},
-        )
+        # Add to MinHash index for future fuzzy dedup. The write already
+        # succeeded; an index-add failure means future calls won't see this
+        # doc in fuzzy lookups but the doc itself is persisted — surface as
+        # a real error so operators can diagnose the dedup drift.
+        try:
+            minhash_index = _get_minhash_index(registry)
+            if minhash_index is not None:
+                minhash_index.add(stored_id, content)
+        except McpError:
+            raise
+        except Exception as exc:
+            logger.exception("save_memory_minhash_index_add_failed", doc_id=stored_id)
+            _raise_internal(
+                f"failed to index stored memory for fuzzy dedup: {exc}",
+                cause=exc,
+                data={"stage": "minhash_add", "doc_id": stored_id},
+            )
 
     # Emit MEMORY_STORED so enrichment / promotion workers can react.
     try:
@@ -891,7 +917,7 @@ def save_memory(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(auth=trellis_scope(SCOPE_READ))
 def get_lessons(
     domain: str | None = None,
     limit: int = 10,
@@ -929,7 +955,7 @@ def get_lessons(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(auth=trellis_scope(SCOPE_READ))
 def get_graph(
     entity_id: str,
     depth: int = 1,
@@ -979,7 +1005,7 @@ def get_graph(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(auth=trellis_scope(SCOPE_MUTATE))
 def record_feedback(
     trace_id: str = "",
     pack_id: str = "",
@@ -1071,7 +1097,7 @@ def record_feedback(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(auth=trellis_scope(SCOPE_READ))
 def search(
     query: str,
     limit: int = 10,
@@ -1176,7 +1202,7 @@ def search(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(auth=trellis_scope(SCOPE_READ))
 def get_objective_context(
     intent: str,
     domain: str = "",
@@ -1297,7 +1323,7 @@ def get_objective_context(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(auth=trellis_scope(SCOPE_READ))
 def get_task_context(
     intent: str,
     entity_ids: list[str] | None = None,
@@ -1419,7 +1445,7 @@ def get_task_context(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(auth=trellis_scope(SCOPE_READ))
 def get_sectioned_context(
     intent: str,
     sections: list[dict[str, Any]],
@@ -1593,7 +1619,7 @@ def _resolve_operation(operation: str) -> Any:
 # workload.
 
 
-@mcp.tool()
+@mcp.tool(auth=trellis_scope(SCOPE_MUTATE))
 def record_observation(
     subject_entity_id: str,
     subject_entity_type: str,
@@ -1676,7 +1702,7 @@ def record_observation(
     )
 
 
-@mcp.tool()
+@mcp.tool(auth=trellis_scope(SCOPE_READ))
 def query_observations(
     subject_entity_id: str = "",
     observer_agent_id: str = "",
@@ -1725,7 +1751,7 @@ def query_observations(
     return json.dumps({"status": "ok", "observations": projected})
 
 
-@mcp.tool()
+@mcp.tool(auth=trellis_scope(SCOPE_MUTATE))
 def execute_mutation(
     operation: str,
     args: dict[str, Any],
@@ -1867,47 +1893,202 @@ def _install_shutdown_signal_handlers() -> None:
         if signum == signal.SIGINT:
             raise KeyboardInterrupt
 
+    _install_signal_handlers(_handler)
+
+
+def _install_http_shutdown_signal_handlers() -> None:
+    """Stop uvicorn's post-shutdown signal re-raise from skipping cleanup.
+
+    ``uvicorn.Server.capture_signals`` swaps in its own SIGINT/SIGTERM
+    handlers for the lifetime of ``serve()``, restores whatever was there
+    before, and then calls ``signal.raise_signal(...)`` once per signal it
+    caught, so the process exits the way the operator asked. If the
+    restored handler is Python's default, that second delivery kills us
+    immediately — *after* uvicorn has drained connections but *before*
+    :func:`main`'s ``finally`` closes the registry, leaking the Postgres
+    pool and the Neo4j driver on every restart.
+
+    Installing no-op handlers first means that re-raise lands on us, is
+    swallowed, and ``serve()`` returns normally into the ``finally``. They
+    are live only before uvicorn installs its own and after it restores
+    ours, so they never suppress the shutdown itself — uvicorn's handler
+    is what's bound while the server is actually serving.
+    """
+
+    def _handler(signum: int, _frame: Any) -> None:
+        logger.info("mcp_server_shutdown_signal", signal=signum)
+
+    _install_signal_handlers(_handler)
+
+
+def _install_signal_handlers(handler: Any) -> None:
+    """Best-effort install of ``handler`` for SIGTERM and SIGINT.
+
+    Shared by the stdio and http shutdown paths, which differ only in
+    what the handler does. Tolerates platforms where a signal is absent
+    or ``signal.signal`` refuses (not the main thread, Windows SIGTERM):
+    falling back to the default handler is correct in both callers.
+    """
+    import signal  # noqa: PLC0415
+
     for sig_name in ("SIGTERM", "SIGINT"):
         sig = getattr(signal, sig_name, None)
         if sig is None:
             continue
         try:
-            signal.signal(sig, _handler)
+            signal.signal(sig, handler)
         except (AttributeError, ValueError, OSError):
-            # GRACEFUL-DEGRADATION: best-effort signal handler install.
-            # ValueError: signal only works in main thread / not supported
-            # OSError: same on some platforms
-            # AttributeError: defensive, in case of platform stubbing.
-            # Falling back to the default handler is correct — the
-            # stdio-EOF shutdown path still works.
             logger.debug("mcp_server_signal_unsupported", signal=sig_name)
 
 
-def main() -> None:
-    """Run the Macro Tools MCP server.
+#: Stores a tool cannot work without. A broken one SHOULD crash http boot
+#: loudly, like the REST API's readiness gate — not surface as a per-request
+#: 500. Built on the main thread so concurrent worker threads never race the
+#: lock-free lazy init in ``StoreRegistry._get`` (the loser would leak its
+#: connection pool and re-run ``_init_schema``). ``blob_store`` is absent on
+#: purpose: no MCP tool touches it, so forcing it would make e.g. a missing
+#: ``[s3]`` extra a hard boot dependency for a store the surface never uses.
+_REQUIRED_KNOWLEDGE_STORES = ("document_store", "graph_store")
+_REQUIRED_OPERATIONAL_STORES = (
+    "trace_store",
+    "event_log",
+    "parameter_store",
+    "api_key_store",
+)
 
-    Wraps :meth:`mcp.run` in ``try`` / ``finally`` so the cached
-    :class:`StoreRegistry` is closed on shutdown. Without this, the
-    Postgres connection pool and the Neo4j driver leak until the
-    process dies — fine for short-lived stdio sessions, a slow
-    resource leak in long-running deployments.
+
+def _prewarm_registry(registry: StoreRegistry) -> None:
+    """Force lazily-cached singletons to build, single-threaded.
+
+    Only for the ``http`` transport, where one process serves many
+    concurrent sessions and ``StoreRegistry._get`` plus the module-level
+    ``_get_*`` caches are lock-free check-then-act. Under stdio there is
+    one process per session and nothing is ever contended.
+
+    Required stores build eagerly and fail loud. The degradable
+    singletons below build best-effort: winning the init race is worth
+    it, but a build failure must NOT sink the server — the tool paths
+    already fall back (semantic search → keyword/graph, embed-on-ingest
+    is fail-soft, memory extraction is feature-flagged). Forcing them to
+    succeed would turn graceful degradation into a hard http boot
+    dependency the stdio path never had.
     """
-    # MCP speaks JSON-RPC over stdio; stdout is reserved for protocol frames.
-    configure_stderr_logging()
-    _install_shutdown_signal_handlers()
+    for name in _REQUIRED_KNOWLEDGE_STORES:
+        getattr(registry.knowledge, name)
+    for name in _REQUIRED_OPERATIONAL_STORES:
+        getattr(registry.operational, name)
+    _ = registry.budget_config
+    _get_minhash_index(registry)
+
+    for label, build in (
+        ("vector_store", lambda: registry.knowledge.vector_store),
+        ("embedding_fn", lambda: registry.embedding_fn),
+        ("memory_extractor", lambda: _get_memory_extractor(registry)),
+    ):
+        try:
+            build()
+        except Exception:
+            # GRACEFUL-DEGRADATION: log the component, not the exception —
+            # the same fail-soft posture the call sites take at runtime.
+            logger.warning("mcp_prewarm_optional_unavailable", component=label)
+
+    logger.info("mcp_registry_prewarmed")
+
+
+def _configure_http_auth(settings: HttpSettings) -> None:
+    """Attach (or deliberately detach) the API-key verifier."""
+    if settings.auth_enforced:
+        # Lazy provider: the store is resolved per request, after prewarm.
+        mcp.auth = TrellisApiKeyVerifier(
+            lambda: _get_registry().operational.api_key_store
+        )
+        set_auth_enforced(enforced=True)
+        return
+
+    mcp.auth = None
+    # Without a verifier every AuthContext.token is None, so the per-tool
+    # scope checks would deny everything. Turn them off together.
+    set_auth_enforced(enforced=False)
+    logger.warning(
+        "mcp_auth_disabled",
+        message=(
+            "MCP is serving every tool without authentication. Set "
+            "TRELLIS_MCP_AUTH_MODE=required and mint a key with "
+            "'trellis admin api-keys create'."
+        ),
+    )
+
+
+def _close_registry() -> None:
+    global _registry  # noqa: PLW0603
+    if _registry is None:
+        return
+    logger.info("mcp_server_shutting_down")
     try:
-        mcp.run()
+        _registry.close()
+    except Exception:
+        # GRACEFUL-DEGRADATION: this runs inside the ``finally`` of
+        # ``main()``; re-raising would mask an in-flight ``mcp.run()``
+        # exception and obscure the original cause of shutdown. Log
+        # loudly, let the process exit.
+        logger.exception("mcp_server_registry_close_failed")
     finally:
-        global _registry  # noqa: PLW0603
-        if _registry is not None:
-            logger.info("mcp_server_shutting_down")
-            try:
-                _registry.close()
-            except Exception:
-                # GRACEFUL-DEGRADATION: this runs inside the ``finally``
-                # of ``main()``; re-raising would mask an in-flight
-                # ``mcp.run()`` exception and obscure the original cause
-                # of shutdown. Log loudly, let the process exit.
-                logger.exception("mcp_server_registry_close_failed")
-            finally:
-                _registry = None
+        _registry = None
+
+
+def main() -> None:
+    """Run the Trellis MCP server over the configured transport.
+
+    ``stdio`` (the default) is unchanged: the parent agent host is the
+    trust boundary, per-tool ``auth=`` checks are inert because FastMCP
+    short-circuits them off-transport, and shutdown comes from stdin EOF.
+
+    ``http`` turns the server into a network listener and is opt-in via
+    ``TRELLIS_MCP_TRANSPORT``. It authenticates with scoped API keys,
+    pre-warms the registry so concurrent worker threads never race a
+    lazy initialiser, and leaves signal handling to uvicorn.
+
+    Both paths wrap :meth:`mcp.run` in ``try`` / ``finally`` so the
+    cached :class:`StoreRegistry` is closed on shutdown. Without this,
+    the Postgres connection pool and the Neo4j driver leak until the
+    process dies.
+    """
+    # Under stdio, stdout carries JSON-RPC frames and nothing else. Keep
+    # structlog on stderr for both transports — under http it also stops
+    # log lines interleaving with uvicorn's stdout access log.
+    configure_stderr_logging()
+    transport = resolve_transport()
+    try:
+        if transport == TRANSPORT_HTTP:
+            settings = resolve_http_settings()
+            _configure_http_auth(settings)
+            _prewarm_registry(_get_registry())
+            logger.info(
+                "mcp_server_starting",
+                transport=transport,
+                host=settings.host,
+                port=settings.port,
+                path=settings.path,
+                auth_mode=settings.auth_mode,
+            )
+            # Must precede mcp.run(): uvicorn overrides these while it
+            # serves, then restores and re-raises the caught signal. If
+            # that lands on Python's default handler the process dies
+            # before the ``finally`` below closes the registry.
+            _install_http_shutdown_signal_handlers()
+            # stateless_http: the tools keep no per-session server state
+            # (``session_id`` is a dedup key written to the event log, not
+            # an in-memory object), so there is nothing to affinitise.
+            mcp.run(
+                transport="http",
+                host=settings.host,
+                port=settings.port,
+                path=settings.path,
+                stateless_http=True,
+                show_banner=False,
+            )
+        else:
+            _install_shutdown_signal_handlers()
+            mcp.run()
+    finally:
+        _close_registry()
