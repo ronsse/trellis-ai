@@ -252,6 +252,48 @@ trellis ingest evidence /tmp/evidence.json --format json
 {"status": "ingested", "evidence_id": "01JRK6M3QF8GHTM2XVZP3CWD9E", "evidence_type": "snippet"}
 ```
 
+### `trellis ingest corpus`
+
+Sync a directory of files (a notes vault, a folder of transcripts) into
+the document store, idempotently. See
+[`adr-corpus-ingestion.md`](../design/adr-corpus-ingestion.md).
+
+```bash
+trellis ingest corpus <path> [--source-system corpus] [--domain X] \
+    [--tag k=v ...] [--include '*.md'] [--dry-run] [--prune] [--format json]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `path` | — | Directory (or single file) to ingest |
+| `--source-system` | `corpus` | Corpus namespace — part of every `doc_id` (`corpus:<source_system>:<sha1(relpath)>`); the classification layer keys on it (e.g. `obsidian`) |
+| `--domain` | — | Domain tag applied to every written document |
+| `--tag k=v` | — | Extra metadata (repeatable) |
+| `--include` | all files | Glob filter over relative paths (repeatable) |
+| `--dry-run` | off | Report the full plan (files, chunk counts, skips) without writing |
+| `--prune` | off | Delete documents whose source file vanished |
+
+Re-running over an unchanged tree performs zero writes (`content_hash`
+comparison). Edited files re-put under the same `doc_id` and re-embed
+changed chunks; moved files are re-keyed via `get_by_hash`, not
+duplicated. Documents longer than the 8,000-char embed cap are split
+into paragraph-aware **chunk documents**
+(`<parent_doc_id>#chunk-<i>`, metadata `{parent_doc_id, chunk_index,
+chunk_count, source_path, char_span}`) — with
+`TRELLIS_ENABLE_EMBED_ON_INGEST=1` the chunks are what gets embedded,
+so long-document content is semantically retrievable. Markdown YAML
+frontmatter becomes document metadata and `[[wikilinks]]` are collected
+into `metadata.wikilinks` (candidates only — no graph writes).
+Cross-file near-duplicates are warned about in the report, never
+skipped. Every new/changed file emits `MEMORY_STORED`; each run emits a
+`CORPUS_SYNCED` summary event.
+
+**JSON output (abridged):**
+
+```json
+{"status": "synced", "counts": {"files_seen": 3, "ingested": 2, "updated": 1, "moved": 0, "skipped_unchanged": 0, "skipped_unsupported": 1, "pruned": 0, "chunks_written": 6, "warnings": 0}, "files": [{"path": "runbooks/deploy.md", "doc_id": "corpus:obsidian:7417df…", "action": "new", "chunks": 6}]}
+```
+
 ### `trellis ingest dbt-manifest`
 
 Import a dbt manifest into the knowledge graph.

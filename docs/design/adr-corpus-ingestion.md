@@ -1,6 +1,6 @@
 # ADR: Corpus Ingestion — importers into Trellis
 
-**Status:** Proposed
+**Status:** Accepted — §7 phases 1–2 implemented 2026-07-11 (`trellis ingest corpus`, `src/trellis/ingest_corpus/`); phases 3–5 are incremental follow-ups
 **Date:** 2026-07-08
 **Deciders:** Trellis core
 **Supersedes:** [`adr-memory-layer-interop.md`](./adr-memory-layer-interop.md) (external Memory Layer — see §6)

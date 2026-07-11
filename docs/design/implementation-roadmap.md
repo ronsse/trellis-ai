@@ -1,11 +1,11 @@
 # Implementation Roadmap
 
-**Last updated:** 2026-07-08 (Memory Explorer observability surface landed; corpus-ingestion ADR proposed; docs refreshed to memory-system framing)
+**Last updated:** 2026-07-11 (corpus ingestion §G.1 landed — `trellis ingest corpus` with markdown handler, chunking, idempotent re-sync; MCP-over-HTTP transport merged #252)
 **Purpose:** Single-page hand-off for any agent (fresh or returning) picking up Trellis implementation work. Self-contained. Read this top-to-bottom before touching code.
 
 > **Picking up evaluation work?** The eval harness and all planned scenarios are built — see [`../plans/2026-06-17-step3-assessment.md`](../plans/2026-06-17-step3-assessment.md) for what each scenario substantiates (its §6 evidence rules are authoritative). [`plan-evaluation-strategy.md`](./plan-evaluation-strategy.md) is the historical plan they grew from.
 >
-> **Picking up the memory-layer / corpus work?** [`adr-memory-layer-interop.md`](./adr-memory-layer-interop.md) is **Superseded**: the owner decided importers-into-Trellis instead of an external layer. The live design is [`adr-corpus-ingestion.md`](./adr-corpus-ingestion.md) — fully scoped in §G below and ready to execute.
+> **Picking up the memory-layer / corpus work?** [`adr-memory-layer-interop.md`](./adr-memory-layer-interop.md) is **Superseded**: the owner decided importers-into-Trellis instead of an external layer. The live design is [`adr-corpus-ingestion.md`](./adr-corpus-ingestion.md) — **phases 1–2 are landed** (`trellis ingest corpus`, §G below); transcript/`--extract`/PDF handlers (phases 3–5) are incremental follow-ups.
 >
 > **Picking up Phase F (inner agent loop)?** TODO.md "Phase F" is the staged program (F1 harness ≈ 1500–2000 LOC; F5 gated on 30 days of F4 signal). The F6 eval scenario is already implemented with reference drivers at the F1–F5 plug-in seam (`eval/scenarios/skill_loop_convergence/`).
 
@@ -40,6 +40,8 @@
 | 2026-06-30→07-02 | Pilot core fixes (#211/#196/#195 + Bolt SCD-2 fix), CI de-AuraDB'd, security floor (#206/#193), backlog triage (35 issues closed), `skill_loop_convergence` implemented (#249) | [`../plans/2026-06-30-pilot-core-fixes.md`](../plans/2026-06-30-pilot-core-fixes.md) |
 | 2026-07-06→07 | Skynet dogfood deployment (personal agent memory: compose stack, MCP into Claude Code + Hermes, corpus ingested, nightly curation + backups); first dogfood finding closed same-day as **embed-on-ingest** (`ea6113b`) | operations.md embedding section; deployment lives in the private skynet-hub repo |
 | 2026-07-08 | **Memory Explorer** observability surface (explore routes + Memories/Events/Packs UI views + node History); `POST /packs/sectioned` route added (SDK had targeted a nonexistent route); Postgres `/graph/search` backend-detection bug fixed (latent since the skynet Postgres migration); docs refreshed to memory-system framing; corpus-ingestion ADR proposed, memory-layer ADR superseded | [`adr-corpus-ingestion.md`](./adr-corpus-ingestion.md); [surfaces.md](../agent-guide/surfaces.md) |
+| 2026-07-10 | **MCP-over-HTTP transport** merged (#252): opt-in `TRELLIS_MCP_TRANSPORT=http` with scoped API-key auth, serving remote agents (omen) from the skynet deployment; MinHashIndex re-entrant lock fix | [`adr-mcp-http-transport.md`](./adr-mcp-http-transport.md) |
+| 2026-07-11 | **Corpus ingestion §G.1 landed**: `trellis ingest corpus` — walker + markdown handler (frontmatter→metadata, wikilink capture) + deterministic paragraph-aware chunker (chunk docs `<parent>#chunk-<i>` under the embed cap) + idempotent re-sync (`content_hash` skip, `get_by_hash` move re-key, per-chunk re-embed, `--prune`, near-dup warnings, `--dry-run`); new `CORPUS_SYNCED` event | [`adr-corpus-ingestion.md`](./adr-corpus-ingestion.md); [operations.md → `trellis ingest corpus`](../agent-guide/operations.md) |
 
 ### Test suite shape (2026-07-02)
 
@@ -263,17 +265,15 @@ Phase 0 (reserved-namespace validator + schema definitions) was landed in earlie
 
 ### G — Corpus ingestion ([`adr-corpus-ingestion.md`](./adr-corpus-ingestion.md))
 
-#### G.1 — `trellis ingest corpus`: reader + markdown handler + chunking + idempotent re-sync
+#### G.1 — `trellis ingest corpus`: reader + markdown handler + chunking + idempotent re-sync — **LANDED 2026-07-11**
 
-**Scope:** Phases 1–2 of the ADR's §7 sketch. Directory walker + pure format-handler registry (markdown with frontmatter→metadata and wikilink capture first), deterministic paragraph-aware chunker producing chunk documents (`{parent_doc_id, chunk_index, chunk_count, source_path, char_span}` metadata, chunks under the 8k embed cap), stable `doc_id = corpus:<source_system>:<sha1(relpath)>`, `content_hash` skip-unchanged re-sync, `get_by_hash` move detection, MinHash near-dup warnings, `--dry-run`/`--prune`/`--format json`, `MEMORY_STORED` per new doc.
+Phases 1–2 of the ADR's §7 sketch are implemented and tested: directory walker + pure format-handler registry (markdown: frontmatter→metadata, wikilink capture), deterministic paragraph-aware chunker (chunk docs `<parent>#chunk-<i>` with `{parent_doc_id, chunk_index, chunk_count, source_path, char_span}` metadata, every chunk under the 8k embed cap by construction), stable `doc_id = corpus:<source_system>:<sha1(relpath)>`, `content_hash` skip-unchanged re-sync (zero writes on an unchanged tree), per-chunk re-embed on edit, `get_by_hash` move re-keying, MinHash near-dup warnings (warn, never skip), `--dry-run`/`--prune`/`--format json`, `MEMORY_STORED` per new/changed doc + a `CORPUS_SYNCED` run summary event. Lives in `src/trellis/ingest_corpus/` + `src/trellis_cli/ingest_corpus.py`; 51 tests under `tests/unit/ingest_corpus/` + `tests/unit/cli/test_ingest_corpus.py`. Reference: [operations.md → `trellis ingest corpus`](../agent-guide/operations.md).
 
-**Files:** `src/trellis/ingest_corpus/` (new package — walker, handlers, chunker, sync logic), `src/trellis_cli/ingest_corpus.py` registered on `ingest_app` in `src/trellis_cli/ingest.py`, tests under `tests/unit/ingest_corpus/` + a CLI test.
+#### G.2 — follow-up phases (ADR §7 phases 3–5)
 
-**Done when:** second run over an unchanged tree performs zero writes; an edited file re-puts + re-embeds; chunker is deterministic (same input → same chunk ids/spans); `--dry-run` reports the full plan; chunks of a long doc are semantically retrievable via `search` once embedded.
+**Scope:** transcript/plaintext handler, `--extract` LLM pass (wired to `build_save_memory_extractor`, double-gated), PDF handler behind an optional extra. Audio stays out of core (external transcription pre-step).
 
-**Size:** one focused session (ADR estimates phases 1–2 together).
-
-**Gating signal:** skynet dogfood — ingest the owner's real notes vault, then judge retrieval quality through the Memory Explorer packs view. Transcript handler, `--extract` LLM pass, and PDF support are incremental follow-ups (ADR §7 phases 3–5); audio stays out of core (external transcription pre-step).
+**Gating signal:** skynet dogfood — ingest the owner's real notes vault with G.1, judge retrieval quality through the Memory Explorer packs view, then pick follow-ups by observed need. Retrieval-side chunk rollup (group-by-`parent_doc_id` in `PackBuilder`) is a planned follow-up the ADR §3 flags.
 
 ---
 
@@ -290,7 +290,8 @@ agent should NOT invent work from this table — pick up whichever gate has fire
 | Vector-contract drift | C.1 vector DSL | contract suite shows backend drift, or a plugin author asks |
 | Infra access | E.4 AWS ECS+RDS dry-run · #208 | sandbox account / ArcadeDB secret + SSO available |
 | Operator console access | #250 credential hygiene | 1Password / Neo4j console session |
-| Deliberate scheduling | Phase F waves F1–F5 (TODO.md) · corpus ingestion §G ([`adr-corpus-ingestion.md`](./adr-corpus-ingestion.md), ready to execute) · #248 organic-generation corpus tuning | owner schedules them |
+| Deliberate scheduling | Phase F waves F1–F5 (TODO.md) · #248 organic-generation corpus tuning | owner schedules them |
+| Dogfood signal | Corpus-ingestion follow-ups §G.2 (transcript / `--extract` / PDF handlers, chunk rollup in `PackBuilder`) | owner ingests the real vault with G.1 and judges retrieval via Memory Explorer |
 
 ---
 
