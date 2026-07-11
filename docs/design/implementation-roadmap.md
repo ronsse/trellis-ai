@@ -43,6 +43,7 @@
 | 2026-07-10 | **MCP-over-HTTP transport** merged (#252): opt-in `TRELLIS_MCP_TRANSPORT=http` with scoped API-key auth, serving remote agents (omen) from the skynet deployment; MinHashIndex re-entrant lock fix | [`adr-mcp-http-transport.md`](./adr-mcp-http-transport.md) |
 | 2026-07-11 | **Corpus ingestion §G.1 landed**: `trellis ingest corpus` — walker + markdown handler (frontmatter→metadata, wikilink capture) + deterministic paragraph-aware chunker (chunk docs `<parent>#chunk-<i>` under the embed cap) + idempotent re-sync (`content_hash` skip, `get_by_hash` move re-key, per-chunk re-embed, `--prune`, near-dup warnings, `--dry-run`); new `CORPUS_SYNCED` event | [`adr-corpus-ingestion.md`](./adr-corpus-ingestion.md); [operations.md → `trellis ingest corpus`](../agent-guide/operations.md) |
 | 2026-07-11 | **Usage capture + cost metering** (the local-usability push): `trellis ingest conversations` imports claude.ai chat exports (one doc per conversation, speaker-labelled transcript, chunked + embedded, idempotent by uuid) — the personal corpus the Claude Code / MCP path never sees; sync core refactored to a record-oriented `sync_records` shared by files + conversations. `trellis analyze cost` prices Trellis's injected-context overhead in tokens + dollars (`token_pricing` family table, honest absolute-not-ratio framing) — the effectiveness denominator | [operations.md → `ingest conversations` / `analyze cost`](../agent-guide/operations.md) |
+| 2026-07-11 | **Dogfood gap analysis** of the live skynet deployment: three retrieval defects verified live (`get_context` `domain=` hard-exclusion of untagged docs; flat `get_context` missing the `pack_id` header; `get_context`/`search` bypassing PackBuilder), MCP `record_feedback`↔JSONL parity gap, `link-evidence` `relates_to` pattern unimplementable (no governed `Entity.document_ids` write path; `ENTITY_UPDATE` has no handler), and the loop confirmed input-starved (0 lessons / 0 advisories; nightly curation all-zeros). Produced the first **unblocked** work queue since 2026-07-02 | [TODO.md § Dogfood gap analysis](../../TODO.md#dogfood-gap-analysis--2026-07-11); evidence in Trellis: trace `01KX98NQH5WF96W6XGJCWXVKFW`, doc `01KX9BR2PR542KJQ7768D5B6B7` |
 
 ### Test suite shape (2026-07-02)
 
@@ -303,6 +304,15 @@ Both `ingest corpus` and `ingest conversations` accept `--extract`, **double-gat
 **As of 2026-07-02 there is no unblocked queue.** Every open GitHub issue is gated,
 and the ADR phases above are either landed or deliberately signal-gated. A fresh
 agent should NOT invent work from this table — pick up whichever gate has fired:
+
+> **Update 2026-07-11 — the dogfood gate has started firing.** The live-deployment
+> gap analysis produced an **unblocked defect queue** that needs no further signal:
+> `domain=` filter default-pass, `get_context` pack_id parity, MCP-feedback JSONL
+> parity, `Entity.document_ids` governed write path (+ `ENTITY_UPDATE` handler),
+> skill-template fixes, then **Claude Code session auto-capture** as the next §G
+> increment. Scope + evidence: [TODO.md § Dogfood gap analysis — 2026-07-11](../../TODO.md#dogfood-gap-analysis--2026-07-11).
+> The operator gates (vault + claude.ai-export ingest, `llm:` block) remain the
+> prerequisite for judging §G.4 retrieval-quality follow-ups.
 
 | Gate | Items | Fires when |
 |---|---|---|
