@@ -43,6 +43,32 @@ def is_chunk_doc_id(doc_id: str) -> bool:
     return CHUNK_ID_SEPARATOR in doc_id
 
 
+@dataclass
+class SyncRecord:
+    """One document to sync, as produced by a source reader.
+
+    The record-oriented seam between a *reader* (file walker, conversation
+    export parser, future REST bulk route) and the shared idempotent sync
+    core (:func:`trellis.ingest_corpus.sync.sync_records`). A reader is
+    responsible only for turning its source into these; every write
+    decision (new/update/skip/move, chunking, embedding, events) is the
+    core's.
+    """
+
+    #: Stable document id — the reader owns the id scheme
+    #: (``corpus:<sys>:<sha1(relpath)>``, ``conversation:<sys>:<uuid>``…).
+    doc_id: str
+    #: Human-readable source locator stored as ``metadata.source_path``
+    #: and shown in the run report (a relpath, a conversation title…).
+    source_key: str
+    #: Full document content, stored verbatim on the parent row.
+    content: str
+    #: Reader-extracted metadata (frontmatter, conversation fields…).
+    handler_metadata: dict[str, Any] = field(default_factory=dict)
+    #: Non-fatal reader findings surfaced in the run report.
+    warnings: list[dict[str, Any]] = field(default_factory=list)
+
+
 @dataclass(frozen=True)
 class ChunkSpan:
     """One chunk of a parent document, as a span into its content.

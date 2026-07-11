@@ -1,33 +1,37 @@
-"""Idempotent corpus sync — the shared ingest routine.
+"""Idempotent document sync — the shared ingest routine.
 
-The CLI (and any future REST bulk route) calls :func:`sync_corpus`; all
-behaviour lives here so every entry point is identical (ADR §2).
+Readers (the corpus file walker, the conversation-export parser, any
+future REST bulk route) turn their source into :class:`SyncRecord`s and
+hand them to :func:`sync_records`; all write behaviour lives there so
+every entry point is identical (ADR §2). :func:`sync_corpus` is the
+file-walking wrapper.
 
-Write semantics (ADR §4):
+Write semantics (ADR §4), applied per record:
 
-* **Unchanged file** (stored ``content_hash`` equals the file text's
-  hash) → no re-put, no re-embed. A second run over an unchanged tree
+* **Unchanged** (stored ``content_hash`` equals the new content's hash)
+  → no re-put, no re-embed. A second run over an unchanged source
   performs zero Knowledge-Plane writes.
-* **Edited file** → re-put under the same ``doc_id``, re-chunk,
-  re-embed *changed* chunks only, delete orphaned chunk docs beyond the
-  new chunk count. Stored metadata is merged under the newly computed
-  metadata so keys added by enrichment survive the re-put.
-* **Moved file** (new relpath, known content hash under this corpus
-  prefix) → re-keyed: stored under the new ``doc_id``, the old document
-  tree deleted. Reported as a move, not a new ingest.
-* **Vanished file** → deleted only with ``prune=True``.
-* **Near-duplicates** across files are *warned about*, never skipped —
-  unlike ``save_memory``, two legitimately similar notes are common in
-  a vault.
+* **Changed** → re-put under the same ``doc_id``, re-chunk, re-embed
+  *changed* chunks only, delete orphaned chunk docs beyond the new chunk
+  count. Stored metadata is merged under the newly computed metadata so
+  keys added by enrichment survive the re-put.
+* **Moved** (new id, known content hash under this source's id prefix,
+  move detection enabled) → re-keyed: stored under the new ``doc_id``,
+  the old document tree deleted. Reported as a move, not a new ingest.
+  Move detection is a file-corpus concern (content-derived ids); readers
+  with content-independent ids (conversation uuids) disable it.
+* **Vanished** → deleted only with ``prune=True``.
+* **Near-duplicates** across records are *warned about*, never skipped —
+  unlike ``save_memory``, two legitimately similar notes / conversations
+  are common.
 
-Every new/changed file-level document emits ``MEMORY_STORED`` (the same
-event the MCP ``save_memory`` path emits) so downstream consumers see
-one signal regardless of entry point. Chunk documents are derivatives
-of their parent and do not emit their own events. The run itself emits
-``CORPUS_SYNCED`` with the run counts — on dry runs too, flagged
-``dry_run=True`` (the ``BLOB_GC_SWEPT`` convention). Unlike
-``save_memory``, event-emission failure does not abort a bulk sync; it
-is reported as a run warning instead.
+Every new/changed document emits ``MEMORY_STORED`` (the same event the
+MCP ``save_memory`` path emits) so downstream consumers see one signal
+regardless of entry point. Chunk documents are derivatives of their
+parent and do not emit their own events. The run emits ``CORPUS_SYNCED``
+with the run counts — on dry runs too, flagged ``dry_run=True`` (the
+``BLOB_GC_SWEPT`` convention). Unlike ``save_memory``, event-emission
+failure does not abort a bulk sync; it is reported as a run warning.
 
 Embedding rides the existing flag-gated, fail-soft
 :func:`~trellis.retrieve.embed_ingest_hook.run_embed_on_ingest` hook:
@@ -37,6 +41,7 @@ by construction), unchunked documents embed the parent row itself.
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Sequence
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -48,6 +53,7 @@ from trellis.ingest_corpus.handlers import handler_for, supported_extensions
 from trellis.ingest_corpus.models import (
     CorpusSyncReport,
     FileOutcome,
+    SyncRecord,
     chunk_doc_id,
     corpus_doc_id,
     corpus_id_prefix,
@@ -82,6 +88,9 @@ def sync_corpus(
 ) -> CorpusSyncReport:
     """Sync the file tree at *root* into the document store.
 
+    Reads each supported file through the format-handler registry and
+    delegates every write decision to :func:`sync_records`.
+
     Args:
         registry: Active store registry; uses the Knowledge-Plane
             document store (plus vector store via the embed hook) and
@@ -103,66 +112,142 @@ def sync_corpus(
         and warnings.
     """
     root = root.resolve()
-    doc_store = registry.knowledge.document_store
-    report = CorpusSyncReport(
-        root=str(root),
-        source_system=source_system,
-        dry_run=dry_run,
-        prune=prune,
-    )
-    supported, report.unsupported = walk_corpus(
+    supported, unsupported = walk_corpus(
         root, include=tuple(include), extensions=supported_extensions()
     )
 
-    current_ids = {corpus_doc_id(source_system, rel) for rel, _ in supported}
-    minhash = MinHashIndex()
-    moved_from_ids: set[str] = set()
-
+    records: list[SyncRecord] = []
+    read_warnings: list[dict[str, Any]] = []
     for relpath, path in supported:
         try:
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as exc:
-            report.warnings.append(
+            read_warnings.append(
                 {"kind": "unreadable_file", "path": relpath, "detail": str(exc)}
             )
             continue
-
         handler = handler_for(relpath)
         if handler is None:  # pragma: no cover - walker only yields supported
             continue
         handler_metadata, handler_warnings = handler.parse(relpath, text)
-        report.warnings.extend(handler_warnings)
-
-        outcome = _plan_file(
-            doc_store,
-            relpath=relpath,
-            text=text,
-            source_system=source_system,
-            current_ids=current_ids,
+        records.append(
+            SyncRecord(
+                doc_id=corpus_doc_id(source_system, relpath),
+                source_key=relpath,
+                content=text,
+                handler_metadata=handler_metadata,
+                warnings=handler_warnings,
+            )
         )
-        for match_id, similarity in minhash.query(text):
+
+    return sync_records(
+        registry,
+        records,
+        source_system=source_system,
+        id_prefix=corpus_id_prefix(source_system),
+        extra_metadata=extra_metadata,
+        dry_run=dry_run,
+        prune=prune,
+        requested_by=requested_by,
+        root_label=str(root),
+        detect_moves=True,
+        unsupported=unsupported,
+        initial_warnings=read_warnings,
+    )
+
+
+def sync_records(
+    registry: StoreRegistry,
+    records: Iterable[SyncRecord],
+    *,
+    source_system: str,
+    id_prefix: str,
+    root_label: str,
+    requested_by: str,
+    extra_metadata: dict[str, Any] | None = None,
+    dry_run: bool = False,
+    prune: bool = False,
+    detect_moves: bool = True,
+    unsupported: Sequence[str] = (),
+    initial_warnings: Sequence[dict[str, Any]] = (),
+) -> CorpusSyncReport:
+    """Idempotent sync core over reader-produced :class:`SyncRecord`s.
+
+    Args:
+        registry: Active store registry.
+        records: The documents to sync — one per source item.
+        source_system: Stored as ``metadata.source_system``.
+        id_prefix: Doc-id prefix owned by this source (e.g.
+            ``corpus:obsidian:``) — scopes move detection and prune so a
+            run never touches another source's documents.
+        root_label: Human-readable origin for the report / summary event
+            (a directory path, an export-file path).
+        requested_by: Audit identifier for events and embed logging.
+        extra_metadata: Operator tags merged into every written document.
+        dry_run: Compute and report the plan without writing.
+        prune: Delete documents under ``id_prefix`` whose source item is
+            gone.
+        detect_moves: Re-key a document whose content reappears under a
+            new id. Enable for content-derived ids (files); disable for
+            content-independent ids (conversation uuids).
+        unsupported: Source items with no handler (reported, not
+            ingested) — for the run counts.
+        initial_warnings: Reader warnings raised before record building
+            (e.g. unreadable files), seeded so the summary event counts
+            them.
+
+    Returns:
+        A :class:`CorpusSyncReport`.
+    """
+    doc_store = registry.knowledge.document_store
+    report = CorpusSyncReport(
+        root=root_label,
+        source_system=source_system,
+        dry_run=dry_run,
+        prune=prune,
+    )
+    report.unsupported = list(unsupported)
+    report.warnings.extend(initial_warnings)
+
+    records = list(records)
+    current_ids = {record.doc_id for record in records}
+    minhash = MinHashIndex()
+    moved_from_ids: set[str] = set()
+
+    for record in records:
+        report.warnings.extend(record.warnings)
+        outcome = _plan_record(
+            doc_store,
+            doc_id=record.doc_id,
+            source_key=record.source_key,
+            content=record.content,
+            id_prefix=id_prefix,
+            current_ids=current_ids,
+            detect_moves=detect_moves,
+        )
+        for match_id, similarity in minhash.query(record.content):
             report.warnings.append(
                 {
                     "kind": "near_duplicate",
-                    "path": relpath,
+                    "path": record.source_key,
                     "match_doc_id": match_id,
                     "similarity": round(similarity, 3),
                 }
             )
-        minhash.add(outcome.doc_id, text)
+        minhash.add(outcome.doc_id, record.content)
 
-        spans = chunk_spans(text)
+        spans = chunk_spans(record.content)
         outcome.chunk_count = len(spans)
         if outcome.moved_from is not None:
             moved_from_ids.add(outcome.moved_from)
 
         if not dry_run and outcome.action != "skip":
-            _apply_file(
+            _apply_record(
                 registry,
                 report,
                 outcome=outcome,
-                text=text,
-                handler_metadata=handler_metadata,
+                text=record.content,
+                handler_metadata=record.handler_metadata,
                 extra_metadata=extra_metadata or {},
                 spans=spans,
                 source_system=source_system,
@@ -174,6 +259,7 @@ def sync_corpus(
         _prune_vanished(
             registry,
             report,
+            id_prefix=id_prefix,
             keep_ids=current_ids | moved_from_ids,
             dry_run=dry_run,
         )
@@ -182,40 +268,45 @@ def sync_corpus(
     return report
 
 
-def _plan_file(
+def _plan_record(
     doc_store: DocumentStore,
     *,
-    relpath: str,
-    text: str,
-    source_system: str,
+    doc_id: str,
+    source_key: str,
+    content: str,
+    id_prefix: str,
     current_ids: set[str],
+    detect_moves: bool,
 ) -> FileOutcome:
-    """Decide new / update / skip / move for one walked file."""
-    doc_id = corpus_doc_id(source_system, relpath)
-    chash = content_hash(text)
+    """Decide new / update / skip / move for one record."""
+    chash = content_hash(content)
 
     existing = doc_store.get(doc_id)
     if existing is not None:
         if existing.get("content_hash") == chash:
-            return FileOutcome(relpath=relpath, doc_id=doc_id, action="skip")
-        return FileOutcome(relpath=relpath, doc_id=doc_id, action="update")
+            return FileOutcome(relpath=source_key, doc_id=doc_id, action="skip")
+        return FileOutcome(relpath=source_key, doc_id=doc_id, action="update")
 
-    # New id — same content under another id of this corpus whose file
-    # is gone from the tree means the file moved: re-key, don't duplicate.
-    hit = doc_store.get_by_hash(chash)
-    if (
-        hit is not None
-        and hit["doc_id"].startswith(corpus_id_prefix(source_system))
-        and not is_chunk_doc_id(hit["doc_id"])
-        and hit["doc_id"] not in current_ids
-    ):
-        return FileOutcome(
-            relpath=relpath, doc_id=doc_id, action="move", moved_from=hit["doc_id"]
-        )
-    return FileOutcome(relpath=relpath, doc_id=doc_id, action="new")
+    # New id — same content under another id of this source whose item is
+    # gone means it moved: re-key, don't duplicate.
+    if detect_moves:
+        hit = doc_store.get_by_hash(chash)
+        if (
+            hit is not None
+            and hit["doc_id"].startswith(id_prefix)
+            and not is_chunk_doc_id(hit["doc_id"])
+            and hit["doc_id"] not in current_ids
+        ):
+            return FileOutcome(
+                relpath=source_key,
+                doc_id=doc_id,
+                action="move",
+                moved_from=hit["doc_id"],
+            )
+    return FileOutcome(relpath=source_key, doc_id=doc_id, action="new")
 
 
-def _apply_file(
+def _apply_record(
     registry: StoreRegistry,
     report: CorpusSyncReport,
     *,
@@ -227,7 +318,7 @@ def _apply_file(
     source_system: str,
     requested_by: str,
 ) -> None:
-    """Execute the writes for one new / updated / moved file."""
+    """Execute the writes for one new / updated / moved record."""
     doc_store = registry.knowledge.document_store
     vector_store = getattr(registry.knowledge, "vector_store", None)
 
@@ -341,13 +432,13 @@ def _prune_vanished(
     registry: StoreRegistry,
     report: CorpusSyncReport,
     *,
+    id_prefix: str,
     keep_ids: set[str],
     dry_run: bool,
 ) -> None:
-    """Delete corpus documents whose source file is gone from the tree."""
+    """Delete documents under ``id_prefix`` whose source item is gone."""
     doc_store = registry.knowledge.document_store
     vector_store = getattr(registry.knowledge, "vector_store", None)
-    prefix = corpus_id_prefix(report.source_system)
 
     candidates: list[dict[str, Any]] = []
     offset = 0
@@ -359,7 +450,7 @@ def _prune_vanished(
         for doc in page:
             doc_id = doc["doc_id"]
             if (
-                not doc_id.startswith(prefix)
+                not doc_id.startswith(id_prefix)
                 or is_chunk_doc_id(doc_id)
                 or doc_id in keep_ids
             ):

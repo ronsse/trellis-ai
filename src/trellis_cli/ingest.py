@@ -30,6 +30,7 @@ from trellis.schemas.extraction import ExtractionResult
 from trellis.schemas.trace import Trace
 from trellis.stores.registry import StoreRegistry
 from trellis_cli.exit_codes import EXIT_INTERNAL
+from trellis_cli.ingest_conversations import ingest_conversations
 from trellis_cli.ingest_corpus import ingest_corpus
 from trellis_cli.stores import _get_registry, get_document_store
 
@@ -37,6 +38,7 @@ ingest_app = typer.Typer(no_args_is_help=True)
 console = Console()
 
 ingest_app.command("corpus")(ingest_corpus)
+ingest_app.command("conversations")(ingest_conversations)
 
 
 @ingest_app.command("trace")

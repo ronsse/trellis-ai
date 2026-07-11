@@ -294,6 +294,43 @@ skipped. Every new/changed file emits `MEMORY_STORED`; each run emits a
 {"status": "synced", "counts": {"files_seen": 3, "ingested": 2, "updated": 1, "moved": 0, "skipped_unchanged": 0, "skipped_unsupported": 1, "pruned": 0, "chunks_written": 6, "warnings": 0}, "files": [{"path": "runbooks/deploy.md", "doc_id": "corpus:obsidian:7417df…", "action": "new", "chunks": 6}]}
 ```
 
+### `trellis ingest conversations`
+
+Sync a **Claude conversation export** — the personal context in your
+everyday Claude chat — into the document store as one document per
+conversation. This is the capture path for real usage: the memories you
+accumulate by talking to Claude, which the Claude Code / MCP path never
+sees. Shares the idempotent sync core with `ingest corpus`.
+
+```bash
+trellis ingest conversations <path> [--source-system claude-ai] \
+    [--domain X] [--tag k=v ...] [--dry-run] [--prune] [--format json]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `path` | — | A `conversations.json`, the `.zip` export containing it, or a directory holding it |
+| `--source-system` | `claude-ai` | Corpus namespace — part of every `doc_id` |
+| `--domain` / `--tag k=v` | — | Metadata applied to every written document |
+| `--dry-run` | off | Report the plan without writing |
+| `--prune` | off | Delete conversations no longer present in the export |
+
+**Getting the export:** in claude.ai, Settings → Privacy → *Export data*;
+you'll be emailed a `.zip`. Point this command at the `.zip` (or the
+unzipped `conversations.json`). Each conversation becomes a document with
+`doc_id = conversation:<source_system>:<uuid>`, a speaker-labelled
+transcript (`**You:**` / `**Claude:**`), and metadata `{conversation_id,
+title, created_at, updated_at, message_count, content_type:
+"conversation"}`. Long conversations are chunked and (with
+`TRELLIS_ENABLE_EMBED_ON_INGEST=1`) embedded, so a topic buried deep in a
+chat is retrievable. Re-exporting and re-syncing is idempotent:
+unchanged conversations skip, conversations that grew new turns re-put and
+re-embed. Identity is the conversation's own uuid, so re-imports never
+duplicate. The reader tolerates both claude.ai message shapes (top-level
+`text` and `content` block lists) and skips thinking / tool-use blocks and
+empty turns. Mining entities (people, accounts, preferences) out of the
+prose into the graph is the flag-gated `--extract` follow-up (ADR §5).
+
 ### `trellis ingest dbt-manifest`
 
 Import a dbt manifest into the knowledge graph.
