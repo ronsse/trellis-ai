@@ -30,9 +30,23 @@ def _clean_exposure_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
-def fresh_app(tmp_path) -> FastAPI:
+def fresh_app(tmp_path, monkeypatch: pytest.MonkeyPatch) -> FastAPI:
     """An app instance with a real registry attached so /metrics, etc.
-    pass through the same lifespan a real deploy would."""
+    pass through the same lifespan a real deploy would.
+
+    Isolate ``TRELLIS_CONFIG_DIR`` / ``TRELLIS_DATA_DIR`` to tmp so the
+    lifespan's ``StoreRegistry.from_config_dir()`` (app.py) builds
+    sqlite-default stores. Without this the lifespan reads the developer's
+    ``~/.trellis/config.yaml`` — which on a real deploy points at postgres
+    backends with no DSN in the test env — and ``validate()`` raises
+    ``RegistryValidationError``, failing any test that enters the
+    ``TestClient`` context (the failure was host-dependent: green on a
+    clean CI box with no ``~/.trellis``, red on a configured one).
+    """
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    monkeypatch.setenv("TRELLIS_CONFIG_DIR", str(config_dir))
+    monkeypatch.setenv("TRELLIS_DATA_DIR", str(tmp_path / "data"))
     registry = StoreRegistry(stores_dir=tmp_path / "stores")
     app_module._registry = registry
     yield create_app()
