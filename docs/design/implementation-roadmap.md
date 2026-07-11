@@ -286,11 +286,15 @@ seam). Lives in `src/trellis/ingest_corpus/conversations.py` +
 entity-mining pass (ADR §5) is the natural next enhancement — storing +
 embedding already makes conversations retrievable.
 
-#### G.3 — remaining follow-up phases (ADR §7 phases 3–5)
+#### G.3 — `--extract` entity mining — **LANDED 2026-07-11**
 
-**Scope:** `--extract` LLM pass over conversations/corpus (wired to `build_save_memory_extractor`, double-gated) to mine entities (people, accounts, preferences) into the graph; transcript/plaintext file handler; PDF handler behind an optional extra. Audio stays out of core (external transcription pre-step). Retrieval-side chunk rollup (group-by-`parent_doc_id` in `PackBuilder`) is a planned follow-up the ADR §3 flags.
+Both `ingest corpus` and `ingest conversations` accept `--extract`, **double-gated** with `TRELLIS_ENABLE_MEMORY_EXTRACTION` (per-run LLM-cost decision). When on + an LLM client is configured, each new/changed document's prose is mined for entity/edge drafts via the same `build_save_memory_extractor` pipeline the MCP `save_memory` path uses (deterministic alias-match + LLM residue), routed through the governed `MutationExecutor`; the run report gains `entities_extracted` / `edges_extracted`. Fully fail-soft. Shared, non-MCP hook `src/trellis/extract/memory_ingest_hook.py` (mirrors `run_embed_on_ingest`) so the CLI path and the MCP path build the *same* extractor and can't drift. Carries the known O(n) alias-resolver caveat (capped 2000 nodes), flagged for an indexed lookup before large graphs. 12 tests.
 
-**Gating signal:** skynet dogfood — ingest the owner's real vault + Claude chat export, judge retrieval quality through the Memory Explorer packs view and the `trellis analyze cost` overhead figure, then pick follow-ups by observed need.
+#### G.4 — remaining follow-up phases (ADR §7 phases 3–5)
+
+**Scope:** transcript/plaintext file handler; PDF handler behind an optional extra. Audio stays out of core (external transcription pre-step). Retrieval-side chunk rollup (group-by-`parent_doc_id` in `PackBuilder`) is a planned follow-up the ADR §3 flags.
+
+**Gating signal:** skynet dogfood — ingest the owner's real vault + Claude chat export (with `--extract` once an LLM is configured), judge retrieval quality through the Memory Explorer packs view and the `trellis analyze cost` overhead figure, then pick follow-ups by observed need.
 
 ---
 

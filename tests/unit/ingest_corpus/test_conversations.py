@@ -285,3 +285,10 @@ class TestSyncConversations:
         report = sync_conversations(registry, src, dry_run=True)
         assert report.counts()["ingested"] == 1
         assert registry.knowledge.document_store.count() == 0
+
+    def test_extract_off_by_default(self, registry, tmp_path: Path):
+        # Without the env flag / --extract, no extraction runs and the
+        # report shows zero extracted entities.
+        report = sync_conversations(registry, _write_export(tmp_path, [_CONV_OLD]))
+        assert report.counts()["entities_extracted"] == 0
+        assert report.counts()["edges_extracted"] == 0

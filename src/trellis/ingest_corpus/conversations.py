@@ -77,6 +77,7 @@ def sync_conversations(
     extra_metadata: dict[str, Any] | None = None,
     dry_run: bool = False,
     prune: bool = False,
+    extract: bool = False,
     requested_by: str = "cli:ingest-conversations",
 ) -> CorpusSyncReport:
     """Sync a Claude conversation export into the document store.
@@ -90,11 +91,17 @@ def sync_conversations(
         extra_metadata: Operator tags merged into every written document.
         dry_run: Report the plan without writing.
         prune: Delete conversations no longer present in the export.
+        extract: Opt into the flag-gated entity/edge extraction pass
+            (also requires ``TRELLIS_ENABLE_MEMORY_EXTRACTION``).
         requested_by: Audit identifier for events and embed logging.
 
     Returns:
         A :class:`CorpusSyncReport`.
     """
+    from trellis.extract.memory_ingest_hook import (  # noqa: PLC0415
+        build_memory_extractor,
+    )
+
     records, warnings = read_claude_export(path, source_system=source_system)
     return sync_records(
         registry,
@@ -106,6 +113,7 @@ def sync_conversations(
         extra_metadata=extra_metadata,
         dry_run=dry_run,
         prune=prune,
+        extractor=build_memory_extractor(registry, opt_in=extract and not dry_run),
         detect_moves=False,
         initial_warnings=warnings,
     )

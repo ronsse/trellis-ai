@@ -76,6 +76,12 @@ def ingest_corpus(
     prune: bool = typer.Option(
         False, "--prune", help="Delete documents whose source file vanished"
     ),
+    extract: bool = typer.Option(
+        False,
+        "--extract",
+        help="Mine entities/edges from prose into the graph "
+        "(also needs TRELLIS_ENABLE_MEMORY_EXTRACTION; LLM cost)",
+    ),
     output_format: str = typer.Option(
         "text", "--format", help="Output format: text or json"
     ),
@@ -105,6 +111,7 @@ def ingest_corpus(
             include=tuple(include),
             dry_run=dry_run,
             prune=prune,
+            extract=extract,
             requested_by="cli:ingest-corpus",
         )
     except Exception as exc:
@@ -142,6 +149,12 @@ def ingest_corpus(
         f"pruned={counts['pruned']} chunks={counts['chunks_written']} "
         f"unsupported={counts['skipped_unsupported']}"
     )
+    if counts["entities_extracted"] or counts["edges_extracted"]:
+        console.print(
+            f"  [magenta]extracted[/magenta] "
+            f"entities={counts['entities_extracted']} "
+            f"edges={counts['edges_extracted']}"
+        )
     for warning in report.warnings:
         detail = " ".join(
             f"{k}={v}" for k, v in warning.items() if k != "kind" and v is not None

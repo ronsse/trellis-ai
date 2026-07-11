@@ -126,6 +126,10 @@ class CorpusSyncReport:
     #: Non-fatal findings: near-duplicate pairs, unreadable files,
     #: malformed frontmatter. Each entry has a ``kind`` key.
     warnings: list[dict[str, Any]] = field(default_factory=list)
+    #: Entities created by the optional ``--extract`` pass this run.
+    entities_extracted: int = 0
+    #: Edges created by the optional ``--extract`` pass this run.
+    edges_extracted: int = 0
 
     def counts(self) -> dict[str, int]:
         by_action = {"new": 0, "update": 0, "skip": 0, "move": 0}
@@ -140,6 +144,8 @@ class CorpusSyncReport:
             "skipped_unsupported": len(self.unsupported),
             "pruned": len(self.pruned),
             "chunks_written": sum(o.chunks_written for o in self.files),
+            "entities_extracted": self.entities_extracted,
+            "edges_extracted": self.edges_extracted,
             "warnings": len(self.warnings),
         }
 

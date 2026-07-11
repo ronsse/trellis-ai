@@ -48,6 +48,10 @@ import structlog
 
 from trellis.classify.dedup.minhash import MinHashIndex
 from trellis.core.hashing import content_hash
+from trellis.extract.memory_ingest_hook import (
+    build_memory_extractor,
+    run_memory_extraction,
+)
 from trellis.ingest_corpus.chunker import chunk_spans
 from trellis.ingest_corpus.handlers import handler_for, supported_extensions
 from trellis.ingest_corpus.models import (
@@ -84,6 +88,7 @@ def sync_corpus(
     include: tuple[str, ...] = (),
     dry_run: bool = False,
     prune: bool = False,
+    extract: bool = False,
     requested_by: str = "cli:ingest-corpus",
 ) -> CorpusSyncReport:
     """Sync the file tree at *root* into the document store.
@@ -105,6 +110,8 @@ def sync_corpus(
         include: Optional glob filter over relative paths.
         dry_run: Compute and report the full plan without writing.
         prune: Delete documents whose source file vanished.
+        extract: Opt into the flag-gated entity/edge extraction pass
+            (also requires ``TRELLIS_ENABLE_MEMORY_EXTRACTION``).
         requested_by: Audit identifier for events and embed logging.
 
     Returns:
@@ -148,6 +155,7 @@ def sync_corpus(
         extra_metadata=extra_metadata,
         dry_run=dry_run,
         prune=prune,
+        extractor=build_memory_extractor(registry, opt_in=extract and not dry_run),
         requested_by=requested_by,
         root_label=str(root),
         detect_moves=True,
@@ -168,6 +176,7 @@ def sync_records(
     dry_run: bool = False,
     prune: bool = False,
     detect_moves: bool = True,
+    extractor: Any = None,
     unsupported: Sequence[str] = (),
     initial_warnings: Sequence[dict[str, Any]] = (),
 ) -> CorpusSyncReport:
@@ -190,6 +199,10 @@ def sync_records(
         detect_moves: Re-key a document whose content reappears under a
             new id. Enable for content-derived ids (files); disable for
             content-independent ids (conversation uuids).
+        extractor: Optional memory extractor (from
+            :func:`~trellis.extract.memory_ingest_hook.build_memory_extractor`);
+            when set, each new/changed document's text is mined for
+            entity/edge drafts routed through the governed executor.
         unsupported: Source items with no handler (reported, not
             ingested) — for the run counts.
         initial_warnings: Reader warnings raised before record building
@@ -252,6 +265,7 @@ def sync_records(
                 spans=spans,
                 source_system=source_system,
                 requested_by=requested_by,
+                extractor=extractor,
             )
         report.files.append(outcome)
 
@@ -317,6 +331,7 @@ def _apply_record(
     spans: list[ChunkSpan],
     source_system: str,
     requested_by: str,
+    extractor: Any = None,
 ) -> None:
     """Execute the writes for one new / updated / moved record."""
     doc_store = registry.knowledge.document_store
@@ -375,6 +390,16 @@ def _apply_record(
         metadata=metadata,
         requested_by=requested_by,
     )
+
+    if extractor is not None:
+        # Mine entity/edge drafts from the full document text (not chunks)
+        # and route them through the governed executor. Fully fail-soft —
+        # the document is already durably stored.
+        entities, edges = run_memory_extraction(
+            registry, extractor, outcome.doc_id, text, requested_by=requested_by
+        )
+        report.entities_extracted += entities
+        report.edges_extracted += edges
 
 
 def _write_chunks(

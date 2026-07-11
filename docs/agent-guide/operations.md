@@ -260,7 +260,7 @@ the document store, idempotently. See
 
 ```bash
 trellis ingest corpus <path> [--source-system corpus] [--domain X] \
-    [--tag k=v ...] [--include '*.md'] [--dry-run] [--prune] [--format json]
+    [--tag k=v ...] [--include '*.md'] [--dry-run] [--prune] [--extract] [--format json]
 ```
 
 | Option | Default | Description |
@@ -272,6 +272,7 @@ trellis ingest corpus <path> [--source-system corpus] [--domain X] \
 | `--include` | all files | Glob filter over relative paths (repeatable) |
 | `--dry-run` | off | Report the full plan (files, chunk counts, skips) without writing |
 | `--prune` | off | Delete documents whose source file vanished |
+| `--extract` | off | Mine entities/edges from prose into the graph (see below) |
 
 Re-running over an unchanged tree performs zero writes (`content_hash`
 comparison). Edited files re-put under the same `doc_id` and re-embed
@@ -287,6 +288,17 @@ into `metadata.wikilinks` (candidates only — no graph writes).
 Cross-file near-duplicates are warned about in the report, never
 skipped. Every new/changed file emits `MEMORY_STORED`; each run emits a
 `CORPUS_SYNCED` summary event.
+
+**Entity extraction (`--extract`)** is **double-gated**: the `--extract`
+flag *and* the `TRELLIS_ENABLE_MEMORY_EXTRACTION` env flag must both be
+set (at corpus scale it's a per-run LLM-cost decision). When on and an
+LLM client is configured, each new/changed document's prose is mined for
+entity/edge drafts (the same `build_save_memory_extractor` pipeline the
+MCP `save_memory` path uses — deterministic alias-match + LLM residue)
+and routed through the governed `MutationExecutor`; the run report gains
+`entities_extracted` / `edges_extracted`. Fully fail-soft — a broken
+extractor never fails the ingest. With either gate off (the default), no
+extraction runs.
 
 **JSON output (abridged):**
 
@@ -304,7 +316,7 @@ sees. Shares the idempotent sync core with `ingest corpus`.
 
 ```bash
 trellis ingest conversations <path> [--source-system claude-ai] \
-    [--domain X] [--tag k=v ...] [--dry-run] [--prune] [--format json]
+    [--domain X] [--tag k=v ...] [--dry-run] [--prune] [--extract] [--format json]
 ```
 
 | Option | Default | Description |
@@ -314,6 +326,7 @@ trellis ingest conversations <path> [--source-system claude-ai] \
 | `--domain` / `--tag k=v` | — | Metadata applied to every written document |
 | `--dry-run` | off | Report the plan without writing |
 | `--prune` | off | Delete conversations no longer present in the export |
+| `--extract` | off | Mine entities/edges from conversation prose into the graph (double-gated with `TRELLIS_ENABLE_MEMORY_EXTRACTION`; see `ingest corpus`) |
 
 **Getting the export:** in claude.ai, Settings → Privacy → *Export data*;
 you'll be emailed a `.zip`. Point this command at the `.zip` (or the
