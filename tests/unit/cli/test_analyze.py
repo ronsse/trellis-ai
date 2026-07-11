@@ -122,6 +122,54 @@ class TestTokenUsage:
         assert result.exit_code == 0
 
 
+class TestCost:
+    def test_empty_events_json(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("TRELLIS_COST_PRICE_PER_MTOK", raising=False)
+        result = runner.invoke(app, ["analyze", "cost", "--format", "json"])
+        assert result.exit_code == 0
+        data = json.loads(result.stdout.strip())
+        assert data["overhead_events"] == 0
+        assert data["overhead_dollars"] == 0.0
+
+    def test_prices_injected_overhead(
+        self, temp_stores: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("TRELLIS_COST_PRICE_PER_MTOK", raising=False)
+        from trellis.retrieve.token_tracker import track_token_usage
+
+        log = temp_stores.operational.event_log
+        for _ in range(10):
+            track_token_usage(
+                log, layer="mcp", operation="get_context", response_tokens=1500
+            )
+        result = runner.invoke(
+            app,
+            ["analyze", "cost", "--model", "claude-opus", "--format", "json"],
+        )
+        assert result.exit_code == 0
+        data = json.loads(result.stdout.strip())
+        assert data["overhead_tokens"] == 15_000
+        assert data["price_per_mtok"] == 15.0
+        assert data["overhead_dollars"] == pytest.approx(0.225)
+
+    def test_text_output_shows_dollars(
+        self, temp_stores: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("TRELLIS_COST_PRICE_PER_MTOK", raising=False)
+        from trellis.retrieve.token_tracker import track_token_usage
+
+        track_token_usage(
+            temp_stores.operational.event_log,
+            layer="mcp",
+            operation="get_context",
+            response_tokens=4000,
+        )
+        result = runner.invoke(app, ["analyze", "cost", "--price-per-mtok", "3"])
+        assert result.exit_code == 0
+        assert "Trellis Cost Overhead" in result.stdout
+        assert "$" in result.stdout
+
+
 class TestAdvisoryEffectiveness:
     def test_empty_events(self) -> None:
         result = runner.invoke(app, ["analyze", "advisory-effectiveness"])

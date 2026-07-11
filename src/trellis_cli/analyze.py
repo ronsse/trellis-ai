@@ -47,6 +47,7 @@ from trellis.retrieve.evaluate import (
 from trellis.retrieve.pack_sections import analyze_pack_sections
 from trellis.retrieve.telemetry import analyze_pack_telemetry
 from trellis.retrieve.token_usage import analyze_token_usage
+from trellis.retrieve.trellis_cost import summarize_trellis_cost
 from trellis.schemas.parameters import ParameterScope, ParameterSet
 from trellis.stores.advisory_store import AdvisoryStore
 from trellis.stores.base.parameter import ParameterStore
@@ -465,6 +466,85 @@ def token_usage(
         console.print(
             "[dim]No token usage recorded yet. Token tracking is enabled"
             " on MCP macro tools automatically.[/dim]"
+        )
+
+
+@analyze_app.command("cost")
+def cost(
+    days: int = typer.Option(7, help="Days of history to analyze"),
+    model: str | None = typer.Option(
+        None, "--model", help="Consuming model for pricing (e.g. claude-opus)"
+    ),
+    price_per_mtok: float | None = typer.Option(
+        None, "--price-per-mtok", help="Override input price, USD per 1M tokens"
+    ),
+    output_format: str = typer.Option("text", "--format", help="Output format"),
+    no_meta_trace: bool = typer.Option(
+        False,
+        "--no-meta-trace",
+        help="Skip recording this run as a meta-Activity (Item 6 Phase 2).",
+    ),
+) -> None:
+    """Estimate Trellis's cost overhead — dollars of context it injected."""
+    event_log = get_event_log()
+    with wrap_cli_meta_analysis(
+        agent_suffix="analyze",
+        analyzer_name="cli.analyze.cost",
+        disabled=no_meta_trace,
+    ) as _meta_record:
+        report = summarize_trellis_cost(
+            event_log, days=days, model=model, price_per_mtok=price_per_mtok
+        )
+        if _meta_record.enabled and report.overhead_events > 0:
+            _meta_record.produced_finding(
+                f"trellis-cost-report-d{days}",
+                finding_type="TrellisCostReport",
+            )
+
+    if output_format == "json":
+        print(json.dumps(report.model_dump()))
+        return
+
+    console.print(f"[bold]Trellis Cost Overhead[/bold] (last {days} days)")
+    console.print(
+        f"  Injected {report.overhead_tokens:,} tokens "
+        f"across {report.overhead_events} retrievals"
+    )
+    console.print(
+        f"  [green]≈ ${report.overhead_dollars:,.4f}[/green] "
+        f"at ${report.price_per_mtok:g}/Mtok input "
+        f"({report.model}, {report.price_source})"
+    )
+    console.print(
+        "  [dim]This is the marginal input-token overhead memory adds to "
+        "agent turns.\n"
+        "  Compare against your provider's input bill for the overhead "
+        "fraction.[/dim]"
+    )
+
+    if report.by_operation:
+        console.print()
+        op_table = Table(title="Cost by Operation")
+        op_table.add_column("Operation", style="cyan")
+        op_table.add_column("Layer", style="dim")
+        op_table.add_column("Calls", justify="right")
+        op_table.add_column("Tokens", justify="right")
+        op_table.add_column("Dollars", justify="right")
+        for op in report.by_operation:
+            op_table.add_row(
+                op["operation"],
+                op["layer"],
+                str(op["calls"]),
+                f"{op['tokens']:,}",
+                f"${op['dollars']:,.4f}",
+            )
+        console.print(op_table)
+
+    if report.overhead_events == 0:
+        console.print()
+        console.print(
+            "[dim]No token usage recorded yet. Trellis's context tools"
+            " track it automatically once agents start retrieving.[/dim]"
         )
 
 

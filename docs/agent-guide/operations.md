@@ -877,6 +877,41 @@ trellis analyze token-usage [--days N] [--format text|json]
 
 Shows total tokens, average per response, breakdown by layer and operation, and over-budget alerts.
 
+### `trellis analyze cost`
+
+Estimate **Trellis's cost overhead** — the dollar cost of the context
+Trellis injects into agent turns. This is the "what does memory cost on
+top of my agent bill?" number.
+
+```bash
+trellis analyze cost [--days N] [--model claude-opus] \
+    [--price-per-mtok 3.0] [--format text|json]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--days` | `7` | Days of history to analyze |
+| `--model` | `claude-sonnet` (or `TRELLIS_COST_MODEL`) | Consuming model for input pricing; resolves by family (`claude-opus-4-8` → `claude-opus`) |
+| `--price-per-mtok` | model table (or `TRELLIS_COST_PRICE_PER_MTOK`) | Explicit input price override, USD per 1M tokens |
+
+Prices the `response_tokens` of every `TOKEN_TRACKED` event (emitted by
+`get_context` / `get_lessons` / the other MCP macro tools) at the
+consuming model's **input** rate — those injected tokens land in the
+agent's next prompt. The **token count is exact**; the **dollar figure is
+an estimate** (the ~4-chars/token counter, and an operator-owned price —
+`price_source` in the output says which input won: explicit / env /
+model-table / default). It reports the *absolute* overhead in tokens and
+dollars, not a ratio: Trellis never sees the agent's own generation, so
+compare `overhead_dollars` against your provider's input-token bill for
+the same window to get the overhead fraction. Local models (Ollama) price
+at `--model local` → $0.
+
+**JSON output (abridged):**
+
+```json
+{"period_days": 7, "overhead_events": 28, "overhead_tokens": 34800, "model": "claude-opus", "price_per_mtok": 15.0, "price_source": "model_table", "overhead_dollars": 0.522, "by_operation": [{"operation": "get_context", "layer": "mcp", "calls": 20, "tokens": 30000, "dollars": 0.45}], "estimator": "estimate_4_chars_per_token"}
+```
+
 ### `trellis analyze domains`
 
 Read-only usage report for the primary retrieval slice, `domain`. Joins observed
