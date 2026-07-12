@@ -1,6 +1,6 @@
 # Plan: Evaluation strategy
 
-**Status:** active 2026-04-26
+**Status:** active 2026-04-26 · **Program relocated 2026-07-12:** the harness, scenarios, corpora, and eval unit tests now live in the private `ronsse/trellis-evals` repo (subtree split, history preserved). This doc remains the strategy of record.
 
 > *Historical note: references to WorkflowEngine below predate its retirement (2026-05-18); see `docs/research/workflow-engine-disposition.md`.*
 

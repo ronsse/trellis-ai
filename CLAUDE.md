@@ -64,7 +64,7 @@ All packages depend on `trellis` (core library) and share configuration via `Sto
 
 Every write flows through `MutationExecutor` in 5 stages: validate → policy check → idempotency check → execute → emit event. Handlers and policy gates are Protocol-based (injected, not hardcoded). Batch execution supports `SEQUENTIAL`, `STOP_ON_ERROR`, and `CONTINUE_ON_ERROR` strategies.
 
-**Sanctioned exception — eval-scenario seeding.** Eval scenarios under `eval/scenarios/` may synthesize audit events directly via `event_log.emit(...)` when seeding test data (e.g., `_seed_extraction_failures`, `_populate_entity_documents`). The pipeline's per-row policy + idempotency checks are uneconomical at the volume eval scenarios produce, and the events the pipeline *would* have emitted are reproducible from the synthetic seed. This is scenario-local; **production code paths must use `MutationExecutor`**.
+**Sanctioned exception — eval-scenario seeding.** Eval scenarios (in the separate `trellis-evals` repo since 2026-07-12) may synthesize audit events directly via `event_log.emit(...)` when seeding test data (e.g., `_seed_extraction_failures`, `_populate_entity_documents`). The pipeline's per-row policy + idempotency checks are uneconomical at the volume eval scenarios produce, and the events the pipeline *would* have emitted are reproducible from the synthetic seed. This is scenario-local; **production code paths must use `MutationExecutor`**.
 
 ### Store Abstraction (`src/trellis/stores/`)
 

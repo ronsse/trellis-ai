@@ -1,0 +1,158 @@
+{
+  "generated_at": "20260710T181532_039775Z",
+  "scenarios": [
+    {
+      "decision": "Program regression suite \u2014 50 rounds, profile='synthetic' (axis A threshold=0.05), 0/9 axes regressed, 0/4 satellites failed. Each per-axis assertion has its own Finding with actual vs expected numbers; inspect failures individually rather than treating the suite's status as a single bit. CI exits non-zero on any regression.",
+      "duration_seconds": 2.215273,
+      "findings": [
+        {
+          "detail": {
+            "delta": 0.0545,
+            "first_quarter_mean": 0.9455,
+            "last_quarter_mean": 1.0,
+            "profile": "synthetic",
+            "threshold": 0.05
+          },
+          "message": "axis A_pack_quality PASS \u2014 actual=0.0545 (delta \u2265 0.05 (profile=synthetic))",
+          "severity": "info"
+        },
+        {
+          "detail": {
+            "delta": 0.3438,
+            "first_quarter_mean": 0.6562,
+            "last_quarter_mean": 1.0,
+            "profile": null,
+            "threshold": 0.1
+          },
+          "message": "axis B_useful_item_fraction PASS \u2014 actual=0.3438 (delta \u2265 0.1)",
+          "severity": "info"
+        },
+        {
+          "detail": {
+            "delta": 0.0,
+            "first_quarter_mean": 0.0,
+            "last_quarter_mean": 0.0
+          },
+          "message": "axis C_advisory_hit_rate PASS \u2014 actual=0.0 (last_quarter_mean \u2265 0.0)",
+          "severity": "info"
+        },
+        {
+          "detail": {
+            "per_seed_average": 11.8182,
+            "seed_entity_count": 22,
+            "total_observations_by_r25": 260.0
+          },
+          "message": "axis D_observation_enrichment PASS \u2014 actual=11.8182 (\u2265 10.0 per seed entity by round 25)",
+          "severity": "info"
+        },
+        {
+          "detail": {
+            "delta": 0.0,
+            "first_quarter_mean": 1.0,
+            "last_quarter_mean": 1.0
+          },
+          "message": "axis E_provenance_queryability PASS \u2014 actual=1.0 (last_quarter_mean \u2265 1.0)",
+          "severity": "info"
+        },
+        {
+          "detail": {
+            "delta": 0.0,
+            "final_round_count": 0.0,
+            "round_25_count": 0.0
+          },
+          "message": "axis F_extraction_failure_clusters PASS \u2014 actual=0.0 (round 50 cluster count \u2264 round 25 cluster count)",
+          "severity": "info"
+        },
+        {
+          "detail": {
+            "total_candidates_by_r30": 1.0
+          },
+          "message": "axis G_schema_evolution_candidates PASS \u2014 actual=1.0 (\u2265 1.0 candidate by round 30)",
+          "severity": "info"
+        },
+        {
+          "detail": {
+            "max_per_round": 1.0,
+            "rounds_observed": 50
+          },
+          "message": "axis H_meta_trace_density PASS \u2014 actual=1.0 (max per round \u2264 50.0)",
+          "severity": "info"
+        },
+        {
+          "detail": {
+            "cluster_peak_by_r40": 3.0,
+            "proposals_by_r40": 4.0,
+            "ratio": 1.3333
+          },
+          "message": "axis I_self_authored_proposals PASS \u2014 actual=1.3333 (proposal/cluster ratio \u2265 1.0 by round 40)",
+          "severity": "info"
+        },
+        {
+          "detail": {
+            "module": "eval.scenarios.observation_retrieval",
+            "stage": "completed",
+            "status": "pass"
+          },
+          "message": "satellite eval.scenarios.observation_retrieval pass",
+          "severity": "info"
+        },
+        {
+          "detail": {
+            "module": "eval.scenarios.parameter_registry_passthrough",
+            "stage": "completed",
+            "status": "pass"
+          },
+          "message": "satellite eval.scenarios.parameter_registry_passthrough pass",
+          "severity": "info"
+        },
+        {
+          "detail": {
+            "module": "eval.scenarios.proposal_generation",
+            "stage": "completed",
+            "status": "pass"
+          },
+          "message": "satellite eval.scenarios.proposal_generation pass",
+          "severity": "info"
+        },
+        {
+          "detail": {
+            "module": "eval.scenarios.meta_trace_round_trip",
+            "stage": "completed",
+            "status": "pass"
+          },
+          "message": "satellite eval.scenarios.meta_trace_round_trip pass",
+          "severity": "info"
+        }
+      ],
+      "metrics": {
+        "axes.regressed": 0.0,
+        "axis.A_pack_quality.actual": 0.0545,
+        "axis.A_pack_quality.passed": 1.0,
+        "axis.B_useful_item_fraction.actual": 0.3438,
+        "axis.B_useful_item_fraction.passed": 1.0,
+        "axis.C_advisory_hit_rate.actual": 0.0,
+        "axis.C_advisory_hit_rate.passed": 1.0,
+        "axis.D_observation_enrichment.actual": 11.8182,
+        "axis.D_observation_enrichment.passed": 1.0,
+        "axis.E_provenance_queryability.actual": 1.0,
+        "axis.E_provenance_queryability.passed": 1.0,
+        "axis.F_extraction_failure_clusters.actual": 0.0,
+        "axis.F_extraction_failure_clusters.passed": 1.0,
+        "axis.G_schema_evolution_candidates.actual": 1.0,
+        "axis.G_schema_evolution_candidates.passed": 1.0,
+        "axis.H_meta_trace_density.actual": 1.0,
+        "axis.H_meta_trace_density.passed": 1.0,
+        "axis.I_self_authored_proposals.actual": 1.3333,
+        "axis.I_self_authored_proposals.passed": 1.0,
+        "rounds": 50.0,
+        "rounds_executed": 50.0,
+        "satellites.failed": 0.0,
+        "satellites.invoked": 4.0,
+        "seed": 0.0,
+        "seed_entities": 22.0
+      },
+      "name": "program_regression_suite",
+      "status": "pass"
+    }
+  ]
+}

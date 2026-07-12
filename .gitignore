@@ -37,10 +37,3 @@ tmp*
 # Renderer sources (``*.py``) and ``__init__`` are tracked; generated
 # artifacts (PNG charts, JSON dumps) are not.
 # Phase A/B run records (`phase_*.json`) are citable artifacts — keep them.
-eval/reports/*
-!eval/reports/.gitkeep
-!eval/reports/__init__.py
-!eval/reports/*.py
-eval/runs/*
-!eval/runs/.gitkeep
-!eval/runs/phase_*.json

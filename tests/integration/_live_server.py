@@ -3,7 +3,7 @@
 Spawns ``uvicorn trellis_api.app:create_app --factory`` as a subprocess
 against a tmp config dir wired to live Neon Postgres (operational
 plane) + AuraDB Neo4j (knowledge plane). The fixture wipes persistent
-state via ``eval._live_wipe.wipe_live_state`` before yielding so each
+state via ``tests.integration._live_wipe.wipe_live_state`` before yielding so each
 test starts from an empty graph + clean tables. SQLite stores under
 ``tmp_path`` naturally start clean per test.
 
@@ -120,8 +120,7 @@ def wipe_live_state_for_config(config_dir: Path, env: dict[str, str]) -> None:
     than after uvicorn boots. The registry is closed before yielding
     to release the connection — uvicorn opens its own.
     """
-    from eval._live_wipe import wipe_live_state
-
+    from tests.integration._live_wipe import wipe_live_state
     from trellis.stores.registry import StoreRegistry
 
     # Restore the env so plane-aware DSN resolution sees the test DSNs.

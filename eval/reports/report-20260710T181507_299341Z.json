@@ -1,0 +1,83 @@
+{
+  "generated_at": "20260710T181507_299341Z",
+  "scenarios": [
+    {
+      "decision": "Degraded-retrieval convergence run complete. useful_delta=+0.490; quarter trajectory: 0.48 \u2192 0.97. Read the trajectory before the delta \u2014 a clean monotonic climb across all four quarters is what proves the loop is doing the work; a single jump might be a corpus artifact. If status is ``regress``, either distractors weren't winning pack slots (lower pack_max_items or raise distractors_per_domain) or the loop didn't get enough periodic passes (raise rounds).",
+      "duration_seconds": 1.208633,
+      "findings": [
+        {
+          "detail": {
+            "useful_delta": 0.49,
+            "useful_fraction_first_quarter": 0.48,
+            "useful_fraction_last_quarter": 0.97
+          },
+          "message": "weighted score: 0.949 \u2192 0.996 (\u0394 +0.047)",
+          "severity": "info"
+        },
+        {
+          "detail": {
+            "suppressed_ids": []
+          },
+          "message": "loops fired: 20 effectiveness, 20 advisory; noise tags applied: 851; advisories \u2014 generated 2, suppressed 0, restored 0, boosted 34",
+          "severity": "info"
+        },
+        {
+          "detail": {
+            "climb_q4_minus_q1": 0.49,
+            "quarter_means": [
+              0.48,
+              0.75,
+              0.815,
+              0.97
+            ]
+          },
+          "message": "useful-fraction trajectory by quarter: 0.480 \u2192 0.750 \u2192 0.815 \u2192 0.970",
+          "severity": "info"
+        }
+      ],
+      "metrics": {
+        "convergence.quarters.useful_q1_mean": 0.48,
+        "convergence.quarters.useful_q2_mean": 0.75,
+        "convergence.quarters.useful_q3_mean": 0.815,
+        "convergence.quarters.useful_q4_mean": 0.97,
+        "convergence.useful_delta": 0.49,
+        "convergence.useful_first_quarter_mean": 0.48,
+        "convergence.useful_last_quarter_mean": 0.97,
+        "convergence.weighted_delta": 0.0469,
+        "convergence.weighted_first_quarter_mean": 0.9495,
+        "convergence.weighted_last_quarter_mean": 0.9964,
+        "distractors_per_domain": 15.0,
+        "distractors_planted": 45.0,
+        "domain_count": 3.0,
+        "entities_upserted": 22.0,
+        "feedback_batch_size": 10.0,
+        "loops.advisories_boosted_total": 34.0,
+        "loops.advisories_generated_total": 2.0,
+        "loops.advisories_restored_total": 0.0,
+        "loops.advisories_suppressed_total": 0.0,
+        "loops.advisory_runs": 20.0,
+        "loops.effectiveness_runs": 20.0,
+        "loops.noise_items_tagged_total": 851.0,
+        "pack_max_items": 4.0,
+        "per_domain.customer_support.success_rate": 1.0,
+        "per_domain.customer_support.useful_fraction_mean": 0.7992,
+        "per_domain.data_pipeline.success_rate": 0.8507,
+        "per_domain.data_pipeline.useful_fraction_mean": 0.7052,
+        "per_domain.software_engineering.success_rate": 0.8955,
+        "per_domain.software_engineering.useful_fraction_mean": 0.7575,
+        "round_coverage_mean": 0.91,
+        "round_success_rate": 0.915,
+        "round_total_items_referenced": 546.0,
+        "round_total_items_served": 743.0,
+        "round_useful_fraction_overall": 0.7349,
+        "round_weighted_score_max": 1.0,
+        "round_weighted_score_mean": 0.9755,
+        "round_weighted_score_min": 0.8347,
+        "rounds": 200.0,
+        "traces_ingested": 18.0
+      },
+      "name": "agent_loop_convergence_degraded",
+      "status": "pass"
+    }
+  ]
+}

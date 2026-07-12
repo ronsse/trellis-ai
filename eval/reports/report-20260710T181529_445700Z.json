@@ -1,0 +1,175 @@
+{
+  "generated_at": "20260710T181529_445700Z",
+  "scenarios": [
+    {
+      "decision": "Master program_convergence scenario ran nine axes end-to-end on 30 synthetic rounds. Inspect per-axis deltas in the metrics block ('axis.<label>.delta'); plan \u00a72.1 specifies which direction each axis should move. Phase 2 (regression suite, plan \u00a74.2) and Phase 3 (PNG chart renderer, \u00a74.3) consume the same axis metrics.",
+      "duration_seconds": 3.825666,
+      "findings": [
+        {
+          "detail": {
+            "suppressed_ids": []
+          },
+          "message": "loops fired: 6 effectiveness, 6 advisory; noise tags applied: 73; advisories \u2014 generated 1, suppressed 0, restored 0, boosted 5",
+          "severity": "info"
+        },
+        {
+          "detail": {
+            "axis": "A_pack_quality",
+            "delta": 0.079,
+            "first_quarter_mean": 0.921,
+            "last_quarter_mean": 1.0
+          },
+          "message": "A_pack_quality: 0.921 \u2192 1.000 (\u0394 +0.079)",
+          "severity": "info"
+        },
+        {
+          "detail": {
+            "axis": "B_useful_item_fraction",
+            "delta": 0.5,
+            "first_quarter_mean": 0.5,
+            "last_quarter_mean": 1.0
+          },
+          "message": "B_useful_item_fraction: 0.500 \u2192 1.000 (\u0394 +0.500)",
+          "severity": "info"
+        },
+        {
+          "detail": {
+            "axis": "C_advisory_hit_rate",
+            "delta": 0.0,
+            "first_quarter_mean": 0.0,
+            "last_quarter_mean": 0.0
+          },
+          "message": "C_advisory_hit_rate: 0.000 \u2192 0.000 (\u0394 +0.000)",
+          "severity": "info"
+        },
+        {
+          "detail": {
+            "axis": "D_observation_enrichment",
+            "delta": 0.0,
+            "first_quarter_mean": 10.0,
+            "last_quarter_mean": 10.0
+          },
+          "message": "D_observation_enrichment: 10.000 \u2192 10.000 (\u0394 +0.000)",
+          "severity": "info"
+        },
+        {
+          "detail": {
+            "axis": "E_provenance_queryability",
+            "delta": 0.0,
+            "first_quarter_mean": 1.0,
+            "last_quarter_mean": 1.0
+          },
+          "message": "E_provenance_queryability: 1.000 \u2192 1.000 (\u0394 +0.000)",
+          "severity": "info"
+        },
+        {
+          "detail": {
+            "axis": "F_extraction_failure_clusters",
+            "delta": -1.7143,
+            "first_quarter_mean": 1.7143,
+            "last_quarter_mean": 0.0
+          },
+          "message": "F_extraction_failure_clusters: 1.714 \u2192 0.000 (\u0394 -1.714)",
+          "severity": "info"
+        },
+        {
+          "detail": {
+            "axis": "G_schema_evolution_candidates",
+            "delta": -0.1429,
+            "first_quarter_mean": 0.1429,
+            "last_quarter_mean": 0.0
+          },
+          "message": "G_schema_evolution_candidates: 0.143 \u2192 0.000 (\u0394 -0.143)",
+          "severity": "info"
+        },
+        {
+          "detail": {
+            "axis": "H_meta_trace_density",
+            "delta": 0.1429,
+            "first_quarter_mean": 0.1429,
+            "last_quarter_mean": 0.2857
+          },
+          "message": "H_meta_trace_density: 0.143 \u2192 0.286 (\u0394 +0.143)",
+          "severity": "info"
+        },
+        {
+          "detail": {
+            "axis": "I_self_authored_proposals",
+            "delta": -0.5714,
+            "first_quarter_mean": 0.5714,
+            "last_quarter_mean": 0.0
+          },
+          "message": "I_self_authored_proposals: 0.571 \u2192 0.000 (\u0394 -0.571)",
+          "severity": "info"
+        },
+        {
+          "detail": {
+            "axis_deltas": {
+              "A_pack_quality": 0.079,
+              "B_useful_item_fraction": 0.5,
+              "C_advisory_hit_rate": 0.0,
+              "D_observation_enrichment": 0.0,
+              "E_provenance_queryability": 0.0,
+              "F_extraction_failure_clusters": -1.7143,
+              "G_schema_evolution_candidates": -0.1429,
+              "H_meta_trace_density": 0.1429,
+              "I_self_authored_proposals": -0.5714
+            }
+          },
+          "message": "program_convergence multi-axis summary \u2014 see detail for the nine per-axis deltas",
+          "severity": "info"
+        }
+      ],
+      "metrics": {
+        "analyzer_cadence": 5.0,
+        "axis.A_pack_quality.delta": 0.079,
+        "axis.A_pack_quality.first_quarter_mean": 0.921,
+        "axis.A_pack_quality.last_quarter_mean": 1.0,
+        "axis.B_useful_item_fraction.delta": 0.5,
+        "axis.B_useful_item_fraction.first_quarter_mean": 0.5,
+        "axis.B_useful_item_fraction.last_quarter_mean": 1.0,
+        "axis.C_advisory_hit_rate.delta": 0.0,
+        "axis.C_advisory_hit_rate.first_quarter_mean": 0.0,
+        "axis.C_advisory_hit_rate.last_quarter_mean": 0.0,
+        "axis.D_observation_enrichment.delta": 0.0,
+        "axis.D_observation_enrichment.first_quarter_mean": 10.0,
+        "axis.D_observation_enrichment.last_quarter_mean": 10.0,
+        "axis.E_provenance_queryability.delta": 0.0,
+        "axis.E_provenance_queryability.first_quarter_mean": 1.0,
+        "axis.E_provenance_queryability.last_quarter_mean": 1.0,
+        "axis.F_extraction_failure_clusters.delta": -1.7143,
+        "axis.F_extraction_failure_clusters.first_quarter_mean": 1.7143,
+        "axis.F_extraction_failure_clusters.last_quarter_mean": 0.0,
+        "axis.G_schema_evolution_candidates.delta": -0.1429,
+        "axis.G_schema_evolution_candidates.first_quarter_mean": 0.1429,
+        "axis.G_schema_evolution_candidates.last_quarter_mean": 0.0,
+        "axis.H_meta_trace_density.delta": 0.1429,
+        "axis.H_meta_trace_density.first_quarter_mean": 0.1429,
+        "axis.H_meta_trace_density.last_quarter_mean": 0.2857,
+        "axis.I_self_authored_proposals.delta": -0.5714,
+        "axis.I_self_authored_proposals.first_quarter_mean": 0.5714,
+        "axis.I_self_authored_proposals.last_quarter_mean": 0.0,
+        "convergence.useful_delta": 0.5,
+        "convergence.useful_first_quarter_mean": 0.5,
+        "convergence.useful_last_quarter_mean": 1.0,
+        "convergence.weighted_delta": 0.079,
+        "convergence.weighted_first_quarter_mean": 0.921,
+        "convergence.weighted_last_quarter_mean": 1.0,
+        "domain_count": 3.0,
+        "feedback_batch_size": 5.0,
+        "loops.advisories_boosted_total": 5.0,
+        "loops.advisories_generated_total": 1.0,
+        "loops.advisories_restored_total": 0.0,
+        "loops.advisories_suppressed_total": 0.0,
+        "loops.advisory_runs": 6.0,
+        "loops.effectiveness_runs": 6.0,
+        "loops.noise_items_tagged_total": 73.0,
+        "rounds": 30.0,
+        "seed_entities": 22.0,
+        "traces_ingested": 18.0
+      },
+      "name": "program_convergence",
+      "status": "pass"
+    }
+  ]
+}

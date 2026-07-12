@@ -25,7 +25,8 @@ order, are:
 **Definitional parity with the convergence scenario — partial.** Only
 ``pack_success_rate`` and ``reference_rate`` have a genuine eval
 counterpart (``round_success_rate`` and ``round_useful_fraction_overall``
-in ``eval/scenarios/_convergence_common.py``), and their arithmetic
+in the trellis-evals repo's ``eval/scenarios/_convergence_common.py``),
+and their arithmetic
 matches **only** when an entire eval run lands within a single UTC day
 **and** every FEEDBACK_RECORDED event joins a PACK_ASSEMBLED event. The
 two constructions diverge otherwise: this module buckets per UTC calendar

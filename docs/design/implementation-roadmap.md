@@ -7,7 +7,7 @@
 >
 > **Picking up the memory-layer / corpus work?** [`adr-memory-layer-interop.md`](./adr-memory-layer-interop.md) is **Superseded**: the owner decided importers-into-Trellis instead of an external layer. The live design is [`adr-corpus-ingestion.md`](./adr-corpus-ingestion.md) — **phases 1–2 are landed** (`trellis ingest corpus`, §G below); transcript/`--extract`/PDF handlers (phases 3–5) are incremental follow-ups.
 >
-> **Picking up Phase F (inner agent loop)?** TODO.md "Phase F" is the staged program (F1 harness ≈ 1500–2000 LOC; F5 gated on 30 days of F4 signal). The F6 eval scenario is already implemented with reference drivers at the F1–F5 plug-in seam (`eval/scenarios/skill_loop_convergence/`).
+> **Picking up Phase F (inner agent loop)?** TODO.md "Phase F" is the staged program (F1 harness ≈ 1500–2000 LOC; F5 gated on 30 days of F4 signal). The F6 eval scenario is already implemented with reference drivers at the F1–F5 plug-in seam (`eval/scenarios/skill_loop_convergence/` — in the `trellis-evals` repo since the 2026-07-12 split).
 
 ---
 
