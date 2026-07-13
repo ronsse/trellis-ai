@@ -44,7 +44,7 @@ Honesty note: verified deployments today = the author's dogfood + that paused pi
 
 - **Traces are immutable**; all writes flow through `MutationExecutor` — no direct store writes (`CLAUDE.md` Hard Rules).
 - **EventLog is the single authoritative feedback path**; `pack_feedback.jsonl` is audit-only (`docs/design/adr-dual-loop-evolution.md` §8).
-- **Deterministic-first, LLM opt-in**: LLM never in the write path; extraction routes `DETERMINISTIC > HYBRID > LLM` with `allow_llm_fallback=False` default; core stays LLM-SDK-free (protocols only, `src/trellis/llm/`).
+- **Deterministic-first, LLM opt-in**: LLM never in the write path; extraction routes `DETERMINISTIC > HYBRID > LLM` with `allow_llm_fallback=False` default; core stays LLM-SDK-free (protocols only, `src/trellis/llm/`). The ladder's destination is `DETERMINISTIC > LOCAL > FRONTIER` (north star, §6): *cost-motivated* judgment-avoidance dissolves as local inference approaches free; *trust-motivated* determinism — governed writes, idempotency, audit — is permanent regardless of where inference runs.
 - **Statistical gate before parameter promotion** (defaults: 5 samples, 15% effect) — no evidence, no change.
 - **Contract suites are the storage spec**; a backend that doesn't pass them doesn't ship.
 - **Open-string type extensibility** — no domain-specific types in core enums.
@@ -66,7 +66,14 @@ Honesty note: verified deployments today = the author's dogfood + that paused pi
 
 ## 6. Scope: now / next / not
 
-- **Now** — Productionization (see `docs/ROADMAP-EDITS.draft.md`): fix the three live retrieval defects + feedback plumbing (TODO.md dogfood queue), close the security floor (#250 credential hygiene, #194 classification enforcement), land the query-history curation primitives (#200–#203) as fixture-tested code, disposition #208.
+- **North star (stretch; orders everything else)** — a **small local model performs every
+  judged memory operation**: extraction, reconciliation, distillation, curation verdicts.
+  Frontier models become optional, never load-bearing. Partially live already (hermes3:8b
+  extraction, nomic-embed embeddings — both local). Rules it imposes *today*: every new
+  judged stage targets a local model first; no judged stage may be designed to require
+  frontier-scale reasoning; every judged op is logged with its downstream outcome as a
+  training pair — the memory system generates its own fine-tuning corpus.
+- **Now** — Productionization (see `docs/ROADMAP-EDITS-2026-07-11.md`): fix the three live retrieval defects + feedback plumbing (TODO.md dogfood queue), close the security floor (#250 credential hygiene, #194 classification enforcement), land the query-history curation primitives (#200–#203) as fixture-tested code, disposition #208.
 - **Next** — Claude Code session auto-capture (the highest-leverage capture gap; new ADR increment); §G.4 corpus handlers strictly by observed dogfood need; Phase F F1 harness when the owner schedules it.
 - **Not doing** — the anti-scope list; this project has scope-creep gravity:
   - **No new storage backends.** FalkorDB (SSPL), Kuzu (single-writer), Neptune (cost) already rejected — `adr-arcadedb-blessed-substrate.md`.

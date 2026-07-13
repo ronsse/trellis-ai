@@ -28,6 +28,35 @@ rule this doc applies throughout:
   not anyone's forecast at write time. This is the stage where Trellis's item-level
   attribution seam is a structural advantage no comparable system has.
 
+### 0.1 North star: the local memory model
+
+The stretch goal that orders everything else (owner decision, 2026-07-12): **a small
+local model eventually performs every judged stage** — extraction, reconciliation,
+distillation, curation verdicts — so frontier models are optional, never load-bearing.
+The future this bets on is small local models doing tasks; it is already partially live
+here (hermes3:8b extraction, nomic-embed embeddings, both local, both free).
+
+Three consequences:
+
+1. **The determinism thesis splits in two.** *Cost-motivated* judgment-avoidance
+   ("keep the LLM out of this stage because calls are expensive") dissolves as local
+   inference approaches free — the ladder's destination is
+   `DETERMINISTIC > LOCAL > FRONTIER`, and the middle rung keeps widening.
+   *Trust-motivated* determinism — governed writes, idempotency, immutable audit,
+   LLM-never-in-the-write-path — is about reproducibility, not cost, and is
+   **permanent regardless of where inference runs**. When this doc assigns a stage
+   "deterministic," check which motivation applies before defending it.
+2. **The system generates its own curriculum.** Every judged memory operation has the
+   shape of a training example: (input context, decision, downstream outcome via
+   feedback attribution). Log them from day one — extraction verdicts, reconciliation
+   ADD/UPDATE/SUPERSEDE/NOOP calls, distillation summaries, each joined later to
+   whether the resulting memory proved useful. Training the local memory model is
+   years off; its dataset accrues now or never.
+3. **Design ceiling on judgment.** No judged stage may be *designed* to require
+   frontier-scale reasoning. If a stage only works with a heavy model, the stage is
+   mis-factored — split it until an 8B-class model (or the deterministic tier) can
+   carry each piece.
+
 Every section below is one lifecycle stage; §8 maps the whole pipeline
 deterministic-vs-judged in one table; §9 is the concrete fallout.
 
