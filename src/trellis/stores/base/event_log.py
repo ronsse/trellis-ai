@@ -123,6 +123,27 @@ class EventType(StrEnum):
     #: audit record. See ``docs/design/adr-corpus-ingestion.md`` §4.
     CORPUS_SYNCED = "corpus.synced"
 
+    # Judged memory operation (north star — the memory system generates its
+    # own training curriculum; plan-memory-lifecycle.md §0.1).
+    #: Emitted once per **judged** memory-lifecycle operation — an
+    #: extraction verdict, a reconciliation ADD/UPDATE/SUPERSEDE/NOOP
+    #: call, a distillation summary, a curation verdict — to log the
+    #: ``(input, decision)`` half of a training pair. The downstream
+    #: *outcome label* that completes the pair is supplied later by the
+    #: same feedback-attribution join that
+    #: :mod:`trellis.learning.pack_observations` already runs for packs
+    #: (join key: the payload's ``subject_ref``); this event does not
+    #: invent a second join path. Payload is the typed, leak-safe
+    #: :class:`~trellis.schemas.memory_op.MemoryOpJudgedPayload` — content
+    #: digests, item refs, verdict labels, model identifiers only,
+    #: **never** raw memory content or model prose (event logs have a
+    #: different access/retention profile than the doc store). Opt-in and
+    #: additive, the PACK_QUALITY_SCORED posture: nothing emits it until
+    #: the judged-operation paths are wired (#263), so consumers who do
+    #: not opt in see zero noise. See
+    #: ``docs/design/plan-memory-lifecycle.md`` §0.1.
+    MEMORY_OP_JUDGED = "memory_op.judged"
+
     # Empirical-observation ingestion — see adr-observation-entity-type.md
     # and Item 1 Phase 1 of plan-self-improvement-program.md. Emitted by
     # the ObservationHandler / MeasurementHandler when a new Observation

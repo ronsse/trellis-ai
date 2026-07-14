@@ -29,6 +29,12 @@ from trellis.schemas.extraction import (
 )
 from trellis.schemas.graph import Edge
 from trellis.schemas.measurement import Measurement
+from trellis.schemas.memory_op import (
+    InputDigest,
+    JudgedOpType,
+    MemoryOpJudgedPayload,
+    SubjectRef,
+)
 from trellis.schemas.observation import Observation
 from trellis.schemas.outcome import (
     INTENT_FAMILIES,
@@ -93,9 +99,12 @@ __all__ = [
     "ExtractionResult",
     "Feedback",
     "GenerationSpec",
+    "InputDigest",
+    "JudgedOpType",
     "Lifecycle",
     "LifecycleState",
     "Measurement",
+    "MemoryOpJudgedPayload",
     "NodeRole",
     "Observation",
     "Outcome",
@@ -119,6 +128,7 @@ __all__ = [
     "SectionedPack",
     "SectionRequest",
     "Sensitivity",
+    "SubjectRef",
     "Trace",
     "TraceContext",
     "TracePayloadBuilder",
