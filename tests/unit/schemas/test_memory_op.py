@@ -61,9 +61,14 @@ def test_field_set_matches_guide_contract() -> None:
     """
     assert set(MemoryOpJudgedPayload.model_fields) == EXPECTED_FIELDS
     # Explicit leak-safety guard: none of the obvious free-content field
-    # names exist on the model.
+    # names exist on the payload model OR its nested models —
+    # ``extra="forbid"`` only rejects *undeclared* keys, so a future
+    # declared ``summary: str`` on a nested model must fail here.
     forbidden = {"content", "text", "body", "prose", "raw", "summary"}
-    assert forbidden.isdisjoint(MemoryOpJudgedPayload.model_fields)
+    for model in (MemoryOpJudgedPayload, InputDigest, SubjectRef):
+        assert forbidden.isdisjoint(model.model_fields), (
+            f"{model.__name__} declares a free-content field name"
+        )
 
 
 def test_extra_fields_rejected() -> None:
