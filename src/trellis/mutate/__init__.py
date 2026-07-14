@@ -13,6 +13,7 @@ from trellis.mutate.commands import (
     Operation,
     OperationRegistry,
 )
+from trellis.mutate.evidence import ensure_evidence_document
 from trellis.mutate.executor import MutationExecutor
 from trellis.mutate.policy_gate import DefaultPolicyGate
 
@@ -56,4 +57,5 @@ __all__ = [
     "Operation",
     "OperationRegistry",
     "build_curate_executor",
+    "ensure_evidence_document",
 ]

@@ -6,6 +6,7 @@ import contextlib
 import json
 from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 from mcp.shared.exceptions import McpError
@@ -13,6 +14,8 @@ from mcp.types import INTERNAL_ERROR, INVALID_PARAMS
 
 import trellis.mcp.server as server_mod
 from tests.unit.mcp.conftest import unwrap_tool
+from trellis.core.hashing import content_hash
+from trellis.errors import StoreError
 from trellis.mcp.server import RESOURCE_NOT_FOUND
 from trellis.mcp.server import (
     get_context as _get_context,
@@ -47,6 +50,7 @@ from trellis.mcp.server import (
 from trellis.mcp.server import (
     search as _search,
 )
+from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 
 get_context = unwrap_tool(_get_context)
@@ -325,6 +329,123 @@ class TestSaveKnowledge:
         result = save_knowledge("orphan", relates_to="nonexistent_id")
         assert "Warning" in result
         assert "edge not created" in result
+
+    @staticmethod
+    def _node_id_from_result(result: str) -> str:
+        # Result shape: "Entity created: <node_id> (<type>: <name>)".
+        return result.split("Entity created: ", 1)[1].split(" (", 1)[0]
+
+    def test_content_auto_creates_evidence_doc_and_links(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        result = save_knowledge("finding", content="the observed prose")
+        node_id = self._node_id_from_result(result)
+
+        # The evidence document holds the prose ...
+        doc = temp_registry.knowledge.document_store.get_by_hash(
+            content_hash("the observed prose")
+        )
+        assert doc is not None
+        doc_id = doc["doc_id"]
+        assert doc["content"] == "the observed prose"
+
+        # ... and the graph node carries a pointer to it, never the prose.
+        node = temp_registry.knowledge.graph_store.get_node(node_id)
+        assert node is not None
+        assert node["properties"]["evidence_ref"] == doc_id
+        assert node["document_ids"] == [doc_id]
+        assert "the observed prose" not in json.dumps(node["properties"])
+        assert doc_id in result
+
+    def test_content_retry_is_idempotent_one_doc(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        save_knowledge("finding-a", content="same evidence body")
+        save_knowledge("finding-b", content="same evidence body")
+        # Content-hash dedup: the evidence doc is created once, reused on retry.
+        assert temp_registry.knowledge.document_store.count() == 1
+
+    def test_nonexistent_evidence_ref_rejected_no_node(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        # A stale/hallucinated doc id must be rejected BEFORE any mutation —
+        # attaching it would create the permanent dangling graph pointer the
+        # pointer-not-prose invariant forbids.
+        with pytest.raises(McpError) as excinfo:
+            save_knowledge("finding", evidence_ref="doc-hallucinated-42")
+        assert excinfo.value.error.code == INVALID_PARAMS
+        assert "does not reference an existing document" in (
+            excinfo.value.error.message
+        )
+        # No node created, no document created.
+        assert temp_registry.knowledge.graph_store.count_nodes() == 0
+        assert temp_registry.knowledge.document_store.count() == 0
+
+    def test_existing_evidence_ref_attached_no_new_doc(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        doc_id = temp_registry.knowledge.document_store.put(
+            None, "pre-existing evidence prose"
+        )
+        result = save_knowledge("finding", evidence_ref=doc_id)
+        node_id = self._node_id_from_result(result)
+        # The caller-supplied pointer is attached; no new document created.
+        assert temp_registry.knowledge.document_store.count() == 1
+        node = temp_registry.knowledge.graph_store.get_node(node_id)
+        assert node is not None
+        assert node["properties"]["evidence_ref"] == doc_id
+        assert node["document_ids"] == [doc_id]
+
+    def test_explicit_ref_wins_over_content_with_notice(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        doc_id = temp_registry.knowledge.document_store.put(None, "the real evidence")
+        result = save_knowledge(
+            "finding", content="ignored prose", evidence_ref=doc_id
+        )
+        node_id = self._node_id_from_result(result)
+        # The explicit pointer wins; the prose is NOT stored as a second doc
+        # and the result says so explicitly rather than silently dropping it.
+        assert temp_registry.knowledge.document_store.count() == 1
+        assert "content ignored" in result
+        node = temp_registry.knowledge.graph_store.get_node(node_id)
+        assert node is not None
+        assert node["properties"]["evidence_ref"] == doc_id
+
+    def test_partial_failure_orphan_doc_no_dangling_pointer(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Force the graph write to fail *after* the evidence doc is created.
+        monkeypatch.setattr(
+            temp_registry.knowledge.graph_store,
+            "upsert_node",
+            MagicMock(side_effect=StoreError("graph down")),
+        )
+
+        with pytest.raises(McpError):
+            save_knowledge("doomed", content="evidence that will orphan")
+
+        # Doc-first ordering guarantee: the orphan doc exists (findable,
+        # prunable) ...
+        assert (
+            temp_registry.knowledge.document_store.get_by_hash(
+                content_hash("evidence that will orphan")
+            )
+            is not None
+        )
+        # ... and no graph node was written, so there is no dangling pointer.
+        assert temp_registry.knowledge.graph_store.count_nodes() == 0
+
+    def test_content_path_emits_entity_created(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        save_knowledge("finding", content="prose body")
+        events = temp_registry.operational.event_log.get_events(
+            event_type=EventType.ENTITY_CREATED
+        )
+        assert len(events) == 1
+        # The graph↔document link rides the audit payload.
+        assert events[0].payload["document_ids"]
 
 
 # ---------------------------------------------------------------------------

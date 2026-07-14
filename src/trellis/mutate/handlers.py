@@ -215,12 +215,19 @@ class EntityCreateHandler:
         caller_id = command.args.get("entity_id")
         node_role = command.args.get("node_role", "semantic")
         generation_spec = command.args.get("generation_spec")
+        # ``document_ids`` is the first-class graph↔document link (Phase 4 of
+        # ADR planes-and-substrates). Threading it here gives the pointer a
+        # governed write path — the pointer-not-prose invariant depends on a
+        # created entity being able to carry an ``evidence_ref`` document
+        # pointer without smuggling it through metadata. ``None`` == "no link".
+        document_ids = command.args.get("document_ids")
         node_id = self._registry.knowledge.graph_store.upsert_node(
             node_id=caller_id,
             node_type=command.args["entity_type"],
             properties=props,
             node_role=node_role,
             generation_spec=generation_spec,
+            document_ids=document_ids,
         )
 
         self._registry.operational.event_log.emit(
@@ -231,9 +238,99 @@ class EntityCreateHandler:
             payload={
                 "name": command.args["name"],
                 "node_role": node_role,
+                "document_ids": document_ids or [],
             },
         )
         return node_id, f"Entity created: {command.args['name']}"
+
+
+class EntityUpdateHandler:
+    """Update an existing entity node, emitting ``ENTITY_UPDATED``.
+
+    Wires :data:`Operation.ENTITY_UPDATE` into the governed pipeline. The
+    enum verb shipped with no handler, so the executor rejected every
+    ``entity.update`` command with "No handler registered for:
+    entity.update" — this closes that gap.
+
+    **SCD-2 discipline.** The update is never an in-place edit. Reading the
+    current version and re-``upsert_node``-ing closes the old version
+    (``valid_to`` is set) and inserts a fresh version row;
+    ``get_node_history`` is the audit trail. ``node_role`` and
+    ``generation_spec`` are immutable across versions (the graph store
+    enforces role immutability via ``check_node_role_immutable``), so they
+    are carried forward from the existing version rather than reset to the
+    ``upsert_node`` defaults — the same discipline
+    :class:`LabelAddHandler` uses.
+
+    **Partial update.** ``properties`` is *merged* into the existing bag
+    (not replaced) so a caller can attach a single field — e.g. an
+    ``evidence_ref`` pointer — without resending the whole node. Likewise
+    ``document_ids`` is carried forward when the caller omits it: absent
+    means "leave the graph↔document link untouched", present means "replace
+    it". This keeps a version bump from silently dropping the
+    pointer-not-prose link.
+
+    Idempotency: a same-payload re-submission still creates a new version
+    row (SCD-2 has no same-value short-circuit at this layer); use
+    ``Command.idempotency_key`` when at-most-once semantics are required.
+    """
+
+    def __init__(self, registry: StoreRegistry) -> None:
+        self._registry = registry
+
+    def handle(self, command: Command) -> tuple[str | None, str]:
+        entity_id = command.args["entity_id"]
+        store = self._registry.knowledge.graph_store
+
+        existing = store.get_node(entity_id)
+        if existing is None:
+            # Surface as a typed NotFoundError → the executor maps it to a
+            # FAILED CommandResult (StoreError branch) rather than a silent
+            # success. Updating a nonexistent entity is a caller error.
+            raise NotFoundError(entity_type="entity", entity_id=entity_id)
+
+        # Partial update: merge caller-supplied properties onto the existing
+        # bag, then let an explicit ``name`` win.
+        props: dict[str, Any] = dict(existing["properties"])
+        props.update(command.args.get("properties") or {})
+        if "name" in command.args:
+            props["name"] = command.args["name"]
+
+        # ``node_type`` is mutable across versions but defaults to
+        # carry-forward when the caller omits ``entity_type``.
+        node_type = command.args.get("entity_type") or existing["node_type"]
+
+        # Carry the existing document link forward unless the caller supplies
+        # a replacement. ``get_node`` always returns ``document_ids`` as a
+        # (possibly empty) list; normalise an empty list to ``None`` ("no
+        # link") so ``validate_document_ids`` sees a clean value.
+        if "document_ids" in command.args:
+            document_ids = command.args["document_ids"]
+        else:
+            document_ids = existing.get("document_ids") or None
+
+        node_role = existing.get("node_role", "semantic")
+        node_id = store.upsert_node(
+            node_id=entity_id,
+            node_type=node_type,
+            properties=props,
+            node_role=node_role,
+            generation_spec=existing.get("generation_spec"),
+            document_ids=document_ids,
+        )
+
+        self._registry.operational.event_log.emit(
+            EventType.ENTITY_UPDATED,
+            source="mutation_executor",
+            entity_id=node_id,
+            entity_type=node_type,
+            payload={
+                "name": props.get("name"),
+                "node_role": node_role,
+                "document_ids": document_ids or [],
+            },
+        )
+        return node_id, f"Entity updated: {node_id}"
 
 
 class LinkCreateHandler:
@@ -538,6 +635,7 @@ def create_curate_handlers(
         Operation.LABEL_REMOVE: LabelRemoveHandler(registry),
         Operation.FEEDBACK_RECORD: FeedbackRecordHandler(registry),
         Operation.ENTITY_CREATE: EntityCreateHandler(registry),
+        Operation.ENTITY_UPDATE: EntityUpdateHandler(registry),
         Operation.LINK_CREATE: LinkCreateHandler(registry),
         Operation.OBSERVATION_RECORD: ObservationRecordHandler(registry),
         Operation.MEASUREMENT_RECORD: MeasurementRecordHandler(registry),
