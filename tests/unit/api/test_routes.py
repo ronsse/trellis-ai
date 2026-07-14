@@ -362,6 +362,20 @@ def test_assemble_pack(client):
     assert data["intent"] == "test pack"
 
 
+def test_api_pack_builder_wires_semantic_dedup(tmp_path):
+    """The HTTP pack path mirrors the MCP server: near-duplicate suppression
+    is wired at assembly (F14, #259) so cross-source clones can't re-serve."""
+    from trellis.retrieve.pack_builder import SemanticDedupConfig
+
+    registry = StoreRegistry(stores_dir=tmp_path / "stores")
+    try:
+        builder = retrieve._build_pack_builder(registry)
+        assert isinstance(builder._semantic_dedup, SemanticDedupConfig)
+        assert builder._semantic_dedup.threshold == 0.85
+    finally:
+        registry.close()
+
+
 def test_stats_after_ingest(client):
     trace = _make_trace()
     client.post("/api/v1/traces", json=trace)

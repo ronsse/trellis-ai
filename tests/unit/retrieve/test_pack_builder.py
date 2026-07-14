@@ -1552,6 +1552,193 @@ class TestSemanticDedup:
         section_items = {i.item_id for i in pack.sections[0].items}
         assert section_items == {"winner"}
 
+    def test_sectioned_telemetry_records_suppression_count(
+        self, tmp_path: Path
+    ) -> None:
+        """The sectioned PACK_ASSEMBLED payload carries the same
+        ``semantic_dedup_rejected`` count as the flat path (#259)."""
+        from trellis.retrieve.pack_builder import SemanticDedupConfig
+        from trellis.stores.base.event_log import EventType
+
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        try:
+            s = _make_strategy(
+                "kw",
+                [
+                    _item("winner", 0.9, excerpt=self._LONG_EXCERPT),
+                    _item(
+                        "loser",
+                        0.5,
+                        excerpt=self._near_duplicate(self._LONG_EXCERPT),
+                    ),
+                ],
+            )
+            builder = PackBuilder(
+                strategies=[s],
+                event_log=event_log,
+                semantic_dedup=SemanticDedupConfig(),
+            )
+            builder.build_sectioned("q", sections=[SectionRequest(name="all")])
+
+            events = event_log.get_events(event_type=EventType.PACK_ASSEMBLED)
+            assert len(events) == 1
+            payload = events[0].payload
+            assert payload["semantic_dedup_enabled"] is True
+            assert payload["semantic_dedup_rejected"] == 1
+        finally:
+            event_log.close()
+
+    def test_sectioned_telemetry_zero_when_disabled(self, tmp_path: Path) -> None:
+        """Disabled config → count is 0 (field always present, additive)."""
+        from trellis.stores.base.event_log import EventType
+
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        try:
+            s = _make_strategy("kw", [_item("a", 0.9, excerpt=self._LONG_EXCERPT)])
+            builder = PackBuilder(strategies=[s], event_log=event_log)
+            builder.build_sectioned("q", sections=[SectionRequest(name="all")])
+            events = event_log.get_events(event_type=EventType.PACK_ASSEMBLED)
+            assert events[0].payload["semantic_dedup_enabled"] is False
+            assert events[0].payload["semantic_dedup_rejected"] == 0
+        finally:
+            event_log.close()
+
+
+# ---------------------------------------------------------------------------
+# F14 — cross-source near-duplicate (save_memory copy vs corpus copy)
+# ---------------------------------------------------------------------------
+
+
+class TestF14CrossSourceDedup:
+    """The enrichment-pilot F14 finding: the *same fact* stored via
+    ``save_memory`` (raw body) AND via corpus ingestion (identical body
+    wrapped in a ``---`` YAML frontmatter block + heading) surfaced *both*
+    copies in one pack. Exact ``item_id`` and content-hash dedup can't catch
+    it (different ids, different bytes); MinHash at pack assembly must.
+    """
+
+    # A synthetic single-paragraph fact modelling the F14 pair. Under 500
+    # chars, so it mirrors the excerpt the strategies produce
+    # (``content[:500]``) without truncation drift. Content is invented and
+    # carries no real infrastructure detail.
+    _FACT = (
+        "The staging deployment pipeline runs the full migration suite before "
+        "promoting a build, then validates the schema against a read replica "
+        "and posts a summary to the release channel. Rollbacks trigger "
+        "automatically when the post-deploy smoke tests fail. The pipeline "
+        "config is reviewed by two engineers before any change merges."
+    )
+
+    #: The corpus copy: the identical fact wrapped in YAML frontmatter and a
+    #: markdown heading — the ``corpus`` framing that differs only in metadata
+    #: wrapping.
+    _CORPUS_COPY = (
+        "---\n"
+        "source: notes-import\n"
+        "captured_at: 2026-01-02T09:14:00Z\n"
+        "tags: [deploy, pipeline, staging]\n"
+        "---\n"
+        "# Note: staging deployment pipeline\n\n" + _FACT
+    )
+
+    def test_frontmatter_wrapped_copy_is_suppressed(self) -> None:
+        """The frontmatter-wrapped corpus copy collapses into the raw copy.
+
+        Without frontmatter stripping, the corpus copy's ~134-char
+        YAML/heading prefix dilutes the shingle overlap, dragging the
+        3-shingle Jaccard estimate down to ~0.75 — under the 0.85 default —
+        so the near-dup would survive. (This fixture is 460 chars, so the
+        strategies' 500-char excerpt truncation plays no role here; for
+        longer docs it compounds the dilution.) The builder strips the
+        frontmatter before shingling, restoring the estimate to ~0.95+.
+        """
+        from trellis.retrieve.pack_builder import SemanticDedupConfig
+
+        s = _make_strategy(
+            "kw",
+            [
+                # save_memory copy scores higher → it is the winner.
+                _item("01KWWACXRQ465G4C0MZDNSJJVB", 0.92, excerpt=self._FACT),
+                _item(
+                    "corpus:notes-import:0bca32",
+                    0.61,
+                    excerpt=self._CORPUS_COPY,
+                ),
+            ],
+        )
+        builder = PackBuilder(strategies=[s], semantic_dedup=SemanticDedupConfig())
+        pack = builder.build("how does the staging pipeline promote a build")
+
+        # Exactly one copy survives, and it is the higher-relevance
+        # save_memory doc (relevance-order winner rule).
+        assert [i.item_id for i in pack.items] == ["01KWWACXRQ465G4C0MZDNSJJVB"]
+        rejected = {
+            r.item_id: r.reason for r in pack.retrieval_report.rejected_items
+        }
+        assert rejected.get("corpus:notes-import:0bca32") == "semantic_dedup"
+
+    def test_higher_scoring_corpus_copy_would_win(self) -> None:
+        """The winner is decided purely by relevance, not by source system.
+
+        Flip the scores: when the corpus copy outranks the save_memory copy,
+        it is the survivor. Confirms the collapse is relevance-ordered (no
+        hidden authority preference for one source).
+        """
+        from trellis.retrieve.pack_builder import SemanticDedupConfig
+
+        s = _make_strategy(
+            "kw",
+            [
+                _item("save-mem", 0.40, excerpt=self._FACT),
+                _item("corpus-copy", 0.95, excerpt=self._CORPUS_COPY),
+            ],
+        )
+        builder = PackBuilder(strategies=[s], semantic_dedup=SemanticDedupConfig())
+        pack = builder.build("q")
+        assert [i.item_id for i in pack.items] == ["corpus-copy"]
+
+    def test_distinct_fact_is_not_over_suppressed(self) -> None:
+        """A genuinely different fact survives alongside the pipeline fact —
+        the frontmatter normalization must not cause over-suppression.
+        """
+        from trellis.retrieve.pack_builder import SemanticDedupConfig
+
+        other_fact = (
+            "Nightly database backups are written to object storage at 02:00 "
+            "and retained for thirty days. Restores are rehearsed quarterly "
+            "against a throwaway environment. The backup job emits a metric "
+            "that alerts if a run is skipped or exceeds its window."
+        )
+        s = _make_strategy(
+            "kw",
+            [
+                _item("pipeline", 0.9, excerpt=self._FACT),
+                _item("backups", 0.8, excerpt=other_fact),
+            ],
+        )
+        builder = PackBuilder(strategies=[s], semantic_dedup=SemanticDedupConfig())
+        pack = builder.build("q")
+        assert {i.item_id for i in pack.items} == {"pipeline", "backups"}
+
+    def test_strip_frontmatter_helper_is_targeted(self) -> None:
+        """``_strip_dedup_frontmatter`` removes only a *leading* frontmatter
+        fence — plain text and mid-document ``---`` rules are untouched."""
+        from trellis.retrieve.pack_builder import _strip_dedup_frontmatter
+
+        # Leading frontmatter block is removed.
+        assert _strip_dedup_frontmatter(self._CORPUS_COPY).startswith(
+            "# Note: staging deployment pipeline"
+        )
+        # No frontmatter → unchanged.
+        plain = "just an ordinary excerpt with no frontmatter at all"
+        assert _strip_dedup_frontmatter(plain) == plain
+        # A mid-text horizontal rule is not a frontmatter block.
+        midrule = "Intro paragraph.\n\n---\n\nSection after a horizontal rule."
+        assert _strip_dedup_frontmatter(midrule) == midrule
+        # A leading fence with no closing fence is left alone.
+        unclosed = "---\nkey: value\nstill going with no close fence"
+        assert _strip_dedup_frontmatter(unclosed) == unclosed
+
 
 class TestEvaluatorHook:
     """Optional pack-quality evaluator hook on PackBuilder."""

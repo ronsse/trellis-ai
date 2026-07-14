@@ -66,7 +66,7 @@ from trellis.retrieve.formatters import (
     format_sectioned_pack_as_markdown,
     format_subgraph_as_markdown,
 )
-from trellis.retrieve.pack_builder import PackBuilder
+from trellis.retrieve.pack_builder import PackBuilder, SemanticDedupConfig
 from trellis.retrieve.rerankers import build_reranker
 from trellis.retrieve.strategies import build_strategies
 from trellis.retrieve.token_tracker import estimate_tokens, track_token_usage
@@ -162,6 +162,12 @@ def _build_pack_builder(registry: StoreRegistry) -> PackBuilder:
         event_log=registry.operational.event_log,
         advisory_store=advisory_store,
         reranker=build_reranker("rrf", parameter_registry=param_registry),
+        # F14 (#259): collapse near-duplicate pack items — the same fact stored
+        # via save_memory AND via corpus ingestion surfaced both copies in one
+        # pack. MinHash/LSH over item excerpts, relevance-ordered so the
+        # highest-scoring copy wins. Default 0.85 Jaccard per the config's
+        # guidance table; threshold is a first-class field for future tuning.
+        semantic_dedup=SemanticDedupConfig(),
     )
 
 

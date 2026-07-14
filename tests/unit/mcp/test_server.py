@@ -1456,12 +1456,33 @@ class TestOneRetrievalPath:
     ) -> None:
         """``search(limit>20)`` fetches at least ``limit`` candidates per
         axis — the per-strategy default of 20 must not silently cap a
-        large-limit caller's recall."""
+        large-limit caller's recall.
+
+        The 30 docs carry *genuinely distinct* topics: with near-duplicate
+        suppression now wired at assembly (#259), templated content that
+        differs only by an index digit would (correctly) collapse into a
+        handful of survivors and mask what this test measures — candidate
+        fetch depth, not dedup.
+        """
         doc_store = temp_registry.knowledge.document_store
-        for i in range(30):
-            doc_store.put(f"doc-recall-{i:02d}", f"kubernetes rollout guide {i}")
+        # 30 distinct kubernetes topics — all match the "kubernetes" query but
+        # are mutually dissimilar, so MinHash keeps every one.
+        topics = [
+            "ingress routing", "pod autoscaling", "secret rotation",
+            "node draining", "rolling upgrade", "canary release", "service mesh",
+            "config maps", "persistent volumes", "network policy",
+            "cluster autoscaler", "helm charts", "operator pattern",
+            "sidecar injection", "resource quotas", "pod affinity",
+            "taints tolerations", "readiness probes", "liveness checks",
+            "batch jobs", "vertical scaling", "namespace isolation",
+            "rbac policies", "admission control", "custom resources",
+            "gpu scheduling", "cron workloads", "stateful sets", "daemon sets",
+            "init containers",
+        ]
+        for i, topic in enumerate(topics):
+            doc_store.put(f"doc-recall-{i:02d}", f"kubernetes {topic} deployment guide")
         result = search("kubernetes", limit=50, max_tokens=8000)
-        served = sum(1 for i in range(30) if f"doc-recall-{i:02d}" in result)
+        served = sum(1 for i in range(len(topics)) if f"doc-recall-{i:02d}" in result)
         assert served > 20
 
     def test_session_dedup_tolerates_historical_thin_pack_assembled(
@@ -1489,6 +1510,93 @@ class TestOneRetrievalPath:
         # A fresh routed call in the same session must exclude the served item.
         result = get_context("kubernetes", session_id="sess-thin")
         assert "No context found" in result
+
+
+# ---------------------------------------------------------------------------
+# Near-duplicate suppression at pack assembly (#259 / F14)
+# ---------------------------------------------------------------------------
+
+
+class TestNearDuplicateSuppression:
+    """``_build_pack_builder`` now passes a semantic-dedup config, so every
+    routed retrieval tool (#262) collapses cross-source near-duplicates —
+    the F14 finding: the same fact stored via ``save_memory`` and via corpus
+    ingestion surfaced both copies in one pack.
+    """
+
+    #: A synthetic fact modelling the F14 pilot pair, one paragraph. Content
+    #: is invented and carries no real infrastructure detail.
+    _FACT = (
+        "The staging deployment pipeline runs the full migration suite before "
+        "promoting a build, then validates the schema against a read replica "
+        "and posts a summary to the release channel. Rollbacks trigger "
+        "automatically when the post-deploy smoke tests fail. The pipeline "
+        "config is reviewed by two engineers before any change merges."
+    )
+    #: Same fact wrapped in YAML frontmatter + heading (the corpus copy).
+    _CORPUS_COPY = (
+        "---\n"
+        "source: notes-import\n"
+        "tags: [deploy, pipeline]\n"
+        "---\n"
+        "# Note: staging deployment pipeline\n\n" + _FACT
+    )
+
+    def test_build_pack_builder_wires_semantic_dedup(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        """The construction site passes a working config (default 0.85)."""
+        from trellis.retrieve.pack_builder import SemanticDedupConfig
+
+        builder = server_mod._build_pack_builder(temp_registry)
+        config = builder._semantic_dedup
+        assert isinstance(config, SemanticDedupConfig)
+        assert config.threshold == 0.85
+
+    def test_f14_cross_source_pair_collapses_end_to_end(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        """Two near-duplicate docs (raw save_memory copy + frontmatter-wrapped
+        corpus copy) reach the pack via the real retrieval path; exactly one
+        survives and the suppression is visible in telemetry."""
+        doc_store = temp_registry.knowledge.document_store
+        doc_store.put("sm-pipeline", self._FACT)
+        doc_store.put("corpus-pipeline", self._CORPUS_COPY)
+
+        result = get_context(
+            "staging deployment pipeline migration rollback", max_tokens=4000
+        )
+
+        survivors = [
+            doc_id
+            for doc_id in ("sm-pipeline", "corpus-pipeline")
+            if doc_id in result
+        ]
+        assert len(survivors) == 1, f"expected one survivor, got {survivors}"
+
+        events = temp_registry.operational.event_log.get_events(
+            event_type=EventType.PACK_ASSEMBLED, limit=10
+        )
+        assert events
+        payload = events[-1].payload
+        assert payload["semantic_dedup_enabled"] is True
+        assert payload["semantic_dedup_rejected"] >= 1
+
+    def test_distinct_docs_are_not_over_suppressed_end_to_end(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        """Two genuinely different facts both survive — no over-suppression."""
+        doc_store = temp_registry.knowledge.document_store
+        doc_store.put("d-pipeline", self._FACT)
+        doc_store.put(
+            "d-backups",
+            "Nightly database backups are written to object storage at 02:00 "
+            "and retained for thirty days. Restores are rehearsed quarterly "
+            "against a throwaway environment and alert if a run is skipped.",
+        )
+        result = get_context("deployment and backup operations notes", max_tokens=4000)
+        assert "d-pipeline" in result
+        assert "d-backups" in result
 
 
 # ---------------------------------------------------------------------------
