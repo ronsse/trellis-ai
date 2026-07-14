@@ -1260,6 +1260,163 @@ class TestSessionAwareGetContext:
 
 
 # ---------------------------------------------------------------------------
+# One retrieval path (#262): PackBuilder routing, aliases, rich telemetry
+# ---------------------------------------------------------------------------
+
+
+class TestOneRetrievalPath:
+    """get_context / search / the sectioned aliases all route through
+    PackBuilder — pack_id in output, rich PACK_ASSEMBLED, no fixed 0.5/0.3
+    heuristic scores, aliases delegating to the shared path (#262)."""
+
+    def test_hand_rolled_axis_merging_is_gone(self) -> None:
+        """The hand-rolled flat-path helpers were deleted, not left dormant.
+
+        ``_passes_domain_scope`` moved to the strategy layer; the flat path
+        no longer owns a private domain post-filter. Guards against a future
+        edit quietly reviving a second retrieval path in this module (#262).
+        """
+        assert not hasattr(server_mod, "_passes_domain_scope")
+
+    def test_get_context_emits_pack_id_header_in_flat_mode(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        """Defect 2: the primary skill-recommended tool now emits the
+        ``**pack_id:**`` header so pack-level feedback attribution works."""
+        temp_registry.knowledge.document_store.put(
+            "doc-pid", "kubernetes deployment rollout guide"
+        )
+        result = get_context("kubernetes deployment")
+        assert "**pack_id:**" in result
+
+    def test_search_emits_pack_id_header(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        temp_registry.knowledge.document_store.put("doc-s", "kubernetes guide")
+        result = search("kubernetes")
+        assert "**pack_id:**" in result
+
+    def test_get_context_emits_rich_pack_assembled(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        """The flat path now emits PackBuilder's rich payload — ``pack_id``
+        (entity_id), ``injected_items`` telemetry, and the RRF reranker
+        stamp — replacing the old thin ``source="get_context"`` event."""
+        temp_registry.knowledge.document_store.put(
+            "doc-rich", "kubernetes deployment rollout"
+        )
+        get_context("kubernetes deployment")
+        events = temp_registry.operational.event_log.get_events(
+            event_type=EventType.PACK_ASSEMBLED, limit=10
+        )
+        assert len(events) == 1
+        ev = events[0]
+        # entity_id carries the pack_id; the rich payload carries strategy
+        # telemetry the old thin get_context payload lacked.
+        assert ev.entity_id
+        assert ev.payload.get("reranker") == "rrf"
+        assert "injected_items" in ev.payload
+        assert "doc-rich" in ev.payload.get("injected_item_ids", [])
+        # The old flat path stamped source="get_context"; the routed path
+        # stamps source="pack_builder".
+        assert ev.source == "pack_builder"
+
+    def test_no_fixed_heuristic_scores_in_flat_pack(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        """The deleted hand-rolled path assigned graph hits a fixed 0.5 and
+        traces 0.3. Routed through RRF, per-item scores are fused
+        reciprocal ranks — never the old constants."""
+        graph = temp_registry.knowledge.graph_store
+        graph.upsert_node(
+            node_id="n-score",
+            node_type="concept",
+            properties={"name": "deployment pipeline detail"},
+        )
+        temp_registry.knowledge.document_store.put(
+            "doc-score", "deployment pipeline detail runbook"
+        )
+        get_context("deployment pipeline detail")
+        events = temp_registry.operational.event_log.get_events(
+            event_type=EventType.PACK_ASSEMBLED, limit=10
+        )
+        scores = [
+            item.get("score_breakdown", {}).get("rrf_total")
+            for ev in events
+            for item in ev.payload.get("injected_items", [])
+        ]
+        assert scores, "expected rrf-scored items in the pack telemetry"
+        assert all(s is not None for s in scores)
+        # RRF total for a single-list hit is 1/(k+rank) — never 0.5 or 0.3.
+        assert all(s not in (0.5, 0.3) for s in scores)
+
+    def test_get_sectioned_context_alias_matches_canonical(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        """The ``get_sectioned_context`` alias returns the same shape as the
+        canonical ``get_context(sections=...)`` for a fixed fixture."""
+        temp_registry.knowledge.document_store.put(
+            "doc-alias", "kubernetes deployment rollout notes"
+        )
+        sections = [
+            {
+                "name": "Background",
+                "retrieval_affinities": ["domain_knowledge"],
+                "max_tokens": 500,
+            }
+        ]
+        via_alias = get_sectioned_context("kubernetes", sections=sections)
+        via_canonical = get_context("kubernetes", sections=sections)
+
+        def _strip_pack_id(text: str) -> str:
+            return "\n".join(
+                line for line in text.splitlines() if "pack_id" not in line
+            )
+
+        # pack_id differs per call; everything else (section headings, item
+        # blocks) must be identical.
+        assert _strip_pack_id(via_alias) == _strip_pack_id(via_canonical)
+
+    def test_objective_and_task_aliases_delegate(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        """The fixed-layout aliases still assemble their named sections
+        through the shared path and carry a pack_id."""
+        obj = get_objective_context("release plan", max_tokens=1500)
+        task = get_task_context("write SQL", max_tokens=1500)
+        assert "Context for: release plan" in obj
+        assert "**pack_id:**" in obj
+        assert "Context for: write SQL" in task
+        assert "**pack_id:**" in task
+
+    def test_session_dedup_tolerates_historical_thin_pack_assembled(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        """Backward-compat: PackBuilder's session-dedup (the consumer this
+        change relies on) must tolerate the *old* thin get_context event
+        shape (source='get_context', injected_item_ids only, no pack_id /
+        injected_items). A historical thin event still dedups the item."""
+        temp_registry.knowledge.document_store.put(
+            "doc-thin", "kubernetes deployment tips"
+        )
+        # Simulate a pre-#262 thin PACK_ASSEMBLED event for this session.
+        temp_registry.operational.event_log.emit(
+            EventType.PACK_ASSEMBLED,
+            source="get_context",
+            entity_type="pack",
+            payload={
+                "intent": "kubernetes",
+                "session_id": "sess-thin",
+                "items_count": 1,
+                "injected_item_ids": ["doc-thin"],
+            },
+        )
+        # A fresh routed call in the same session must exclude the served item.
+        result = get_context("kubernetes", session_id="sess-thin")
+        assert "No context found" in result
+
+
+# ---------------------------------------------------------------------------
 # Shutdown handling
 # ---------------------------------------------------------------------------
 
@@ -1392,40 +1549,51 @@ class TestStructuredErrorContract:
     * ``INTERNAL_ERROR`` — unexpected sub-system failure with cause chain.
     """
 
-    def test_get_context_doc_store_failure_surfaces_internal_error(
+    def test_get_context_single_axis_outage_degrades_gracefully(
         self,
         temp_registry: StoreRegistry,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """If the document store is down, ``get_context`` raises rather
-        than silently returning the partial pack from the other axes."""
+        """A single-axis outage (document store) degrades to the surviving
+        axes instead of failing the whole call.
+
+        #262 routed ``get_context`` onto the one PackBuilder path and
+        deliberately adopted PackBuilder's partial-failure posture: the
+        keyword strategy raising is tolerated because sibling strategies
+        (graph, semantic) can still assemble a pack. The pre-#262
+        loud-raise-on-any-axis behaviour was the accepted-trade-off the
+        consolidation removes.
+        """
         boom = RuntimeError("fake doc store outage")
         _patch_method_to_raise(
             monkeypatch, temp_registry.knowledge.document_store, "search", boom
         )
 
-        with pytest.raises(McpError) as excinfo:
-            get_context("kubernetes")
-        err = excinfo.value
-        assert err.error.code == INTERNAL_ERROR
-        assert "document search failed" in err.error.message
-        assert err.error.data is not None
-        assert err.error.data["stage"] == "doc_search"
-        assert err.error.data["intent"] == "kubernetes"
-        # ``raise … from exc`` preserves the cause chain so operators
-        # see the underlying ``RuntimeError`` traceback in server logs.
-        assert excinfo.value.__cause__ is boom
+        # Graph axis survives → no raise. Empty graph → "No context found".
+        result = get_context("kubernetes")
+        assert isinstance(result, str)
 
-    def test_get_context_graph_store_failure_surfaces_internal_error(
+    def test_get_context_total_retrieval_outage_surfaces_internal_error(
         self,
         temp_registry: StoreRegistry,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Graph-store outage is structurally distinct from doc-store outage
-        (different ``data['stage']``) so the agent can attribute fault."""
-        boom = RuntimeError("fake graph store outage")
+        """When *every* axis fails, PackBuilder raises ``PackAssemblyError``,
+        which ``get_context`` surfaces as ``INTERNAL_ERROR`` with the cause
+        chained — loud-by-default is preserved for total failure."""
+        from trellis.retrieve.pack_builder import PackAssemblyError
+
         _patch_method_to_raise(
-            monkeypatch, temp_registry.knowledge.graph_store, "query", boom
+            monkeypatch,
+            temp_registry.knowledge.document_store,
+            "search",
+            RuntimeError("doc store down"),
+        )
+        _patch_method_to_raise(
+            monkeypatch,
+            temp_registry.knowledge.graph_store,
+            "query",
+            RuntimeError("graph store down"),
         )
 
         with pytest.raises(McpError) as excinfo:
@@ -1433,8 +1601,10 @@ class TestStructuredErrorContract:
         err = excinfo.value
         assert err.error.code == INTERNAL_ERROR
         assert err.error.data is not None
-        assert err.error.data["stage"] == "graph_search"
-        assert excinfo.value.__cause__ is boom
+        assert err.error.data["tool"] == "get_context"
+        # ``raise … from exc`` preserves the cause chain so operators see
+        # the underlying PackAssemblyError in server logs.
+        assert isinstance(excinfo.value.__cause__, PackAssemblyError)
 
     def test_save_experience_invalid_trace_data_carries_field(self) -> None:
         """Invalid trace JSON surfaces as INVALID_PARAMS with the

@@ -70,7 +70,7 @@ from trellis.retrieve.pack_builder import PackBuilder
 from trellis.retrieve.rerankers import build_reranker
 from trellis.retrieve.strategies import build_strategies
 from trellis.retrieve.token_tracker import estimate_tokens, track_token_usage
-from trellis.schemas.pack import SectionRequest
+from trellis.schemas.pack import PackBudget, SectionRequest
 from trellis.schemas.trace import Trace
 from trellis.stores.advisory_store import AdvisoryStore
 from trellis.stores.base.event_log import EventType
@@ -440,60 +440,218 @@ def _get_minhash_index(registry: StoreRegistry) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# Macro Tool 1: get_context
+# One retrieval path (#262)
+# ---------------------------------------------------------------------------
+#
+# get_context / search / get_objective_context / get_task_context /
+# get_sectioned_context all route through PackBuilder — one place that runs
+# keyword + graph + semantic strategies, fuses them with RRF, applies
+# recency/importance decay, session-aware dedup and domain default-pass
+# scoping, and emits a rich ``PACK_ASSEMBLED`` event carrying ``pack_id``.
+# There is no hand-rolled axis merging, fixed-relevance heuristic, or
+# duplicate session-dedup scan in this module any more. Domain default-pass
+# lives in the strategy layer (``PackBuilder._apply_domain_scope`` +
+# per-strategy filter handling), so every routed tool inherits it.
+
+#: Default item ceiling for flat packs. The markdown formatter enforces the
+#: token budget; this bounds the candidate list the budget walk considers.
+_FLAT_MAX_ITEMS = 50
+
+#: Human-readable label per tool for INTERNAL_ERROR messages on the sectioned
+#: path (keeps the pre-#262 wording the error-contract tests assert).
+_TOOL_LABEL = {
+    "get_context": "context",
+    "get_objective_context": "objective context",
+    "get_task_context": "task context",
+    "get_sectioned_context": "sectioned context",
+}
+
+
+def _track_tokens(
+    registry: StoreRegistry, *, operation: str, result: str, budget: int
+) -> None:
+    """Best-effort response-token telemetry — never fails the tool call."""
+    try:
+        track_token_usage(
+            registry.operational.event_log,
+            layer="mcp",
+            operation=operation,
+            response_tokens=estimate_tokens(result),
+            budget_tokens=budget,
+        )
+    except Exception:
+        # GRACEFUL-DEGRADATION: token tracking is post-success telemetry;
+        # failure here must not invalidate a successfully assembled pack.
+        logger.exception("token_tracking_failed", operation=operation)
+
+
+def _flat_context(
+    registry: StoreRegistry,
+    intent: str,
+    *,
+    domain: str | None,
+    max_tokens: int,
+    session_id: str,
+    max_items: int = _FLAT_MAX_ITEMS,
+    title: str | None = None,
+    empty_message: str | None = None,
+    operation: str = "get_context",
+) -> str:
+    """Assemble a flat pack through the one PackBuilder-backed path.
+
+    Shared by ``get_context`` and ``search``. Domain default-pass scoping,
+    session dedup (via ``PackBuilder._recently_served_item_ids``), RRF
+    fusion, recency/importance decay and the rich ``PACK_ASSEMBLED``
+    emission (with ``pack_id``) all come from :class:`PackBuilder`.
+
+    Failure posture (adopted from PackBuilder for #262): a single-axis
+    outage degrades to the surviving axes; only a total retrieval failure
+    (``PackAssemblyError``) surfaces as ``INTERNAL_ERROR``.
+    """
+    try:
+        builder = _build_pack_builder(registry)
+        pack = builder.build(
+            intent,
+            domain=domain or None,
+            session_id=session_id or None,
+            budget=PackBudget(max_items=max_items, max_tokens=max_tokens),
+        )
+    except McpError:
+        raise
+    except Exception as exc:
+        logger.exception("flat_context_failed", operation=operation)
+        _raise_internal(
+            f"failed to assemble {_TOOL_LABEL.get(operation, 'context')} "
+            f"for intent={intent!r}: {exc}",
+            cause=exc,
+            data={"tool": operation, "intent": intent},
+        )
+
+    if not pack.items:
+        return empty_message or f"No context found for: {intent}"
+
+    item_dicts = [
+        {
+            "item_id": item.item_id,
+            "item_type": item.item_type,
+            "excerpt": item.excerpt,
+            "relevance_score": item.relevance_score,
+        }
+        for item in pack.items
+    ]
+    result = format_pack_as_markdown(
+        item_dicts,
+        title or intent,
+        max_tokens=max_tokens,
+        pack_id=pack.pack_id,
+    )
+    _track_tokens(registry, operation=operation, result=result, budget=max_tokens)
+    return result
+
+
+def _sectioned_context(
+    registry: StoreRegistry,
+    intent: str,
+    *,
+    section_specs: list[dict[str, Any]],
+    resolved_tokens: int,
+    domain: str,
+    session_id: str,
+    tool: str,
+) -> str:
+    """Assemble a sectioned pack through the one PackBuilder-backed path.
+
+    Shared by ``get_objective_context`` / ``get_task_context`` /
+    ``get_sectioned_context`` and by ``get_context`` when called with a
+    custom ``sections`` layout. ``section_specs`` are raw dicts validated
+    into :class:`SectionRequest` inside the failure boundary so a malformed
+    section surfaces as ``INTERNAL_ERROR`` (the pre-#262 contract).
+    """
+    try:
+        builder = _build_pack_builder(registry)
+        sections = [SectionRequest.model_validate(s) for s in section_specs]
+        sectioned_pack = builder.build_sectioned(
+            intent,
+            sections=sections,
+            domain=domain or None,
+            session_id=session_id or None,
+        )
+        section_dicts = [
+            {
+                "name": s.name,
+                "items": [
+                    {
+                        "item_id": item.item_id,
+                        "item_type": item.item_type,
+                        "excerpt": item.excerpt,
+                        "relevance_score": item.relevance_score,
+                    }
+                    for item in s.items
+                ],
+            }
+            for s in sectioned_pack.sections
+        ]
+        result = format_sectioned_pack_as_markdown(
+            section_dicts,
+            intent,
+            max_tokens=resolved_tokens,
+            pack_id=sectioned_pack.pack_id,
+        )
+        adv_md = format_advisories_as_markdown(sectioned_pack.advisories)
+        if adv_md:
+            result = result + "\n\n" + adv_md
+        _track_tokens(
+            registry, operation=tool, result=result, budget=resolved_tokens
+        )
+    except McpError:
+        # Already structured by a deeper helper — let it propagate.
+        raise
+    except Exception as exc:
+        logger.exception("sectioned_context_failed", tool=tool)
+        _raise_internal(
+            f"failed to assemble {_TOOL_LABEL.get(tool, 'context')} "
+            f"for intent={intent!r}: {exc}",
+            cause=exc,
+            data={"tool": tool, "intent": intent},
+        )
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Macro Tool 1: get_context — the one parameterized retrieval tool (#262)
 # ---------------------------------------------------------------------------
 
 
-def _passes_domain_scope(metadata: dict[str, Any], domain: str) -> bool:
-    """Default-pass domain check for semantic-axis hits (#254).
-
-    Mirrors the keyword axis's ``content_tags`` facet semantics at the
-    Python boundary — the vector stores only offer a hard-equality
-    scalar metadata filter, which would hard-exclude domain-less rows.
-    Vector rows carry full document metadata (``build_vector_row``
-    copies it), so a hit may hold ``domain`` in either storage
-    location: scalar ``metadata.domain`` or the
-    ``metadata.content_tags.domain`` facet (a list).
-
-    Semantics: pass when no domain is present in either location
-    (default-pass — a domain-less memory is never hard-excluded); pass
-    when either location matches; exclude only on explicit mismatch.
-    """
-    values: list[Any] = []
-    scalar = metadata.get("domain")
-    if scalar is not None:
-        values.append(scalar)
-    tags = metadata.get("content_tags")
-    if isinstance(tags, dict):
-        facet = tags.get("domain")
-        if isinstance(facet, list):
-            values.extend(facet)
-        elif facet is not None:
-            values.append(facet)
-    if not values:
-        return True
-    return domain in values
-
-
 @mcp.tool(auth=trellis_scope(SCOPE_READ))
-def get_context(  # noqa: PLR0912, PLR0915
+def get_context(
     intent: str,
     domain: str | None = None,
     max_tokens: int = 2000,
     session_id: str = "",
+    sections: list[dict[str, Any]] | None = None,
 ) -> str:
     """Get relevant context from the experience graph for a task or question.
 
-    Searches documents, knowledge graph, and past traces, then returns
-    a summarized markdown pack optimized for your context window.
+    Fuses keyword, knowledge-graph and semantic retrieval (Reciprocal Rank
+    Fusion, recency/importance decay, session-aware dedup) into one
+    token-budgeted markdown pack with a citable ``pack_id``. This is the
+    single retrieval entry point — pass ``sections`` for the sectioned
+    layout that ``get_sectioned_context`` used to provide.
 
     Args:
         intent: What you're trying to do or learn about.
-        domain: Optional domain scope (e.g., "platform", "data").
+        domain: Optional domain scope (e.g., "platform", "data"). Scoped
+            with default-pass semantics — a memory that carries no domain is
+            never hard-excluded; only an explicit mismatch is dropped.
         max_tokens: Maximum response size in tokens (default 2000).
         session_id: Optional conversation/session identifier. When supplied,
             items already returned by recent calls in this session are
             excluded, preventing repetition across calls.
+        sections: Optional custom section layout — a list of section config
+            dicts (each with ``name`` plus optional ``retrieval_affinities``,
+            ``content_types``, ``scopes``, ``entity_ids``, ``max_tokens``,
+            ``max_items``). When provided, context is organised into
+            independently budgeted sections instead of a flat list.
     """
     if not intent or not intent.strip():
         _raise_invalid_params(
@@ -502,216 +660,36 @@ def get_context(  # noqa: PLR0912, PLR0915
         )
 
     registry = _get_registry()
-    items: list[dict[str, Any]] = []
 
-    # Search documents — a store outage here used to silently drop the
-    # document axis from the merged pack. Loud raise instead.
-    try:
-        filters: dict[str, Any] = {}
-        if domain:
-            # Route ``domain`` onto the ``content_tags`` facet path, which
-            # default-passes documents missing the key, rather than the
-            # generic scalar branch (``json_extract(...) = ?``) that
-            # hard-excludes every doc lacking a scalar ``metadata.domain``
-            # (#254). The generic scalar branch is deliberately left
-            # untouched — other callers (e.g. ``source_system``) rely on
-            # its hard-match semantics.
-            filters["content_tags"] = {"domain": {"in": [domain]}}
-        doc_results = registry.knowledge.document_store.search(
-            intent, limit=10, filters=filters
-        )
-        items.extend(
-            {
-                "item_id": doc["doc_id"],
-                "item_type": "document",
-                "excerpt": doc.get("content", "")[:500],
-                "relevance_score": abs(doc.get("rank", 0.0)),
-            }
-            for doc in doc_results
-        )
-    except Exception as exc:
-        logger.exception("get_context_doc_search_failed")
-        _raise_internal(
-            f"document search failed: {exc}",
-            cause=exc,
-            data={"stage": "doc_search", "intent": intent},
-        )
-
-    # Search graph
-    try:
-        nodes = registry.knowledge.graph_store.query(limit=20)
-        q_lower = intent.lower()
-        for node in nodes:
-            props = node.get("properties", {})
-            name = str(props.get("name", "")).lower()
-            desc = str(props.get("description", "")).lower()
-            if q_lower in name or q_lower in desc:
-                items.append(
-                    {
-                        "item_id": node["node_id"],
-                        "item_type": "entity",
-                        "excerpt": props.get("name", "")
-                        or props.get("description", ""),
-                        "relevance_score": 0.5,
-                    }
-                )
-    except Exception as exc:
-        logger.exception("get_context_graph_search_failed")
-        _raise_internal(
-            f"graph search failed: {exc}",
-            cause=exc,
-            data={"stage": "graph_search", "intent": intent},
-        )
-
-    # Recent traces
-    try:
-        traces = registry.operational.trace_store.query(domain=domain, limit=5)
-        items.extend(
-            {
-                "item_id": t.trace_id,
-                "item_type": "trace",
-                "excerpt": t.intent[:300],
-                "relevance_score": 0.3,
-            }
-            for t in traces
-        )
-    except Exception as exc:
-        logger.exception("get_context_trace_search_failed")
-        _raise_internal(
-            f"trace search failed: {exc}",
-            cause=exc,
-            data={"stage": "trace_search", "intent": intent},
-        )
-
-    # Semantic search — only when an embedder + vector store are configured
-    # (the same pair the embed-on-ingest hook writes through). Unlike the
-    # three core axes above, this axis is additive and GRACEFUL-DEGRADATION:
-    # the embedder is an external network service, and retrieval follows the
-    # ``build_strategies`` precedent — a down embedder degrades to
-    # keyword/graph/trace results instead of failing the whole tool call.
-    # Vector hits share ``doc_id`` with document hits, so the dedup pass
-    # below merges the two axes; the FTS item (appended first) wins.
-    try:
-        embedding_fn = registry.embedding_fn
-        vector_store = getattr(registry.knowledge, "vector_store", None)
-        if embedding_fn is not None and vector_store is not None:
-            # The vector stores have no facet / default-pass filter — a
-            # scalar ``{"domain": ...}`` store-side filter compiles to
-            # hard equality (SQLite ``json_extract`` / pgvector ``@>``
-            # containment), re-introducing the #254 hard-exclusion on the
-            # semantic axis. Instead, apply domain scoping as a
-            # Python-side default-pass post-filter over the materialized
-            # hits (they carry full document metadata via
-            # ``build_vector_row``), mirroring the keyword axis's facet
-            # semantics: missing domain passes, matching domain (scalar
-            # or ``content_tags`` facet) passes, explicit mismatch is
-            # excluded. Store-side facet filtering lands with the unified
-            # retrieval path (#262).
-            hits = vector_store.query(embedding_fn(intent), top_k=10)
-            if domain:
-                hits = [
-                    hit
-                    for hit in hits
-                    if _passes_domain_scope(hit.get("metadata", {}), domain)
-                ]
-            items.extend(
-                {
-                    "item_id": hit["item_id"],
-                    "item_type": "document",
-                    "excerpt": hit.get("metadata", {}).get("content", "")[:500],
-                    "relevance_score": hit.get("score", 0.0),
-                }
-                for hit in hits
+    if sections is not None:
+        if not sections:
+            _raise_invalid_params(
+                "sections must not be empty",
+                data={"field": "sections"},
             )
-    except Exception:
-        logger.exception("get_context_semantic_search_failed")
-
-    # Session dedup: exclude items already served in this session.
-    session_served: set[str] = set()
-    if session_id:
-        try:
-            from datetime import UTC, datetime, timedelta  # noqa: PLC0415
-
-            since = datetime.now(UTC) - timedelta(
-                minutes=60,  # matches DEFAULT_SESSION_DEDUP_WINDOW_MINUTES
-            )
-            events = registry.operational.event_log.get_events(
-                event_type=EventType.PACK_ASSEMBLED,
-                since=since,
-                limit=200,
-            )
-            for ev in events:
-                payload = ev.payload or {}
-                if payload.get("session_id") != session_id:
-                    continue
-                for iid in payload.get("injected_item_ids", []) or []:
-                    session_served.add(iid)
-                for section in payload.get("sections", []) or []:
-                    for iid in section.get("item_ids", []) or []:
-                        session_served.add(iid)
-        except Exception as exc:
-            logger.exception("get_context_session_dedup_failed")
-            _raise_internal(
-                f"session dedup query failed: {exc}",
-                cause=exc,
-                data={
-                    "stage": "session_dedup",
-                    "session_id": session_id,
-                },
-            )
-
-    # Deduplicate and sort
-    seen: set[str] = set()
-    unique: list[dict[str, Any]] = []
-    for item in items:
-        if item["item_id"] in session_served:
-            continue
-        if item["item_id"] not in seen:
-            seen.add(item["item_id"])
-            unique.append(item)
-    unique.sort(key=lambda x: x.get("relevance_score", 0.0), reverse=True)
-
-    if not unique:
-        return f"No context found for: {intent}"
-
-    result = format_pack_as_markdown(unique, intent, max_tokens=max_tokens)
-
-    # Record what was served so subsequent calls with this session_id can
-    # dedup against it. Mirrors PackBuilder's PACK_ASSEMBLED telemetry.
-    if session_id:
-        try:
-            registry.operational.event_log.emit(
-                EventType.PACK_ASSEMBLED,
-                source="get_context",
-                entity_type="pack",
-                payload={
-                    "intent": intent,
-                    "domain": domain,
-                    "session_id": session_id,
-                    "items_count": len(unique),
-                    "injected_item_ids": [i["item_id"] for i in unique],
-                },
-            )
-        except Exception:
-            # GRACEFUL-DEGRADATION: pack already assembled and returned —
-            # an event-log emit failure is a telemetry concern, not a
-            # tool-result correctness concern. Phase 5 covers telemetry
-            # site cleanup.
-            logger.exception("get_context_pack_emit_failed")
-
-    try:
-        track_token_usage(
-            registry.operational.event_log,
-            layer="mcp",
-            operation="get_context",
-            response_tokens=estimate_tokens(result),
-            budget_tokens=max_tokens,
+        budget = registry.budget_config.resolve(
+            tool="get_context",
+            domain=domain or None,
+            caller_override_tokens=max_tokens if max_tokens > 0 else None,
         )
-    except Exception:
-        # GRACEFUL-DEGRADATION: token tracking is post-success telemetry;
-        # failure here must not invalidate a successful pack assembly.
-        logger.exception("token_tracking_failed", operation="get_context")
-    return result
+        return _sectioned_context(
+            registry,
+            intent,
+            section_specs=sections,
+            resolved_tokens=budget.max_tokens,
+            domain=domain or "",
+            session_id=session_id,
+            tool="get_context",
+        )
+
+    return _flat_context(
+        registry,
+        intent,
+        domain=domain,
+        max_tokens=max_tokens,
+        session_id=session_id,
+        operation="get_context",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1281,6 +1259,10 @@ def search(
 ) -> str:
     """Search the experience graph for documents and entities.
 
+    A targeted flat lookup over the same one retrieval path as
+    ``get_context`` (keyword + graph + semantic fused with RRF), returning
+    a token-budgeted markdown pack with a citable ``pack_id``.
+
     Args:
         query: Search query.
         limit: Maximum results (default 10).
@@ -1292,85 +1274,17 @@ def search(
             data={"field": "query"},
         )
 
-    registry = _get_registry()
-
-    # Search documents
-    doc_results = registry.knowledge.document_store.search(query, limit=limit)
-    items: list[dict[str, Any]] = [
-        {
-            "item_id": doc["doc_id"],
-            "item_type": "document",
-            "excerpt": doc.get("content", "")[:300],
-            "relevance_score": abs(doc.get("rank", 0.0)),
-        }
-        for doc in doc_results
-    ]
-
-    # Search graph nodes
-    all_nodes = registry.knowledge.graph_store.query(limit=limit * 2)
-    q_lower = query.lower()
-    for node in all_nodes:
-        props = node.get("properties", {})
-        name = str(props.get("name", "")).lower()
-        desc = str(props.get("description", "")).lower()
-        if q_lower in name or q_lower in desc:
-            items.append(
-                {
-                    "item_id": node["node_id"],
-                    "item_type": "entity",
-                    "excerpt": props.get("name", "") or props.get("description", ""),
-                    "relevance_score": 0.5,
-                }
-            )
-
-    # Semantic search — additive axis, same shape and degradation contract
-    # as get_context's (see the comment there). Dedup below folds vector
-    # hits into the FTS hits sharing the same doc_id.
-    try:
-        embedding_fn = registry.embedding_fn
-        vector_store = getattr(registry.knowledge, "vector_store", None)
-        if embedding_fn is not None and vector_store is not None:
-            hits = vector_store.query(embedding_fn(query), top_k=limit)
-            items.extend(
-                {
-                    "item_id": hit["item_id"],
-                    "item_type": "document",
-                    "excerpt": hit.get("metadata", {}).get("content", "")[:300],
-                    "relevance_score": hit.get("score", 0.0),
-                }
-                for hit in hits
-            )
-    except Exception:
-        logger.exception("search_semantic_search_failed")
-
-    # Dedup by item_id (first occurrence wins — FTS before semantic).
-    seen: set[str] = set()
-    unique: list[dict[str, Any]] = []
-    for item in items:
-        if item["item_id"] not in seen:
-            seen.add(item["item_id"])
-            unique.append(item)
-    items = unique
-
-    if not items:
-        return f"No results found for: {query}"
-
-    items.sort(key=lambda x: x.get("relevance_score", 0.0), reverse=True)
-    result = format_pack_as_markdown(
-        items[:limit], f"Search: {query}", max_tokens=max_tokens
+    return _flat_context(
+        _get_registry(),
+        query,
+        domain=None,
+        max_tokens=max_tokens,
+        session_id="",
+        max_items=limit,
+        title=f"Search: {query}",
+        empty_message=f"No results found for: {query}",
+        operation="search",
     )
-    try:
-        track_token_usage(
-            registry.operational.event_log,
-            layer="mcp",
-            operation="search",
-            response_tokens=estimate_tokens(result),
-            budget_tokens=max_tokens,
-        )
-    except Exception:
-        # GRACEFUL-DEGRADATION: token tracking is post-success telemetry.
-        logger.exception("token_tracking_failed", operation="search")
-    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1392,6 +1306,11 @@ def get_objective_context(
     for a user's business objective. Designed to be called once at
     workflow start and shared across all downstream agent phases.
 
+    .. deprecated::
+        Retained as a thin alias over the one retrieval path (#262) for one
+        release. Prefer ``get_context`` with a ``sections`` layout — this
+        tool is a fixed two-section preset and will be removed.
+
     Args:
         intent: The user's original business objective in their own words.
         domain: Optional domain filter (e.g., "orders", "data-pipeline").
@@ -1408,90 +1327,36 @@ def get_objective_context(
             data={"field": "intent"},
         )
 
-    try:
-        registry = _get_registry()
-        builder = _build_pack_builder(registry)
-
-        budget = registry.budget_config.resolve(
-            tool="get_objective_context",
-            domain=domain or None,
-            caller_override_tokens=max_tokens if max_tokens > 0 else None,
-        )
-        resolved_tokens = budget.max_tokens
-
-        sections = [
-            SectionRequest(
-                name="Domain Knowledge",
-                retrieval_affinities=["domain_knowledge"],
-                max_tokens=resolved_tokens // 2,
-                max_items=10,
-            ),
-            SectionRequest(
-                name="Operational Context",
-                retrieval_affinities=["operational"],
-                max_tokens=resolved_tokens // 3,
-                max_items=8,
-            ),
-        ]
-
-        sectioned_pack = builder.build_sectioned(
-            intent,
-            sections=sections,
-            domain=domain or None,
-            session_id=session_id or None,
-        )
-
-        # Convert SectionedPack to list-of-dicts for the formatter
-        section_dicts = [
-            {
-                "name": s.name,
-                "items": [
-                    {
-                        "item_id": item.item_id,
-                        "item_type": item.item_type,
-                        "excerpt": item.excerpt,
-                        "relevance_score": item.relevance_score,
-                    }
-                    for item in s.items
-                ],
-            }
-            for s in sectioned_pack.sections
-        ]
-
-        result = format_sectioned_pack_as_markdown(
-            section_dicts,
-            intent,
-            max_tokens=resolved_tokens,
-            pack_id=sectioned_pack.pack_id,
-        )
-
-        # Append advisories if present
-        adv_md = format_advisories_as_markdown(sectioned_pack.advisories)
-        if adv_md:
-            result = result + "\n\n" + adv_md
-
-        try:
-            track_token_usage(
-                registry.operational.event_log,
-                layer="mcp",
-                operation="get_objective_context",
-                response_tokens=estimate_tokens(result),
-                budget_tokens=resolved_tokens,
-            )
-        except Exception:
-            # GRACEFUL-DEGRADATION: token tracking is post-success telemetry.
-            logger.exception("token_tracking_failed", operation="get_objective_context")
-    except McpError:
-        # Already structured by a deeper helper — let it propagate.
-        raise
-    except Exception as exc:
-        logger.exception("get_objective_context_failed")
-        _raise_internal(
-            f"failed to assemble objective context for intent={intent!r}: {exc}",
-            cause=exc,
-            data={"tool": "get_objective_context", "intent": intent},
-        )
-    return result
+    registry = _get_registry()
+    budget = registry.budget_config.resolve(
+        tool="get_objective_context",
+        domain=domain or None,
+        caller_override_tokens=max_tokens if max_tokens > 0 else None,
+    )
+    resolved_tokens = budget.max_tokens
+    section_specs = [
+        {
+            "name": "Domain Knowledge",
+            "retrieval_affinities": ["domain_knowledge"],
+            "max_tokens": resolved_tokens // 2,
+            "max_items": 10,
+        },
+        {
+            "name": "Operational Context",
+            "retrieval_affinities": ["operational"],
+            "max_tokens": resolved_tokens // 3,
+            "max_items": 8,
+        },
+    ]
+    return _sectioned_context(
+        registry,
+        intent,
+        section_specs=section_specs,
+        resolved_tokens=resolved_tokens,
+        domain=domain,
+        session_id=session_id,
+        tool="get_objective_context",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1513,6 +1378,12 @@ def get_task_context(
     specific task (e.g., SQL generation, validation). Complements
     objective context with step-specific details.
 
+    .. deprecated::
+        Retained as a thin alias over the one retrieval path (#262) for one
+        release. Prefer ``get_context`` with a ``sections`` layout (anchor
+        via each section's ``entity_ids``) — this fixed two-section preset
+        will be removed.
+
     Args:
         intent: Description of the specific task being performed.
         entity_ids: Entity IDs being touched (e.g., table URIs).
@@ -1530,90 +1401,39 @@ def get_task_context(
             data={"field": "intent"},
         )
 
-    try:
-        registry = _get_registry()
-        builder = _build_pack_builder(registry)
-
-        budget = registry.budget_config.resolve(
-            tool="get_task_context",
-            domain=domain or None,
-            caller_override_tokens=max_tokens if max_tokens > 0 else None,
-        )
-        resolved_tokens = budget.max_tokens
-
-        sections = [
-            SectionRequest(
-                name="Technical Patterns",
-                retrieval_affinities=["technical_pattern"],
-                max_tokens=resolved_tokens // 2,
-                max_items=10,
-            ),
-            SectionRequest(
-                name="Reference Data",
-                retrieval_affinities=["reference"],
-                entity_ids=entity_ids or [],
-                max_tokens=resolved_tokens // 3,
-                max_items=10,
-            ),
-        ]
-
-        sectioned_pack = builder.build_sectioned(
-            intent,
-            sections=sections,
-            domain=domain or None,
-            session_id=session_id or None,
-        )
-
-        # Convert SectionedPack to list-of-dicts for the formatter
-        section_dicts = [
-            {
-                "name": s.name,
-                "items": [
-                    {
-                        "item_id": item.item_id,
-                        "item_type": item.item_type,
-                        "excerpt": item.excerpt,
-                        "relevance_score": item.relevance_score,
-                    }
-                    for item in s.items
-                ],
-            }
-            for s in sectioned_pack.sections
-        ]
-
-        result = format_sectioned_pack_as_markdown(
-            section_dicts,
-            intent,
-            max_tokens=resolved_tokens,
-            pack_id=sectioned_pack.pack_id,
-        )
-
-        # Append advisories if present
-        adv_md = format_advisories_as_markdown(sectioned_pack.advisories)
-        if adv_md:
-            result = result + "\n\n" + adv_md
-
-        try:
-            track_token_usage(
-                registry.operational.event_log,
-                layer="mcp",
-                operation="get_task_context",
-                response_tokens=estimate_tokens(result),
-                budget_tokens=resolved_tokens,
-            )
-        except Exception:
-            # GRACEFUL-DEGRADATION: token tracking is post-success telemetry.
-            logger.exception("token_tracking_failed", operation="get_task_context")
-    except McpError:
-        raise
-    except Exception as exc:
-        logger.exception("get_task_context_failed")
-        _raise_internal(
-            f"failed to assemble task context for intent={intent!r}: {exc}",
-            cause=exc,
-            data={"tool": "get_task_context", "intent": intent},
-        )
-    return result
+    registry = _get_registry()
+    budget = registry.budget_config.resolve(
+        tool="get_task_context",
+        domain=domain or None,
+        caller_override_tokens=max_tokens if max_tokens > 0 else None,
+    )
+    resolved_tokens = budget.max_tokens
+    section_specs = [
+        {
+            "name": "Technical Patterns",
+            "retrieval_affinities": ["technical_pattern"],
+            "max_tokens": resolved_tokens // 2,
+            "max_items": 10,
+        },
+        {
+            "name": "Reference Data",
+            "retrieval_affinities": ["reference"],
+            # Passed through as-is so an invalid ``entity_ids`` (e.g. a
+            # non-list) surfaces as INTERNAL_ERROR from the shared validator.
+            "entity_ids": entity_ids if entity_ids is not None else [],
+            "max_tokens": resolved_tokens // 3,
+            "max_items": 10,
+        },
+    ]
+    return _sectioned_context(
+        registry,
+        intent,
+        section_specs=section_specs,
+        resolved_tokens=resolved_tokens,
+        domain=domain,
+        session_id=session_id,
+        tool="get_task_context",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1635,6 +1455,11 @@ def get_sectioned_context(
     section layouts), this tool lets you define your own sections with
     custom affinities, content types, scopes, entity IDs, and per-section
     token budgets.
+
+    .. deprecated::
+        Retained as a thin alias over the one retrieval path (#262) for one
+        release. Prefer ``get_context(intent, sections=[...])`` — the
+        canonical parameterized tool with the identical ``sections`` schema.
 
     Args:
         intent: Natural language description of the task or question.
@@ -1673,76 +1498,21 @@ def get_sectioned_context(
             data={"field": "sections"},
         )
 
-    try:
-        registry = _get_registry()
-        builder = _build_pack_builder(registry)
-
-        budget = registry.budget_config.resolve(
-            tool="get_sectioned_context",
-            domain=domain or None,
-            caller_override_tokens=max_tokens if max_tokens > 0 else None,
-        )
-        resolved_tokens = budget.max_tokens
-
-        section_requests = [SectionRequest.model_validate(s) for s in sections]
-
-        sectioned_pack = builder.build_sectioned(
-            intent,
-            sections=section_requests,
-            domain=domain or None,
-            session_id=session_id or None,
-        )
-
-        # Convert SectionedPack to list-of-dicts for the formatter
-        section_dicts = [
-            {
-                "name": s.name,
-                "items": [
-                    {
-                        "item_id": item.item_id,
-                        "item_type": item.item_type,
-                        "excerpt": item.excerpt,
-                        "relevance_score": item.relevance_score,
-                    }
-                    for item in s.items
-                ],
-            }
-            for s in sectioned_pack.sections
-        ]
-
-        result = format_sectioned_pack_as_markdown(
-            section_dicts,
-            intent,
-            max_tokens=resolved_tokens,
-            pack_id=sectioned_pack.pack_id,
-        )
-
-        # Append advisories if present
-        adv_md = format_advisories_as_markdown(sectioned_pack.advisories)
-        if adv_md:
-            result = result + "\n\n" + adv_md
-
-        try:
-            track_token_usage(
-                registry.operational.event_log,
-                layer="mcp",
-                operation="get_sectioned_context",
-                response_tokens=estimate_tokens(result),
-                budget_tokens=resolved_tokens,
-            )
-        except Exception:
-            # GRACEFUL-DEGRADATION: token tracking is post-success telemetry.
-            logger.exception("token_tracking_failed", operation="get_sectioned_context")
-    except McpError:
-        raise
-    except Exception as exc:
-        logger.exception("get_sectioned_context_failed")
-        _raise_internal(
-            f"failed to assemble sectioned context for intent={intent!r}: {exc}",
-            cause=exc,
-            data={"tool": "get_sectioned_context", "intent": intent},
-        )
-    return result
+    registry = _get_registry()
+    budget = registry.budget_config.resolve(
+        tool="get_sectioned_context",
+        domain=domain or None,
+        caller_override_tokens=max_tokens if max_tokens > 0 else None,
+    )
+    return _sectioned_context(
+        registry,
+        intent,
+        section_specs=sections,
+        resolved_tokens=budget.max_tokens,
+        domain=domain,
+        session_id=session_id,
+        tool="get_sectioned_context",
+    )
 
 
 # ---------------------------------------------------------------------------
