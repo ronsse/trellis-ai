@@ -722,6 +722,54 @@ def save_experience(trace_json: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _resolve_evidence_pointer(
+    registry: StoreRegistry,
+    *,
+    name: str,
+    entity_type: str,
+    content: str | None,
+    evidence_ref: str | None,
+) -> tuple[str | None, bool]:
+    """Resolve the evidence-document pointer for ``save_knowledge``.
+
+    Returns ``(evidence_ref, content_ignored)``. Runs BEFORE any graph
+    mutation, enforcing the two halves of the pointer-not-prose ordering
+    contract at the agent-facing boundary:
+
+    * An explicit ``evidence_ref`` must reference an existing document.
+      Stale or hallucinated doc ids are plausible agent inputs, and
+      attaching one would create a permanent dangling graph pointer — the
+      state the invariant forbids outright. Mirrors the FK-existence
+      precedent ``LinkCreateHandler`` applies to edge endpoints. When both
+      ``evidence_ref`` and ``content`` are supplied, the explicit pointer
+      wins and ``content_ignored=True`` signals the caller to surface a
+      notice rather than silently discarding the prose.
+
+    * ``content`` without a pointer auto-creates the evidence document
+      doc-FIRST: on partial failure the orphaned doc is acceptable
+      (findable, prunable); a dangling graph pointer is never acceptable.
+    """
+    if evidence_ref is not None:
+        if registry.knowledge.document_store.get(evidence_ref) is None:
+            _raise_invalid_params(
+                f"evidence_ref does not reference an existing document: "
+                f"{evidence_ref}",
+                data={"field": "evidence_ref", "evidence_ref": evidence_ref},
+            )
+        return evidence_ref, content is not None and bool(content.strip())
+    if content is not None and content.strip():
+        return (
+            ensure_evidence_document(
+                registry,
+                content,
+                metadata={"entity_name": name, "entity_type": entity_type},
+                source="mcp:save_knowledge",
+            ),
+            False,
+        )
+    return None, False
+
+
 @mcp.tool(auth=trellis_scope(SCOPE_INGEST))
 def save_knowledge(
     name: str,
@@ -753,9 +801,12 @@ def save_knowledge(
             Default: "entity_related_to".
         content: Optional evidence prose. When given without ``evidence_ref``,
             an evidence document is auto-created and linked (pointer-not-prose).
-        evidence_ref: Optional existing document id to point at. When set, no
-            document is created — the provided pointer is attached as-is. Takes
-            precedence over ``content`` for the pointer value.
+        evidence_ref: Optional existing document id to point at. Must reference
+            a document that already exists — a nonexistent id is rejected
+            before any mutation, because a graph pointer at a missing document
+            is exactly the dangling state this tool exists to prevent. When
+            set, no document is created and ``content`` is ignored (a notice
+            is appended to the result).
     """
     if not name or not name.strip():
         _raise_invalid_params(
@@ -765,17 +816,16 @@ def save_knowledge(
 
     registry = _get_registry()
 
-    # Doc-FIRST: auto-create the evidence document when prose arrived without
-    # an explicit pointer. On partial failure the orphaned doc is acceptable;
-    # a dangling graph pointer is not — so this must complete before the graph
-    # write below. An explicit ``evidence_ref`` attaches as-is (no doc create).
-    if evidence_ref is None and content is not None and content.strip():
-        evidence_ref = ensure_evidence_document(
-            registry,
-            content,
-            metadata={"entity_name": name, "entity_type": entity_type},
-            source="mcp:save_knowledge",
-        )
+    # Existence-check any explicit pointer / auto-create the evidence doc
+    # (doc-FIRST) before any graph mutation — see _resolve_evidence_pointer
+    # for the two halves of the pointer-not-prose ordering contract.
+    evidence_ref, content_ignored = _resolve_evidence_pointer(
+        registry,
+        name=name,
+        entity_type=entity_type,
+        content=content,
+        evidence_ref=evidence_ref,
+    )
 
     props = dict(properties or {})
     if evidence_ref is not None:
@@ -814,6 +864,8 @@ def save_knowledge(
     result = f"Entity created: {node_id} ({entity_type}: {name})"
     if evidence_ref is not None:
         result += f"\nEvidence document: {evidence_ref}"
+    if content_ignored:
+        result += "\nWarning: content ignored — evidence_ref takes precedence"
 
     if relates_to:
         if registry.knowledge.graph_store.get_node(relates_to) is None:

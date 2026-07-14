@@ -287,29 +287,52 @@ class TestSaveKnowledge:
         # Content-hash dedup: the evidence doc is created once, reused on retry.
         assert temp_registry.knowledge.document_store.count() == 1
 
-    def test_explicit_evidence_ref_does_not_create_doc(
+    def test_nonexistent_evidence_ref_rejected_no_node(
         self, temp_registry: StoreRegistry
     ) -> None:
-        result = save_knowledge("finding", evidence_ref="doc-external-1")
-        node_id = self._node_id_from_result(result)
-        # No document created — the caller-supplied pointer is attached as-is.
+        # A stale/hallucinated doc id must be rejected BEFORE any mutation —
+        # attaching it would create the permanent dangling graph pointer the
+        # pointer-not-prose invariant forbids.
+        with pytest.raises(McpError) as excinfo:
+            save_knowledge("finding", evidence_ref="doc-hallucinated-42")
+        assert excinfo.value.error.code == INVALID_PARAMS
+        assert "does not reference an existing document" in (
+            excinfo.value.error.message
+        )
+        # No node created, no document created.
+        assert temp_registry.knowledge.graph_store.count_nodes() == 0
         assert temp_registry.knowledge.document_store.count() == 0
+
+    def test_existing_evidence_ref_attached_no_new_doc(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        doc_id = temp_registry.knowledge.document_store.put(
+            None, "pre-existing evidence prose"
+        )
+        result = save_knowledge("finding", evidence_ref=doc_id)
+        node_id = self._node_id_from_result(result)
+        # The caller-supplied pointer is attached; no new document created.
+        assert temp_registry.knowledge.document_store.count() == 1
         node = temp_registry.knowledge.graph_store.get_node(node_id)
         assert node is not None
-        assert node["properties"]["evidence_ref"] == "doc-external-1"
-        assert node["document_ids"] == ["doc-external-1"]
+        assert node["properties"]["evidence_ref"] == doc_id
+        assert node["document_ids"] == [doc_id]
 
-    def test_explicit_ref_wins_over_content(
+    def test_explicit_ref_wins_over_content_with_notice(
         self, temp_registry: StoreRegistry
     ) -> None:
+        doc_id = temp_registry.knowledge.document_store.put(None, "the real evidence")
         result = save_knowledge(
-            "finding", content="prose", evidence_ref="doc-external-2"
+            "finding", content="ignored prose", evidence_ref=doc_id
         )
         node_id = self._node_id_from_result(result)
-        assert temp_registry.knowledge.document_store.count() == 0
+        # The explicit pointer wins; the prose is NOT stored as a second doc
+        # and the result says so explicitly rather than silently dropping it.
+        assert temp_registry.knowledge.document_store.count() == 1
+        assert "content ignored" in result
         node = temp_registry.knowledge.graph_store.get_node(node_id)
         assert node is not None
-        assert node["properties"]["evidence_ref"] == "doc-external-2"
+        assert node["properties"]["evidence_ref"] == doc_id
 
     def test_partial_failure_orphan_doc_no_dangling_pointer(
         self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch

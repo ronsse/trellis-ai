@@ -39,6 +39,7 @@ def _create_node(registry: StoreRegistry, **kwargs: Any) -> str:
         node_type=kwargs.get("node_type", "concept"),
         properties=kwargs.get("properties", {"name": "Original"}),
         node_role=kwargs.get("node_role", "semantic"),
+        generation_spec=kwargs.get("generation_spec"),
         document_ids=kwargs.get("document_ids"),
     )
 
@@ -151,6 +152,26 @@ class TestEntityUpdateHandler:
         assert node is not None
         # node_role is immutable across versions; carried forward, not reset.
         assert node["node_role"] == "structural"
+
+    def test_preserves_generation_spec_across_update(
+        self, registry: StoreRegistry
+    ) -> None:
+        spec = {"generator": "test-gen", "version": "1", "inputs": ["a"]}
+        node_id = _create_node(registry, node_role="curated", generation_spec=spec)
+        handler = EntityUpdateHandler(registry)
+        handler.handle(
+            Command(
+                operation=Operation.ENTITY_UPDATE,
+                args={"entity_id": node_id, "properties": {"k": "v"}},
+            )
+        )
+        node = registry.knowledge.graph_store.get_node(node_id)
+        assert node is not None
+        # generation_spec is immutable across versions; a version bump must
+        # carry it forward — a curated node without its spec would fail the
+        # graph store's role validation and lose its regeneration audit trail.
+        assert node["generation_spec"] == spec
+        assert node["node_role"] == "curated"
 
     def test_missing_entity_raises_not_found(self, registry: StoreRegistry) -> None:
         handler = EntityUpdateHandler(registry)
