@@ -496,13 +496,17 @@ def _flat_context(
     title: str | None = None,
     empty_message: str | None = None,
     operation: str = "get_context",
+    refresh: bool = False,
 ) -> str:
     """Assemble a flat pack through the one PackBuilder-backed path.
 
     Shared by ``get_context`` and ``search``. Domain default-pass scoping,
-    session dedup (via ``PackBuilder._recently_served_item_ids``), RRF
-    fusion, recency/importance decay and the rich ``PACK_ASSEMBLED``
-    emission (with ``pack_id``) all come from :class:`PackBuilder`.
+    session dedup (via ``PackBuilder._recently_served``), RRF fusion,
+    recency/importance decay and the rich ``PACK_ASSEMBLED`` emission
+    (with ``pack_id``) all come from :class:`PackBuilder`.
+
+    ``refresh=True`` bypasses session dedup for this call (client
+    compaction signal), forwarded to :meth:`PackBuilder.build`.
 
     Failure posture (adopted from PackBuilder for #262): a single-axis
     outage degrades to the surviving axes; only a total retrieval failure
@@ -521,6 +525,7 @@ def _flat_context(
             # 20 candidates per axis. ``max(20, ...)`` keeps the default
             # fetch depth unchanged for small budgets.
             limit_per_strategy=max(20, max_items),
+            refresh=refresh,
         )
     except McpError:
         raise
@@ -564,6 +569,7 @@ def _sectioned_context(
     domain: str,
     session_id: str,
     tool: str,
+    refresh: bool = False,
 ) -> str:
     """Assemble a sectioned pack through the one PackBuilder-backed path.
 
@@ -572,6 +578,9 @@ def _sectioned_context(
     custom ``sections`` layout. ``section_specs`` are raw dicts validated
     into :class:`SectionRequest` inside the failure boundary so a malformed
     section surfaces as ``INTERNAL_ERROR`` (the pre-#262 contract).
+
+    ``refresh=True`` bypasses session dedup for this call (client
+    compaction signal), forwarded to :meth:`PackBuilder.build_sectioned`.
     """
     try:
         builder = _build_pack_builder(registry)
@@ -581,6 +590,7 @@ def _sectioned_context(
             sections=sections,
             domain=domain or None,
             session_id=session_id or None,
+            refresh=refresh,
         )
         section_dicts = [
             {
@@ -635,6 +645,7 @@ def get_context(
     max_tokens: int = 2000,
     session_id: str = "",
     sections: list[dict[str, Any]] | None = None,
+    refresh: bool = False,
 ) -> str:
     """Get relevant context from the experience graph for a task or question.
 
@@ -658,6 +669,11 @@ def get_context(
             ``content_types``, ``scopes``, ``entity_ids``, ``max_tokens``,
             ``max_items``). When provided, context is organised into
             independently budgeted sections instead of a flat list.
+        refresh: Bypass session dedup for this call only (default False).
+            Set when the caller's context window was truncated (e.g. after
+            compaction) and it needs previously-served items re-injected.
+            Only affects this call; ``session_id`` must still be supplied
+            for it to matter, and later calls dedup normally.
     """
     if not intent or not intent.strip():
         _raise_invalid_params(
@@ -686,6 +702,7 @@ def get_context(
             domain=domain or "",
             session_id=session_id,
             tool="get_context",
+            refresh=refresh,
         )
 
     return _flat_context(
@@ -695,6 +712,7 @@ def get_context(
         max_tokens=max_tokens,
         session_id=session_id,
         operation="get_context",
+        refresh=refresh,
     )
 
 

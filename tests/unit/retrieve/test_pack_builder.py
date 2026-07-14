@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
+from trellis.core.hashing import content_hash
 from trellis.retrieve.pack_builder import PackBuilder
 from trellis.retrieve.strategies import SearchStrategy
 from trellis.schemas.advisory import Advisory, AdvisoryCategory, AdvisoryEvidence
 from trellis.schemas.pack import PackBudget, PackItem, SectionRequest
 from trellis.stores.advisory_store import AdvisoryStore
+from trellis.stores.base.event_log import Event, EventType
 from trellis.stores.sqlite.event_log import SQLiteEventLog
 
 
@@ -1090,6 +1093,251 @@ class TestSessionDedup:
         )
         flat = builder.build("q", session_id="sess-H")
         assert flat.items == []
+
+
+# ---------------------------------------------------------------------------
+# Issue #258 — session-delta packs: content-hash re-serve, refresh, bounds
+# ---------------------------------------------------------------------------
+
+
+def _emit_served_event(
+    log: SQLiteEventLog,
+    *,
+    session_id: str,
+    item_id: str,
+    excerpt: str,
+    occurred_at: datetime | None = None,
+    with_hash: bool = True,
+) -> None:
+    """Append a synthetic ``PACK_ASSEMBLED`` served-item event.
+
+    ``with_hash=False`` produces a *thin* payload (no ``injected_item_hashes``)
+    matching events emitted before issue #258, so the id-only suppression
+    path can be exercised. ``occurred_at`` lets a test place the event
+    inside or outside the dedup window deterministically.
+    """
+    payload: dict[str, object] = {
+        "session_id": session_id,
+        "injected_item_ids": [item_id],
+    }
+    if with_hash:
+        payload["injected_item_hashes"] = {item_id: content_hash(excerpt)}
+    event = Event(
+        event_type=EventType.PACK_ASSEMBLED,
+        source="pack_builder",
+        entity_id=f"pack-{item_id}",
+        entity_type="pack",
+        payload=payload,
+    )
+    if occurred_at is not None:
+        event = event.model_copy(update={"occurred_at": occurred_at})
+    log.append(event)
+
+
+class TestSessionDeltaPacks:
+    """Content-hash re-serve rule, ``refresh`` bypass, and window bounds."""
+
+    def test_same_id_same_content_suppressed(
+        self, session_event_log: SQLiteEventLog
+    ) -> None:
+        """(a) Same id + unchanged content within window → suppressed."""
+        s = _make_strategy("kw", [_item("d1", 0.9, excerpt="v1")])
+        builder = PackBuilder(strategies=[s], event_log=session_event_log)
+        first = builder.build("q", session_id="sess-same")
+        assert {i.item_id for i in first.items} == {"d1"}
+        # Second call: identical content → still suppressed.
+        second = builder.build("q", session_id="sess-same")
+        assert second.items == []
+
+    def test_same_id_changed_content_reserved(
+        self, session_event_log: SQLiteEventLog
+    ) -> None:
+        """(b) Same id + CHANGED content → eligible for re-serving."""
+        s = _make_strategy("kw", [_item("d1", 0.9, excerpt="original")])
+        builder = PackBuilder(strategies=[s], event_log=session_event_log)
+        first = builder.build("q", session_id="sess-change")
+        assert {i.item_id for i in first.items} == {"d1"}
+
+        # Same id, superseded content — content hash no longer matches.
+        s.search.return_value = [_item("d1", 0.9, excerpt="superseded content")]
+        second = builder.build("q", session_id="sess-change")
+        assert [i.item_id for i in second.items] == ["d1"]
+        assert second.items[0].excerpt == "superseded content"
+
+    def test_thin_event_suppressed_by_id(
+        self, session_event_log: SQLiteEventLog
+    ) -> None:
+        """(c) Historical event without hashes → suppressed by id, as before."""
+        _emit_served_event(
+            session_event_log,
+            session_id="sess-thin",
+            item_id="d1",
+            excerpt="whatever",
+            with_hash=False,
+        )
+        # Candidate has *different* content, but the thin event carries no
+        # hash, so we cannot tell it changed → suppress by id (no KeyError).
+        s = _make_strategy("kw", [_item("d1", 0.9, excerpt="different now")])
+        builder = PackBuilder(strategies=[s], event_log=session_event_log)
+        pack = builder.build("q", session_id="sess-thin")
+        assert pack.items == []
+
+    def test_refresh_bypasses_session_dedup(
+        self, session_event_log: SQLiteEventLog
+    ) -> None:
+        """refresh=True re-serves previously-served items for that call only."""
+        s = _make_strategy("kw", [_item("d1", 0.9), _item("d2", 0.7)])
+        builder = PackBuilder(strategies=[s], event_log=session_event_log)
+        builder.build("q", session_id="sess-refresh")
+
+        # Default path still suppresses.
+        deduped = builder.build("q", session_id="sess-refresh")
+        assert deduped.items == []
+
+        # refresh=True bypasses the served-set subtraction.
+        refreshed = builder.build("q", session_id="sess-refresh", refresh=True)
+        assert {i.item_id for i in refreshed.items} == {"d1", "d2"}
+
+        # And it is scoped to that call only — the next default call dedups.
+        after = builder.build("q", session_id="sess-refresh")
+        assert after.items == []
+
+    def test_refresh_bypasses_sectioned_session_dedup(
+        self, session_event_log: SQLiteEventLog
+    ) -> None:
+        """refresh=True also bypasses dedup on the sectioned path."""
+        s = _make_strategy("kw", [_item("d1", 0.9), _item("d2", 0.7)])
+        builder = PackBuilder(strategies=[s], event_log=session_event_log)
+        builder.build_sectioned(
+            "q", sections=[SectionRequest(name="all")], session_id="sess-sec-r"
+        )
+        deduped = builder.build_sectioned(
+            "q", sections=[SectionRequest(name="all")], session_id="sess-sec-r"
+        )
+        assert deduped.all_items == []
+        refreshed = builder.build_sectioned(
+            "q",
+            sections=[SectionRequest(name="all")],
+            session_id="sess-sec-r",
+            refresh=True,
+        )
+        assert {i.item_id for i in refreshed.all_items} == {"d1", "d2"}
+
+    def test_sectioned_changed_content_reserved(
+        self, session_event_log: SQLiteEventLog
+    ) -> None:
+        """Content-hash re-serve rule applies to the sectioned path too."""
+        s = _make_strategy("kw", [_item("d1", 0.9, excerpt="original")])
+        builder = PackBuilder(strategies=[s], event_log=session_event_log)
+        builder.build_sectioned(
+            "q", sections=[SectionRequest(name="all")], session_id="sess-sec-c"
+        )
+        s.search.return_value = [_item("d1", 0.9, excerpt="new content")]
+        second = builder.build_sectioned(
+            "q", sections=[SectionRequest(name="all")], session_id="sess-sec-c"
+        )
+        assert [i.item_id for i in second.all_items] == ["d1"]
+
+    def test_flat_payload_carries_item_hashes(
+        self, session_event_log: SQLiteEventLog
+    ) -> None:
+        """Flat PACK_ASSEMBLED payload records per-item content hashes."""
+        s = _make_strategy("kw", [_item("d1", 0.9, excerpt="hash me")])
+        builder = PackBuilder(strategies=[s], event_log=session_event_log)
+        builder.build("q", session_id="sess-flat-h")
+        events = session_event_log.get_events(
+            event_type=EventType.PACK_ASSEMBLED, limit=10
+        )
+        hashes = events[0].payload.get("injected_item_hashes")
+        assert hashes == {"d1": content_hash("hash me")}
+
+    def test_sectioned_payload_carries_item_hashes(
+        self, session_event_log: SQLiteEventLog
+    ) -> None:
+        """Sectioned PACK_ASSEMBLED payload records per-item content hashes."""
+        s = _make_strategy("kw", [_item("d1", 0.9, excerpt="sec hash")])
+        builder = PackBuilder(strategies=[s], event_log=session_event_log)
+        builder.build_sectioned(
+            "q", sections=[SectionRequest(name="all")], session_id="sess-sec-h"
+        )
+        events = session_event_log.get_events(
+            event_type=EventType.PACK_ASSEMBLED, limit=10
+        )
+        hashes = events[0].payload.get("injected_item_hashes")
+        assert hashes == {"d1": content_hash("sec hash")}
+
+    def test_event_outside_time_window_not_suppressed(
+        self, session_event_log: SQLiteEventLog
+    ) -> None:
+        """An event older than the window is not consulted → item re-served."""
+        old = datetime.now(UTC) - timedelta(minutes=120)
+        _emit_served_event(
+            session_event_log,
+            session_id="sess-win",
+            item_id="d1",
+            excerpt="text",
+            occurred_at=old,
+        )
+        s = _make_strategy("kw", [_item("d1", 0.9, excerpt="text")])
+        builder = PackBuilder(strategies=[s], event_log=session_event_log)
+        # 60-minute window (default) excludes the 120-minute-old serve.
+        pack = builder.build(
+            "q", session_id="sess-win", session_dedup_window_minutes=60
+        )
+        assert {i.item_id for i in pack.items} == {"d1"}
+
+    def test_event_inside_time_window_suppressed(
+        self, session_event_log: SQLiteEventLog
+    ) -> None:
+        """An event inside the window is consulted → item suppressed."""
+        recent = datetime.now(UTC) - timedelta(minutes=30)
+        _emit_served_event(
+            session_event_log,
+            session_id="sess-win2",
+            item_id="d1",
+            excerpt="text",
+            occurred_at=recent,
+        )
+        s = _make_strategy("kw", [_item("d1", 0.9, excerpt="text")])
+        builder = PackBuilder(strategies=[s], event_log=session_event_log)
+        pack = builder.build(
+            "q", session_id="sess-win2", session_dedup_window_minutes=60
+        )
+        assert pack.items == []
+
+    def test_event_beyond_count_limit_not_suppressed(
+        self,
+        session_event_log: SQLiteEventLog,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Serves older than the event-count cap fall out of the served-set."""
+        monkeypatch.setattr(
+            "trellis.retrieve.pack_builder.DEFAULT_SESSION_DEDUP_EVENT_LIMIT", 1
+        )
+        base = datetime.now(UTC) - timedelta(minutes=5)
+        # Oldest serve (d1) — will be dropped by the count cap.
+        _emit_served_event(
+            session_event_log,
+            session_id="sess-cap",
+            item_id="d1",
+            excerpt="text",
+            occurred_at=base,
+        )
+        # Newest serve (d2) — the only event the cap of 1 keeps.
+        _emit_served_event(
+            session_event_log,
+            session_id="sess-cap",
+            item_id="d2",
+            excerpt="text",
+            occurred_at=base + timedelta(minutes=1),
+        )
+        s = _make_strategy(
+            "kw", [_item("d1", 0.9, excerpt="text"), _item("d2", 0.7, excerpt="text")]
+        )
+        builder = PackBuilder(strategies=[s], event_log=session_event_log)
+        pack = builder.build("q", session_id="sess-cap")
+        # d2 (newest, within cap) suppressed; d1 (beyond cap) re-served.
+        assert {i.item_id for i in pack.items} == {"d1"}
 
 
 # ---------------------------------------------------------------------------
