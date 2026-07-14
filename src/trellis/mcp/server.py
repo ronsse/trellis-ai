@@ -55,6 +55,7 @@ from trellis.mutate import (
     CommandStatus,
     Operation,
     build_curate_executor,
+    ensure_evidence_document,
 )
 from trellis.ops import ParameterRegistry
 from trellis.retrieve.embed_ingest_hook import run_embed_on_ingest
@@ -728,8 +729,19 @@ def save_knowledge(
     properties: dict[str, Any] | None = None,
     relates_to: str | None = None,
     edge_kind: str = "entity_related_to",
+    content: str | None = None,
+    evidence_ref: str | None = None,
 ) -> str:
     """Create an entity in the knowledge graph, optionally linking it.
+
+    Pointer-not-prose: when ``content`` is supplied without an
+    ``evidence_ref``, the evidence *document* is auto-created first (embedded
+    via the standard ingest hook) and the new entity carries a pointer to it
+    (``evidence_ref`` property + ``document_ids`` link) — the graph node never
+    holds the prose itself. Ordering is doc-first by design: if the graph
+    write then fails, an orphaned document is acceptable (findable, prunable)
+    but a graph node pointing at a nonexistent document is not. All graph
+    writes go through the governed :class:`MutationExecutor`.
 
     Args:
         name: Entity name.
@@ -739,6 +751,11 @@ def save_knowledge(
         relates_to: Optional entity ID to create a relationship to.
         edge_kind: Relationship type if relates_to is set.
             Default: "entity_related_to".
+        content: Optional evidence prose. When given without ``evidence_ref``,
+            an evidence document is auto-created and linked (pointer-not-prose).
+        evidence_ref: Optional existing document id to point at. When set, no
+            document is created — the provided pointer is attached as-is. Takes
+            precedence over ``content`` for the pointer value.
     """
     if not name or not name.strip():
         _raise_invalid_params(
@@ -746,17 +763,57 @@ def save_knowledge(
             data={"field": "name"},
         )
 
-    props = dict(properties or {})
-    props["name"] = name
-
     registry = _get_registry()
-    node_id = registry.knowledge.graph_store.upsert_node(
-        node_id=None,
-        node_type=entity_type,
-        properties=props,
-    )
 
+    # Doc-FIRST: auto-create the evidence document when prose arrived without
+    # an explicit pointer. On partial failure the orphaned doc is acceptable;
+    # a dangling graph pointer is not — so this must complete before the graph
+    # write below. An explicit ``evidence_ref`` attaches as-is (no doc create).
+    if evidence_ref is None and content is not None and content.strip():
+        evidence_ref = ensure_evidence_document(
+            registry,
+            content,
+            metadata={"entity_name": name, "entity_type": entity_type},
+            source="mcp:save_knowledge",
+        )
+
+    props = dict(properties or {})
+    if evidence_ref is not None:
+        props["evidence_ref"] = evidence_ref
+    document_ids = [evidence_ref] if evidence_ref is not None else None
+
+    executor = build_curate_executor(registry)
+    create_result = executor.execute(
+        Command(
+            operation=Operation.ENTITY_CREATE,
+            args={
+                "entity_type": entity_type,
+                "name": name,
+                "properties": props,
+                "document_ids": document_ids,
+            },
+            target_type=entity_type,
+            requested_by="mcp:save_knowledge",
+        )
+    )
+    if create_result.status != CommandStatus.SUCCESS:
+        # Graph write failed. Any auto-created evidence doc is left as an
+        # acceptable orphan — we never wrote a node, so there is no dangling
+        # pointer to clean up.
+        _raise_mutation_failed(
+            f"failed to create entity: {create_result.message}",
+            data={
+                "status": create_result.status.value,
+                "command_id": create_result.command_id,
+                "message": create_result.message,
+                "evidence_ref": evidence_ref,
+            },
+        )
+
+    node_id = create_result.created_id
     result = f"Entity created: {node_id} ({entity_type}: {name})"
+    if evidence_ref is not None:
+        result += f"\nEvidence document: {evidence_ref}"
 
     if relates_to:
         if registry.knowledge.graph_store.get_node(relates_to) is None:
@@ -768,12 +825,26 @@ def save_knowledge(
                 f"\nWarning: target entity not found: {relates_to} — edge not created"
             )
         else:
-            edge_id = registry.knowledge.graph_store.upsert_edge(
-                source_id=node_id,
-                target_id=relates_to,
-                edge_type=edge_kind,
+            link_result = executor.execute(
+                Command(
+                    operation=Operation.LINK_CREATE,
+                    args={
+                        "source_id": node_id,
+                        "target_id": relates_to,
+                        "edge_kind": edge_kind,
+                    },
+                    requested_by="mcp:save_knowledge",
+                )
             )
-            result += f"\nEdge created: {edge_id} --[{edge_kind}]--> {relates_to}"
+            if link_result.status == CommandStatus.SUCCESS:
+                result += (
+                    f"\nEdge created: {link_result.created_id} "
+                    f"--[{edge_kind}]--> {relates_to}"
+                )
+            else:
+                result += (
+                    f"\nWarning: edge not created: {link_result.message}"
+                )
 
     return result
 
