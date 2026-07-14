@@ -50,6 +50,23 @@ from trellis.mcp.auth import (
     set_auth_enforced,
     trellis_scope,
 )
+from trellis.mcp.reconcile import (
+    LIFECYCLE_KEY,
+    MARKER_SKIPPED,
+    MARKER_STALE,
+    RECONCILIATION_KEY,
+    SUPERSEDES_DOC_KEY,
+    UPDATES_DOC_KEY,
+    ReconcileCandidate,
+    ReconcileDecision,
+    ReconcileOutcome,
+    configured_model_id,
+    emit_reconcile_verdict,
+    judge_reconcile,
+    mark_document_superseded,
+    reconcile_on_write_enabled,
+    reconcile_timeout_seconds,
+)
 from trellis.mutate import (
     Command,
     CommandStatus,
@@ -967,6 +984,57 @@ def save_knowledge(
 # ---------------------------------------------------------------------------
 
 
+def _emit_memory_stored_and_enrich(
+    registry: StoreRegistry,
+    stored_id: str,
+    content: str,
+    metadata: dict[str, Any],
+    chash: str,
+) -> None:
+    """Post-store tail shared by every save_memory path that persists a doc.
+
+    Emits ``MEMORY_STORED`` (a hard requirement — the store already happened),
+    then runs the two feature-flagged, best-effort enrichment stages (tiered
+    extraction, embed-on-ingest). Runs *outside* ``_save_memory_lock``; never
+    for the NOOP verdict, which stores nothing.
+    """
+    # Emit MEMORY_STORED so enrichment / promotion workers can react.
+    try:
+        registry.operational.event_log.emit(
+            EventType.MEMORY_STORED,
+            source="save_memory",
+            entity_id=stored_id,
+            entity_type="document",
+            payload={
+                "doc_id": stored_id,
+                "content_hash": chash,
+                "content_length": len(content),
+                "metadata": metadata,
+            },
+        )
+    except Exception as exc:
+        logger.exception("memory_stored_event_emission_failed", doc_id=stored_id)
+        _raise_internal(
+            f"MEMORY_STORED event emit failed: {exc}",
+            cause=exc,
+            data={"stage": "memory_stored_emit", "doc_id": stored_id},
+        )
+
+    # Feature-flagged tiered extraction (TRELLIS_ENABLE_MEMORY_EXTRACTION=1).
+    # Runs AliasMatch + LLM residue via the governed MutationExecutor.
+    # Never blocks save_memory success — failures are logged and swallowed.
+    memory_extractor = _get_memory_extractor(registry)
+    if memory_extractor is not None:
+        _run_memory_extraction(registry, memory_extractor, stored_id, content)
+
+    # Feature-flagged embedding (TRELLIS_ENABLE_EMBED_ON_INGEST=1) so
+    # SemanticSearch can retrieve the memory. Fail-soft inside the hook —
+    # a broken embedder never fails save_memory.
+    run_embed_on_ingest(
+        registry, stored_id, content, metadata, source="mcp:save_memory"
+    )
+
+
 @mcp.tool(auth=trellis_scope(SCOPE_INGEST))
 def save_memory(
     content: str,
@@ -994,9 +1062,16 @@ def save_memory(
     from trellis.core.hashing import content_hash  # noqa: PLC0415
 
     registry = _get_registry()
-    metadata = metadata or {}
+    metadata = dict(metadata or {})
 
     chash = content_hash(content)
+
+    # Model-judged verdict tier (TRELLIS_ENABLE_RECONCILE_ON_WRITE=1). When a
+    # near — not exact — match exists, a local model decides
+    # ADD/UPDATE/SUPERSEDE/NOOP instead of today's binary keep/drop. Off by
+    # default: the deterministic-only path below is unchanged.
+    if reconcile_on_write_enabled():
+        return _save_memory_reconciled(registry, content, metadata, doc_id, chash)
 
     # Dedup decision + store, serialized so concurrent http workers can't
     # both pass the checks and both persist. The returns for an existing
@@ -1057,43 +1132,335 @@ def save_memory(
                 data={"stage": "minhash_add", "doc_id": stored_id},
             )
 
-    # Emit MEMORY_STORED so enrichment / promotion workers can react.
+    _emit_memory_stored_and_enrich(registry, stored_id, content, metadata, chash)
+    return f"Memory saved: {stored_id}"
+
+
+# ---------------------------------------------------------------------------
+# save_memory — model-judged reconcile-on-write verdict tier (#263)
+# ---------------------------------------------------------------------------
+#
+# Layered on top of the deterministic tier (exact-hash → MinHash near-dup,
+# serialized by ``_save_memory_lock``). Feature-flagged
+# (TRELLIS_ENABLE_RECONCILE_ON_WRITE); off by default. The lock discipline is
+# the whole point: an 8B verdict takes seconds, so the model call happens
+# OUTSIDE the lock, and preconditions are re-verified UNDER the lock before the
+# verdict commits (the world may have changed while the model thought).
+
+
+def _index_stored_memory(
+    registry: StoreRegistry, stored_id: str, content: str
+) -> None:
+    """Add a freshly stored doc to the MinHash index (loud on failure)."""
     try:
-        registry.operational.event_log.emit(
-            EventType.MEMORY_STORED,
-            source="save_memory",
-            entity_id=stored_id,
-            entity_type="document",
-            payload={
-                "doc_id": stored_id,
-                "content_hash": chash,
-                "content_length": len(content),
-                "metadata": metadata,
-            },
-        )
+        minhash_index = _get_minhash_index(registry)
+        if minhash_index is not None:
+            minhash_index.add(stored_id, content)
+    except McpError:
+        raise
     except Exception as exc:
-        logger.exception("memory_stored_event_emission_failed", doc_id=stored_id)
+        logger.exception("save_memory_minhash_index_add_failed", doc_id=stored_id)
         _raise_internal(
-            f"MEMORY_STORED event emit failed: {exc}",
+            f"failed to index stored memory for fuzzy dedup: {exc}",
             cause=exc,
-            data={"stage": "memory_stored_emit", "doc_id": stored_id},
+            data={"stage": "minhash_add", "doc_id": stored_id},
         )
 
-    # Feature-flagged tiered extraction (TRELLIS_ENABLE_MEMORY_EXTRACTION=1).
-    # Runs AliasMatch + LLM residue via the governed MutationExecutor.
-    # Never blocks save_memory success — failures are logged and swallowed.
-    memory_extractor = _get_memory_extractor(registry)
-    if memory_extractor is not None:
-        _run_memory_extraction(registry, memory_extractor, stored_id, content)
 
-    # Feature-flagged embedding (TRELLIS_ENABLE_EMBED_ON_INGEST=1) so
-    # SemanticSearch can retrieve the memory. Fail-soft inside the hook —
-    # a broken embedder never fails save_memory.
-    run_embed_on_ingest(
-        registry, stored_id, content, metadata, source="mcp:save_memory"
+def _store_new_memory(
+    registry: StoreRegistry,
+    document_store: Any,
+    doc_id: str | None,
+    content: str,
+    metadata: dict[str, Any],
+) -> str:
+    """Persist a new memory doc and index it. Runs under ``_save_memory_lock``."""
+    stored_id: str = document_store.put(doc_id, content, metadata=metadata)
+    _index_stored_memory(registry, stored_id, content)
+    return stored_id
+
+
+def _gather_reconcile_candidate(
+    registry: StoreRegistry, document_store: Any, content: str
+) -> ReconcileCandidate | None:
+    """Return the top MinHash near-match to adjudicate, or ``None`` if clean.
+
+    Runs under ``_save_memory_lock`` — the same near-dup scan the deterministic
+    tier does, but it hands the match to the model instead of auto-dropping it.
+    """
+    minhash_index = _get_minhash_index(registry)
+    if minhash_index is None:
+        return None
+    matches = minhash_index.query(content)
+    if not matches:
+        return None
+    match_id, similarity = matches[0]
+    doc = document_store.get(match_id)
+    if doc is None:
+        return None
+    return ReconcileCandidate(
+        doc_id=match_id, content=doc["content"], similarity=float(similarity)
     )
 
-    return f"Memory saved: {stored_id}"
+
+def _compute_reconcile_outcome(
+    registry: StoreRegistry, content: str, candidate: ReconcileCandidate
+) -> ReconcileOutcome:
+    """Build the client and compute the verdict — **outside** the lock.
+
+    The model is never a hard dependency: an unbuildable / unavailable client
+    yields a fallback ADD outcome rather than raising.
+    """
+    model_id = configured_model_id()
+    try:
+        client = _build_llm_client(registry)
+    except Exception:
+        # A misconfigured / uninstalled provider must not fail a capture —
+        # the memory is saved as a plain ADD, marked for a later sweep.
+        logger.warning("reconcile_client_build_failed")
+        client = None
+    if client is None:
+        logger.info("reconcile_model_unavailable")
+        return ReconcileOutcome(
+            decision=ReconcileDecision.ADD,
+            confidence=0.0,
+            model_id=model_id,
+            fallback=True,
+            fallback_reason="model_unavailable",
+        )
+    return judge_reconcile(
+        client,
+        new_content=content,
+        candidate=candidate,
+        timeout=reconcile_timeout_seconds(),
+        model_id=model_id,
+    )
+
+
+def _candidate_is_stale(document_store: Any, candidate: ReconcileCandidate) -> bool:
+    """True when the candidate no longer matches what the model judged.
+
+    Two staleness axes, both re-checked under the lock:
+
+    * **Content** — the candidate was edited or deleted while the model
+      thought; the verdict is about text that no longer exists.
+    * **Lifecycle** — the candidate was superseded/deprecated by a concurrent
+      writer. ``mark_document_superseded`` preserves content (SCD-2), so a
+      content-hash check alone would let two racing SUPERSEDE verdicts both
+      commit and fork the supersession chain — ``superseded_by`` can only name
+      one successor. Any non-``current`` lifecycle state fails re-verify.
+    """
+    from trellis.core.hashing import content_hash  # noqa: PLC0415
+
+    current = document_store.get(candidate.doc_id)
+    if current is None:
+        return True
+    if content_hash(current["content"]) != content_hash(candidate.content):
+        return True
+    lifecycle = (current.get("metadata") or {}).get(LIFECYCLE_KEY)
+    return (
+        isinstance(lifecycle, dict) and lifecycle.get("state", "current") != "current"
+    )
+
+
+def _reverify_candidate(
+    document_store: Any,
+    candidate: ReconcileCandidate,
+    outcome: ReconcileOutcome,
+) -> ReconcileOutcome:
+    """Re-check the candidate under the lock; downgrade to ADD if it changed.
+
+    Another writer may have edited, deleted, or (lifecycle axis) superseded
+    the candidate while the model was thinking. Applying a stale verdict
+    would act on a doc that no longer is what the model judged, so we
+    downgrade to a plain ADD marked ``stale_recheck`` (data is never lost;
+    no synchronous re-judge — the marker queues it for a later sweep).
+    """
+    if outcome.fallback:
+        return outcome  # already an ADD — nothing to re-verify against
+    if _candidate_is_stale(document_store, candidate):
+        logger.info(
+            "reconcile_candidate_changed_downgrade_to_add",
+            candidate_id=candidate.doc_id,
+        )
+        return ReconcileOutcome(
+            decision=ReconcileDecision.ADD,
+            confidence=outcome.confidence,
+            model_id=outcome.model_id,
+            fallback=True,
+            fallback_reason="stale_recheck",
+        )
+    return outcome
+
+
+def _commit_reconcile_verdict(
+    registry: StoreRegistry,
+    document_store: Any,
+    doc_id: str | None,
+    content: str,
+    metadata: dict[str, Any],
+    candidate: ReconcileCandidate,
+    outcome: ReconcileOutcome,
+) -> tuple[str | None, dict[str, Any] | None]:
+    """Apply the verdict under ``_save_memory_lock``.
+
+    Returns ``(stored_id, stored_metadata)`` — ``(None, None)`` for NOOP, which
+    stores nothing. SUPERSEDE rides SCD-2: a new doc plus Lifecycle
+    stale-marking of the old, never a delete.
+    """
+    if outcome.fallback:
+        marker = (
+            MARKER_STALE
+            if outcome.fallback_reason == "stale_recheck"
+            else MARKER_SKIPPED
+        )
+        meta = {**metadata, RECONCILIATION_KEY: marker}
+        return _store_new_memory(registry, document_store, doc_id, content, meta), meta
+
+    decision = outcome.decision
+    if decision == ReconcileDecision.NOOP:
+        return None, None
+    if decision == ReconcileDecision.UPDATE:
+        meta = {
+            **metadata,
+            RECONCILIATION_KEY: ReconcileDecision.UPDATE.value,
+            UPDATES_DOC_KEY: candidate.doc_id,
+        }
+        return _store_new_memory(registry, document_store, doc_id, content, meta), meta
+    if decision == ReconcileDecision.SUPERSEDE:
+        meta = {
+            **metadata,
+            RECONCILIATION_KEY: ReconcileDecision.SUPERSEDE.value,
+            SUPERSEDES_DOC_KEY: candidate.doc_id,
+        }
+        stored_id = _store_new_memory(registry, document_store, doc_id, content, meta)
+        mark_document_superseded(
+            document_store, old_doc_id=candidate.doc_id, new_doc_id=stored_id
+        )
+        return stored_id, meta
+    # ADD
+    meta = {**metadata, RECONCILIATION_KEY: ReconcileDecision.ADD.value}
+    return _store_new_memory(registry, document_store, doc_id, content, meta), meta
+
+
+def _reconcile_subject(
+    decision: ReconcileDecision, candidate: ReconcileCandidate, stored_id: str | None
+) -> tuple[str, str]:
+    """Pick the ``subject_ref`` the verdict is *about* (the feedback join key).
+
+    ADD is about the new memory; UPDATE / SUPERSEDE / NOOP are about the
+    pre-existing candidate that triggered the reconciliation.
+    """
+    if decision == ReconcileDecision.ADD and stored_id is not None:
+        return "doc", stored_id
+    return "doc", candidate.doc_id
+
+
+def _reconcile_result_message(
+    outcome: ReconcileOutcome, candidate: ReconcileCandidate, stored_id: str | None
+) -> str:
+    """Human-readable tool result for a reconciled write."""
+    if outcome.fallback or outcome.decision == ReconcileDecision.ADD:
+        return f"Memory saved: {stored_id}"
+    if outcome.decision == ReconcileDecision.NOOP:
+        return f"Memory already covered by: {candidate.doc_id}"
+    if outcome.decision == ReconcileDecision.UPDATE:
+        return f"Memory saved (update of {candidate.doc_id}): {stored_id}"
+    return f"Memory saved (supersedes {candidate.doc_id}): {stored_id}"
+
+
+def _save_memory_reconciled(
+    registry: StoreRegistry,
+    content: str,
+    metadata: dict[str, Any],
+    doc_id: str | None,
+    chash: str,
+) -> str:
+    """Reconcile-on-write path: deterministic short-circuit + model verdict.
+
+    Three phases, per the binding guide's lock discipline:
+      A. under the lock — exact-hash short-circuit; gather the near-dup
+         candidate; a *clean* ADD (no candidate) stores immediately;
+      B. outside the lock — the (slow) model verdict;
+      C. under the lock — re-verify the candidate, then commit the verdict.
+    """
+    document_store = registry.knowledge.document_store
+
+    # -- Phase A: gather under the lock --------------------------------------
+    with _save_memory_lock:
+        existing = document_store.get_by_hash(chash)
+        if existing is not None:
+            existing_id = existing["doc_id"]
+            logger.debug(
+                "save_memory_dedup_exact", doc_id=existing_id, content_hash=chash
+            )
+            return f"Memory already exists: {existing_id}"
+
+        candidate = _gather_reconcile_candidate(registry, document_store, content)
+        if candidate is None:
+            # No near match: an unambiguous ADD — no model call, no verdict.
+            # Store under the lock exactly as the deterministic tier would.
+            clean_id = _store_new_memory(
+                registry, document_store, doc_id, content, metadata
+            )
+
+    if candidate is None:
+        _emit_memory_stored_and_enrich(registry, clean_id, content, metadata, chash)
+        return f"Memory saved: {clean_id}"
+
+    # -- Phase B: verdict OUTSIDE the lock (never serialize saves on a model) -
+    # _compute_reconcile_outcome is internally exhaustive (client build, model
+    # transport, timeout, malformed JSON all resolve to fallback ADDs), but
+    # "capture never fails because a judge failed" must be total, not
+    # near-total — a belt-and-suspenders guard turns any escape into the same
+    # offline fallback. Fail-soft, never silent: the traceback goes to stderr.
+    try:
+        outcome = _compute_reconcile_outcome(registry, content, candidate)
+    except Exception:
+        logger.exception("reconcile_phase_b_failed", candidate_id=candidate.doc_id)
+        outcome = ReconcileOutcome(
+            decision=ReconcileDecision.ADD,
+            confidence=0.0,
+            model_id=configured_model_id(),
+            fallback=True,
+            fallback_reason="judge_error",
+        )
+
+    # -- Phase C: re-verify + commit under the lock --------------------------
+    with _save_memory_lock:
+        raced = document_store.get_by_hash(chash)
+        if raced is not None:
+            # A concurrent writer stored identical content while we judged —
+            # the deterministic dedup wins; drop our now-duplicate write.
+            return f"Memory already exists: {raced['doc_id']}"
+        outcome = _reverify_candidate(document_store, candidate, outcome)
+        stored_id, stored_meta = _commit_reconcile_verdict(
+            registry, document_store, doc_id, content, metadata, candidate, outcome
+        )
+
+    # -- Emit + enrich outside the lock --------------------------------------
+    # A genuine model verdict (not a fallback / stale downgrade) is a training
+    # pair: emit MEMORY_OP_JUDGED. Fallback ADDs judged nothing, so no event.
+    if not outcome.fallback:
+        subject_type, subject_id = _reconcile_subject(
+            outcome.decision, candidate, stored_id
+        )
+        emit_reconcile_verdict(
+            registry.operational.event_log,
+            outcome=outcome,
+            new_content=content,
+            candidate=candidate,
+            subject_ref_type=subject_type,
+            subject_ref_id=subject_id,
+        )
+
+    # Everything but NOOP persisted a doc → MEMORY_STORED + enrichment.
+    if stored_id is not None:
+        _emit_memory_stored_and_enrich(
+            registry, stored_id, content, stored_meta or metadata, chash
+        )
+
+    return _reconcile_result_message(outcome, candidate, stored_id)
 
 
 # ---------------------------------------------------------------------------
