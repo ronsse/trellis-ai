@@ -27,6 +27,7 @@ import structlog
 
 from trellis.classify.dedup.minhash import MinHashIndex
 from trellis.core.base import utc_now
+from trellis.core.hashing import content_hash
 from trellis.meta.agents import META_AGENT_PREFIX
 from trellis.retrieve.evaluate import QualityReport
 from trellis.retrieve.rerankers.base import Reranker
@@ -53,7 +54,21 @@ logger = structlog.get_logger()
 
 #: Default window for session-aware dedup. When a ``session_id`` is
 #: supplied, items served in prior packs within this window are excluded.
+#: This is the *time* bound on the served-set scan: a pack assembled more
+#: than this many minutes ago is not consulted, so its items become
+#: eligible for re-serving. Bounded, documented staleness — not a leak.
 DEFAULT_SESSION_DEDUP_WINDOW_MINUTES = 60
+
+#: Maximum number of ``PACK_ASSEMBLED`` events scanned when deriving the
+#: session served-set. This is the *count* bound, complementing the time
+#: window above. The ``session_id`` predicate is pushed SQL-side (see
+#: :meth:`PackBuilder._recently_served`) so the cap counts only *this*
+#: session's own packs — a busy neighbouring session cannot crowd the
+#: window — and the scan runs newest-first (``order="desc"``) so hitting
+#: the cap drops the *oldest* packs, never the recent end. A session that
+#: assembles more than this many packs inside the time window will re-serve
+#: items last seen beyond the cap: bounded, documented staleness.
+DEFAULT_SESSION_DEDUP_EVENT_LIMIT = 200
 
 #: Signature for an optional assembly-time pack evaluator. Consumers own the
 #: scenario-resolution logic (e.g., lookup by ``agent_id`` + ``intent``) and
@@ -138,6 +153,35 @@ class SemanticDedupConfig:
     num_bands: int = 16
     shingle_size: int = 3
     min_shingles: int = 5
+
+
+@dataclass(frozen=True)
+class _ServedSet:
+    """The session dedup served-set, split into id- and content-knowledge.
+
+    Session dedup is item-id based, but an item whose *content* changed
+    since it was served (a superseded / updated doc reusing the same id)
+    should be eligible for re-serving. So the served-set carries two
+    things derived from prior ``PACK_ASSEMBLED`` events:
+
+    * ``ids`` — every ``item_id`` served in the window, whether the event
+      was rich (carried per-item hashes) or thin (historical, hash-less).
+      This preserves the id-only suppression contract for old events.
+    * ``hashes`` — ``item_id -> {content_hash, ...}`` for the ids whose
+      served content we actually know (from the ``injected_item_hashes``
+      payload field). An id can accumulate several hashes across the
+      window if its content changed between serves.
+
+    Suppression (:meth:`PackBuilder._is_suppressed`): an id not in ``ids``
+    was never served → keep. An id in ``ids`` with *no* known hash (only
+    thin events) → suppress by id, exactly as before content hashing
+    existed. An id in ``ids`` *with* known hashes → suppress only when the
+    candidate's current content hash matches one already served; a hash
+    miss means the content changed → re-serve.
+    """
+
+    ids: frozenset[str]
+    hashes: dict[str, set[str]]
 
 
 def _raise_if_blocking_strategy_failures(
@@ -243,6 +287,7 @@ class PackBuilder:
         include_structural: bool = False,
         include_meta: bool = False,
         session_dedup_window_minutes: int = DEFAULT_SESSION_DEDUP_WINDOW_MINUTES,
+        refresh: bool = False,
     ) -> Pack:
         """Assemble a pack by running all strategies and applying budget.
 
@@ -264,7 +309,22 @@ class PackBuilder:
         ``session_dedup_window_minutes`` is excluded (reason:
         ``session_dedup``). This prevents the agent from receiving the
         same context repeatedly across multiple tool calls in one
-        conversation.
+        conversation. The scan is bounded on two axes — the time window
+        above and :data:`DEFAULT_SESSION_DEDUP_EVENT_LIMIT` events — both
+        documented as bounded staleness rather than leaks.
+
+        Session dedup is content-aware: an item is only suppressed when
+        the content served earlier still matches. If the same ``item_id``
+        is re-retrieved with *changed* content (a superseded / updated
+        doc), its content hash no longer matches the served one and it is
+        re-served. Events predating content hashing carry no per-item
+        hashes and are suppressed by ``item_id`` alone, as before.
+
+        ``refresh`` (default ``False``) bypasses session dedup for this
+        call only: the served-set subtraction is skipped entirely and
+        previously-served items are eligible again. This is the
+        client-compaction signal — only the caller knows its context
+        window was truncated and it needs the earlier items re-injected.
 
         ``include_meta`` (default ``False``) filters out graph nodes
         produced by :func:`trellis.meta.record_meta_analysis` — i.e.,
@@ -393,14 +453,16 @@ class PackBuilder:
             deduped = kept_meta
 
         # Session dedup: drop items recently served in this session.
-        if session_id:
-            served = self._recently_served_item_ids(
+        # ``refresh`` bypasses the subtraction entirely (client-compaction
+        # signal — the caller lost its window and needs served items back).
+        if session_id and not refresh:
+            served = self._recently_served(
                 session_id, window_minutes=session_dedup_window_minutes
             )
-            if served:
+            if served.ids:
                 kept = []
                 for item in deduped:
-                    if item.item_id in served:
+                    if self._is_suppressed(item, served):
                         rejected.append(
                             RejectedItem(
                                 item_id=item.item_id,
@@ -510,8 +572,14 @@ class PackBuilder:
         include_structural: bool = False,
         include_meta: bool = False,
         session_dedup_window_minutes: int = DEFAULT_SESSION_DEDUP_WINDOW_MINUTES,
+        refresh: bool = False,
     ) -> SectionedPack:
         """Assemble a sectioned pack with independently budgeted sections.
+
+        Session dedup (step 3a) mirrors :meth:`build`: content-aware
+        suppression bounded by the time window and event-count cap, and
+        ``refresh=True`` bypasses it for this call only (client-compaction
+        signal). See :meth:`build` for the full contract.
 
         Steps:
             1. Run all strategies once to collect a candidate pool.
@@ -599,12 +667,15 @@ class PackBuilder:
             deduped = kept_meta
 
         # 3a. Session dedup: drop items recently served in this session.
-        if session_id:
-            served = self._recently_served_item_ids(
+        # ``refresh`` bypasses it (client-compaction signal) — see build().
+        if session_id and not refresh:
+            served = self._recently_served(
                 session_id, window_minutes=session_dedup_window_minutes
             )
-            if served:
-                deduped = [i for i in deduped if i.item_id not in served]
+            if served.ids:
+                deduped = [
+                    i for i in deduped if not self._is_suppressed(i, served)
+                ]
 
         # 3b. Rerank the shared candidate pool before section filling.
         # Loud-by-default (C2 Phase 4) — see build().
@@ -757,6 +828,14 @@ class PackBuilder:
                 "session_id": pack.session_id,
                 "section_count": len(pack.sections),
                 "total_items": pack.total_items,
+                # Per-item content hashes (issue #258), flattened across
+                # sections. Symmetric with the flat pack payload so the
+                # served-set reader consults one field for both pack kinds.
+                "injected_item_hashes": {
+                    item.item_id: content_hash(item.excerpt or "")
+                    for section in pack.sections
+                    for item in section.items
+                },
                 "sections": [
                     {
                         "name": s.name,
@@ -882,6 +961,14 @@ class PackBuilder:
                 "session_id": pack.session_id,
                 "items_count": len(pack.items),
                 "injected_item_ids": [item.item_id for item in pack.items],
+                # Per-item content hashes (issue #258): lets a later build in
+                # the same session re-serve an item whose content changed
+                # since it was served. Additive — thin/older events without
+                # this field fall back to id-only suppression in the reader.
+                "injected_item_hashes": {
+                    item.item_id: content_hash(item.excerpt or "")
+                    for item in pack.items
+                },
                 "injected_items": [
                     {
                         "item_id": item.item_id,
@@ -990,28 +1077,44 @@ class PackBuilder:
                 logger.exception("token_budget_validator_failed")
         return payload
 
-    def _recently_served_item_ids(
+    def _recently_served(
         self,
         session_id: str,
         *,
         window_minutes: int = DEFAULT_SESSION_DEDUP_WINDOW_MINUTES,
-    ) -> set[str]:
-        """Return item_ids served to this session within the window.
+    ) -> _ServedSet:
+        """Return the served-set for this session within the bounded window.
 
-        Reads ``PACK_ASSEMBLED`` events for ``session_id`` in the last
-        ``window_minutes`` and aggregates their ``injected_item_ids``
-        (flat packs) and section ``item_ids`` (sectioned packs).
-        Returns an empty set if no event log is configured or nothing
-        matches — the caller should treat this as "no dedup applied".
+        Reads ``PACK_ASSEMBLED`` events for ``session_id`` and aggregates
+        the item_ids they served — ``injected_item_ids`` (flat packs) and
+        section ``item_ids`` (sectioned packs) — plus any per-item
+        ``injected_item_hashes`` recorded (issue #258). See
+        :class:`_ServedSet` for how the two feed the suppression rule.
+
+        The scan is bounded on both axes documented at module scope:
+
+        * **time** — only events newer than ``window_minutes`` (SQL
+          ``since``);
+        * **count** — at most :data:`DEFAULT_SESSION_DEDUP_EVENT_LIMIT`
+          events. The ``session_id`` predicate is pushed SQL-side via
+          ``payload_filters`` so that cap counts only this session's own
+          packs (a neighbouring session cannot crowd the window), and
+          ``order="desc"`` fetches newest-first so hitting the cap drops
+          the oldest packs, never the recent end.
+
+        Returns an empty served-set when no event log is configured or
+        nothing matches — the caller treats this as "no dedup applied".
         """
         if self._event_log is None:
-            return set()
+            return _ServedSet(ids=frozenset(), hashes={})
         try:
             since = datetime.now(UTC) - timedelta(minutes=window_minutes)
             events = self._event_log.get_events(
                 event_type=EventType.PACK_ASSEMBLED,
                 since=since,
-                limit=200,
+                limit=DEFAULT_SESSION_DEDUP_EVENT_LIMIT,
+                order="desc",
+                payload_filters={"session_id": session_id},
             )
         except Exception:
             # GRACEFUL-DEGRADATION: session dedup is a duplicate-
@@ -1021,21 +1124,53 @@ class PackBuilder:
             # turn a transient observability outage into a hard
             # retrieval failure.
             logger.exception("session_dedup_event_query_failed")
-            return set()
+            return _ServedSet(ids=frozenset(), hashes={})
 
-        served: set[str] = set()
+        ids: set[str] = set()
+        hashes: dict[str, set[str]] = {}
         for event in events:
             payload = event.payload or {}
+            # Defense-in-depth: ``payload_filters`` already scopes the query
+            # to this session SQL-side, but keep the guard so a backend that
+            # ignored the predicate cannot leak another session's items.
             if payload.get("session_id") != session_id:
                 continue
-            # Flat pack payload
+            # Item ids served — flat packs and sectioned packs.
             for iid in payload.get("injected_item_ids", []) or []:
-                served.add(iid)
-            # Sectioned pack payload
+                ids.add(iid)
             for section in payload.get("sections", []) or []:
                 for iid in section.get("item_ids", []) or []:
-                    served.add(iid)
-        return served
+                    ids.add(iid)
+            # Per-item content hashes (issue #258). Absent on thin/older
+            # events — those ids stay hash-less and suppress by id alone.
+            for iid, chash in (payload.get("injected_item_hashes") or {}).items():
+                ids.add(iid)
+                if chash:
+                    hashes.setdefault(iid, set()).add(chash)
+        return _ServedSet(ids=frozenset(ids), hashes=hashes)
+
+    @staticmethod
+    def _is_suppressed(item: PackItem, served: _ServedSet) -> bool:
+        """Return ``True`` when ``item`` should be dropped by session dedup.
+
+        The content-hash re-serve rule (issue #258):
+
+        * ``item_id`` never served in the window → keep (not suppressed).
+        * ``item_id`` served but with no known content hash (only thin /
+          pre-hashing events) → suppress by id, the historical behavior.
+        * ``item_id`` served *with* known hashes → suppress only when the
+          candidate's current content matches one already served; a hash
+          miss means the content changed since serving → re-serve.
+        """
+        if item.item_id not in served.ids:
+            return False
+        known = served.hashes.get(item.item_id)
+        if not known:
+            # No content knowledge for this id (thin events only): treat a
+            # missing hash as "unchanged" and suppress, exactly as before
+            # content hashing existed. Never a KeyError.
+            return True
+        return content_hash(item.excerpt or "") in known
 
     # Advisories below this confidence are suppressed from delivery
     _ADVISORY_MIN_CONFIDENCE = 0.1

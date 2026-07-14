@@ -120,6 +120,35 @@ class TestGetContext:
         assert isinstance(result, str)
 
 
+class TestGetContextRefresh:
+    """``refresh`` bypasses session dedup end-to-end through the MCP tool (#258)."""
+
+    def test_refresh_reserves_previously_served_item(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        doc_store = temp_registry.knowledge.document_store
+        doc_store.put(
+            "doc1", "How to deploy the platform safely", metadata={"domain": "platform"}
+        )
+
+        first = get_context("deploy platform", session_id="sess-mcp")
+        assert "deploy" in first.lower()
+
+        # Same session, unchanged content → the only item is deduped away.
+        second = get_context("deploy platform", session_id="sess-mcp")
+        assert "No context found" in second
+
+        # refresh=True bypasses session dedup for this call only.
+        refreshed = get_context(
+            "deploy platform", session_id="sess-mcp", refresh=True
+        )
+        assert "deploy" in refreshed.lower()
+
+        # Bypass is scoped to that one call — the next default call dedups.
+        after = get_context("deploy platform", session_id="sess-mcp")
+        assert "No context found" in after
+
+
 class TestGetContextDomainFilter:
     """``domain=`` routes onto the ``content_tags`` facet path (#254).
 
