@@ -443,6 +443,37 @@ def _get_minhash_index(registry: StoreRegistry) -> Any:
 # ---------------------------------------------------------------------------
 
 
+def _passes_domain_scope(metadata: dict[str, Any], domain: str) -> bool:
+    """Default-pass domain check for semantic-axis hits (#254).
+
+    Mirrors the keyword axis's ``content_tags`` facet semantics at the
+    Python boundary — the vector stores only offer a hard-equality
+    scalar metadata filter, which would hard-exclude domain-less rows.
+    Vector rows carry full document metadata (``build_vector_row``
+    copies it), so a hit may hold ``domain`` in either storage
+    location: scalar ``metadata.domain`` or the
+    ``metadata.content_tags.domain`` facet (a list).
+
+    Semantics: pass when no domain is present in either location
+    (default-pass — a domain-less memory is never hard-excluded); pass
+    when either location matches; exclude only on explicit mismatch.
+    """
+    values: list[Any] = []
+    scalar = metadata.get("domain")
+    if scalar is not None:
+        values.append(scalar)
+    tags = metadata.get("content_tags")
+    if isinstance(tags, dict):
+        facet = tags.get("domain")
+        if isinstance(facet, list):
+            values.extend(facet)
+        elif facet is not None:
+            values.append(facet)
+    if not values:
+        return True
+    return domain in values
+
+
 @mcp.tool(auth=trellis_scope(SCOPE_READ))
 def get_context(  # noqa: PLR0912, PLR0915
     intent: str,
@@ -563,19 +594,25 @@ def get_context(  # noqa: PLR0912, PLR0915
         embedding_fn = registry.embedding_fn
         vector_store = getattr(registry.knowledge, "vector_store", None)
         if embedding_fn is not None and vector_store is not None:
-            # ``domain`` scoping is carried by the document (keyword) axis
-            # via the ``content_tags`` facet path, which default-passes
-            # documents missing the key (#254). The vector stores have no
-            # facet / default-pass filter — a scalar ``{"domain": ...}``
-            # here compiles to hard equality (SQLite ``json_extract`` /
-            # pgvector ``@>`` containment), re-introducing the same
-            # hard-exclusion on the semantic axis. Leave the vector axis
-            # unfiltered by domain until the unified retrieval path (#262)
-            # gives the vector stores facet-aware default-pass.
-            vec_filters: dict[str, Any] | None = None
-            hits = vector_store.query(
-                embedding_fn(intent), top_k=10, filters=vec_filters
-            )
+            # The vector stores have no facet / default-pass filter — a
+            # scalar ``{"domain": ...}`` store-side filter compiles to
+            # hard equality (SQLite ``json_extract`` / pgvector ``@>``
+            # containment), re-introducing the #254 hard-exclusion on the
+            # semantic axis. Instead, apply domain scoping as a
+            # Python-side default-pass post-filter over the materialized
+            # hits (they carry full document metadata via
+            # ``build_vector_row``), mirroring the keyword axis's facet
+            # semantics: missing domain passes, matching domain (scalar
+            # or ``content_tags`` facet) passes, explicit mismatch is
+            # excluded. Store-side facet filtering lands with the unified
+            # retrieval path (#262).
+            hits = vector_store.query(embedding_fn(intent), top_k=10)
+            if domain:
+                hits = [
+                    hit
+                    for hit in hits
+                    if _passes_domain_scope(hit.get("metadata", {}), domain)
+                ]
             items.extend(
                 {
                     "item_id": hit["item_id"],

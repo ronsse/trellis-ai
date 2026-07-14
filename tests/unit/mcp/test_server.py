@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 from mcp.shared.exceptions import McpError
@@ -443,10 +444,16 @@ def _fake_embed(text: str) -> list[float]:
 class TestSemanticAxis:
     """get_context / search gain a semantic axis when embeddings exist."""
 
-    def _seed_embedded_memory(self, monkeypatch: pytest.MonkeyPatch) -> str:
+    def _seed_embedded_memory(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        content: str = "the deployment runbook lives in the wiki",
+        metadata: dict[str, Any] | None = None,
+    ) -> str:
         monkeypatch.setenv("TRELLIS_ENABLE_EMBED_ON_INGEST", "1")
         monkeypatch.setenv("TRELLIS_EMBEDDING_FN", _EMBED_FN_PATH)
-        result = save_memory("the deployment runbook lives in the wiki")
+        result = save_memory(content, metadata=metadata)
         return result.split(":", 1)[1].strip()
 
     def test_get_context_returns_semantic_hit(
@@ -471,12 +478,11 @@ class TestSemanticAxis:
     ) -> None:
         """#254 Gotcha 1: the semantic axis must not hard-exclude on domain.
 
-        The vector stores have no facet / default-pass filter, so a
-        scalar ``{"domain": ...}`` filter would hard-exclude the
-        (domain-less) embedded memory — moving the #254 bug onto the
-        semantic axis. A domain-scoped call whose intent has zero FTS
-        overlap (so only the vector axis can surface the memory) must
-        still return it.
+        A store-side scalar ``{"domain": ...}`` filter would hard-exclude
+        the (domain-less) embedded memory — moving the #254 bug onto the
+        semantic axis. The Python-side default-pass post-filter keeps it:
+        a domain-scoped call whose intent has zero FTS overlap (so only
+        the vector axis can surface the memory) must still return it.
         """
         doc_id = self._seed_embedded_memory(monkeypatch)
         result = get_context(
@@ -484,6 +490,58 @@ class TestSemanticAxis:
         )
         assert doc_id in result
         assert "deployment runbook" in result
+
+    def test_domain_mismatch_excluded_on_semantic_axis(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Reviewer repro: domain scoping must still work on the semantic axis.
+
+        Vector rows carry full document metadata (``build_vector_row``
+        copies it), so a memory saved with scalar ``domain="data"``
+        carries that domain on its vector row. A ``domain="infra"``
+        call with zero FTS overlap must NOT surface it — default-pass
+        is not filter-disabled: explicit mismatch excludes.
+        """
+        doc_id = self._seed_embedded_memory(monkeypatch, metadata={"domain": "data"})
+        result = get_context(
+            "where do I find operational documentation", domain="infra"
+        )
+        assert doc_id not in result
+
+    def test_domain_match_included_on_semantic_axis(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        doc_id = self._seed_embedded_memory(monkeypatch, metadata={"domain": "infra"})
+        result = get_context(
+            "where do I find operational documentation", domain="infra"
+        )
+        assert doc_id in result
+
+    def test_facet_domain_honored_on_semantic_axis(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The ``content_tags.domain`` facet location is honored too.
+
+        Vector-row metadata can carry domain in the facet location
+        (a list). Matching facet passes; mismatched facet is excluded.
+        Contents are deliberately dissimilar so MinHash fuzzy dedup
+        doesn't collapse the two memories.
+        """
+        matching_id = self._seed_embedded_memory(
+            monkeypatch,
+            content="the postmortem archive sits behind the vpn",
+            metadata={"content_tags": {"domain": ["infra"]}},
+        )
+        mismatched_id = self._seed_embedded_memory(
+            monkeypatch,
+            content="quarterly revenue figures are tracked in the ledger",
+            metadata={"content_tags": {"domain": ["data"]}},
+        )
+        result = get_context(
+            "where do I find operational documentation", domain="infra"
+        )
+        assert matching_id in result
+        assert mismatched_id not in result
 
     def test_get_context_broken_embedder_degrades_gracefully(
         self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
