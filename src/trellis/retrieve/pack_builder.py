@@ -126,20 +126,31 @@ def _strip_dedup_frontmatter(text: str) -> str:
 
     F14: the same fact stored via ``save_memory`` (raw body) and via corpus
     ingestion (the identical body wrapped in a ``---`` YAML frontmatter block
-    plus a heading) must collapse to one pack item. But the pack strategies
-    truncate excerpts to 500 chars, so the corpus copy's frontmatter eats into
-    its window and shifts the shared body — the 3-shingle Jaccard falls to
-    ~0.78, under the 0.85 threshold, and the near-duplicate survives.
+    plus a heading) must collapse to one pack item. But the corpus copy's
+    ~130-char frontmatter/heading prefix dilutes the shingle-set overlap —
+    on the F14-shaped test fixture the 3-shingle Jaccard estimate drops to
+    ~0.75, under the 0.85 threshold, and the near-duplicate survives. (For
+    documents longer than the strategies' 500-char excerpt window the prefix
+    compounds the problem by also displacing shared body out of the compared
+    excerpt.)
 
-    Stripping the frontmatter before shingling restores ~0.95 Jaccard so the
-    default threshold catches the pair, without loosening the global match
-    sensitivity (which would risk over-suppressing genuinely-distinct items).
-    This only normalizes the text used for the *similarity comparison*; the
-    excerpt served in the pack is untouched.
+    Stripping the frontmatter before shingling restores the estimate to
+    ~0.95+ so the default threshold catches the pair, without loosening the
+    global match sensitivity (which would risk over-suppressing genuinely-
+    distinct items). This only normalizes the text used for the *similarity
+    comparison*; the excerpt served in the pack is untouched.
 
     Text without a leading frontmatter fence — including a mid-document
     ``---`` horizontal rule — is returned unchanged (the ``\\A`` anchor and
     required closing fence guard against false strips).
+
+    Known limitation (accepted): a document whose *first* line is a bare
+    ``---`` markdown horizontal rule and which contains a later ``---`` (or
+    ``...``) line is indistinguishable from frontmatter by shape, so its
+    leading section is stripped as if it were frontmatter. This affects only
+    the comparison text, and errs in the safe direction — at worst two such
+    docs sharing a post-rule body compare as more similar, and the
+    relevance-order winner rule keeps the best copy.
     """
     return _DEDUP_FRONTMATTER_RE.sub("", text, count=1)
 
@@ -609,11 +620,17 @@ class PackBuilder:
         # 2. Deduplicate
         deduped = self._deduplicate(all_items)
 
-        # 2a. Fuzzy/semantic dedup (Gap 3.2). Rejected items are discarded
-        # for the sectioned path because each section builds its own report
-        # later; the shared pool just needs to be collapsed.
+        # 2a. Fuzzy/semantic dedup (Gap 3.2 / #259). Per-section reports are
+        # built later from the collapsed pool, so the rejection *records*
+        # aren't threaded into section RetrievalReports — but the count is
+        # kept so the sectioned PACK_ASSEMBLED emit carries the same
+        # ``semantic_dedup_rejected`` observability as the flat path.
+        semantic_dedup_rejected_count = 0
         if self._semantic_dedup is not None:
-            deduped, _ = self._semantic_dedup_tracked(deduped, self._semantic_dedup)
+            deduped, semantic_rejected = self._semantic_dedup_tracked(
+                deduped, self._semantic_dedup
+            )
+            semantic_dedup_rejected_count = len(semantic_rejected)
 
         # 3. Defense-in-depth structural filter.
         if not include_structural:
@@ -756,6 +773,7 @@ class PackBuilder:
                 sectioned_pack,
                 strategy_failures=strategy_failures,
                 meta_filtered_count=meta_filtered_count,
+                semantic_dedup_rejected_count=semantic_dedup_rejected_count,
             )
 
         return sectioned_pack
@@ -766,8 +784,15 @@ class PackBuilder:
         *,
         strategy_failures: list[StrategyFailure] | None = None,
         meta_filtered_count: int = 0,
+        semantic_dedup_rejected_count: int = 0,
     ) -> None:
-        """Emit telemetry event for a sectioned pack."""
+        """Emit telemetry event for a sectioned pack.
+
+        ``semantic_dedup_rejected_count`` (#259) mirrors the flat path's
+        ``semantic_dedup_rejected`` payload field so near-duplicate
+        suppression is observable on both pack kinds. Additive field —
+        consumers ``payload.get(...)`` with a default.
+        """
         per_item_estimates = [
             item.estimated_tokens or self._token_counter.count(item.excerpt)
             for section in pack.sections
@@ -807,6 +832,7 @@ class PackBuilder:
                 "advisory_ids": [a.advisory_id for a in pack.advisories],
                 "reranker": self._reranker.name if self._reranker else None,
                 "semantic_dedup_enabled": self._semantic_dedup is not None,
+                "semantic_dedup_rejected": semantic_dedup_rejected_count,
                 "strategy_failures": [
                     sf.to_event_payload() for sf in (strategy_failures or [])
                 ],

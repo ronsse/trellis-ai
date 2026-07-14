@@ -1304,6 +1304,57 @@ class TestSemanticDedup:
         section_items = {i.item_id for i in pack.sections[0].items}
         assert section_items == {"winner"}
 
+    def test_sectioned_telemetry_records_suppression_count(
+        self, tmp_path: Path
+    ) -> None:
+        """The sectioned PACK_ASSEMBLED payload carries the same
+        ``semantic_dedup_rejected`` count as the flat path (#259)."""
+        from trellis.retrieve.pack_builder import SemanticDedupConfig
+        from trellis.stores.base.event_log import EventType
+
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        try:
+            s = _make_strategy(
+                "kw",
+                [
+                    _item("winner", 0.9, excerpt=self._LONG_EXCERPT),
+                    _item(
+                        "loser",
+                        0.5,
+                        excerpt=self._near_duplicate(self._LONG_EXCERPT),
+                    ),
+                ],
+            )
+            builder = PackBuilder(
+                strategies=[s],
+                event_log=event_log,
+                semantic_dedup=SemanticDedupConfig(),
+            )
+            builder.build_sectioned("q", sections=[SectionRequest(name="all")])
+
+            events = event_log.get_events(event_type=EventType.PACK_ASSEMBLED)
+            assert len(events) == 1
+            payload = events[0].payload
+            assert payload["semantic_dedup_enabled"] is True
+            assert payload["semantic_dedup_rejected"] == 1
+        finally:
+            event_log.close()
+
+    def test_sectioned_telemetry_zero_when_disabled(self, tmp_path: Path) -> None:
+        """Disabled config → count is 0 (field always present, additive)."""
+        from trellis.stores.base.event_log import EventType
+
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        try:
+            s = _make_strategy("kw", [_item("a", 0.9, excerpt=self._LONG_EXCERPT)])
+            builder = PackBuilder(strategies=[s], event_log=event_log)
+            builder.build_sectioned("q", sections=[SectionRequest(name="all")])
+            events = event_log.get_events(event_type=EventType.PACK_ASSEMBLED)
+            assert events[0].payload["semantic_dedup_enabled"] is False
+            assert events[0].payload["semantic_dedup_rejected"] == 0
+        finally:
+            event_log.close()
+
 
 # ---------------------------------------------------------------------------
 # F14 — cross-source near-duplicate (save_memory copy vs corpus copy)
@@ -1345,10 +1396,13 @@ class TestF14CrossSourceDedup:
     def test_frontmatter_wrapped_copy_is_suppressed(self) -> None:
         """The frontmatter-wrapped corpus copy collapses into the raw copy.
 
-        Without frontmatter stripping the corpus copy's excerpt starts with
-        ~135 chars of YAML/heading, dragging the 3-shingle Jaccard down to
-        ~0.78 — under the 0.85 default — so the near-dup would survive. The
-        builder strips the frontmatter before shingling, restoring ~0.95.
+        Without frontmatter stripping, the corpus copy's ~134-char
+        YAML/heading prefix dilutes the shingle overlap, dragging the
+        3-shingle Jaccard estimate down to ~0.75 — under the 0.85 default —
+        so the near-dup would survive. (This fixture is 460 chars, so the
+        strategies' 500-char excerpt truncation plays no role here; for
+        longer docs it compounds the dilution.) The builder strips the
+        frontmatter before shingling, restoring the estimate to ~0.95+.
         """
         from trellis.retrieve.pack_builder import SemanticDedupConfig
 

@@ -244,6 +244,53 @@ class TestPackSections:
         assert "tactical" in data["empty_section_flags"]
 
 
+class TestPackQualityAssembly:
+    """``analyze pack-quality``'s live assembly mirrors production wiring.
+
+    #259: the eval harness must assemble packs the way the MCP server / API
+    do — with near-duplicate suppression enabled. Without the wire-up, a
+    scenario containing a cross-source near-dup pair scores 2 items in eval
+    while production ships 1, and every pack-quality score silently measures
+    a pack shape production never serves.
+    """
+
+    #: Synthetic fact + frontmatter-wrapped copy (the F14 pair shape).
+    _FACT = (
+        "The staging deployment pipeline runs the full migration suite before "
+        "promoting a build, then validates the schema against a read replica "
+        "and posts a summary to the release channel. Rollbacks trigger "
+        "automatically when the post-deploy smoke tests fail. The pipeline "
+        "config is reviewed by two engineers before any change merges."
+    )
+    _CORPUS_COPY = (
+        "---\n"
+        "source: notes-import\n"
+        "tags: [deploy, pipeline]\n"
+        "---\n"
+        "# Note: staging deployment pipeline\n\n" + _FACT
+    )
+
+    def test_assembly_suppresses_near_duplicates(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        from trellis.retrieve.evaluate import EvaluationScenario
+        from trellis_cli.analyze import _assemble_pack_for_scenario
+
+        doc_store = temp_stores.knowledge.document_store
+        doc_store.put("sm-pipeline", self._FACT)
+        doc_store.put("corpus-pipeline", self._CORPUS_COPY)
+
+        pack = _assemble_pack_for_scenario(
+            EvaluationScenario(
+                name="near-dup-pair",
+                intent="staging deployment pipeline migration rollback",
+            )
+        )
+        served = {item.item_id for item in pack.items}  # type: ignore[attr-defined]
+        survivors = served & {"sm-pipeline", "corpus-pipeline"}
+        assert len(survivors) == 1, f"expected one survivor, got {survivors}"
+
+
 class TestLearningCandidates:
     def _seed_promote_signal(
         self,
