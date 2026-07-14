@@ -62,6 +62,28 @@ def test_search_with_filters(doc_store: SQLiteDocumentStore) -> None:
     assert results[0]["metadata"]["category"] == "tutorial"
 
 
+def test_search_generic_scalar_filter_hard_excludes_missing_key(
+    doc_store: SQLiteDocumentStore,
+) -> None:
+    """Generic scalar filters (e.g. ``source_system``) stay hard-match.
+
+    #254 routes the ``domain`` *parameter* onto the content_tags facet
+    path, but must NOT change the generic scalar ``json_extract = ?``
+    branch: callers like ``source_system`` rely on hard equality, which
+    excludes both documents missing the key and documents with a
+    different value. This guards that the branch is untouched.
+    """
+    doc_store.put("has-key", "shared keyword payload", {"source_system": "dbt"})
+    doc_store.put("missing-key", "shared keyword payload")
+    doc_store.put(
+        "other-value", "shared keyword payload", {"source_system": "airflow"}
+    )
+
+    results = doc_store.search("keyword", filters={"source_system": "dbt"})
+
+    assert {r["doc_id"] for r in results} == {"has-key"}
+
+
 def test_list_documents(doc_store: SQLiteDocumentStore) -> None:
     for i in range(5):
         doc_store.put(None, f"doc {i}")
