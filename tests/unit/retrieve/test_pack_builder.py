@@ -195,6 +195,123 @@ class TestPackBuilder:
         call_kwargs = s.search.call_args
         assert call_kwargs[1]["filters"] is None
 
+    def test_domain_param_translated_to_strategy_filters(self) -> None:
+        """``domain=`` alone (no explicit filters) reaches strategies as
+        both the scalar hint and the content_tags facet (#262)."""
+        s = _make_strategy("kw", [])
+        builder = PackBuilder(strategies=[s])
+        builder.build("q", domain="infra")
+        filters = s.search.call_args[1]["filters"]
+        assert filters["domain"] == "infra"
+        assert filters["content_tags"]["domain"] == {"in": ["infra"]}
+
+    def test_domain_param_does_not_override_caller_filters(self) -> None:
+        """An explicit caller-supplied domain filter wins over the param."""
+        s = _make_strategy("kw", [])
+        builder = PackBuilder(strategies=[s])
+        builder.build(
+            "q",
+            domain="infra",
+            filters={"domain": "explicit"},
+            tag_filters={"domain": {"in": ["explicit"]}},
+        )
+        filters = s.search.call_args[1]["filters"]
+        assert filters["domain"] == "explicit"
+        assert filters["content_tags"]["domain"] == {"in": ["explicit"]}
+
+
+class _FakeGraphStore:
+    """Minimal GraphStore stand-in returning a fixed node list."""
+
+    def __init__(self, nodes: list[dict[str, object]]) -> None:
+        self._nodes = nodes
+
+    def query(
+        self,
+        *,
+        node_type: str | None = None,
+        properties: dict[str, object] | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, object]]:
+        del node_type, properties, limit
+        return list(self._nodes)
+
+
+class TestBuildDomainScopeGraphAxis:
+    """`build(domain=...)` enforces the #254 default-pass contract on the
+    graph axis: explicit mismatch excluded, domain-less passes (#262)."""
+
+    def _nodes(self) -> list[dict[str, object]]:
+        return [
+            {
+                "node_id": "n-mismatch",
+                "node_type": "concept",
+                "node_role": "semantic",
+                "properties": {"name": "mismatch", "domain": "data"},
+            },
+            {
+                "node_id": "n-plain",
+                "node_type": "concept",
+                "node_role": "semantic",
+                "properties": {"name": "plain"},
+            },
+            {
+                "node_id": "n-match",
+                "node_type": "concept",
+                "node_role": "semantic",
+                "properties": {"name": "match", "domain": "infra"},
+            },
+        ]
+
+    def test_mismatched_domain_node_excluded_domainless_passes(self) -> None:
+        from trellis.retrieve.strategies import GraphSearch
+
+        builder = PackBuilder(strategies=[GraphSearch(_FakeGraphStore(self._nodes()))])
+        pack = builder.build("q", domain="infra")
+        ids = {item.item_id for item in pack.items}
+        assert "n-mismatch" not in ids
+        assert "n-plain" in ids
+        assert "n-match" in ids
+
+    def test_no_domain_returns_everything(self) -> None:
+        from trellis.retrieve.strategies import GraphSearch
+
+        builder = PackBuilder(strategies=[GraphSearch(_FakeGraphStore(self._nodes()))])
+        pack = builder.build("q")
+        ids = {item.item_id for item in pack.items}
+        assert ids == {"n-mismatch", "n-plain", "n-match"}
+
+    def test_facet_domain_mismatch_excluded(self) -> None:
+        """The ``properties.content_tags.domain`` facet location is honored
+        on the graph axis too."""
+        from trellis.retrieve.strategies import GraphSearch
+
+        nodes: list[dict[str, object]] = [
+            {
+                "node_id": "n-facet-mismatch",
+                "node_type": "concept",
+                "node_role": "semantic",
+                "properties": {
+                    "name": "facet mismatch",
+                    "content_tags": {"domain": ["data"]},
+                },
+            },
+            {
+                "node_id": "n-facet-match",
+                "node_type": "concept",
+                "node_role": "semantic",
+                "properties": {
+                    "name": "facet match",
+                    "content_tags": {"domain": ["infra"]},
+                },
+            },
+        ]
+        builder = PackBuilder(strategies=[GraphSearch(_FakeGraphStore(nodes))])
+        pack = builder.build("q", domain="infra")
+        ids = {item.item_id for item in pack.items}
+        assert "n-facet-mismatch" not in ids
+        assert "n-facet-match" in ids
+
     def test_selected_items_gain_observability_fields(self) -> None:
         s = _make_strategy(
             "kw",

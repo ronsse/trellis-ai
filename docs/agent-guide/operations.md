@@ -193,7 +193,7 @@ The flag applies identically across the three document-ingest paths: the REST `P
 
 The vector row's metadata carries a `content` excerpt (500 chars — what `SemanticSearch` renders as the pack excerpt), the document metadata, `doc_id`, and a `created_at` recency stamp. Note that metadata-only re-puts (e.g. enrichment tag writes) do not re-embed; run the backfill with `--force` to refresh vector metadata.
 
-On the retrieval side, embedded documents are visible to every `SemanticSearch`/`PackBuilder` consumer, and the MCP `get_context` and `search` macro tools gain a **semantic axis**: when the embedder + vector store pair is configured, the query is embedded and vector hits merge with the keyword/graph/trace results (deduplicated by `doc_id`). The axis is additive and degrades gracefully — a down embedder means keyword results only, never a failed tool call.
+On the retrieval side, embedded documents are visible to every `SemanticSearch`/`PackBuilder` consumer. Since #262 the MCP `get_context` and `search` macro tools route through `PackBuilder`, which fuses the keyword, graph and **semantic** axes with Reciprocal Rank Fusion (deduplicated by `item_id`): when the embedder + vector store pair is configured, the query is embedded and vector hits join the fusion. The semantic axis is additive and degrades gracefully — a down embedder means keyword + graph results only, never a failed tool call.
 
 ### `trellis admin reindex-vectors` (backfill)
 
@@ -1339,7 +1339,7 @@ Start with `trellis-mcp`. 11 tools returning token-budgeted markdown — 8 core 
 
 | Tool | Args | Returns |
 |------|------|---------|
-| `get_context` | `intent`, `domain?`, `max_tokens?` | Markdown pack from docs + graph + traces |
+| `get_context` | `intent`, `domain?`, `max_tokens?`, `session_id?`, `sections?` | Markdown pack fusing keyword + graph + semantic axes (RRF, recency/importance decay, session dedup) with a citable `pack_id`. Pass `sections` for the sectioned layout. |
 | `save_experience` | `trace_json` | Confirmation with trace_id |
 | `save_knowledge` | `name`, `entity_type?`, `properties?`, `relates_to?`, `edge_kind?` | Confirmation with entity_id |
 | `save_memory` | `content`, `metadata?`, `doc_id?` | Confirmation with doc_id |
@@ -1348,7 +1348,9 @@ Start with `trellis-mcp`. 11 tools returning token-budgeted markdown — 8 core 
 | `record_feedback` | `trace_id?`, `pack_id?`, `success`, `notes?`, `helpful_item_ids?`, `unhelpful_item_ids?`, `followed_advisory_ids?` | Confirmation |
 | `search` | `query`, `limit?`, `max_tokens?` | Markdown search results |
 
-**Sectioned-context tools**
+**Sectioned-context tools (deprecated aliases — #262)**
+
+All three now route through the same one retrieval path as `get_context` and are retained as thin aliases for one release. Prefer `get_context` — for custom sections pass `get_context(intent, sections=[...])` (identical schema to `get_sectioned_context`); the objective/task presets are fixed section layouts over the same path.
 
 | Tool | Args | Returns |
 |------|------|---------|
@@ -1356,7 +1358,7 @@ Start with `trellis-mcp`. 11 tools returning token-budgeted markdown — 8 core 
 | `get_task_context` | `intent`, `entity_ids?`, `domain?`, `max_tokens?`, `session_id?` | Markdown pack scoped to specific entities; designed for per-step retrieval inside a workflow. |
 | `get_sectioned_context` | `intent`, `sections`, `domain?`, `max_tokens?`, `session_id?` | Markdown pack with caller-defined sections (custom affinities, content types, scopes, per-section budgets). |
 
-`session_id` lets the three sectioned tools deduplicate items returned by recent calls in the same session. Token budgets default to the values in `retrieval.budgets` (`config.yaml`); pass `max_tokens > 0` to override.
+`session_id` lets every context tool deduplicate items returned by recent calls in the same session. Token budgets default to the values in `retrieval.budgets` (`config.yaml`); pass `max_tokens > 0` to override.
 
 All read tools track token usage in the event log for observability.
 

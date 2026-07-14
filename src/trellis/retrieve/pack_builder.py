@@ -284,7 +284,10 @@ class PackBuilder:
         strategy_failures: list[StrategyFailure] = []
         meta_filtered_count = 0
 
-        merged_filters = self._build_filters(filters, tag_filters)
+        scoped_filters, scoped_tag_filters = self._apply_domain_scope(
+            domain, filters, tag_filters
+        )
+        merged_filters = self._build_filters(scoped_filters, scoped_tag_filters)
         # Propagate structural preference into the per-strategy filter so
         # GraphSearch can skip the client-side filter when requested.
         if include_structural:
@@ -527,7 +530,10 @@ class PackBuilder:
         candidates_found = 0
         strategy_failures: list[StrategyFailure] = []
 
-        merged_filters = self._build_filters(filters, tag_filters)
+        scoped_filters, scoped_tag_filters = self._apply_domain_scope(
+            domain, filters, tag_filters
+        )
+        merged_filters = self._build_filters(scoped_filters, scoped_tag_filters)
         if include_structural:
             merged_filters = dict(merged_filters) if merged_filters else {}
             merged_filters["include_structural"] = True
@@ -1345,6 +1351,39 @@ class PackBuilder:
                 )
 
         return result, rejected, budget_trace
+
+    @staticmethod
+    def _apply_domain_scope(
+        domain: str | None,
+        filters: dict[str, Any] | None,
+        tag_filters: dict[str, Any] | None,
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        """Translate the ``domain`` scope into per-store filter dialects (#262).
+
+        A single ``domain=`` argument must scope every retrieval axis without
+        hard-excluding domain-less items (the #254 default-pass contract). The
+        stores speak different filter dialects, so ``domain`` is expressed
+        twice and each strategy keeps only the form its store understands:
+
+        * the document store speaks the ``content_tags.domain`` facet with
+          default-pass semantics → injected into ``tag_filters``
+          (:class:`KeywordSearch` forwards it and strips the scalar);
+        * the graph match-boost and the semantic-axis default-pass post-filter
+          read the scalar ``domain`` key
+          (:class:`GraphSearch` / :class:`SemanticSearch` strip it from their
+          store calls).
+
+        Caller-supplied domain filters win (``setdefault``) so an explicit
+        ``filters`` / ``tag_filters`` from the caller is never overridden.
+        Returns ``(filters, tag_filters)`` unchanged when ``domain`` is falsy.
+        """
+        if not domain:
+            return filters, tag_filters
+        scoped_tags = dict(tag_filters or {})
+        scoped_tags.setdefault("domain", {"in": [domain]})
+        scoped_filters = dict(filters or {})
+        scoped_filters.setdefault("domain", domain)
+        return scoped_filters, scoped_tags
 
     @staticmethod
     def _build_filters(

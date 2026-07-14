@@ -61,6 +61,45 @@ _KEYWORD_COMPONENT = "retrieve.strategies.KeywordSearch"
 _SEMANTIC_COMPONENT = "retrieve.strategies.SemanticSearch"
 _GRAPH_COMPONENT = "retrieve.strategies.GraphSearch"
 
+#: Over-fetch multiplier for the semantic axis when a domain scope is active.
+#: The vector stores cannot express the ``content_tags`` default-pass facet
+#: filter (a scalar store-side filter would hard-exclude domain-less rows —
+#: the #254 defect), so :class:`SemanticSearch` fetches extra candidates and
+#: applies the Python-side default-pass post-filter, then slices back to
+#: ``limit``. Over-fetching keeps a heavily-mismatched domain from thinning
+#: semantic recall (the trade-off #254 accepted, closed here for #262).
+_SEMANTIC_DOMAIN_OVERFETCH = 4
+
+
+def _passes_domain_scope(metadata: dict[str, Any], domain: str) -> bool:
+    """Default-pass domain check for semantic-axis hits (#254 / #262).
+
+    Mirrors the keyword axis's ``content_tags`` facet semantics at the
+    Python boundary — the vector stores only offer a hard-equality scalar
+    metadata filter, which would hard-exclude domain-less rows. Vector rows
+    carry full document metadata (``build_vector_row`` copies it), so a hit
+    may hold ``domain`` in either storage location: scalar ``metadata.domain``
+    or the ``metadata.content_tags.domain`` facet (a list).
+
+    Semantics: pass when no domain is present in either location
+    (default-pass — a domain-less memory is never hard-excluded); pass when
+    either location matches; exclude only on explicit mismatch.
+    """
+    values: list[Any] = []
+    scalar = metadata.get("domain")
+    if scalar is not None:
+        values.append(scalar)
+    tags = metadata.get("content_tags")
+    if isinstance(tags, dict):
+        facet = tags.get("domain")
+        if isinstance(facet, list):
+            values.extend(facet)
+        elif facet is not None:
+            values.append(facet)
+    if not values:
+        return True
+    return domain in values
+
 
 def _resolve_param(
     registry: ParameterRegistry | None,
@@ -340,7 +379,15 @@ class KeywordSearch(SearchStrategy):
             _KEYWORD_COMPONENT,
             domain,
         )
-        results = self._store.search(query, limit=limit, filters=filters)
+        # ``domain`` is a scoping hint routed onto the ``content_tags`` facet
+        # (default-pass, store-side) by :meth:`PackBuilder._apply_domain_scope`.
+        # The scalar key is consumed here for per-(component, domain) param
+        # resolution; forwarding it to the document store would re-introduce
+        # the #254 scalar hard-equality that hard-excludes untagged rows.
+        store_filters = filters
+        if filters and "domain" in filters:
+            store_filters = {k: v for k, v in filters.items() if k != "domain"}
+        results = self._store.search(query, limit=limit, filters=store_filters)
         items = []
         for doc in results:
             metadata = doc.get("metadata", {})
@@ -415,8 +462,27 @@ class SemanticSearch(SearchStrategy):
             _SEMANTIC_COMPONENT,
             domain,
         )
+        # The vector store speaks neither the ``content_tags`` default-pass
+        # facet nor a default-pass scalar ``domain`` filter — a store-side
+        # filter on either compiles to hard equality and hard-excludes
+        # domain-less rows (#254). Strip both from the store call and apply
+        # domain scoping as a Python-side default-pass post-filter over the
+        # materialized hits (which carry full document metadata). Over-fetch
+        # so a heavily-mismatched domain doesn't thin recall (#262).
+        store_filters = None
+        if filters:
+            store_filters = {
+                k: v for k, v in filters.items() if k not in ("domain", "content_tags")
+            } or None
+        fetch_k = limit * _SEMANTIC_DOMAIN_OVERFETCH if domain else limit
         query_vector = self._embedding_fn(query)
-        results = self._store.query(query_vector, top_k=limit, filters=filters)
+        results = self._store.query(query_vector, top_k=fetch_k, filters=store_filters)
+        if domain:
+            results = [
+                r
+                for r in results
+                if _passes_domain_scope(r.get("metadata", {}), domain)
+            ][:limit]
         items = []
         for result in results:
             metadata = result.get("metadata", {})
@@ -557,10 +623,17 @@ class GraphSearch(SearchStrategy):
             nodes = subgraph.get("nodes", [])
         else:
             node_type = filters.pop("node_type", None)
-            # Pass domain as a property filter to the graph store
-            query_props = {k: v for k, v in filters.items() if k != "domain"}
-            if request_domain:
-                query_props["domain"] = request_domain
+            # ``domain`` and ``content_tags`` are scoping hints, not graph
+            # properties: ``domain`` is applied client-side with default-pass
+            # semantics below (a domain-less node is never hard-excluded,
+            # mirroring the other axes for #262), and ``content_tags`` is a
+            # document-store facet the graph store cannot interpret. Neither
+            # is forwarded as a property filter — a store-side property
+            # filter compiles to hard equality and would hard-exclude every
+            # domain-less node (#254).
+            query_props = {
+                k: v for k, v in filters.items() if k not in ("domain", "content_tags")
+            }
             # Over-fetch 4x to leave room for structural filtering before
             # slicing to the caller's limit.
             nodes = self._query_nodes(
@@ -572,6 +645,19 @@ class GraphSearch(SearchStrategy):
         # Filter structural nodes client-side unless explicitly requested.
         if not include_structural:
             nodes = [n for n in nodes if n.get("node_role") != "structural"]
+
+        # Domain scoping — the same default-pass contract as the keyword
+        # facet and the semantic post-filter (#254): a node carrying an
+        # explicitly mismatched domain (scalar ``properties.domain`` or the
+        # ``properties.content_tags.domain`` facet) is excluded; a
+        # domain-less node passes; a match passes and keeps the
+        # ``domain_match_boost`` below.
+        if request_domain:
+            nodes = [
+                n
+                for n in nodes
+                if _passes_domain_scope(n.get("properties", {}), request_domain)
+            ]
 
         # Resolve all tuneable scoring params once per .search() call.
         domain_match_boost = _resolve_param(
