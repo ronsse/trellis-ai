@@ -16,8 +16,20 @@ The regex classes are the ones named in the #255 implementation guide:
 * ``bearer_token`` — ``Authorization: Bearer <token>`` headers.
 * ``op_ref`` — secrets-manager URI references (the ``op`` URI scheme).
 * ``pem_private_key`` — ``-----BEGIN ... PRIVATE KEY-----`` blocks.
+* ``connection_string`` — DSNs with a userinfo password segment
+  (``scheme://user:pass@host``). Named class because the ``:``/``@``
+  delimiters split such strings below the entropy heuristic's length gate.
+* ``aws_access_key_id`` — ``AKIA``/``ASIA`` access-key ids. Named class
+  because their entropy (~3.7 bits/char) sits below the entropy threshold.
 * ``high_entropy_string`` — long base64/hex tokens with high Shannon entropy
   (catches raw API responses and access keys the named patterns miss).
+
+**Honest bounds of the entropy heuristic:** it only considers runs of 20+
+``[A-Za-z0-9+/=_-]`` characters and requires >= 4.0 bits/char of Shannon
+entropy. Short secrets, secrets broken up by delimiters, and structured
+low-entropy credentials fall below one gate or the other — that is what the
+named classes are for. A newly verified miss gets a new named class; the
+heuristic's length/threshold bounds are not re-tuned per incident.
 """
 
 from __future__ import annotations
@@ -48,6 +60,14 @@ _PATTERNS: dict[str, re.Pattern[str]] = {
     "bearer_token": re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/\-]{10,}=*"),
     "op_ref": re.compile(re.escape(_OP_SCHEME) + r"[^\s'\"]+"),
     "pem_private_key": re.compile(r"-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----"),
+    # Any URI whose userinfo carries a password segment (user:pass@host).
+    # Plain URLs (no "@") and passwordless userinfo (git@host) don't match.
+    "connection_string": re.compile(
+        r"[A-Za-z][A-Za-z0-9+.\-]*://[^\s/:@'\"]+:[^\s@'\"]+@"
+    ),
+    # AWS long-lived (AKIA) / temporary (ASIA) access-key ids — structured,
+    # low-entropy by construction, so the entropy heuristic never sees them.
+    "aws_access_key_id": re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"),
 }
 
 #: Token shape fed to the entropy heuristic (base64 / hex / url-safe).

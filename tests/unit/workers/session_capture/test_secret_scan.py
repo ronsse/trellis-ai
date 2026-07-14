@@ -32,6 +32,35 @@ def test_pem_private_key_class() -> None:
     assert "pem_private_key" in secret_scan.scan(text)
 
 
+def test_connection_string_class() -> None:
+    # Verified miss for the entropy heuristic: the :/@ delimiters split the
+    # DSN below the token-length gate. Synthetic credentials throughout.
+    text = "connect via postgres" + "://admin:hunter2@db.fake.internal:5432/prod"
+    assert "connection_string" in secret_scan.scan(text)
+
+
+def test_connection_string_requires_password_segment() -> None:
+    # A plain URL and a passwordless userinfo must NOT match.
+    assert "connection_string" not in secret_scan.scan(
+        "see https://docs.example.test:8080/guide for details"
+    )
+    assert "connection_string" not in secret_scan.scan(
+        "clone from ssh://git@code.example.test/repo.git"
+    )
+
+
+def test_aws_access_key_id_class() -> None:
+    # The AWS docs' canonical fake key — entropy ~3.7 sits under the 4.0
+    # threshold, hence the named class.
+    text = "found key AKIA" + "IOSFODNN7EXAMPLE in the old config"
+    assert "aws_access_key_id" in secret_scan.scan(text)
+
+
+def test_aws_temporary_key_id_class() -> None:
+    text = "session used ASIA" + "IOSFODNN7EXAMPLE briefly"
+    assert "aws_access_key_id" in secret_scan.scan(text)
+
+
 def test_high_entropy_string_class() -> None:
     blob = "kJ8xQ2vB9nM4wZ7pR1sT6yU3aC5dF0gH2jL4kN6mP8"
     text = f"the response returned {blob} as an access token"

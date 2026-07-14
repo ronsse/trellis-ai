@@ -66,12 +66,24 @@ class WatermarkStore:
             and cursor.get("mtime") == stat.st_mtime
         )
 
-    def record(self, file_path: Path) -> None:
-        """Stamp *file_path*'s current ``(mtime, size)`` into the cursor."""
-        try:
-            stat = file_path.stat()
-        except OSError:
-            return
+    def record(self, file_path: Path, stat: os.stat_result | None = None) -> None:
+        """Stamp *file_path*'s ``(mtime, size)`` into the cursor.
+
+        Callers that read the file MUST pass a ``stat`` taken **before**
+        reading (the append-during-sweep race): a fresh post-read stat can
+        claim bytes appended between read-EOF and the stat call, permanently
+        skipping that tail. Recording the pre-read snapshot instead means an
+        appended tail makes the file compare as changed, so the session is
+        re-processed next sweep (safe — the write path is idempotent).
+
+        The fresh-stat fallback (``stat=None``) is only for callers that do
+        not read the file between the watermark check and the record.
+        """
+        if stat is None:
+            try:
+                stat = file_path.stat()
+            except OSError:
+                return
         self._cursors[str(file_path)] = {
             "size": stat.st_size,
             "mtime": stat.st_mtime,

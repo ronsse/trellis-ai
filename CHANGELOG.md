@@ -12,14 +12,18 @@ All notable changes to Trellis will be documented in this file.
   through the existing `sync_records` seam (no transcript parser in core, per
   ADR #257). F8-safe parser (skips malformed lines; tolerates sidechains,
   tool-result content arrays, compaction summaries, and unknown record types),
-  a per-file `(mtime, size)` watermark for incremental sweeps, a deterministic
-  secret-scan gate (key=value / bearer / secrets-manager-URI / PEM /
-  high-entropy classes) that drops any candidate before write, the
-  lifecycle-plan §2 worthiness gate (non-derivable / durable / actionable /
-  attributed) with failure-bias triggers, fail-closed distillation (model down
-  → capture nothing), flag-gated near-duplicate reconcile reusing #263, and a
-  leak-safe `MEMORY_OP_JUDGED` (`distillation`) training-pair per written
-  memory. Runbook: [`docs/agent-guide/session-auto-capture.md`](docs/agent-guide/session-auto-capture.md).
+  a per-file `(mtime, size)` watermark for incremental sweeps (pre-read stat
+  snapshot, so a tail appended mid-sweep re-processes instead of being
+  skipped), a deterministic secret-scan gate (key=value / bearer /
+  secrets-manager-URI / PEM / connection-string DSN / AWS-access-key-id /
+  high-entropy classes) that drops any candidate before write, a
+  capture-instruction injection guard ("remember this…" shapes and
+  worthiness-rubric stuffing rejected and counted), the lifecycle-plan §2
+  worthiness gate (non-derivable / durable / actionable / attributed) with
+  failure-bias triggers, fail-closed distillation (model down → capture
+  nothing), flag-gated near-duplicate reconcile reusing #263, and a leak-safe
+  `MEMORY_OP_JUDGED` (`distillation`) training-pair per written memory.
+  Runbook: [`docs/agent-guide/session-auto-capture.md`](docs/agent-guide/session-auto-capture.md).
   ([#255](https://github.com/ronsse/trellis-ai/issues/255))
 - **`matplotlib>=3.8`** — dev-only dependency added for the
   ``program_convergence`` master scenario's PNG chart renderer at
@@ -28,6 +32,16 @@ All notable changes to Trellis will be documented in this file.
   CI / containers without an X server render correctly. Imported only
   from the eval package; core library and CLI runtime have no
   matplotlib dependency.
+
+### Changed
+
+- **MinHash shingle hashing switched from MD5 to truncated SHA-256**
+  (`classify/dedup/minhash.py`). Non-cryptographic use (similarity
+  estimation, not secret protection), but CodeQL's sensitive-data-hashing
+  check flags MD5 regardless of `usedforsecurity=False`. Signatures are
+  in-memory only (never persisted), so the swap has no compatibility impact;
+  similarity behavior is statistically equivalent.
+  ([#255](https://github.com/ronsse/trellis-ai/issues/255))
 
 ## [0.9.0] - 2026-05-13
 

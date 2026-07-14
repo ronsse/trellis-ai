@@ -61,3 +61,23 @@ def test_save_noop_when_nothing_recorded(tmp_path: Path) -> None:
     wm_path = tmp_path / "wm.json"
     WatermarkStore(wm_path).save()
     assert not wm_path.exists()
+
+
+def test_pre_read_stat_prevents_append_race(tmp_path: Path) -> None:
+    """A tail appended between read-EOF and record must not be claimed.
+
+    The sweep stats BEFORE reading and records that snapshot; if a writer
+    appends after the reader hit EOF, the recorded cursor no longer matches
+    the file, so the whole session re-processes next sweep instead of the
+    appended tail being permanently skipped.
+    """
+    f = tmp_path / "s.jsonl"
+    _touch(f, "line one\n")
+    wm = WatermarkStore(tmp_path / "wm.json")
+
+    pre_read = f.stat()  # taken before the (simulated) read
+    with f.open("a", encoding="utf-8") as handle:
+        handle.write("tail appended after read-EOF\n")
+
+    wm.record(f, stat=pre_read)
+    assert not wm.is_unchanged(f)

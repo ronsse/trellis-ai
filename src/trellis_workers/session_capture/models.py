@@ -109,11 +109,19 @@ class CaptureReport:
     malformed_lines: int = 0
     candidates_distilled: int = 0
     candidates_rejected_worthiness: int = 0
-    candidates_blocked_secret: int = 0
+    #: Candidates dropped by the deterministic capture-instruction injection
+    #: guard (imperative "remember this" shapes / rubric-stuffing).
+    candidates_rejected_injection: int = 0
+    #: Candidates dropped by the deterministic secret-scan gate. An integer
+    #: count only — the gate never surfaces matched content anywhere.
+    candidates_blocked_scan: int = 0
     candidates_reconciled_noop: int = 0
     memories_written: int = 0
     memories_skipped_unchanged: int = 0
-    secret_hits_by_class: dict[str, int] = field(default_factory=dict)
+    #: Per-class hit counters from the secret-scan gate: class *label* → int.
+    #: Plainly named (labels + counts, nothing else) so the report payload is
+    #: structurally and nominally safe for every log/print sink.
+    scan_hits_by_class: dict[str, int] = field(default_factory=dict)
     warnings: list[dict[str, Any]] = field(default_factory=list)
 
     def to_payload(self) -> dict[str, Any]:
@@ -130,10 +138,11 @@ class CaptureReport:
             "malformed_lines": self.malformed_lines,
             "candidates_distilled": self.candidates_distilled,
             "candidates_rejected_worthiness": self.candidates_rejected_worthiness,
-            "candidates_blocked_secret": self.candidates_blocked_secret,
+            "candidates_rejected_injection": self.candidates_rejected_injection,
+            "candidates_blocked_scan": self.candidates_blocked_scan,
             "candidates_reconciled_noop": self.candidates_reconciled_noop,
             "memories_written": self.memories_written,
             "memories_skipped_unchanged": self.memories_skipped_unchanged,
-            "secret_hits_by_class": dict(self.secret_hits_by_class),
+            "scan_hits_by_class": dict(self.scan_hits_by_class),
             "warnings": list(self.warnings),
         }

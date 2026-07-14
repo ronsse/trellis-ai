@@ -7,7 +7,8 @@ One nightly pass over the Claude Code transcript directory:
 #. **Trigger** deterministically — error/correction sessions are mandatory,
    clean ones sampled.
 #. **Distil** triggered sessions with the local model (fail-closed).
-#. **Gate** each candidate: secret-scan (hard drop) then worthiness.
+#. **Gate** each candidate: secret-scan (hard drop), then the deterministic
+   capture-instruction injection guard, then worthiness.
 #. **Reconcile** survivors against stored captures (flag-gated, #263 reuse).
 #. **Write** through :func:`~trellis.ingest_corpus.sync.sync_records` — the
    sanctioned reader→core seam ``ingest conversations`` already uses. No
@@ -19,6 +20,7 @@ One nightly pass over the Claude Code transcript directory:
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING
 
 import structlog
@@ -32,12 +34,13 @@ from trellis.mcp.reconcile import (
     UPDATES_DOC_KEY,
     reconcile_on_write_enabled,
 )
-from trellis_workers.session_capture import distill, gating, reconcile_pass, secret_scan
+from trellis_workers.session_capture import distill, gating, reconcile_pass
 from trellis_workers.session_capture.models import (
     CandidateMemory,
     CaptureReport,
     SessionDigest,
 )
+from trellis_workers.session_capture.secret_scan import scan as scan_for_leak_classes
 from trellis_workers.session_capture.transcripts import (
     discover_sessions,
     parse_session,
@@ -65,6 +68,14 @@ DEFAULT_SAMPLE_DENOMINATOR = 5
 MARKER_PENDING = "pending"
 
 _REQUESTED_BY = "worker:session-capture"
+
+
+def _stat_or_none(path: Path) -> os.stat_result | None:
+    """A pre-read stat snapshot; ``None`` if the file vanished (retry later)."""
+    try:
+        return path.stat()
+    except OSError:
+        return None
 
 
 def capture_id_prefix(source_system: str) -> str:
@@ -109,22 +120,31 @@ def _gate_candidates(
     candidates: list[CandidateMemory],
     report: CaptureReport,
 ) -> list[CandidateMemory]:
-    """Apply the secret-scan then worthiness gates; return survivors."""
+    """Apply the secret-scan, injection, and worthiness gates in order."""
     survivors: list[CandidateMemory] = []
     for candidate in candidates:
         report.candidates_distilled += 1
         rendered = render_memory(candidate)
-        hits = secret_scan.scan(rendered)
-        if hits:
-            for cls in hits:
-                report.secret_hits_by_class[cls] = (
-                    report.secret_hits_by_class.get(cls, 0) + 1
+        # Class *labels* only — the scan never returns matched content, so
+        # nothing downstream of this call can log or store what it caught.
+        matched_classes = scan_for_leak_classes(rendered)
+        if matched_classes:
+            for label in matched_classes:
+                report.scan_hits_by_class[label] = (
+                    report.scan_hits_by_class.get(label, 0) + 1
                 )
-            report.candidates_blocked_secret += 1
+            report.candidates_blocked_scan += 1
             logger.warning(
                 "capture_secret_blocked",
                 session_id=candidate.session_id,
-                classes=hits,
+                matched_classes=matched_classes,
+            )
+            continue
+        if gating.looks_like_injection(candidate):
+            # Counted, never silent — same pattern as the secret gate.
+            report.candidates_rejected_injection += 1
+            logger.warning(
+                "capture_injection_blocked", session_id=candidate.session_id
             )
             continue
         if not gating.passes_worthiness(candidate):
@@ -164,14 +184,19 @@ def run_capture(
             report.sessions_skipped_watermark += 1
             continue
 
+        # Snapshot BEFORE reading: a tail appended between read-EOF and a
+        # post-read stat would otherwise be claimed by the cursor and
+        # permanently skipped. With the pre-read snapshot, an appended tail
+        # makes the file compare as changed and the session re-processes.
+        pre_read_stat = _stat_or_none(path)
         digest = parse_session(path)
         report.sessions_parsed += 1
         report.malformed_lines += digest.malformed_lines
 
         if not gating.should_distill(digest, sample_denominator):
             report.sessions_sampled_out += 1
-            if not dry_run:
-                watermark.record(path)
+            if not dry_run and pre_read_stat is not None:
+                watermark.record(path, stat=pre_read_stat)
             continue
 
         survivors = _capture_session(
@@ -197,8 +222,8 @@ def run_capture(
                 )
             )
             written.append(candidate)
-        if not dry_run:
-            watermark.record(path)
+        if not dry_run and pre_read_stat is not None:
+            watermark.record(path, stat=pre_read_stat)
 
     _write_records(registry, records, report, source_system, id_prefix, dry_run)
     if not dry_run:

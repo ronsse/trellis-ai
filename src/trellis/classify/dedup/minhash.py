@@ -45,10 +45,17 @@ def _char_shingles(text: str, k: int = 3) -> set[str]:
 
 
 def _hash_shingle(shingle: str) -> int:
-    """Deterministic 32-bit hash of a shingle string."""
+    """Deterministic 32-bit hash of a shingle string.
+
+    Non-cryptographic shingle hashing (similarity estimation, not secret
+    protection). Truncated SHA-256 rather than MD5 so security scanners
+    never flag weak-hash use on data flowing through the index
+    (``usedforsecurity=False`` did not satisfy the sensitive-data-hashing
+    check). Safe to change: signatures are in-memory only, never persisted.
+    """
     result: int = struct.unpack(
         "<I",
-        hashlib.md5(shingle.encode(), usedforsecurity=False).digest()[:4],
+        hashlib.sha256(shingle.encode()).digest()[:4],
     )[0]
     return result
 

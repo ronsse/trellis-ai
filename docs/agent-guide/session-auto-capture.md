@@ -33,8 +33,10 @@ instance are set up here.
    model is unavailable the sweep captures *nothing* for that session and
    leaves it un-watermarked so a later run retries it.
 5. **Gate** each candidate: the deterministic secret-scan gate (hard drop on a
-   hit; the content is never logged) then the four-test worthiness gate
-   (non-derivable / durable / actionable / attributed).
+   hit; the content is never logged), the capture-instruction injection guard
+   (drops candidates whose text addresses the memory system — "remember
+   this…" shapes or worthiness-rubric stuffing), then the four-test
+   worthiness gate (non-derivable / durable / actionable / attributed).
 6. **Reconcile** (optional, flag-gated) survivors against already-stored
    captures, reusing the #263 reconcile-on-write machinery.
 7. **Write** through `sync_records` — content-hash idempotent, per-source
@@ -45,6 +47,15 @@ instance are set up here.
 Two idempotency layers make re-runs safe: the watermark skips unchanged files,
 and the content-derived `doc_id` makes `sync_records` skip an identical memory
 even if a file is re-parsed after a watermark reset.
+
+**Residual risk (be honest with yourself as operator):** unattended capture
+of adversarial text is inherently gameable at the v1 deterministic tier — a
+model can launder an injected instruction into clean-looking prose the guard
+patterns won't match. The mitigations are layered, not absolute: every
+capture is provenance-marked (`capture:claude-code:` doc-id prefix,
+`distilled: true` metadata) so evidence-driven retention (#261) can prune
+captures that never prove useful, and the secret-scan gate bounds a
+successful injection's damage to junk, not leakage.
 
 ---
 
@@ -83,15 +94,28 @@ python -m trellis_workers.session_capture --dry-run
 
 Emits the JSON `CaptureReport` to stdout: how many sessions would be parsed,
 triggered, distilled, blocked by the secret gate, and written. No documents
-are stored and the watermark is not advanced. Confirm `candidates_blocked_secret`
-behaves as expected and `memories_written` (the *plan* count on a dry run) is
-sane before enabling the timer.
+are stored and the watermark is not advanced. Confirm `candidates_blocked_scan`
+(drops by the secret-scan gate) behaves as expected and `memories_written` (the
+*plan* count on a dry run) is sane before enabling the timer.
+
+> **Precise scope of "writes nothing":** a dry run stores no documents, emits
+> no training-pair events, and never advances the watermark — but it does
+> emit the seam's `CORPUS_SYNCED` telemetry event (flagged `dry_run: true`,
+> run **counts** only, no content), the same convention as
+> `ingest corpus --dry-run`.
 
 ## Nightly sweep — systemd user timer
 
 A nightly sweep beats a `SessionEnd`/`Stop` hook: hooks run under tight
-time budgets and distillation is a model call. Install as a **user** timer
-(replace `<user>` and paths to match the host):
+time budgets and distillation is a model call. The off-peak hour matters for
+a second reason: **the sweep writes in-process against the same stores the
+live MCP server uses** (same `~/.trellis` config → same SQLite files by
+default). Schedule it when live sessions are idle and avoid manual runs
+during heavy interactive use — the worst case is a transient
+`SQLITE_BUSY`-class error on a contended write, which fails that sweep's
+write and is retried next sweep (the session stays un-watermarked; nothing
+is lost). Install as a **user** timer (replace `<user>` and paths to match
+the host):
 
 `~/.config/systemd/user/trellis-session-capture.service`
 
@@ -153,8 +177,12 @@ trellis analyze context-effectiveness --format json
 
 Health signals in the JSON `CaptureReport`:
 
-- `secret_hits_by_class` climbing while `memories_written` stays reasonable →
-  the gate is doing its job; investigate only if *every* candidate is blocked.
+- `scan_hits_by_class` (secret-scan gate hits, class label → count) climbing
+  while `memories_written` stays reasonable → the gate is doing its job;
+  investigate only if *every* candidate is blocked.
+- `candidates_rejected_injection` > 0 → a session tried to address the memory
+  system directly ("remember this…" / rubric-stuffing). Worth eyeballing the
+  session; the candidate was dropped, never stored.
 - Repeated `warnings[].kind == "distill_unavailable"` → the local model
   endpoint is down; sessions are being retried (not lost), but nothing is
   captured until it recovers.
