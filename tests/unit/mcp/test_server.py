@@ -1389,6 +1389,52 @@ class TestOneRetrievalPath:
         assert "Context for: write SQL" in task
         assert "**pack_id:**" in task
 
+    def test_graph_axis_domain_mismatch_excluded(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        """The graph axis honors the #254 default-pass contract like the
+        keyword and semantic axes: a node carrying an explicitly mismatched
+        domain is excluded; a domain-less node still surfaces."""
+        graph = temp_registry.knowledge.graph_store
+        graph.upsert_node(
+            node_id="n-graph-mismatch",
+            node_type="concept",
+            properties={"name": "deployment notes", "domain": "data"},
+        )
+        graph.upsert_node(
+            node_id="n-graph-plain",
+            node_type="concept",
+            properties={"name": "deployment guide"},
+        )
+        result = get_context("deployment", domain="infra")
+        assert "n-graph-plain" in result
+        assert "n-graph-mismatch" not in result
+
+    def test_graph_axis_domain_match_included(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        graph = temp_registry.knowledge.graph_store
+        graph.upsert_node(
+            node_id="n-graph-match",
+            node_type="concept",
+            properties={"name": "deployment runbook", "domain": "infra"},
+        )
+        result = get_context("deployment", domain="infra")
+        assert "n-graph-match" in result
+
+    def test_search_large_limit_keeps_recall(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        """``search(limit>20)`` fetches at least ``limit`` candidates per
+        axis — the per-strategy default of 20 must not silently cap a
+        large-limit caller's recall."""
+        doc_store = temp_registry.knowledge.document_store
+        for i in range(30):
+            doc_store.put(f"doc-recall-{i:02d}", f"kubernetes rollout guide {i}")
+        result = search("kubernetes", limit=50, max_tokens=8000)
+        served = sum(1 for i in range(30) if f"doc-recall-{i:02d}" in result)
+        assert served > 20
+
     def test_session_dedup_tolerates_historical_thin_pack_assembled(
         self, temp_registry: StoreRegistry
     ) -> None:
@@ -1555,7 +1601,7 @@ class TestStructuredErrorContract:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A single-axis outage (document store) degrades to the surviving
-        axes instead of failing the whole call.
+        axes instead of failing the whole call — degraded but *serving*.
 
         #262 routed ``get_context`` onto the one PackBuilder path and
         deliberately adopted PackBuilder's partial-failure posture: the
@@ -1564,14 +1610,21 @@ class TestStructuredErrorContract:
         loud-raise-on-any-axis behaviour was the accepted-trade-off the
         consolidation removes.
         """
+        # Seed the healthy axis: a graph node the surviving strategy serves.
+        temp_registry.knowledge.graph_store.upsert_node(
+            node_id="n-survivor",
+            node_type="concept",
+            properties={"name": "deployment pipeline"},
+        )
         boom = RuntimeError("fake doc store outage")
         _patch_method_to_raise(
             monkeypatch, temp_registry.knowledge.document_store, "search", boom
         )
 
-        # Graph axis survives → no raise. Empty graph → "No context found".
+        # Keyword axis is down; the graph axis must still serve its item.
         result = get_context("kubernetes")
-        assert isinstance(result, str)
+        assert "n-survivor" in result
+        assert "No context found" not in result
 
     def test_get_context_total_retrieval_outage_surfaces_internal_error(
         self,

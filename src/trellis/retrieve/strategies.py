@@ -624,11 +624,13 @@ class GraphSearch(SearchStrategy):
         else:
             node_type = filters.pop("node_type", None)
             # ``domain`` and ``content_tags`` are scoping hints, not graph
-            # properties: ``domain`` drives the match-boost below (default-pass
-            # — a domain-less node is never hard-excluded, mirroring the other
-            # axes for #262), and ``content_tags`` is a document-store facet
-            # the graph store cannot interpret. Neither is forwarded as a
-            # property filter.
+            # properties: ``domain`` is applied client-side with default-pass
+            # semantics below (a domain-less node is never hard-excluded,
+            # mirroring the other axes for #262), and ``content_tags`` is a
+            # document-store facet the graph store cannot interpret. Neither
+            # is forwarded as a property filter — a store-side property
+            # filter compiles to hard equality and would hard-exclude every
+            # domain-less node (#254).
             query_props = {
                 k: v for k, v in filters.items() if k not in ("domain", "content_tags")
             }
@@ -643,6 +645,19 @@ class GraphSearch(SearchStrategy):
         # Filter structural nodes client-side unless explicitly requested.
         if not include_structural:
             nodes = [n for n in nodes if n.get("node_role") != "structural"]
+
+        # Domain scoping — the same default-pass contract as the keyword
+        # facet and the semantic post-filter (#254): a node carrying an
+        # explicitly mismatched domain (scalar ``properties.domain`` or the
+        # ``properties.content_tags.domain`` facet) is excluded; a
+        # domain-less node passes; a match passes and keeps the
+        # ``domain_match_boost`` below.
+        if request_domain:
+            nodes = [
+                n
+                for n in nodes
+                if _passes_domain_scope(n.get("properties", {}), request_domain)
+            ]
 
         # Resolve all tuneable scoring params once per .search() call.
         domain_match_boost = _resolve_param(

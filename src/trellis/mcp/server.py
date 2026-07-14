@@ -515,6 +515,12 @@ def _flat_context(
             domain=domain or None,
             session_id=session_id or None,
             budget=PackBudget(max_items=max_items, max_tokens=max_tokens),
+            # Fetch at least as many candidates per axis as the item budget
+            # allows — a caller raising ``limit`` above the PackBuilder
+            # default (20) gains recall instead of being silently capped at
+            # 20 candidates per axis. ``max(20, ...)`` keeps the default
+            # fetch depth unchanged for small budgets.
+            limit_per_strategy=max(20, max_items),
         )
     except McpError:
         raise
