@@ -6,6 +6,21 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **Claude Code session auto-capture** (`trellis_workers.session_capture`) —
+  client-side nightly sweep that reads local Claude Code transcript JSONL,
+  distils durable operator memories with a local model, and writes them
+  through the existing `sync_records` seam (no transcript parser in core, per
+  ADR #257). F8-safe parser (skips malformed lines; tolerates sidechains,
+  tool-result content arrays, compaction summaries, and unknown record types),
+  a per-file `(mtime, size)` watermark for incremental sweeps, a deterministic
+  secret-scan gate (key=value / bearer / secrets-manager-URI / PEM /
+  high-entropy classes) that drops any candidate before write, the
+  lifecycle-plan §2 worthiness gate (non-derivable / durable / actionable /
+  attributed) with failure-bias triggers, fail-closed distillation (model down
+  → capture nothing), flag-gated near-duplicate reconcile reusing #263, and a
+  leak-safe `MEMORY_OP_JUDGED` (`distillation`) training-pair per written
+  memory. Runbook: [`docs/agent-guide/session-auto-capture.md`](docs/agent-guide/session-auto-capture.md).
+  ([#255](https://github.com/ronsse/trellis-ai/issues/255))
 - **`matplotlib>=3.8`** — dev-only dependency added for the
   ``program_convergence`` master scenario's PNG chart renderer at
   ``eval/reports/program_convergence_chart.py`` (9-axis 3x3 subplot
