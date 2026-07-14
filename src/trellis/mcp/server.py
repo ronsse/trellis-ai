@@ -477,7 +477,14 @@ def get_context(  # noqa: PLR0912, PLR0915
     try:
         filters: dict[str, Any] = {}
         if domain:
-            filters["domain"] = domain
+            # Route ``domain`` onto the ``content_tags`` facet path, which
+            # default-passes documents missing the key, rather than the
+            # generic scalar branch (``json_extract(...) = ?``) that
+            # hard-excludes every doc lacking a scalar ``metadata.domain``
+            # (#254). The generic scalar branch is deliberately left
+            # untouched — other callers (e.g. ``source_system``) rely on
+            # its hard-match semantics.
+            filters["content_tags"] = {"domain": {"in": [domain]}}
         doc_results = registry.knowledge.document_store.search(
             intent, limit=10, filters=filters
         )
@@ -556,7 +563,16 @@ def get_context(  # noqa: PLR0912, PLR0915
         embedding_fn = registry.embedding_fn
         vector_store = getattr(registry.knowledge, "vector_store", None)
         if embedding_fn is not None and vector_store is not None:
-            vec_filters: dict[str, Any] | None = {"domain": domain} if domain else None
+            # ``domain`` scoping is carried by the document (keyword) axis
+            # via the ``content_tags`` facet path, which default-passes
+            # documents missing the key (#254). The vector stores have no
+            # facet / default-pass filter — a scalar ``{"domain": ...}``
+            # here compiles to hard equality (SQLite ``json_extract`` /
+            # pgvector ``@>`` containment), re-introducing the same
+            # hard-exclusion on the semantic axis. Leave the vector axis
+            # unfiltered by domain until the unified retrieval path (#262)
+            # gives the vector stores facet-aware default-pass.
+            vec_filters: dict[str, Any] | None = None
             hits = vector_store.query(
                 embedding_fn(intent), top_k=10, filters=vec_filters
             )

@@ -115,6 +115,83 @@ class TestGetContext:
         assert isinstance(result, str)
 
 
+class TestGetContextDomainFilter:
+    """``domain=`` routes onto the ``content_tags`` facet path (#254).
+
+    The old scalar ``metadata.domain`` filter compiled to hard equality
+    and hard-excluded every document missing the key — and since almost
+    nothing carries a scalar ``domain``, a ``domain=``-scoped call
+    returned an empty pack. ``domain`` now routes onto the facet path,
+    which default-passes documents lacking the facet while still
+    positively matching (and narrowing out) documents that carry it.
+    """
+
+    #: Intent whose keywords appear in every fixture doc below, so the
+    #: FTS axis matches them all and the domain filter is the only
+    #: differentiator.
+    _INTENT = "kubernetes deployment rollout strategy"
+
+    def test_facet_domain_doc_is_returned(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        doc_store = temp_registry.knowledge.document_store
+        doc_store.put(
+            "facet-doc",
+            "kubernetes deployment rollout notes",
+            metadata={"content_tags": {"domain": ["infra"]}},
+        )
+        result = get_context(self._INTENT, domain="infra")
+        assert "facet-doc" in result
+        assert "No context found" not in result
+
+    def test_scalar_only_domain_doc_is_returned(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        # Docs ingested via ``ingest corpus --domain`` carry scalar
+        # ``metadata.domain`` but no content_tags facet. Under facet
+        # routing they default-pass (included, no positive match) —
+        # the accepted migration behaviour per the implementation guide.
+        doc_store = temp_registry.knowledge.document_store
+        doc_store.put(
+            "scalar-doc",
+            "kubernetes deployment rollout runbook",
+            metadata={"domain": "infra"},
+        )
+        result = get_context(self._INTENT, domain="infra")
+        assert "scalar-doc" in result
+        assert "No context found" not in result
+
+    def test_doc_without_any_domain_key_is_returned(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        # The core #254 regression: a domain-less doc used to be
+        # hard-excluded, yielding "No context found" for the exact
+        # domain-scoped call the retrieve-before-task skill recommends.
+        doc_store = temp_registry.knowledge.document_store
+        doc_store.put("no-domain-doc", "kubernetes deployment rollout guide")
+        result = get_context(self._INTENT, domain="infra")
+        assert "no-domain-doc" in result
+        assert "No context found" not in result
+
+    def test_mismatched_facet_domain_doc_is_excluded(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        # Default-pass is not match-everything: a doc carrying a
+        # *different* content_tags.domain is still narrowed out, while an
+        # untagged doc passes. Proves the routing preserves positive
+        # scoping rather than disabling the filter.
+        doc_store = temp_registry.knowledge.document_store
+        doc_store.put(
+            "other-domain-doc",
+            "kubernetes deployment rollout for a separate area",
+            metadata={"content_tags": {"domain": ["data"]}},
+        )
+        doc_store.put("untagged-doc", "kubernetes deployment rollout untagged")
+        result = get_context(self._INTENT, domain="infra")
+        assert "untagged-doc" in result
+        assert "other-domain-doc" not in result
+
+
 # ---------------------------------------------------------------------------
 # save_experience
 # ---------------------------------------------------------------------------
@@ -388,6 +465,25 @@ class TestSemanticAxis:
         doc_id = self._seed_embedded_memory(monkeypatch)
         result = search("where do I find operational documentation")
         assert doc_id in result
+
+    def test_domain_does_not_hard_exclude_semantic_axis(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#254 Gotcha 1: the semantic axis must not hard-exclude on domain.
+
+        The vector stores have no facet / default-pass filter, so a
+        scalar ``{"domain": ...}`` filter would hard-exclude the
+        (domain-less) embedded memory — moving the #254 bug onto the
+        semantic axis. A domain-scoped call whose intent has zero FTS
+        overlap (so only the vector axis can surface the memory) must
+        still return it.
+        """
+        doc_id = self._seed_embedded_memory(monkeypatch)
+        result = get_context(
+            "where do I find operational documentation", domain="infra"
+        )
+        assert doc_id in result
+        assert "deployment runbook" in result
 
     def test_get_context_broken_embedder_degrades_gracefully(
         self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
