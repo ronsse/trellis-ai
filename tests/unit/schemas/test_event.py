@@ -43,3 +43,17 @@ def test_proposal_event_types_registered() -> None:
     # ``PROPOSAL_UPDATED``.
     assert EventType("proposal.drafted") is EventType.PROPOSAL_DRAFTED
     assert EventType("proposal.updated") is EventType.PROPOSAL_UPDATED
+
+
+def test_memory_op_judged_event_type_registered() -> None:
+    """The training-pair event type is on the enum (north star, #264).
+
+    ``plan-memory-lifecycle.md`` §0.1. Hard-coding the wire literal
+    catches accidental renames that would corrupt on-disk event logs the
+    future feedback-attribution join reads to label each training pair.
+    """
+    assert EventType.MEMORY_OP_JUDGED.value == "memory_op.judged"
+    # Round-trip the wire string through StrEnum so consumers reading raw
+    # payloads (ad-hoc `WHERE event_type = 'memory_op.judged'`) land on
+    # the same member.
+    assert EventType("memory_op.judged") is EventType.MEMORY_OP_JUDGED

@@ -35,6 +35,13 @@ from datetime import timedelta
 import pytest
 
 from trellis.core.base import utc_now
+from trellis.core.hashing import content_hash
+from trellis.schemas.memory_op import (
+    InputDigest,
+    JudgedOpType,
+    MemoryOpJudgedPayload,
+    SubjectRef,
+)
 from trellis.stores.base.event_log import Event, EventLog, EventType
 
 
@@ -166,6 +173,49 @@ class EventLogContractTests:
         rows = store.get_events(event_type=EventType.PRECEDENT_PROMOTED)
         assert len(rows) == 1
         assert rows[0].event_id == event.event_id
+
+    def test_memory_op_judged_payload_round_trips(self, store: EventLog) -> None:
+        """A ``MEMORY_OP_JUDGED`` training-pair payload round-trips intact.
+
+        The #264 schema slice: emit the JSON-mode dump of a typed
+        :class:`~trellis.schemas.memory_op.MemoryOpJudgedPayload`, read
+        it back, and re-validate the stored dict through the model. Every
+        backend must preserve the nested digest / ref structure verbatim
+        — this is the wire the #263 emit paths and the downstream
+        feedback-attribution join will depend on. Leak-safety rider: the
+        persisted payload never contains a raw-content key.
+        """
+        judged_input = "some judged memory content"
+        payload = MemoryOpJudgedPayload(
+            op_type=JudgedOpType.RECONCILIATION,
+            model_id="hermes3:8b",
+            input_digest=InputDigest(
+                hash=content_hash(judged_input),
+                length=len(judged_input),
+                source_refs=["doc_abc", "entity_xyz"],
+            ),
+            decision="supersede",
+            confidence=0.82,
+            subject_ref=SubjectRef(ref_type="doc", ref_id="doc_abc"),
+        )
+        emitted = store.emit(
+            EventType.MEMORY_OP_JUDGED,
+            "reconciler",
+            entity_id=payload.subject_ref.ref_id,
+            entity_type=payload.subject_ref.ref_type,
+            payload=payload.model_dump(mode="json"),
+        )
+        assert emitted.event_type is EventType.MEMORY_OP_JUDGED
+
+        rows = store.get_events(event_type=EventType.MEMORY_OP_JUDGED)
+        assert len(rows) == 1
+        got = rows[0]
+        assert got.event_id == emitted.event_id
+        assert got.event_type is EventType.MEMORY_OP_JUDGED
+        restored = MemoryOpJudgedPayload.model_validate(got.payload)
+        assert restored == payload
+        # No raw content ever touched the log.
+        assert "content" not in got.payload
 
     # ------------------------------------------------------------------
     # Empty store on every query path
