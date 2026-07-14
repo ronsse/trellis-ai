@@ -41,6 +41,9 @@ save_memory = unwrap_tool(server_mod.save_memory)
 # candidate to adjudicate when NEAR is written.
 _BASE = "The staging gateway listens on port 9450 for inbound sync jobs."
 _NEAR = "The staging gateway listens on port 9451 for inbound sync jobs."
+#: A second, DISTINCT near-dup of _BASE (Jaccard ~0.91) for racing two
+#: different contents against the same candidate.
+_NEAR_B = "The staging gateway listens on port 9460 for inbound sync jobs."
 _UNRELATED = "Kubernetes pods restart when the liveness probe fails three times."
 
 
@@ -423,6 +426,138 @@ class TestReverifyUnderLock:
         # The (now-changed) candidate was NOT superseded.
         assert "lifecycle" not in (docs.get(base_id)["metadata"] or {})
         # No judged event — the verdict was never applied.
+        assert _judged_events(temp_registry) == []
+
+    def test_candidate_superseded_midflight_downgrades_to_add(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Lifecycle axis of re-verify: content preserved, but stale-marked.
+
+        ``mark_document_superseded`` keeps the candidate's content byte-
+        identical (SCD-2), so a content-hash-only re-check would pass and a
+        second SUPERSEDE would fork the supersession chain. A non-``current``
+        lifecycle state must fail re-verify on its own.
+        """
+        from trellis.mcp.reconcile import mark_document_superseded
+
+        base_id = _doc_id(save_memory(_BASE))
+        docs = temp_registry.knowledge.document_store
+
+        def supersede_candidate() -> None:
+            # A concurrent writer wins its own SUPERSEDE against the
+            # candidate while our model is thinking — content unchanged.
+            mark_document_superseded(
+                docs, old_doc_id=base_id, new_doc_id="someone-elses-successor"
+            )
+
+        _enable(
+            monkeypatch,
+            FakeLLMClient(
+                content=_verdict_json("supersede"), on_call=supersede_candidate
+            ),
+        )
+
+        result = save_memory(_NEAR)
+        new_id = _doc_id(result)
+
+        assert result.startswith("Memory saved:")
+        assert docs.get(new_id)["metadata"]["reconciliation"] == "stale_recheck"
+        # The candidate's back-pointer still names the FIRST successor only.
+        lifecycle = docs.get(base_id)["metadata"]["lifecycle"]
+        assert lifecycle["superseded_by"] == "someone-elses-successor"
+        assert _judged_events(temp_registry) == []
+
+    def test_double_supersede_race_single_successor(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Two DISTINCT near-dups racing SUPERSEDE against the same candidate.
+
+        Both writers judge SUPERSEDE outside the lock (a barrier inside the
+        mocked model call guarantees both are mid-verdict simultaneously,
+        so neither has committed when the other gathered). Exactly one may
+        supersede; the loser must land as a ``stale_recheck``-marked ADD and
+        the candidate's ``superseded_by`` must name exactly one successor.
+        """
+        import threading
+        from concurrent.futures import ThreadPoolExecutor
+
+        base_id = _doc_id(save_memory(_BASE))
+        docs = temp_registry.knowledge.document_store
+
+        barrier = threading.Barrier(2, timeout=10)
+        _enable(
+            monkeypatch,
+            FakeLLMClient(content=_verdict_json("supersede"), on_call=barrier.wait),
+        )
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(save_memory, c) for c in (_NEAR, _NEAR_B)]
+            results = [f.result(timeout=30) for f in futures]
+
+        winners = [r for r in results if f"(supersedes {base_id})" in r]
+        losers = [r for r in results if r.startswith("Memory saved:") and "(" not in r]
+        assert len(winners) == 1, results
+        assert len(losers) == 1, results
+        winner_id = _doc_id(winners[0])
+        loser_id = _doc_id(losers[0])
+
+        # The candidate names exactly one successor — the winner.
+        lifecycle = docs.get(base_id)["metadata"]["lifecycle"]
+        assert lifecycle["state"] == "superseded"
+        assert lifecycle["superseded_by"] == winner_id
+
+        # Winner carries the supersede markers; loser is a marked ADD.
+        assert docs.get(winner_id)["metadata"]["supersedes_doc_id"] == base_id
+        assert docs.get(loser_id)["metadata"]["reconciliation"] == "stale_recheck"
+        assert "supersedes_doc_id" not in docs.get(loser_id)["metadata"]
+
+        # Exactly one doc in the store claims to supersede the candidate.
+        all_docs = docs.list_documents(limit=50)
+        claimants = [
+            d
+            for d in all_docs
+            if (d.get("metadata") or {}).get("supersedes_doc_id") == base_id
+        ]
+        assert len(claimants) == 1
+        assert claimants[0]["doc_id"] == winner_id
+
+        # No data loss: candidate + both racers persisted.
+        assert docs.count() == 3
+        # Exactly one training pair — the applied verdict.
+        judged = _judged_events(temp_registry)
+        assert len(judged) == 1
+        assert judged[0].payload["decision"] == "supersede"
+        assert judged[0].payload["subject_ref"]["ref_id"] == base_id
+
+
+# ---------------------------------------------------------------------------
+# Phase-B belt-and-suspenders guard — capture never fails on a judge failure
+# ---------------------------------------------------------------------------
+
+
+class TestPhaseBGuard:
+    def test_unexpected_judge_crash_falls_back_to_marked_add(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An exception escaping the whole verdict computation (beyond the
+        exhaustive handling inside ``judge_reconcile``) still resolves to the
+        offline fallback: ADD marked ``skipped``, no judged event."""
+        base_id = _doc_id(save_memory(_BASE))
+        _enable(monkeypatch, FakeLLMClient(content=_verdict_json("noop")))
+
+        def _crash(*_a: Any, **_k: Any) -> Any:
+            msg = "unexpected judge-path crash"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(server_mod, "_compute_reconcile_outcome", _crash)
+
+        result = save_memory(_NEAR)
+        new_id = _doc_id(result)
+
+        assert result.startswith("Memory saved:")
+        assert new_id != base_id
+        docs = temp_registry.knowledge.document_store
+        assert docs.get(new_id)["metadata"]["reconciliation"] == "skipped"
         assert _judged_events(temp_registry) == []
 
 

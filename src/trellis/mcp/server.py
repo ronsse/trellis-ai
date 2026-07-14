@@ -51,6 +51,7 @@ from trellis.mcp.auth import (
     trellis_scope,
 )
 from trellis.mcp.reconcile import (
+    LIFECYCLE_KEY,
     MARKER_SKIPPED,
     MARKER_STALE,
     RECONCILIATION_KEY,
@@ -1236,6 +1237,32 @@ def _compute_reconcile_outcome(
     )
 
 
+def _candidate_is_stale(document_store: Any, candidate: ReconcileCandidate) -> bool:
+    """True when the candidate no longer matches what the model judged.
+
+    Two staleness axes, both re-checked under the lock:
+
+    * **Content** — the candidate was edited or deleted while the model
+      thought; the verdict is about text that no longer exists.
+    * **Lifecycle** — the candidate was superseded/deprecated by a concurrent
+      writer. ``mark_document_superseded`` preserves content (SCD-2), so a
+      content-hash check alone would let two racing SUPERSEDE verdicts both
+      commit and fork the supersession chain — ``superseded_by`` can only name
+      one successor. Any non-``current`` lifecycle state fails re-verify.
+    """
+    from trellis.core.hashing import content_hash  # noqa: PLC0415
+
+    current = document_store.get(candidate.doc_id)
+    if current is None:
+        return True
+    if content_hash(current["content"]) != content_hash(candidate.content):
+        return True
+    lifecycle = (current.get("metadata") or {}).get(LIFECYCLE_KEY)
+    return (
+        isinstance(lifecycle, dict) and lifecycle.get("state", "current") != "current"
+    )
+
+
 def _reverify_candidate(
     document_store: Any,
     candidate: ReconcileCandidate,
@@ -1243,19 +1270,15 @@ def _reverify_candidate(
 ) -> ReconcileOutcome:
     """Re-check the candidate under the lock; downgrade to ADD if it changed.
 
-    Another writer may have superseded or edited the candidate while the model
-    was thinking. Applying a stale verdict would act on a doc that no longer
-    says what the model judged, so we downgrade to a plain ADD marked
-    ``stale_recheck`` (data is never lost).
+    Another writer may have edited, deleted, or (lifecycle axis) superseded
+    the candidate while the model was thinking. Applying a stale verdict
+    would act on a doc that no longer is what the model judged, so we
+    downgrade to a plain ADD marked ``stale_recheck`` (data is never lost;
+    no synchronous re-judge — the marker queues it for a later sweep).
     """
-    from trellis.core.hashing import content_hash  # noqa: PLC0415
-
     if outcome.fallback:
         return outcome  # already an ADD — nothing to re-verify against
-    current = document_store.get(candidate.doc_id)
-    if current is None or content_hash(current["content"]) != content_hash(
-        candidate.content
-    ):
+    if _candidate_is_stale(document_store, candidate):
         logger.info(
             "reconcile_candidate_changed_downgrade_to_add",
             candidate_id=candidate.doc_id,
@@ -1386,7 +1409,22 @@ def _save_memory_reconciled(
         return f"Memory saved: {clean_id}"
 
     # -- Phase B: verdict OUTSIDE the lock (never serialize saves on a model) -
-    outcome = _compute_reconcile_outcome(registry, content, candidate)
+    # _compute_reconcile_outcome is internally exhaustive (client build, model
+    # transport, timeout, malformed JSON all resolve to fallback ADDs), but
+    # "capture never fails because a judge failed" must be total, not
+    # near-total — a belt-and-suspenders guard turns any escape into the same
+    # offline fallback. Fail-soft, never silent: the traceback goes to stderr.
+    try:
+        outcome = _compute_reconcile_outcome(registry, content, candidate)
+    except Exception:
+        logger.exception("reconcile_phase_b_failed", candidate_id=candidate.doc_id)
+        outcome = ReconcileOutcome(
+            decision=ReconcileDecision.ADD,
+            confidence=0.0,
+            model_id=configured_model_id(),
+            fallback=True,
+            fallback_reason="judge_error",
+        )
 
     # -- Phase C: re-verify + commit under the lock --------------------------
     with _save_memory_lock:

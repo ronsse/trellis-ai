@@ -72,6 +72,10 @@ logger = structlog.get_logger(__name__)
 # off unless an operator opts in).
 # ---------------------------------------------------------------------------
 
+#: Truthy spellings that turn the verdict tier on (the repo's flag
+#: convention — mirrors ``embed_ingest_hook._TRUTHY`` / ``mcp.auth._TRUTHY``).
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
+
 #: Truthy → the model-judged verdict tier runs. Off by default: capture keeps
 #: the deterministic-only behavior every existing deployment sees today.
 RECONCILE_FLAG_ENV = "TRELLIS_ENABLE_RECONCILE_ON_WRITE"
@@ -165,12 +169,7 @@ class ReconcileOutcome(TrellisModel):
 
 def reconcile_on_write_enabled() -> bool:
     """Return whether the model-judged verdict tier is enabled."""
-    return os.environ.get(RECONCILE_FLAG_ENV, "").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
-    )
+    return os.environ.get(RECONCILE_FLAG_ENV, "").strip().lower() in _TRUTHY
 
 
 def reconcile_timeout_seconds() -> float:
