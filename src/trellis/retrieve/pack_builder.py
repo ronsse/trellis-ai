@@ -18,6 +18,7 @@ Failure semantics (C2 Phase 4):
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -106,6 +107,41 @@ class StrategyFailure:
             "error_class": self.error_class,
             "message": self.message,
         }
+
+
+#: Leading YAML frontmatter block: a ``---`` fence line at the very start,
+#: arbitrary YAML, then a closing ``---`` or ``...`` fence. Mirrors the ingest
+#: markdown handler's ``_FRONTMATTER`` pattern — the same shape that produced
+#: these corpus copies — kept independent to avoid a cross-package import into
+#: the corpus layer. Consumes the trailing newline so the stripped body starts
+#: cleanly.
+_DEDUP_FRONTMATTER_RE = re.compile(
+    r"\A---[ \t]*\r?\n.*?\r?\n(?:---|\.\.\.)[ \t]*(?:\r?\n|\Z)",
+    re.DOTALL,
+)
+
+
+def _strip_dedup_frontmatter(text: str) -> str:
+    """Drop a leading YAML frontmatter block before MinHash comparison.
+
+    F14: the same fact stored via ``save_memory`` (raw body) and via corpus
+    ingestion (the identical body wrapped in a ``---`` YAML frontmatter block
+    plus a heading) must collapse to one pack item. But the pack strategies
+    truncate excerpts to 500 chars, so the corpus copy's frontmatter eats into
+    its window and shifts the shared body — the 3-shingle Jaccard falls to
+    ~0.78, under the 0.85 threshold, and the near-duplicate survives.
+
+    Stripping the frontmatter before shingling restores ~0.95 Jaccard so the
+    default threshold catches the pair, without loosening the global match
+    sensitivity (which would risk over-suppressing genuinely-distinct items).
+    This only normalizes the text used for the *similarity comparison*; the
+    excerpt served in the pack is untouched.
+
+    Text without a leading frontmatter fence — including a mid-document
+    ``---`` horizontal rule — is returned unchanged (the ``\\A`` anchor and
+    required closing fence guard against false strips).
+    """
+    return _DEDUP_FRONTMATTER_RE.sub("", text, count=1)
 
 
 @dataclass(frozen=True)
@@ -1211,7 +1247,11 @@ class PackBuilder:
         rejected: list[RejectedItem] = []
 
         for item in ordered:
-            excerpt = item.excerpt or ""
+            # Normalize the comparison text only (the served excerpt is
+            # untouched): strip a leading YAML frontmatter block so a corpus
+            # copy wrapped in frontmatter still matches its raw save_memory
+            # twin at the default threshold (F14).
+            excerpt = _strip_dedup_frontmatter(item.excerpt or "")
             match = index.find_duplicate(excerpt)
             if match is not None:
                 matched_id, similarity = match

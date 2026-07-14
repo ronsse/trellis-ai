@@ -8,7 +8,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import ValidationError
 
 from trellis.ops import ParameterRegistry
-from trellis.retrieve.pack_builder import PackBuilder
+from trellis.retrieve.pack_builder import PackBuilder, SemanticDedupConfig
 from trellis.retrieve.precedents import list_precedents as _list_precedents
 from trellis.retrieve.rerankers import build_reranker
 from trellis.retrieve.strategies import build_strategies
@@ -45,6 +45,9 @@ def _build_pack_builder(registry: Any) -> PackBuilder:
         event_log=registry.operational.event_log,
         advisory_store=advisory_store,
         reranker=build_reranker("rrf", parameter_registry=param_registry),
+        # Mirror the MCP server: near-duplicate suppression at pack assembly
+        # (F14, #259) so the HTTP pack path can't re-serve cross-source clones.
+        semantic_dedup=SemanticDedupConfig(),
     )
 
 
