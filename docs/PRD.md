@@ -73,8 +73,8 @@ Honesty note: verified deployments today = the author's dogfood + that paused pi
   judged stage targets a local model first; no judged stage may be designed to require
   frontier-scale reasoning; every judged op is logged with its downstream outcome as a
   training pair — the memory system generates its own fine-tuning corpus.
-- **Now** — Productionization (see `docs/ROADMAP-EDITS-2026-07-11.md`): fix the three live retrieval defects + feedback plumbing (TODO.md dogfood queue), close the security floor (#250 credential hygiene, #194 classification enforcement), land the query-history curation primitives (#200–#203) as fixture-tested code, disposition #208.
-- **Next** — Claude Code session auto-capture (the highest-leverage capture gap; new ADR increment); §G.4 corpus handlers strictly by observed dogfood need; Phase F F1 harness when the owner schedules it.
+- **Now** — Productionization (roadmap §3.H): the three retrieval defects + feedback/evidence plumbing + the auto-capture keystone landed 2026-07-14 (§3.H.0); what remains is the security floor (#250 credential purge, #194 classification enforcement), the query-history curation primitives (#200–#203) as fixture-tested code, and dispositioning #208.
+- **Next** — the auto-capture keystone (#255) landed 2026-07-14, so the live loop is now wired end-to-end; watch it *un-starve* (advisories / lessons > 0) over the 30-day window. Then §G.4 corpus handlers strictly by observed dogfood need; Phase F F1 harness when the owner schedules it.
 - **Not doing** — the anti-scope list; this project has scope-creep gravity:
   - **No new storage backends.** FalkorDB (SSPL), Kuzu (single-writer), Neptune (cost) already rejected — `adr-arcadedb-blessed-substrate.md`.
   - **No managed/SaaS offering.** Self-hosted is the positioning, not a gap.

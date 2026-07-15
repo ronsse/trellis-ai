@@ -1,6 +1,6 @@
 # Implementation Roadmap
 
-**Last updated:** 2026-07-11 (corpus §G.1 + **conversation capture** landed — `trellis ingest corpus` / `trellis ingest conversations`; **`trellis analyze cost`** meters Trellis's token/dollar overhead; MCP-over-HTTP transport merged #252)
+**Last updated:** 2026-07-15 (Productionization milestone §3.H added; retrieval defects #254/#262 + the auto-capture keystone #255 + #258/#259/#260/#263 landed 2026-07-14. Earlier — 2026-07-11: corpus §G.1 + **conversation capture** (`trellis ingest corpus` / `trellis ingest conversations`); **`trellis analyze cost`** overhead metering; MCP-over-HTTP #252)
 **Purpose:** Single-page hand-off for any agent (fresh or returning) picking up Trellis implementation work. Self-contained. Read this top-to-bottom before touching code.
 
 > **Picking up evaluation work?** The eval harness and all planned scenarios are built — see [`../plans/2026-06-17-step3-assessment.md`](../plans/2026-06-17-step3-assessment.md) for what each scenario substantiates (its §6 evidence rules are authoritative). [`plan-evaluation-strategy.md`](./plan-evaluation-strategy.md) is the historical plan they grew from.
@@ -11,7 +11,7 @@
 
 ---
 
-## 1. State of the project — 2026-07-02
+## 1. State of the project
 
 ### What's live and tested
 
@@ -45,13 +45,13 @@
 | 2026-07-11 | **Usage capture + cost metering** (the local-usability push): `trellis ingest conversations` imports claude.ai chat exports (one doc per conversation, speaker-labelled transcript, chunked + embedded, idempotent by uuid) — the personal corpus the Claude Code / MCP path never sees; sync core refactored to a record-oriented `sync_records` shared by files + conversations. `trellis analyze cost` prices Trellis's injected-context overhead in tokens + dollars (`token_pricing` family table, honest absolute-not-ratio framing) — the effectiveness denominator | [operations.md → `ingest conversations` / `analyze cost`](../agent-guide/operations.md) |
 | 2026-07-11 | **Dogfood gap analysis** of the live skynet deployment: three retrieval defects verified live (`get_context` `domain=` hard-exclusion of untagged docs; flat `get_context` missing the `pack_id` header; `get_context`/`search` bypassing PackBuilder), MCP `record_feedback`↔JSONL parity gap, `link-evidence` `relates_to` pattern unimplementable (no governed `Entity.document_ids` write path; `ENTITY_UPDATE` has no handler), and the loop confirmed input-starved (0 lessons / 0 advisories; nightly curation all-zeros). Produced the first **unblocked** work queue since 2026-07-02 | [TODO.md § Dogfood gap analysis](../../TODO.md#dogfood-gap-analysis--2026-07-11); evidence in Trellis: trace `01KX98NQH5WF96W6XGJCWXVKFW`, doc `01KX9BR2PR542KJQ7768D5B6B7` |
 
-### Test suite shape (2026-07-02)
+### Test suite shape
 
-`pytest tests/unit/ -q` collects **3962 tests by default** (4510 total; 548 backend-marked tests deselect without their env toggles). CI runs five required checks (Tests, Lint, Type Check, OpenAPI, CodeQL) plus **Live infrastructure tests** — which since `586aee6` runs against **ephemeral service containers** (`neo4j:2025.12`, `pgvector/pgvector:pg16`), needs **no external instance and no repo secrets**, and includes the storage contract suites.
+`pytest tests/unit/ -q` collects **4133 tests by default** (4682 total; 549 backend-marked tests deselect without their env toggles). CI runs five required checks (Tests, Lint, Type Check, OpenAPI, CodeQL) plus **Live infrastructure tests** — which since `586aee6` runs against **ephemeral service containers** (`neo4j:2025.12`, `pgvector/pgvector:pg16`), needs **no external instance and no repo secrets**, and includes the storage contract suites.
 
 ### Live test credentials — current reality
 
-* **The AuraDB free-tier instance is GONE** (auto-deleted; DNS-dead). Do **not** follow older instructions that say "leave it running". CI no longer needs it. For local live Neo4j/ArcadeDB tests, run containers — the fixture header of `tests/unit/stores/test_arcadedb_graph.py` and `.github/workflows/live-infra.yml` show the exact `docker run` incantations and `TRELLIS_TEST_*` variables.
+* **The AuraDB free-tier instance is GONE** (auto-deleted; DNS-dead — confirmed `NXDOMAIN` 2026-07-15, see #250). Do **not** follow older instructions that say "leave it running". CI no longer needs it. For local live Neo4j/ArcadeDB tests, run containers — the fixture header of `tests/unit/stores/test_arcadedb_graph.py` and `.github/workflows/live-infra.yml` show the exact `docker run` incantations and `TRELLIS_TEST_*` variables.
 * **Repo-root `.env` no longer exists** (only `.env.example`, which documents every recognised variable). Recreate locally as needed.
 * Remaining credential hygiene (rotate dead AuraDB creds in 1Password, Neon status) is tracked in **#250** (operator-only).
 
@@ -297,32 +297,54 @@ Both `ingest corpus` and `ingest conversations` accept `--extract`, **double-gat
 
 **Gating signal:** skynet dogfood — ingest the owner's real vault + Claude chat export (with `--extract` once an LLM is configured), judge retrieval quality through the Memory Explorer packs view and the `trellis analyze cost` overhead figure, then pick follow-ups by observed need.
 
+### H — Productionization (open-issue closeout)
+
+> **Milestone:** GitHub `Productionization` (#1) — the boundary between "works on skynet" and "safe to recommend to a second deployer": security floor first, then the query-history curation primitives, every item acceptance-checked. Gate-state is tracked with GitHub labels (`ready` / `blocked:*` / `mechanical` / `keystone` / `owner-only` / `ops`); §4's table is the narrative view of the same queue.
+
+**H.0 — defect + plumbing half — ✅ LANDED 2026-07-14.** The 2026-07-11 dogfood defect queue closed as a wave of merges: the `domain=` hard-exclusion (#254), the one-retrieval-path / PackBuilder + `pack_id` parity fix (#262), the evidence-doc / `ENTITY_UPDATE` seam (#260), session-delta packs (#258), near-duplicate suppression (#259), reconcile-on-write (#263), and the **Claude Code session auto-capture keystone (#255)**. The learning loop is now wired end-to-end; whether it *un-starves* (advisories / lessons > 0) is a 30-day dogfood observation, not a code gate (PRD §7).
+
+**H.1 — security floor**
+
+- [ ] **#250 credential hygiene** (operator-only, `ready`): the AuraDB instance is confirmed gone (`NXDOMAIN` 2026-07-15) — purge the dead credentials (1Password entry + Aura API client IDs `985676d4`/`d664924e`), recreate repo-root `.env` from `.env.example`, and remove/rotate the now-dead `TRELLIS_TEST_NEO4J_*` GitHub secrets (CI has been container-based since `586aee6`). Acceptance: #250 closed with its checklist ticked; `test -f .env` locally; `gh secret list --repo ronsse/trellis-ai` shows the secrets purged.
+- [ ] **#194 classification enforcement, minimal slice** (`keystone`; `blocked:owner-decision` + `blocked:dep` on #256): populate `DataClassification` on write paths; PackBuilder/search filter and the mutation policy-gate deny by caller scope. Acceptance: `pytest tests/unit/ -k classification` proves (a) a restricted document is excluded from packs and search for an unscoped caller, (b) a mutation touching restricted content is denied without the scope. Caller identity already exists on REST (#242) and MCP-over-HTTP (#252); stdio-MCP / local-CLI stay trusted-local — document that boundary. This pulls one slice of tag-vocab Phase 4 (§D) ahead of its "design-partner-asks" gate (owner-approved exception) and is blocked-on #256 (Bolt→plugin extraction), which halves the enforcement surface.
+
+**H.2 — query-history curation primitives** (#200–#203; spec: [`adr-query-history-promotion.md`](./adr-query-history-promotion.md) §2–§5)
+
+Implementable and fixture-testable now (`blocked:owner-decision`); the consumer-kg pilot restart is the *validation* gate, not the implementation gate.
+
+- [ ] **#200 usage families** — pipeline-operational vs analyst usage as separate families with distinct promotion rules. Acceptance: a pipeline-only fixture produces zero analyst business-rule promotions; the curation report separates analytical / pipeline / skipped / candidate rows.
+- [ ] **#202 matching guardrails** — discovery keyword `user` must not match `vendor_user_id`; a query-history domain with only keyword predicates warns or requires an explicit unsafe flag.
+- [ ] **#203 scouting primitive** — aggregate-only readiness scout; output asserts row/candidate counts present and `statement_text` / `executed_by` / raw SQL / query hashes absent.
+- [ ] **#201 BI/dashboard metadata source** (`blocked:signal`) — the largest; allowed to slip to pilot restart. Acceptance: connector interface + reference emitter produce graph-safe evidence (no raw SQL by default) ranked separately from pipeline usage.
+
+**H.3 — issue hygiene**
+
+- [ ] **#208** (`owner-only`, `blocked:signal`) — pilot-infra blockage (ArcadeDB secret + expired AWS SSO), not a trellis-ai code defect. Acceptance: re-homed to the consumer-kg repo or closed with a disposition comment.
+
+**Adjacent (on the deployer-#2 path, tracked on the cross-repo Productionization project):** #256 (Bolt→plugin extraction, `keystone`/`ready` — precedes #194), #257 (ingest-normalization ADR, `owner-only`), #264 (log judged operations as training examples, `mechanical`/`ready`). Deployment-side gates — rebuild `trellis-api`, `:8420` LAN-lockdown, backup mirror, the `llm:` block that lets `worker enrich`/`mine-precedents` fire — live in the private skynet-hub repo's M1.
+
 ---
 
 ## 4. Recommended execution order for a fresh swarm
 
-**As of 2026-07-02 there is no unblocked queue.** Every open GitHub issue is gated,
-and the ADR phases above are either landed or deliberately signal-gated. A fresh
-agent should NOT invent work from this table — pick up whichever gate has fired:
-
-> **Update 2026-07-11 — the dogfood gate has started firing.** The live-deployment
-> gap analysis produced an **unblocked defect queue** that needs no further signal:
-> `domain=` filter default-pass, `get_context` pack_id parity, MCP-feedback JSONL
-> parity, `Entity.document_ids` governed write path (+ `ENTITY_UPDATE` handler),
-> skill-template fixes, then **Claude Code session auto-capture** as the next §G
-> increment. Scope + evidence: [TODO.md § Dogfood gap analysis — 2026-07-11](../../TODO.md#dogfood-gap-analysis--2026-07-11).
-> The operator gates (vault + claude.ai-export ingest, `llm:` block) remain the
-> prerequisite for judging §G.4 retrieval-quality follow-ups.
+**The active queue is the GitHub `Productionization` milestone (§3.H).** The dogfood
+gate fired 2026-07-11 and its defect + plumbing half has since **landed** (the retrieval
+defects #254/#262, the evidence-doc seam #260, bloat defenses #258/#259, reconcile-on-write
+#263, and the **auto-capture keystone #255** all merged 2026-07-14 — §3.H.0). What remains
+is the milestone's security floor and query-history primitives, plus the deliberately
+signal-gated ADR phases. Pick up whichever milestone issue is labelled `ready`, or
+whichever gate below has fired — don't invent work from this table.
 
 | Gate | Items | Fires when |
 |---|---|---|
-| Production pilot resumes | #200 (usage families) · #201 (BI-metadata extractor) · #202 (matching guardrails) · #203 (scouting primitive) | consumer-kg pilot restarts and produces real query-history flow |
-| Design partner asks | #194 / Tag-vocab phases 1–5 (§D) · B.4 RDF export | partner wants enforced classification / RDF interop |
+| §3.H.1 — security floor | #250 credential purge (operator console) · #194 classification enforcement (owner-approved pull-forward, blocked-on #256) | `ready` now — see §3.H |
+| §3.H.2 — curation primitives | #200 (usage families) · #202 (matching guardrails) · #203 (scouting primitive) · #201 (BI-metadata, largest) | fixture-testable now; consumer-kg pilot restart is the *validation* gate |
+| §3.H.3 — issue hygiene | #208 pilot-infra blockage | re-home to consumer-kg or close |
+| Design partner asks | Tag-vocab phases 1–5 (§D) · B.4 RDF export | partner wants enforced classification / RDF interop |
 | Vector-contract drift | C.1 vector DSL | contract suite shows backend drift, or a plugin author asks |
-| Infra access | E.4 AWS ECS+RDS dry-run · #208 | sandbox account / ArcadeDB secret + SSO available |
-| Operator console access | #250 credential hygiene | 1Password / Neo4j console session |
+| Infra access | E.4 AWS ECS+RDS dry-run | sandbox account available |
 | Deliberate scheduling | Phase F waves F1–F5 (TODO.md) · #248 organic-generation corpus tuning | owner schedules them |
-| Dogfood signal | Corpus-ingestion follow-ups §G.2 (transcript / `--extract` / PDF handlers, chunk rollup in `PackBuilder`) | owner ingests the real vault with G.1 and judges retrieval via Memory Explorer |
+| Dogfood signal | Corpus-ingestion follow-ups §G.4 (transcript / PDF handlers, chunk rollup in `PackBuilder`) | owner ingests the real vault and judges retrieval via Memory Explorer |
 
 ---
 
@@ -337,7 +359,7 @@ Read in order:
 
 Before writing code:
 
-* Run `pytest tests/unit/ -q` — expect ~3962 collected / green by default (548 backend-marked tests deselect cleanly without env toggles; exact counts drift as tests land — CI's Tests job is the source of truth).
+* Run `pytest tests/unit/ -q` — expect ~4133 collected / green by default (549 backend-marked tests deselect cleanly without env toggles; exact counts drift as tests land — CI's Tests job is the source of truth).
 * Touching graph/vector backends? Spin up local containers and export the `TRELLIS_TEST_*` toggles — copy the incantations from `.github/workflows/live-infra.yml`. **There is no shared cloud instance anymore** (the AuraDB free-tier instance was auto-deleted; CI is container-based since `586aee6`).
 * **Bolt-substrate discipline** (hard-won, twice): the SQLite graph store tolerates behaviours the Bolt backends reject — dangling edges, and (pre-`ab36af6`) unchanged-node re-versioning that strands edges. Never validate Bolt-path changes on SQLite alone; run the contract suites against a Neo4j container, and run `tests/unit/stores/` with `TRELLIS_TEST_NEO=1` so the marker-deselected mock suites execute.
 * Read [`adr-terminology.md`](./adr-terminology.md) §2 if any term feels ambiguous.
