@@ -141,4 +141,4 @@ Detailed operational reference lives in `docs/agent-guide/`:
 ## Product docs
 
 - `docs/PRD.md` — product thesis, adopter profiles, component disposition
-- `docs/ROADMAP-EDITS-2026-07-11.md` — proposed edit-set for `docs/design/implementation-roadmap.md` (which stays the authoritative roadmap)
+- `docs/design/implementation-roadmap.md` — authoritative single-page roadmap; §3.H is the Productionization milestone (the 2026-07-11 edit-set has been applied into it and removed)

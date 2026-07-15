@@ -482,7 +482,7 @@ git clone https://github.com/ronsse/trellis-ai.git
 cd trellis-ai
 uv pip install -e ".[dev]"
 
-pytest tests/unit/                # unit tests (~2300)
+pytest tests/unit/                # unit tests (~4100)
 pytest -m postgres                # postgres integration tests
 pytest -m neo4j                   # neo4j integration tests (set TRELLIS_TEST_NEO4J_URI)
 ruff check src/ tests/            # lint
