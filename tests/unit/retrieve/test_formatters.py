@@ -71,6 +71,53 @@ def test_format_pack_respects_token_budget():
     assert "omitted" in result
 
 
+def test_format_pack_omits_relevance_score():
+    """RRF-fused scores are ordinal, not calibrated — the pack must not render
+    them as a "relevance: X.XX" decimal (it read as low-confidence on every
+    item). Order conveys ranking; the id/excerpt still render."""
+    items = [
+        {
+            "item_id": "top",
+            "item_type": "document",
+            "excerpt": "most relevant",
+            "relevance_score": 0.0164,
+        },
+        {
+            "item_id": "next",
+            "item_type": "entity",
+            "excerpt": "less relevant",
+            "relevance_score": 0.0161,
+        },
+    ]
+    result = format_pack_as_markdown(items, "q", max_tokens=2000)
+    assert "relevance:" not in result
+    assert "0.02" not in result
+    assert "top" in result
+    assert "next" in result
+    # Order preserved: the higher-ranked item appears first.
+    assert result.index("`top`") < result.index("`next`")
+
+
+def test_format_sectioned_pack_omits_relevance_score():
+    sections = [
+        {
+            "name": "Domain",
+            "items": [
+                {
+                    "item_id": "s1",
+                    "item_type": "document",
+                    "excerpt": "body",
+                    "relevance_score": 0.0164,
+                }
+            ],
+        }
+    ]
+    result = format_sectioned_pack_as_markdown(sections, "q", max_tokens=2000)
+    assert "0.02" not in result
+    assert "`s1`" in result
+    assert "body" in result
+
+
 def test_format_traces_empty():
     assert "No traces" in format_traces_as_markdown([])
 
