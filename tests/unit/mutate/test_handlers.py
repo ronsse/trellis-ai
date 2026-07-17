@@ -102,6 +102,48 @@ class TestPrecedentPromoteHandler:
         created_id, message = handler.handle(cmd)
         assert created_id is not None
         assert "My Precedent" in message
+        # Trace-mined payload is unchanged: entity_type "trace", carries trace_id.
+        events = registry.operational.event_log.get_events(
+            event_type=EventType.PRECEDENT_PROMOTED, entity_id="t1"
+        )
+        assert len(events) == 1
+        assert events[0].entity_type == "trace"
+        assert events[0].payload["trace_id"] == "t1"
+
+    def test_emits_event_for_entity_sourced_promotion(
+        self, registry: StoreRegistry
+    ) -> None:
+        """Learning-scoring promotions carry no trace_id but still emit a
+        PRECEDENT_PROMOTED so get_lessons surfaces them."""
+        handler = PrecedentPromoteHandler(registry)
+        cmd = Command(
+            operation=Operation.PRECEDENT_PROMOTE,
+            args={
+                "title": "Learning: source_analysis",
+                "description": "Reviewed learning for source_analysis.",
+                "domain": "billing",
+                "entity_type": "precedent",
+                "source_item_id": "doc:123",
+            },
+            target_id="precedent://learning/abc",
+            target_type="entity",
+        )
+        created_id, _message = handler.handle(cmd)
+        assert created_id is not None
+
+        events = registry.operational.event_log.get_events(
+            event_type=EventType.PRECEDENT_PROMOTED,
+            entity_id="precedent://learning/abc",
+        )
+        assert len(events) == 1
+        event = events[0]
+        assert event.entity_type == "precedent"
+        assert event.payload["title"] == "Learning: source_analysis"
+        assert event.payload["domain"] == "billing"
+        assert event.payload["source_item_id"] == "doc:123"
+        # No trace for an entity-sourced promotion — trace_id must be absent,
+        # not None, so trace-only consumers can branch on presence.
+        assert "trace_id" not in event.payload
 
 
 class TestLabelAddHandler:

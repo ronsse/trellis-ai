@@ -75,25 +75,46 @@ class TraceIngestHandler:
 
 
 class PrecedentPromoteHandler:
-    """Emit PRECEDENT_PROMOTED event with title/description/domain from args."""
+    """Emit PRECEDENT_PROMOTED event with title/description/domain from args.
+
+    Serves two sources that both feed ``get_lessons`` (which reads
+    ``PRECEDENT_PROMOTED`` events via ``list_precedents``):
+
+    * **Trace-mined** precedents pass ``trace_id`` and default to
+      ``entity_type="trace"`` — the emitted payload is unchanged.
+    * **Learning-scoring** promotions pass the promoted graph entity's id as
+      ``target_id`` with ``entity_type="precedent"`` and no ``trace_id``;
+      without this the entity landed but stayed invisible to ``get_lessons``.
+    """
 
     def __init__(self, registry: StoreRegistry) -> None:
         self._registry = registry
 
     def handle(self, command: Command) -> tuple[str | None, str]:
+        args = command.args
+        payload: dict[str, Any] = {
+            "title": args["title"],
+            "description": args["description"],
+            "domain": args.get("domain"),
+        }
+        # Preserve the trace-path payload byte-for-byte; only add provenance
+        # keys for the entity-sourced (learning) path so nothing downstream
+        # that reads ``trace_id`` on a trace precedent is surprised.
+        trace_id = args.get("trace_id")
+        if trace_id is not None:
+            payload["trace_id"] = trace_id
+        source_item_id = args.get("source_item_id")
+        if source_item_id is not None:
+            payload["source_item_id"] = source_item_id
+
         event = self._registry.operational.event_log.emit(
             EventType.PRECEDENT_PROMOTED,
             source="mutation_executor",
-            entity_id=command.target_id,
-            entity_type="trace",
-            payload={
-                "trace_id": command.args["trace_id"],
-                "title": command.args["title"],
-                "description": command.args["description"],
-                "domain": command.args.get("domain"),
-            },
+            entity_id=command.target_id or trace_id,
+            entity_type=args.get("entity_type", "trace"),
+            payload=payload,
         )
-        return event.event_id, f"Precedent promoted: {command.args['title']}"
+        return event.event_id, f"Precedent promoted: {args['title']}"
 
 
 class LabelAddHandler:
