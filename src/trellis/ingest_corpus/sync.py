@@ -47,6 +47,11 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from trellis.classify.dedup.minhash import MinHashIndex
+from trellis.classify.ingest import (
+    build_ingest_classifier,
+    classify_for_ingest,
+    classify_on_ingest_enabled,
+)
 from trellis.core.hashing import content_hash
 from trellis.extract.memory_ingest_hook import (
     build_memory_extractor,
@@ -227,6 +232,12 @@ def sync_records(
     minhash = MinHashIndex()
     moved_from_ids: set[str] = set()
 
+    # Build the deterministic classify-on-write pipeline once per run when the
+    # flag is on. Every sync_records caller (corpus, conversation-export,
+    # session capture) inherits tagging through this single seam; disabled →
+    # None → documents are stored untagged exactly as before.
+    classifier = build_ingest_classifier() if classify_on_ingest_enabled() else None
+
     for record in records:
         report.warnings.extend(record.warnings)
         outcome = _plan_record(
@@ -266,6 +277,7 @@ def sync_records(
                 source_system=source_system,
                 requested_by=requested_by,
                 extractor=extractor,
+                classifier=classifier,
             )
         report.files.append(outcome)
 
@@ -332,6 +344,7 @@ def _apply_record(
     source_system: str,
     requested_by: str,
     extractor: Any = None,
+    classifier: Any = None,
 ) -> None:
     """Execute the writes for one new / updated / moved record."""
     doc_store = registry.knowledge.document_store
@@ -356,6 +369,30 @@ def _apply_record(
         if not spans:
             metadata.pop("chunk_count", None)
 
+    # Classify-on-write: tag the FULL document once (not per chunk — a chunk in
+    # isolation lacks the doc's structural cues, and StructuralClassifier would
+    # mark every short chunk low-signal). The resulting tags ride onto the
+    # parent here and are propagated to the chunks below, which are the
+    # retrievable unit.
+    #
+    # Fill-if-absent: only classify when the (post-merge) metadata carries no
+    # content_tags. This tags every new document but never clobbers tags a
+    # prior run — or the LLM enrichment pass — already wrote (both persist to
+    # the same content_tags key, and enrichment tags must survive a re-put per
+    # the update-merge contract above). Refreshing stale tags on edited content
+    # is reclassify_stale's job, not the write path's.
+    classify_meta: dict[str, Any] = {}
+    if classifier is not None and "content_tags" not in metadata:
+        classify_meta = classify_for_ingest(
+            classifier,
+            text,
+            source_system=source_system,
+            title=str(metadata.get("title") or ""),
+            doc_id=outcome.doc_id,
+            prior_importance=float(metadata.get("auto_importance", 0.0) or 0.0),
+        )
+        metadata.update(classify_meta)
+
     doc_store.put(outcome.doc_id, text, metadata=metadata)
     outcome.chunks_written = _write_chunks(
         registry,
@@ -366,6 +403,7 @@ def _apply_record(
         source_system=source_system,
         extra_metadata=extra_metadata,
         requested_by=requested_by,
+        inherited_tags=classify_meta,
     )
     for index in range(len(spans), old_chunk_count):
         _delete_doc_and_vector(
@@ -412,12 +450,15 @@ def _write_chunks(
     source_system: str,
     extra_metadata: dict[str, Any],
     requested_by: str,
+    inherited_tags: dict[str, Any] | None = None,
 ) -> int:
     """Write (and embed) chunk documents; skip byte-identical chunks.
 
-    Returns the number of chunk docs actually written. Operator tags
-    propagate to chunks — chunks are the retrievable unit, so retrieval
-    tag filters must see them; handler metadata stays on the parent.
+    Returns the number of chunk docs actually written. Operator tags and the
+    parent's classify-on-write ``content_tags`` / ``auto_importance``
+    (``inherited_tags``) propagate to chunks — chunks are the retrievable
+    unit, so retrieval tag filters must see them; handler metadata stays on
+    the parent.
     """
     doc_store = registry.knowledge.document_store
     written = 0
@@ -435,6 +476,7 @@ def _write_chunks(
             continue
         metadata: dict[str, Any] = {
             **extra_metadata,
+            **(inherited_tags or {}),
             "source_system": source_system,
             "source_path": relpath,
             "parent_doc_id": parent_doc_id,
