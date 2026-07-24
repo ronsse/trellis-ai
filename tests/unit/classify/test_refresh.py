@@ -154,12 +154,17 @@ class TestReclassifyItem:
         assert outcome.refreshed is True
         assert outcome.before == {}
         assert outcome.after is not None
-        assert outcome.after["domain"] == ["engineering"]
+        # The doc had no prior domain, so the safe default leaves it empty
+        # rather than persisting the classifier's derived `domain` (the only
+        # hard-excluding facet). `refreshed is True` already proves the
+        # pipeline produced signal. See TestDomainFacetSafety for the full
+        # matrix.
+        assert outcome.after["domain"] == []
         assert outcome.after["classified_at"] is not None
 
         persisted = store.get("doc-1")
         assert persisted is not None
-        assert persisted["metadata"]["content_tags"]["domain"] == ["engineering"]
+        assert persisted["metadata"]["content_tags"]["domain"] == []
 
     def test_no_refresh_when_pipeline_produces_no_tags(self) -> None:
         """A pipeline that returns empty tags must not wipe prior classification."""
@@ -231,7 +236,9 @@ class TestReclassifyItem:
         assert evt["entity_id"] == "doc-1"
         assert evt["payload"]["item_id"] == "doc-1"
         assert evt["payload"]["before"] == {}
-        assert evt["payload"]["after"]["domain"] == ["engineering"]
+        # Safe default: no prior domain on the doc, so the derived domain is
+        # dropped before persisting (see TestDomainFacetSafety).
+        assert evt["payload"]["after"]["domain"] == []
 
     def test_uses_custom_context_builder(self) -> None:
         """Custom context builders let callers inject graph-neighbor signals."""
@@ -410,6 +417,104 @@ class TestReclassifyItem:
         assert outcome.refreshed is True
         assert outcome.after is not None
         assert outcome.after["domain"] == ["engineering"]
+
+
+class TestDomainFacetSafety:
+    """`domain` is the only facet that hard-excludes a document from a
+    domain-scoped query, so a deterministic refresh must never introduce or
+    overwrite it — mirroring classify-on-write (trellis.classify.ingest). This
+    is what makes the reclassify_stale backfill over untagged docs safe.
+    """
+
+    def _pipeline(self, domain: list[str]) -> ClassifierPipeline:
+        return ClassifierPipeline(
+            classifiers=[
+                _StubClassifier(
+                    "stub",
+                    tags={"domain": domain, "content_type": ["procedure"]},
+                )
+            ]
+        )
+
+    def test_never_domained_doc_stays_domainless(self) -> None:
+        """A doc with no prior domain must not gain the classifier's domain —
+        the keyword classifier tagging a personal note "infrastructure" would
+        otherwise silently hide it from a domain query."""
+        store = _InMemoryDocStore()
+        store.put("doc-1", "a personal note that mentions kubernetes", {})
+
+        outcome = reclassify_item(
+            "doc-1",
+            pipeline=self._pipeline(["infrastructure"]),
+            document_store=store,
+        )
+
+        assert outcome.refreshed is True
+        assert outcome.after is not None
+        assert outcome.after["domain"] == []
+        persisted = store.get("doc-1")
+        assert persisted is not None
+        assert persisted["metadata"]["content_tags"]["domain"] == []
+
+    def test_prior_domain_carried_forward_not_overwritten(self) -> None:
+        """An existing operator- or enrichment-set domain survives a
+        deterministic refresh even when the classifier derives a different one.
+        """
+        store = _InMemoryDocStore()
+        store.put(
+            "doc-1",
+            "content",
+            {"content_tags": {"domain": ["finance"]}},
+        )
+
+        outcome = reclassify_item(
+            "doc-1",
+            pipeline=self._pipeline(["infrastructure"]),
+            document_store=store,
+        )
+
+        assert outcome.refreshed is True
+        assert outcome.after is not None
+        assert outcome.after["domain"] == ["finance"]
+        persisted = store.get("doc-1")
+        assert persisted is not None
+        assert persisted["metadata"]["content_tags"]["domain"] == ["finance"]
+
+    def test_include_domain_opt_in_persists_fresh_domain(self) -> None:
+        """`include_domain=True` trusts the pipeline to (re)compute domain — for
+        a deliberate enrichment-mode refresh with an LLM classifier."""
+        store = _InMemoryDocStore()
+        store.put("doc-1", "content", {})
+
+        outcome = reclassify_item(
+            "doc-1",
+            pipeline=self._pipeline(["infrastructure"]),
+            document_store=store,
+            include_domain=True,
+        )
+
+        assert outcome.refreshed is True
+        assert outcome.after is not None
+        assert outcome.after["domain"] == ["infrastructure"]
+
+    def test_reclassify_stale_backfill_adds_no_domain(self) -> None:
+        """The batch backfill entry point is domain-safe by default — this is
+        the invariant that lets the untagged-doc backfill run without hiding
+        anything behind a spurious domain."""
+        store = _InMemoryDocStore()
+        store.put("doc-a", "aaa", {})
+        store.put("doc-b", "bbb", {})
+
+        result = reclassify_stale(
+            pipeline=self._pipeline(["infrastructure"]),
+            document_store=store,
+        )
+
+        assert result.refreshed == 2
+        for doc_id in ("doc-a", "doc-b"):
+            persisted = store.get(doc_id)
+            assert persisted is not None
+            assert persisted["metadata"]["content_tags"]["domain"] == []
 
 
 class TestReclassifyStale:

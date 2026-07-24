@@ -71,6 +71,7 @@ def reclassify_item(
     document_store: DocumentStore,
     event_log: EventLog | None = None,
     context_builder: Any | None = None,
+    include_domain: bool = False,
 ) -> RefreshOutcome:
     """Re-run the classifier pipeline against a single item and persist
     updated tags.
@@ -89,6 +90,16 @@ def reclassify_item(
             ``title`` / ``source_system`` from doc metadata. Pass a custom
             builder to inject graph-neighborhood context or other signals
             the base metadata doesn't carry.
+        include_domain: When ``False`` (the default, and the safe choice for a
+            deterministic backfill), the freshly-derived ``domain`` facet is
+            discarded and the item's prior ``domain`` is carried forward
+            unchanged — mirroring classify-on-write
+            (:mod:`trellis.classify.ingest`). ``domain`` is the only facet that
+            *hard-excludes* a document from a domain-scoped query on mismatch,
+            so letting the deterministic keyword / source-system classifiers
+            (re)assign it during a refresh could silently hide a document.
+            Set ``True`` only for a deliberate enrichment-mode refresh whose
+            LLM classifier is trusted to (re)compute ``domain``.
 
     Returns:
         :class:`RefreshOutcome` with the before/after tag diffs and a
@@ -126,6 +137,23 @@ def reclassify_item(
     # the LLM contribution (frozen prior) while re-applying tag-derived
     # boosts on top.
     fresh_tags_obj = merged.to_content_tags()
+
+    # Domain-facet safety (mirrors classify-on-write, trellis.classify.ingest):
+    # `domain` is the only facet that HARD-EXCLUDES a document from a
+    # domain-scoped query on mismatch. The deterministic keyword / source-system
+    # classifiers will confidently (re)assign a code-flavoured domain to
+    # personal content, so a refresh must never let that heuristic *introduce*
+    # or overwrite a domain and silently hide the document. Carry the prior
+    # domain forward unchanged — preserving any operator- or enrichment-set
+    # value, and leaving a never-domained document domain-less — unless the
+    # caller explicitly opts in. Applied before the tags-unchanged early-out so
+    # a spurious fresh domain never counts as a change. `compute_importance`
+    # ignores `domain`, so the ordering relative to the score is immaterial.
+    if not include_domain:
+        fresh_tags_obj = fresh_tags_obj.model_copy(
+            update={"domain": list(before_tags.get("domain") or [])}
+        )
+
     prior_importance = float(metadata.get("auto_importance", 0.0))
     new_importance = compute_importance(
         fresh_tags_obj,
@@ -188,6 +216,7 @@ def reclassify_stale(
     max_age_days: int = 30,
     limit: int = 100,
     context_builder: Any | None = None,
+    include_domain: bool = False,
 ) -> BatchRefreshResult:
     """Scan the document store for items with stale or missing
     ``classified_at`` and reclassify them.
@@ -209,6 +238,9 @@ def reclassify_stale(
         limit: Max number of documents to scan per call. This function
             runs synchronously; large stores should page in batches.
         context_builder: Optional ``(doc) -> ClassificationContext``.
+        include_domain: Forwarded to :func:`reclassify_item`. Defaults to
+            ``False`` so a batch backfill never lets the deterministic pipeline
+            introduce a hard-excluding ``domain`` — see that function's docs.
 
     Returns:
         :class:`BatchRefreshResult` with counts and the list of refreshed
@@ -246,6 +278,7 @@ def reclassify_stale(
             document_store=document_store,
             event_log=event_log,
             context_builder=context_builder,
+            include_domain=include_domain,
         )
         if outcome.refreshed:
             result.refreshed += 1
