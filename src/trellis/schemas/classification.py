@@ -9,7 +9,7 @@ defined here.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Literal, get_args
 
 from pydantic import Field, model_validator
 
@@ -27,6 +27,12 @@ ContentType = Literal[
     "code",
     "documentation",
 ]
+
+#: The ``ContentType`` vocabulary as a set, for callers that have to *test*
+#: membership rather than annotate with it — chiefly
+#: :mod:`trellis.schemas.document_metadata`, which uses it to tell a real
+#: content-type facet from the foreign values that used to share the key.
+CONTENT_TYPE_VALUES: frozenset[str] = frozenset(get_args(ContentType))
 
 Scope = Literal["universal", "org", "project", "ephemeral"]
 

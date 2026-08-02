@@ -21,6 +21,7 @@ import pytest
 from trellis.retrieve.semantic_seeds import (
     DEFAULT_TOP_K,
     ENTITY_SUMMARY_CONTENT_TYPE,
+    ENTITY_SUMMARY_DOCUMENT_FORM,
     SemanticSeedExtractor,
 )
 
@@ -117,6 +118,29 @@ class TestExtraction:
         extractor, _store, _embed = self._build(hits)
         # Hit without content_type=entity_summary must not be elevated
         # to a graph seed; only the explicitly-tagged one survives.
+        assert extractor.extract("intent") == ["e1"]
+
+    def test_accepts_the_reconciled_document_form_key(self) -> None:
+        # Post-reconciliation shape: the provenance value lives under
+        # ``document_form``. The legacy flat ``content_type`` key stays
+        # accepted (every other test in this class uses it — the eval corpus
+        # loaders that write it live in the separate trellis-evals repo).
+        hits = [
+            {
+                "item_id": "doc:e1",
+                "score": 0.95,
+                "metadata": {
+                    "document_form": ENTITY_SUMMARY_DOCUMENT_FORM,
+                    "entity_id": "e1",
+                },
+            },
+            {
+                "item_id": "doc:n1",
+                "score": 0.90,
+                "metadata": {"document_form": "conversation", "entity_id": "n1"},
+            },
+        ]
+        extractor, _store, _embed = self._build(hits)
         assert extractor.extract("intent") == ["e1"]
 
     def test_strips_doc_prefix_when_entity_id_metadata_missing(self) -> None:

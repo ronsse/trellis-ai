@@ -367,6 +367,51 @@ Temporal validity state of content. Separate from `ContentTags.signal_quality` b
 
 ---
 
+## DocumentMetadata
+
+The validated core of a stored document's metadata dict. Documents are stored with a free-form metadata dict, but that dict is not free-form in practice — retrieval filters, the tagging pipeline, and the chunker all key off specific names in it. `DocumentMetadata` names those keys and type-checks them; everything else rides in `custom`.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `title` | `string` or `null` | No | `null` | Human-readable title (frontmatter `title`, conversation name) |
+| `source_system` | `string` or `null` | No | `null` | Corpus namespace the document was ingested under |
+| `source_path` | `string` or `null` | No | `null` | Human-readable source locator (relpath, conversation title) |
+| `document_form` | `string` or `null` | No | `null` | Provenance / format — `conversation`, `entity_summary`, … Open vocabulary. **Not** the `ContentTags.content_type` facet |
+| `content_type` | `string` or `null` | No | `null` | **Deprecated** flat mirror of `ContentTags.content_type`; only in-vocabulary values are accepted |
+| `content_tags` | `dict` or `null` | No | `null` | JSON dump of `ContentTags` |
+| `auto_importance` | `float` or `null` | No | `null` | Computed importance score |
+| `domain` | `list[string]`, `string`, or `null` | No | `null` | Operator-set domain (`--domain` / `--tag`) |
+| `parent_doc_id` | `string` or `null` | No | `null` | Chunk's parent document id |
+| `chunk_index` / `chunk_count` | `int` or `null` | No | `null` | Chunk bookkeeping |
+| `char_span` | `list[int]` or `null` | No | `null` | `[start, end]` offsets of a chunk into its parent |
+| `custom` | `dict[string, Any]` | No | `{}` | Everything else, preserved verbatim |
+
+**`custom` is a modelling device, not a storage one.** `to_metadata()` re-flattens it, so a document round-tripped through the model is stored with exactly the keys it arrived with — every store-level metadata filter is a `json_extract` against a *top-level* key, so nesting would break live queries.
+
+```python
+from trellis.schemas import DocumentMetadata, document_form_of
+
+meta = DocumentMetadata.from_mapping(stored["metadata"])   # never DocumentMetadata(**dict)
+meta.title, meta.document_form, meta.custom
+meta.to_metadata()                                          # back to the flat stored dict
+```
+
+`from_mapping` is lenient: an unknown key lands in `custom`, and a *known* key whose value doesn't validate is demoted to `custom` too (logged, still round-trips). It never raises for a JSON-shaped mapping — ingest must not fail on a caller's odd frontmatter. Direct construction keeps `extra="forbid"` and raises.
+
+Exactly one value is dropped rather than preserved: a foreign flat `content_type` when the mapping *also* carries an explicit `document_form`. Both keys describe the same dimension, the explicit one is the writer's intent, and parking the loser under a third key would just move the drift. The drop is logged at WARNING (`document_metadata_conflicting_form`). Everything else round-trips, including keys whose stored value is explicitly `null` and keys with incidental whitespace (`str_strip_whitespace` is off on this model — it would rename `custom` keys, and every store filter is a `json_extract` against the exact key).
+
+### `document_form` vs `content_type`
+
+Two vocabularies used to share the `content_type` name: the closed `ContentTags.content_type` facet (*what shape of information is this*), and a flat `metadata["content_type"]` carrying `"conversation"` / `"entity_summary"` (*where the document came from and what form it takes*). The second is now `document_form`.
+
+Read it with `document_form_of(metadata)`, which accepts both the current key and the pre-reconciliation flat key — documents stored under the old shape are **not** migrated, and are normalised only when the ingest seam next rewrites them.
+
+Because the seam rewrites the key, readers of the flat key have to accept the new one or the rename silently changes behaviour. `retrieve/evaluate._item_content_type` (which feeds `BreadthScorer`) falls through to `document_form_of`, so a document contributes the same category before and after it is rewritten.
+
+**Where it is validated:** `trellis.ingest_corpus.sync` — corpus files, conversation exports, and session capture, parents and chunks. Every other document write path (MCP / REST `save_memory`, the enrichment worker) still hands the store a raw dict.
+
+---
+
 ## EntityAlias
 
 Cross-system identifier mapped onto a canonical entity.

@@ -33,6 +33,11 @@ with the run counts — on dry runs too, flagged ``dry_run=True`` (the
 ``BLOB_GC_SWEPT`` convention). Unlike ``save_memory``, event-emission
 failure does not abort a bulk sync; it is reported as a run warning.
 
+Every document this module writes — parent and chunk — has its metadata run
+through :class:`~trellis.schemas.document_metadata.DocumentMetadata` first.
+That module owns the contract; this is the only place it is currently
+enforced.
+
 Embedding rides the existing flag-gated, fail-soft
 :func:`~trellis.retrieve.embed_ingest_hook.run_embed_on_ingest` hook:
 chunked documents embed their chunks (each under the embedder input cap
@@ -71,6 +76,7 @@ from trellis.ingest_corpus.models import (
 )
 from trellis.ingest_corpus.walker import walk_corpus
 from trellis.retrieve.embed_ingest_hook import run_embed_on_ingest
+from trellis.schemas.document_metadata import DocumentMetadata
 from trellis.stores.base.event_log import EventType
 
 if TYPE_CHECKING:
@@ -394,6 +400,10 @@ def _apply_record(
             )
         )
 
+    # The validation seam. Shape-preserving apart from the reconciled
+    # `content_type` → `document_form` key; see trellis.schemas.document_metadata.
+    metadata = DocumentMetadata.from_mapping(metadata).to_metadata()
+
     doc_store.put(outcome.doc_id, text, metadata=metadata)
     outcome.chunks_written = _write_chunks(
         registry,
@@ -507,6 +517,8 @@ def _write_chunks(
             "chunk_count": len(spans),
             "char_span": [span.start, span.end],
         }
+        # Same seam as the parent — chunks are the retrievable unit.
+        metadata = DocumentMetadata.from_mapping(metadata).to_metadata()
         doc_store.put(cid, chunk_content, metadata=metadata)
         if content_changed:
             # Metadata-only refreshes deliberately don't re-embed —

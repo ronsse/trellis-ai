@@ -53,6 +53,8 @@ from typing import Any
 
 import structlog
 
+from trellis.schemas.document_metadata import document_form_of
+
 logger = structlog.get_logger(__name__)
 
 
@@ -71,14 +73,26 @@ logger = structlog.get_logger(__name__)
 DEFAULT_TOP_K = 5
 
 
-#: Metadata key used to identify entity-summary documents in the
-#: vector store. Both eval corpus loaders
+#: Document form identifying entity-summary documents in the vector
+#: store. Both eval corpus loaders
 #: (:mod:`eval.corpora.github_trellis.loader`,
-#: :mod:`eval.corpora.dbt_loader`) stamp ``content_type="entity_summary"``
-#: when they index per-entity docs. Filtering on this key prevents
-#: feedback-derived documents, advisory notes, or non-entity content
-#: from being elevated to graph-traversal seeds.
-ENTITY_SUMMARY_CONTENT_TYPE = "entity_summary"
+#: :mod:`eval.corpora.dbt_loader`) stamp it when they index per-entity
+#: docs. Filtering on it prevents feedback-derived documents, advisory
+#: notes, or non-entity content from being elevated to graph-traversal
+#: seeds.
+#:
+#: The value is read via
+#: :func:`~trellis.schemas.document_metadata.document_form_of`, which
+#: accepts both the current ``document_form`` key and the flat
+#: ``content_type`` key the loaders write today — "entity_summary" was
+#: never a ``ContentTags.content_type``, it describes how the document
+#: was *produced*. The loaders live in the separate ``trellis-evals``
+#: repo, so the legacy read is load-bearing here, not merely historical.
+ENTITY_SUMMARY_DOCUMENT_FORM = "entity_summary"
+
+#: Deprecated alias of :data:`ENTITY_SUMMARY_DOCUMENT_FORM`, kept because
+#: out-of-repo callers (the eval corpus loaders) import it by this name.
+ENTITY_SUMMARY_CONTENT_TYPE = ENTITY_SUMMARY_DOCUMENT_FORM
 
 
 #: Doc-id prefix used by both eval corpus loaders. Vector store
@@ -165,10 +179,16 @@ class SemanticSeedExtractor:
         2. Cache miss: ``embedding_fn(intent)`` → query vector.
         3. ``vector_store.query(vector, top_k=self._top_k)`` → list of
            ``{item_id, score, metadata}`` ordered by descending similarity.
-        4. Filter to hits with ``metadata.content_type ==
-           "entity_summary"``. Hits without that tag are dropped; they
-           are not entity-anchored content and should not seed graph
-           traversal.
+        4. Filter to hits whose
+           :func:`~trellis.schemas.document_metadata.document_form_of`
+           is ``"entity_summary"`` — that reads ``metadata.document_form``
+           and, for documents written before the reconciliation, an
+           out-of-vocabulary flat ``metadata.content_type``. A new
+           loader must stamp one of those two keys; an *in-vocabulary*
+           flat ``content_type`` (``"documentation"``, say) is a
+           ``ContentTags`` facet and is deliberately not read here.
+           Hits without a matching form are dropped; they are not
+           entity-anchored content and should not seed graph traversal.
         5. Strip the ``doc:`` prefix from each surviving ``item_id``
            (or read ``metadata["entity_id"]`` when the prefix is
            absent — both loaders stamp it as a defensive fallback).
@@ -217,8 +237,7 @@ class SemanticSeedExtractor:
         seen: set[str] = set()
         for hit in hits:
             metadata = hit.get("metadata") or {}
-            content_type = metadata.get("content_type")
-            if content_type != ENTITY_SUMMARY_CONTENT_TYPE:
+            if document_form_of(metadata) != ENTITY_SUMMARY_DOCUMENT_FORM:
                 continue
             entity_id = self._resolve_entity_id(hit, metadata)
             if entity_id is None or entity_id in seen:
@@ -288,5 +307,6 @@ class SemanticSeedExtractor:
 __all__ = [
     "DEFAULT_TOP_K",
     "ENTITY_SUMMARY_CONTENT_TYPE",
+    "ENTITY_SUMMARY_DOCUMENT_FORM",
     "SemanticSeedExtractor",
 ]

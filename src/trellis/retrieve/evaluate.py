@@ -36,6 +36,7 @@ import structlog
 from pydantic import Field, model_validator
 
 from trellis.core.base import TrellisModel
+from trellis.schemas.document_metadata import document_form_of
 from trellis.schemas.pack import Pack, PackItem
 
 if TYPE_CHECKING:
@@ -210,6 +211,18 @@ def _item_domains(item: PackItem) -> list[str]:
 
 
 def _item_content_type(item: PackItem) -> str | None:
+    """Category a pack item contributes to ``BreadthScorer``.
+
+    Reads three keys, widest-to-narrowest: the ``content_tags.content_type``
+    facet, the deprecated flat mirror of it, and finally ``document_form``.
+
+    The last is not a content type — it is provenance — but it is what a
+    foreign flat ``content_type`` becomes once the ingest seam rewrites it
+    (:mod:`trellis.schemas.document_metadata`), and eval scenarios legitimately
+    declare ``expected_categories`` outside the closed vocabulary. Without this
+    fallback a document would score breadth 1.0 before the seam touched it and
+    0.0 after, which would make the rename a silent scoring change.
+    """
     meta = item.metadata or {}
     nested = meta.get("content_tags")
     if isinstance(nested, dict):
@@ -219,7 +232,7 @@ def _item_content_type(item: PackItem) -> str | None:
     flat = meta.get("content_type")
     if isinstance(flat, str):
         return flat
-    return None
+    return document_form_of(meta)
 
 
 def _item_tokens(item: PackItem) -> int:

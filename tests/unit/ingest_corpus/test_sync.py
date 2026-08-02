@@ -23,6 +23,8 @@ from trellis.ingest_corpus.models import (
 )
 from trellis.ingest_corpus.sync import sync_corpus
 from trellis.retrieve.embed_ingest_hook import EMBED_ON_INGEST_FLAG
+from trellis.retrieve.evaluate import BreadthScorer, EvaluationScenario
+from trellis.schemas.pack import Pack, PackItem
 from trellis.stores.base.event_log import EventType
 from trellis.stores.sqlite.document import SQLiteDocumentStore
 from trellis.stores.sqlite.event_log import SQLiteEventLog
@@ -406,6 +408,150 @@ class TestClassifyOnIngest:
             },
         )
         assert any(is_chunk_doc_id(hit["doc_id"]) for hit in hits)
+
+
+class TestMetadataValidationSeam:
+    """The ingest seam is where document metadata is validated.
+
+    Shape-preserving by design — see
+    :mod:`trellis.schemas.document_metadata`. These tests pin the three
+    properties that make partial adoption safe: arbitrary frontmatter still
+    stores flat, the only rewrite is the reconciled provenance key, and a
+    document that has been rewritten still scores what it scored before.
+    """
+
+    def test_arbitrary_frontmatter_stores_flat_and_unchanged(
+        self, registry, tmp_path: Path
+    ):
+        root = tmp_path / "frontmatter"
+        root.mkdir()
+        (root / "note.md").write_text(
+            "---\n"
+            "title: Odd Note\n"
+            "rating: 4.5\n"
+            "aliases:\n  - alt\n"
+            "sprint: 14\n"
+            "---\n\nBody.\n"
+        )
+        sync_corpus(registry, root, source_system="obsidian")
+
+        metadata = registry.knowledge.document_store.get(
+            corpus_doc_id("obsidian", "note.md")
+        )["metadata"]
+        assert metadata["title"] == "Odd Note"
+        assert metadata["rating"] == 4.5
+        assert metadata["aliases"] == ["alt"]
+        assert metadata["sprint"] == 14
+        assert "custom" not in metadata
+
+    def test_non_string_title_does_not_break_ingest(self, registry, tmp_path: Path):
+        root = tmp_path / "odd-title"
+        root.mkdir()
+        (root / "year.md").write_text("---\ntitle: 2026\n---\n\nBody.\n")
+        report = sync_corpus(registry, root, source_system="obsidian")
+
+        assert report.counts()["ingested"] == 1
+        metadata = registry.knowledge.document_store.get(
+            corpus_doc_id("obsidian", "year.md")
+        )["metadata"]
+        # YAML parses a bare 2026 as an int; the value is preserved verbatim
+        # (demoted to `custom`, re-flattened) rather than coerced or dropped.
+        assert metadata["title"] == 2026
+
+    def test_foreign_flat_content_type_is_reconciled_on_write(
+        self, registry, tmp_path: Path
+    ):
+        # An operator ``--tag content_type=conversation`` is the same drift the
+        # conversation reader used to produce; the seam normalises it.
+        root = tmp_path / "tagged"
+        root.mkdir()
+        (root / "note.md").write_text("Body.\n")
+        sync_corpus(
+            registry,
+            root,
+            source_system="obsidian",
+            extra_metadata={"content_type": "conversation"},
+        )
+
+        metadata = registry.knowledge.document_store.get(
+            corpus_doc_id("obsidian", "note.md")
+        )["metadata"]
+        assert metadata["document_form"] == "conversation"
+        assert "content_type" not in metadata
+
+    def test_in_vocabulary_flat_content_type_is_left_alone(
+        self, registry, tmp_path: Path
+    ):
+        root = tmp_path / "faceted"
+        root.mkdir()
+        (root / "note.md").write_text("Body.\n")
+        sync_corpus(
+            registry,
+            root,
+            source_system="obsidian",
+            extra_metadata={"content_type": "decision"},
+        )
+
+        metadata = registry.knowledge.document_store.get(
+            corpus_doc_id("obsidian", "note.md")
+        )["metadata"]
+        assert metadata["content_type"] == "decision"
+        assert "document_form" not in metadata
+
+    def test_ingested_document_scores_breadth_as_it_did_before(
+        self, registry, tmp_path: Path
+    ):
+        # The composed property the rename can actually break: ingest through
+        # the seam, read the stored metadata back, put it on a PackItem the way
+        # retrieve.strategies does, and score it. "tutorial" is outside the
+        # ContentType vocabulary — exactly the case the read-side fallback in
+        # evaluate._item_content_type exists for — so the seam rewriting the
+        # key must not move the score.
+        root = tmp_path / "foreign"
+        root.mkdir()
+        (root / "note.md").write_text("---\ncontent_type: tutorial\n---\n\nBody.\n")
+        sync_corpus(registry, root, source_system="obsidian")
+
+        stored = registry.knowledge.document_store.get(
+            corpus_doc_id("obsidian", "note.md")
+        )["metadata"]
+        assert stored["document_form"] == "tutorial"
+        assert "content_type" not in stored
+
+        pack = Pack(
+            pack_id="p",
+            intent="i",
+            items=[
+                PackItem(
+                    item_id="doc-1",
+                    item_type="document",
+                    excerpt="Body.",
+                    relevance_score=0.5,
+                    metadata={"source_strategy": "keyword", **stored},
+                )
+            ],
+        )
+        scenario = EvaluationScenario(
+            name="s", intent="i", expected_categories=["tutorial"]
+        )
+        assert BreadthScorer().score(pack, scenario) == 1.0
+
+    def test_chunk_metadata_is_validated_too(self, registry, tmp_path: Path):
+        root = tmp_path / "chunked"
+        root.mkdir()
+        (root / "long.md").write_text(_long_markdown())
+        sync_corpus(
+            registry,
+            root,
+            source_system="obsidian",
+            extra_metadata={"content_type": "conversation"},
+        )
+
+        parent_id = corpus_doc_id("obsidian", "long.md")
+        chunk = registry.knowledge.document_store.get(chunk_doc_id(parent_id, 0))
+        assert chunk["metadata"]["document_form"] == "conversation"
+        assert "content_type" not in chunk["metadata"]
+        assert chunk["metadata"]["char_span"][0] == 0
 
 
 class TestIdempotentResync:
