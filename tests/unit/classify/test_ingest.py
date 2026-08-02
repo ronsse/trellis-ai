@@ -176,6 +176,16 @@ class TestClassifyMetadataOnWrite:
         meta = {"source": "test"}
         assert classify_metadata_on_write(meta, self._CONTENT) is meta
 
+    @pytest.mark.parametrize("bad_metadata", [None, 3, "oops", ["a"]])
+    def test_non_mapping_metadata_degrades_instead_of_raising(
+        self, monkeypatch: pytest.MonkeyPatch, bad_metadata: object
+    ) -> None:
+        # Fail-soft has to be TOTAL, not just late: an API caller can send
+        # ``"metadata": null`` and a durable write must not 500 on it. The
+        # guards live inside the try for exactly this.
+        monkeypatch.setenv(CLASSIFY_ON_INGEST_FLAG, "1")
+        assert classify_metadata_on_write(bad_metadata, self._CONTENT) is bad_metadata  # type: ignore[arg-type]
+
     def test_source_system_defaults_to_metadata(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

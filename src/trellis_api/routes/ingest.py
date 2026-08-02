@@ -81,9 +81,9 @@ def ingest_evidence(body: dict[str, Any]) -> IngestResponse:
         "evidence_type": evidence.evidence_type,
         "source_origin": evidence.source_origin,
     }
-    # Classify-on-write (TRELLIS_ENABLE_CLASSIFY_ON_INGEST=1). ``source_origin``
-    # is a provenance label ("trace"/"manual"/"ingestion"), not a source system,
-    # so no classification context is derived from it. Fail-soft inside.
+    # Classify-on-write (see classify_metadata_on_write). ``source_origin`` is
+    # a provenance label ("trace"/"manual"/"ingestion"), not a source system,
+    # so no classification context is derived from it.
     evidence_metadata = classify_metadata_on_write(
         evidence_metadata, evidence.content or "", doc_id=evidence.evidence_id
     )

@@ -123,12 +123,13 @@ def create_document(body: dict[str, Any]) -> dict[str, Any]:
     registry = get_registry()
     doc_id = body.get("doc_id")
     content = body.get("content", "")
-    metadata = body.get("metadata", {})
+    # ``or {}`` not ``.get(..., {})``: an explicit ``"metadata": null`` is a
+    # shape real clients send, and every consumer below wants a mapping.
+    metadata = body.get("metadata") or {}
     if not content:
         raise HTTPException(status_code=400, detail="content is required")
-    # Classify-on-write (TRELLIS_ENABLE_CLASSIFY_ON_INGEST=1) so an
-    # API-written document carries the same retrieval-shaping tags as one
-    # written through corpus ingest. Fail-soft and fill-if-absent inside.
+    # Classify-on-write — see classify_metadata_on_write for the four
+    # properties it guarantees.
     metadata = classify_metadata_on_write(metadata, content, doc_id=doc_id or "")
     stored_id = registry.knowledge.document_store.put(
         doc_id=doc_id, content=content, metadata=metadata

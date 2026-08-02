@@ -39,6 +39,18 @@ _INFRA = "kubernetes deployment infra helm terraform rollout"
 #: the reconcile tier surfaces a candidate to adjudicate.
 _INFRA_NEAR = "kubernetes deployment infra helm terraform rollouts"
 
+#: Unrelated to _INFRA (no MinHash overlap), so it is stored rather than
+#: deduped away — used as the positive control in absence-assertion tests.
+_UNRELATED = "grocery list milk bread apples for saturday dinner with friends"
+
+#: Dotted path handed to TRELLIS_EMBEDDING_FN; the registry resolves it
+#: lazily, so setting the env inside a test is picked up on first use.
+_EMBED_FN_PATH = "tests.unit.mcp.test_classify_on_write._fake_embed"
+
+
+def _fake_embed(text: str) -> list[float]:
+    return [1.0, 0.0, 0.5]
+
 
 class _BoomPipeline:
     def classify(self, *args: object, **kwargs: object) -> None:
@@ -97,10 +109,16 @@ class TestSaveMemoryClassifyOnWrite:
     def test_existing_content_tags_not_clobbered(
         self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # The absence assertion alone would also pass if the seam were never
+        # wired, so a tag-less control write in the same test proves it is.
         _enable(monkeypatch)
         caller_tags = {"domain": ["backend"], "signal_quality": "high"}
         doc_id = _doc_id(save_memory(_INFRA, metadata={"content_tags": caller_tags}))
         assert _stored_metadata(temp_registry, doc_id)["content_tags"] == caller_tags
+
+        control_id = _doc_id(save_memory(_UNRELATED))
+        control_meta = _stored_metadata(temp_registry, control_id)
+        assert control_meta["content_tags"]["domain"] == []
 
     def test_classifier_error_still_stores_the_document(
         self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
@@ -123,6 +141,22 @@ class TestSaveMemoryClassifyOnWrite:
         )
         assert len(events) == 1
         assert events[0].payload["metadata"]["content_tags"]["domain"] == []
+
+    def test_tags_ride_the_embed_hooks_vector_row(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The other half of the post-store tail, and the stated reason
+        # _store_new_memory returns the metadata it persisted: SemanticSearch
+        # reads importance/tags off the vector row, not the document row.
+        _enable(monkeypatch)
+        monkeypatch.setenv("TRELLIS_ENABLE_EMBED_ON_INGEST", "1")
+        monkeypatch.setenv("TRELLIS_EMBEDDING_FN", _EMBED_FN_PATH)
+
+        doc_id = _doc_id(save_memory(_INFRA))
+        row = temp_registry.knowledge.vector_store.get(doc_id)
+        assert row is not None
+        assert row["metadata"]["content_tags"]["domain"] == []
+        assert isinstance(row["metadata"]["auto_importance"], float)
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +195,38 @@ class TestReconcileTierClassifyOnWrite:
         meta = _stored_metadata(temp_registry, doc_id)
         assert meta["reconciliation"]
         assert meta["content_tags"]["domain"] == []
+
+    def test_caller_tags_survive_alongside_the_marker(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The reconcile tier is the one remaining path where a caller CAN
+        # supply content_tags: they ride save_memory's ``metadata`` through
+        # _commit_reconcile_verdict's ``{**metadata, marker}`` into
+        # _store_new_memory. Fill-if-absent must hold there too.
+        _enable(monkeypatch)
+        save_memory(_INFRA)
+        monkeypatch.setenv("TRELLIS_ENABLE_RECONCILE_ON_WRITE", "1")
+        monkeypatch.setattr(server_mod, "_build_llm_client", lambda _registry: None)
+
+        caller_tags = {"domain": ["backend"], "signal_quality": "high"}
+        doc_id = _doc_id(
+            save_memory(_INFRA_NEAR, metadata={"content_tags": caller_tags})
+        )
+        meta = _stored_metadata(temp_registry, doc_id)
+        assert meta["reconciliation"]
+        assert meta["content_tags"] == caller_tags
+
+    def test_classifier_error_still_stores_the_document(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _enable(monkeypatch)
+        monkeypatch.setenv("TRELLIS_ENABLE_RECONCILE_ON_WRITE", "1")
+        monkeypatch.setattr(server_mod, "_build_llm_client", lambda _registry: None)
+        monkeypatch.setattr(ingest_mod, "_ingest_classifier", _BoomPipeline())
+
+        result = save_memory(_INFRA)
+        assert result.startswith("Memory saved:")
+        assert "content_tags" not in _stored_metadata(temp_registry, _doc_id(result))
 
     def test_flag_off_leaves_the_reconcile_tier_untagged(
         self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch

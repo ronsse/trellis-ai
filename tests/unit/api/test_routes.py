@@ -246,6 +246,12 @@ def test_create_document_classify_flag_on(client, monkeypatch):
 
 
 def test_create_document_classify_does_not_clobber_existing_tags(client, monkeypatch):
+    """Caller tags survive — and the positive control proves the seam is wired.
+
+    Asserting only that the caller's tags came back is trivially true if
+    ``classify_metadata_on_write`` is never called at all, so the same test
+    writes a second, tag-less document and asserts that one IS tagged.
+    """
     monkeypatch.setenv(_CLASSIFY_FLAG, "1")
     caller_tags = {"domain": ["backend"], "signal_quality": "high"}
     resp = client.post(
@@ -254,6 +260,23 @@ def test_create_document_classify_does_not_clobber_existing_tags(client, monkeyp
     )
     assert resp.status_code == 200
     assert _stored_metadata(resp.json()["doc_id"])["content_tags"] == caller_tags
+
+    control = client.post("/api/v1/documents", json={"content": _INFRA})
+    assert control.status_code == 200
+    assert _stored_metadata(control.json()["doc_id"])["content_tags"]["domain"] == []
+
+
+def test_create_document_null_metadata_does_not_fail_request(client, monkeypatch):
+    """``"metadata": null`` is a shape clients send; it must not 500.
+
+    Regression: the seam's guards used to run outside its try/except, so a
+    non-mapping ``metadata`` raised ``TypeError`` out of a durable write path
+    (200 with the flag off, 500 with it on).
+    """
+    monkeypatch.setenv(_CLASSIFY_FLAG, "1")
+    resp = client.post("/api/v1/documents", json={"content": _INFRA, "metadata": None})
+    assert resp.status_code == 200
+    assert _stored_metadata(resp.json()["doc_id"])["content_tags"]["domain"] == []
 
 
 def test_create_document_classify_failure_does_not_fail_request(client, monkeypatch):
@@ -295,7 +318,11 @@ def test_ingest_evidence_classify_flag_on(client, monkeypatch):
 
 
 def test_ingest_evidence_classify_skips_content_less_evidence(client, monkeypatch):
-    """A uri-only evidence row has nothing to classify."""
+    """A uri-only evidence row has nothing to classify.
+
+    The positive control (same test, evidence WITH content) is what makes the
+    absence assertion mean "correctly skipped" rather than "never wired".
+    """
     monkeypatch.setenv(_CLASSIFY_FLAG, "1")
     resp = client.post(
         "/api/v1/evidence",
@@ -307,6 +334,11 @@ def test_ingest_evidence_classify_skips_content_less_evidence(client, monkeypatc
     )
     assert resp.status_code == 200
     assert "content_tags" not in _stored_metadata(resp.json()["evidence_id"])
+
+    control = _post_evidence(client)
+    assert control.status_code == 200
+    control_meta = _stored_metadata(control.json()["evidence_id"])
+    assert control_meta["content_tags"]["domain"] == []
 
 
 def test_ingest_evidence_classify_failure_does_not_fail_request(client, monkeypatch):

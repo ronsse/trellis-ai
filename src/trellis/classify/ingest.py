@@ -129,8 +129,20 @@ _ingest_classifier: ClassifierPipeline | None = None
 
 
 def get_ingest_classifier() -> ClassifierPipeline:
-    """Return the process-wide deterministic classify-on-write pipeline."""
+    """Return the process-wide deterministic classify-on-write pipeline.
+
+    A single instance per process is only sound because
+    :func:`build_ingest_classifier` is config-free, which in turn is only
+    sound because the ``domain`` facet is dropped at persist time
+    (``include_domain=False``). If ``domain`` ever becomes persistable, both
+    assumptions have to be revisited together.
+    """
     global _ingest_classifier  # noqa: PLW0603
+    # Double-checked: the lock exists solely to serialize the one-time build,
+    # so once it is built every classified write reads the global lock-free
+    # (attribute reads are atomic under the GIL).
+    if _ingest_classifier is not None:
+        return _ingest_classifier
     with _classifier_lock:
         if _ingest_classifier is None:
             _ingest_classifier = build_ingest_classifier()
@@ -147,22 +159,30 @@ def classify_metadata_on_write(
     """Return ``metadata`` with deterministic tags merged in, if warranted.
 
     The single-document counterpart to the ``sync_records`` inline block: the
-    same flag, the same tag shape, the same four safety properties, so a
-    document written through MCP ``save_memory`` / ``save_knowledge`` or the
-    REST document / evidence routes carries byte-identical tags to one written
-    through corpus ingest.
+    same flag, the same ``classify_for_ingest`` call, so a document written
+    through MCP ``save_memory`` / ``save_knowledge`` or the REST document /
+    evidence routes carries the same tag shape as one written through corpus
+    ingest, with the same four safety properties.
 
     * **Flag-gated** on ``TRELLIS_ENABLE_CLASSIFY_ON_INGEST`` — off returns the
       caller's mapping untouched, so behaviour is byte-identical to before.
     * **Fill-if-absent** — existing ``content_tags`` (a prior write, or the LLM
       enrichment pass) are never clobbered.
-    * **Fail-soft** — any failure logs and returns the caller's mapping; a
-      classification error must never block or fail a durable write.
+    * **Fail-soft** — *any* failure logs and returns the caller's mapping; a
+      classification error must never block or fail a durable write. This is
+      total: a ``metadata`` that is not a mapping at all degrades to a warning,
+      it does not raise into the write path.
     * **No auto-``domain``** — inherited from :func:`classify_for_ingest`'s
       ``include_domain=False`` default (see the module docstring).
 
     Empty / whitespace-only content is a no-op too (uri-only evidence), the
     same skip the embed-on-ingest hook applies.
+
+    Two deliberate deviations from ``sync_records``, which is why the two are
+    not (yet) one function: this skips empty content, and it inspects only the
+    caller's mapping — ``sync_records`` classifies against metadata already
+    merged with the stored document's, and needs the tag dict separately to
+    propagate onto the chunk rows.
 
     Args:
         metadata: The document metadata about to be persisted. Never mutated;
@@ -179,14 +199,14 @@ def classify_metadata_on_write(
     """
     if not classify_on_ingest_enabled():
         return metadata
-    if "content_tags" in metadata:
-        return metadata
-    if not content or not content.strip():
-        # Nothing to classify (e.g. uri-only evidence) — tagging an empty
-        # string would record structural verdicts about no content at all.
-        return metadata
 
     try:
+        if "content_tags" in metadata:
+            return metadata
+        if not content or not content.strip():
+            # Nothing to classify (e.g. uri-only evidence) — tagging an empty
+            # string would record structural verdicts about no content at all.
+            return metadata
         classify_meta = classify_for_ingest(
             get_ingest_classifier(),
             content,
@@ -197,8 +217,10 @@ def classify_metadata_on_write(
         )
     except Exception:
         # GRACEFUL-DEGRADATION: classify_for_ingest already swallows classifier
-        # errors; this catches the rest of the seam (pipeline construction, a
-        # non-numeric auto_importance) so no write path can ever fail on it.
+        # errors; the guards live inside this try so the *whole* seam is total
+        # — pipeline construction, a non-numeric auto_importance, and a
+        # ``metadata`` that is not a mapping (an API caller can send
+        # ``"metadata": null``) all degrade to an untagged write, never a 500.
         logger.warning("classify_on_write_failed", doc_id=doc_id, exc_info=True)
         return metadata
 

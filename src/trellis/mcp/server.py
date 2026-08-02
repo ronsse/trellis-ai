@@ -1111,11 +1111,10 @@ def save_memory(
                 data={"stage": "minhash_find"},
             )
 
-        # Classify-on-write (TRELLIS_ENABLE_CLASSIFY_ON_INGEST=1). Runs after
-        # both dedup stages — a dedup hit stores nothing to tag — and before
-        # the put, so the tags land in the same row. Rebinding ``metadata``
-        # also carries them into the MEMORY_STORED payload and the embed
-        # hook's vector row below. Fail-soft and fill-if-absent inside.
+        # Classify-on-write (see classify_metadata_on_write). Placement is
+        # load-bearing: after both dedup stages (a hit stores nothing to tag)
+        # and before the put, and the rebind carries the tags into the
+        # MEMORY_STORED payload and the embed hook's vector row below.
         metadata = classify_metadata_on_write(metadata, content, doc_id=doc_id or "")
 
         stored_id = registry.knowledge.document_store.put(
@@ -1189,8 +1188,7 @@ def _store_new_memory(
     (MEMORY_STORED payload, embed hook) must see what was actually persisted —
     every reconcile verdict that stores a doc funnels through here.
     """
-    # Classify-on-write (TRELLIS_ENABLE_CLASSIFY_ON_INGEST=1) — same seam as
-    # the deterministic tier's put. Fail-soft and fill-if-absent inside.
+    # Classify-on-write — same seam as the deterministic tier's put.
     metadata = classify_metadata_on_write(metadata, content, doc_id=doc_id or "")
     stored_id: str = document_store.put(doc_id, content, metadata=metadata)
     _index_stored_memory(registry, stored_id, content)
