@@ -1,6 +1,6 @@
 # ADR amendment: Coding-agent loop — Cohort 2 (autonomous spawn)
 
-**Status:** Proposed 2026-05-16
+**Status:** Accepted 2026-08-02 (gate (b) recorded — see §0.1; gate (a) still open, so no spawn can run)
 **Amends:** [`adr-coding-agent-loop.md`](./adr-coding-agent-loop.md) (Proposed 2026-05-11)
 **Deciders:** Trellis core
 **Related:**
@@ -10,6 +10,41 @@
 - `TODO.md` — "Item 7 Cohort 2 — Sandboxed Claude Code spawn" deferred entry
 
 ---
+
+## 0.1 Owner authorization (gate (b)) — recorded 2026-08-02
+
+The operator (nronsse) authorizes autonomous spawn under the §2 controls
+exactly as written, and additionally declares a **second proposal source**:
+
+> The curated **GitHub issue queue** may act as a proposal source alongside the
+> EventLog telemetry clusters of §2.2, for issues a human has labelled
+> `mechanical` + `ready` and given an explicit `files_allowed` scope. Every
+> control in §2.1–§2.8 applies to an issue-sourced proposal unchanged — the
+> source is the only thing that differs.
+
+Why this was needed: the Cohort-1 signal path (`EXTRACTION_FAILED` clusters,
+`WELL_KNOWN_CANDIDATE` events) is empty on the live deployment, so a
+telemetry-only selector could never produce a proposal to review. The issue
+queue is the source where the human judgment this loop depends on has *already*
+happened.
+
+**This authorization does not start anything.** Three independent gates remain,
+and all must clear before a single spawn runs:
+
+1. **Gate (a) is still open** (§2.0) — no `COHORT2_REVIEW_RECORDED` event
+   exists. `spawn-coder` refuses until the operator reviews N ≥ 5 real
+   proposals and records the pass.
+2. **The kill switch is off** (§2.1) — `TRELLIS_AUTONOMOUS_SPAWN_ENABLED`
+   defaults to `false` in every deployment shape.
+3. **The spawn harness does not exist yet.** As of 2026-08-02 the shipped
+   surface is guardrails-only: `code_authoring.safety` (§2.5/§2.6 decisions)
+   and `code_authoring.issue_selector` (the source seam above). There is no
+   worktree creation, no Claude Code invocation, no `gh pr create`, and no
+   budget ledger. Nothing in this package can write to a repository.
+
+Controls-before-capability is deliberate: the guardrails are testable in
+isolation, and shipping them first means the capability lands into an
+already-enforced boundary rather than the reverse.
 
 ## 0. What this amendment does and does not do
 
