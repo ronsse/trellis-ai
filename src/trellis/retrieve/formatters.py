@@ -50,13 +50,16 @@ def format_pack_as_markdown(
     for item in items:
         item_type = item.get("item_type", "item")
         excerpt = item.get("excerpt", "")
-        score = item.get("relevance_score", 0.0)
         item_id = item.get("item_id", "")
 
-        # Build item block — full item_id in backticks so it's copy-pastable
+        # Build item block - full item_id in backticks so it's copy-pastable.
+        # No relevance number is shown: after RRF fusion the score is a
+        # reciprocal-rank sum (typically ~0.01 to 0.02), not a calibrated 0-1
+        # relevance. Rendering it as "relevance: 0.02" reads as low-confidence
+        # on every item and leads agents to discount the whole pack. Item
+        # order already conveys ranking; exact scores and per-strategy
+        # breakdowns live in the PACK_ASSEMBLED telemetry for offline analysis.
         header = f"## [{item_type}] `{item_id}`"
-        if score > 0:
-            header += f" (relevance: {score:.2f})"
 
         block = f"{header}\n{excerpt}\n"
         block_tokens = _estimate_tokens(block)
@@ -328,13 +331,11 @@ def format_sectioned_pack_as_markdown(
             excerpt = item.get("excerpt", "")
             item_type = item.get("item_type", "item")
             item_id = item.get("item_id", "")
-            score = item.get("relevance_score", 0.0)
 
-            # Full item_id in backticks so it's copy-pastable for feedback
-            block = f"- `{item_id}` ({item_type}"
-            if score > 0:
-                block += f", {score:.2f}"
-            block += f"): {excerpt}"
+            # Full item_id in backticks so it's copy-pastable for feedback.
+            # Score intentionally omitted — the RRF-fused value is ordinal, not
+            # a calibrated relevance; see format_pack_as_markdown for rationale.
+            block = f"- `{item_id}` ({item_type}): {excerpt}"
             block_tokens = _estimate_tokens(block)
 
             if used + block_tokens > max_tokens:
