@@ -23,6 +23,7 @@ import structlog
 from pydantic import Field
 
 from trellis.core.base import TrellisModel
+from trellis.feedback.models import SUCCESS_RATING_THRESHOLD
 from trellis.learning.pack_observations import join_pack_feedback
 from trellis.schemas.advisory import DriftPattern
 from trellis.schemas.parameters import ParameterScope
@@ -37,7 +38,10 @@ logger = structlog.get_logger(__name__)
 
 # Thresholds for classification.  Still the canonical defaults — the
 # ``registry`` parameter on each function can override them per scope.
-_SUCCESS_RATING_THRESHOLD = 0.5
+# The success threshold is shared with the write side (feedback surfaces
+# derive ``success`` from ``rating`` with the same value) so read and
+# write cannot drift apart on what a 0.5 means.
+_SUCCESS_RATING_THRESHOLD = SUCCESS_RATING_THRESHOLD
 _NOISE_RATE_THRESHOLD = 0.3
 
 # Advisory fitness thresholds

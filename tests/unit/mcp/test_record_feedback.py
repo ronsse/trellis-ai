@@ -29,6 +29,10 @@ from trellis.feedback.recording import (
     reconcile_feedback_log_to_event_log,
 )
 from trellis.mcp.server import record_feedback as _record_feedback
+from trellis.retrieve.metrics_timeseries import (
+    METRIC_REFERENCE_RATE,
+    compute_timeseries,
+)
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 
@@ -138,7 +142,9 @@ class TestBooleanFallback:
         (payload,) = _payloads(temp_registry)
         assert payload["success"] is True
         assert payload["rating"] == 1.0
-        assert _rows(temp_registry)[0]["rating"] == 1.0
+        # The row records "ungraded" rather than a fabricated 1.0; the
+        # event payload derives the grade, so a replay reproduces it.
+        assert _rows(temp_registry)[0]["rating"] is None
 
     def test_success_false_is_rating_zero(self, temp_registry: StoreRegistry) -> None:
         result = record_feedback(pack_id="pack_bad", success=False)
@@ -165,7 +171,11 @@ class TestBooleanFallback:
         events = temp_registry.operational.event_log.get_events(entity_id="trace_1")
         assert len(events) == 1
         assert events[0].entity_type == "trace"
-        assert _rows(temp_registry)[0]["run_id"] == "trace_1"
+        row = _rows(temp_registry)[0]
+        assert row["run_id"] == "trace_1"
+        # Stamped even without a pack — it is what reconcile recovers
+        # the trace association from after a soft-failed emit.
+        assert row["metadata"]["trace_id"] == "trace_1"
 
 
 class TestJsonlParity:
@@ -231,6 +241,23 @@ class TestFailingEventSink:
         # effectiveness joins can still use the recovered event.
         assert payload["pack_id"] == "pack_recover"
 
+    def test_trace_only_association_survives_replay(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Symmetric with the pack case: trace-level feedback replayed
+        # after a soft-failed emit must come back reachable by entity,
+        # not with entity_id=None and the association buried in run_id.
+        event_log = temp_registry.operational.event_log
+        monkeypatch.setattr(event_log, "emit", _emit_boom)
+        record_feedback(trace_id="trace_only_1", rating=0.9)
+        monkeypatch.undo()
+
+        result = reconcile_feedback_log_to_event_log(_log_dir(temp_registry), event_log)
+        assert (result.scanned, result.emitted, result.failed) == (1, 1, 0)
+        (event,) = event_log.get_events(entity_id="trace_only_1")
+        assert event.entity_type == "trace"
+        assert event.payload["rating"] == 0.9
+
 
 class TestAttributionSurvives:
     """Element-level ids reach both the event payload and the JSONL row."""
@@ -248,9 +275,13 @@ class TestAttributionSurvives:
         assert payload["helpful_item_ids"] == ["doc_a", "entity_b"]
         assert payload["unhelpful_item_ids"] == ["doc_noise"]
         assert payload["followed_advisory_ids"] == ["adv_1"]
-        # Everything cited counts as served, so effectiveness can score
-        # the unreferenced items too.
-        assert payload["items_served"] == ["doc_a", "entity_b", "doc_noise"]
+        # items_served stays empty: the cited ids are what the agent
+        # *referenced*, not what the pack *contained*. Unioning them
+        # would report a 100% reference rate for every graded pack.
+        # Empty is falsy, so the read side keeps falling back to the
+        # joined PACK_ASSEMBLED injected_item_ids (see
+        # ``test_reference_rate_uses_pack_contents_not_citations``).
+        assert payload["items_served"] == []
 
         (row,) = _rows(temp_registry)
         assert row["items_referenced"] == ["doc_a", "entity_b"]
@@ -266,3 +297,31 @@ class TestAttributionSurvives:
         assert row["metadata"]["trace_id"] == "trace_z"
         (payload,) = _payloads(temp_registry)
         assert payload["pack_id"] == "pack_z"
+
+    def test_reference_rate_uses_pack_contents_not_citations(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        """Citing two of ten served items is a 20% reference rate, not 100%.
+
+        Synthesizing ``items_served`` from the cited ids would make the
+        denominator equal the numerator for every attributed pack, so the
+        Memory Explorer's reference-rate chart would read a hard 1.0 on
+        exactly the calls this tool exists to encourage.
+        """
+        event_log = temp_registry.operational.event_log
+        served = [f"doc_{i}" for i in range(10)]
+        event_log.emit(
+            EventType.PACK_ASSEMBLED,
+            source="test",
+            entity_id="pack_rr",
+            entity_type="pack",
+            payload={"intent": "t", "injected_item_ids": served},
+        )
+
+        record_feedback(
+            pack_id="pack_rr", rating=0.6, helpful_item_ids=["doc_0", "doc_1"]
+        )
+
+        result = compute_timeseries(event_log, metric=METRIC_REFERENCE_RATE, days=1)
+        (point,) = result.series[0].points
+        assert point.value == pytest.approx(0.2)

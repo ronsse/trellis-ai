@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException
 
 from trellis.classify.ingest import classify_metadata_on_write
 from trellis.feedback.models import PackFeedback
+from trellis.feedback.recording import feedback_log_dir
 from trellis.feedback.recording import record_feedback as record_pack_feedback
 from trellis.mutate import (
     Command,
@@ -178,46 +179,32 @@ def pack_feedback(pack_id: str, req: PackFeedbackRequest) -> PackFeedbackRespons
             detail="stores_dir is not configured; cannot record pack feedback",
         )
 
-    # Map the element-level surface onto PackFeedback. helpful_item_ids
-    # become items_referenced (the positive signal to_event_payload
-    # promotes to helpful_item_ids); items_served is the union of cited
-    # items. The "actively unhelpful", "advisory followed" and graded
-    # ``rating`` signals are first-class PackFeedback fields, so they
-    # reach the event payload top level where the fitness loops read
-    # them (and survive a JSONL replay). Only free text stays in
-    # metadata.
-    helpful = list(req.helpful_item_ids)
-    unhelpful = list(req.unhelpful_item_ids)
-    items_served = list(dict.fromkeys([*helpful, *unhelpful]))
-    # ``pack_id`` is not a PackFeedback field; stamping it in metadata is
-    # what lets ``reconcile_feedback_log_to_event_log`` replay a row with
-    # its pack association after a soft-failed emit.
-    metadata: dict[str, Any] = {"pack_id": pack_id}
-    if req.comment:
-        metadata["notes"] = req.comment
-
-    feedback = PackFeedback(
+    # Shared with the MCP ``record_feedback`` tool: one mapping of the
+    # element-level surface onto PackFeedback, so the two agent-facing
+    # surfaces cannot disagree about what identical inputs mean. In
+    # particular ``success`` is derived from ``rating`` when the caller
+    # omits it, and ``items_served`` is left empty rather than unioned
+    # from the cited ids (see :meth:`PackFeedback.from_agent_signal`).
+    feedback = PackFeedback.from_agent_signal(
         run_id=req.target_id or pack_id,
-        phase="feedback",
-        intent="",
-        outcome="success" if req.success else "failure",
-        items_served=items_served,
-        items_referenced=helpful,
+        success=req.success,
         rating=req.rating,
-        unhelpful_item_ids=unhelpful,
-        followed_advisory_ids=list(req.followed_advisory_ids),
-        metadata=metadata,
+        helpful_item_ids=req.helpful_item_ids,
+        unhelpful_item_ids=req.unhelpful_item_ids,
+        followed_advisory_ids=req.followed_advisory_ids,
+        pack_id=pack_id,
+        notes=req.comment,
     )
     result = record_pack_feedback(
         feedback,
-        log_dir=stores_dir / "feedback",
+        log_dir=feedback_log_dir(stores_dir),
         event_log=registry.operational.event_log,
         pack_id=pack_id,
     )
     return PackFeedbackResponse(
         pack_id=pack_id,
         feedback_id=result.feedback_id,
-        feedback="positive" if req.success else "negative",
+        feedback="positive" if feedback.succeeded else "negative",
         event_log_in_sync=result.event_log_in_sync,
         event_log_emitted=result.event_log_emitted,
         event_log_skipped_as_duplicate=result.event_log_skipped_as_duplicate,

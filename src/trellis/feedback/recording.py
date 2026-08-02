@@ -28,6 +28,21 @@ _DEFAULT_COMPONENT_ID = "retrieve.pack_builder.PackBuilder"
 #: Overridable per-call so agent-facing surfaces keep their provenance.
 _DEFAULT_EVENT_SOURCE = "feedback.record"
 
+#: Sub-directory of ``StoreRegistry.stores_dir`` holding the audit log.
+_FEEDBACK_LOG_SUBDIR = "feedback"
+
+
+def feedback_log_dir(stores_dir: Path | str) -> Path:
+    """Directory holding ``pack_feedback.jsonl`` for a given stores dir.
+
+    One spelling of the location, so the MCP tool, the REST route and
+    ``worker curate --reconcile-first`` cannot look in different places.
+    Always derive ``stores_dir`` from ``StoreRegistry.stores_dir`` — it
+    honours ``data_dir:`` in ``config.yaml``, which re-deriving from the
+    environment does not.
+    """
+    return Path(stores_dir) / _FEEDBACK_LOG_SUBDIR
+
 
 @dataclass(frozen=True)
 class FeedbackRecordResult:
@@ -282,9 +297,12 @@ def reconcile_feedback_log_to_event_log(
             first and from ``metadata["pack_id"]`` second — the writers
             that know the pack stamp it there precisely so an emit that
             failed at record time can be replayed with its pack
-            association intact. Without either, the emitted event has
-            ``entity_id=None`` and no ``payload.pack_id``, which the
-            advisory/effectiveness joins cannot use.
+            association intact. Trace-level feedback (no pack) falls
+            back to ``metadata["trace_id"]`` and is re-emitted with
+            ``entity_type="trace"``, matching what the original emit
+            would have written. Without any of the three, the emitted
+            event has ``entity_id=None`` and no ``payload.pack_id``,
+            which the advisory/effectiveness joins cannot use.
 
     Returns:
         :class:`ReconcileResult` with counts and the list of
@@ -300,12 +318,18 @@ def reconcile_feedback_log_to_event_log(
             continue
         recovered = lookup.get(fb.feedback_id) or fb.metadata.get("pack_id")
         pack_id = str(recovered) if recovered else None
+        entity_id: str | None = pack_id
+        entity_type: str | None = "pack" if pack_id else None
+        if entity_id is None:
+            trace_id = fb.metadata.get("trace_id")
+            if trace_id:
+                entity_id, entity_type = str(trace_id), "trace"
         try:
             event_log.emit(
                 EventType.FEEDBACK_RECORDED,
                 source="feedback.reconcile",
-                entity_id=pack_id,
-                entity_type="pack" if pack_id else None,
+                entity_id=entity_id,
+                entity_type=entity_type,
                 payload=fb.to_event_payload(pack_id=pack_id),
             )
             result.emitted += 1
@@ -375,7 +399,7 @@ def _emit_outcome(
     occurred_at = _parse_timestamp(feedback.timestamp_utc)
     items_served = len(feedback.items_served)
     items_referenced = len(feedback.items_referenced)
-    success = feedback.outcome in {"success", "completed"}
+    success = feedback.succeeded
 
     metadata: dict[str, object] = {
         "pack_outcome": feedback.outcome,
@@ -424,6 +448,7 @@ def load_feedback_log(log_dir: Path | str) -> list[PackFeedback]:
             if not stripped:
                 continue
             data = json.loads(stripped)
+            metadata = data.get("metadata") or {}
             kwargs: dict[str, object] = {
                 "run_id": data["run_id"],
                 "phase": data["phase"],
@@ -433,14 +458,18 @@ def load_feedback_log(log_dir: Path | str) -> list[PackFeedback]:
                 "items_referenced": data.get("items_referenced", []),
                 "relevance_scores": data.get("relevance_scores", {}),
                 # Absent on rows written before these fields existed;
-                # the defaults match "ungraded, no attribution".
-                "rating": data.get("rating"),
+                # the defaults match "ungraded, no attribution". The
+                # ``metadata`` fallback recovers the grade from rows the
+                # REST route wrote while ``rating`` was still a metadata
+                # key — without it a replay would overwrite a real 0.3
+                # with a derived 1.0 at the key consumers read.
+                "rating": data.get("rating", metadata.get("rating")),
                 "unhelpful_item_ids": data.get("unhelpful_item_ids", []),
                 "followed_advisory_ids": data.get("followed_advisory_ids", []),
                 "intent_family": data.get("intent_family", ""),
                 "timestamp_utc": data.get("timestamp_utc", ""),
                 "agent_id": data.get("agent_id"),
-                "metadata": data.get("metadata", {}),
+                "metadata": metadata,
             }
             # Older JSONL rows pre-date feedback_id; only pass through when
             # present so the dataclass default (fresh ULID) doesn't stomp

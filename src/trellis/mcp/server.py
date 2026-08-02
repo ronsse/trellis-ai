@@ -42,6 +42,7 @@ from trellis.auth import SCOPE_INGEST, SCOPE_MUTATE, SCOPE_READ
 from trellis.classify.ingest import classify_metadata_on_write
 from trellis.extract.trace_ingest_hook import run_trace_extraction
 from trellis.feedback.models import PackFeedback
+from trellis.feedback.recording import feedback_log_dir
 from trellis.feedback.recording import record_feedback as record_pack_feedback
 from trellis.logging import configure_stderr_logging
 from trellis.mcp.auth import (
@@ -110,18 +111,6 @@ POLICY_DENIED = -32002
 
 #: A governed mutation executed but came back non-success.
 MUTATION_FAILED = -32003
-
-#: Rating at or above which an ungraded ``success`` is inferred as True.
-#: Mirrors the default the fitness loops use when a feedback event has no
-#: ``success`` key (``retrieve.effectiveness`` / ``retrieve.advisory_generator``,
-#: both tunable via the parameter registry). Kept as a local default rather
-#: than imported so the tool surface doesn't depend on analysis internals.
-_SUCCESS_RATING_THRESHOLD = 0.5
-
-#: Sub-directory of ``stores_dir`` holding ``pack_feedback.jsonl``. Same
-#: location the REST pack-feedback route writes to, so both surfaces
-#: append to one audit log and one reconcile run covers both.
-_FEEDBACK_LOG_SUBDIR = "feedback"
 
 
 def _raise_invalid_params(
@@ -1652,19 +1641,6 @@ def record_feedback(
             data={"field": "rating", "value": rating},
         )
 
-    # ``success`` and ``rating`` are two views of one signal, and every
-    # consumer reads ``payload["success"]`` first (``rating`` is only its
-    # fallback). So a graded call whose ``success`` still defaulted to
-    # True would be read as a plain win and the gradient would never
-    # reach the loops — which is why ``success`` defaults to *unset* and
-    # is derived from the grade. An explicit ``success`` still wins: the
-    # caller is making a claim the threshold shouldn't overrule.
-    if success is None:
-        succeeded = rating >= _SUCCESS_RATING_THRESHOLD if rating is not None else True
-    else:
-        succeeded = success
-    graded = rating if rating is not None else float(succeeded)
-
     registry = _get_registry()
     stores_dir = registry.stores_dir
     if stores_dir is None:
@@ -1673,35 +1649,20 @@ def record_feedback(
             data={"setting": "stores_dir"},
         )
 
-    # Map the tool surface onto PackFeedback, mirroring the REST route:
-    # helpful items are the referenced ones, items_served is the union of
-    # everything cited, and free-text notes ride in metadata.
-    helpful = list(helpful_item_ids or [])
-    unhelpful = list(unhelpful_item_ids or [])
-    metadata: dict[str, Any] = {}
-    if notes:
-        metadata["notes"] = notes
-    if has_pack:
-        # pack_id is not a PackFeedback field, so the JSONL row would
-        # otherwise lose it — and a row replayed by reconcile without a
-        # pack association can't be joined to its PACK_ASSEMBLED event.
-        metadata["pack_id"] = pack_id
-    if has_trace and has_pack:
-        # pack_id wins for the event's entity; keep the trace association
-        # rather than dropping it on the floor.
-        metadata["trace_id"] = trace_id
-
-    feedback = PackFeedback(
+    # Shared with the REST pack-feedback route so the two agent-facing
+    # surfaces agree on what identical inputs mean — including deriving
+    # ``success`` from ``rating`` and leaving ``items_served`` empty
+    # rather than fabricating it from the cited ids.
+    feedback = PackFeedback.from_agent_signal(
         run_id=trace_id if has_trace else pack_id,
-        phase="feedback",
-        intent="",
-        outcome="success" if succeeded else "failure",
-        items_served=list(dict.fromkeys([*helpful, *unhelpful])),
-        items_referenced=helpful,
-        rating=graded,
-        unhelpful_item_ids=unhelpful,
-        followed_advisory_ids=list(followed_advisory_ids or []),
-        metadata=metadata,
+        success=success,
+        rating=rating,
+        helpful_item_ids=helpful_item_ids or (),
+        unhelpful_item_ids=unhelpful_item_ids or (),
+        followed_advisory_ids=followed_advisory_ids or (),
+        pack_id=pack_id if has_pack else None,
+        trace_id=trace_id if has_trace else None,
+        notes=notes,
     )
 
     # One path writes both sinks: the durable pack_feedback.jsonl row and
@@ -1711,7 +1672,7 @@ def record_feedback(
     # out of an agent-facing tool.
     result = record_pack_feedback(
         feedback,
-        log_dir=stores_dir / _FEEDBACK_LOG_SUBDIR,
+        log_dir=feedback_log_dir(stores_dir),
         event_log=registry.operational.event_log,
         pack_id=pack_id if has_pack else None,
         source="mcp",
@@ -1720,7 +1681,8 @@ def record_feedback(
     )
 
     target = f"pack: {pack_id}" if has_pack else f"trace: {trace_id}"
-    status = "positive" if succeeded else "negative"
+    status = "positive" if feedback.succeeded else "negative"
+    graded = feedback.effective_rating
     message = f"Feedback recorded ({status}, rating {graded:.2f}) for {target}"
     if not result.event_log_in_sync:
         message += (

@@ -392,7 +392,7 @@ class AsyncTrellisClient:
     async def record_feedback(
         self,
         pack_id: str,
-        success: bool,
+        success: bool | None = None,
         *,
         helpful_item_ids: list[str] | None = None,
         unhelpful_item_ids: list[str] | None = None,

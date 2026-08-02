@@ -65,7 +65,7 @@ from trellis.retrieve.effectiveness import (
 from trellis.stores.advisory_store import AdvisoryStore
 from trellis_cli._meta_wiring import wrap_cli_meta_analysis
 from trellis_cli.analyze import _build_learning_registry_or_exit
-from trellis_cli.config import get_config_dir, get_data_dir, get_stores_dir
+from trellis_cli.config import get_config_dir, get_data_dir
 from trellis_cli.exit_codes import EXIT_INTERNAL
 from trellis_cli.output import emit_json
 from trellis_cli.stores import (
@@ -855,13 +855,24 @@ def _reconcile_before_cycle() -> None:
     earlier ad-hoc runs used. Reconciliation is keyed on ``feedback_id``
     and idempotent, so covering both costs one extra empty scan and
     never double-emits.
+
+    ``stores_dir`` comes off the registry rather than being re-derived
+    from the environment: ``StoreRegistry.from_config_dir`` lets
+    ``data_dir:`` in ``config.yaml`` override ``$TRELLIS_DATA_DIR``, so
+    an env-only derivation would scan an empty directory and report a
+    healthy no-op on exactly the deployments ``trellis admin init
+    --data-dir`` produces.
     """
     from trellis.feedback.recording import (  # noqa: PLC0415
+        feedback_log_dir,
         reconcile_feedback_log_to_event_log,
     )
 
     event_log = get_event_log()
-    log_dirs = [get_stores_dir() / "feedback", get_data_dir()]
+    stores_dir = _get_registry().stores_dir
+    log_dirs = [get_data_dir()]
+    if stores_dir is not None:
+        log_dirs.insert(0, feedback_log_dir(stores_dir))
     found = [d for d in log_dirs if (d / "pack_feedback.jsonl").exists()]
     if not found:
         # Loud about the no-op: "reconcile ran and found nothing" and

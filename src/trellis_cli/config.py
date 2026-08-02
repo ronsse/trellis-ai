@@ -20,17 +20,6 @@ def get_data_dir() -> Path:
     return Path(os.environ.get("TRELLIS_DATA_DIR", str(get_config_dir() / "data")))
 
 
-def get_stores_dir() -> Path:
-    """Get the store-files directory (``<data_dir>/stores``).
-
-    The same layout ``StoreRegistry.from_config_dir`` applies. Named here
-    so callers that need a sibling of the store files — the feedback
-    audit log lives in ``<stores_dir>/feedback`` — don't each re-derive
-    it.
-    """
-    return get_data_dir() / "stores"
-
-
 class TrellisConfig(TrellisModel):
     """CLI configuration."""
 

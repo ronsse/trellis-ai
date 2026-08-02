@@ -369,7 +369,7 @@ class TrellisClient:
     def record_feedback(
         self,
         pack_id: str,
-        success: bool,
+        success: bool | None = None,
         *,
         helpful_item_ids: list[str] | None = None,
         unhelpful_item_ids: list[str] | None = None,
@@ -392,6 +392,9 @@ class TrellisClient:
             pack_id: Pack whose items are being graded (the ``pack_id``
                 shown in the pack response header).
             success: Whether the task the pack supported succeeded.
+                Omit when passing ``rating`` — the server then derives it
+                from the grade, so a mediocre pack is not recorded as an
+                unqualified win.
             helpful_item_ids: Pack ``item_id``s that actually helped.
                 Recorded as the positive ``items_referenced`` signal.
             unhelpful_item_ids: Pack ``item_id``s that were noise or
@@ -399,8 +402,9 @@ class TrellisClient:
             followed_advisory_ids: ``advisory_id``s the agent followed.
             target_id: Trace or entity the pack supported, if any. Used
                 as the feedback ``run_id`` when present.
-            rating: Explicit 0.0-1.0 score; defaults to derive from
-                ``success`` server-side.
+            rating: Explicit 0.0-1.0 score. Preferred over ``success``
+                alone — only graded feedback gives the fitness loops any
+                variance to learn from.
             comment: Free-text notes about what worked or didn't.
 
         Returns:

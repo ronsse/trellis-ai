@@ -205,12 +205,21 @@ class PackFeedbackRequest(WireRequestModel):
     authoritative ``FEEDBACK_RECORDED`` event.
     """
 
-    success: bool
+    #: Explicit outcome claim. Optional so a graded call can omit it:
+    #: every consumer reads ``payload["success"]`` before falling back to
+    #: ``rating``, so shipping a defaulted ``True`` alongside
+    #: ``rating=0.3`` would have the loops read a mediocre pack as a
+    #: plain win. ``None`` means "derive it from the rating" —
+    #: :data:`trellis.feedback.models.SUCCESS_RATING_THRESHOLD`.
+    success: bool | None = None
     helpful_item_ids: list[str] = Field(default_factory=list)
     unhelpful_item_ids: list[str] = Field(default_factory=list)
     followed_advisory_ids: list[str] = Field(default_factory=list)
     target_id: str | None = None  # trace/entity the pack supported, if any
-    rating: float | None = None  # explicit 0.0-1.0 score; defaults from success
+    #: Explicit 0.0-1.0 score; defaults from ``success``. Bounded here
+    #: because it lands at ``payload["rating"]``, the key the fitness
+    #: loops threshold against — the MCP surface enforces the same range.
+    rating: float | None = Field(default=None, ge=0.0, le=1.0)
     comment: str | None = None  # free-text notes
 
 
