@@ -12,7 +12,9 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import MagicMock
 
+from trellis.retrieve import EXCERPT_ELLIPSIS, EXCERPT_MAX_CHARS
 from trellis.retrieve.observation_strategy import ObservationSearch
+from trellis.schemas.pack import PackItem
 from trellis.schemas.well_known import (
     HAS_MEASUREMENT,
     HAS_OBSERVATION,
@@ -458,3 +460,80 @@ def test_strategy_skips_has_measurement_when_measurements_disabled() -> None:
     }
     assert HAS_OBSERVATION in edge_kinds_queried
     assert HAS_MEASUREMENT not in edge_kinds_queried
+
+
+# ---------------------------------------------------------------------------
+# Excerpt construction
+# ---------------------------------------------------------------------------
+
+
+def _measurement_node(node_id: str, **props: Any) -> dict[str, Any]:
+    """A Measurement node shaped like ``MeasurementRecordHandler`` writes it.
+
+    Notably *without* a ``content`` property — the handler writes
+    ``metric_name`` / ``metric_value`` / ``unit`` and nothing else.
+    """
+    return {
+        "node_id": node_id,
+        "node_type": MEASUREMENT,
+        "node_role": "semantic",
+        "properties": {
+            "measurement_id": node_id,
+            "subject_entity_id": "dataset:x",
+            "observer_agent_id": "test-agent",
+            "confidence": 0.8,
+            "measured_at": NOW.isoformat(),
+            **props,
+        },
+    }
+
+
+def _search_one(node: dict[str, Any]) -> PackItem:
+    store = _make_store(
+        edges_by_subject={"dataset:x": [{"target_id": node["node_id"]}]},
+        nodes_by_id={node["node_id"]: node},
+    )
+    strategy = ObservationSearch(graph_store=store)
+    return strategy.search("", filters={"subject_entity_id": "dataset:x"})[0]
+
+
+def test_measurement_excerpt_carries_the_reading_not_just_the_metric_name() -> None:
+    """The value is the whole point of a Measurement.
+
+    The excerpt used to fall back to ``metric_name`` alone, which told the
+    agent what was measured but never what it measured *to*.
+    """
+    item = _search_one(
+        _measurement_node("m1", metric_name="row_count", metric_value=41823)
+    )
+    assert item.excerpt == "row_count = 41823"
+
+
+def test_measurement_excerpt_includes_the_unit_when_present() -> None:
+    item = _search_one(
+        _measurement_node("m1", metric_name="p95_latency", metric_value=812, unit="ms")
+    )
+    assert item.excerpt == "p95_latency = 812 ms"
+
+
+def test_measurement_content_wins_when_a_producer_supplies_it() -> None:
+    item = _search_one(
+        _measurement_node(
+            "m1",
+            metric_name="row_count",
+            metric_value=1,
+            content="row_count fell to 1 after the backfill was reverted",
+        )
+    )
+    assert item.excerpt == "row_count fell to 1 after the backfill was reverted"
+
+
+def test_observation_excerpt_is_boundary_truncated() -> None:
+    """The fourth excerpt site shares the one helper, not a raw slice."""
+    content = "The nightly backfill re-ingested every chunk without tags. " * 20
+    item = _search_one(
+        _make_observation_node("obs1", subject_entity_id="dataset:x", content=content)
+    )
+    assert len(item.excerpt) <= EXCERPT_MAX_CHARS
+    assert item.excerpt.endswith(EXCERPT_ELLIPSIS)
+    assert content.startswith(item.excerpt[: -len(EXCERPT_ELLIPSIS)])

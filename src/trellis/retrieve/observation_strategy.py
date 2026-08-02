@@ -58,6 +58,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from trellis.retrieve.excerpts import truncate_excerpt
 from trellis.retrieve.strategies import (
     DEFAULT_RECENCY_HALF_LIFE_DAYS,
     RECENCY_FLOOR,
@@ -235,7 +236,7 @@ class ObservationSearch(SearchStrategy):
                 floor=floor,
             )
 
-            excerpt = str(props.get("content") or props.get("metric_name") or "")[:500]
+            excerpt = truncate_excerpt(_observation_excerpt(canonical_type, props))
             items.append(
                 PackItem(
                     item_id=node["node_id"],
@@ -374,6 +375,27 @@ class ObservationSearch(SearchStrategy):
             if row is not None:
                 rows.append(row)
         return rows
+
+
+def _observation_excerpt(canonical_type: str, props: dict[str, Any]) -> str:
+    """Excerpt text for an observation-plane node.
+
+    Observations carry prose in ``content``. Measurements carry none —
+    :class:`~trellis.mutate.handlers.MeasurementRecordHandler` writes
+    ``metric_name`` / ``metric_value`` / ``unit`` and no ``content`` — so
+    rendering the reading is the only way the excerpt says what the node
+    actually measured. Falling back to the bare metric name (as this did)
+    told the agent *what* was measured but never what it measured **to**.
+    """
+    content = props.get("content")
+    if content:
+        return str(content)
+    metric_name = props.get("metric_name")
+    if canonical_type != MEASUREMENT or metric_name is None:
+        return str(metric_name or "")
+    reading = f"{metric_name} = {props.get('metric_value')}"
+    unit = props.get("unit")
+    return f"{reading} {unit}" if unit else reading
 
 
 def _parse_datetime(value: Any) -> datetime | None:

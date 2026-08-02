@@ -41,6 +41,7 @@ KNOWN_REJECTION_REASONS = (
     "token_budget",
     "session_dedup",
     "semantic_dedup",
+    "content_floor",
 )
 
 #: Finding thresholds — operator-facing, not tuning knobs.
