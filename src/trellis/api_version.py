@@ -32,7 +32,11 @@ API_MAJOR = 1
 # Bump on backwards-compatible additions (new routes, new optional
 # fields, new enum values that default safely).  Reset to 0 when
 # API_MAJOR bumps.
-API_MINOR = 0
+#
+# 1 — ``GET /api/version`` gained the optional ``write_provenance``
+#     field (build identity + effective write-behaviour flags).  Purely
+#     additive; ``SDK_API_MINOR`` stays 0 because no client *needs* it.
+API_MINOR = 1
 
 # The wire-level Pydantic schema version. Sourced from trellis.core.base
 # so the DTOs and the handshake stay in sync automatically.

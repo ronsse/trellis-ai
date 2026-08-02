@@ -36,11 +36,15 @@ hook returns ``None`` and does nothing.
 from __future__ import annotations
 
 import asyncio
-import os
 from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from trellis.core.write_config import (
+    TRACE_EXTRACTION_FLAG,
+    TRACE_EXTRACTION_MIN_CONFIDENCE_FLAG,
+    WriteBehaviourConfig,
+)
 from trellis.extract.commands import (
     batch_draft_counts,
     reconcile_node_roles,
@@ -67,15 +71,9 @@ __all__ = [
 
 logger = structlog.get_logger(__name__)
 
-#: Truthy spellings that turn the post-ingest extraction stage on.
-_TRUTHY = frozenset({"1", "true", "yes", "on"})
-
-#: Feature flag — off by default.
-TRACE_EXTRACTION_FLAG = "TRELLIS_ENABLE_TRACE_EXTRACTION"
-
-#: Optional confidence floor for the drafts this path produces.  Unset
-#: (the default) means no gate — see :func:`trace_extraction_min_confidence`.
-TRACE_EXTRACTION_MIN_CONFIDENCE_FLAG = "TRELLIS_TRACE_EXTRACTION_MIN_CONFIDENCE"
+# ``TRACE_EXTRACTION_FLAG`` / ``TRACE_EXTRACTION_MIN_CONFIDENCE_FLAG`` are
+# re-exported from :mod:`trellis.core.write_config`, which owns the names
+# and the parsing for every write-behaviour knob.
 
 #: Command outcomes that mean "this draft did not land".
 _UNSUCCESSFUL = frozenset({CommandStatus.FAILED, CommandStatus.REJECTED})
@@ -86,7 +84,7 @@ _MAX_LOGGED_FAILURES = 5
 
 def trace_extraction_enabled() -> bool:
     """``True`` iff ``TRELLIS_ENABLE_TRACE_EXTRACTION`` is set truthy."""
-    return os.environ.get(TRACE_EXTRACTION_FLAG, "").strip().lower() in _TRUTHY
+    return WriteBehaviourConfig.from_env().trace_extraction
 
 
 def trace_extraction_min_confidence() -> float | None:
@@ -100,26 +98,7 @@ def trace_extraction_min_confidence() -> float | None:
     warning) rather than as ``0.0`` — misreading "0.85" as "drop
     nothing" is recoverable, misreading it as "drop everything" is not.
     """
-    raw = os.environ.get(TRACE_EXTRACTION_MIN_CONFIDENCE_FLAG, "").strip()
-    if not raw:
-        return None
-    try:
-        value = float(raw)
-    except ValueError:
-        logger.warning(
-            "trace_extraction_min_confidence_unparseable",
-            flag=TRACE_EXTRACTION_MIN_CONFIDENCE_FLAG,
-            value=raw,
-        )
-        return None
-    if not 0.0 <= value <= 1.0:
-        logger.warning(
-            "trace_extraction_min_confidence_out_of_range",
-            flag=TRACE_EXTRACTION_MIN_CONFIDENCE_FLAG,
-            value=value,
-        )
-        return None
-    return value
+    return WriteBehaviourConfig.from_env().trace_extraction_min_confidence
 
 
 def extract_trace_batch(

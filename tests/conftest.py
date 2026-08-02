@@ -29,10 +29,11 @@ import os
 import re
 from typing import TYPE_CHECKING
 
+import pytest
 from hypothesis import HealthCheck, settings
 
 if TYPE_CHECKING:
-    import pytest
+    from collections.abc import Iterator
 
 # A short, deterministic-feeling profile for in-tree property tests. Property
 # tests in this repo are invariant checks, not soak/fuzz tests — 50 examples
@@ -112,3 +113,20 @@ def pytest_configure(config: pytest.Config) -> None:
             for marker in markers:
                 expr = _strip_not_marker(expr, marker)
     config.option.markexpr = expr
+
+
+@pytest.fixture(autouse=True)
+def _reset_write_provenance() -> Iterator[None]:
+    """Drop the memoized write-provenance stamp around every test.
+
+    The stamp snapshots the write-behaviour environment once per process
+    (see :mod:`trellis.core.write_provenance`). Without this, a test that
+    monkeypatches a flag and then asserts on an emitted event's stamp would
+    pass or fail depending on whether some earlier test had already warmed
+    the cache — the classic order-dependent flake.
+    """
+    from trellis.core.write_provenance import reset_write_provenance_cache
+
+    reset_write_provenance_cache()
+    yield
+    reset_write_provenance_cache()

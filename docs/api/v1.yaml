@@ -1799,7 +1799,22 @@ components:
 
         installed ``trellis-ai`` package version, which may move without
 
-        changing the API contract.'
+        changing the API contract.
+
+
+        ``write_provenance`` is the write-provenance stamp this server puts
+
+        on every event it emits (build identity + the write-behaviour flags
+
+        in effect).  It exists so an operator can ask a *running container*
+
+        what semantics it is applying, rather than inferring it from whatever
+
+        image was last built.  Optional and free-form: it mirrors
+
+        ``metadata.write_provenance`` on stored events, whose shape is owned
+
+        by :mod:`trellis.core.write_provenance`, not by the wire contract.'
       properties:
         api_major:
           title: Api Major
@@ -1823,6 +1838,12 @@ components:
         wire_schema:
           title: Wire Schema
           type: string
+        write_provenance:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Write Provenance
       required:
       - api_major
       - api_minor
@@ -3891,7 +3912,18 @@ paths:
 
         SDK clients call this on first use.  Static — no IO, no store
 
-        access — so it''s cheap to poll and safe to leave public.'
+        access — so it''s cheap to poll and safe to leave public.
+
+
+        Also carries ``write_provenance``: the build identity and
+
+        write-behaviour flags this server stamps onto every event it emits.
+
+        A container image that has drifted from the host working tree is
+
+        otherwise invisible; this makes it one request away.  Resolved once
+
+        per process, so the route stays IO-free.'
       operationId: api_version_api_version_get
       responses:
         '200':

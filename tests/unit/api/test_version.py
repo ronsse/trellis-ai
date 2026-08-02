@@ -15,6 +15,8 @@ from trellis.api_version import (
     SDK_MIN,
     WIRE_SCHEMA,
 )
+from trellis.core.write_config import ENV_VAR_BY_FIELD
+from trellis.core.write_provenance import get_write_provenance
 from trellis_api.routes import version as version_route
 
 
@@ -58,3 +60,22 @@ class TestVersionEndpoint:
         # doesn't reach into the store layer (the fixture provides none).
         for _ in range(3):
             assert client.get("/api/version").status_code == 200
+
+    def test_reports_write_provenance(self, client):
+        """A running container can be asked what write semantics it applies.
+
+        The drift this exists for is invisible otherwise: an image built
+        six commits behind serves a superseded path and looks identical
+        from the outside.
+        """
+        body = client.get("/api/version").json()
+        provenance = body["write_provenance"]
+        assert provenance["version"]
+        assert provenance["version_source"]
+        assert set(provenance["flags"]) == set(ENV_VAR_BY_FIELD)
+        assert provenance["flags_digest"]
+
+    def test_write_provenance_matches_the_event_stamp(self, client):
+        """The endpoint must not report a different answer than the writes."""
+        body = client.get("/api/version").json()
+        assert body["write_provenance"] == dict(get_write_provenance())

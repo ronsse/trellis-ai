@@ -66,6 +66,12 @@ Every write flows through `MutationExecutor` in 5 stages: validate → policy ch
 
 **Sanctioned exception — eval-scenario seeding.** Eval scenarios (in the separate `trellis-evals` repo since 2026-07-12) may synthesize audit events directly via `event_log.emit(...)` when seeding test data (e.g., `_seed_extraction_failures`, `_populate_entity_documents`). The pipeline's per-row policy + idempotency checks are uneconomical at the volume eval scenarios produce, and the events the pipeline *would* have emitted are reproducible from the synthetic seed. This is scenario-local; **production code paths must use `MutationExecutor`**.
 
+### Write Provenance & Write-Behaviour Config (`src/trellis/core/`)
+
+The same database is written concurrently by several builds (host editable install, container images of varying age), so a write has to say which code produced it. Every event emitted through `EventLog.emit` carries `metadata["write_provenance"]` — build version + git sha + the write-behaviour flags in effect + a short `flags_digest`. It rides the free-form `Event.metadata`, so it is additive: payload models keep `extra="forbid"`, rows written before it existed still parse, and no emitter is required to supply one. Resolved once per process ([`write_provenance.py`](src/trellis/core/write_provenance.py)); version comes from the installed distribution metadata that `hatch-vcs` bakes in at install/build time ([`version.py`](src/trellis/core/version.py)), which resolves in both deployment shapes.
+
+[`write_config.py`](src/trellis/core/write_config.py) is the **one home** for the ingest-time knobs (`TRELLIS_ENABLE_{CLASSIFY_ON_INGEST,EMBED_ON_INGEST,MEMORY_EXTRACTION,RECONCILE_ON_WRITE,TRACE_EXTRACTION}`, `TRELLIS_TRACE_EXTRACTION_MIN_CONFIDENCE`, `TRELLIS_RECONCILE_MODEL`, `TRELLIS_RECONCILE_TIMEOUT_S`). Add a new write-behaviour knob **there**, with an `ENV_VAR_BY_FIELD` entry — the per-module readers (`classify_on_ingest_enabled()` and friends) delegate to it and stay the call-site-facing names. Ask a process what it is applying with `trellis admin write-config --format json`; ask a running API container with `GET /api/version`.
+
 ### Store Abstraction (`src/trellis/stores/`)
 
 Six ABCs in `stores/base/`: TraceStore, DocumentStore, GraphStore, VectorStore, EventLog, BlobStore. `StoreRegistry` uses `importlib` for late-binding dynamic module loading — config determines which backend class to instantiate at runtime.

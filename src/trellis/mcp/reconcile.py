@@ -42,14 +42,15 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
 import structlog
 
+from trellis.core import write_config
 from trellis.core.base import TrellisModel
 from trellis.core.hashing import content_hash
+from trellis.core.write_config import WriteBehaviourConfig
 from trellis.llm.types import Message
 from trellis.schemas.classification import Lifecycle
 from trellis.schemas.memory_op import (
@@ -68,33 +69,32 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 # ---------------------------------------------------------------------------
-# Configuration (all read from the environment; the write path stays flagged
-# off unless an operator opts in).
+# Configuration. The names, defaults, and parsing live in
+# :mod:`trellis.core.write_config` — the one home for every write-behaviour
+# knob — and are re-exported here so this module's call sites and tests keep
+# their existing spellings. The write path still stays flagged off unless an
+# operator opts in.
 # ---------------------------------------------------------------------------
-
-#: Truthy spellings that turn the verdict tier on (the repo's flag
-#: convention — mirrors ``embed_ingest_hook._TRUTHY`` / ``mcp.auth._TRUTHY``).
-_TRUTHY = frozenset({"1", "true", "yes", "on"})
 
 #: Truthy → the model-judged verdict tier runs. Off by default: capture keeps
 #: the deterministic-only behavior every existing deployment sees today.
-RECONCILE_FLAG_ENV = "TRELLIS_ENABLE_RECONCILE_ON_WRITE"
+RECONCILE_FLAG_ENV = write_config.RECONCILE_FLAG_ENV
 
 #: Optional override for the verdict model identifier used in emitted events
 #: when the provider does not report a model back. Defaults to
 #: :data:`DEFAULT_RECONCILE_MODEL`.
-RECONCILE_MODEL_ENV = "TRELLIS_RECONCILE_MODEL"
+RECONCILE_MODEL_ENV = write_config.RECONCILE_MODEL_ENV
 
 #: Optional per-verdict timeout (seconds). An 8B verdict takes seconds; the
 #: cap bounds how long capture waits before falling back to a plain ADD.
-RECONCILE_TIMEOUT_ENV = "TRELLIS_RECONCILE_TIMEOUT_S"
+RECONCILE_TIMEOUT_ENV = write_config.RECONCILE_TIMEOUT_ENV
 
 #: Default verdict model — a small local model over an OpenAI-compatible
 #: endpoint (Ollama), per the guide's north-star ladder.
-DEFAULT_RECONCILE_MODEL = "hermes3:8b"
+DEFAULT_RECONCILE_MODEL = write_config.DEFAULT_RECONCILE_MODEL
 
 #: Default verdict timeout in seconds.
-DEFAULT_TIMEOUT_S = 20.0
+DEFAULT_TIMEOUT_S = write_config.DEFAULT_RECONCILE_TIMEOUT_S
 
 # ---------------------------------------------------------------------------
 # Document metadata markers. The verdict's effect is auditable from the stored
@@ -169,24 +169,17 @@ class ReconcileOutcome(TrellisModel):
 
 def reconcile_on_write_enabled() -> bool:
     """Return whether the model-judged verdict tier is enabled."""
-    return os.environ.get(RECONCILE_FLAG_ENV, "").strip().lower() in _TRUTHY
+    return WriteBehaviourConfig.from_env().reconcile_on_write
 
 
 def reconcile_timeout_seconds() -> float:
     """Return the per-verdict timeout, defaulting on absent/invalid config."""
-    raw = os.environ.get(RECONCILE_TIMEOUT_ENV, "").strip()
-    if not raw:
-        return DEFAULT_TIMEOUT_S
-    try:
-        value = float(raw)
-    except ValueError:
-        return DEFAULT_TIMEOUT_S
-    return value if value > 0 else DEFAULT_TIMEOUT_S
+    return WriteBehaviourConfig.from_env().reconcile_timeout_s
 
 
 def configured_model_id() -> str:
     """Return the fallback model identifier label for emitted events."""
-    return os.environ.get(RECONCILE_MODEL_ENV, "").strip() or DEFAULT_RECONCILE_MODEL
+    return WriteBehaviourConfig.from_env().reconcile_model
 
 
 # ---------------------------------------------------------------------------

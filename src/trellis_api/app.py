@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from trellis.auth import SCOPE_ADMIN, SCOPE_INGEST, SCOPE_MUTATE, SCOPE_READ
+from trellis.core.write_provenance import get_write_provenance
 from trellis.errors import ConfigError
 from trellis.stores.registry import StoreRegistry
 from trellis_api.auth import require_scope, warn_if_unauthenticated
@@ -50,6 +51,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:  # noqa: ARG001
     _registry.validate()
     warn_if_unauthenticated()
     logger.info("api_stores_initialized")
+    # Which build, applying which write semantics — the same stamp this
+    # process puts on every event it emits. Logged once so an image that
+    # has drifted from the host working tree is visible in the container
+    # log without a request; also served by GET /api/version.
+    logger.info("api_write_provenance", **get_write_provenance())
     yield
     _registry.close()
     _registry = None

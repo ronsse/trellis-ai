@@ -17,15 +17,22 @@ def utc_now() -> datetime:
 
 @functools.lru_cache(maxsize=1)
 def get_version() -> str:
-    """Return the package version, falling back to ``0.0.0-dev``."""
-    try:
-        from trellis._version import (  # noqa: PLC0415
-            __version__,  # type: ignore[import-not-found]
-        )
-    except ImportError:
-        return "0.0.0-dev"
-    else:
-        return __version__  # type: ignore[no-any-return]
+    """Return the package version, falling back to ``0.0.0-dev``.
+
+    Delegates to :func:`trellis.core.version.resolve_code_version`, which
+    reads the installed distribution metadata first — ``hatch-vcs`` bakes
+    the git-derived version in there at install/build time, so this
+    resolves in an editable install *and* inside a container image. The
+    historical ``0.0.0-dev`` sentinel is preserved for the case where
+    neither source can name the build.
+    """
+    from trellis.core.version import (  # noqa: PLC0415
+        UNKNOWN_VERSION,
+        resolve_code_version,
+    )
+
+    resolved = resolve_code_version().version
+    return "0.0.0-dev" if resolved == UNKNOWN_VERSION else resolved
 
 
 class TrellisModel(BaseModel):

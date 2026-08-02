@@ -6,6 +6,35 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **Write provenance on emitted events.** Every event emitted through
+  `EventLog.emit` now carries `metadata["write_provenance"]`: the build that
+  wrote it (version, git sha, dirty flag, and which mechanism resolved it) plus
+  the write-behaviour flags in effect and a short `flags_digest` for cheap
+  bucketing. Answers "was this row written before or after the fix?", which was
+  previously unanswerable — nothing a write left behind recorded which build
+  produced it, and the same database is written concurrently by an editable
+  install off a working tree and by container images of varying age. The stamp
+  rides the already-free-form `Event.metadata`, so it is additive: payload
+  models keep their `extra="forbid"` contract, rows written before it existed
+  still parse, and no emitter is required to supply one. Resolved once per
+  process (~0.3 µs and ~390 bytes per event). New module
+  `trellis.core.write_provenance`; version resolution in `trellis.core.version`.
+- **`trellis.core.write_config`** — one home for the write-behaviour knobs
+  (`TRELLIS_ENABLE_CLASSIFY_ON_INGEST`, `..._EMBED_ON_INGEST`,
+  `..._MEMORY_EXTRACTION`, `..._RECONCILE_ON_WRITE`, `..._TRACE_EXTRACTION`,
+  `TRELLIS_TRACE_EXTRACTION_MIN_CONFIDENCE`, `TRELLIS_RECONCILE_MODEL`,
+  `TRELLIS_RECONCILE_TIMEOUT_S`). They were uncorrelated env vars read at five
+  different call sites, so which semantics a write received depended on which
+  wrapper on which host performed it. `WriteBehaviourConfig.from_env()` reads
+  them as one structured value and `describe()` reports the effective
+  configuration. Pure consolidation — every variable name, default, and parsing
+  quirk is unchanged, and the existing per-module readers still work.
+- **`trellis admin write-config`** (`--format text|json`) — reports the build
+  and the effective write semantics of the invoking process. `GET /api/version`
+  gained the same stamp as an optional `write_provenance` field (API minor
+  1 → additive) so a *running container* can be asked directly; the API and MCP
+  servers also log it once at startup.
+
 - **`trellis classify backfill`** — the missing front door for the tagging
   backfill. `trellis.classify.refresh.reclassify_stale` shipped tested but had
   no caller outside comments, so re-tagging documents ingested before
@@ -51,6 +80,14 @@ All notable changes to Trellis will be documented in this file.
 
 ### Changed
 
+- **`get_version()` now returns a real version.** It read `trellis._version`,
+  a module no configured build hook ever writes, so it always fell through to
+  `0.0.0-dev`. It now resolves from the installed distribution metadata that
+  `hatch-vcs` already populates, which works both for an editable install off a
+  working tree and inside a container image; the `0.0.0-dev` sentinel is kept
+  for the genuinely unresolvable case. `trellis admin version` and
+  `GET /api/version` report a real version (and, in a dev install, a git sha)
+  as a result.
 - **A capture sweep that leaves sessions unjudged now exits non-zero.**
   Previously a mid-sweep judge outage was a `warnings[]` entry and a clean
   exit `0`. Adopters running the shipped systemd timer will see the unit fail

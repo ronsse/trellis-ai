@@ -23,6 +23,7 @@ from trellis.api_version import (
     api_version_string,
 )
 from trellis.core.base import get_version
+from trellis.core.write_provenance import get_write_provenance
 from trellis_wire.dtos import VersionResponse
 
 router = APIRouter()
@@ -34,6 +35,12 @@ def api_version() -> VersionResponse:
 
     SDK clients call this on first use.  Static — no IO, no store
     access — so it's cheap to poll and safe to leave public.
+
+    Also carries ``write_provenance``: the build identity and
+    write-behaviour flags this server stamps onto every event it emits.
+    A container image that has drifted from the host working tree is
+    otherwise invisible; this makes it one request away.  Resolved once
+    per process, so the route stays IO-free.
     """
     return VersionResponse(
         api_major=API_MAJOR,
@@ -43,4 +50,5 @@ def api_version() -> VersionResponse:
         sdk_min=SDK_MIN,
         package_version=get_version(),
         mcp_tools_version=MCP_TOOLS_VERSION,
+        write_provenance=dict(get_write_provenance()),
     )

@@ -382,14 +382,25 @@ class EventLog(ABC):
         payload: dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> Event:
-        """Convenience: create and append an event. Returns the event."""
+        """Convenience: create and append an event. Returns the event.
+
+        Stamps ``metadata["write_provenance"]`` with the emitting build
+        and the write-behaviour flags in effect (see
+        :mod:`trellis.core.write_provenance`) so a stored row can be
+        attributed to the code that produced it. Additive: the stamp
+        lives in the free-form ``metadata`` dict, rows written before it
+        existed simply lack the key, and a caller that supplies its own
+        stamp (replay / backfill on behalf of another build) keeps it.
+        """
+        from trellis.core.write_provenance import stamp_metadata  # noqa: PLC0415
+
         event = Event(
             event_type=event_type,
             source=source,
             entity_id=entity_id,
             entity_type=entity_type,
             payload=payload or {},
-            metadata=metadata or {},
+            metadata=stamp_metadata(metadata),
         )
         self.append(event)
         return event

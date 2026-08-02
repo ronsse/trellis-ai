@@ -17,6 +17,12 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from trellis.core.write_config import (
+    MEMORY_EXTRACTION_FLAG,
+    TRUTHY,
+    WriteBehaviourConfig,
+)
+from trellis.core.write_provenance import build_write_provenance
 from trellis.errors import BackendNotInstalledError
 from trellis_cli._meta_wiring import wrap_cli_meta_analysis
 from trellis_cli.claude_integration import (
@@ -38,9 +44,11 @@ from trellis_cli.stores import (
 )
 
 # Environment variable names used by the memory-extraction pipeline.
-_MEMORY_FLAG_ENV = "TRELLIS_ENABLE_MEMORY_EXTRACTION"
+# The flag name and its truthy spellings come from the one home for
+# write-behaviour config so this surface cannot drift from the code path.
+_MEMORY_FLAG_ENV = MEMORY_EXTRACTION_FLAG
 _LLM_API_KEY_ENVS = ("OPENAI_API_KEY", "ANTHROPIC_API_KEY")
-_TRUTHY = {"1", "true", "yes", "on"}
+_TRUTHY = TRUTHY
 
 # Commented-out ``llm:`` block appended to a freshly-initialized
 # ``config.yaml`` so operators have an in-place template for enabling
@@ -319,6 +327,62 @@ def version(
     table.add_row("package_version", info["package_version"])
     table.add_row("mcp_tools_version", str(info["mcp_tools_version"]))
     console.print(table)
+
+
+@admin_app.command("write-config")
+def write_config(
+    output_format: str = typer.Option(
+        "text", "--format", help="Output format: text or json"
+    ),
+) -> None:
+    """Report the write semantics *this process* is applying.
+
+    Answers "which build is this, and which ingest-time behaviours are
+    on?" without reading five environment variables across three hosts.
+    The same structure is stamped onto every emitted event under
+    ``metadata.write_provenance``, so what this prints is exactly what a
+    write performed right now would be attributed to.
+
+    Scope caveat worth stating out loud: this reports the *invoking*
+    process. A container running a different image, or a stdio MCP server
+    spawned with a different environment, has its own answer — read
+    ``GET /api/version`` for the former and the stamp on the rows it
+    wrote for the latter.
+    """
+    config = WriteBehaviourConfig.from_env()
+    provenance = build_write_provenance(config)
+
+    if output_format == "json":
+        typer.echo(json.dumps({**provenance, "knobs": config.describe()}, indent=2))
+        return
+
+    build = Table(title="Trellis Build")
+    build.add_column("Field", style="cyan")
+    build.add_column("Value")
+    build.add_row("version", str(provenance["version"]))
+    build.add_row("version_source", str(provenance["version_source"]))
+    build.add_row("commit", str(provenance["commit"] or "unknown"))
+    build.add_row("dirty", str(provenance["dirty"]))
+    build.add_row("flags_digest", str(provenance["flags_digest"]))
+    console.print(build)
+
+    knobs = Table(title="Effective Write Behaviour")
+    knobs.add_column("Setting", style="cyan", overflow="fold")
+    # ``fold`` rather than the default ellipsis truncation: an env var name
+    # the operator cannot read in an 80-column terminal defeats the point.
+    knobs.add_column("Env var", overflow="fold")
+    knobs.add_column("Value", overflow="fold")
+    knobs.add_column("Default", overflow="fold")
+    for row in config.describe():
+        style = "yellow" if row["overridden"] else None
+        knobs.add_row(
+            row["name"],
+            row["env_var"],
+            str(row["value"]),
+            str(row["default"]),
+            style=style,
+        )
+    console.print(knobs)
 
 
 @admin_app.command()

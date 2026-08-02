@@ -41,6 +41,8 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from trellis.core.write_config import EMBED_ON_INGEST_FLAG, WriteBehaviourConfig
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
@@ -48,11 +50,18 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
-#: Truthy spellings that turn the post-ingest embedding stage on.
-_TRUTHY = frozenset({"1", "true", "yes", "on"})
+__all__ = [
+    "EMBED_INPUT_CHAR_CAP",
+    "EMBED_ON_INGEST_FLAG",
+    "VECTOR_METADATA_EXCERPT_CHARS",
+    "build_vector_row",
+    "embed_on_ingest_enabled",
+    "run_embed_on_ingest",
+]
 
-#: Feature flag — off by default.
-EMBED_ON_INGEST_FLAG = "TRELLIS_ENABLE_EMBED_ON_INGEST"
+# ``EMBED_ON_INGEST_FLAG`` is re-exported from
+# :mod:`trellis.core.write_config`, which owns the name and the parsing for
+# every write-behaviour knob. Off by default.
 
 #: Cap on the characters sent to the embedder. Embedding models have
 #: finite context windows (≈8k tokens for common models); 8000 chars
@@ -68,9 +77,7 @@ VECTOR_METADATA_EXCERPT_CHARS = 500
 
 def embed_on_ingest_enabled() -> bool:
     """``True`` iff ``TRELLIS_ENABLE_EMBED_ON_INGEST`` is set truthy."""
-    import os  # noqa: PLC0415
-
-    return os.environ.get(EMBED_ON_INGEST_FLAG, "").strip().lower() in _TRUTHY
+    return WriteBehaviourConfig.from_env().embed_on_ingest
 
 
 def build_vector_row(
