@@ -6,6 +6,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException
 
+from trellis.classify.ingest import classify_metadata_on_write
 from trellis.feedback.models import PackFeedback
 from trellis.feedback.recording import record_feedback as record_pack_feedback
 from trellis.mutate import (
@@ -125,6 +126,10 @@ def create_document(body: dict[str, Any]) -> dict[str, Any]:
     metadata = body.get("metadata", {})
     if not content:
         raise HTTPException(status_code=400, detail="content is required")
+    # Classify-on-write (TRELLIS_ENABLE_CLASSIFY_ON_INGEST=1) so an
+    # API-written document carries the same retrieval-shaping tags as one
+    # written through corpus ingest. Fail-soft and fill-if-absent inside.
+    metadata = classify_metadata_on_write(metadata, content, doc_id=doc_id or "")
     stored_id = registry.knowledge.document_store.put(
         doc_id=doc_id, content=content, metadata=metadata
     )

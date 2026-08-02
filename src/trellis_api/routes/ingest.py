@@ -7,6 +7,7 @@ from typing import Any
 import structlog
 from fastapi import APIRouter, HTTPException
 
+from trellis.classify.ingest import classify_metadata_on_write
 from trellis.core.ids import generate_ulid
 from trellis.extract.trace_ingest_hook import run_trace_extraction
 from trellis.mutate import build_curate_executor
@@ -76,10 +77,16 @@ def ingest_evidence(body: dict[str, Any]) -> IngestResponse:
         raise HTTPException(status_code=422, detail=f"Invalid evidence: {exc}") from exc
 
     registry = get_registry()
-    evidence_metadata = {
+    evidence_metadata: dict[str, Any] = {
         "evidence_type": evidence.evidence_type,
         "source_origin": evidence.source_origin,
     }
+    # Classify-on-write (TRELLIS_ENABLE_CLASSIFY_ON_INGEST=1). ``source_origin``
+    # is a provenance label ("trace"/"manual"/"ingestion"), not a source system,
+    # so no classification context is derived from it. Fail-soft inside.
+    evidence_metadata = classify_metadata_on_write(
+        evidence_metadata, evidence.content or "", doc_id=evidence.evidence_id
+    )
     registry.knowledge.document_store.put(
         doc_id=evidence.evidence_id,
         content=evidence.content or "",

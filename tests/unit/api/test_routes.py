@@ -199,6 +199,126 @@ def test_ingest_evidence_embed_flag_on(client, monkeypatch):
     assert row["metadata"]["evidence_type"] == "document"
 
 
+# -- classify-on-write (feature-flagged) --------------------------------------
+#
+# The shared seam's contract is covered in tests/unit/classify/test_ingest.py;
+# these prove the two REST document writers call it before the put. Content
+# the deterministic classifiers confidently domain-tag, so the domain-drop
+# assertions mean something.
+
+_CLASSIFY_FLAG = "TRELLIS_ENABLE_CLASSIFY_ON_INGEST"
+_INFRA = "kubernetes deployment infra helm terraform rollout"
+
+
+class _BoomPipeline:
+    def classify(self, *args, **kwargs):
+        msg = "classifier exploded"
+        raise RuntimeError(msg)
+
+
+def _stored_metadata(doc_id):
+    doc = app_module._registry.knowledge.document_store.get(doc_id)
+    assert doc is not None
+    return doc["metadata"] or {}
+
+
+def test_create_document_classify_flag_off(client, monkeypatch):
+    """Flag off -> document stored untagged."""
+    monkeypatch.delenv(_CLASSIFY_FLAG, raising=False)
+    resp = client.post("/api/v1/documents", json={"content": _INFRA})
+    assert resp.status_code == 200
+    assert "content_tags" not in _stored_metadata(resp.json()["doc_id"])
+
+
+def test_create_document_classify_flag_on(client, monkeypatch):
+    """Flag on -> tags persisted, minus the hard-excluding domain facet."""
+    monkeypatch.setenv(_CLASSIFY_FLAG, "1")
+    resp = client.post(
+        "/api/v1/documents",
+        json={"content": _INFRA, "metadata": {"source": "api"}},
+    )
+    assert resp.status_code == 200
+    meta = _stored_metadata(resp.json()["doc_id"])
+    assert meta["source"] == "api"
+    assert meta["content_tags"]["signal_quality"]
+    assert meta["content_tags"]["domain"] == []
+    assert isinstance(meta["auto_importance"], float)
+
+
+def test_create_document_classify_does_not_clobber_existing_tags(client, monkeypatch):
+    monkeypatch.setenv(_CLASSIFY_FLAG, "1")
+    caller_tags = {"domain": ["backend"], "signal_quality": "high"}
+    resp = client.post(
+        "/api/v1/documents",
+        json={"content": _INFRA, "metadata": {"content_tags": caller_tags}},
+    )
+    assert resp.status_code == 200
+    assert _stored_metadata(resp.json()["doc_id"])["content_tags"] == caller_tags
+
+
+def test_create_document_classify_failure_does_not_fail_request(client, monkeypatch):
+    """A broken classifier must never fail the document write."""
+    import trellis.classify.ingest as ingest_mod
+
+    monkeypatch.setenv(_CLASSIFY_FLAG, "1")
+    monkeypatch.setattr(ingest_mod, "_ingest_classifier", _BoomPipeline())
+    resp = client.post("/api/v1/documents", json={"content": _INFRA})
+    assert resp.status_code == 200
+    assert "content_tags" not in _stored_metadata(resp.json()["doc_id"])
+
+
+def _post_evidence(client, content=_INFRA):
+    return client.post(
+        "/api/v1/evidence",
+        json={
+            "evidence_type": "document",
+            "content": content,
+            "source_origin": "test",
+        },
+    )
+
+
+def test_ingest_evidence_classify_flag_off(client, monkeypatch):
+    monkeypatch.delenv(_CLASSIFY_FLAG, raising=False)
+    resp = _post_evidence(client)
+    assert resp.status_code == 200
+    assert "content_tags" not in _stored_metadata(resp.json()["evidence_id"])
+
+
+def test_ingest_evidence_classify_flag_on(client, monkeypatch):
+    monkeypatch.setenv(_CLASSIFY_FLAG, "1")
+    resp = _post_evidence(client)
+    assert resp.status_code == 200
+    meta = _stored_metadata(resp.json()["evidence_id"])
+    assert meta["evidence_type"] == "document"
+    assert meta["content_tags"]["domain"] == []
+
+
+def test_ingest_evidence_classify_skips_content_less_evidence(client, monkeypatch):
+    """A uri-only evidence row has nothing to classify."""
+    monkeypatch.setenv(_CLASSIFY_FLAG, "1")
+    resp = client.post(
+        "/api/v1/evidence",
+        json={
+            "evidence_type": "document",
+            "uri": "https://example.test/doc",
+            "source_origin": "test",
+        },
+    )
+    assert resp.status_code == 200
+    assert "content_tags" not in _stored_metadata(resp.json()["evidence_id"])
+
+
+def test_ingest_evidence_classify_failure_does_not_fail_request(client, monkeypatch):
+    import trellis.classify.ingest as ingest_mod
+
+    monkeypatch.setenv(_CLASSIFY_FLAG, "1")
+    monkeypatch.setattr(ingest_mod, "_ingest_classifier", _BoomPipeline())
+    resp = _post_evidence(client)
+    assert resp.status_code == 200
+    assert "content_tags" not in _stored_metadata(resp.json()["evidence_id"])
+
+
 def test_search_empty(client):
     resp = client.get("/api/v1/search", params={"q": "test"})
     assert resp.status_code == 200

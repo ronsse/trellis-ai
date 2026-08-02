@@ -1,12 +1,14 @@
 """Classify-on-write — inline deterministic tagging at ingest time.
 
 The batch counterpart, :mod:`trellis.classify.refresh`, re-tags already-stored
-documents; this module tags a document *as it is written* by ``sync_records``
+documents; this module tags a document *as it is written* — by ``sync_records``
 (corpus, conversation-export, and session-capture ingest all funnel through
-there), so retrieval-shaping tags exist from the first write rather than
-waiting for a refresh pass that, in practice, is never scheduled. Deterministic
-and inline (no LLM), fail-soft, and flag-gated — matching the sibling
-ingest-time behaviours (embed / reconcile / memory-extraction).
+there) and by the MCP / REST document write paths via
+:func:`classify_metadata_on_write` — so retrieval-shaping tags exist from the
+first write rather than waiting for a refresh pass that, in practice, is never
+scheduled. Deterministic and inline (no LLM), fail-soft, and flag-gated —
+matching the sibling ingest-time behaviours (embed / reconcile /
+memory-extraction).
 
 Two deliberate scope limits:
 
@@ -28,6 +30,7 @@ Two deliberate scope limits:
 from __future__ import annotations
 
 import os
+import threading
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -115,9 +118,98 @@ def classify_for_ingest(
         return {}
 
 
+#: Process-wide pipeline for the single-document write paths. ``sync_records``
+#: builds its own per-run instance (it already has a natural once-per-run
+#: seam); the MCP server and the REST app write one document per call, so they
+#: share this lazily built singleton instead of rebuilding the classifiers on
+#: every write. The pipeline is pure and stateless, so sharing it is safe; the
+#: lock only guards the one-time construction against concurrent http workers.
+_classifier_lock = threading.Lock()
+_ingest_classifier: ClassifierPipeline | None = None
+
+
+def get_ingest_classifier() -> ClassifierPipeline:
+    """Return the process-wide deterministic classify-on-write pipeline."""
+    global _ingest_classifier  # noqa: PLW0603
+    with _classifier_lock:
+        if _ingest_classifier is None:
+            _ingest_classifier = build_ingest_classifier()
+        return _ingest_classifier
+
+
+def classify_metadata_on_write(
+    metadata: dict[str, Any],
+    content: str,
+    *,
+    source_system: str = "",
+    doc_id: str = "",
+) -> dict[str, Any]:
+    """Return ``metadata`` with deterministic tags merged in, if warranted.
+
+    The single-document counterpart to the ``sync_records`` inline block: the
+    same flag, the same tag shape, the same four safety properties, so a
+    document written through MCP ``save_memory`` / ``save_knowledge`` or the
+    REST document / evidence routes carries byte-identical tags to one written
+    through corpus ingest.
+
+    * **Flag-gated** on ``TRELLIS_ENABLE_CLASSIFY_ON_INGEST`` — off returns the
+      caller's mapping untouched, so behaviour is byte-identical to before.
+    * **Fill-if-absent** — existing ``content_tags`` (a prior write, or the LLM
+      enrichment pass) are never clobbered.
+    * **Fail-soft** — any failure logs and returns the caller's mapping; a
+      classification error must never block or fail a durable write.
+    * **No auto-``domain``** — inherited from :func:`classify_for_ingest`'s
+      ``include_domain=False`` default (see the module docstring).
+
+    Empty / whitespace-only content is a no-op too (uri-only evidence), the
+    same skip the embed-on-ingest hook applies.
+
+    Args:
+        metadata: The document metadata about to be persisted. Never mutated;
+            a *new* dict is returned when tags are added, otherwise the same
+            object comes back.
+        content: The document content being written.
+        source_system: Classification context. Defaults to
+            ``metadata['source_system']`` when not given.
+        doc_id: Document id, for logging / classification context. May be
+            empty for store-assigned ids (the document is not written yet).
+
+    Returns:
+        The metadata to persist — tagged, or the caller's own mapping.
+    """
+    if not classify_on_ingest_enabled():
+        return metadata
+    if "content_tags" in metadata:
+        return metadata
+    if not content or not content.strip():
+        # Nothing to classify (e.g. uri-only evidence) — tagging an empty
+        # string would record structural verdicts about no content at all.
+        return metadata
+
+    try:
+        classify_meta = classify_for_ingest(
+            get_ingest_classifier(),
+            content,
+            source_system=source_system or str(metadata.get("source_system") or ""),
+            title=str(metadata.get("title") or ""),
+            doc_id=doc_id,
+            prior_importance=float(metadata.get("auto_importance", 0.0) or 0.0),
+        )
+    except Exception:
+        # GRACEFUL-DEGRADATION: classify_for_ingest already swallows classifier
+        # errors; this catches the rest of the seam (pipeline construction, a
+        # non-numeric auto_importance) so no write path can ever fail on it.
+        logger.warning("classify_on_write_failed", doc_id=doc_id, exc_info=True)
+        return metadata
+
+    return {**metadata, **classify_meta} if classify_meta else metadata
+
+
 __all__ = [
     "CLASSIFY_ON_INGEST_FLAG",
     "build_ingest_classifier",
     "classify_for_ingest",
+    "classify_metadata_on_write",
     "classify_on_ingest_enabled",
+    "get_ingest_classifier",
 ]
