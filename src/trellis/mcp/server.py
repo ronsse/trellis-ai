@@ -39,6 +39,7 @@ from mcp.shared.exceptions import McpError
 from mcp.types import INTERNAL_ERROR, INVALID_PARAMS, ErrorData
 
 from trellis.auth import SCOPE_INGEST, SCOPE_MUTATE, SCOPE_READ
+from trellis.classify.ingest import classify_metadata_on_write
 from trellis.extract.trace_ingest_hook import run_trace_extraction
 from trellis.logging import configure_stderr_logging
 from trellis.mcp.auth import (
@@ -1110,6 +1111,12 @@ def save_memory(
                 data={"stage": "minhash_find"},
             )
 
+        # Classify-on-write (see classify_metadata_on_write). Placement is
+        # load-bearing: after both dedup stages (a hit stores nothing to tag)
+        # and before the put, and the rebind carries the tags into the
+        # MEMORY_STORED payload and the embed hook's vector row below.
+        metadata = classify_metadata_on_write(metadata, content, doc_id=doc_id or "")
+
         stored_id = registry.knowledge.document_store.put(
             doc_id, content, metadata=metadata
         )
@@ -1173,11 +1180,19 @@ def _store_new_memory(
     doc_id: str | None,
     content: str,
     metadata: dict[str, Any],
-) -> str:
-    """Persist a new memory doc and index it. Runs under ``_save_memory_lock``."""
+) -> tuple[str, dict[str, Any]]:
+    """Persist a new memory doc and index it. Runs under ``_save_memory_lock``.
+
+    Returns ``(stored_id, stored_metadata)``. The metadata comes back because
+    classify-on-write may have added tags to it, and the post-store tail
+    (MEMORY_STORED payload, embed hook) must see what was actually persisted —
+    every reconcile verdict that stores a doc funnels through here.
+    """
+    # Classify-on-write — same seam as the deterministic tier's put.
+    metadata = classify_metadata_on_write(metadata, content, doc_id=doc_id or "")
     stored_id: str = document_store.put(doc_id, content, metadata=metadata)
     _index_stored_memory(registry, stored_id, content)
-    return stored_id
+    return stored_id, metadata
 
 
 def _gather_reconcile_candidate(
@@ -1315,7 +1330,7 @@ def _commit_reconcile_verdict(
             else MARKER_SKIPPED
         )
         meta = {**metadata, RECONCILIATION_KEY: marker}
-        return _store_new_memory(registry, document_store, doc_id, content, meta), meta
+        return _store_new_memory(registry, document_store, doc_id, content, meta)
 
     decision = outcome.decision
     if decision == ReconcileDecision.NOOP:
@@ -1326,21 +1341,23 @@ def _commit_reconcile_verdict(
             RECONCILIATION_KEY: ReconcileDecision.UPDATE.value,
             UPDATES_DOC_KEY: candidate.doc_id,
         }
-        return _store_new_memory(registry, document_store, doc_id, content, meta), meta
+        return _store_new_memory(registry, document_store, doc_id, content, meta)
     if decision == ReconcileDecision.SUPERSEDE:
         meta = {
             **metadata,
             RECONCILIATION_KEY: ReconcileDecision.SUPERSEDE.value,
             SUPERSEDES_DOC_KEY: candidate.doc_id,
         }
-        stored_id = _store_new_memory(registry, document_store, doc_id, content, meta)
+        stored_id, stored_meta = _store_new_memory(
+            registry, document_store, doc_id, content, meta
+        )
         mark_document_superseded(
             document_store, old_doc_id=candidate.doc_id, new_doc_id=stored_id
         )
-        return stored_id, meta
+        return stored_id, stored_meta
     # ADD
     meta = {**metadata, RECONCILIATION_KEY: ReconcileDecision.ADD.value}
-    return _store_new_memory(registry, document_store, doc_id, content, meta), meta
+    return _store_new_memory(registry, document_store, doc_id, content, meta)
 
 
 def _reconcile_subject(
@@ -1400,12 +1417,12 @@ def _save_memory_reconciled(
         if candidate is None:
             # No near match: an unambiguous ADD — no model call, no verdict.
             # Store under the lock exactly as the deterministic tier would.
-            clean_id = _store_new_memory(
+            clean_id, clean_meta = _store_new_memory(
                 registry, document_store, doc_id, content, metadata
             )
 
     if candidate is None:
-        _emit_memory_stored_and_enrich(registry, clean_id, content, metadata, chash)
+        _emit_memory_stored_and_enrich(registry, clean_id, content, clean_meta, chash)
         return f"Memory saved: {clean_id}"
 
     # -- Phase B: verdict OUTSIDE the lock (never serialize saves on a model) -

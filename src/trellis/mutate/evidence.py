@@ -71,8 +71,11 @@ def ensure_evidence_document(
         msg = "content must not be empty"
         raise ValueError(msg)
 
-    # Lazy imports keep the mutate package free of a retrieve/core import at
-    # module load time (matches the codebase's PLC0415 convention).
+    # Lazy imports keep the mutate package free of a classify/retrieve/core
+    # import at module load time (matches the codebase's PLC0415 convention).
+    # The other classify-on-write call sites import at module top; this one is
+    # deferred for that convention, not because the seam differs.
+    from trellis.classify.ingest import classify_metadata_on_write  # noqa: PLC0415
     from trellis.core.hashing import content_hash  # noqa: PLC0415
     from trellis.retrieve.embed_ingest_hook import run_embed_on_ingest  # noqa: PLC0415
 
@@ -86,6 +89,12 @@ def ensure_evidence_document(
             "evidence_document_dedup", doc_id=existing_id, content_hash=chash
         )
         return existing_id
+
+    # Classify-on-write (see classify_metadata_on_write). This prose is
+    # embedded below, so it is a real retrieval surface and wants the same
+    # tags as any other write path. After the dedup short-circuit (a hit
+    # stores nothing), before the put, so the tags land in the same row.
+    meta = classify_metadata_on_write(meta, content)
 
     doc_id = registry.knowledge.document_store.put(None, content, metadata=meta)
 

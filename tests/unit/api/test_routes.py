@@ -199,6 +199,158 @@ def test_ingest_evidence_embed_flag_on(client, monkeypatch):
     assert row["metadata"]["evidence_type"] == "document"
 
 
+# -- classify-on-write (feature-flagged) --------------------------------------
+#
+# The shared seam's contract is covered in tests/unit/classify/test_ingest.py;
+# these prove the two REST document writers call it before the put. Content
+# the deterministic classifiers confidently domain-tag, so the domain-drop
+# assertions mean something.
+
+_CLASSIFY_FLAG = "TRELLIS_ENABLE_CLASSIFY_ON_INGEST"
+_INFRA = "kubernetes deployment infra helm terraform rollout"
+
+
+class _BoomPipeline:
+    def classify(self, *args, **kwargs):
+        msg = "classifier exploded"
+        raise RuntimeError(msg)
+
+
+def _stored_metadata(doc_id):
+    doc = app_module._registry.knowledge.document_store.get(doc_id)
+    assert doc is not None
+    return doc["metadata"] or {}
+
+
+def test_create_document_classify_flag_off(client, monkeypatch):
+    """Flag off -> document stored untagged."""
+    monkeypatch.delenv(_CLASSIFY_FLAG, raising=False)
+    resp = client.post("/api/v1/documents", json={"content": _INFRA})
+    assert resp.status_code == 200
+    assert "content_tags" not in _stored_metadata(resp.json()["doc_id"])
+
+
+def test_create_document_classify_flag_on(client, monkeypatch):
+    """Flag on -> tags persisted, minus the hard-excluding domain facet."""
+    monkeypatch.setenv(_CLASSIFY_FLAG, "1")
+    resp = client.post(
+        "/api/v1/documents",
+        json={"content": _INFRA, "metadata": {"source": "api"}},
+    )
+    assert resp.status_code == 200
+    meta = _stored_metadata(resp.json()["doc_id"])
+    assert meta["source"] == "api"
+    assert meta["content_tags"]["signal_quality"]
+    assert meta["content_tags"]["domain"] == []
+    assert isinstance(meta["auto_importance"], float)
+
+
+def test_create_document_classify_does_not_clobber_existing_tags(client, monkeypatch):
+    """Caller tags survive — and the positive control proves the seam is wired.
+
+    Asserting only that the caller's tags came back is trivially true if
+    ``classify_metadata_on_write`` is never called at all, so the same test
+    writes a second, tag-less document and asserts that one IS tagged.
+    """
+    monkeypatch.setenv(_CLASSIFY_FLAG, "1")
+    caller_tags = {"domain": ["backend"], "signal_quality": "high"}
+    resp = client.post(
+        "/api/v1/documents",
+        json={"content": _INFRA, "metadata": {"content_tags": caller_tags}},
+    )
+    assert resp.status_code == 200
+    assert _stored_metadata(resp.json()["doc_id"])["content_tags"] == caller_tags
+
+    control = client.post("/api/v1/documents", json={"content": _INFRA})
+    assert control.status_code == 200
+    assert _stored_metadata(control.json()["doc_id"])["content_tags"]["domain"] == []
+
+
+def test_create_document_null_metadata_does_not_fail_request(client, monkeypatch):
+    """``"metadata": null`` is a shape clients send; it must not 500.
+
+    Regression: the seam's guards used to run outside its try/except, so a
+    non-mapping ``metadata`` raised ``TypeError`` out of a durable write path
+    (200 with the flag off, 500 with it on).
+    """
+    monkeypatch.setenv(_CLASSIFY_FLAG, "1")
+    resp = client.post("/api/v1/documents", json={"content": _INFRA, "metadata": None})
+    assert resp.status_code == 200
+    assert _stored_metadata(resp.json()["doc_id"])["content_tags"]["domain"] == []
+
+
+def test_create_document_classify_failure_does_not_fail_request(client, monkeypatch):
+    """A broken classifier must never fail the document write."""
+    import trellis.classify.ingest as ingest_mod
+
+    monkeypatch.setenv(_CLASSIFY_FLAG, "1")
+    monkeypatch.setattr(ingest_mod, "_ingest_classifier", _BoomPipeline())
+    resp = client.post("/api/v1/documents", json={"content": _INFRA})
+    assert resp.status_code == 200
+    assert "content_tags" not in _stored_metadata(resp.json()["doc_id"])
+
+
+def _post_evidence(client, content=_INFRA):
+    return client.post(
+        "/api/v1/evidence",
+        json={
+            "evidence_type": "document",
+            "content": content,
+            "source_origin": "test",
+        },
+    )
+
+
+def test_ingest_evidence_classify_flag_off(client, monkeypatch):
+    monkeypatch.delenv(_CLASSIFY_FLAG, raising=False)
+    resp = _post_evidence(client)
+    assert resp.status_code == 200
+    assert "content_tags" not in _stored_metadata(resp.json()["evidence_id"])
+
+
+def test_ingest_evidence_classify_flag_on(client, monkeypatch):
+    monkeypatch.setenv(_CLASSIFY_FLAG, "1")
+    resp = _post_evidence(client)
+    assert resp.status_code == 200
+    meta = _stored_metadata(resp.json()["evidence_id"])
+    assert meta["evidence_type"] == "document"
+    assert meta["content_tags"]["domain"] == []
+
+
+def test_ingest_evidence_classify_skips_content_less_evidence(client, monkeypatch):
+    """A uri-only evidence row has nothing to classify.
+
+    The positive control (same test, evidence WITH content) is what makes the
+    absence assertion mean "correctly skipped" rather than "never wired".
+    """
+    monkeypatch.setenv(_CLASSIFY_FLAG, "1")
+    resp = client.post(
+        "/api/v1/evidence",
+        json={
+            "evidence_type": "document",
+            "uri": "https://example.test/doc",
+            "source_origin": "test",
+        },
+    )
+    assert resp.status_code == 200
+    assert "content_tags" not in _stored_metadata(resp.json()["evidence_id"])
+
+    control = _post_evidence(client)
+    assert control.status_code == 200
+    control_meta = _stored_metadata(control.json()["evidence_id"])
+    assert control_meta["content_tags"]["domain"] == []
+
+
+def test_ingest_evidence_classify_failure_does_not_fail_request(client, monkeypatch):
+    import trellis.classify.ingest as ingest_mod
+
+    monkeypatch.setenv(_CLASSIFY_FLAG, "1")
+    monkeypatch.setattr(ingest_mod, "_ingest_classifier", _BoomPipeline())
+    resp = _post_evidence(client)
+    assert resp.status_code == 200
+    assert "content_tags" not in _stored_metadata(resp.json()["evidence_id"])
+
+
 def test_search_empty(client):
     resp = client.get("/api/v1/search", params={"q": "test"})
     assert resp.status_code == 200
