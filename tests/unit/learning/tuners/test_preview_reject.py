@@ -59,9 +59,7 @@ def _proposal(**kw) -> ParameterProposal:
 
 def test_preview_missing_proposal(stores):
     params, state, events = stores
-    pv = preview_promotion(
-        "nope", tuner_state=state, parameter_store=params
-    )
+    pv = preview_promotion("nope", tuner_state=state, parameter_store=params)
     assert isinstance(pv, PromotionPreview)
     assert pv.status == "skipped"
     assert pv.reason == "proposal_not_found"
@@ -74,9 +72,7 @@ def test_preview_predicts_promote(stores):
     params.put(ParameterSet(scope=_proposal().scope, values={"max_items": 10.0}))
     p = _proposal()
     state.put_proposal(p)
-    pv = preview_promotion(
-        p.proposal_id, tuner_state=state, parameter_store=params
-    )
+    pv = preview_promotion(p.proposal_id, tuner_state=state, parameter_store=params)
     assert pv.status == "promoted"
     assert pv.reason == "ok"
     assert pv.proposed_values == {"max_items": 20.0}
@@ -91,9 +87,7 @@ def test_preview_predicts_reject(stores):
     params.put(ParameterSet(scope=_proposal().scope, values={"max_items": 10.0}))
     p = _proposal(sample_size=1)
     state.put_proposal(p)
-    pv = preview_promotion(
-        p.proposal_id, tuner_state=state, parameter_store=params
-    )
+    pv = preview_promotion(p.proposal_id, tuner_state=state, parameter_store=params)
     assert pv.status == "rejected"
     assert "sample_size" in pv.reason
 
@@ -106,9 +100,7 @@ def test_preview_matches_promote_outcome(stores):
     params.put(ParameterSet(scope=_proposal().scope, values={"max_items": 10.0}))
     p = _proposal()
     state.put_proposal(p)
-    pv = preview_promotion(
-        p.proposal_id, tuner_state=state, parameter_store=params
-    )
+    pv = preview_promotion(p.proposal_id, tuner_state=state, parameter_store=params)
     result = promote_proposal(
         p.proposal_id,
         tuner_state=state,
@@ -141,9 +133,7 @@ def test_reject_persists_and_emits(stores):
     )
     assert r.status == "rejected"
     assert state.get_proposal(p.proposal_id).status == "rejected"
-    emitted = events.get_events(
-        event_type=EventType.TUNER_PROPOSAL_REJECTED, limit=10
-    )
+    emitted = events.get_events(event_type=EventType.TUNER_PROPOSAL_REJECTED, limit=10)
     assert len(emitted) == 1
     assert emitted[0].payload["reason"] == "reviewer says no"
     assert emitted[0].payload["manual"] is True

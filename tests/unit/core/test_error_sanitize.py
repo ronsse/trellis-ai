@@ -43,7 +43,7 @@ class TestSuppression:
     def test_url_with_credentials_suppressed(self) -> None:
         # The classic driver leak: connection error echoing the DSN.
         msg = (
-            'connection failed: could not connect to server at '
+            "connection failed: could not connect to server at "
             '"postgresql://trellis:s3cretpw@db.internal:5432/prod"'
         )
         assert sanitize_error_message(msg) == SUPPRESSED_MARKER
@@ -70,9 +70,12 @@ class TestSuppression:
         assert sanitize_error_message(msg) == SUPPRESSED_MARKER
 
     def test_insert_statement_suppressed(self) -> None:
-        assert sanitize_error_message(
-            "syntax error near: INSERT INTO staging.users VALUES (1)"
-        ) == SUPPRESSED_MARKER
+        assert (
+            sanitize_error_message(
+                "syntax error near: INSERT INTO staging.users VALUES (1)"
+            )
+            == SUPPRESSED_MARKER
+        )
 
 
 class TestBounding:

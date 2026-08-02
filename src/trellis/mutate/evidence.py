@@ -85,9 +85,7 @@ def ensure_evidence_document(
     existing = registry.knowledge.document_store.get_by_hash(chash)
     if existing is not None:
         existing_id: str = existing["doc_id"]
-        logger.debug(
-            "evidence_document_dedup", doc_id=existing_id, content_hash=chash
-        )
+        logger.debug("evidence_document_dedup", doc_id=existing_id, content_hash=chash)
         return existing_id
 
     # Classify-on-write (see classify_metadata_on_write). This prose is

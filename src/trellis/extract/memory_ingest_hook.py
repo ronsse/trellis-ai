@@ -159,8 +159,7 @@ def _count_created(results: list[Any]) -> tuple[int, int]:
     entities = sum(
         1
         for r in results
-        if r.operation == Operation.ENTITY_CREATE
-        and r.status == CommandStatus.SUCCESS
+        if r.operation == Operation.ENTITY_CREATE and r.status == CommandStatus.SUCCESS
     )
     edges = sum(
         1

@@ -122,9 +122,7 @@ class TestEntityUpdateHandler:
         # A version bump must not silently drop the pointer-not-prose link.
         assert node["document_ids"] == ["doc-1"]
 
-    def test_document_ids_replaced_when_provided(
-        self, registry: StoreRegistry
-    ) -> None:
+    def test_document_ids_replaced_when_provided(self, registry: StoreRegistry) -> None:
         node_id = _create_node(registry, document_ids=["doc-1"])
         handler = EntityUpdateHandler(registry)
         handler.handle(
@@ -137,9 +135,7 @@ class TestEntityUpdateHandler:
         assert node is not None
         assert node["document_ids"] == ["doc-2"]
 
-    def test_preserves_node_role_across_update(
-        self, registry: StoreRegistry
-    ) -> None:
+    def test_preserves_node_role_across_update(self, registry: StoreRegistry) -> None:
         node_id = _create_node(registry, node_role="structural")
         handler = EntityUpdateHandler(registry)
         handler.handle(

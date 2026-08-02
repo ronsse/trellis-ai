@@ -143,9 +143,7 @@ def _gate_candidates(
         if gating.looks_like_injection(candidate):
             # Counted, never silent — same pattern as the secret gate.
             report.candidates_rejected_injection += 1
-            logger.warning(
-                "capture_injection_blocked", session_id=candidate.session_id
-            )
+            logger.warning("capture_injection_blocked", session_id=candidate.session_id)
             continue
         if not gating.passes_worthiness(candidate):
             report.candidates_rejected_worthiness += 1

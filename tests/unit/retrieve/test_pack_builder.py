@@ -1683,9 +1683,7 @@ class TestF14CrossSourceDedup:
         # Exactly one copy survives, and it is the higher-relevance
         # save_memory doc (relevance-order winner rule).
         assert [i.item_id for i in pack.items] == ["01KWWACXRQ465G4C0MZDNSJJVB"]
-        rejected = {
-            r.item_id: r.reason for r in pack.retrieval_report.rejected_items
-        }
+        rejected = {r.item_id: r.reason for r in pack.retrieval_report.rejected_items}
         assert rejected.get("corpus:notes-import:0bca32") == "semantic_dedup"
 
     def test_higher_scoring_corpus_copy_would_win(self) -> None:

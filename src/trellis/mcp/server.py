@@ -647,9 +647,7 @@ def _sectioned_context(
         adv_md = format_advisories_as_markdown(sectioned_pack.advisories)
         if adv_md:
             result = result + "\n\n" + adv_md
-        _track_tokens(
-            registry, operation=tool, result=result, budget=resolved_tokens
-        )
+        _track_tokens(registry, operation=tool, result=result, budget=resolved_tokens)
     except McpError:
         # Already structured by a deeper helper — let it propagate.
         raise
@@ -845,8 +843,7 @@ def _resolve_evidence_pointer(
     if evidence_ref is not None:
         if registry.knowledge.document_store.get(evidence_ref) is None:
             _raise_invalid_params(
-                f"evidence_ref does not reference an existing document: "
-                f"{evidence_ref}",
+                f"evidence_ref does not reference an existing document: {evidence_ref}",
                 data={"field": "evidence_ref", "evidence_ref": evidence_ref},
             )
         return evidence_ref, content is not None and bool(content.strip())
@@ -987,9 +984,7 @@ def save_knowledge(
                     f"--[{edge_kind}]--> {relates_to}"
                 )
             else:
-                result += (
-                    f"\nWarning: edge not created: {link_result.message}"
-                )
+                result += f"\nWarning: edge not created: {link_result.message}"
 
     return result
 
@@ -1169,9 +1164,7 @@ def save_memory(
 # verdict commits (the world may have changed while the model thought).
 
 
-def _index_stored_memory(
-    registry: StoreRegistry, stored_id: str, content: str
-) -> None:
+def _index_stored_memory(registry: StoreRegistry, stored_id: str, content: str) -> None:
     """Add a freshly stored doc to the MinHash index (loud on failure)."""
     try:
         minhash_index = _get_minhash_index(registry)

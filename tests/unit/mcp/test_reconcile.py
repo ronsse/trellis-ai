@@ -412,9 +412,7 @@ class TestReverifyUnderLock:
 
         _enable(
             monkeypatch,
-            FakeLLMClient(
-                content=_verdict_json("supersede"), on_call=mutate_candidate
-            ),
+            FakeLLMClient(content=_verdict_json("supersede"), on_call=mutate_candidate),
         )
 
         result = save_memory(_NEAR)

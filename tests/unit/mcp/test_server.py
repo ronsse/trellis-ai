@@ -196,9 +196,7 @@ class TestGetContextRefresh:
         assert "No context found" in second
 
         # refresh=True bypasses session dedup for this call only.
-        refreshed = get_context(
-            "deploy platform", session_id="sess-mcp", refresh=True
-        )
+        refreshed = get_context("deploy platform", session_id="sess-mcp", refresh=True)
         assert "deploy" in refreshed.lower()
 
         # Bypass is scoped to that one call — the next default call dedups.
@@ -222,9 +220,7 @@ class TestGetContextDomainFilter:
     #: differentiator.
     _INTENT = "kubernetes deployment rollout strategy"
 
-    def test_facet_domain_doc_is_returned(
-        self, temp_registry: StoreRegistry
-    ) -> None:
+    def test_facet_domain_doc_is_returned(self, temp_registry: StoreRegistry) -> None:
         doc_store = temp_registry.knowledge.document_store
         doc_store.put(
             "facet-doc",
@@ -486,9 +482,7 @@ class TestSaveKnowledge:
         self, temp_registry: StoreRegistry
     ) -> None:
         doc_id = temp_registry.knowledge.document_store.put(None, "the real evidence")
-        result = save_knowledge(
-            "finding", content="ignored prose", evidence_ref=doc_id
-        )
+        result = save_knowledge("finding", content="ignored prose", evidence_ref=doc_id)
         node_id = self._node_id_from_result(result)
         # The explicit pointer wins; the prose is NOT stored as a second doc
         # and the result says so explicitly rather than silently dropping it.
@@ -1375,9 +1369,7 @@ class TestOneRetrievalPath:
         result = get_context("kubernetes deployment")
         assert "**pack_id:**" in result
 
-    def test_search_emits_pack_id_header(
-        self, temp_registry: StoreRegistry
-    ) -> None:
+    def test_search_emits_pack_id_header(self, temp_registry: StoreRegistry) -> None:
         temp_registry.knowledge.document_store.put("doc-s", "kubernetes guide")
         result = search("kubernetes")
         assert "**pack_id:**" in result
@@ -1525,15 +1517,35 @@ class TestOneRetrievalPath:
         # 30 distinct kubernetes topics — all match the "kubernetes" query but
         # are mutually dissimilar, so MinHash keeps every one.
         topics = [
-            "ingress routing", "pod autoscaling", "secret rotation",
-            "node draining", "rolling upgrade", "canary release", "service mesh",
-            "config maps", "persistent volumes", "network policy",
-            "cluster autoscaler", "helm charts", "operator pattern",
-            "sidecar injection", "resource quotas", "pod affinity",
-            "taints tolerations", "readiness probes", "liveness checks",
-            "batch jobs", "vertical scaling", "namespace isolation",
-            "rbac policies", "admission control", "custom resources",
-            "gpu scheduling", "cron workloads", "stateful sets", "daemon sets",
+            "ingress routing",
+            "pod autoscaling",
+            "secret rotation",
+            "node draining",
+            "rolling upgrade",
+            "canary release",
+            "service mesh",
+            "config maps",
+            "persistent volumes",
+            "network policy",
+            "cluster autoscaler",
+            "helm charts",
+            "operator pattern",
+            "sidecar injection",
+            "resource quotas",
+            "pod affinity",
+            "taints tolerations",
+            "readiness probes",
+            "liveness checks",
+            "batch jobs",
+            "vertical scaling",
+            "namespace isolation",
+            "rbac policies",
+            "admission control",
+            "custom resources",
+            "gpu scheduling",
+            "cron workloads",
+            "stateful sets",
+            "daemon sets",
             "init containers",
         ]
         for i, topic in enumerate(topics):
@@ -1625,9 +1637,7 @@ class TestNearDuplicateSuppression:
         )
 
         survivors = [
-            doc_id
-            for doc_id in ("sm-pipeline", "corpus-pipeline")
-            if doc_id in result
+            doc_id for doc_id in ("sm-pipeline", "corpus-pipeline") if doc_id in result
         ]
         assert len(survivors) == 1, f"expected one survivor, got {survivors}"
 

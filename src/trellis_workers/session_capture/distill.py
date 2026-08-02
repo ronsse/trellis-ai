@@ -79,9 +79,7 @@ def build_distill_messages(digest: SessionDigest) -> list[Message]:
     """Build the distillation prompt from the secret-free digest only."""
     salient = digest.salient_text[:_MAX_SALIENT_CHARS]
     tool_names = sorted({call.name for call in digest.tool_calls})
-    signals = (
-        f"has_error={digest.has_error} has_correction={digest.has_correction}"
-    )
+    signals = f"has_error={digest.has_error} has_correction={digest.has_correction}"
     user = (
         f"Session signals: {signals}\n"
         f"Tools used: {', '.join(tool_names) or 'none'}\n\n"
@@ -223,6 +221,4 @@ def emit_distillation_judged(
             payload=payload.model_dump(mode="json"),
         )
     except Exception:
-        logger.exception(
-            "distill_judged_emit_failed", session_id=candidate.session_id
-        )
+        logger.exception("distill_judged_emit_failed", session_id=candidate.session_id)
