@@ -85,6 +85,8 @@ class TestValuesLand:
         )
         used = [e for e in edges if e["target_id"] == "tool:bash"]
         assert len(used) == 1
+        # ...and the edge carries its confidence too, not just the node.
+        assert used[0]["properties"][CONFIDENCE_PROPERTY] == 1.0
 
 
 class TestPackGate:
