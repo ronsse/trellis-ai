@@ -69,6 +69,12 @@ Retrieval carries a **semantic axis** when embeddings are configured:
 documents embed on ingest when `TRELLIS_ENABLE_EMBED_ON_INGEST=1`
 (see [operations.md](operations.md) — "Document → vector embedding").
 
+Retrieval-shaping **content tags** (`domain`, `content_type`, `scope`,
+`signal_quality`) are written at ingest when
+`TRELLIS_ENABLE_CLASSIFY_ON_INGEST=1`; `trellis classify backfill` re-tags
+what is already stored (see [operations.md](operations.md) — "Document →
+content tags").
+
 ## Why three surfaces?
 
 Each has a different consumer and a different optimization target.

@@ -9,6 +9,7 @@ import typer
 from trellis.logging import configure_stderr_logging
 from trellis_cli.admin import admin_app
 from trellis_cli.analyze import analyze_app
+from trellis_cli.classify import classify_app
 from trellis_cli.curate import curate_app
 from trellis_cli.demo import demo_app
 from trellis_cli.extract_refresh import extract_app
@@ -56,6 +57,11 @@ app.add_typer(
     extract_app,
     name="extract",
     help="Re-run extractors and emit structural diffs",
+)
+app.add_typer(
+    classify_app,
+    name="classify",
+    help="Backfill and refresh content tags",
 )
 app.add_typer(curate_app, name="curate")
 app.add_typer(retrieve_app, name="retrieve")

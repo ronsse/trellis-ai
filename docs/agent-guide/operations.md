@@ -219,6 +219,41 @@ This command does **not** require the `TRELLIS_ENABLE_EMBED_ON_INGEST` flag — 
 {"status": "ok", "scanned": 240, "embedded": 198, "skipped_existing": 30, "skipped_empty": 12, "errors": 0, "dry_run": false}
 ```
 
+#### Document → content tags (opt-in)
+
+By default document ingestion writes no retrieval-shaping tags — the document is retrievable, but `PackBuilder`'s `tag_filters`, the `signal_quality="noise"` exclusion and the tag-derived importance boost have nothing to work with. Set `TRELLIS_ENABLE_CLASSIFY_ON_INGEST=1` (also accepts `true`/`yes`/`on`) to turn on **classify-on-write**: an inline, deterministic pass (structural + keyword-domain + source-system classifiers, no LLM, microseconds) that stamps `metadata.content_tags` and `metadata.auto_importance` as the document is written.
+
+The flag applies to the shared ingest seam (`sync_records`) — `trellis ingest corpus`, `trellis ingest conversations`, and the session-capture sweep. It is fully fail-soft: a classification error is logged and the document is stored untagged, never lost.
+
+One deliberate omission: the classifier-derived **`domain` facet is dropped** before persisting. `domain` is the only facet that *hard-excludes* a document from a domain-scoped query on mismatch, and the deterministic keyword / source-system classifiers will confidently assign a code-flavoured domain to personal content. The operator-set scalar `metadata['domain']` (the `--domain` flag) is a separate key and is untouched. Every facet that *is* persisted only shapes ranking, sectioning, or noise exclusion — a wrong value degrades ranking at worst, it never hides content.
+
+### `trellis classify backfill`
+
+Backfill tags for documents ingested before the flag was enabled, and refresh tags that have drifted (the keyword vocabulary grew, the graph around a document changed). Pages the DocumentStore and re-runs the deterministic tagging pipeline over every item whose `content_tags.classified_at` is missing or older than `--max-age-days`, through the same `reclassify_item` core the programmatic path uses.
+
+```bash
+trellis classify backfill [--max-age-days <n>] [--limit <n>] [--page-size <n>] [--include-domain] [--dry-run] [--format text|json]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--max-age-days` | `30` | Re-tag items whose tags are older than this. `0` re-tags every scanned item. |
+| `--limit` | `0` (all) | Stop after scanning this many documents. |
+| `--page-size` | `100` | Documents fetched per store round-trip. |
+| `--include-domain` | off | **Dangerous** — let the classifiers (re)assign the hard-excluding `domain` facet. See below. |
+| `--dry-run` | off | Report what would change without writing tags or emitting events. |
+| `--format` | `text` | `text` or `json`. |
+
+Like the two backfills above, this command does **not** require the `TRELLIS_ENABLE_CLASSIFY_ON_INGEST` flag — invoking it *is* the opt-in. It never deletes tags: an item the pipeline produces no signal for keeps whatever it had, and is counted under `skipped_no_signal`. Each write emits a `TAGS_REFRESHED` event carrying the before/after tag diff; a dry run emits nothing.
+
+`--include-domain` re-enables the facet classify-on-write deliberately drops, with the same hazard: a deterministic keyword match that assigns the wrong `domain` will hide the document from domain-scoped retrieval rather than merely mis-rank it. Leave it off for a backfill over mixed content; use it only with a vocabulary you trust (`classify.domain_keywords` in `config.yaml`) or an enrichment-mode pipeline.
+
+**JSON output:**
+
+```json
+{"status": "ok", "scanned": 240, "refreshed": 31, "skipped_fresh": 200, "skipped_no_signal": 6, "skipped_missing_content": 3, "dry_run": false, "include_domain": false, "item_ids_refreshed": ["doc-1", "doc-2"]}
+```
+
 ### `trellis ingest evidence`
 
 Ingest evidence from a JSON file.
@@ -1079,6 +1114,21 @@ trellis worker mine-precedents [--domain D] [--min-traces N] \
 | `--format` | `text` | `text` or `json`. |
 
 Candidates are **surfaced** (the miner emits `PRECEDENT_PROMOTED` events as it intends) but **not auto-promoted** into the graph — review before acting. Like `enrich`, this requires an LLM extra and exits loudly when none is configured.
+
+### `trellis worker capture-sessions`
+
+Run one Claude Code session-capture sweep — the `trellis worker` front door for the same code path as the `trellis-session-capture` console script and `python -m trellis_workers.session_capture`.
+
+```bash
+trellis worker capture-sessions [--dry-run] [--format text|json]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--dry-run` | off | Plan the sweep without writing memories or advancing the watermark. |
+| `--format` | `text` | `text` or `json`. |
+
+Everything else is configured by the `TRELLIS_CAPTURE_*` environment variables documented in [session-auto-capture.md](session-auto-capture.md). **Requires a distillation judge** (an `llm:` block): distillation fail-closes, so a sweep without one captures nothing — the command exits non-zero rather than reporting a clean no-op, and exits non-zero again when `sessions_judge_unavailable` is non-empty because the judge went away mid-sweep.
 
 ---
 

@@ -103,6 +103,10 @@ all = [
 trellis = "trellis_cli.main:app"
 trellis-mcp = "trellis.mcp.server:main"
 trellis-api = "trellis_api.app:main"
+# The capture sweep names itself `trellis-session-capture` in its own --help;
+# ship the script so that name resolves. Also reachable as
+# `trellis worker capture-sessions` and `python -m trellis_workers.session_capture`.
+trellis-session-capture = "trellis_workers.session_capture.__main__:main"
 
 [tool.hatch.version]
 source = "vcs"

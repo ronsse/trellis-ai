@@ -6,6 +6,21 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **`trellis classify backfill`** — the missing front door for the tagging
+  backfill. `trellis.classify.refresh.reclassify_stale` shipped tested but had
+  no caller outside comments, so re-tagging documents ingested before
+  `TRELLIS_ENABLE_CLASSIFY_ON_INGEST` was enabled (or whose tags have since
+  drifted) required an ad-hoc script. Exposes `--max-age-days`, `--limit`
+  (`0` = whole store), `--page-size`, `--dry-run`, and the deliberately
+  dangerous `--include-domain` (off by default — `domain` is the only facet
+  that hard-excludes a document from a domain-scoped query). `reclassify_stale`
+  gained offset paging so one invocation covers a store larger than one page,
+  and both refresh entry points gained `dry_run`. Documented in
+  [`operations.md`](docs/agent-guide/operations.md).
+- **`trellis-session-capture` console script** and **`trellis worker
+  capture-sessions`** — the capture sweep advertised the console-script name in
+  its own `--help` but never shipped it, and was the only worker with no
+  `trellis worker` front door. Both delegate to the same `run_sweep`.
 - **Claude Code session auto-capture** (`trellis_workers.session_capture`) —
   client-side nightly sweep that reads local Claude Code transcript JSONL,
   distils durable operator memories with a local model, and writes them
@@ -103,6 +118,15 @@ Net DEFECT delta in `src/`: 113 literal-only → 85 literal-only / 67 helper-awa
 
 ### Fixed
 
+- **Session capture no longer no-ops silently on a misconfigured judge.**
+  `_build_llm_client` swallowed every failure and returned `None`, and
+  `distill_session` fail-closes on `None` — so a broken `llm:` block produced a
+  sweep that judged nothing, wrote nothing, advanced no watermark, and exited
+  `0`. It now raises `CaptureJudgeUnavailableError`; every front door exits
+  non-zero with the remediation, and a judge that disappears *mid*-sweep is
+  reported as `sessions_judge_unavailable` (also a non-zero exit) rather than a
+  warning in the log. The entry point also pins structlog to stderr so the JSON
+  report on stdout stays parseable.
 - **SQLite concurrent ingest race.** Partial fix in [#117](https://github.com/ronsse/trellis-ai/pull/117) (`busy_timeout=10s`) closed the named "database is locked" symptom; the deeper Python-level `sqlite3.ProgrammingError: cannot commit - no transaction is active` race remained. Full fix in [#131](https://github.com/ronsse/trellis-ai/pull/131): WAL mode + thread-local `Connection` pool via the existing `_conn` property forwarder; `_ensure_wal_mode` retry helper covers the Windows WAL-transition race that `busy_timeout` alone misses. `test_concurrent_ingests` goes from ~12% flaky to **100/100 deterministic** under tight repeat-loops.
 - **ArcadeDB registry-path schema-migration bypass.** The new typed-property + `FLOAT (MIN 0.0, MAX 1.0)` constraint installed only on the direct-construct test path; in production deployments using `StoreRegistry.from_config()` the server-side constraint never landed. Fixed in two passes: [#126](https://github.com/ronsse/trellis-ai/pull/126)'s reviewer caught the new-driver bypass (registry now runs the migration itself before injecting the driver); [#137](https://github.com/ronsse/trellis-ai/pull/137) closed the cached-driver short-circuit AND stopped stripping `http_url` from forwarded params (kept the `password` strip — preserves the constructor's driver-XOR-password mutex).
 - **Phase 5 test-ordering flake.** Seven tests in `test_dispatcher_phase5.py` / `test_recording_phase5.py` passed in isolation but failed in full-suite ordering. Root cause: `structlog.cache_logger_on_first_use=True` interacting with the CLI conftest's `TRELLIS_LOG_LEVEL=CRITICAL` monkeypatch — module-level loggers cached a CRITICAL-only bind on `BoundLoggerLazyProxy` that `structlog.configure()` and `reset_defaults()` do not evict. Fix: package-scoped autouse finalizer in `tests/unit/cli/conftest.py` walks `gc.get_objects()` for live proxies and evicts cached attrs at package teardown. 3/3 consecutive full-suite runs green. ([#138](https://github.com/ronsse/trellis-ai/pull/138))

@@ -713,3 +713,139 @@ class TestOutcomeAndResultModels:
         assert result.scanned == 0
         assert result.refreshed == 0
         assert result.item_ids_refreshed == []
+
+
+class _PagingDocStore(_InMemoryDocStore):
+    """Doc store that records every ``list_documents`` page request."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.page_requests: list[tuple[int, int]] = []
+
+    def list_documents(
+        self, *, limit: int = 50, offset: int = 0
+    ) -> list[dict[str, Any]]:
+        self.page_requests.append((limit, offset))
+        return super().list_documents(limit=limit, offset=offset)
+
+
+class TestReclassifyStalePaging:
+    """A backfill has to cover a store bigger than one page."""
+
+    def _pipeline(self) -> ClassifierPipeline:
+        return ClassifierPipeline(
+            classifiers=[_StubClassifier("stub", tags={"domain": ["refreshed"]})],
+        )
+
+    def _store(self, count: int) -> _PagingDocStore:
+        store = _PagingDocStore()
+        for i in range(count):
+            store.put(f"doc-{i}", f"content {i}", {})
+        store.page_requests.clear()
+        return store
+
+    def test_limit_zero_pages_through_whole_store(self) -> None:
+        store = self._store(5)
+
+        result = reclassify_stale(
+            pipeline=self._pipeline(),
+            document_store=store,
+            limit=0,
+            page_size=2,
+        )
+
+        assert result.scanned == 5
+        assert result.refreshed == 5
+        # Three pages plus the empty page that ends the walk. The last real
+        # page held a single row, so the terminating probe starts at 5.
+        assert store.page_requests == [(2, 0), (2, 2), (2, 4), (2, 5)]
+
+    def test_limit_caps_the_scan_across_pages(self) -> None:
+        store = self._store(5)
+
+        result = reclassify_stale(
+            pipeline=self._pipeline(),
+            document_store=store,
+            limit=3,
+            page_size=2,
+        )
+
+        assert result.scanned == 3
+        assert result.refreshed == 3
+        # The final page is trimmed to the remaining budget, and the walk
+        # stops without asking for a page it could not use.
+        assert store.page_requests == [(2, 0), (1, 2)]
+
+    def test_store_smaller_than_the_budget_ends_on_an_empty_page(self) -> None:
+        store = self._store(3)
+
+        result = reclassify_stale(
+            pipeline=self._pipeline(),
+            document_store=store,
+            limit=100,
+        )
+
+        assert result.scanned == 3
+        # One real page, then a probe that comes back empty — the walk never
+        # assumes a short page means exhaustion.
+        assert store.page_requests == [(100, 0), (97, 3)]
+
+
+class TestReclassifyDryRun:
+    """Dry-run reports what a live run would do, and writes nothing."""
+
+    def _pipeline(self) -> ClassifierPipeline:
+        return ClassifierPipeline(
+            classifiers=[_StubClassifier("stub", tags={"domain": ["refreshed"]})],
+        )
+
+    def test_item_dry_run_persists_nothing(self) -> None:
+        store = _InMemoryDocStore()
+        store.put("doc-a", "aaa", {})
+        event_log = _CapturingEventLog()
+
+        outcome = reclassify_item(
+            "doc-a",
+            pipeline=self._pipeline(),
+            document_store=store,
+            event_log=event_log,
+            dry_run=True,
+        )
+
+        assert outcome.refreshed is True
+        assert outcome.reason == "tags would be updated (dry-run)"
+        assert outcome.after is not None
+        # Nothing landed in the store, and no event claimed a write happened.
+        persisted = store.get("doc-a")
+        assert persisted is not None
+        assert persisted["metadata"] == {}
+        assert event_log.events == []
+
+    def test_batch_dry_run_matches_live_counts(self) -> None:
+        store = _InMemoryDocStore()
+        store.put("doc-a", "aaa", {})
+        store.put("doc-b", "bbb", {})
+        store.put("doc-empty", "", {})
+
+        dry = reclassify_stale(
+            pipeline=self._pipeline(),
+            document_store=store,
+            dry_run=True,
+        )
+        assert dry.scanned == 3
+        assert dry.refreshed == 2
+        assert dry.skipped_missing_content == 1
+        dry_doc = store.get("doc-a")
+        assert dry_doc is not None
+        assert dry_doc["metadata"] == {}
+
+        live = reclassify_stale(
+            pipeline=self._pipeline(),
+            document_store=store,
+        )
+        assert live.scanned == dry.scanned
+        assert live.refreshed == dry.refreshed
+        assert live.item_ids_refreshed == dry.item_ids_refreshed
+        live_doc = store.get("doc-a")
+        assert live_doc is not None
+        assert live_doc["metadata"]["content_tags"]

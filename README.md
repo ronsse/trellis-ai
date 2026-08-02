@@ -314,6 +314,7 @@ trellis ingest trace trace.json
 trellis retrieve pack --intent "..." --domain backend --max-tokens 2000
 trellis curate promote TRACE_ID --title "..." --description "..."
 trellis analyze context-effectiveness
+trellis classify backfill --dry-run  # re-tag stored documents (preview first)
 trellis admin check-extractors       # readiness diagnostic for tiered extraction
 trellis admin migrate-graph \
   --from-config sqlite.yaml \
@@ -450,7 +451,9 @@ Graph stores support SCD Type 2 temporal versioning — every node carries `vali
 
 ## Classification & tiered extraction
 
-Every item is classified at ingestion on four orthogonal facets: `domain`, `content_type`, `scope`, `signal_quality`. Deterministic classifiers run inline (microseconds); LLM-backed classifiers only fire when deterministic confidence is below threshold.
+Items are tagged on four orthogonal facets: `domain`, `content_type`, `scope`, `signal_quality`. Deterministic classifiers run inline (microseconds); LLM-backed classifiers only fire when deterministic confidence is below threshold.
+
+Tagging at write time is opt-in: set `TRELLIS_ENABLE_CLASSIFY_ON_INGEST=1` (also accepts `true`/`yes`/`on`) and every document written through the ingest seam — `trellis ingest corpus`, `ingest conversations`, the session-capture sweep — carries tags from its first write. Everything stored before that (and any tags that have since drifted) is covered by `trellis classify backfill`.
 
 Raw sources (agent messages, dbt manifests, OpenLineage events, …) flow through a **tiered extraction pipeline**: deterministic rule-based extractors run first, then hybrid JSON extractors, then LLM extraction as an opt-in fallback. As patterns stabilize, extraction graduates from expensive-but-universal LLM calls to cheap-and-deterministic rules — so the cost curve drops the more the domain crystallizes.
 

@@ -40,6 +40,11 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
+#: Documents fetched per ``list_documents`` round-trip in
+#: :func:`reclassify_stale`. Mirrors ``trellis admin reindex-vectors`` —
+#: the other operator-driven backfill over the same store.
+DEFAULT_PAGE_SIZE = 100
+
 
 @dataclass
 class RefreshOutcome:
@@ -72,6 +77,7 @@ def reclassify_item(
     event_log: EventLog | None = None,
     context_builder: Any | None = None,
     include_domain: bool = False,
+    dry_run: bool = False,
 ) -> RefreshOutcome:
     """Re-run the classifier pipeline against a single item and persist
     updated tags.
@@ -100,6 +106,10 @@ def reclassify_item(
             (re)assign it during a refresh could silently hide a document.
             Set ``True`` only for a deliberate enrichment-mode refresh whose
             LLM classifier is trusted to (re)compute ``domain``.
+        dry_run: When ``True`` the fresh tags are computed and returned in
+            ``after`` but nothing is persisted and no event is emitted.
+            ``refreshed`` still reports whether a real run *would* have
+            written, so a dry-run and a live run agree on the counts.
 
     Returns:
         :class:`RefreshOutcome` with the before/after tag diffs and a
@@ -187,6 +197,15 @@ def reclassify_item(
             after=before_tags,
         )
 
+    if dry_run:
+        return RefreshOutcome(
+            item_id=item_id,
+            refreshed=True,
+            reason="tags would be updated (dry-run)",
+            before=before_tags,
+            after=fresh_tags,
+        )
+
     metadata["content_tags"] = fresh_tags
     metadata["auto_importance"] = new_importance
     document_store.put(item_id, content, metadata)
@@ -215,8 +234,10 @@ def reclassify_stale(
     event_log: EventLog | None = None,
     max_age_days: int = 30,
     limit: int = 100,
+    page_size: int = DEFAULT_PAGE_SIZE,
     context_builder: Any | None = None,
     include_domain: bool = False,
+    dry_run: bool = False,
 ) -> BatchRefreshResult:
     """Scan the document store for items with stale or missing
     ``classified_at`` and reclassify them.
@@ -229,62 +250,74 @@ def reclassify_stale(
     Items that have no ``content_tags`` at all are also refreshed — they
     likely bypassed the ingestion pipeline and have never been tagged.
 
+    The scan pages through ``list_documents`` in ``page_size`` chunks so a
+    store larger than one page is covered in a single call without holding
+    every document in memory. Paging by offset is stable across the writes
+    this function performs: both shipped backends order by ``created_at``,
+    which ``DocumentStore.put`` never rewrites on an existing row.
+
     Args:
         pipeline: Pipeline to run.
         document_store: Where to scan + write.
         event_log: Optional audit sink.
         max_age_days: Freshness threshold. Items tagged more recently
             than this are skipped.
-        limit: Max number of documents to scan per call. This function
-            runs synchronously; large stores should page in batches.
+        limit: Max number of documents to scan. ``0`` (or negative) means
+            "every document in the store", paging until exhausted.
+        page_size: Documents fetched per ``list_documents`` round-trip.
         context_builder: Optional ``(doc) -> ClassificationContext``.
         include_domain: Forwarded to :func:`reclassify_item`. Defaults to
             ``False`` so a batch backfill never lets the deterministic pipeline
             introduce a hard-excluding ``domain`` — see that function's docs.
+        dry_run: Forwarded to :func:`reclassify_item`. Nothing is persisted
+            and no event is emitted; the counts report what a live run would
+            have done.
 
     Returns:
         :class:`BatchRefreshResult` with counts and the list of refreshed
         item IDs.
     """
     cutoff = datetime.now(UTC) - timedelta(days=max_age_days)
-    docs = document_store.list_documents(limit=limit)
+    result = BatchRefreshResult()
+    offset = 0
 
-    result = BatchRefreshResult(scanned=len(docs))
-    for doc in docs:
-        item_id = doc.get("doc_id")
-        if not item_id:
-            continue
-        if not doc.get("content"):
-            result.skipped_missing_content += 1
-            continue
+    while True:
+        fetch = page_size if limit <= 0 else min(page_size, limit - result.scanned)
+        if fetch <= 0:
+            break
+        page = document_store.list_documents(limit=fetch, offset=offset)
+        if not page:
+            break
+        offset += len(page)
+        result.scanned += len(page)
 
-        tags = (doc.get("metadata") or {}).get("content_tags") or {}
-        # Option A: missing/unparseable classified_at is treated as
-        # *always stale*. Legacy or hand-edited rows that never carried a
-        # stamp must be reclassified — there's no other freshness signal,
-        # and silently skipping them would let drift accumulate forever.
-        raw_stamp = tags.get("classified_at")
-        classified_at = _parse_classified_at(raw_stamp)
-        if classified_at is None:
-            # Fall through to reclassify — explicit "missing => stale".
-            pass
-        elif classified_at >= cutoff:
-            result.skipped_fresh += 1
-            continue
+        for doc in page:
+            item_id = doc.get("doc_id")
+            if not item_id:
+                continue
+            if not doc.get("content"):
+                result.skipped_missing_content += 1
+                continue
 
-        outcome = reclassify_item(
-            item_id,
-            pipeline=pipeline,
-            document_store=document_store,
-            event_log=event_log,
-            context_builder=context_builder,
-            include_domain=include_domain,
-        )
-        if outcome.refreshed:
-            result.refreshed += 1
-            result.item_ids_refreshed.append(item_id)
-        elif outcome.reason.startswith("pipeline produced no tags"):
-            result.skipped_no_signal += 1
+            tags = (doc.get("metadata") or {}).get("content_tags") or {}
+            if not _is_stale(tags, cutoff):
+                result.skipped_fresh += 1
+                continue
+
+            outcome = reclassify_item(
+                item_id,
+                pipeline=pipeline,
+                document_store=document_store,
+                event_log=event_log,
+                context_builder=context_builder,
+                include_domain=include_domain,
+                dry_run=dry_run,
+            )
+            if outcome.refreshed:
+                result.refreshed += 1
+                result.item_ids_refreshed.append(item_id)
+            elif outcome.reason.startswith("pipeline produced no tags"):
+                result.skipped_no_signal += 1
 
     logger.info(
         "reclassify_stale_completed",
@@ -292,8 +325,21 @@ def reclassify_stale(
         refreshed=result.refreshed,
         skipped_fresh=result.skipped_fresh,
         skipped_no_signal=result.skipped_no_signal,
+        dry_run=dry_run,
     )
     return result
+
+
+def _is_stale(tags: dict[str, Any], cutoff: datetime) -> bool:
+    """``True`` when an item's tags are older than ``cutoff`` — or unproven.
+
+    Option A: a missing or unparseable ``classified_at`` is treated as
+    *always stale*. Legacy or hand-edited rows that never carried a stamp
+    must be reclassified — there's no other freshness signal, and silently
+    skipping them would let drift accumulate forever.
+    """
+    classified_at = _parse_classified_at(tags.get("classified_at"))
+    return classified_at is None or classified_at < cutoff
 
 
 def _default_context_builder(doc: dict[str, Any]) -> ClassificationContext:
