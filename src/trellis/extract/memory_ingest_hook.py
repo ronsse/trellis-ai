@@ -28,11 +28,11 @@ its failure modes.
 
 from __future__ import annotations
 
-import os
 from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from trellis.core.write_config import MEMORY_EXTRACTION_FLAG, WriteBehaviourConfig
 from trellis.extract.entity_resolution import build_name_alias_resolver
 
 if TYPE_CHECKING:
@@ -42,10 +42,16 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
-#: Env flag shared with the MCP ``save_memory`` extraction path.
-MEMORY_EXTRACTION_FLAG = "TRELLIS_ENABLE_MEMORY_EXTRACTION"
+__all__ = [
+    "MEMORY_EXTRACTION_FLAG",
+    "build_memory_extractor",
+    "memory_extraction_env_enabled",
+    "run_memory_extraction",
+]
 
-_TRUTHY = frozenset({"1", "true", "yes", "on"})
+# ``MEMORY_EXTRACTION_FLAG`` — shared with the MCP ``save_memory``
+# extraction path — is re-exported from :mod:`trellis.core.write_config`,
+# which owns the name and the parsing for every write-behaviour knob.
 
 # LLM budget per document — one call, short residue prompt. Matches the
 # save_memory path so cost per extracted document is identical.
@@ -55,7 +61,7 @@ _MAX_EXTRACT_TOKENS = 400
 
 def memory_extraction_env_enabled() -> bool:
     """``True`` iff ``TRELLIS_ENABLE_MEMORY_EXTRACTION`` is set truthy."""
-    return os.environ.get(MEMORY_EXTRACTION_FLAG, "").strip().lower() in _TRUTHY
+    return WriteBehaviourConfig.from_env().memory_extraction
 
 
 def build_memory_extractor(registry: StoreRegistry, *, opt_in: bool) -> Any | None:
@@ -66,6 +72,11 @@ def build_memory_extractor(registry: StoreRegistry, *, opt_in: bool) -> Any | No
     ``TRELLIS_ENABLE_MEMORY_EXTRACTION`` env flag are set, and an LLM
     client can be built from the registry. Never raises: a bulk ingest
     must not fail because the optional extractor could not be constructed.
+
+    Note for anyone reading event provenance: the ``env_flags`` stamp
+    (:mod:`trellis.core.write_provenance`) records only the env half of
+    that conjunction, so ``memory_extraction: true`` on a row means the
+    environment permitted extraction, not that this run performed it.
     """
     if not opt_in or not memory_extraction_env_enabled():
         return None

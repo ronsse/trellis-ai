@@ -3,7 +3,8 @@
 # Stage 1 (builder): install dependencies into a venv using uv.
 # Stage 2 (runtime): copy the venv + source into a slim image.
 #
-# Build:   docker build -t trellis-ai .
+# Build:   make docker-build          (stamps the image with its git sha)
+#          docker build -t trellis-ai .   (unstamped — see TRELLIS_BUILD_VERSION)
 # Run:     docker run --rm -p 8420:8420 \
 #            -e TRELLIS_CONFIG_DIR=/etc/trellis \
 #            -v $PWD/config:/etc/trellis:ro \
@@ -28,7 +29,20 @@ COPY src ./src
 ENV VIRTUAL_ENV=/opt/venv \
     PATH="/opt/venv/bin:$PATH"
 
+# The build context has no ``.git`` (see .dockerignore), so hatch-vcs cannot
+# derive a version and every image would otherwise bake the same
+# ``fallback-version`` — making one image indistinguishable from another,
+# which is exactly the drift the write-provenance stamp exists to detect.
+# Pass the working tree's git-derived version in and the image carries the
+# sha it was built from; ``make docker-build`` computes it for you. Left
+# empty, resolution reports ``version_source="fallback-version"`` rather
+# than asserting a version it cannot vouch for.
+ARG TRELLIS_BUILD_VERSION=""
+
 RUN uv venv /opt/venv \
+ && if [ -n "$TRELLIS_BUILD_VERSION" ]; then \
+      export SETUPTOOLS_SCM_PRETEND_VERSION="$TRELLIS_BUILD_VERSION"; \
+    fi \
  && uv pip install ".[cloud,llm-openai]"
 
 # ---------- runtime ----------

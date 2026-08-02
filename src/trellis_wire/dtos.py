@@ -52,6 +52,16 @@ class VersionResponse(WireModel):
     ``package_version`` is informational only — it's the actual
     installed ``trellis-ai`` package version, which may move without
     changing the API contract.
+
+    ``write_provenance`` is the write-provenance stamp this server puts
+    on every event it emits (build identity + the write-behaviour
+    environment it was launched with).  It exists so an operator can ask
+    a *running container* what it is, rather than inferring it from
+    whatever image was last built.  Free-form: it mirrors
+    ``metadata.write_provenance`` on stored events, whose shape is owned
+    by :mod:`trellis.core.write_provenance`, not by the wire contract.
+    ``None`` means the server withheld it — it is ops detail, gated like
+    the ``/readyz`` breakdown — not that the server cannot report it.
     """
 
     api_major: int
@@ -61,6 +71,7 @@ class VersionResponse(WireModel):
     sdk_min: str
     package_version: str
     mcp_tools_version: int = 1
+    write_provenance: dict[str, Any] | None = None
 
 
 # -- Ingest --

@@ -29,7 +29,6 @@ Two deliberate scope limits:
 
 from __future__ import annotations
 
-import os
 import threading
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -39,19 +38,18 @@ import structlog
 from trellis.classify.factory import build_ingestion_pipeline
 from trellis.classify.importance import compute_importance
 from trellis.classify.protocol import ClassificationContext
+from trellis.core.write_config import CLASSIFY_ON_INGEST_FLAG, WriteBehaviourConfig
 
 if TYPE_CHECKING:
     from trellis.classify.pipeline import ClassifierPipeline
 
 logger = structlog.get_logger(__name__)
 
-#: Truthy spellings that turn classify-on-ingest on (mirrors the embed hook).
-_TRUTHY = frozenset({"1", "true", "yes", "on"})
-
-#: Feature flag — off by default, consistent with the sibling ingest-time
-#: behaviours. Enable per-deployment; the tags it writes are always safe
-#: (see module docstring) so flipping the default later is low-risk.
-CLASSIFY_ON_INGEST_FLAG = "TRELLIS_ENABLE_CLASSIFY_ON_INGEST"
+# ``CLASSIFY_ON_INGEST_FLAG`` is re-exported from
+# :mod:`trellis.core.write_config`, which owns the name and the parsing for
+# every write-behaviour knob. Off by default, consistent with the sibling
+# ingest-time behaviours; the tags it writes are always safe (see module
+# docstring) so flipping the default later is low-risk.
 
 #: The metadata keys :func:`classify_for_ingest` writes. Callers that have to
 #: move a classified document's tags somewhere else — corpus sync propagates
@@ -64,7 +62,7 @@ CLASSIFY_METADATA_KEYS = ("content_tags", "auto_importance")
 
 def classify_on_ingest_enabled() -> bool:
     """``True`` iff ``TRELLIS_ENABLE_CLASSIFY_ON_INGEST`` is set truthy."""
-    return os.environ.get(CLASSIFY_ON_INGEST_FLAG, "").strip().lower() in _TRUTHY
+    return WriteBehaviourConfig.from_env().classify_on_ingest
 
 
 def build_ingest_classifier() -> ClassifierPipeline:

@@ -40,6 +40,7 @@ from mcp.types import INTERNAL_ERROR, INVALID_PARAMS, ErrorData
 
 from trellis.auth import SCOPE_INGEST, SCOPE_MUTATE, SCOPE_READ
 from trellis.classify.ingest import classify_metadata_on_write
+from trellis.core.write_provenance import get_write_provenance
 from trellis.extract.entity_resolution import build_name_alias_resolver
 from trellis.extract.trace_ingest_hook import run_trace_extraction
 from trellis.feedback.models import PackFeedback
@@ -241,10 +242,11 @@ def _get_memory_extractor(registry: StoreRegistry) -> Any:
         return _memory_extractor
     _memory_extractor_attempted = True
 
-    import os  # noqa: PLC0415
+    from trellis.extract.memory_ingest_hook import (  # noqa: PLC0415
+        memory_extraction_env_enabled,
+    )
 
-    flag = os.environ.get("TRELLIS_ENABLE_MEMORY_EXTRACTION", "").strip().lower()
-    if flag not in ("1", "true", "yes", "on"):
+    if not memory_extraction_env_enabled():
         return None
 
     try:
@@ -2458,6 +2460,12 @@ def main() -> None:
     # structlog on stderr for both transports — under http it also stops
     # log lines interleaving with uvicorn's stdout access log.
     configure_stderr_logging()
+    # Which build, applying which write semantics. Emitted before the
+    # transport branch so *both* paths get it — a stdio server is spawned
+    # per session and gone before anyone can query it, so this line is its
+    # only live record; the durable record is the same stamp on every
+    # event it writes.
+    logger.info("mcp_write_provenance", **get_write_provenance())
     transport = resolve_transport()
     try:
         if transport == TRANSPORT_HTTP:
