@@ -1,6 +1,12 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help setup install install-dev lint format typecheck test check clean build publish-check verify-wheel hooks hooks-run fix openapi openapi-check secrets-check
+.PHONY: help setup install install-dev lint format typecheck test check clean build publish-check verify-wheel hooks hooks-run fix openapi openapi-check secrets-check docker-build
+
+# Git-derived PEP 440 version for the working tree, e.g. 0.9.0.dev157+gd9939e8ee.
+# The Docker build context excludes .git, so this is the only way an image can
+# know which commit it was built from — see the ARG in Dockerfile.
+BUILD_VERSION := $(shell git describe --tags --abbrev=9 --dirty=.dirty --always \
+	| sed -E 's/^v//; s/-([0-9]+)-g/.dev\1+g/')
 
 help: ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-15s\033[0m %s\n", $$1, $$2}'
@@ -56,6 +62,10 @@ verify-wheel: build ## Build and inspect wheel contents (sanity-check before tag
 
 publish-check: build ## Build and run twine check on the artifacts
 	python -m twine check dist/*
+
+docker-build: ## Build the API image stamped with the working tree's git sha
+	docker build --build-arg TRELLIS_BUILD_VERSION="$(BUILD_VERSION)" -t trellis-ai .
+	@echo "Built trellis-ai stamped as $(BUILD_VERSION)"
 
 openapi: ## Regenerate docs/api/v1.yaml from the live FastAPI app
 	python scripts/generate_openapi.py

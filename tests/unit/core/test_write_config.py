@@ -1,17 +1,20 @@
 """Tests for :mod:`trellis.core.write_config`.
 
-The point of this module is that consolidating the write-behaviour knobs
-changed **nothing**: same env var names, same defaults, same parsing
-quirks. These tests pin that, and they pin that each legacy reader
-function — which deployments and other modules still call — is still
-driven by exactly the variable it was always driven by.
+Consolidating the write-behaviour knobs changed no observable behaviour:
+same env var names, same defaults, same parsing quirks. These tests pin
+that, and they pin that each legacy reader function — which deployments
+and other modules still call — is still driven by exactly the variable it
+was always driven by. The one deliberate difference, warning frequency for
+a malformed confidence floor, is pinned too.
 """
 
 from __future__ import annotations
 
 import pytest
+import structlog.testing
 
 from trellis.classify.ingest import classify_on_ingest_enabled
+from trellis.core import write_config
 from trellis.core.write_config import (
     ENV_VAR_BY_FIELD,
     TRUTHY,
@@ -119,6 +122,21 @@ class TestConfidenceFloor:
         assert WriteBehaviourConfig.from_env(env).trace_extraction_min_confidence is (
             None
         )
+
+    def test_a_malformed_value_warns_once_not_once_per_read(self) -> None:
+        """Every flag reader now builds the whole config.
+
+        Before consolidation, only the trace-extraction batch parsed this
+        knob. Warning per read would turn one typo into several log lines
+        per ingested document, since classify/embed fire per document.
+        """
+        write_config._parse_min_confidence.cache_clear()
+        env = {ENV_VAR_BY_FIELD["trace_extraction_min_confidence"]: "0.85f"}
+        with structlog.testing.capture_logs() as logs:
+            for _ in range(5):
+                WriteBehaviourConfig.from_env(env)
+        events = [entry["event"] for entry in logs]
+        assert events == ["trace_extraction_min_confidence_unparseable"]
 
 
 class TestReconcileKnobs:

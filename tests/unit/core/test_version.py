@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import tomllib
 from importlib.metadata import PackageNotFoundError
+from pathlib import Path
 
 import pytest
 
 from trellis.core import version as version_mod
 from trellis.core.base import get_version
 from trellis.core.version import (
+    FALLBACK_SOURCE,
+    FALLBACK_VERSION,
     UNKNOWN_VERSION,
     CodeVersion,
     resolve_code_version,
@@ -56,7 +60,8 @@ class TestPackagedContext:
         [
             # Clean tagged release built into a wheel — no local segment.
             ("1.4.0", None, False),
-            # Wheel built from a checkout between tags (the container case).
+            # Wheel built from a checkout between tags — what a container
+            # image carries when the build passed TRELLIS_BUILD_VERSION.
             ("0.9.1.dev156+gd7c3e7ace", "d7c3e7ace", False),
             # Built from a dirty tree — setuptools-scm's node-and-date scheme.
             ("0.9.1.dev156+gd7c3e7ace.d20260802", "d7c3e7ace", True),
@@ -81,6 +86,31 @@ class TestPackagedContext:
             commit=expected_commit,
             dirty=expected_dirty,
         )
+
+    def test_unstamped_build_reports_that_it_cannot_identify_itself(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A git-less build resolves to ``fallback-version``, not a version.
+
+        The Docker build context excludes ``.git``, so hatch-vcs falls
+        through to ``[tool.hatch.version] fallback-version`` and every
+        image built without ``TRELLIS_BUILD_VERSION`` carries the same
+        string. Reporting that as ``dist-metadata`` would make an
+        unidentifiable image look like an identified one — the exact
+        drift this module exists to surface.
+        """
+        monkeypatch.setattr(
+            version_mod, "_version_from_metadata", lambda: FALLBACK_VERSION
+        )
+        assert resolve_code_version() == CodeVersion(
+            version=FALLBACK_VERSION, source=FALLBACK_SOURCE, commit=None, dirty=False
+        )
+
+    def test_fallback_version_matches_pyproject(self) -> None:
+        """The constant is a copy of build config; keep the copy honest."""
+        pyproject = Path(__file__).resolve().parents[3] / "pyproject.toml"
+        hatch_version = tomllib.loads(pyproject.read_text())["tool"]["hatch"]["version"]
+        assert hatch_version["fallback-version"] == FALLBACK_VERSION
 
     def test_falls_back_to_generated_module(
         self, monkeypatch: pytest.MonkeyPatch

@@ -72,6 +72,11 @@ def build_memory_extractor(registry: StoreRegistry, *, opt_in: bool) -> Any | No
     ``TRELLIS_ENABLE_MEMORY_EXTRACTION`` env flag are set, and an LLM
     client can be built from the registry. Never raises: a bulk ingest
     must not fail because the optional extractor could not be constructed.
+
+    Note for anyone reading event provenance: the ``env_flags`` stamp
+    (:mod:`trellis.core.write_provenance`) records only the env half of
+    that conjunction, so ``memory_extraction: true`` on a row means the
+    environment permitted extraction, not that this run performed it.
     """
     if not opt_in or not memory_extraction_env_enabled():
         return None

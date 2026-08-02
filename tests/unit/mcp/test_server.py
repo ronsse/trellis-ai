@@ -1731,6 +1731,35 @@ class TestMainShutdown:
         assert close_calls == [1]
         assert server_mod._registry is None
 
+    def test_main_logs_write_provenance_on_the_stdio_path(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """stdio is the default transport and the host integration's path.
+
+        The stamp used to be logged inside ``_prewarm_registry``, which
+        only the http branch calls — so an operator grepping a stdio
+        session's stderr found nothing and concluded the build was
+        unstamped.
+        """
+        self._drain_registry()
+        monkeypatch.setattr(server_mod.mcp, "run", lambda: None)
+        monkeypatch.setattr(server_mod, "configure_stderr_logging", lambda: None)
+        # The conftest filters structlog below CRITICAL at the bound-logger
+        # level, so ``capture_logs`` never sees an info line; record the
+        # module logger's calls directly instead.
+        recorded: list[tuple[str, dict[str, Any]]] = []
+        monkeypatch.setattr(
+            server_mod.logger,
+            "info",
+            lambda event, **kw: recorded.append((event, kw)),
+        )
+
+        server_mod.main()
+
+        (fields,) = [kw for event, kw in recorded if event == "mcp_write_provenance"]
+        assert fields["version"]
+        assert "env_flags" in fields
+
     def test_main_no_registry_constructed_no_close(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

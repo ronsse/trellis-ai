@@ -21,10 +21,19 @@ therefore works in both deployment shapes:
   moved on (``git pull`` with no re-install) reports the older sha.  That
   is still strictly better than nothing — and the mismatch is itself the
   signal that the install is stale.
-* **Container image** (wheel built from a checkout, then installed) —
-  yields the version computed at build time, i.e. the sha the image was
-  built from.  Immutable for the life of the image, which is exactly the
-  attribution an image-versus-host drift investigation needs.
+* **Container image** — this repo's ``Dockerfile`` builds the wheel from a
+  context with no ``.git`` in it (``.dockerignore`` excludes it, and the
+  builder stage copies only ``pyproject.toml README.md LICENSE src/``), so
+  ``hatch-vcs`` has nothing to read and falls through to
+  ``[tool.hatch.version] fallback-version`` — the same
+  :data:`FALLBACK_VERSION` string for every image ever built.  A build must
+  therefore *tell* the image what it is: ``make docker-build`` passes the
+  working tree's git-derived version as the ``TRELLIS_BUILD_VERSION`` build
+  arg, which the Dockerfile forwards to ``SETUPTOOLS_SCM_PRETEND_VERSION``.
+  Do that and the image carries the sha it was built from, immutable for
+  its life.  Skip it and resolution reports ``source="fallback-version"``
+  with ``commit=None`` — "I cannot identify this build", which is the truth
+  and is greppable, rather than a plausible-looking ``0.2.0``.
 
 No build system is invented here: both shapes read the metadata that the
 existing ``[tool.hatch.version] source = "vcs"`` config already produces.
@@ -50,6 +59,16 @@ DISTRIBUTION_NAME = "trellis-ai"
 #: ``_version`` module can name the running build (e.g. running straight
 #: from a source tree that was never installed).
 UNKNOWN_VERSION = "0.0.0+unknown"
+
+#: ``[tool.hatch.version] fallback-version`` from ``pyproject.toml``.  A
+#: build with no git history resolves to exactly this, which means it says
+#: nothing about *which* build it is — so resolution reports it as
+#: :data:`FALLBACK_SOURCE`, not as a successfully identified version.
+#: ``tests/unit/core/test_version.py`` asserts the two stay in sync.
+FALLBACK_VERSION = "0.2.0"
+
+#: ``CodeVersion.source`` for the case above.
+FALLBACK_SOURCE = "fallback-version"
 
 #: A ``+g<sha>`` token in a PEP 440 local segment — how ``hatch-vcs``
 #: (via ``setuptools-scm``'s ``node-and-date`` scheme) encodes the commit.
@@ -140,12 +159,16 @@ def resolve_code_version() -> CodeVersion:
         source = "generated-module"
     if raw is None:
         return CodeVersion(version=UNKNOWN_VERSION, source="unknown")
+    if raw == FALLBACK_VERSION:
+        return CodeVersion(version=raw, source=FALLBACK_SOURCE)
     commit, dirty = _split_local_segment(raw)
     return CodeVersion(version=raw, source=source, commit=commit, dirty=dirty)
 
 
 __all__ = [
     "DISTRIBUTION_NAME",
+    "FALLBACK_SOURCE",
+    "FALLBACK_VERSION",
     "UNKNOWN_VERSION",
     "CodeVersion",
     "resolve_code_version",

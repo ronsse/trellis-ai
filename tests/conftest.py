@@ -125,8 +125,8 @@ def _reset_write_provenance() -> Iterator[None]:
     pass or fail depending on whether some earlier test had already warmed
     the cache — the classic order-dependent flake.
     """
-    from trellis.core.write_provenance import reset_write_provenance_cache
+    from trellis.core.write_provenance import get_write_provenance
 
-    reset_write_provenance_cache()
+    get_write_provenance.cache_clear()
     yield
-    reset_write_provenance_cache()
+    get_write_provenance.cache_clear()

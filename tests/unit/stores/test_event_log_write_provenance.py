@@ -20,7 +20,6 @@ from trellis.core.write_config import ENV_VAR_BY_FIELD
 from trellis.core.write_provenance import (
     WRITE_PROVENANCE_KEY,
     get_write_provenance,
-    reset_write_provenance_cache,
 )
 from trellis.mutate.commands import Command, CommandResult, CommandStatus, Operation
 from trellis.mutate.executor import MutationExecutor
@@ -48,7 +47,7 @@ def event_log(tmp_path: Path) -> Iterator[SQLiteEventLog]:
 def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in ENV_VAR_BY_FIELD.values():
         monkeypatch.delenv(name, raising=False)
-    reset_write_provenance_cache()
+    get_write_provenance.cache_clear()
 
 
 class TestEmitStamps:
@@ -62,7 +61,7 @@ class TestEmitStamps:
         event_log.emit(EventType.ENTITY_CREATED, "curate", entity_id="e1")
         (stored,) = event_log.get_events()
         assert stored.metadata[WRITE_PROVENANCE_KEY]["version"]
-        assert stored.metadata[WRITE_PROVENANCE_KEY]["flags_digest"]
+        assert stored.metadata[WRITE_PROVENANCE_KEY]["env_flags_digest"]
 
     def test_stamp_records_the_flags_in_effect(
         self, event_log: SQLiteEventLog, monkeypatch: pytest.MonkeyPatch
@@ -70,20 +69,15 @@ class TestEmitStamps:
         """The whole point: two writes under different semantics differ."""
         event_log.emit(EventType.MEMORY_STORED, "mcp", entity_id="d1")
         monkeypatch.setenv(ENV_VAR_BY_FIELD["classify_on_ingest"], "1")
-        reset_write_provenance_cache()
+        get_write_provenance.cache_clear()
         event_log.emit(EventType.MEMORY_STORED, "mcp", entity_id="d2")
 
         first, second = event_log.get_events()
-        assert first.metadata[WRITE_PROVENANCE_KEY]["flags"]["classify_on_ingest"] is (
-            False
-        )
-        assert second.metadata[WRITE_PROVENANCE_KEY]["flags"]["classify_on_ingest"] is (
-            True
-        )
-        assert (
-            first.metadata[WRITE_PROVENANCE_KEY]["flags_digest"]
-            != second.metadata[WRITE_PROVENANCE_KEY]["flags_digest"]
-        )
+        before = first.metadata[WRITE_PROVENANCE_KEY]
+        after = second.metadata[WRITE_PROVENANCE_KEY]
+        assert before["env_flags"]["classify_on_ingest"] is False
+        assert after["env_flags"]["classify_on_ingest"] is True
+        assert before["env_flags_digest"] != after["env_flags_digest"]
 
     def test_caller_metadata_is_preserved_alongside(
         self, event_log: SQLiteEventLog

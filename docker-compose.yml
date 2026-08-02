@@ -34,6 +34,13 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # Stamps the image with the sha it was built from, so
+        # ``GET /api/version`` and every event this container writes can
+        # be attributed to a commit. Unset → the image reports
+        # ``version_source: fallback-version``. ``make docker-build``
+        # exports this; plain ``docker compose up --build`` does not.
+        TRELLIS_BUILD_VERSION: ${TRELLIS_BUILD_VERSION:-}
     depends_on:
       postgres:
         condition: service_healthy

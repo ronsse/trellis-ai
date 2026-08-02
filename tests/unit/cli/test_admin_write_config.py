@@ -24,9 +24,10 @@ class TestJsonOutput:
         result = runner.invoke(app, ["admin", "write-config", "--format", "json"])
         assert result.exit_code == 0
         payload = json.loads(result.stdout)
-        assert payload["version"]
-        assert payload["version_source"]
-        assert payload["flags_digest"]
+        stamp = payload["write_provenance"]
+        assert stamp["version"]
+        assert stamp["version_source"]
+        assert stamp["env_flags_digest"]
         assert sorted(row["env_var"] for row in payload["knobs"]) == sorted(
             ENV_VAR_BY_FIELD.values()
         )
@@ -43,7 +44,7 @@ class TestJsonOutput:
         monkeypatch.setenv(ENV_VAR_BY_FIELD["classify_on_ingest"], "1")
         result = runner.invoke(app, ["admin", "write-config", "--format", "json"])
         payload = json.loads(result.stdout)
-        assert payload["flags"]["classify_on_ingest"] is True
+        assert payload["write_provenance"]["env_flags"]["classify_on_ingest"] is True
         overridden = {row["name"] for row in payload["knobs"] if row["overridden"]}
         assert overridden == {"classify_on_ingest"}
 
@@ -64,4 +65,4 @@ class TestTextOutput:
         monkeypatch.setenv("COLUMNS", "200")
         result = runner.invoke(app, ["admin", "write-config"])
         assert "version_source" in result.stdout
-        assert "flags_digest" in result.stdout
+        assert "env_flags_digest" in result.stdout

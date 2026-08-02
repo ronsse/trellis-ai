@@ -2396,11 +2396,6 @@ def _prewarm_registry(registry: StoreRegistry) -> None:
             logger.warning("mcp_prewarm_optional_unavailable", component=label)
 
     logger.info("mcp_registry_prewarmed")
-    # Which build, applying which write semantics. A stdio MCP server is
-    # spawned per session and gone before anyone can query it, so this
-    # line is the only *live* record of what it was; the durable record
-    # is the same stamp on every event it writes.
-    logger.info("mcp_write_provenance", **get_write_provenance())
 
 
 def _configure_http_auth(settings: HttpSettings) -> None:
@@ -2465,6 +2460,12 @@ def main() -> None:
     # structlog on stderr for both transports — under http it also stops
     # log lines interleaving with uvicorn's stdout access log.
     configure_stderr_logging()
+    # Which build, applying which write semantics. Emitted before the
+    # transport branch so *both* paths get it — a stdio server is spawned
+    # per session and gone before anyone can query it, so this line is its
+    # only live record; the durable record is the same stamp on every
+    # event it writes.
+    logger.info("mcp_write_provenance", **get_write_provenance())
     transport = resolve_transport()
     try:
         if transport == TRANSPORT_HTTP:

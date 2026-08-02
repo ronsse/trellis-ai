@@ -32,7 +32,10 @@ Two credential kinds are honoured:
 Per-router scope enforcement lives in :func:`require_scope`; the
 router→scope map is wired in :mod:`trellis_api.app`. Health and
 version probes (``/healthz``, ``/readyz``, ``/api/version``) stay
-unauthenticated so orchestrator probes work without a key.
+unauthenticated so orchestrator probes work without a key — but the
+ops detail inside two of them (``/readyz``'s per-backend breakdown,
+``/api/version``'s ``write_provenance``) is gated on
+:func:`authenticate_optional` plus ``TRELLIS_OPS_DETAIL``.
 
 401 responses are deliberately undifferentiated ("missing or invalid
 API credentials") — the failure category (malformed / unknown /

@@ -17,7 +17,9 @@ from trellis.api_version import (
 )
 from trellis.core.write_config import ENV_VAR_BY_FIELD
 from trellis.core.write_provenance import get_write_provenance
+from trellis_api.auth import AUTH_MODE_ENV, AUTH_MODE_REQUIRED
 from trellis_api.routes import version as version_route
+from trellis_api.routes.health import OPS_DETAIL_ENV, OPS_DETAIL_PUBLIC
 
 
 @pytest.fixture
@@ -72,10 +74,33 @@ class TestVersionEndpoint:
         provenance = body["write_provenance"]
         assert provenance["version"]
         assert provenance["version_source"]
-        assert set(provenance["flags"]) == set(ENV_VAR_BY_FIELD)
-        assert provenance["flags_digest"]
+        assert set(provenance["env_flags"]) == set(ENV_VAR_BY_FIELD)
+        assert provenance["env_flags_digest"]
 
     def test_write_provenance_matches_the_event_stamp(self, client):
         """The endpoint must not report a different answer than the writes."""
         body = client.get("/api/version").json()
         assert body["write_provenance"] == dict(get_write_provenance())
+
+    def test_write_provenance_withheld_from_anonymous_when_auth_required(
+        self, client, monkeypatch
+    ):
+        """Build sha + effective flags are ops detail, gated like /readyz.
+
+        The compatibility fields stay public — an SDK client must be able
+        to negotiate before it has a key — but a deployment that opted
+        into ``required`` does not hand its commit and enabled ingest
+        behaviours to an unauthenticated caller.
+        """
+        monkeypatch.setenv(AUTH_MODE_ENV, AUTH_MODE_REQUIRED)
+        body = client.get("/api/version").json()
+        assert body["write_provenance"] is None
+        assert body["api_major"] == API_MAJOR
+
+    def test_ops_detail_public_restores_it_for_anonymous_callers(
+        self, client, monkeypatch
+    ):
+        """The same opt-out that publishes the /readyz breakdown."""
+        monkeypatch.setenv(AUTH_MODE_ENV, AUTH_MODE_REQUIRED)
+        monkeypatch.setenv(OPS_DETAIL_ENV, OPS_DETAIL_PUBLIC)
+        assert client.get("/api/version").json()["write_provenance"] is not None

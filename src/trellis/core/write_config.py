@@ -12,12 +12,15 @@ and friends) as the call-site-facing name, but the reader now delegates
 here, so there is exactly one parsing rule per knob and one place to add
 the next one.
 
-**This is a consolidation, not a behaviour change.**  Every environment
-variable name and every default is identical to what shipped before; the
-parsing quirks (unset-and-blank both mean "off"; an out-of-range
-confidence floor degrades to "no gate" with a warning rather than to
-``0.0``) are preserved verbatim because deployments already depend on
-them.
+**Consolidation, not a behaviour change** — with one visible exception.
+Every environment variable name, every default, and every parsing quirk
+(unset-and-blank both mean "off"; an out-of-range confidence floor
+degrades to "no gate" with a warning rather than to ``0.0``) is what
+shipped before, because deployments already depend on them.  What did
+change is where the malformed-value warnings surface: they now carry this
+module's logger name rather than ``trellis.extract.trace_ingest_hook``,
+and they are emitted once per distinct value per process rather than once
+per read (see :func:`_parse_min_confidence`).
 
 Reads stay live against :data:`os.environ` — no caching — so a test that
 monkeypatches a variable still sees the change, exactly as before.  The
@@ -27,6 +30,7 @@ monkeypatches a variable still sees the change, exactly as before.  The
 
 from __future__ import annotations
 
+import functools
 import os
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
@@ -88,20 +92,17 @@ def _truthy(env: Mapping[str, str], name: str) -> bool:
     return env.get(name, "").strip().lower() in TRUTHY
 
 
-def _min_confidence(env: Mapping[str, str]) -> float | None:
-    """Confidence floor from the environment, or ``None`` for no gate.
+@functools.lru_cache(maxsize=8)
+def _parse_min_confidence(raw: str) -> float | None:
+    """Parse one confidence-floor spelling, warning at most once for it.
 
-    Unset / blank means **off**: every draft the extractor produced is
-    submitted, which is what an existing deployment already gets.  A gate
-    that silently drops extraction output has to be asked for.
-
-    An unparseable or out-of-range value is treated as unset (with a
-    warning) rather than as ``0.0`` — misreading "0.85" as "drop nothing"
-    is recoverable, misreading it as "drop everything" is not.
+    Cached on the raw string, not on "have I run yet": a test that
+    monkeypatches the variable still gets a fresh parse, but a deployment
+    with one typo'd value logs one warning per process instead of one per
+    ingested document.  Every write-behaviour reader now goes through
+    :meth:`WriteBehaviourConfig.from_env`, so an uncached warning here
+    would fire on flag reads that have nothing to do with this knob.
     """
-    raw = env.get(TRACE_EXTRACTION_MIN_CONFIDENCE_FLAG, "").strip()
-    if not raw:
-        return None
     try:
         value = float(raw)
     except ValueError:
@@ -119,6 +120,21 @@ def _min_confidence(env: Mapping[str, str]) -> float | None:
         )
         return None
     return value
+
+
+def _min_confidence(env: Mapping[str, str]) -> float | None:
+    """Confidence floor from the environment, or ``None`` for no gate.
+
+    Unset / blank means **off**: every draft the extractor produced is
+    submitted, which is what an existing deployment already gets.  A gate
+    that silently drops extraction output has to be asked for.
+
+    An unparseable or out-of-range value is treated as unset (with a
+    warning) rather than as ``0.0`` — misreading "0.85" as "drop nothing"
+    is recoverable, misreading it as "drop everything" is not.
+    """
+    raw = env.get(TRACE_EXTRACTION_MIN_CONFIDENCE_FLAG, "").strip()
+    return _parse_min_confidence(raw) if raw else None
 
 
 def _reconcile_timeout(env: Mapping[str, str]) -> float:
