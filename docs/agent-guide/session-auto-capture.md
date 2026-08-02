@@ -66,8 +66,23 @@ successful injection's damage to junk, not leakage.
   live stores.
 - A local, OpenAI-compatible model endpoint configured in that `config.yaml`
   under the `llm:` block (the sweep builds the distillation client via
-  `StoreRegistry.build_llm_client()`). If no client can be built, the sweep is
-  a safe no-op (captures nothing).
+  `StoreRegistry.build_llm_client()`). **The judge is not optional.**
+  Distillation fail-closes, so a sweep without a client captures nothing — it
+  therefore refuses to run and exits non-zero rather than reporting a clean
+  no-op. A sweep whose judge disappears part-way finishes, reports
+  `sessions_judge_unavailable` (those sessions stay un-watermarked for the
+  next run), and also exits non-zero.
+
+## Three ways to run it
+
+All three are the same code path (`run_sweep` in
+`trellis_workers/session_capture/__main__.py`) and read the same environment:
+
+```bash
+trellis worker capture-sessions [--dry-run] [--format text|json]
+trellis-session-capture [--dry-run]            # console script
+python -m trellis_workers.session_capture [--dry-run]
+```
 
 ## Configuration (environment)
 
@@ -79,6 +94,7 @@ successful injection's damage to junk, not leakage.
 | `TRELLIS_CAPTURE_SAMPLE_DENOMINATOR` | `5` | Clean-session sampling (`1` = capture all clean sessions). |
 | `TRELLIS_CAPTURE_SOURCE_SYSTEM` | `claude-code` | Corpus namespace / doc-id prefix. |
 | `TRELLIS_DISTILL_MODEL` | `hermes3:8b` | Model id label recorded in training events. |
+| `TRELLIS_CAPTURE_STRICT` | `1` | When truthy (the default), a sweep that left any session unjudged exits non-zero. Set `0`/`false`/`no`/`off` to report the count and exit `0` instead — those sessions stay un-watermarked and are retried next sweep. A sweep with *no* judge at all always fails, strict or not. |
 | `TRELLIS_ENABLE_RECONCILE_ON_WRITE` | *(unset)* | When truthy, near-duplicate captures are adjudicated (ADD/UPDATE/SUPERSEDE/NOOP) instead of piling up. Off by default. |
 
 The reconcile step also honours the #263 knobs (`TRELLIS_RECONCILE_MODEL`,
@@ -89,7 +105,7 @@ The reconcile step also honours the #263 knobs (`TRELLIS_RECONCILE_MODEL`,
 ## Dry run first (writes nothing)
 
 ```bash
-python -m trellis_workers.session_capture --dry-run
+trellis-session-capture --dry-run
 ```
 
 Emits the JSON `CaptureReport` to stdout: how many sessions would be parsed,
@@ -126,8 +142,8 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-# Point at the venv/interpreter that has trellis + trellis_workers installed.
-ExecStart=/home/<user>/path/to/.venv/bin/python -m trellis_workers.session_capture
+# Point at the venv that has trellis + trellis_workers installed.
+ExecStart=/home/<user>/path/to/.venv/bin/trellis-session-capture
 Environment=TRELLIS_CONFIG_DIR=/home/<user>/.trellis
 # Opt into near-duplicate adjudication once a memory corpus exists:
 # Environment=TRELLIS_ENABLE_RECONCILE_ON_WRITE=1
@@ -183,9 +199,15 @@ Health signals in the JSON `CaptureReport`:
 - `candidates_rejected_injection` > 0 → a session tried to address the memory
   system directly ("remember this…" / rubric-stuffing). Worth eyeballing the
   session; the candidate was dropped, never stored.
-- Repeated `warnings[].kind == "distill_unavailable"` → the local model
-  endpoint is down; sessions are being retried (not lost), but nothing is
-  captured until it recovers.
+- `sessions_judge_unavailable` > 0 (equivalently, repeated
+  `warnings[].kind == "distill_unavailable"`) → the local model endpoint is
+  down; those sessions are retried next sweep (not lost), but nothing is
+  captured until it recovers. The run exits non-zero, so the systemd unit is
+  marked failed instead of logging a clean success. **This is a behaviour
+  change** for timers installed before this landed: a single transient model
+  timeout in an otherwise-good sweep now fails the unit. Set
+  `TRELLIS_CAPTURE_STRICT=0` in the unit to keep the count but restore the
+  zero exit.
 - `sessions_skipped_watermark` should dominate on steady-state runs (only new
   work is processed).
 

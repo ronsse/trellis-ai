@@ -19,6 +19,10 @@ surfaces from ``docs/design/adr-autonomy-ladder.md``:
   unenriched / low-confidence-tagged documents.
 * :func:`mine_precedents_cmd` (``trellis worker mine-precedents``) — wraps
   :meth:`PrecedentMiner.generate_precedent_candidates`.
+* :func:`capture_sessions_cmd` (``trellis worker capture-sessions``) — one
+  Claude Code session-capture sweep, delegating to the same
+  :func:`~trellis_workers.session_capture.sweep.run_sweep` the
+  ``trellis-session-capture`` console script runs.
 
 The ``worker_app`` lived in ``trellis_cli.main`` as an empty group; it has
 moved here. ``main`` imports it from this module.
@@ -38,6 +42,7 @@ import structlog
 import typer
 import yaml
 from rich.console import Console
+from rich.markup import escape
 
 from trellis.errors import BackendNotInstalledError
 from trellis.learning import (
@@ -1176,3 +1181,98 @@ def _count_failure_traces(
         if t.outcome
         and t.outcome.status in (OutcomeStatus.FAILURE, OutcomeStatus.PARTIAL)
     )
+
+
+# ---------------------------------------------------------------------------
+# worker capture-sessions — one Claude Code session-capture sweep
+# ---------------------------------------------------------------------------
+
+
+@worker_app.command("capture-sessions")
+def capture_sessions_cmd(
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Plan the sweep without writing memories or advancing the watermark.",
+    ),
+    output_format: str = typer.Option("text", "--format", help="Output format."),
+) -> None:
+    """Run one Claude Code session-capture sweep.
+
+    The ``trellis worker`` front door for the sweep that also ships as the
+    ``trellis-session-capture`` console script; both call the same
+    :func:`run_sweep`, so the transcript root, watermark, sampling and model
+    env vars documented in ``docs/agent-guide/session-auto-capture.md`` behave
+    identically here.
+
+    **Requires a distillation judge.** Distillation fail-closes on a missing
+    client, so a sweep without one captures nothing while looking like a clean
+    run. This command exits non-zero when no judge can be built, and again
+    when the judge went away mid-sweep — ``sessions_judge_unavailable`` counts
+    the sessions left un-watermarked for a later retry, and
+    ``TRELLIS_CAPTURE_STRICT=0`` downgrades that second case to a reported
+    count with a zero exit.
+    """
+    # Imported here, not at module scope: trellis_workers is an optional
+    # install alongside the CLI, and every other `trellis worker` command
+    # pays the same lazy-import cost.
+    from trellis_workers.session_capture.sweep import (  # noqa: PLC0415
+        CaptureJudgeUnavailableError,
+        judge_unavailable_sessions,
+        run_sweep,
+        strict_mode,
+    )
+
+    try:
+        report = run_sweep(registry=_get_registry(), dry_run=dry_run)
+    except CaptureJudgeUnavailableError as exc:
+        if output_format == "json":
+            emit_json({"status": "error", "message": str(exc)})
+        else:
+            # escape(): the remediation names the `[llm-openai]` /
+            # `[llm-anthropic]` extras, which Rich would eat as markup tags.
+            console.print(f"[red]worker capture-sessions: {escape(str(exc))}[/red]")
+        raise typer.Exit(code=EXIT_INTERNAL) from exc
+
+    payload = report.to_payload()
+    unjudged = judge_unavailable_sessions(report)
+    payload["sessions_judge_unavailable"] = unjudged
+
+    if output_format == "json":
+        # "partial", not "ok": the command itself treats an unjudged session
+        # as a failed run, so a consumer keying off `status` must not read it
+        # as success.
+        emit_json({"status": "partial" if unjudged else "ok", **payload})
+    else:
+        _render_capture_text(payload)
+
+    if unjudged and strict_mode():
+        raise typer.Exit(code=EXIT_INTERNAL)
+
+
+def _render_capture_text(payload: dict[str, Any]) -> None:
+    """Human-readable rendering of a :class:`CaptureReport` payload."""
+    mode = "DRY-RUN" if payload["dry_run"] else "LIVE"
+    console.print(f"[bold]worker capture-sessions[/bold] mode={mode}")
+    console.print(
+        f"  sessions: {payload['sessions_seen']} seen  "
+        f"{payload['sessions_parsed']} parsed  "
+        f"{payload['sessions_triggered']} triggered  "
+        f"{payload['sessions_skipped_watermark']} watermark-skipped"
+    )
+    console.print(
+        f"  candidates: {payload['candidates_distilled']} distilled  "
+        f"{payload['candidates_blocked_scan']} secret-blocked  "
+        f"{payload['candidates_rejected_injection']} injection-blocked  "
+        f"{payload['candidates_rejected_worthiness']} unworthy"
+    )
+    console.print(
+        f"  memories written: {payload['memories_written']}  "
+        f"unchanged: {payload['memories_skipped_unchanged']}"
+    )
+    if payload["sessions_judge_unavailable"]:
+        console.print(
+            f"[red]  {payload['sessions_judge_unavailable']} session(s) left "
+            f"unjudged — the judge was unreachable; they stay un-watermarked "
+            f"for a later retry.[/red]"
+        )

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 import typer
@@ -24,6 +25,8 @@ from trellis.stores.registry import StoreRegistry
 from trellis_cli import worker
 from trellis_cli.main import app, worker_app
 from trellis_cli.stores import _reset_registry
+from trellis_workers.session_capture import sweep as capture_sweep
+from trellis_workers.session_capture.models import CaptureReport
 
 runner = CliRunner()
 
@@ -262,7 +265,7 @@ class TestWorkerCurate:
         names = {
             cmd.name or cmd.callback.__name__ for cmd in worker_app.registered_commands
         }
-        assert {"curate", "enrich", "mine-precedents"} <= names
+        assert {"curate", "enrich", "mine-precedents", "capture-sessions"} <= names
 
     def test_full_cycle_happy_path(
         self, tmp_path: Path, temp_stores: StoreRegistry
@@ -767,3 +770,137 @@ class TestAdminReconcileFeedback:
             event_type=EventType.FEEDBACK_RECORDED, limit=10
         )
         assert len(fb) == 0
+
+
+# ===========================================================================
+# worker capture-sessions — the CLI front door for the session-capture sweep
+# ===========================================================================
+
+
+class TestWorkerCaptureSessions:
+    """The sweep itself is covered in tests/unit/workers/session_capture/;
+    these pin the CLI contract — same code path, loud on a missing judge."""
+
+    def _report(self, **overrides: object) -> CaptureReport:
+        report = CaptureReport(transcripts_root="transcripts-root")
+        for key, value in overrides.items():
+            setattr(report, key, value)
+        return report
+
+    def test_delegates_to_run_sweep_with_the_cli_registry(
+        self, temp_stores: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        spy = MagicMock(return_value=self._report(sessions_seen=4))
+        monkeypatch.setattr(capture_sweep, "run_sweep", spy)
+
+        result = runner.invoke(
+            worker_app, ["capture-sessions", "--dry-run", "--format", "json"]
+        )
+
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout.strip().splitlines()[-1])
+        assert payload["status"] == "ok"
+        assert payload["sessions_seen"] == 4
+        assert payload["sessions_judge_unavailable"] == 0
+        kwargs = spy.call_args[1]
+        assert kwargs["dry_run"] is True
+        assert kwargs["registry"] is not None
+
+    def test_missing_judge_exits_nonzero(
+        self, temp_stores: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            capture_sweep,
+            "run_sweep",
+            MagicMock(
+                side_effect=capture_sweep.CaptureJudgeUnavailableError(
+                    "no distillation judge is configured."
+                )
+            ),
+        )
+
+        result = runner.invoke(worker_app, ["capture-sessions"])
+
+        assert result.exit_code == 1
+        assert "no distillation judge is configured" in result.output
+
+    def test_missing_judge_reports_json_under_format_json(
+        self, temp_stores: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The failure path most likely to be piped into jq must stay parseable."""
+        monkeypatch.setattr(
+            capture_sweep,
+            "run_sweep",
+            MagicMock(
+                side_effect=capture_sweep.CaptureJudgeUnavailableError(
+                    "no distillation judge is configured."
+                )
+            ),
+        )
+
+        result = runner.invoke(worker_app, ["capture-sessions", "--format", "json"])
+
+        assert result.exit_code == 1
+        payload = json.loads(result.stdout.strip().splitlines()[-1])
+        assert payload["status"] == "error"
+        assert "no distillation judge is configured" in payload["message"]
+
+    def test_unjudged_sessions_exit_nonzero_with_a_count(
+        self, temp_stores: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("TRELLIS_CAPTURE_STRICT", raising=False)
+        monkeypatch.setattr(
+            capture_sweep,
+            "run_sweep",
+            MagicMock(
+                return_value=self._report(
+                    sessions_seen=2,
+                    warnings=[{"kind": "distill_unavailable", "session_id": "a"}],
+                )
+            ),
+        )
+
+        result = runner.invoke(worker_app, ["capture-sessions", "--format", "json"])
+
+        assert result.exit_code == 1
+        payload = json.loads(result.stdout.strip().splitlines()[0])
+        assert payload["sessions_judge_unavailable"] == 1
+        # Not "ok": the command itself treats this run as failed.
+        assert payload["status"] == "partial"
+
+    def test_strict_opt_out_keeps_the_count_but_exits_zero(
+        self, temp_stores: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("TRELLIS_CAPTURE_STRICT", "0")
+        monkeypatch.setattr(
+            capture_sweep,
+            "run_sweep",
+            MagicMock(
+                return_value=self._report(
+                    sessions_seen=2,
+                    warnings=[{"kind": "distill_unavailable", "session_id": "a"}],
+                )
+            ),
+        )
+
+        result = runner.invoke(worker_app, ["capture-sessions", "--format", "json"])
+
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout.strip().splitlines()[0])
+        assert payload["status"] == "partial"
+        assert payload["sessions_judge_unavailable"] == 1
+
+    def test_text_output_renders_the_report(
+        self, temp_stores: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            capture_sweep,
+            "run_sweep",
+            MagicMock(return_value=self._report(sessions_seen=1, memories_written=1)),
+        )
+
+        result = runner.invoke(worker_app, ["capture-sessions"])
+
+        assert result.exit_code == 0, result.output
+        assert "worker capture-sessions" in result.output
+        assert "memories written: 1" in result.output

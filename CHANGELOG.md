@@ -6,6 +6,22 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **`trellis classify backfill`** — the missing front door for the tagging
+  backfill. `trellis.classify.refresh.reclassify_stale` shipped tested but had
+  no caller outside comments, so re-tagging documents ingested before
+  `TRELLIS_ENABLE_CLASSIFY_ON_INGEST` was enabled (or whose tags have since
+  drifted) required an ad-hoc script. Exposes `--max-age-days`, `--limit`
+  (`0` = whole store), `--page-size`, `--dry-run`, and the deliberately
+  dangerous `--include-domain` (off by default — `domain` is the only facet
+  that hard-excludes a document from a domain-scoped query). `reclassify_stale`
+  gained offset paging so one invocation covers a store larger than one page,
+  per-document fail-soft (one bad row is counted in `errors` and skipped, not
+  fatal to the run), and both refresh entry points gained `dry_run`.
+  Documented in [`operations.md`](docs/agent-guide/operations.md).
+- **`trellis-session-capture` console script** and **`trellis worker
+  capture-sessions`** — the capture sweep advertised the console-script name in
+  its own `--help` but never shipped it, and was the only worker with no
+  `trellis worker` front door. Both delegate to the same `run_sweep`.
 - **Claude Code session auto-capture** (`trellis_workers.session_capture`) —
   client-side nightly sweep that reads local Claude Code transcript JSONL,
   distils durable operator memories with a local model, and writes them
@@ -35,6 +51,15 @@ All notable changes to Trellis will be documented in this file.
 
 ### Changed
 
+- **A capture sweep that leaves sessions unjudged now exits non-zero.**
+  Previously a mid-sweep judge outage was a `warnings[]` entry and a clean
+  exit `0`. Adopters running the shipped systemd timer will see the unit fail
+  on a single transient model timeout, even though the other sessions were
+  captured and the unjudged one stays un-watermarked for automatic retry. Set
+  `TRELLIS_CAPTURE_STRICT=0` to keep the reported
+  `sessions_judge_unavailable` count with the old zero exit. The *total*
+  no-op (no judge at all) fails regardless — nothing ran, so nothing is
+  retried.
 - **MinHash shingle hashing switched from MD5 to truncated SHA-256**
   (`classify/dedup/minhash.py`). Non-cryptographic use (similarity
   estimation, not secret protection), but CodeQL's sensitive-data-hashing
@@ -103,6 +128,34 @@ Net DEFECT delta in `src/`: 113 literal-only → 85 literal-only / 67 helper-awa
 
 ### Fixed
 
+- **Tag refresh rewrote every stale document, even when nothing changed.** The
+  tags-unchanged early-out in `classify/refresh.py` dropped only
+  `importance_scored_at` from its before/after comparison, but
+  `to_content_tags()` mints a fresh `classified_at` on every call — so the two
+  dicts always differed and the branch could never fire on the batch path.
+  Consequences: `trellis classify backfill --dry-run` reported what was
+  *stale* rather than what would *change*, and a live run rewrote every stale
+  row and emitted an empty-diff `TAGS_REFRESHED` for each, defeating the audit
+  trail. Both stamps are now excluded, and unchanged items are counted under
+  the new `skipped_unchanged`.
+- **A scalar `content_tags.domain` was shredded into one domain per
+  character.** On the safe `include_domain=False` path the prior domain was
+  carried forward with `list(...)`, so a legacy `"payments"` became
+  `['p','a','y',...]` — which `ContentTags` validates happily and no domain
+  filter ever matches, silently hiding the document from every domain-scoped
+  query. The flat scalar shape is legal elsewhere in the repo
+  (`analyze.domains`, `retrieve.evaluate` both handle it). Now normalised;
+  a `content_tags` value that is not a mapping at all is treated as untagged
+  (warned, re-classified) instead of raising.
+- **Session capture no longer no-ops silently on a misconfigured judge.**
+  `_build_llm_client` swallowed every failure and returned `None`, and
+  `distill_session` fail-closes on `None` — so a broken `llm:` block produced a
+  sweep that judged nothing, wrote nothing, advanced no watermark, and exited
+  `0`. It now raises `CaptureJudgeUnavailableError`; every front door exits
+  non-zero with the remediation, and a judge that disappears *mid*-sweep is
+  reported as `sessions_judge_unavailable` (also a non-zero exit) rather than a
+  warning in the log. The entry point also pins structlog to stderr so the JSON
+  report on stdout stays parseable.
 - **SQLite concurrent ingest race.** Partial fix in [#117](https://github.com/ronsse/trellis-ai/pull/117) (`busy_timeout=10s`) closed the named "database is locked" symptom; the deeper Python-level `sqlite3.ProgrammingError: cannot commit - no transaction is active` race remained. Full fix in [#131](https://github.com/ronsse/trellis-ai/pull/131): WAL mode + thread-local `Connection` pool via the existing `_conn` property forwarder; `_ensure_wal_mode` retry helper covers the Windows WAL-transition race that `busy_timeout` alone misses. `test_concurrent_ingests` goes from ~12% flaky to **100/100 deterministic** under tight repeat-loops.
 - **ArcadeDB registry-path schema-migration bypass.** The new typed-property + `FLOAT (MIN 0.0, MAX 1.0)` constraint installed only on the direct-construct test path; in production deployments using `StoreRegistry.from_config()` the server-side constraint never landed. Fixed in two passes: [#126](https://github.com/ronsse/trellis-ai/pull/126)'s reviewer caught the new-driver bypass (registry now runs the migration itself before injecting the driver); [#137](https://github.com/ronsse/trellis-ai/pull/137) closed the cached-driver short-circuit AND stopped stripping `http_url` from forwarded params (kept the `password` strip — preserves the constructor's driver-XOR-password mutex).
 - **Phase 5 test-ordering flake.** Seven tests in `test_dispatcher_phase5.py` / `test_recording_phase5.py` passed in isolation but failed in full-suite ordering. Root cause: `structlog.cache_logger_on_first_use=True` interacting with the CLI conftest's `TRELLIS_LOG_LEVEL=CRITICAL` monkeypatch — module-level loggers cached a CRITICAL-only bind on `BoundLoggerLazyProxy` that `structlog.configure()` and `reset_defaults()` do not evict. Fix: package-scoped autouse finalizer in `tests/unit/cli/conftest.py` walks `gc.get_objects()` for live proxies and evicts cached attrs at package teardown. 3/3 consecutive full-suite runs green. ([#138](https://github.com/ronsse/trellis-ai/pull/138))
