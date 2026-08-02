@@ -25,6 +25,7 @@ from trellis_sdk._http import (
     SDK_API_MAJOR,
     SDK_API_MINOR,
     check_handshake,
+    pack_attribution,
     raise_for_status,
     wrap_transport_error,
 )
@@ -210,13 +211,24 @@ class TrellisClient:
         *,
         domain: str | None = None,
         agent_id: str | None = None,
+        run_id: str | None = None,
+        intent_family: str | None = None,
         max_items: int = 50,
         max_tokens: int = 8000,
     ) -> dict[str, Any]:
+        """Assemble a flat context pack.
+
+        ``run_id`` / ``intent_family`` are optional request-scoped
+        attribution: they ride the ``PACK_ASSEMBLED`` event so the learning
+        loop can credit the run and bucket the intent family instead of
+        falling back to ``unknown-run`` / ``general_context``. Both are
+        sent only when set — see :func:`~trellis_sdk._http.pack_attribution`.
+        """
         payload = {
             "intent": intent,
             "domain": domain,
             "agent_id": agent_id,
+            **pack_attribution(run_id=run_id, intent_family=intent_family),
             "max_items": max_items,
             "max_tokens": max_tokens,
         }
@@ -230,12 +242,17 @@ class TrellisClient:
         *,
         domain: str | None = None,
         agent_id: str | None = None,
+        run_id: str | None = None,
+        intent_family: str | None = None,
     ) -> dict[str, Any]:
+        """Assemble a sectioned pack. See :meth:`assemble_pack` for
+        ``run_id`` / ``intent_family``."""
         payload = {
             "intent": intent,
             "sections": sections,
             "domain": domain,
             "agent_id": agent_id,
+            **pack_attribution(run_id=run_id, intent_family=intent_family),
         }
         resp = self._request("POST", "/api/v1/packs/sectioned", json=payload)
         return cast("dict[str, Any]", resp.json())

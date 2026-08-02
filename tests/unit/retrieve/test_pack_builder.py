@@ -2226,3 +2226,166 @@ class TestMetaActivityFilter:
             metadata={},
         )
         assert PackBuilder._is_meta_activity(item) is False
+
+
+class TestAttributionTelemetry:
+    """PACK_ASSEMBLED carries the fields the learning join reads.
+
+    ``trellis.learning.pack_observations._join_one`` reads ``title`` /
+    ``category`` / ``domain_system`` per item and ``intent_family`` /
+    ``run_id`` per pack off the *pack* payload. None of them were emitted
+    before, so every promotion candidate landed in ``general_context`` with
+    a null category. These pin the emit side; the end-to-end join is pinned
+    in ``tests/unit/learning/test_pack_observations.py``.
+    """
+
+    @staticmethod
+    def _pack_payload(event_log: SQLiteEventLog) -> dict:
+        events = event_log.get_events(event_type=EventType.PACK_ASSEMBLED, limit=10)
+        assert len(events) == 1
+        return events[0].payload
+
+    def test_intent_family_derived_from_intent(
+        self, session_event_log: SQLiteEventLog
+    ) -> None:
+        builder = PackBuilder(
+            strategies=[_make_strategy("kw", [_item("d1", 0.9)])],
+            event_log=session_event_log,
+        )
+        pack = builder.build("validate the pii convention")
+        assert pack.intent_family == "validation_diagnostics"
+        payload = self._pack_payload(session_event_log)
+        assert payload["intent_family"] == "validation_diagnostics"
+        assert payload["run_id"] is None
+
+    def test_explicit_intent_family_and_run_id_win(
+        self, session_event_log: SQLiteEventLog
+    ) -> None:
+        builder = PackBuilder(
+            strategies=[_make_strategy("kw", [_item("d1", 0.9)])],
+            event_log=session_event_log,
+        )
+        pack = builder.build(
+            "generate sql", run_id="run-7", intent_family="custom_family"
+        )
+        assert (pack.run_id, pack.intent_family) == ("run-7", "custom_family")
+        payload = self._pack_payload(session_event_log)
+        assert payload["run_id"] == "run-7"
+        assert payload["intent_family"] == "custom_family"
+
+    def test_unmatched_intent_falls_back_to_general_context(
+        self, session_event_log: SQLiteEventLog
+    ) -> None:
+        """No keyword match must not invent a bucket — it lands in the same
+        fallback the join already used."""
+        builder = PackBuilder(
+            strategies=[_make_strategy("kw", [_item("d1", 0.9)])],
+            event_log=session_event_log,
+        )
+        builder.build("zzz")
+        payload = self._pack_payload(session_event_log)
+        assert payload["intent_family"] == "general_context"
+
+    def test_item_attribution_from_metadata(
+        self, session_event_log: SQLiteEventLog
+    ) -> None:
+        item = PackItem(
+            item_id="d1",
+            item_type="document",
+            excerpt="text",
+            relevance_score=0.9,
+            metadata={
+                "title": "Deploy checklist",
+                "source_system": "dbt",
+                "content_tags": {"content_type": "procedure", "domain": ["platform"]},
+            },
+        )
+        builder = PackBuilder(
+            strategies=[_make_strategy("kw", [item])], event_log=session_event_log
+        )
+        builder.build("q")
+        injected = self._pack_payload(session_event_log)["injected_items"][0]
+        assert injected["title"] == "Deploy checklist"
+        assert injected["category"] == "procedure"
+        assert injected["domain_system"] == "dbt"
+
+    def test_item_attribution_omits_missing_fields(
+        self, session_event_log: SQLiteEventLog
+    ) -> None:
+        """An untagged item keeps the pre-existing payload shape rather
+        than gaining null keys."""
+        builder = PackBuilder(
+            strategies=[_make_strategy("kw", [_item("d1", 0.9)])],
+            event_log=session_event_log,
+        )
+        builder.build("q")
+        injected = self._pack_payload(session_event_log)["injected_items"][0]
+        assert "title" not in injected
+        assert "category" not in injected
+        assert "domain_system" not in injected
+
+    def test_flat_content_type_is_not_a_category(
+        self, session_event_log: SQLiteEventLog
+    ) -> None:
+        """A flat ``content_type`` belongs to a different vocabulary.
+
+        ``ingest_corpus.conversations`` stamps ``content_type="conversation"``
+        on every conversation export and ``retrieve.semantic_seeds`` uses
+        ``"entity_summary"`` — neither is a ``ContentTags.content_type``
+        value, so reading them would show reviewers a category from a second
+        taxonomy. Title still falls back to ``name``.
+        """
+        item = PackItem(
+            item_id="d1",
+            item_type="document",
+            excerpt="text",
+            relevance_score=0.9,
+            metadata={"name": "node-name", "content_type": "conversation"},
+        )
+        builder = PackBuilder(
+            strategies=[_make_strategy("kw", [item])], event_log=session_event_log
+        )
+        builder.build("q")
+        injected = self._pack_payload(session_event_log)["injected_items"][0]
+        assert injected["title"] == "node-name"
+        assert "category" not in injected
+
+    def test_title_falls_back_to_session_capture_key(
+        self, session_event_log: SQLiteEventLog
+    ) -> None:
+        """Session-capture documents key their title as ``capture_title``.
+
+        ``trellis_workers.session_capture.capture._candidate_metadata``
+        writes no ``title``, so without this fallback the newest primary
+        write path produces candidates named after an opaque doc id.
+        """
+        item = PackItem(
+            item_id="capture:claude-code:9f3a",
+            item_type="document",
+            excerpt="text",
+            relevance_score=0.9,
+            metadata={"capture_title": "Worktree venv resolves to prod"},
+        )
+        builder = PackBuilder(
+            strategies=[_make_strategy("kw", [item])], event_log=session_event_log
+        )
+        builder.build("q")
+        injected = self._pack_payload(session_event_log)["injected_items"][0]
+        assert injected["title"] == "Worktree venv resolves to prod"
+
+    def test_sectioned_payload_carries_pack_attribution(
+        self, session_event_log: SQLiteEventLog
+    ) -> None:
+        builder = PackBuilder(
+            strategies=[_make_strategy("kw", [_item("d1", 0.9)])],
+            event_log=session_event_log,
+        )
+        pack = builder.build_sectioned(
+            "generate sql",
+            sections=[SectionRequest(name="All")],
+            run_id="run-9",
+        )
+        assert pack.run_id == "run-9"
+        payload = self._pack_payload(session_event_log)
+        assert payload["run_id"] == "run-9"
+        assert payload["intent_family"] == "asset_generation"

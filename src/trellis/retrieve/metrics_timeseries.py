@@ -243,10 +243,12 @@ def _compute_pack_success_rate(
     counts joined feedback per UTC-day bucket and drops un-joined feedback
     (the ``continue`` below), whereas the eval scalar is
     ``successes / len(rounds)`` over all rounds, corpus-wide. See
-    ``docs/plans/2026-06-17-step3-assessment.md`` §2. Grouping resolves
-    ``domain`` from the PACK_ASSEMBLED payload and ``intent_family`` from
-    the FEEDBACK_RECORDED payload (the only event carrying it), matching
-    the pack_observations join precedence.
+    ``docs/plans/2026-06-17-step3-assessment.md`` §2. Grouping reads the
+    FEEDBACK_RECORDED payload first and falls back to PACK_ASSEMBLED,
+    matching the pack_observations join precedence — both events can carry
+    ``intent_family``, and ``PackFeedback.to_event_payload`` always emits
+    the key even when it is empty, so a plain dict merge would let that
+    empty value shadow the family PackBuilder derived.
     """
     feedback_events, pack_payloads, _ = join_pack_feedback(
         event_log, since=since, limit=limit
@@ -259,8 +261,9 @@ def _compute_pack_success_rate(
         if pack_id is None or pack_id not in pack_payloads:
             continue
         fb_payload = feedback.payload or {}
-        merged = {**pack_payloads[pack_id], **fb_payload}
-        group_key = _resolve_group_key(merged, group_by)
+        group_key = _resolve_group_key(fb_payload, group_by)
+        if group_key == _UNGROUPED_KEY:
+            group_key = _resolve_group_key(pack_payloads[pack_id], group_by)
         bucket = buckets[group_key][_bucket_key(feedback.occurred_at)]
         bucket.denominator += 1
         bucket.samples += 1

@@ -120,6 +120,63 @@ class TestGetContext:
         assert isinstance(result, str)
 
 
+class TestGetContextRunId:
+    """``run_id`` reaches PACK_ASSEMBLED through the MCP seam.
+
+    The whole payoff of the pack-side attribution depends on an agent
+    being able to pass a run id: ``record_feedback`` carries none, so if
+    the MCP tool drops the kwarg every MCP-served pack stays in the
+    join's ``unknown-run`` bucket with the fields still nominally present.
+    """
+
+    @staticmethod
+    def _pack_payload(registry: StoreRegistry) -> dict[str, Any]:
+        events = registry.operational.event_log.get_events(
+            event_type=EventType.PACK_ASSEMBLED, limit=10
+        )
+        assert len(events) == 1
+        return events[0].payload
+
+    def test_run_id_and_derived_intent_family_reach_the_event(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        temp_registry.knowledge.document_store.put(
+            "doc1", "How to validate the pii convention"
+        )
+
+        get_context("validate the pii convention", run_id="run-42")
+
+        payload = self._pack_payload(temp_registry)
+        assert payload["run_id"] == "run-42"
+        assert payload["intent_family"] == "validation_diagnostics"
+
+    def test_run_id_reaches_the_sectioned_path(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        temp_registry.knowledge.document_store.put(
+            "doc1", "How to validate the pii convention"
+        )
+
+        get_context(
+            "validate the pii convention",
+            run_id="run-43",
+            sections=[{"name": "All"}],
+        )
+
+        assert self._pack_payload(temp_registry)["run_id"] == "run-43"
+
+    def test_omitted_run_id_is_none_not_empty_string(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        """Empty means "no run identity" — the join's ``unknown-run``
+        bucket, not a run literally named ``""``."""
+        temp_registry.knowledge.document_store.put("doc1", "deploy the platform")
+
+        get_context("deploy platform")
+
+        assert self._pack_payload(temp_registry)["run_id"] is None
+
+
 class TestGetContextRefresh:
     """``refresh`` bypasses session dedup end-to-end through the MCP tool (#258)."""
 

@@ -120,6 +120,25 @@ def wrap_transport_error(exc: Exception, *, request_path: str) -> TrellisTranspo
     return wrapped
 
 
+def pack_attribution(
+    *, run_id: str | None, intent_family: str | None
+) -> dict[str, str]:
+    """Optional pack-attribution keys, omitted when the caller has none.
+
+    Shared by both clients' ``assemble_pack`` / ``assemble_sectioned_pack``
+    so the sync and async payloads cannot drift. Keys are left out rather
+    than sent as ``None`` because ``trellis_wire``'s request models are
+    ``extra="forbid"``: an SDK newer than the API it is pointed at would
+    otherwise turn every pack assembly into a 422 instead of degrading to
+    the old behaviour.
+    """
+    return {
+        key: value
+        for key, value in (("run_id", run_id), ("intent_family", intent_family))
+        if value is not None
+    }
+
+
 def check_handshake(
     response_body: dict[str, Any],
     *,

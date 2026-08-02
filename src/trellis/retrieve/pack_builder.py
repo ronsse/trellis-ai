@@ -29,6 +29,7 @@ import structlog
 from trellis.classify.dedup.minhash import MinHashIndex
 from trellis.core.base import utc_now
 from trellis.core.hashing import content_hash
+from trellis.learning.scoring import normalize_intent_family
 from trellis.meta.agents import META_AGENT_PREFIX
 from trellis.retrieve.evaluate import QualityReport
 from trellis.retrieve.excerpts import (
@@ -173,6 +174,56 @@ def _strip_dedup_frontmatter(text: str) -> str:
     relevance-order winner rule keeps the best copy.
     """
     return _DEDUP_FRONTMATTER_RE.sub("", text, count=1)
+
+
+def _item_attribution(item: PackItem) -> dict[str, str]:
+    """Per-item attribution stamped onto ``PACK_ASSEMBLED.injected_items``.
+
+    ``trellis.learning.pack_observations._join_one`` reads ``title`` /
+    ``category`` / ``domain_system`` off the *pack* payload (not the
+    feedback payload) to describe promotion candidates. Without them every
+    candidate carried ``title=None, category=None``, so a human reviewing
+    ``intent_learning_candidates.json`` saw only opaque item_ids.
+
+    All three are derived from metadata the strategies already attach —
+    nothing new is computed here:
+
+    * ``title`` — ``title``, then ``capture_title`` (the key the Claude
+      Code session-capture ingest writes,
+      :mod:`trellis_workers.session_capture.capture`), then ``name`` for
+      graph nodes — whose name the graph strategy folds into the excerpt
+      rather than the metadata, so most entities legitimately have none.
+    * ``category`` — the ``content_type`` facet of
+      :class:`~trellis.schemas.classification.ContentTags`, and *only*
+      that. The closed vocabulary (pattern / decision / error-resolution /
+      …) already answers "what shape of information is this", which is
+      exactly what a candidate's category means. A flat
+      ``metadata["content_type"]`` is deliberately **not** read as a
+      fallback: ingest handlers stamp their own vocabulary on that key
+      (``"conversation"`` in :mod:`trellis.ingest_corpus.conversations`,
+      ``"entity_summary"`` in :mod:`trellis.retrieve.semantic_seeds`), and
+      mixing those in would make the column ambiguous across item kinds.
+      An item the tagging pipeline never touched carries no category — a
+      known-unknown beats a value drawn from a second taxonomy.
+    * ``domain_system`` — the ``source_system`` the
+      :class:`~trellis.classify.classifiers.source_system.SourceSystemClassifier`
+      records (dbt, snowflake, …).
+
+    Empty values are omitted rather than emitted as ``None`` so thin items
+    keep the pre-existing payload shape.
+    """
+    meta = item.metadata or {}
+    tags = meta.get("content_tags")
+    fields = {
+        "title": meta.get("title") or meta.get("capture_title") or meta.get("name"),
+        "category": tags.get("content_type") if isinstance(tags, dict) else None,
+        "domain_system": meta.get("source_system"),
+    }
+    return {
+        key: value.strip()
+        for key, value in fields.items()
+        if isinstance(value, str) and value.strip()
+    }
 
 
 @dataclass(frozen=True)
@@ -338,6 +389,8 @@ class PackBuilder:
         domain: str | None = None,
         agent_id: str | None = None,
         session_id: str | None = None,
+        run_id: str | None = None,
+        intent_family: str | None = None,
         budget: PackBudget | None = None,
         filters: dict[str, Any] | None = None,
         tag_filters: dict[str, Any] | None = None,
@@ -395,6 +448,18 @@ class PackBuilder:
         ``include_meta=True`` to surface them — useful for the
         ``meta_trace_round_trip`` eval scenario and for operators
         debugging the self-improvement loop.
+
+        ``run_id`` and ``intent_family`` are request-scoped attribution
+        the item layer cannot know. Both land in the ``PACK_ASSEMBLED``
+        payload so :mod:`trellis.learning.pack_observations` can bucket
+        the pack's outcome by intent family and credit the supporting
+        run. ``intent_family`` defaults to
+        :func:`~trellis.learning.scoring.normalize_intent_family` over
+        ``intent`` — the same canonical normalizer the learning half
+        uses, so an unmatched intent still lands in ``general_context``
+        rather than a made-up bucket. ``run_id`` has no derivation:
+        omitted when the caller has none, and the join keeps its
+        ``"unknown-run"`` bucket.
         """
         budget = budget or PackBudget()
         all_items: list[PackItem] = []
@@ -609,6 +674,8 @@ class PackBuilder:
             domain=domain,
             agent_id=agent_id,
             session_id=session_id,
+            run_id=run_id,
+            intent_family=intent_family or normalize_intent_family(intent=intent),
             advisories=advisories,
             assembled_at=utc_now(),
         )
@@ -635,6 +702,8 @@ class PackBuilder:
         domain: str | None = None,
         agent_id: str | None = None,
         session_id: str | None = None,
+        run_id: str | None = None,
+        intent_family: str | None = None,
         filters: dict[str, Any] | None = None,
         tag_filters: dict[str, Any] | None = None,
         limit_per_strategy: int = 20,
@@ -649,7 +718,8 @@ class PackBuilder:
         Session dedup (step 3a) mirrors :meth:`build`: content-aware
         suppression bounded by the time window and event-count cap, and
         ``refresh=True`` bypasses it for this call only (client-compaction
-        signal). See :meth:`build` for the full contract.
+        signal). ``run_id`` / ``intent_family`` mirror :meth:`build` too.
+        See :meth:`build` for the full contract.
 
         Steps:
             1. Run all strategies once to collect a candidate pool.
@@ -872,6 +942,8 @@ class PackBuilder:
             domain=domain,
             agent_id=agent_id,
             session_id=session_id,
+            run_id=run_id,
+            intent_family=intent_family or normalize_intent_family(intent=intent),
             advisories=advisories,
             assembled_at=utc_now(),
         )
@@ -928,6 +1000,14 @@ class PackBuilder:
                 "domain": pack.domain,
                 "agent_id": pack.agent_id,
                 "session_id": pack.session_id,
+                # Symmetric with the flat payload (see _emit_telemetry).
+                # Known gap: this payload carries no ``injected_items``, so
+                # ``pack_observations._join_one`` yields zero per-item rows
+                # for a sectioned pack and these two fields stay inert until
+                # that is fixed. Emitted now so the sectioned path does not
+                # need a second change once it is.
+                "run_id": pack.run_id,
+                "intent_family": pack.intent_family,
                 "section_count": len(pack.sections),
                 "total_items": pack.total_items,
                 # Per-item content hashes (issue #258), flattened across
@@ -1070,6 +1150,11 @@ class PackBuilder:
                 "domain": pack.domain,
                 "agent_id": pack.agent_id,
                 "session_id": pack.session_id,
+                # Request-scoped attribution for the learning join. Both
+                # follow the ``domain`` idiom above: the key is always
+                # present, its value is ``None`` when unknown.
+                "run_id": pack.run_id,
+                "intent_family": pack.intent_family,
                 "items_count": len(pack.items),
                 "injected_item_ids": [item.item_id for item in pack.items],
                 # Per-item content hashes (issue #258): lets a later build in
@@ -1090,6 +1175,9 @@ class PackBuilder:
                         "estimated_tokens": item.estimated_tokens,
                         "strategy_source": item.strategy_source,
                         "injected_advisory_ids": list(item.injected_advisory_ids),
+                        # title / category / domain_system for the learning
+                        # join — see :func:`_item_attribution`.
+                        **_item_attribution(item),
                     }
                     for item in pack.items
                 ],

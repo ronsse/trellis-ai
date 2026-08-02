@@ -1263,7 +1263,7 @@ Start with `trellis admin serve` or `trellis-api`. Base path: `/api/v1/`.
 | Method | Endpoint | Params/Body | Description |
 |--------|----------|-------------|-------------|
 | GET | `/search` | `?q=...&domain=...&limit=20` | Full-text search |
-| POST | `/packs` | `{intent, domain?, max_items?, max_tokens?}` | Assemble context pack |
+| POST | `/packs` | `{intent, domain?, max_items?, max_tokens?, run_id?, intent_family?}` | Assemble context pack. `run_id` / `intent_family` ride the `PACK_ASSEMBLED` event so the learning loop can credit the run and bucket the intent instead of falling back to `unknown-run` / `general_context`; `intent_family` is derived from `intent` when omitted. |
 | GET | `/entities/{id}` | — | Get entity with subgraph |
 | GET | `/traces` | `?domain=...&limit=20` | List traces |
 | GET | `/traces/{id}` | — | Get trace by ID |
@@ -1398,7 +1398,7 @@ Start with `trellis-mcp`. 11 tools returning token-budgeted markdown — 8 core 
 
 | Tool | Args | Returns |
 |------|------|---------|
-| `get_context` | `intent`, `domain?`, `max_tokens?`, `session_id?`, `sections?` | Markdown pack fusing keyword + graph + semantic axes (RRF, recency/importance decay, session dedup) with a citable `pack_id`. Pass `sections` for the sectioned layout. |
+| `get_context` | `intent`, `domain?`, `max_tokens?`, `session_id?`, `run_id?`, `sections?` | Markdown pack fusing keyword + graph + semantic axes (RRF, recency/importance decay, session dedup) with a citable `pack_id`. Pass `sections` for the sectioned layout. Pass `run_id` (the unit of work this context is for — narrower than `session_id`) so later feedback can credit the runs a memory actually helped; without it the learning join buckets the pack under `unknown-run`. |
 | `save_experience` | `trace_json` | Confirmation with trace_id |
 | `save_knowledge` | `name`, `entity_type?`, `properties?`, `relates_to?`, `edge_kind?` | Confirmation with entity_id |
 | `save_memory` | `content`, `metadata?`, `doc_id?` | Confirmation with doc_id |

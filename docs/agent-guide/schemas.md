@@ -579,6 +579,8 @@ A context pack assembled for an agent or workflow.
 | `budget` | `PackBudget` | No | Default budget | Budget constraints |
 | `domain` | `string` or `null` | No | `null` | Domain scope |
 | `agent_id` | `string` or `null` | No | `null` | Agent scope |
+| `run_id` | `string` or `null` | No | `null` | Unit of work this pack was served to; carried into `PACK_ASSEMBLED` so the learning loop can credit supporting runs |
+| `intent_family` | `string` or `null` | No | derived | Canonical intent bucket; PackBuilder derives it from `intent` when the caller doesn't supply one |
 | `skill_id` | `string` or `null` | No | `null` | Skill or capability requesting the pack |
 | `target_entity_ids` | `list[string]` | No | `[]` | Canonical entities the pack is centered on |
 | `assembled_at` | `datetime` | No | UTC now | When pack was assembled |
