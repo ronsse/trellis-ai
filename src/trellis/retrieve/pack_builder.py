@@ -31,6 +31,11 @@ from trellis.core.base import utc_now
 from trellis.core.hashing import content_hash
 from trellis.meta.agents import META_AGENT_PREFIX
 from trellis.retrieve.evaluate import QualityReport
+from trellis.retrieve.excerpts import (
+    DEFAULT_CONTENT_FLOOR,
+    ContentFloorConfig,
+    apply_content_floor,
+)
 from trellis.retrieve.rerankers.base import Reranker
 from trellis.retrieve.strategies import SearchStrategy
 from trellis.retrieve.tier_mapping import TierMapper
@@ -279,6 +284,7 @@ class PackBuilder:
         token_counter: TokenCounter | None = None,
         token_budget_safety_margin: float = 0.0,
         token_budget_validator: TokenCounter | None = None,
+        content_floor: ContentFloorConfig | None = None,
     ) -> None:
         self._strategies = strategies or []
         self._event_log = event_log
@@ -315,6 +321,11 @@ class PackBuilder:
         #: telemetry so drift is observable even when the estimator is
         #: the heuristic.
         self._token_budget_validator = token_budget_validator
+        #: Substance floor for pack items. Defaults to
+        #: :data:`~trellis.retrieve.excerpts.DEFAULT_CONTENT_FLOOR` —
+        #: demote name-only stubs, never drop them. Pass an explicit
+        #: config for ``mode="exclude"`` or ``mode="off"``.
+        self._content_floor = content_floor or DEFAULT_CONTENT_FLOOR
 
     def add_strategy(self, strategy: SearchStrategy) -> None:
         """Add a search strategy."""
@@ -346,7 +357,9 @@ class PackBuilder:
             5. Drop Trellis-internal meta-Activities unless
                ``include_meta=True``.
             6. Drop items already served in this session (session dedup).
-            7. Sort by relevance_score descending.
+            7. Apply the content floor (demote, or drop, substance-free
+               excerpts — see :mod:`trellis.retrieve.excerpts`), then sort
+               by relevance_score descending.
             8. Apply budget limits (max_items, then max_tokens).
             9. Build RetrievalReport.
             10. Return Pack.
@@ -539,6 +552,15 @@ class PackBuilder:
                 )
                 raise PackAssemblyError(msg, strategy_failures) from exc
 
+        # Content floor: demote (or, when configured, drop) items whose
+        # excerpt carries no substance — the logic lives in
+        # ``trellis.retrieve.excerpts``. Applied after rerank so the
+        # penalty is not overwritten, and before the sort so it actually
+        # moves the item down the ranking.
+        floor_result = apply_content_floor(deduped, self._content_floor)
+        deduped = floor_result.items
+        rejected.extend(floor_result.rejected)
+
         # Sort by relevance_score descending
         deduped.sort(key=lambda x: x.relevance_score, reverse=True)
 
@@ -600,6 +622,7 @@ class PackBuilder:
                 pack,
                 strategy_failures=strategy_failures,
                 meta_filtered_count=meta_filtered_count,
+                content_floor=floor_result.as_telemetry(),
             )
 
         return pack
@@ -746,6 +769,13 @@ class PackBuilder:
                 )
                 raise PackAssemblyError(msg, strategy_failures) from exc
 
+        # 3c. Content floor over the shared pool — mirrors build(). As with
+        # semantic dedup above, per-section reports are built later from the
+        # collapsed pool, so exclusion *records* aren't threaded into section
+        # RetrievalReports; the counts ride the sectioned PACK_ASSEMBLED emit.
+        floor_result = apply_content_floor(deduped, self._content_floor)
+        deduped = floor_result.items
+
         # 4. Fill each section independently
         #    Track which section each item lands in (for cross-section dedup)
         item_best_section: dict[
@@ -845,6 +875,7 @@ class PackBuilder:
                 strategy_failures=strategy_failures,
                 meta_filtered_count=meta_filtered_count,
                 semantic_dedup_rejected_count=semantic_dedup_rejected_count,
+                content_floor=floor_result.as_telemetry(),
             )
 
         return sectioned_pack
@@ -856,13 +887,15 @@ class PackBuilder:
         strategy_failures: list[StrategyFailure] | None = None,
         meta_filtered_count: int = 0,
         semantic_dedup_rejected_count: int = 0,
+        content_floor: dict[str, Any] | None = None,
     ) -> None:
         """Emit telemetry event for a sectioned pack.
 
         ``semantic_dedup_rejected_count`` (#259) mirrors the flat path's
         ``semantic_dedup_rejected`` payload field so near-duplicate
         suppression is observable on both pack kinds. Additive field —
-        consumers ``payload.get(...)`` with a default.
+        consumers ``payload.get(...)`` with a default. ``content_floor``
+        mirrors the flat path's field of the same name.
         """
         per_item_estimates = [
             item.estimated_tokens or self._token_counter.count(item.excerpt)
@@ -912,6 +945,7 @@ class PackBuilder:
                 "reranker": self._reranker.name if self._reranker else None,
                 "semantic_dedup_enabled": self._semantic_dedup is not None,
                 "semantic_dedup_rejected": semantic_dedup_rejected_count,
+                "content_floor": content_floor or {},
                 "strategy_failures": [
                     sf.to_event_payload() for sf in (strategy_failures or [])
                 ],
@@ -988,6 +1022,7 @@ class PackBuilder:
         *,
         strategy_failures: list[StrategyFailure] | None = None,
         meta_filtered_count: int = 0,
+        content_floor: dict[str, Any] | None = None,
     ) -> None:
         """Emit a ContextRetrievalEvent for observability.
 
@@ -1002,6 +1037,12 @@ class PackBuilder:
         nodes were dropped by the default meta-Activity filter. ``0``
         when the build either had no candidates of that shape or was
         called with ``include_meta=True``.
+
+        ``content_floor`` carries the substance-floor decision summary
+        (mode, threshold, and the item ids penalised or excluded) so a
+        demoted item is attributable in telemetry rather than just
+        appearing lower in the ranking. Per-item detail also rides
+        ``injected_items[].score_breakdown``.
         """
         report = pack.retrieval_report
         token_budget_fields = self._build_token_budget_payload(
@@ -1058,6 +1099,7 @@ class PackBuilder:
                     }
                     for r in report.rejected_items
                 ],
+                "content_floor": content_floor or {},
                 "budget_trace": [
                     {
                         "item_id": b.item_id,

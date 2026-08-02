@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, TypedDict
 
 import structlog
 
+from trellis.retrieve.excerpts import truncate_excerpt
 from trellis.schemas.pack import PackItem
 from trellis.schemas.parameters import ParameterScope
 from trellis.schemas.well_known import (
@@ -403,7 +404,7 @@ class KeywordSearch(SearchStrategy):
                 PackItem(
                     item_id=doc["doc_id"],
                     item_type="document",
-                    excerpt=doc.get("content", "")[:500],
+                    excerpt=truncate_excerpt(doc.get("content", "")),
                     relevance_score=score,
                     metadata={"source_strategy": "keyword", **metadata},
                 )
@@ -498,7 +499,9 @@ class SemanticSearch(SearchStrategy):
                 PackItem(
                     item_id=result["item_id"],
                     item_type="vector",
-                    excerpt=metadata.get("content", metadata.get("excerpt", ""))[:500],
+                    excerpt=truncate_excerpt(
+                        metadata.get("content", metadata.get("excerpt", ""))
+                    ),
                     relevance_score=score,
                     metadata={"source_strategy": "semantic", **metadata},
                 )
@@ -752,7 +755,7 @@ class GraphSearch(SearchStrategy):
                 PackItem(
                     item_id=node["node_id"],
                     item_type="entity",
-                    excerpt=str(excerpt)[:500],
+                    excerpt=truncate_excerpt(str(excerpt)),
                     relevance_score=score,
                     metadata={
                         "source_strategy": "graph",

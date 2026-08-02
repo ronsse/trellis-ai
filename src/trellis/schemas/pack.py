@@ -52,7 +52,7 @@ class RejectedItem(VersionedModel):
     item_id: str
     item_type: str
     relevance_score: float = 0.0
-    reason: str  # dedup, structural_filter, max_items, token_budget
+    reason: str  # dedup, structural_filter, max_items, token_budget, content_floor
     strategy_source: str | None = None
 
 

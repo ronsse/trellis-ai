@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from trellis.core.hashing import content_hash
+from trellis.retrieve.excerpts import ContentFloorConfig
 from trellis.retrieve.pack_builder import PackBuilder
 from trellis.retrieve.strategies import SearchStrategy
 from trellis.schemas.advisory import Advisory, AdvisoryCategory, AdvisoryEvidence
@@ -58,8 +59,12 @@ class TestPackBuilder:
         assert pack.retrieval_report.queries_run == 2
 
     def test_deduplication_keeps_highest_score(self) -> None:
-        s1 = _make_strategy("keyword", [_item("d1", 0.7)])
-        s2 = _make_strategy("semantic", [_item("d1", 0.9)])
+        # Substantive excerpt so the content floor (on by default) leaves the
+        # score alone and the assertion below reads the dedup winner, not a
+        # penalised stub. See tests/unit/retrieve/test_excerpts.py.
+        body = "the deploy checklist requires draining the queue first"
+        s1 = _make_strategy("keyword", [_item("d1", 0.7, excerpt=body)])
+        s2 = _make_strategy("semantic", [_item("d1", 0.9, excerpt=body)])
         builder = PackBuilder(strategies=[s1, s2])
         pack = builder.build("search")
         assert len(pack.items) == 1
@@ -323,7 +328,13 @@ class TestBuildDomainScopeGraphAxis:
                 _item("d2", 0.7, excerpt="y" * 20),
             ],
         )
-        builder = PackBuilder(strategies=[s])
+        # The floor is disabled here so the single-token "xxxx" fixtures keep
+        # their exact scores and token counts — this test is about the
+        # annotation fields, not about substance. Floor behaviour is covered
+        # in tests/unit/retrieve/test_excerpts.py.
+        builder = PackBuilder(
+            strategies=[s], content_floor=ContentFloorConfig(mode="off")
+        )
         pack = builder.build("q")
 
         assert [item.rank for item in pack.items] == [1, 2]

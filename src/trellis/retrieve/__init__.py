@@ -21,6 +21,15 @@ from trellis.retrieve.evaluate import (
     analyze_dimension_predictiveness,
     evaluate_pack,
 )
+from trellis.retrieve.excerpts import (
+    DEFAULT_CONTENT_FLOOR,
+    EXCERPT_MAX_CHARS,
+    ContentFloorConfig,
+    ContentFloorResult,
+    apply_content_floor,
+    count_substance_words,
+    truncate_excerpt,
+)
 from trellis.retrieve.observation_strategy import ObservationSearch
 from trellis.retrieve.pack_builder import (
     PackAssemblyError,
@@ -51,11 +60,15 @@ from trellis.retrieve.token_counting import (
 __all__ = [
     "BUILTIN_PROFILES",
     "CODE_GENERATION_PROFILE",
+    "DEFAULT_CONTENT_FLOOR",
     "DEFAULT_DIMENSIONS",
     "DEFAULT_TOKEN_COUNTER",
     "DOMAIN_CONTEXT_PROFILE",
+    "EXCERPT_MAX_CHARS",
     "BreadthScorer",
     "CompletenessScorer",
+    "ContentFloorConfig",
+    "ContentFloorResult",
     "DimensionPredictiveness",
     "DimensionPredictivenessReport",
     "EfficiencyScorer",
@@ -85,5 +98,8 @@ __all__ = [
     "TokenCounter",
     "analyze_dimension_predictiveness",
     "analyze_pack_telemetry",
+    "apply_content_floor",
+    "count_substance_words",
     "evaluate_pack",
+    "truncate_excerpt",
 ]
