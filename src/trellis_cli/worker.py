@@ -21,7 +21,7 @@ surfaces from ``docs/design/adr-autonomy-ladder.md``:
   :meth:`PrecedentMiner.generate_precedent_candidates`.
 * :func:`capture_sessions_cmd` (``trellis worker capture-sessions``) — one
   Claude Code session-capture sweep, delegating to the same
-  :func:`~trellis_workers.session_capture.__main__.run_sweep` the
+  :func:`~trellis_workers.session_capture.sweep.run_sweep` the
   ``trellis-session-capture`` console script runs.
 
 The ``worker_app`` lived in ``trellis_cli.main`` as an empty group; it has
@@ -1209,20 +1209,29 @@ def capture_sessions_cmd(
     client, so a sweep without one captures nothing while looking like a clean
     run. This command exits non-zero when no judge can be built, and again
     when the judge went away mid-sweep — ``sessions_judge_unavailable`` counts
-    the sessions left un-watermarked for a later retry.
+    the sessions left un-watermarked for a later retry, and
+    ``TRELLIS_CAPTURE_STRICT=0`` downgrades that second case to a reported
+    count with a zero exit.
     """
-    from trellis_workers.session_capture.__main__ import (  # noqa: PLC0415
+    # Imported here, not at module scope: trellis_workers is an optional
+    # install alongside the CLI, and every other `trellis worker` command
+    # pays the same lazy-import cost.
+    from trellis_workers.session_capture.sweep import (  # noqa: PLC0415
         CaptureJudgeUnavailableError,
         judge_unavailable_sessions,
         run_sweep,
+        strict_mode,
     )
 
     try:
         report = run_sweep(registry=_get_registry(), dry_run=dry_run)
     except CaptureJudgeUnavailableError as exc:
-        # escape(): the remediation names the `[llm-openai]` / `[llm-anthropic]`
-        # extras, which Rich would otherwise eat as markup tags.
-        console.print(f"[red]worker capture-sessions: {escape(str(exc))}[/red]")
+        if output_format == "json":
+            emit_json({"status": "error", "message": str(exc)})
+        else:
+            # escape(): the remediation names the `[llm-openai]` /
+            # `[llm-anthropic]` extras, which Rich would eat as markup tags.
+            console.print(f"[red]worker capture-sessions: {escape(str(exc))}[/red]")
         raise typer.Exit(code=EXIT_INTERNAL) from exc
 
     payload = report.to_payload()
@@ -1230,11 +1239,14 @@ def capture_sessions_cmd(
     payload["sessions_judge_unavailable"] = unjudged
 
     if output_format == "json":
-        emit_json({"status": "ok", **payload})
+        # "partial", not "ok": the command itself treats an unjudged session
+        # as a failed run, so a consumer keying off `status` must not read it
+        # as success.
+        emit_json({"status": "partial" if unjudged else "ok", **payload})
     else:
         _render_capture_text(payload)
 
-    if unjudged:
+    if unjudged and strict_mode():
         raise typer.Exit(code=EXIT_INTERNAL)
 
 

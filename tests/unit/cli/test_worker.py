@@ -25,7 +25,7 @@ from trellis.stores.registry import StoreRegistry
 from trellis_cli import worker
 from trellis_cli.main import app, worker_app
 from trellis_cli.stores import _reset_registry
-from trellis_workers.session_capture import __main__ as capture_main
+from trellis_workers.session_capture import sweep as capture_sweep
 from trellis_workers.session_capture.models import CaptureReport
 
 runner = CliRunner()
@@ -791,7 +791,7 @@ class TestWorkerCaptureSessions:
         self, temp_stores: StoreRegistry, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         spy = MagicMock(return_value=self._report(sessions_seen=4))
-        monkeypatch.setattr(capture_main, "run_sweep", spy)
+        monkeypatch.setattr(capture_sweep, "run_sweep", spy)
 
         result = runner.invoke(
             worker_app, ["capture-sessions", "--dry-run", "--format", "json"]
@@ -810,10 +810,10 @@ class TestWorkerCaptureSessions:
         self, temp_stores: StoreRegistry, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(
-            capture_main,
+            capture_sweep,
             "run_sweep",
             MagicMock(
-                side_effect=capture_main.CaptureJudgeUnavailableError(
+                side_effect=capture_sweep.CaptureJudgeUnavailableError(
                     "no distillation judge is configured."
                 )
             ),
@@ -824,11 +824,33 @@ class TestWorkerCaptureSessions:
         assert result.exit_code == 1
         assert "no distillation judge is configured" in result.output
 
+    def test_missing_judge_reports_json_under_format_json(
+        self, temp_stores: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The failure path most likely to be piped into jq must stay parseable."""
+        monkeypatch.setattr(
+            capture_sweep,
+            "run_sweep",
+            MagicMock(
+                side_effect=capture_sweep.CaptureJudgeUnavailableError(
+                    "no distillation judge is configured."
+                )
+            ),
+        )
+
+        result = runner.invoke(worker_app, ["capture-sessions", "--format", "json"])
+
+        assert result.exit_code == 1
+        payload = json.loads(result.stdout.strip().splitlines()[-1])
+        assert payload["status"] == "error"
+        assert "no distillation judge is configured" in payload["message"]
+
     def test_unjudged_sessions_exit_nonzero_with_a_count(
         self, temp_stores: StoreRegistry, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        monkeypatch.delenv("TRELLIS_CAPTURE_STRICT", raising=False)
         monkeypatch.setattr(
-            capture_main,
+            capture_sweep,
             "run_sweep",
             MagicMock(
                 return_value=self._report(
@@ -843,12 +865,36 @@ class TestWorkerCaptureSessions:
         assert result.exit_code == 1
         payload = json.loads(result.stdout.strip().splitlines()[0])
         assert payload["sessions_judge_unavailable"] == 1
+        # Not "ok": the command itself treats this run as failed.
+        assert payload["status"] == "partial"
+
+    def test_strict_opt_out_keeps_the_count_but_exits_zero(
+        self, temp_stores: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("TRELLIS_CAPTURE_STRICT", "0")
+        monkeypatch.setattr(
+            capture_sweep,
+            "run_sweep",
+            MagicMock(
+                return_value=self._report(
+                    sessions_seen=2,
+                    warnings=[{"kind": "distill_unavailable", "session_id": "a"}],
+                )
+            ),
+        )
+
+        result = runner.invoke(worker_app, ["capture-sessions", "--format", "json"])
+
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout.strip().splitlines()[0])
+        assert payload["status"] == "partial"
+        assert payload["sessions_judge_unavailable"] == 1
 
     def test_text_output_renders_the_report(
         self, temp_stores: StoreRegistry, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(
-            capture_main,
+            capture_sweep,
             "run_sweep",
             MagicMock(return_value=self._report(sessions_seen=1, memories_written=1)),
         )

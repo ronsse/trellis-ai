@@ -18,7 +18,20 @@ Design notes:
   from erasing good prior classifications.
 * **Audit via :class:`EventType.TAGS_REFRESHED`.** Each refresh emits an
   event carrying the before/after diff so operators can trace why a
-  classification changed.
+  classification changed. Only a *real* change is written, so an empty
+  before/after diff never reaches the log.
+
+**Sanctioned exception to the governed-mutation rule.** Tag writes here go
+straight to ``DocumentStore.put`` and emit ``TAGS_REFRESHED`` by hand rather
+than routing through :class:`~trellis.mutate.executor.MutationExecutor`, in the
+same way classify-on-write (:mod:`trellis.classify.ingest`) does. A refresh
+rewrites *derived* metadata on an existing row — it creates no entity, changes
+no content, and is fully reconstructible by re-running the pipeline — while
+``MutationExecutor``'s per-row validate/policy/idempotency stages are
+uneconomical at whole-store scale (``trellis classify backfill`` defaults to
+every document). The ``TAGS_REFRESHED`` event preserves the audit trail the
+executor would have emitted. This exception is scoped to tag/importance
+metadata; every other write on this path still goes through the executor.
 """
 
 from __future__ import annotations
@@ -45,6 +58,21 @@ logger = structlog.get_logger(__name__)
 #: the other operator-driven backfill over the same store.
 DEFAULT_PAGE_SIZE = 100
 
+#: Freshness stamps are excluded from the tags-unchanged comparison. Both are
+#: minted anew on every call (``classified_at`` by
+#: :meth:`MergedClassification.to_content_tags`, ``importance_scored_at``
+#: below), so comparing them would make every item look changed and defeat
+#: the early-out entirely.
+_STAMP_FIELDS = frozenset({"classified_at", "importance_scored_at"})
+
+#: :attr:`RefreshOutcome.reason` values. Constants, not free text, so the
+#: batch pass buckets outcomes by identity instead of sniffing prose.
+REASON_NOT_FOUND = "document not found"
+REASON_NO_SIGNAL = "pipeline produced no tags — keeping prior"
+REASON_UNCHANGED = "tags unchanged"
+REASON_DRY_RUN = "tags would be updated (dry-run)"
+REASON_UPDATED = "tags updated"
+
 
 @dataclass
 class RefreshOutcome:
@@ -65,7 +93,9 @@ class BatchRefreshResult:
     refreshed: int = 0
     skipped_missing_content: int = 0
     skipped_fresh: int = 0
+    skipped_unchanged: int = 0
     skipped_no_signal: int = 0
+    errors: int = 0
     item_ids_refreshed: list[str] = field(default_factory=list)
 
 
@@ -121,12 +151,12 @@ def reclassify_item(
         return RefreshOutcome(
             item_id=item_id,
             refreshed=False,
-            reason="document not found",
+            reason=REASON_NOT_FOUND,
         )
 
     content = doc.get("content", "")
     metadata: dict[str, Any] = dict(doc.get("metadata") or {})
-    before_tags = dict(metadata.get("content_tags") or {})
+    before_tags = _prior_tags(metadata.get("content_tags"), item_id=item_id)
 
     builder = context_builder or _default_context_builder
     context = builder(doc)
@@ -136,7 +166,7 @@ def reclassify_item(
         return RefreshOutcome(
             item_id=item_id,
             refreshed=False,
-            reason="pipeline produced no tags — keeping prior",
+            reason=REASON_NO_SIGNAL,
             before=before_tags,
             after=before_tags,
         )
@@ -161,7 +191,7 @@ def reclassify_item(
     # ignores `domain`, so the ordering relative to the score is immaterial.
     if not include_domain:
         fresh_tags_obj = fresh_tags_obj.model_copy(
-            update={"domain": list(before_tags.get("domain") or [])}
+            update={"domain": _carried_domain(before_tags.get("domain"))}
         )
 
     prior_importance = float(metadata.get("auto_importance", 0.0))
@@ -175,24 +205,22 @@ def reclassify_item(
     fresh_tags = fresh_tags_obj.model_dump(mode="json")
 
     # Tags-unchanged early-out: skip when neither the tag set nor the
-    # importance score would change. We compare against ``before_tags``
-    # ignoring the freshness stamp itself (the stamp varies on every call;
-    # using it as a tiebreaker would defeat the early-out). Importance is
-    # checked against the existing metadata value.
-    before_tags_no_stamp = {
-        k: v for k, v in before_tags.items() if k != "importance_scored_at"
-    }
-    fresh_tags_no_stamp = {
-        k: v for k, v in fresh_tags.items() if k != "importance_scored_at"
-    }
+    # importance score would change. Both freshness stamps are dropped from
+    # the comparison (see ``_STAMP_FIELDS``) — they are minted on every call,
+    # so keeping either would make every item differ and the early-out could
+    # never fire. Consequence: an unchanged item keeps its old
+    # ``classified_at`` and is re-scanned (but not rewritten, and no event) by
+    # the next backfill. That is the cheap half of the work, and it is what
+    # makes ``--dry-run`` report what would *change* rather than what is
+    # merely stale. Importance is checked against the existing metadata value.
     if (
-        fresh_tags_no_stamp == before_tags_no_stamp
+        _without_stamps(fresh_tags) == _without_stamps(before_tags)
         and new_importance == prior_importance
     ):
         return RefreshOutcome(
             item_id=item_id,
             refreshed=False,
-            reason="tags unchanged",
+            reason=REASON_UNCHANGED,
             before=before_tags,
             after=before_tags,
         )
@@ -201,7 +229,7 @@ def reclassify_item(
         return RefreshOutcome(
             item_id=item_id,
             refreshed=True,
-            reason="tags would be updated (dry-run)",
+            reason=REASON_DRY_RUN,
             before=before_tags,
             after=fresh_tags,
         )
@@ -221,7 +249,7 @@ def reclassify_item(
     return RefreshOutcome(
         item_id=item_id,
         refreshed=True,
-        reason="tags updated",
+        reason=REASON_UPDATED,
         before=before_tags,
         after=fresh_tags,
     )
@@ -275,7 +303,14 @@ def reclassify_stale(
 
     Returns:
         :class:`BatchRefreshResult` with counts and the list of refreshed
-        item IDs.
+        item IDs. Every scanned document lands in exactly one bucket:
+        ``refreshed``, ``skipped_missing_content``, ``skipped_fresh``,
+        ``skipped_unchanged`` (stale stamp, but re-running the pipeline
+        produces the same tags), ``skipped_no_signal``, or ``errors``.
+
+    A failure on one document is counted in ``errors`` and skipped — the scan
+    continues. A whole-store backfill must not abort halfway on a single
+    malformed row and leave the operator with committed writes and no counts.
     """
     cutoff = datetime.now(UTC) - timedelta(days=max_age_days)
     result = BatchRefreshResult()
@@ -299,47 +334,122 @@ def reclassify_stale(
                 result.skipped_missing_content += 1
                 continue
 
-            tags = (doc.get("metadata") or {}).get("content_tags") or {}
-            if not _is_stale(tags, cutoff):
-                result.skipped_fresh += 1
+            # Fail-soft per document: one unparseable row (a hand-edited
+            # `auto_importance`, a `content_tags` of the wrong shape) must not
+            # abort a whole-store backfill halfway, leaving the operator with
+            # committed writes and no counts. Same guarantee
+            # `classify_for_ingest` gives the write path.
+            try:
+                if not _is_stale(
+                    (doc.get("metadata") or {}).get("content_tags"), cutoff
+                ):
+                    result.skipped_fresh += 1
+                    continue
+                outcome = reclassify_item(
+                    item_id,
+                    pipeline=pipeline,
+                    document_store=document_store,
+                    event_log=event_log,
+                    context_builder=context_builder,
+                    include_domain=include_domain,
+                    dry_run=dry_run,
+                )
+            # GRACEFUL-DEGRADATION: counted in `errors` and surfaced to the
+            # operator in the CLI summary; logged with a traceback so the
+            # offending row is identifiable.
+            # TODO(c2-phase5): add metrics.telemetry_failures counter.
+            except Exception:
+                result.errors += 1
+                logger.exception("reclassify_item_failed", item_id=item_id)
                 continue
 
-            outcome = reclassify_item(
-                item_id,
-                pipeline=pipeline,
-                document_store=document_store,
-                event_log=event_log,
-                context_builder=context_builder,
-                include_domain=include_domain,
-                dry_run=dry_run,
-            )
-            if outcome.refreshed:
-                result.refreshed += 1
-                result.item_ids_refreshed.append(item_id)
-            elif outcome.reason.startswith("pipeline produced no tags"):
-                result.skipped_no_signal += 1
+            _tally(result, item_id, outcome)
 
     logger.info(
         "reclassify_stale_completed",
         scanned=result.scanned,
         refreshed=result.refreshed,
         skipped_fresh=result.skipped_fresh,
+        skipped_unchanged=result.skipped_unchanged,
         skipped_no_signal=result.skipped_no_signal,
+        errors=result.errors,
         dry_run=dry_run,
     )
     return result
 
 
-def _is_stale(tags: dict[str, Any], cutoff: datetime) -> bool:
+def _tally(result: BatchRefreshResult, item_id: str, outcome: RefreshOutcome) -> None:
+    """Route one :class:`RefreshOutcome` into its ``BatchRefreshResult`` bucket.
+
+    Buckets by reason *identity* (the ``REASON_*`` constants) rather than by
+    sniffing prose, so renaming a message can never silently mis-count.
+    """
+    if outcome.refreshed:
+        result.refreshed += 1
+        result.item_ids_refreshed.append(item_id)
+    elif outcome.reason == REASON_NO_SIGNAL:
+        result.skipped_no_signal += 1
+    elif outcome.reason == REASON_UNCHANGED:
+        result.skipped_unchanged += 1
+    else:
+        # REASON_NOT_FOUND: the store listed the row and then could not read
+        # it back. Rare (a concurrent delete), but it is a document we were
+        # asked to refresh and did not — that is the `errors` bucket.
+        result.errors += 1
+
+
+def _is_stale(tags: Any, cutoff: datetime) -> bool:
     """``True`` when an item's tags are older than ``cutoff`` — or unproven.
 
     Option A: a missing or unparseable ``classified_at`` is treated as
     *always stale*. Legacy or hand-edited rows that never carried a stamp
     must be reclassified — there's no other freshness signal, and silently
-    skipping them would let drift accumulate forever.
+    skipping them would let drift accumulate forever. A ``content_tags``
+    value that is not a mapping at all (a legacy scalar) is unproven for the
+    same reason, so it is stale too rather than an ``AttributeError``.
     """
+    if not isinstance(tags, dict):
+        return True
     classified_at = _parse_classified_at(tags.get("classified_at"))
     return classified_at is None or classified_at < cutoff
+
+
+def _prior_tags(raw: Any, *, item_id: str) -> dict[str, Any]:
+    """The document's stored tags as a mapping — ``{}`` if it has none usable.
+
+    A ``content_tags`` value that is not a mapping (a legacy scalar, a
+    hand-edited string) carries no prior signal to preserve, so the refresh
+    treats it as untagged and re-classifies from scratch rather than failing
+    the row. Warned, not silent, so corrupt rows stay observable.
+    """
+    if isinstance(raw, dict):
+        return dict(raw)
+    if raw:
+        logger.warning(
+            "prior_tags_not_a_mapping", item_id=item_id, raw_type=type(raw).__name__
+        )
+    return {}
+
+
+def _without_stamps(tags: dict[str, Any]) -> dict[str, Any]:
+    """``tags`` minus the per-call freshness stamps — see ``_STAMP_FIELDS``."""
+    return {k: v for k, v in tags.items() if k not in _STAMP_FIELDS}
+
+
+def _carried_domain(prior: Any) -> list[str]:
+    """Normalise a stored ``domain`` value into the ``list[str]`` shape.
+
+    The flat scalar form (``content_tags.domain == "payments"``) is a legal
+    stored shape elsewhere in the repo (``analyze.domains._document_domains``,
+    ``retrieve.evaluate._item_domains`` both handle it). Feeding it to
+    ``list()`` would shred it into one single-character "domain" per letter —
+    which ``ContentTags`` happily validates, and which matches no real domain
+    filter, silently hiding the document from every domain-scoped query. That
+    is exactly the failure ``include_domain=False`` exists to prevent.
+    """
+    if isinstance(prior, str):
+        return [prior] if prior else []
+    return list(prior or [])
 
 
 def _default_context_builder(doc: dict[str, Any]) -> ClassificationContext:

@@ -88,7 +88,7 @@ class TestClassifyBackfillCLI:
         assert rerun["refreshed"] == 0
         assert rerun["skipped_fresh"] == 3
 
-    def test_max_age_days_zero_retags_everything(self, cli_env) -> None:
+    def test_max_age_days_zero_rescans_everything(self, cli_env) -> None:
         _seed_documents()
         _run_json()
 
@@ -96,6 +96,63 @@ class TestClassifyBackfillCLI:
 
         assert rerun["skipped_fresh"] == 0
         assert rerun["scanned"] == 3
+        # Rescanned, but the pipeline produces the same tags, so nothing is
+        # rewritten — "stale" is not the same question as "would change".
+        assert rerun["refreshed"] == 0
+        assert rerun["skipped_unchanged"] == 3
+
+    def test_dry_run_reports_what_would_change_not_what_is_stale(self, cli_env) -> None:
+        """Regression: ``--dry-run`` counted every stale item as a rewrite.
+
+        The tags-unchanged early-out compared a freshly minted ``classified_at``
+        against the stored one, so it could never fire on the batch path. A
+        preview said "1 refreshed" for a document whose tags were identical,
+        and the live run then rewrote it and emitted an empty-diff
+        ``TAGS_REFRESHED``.
+        """
+        _seed_documents(1)
+        _run_json()
+
+        preview = _run_json("--max-age-days", "0", "--dry-run")
+        assert preview["refreshed"] == 0
+
+        live = _run_json("--max-age-days", "0")
+        assert live["refreshed"] == 0
+        events = _get_registry().operational.event_log.get_events(
+            event_type=EventType.TAGS_REFRESHED, limit=50
+        )
+        assert len(events) == 1  # only the original tagging run
+
+    def test_one_bad_document_is_reported_not_fatal(self, cli_env) -> None:
+        """A malformed row must not abort the scan or masquerade as a config error.
+
+        ``metadata`` is free-form: a hand-written ``auto_importance`` string
+        reaches ``float()`` and raises ``ValueError``. That used to escape into
+        the CLI's ``except ValueError``, which reports a malformed ``classify:``
+        block — the wrong diagnosis, with all counts discarded and earlier
+        writes already committed.
+        """
+        store = _get_registry().knowledge.document_store
+        store.put("doc-a", _TAGGABLE, {"title": "a"})
+        store.put("doc-b", _TAGGABLE, {"title": "b", "auto_importance": "high"})
+        store.put("doc-c", _TAGGABLE, {"title": "c"})
+
+        summary = _run_json()
+
+        assert summary["status"] == "partial"
+        assert summary["errors"] == 1
+        assert summary["scanned"] == 3
+        assert sorted(summary["item_ids_refreshed"]) == ["doc-a", "doc-c"]
+
+    def test_scalar_domain_survives_the_default_backfill(self, cli_env) -> None:
+        """A legacy scalar ``domain`` must not be shredded into characters."""
+        store = _get_registry().knowledge.document_store
+        store.put("doc-scalar", _TAGGABLE, {"content_tags": {"domain": "payments"}})
+
+        summary = _run_json()
+
+        assert summary["refreshed"] == 1
+        assert _tags("doc-scalar")["domain"] == ["payments"]
 
     def test_emits_one_tags_refreshed_event_per_document(self, cli_env) -> None:
         _seed_documents(2)

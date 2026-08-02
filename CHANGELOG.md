@@ -15,8 +15,9 @@ All notable changes to Trellis will be documented in this file.
   dangerous `--include-domain` (off by default — `domain` is the only facet
   that hard-excludes a document from a domain-scoped query). `reclassify_stale`
   gained offset paging so one invocation covers a store larger than one page,
-  and both refresh entry points gained `dry_run`. Documented in
-  [`operations.md`](docs/agent-guide/operations.md).
+  per-document fail-soft (one bad row is counted in `errors` and skipped, not
+  fatal to the run), and both refresh entry points gained `dry_run`.
+  Documented in [`operations.md`](docs/agent-guide/operations.md).
 - **`trellis-session-capture` console script** and **`trellis worker
   capture-sessions`** — the capture sweep advertised the console-script name in
   its own `--help` but never shipped it, and was the only worker with no
@@ -50,6 +51,15 @@ All notable changes to Trellis will be documented in this file.
 
 ### Changed
 
+- **A capture sweep that leaves sessions unjudged now exits non-zero.**
+  Previously a mid-sweep judge outage was a `warnings[]` entry and a clean
+  exit `0`. Adopters running the shipped systemd timer will see the unit fail
+  on a single transient model timeout, even though the other sessions were
+  captured and the unjudged one stays un-watermarked for automatic retry. Set
+  `TRELLIS_CAPTURE_STRICT=0` to keep the reported
+  `sessions_judge_unavailable` count with the old zero exit. The *total*
+  no-op (no judge at all) fails regardless — nothing ran, so nothing is
+  retried.
 - **MinHash shingle hashing switched from MD5 to truncated SHA-256**
   (`classify/dedup/minhash.py`). Non-cryptographic use (similarity
   estimation, not secret protection), but CodeQL's sensitive-data-hashing
@@ -118,6 +128,25 @@ Net DEFECT delta in `src/`: 113 literal-only → 85 literal-only / 67 helper-awa
 
 ### Fixed
 
+- **Tag refresh rewrote every stale document, even when nothing changed.** The
+  tags-unchanged early-out in `classify/refresh.py` dropped only
+  `importance_scored_at` from its before/after comparison, but
+  `to_content_tags()` mints a fresh `classified_at` on every call — so the two
+  dicts always differed and the branch could never fire on the batch path.
+  Consequences: `trellis classify backfill --dry-run` reported what was
+  *stale* rather than what would *change*, and a live run rewrote every stale
+  row and emitted an empty-diff `TAGS_REFRESHED` for each, defeating the audit
+  trail. Both stamps are now excluded, and unchanged items are counted under
+  the new `skipped_unchanged`.
+- **A scalar `content_tags.domain` was shredded into one domain per
+  character.** On the safe `include_domain=False` path the prior domain was
+  carried forward with `list(...)`, so a legacy `"payments"` became
+  `['p','a','y',...]` — which `ContentTags` validates happily and no domain
+  filter ever matches, silently hiding the document from every domain-scoped
+  query. The flat scalar shape is legal elsewhere in the repo
+  (`analyze.domains`, `retrieve.evaluate` both handle it). Now normalised;
+  a `content_tags` value that is not a mapping at all is treated as untagged
+  (warned, re-classified) instead of raising.
 - **Session capture no longer no-ops silently on a misconfigured judge.**
   `_build_llm_client` swallowed every failure and returned `None`, and
   `distill_session` fail-closes on `None` — so a broken `llm:` block produced a

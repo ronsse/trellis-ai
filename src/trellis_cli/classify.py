@@ -20,6 +20,20 @@ keeps whatever it had.
 :func:`~trellis.classify.refresh.reclassify_item` for why re-deriving the
 ``domain`` facet deterministically can hide a document from domain-scoped
 retrieval.
+
+**One deliberate divergence from classify-on-write.** The backfill builds its
+pipeline with :meth:`StoreRegistry.build_ingestion_pipeline`, which seeds the
+:class:`KeywordDomainClassifier` from ``classify.domain_keywords`` in
+``config.yaml``; classify-on-write uses ``build_ingest_classifier()`` with
+built-in defaults only, because it drops the ``domain`` facet at persist time
+and operator vocabulary would have no effect there. It *does* have an effect
+here even with ``--include-domain`` off: a keyword hit still contributes
+``retrieval_affinity``, adds the classifier to ``classified_by``, and raises
+that classifier's confidence (which drives per-facet merge precedence). So a
+backfilled document can differ from the same document tagged at ingest. That
+is the intended reading of a config block the operator wrote on purpose —
+a backfill is an explicit operator action, not the silent write path — but it
+is a real difference and is documented in ``operations.md`` too.
 """
 
 from __future__ import annotations
@@ -110,26 +124,31 @@ def backfill(
         )
 
     try:
-        result = reclassify_stale(
-            pipeline=registry.build_ingestion_pipeline(),
-            document_store=registry.knowledge.document_store,
-            # Dry runs stay audit-silent: TAGS_REFRESHED claims a write that
-            # did not happen.
-            event_log=None if dry_run else registry.operational.event_log,
-            max_age_days=max_age_days,
-            limit=limit,
-            page_size=page_size,
-            include_domain=include_domain,
-            dry_run=dry_run,
-        )
+        pipeline = registry.build_ingestion_pipeline()
     except ValueError as exc:
-        # Raised by the pipeline factory on a malformed classify: block in
-        # config.yaml — an operator error, not a bug. Report and exit.
+        # Scoped to the factory call *only*: a malformed classify: block in
+        # config.yaml is an operator error, not a bug. Wrapping the scan too
+        # would relabel any per-document ValueError (including every
+        # pydantic.ValidationError, which subclasses it) as a config problem.
+        # Per-document faults are counted by reclassify_stale instead.
         if output_format == "json":
             emit_json({"status": "error", "message": str(exc)})
         else:
             console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=EXIT_INTERNAL) from exc
+
+    result = reclassify_stale(
+        pipeline=pipeline,
+        document_store=registry.knowledge.document_store,
+        # Dry runs stay audit-silent: TAGS_REFRESHED claims a write that
+        # did not happen.
+        event_log=None if dry_run else registry.operational.event_log,
+        max_age_days=max_age_days,
+        limit=limit,
+        page_size=page_size,
+        include_domain=include_domain,
+        dry_run=dry_run,
+    )
 
     summary = _summary(result, dry_run=dry_run, include_domain=include_domain)
     logger.info("classify_backfill_completed", **summary)
@@ -147,14 +166,21 @@ def _summary(
     dry_run: bool,
     include_domain: bool,
 ) -> dict[str, object]:
-    """Flat JSON-friendly view of a :class:`BatchRefreshResult`."""
+    """Flat JSON-friendly view of a :class:`BatchRefreshResult`.
+
+    ``status`` is ``"partial"`` when any document failed, so a machine
+    consumer keying off it does not read a half-completed backfill as a
+    clean run. ``errors`` carries the count either way.
+    """
     return {
-        "status": "ok",
+        "status": "partial" if result.errors else "ok",
         "scanned": result.scanned,
         "refreshed": result.refreshed,
         "skipped_fresh": result.skipped_fresh,
+        "skipped_unchanged": result.skipped_unchanged,
         "skipped_no_signal": result.skipped_no_signal,
         "skipped_missing_content": result.skipped_missing_content,
+        "errors": result.errors,
         "dry_run": dry_run,
         "include_domain": include_domain,
         "item_ids_refreshed": list(result.item_ids_refreshed),
@@ -168,8 +194,14 @@ def _render_text(summary: dict[str, object]) -> None:
         f"[green]Classify backfill:[/green] {verb} {summary['refreshed']} of "
         f"{summary['scanned']} scanned "
         f"({summary['skipped_fresh']} still fresh, "
+        f"{summary['skipped_unchanged']} unchanged, "
         f"{summary['skipped_no_signal']} no signal, "
         f"{summary['skipped_missing_content']} empty)"
     )
+    if summary["errors"]:
+        console.print(
+            f"[red]  {summary['errors']} document(s) failed and were skipped — "
+            f"see the log for the item IDs.[/red]"
+        )
     if summary["dry_run"]:
         console.print("  [yellow]dry-run — nothing written, no events[/yellow]")

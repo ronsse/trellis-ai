@@ -197,26 +197,85 @@ class TestReclassifyItem:
         assert persisted["metadata"]["content_tags"]["domain"] == ["legacy"]
 
     def test_no_refresh_when_tags_unchanged(self) -> None:
-        """If the pipeline would produce the same tag dict, skip the write."""
+        """If the pipeline would produce the same tag dict, skip the write.
+
+        Regression: the early-out excluded only ``importance_scored_at`` from
+        the comparison, but ``to_content_tags()`` mints a fresh
+        ``classified_at`` on every call — so the two dicts always differed and
+        the branch could never fire. Live runs rewrote every stale document and
+        emitted an empty-diff ``TAGS_REFRESHED`` for each; ``--dry-run``
+        reported what was *stale* rather than what would *change*.
+        """
         store = _InMemoryDocStore()
         pipeline = self._pipeline()
+        event_log = _CapturingEventLog()
 
-        # First pass: fresh classification.
         store.put("doc-1", "content", {})
-        first = reclassify_item("doc-1", pipeline=pipeline, document_store=store)
+        first = reclassify_item(
+            "doc-1", pipeline=pipeline, document_store=store, event_log=event_log
+        )
         assert first.refreshed is True
 
-        # Second pass with the same pipeline against the same doc should
-        # produce the same classified_by + tag shape. Since classified_at
-        # is a stamp and varies between calls, `to_content_tags()` always
-        # returns a different dict → the guard correctly detects "changed".
-        # This test proves the equality check structure; we assert that
-        # ONLY the stamp differs in this narrow scenario.
-        second = reclassify_item("doc-1", pipeline=pipeline, document_store=store)
-        # classified_at will differ, so refreshed=True even though the
-        # signal is identical. That's acceptable — the stamp IS the
-        # freshness signal, so restamping on every pass is correct.
-        assert second.refreshed is True
+        # Same pipeline, same document: identical signal, only the two
+        # freshness stamps would move. Nothing to write, nothing to audit.
+        second = reclassify_item(
+            "doc-1", pipeline=pipeline, document_store=store, event_log=event_log
+        )
+        assert second.refreshed is False
+        assert second.reason == "tags unchanged"
+        assert len(event_log.events) == 1
+
+    def test_unchanged_run_over_a_stale_document_writes_nothing(self) -> None:
+        """The batch path's version of the same regression, end to end."""
+        store = _InMemoryDocStore()
+        pipeline = self._pipeline()
+        event_log = _CapturingEventLog()
+
+        store.put("doc-1", "content", {})
+        first = reclassify_stale(
+            pipeline=pipeline,
+            document_store=store,
+            event_log=event_log,
+            max_age_days=0,
+        )
+        assert first.refreshed == 1
+
+        # max_age_days=0 makes every item stale, so this re-run reaches
+        # reclassify_item for the same document — and must still find nothing
+        # to do.
+        second = reclassify_stale(
+            pipeline=pipeline,
+            document_store=store,
+            event_log=event_log,
+            max_age_days=0,
+        )
+        assert second.scanned == 1
+        assert second.refreshed == 0
+        assert second.skipped_unchanged == 1
+        assert len(event_log.events) == 1
+
+    def test_scalar_domain_is_carried_forward_intact(self) -> None:
+        """A stored scalar ``domain`` must not be shredded into characters.
+
+        ``content_tags.domain`` as a bare string is a legal stored shape
+        (``analyze.domains`` and ``retrieve.evaluate`` both handle it).
+        ``list("payments")`` would turn it into eight one-letter domains that
+        ``ContentTags`` validates happily and no domain filter ever matches —
+        hiding the document from exactly the queries ``include_domain=False``
+        exists to protect.
+        """
+        store = _InMemoryDocStore()
+        store.put("doc-1", "content", {"content_tags": {"domain": "payments"}})
+
+        outcome = reclassify_item(
+            "doc-1",
+            pipeline=self._pipeline(),
+            document_store=store,
+            include_domain=False,
+        )
+
+        assert outcome.refreshed is True
+        assert store.get("doc-1")["metadata"]["content_tags"]["domain"] == ["payments"]
 
     def test_emits_tags_refreshed_event(self) -> None:
         store = _InMemoryDocStore()
@@ -529,6 +588,43 @@ class TestReclassifyStale:
             document_store=_InMemoryDocStore(),
         )
         assert result == BatchRefreshResult(scanned=0)
+
+    def test_one_bad_row_is_counted_not_fatal(self) -> None:
+        """A whole-store backfill must survive an unparseable document.
+
+        ``metadata`` is a free-form dict — nothing validates it — so a
+        hand-written ``auto_importance`` string reaches ``float()`` and raises.
+        Before the fix that ``ValueError`` escaped ``reclassify_stale``,
+        aborting the run mid-store: earlier documents were already written,
+        later ones never scanned, and the operator got no counts at all.
+        """
+        store = _InMemoryDocStore()
+        store.put("doc-a", "content a", {})
+        store.put("doc-b", "content b", {"auto_importance": "high"})
+        store.put("doc-c", "content c", {})
+
+        result = reclassify_stale(
+            pipeline=self._pipeline(),
+            document_store=store,
+        )
+
+        assert result.scanned == 3
+        assert result.errors == 1
+        assert result.refreshed == 2
+        assert result.item_ids_refreshed == ["doc-a", "doc-c"]
+
+    def test_legacy_scalar_content_tags_is_stale_not_a_crash(self) -> None:
+        """``content_tags`` of the wrong shape is unproven, so it re-tags."""
+        store = _InMemoryDocStore()
+        store.put("doc-1", "content", {"content_tags": "legacy-string"})
+
+        result = reclassify_stale(
+            pipeline=self._pipeline(),
+            document_store=store,
+        )
+
+        assert result.errors == 0
+        assert result.refreshed == 1
 
     def test_refreshes_items_without_classified_at(self) -> None:
         store = _InMemoryDocStore()

@@ -246,12 +246,21 @@ trellis classify backfill [--max-age-days <n>] [--limit <n>] [--page-size <n>] [
 
 Like the two backfills above, this command does **not** require the `TRELLIS_ENABLE_CLASSIFY_ON_INGEST` flag — invoking it *is* the opt-in. It never deletes tags: an item the pipeline produces no signal for keeps whatever it had, and is counted under `skipped_no_signal`. Each write emits a `TAGS_REFRESHED` event carrying the before/after tag diff; a dry run emits nothing.
 
+Every scanned document lands in exactly one bucket: `refreshed`, `skipped_fresh` (stamp newer than `--max-age-days`), `skipped_unchanged` (stale stamp, but re-running the pipeline produces the same tags — so nothing is written and no event is emitted), `skipped_no_signal`, `skipped_missing_content`, or `errors`. That means **`--dry-run` previews what would *change*, not what is merely stale**, and the two runs agree. An unchanged document keeps its old `classified_at` and is re-scanned (never rewritten) by the next backfill.
+
+The scan is fail-soft per document: a row that fails to process — a hand-edited `auto_importance`, a `content_tags` value of the wrong shape — is logged with a traceback, counted in `errors`, and skipped; the rest of the store is still backfilled. `status` is then `"partial"` rather than `"ok"`. The exit code stays `0` (matching `admin reindex-vectors`) — read `errors` / `status`, not the exit code, to detect a partial run. A malformed `classify:` block in `config.yaml` is a different failure: the command exits `1` with `{"status": "error", ...}` before scanning anything.
+
 `--include-domain` re-enables the facet classify-on-write deliberately drops, with the same hazard: a deterministic keyword match that assigns the wrong `domain` will hide the document from domain-scoped retrieval rather than merely mis-rank it. Leave it off for a backfill over mixed content; use it only with a vocabulary you trust (`classify.domain_keywords` in `config.yaml`) or an enrichment-mode pipeline.
+
+Two things to know about how this differs from classify-on-write:
+
+- **The backfill honours `classify.domain_keywords`; classify-on-write does not.** The write path uses built-in defaults because it drops the `domain` facet anyway. Here a keyword hit still contributes `retrieval_affinity`, adds the classifier to `classified_by`, and raises that classifier's confidence (which drives per-facet merge precedence) — so a backfilled document can carry slightly different tags than the same document tagged at ingest, even with `--include-domain` off. That is intentional: a backfill is an explicit operator action, and reading the operator's configured vocabulary is the point of writing it.
+- **Tag writes are a sanctioned exception to the governed-mutation pipeline.** Both this command and classify-on-write write `metadata.content_tags` / `metadata.auto_importance` straight to the DocumentStore and emit `TAGS_REFRESHED` by hand rather than routing through `MutationExecutor`. A refresh rewrites derived metadata on an existing row — no entity created, no content changed, fully reconstructible by re-running the pipeline — while per-row validate/policy/idempotency stages are uneconomical at whole-store scale. The `TAGS_REFRESHED` event preserves the audit trail. See the module docstring of `trellis/classify/refresh.py`.
 
 **JSON output:**
 
 ```json
-{"status": "ok", "scanned": 240, "refreshed": 31, "skipped_fresh": 200, "skipped_no_signal": 6, "skipped_missing_content": 3, "dry_run": false, "include_domain": false, "item_ids_refreshed": ["doc-1", "doc-2"]}
+{"status": "ok", "scanned": 240, "refreshed": 31, "skipped_fresh": 200, "skipped_unchanged": 0, "skipped_no_signal": 6, "skipped_missing_content": 3, "errors": 0, "dry_run": false, "include_domain": false, "item_ids_refreshed": ["doc-1", "doc-2"]}
 ```
 
 ### `trellis ingest evidence`
@@ -1128,7 +1137,7 @@ trellis worker capture-sessions [--dry-run] [--format text|json]
 | `--dry-run` | off | Plan the sweep without writing memories or advancing the watermark. |
 | `--format` | `text` | `text` or `json`. |
 
-Everything else is configured by the `TRELLIS_CAPTURE_*` environment variables documented in [session-auto-capture.md](session-auto-capture.md). **Requires a distillation judge** (an `llm:` block): distillation fail-closes, so a sweep without one captures nothing — the command exits non-zero rather than reporting a clean no-op, and exits non-zero again when `sessions_judge_unavailable` is non-empty because the judge went away mid-sweep.
+Everything else is configured by the `TRELLIS_CAPTURE_*` environment variables documented in [session-auto-capture.md](session-auto-capture.md). **Requires a distillation judge** (an `llm:` block): distillation fail-closes, so a sweep without one captures nothing — the command exits non-zero rather than reporting a clean no-op. A judge that goes away *mid*-sweep is counted in `sessions_judge_unavailable`, reported as `"status": "partial"`, and also exits non-zero unless `TRELLIS_CAPTURE_STRICT=0`.
 
 ---
 

@@ -94,6 +94,7 @@ python -m trellis_workers.session_capture [--dry-run]
 | `TRELLIS_CAPTURE_SAMPLE_DENOMINATOR` | `5` | Clean-session sampling (`1` = capture all clean sessions). |
 | `TRELLIS_CAPTURE_SOURCE_SYSTEM` | `claude-code` | Corpus namespace / doc-id prefix. |
 | `TRELLIS_DISTILL_MODEL` | `hermes3:8b` | Model id label recorded in training events. |
+| `TRELLIS_CAPTURE_STRICT` | `1` | When truthy (the default), a sweep that left any session unjudged exits non-zero. Set `0`/`false`/`no`/`off` to report the count and exit `0` instead — those sessions stay un-watermarked and are retried next sweep. A sweep with *no* judge at all always fails, strict or not. |
 | `TRELLIS_ENABLE_RECONCILE_ON_WRITE` | *(unset)* | When truthy, near-duplicate captures are adjudicated (ADD/UPDATE/SUPERSEDE/NOOP) instead of piling up. Off by default. |
 
 The reconcile step also honours the #263 knobs (`TRELLIS_RECONCILE_MODEL`,
@@ -202,7 +203,11 @@ Health signals in the JSON `CaptureReport`:
   `warnings[].kind == "distill_unavailable"`) → the local model endpoint is
   down; those sessions are retried next sweep (not lost), but nothing is
   captured until it recovers. The run exits non-zero, so the systemd unit is
-  marked failed instead of logging a clean success.
+  marked failed instead of logging a clean success. **This is a behaviour
+  change** for timers installed before this landed: a single transient model
+  timeout in an otherwise-good sweep now fails the unit. Set
+  `TRELLIS_CAPTURE_STRICT=0` in the unit to keep the count but restore the
+  zero exit.
 - `sessions_skipped_watermark` should dominate on steady-state runs (only new
   work is processed).
 
