@@ -294,3 +294,28 @@ class DocumentStoreContractTests:
         assert len(results) >= 1
         # Per ABC: search results "with a rank key".
         assert "rank" in results[0]
+
+    def test_search_tag_filter_default_passes_valueless_facets(
+        self, store: DocumentStore
+    ) -> None:
+        """A facet with no value never excludes — missing *or* empty.
+
+        Every backend default-passes a missing facet so untagged items stay
+        retrievable. An empty list facet (``domain: []``) carries no value
+        either and must behave identically: the classify-on-write path
+        persists exactly that shape (``domain`` is the one hard-excluding
+        facet, so it is never auto-assigned — see
+        :mod:`trellis.classify.ingest`), so a backend that reads ``[]`` as a
+        value hides every tagged document from every domain-scoped query.
+        """
+        store.put("untagged", "python programming language")
+        store.put(
+            "empty_facet",
+            "python programming language",
+            {"content_tags": {"domain": [], "signal_quality": "standard"}},
+        )
+        results = store.search(
+            "python",
+            filters={"content_tags": {"domain": {"in": ["engineering"]}}},
+        )
+        assert {r["doc_id"] for r in results} == {"untagged", "empty_facet"}

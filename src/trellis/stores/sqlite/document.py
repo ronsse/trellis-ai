@@ -32,6 +32,15 @@ def _build_tag_conditions(
     ``scope``) match by ``IN (...)``. Both wrap in ``IS NULL OR …`` so
     untagged items pass — mirrors the Postgres path's default-pass.
 
+    For a list facet the default-pass also covers an **empty** array:
+    ``domain: []`` carries no domain, exactly like a missing key, and
+    must pass a domain-scoped query for the same reason. Without this,
+    ``EXISTS(json_each(...))`` is false over an empty array and the item
+    is *hard-excluded* — and every item the classify-on-write path tags
+    stores ``domain: []`` deliberately (see
+    :mod:`trellis.classify.ingest`), so tagging a document would have
+    silently hidden it from every domain-scoped query.
+
     Per-facet operators (``in`` / ``not_in`` / ``eq`` / ``ne``) come
     from :func:`normalize_facet_filter` so SQLite and Postgres see
     identical operator semantics. ``not_in`` is the case the new
@@ -58,7 +67,9 @@ def _build_tag_conditions(
             if operator == "not_in":
                 inner = f"NOT {inner}"
             conditions.append(
-                f"(json_extract(d.metadata_json, '{json_path}') IS NULL OR {inner})"
+                f"(json_extract(d.metadata_json, '{json_path}') IS NULL"
+                f" OR json_array_length(d.metadata_json, '{json_path}') = 0"
+                f" OR {inner})"
             )
             params.extend(values)
         else:

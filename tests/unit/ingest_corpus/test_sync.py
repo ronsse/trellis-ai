@@ -14,8 +14,13 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from trellis.classify.feedback import apply_noise_tags
 from trellis.classify.ingest import CLASSIFY_ON_INGEST_FLAG
-from trellis.ingest_corpus.models import chunk_doc_id, corpus_doc_id
+from trellis.ingest_corpus.models import (
+    chunk_doc_id,
+    corpus_doc_id,
+    is_chunk_doc_id,
+)
 from trellis.ingest_corpus.sync import sync_corpus
 from trellis.retrieve.embed_ingest_hook import EMBED_ON_INGEST_FLAG
 from trellis.stores.base.event_log import EventType
@@ -247,9 +252,12 @@ class TestClassifyOnIngest:
         before = store.get(chunk_doc_id(parent_id, 0))["metadata"]
         assert before["content_tags"]["signal_quality"]
 
-        # Edit the head of the document so every chunk shifts and is re-put.
-        # The second run classifies nothing (parent is already tagged), so the
-        # chunks' tags can only come from the parent's stored metadata.
+        # Edit the head of the document. Only the leading chunks reflow and get
+        # re-put (the markdown chunker keeps the later sections byte-identical,
+        # so they take the `continue` skip) — the assertion below covers both
+        # paths. The second run classifies nothing (parent is already tagged),
+        # so a re-put chunk's tags can only come from the parent's stored
+        # metadata.
         note.write_text("Edited opening paragraph.\n\n" + _long_markdown())
         sync_corpus(registry, vault, source_system="obsidian")
 
@@ -298,6 +306,106 @@ class TestClassifyOnIngest:
         assert chunk_meta["content_tags"]["enriched"] is True
         assert chunk_meta["content_tags"]["signal_quality"] == "high"
         assert chunk_meta["auto_importance"] == 0.91
+
+    def test_tags_reach_chunks_when_classify_is_enabled_later(
+        self, registry, vault, monkeypatch
+    ):
+        """The dominant real-world shape: a corpus ingested before
+        classify-on-write, then re-synced with it on. Chunk bytes barely move,
+        so a purely content-triggered propagation would leave most chunks —
+        the retrievable unit — tag-dark while the parent looks tagged."""
+        note = vault / "long.md"
+        note.write_text(_long_markdown())
+        sync_corpus(registry, vault, source_system="obsidian")
+
+        store = registry.knowledge.document_store
+        parent_id = corpus_doc_id("obsidian", "long.md")
+        chunk_count = store.get(parent_id)["metadata"]["chunk_count"]
+        assert chunk_count >= 2
+        assert "content_tags" not in store.get(chunk_doc_id(parent_id, 0))["metadata"]
+
+        # Flag on, and an edit small enough that only the trailing chunk's
+        # bytes change — every other chunk takes the skip path.
+        monkeypatch.setenv(CLASSIFY_ON_INGEST_FLAG, "1")
+        note.write_text(_long_markdown() + " tail.")
+        sync_corpus(registry, vault, source_system="obsidian")
+
+        parent_meta = store.get(parent_id)["metadata"]
+        assert parent_meta["content_tags"]
+        for index in range(parent_meta["chunk_count"]):
+            meta = store.get(chunk_doc_id(parent_id, index))["metadata"]
+            assert meta["content_tags"] == parent_meta["content_tags"]
+            assert meta["auto_importance"] == parent_meta["auto_importance"]
+
+    def test_parent_tags_win_on_reput_but_untouched_chunks_keep_theirs(
+        self, registry, vault, monkeypatch
+    ):
+        """Pins the precedence the propagation rests on.
+
+        A chunk that is rewritten takes the parent's tags — the parent is
+        authoritative, so parent and chunks can never disagree. A chunk the run
+        does not touch keeps its own, because that is where the feedback loop's
+        demote signal lives (``apply_noise_tags`` writes ``signal_quality:
+        noise`` onto the served item, which is a chunk).
+        """
+        monkeypatch.setenv(CLASSIFY_ON_INGEST_FLAG, "1")
+        note = vault / "long.md"
+        note.write_text(_long_markdown())
+        sync_corpus(registry, vault, source_system="obsidian")
+
+        store = registry.knowledge.document_store
+        parent_id = corpus_doc_id("obsidian", "long.md")
+        last_index = store.get(parent_id)["metadata"]["chunk_count"] - 1
+        assert last_index >= 1
+        apply_noise_tags(
+            [chunk_doc_id(parent_id, 0), chunk_doc_id(parent_id, last_index)], store
+        )
+
+        # Head edit: chunk 0 reflows and is re-put, the last chunk does not.
+        note.write_text("Edited opening paragraph.\n\n" + _long_markdown())
+        sync_corpus(registry, vault, source_system="obsidian")
+
+        parent_quality = store.get(parent_id)["metadata"]["content_tags"][
+            "signal_quality"
+        ]
+        assert parent_quality != "noise"
+        reput = store.get(chunk_doc_id(parent_id, 0))["metadata"]
+        assert reput["content_tags"]["signal_quality"] == parent_quality
+        skipped = store.get(chunk_doc_id(parent_id, last_index))["metadata"]
+        assert skipped["content_tags"]["signal_quality"] == "noise"
+
+    def test_tagged_chunks_still_answer_a_domain_scoped_search(
+        self, registry, vault, monkeypatch
+    ):
+        """Tagging a document must never *hide* it.
+
+        classify-on-write deliberately persists ``content_tags.domain == []``
+        (the facet is the only hard-excluding one, so it is not auto-assigned).
+        A store that treats an empty facet as a value rather than as absent
+        turns propagation into a disappearing act: every chunk of every tagged
+        document drops out of every domain-scoped query.
+        """
+        monkeypatch.setenv(CLASSIFY_ON_INGEST_FLAG, "1")
+        note = vault / "long.md"
+        note.write_text(_long_markdown())
+        sync_corpus(registry, vault, source_system="obsidian")
+        note.write_text("Edited opening paragraph.\n\n" + _long_markdown())
+        sync_corpus(registry, vault, source_system="obsidian")
+
+        store = registry.knowledge.document_store
+        parent_id = corpus_doc_id("obsidian", "long.md")
+        assert store.get(chunk_doc_id(parent_id, 0))["metadata"]["content_tags"]
+
+        hits = store.search(
+            "kubernetes",
+            filters={
+                "content_tags": {
+                    "domain": {"in": ["engineering"]},
+                    "signal_quality": {"not_in": ["noise"]},
+                }
+            },
+        )
+        assert any(is_chunk_doc_id(hit["doc_id"]) for hit in hits)
 
 
 class TestIdempotentResync:

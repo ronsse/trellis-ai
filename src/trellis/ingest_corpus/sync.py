@@ -48,6 +48,7 @@ import structlog
 
 from trellis.classify.dedup.minhash import MinHashIndex
 from trellis.classify.ingest import (
+    CLASSIFY_METADATA_KEYS,
     build_ingest_classifier,
     classify_for_ingest,
     classify_on_ingest_enabled,
@@ -82,14 +83,6 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 _PRUNE_PAGE_SIZE = 500
-
-#: Parent metadata keys that propagate down to the chunk documents. Read off
-#: the *post-merge* parent metadata (see :func:`_apply_record`), never off this
-#: run's classify output, so a chunk inherits whatever the parent actually
-#: carries — tags written this run, by an earlier run, or by the LLM enrichment
-#: pass. Chunks are the retrievable unit; a chunk that loses these is invisible
-#: to noise-exclusion, sectioning and importance weighting.
-_INHERITED_CHUNK_KEYS = ("content_tags", "auto_importance")
 
 
 def sync_corpus(
@@ -373,7 +366,7 @@ def _apply_record(
         old_chunk_count = _chunk_count_of(stored)
         # Merge under the fresh metadata so keys this run does not own
         # (enrichment tags, noise flags) survive the re-put.
-        metadata = {**((stored or {}).get("metadata") or {}), **metadata}
+        metadata = {**_stored_metadata(stored), **metadata}
         if not spans:
             metadata.pop("chunk_count", None)
 
@@ -411,8 +404,12 @@ def _apply_record(
         source_system=source_system,
         extra_metadata=extra_metadata,
         requested_by=requested_by,
+        # Read off the *post-merge* parent metadata, never off this run's
+        # classify output, so a chunk inherits whatever the parent actually
+        # carries — tags written this run, by an earlier run, or by the LLM
+        # enrichment pass.
         inherited_tags={
-            key: metadata[key] for key in _INHERITED_CHUNK_KEYS if key in metadata
+            key: metadata[key] for key in CLASSIFY_METADATA_KEYS if key in metadata
         },
     )
     for index in range(len(spans), old_chunk_count):
@@ -460,7 +457,7 @@ def _write_chunks(
     source_system: str,
     extra_metadata: dict[str, Any],
     requested_by: str,
-    inherited_tags: dict[str, Any] | None = None,
+    inherited_tags: dict[str, Any],
 ) -> int:
     """Write (and embed) chunk documents; skip byte-identical chunks.
 
@@ -471,27 +468,38 @@ def _write_chunks(
 
     Stored chunk metadata is merged *under* the freshly computed metadata, the
     same contract the parent re-put honours: keys this run does not own (an
-    earlier run's operator tags, a chunk-local noise flag on an untagged
-    parent) survive the re-put instead of being rebuilt away.
+    earlier run's operator tags, a chunk-local flag) survive the re-put instead
+    of being rebuilt away. ``inherited_tags`` is the deliberate exception —
+    when a chunk is written, the parent's tags win over the chunk's own, so a
+    parent and its chunks can never disagree about what the document is.
+
+    A chunk whose bytes did not change is normally skipped, with one addition:
+    it is re-put when it is *missing* a key the parent carries, so enabling
+    classify-on-write (or backfilling tags onto parents) reaches the chunks
+    without an unrelated content edit. Missing-only, not differing — an
+    unedited chunk's tags may carry a demote signal from the feedback loop
+    (``apply_noise_tags``) that no sync should overwrite.
     """
     doc_store = registry.knowledge.document_store
     written = 0
     for span in spans:
         cid = chunk_doc_id(parent_doc_id, span.index)
         chunk_content = text[span.start : span.end]
+        # One read serves all three staleness checks and the merge below —
+        # do not split it into a second doc_store.get.
         existing = doc_store.get(cid)
+        stored = _stored_metadata(existing)
         content_changed = existing is None or existing.get(
             "content_hash"
         ) != content_hash(chunk_content)
-        count_stale = existing is not None and (
-            (existing.get("metadata") or {}).get("chunk_count") != len(spans)
-        )
-        if not content_changed and not count_stale:
+        count_stale = existing is not None and stored.get("chunk_count") != len(spans)
+        tags_missing = not (inherited_tags.keys() <= stored.keys())
+        if not content_changed and not count_stale and not tags_missing:
             continue
         metadata: dict[str, Any] = {
-            **((existing or {}).get("metadata") or {}),
+            **stored,
             **extra_metadata,
-            **(inherited_tags or {}),
+            **inherited_tags,
             "source_system": source_system,
             "source_path": relpath,
             "parent_doc_id": parent_doc_id,
@@ -589,10 +597,19 @@ def _delete_doc_and_vector(
         logger.exception("corpus_vector_delete_failed", doc_id=doc_id)
 
 
+def _stored_metadata(doc: dict[str, Any] | None) -> dict[str, Any]:
+    """Metadata of an already-stored document, or ``{}`` if it has none.
+
+    Both re-put paths merge this *under* the metadata they compute, so keys
+    the run does not own survive; see :func:`_apply_record` and
+    :func:`_write_chunks`.
+    """
+    metadata = (doc or {}).get("metadata")
+    return metadata if isinstance(metadata, dict) else {}
+
+
 def _chunk_count_of(doc: dict[str, Any] | None) -> int:
-    if not doc:
-        return 0
-    value = (doc.get("metadata") or {}).get("chunk_count", 0)
+    value = _stored_metadata(doc).get("chunk_count", 0)
     return value if isinstance(value, int) else 0
 
 
