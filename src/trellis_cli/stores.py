@@ -16,7 +16,7 @@ from trellis.stores.base import (
     TunerStateStore,
 )
 from trellis.stores.registry import StoreRegistry
-from trellis_cli.config import get_config_dir, get_data_dir
+from trellis_cli.config import get_config_dir, get_data_dir, get_stores_dir
 from trellis_cli.exit_codes import EXIT_INTERNAL
 
 logger = structlog.get_logger(__name__)
@@ -50,7 +50,7 @@ def _get_registry() -> StoreRegistry:
     if _registry is None:
         config_dir = get_config_dir()
         data_dir = get_data_dir()
-        stores_dir = data_dir / "stores"
+        stores_dir = get_stores_dir()
         if not stores_dir.exists():
             from rich.console import Console  # noqa: PLC0415
 

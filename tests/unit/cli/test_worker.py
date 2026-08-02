@@ -422,6 +422,42 @@ class TestWorkerCurate:
         )
         assert len(fb_events) >= 1
 
+    def test_reconcile_first_backfills_stores_feedback_dir(
+        self, tmp_path: Path, temp_stores: StoreRegistry
+    ) -> None:
+        """The MCP / REST surfaces write to ``<stores_dir>/feedback``.
+
+        Rows landing there are the common case in a live deployment, so
+        the cycle has to scan that directory and not only ``<data_dir>``.
+        """
+        from trellis.feedback.recording import record_feedback
+
+        record_feedback(
+            _make_feedback(outcome="success", items=["x"]),
+            log_dir=Path(temp_stores.stores_dir) / "feedback",
+        )
+        out_dir = tmp_path / "review"
+        result = runner.invoke(
+            app,
+            [
+                "worker",
+                "curate",
+                "--output-dir",
+                str(out_dir),
+                "--reconcile-first",
+                "--skip-advisories",
+                "--skip-learning",
+                "--skip-noise-tags",
+                "--format",
+                "json",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        fb_events = temp_stores.operational.event_log.get_events(
+            event_type=EventType.FEEDBACK_RECORDED, limit=10
+        )
+        assert len(fb_events) == 1
+
 
 # ===========================================================================
 # worker curate --interval — loop mode (WP3)

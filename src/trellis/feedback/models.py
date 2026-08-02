@@ -36,6 +36,21 @@ class PackFeedback:
         default_factory=list
     )  # items agent actually used
     relevance_scores: dict[str, float] = field(default_factory=dict)  # item_id → score
+    # Graded quality of the delivery, 0.0 to 1.0.  ``None`` means "not
+    # graded" and :meth:`to_event_payload` derives 1.0/0.0 from the
+    # outcome — what boolean-only callers effectively sent before.  It is
+    # a first-class field rather than a ``metadata`` key because the
+    # fitness loops read ``payload["rating"]`` at the top level and
+    # reconciliation replays JSONL rows through ``to_event_payload``; a
+    # rating hidden in ``metadata`` would not survive that round trip in
+    # a form those consumers can see.
+    rating: float | None = None
+    # Attribution the agent supplies alongside ``items_referenced``.
+    # "Actively unhelpful" is a stronger claim than "not referenced" (see
+    # :meth:`to_event_payload`) and a followed advisory is not a pack item
+    # at all, so neither can be inferred from served/referenced.
+    unhelpful_item_ids: list[str] = field(default_factory=list)
+    followed_advisory_ids: list[str] = field(default_factory=list)
     intent_family: str = ""
     timestamp_utc: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     agent_id: str | None = None
@@ -59,11 +74,18 @@ class PackFeedback:
           the agent actually used the item, which is the positive signal
           AdvisoryGenerator looks for.
         * Items in ``items_served`` that are **not** referenced are left
-          implicit rather than labeled ``unhelpful_item_ids``.  "Not
-          referenced" is a weaker signal than "actively unhelpful"; a
-          caller who wants the stronger claim can populate that key
-          directly via ``metadata`` or emit a second event.
+          implicit rather than inferred into ``unhelpful_item_ids``.
+          "Not referenced" is a weaker signal than "actively unhelpful";
+          only the ``unhelpful_item_ids`` a caller states explicitly are
+          emitted under that key.
         * ``outcome in {"success", "completed"}`` → ``success=True``.
+        * ``rating`` is always emitted.  When ungraded it falls back to
+          1.0/0.0 from ``success`` so the key is never missing — consumers
+          read it as ``payload.get("rating", 0.0)`` and an absent key is
+          indistinguishable from a genuine 0.0 grade.
+        * ``unhelpful_item_ids`` / ``followed_advisory_ids`` are emitted
+          only when populated, keeping the payload free of empty lists
+          the way ``pack_id`` / ``agent_id`` / ``metadata`` are.
 
         Args:
             pack_id: Pack identifier, stored in ``payload.pack_id`` so
@@ -71,6 +93,7 @@ class PackFeedback:
                 events.  Callers should also pass this as the event's
                 ``entity_id`` when emitting.
         """
+        success = self.outcome in ("success", "completed")
         payload: dict[str, Any] = {
             "feedback_id": self.feedback_id,
             "run_id": self.run_id,
@@ -78,12 +101,17 @@ class PackFeedback:
             "intent": self.intent,
             "intent_family": self.intent_family,
             "outcome": self.outcome,
-            "success": self.outcome in ("success", "completed"),
+            "success": success,
+            "rating": self.rating if self.rating is not None else float(success),
             "items_served": list(self.items_served),
             "helpful_item_ids": list(self.items_referenced),
             "relevance_scores": dict(self.relevance_scores),
             "timestamp_utc": self.timestamp_utc,
         }
+        if self.unhelpful_item_ids:
+            payload["unhelpful_item_ids"] = list(self.unhelpful_item_ids)
+        if self.followed_advisory_ids:
+            payload["followed_advisory_ids"] = list(self.followed_advisory_ids)
         if pack_id is not None:
             payload["pack_id"] = pack_id
         if self.agent_id is not None:

@@ -1404,7 +1404,7 @@ Start with `trellis-mcp`. 11 tools returning token-budgeted markdown — 8 core 
 | `save_memory` | `content`, `metadata?`, `doc_id?` | Confirmation with doc_id |
 | `get_lessons` | `domain?`, `limit?`, `max_tokens?` | Markdown list of precedents |
 | `get_graph` | `entity_id`, `depth?`, `max_tokens?` | Markdown subgraph |
-| `record_feedback` | `trace_id?`, `pack_id?`, `success`, `notes?`, `helpful_item_ids?`, `unhelpful_item_ids?`, `followed_advisory_ids?` | Confirmation |
+| `record_feedback` | `trace_id?`, `pack_id?`, `success?`, `rating?`, `notes?`, `helpful_item_ids?`, `unhelpful_item_ids?`, `followed_advisory_ids?` | Confirmation |
 | `search` | `query`, `limit?`, `max_tokens?` | Markdown search results |
 
 **Sectioned-context tools (deprecated aliases — #262)**
@@ -1442,10 +1442,13 @@ The three sectioned-context tools render each response with a `pack_id` header a
 When an agent finishes the task, it calls `record_feedback` with the copied IDs:
 
 - `pack_id` (preferred over `trace_id` when feedback follows a context retrieval) — attributes the outcome to the pack.
+- `rating` (0.0–1.0) — grades how useful the pack actually was. Omit `success` when grading: it is derived from the rating (≥ 0.5 counts as a success), so a mediocre pack is not recorded as an unqualified win. Passing `success` alone still works and is recorded as `rating` 1.0 / 0.0.
 - `helpful_item_ids` / `unhelpful_item_ids` — cite the specific pack items that actually helped or were noise.
 - `followed_advisory_ids` — cite the advisories whose guidance was acted on.
 
 These element-level signals land in the `FEEDBACK_RECORDED` event payload so the fitness loops (`trellis analyze apply-noise-tags`, `trellis analyze advisory-effectiveness`) can attribute outcomes more precisely than pack-level success alone.
+
+The MCP tool routes through `trellis.feedback.recording.record_feedback`, the same helper the REST route uses: one call appends the durable `pack_feedback.jsonl` row under `<stores_dir>/feedback/` **and** emits the authoritative `FEEDBACK_RECORDED` event. The emit fails soft — when the event sink is down the tool still returns, the audit row is on disk, and `trellis admin reconcile-feedback --log-dir <stores_dir>/feedback` (or `worker curate --reconcile-first`, which scans that directory) replays it.
 
 ### Retrieval Budgets
 

@@ -181,19 +181,18 @@ def pack_feedback(pack_id: str, req: PackFeedbackRequest) -> PackFeedbackRespons
     # Map the element-level surface onto PackFeedback. helpful_item_ids
     # become items_referenced (the positive signal to_event_payload
     # promotes to helpful_item_ids); items_served is the union of cited
-    # items. The stronger "actively unhelpful" and "advisory followed"
-    # signals are not part of the served/referenced model, so they ride
-    # along in metadata where the fitness loops can read them.
+    # items. The "actively unhelpful", "advisory followed" and graded
+    # ``rating`` signals are first-class PackFeedback fields, so they
+    # reach the event payload top level where the fitness loops read
+    # them (and survive a JSONL replay). Only free text stays in
+    # metadata.
     helpful = list(req.helpful_item_ids)
     unhelpful = list(req.unhelpful_item_ids)
     items_served = list(dict.fromkeys([*helpful, *unhelpful]))
-    metadata: dict[str, Any] = {}
-    if unhelpful:
-        metadata["unhelpful_item_ids"] = unhelpful
-    if req.followed_advisory_ids:
-        metadata["followed_advisory_ids"] = list(req.followed_advisory_ids)
-    if req.rating is not None:
-        metadata["rating"] = req.rating
+    # ``pack_id`` is not a PackFeedback field; stamping it in metadata is
+    # what lets ``reconcile_feedback_log_to_event_log`` replay a row with
+    # its pack association after a soft-failed emit.
+    metadata: dict[str, Any] = {"pack_id": pack_id}
     if req.comment:
         metadata["notes"] = req.comment
 
@@ -204,6 +203,9 @@ def pack_feedback(pack_id: str, req: PackFeedbackRequest) -> PackFeedbackRespons
         outcome="success" if req.success else "failure",
         items_served=items_served,
         items_referenced=helpful,
+        rating=req.rating,
+        unhelpful_item_ids=unhelpful,
+        followed_advisory_ids=list(req.followed_advisory_ids),
         metadata=metadata,
     )
     result = record_pack_feedback(
