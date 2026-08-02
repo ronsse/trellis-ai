@@ -93,14 +93,13 @@ content. The built-in keyword map covers agent-centric defaults
 > **Where the auto-`domain` facet actually lands.** Classify-on-write
 > (`TRELLIS_ENABLE_CLASSIFY_ON_INGEST=1`) **drops** the classifier-derived
 > `domain` before persisting, and builds its pipeline from the built-in
-> defaults *without* reading the `classify.domain_keywords` config below.
-> `domain` is the only facet that hard-excludes a document from a
-> domain-scoped query on mismatch, and a deterministic keyword hit will
-> confidently put a code-flavoured domain on personal content — a wrong value
-> there hides content rather than merely re-ranking it. So today the config
-> below shapes exactly one command, `trellis classify backfill`: a keyword hit
-> always contributes `retrieval_affinity` and classifier confidence, and
-> assigns `domain` only under `--include-domain`. The operator-set scalar
+> defaults *without* reading the `classify.domain_keywords` config below —
+> `domain` is the one facet whose wrong value *hides* content rather than
+> merely re-ranking it ([why](operations.md#document--content-tags-opt-in)).
+> So today the config below shapes exactly one command, `trellis classify
+> backfill`: a keyword hit always contributes `retrieval_affinity` and
+> classifier confidence, and assigns `domain` only under
+> `--include-domain`. The operator-set scalar
 > `metadata['domain']` (the `--domain` / `--tag` flags) is a separate key and
 > is never touched by any of this.
 

@@ -229,7 +229,7 @@ This command does **not** require the `TRELLIS_ENABLE_EMBED_ON_INGEST` flag — 
 
 By default document ingestion writes no retrieval-shaping tags — the document is retrievable, but `PackBuilder`'s `tag_filters`, the `signal_quality="noise"` exclusion and the tag-derived importance boost have nothing to work with. Set `TRELLIS_ENABLE_CLASSIFY_ON_INGEST=1` (also accepts `true`/`yes`/`on`) to turn on **classify-on-write**: an inline, deterministic pass (structural + keyword-domain + source-system classifiers, no LLM, microseconds) that stamps `metadata.content_tags` and `metadata.auto_importance` as the document is written.
 
-One flag, every durable document write:
+One flag, five write seams:
 
 | Surface | Seam |
 |---------|------|
@@ -239,14 +239,9 @@ One flag, every durable document write:
 | REST `POST /api/v1/documents` | before the store put |
 | REST `POST /api/v1/evidence` | before the store put |
 
-All of them share one helper, `trellis.classify.ingest.classify_metadata_on_write`, so the persisted tag shape does not drift between surfaces. Four properties hold everywhere:
+The four single-document seams call one helper, `trellis.classify.ingest.classify_metadata_on_write`, so the persisted tag shape does not drift: flag-gated (off returns the caller's metadata untouched), fill-if-absent (existing `content_tags` — an earlier write, or the LLM enrichment pass — are never clobbered), fail-soft on *any* error including a `metadata` that is not a mapping, no auto-`domain` (see below), and a no-op on empty or whitespace-only content, matching the embed-on-ingest skip. The bulk seam calls the same `classify_for_ingest` core inline and shares the flag gate, fill-if-absent and no-auto-`domain`; it has neither the empty-content skip nor the non-mapping guard, because it classifies against metadata already merged with the stored document's.
 
-- **Flag-gated** — with the flag off the caller's metadata comes back untouched.
-- **Fill-if-absent** — metadata that already carries `content_tags` (an earlier write, or the LLM enrichment pass) is never clobbered.
-- **Fail-soft and total** — any failure, including a `metadata` that is not a mapping at all, logs a warning and stores the document untagged. A classification error never fails a durable write.
-- **No auto-`domain`** — see below.
-
-Empty or whitespace-only content is a no-op (uri-only evidence), matching the embed-on-ingest hook's skip.
+**Not covered.** `trellis ingest evidence` and `trellis ingest dbt-manifest` put documents straight to the store with no classify hook, so they stay untagged whatever the flag says. `trellis classify backfill` is the fix for them, exactly as for pre-flag rows.
 
 One deliberate omission: the classifier-derived **`domain` facet is dropped** before persisting. `domain` is the only facet that *hard-excludes* a document from a domain-scoped query on mismatch, and the deterministic keyword / source-system classifiers will confidently assign a code-flavoured domain to personal content. The operator-set scalar `metadata['domain']` (the `--domain` flag) is a separate key and is untouched. Every facet that *is* persisted only shapes ranking, sectioning, or noise exclusion — a wrong value degrades ranking at worst, it never hides content.
 
@@ -769,24 +764,27 @@ trellis retrieve pack --intent "deploy checklist for staging" --domain platform 
 
 #### `PACK_ASSEMBLED` event payload
 
-Every `PackBuilder` build with an `event_log` configured emits one `PACK_ASSEMBLED` event (`entity_id` = `pack_id`, `entity_type` = `"pack"`). It is the read side of two loops — `trellis analyze pack-telemetry` reads the rejection/budget/strategy keys, and the learning join in `learning/pack_observations.py` joins it to `FEEDBACK_RECORDED` on `pack_id`. Keys are always present; a value is `null`/`{}`/`[]` when unknown, so consumers can use `payload["k"]` without a key check.
+Every `PackBuilder` build with an `event_log` configured emits one `PACK_ASSEMBLED` event with `entity_id` = `pack_id`. It is the read side of two loops — `trellis analyze pack-telemetry` reads the rejection/budget/strategy keys, and the learning join in `learning/pack_observations.py` joins it to `FEEDBACK_RECORDED` on `pack_id`.
 
-| Key | Shape | Notes |
-|-----|-------|-------|
-| `intent`, `domain`, `agent_id`, `session_id` | `str \| null` | Pack scope as requested. |
-| `run_id` | `str \| null` | **Request-scoped attribution.** The unit of work the pack was served to — narrower than `session_id`. The learning join prefers the feedback payload's `run_id` and falls back to this one; when both are absent the observation buckets under `unknown-run`. |
-| `intent_family` | `str \| null` | Canonical intent bucket, read by the metrics `group_by=intent_family` axis. Never null on a `PackBuilder`-assembled pack: when the caller supplies none it is derived via `normalize_intent_family(intent=...)`, which falls back to `general_context` rather than an empty value. |
-| `items_count`, `injected_item_ids` | `int`, `list[str]` | What the pack served. `injected_item_ids` is the authoritative served-set for the `reference_rate` metric. |
-| `injected_item_hashes` | `{item_id: hash}` | Content hash of each item's **excerpt**, so a later build in the same session can re-serve an item whose content changed rather than suppressing it as already-seen (#258). Additive — older events without the key fall back to id-only suppression. |
-| `injected_items[]` | `list[dict]` | Per-item detail: `item_id`, `item_type`, `rank`, `selection_reason`, `score_breakdown`, `estimated_tokens`, `strategy_source`, `injected_advisory_ids`, plus the **attribution fields** `title` / `category` / `domain_system`. |
-| `strategies_used`, `candidates_found` | `list[str]`, `int` | Retrieval report roll-up. |
-| `budget_max_items`, `budget_max_tokens`, `budget_trace[]` | `int`, `int`, `list[dict]` | Two-stage budget accounting; each `budget_trace` row is `{item_id, item_tokens, running_total, included}`. |
-| `rejected_items[]` | `list[dict]` | `{item_id, item_type, relevance_score, reason, strategy_source}`. Known `reason` values: `dedup`, `structural_filter`, `max_items`, `token_budget`, `session_dedup`, `semantic_dedup`, `content_floor`. |
-| `content_floor` | `dict` | `{mode, min_distinct_words, penalty, exempt_item_types, penalized_count, penalized_item_ids, excluded_count, excluded_item_ids}`. Emitted even when nothing tripped, so "floor ran, nothing thin" is distinguishable from "floor never ran". |
-| `advisory_ids`, `reranker` | `list[str]`, `str \| null` | |
-| `semantic_dedup_enabled`, `semantic_dedup_rejected` | `bool`, `int` | |
-| `strategy_failures[]` | `list[dict]` | Strategies that raised but did not block the build (a sibling succeeded). Empty on a clean build. |
-| `meta_filtered_count` | `int` | Graph nodes dropped by the default meta-`Activity` filter. |
+**Two payload shapes, told apart by `entity_type`.** `build()` emits `"pack"`; `build_sectioned()` — behind `get_objective_context` / `get_task_context` / `get_sectioned_context` — emits `"sectioned_pack"` with a *different* key set (below). Branch on `entity_type`, or read with `.get()`. `_emit_telemetry` / `_emit_sectioned_telemetry` in `retrieve/pack_builder.py` are the exhaustive key lists; the table covers the flat payload's non-obvious semantics.
+
+| Key | Notes |
+|-----|-------|
+| `run_id` | **Request-scoped attribution.** The unit of work the pack was served to — narrower than `session_id`. The learning join prefers the feedback payload's `run_id` and falls back to this one; when both are absent the observation buckets under `unknown-run`. |
+| `intent_family` | Canonical intent bucket, read by the metrics `group_by=intent_family` axis. Never null on a `PackBuilder`-assembled pack: when the caller supplies none it is derived via `normalize_intent_family(intent=...)`, which falls back to `general_context` rather than an empty value. |
+| `injected_item_ids` | The served set — and the **fallback** source for the `reference_rate` metric, not the first one: `compute_timeseries` reads the feedback payload's `items_served` and only uses this when that is empty. `PackFeedback.from_agent_signal` deliberately leaves `items_served` empty (cited ids are what the agent *referenced*, not what the pack contained), so agent-graded packs do land here. |
+| `injected_item_hashes` | `{item_id: hash}` of each item's **excerpt**, so a later build in the same session can re-serve an item whose content changed rather than suppressing it as already-seen (#258). Additive — older events without the key fall back to id-only suppression. |
+| `injected_items[]` | Per-item detail — `item_id`, `item_type`, `rank`, `selection_reason`, `score_breakdown`, `estimated_tokens`, `strategy_source`, `injected_advisory_ids`, plus the **attribution fields** below. This is the per-item row the learning join reads. |
+| `rejected_items[]` | `{item_id, item_type, relevance_score, reason, strategy_source}`. Known `reason` values: `dedup`, `structural_filter`, `meta_activity_filter`, `max_items`, `token_budget`, `session_dedup`, `semantic_dedup`, `content_floor`. |
+| `content_floor` | `{mode, min_distinct_words, penalty, exempt_item_types, penalized_count, penalized_item_ids, excluded_count, excluded_item_ids}`. Emitted even when nothing tripped, so "floor ran, nothing thin" is distinguishable from "floor never ran". |
+| `budget_trace[]` | One `{item_id, item_tokens, running_total, included}` row per candidate the token stage weighed, against the `budget_max_items` / `budget_max_tokens` alongside it. |
+| `token_*` | `token_counter`, `token_budget_safety_margin`, `token_budget_effective`, `token_total_estimated` always. `token_counter_validator`, `token_total_validated`, `token_count_delta`, `token_count_delta_pct` **only when a `token_budget_validator` is configured** — check before reading. |
+| `strategy_failures[]` | Strategies that raised but did not block the build (a sibling succeeded). Empty on a clean build. |
+| `meta_filtered_count` | Graph nodes dropped by the default meta-`Activity` filter — the same drops `rejected_items` records under `meta_activity_filter`. |
+
+Plus the scope keys `intent` / `domain` / `agent_id` / `session_id`, the roll-ups `items_count` / `strategies_used` / `candidates_found`, and `advisory_ids` / `reranker` / `semantic_dedup_enabled` / `semantic_dedup_rejected`, all as named.
+
+**The sectioned payload is not a superset.** It carries `section_count`, `total_items` and `sections[]` (`{name, items_count, item_ids, injected_advisory_ids}`) *instead of* `items_count`, `injected_item_ids`, `injected_items[]`, `strategies_used`, `candidates_found`, `budget_max_items`, `budget_max_tokens`, `budget_trace[]` and `rejected_items[]` — none of which it emits. Everything else above is shared. Two consequences to know before reading the numbers: `trellis analyze pack-telemetry` counts a sectioned pack as a **0-item pack**, because it reads `injected_item_ids`; and since the learning join reads `injected_items[]`, a sectioned pack yields **zero per-item rows** — `run_id` and `intent_family` are emitted there for symmetry but stay inert until that gap is closed.
 
 **Attribution fields (`title` / `category` / `domain_system`).** Added in #285 because the promotion candidates written to `intent_learning_candidates.json` previously carried only opaque `item_id`s. All three are derived from metadata the strategies already attach — nothing new is computed. `title` reads `title`, then `capture_title` (what the session-capture ingest writes), then `name`. `category` is the `ContentTags.content_type` facet and **only** that: a flat `metadata["content_type"]` is deliberately not read as a fallback, because ingest handlers stamp their own vocabulary there (`"conversation"`, `"entity_summary"`), and mixing the taxonomies would make the column ambiguous. An empty value is omitted rather than emitted as `null`, so thin items keep the pre-existing payload shape.
 
@@ -1490,7 +1488,7 @@ All three now route through the same one retrieval path as `get_context` and are
 | Tool | Args | Returns |
 |------|------|---------|
 | `record_observation` | `subject_entity_id`, `subject_entity_type`, `observer_agent_id`, `content`, `confidence`, `evidence_ref?`, `metadata?` | JSON `{"status": "ok", "observation_id": ...}`. Lands an `Observation` node with a `hasObservation` edge from the subject — see [schemas.md → Observation](schemas.md#observation). Routed through the governed pipeline (`observation.record`). |
-| `query_observations` | `subject_entity_id?`, `observer_agent_id?`, `limit?` | JSON `{"observations": [...]}` — each entry is the Observation property dict plus `node_id`. |
+| `query_observations` | `subject_entity_id?`, `observer_agent_id?`, `limit?` | JSON `{"status": "ok", "observations": [...]}` — each entry is the Observation property dict plus `node_id` and `node_type`. |
 | `execute_mutation` | `operation`, `args`, `idempotency_key?`, `actor?` | JSON `CommandResult`. MCP parity with `POST /commands/batch` for a single command; same five-stage governed pipeline, so policy gates and audit events apply identically. `operation` accepts the wire value (`"link.create"`) or the enum key (`"LINK_CREATE"`). |
 
 `session_id` lets every context tool deduplicate items returned by recent calls in the same session. Token budgets default to the values in `retrieval.budgets` (`config.yaml`); pass `max_tokens > 0` to override.
