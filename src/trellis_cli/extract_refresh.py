@@ -39,7 +39,7 @@ from trellis.extract.commands import result_to_batch
 from trellis.extract.dispatcher import ExtractionDispatcher
 from trellis.extract.registry import ExtractorRegistry
 from trellis.extract.sources import SourceEntry, load_sources
-from trellis.extract.trace_ingest_hook import extract_trace_batch
+from trellis.extract.trace_ingest_hook import batch_draft_counts, extract_trace_batch
 from trellis.mutate import build_curate_executor
 from trellis.schemas.extraction import ExtractionResult
 from trellis.stores.base.event_log import EventType
@@ -540,9 +540,11 @@ def traces(
     total_edges = 0
 
     for trace in stored_traces:
-        result, batch = extract_trace_batch(trace, requested_by="cli:extract-traces")
-        n_entities = len(result.entities)
-        n_edges = len(result.edges)
+        _result, batch = extract_trace_batch(trace, requested_by="cli:extract-traces")
+        # Count the batch, not the raw result: a confidence gate can drop
+        # drafts between the two, and the number reported has to be what
+        # would actually be written.
+        n_entities, n_edges = batch_draft_counts(batch)
         total_entities += n_entities
         total_edges += n_edges
         per_trace.append(

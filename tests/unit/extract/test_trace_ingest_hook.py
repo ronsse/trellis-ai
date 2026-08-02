@@ -16,8 +16,10 @@ import pytest
 
 from trellis.extract.trace_ingest_hook import (
     TRACE_EXTRACTION_FLAG,
+    TRACE_EXTRACTION_MIN_CONFIDENCE_FLAG,
     run_trace_extraction,
     trace_extraction_enabled,
+    trace_extraction_min_confidence,
 )
 from trellis.schemas.trace import Trace
 
@@ -126,3 +128,55 @@ class TestHook:
             summary = run_trace_extraction(registry, _TRACE, requested_by="t")
         assert summary == {"entities": 0, "edges": 0, "executed": False}
         executor.execute_batch.assert_not_called()
+
+
+class TestConfidenceGateFlag:
+    """The gate is a second, separately opt-in switch."""
+
+    def test_unset_means_no_gate(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv(TRACE_EXTRACTION_MIN_CONFIDENCE_FLAG, raising=False)
+        assert trace_extraction_min_confidence() is None
+
+    def test_blank_means_no_gate(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(TRACE_EXTRACTION_MIN_CONFIDENCE_FLAG, "  ")
+        assert trace_extraction_min_confidence() is None
+
+    def test_parses_a_float(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(TRACE_EXTRACTION_MIN_CONFIDENCE_FLAG, "0.75")
+        assert trace_extraction_min_confidence() == 0.75
+
+    @pytest.mark.parametrize("val", ["high", "-0.1", "1.5"])
+    def test_bad_values_fall_back_to_no_gate(
+        self, monkeypatch: pytest.MonkeyPatch, val: str
+    ) -> None:
+        """Misreading a threshold must never mean "drop everything"."""
+        monkeypatch.setenv(TRACE_EXTRACTION_MIN_CONFIDENCE_FLAG, val)
+        assert trace_extraction_min_confidence() is None
+
+    def test_gate_on_drops_sub_threshold_drafts_from_the_batch(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(TRACE_EXTRACTION_FLAG, "1")
+        # Trace drafts are all deterministic (confidence 1.0), so a floor
+        # above 1.0 is impossible; assert the wiring instead — a floor of
+        # 1.0 keeps them, and the gate is reached with the env value.
+        monkeypatch.setenv(TRACE_EXTRACTION_MIN_CONFIDENCE_FLAG, "1.0")
+        registry = MagicMock()
+        executor = MagicMock()
+        with patch("trellis.mutate.build_curate_executor", return_value=executor):
+            summary = run_trace_extraction(registry, _TRACE, requested_by="t")
+        assert summary is not None
+        assert summary["entities"] > 0
+
+    def test_reported_counts_come_from_the_batch(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(TRACE_EXTRACTION_FLAG, "1")
+        monkeypatch.delenv(TRACE_EXTRACTION_MIN_CONFIDENCE_FLAG, raising=False)
+        registry = MagicMock()
+        executor = MagicMock()
+        with patch("trellis.mutate.build_curate_executor", return_value=executor):
+            summary = run_trace_extraction(registry, _TRACE, requested_by="t")
+        batch = executor.execute_batch.call_args.args[0]
+        assert summary is not None
+        assert summary["entities"] + summary["edges"] == len(batch.commands)

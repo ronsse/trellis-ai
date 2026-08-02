@@ -11,7 +11,8 @@ from __future__ import annotations
 import pytest
 
 from trellis.extract.base import ExtractorTier
-from trellis.extract.trace import TRACE_SOURCE_HINT, TraceExtractor
+from trellis.extract.trace import TRACE_SOURCE_HINT, TraceExtractor, normalize_slug
+from trellis.schemas.enums import NodeRole
 from trellis.schemas.extraction import EdgeDraft, EntityDraft
 from trellis.schemas.trace import Trace
 from trellis.schemas.well_known import (
@@ -184,13 +185,15 @@ class TestExample1:
     async def test_tool_entities_and_used_edges(self) -> None:
         trace = Trace.model_validate(EXAMPLE_1)
         result = await TraceExtractor().extract(trace, source_hint="trace")
-        tool = _entity_by_id(result.entities, "tool:search_codebase")
+        # ids are slugified (`_` is a separator); the display name is raw.
+        tool = _entity_by_id(result.entities, "tool:search-codebase")
         assert tool.entity_type == SOFTWARE_APPLICATION
+        assert tool.name == "search_codebase"
         assert _has_edge(
-            result.edges, f"trace:{trace.trace_id}", USED, "tool:search_codebase"
+            result.edges, f"trace:{trace.trace_id}", USED, "tool:search-codebase"
         )
         assert _has_edge(
-            result.edges, f"trace:{trace.trace_id}", USED, "tool:edit_file"
+            result.edges, f"trace:{trace.trace_id}", USED, "tool:edit-file"
         )
 
     async def test_no_evidence_or_artifacts(self) -> None:
@@ -364,21 +367,164 @@ class TestParentTrace:
         )
 
 
-class TestDeduplication:
-    async def test_repeated_tool_emits_single_entity(self) -> None:
-        data = {
+def _tool_trace(names: list[str], *, intent: str = "run tools") -> Trace:
+    return Trace.model_validate(
+        {
             "source": "agent",
-            "intent": "run the same tool twice",
+            "intent": intent,
             "steps": [
-                {"step_type": "tool_call", "name": "grep", "args": {}, "result": {}},
-                {"step_type": "tool_call", "name": "grep", "args": {}, "result": {}},
+                {"step_type": "tool_call", "name": n, "args": {}, "result": {}}
+                for n in names
             ],
             "context": {"agent_id": "a1"},
         }
-        trace = Trace.model_validate(data)
+    )
+
+
+class TestDeduplication:
+    async def test_repeated_tool_emits_single_entity(self) -> None:
+        trace = _tool_trace(["grep", "grep"])
         result = await TraceExtractor().extract(trace, source_hint="trace")
         grep_entities = [e for e in result.entities if e.entity_id == "tool:grep"]
         assert len(grep_entities) == 1
+
+    async def test_forty_identical_tool_steps_emit_one_used_edge(self) -> None:
+        """The guard the old comment promised but never implemented."""
+        trace = _tool_trace(["Bash"] * 40)
+        result = await TraceExtractor().extract(trace, source_hint="trace")
+        used_edges = [
+            e
+            for e in result.edges
+            if e.edge_kind == USED and e.target_id == "tool:bash"
+        ]
+        assert len(used_edges) == 1
+
+    async def test_edge_dedup_does_not_collapse_distinct_relationships(self) -> None:
+        trace = _tool_trace(["grep", "sed"])
+        result = await TraceExtractor().extract(trace, source_hint="trace")
+        used = {e.target_id for e in result.edges if e.edge_kind == USED}
+        assert used == {"tool:grep", "tool:sed"}
+
+
+class TestIdNormalization:
+    async def test_case_and_separator_variants_collapse_to_one_node(self) -> None:
+        trace = _tool_trace(["Bash", "bash", "BASH", "  bash  "])
+        result = await TraceExtractor().extract(trace, source_hint="trace")
+        tools = [e for e in result.entities if e.entity_id.startswith("tool:")]
+        assert [e.entity_id for e in tools] == ["tool:bash"]
+        # First spelling seen wins as the display name.
+        assert tools[0].name == "Bash"
+
+    async def test_mcp_tool_names_normalize_without_losing_namespace(self) -> None:
+        trace = _tool_trace(["mcp__trellis__search"])
+        result = await TraceExtractor().extract(trace, source_hint="trace")
+        tool = _entity_by_id(result.entities, "tool:mcp-trellis-search")
+        assert tool.name == "mcp__trellis__search"
+
+    async def test_agent_team_domain_ids_are_normalized(self) -> None:
+        trace = Trace.model_validate(
+            {
+                "source": "agent",
+                "intent": "x",
+                "context": {
+                    "agent_id": "Hermes 3",
+                    "team": "Data Platform",
+                    "domain": "Backend",
+                },
+            }
+        )
+        result = await TraceExtractor().extract(trace, source_hint="trace")
+        ids = {e.entity_id for e in result.entities}
+        assert {"agent:hermes-3", "team:data-platform", "domain:backend"} <= ids
+        assert _entity_by_id(result.entities, "agent:hermes-3").name == "Hermes 3"
+
+    async def test_opaque_ids_are_not_normalized(self) -> None:
+        """evidence/artifact ids are caller-supplied joins, not free text."""
+        trace = Trace.model_validate(
+            {
+                "source": "agent",
+                "intent": "x",
+                "evidence_used": [{"evidence_id": "ev_01JRK5N7QF", "role": "input"}],
+                "artifacts_produced": [
+                    {"artifact_id": "api/Routes.py", "artifact_type": "file"}
+                ],
+                "context": {},
+            }
+        )
+        result = await TraceExtractor().extract(trace, source_hint="trace")
+        ids = {e.entity_id for e in result.entities}
+        assert "evidence:ev_01JRK5N7QF" in ids
+        assert "artifact:api/Routes.py" in ids
+
+    async def test_punctuation_only_name_is_skipped(self) -> None:
+        trace = _tool_trace(["///"])
+        result = await TraceExtractor().extract(trace, source_hint="trace")
+        assert not any(e.entity_id.startswith("tool:") for e in result.entities)
+
+    def test_normalize_slug_is_idempotent(self) -> None:
+        for value in ["Bash", "mcp__trellis__search", "Data Platform", "café"]:
+            once = normalize_slug(value)
+            assert normalize_slug(once) == once
+
+
+class TestNodeRole:
+    async def test_tool_nodes_are_structural(self) -> None:
+        """So the pack builder's existing structural filter can drop them."""
+        trace = _tool_trace(["grep"])
+        result = await TraceExtractor().extract(trace, source_hint="trace")
+        assert (
+            _entity_by_id(result.entities, "tool:grep").node_role is NodeRole.STRUCTURAL
+        )
+
+    async def test_real_world_nodes_stay_semantic(self) -> None:
+        trace = Trace.model_validate(EXAMPLE_2)
+        result = await TraceExtractor().extract(trace, source_hint="trace")
+        for entity in result.entities:
+            if entity.entity_id.startswith("tool:"):
+                continue
+            assert entity.node_role is NodeRole.SEMANTIC
+
+
+class TestDocumentLink:
+    async def test_activity_carries_document_ids_from_metadata(self) -> None:
+        data = {**EXAMPLE_1, "metadata": {"document_ids": ["doc-1", "doc-2"]}}
+        trace = Trace.model_validate(data)
+        result = await TraceExtractor().extract(trace, source_hint="trace")
+        activity = _entity_by_id(result.entities, f"trace:{trace.trace_id}")
+        assert activity.document_ids == ["doc-1", "doc-2"]
+
+    async def test_singular_metadata_key_accepted(self) -> None:
+        data = {**EXAMPLE_1, "metadata": {"document_id": "doc-1"}}
+        trace = Trace.model_validate(data)
+        result = await TraceExtractor().extract(trace, source_hint="trace")
+        activity = _entity_by_id(result.entities, f"trace:{trace.trace_id}")
+        assert activity.document_ids == ["doc-1"]
+
+    async def test_duplicate_pointers_are_collapsed(self) -> None:
+        data = {**EXAMPLE_1, "metadata": {"document_ids": ["doc-1", "doc-1"]}}
+        trace = Trace.model_validate(data)
+        result = await TraceExtractor().extract(trace, source_hint="trace")
+        activity = _entity_by_id(result.entities, f"trace:{trace.trace_id}")
+        assert activity.document_ids == ["doc-1"]
+
+    async def test_junk_pointers_are_ignored(self) -> None:
+        data = {**EXAMPLE_1, "metadata": {"document_ids": ["", 7, None]}}
+        trace = Trace.model_validate(data)
+        result = await TraceExtractor().extract(trace, source_hint="trace")
+        activity = _entity_by_id(result.entities, f"trace:{trace.trace_id}")
+        assert activity.document_ids is None
+
+    async def test_no_metadata_means_no_link(self) -> None:
+        trace = Trace.model_validate(EXAMPLE_1)
+        result = await TraceExtractor().extract(trace, source_hint="trace")
+        assert all(e.document_ids is None for e in result.entities)
+
+    async def test_shared_nodes_do_not_inherit_the_trace_document(self) -> None:
+        """Only the Activity *is* the trace; tool nodes are shared."""
+        data = {**EXAMPLE_1, "metadata": {"document_ids": ["doc-1"]}}
+        trace = Trace.model_validate(data)
+        result = await TraceExtractor().extract(trace, source_hint="trace")
+        assert _entity_by_id(result.entities, "tool:edit-file").document_ids is None
 
 
 class TestEdgeProperties:

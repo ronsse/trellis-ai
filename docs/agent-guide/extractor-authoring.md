@@ -52,7 +52,11 @@ class ExtractionResult(TrellisModel):
     unparsed_residue: list[dict] = []  # things you saw but didn't model
 ```
 
-Each `EntityDraft` is the data minus the store identity — `entity_id`, `entity_type`, `name`, `properties`, optional `node_role`, optional `generation_spec`, `confidence`. Each `EdgeDraft` is `source_id`, `target_id`, `edge_kind`, optional `properties`, optional `allow_dangling`, `confidence`.
+Each `EntityDraft` is the data minus the store identity — `entity_id`, `entity_type`, `name`, `properties`, optional `node_role`, optional `generation_spec`, optional `document_ids`, `confidence`. Each `EdgeDraft` is `source_id`, `target_id`, `edge_kind`, optional `properties`, optional `allow_dangling`, `confidence`.
+
+**Where `confidence` goes.** `result_to_batch` persists it as the `extraction_confidence` property on the created node / edge, so a downstream consumer can filter on what an extractor actually believed. It also accepts an opt-in `min_confidence` floor that drops sub-threshold drafts (and any edge orphaned by the drop). The floor defaults to `None` — no gate — because silently discarding extraction output on a deployment that never asked for a threshold is worse than passing a weak draft through.
+
+**Why `document_ids`.** It is the graph↔document link (`adr-planes-and-substrates` §2.4): the DocumentStore rows this entity was sourced from, so graph traversal can materialize the original content and so entity-drop heuristics have something to reason about. Set it only when you know the document exists — a pointer at a missing document is exactly the dangling state the link exists to prevent. Omit it (leave it `None`) rather than passing `[]`: an omitted value is what `EntityUpdateHandler` reads as "leave the existing link alone".
 
 **Why `allow_dangling`.** Some inputs reference entities that arrive in a separate batch (cross-manifest dbt depends_on, OpenLineage events emitted out of order). Setting `allow_dangling=True` tells the FK pre-flight in `LinkCreateHandler` to skip the existence check. Use it for genuine cross-batch references, not as a workaround for missing data.
 

@@ -250,15 +250,15 @@ Already-ingested traces can be backfilled with `trellis extract traces --since <
 
 Only structured fields are mined — free-text prose (`intent`, `step.args`/`step.result` payloads, `outcome.summary`) is deliberately left for a future opt-in LLM residue pass. Entity types and edge kinds are canonicalized to the well-known vocabulary (schema.org entity types, PROV-O edge verbs).
 
-| Source field | Entity (id scheme) | Canonical type |
-|--------------|--------------------|----------------|
-| The trace itself | `trace:<trace_id>` | `Activity` |
-| `context.agent_id` | `agent:<agent_id>` | `Agent` |
-| `context.team` | `team:<team>` | `Team` |
-| `context.domain` | `domain:<domain>` | `Concept` |
-| `tool_call` step `name` | `tool:<name>` | `SoftwareApplication` |
-| `evidence_used[].evidence_id` | `evidence:<id>` | `Dataset` |
-| `artifacts_produced[].artifact_id` | `artifact:<id>` | `File` (for `file`/`document` types) or `CreativeWork` |
+| Source field | Entity (id scheme) | Canonical type | Node role |
+|--------------|--------------------|----------------|-----------|
+| The trace itself | `trace:<trace_id>` | `Activity` | `semantic` |
+| `context.agent_id` | `agent:<slug>` | `Agent` | `semantic` |
+| `context.team` | `team:<slug>` | `Team` | `semantic` |
+| `context.domain` | `domain:<slug>` | `Concept` | `semantic` |
+| `tool_call` step `name` | `tool:<slug>` | `SoftwareApplication` | `structural` |
+| `evidence_used[].evidence_id` | `evidence:<id>` | `Dataset` | `semantic` |
+| `artifacts_produced[].artifact_id` | `artifact:<id>` | `File` (for `file`/`document` types) or `CreativeWork` | `semantic` |
 
 | Edge | PROV-aligned kind |
 |------|-------------------|
@@ -270,9 +270,29 @@ Only structured fields are mined — free-text prose (`intent`, `step.args`/`ste
 | artifact File/CreativeWork → Activity | `wasGeneratedBy` |
 | Activity → parent Activity (`context.parent_trace_id`) | `wasInformedBy` |
 
-Every emitted node and edge stamps property-based provenance: `source_trace_id`, `agent_id`, and `extractor_tier` (`"deterministic"`). Edges are emitted with `allow_dangling=True` because trace graphs are inherently cross-batch (e.g. a parent trace's Activity or shared evidence is extracted by a different run).
+Every emitted node and edge stamps property-based provenance: `source_trace_id`, `agent_id`, `extractor_tier` (`"deterministic"`), and `extraction_confidence` (the extractor's per-draft confidence — always `1.0` on this path, since every mined value is a structured field read). Edges are emitted with `allow_dangling=True` because trace graphs are inherently cross-batch (e.g. a parent trace's Activity or shared evidence is extracted by a different run).
 
-For example, ingesting Example 1 above with the flag on produces an `Activity` node (`trace:<id>`), an `Agent` node (`agent:code-orchestrator`), a `Concept` node (`domain:backend`), and two `SoftwareApplication` nodes (`tool:search_codebase`, `tool:edit_file`), wired with `wasAttributedTo`, `appliesTo`, and two `used` edges.
+For example, ingesting Example 1 above with the flag on produces an `Activity` node (`trace:<id>`), an `Agent` node (`agent:code-orchestrator`), a `Concept` node (`domain:backend`), and two `SoftwareApplication` nodes (`tool:search-codebase`, `tool:edit-file`), wired with `wasAttributedTo`, `appliesTo`, and two `used` edges.
+
+### ID normalization
+
+Name-derived ids (`tool:`, `agent:`, `team:`, `domain:`) are **slugified**: NFKC normalize, casefold, then join every run of alphanumeric characters with a single `-`. So `Bash`, `bash`, and `  BASH  ` all mint `tool:bash`, and `mcp__trellis__search` mints `tool:mcp-trellis-search`. Without this, every spelling of a tool name became its own permanent node.
+
+The **display name stays raw** — the node named `tool:mcp-trellis-search` is still called `mcp__trellis__search`, because that is what an operator recognises. When two spellings collapse, the first one seen supplies the name.
+
+Opaque ids are **not** normalized: `trace:`, `evidence:` and `artifact:` ids are caller-supplied identifiers (ULIDs, paths, tags) whose whole job is to join back to the thing they reference.
+
+### Node role and the pack filter
+
+Tool nodes are minted `node_role="structural"` — machine-generated plumbing, regenerated from source on every trace, three words long. That makes them invisible to retrieval by default (`PackBuilder` drops structural items unless `include_structural=True`) while leaving them fully traversable in the graph. Everything else stays `semantic`.
+
+### Document links
+
+If the ingest path that produced a trace also rendered it into the DocumentStore, it can name the row in `metadata` — either `"document_ids": ["<doc_id>", ...]` or `"document_id": "<doc_id>"` — and the extractor carries that onto the `Activity` node as its `document_ids` link. Only the Activity gets it: `tool:` / `agent:` / `team:` nodes are shared across traces and `entity.create` *replaces* rather than merges the link.
+
+### Confidence gate (opt-in)
+
+`TRELLIS_TRACE_EXTRACTION_MIN_CONFIDENCE=<0.0-1.0>` drops drafts scoring below the floor, plus any edge left pointing at a dropped entity. Unset means **no gate** — turning trace extraction on never also turns a silent drop on. An unparseable or out-of-range value is treated as unset and logs a warning.
 
 ---
 

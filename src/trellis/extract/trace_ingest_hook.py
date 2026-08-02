@@ -18,6 +18,9 @@ Contract (mirrors the ``save_memory`` extraction stage):
   extraction must NEVER fail the ingest.
 * Drafts go through ``result_to_batch`` → ``execute_batch`` with the
   default ``CONTINUE_ON_ERROR`` strategy.
+* Optionally gated by ``TRELLIS_TRACE_EXTRACTION_MIN_CONFIDENCE`` — also
+  off by default, so turning trace extraction on never *also* turns a
+  silent drop on.
 
 Returns a small summary dict (``entities`` / ``edges`` draft counts plus
 ``executed``) so callers that want to surface extraction telemetry can,
@@ -34,6 +37,7 @@ import structlog
 
 from trellis.extract.commands import result_to_batch
 from trellis.extract.trace import TRACE_SOURCE_HINT, TraceExtractor
+from trellis.mutate.commands import Operation
 
 if TYPE_CHECKING:
     from trellis.schemas.trace import Trace
@@ -47,12 +51,51 @@ _TRUTHY = frozenset({"1", "true", "yes", "on"})
 #: Feature flag — off by default.
 TRACE_EXTRACTION_FLAG = "TRELLIS_ENABLE_TRACE_EXTRACTION"
 
+#: Optional confidence floor for the drafts this path produces.  Unset
+#: (the default) means no gate — see :func:`trace_extraction_min_confidence`.
+TRACE_EXTRACTION_MIN_CONFIDENCE_FLAG = "TRELLIS_TRACE_EXTRACTION_MIN_CONFIDENCE"
+
 
 def trace_extraction_enabled() -> bool:
     """``True`` iff ``TRELLIS_ENABLE_TRACE_EXTRACTION`` is set truthy."""
     import os  # noqa: PLC0415
 
     return os.environ.get(TRACE_EXTRACTION_FLAG, "").strip().lower() in _TRUTHY
+
+
+def trace_extraction_min_confidence() -> float | None:
+    """Confidence floor from the environment, or ``None`` for no gate.
+
+    Unset / blank means **off**: every draft the extractor produced is
+    submitted, which is what an existing deployment already gets.  A
+    gate that silently drops extraction output has to be asked for.
+
+    An unparseable or out-of-range value is treated as unset (with a
+    warning) rather than as ``0.0`` — misreading "0.85" as "drop
+    nothing" is recoverable, misreading it as "drop everything" is not.
+    """
+    import os  # noqa: PLC0415
+
+    raw = os.environ.get(TRACE_EXTRACTION_MIN_CONFIDENCE_FLAG, "").strip()
+    if not raw:
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning(
+            "trace_extraction_min_confidence_unparseable",
+            flag=TRACE_EXTRACTION_MIN_CONFIDENCE_FLAG,
+            value=raw,
+        )
+        return None
+    if not 0.0 <= value <= 1.0:
+        logger.warning(
+            "trace_extraction_min_confidence_out_of_range",
+            flag=TRACE_EXTRACTION_MIN_CONFIDENCE_FLAG,
+            value=value,
+        )
+        return None
+    return value
 
 
 def extract_trace_batch(
@@ -65,7 +108,8 @@ def extract_trace_batch(
     The single shared core of trace→graph extraction — the live ingest
     hook and the ``trellis extract traces`` backfill both call this, so
     the extractor wiring (``source_hint``, batch construction,
-    ``requested_by`` stamping) cannot drift between the two paths.
+    ``requested_by`` stamping, confidence gate) cannot drift between the
+    two paths.
 
     Returns ``(result, batch)``; ``batch`` is ``None`` when the trace
     produced no drafts.
@@ -76,7 +120,26 @@ def extract_trace_batch(
     )
     if not result.entities and not result.edges:
         return result, None
-    return result, result_to_batch(result, requested_by=requested_by)
+    return result, result_to_batch(
+        result,
+        requested_by=requested_by,
+        min_confidence=trace_extraction_min_confidence(),
+    )
+
+
+def batch_draft_counts(batch: Any | None) -> tuple[int, int]:
+    """``(entities, edges)`` a batch will actually write.
+
+    ``result.entities`` / ``result.edges`` count what the *extractor*
+    produced; once a confidence gate is in play that overstates what
+    survives into the batch.  Telemetry should report what was
+    submitted, so count the commands.
+    """
+    if batch is None:
+        return 0, 0
+    entities = sum(1 for c in batch.commands if c.operation is Operation.ENTITY_CREATE)
+    edges = sum(1 for c in batch.commands if c.operation is Operation.LINK_CREATE)
+    return entities, edges
 
 
 def run_trace_extraction(
@@ -108,9 +171,8 @@ def run_trace_extraction(
     from trellis.mutate import build_curate_executor  # noqa: PLC0415
 
     try:
-        result, batch = extract_trace_batch(trace, requested_by=requested_by)
-        entity_count = len(result.entities)
-        edge_count = len(result.edges)
+        _result, batch = extract_trace_batch(trace, requested_by=requested_by)
+        entity_count, edge_count = batch_draft_counts(batch)
         if batch is None:
             return {"entities": 0, "edges": 0, "executed": False}
 

@@ -26,10 +26,55 @@ Entities
   intentionally *not* a well-known entity type (it collides with the
   ContentTags.domain facet), so the scope is modeled as a ``Concept``.
 * **SoftwareApplication** — the tool invoked by each ``tool_call`` step,
-  keyed by ``step.name`` (``tool:<name>``).
+  keyed by ``step.name`` (``tool:<slug>``).  Minted at
+  ``NodeRole.STRUCTURAL`` — see "Node role" below.
 * **File / CreativeWork** — each ``artifacts_produced`` ref
   (``artifact:<artifact_id>``); type derived from ``artifact_type``.
 * **Dataset** — each ``evidence_used`` ref (``evidence:<evidence_id>``).
+
+ID normalization
+----------------
+
+Free-text names arrive in whatever spelling the agent used — ``Bash``,
+``bash``, ``mcp__trellis__search``, ``Search Codebase``.  Minting an id
+straight from the raw string turns every spelling into its own permanent
+node, which is where the bulk of the graph's duplicate junk comes from.
+:func:`normalize_slug` collapses the spellings into one id: NFKC
+normalize, casefold, then replace every run of non-alphanumeric
+characters with a single ``-``.  ``mcp__trellis__search`` →
+``mcp-trellis-search``; ``Bash`` / ``bash`` → ``bash``.
+
+Only *name-derived* ids are normalized — ``tool:``, ``agent:``,
+``team:``, ``domain:``.  ``evidence:`` / ``artifact:`` / ``trace:`` ids
+are opaque caller-supplied identifiers (ULIDs, paths, tags): normalizing
+them would break the join back to the thing they reference, and they
+don't suffer from spelling drift in the first place.  The *display name*
+always stays the raw string — an operator has to be able to recognise
+the node.
+
+Node role
+---------
+
+Tool nodes are minted ``NodeRole.STRUCTURAL``.  They are exactly what
+that role is for: fine-grained, machine-generated plumbing regenerated
+from source on every trace, carrying no standalone content (a ``bash``
+node is three words long).  The role makes them invisible to the pack
+builder's existing default ``node_role == "structural"`` filter while
+leaving them fully traversable in the graph.  Every other minted node
+represents a real thing in the world and stays ``SEMANTIC``.
+
+Document links
+--------------
+
+A trace is not a document, so there is nothing to link by default.  When
+the ingest path that produced the trace *did* render it into the
+``DocumentStore``, it names the row in ``trace.metadata`` (either
+``document_ids: list[str]`` or ``document_id: str``); that link is
+carried onto the Activity node — the one node that *is* this trace.  It
+is deliberately not fanned out to the tool / agent / team nodes: those
+are shared across traces and ``ENTITY_CREATE`` *replaces* rather than
+merges ``document_ids``, so fanning out would leave every shared node
+pointing at whichever trace happened to be extracted last.
 
 Edges (PROV-aligned well-known kinds)
 
@@ -49,6 +94,7 @@ change (column promotion is roadmap item B.3, out of scope here).
 
 from __future__ import annotations
 
+import unicodedata
 from typing import TYPE_CHECKING, Any
 
 from trellis.extract.base import ExtractorTier
@@ -96,6 +142,40 @@ _TOOL_STEP_TYPES = frozenset({"tool_call"})
 #: type.  Everything else falls back to ``CreativeWork`` — both are
 #: schema.org-aligned so RDF/JSON-LD export stays clean.
 _FILE_ARTIFACT_TYPES = frozenset({"file", "document"})
+
+#: ``trace.metadata`` keys an ingest path may use to name the
+#: ``DocumentStore`` row(s) it rendered the trace into.  Plural wins when
+#: both are present.  Anything that isn't a non-empty string is ignored —
+#: a bogus pointer is worse than no pointer.
+_METADATA_DOCUMENT_IDS_KEY = "document_ids"
+_METADATA_DOCUMENT_ID_KEY = "document_id"
+
+
+def normalize_slug(value: str) -> str:
+    """Collapse a free-text name into a stable, case-insensitive id slug.
+
+    NFKC-normalize, casefold, then join every run of alphanumeric
+    characters with a single ``-``.  Unicode letters and digits survive
+    (``isalnum`` is unicode-aware), so a non-ASCII name still yields a
+    meaningful slug rather than a row of separators.
+
+    Returns ``""`` when *value* holds no alphanumeric character at all;
+    callers skip the entity rather than mint an id with an empty tail.
+
+    Idempotent: ``normalize_slug(normalize_slug(x)) == normalize_slug(x)``.
+    """
+    folded = unicodedata.normalize("NFKC", value).casefold()
+    parts: list[str] = []
+    run: list[str] = []
+    for char in folded:
+        if char.isalnum():
+            run.append(char)
+        elif run:
+            parts.append("".join(run))
+            run = []
+    if run:
+        parts.append("".join(run))
+    return "-".join(parts)
 
 
 class TraceExtractor:
@@ -204,6 +284,10 @@ class _DraftBuilder:
         # De-dupe entity drafts by id so a tool invoked across N steps (or
         # an artifact referenced twice) produces a single node.
         self._seen_entities: set[str] = set()
+        # ...and the matching edge index, keyed by the full edge identity.
+        # Without it a 40-step trace emits 40 identical `used` edges to the
+        # one tool node the entity index collapsed.
+        self._seen_edges: set[tuple[str, str, str]] = set()
 
     # -- provenance ----------------------------------------------------
 
@@ -224,10 +308,16 @@ class _DraftBuilder:
         entity_type: str,
         name: str,
         extra_props: dict[str, Any] | None = None,
+        node_role: NodeRole = NodeRole.SEMANTIC,
+        document_ids: list[str] | None = None,
     ) -> str:
         """Emit a canonicalized, provenance-stamped entity draft once.
 
         Returns the (stable) ``entity_id`` so callers can wire edges.
+
+        ``node_role`` defaults to ``SEMANTIC`` — the caller opts a node
+        down to ``STRUCTURAL`` when it is regenerated plumbing rather
+        than a thing in the world (see the module docstring).
         """
         canonical_type = canonicalize_entity_type(entity_type)
         if entity_id in self._seen_entities:
@@ -247,7 +337,8 @@ class _DraftBuilder:
                 entity_type=canonical_type,
                 name=name,
                 properties=props,
-                node_role=NodeRole.SEMANTIC,
+                node_role=node_role,
+                document_ids=document_ids,
             )
         )
         return entity_id
@@ -259,7 +350,12 @@ class _DraftBuilder:
         target_id: str,
         edge_kind: str,
     ) -> None:
-        """Emit a canonicalized, provenance-stamped edge draft.
+        """Emit a canonicalized, provenance-stamped edge draft once.
+
+        De-duplicated on ``(source, kind, target)`` *after*
+        canonicalization, so the same relationship restated across N
+        steps — 40 ``tool_call`` steps naming the same tool — yields one
+        edge, matching what :meth:`_emit_entity` already does for nodes.
 
         Drafts use ``allow_dangling=True`` so a reference to an entity that
         was extracted by a *different* trace (e.g. a parent trace's
@@ -267,6 +363,11 @@ class _DraftBuilder:
         ``LinkCreateHandler`` — trace graphs are inherently cross-batch.
         """
         canonical_kind = canonicalize_edge_kind(edge_kind)
+        identity = (source_id, canonical_kind, target_id)
+        if identity in self._seen_edges:
+            return
+        self._seen_edges.add(identity)
+
         props: dict[str, Any] = self._provenance_props()
         alignment = schema_alignment_for_edge_kind(canonical_kind)
         if alignment is not None:
@@ -310,14 +411,41 @@ class _DraftBuilder:
             entity_type="Activity",
             name=self._trace.intent,
             extra_props=extra,
+            document_ids=self._trace_document_ids(),
         )
+
+    def _trace_document_ids(self) -> list[str] | None:
+        """Document row(s) this trace was rendered into, if any.
+
+        Reads ``trace.metadata`` (``document_ids`` list, else
+        ``document_id`` string).  ``None`` when the trace names none —
+        the common case, since trace ingest does not write a document.
+        """
+        metadata = self._trace.metadata
+        raw = metadata.get(_METADATA_DOCUMENT_IDS_KEY)
+        if isinstance(raw, str):
+            raw = [raw]
+        elif not isinstance(raw, list):
+            single = metadata.get(_METADATA_DOCUMENT_ID_KEY)
+            raw = [single] if isinstance(single, str) else []
+        # De-dup while preserving order: validate_document_ids rejects
+        # repeats outright, and a duplicated pointer is a caller typo we
+        # can absorb rather than fail the whole extraction on.
+        seen: dict[str, None] = {}
+        for doc_id in raw:
+            if isinstance(doc_id, str) and doc_id:
+                seen[doc_id] = None
+        return list(seen) or None
 
     def _build_agent(self, activity_id: str) -> None:
         agent_id = self._trace.context.agent_id
         if not agent_id:
             return
+        slug = normalize_slug(agent_id)
+        if not slug:
+            return
         entity_id = self._emit_entity(
-            entity_id=f"agent:{agent_id}",
+            entity_id=f"agent:{slug}",
             entity_type=AGENT,
             name=agent_id,
         )
@@ -335,8 +463,11 @@ class _DraftBuilder:
         team = self._trace.context.team
         if not team:
             return
+        slug = normalize_slug(team)
+        if not slug:
+            return
         entity_id = self._emit_entity(
-            entity_id=f"team:{team}",
+            entity_id=f"team:{slug}",
             entity_type=TEAM,
             name=team,
         )
@@ -350,8 +481,11 @@ class _DraftBuilder:
         domain = self._trace.context.domain
         if not domain:
             return
+        slug = normalize_slug(domain)
+        if not slug:
+            return
         entity_id = self._emit_entity(
-            entity_id=f"domain:{domain}",
+            entity_id=f"domain:{slug}",
             entity_type=CONCEPT,
             name=domain,
         )
@@ -380,14 +514,20 @@ class _DraftBuilder:
                 continue
             if not step.name:
                 continue
+            slug = normalize_slug(step.name)
+            if not slug:
+                continue
             entity_id = self._emit_entity(
-                entity_id=f"tool:{step.name}",
+                entity_id=f"tool:{slug}",
                 entity_type=SOFTWARE_APPLICATION,
+                # Display name stays raw — `mcp__trellis__search` is what
+                # the operator will recognise, `mcp-trellis-search` isn't.
                 name=step.name,
+                node_role=NodeRole.STRUCTURAL,
             )
-            # _emit_edge de-dupes nothing, but _emit_entity does — guard the
-            # edge against the same tool used across multiple steps so we
-            # don't emit N identical `used` edges.
+            # Both indexes are in play here: _emit_entity collapses the tool
+            # node across steps, _emit_edge collapses the matching `used`
+            # edge so a 40-step trace doesn't restate it 40 times.
             self._emit_edge(
                 source_id=activity_id,
                 target_id=entity_id,
