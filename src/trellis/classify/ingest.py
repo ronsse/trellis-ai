@@ -50,6 +50,14 @@ _TRUTHY = frozenset({"1", "true", "yes", "on"})
 #: (see module docstring) so flipping the default later is low-risk.
 CLASSIFY_ON_INGEST_FLAG = "TRELLIS_ENABLE_CLASSIFY_ON_INGEST"
 
+#: The metadata keys :func:`classify_for_ingest` writes. Callers that have to
+#: move a classified document's tags somewhere else — corpus sync propagates
+#: them from a parent document down to its chunks, which are the retrievable
+#: unit — key off this instead of restating the return shape, so adding a facet
+#: here cannot silently stop propagating. Pinned by
+#: ``test_classify_metadata_keys_matches_return_shape``.
+CLASSIFY_METADATA_KEYS = ("content_tags", "auto_importance")
+
 
 def classify_on_ingest_enabled() -> bool:
     """``True`` iff ``TRELLIS_ENABLE_CLASSIFY_ON_INGEST`` is set truthy."""
@@ -78,8 +86,9 @@ def classify_for_ingest(
 ) -> dict[str, Any]:
     """Classify ``content`` and return metadata keys to merge into a document.
 
-    Returns ``{"content_tags": {...}, "auto_importance": <float>}`` on success,
-    or ``{}`` when classification produced nothing usable or raised — this is
+    Returns ``{"content_tags": {...}, "auto_importance": <float>}`` (the keys
+    in :data:`CLASSIFY_METADATA_KEYS`) on success, or
+    ``{}`` when classification produced nothing usable or raised — this is
     always fail-soft, because the document is (about to be) durably stored and
     inline tagging is a best-effort enhancement, never a gate on the write.
 
@@ -116,6 +125,7 @@ def classify_for_ingest(
 
 
 __all__ = [
+    "CLASSIFY_METADATA_KEYS",
     "CLASSIFY_ON_INGEST_FLAG",
     "build_ingest_classifier",
     "classify_for_ingest",

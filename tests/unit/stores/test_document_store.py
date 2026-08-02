@@ -289,6 +289,44 @@ def test_search_untagged_doc_passes_domain_filter(
     assert "wrong domain doc" not in contents
 
 
+def test_search_empty_domain_facet_passes_domain_filter(
+    doc_store: SQLiteDocumentStore,
+) -> None:
+    """An *empty* list facet carries no value, so it default-passes too.
+
+    classify-on-write persists ``domain: []`` on purpose (see
+    :mod:`trellis.classify.ingest` — ``domain`` is the one hard-excluding
+    facet, so it is never auto-assigned). Treating that as a value rather
+    than as absent hard-excludes every tagged document from every
+    domain-scoped query, i.e. tagging a document would hide it.
+    """
+    doc_store.put(
+        None,
+        "matching domain doc",
+        {"content_tags": {"domain": ["data-pipeline"]}},
+    )
+    doc_store.put(None, "empty domain doc", {"content_tags": {"domain": []}})
+    doc_store.put(None, "untagged domain doc")
+
+    results = doc_store.search(
+        "doc",
+        filters={"content_tags": {"domain": {"in": ["data-pipeline"]}}},
+    )
+    contents = {r["content"] for r in results}
+    assert contents == {
+        "matching domain doc",
+        "empty domain doc",
+        "untagged domain doc",
+    }
+
+    # …and the inverse operator keeps it too — "no domain" never excludes.
+    excluded = doc_store.search(
+        "doc",
+        filters={"content_tags": {"domain": {"not_in": ["data-pipeline"]}}},
+    )
+    assert "empty domain doc" in {r["content"] for r in excluded}
+
+
 def test_update_preserves_created_at(doc_store: SQLiteDocumentStore) -> None:
     doc_store.put("d1", "v1")
     doc1 = doc_store.get("d1")

@@ -196,12 +196,22 @@ class PostgresDocumentStore(PostgresStoreBase, DocumentStore):
                         # branch keeps default-pass semantics — items
                         # without the facet tag are kept regardless of
                         # whether the operator is in or not_in.
+                        #
+                        # An *empty* list facet (``domain: []``) carries
+                        # no value either, but reads as the text '[]',
+                        # so it needs its own default-pass branch or the
+                        # item is hard-excluded. classify-on-write stores
+                        # exactly that shape (see trellis.classify.ingest),
+                        # which would otherwise make every tagged document
+                        # invisible to domain-scoped queries. Mirrors the
+                        # SQLite path's json_array_length branch.
                         conditions.append(
                             "(metadata -> 'content_tags' ->> %s IS NULL "
+                            "OR metadata -> 'content_tags' -> %s = '[]'::jsonb "
                             f"OR metadata -> 'content_tags' ->> %s "
                             f"{membership} ({placeholders}))"
                         )
-                        params.extend([facet, facet, *values_list])
+                        params.extend([facet, facet, facet, *values_list])
                 elif isinstance(value, str | int | float | bool):
                     conditions.append("metadata->>%s = %s")
                     params.extend([key, str(value)])
