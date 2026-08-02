@@ -40,6 +40,7 @@ from mcp.types import INTERNAL_ERROR, INVALID_PARAMS, ErrorData
 
 from trellis.auth import SCOPE_INGEST, SCOPE_MUTATE, SCOPE_READ
 from trellis.classify.ingest import classify_metadata_on_write
+from trellis.extract.entity_resolution import build_name_alias_resolver
 from trellis.extract.trace_ingest_hook import run_trace_extraction
 from trellis.feedback.models import PackFeedback
 from trellis.feedback.recording import feedback_log_dir
@@ -359,34 +360,28 @@ def _build_llm_client_from_env() -> Any:
 def _build_alias_resolver(registry: StoreRegistry) -> Any:
     """Build a callable that resolves @mention strings to entity IDs.
 
-    Uses a case-insensitive name match against the graph store, scanned
-    lazily on each invocation.  Not suitable for large graphs — the
-    production implementation will want an indexed lookup — but fine
-    for the feature-flagged Phase 2 rollout.
+    Delegates to :func:`trellis.extract.entity_resolution.build_name_alias_resolver`
+    — an indexed ``entity_aliases`` lookup that falls back to a bounded
+    scan and mints the binding so the next call is a single row read. The
+    matching rule (exact after normalization, ambiguity never guessed) is
+    documented on that module.
+
+    A graph-store failure during the fallback scan stays loud here: the
+    agent enabled extraction, so a store outage is a real error rather
+    than a silently empty match set.
     """
-    graph_store = registry.knowledge.graph_store
 
-    def resolve(alias: str) -> list[str]:
-        target = alias.lower()
-        matches: list[str] = []
-        try:
-            nodes = graph_store.query(limit=2000)
-        except Exception as exc:
-            logger.exception("alias_resolver_query_failed", alias=alias)
-            _raise_internal(
-                f"alias resolver graph query failed: {exc}",
-                cause=exc,
-                data={"alias": alias},
-            )
-        for node in nodes:
-            name = str(node.get("name", "")).lower()
-            if name == target:
-                entity_id = node.get("entity_id") or node.get("id")
-                if entity_id:
-                    matches.append(str(entity_id))
-        return matches
+    def _raise_scan_error(exc: Exception, mention: str) -> None:
+        _raise_internal(
+            f"alias resolver graph query failed: {exc}",
+            cause=exc,
+            data={"alias": mention},
+        )
 
-    return resolve
+    return build_name_alias_resolver(
+        registry.knowledge.graph_store,
+        on_scan_error=_raise_scan_error,
+    )
 
 
 def _run_memory_extraction(

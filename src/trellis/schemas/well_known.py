@@ -37,6 +37,7 @@ data-platform types) define their own values in their own packages.
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Final
 
 import structlog
@@ -416,6 +417,35 @@ def expand_edge_kind_query(value: str) -> tuple[str, ...]:
     canonical = canonicalize_edge_kind(value)
     aliases = EDGE_KIND_ALIAS_INVERSE.get(canonical, frozenset())
     return (canonical, *sorted(aliases))
+
+
+# ---------------------------------------------------------------------------
+# Entity-name normalization
+# ---------------------------------------------------------------------------
+#
+# Lives here rather than in one of the callers because *every* path that
+# decides "is this incoming name the entity I already have?" must agree on
+# the answer — the extraction write paths, the alias index they mint into,
+# and any id-derivation helper. A second, subtly different normalizer is
+# how a graph grows seven ``hermes`` nodes.
+
+_WHITESPACE_RUN: Final = re.compile(r"\s+")
+
+
+def normalize_entity_name(value: str) -> str:
+    """Return the match key for an entity display name.
+
+    Strips leading/trailing whitespace, collapses internal whitespace runs
+    to a single space, and case-folds. Deliberately **nothing else**:
+    equality on this key is used to decide that two names denote the same
+    entity, and every extra transform widens that claim. Punctuation,
+    separators (``-`` / ``_``) and accents are left alone, so ``"alice-b"``
+    and ``"Alice B"`` stay distinct.
+
+    Idempotent. Returns ``""`` for whitespace-only input; callers should
+    treat an empty key as "not resolvable".
+    """
+    return _WHITESPACE_RUN.sub(" ", value.strip()).casefold()
 
 
 # ---------------------------------------------------------------------------

@@ -341,6 +341,46 @@ class TestExpandEdgeKindQuery:
         assert wk.expand_edge_kind_query("mentions") == ("mentions",)
 
 
+class TestNormalizeEntityName:
+    """The shared match key every identity decision agrees on."""
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("Hermes", "hermes"),
+            ("HERMES", "hermes"),
+            ("  hermes  ", "hermes"),
+            ("Hermes\tThree", "hermes three"),
+            ("Hermes   Three", "hermes three"),
+            ("Hermes\nThree", "hermes three"),
+        ],
+    )
+    def test_case_and_whitespace_fold_together(self, raw: str, expected: str) -> None:
+        assert wk.normalize_entity_name(raw) == expected
+
+    @pytest.mark.parametrize("raw", ["", "   ", "\t\n"])
+    def test_blank_input_yields_empty_key(self, raw: str) -> None:
+        assert wk.normalize_entity_name(raw) == ""
+
+    def test_idempotent(self) -> None:
+        once = wk.normalize_entity_name("  Alice   B  ")
+        assert wk.normalize_entity_name(once) == once
+
+    @pytest.mark.parametrize(
+        ("left", "right"),
+        [
+            ("alice-b", "alice b"),
+            ("alice_b", "alice b"),
+            ("alice.b", "alice b"),
+        ],
+    )
+    def test_separators_are_not_folded(self, left: str, right: str) -> None:
+        # Deliberately conservative: folding separators would merge
+        # "@alice-b" onto an unrelated "Alice B" entity, and a wrong
+        # identity merge is not recoverable.
+        assert wk.normalize_entity_name(left) != wk.normalize_entity_name(right)
+
+
 # ---------------------------------------------------------------------------
 # Observation / Measurement registration — adr-observation-entity-type.md
 # ---------------------------------------------------------------------------
