@@ -232,6 +232,73 @@ class TestClassifyOnIngest:
         assert after.get("enriched") is True
         assert after["signal_quality"] == "high"
 
+    def test_reingest_keeps_chunks_tagged(self, registry, vault, monkeypatch):
+        """The round trip that matters: editing a tagged document must not
+        un-tag its chunks. Chunks are the retrievable unit, so a wiped chunk
+        is invisible to noise-exclusion / sectioning / importance weighting —
+        exactly for the documents being actively maintained."""
+        monkeypatch.setenv(CLASSIFY_ON_INGEST_FLAG, "1")
+        note = vault / "long.md"
+        note.write_text(_long_markdown())
+        sync_corpus(registry, vault, source_system="obsidian")
+
+        store = registry.knowledge.document_store
+        parent_id = corpus_doc_id("obsidian", "long.md")
+        before = store.get(chunk_doc_id(parent_id, 0))["metadata"]
+        assert before["content_tags"]["signal_quality"]
+
+        # Edit the head of the document so every chunk shifts and is re-put.
+        # The second run classifies nothing (parent is already tagged), so the
+        # chunks' tags can only come from the parent's stored metadata.
+        note.write_text("Edited opening paragraph.\n\n" + _long_markdown())
+        sync_corpus(registry, vault, source_system="obsidian")
+
+        parent_meta = store.get(parent_id)["metadata"]
+        assert parent_meta["chunk_count"] >= 2
+        for index in range(parent_meta["chunk_count"]):
+            meta = store.get(chunk_doc_id(parent_id, index))["metadata"]
+            assert meta["content_tags"] == before["content_tags"]
+            assert meta["auto_importance"] == before["auto_importance"]
+            # And still in step with the parent they derive from.
+            assert meta["content_tags"] == parent_meta["content_tags"]
+            assert meta["auto_importance"] == parent_meta["auto_importance"]
+
+    def test_reingest_propagates_enrichment_tags_to_chunks(
+        self, registry, vault, monkeypatch
+    ):
+        """Chunk tags derive from the post-merge parent metadata, so tags the
+        LLM enrichment pass wrote onto the parent reach the chunks on the next
+        re-ingest — not just tags this run's classifier produced."""
+        monkeypatch.setenv(CLASSIFY_ON_INGEST_FLAG, "1")
+        note = vault / "long.md"
+        note.write_text(_long_markdown())
+        sync_corpus(registry, vault, source_system="obsidian")
+
+        store = registry.knowledge.document_store
+        parent_id = corpus_doc_id("obsidian", "long.md")
+        parent = store.get(parent_id)
+        store.put(
+            parent_id,
+            parent["content"],
+            metadata={
+                **parent["metadata"],
+                "content_tags": {
+                    **parent["metadata"]["content_tags"],
+                    "signal_quality": "high",
+                    "enriched": True,
+                },
+                "auto_importance": 0.91,
+            },
+        )
+
+        note.write_text("Edited opening paragraph.\n\n" + _long_markdown())
+        sync_corpus(registry, vault, source_system="obsidian")
+
+        chunk_meta = store.get(chunk_doc_id(parent_id, 0))["metadata"]
+        assert chunk_meta["content_tags"]["enriched"] is True
+        assert chunk_meta["content_tags"]["signal_quality"] == "high"
+        assert chunk_meta["auto_importance"] == 0.91
+
 
 class TestIdempotentResync:
     def test_second_run_over_unchanged_tree_is_zero_writes(self, registry, vault):
@@ -320,6 +387,39 @@ class TestIdempotentResync:
         sync_corpus(registry, vault, source_system="obsidian")
 
         assert store.get(doc_id)["metadata"]["signal_quality"] == "high"
+
+    def test_enrichment_added_chunk_metadata_survives_an_update(self, registry, vault):
+        """Chunk re-puts honour the same merge contract as the parent: keys the
+        run does not own (an earlier run's operator tags, a chunk-local flag)
+        survive instead of being rebuilt away."""
+        (vault / "long.md").write_text(_long_markdown())
+        sync_corpus(
+            registry,
+            vault,
+            source_system="obsidian",
+            extra_metadata={"team": "core"},
+        )
+        parent_id = corpus_doc_id("obsidian", "long.md")
+        store = registry.knowledge.document_store
+        chunk_id = chunk_doc_id(parent_id, 0)
+        stored = store.get(chunk_id)
+        store.put(
+            chunk_id,
+            stored["content"],
+            metadata={**stored["metadata"], "signal_quality": "high"},
+        )
+
+        # Re-ingest without the operator tag — as the parent does, the chunk
+        # keeps what this run does not supply.
+        (vault / "long.md").write_text(
+            "Edited opening paragraph.\n\n" + _long_markdown()
+        )
+        sync_corpus(registry, vault, source_system="obsidian")
+
+        chunk_meta = store.get(chunk_id)["metadata"]
+        assert chunk_meta["signal_quality"] == "high"
+        assert chunk_meta["team"] == "core"
+        assert store.get(parent_id)["metadata"]["team"] == "core"
 
 
 class TestMoveDetection:

@@ -83,6 +83,14 @@ logger = structlog.get_logger(__name__)
 
 _PRUNE_PAGE_SIZE = 500
 
+#: Parent metadata keys that propagate down to the chunk documents. Read off
+#: the *post-merge* parent metadata (see :func:`_apply_record`), never off this
+#: run's classify output, so a chunk inherits whatever the parent actually
+#: carries — tags written this run, by an earlier run, or by the LLM enrichment
+#: pass. Chunks are the retrievable unit; a chunk that loses these is invisible
+#: to noise-exclusion, sectioning and importance weighting.
+_INHERITED_CHUNK_KEYS = ("content_tags", "auto_importance")
+
 
 def sync_corpus(
     registry: StoreRegistry,
@@ -381,17 +389,17 @@ def _apply_record(
     # the same content_tags key, and enrichment tags must survive a re-put per
     # the update-merge contract above). Refreshing stale tags on edited content
     # is reclassify_stale's job, not the write path's.
-    classify_meta: dict[str, Any] = {}
     if classifier is not None and "content_tags" not in metadata:
-        classify_meta = classify_for_ingest(
-            classifier,
-            text,
-            source_system=source_system,
-            title=str(metadata.get("title") or ""),
-            doc_id=outcome.doc_id,
-            prior_importance=float(metadata.get("auto_importance", 0.0) or 0.0),
+        metadata.update(
+            classify_for_ingest(
+                classifier,
+                text,
+                source_system=source_system,
+                title=str(metadata.get("title") or ""),
+                doc_id=outcome.doc_id,
+                prior_importance=float(metadata.get("auto_importance", 0.0) or 0.0),
+            )
         )
-        metadata.update(classify_meta)
 
     doc_store.put(outcome.doc_id, text, metadata=metadata)
     outcome.chunks_written = _write_chunks(
@@ -403,7 +411,9 @@ def _apply_record(
         source_system=source_system,
         extra_metadata=extra_metadata,
         requested_by=requested_by,
-        inherited_tags=classify_meta,
+        inherited_tags={
+            key: metadata[key] for key in _INHERITED_CHUNK_KEYS if key in metadata
+        },
     )
     for index in range(len(spans), old_chunk_count):
         _delete_doc_and_vector(
@@ -455,10 +465,14 @@ def _write_chunks(
     """Write (and embed) chunk documents; skip byte-identical chunks.
 
     Returns the number of chunk docs actually written. Operator tags and the
-    parent's classify-on-write ``content_tags`` / ``auto_importance``
-    (``inherited_tags``) propagate to chunks — chunks are the retrievable
-    unit, so retrieval tag filters must see them; handler metadata stays on
-    the parent.
+    parent's ``content_tags`` / ``auto_importance`` (``inherited_tags``)
+    propagate to chunks — chunks are the retrievable unit, so retrieval tag
+    filters must see them; handler metadata stays on the parent.
+
+    Stored chunk metadata is merged *under* the freshly computed metadata, the
+    same contract the parent re-put honours: keys this run does not own (an
+    earlier run's operator tags, a chunk-local noise flag on an untagged
+    parent) survive the re-put instead of being rebuilt away.
     """
     doc_store = registry.knowledge.document_store
     written = 0
@@ -475,6 +489,7 @@ def _write_chunks(
         if not content_changed and not count_stale:
             continue
         metadata: dict[str, Any] = {
+            **((existing or {}).get("metadata") or {}),
             **extra_metadata,
             **(inherited_tags or {}),
             "source_system": source_system,
