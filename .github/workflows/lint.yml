@@ -15,7 +15,7 @@ jobs:
         with:
           python-version: "3.11"
       # Keep in sync with the ruff pin in pyproject.toml [dev] and .pre-commit-config.yaml
-      - run: pip install "ruff==0.15.16"
+      - run: pip install "ruff==0.15.22"
       - run: ruff check src/ tests/
       # Formatting drifted to 25 files before this gate existed: `make format`
       # was available but nothing enforced it, so a PR could add unformatted
