@@ -14,6 +14,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from trellis.classify.ingest import CLASSIFY_ON_INGEST_FLAG
 from trellis.ingest_corpus.models import chunk_doc_id, corpus_doc_id
 from trellis.ingest_corpus.sync import sync_corpus
 from trellis.retrieve.embed_ingest_hook import EMBED_ON_INGEST_FLAG
@@ -132,6 +133,104 @@ class TestFirstRun:
         for doc in (parent, chunk):
             assert doc["metadata"]["domain"] == "ops"
             assert doc["metadata"]["team"] == "core"
+
+
+class TestClassifyOnIngest:
+    """Classify-on-write (flag-gated): ingested documents carry content_tags
+    from the first write, so noise-exclusion / sectioning / importance have
+    signal to work with instead of an all-untagged store."""
+
+    def test_disabled_by_default_stores_no_content_tags(self, registry, vault):
+        # No flag set — behaviour is exactly as before this feature.
+        sync_corpus(registry, vault, source_system="obsidian")
+        doc = registry.knowledge.document_store.get(
+            corpus_doc_id("obsidian", "note-a.md")
+        )
+        assert "content_tags" not in doc["metadata"]
+        assert "auto_importance" not in doc["metadata"]
+
+    def test_enabled_tags_parent_and_chunks(self, registry, vault, monkeypatch):
+        monkeypatch.setenv(CLASSIFY_ON_INGEST_FLAG, "1")
+        (vault / "long.md").write_text(_long_markdown())
+        sync_corpus(registry, vault, source_system="obsidian")
+
+        parent_id = corpus_doc_id("obsidian", "long.md")
+        parent = registry.knowledge.document_store.get(parent_id)
+        chunk = registry.knowledge.document_store.get(chunk_doc_id(parent_id, 0))
+        for doc in (parent, chunk):
+            ct = doc["metadata"]["content_tags"]
+            # The full-document classification is stamped on the parent and
+            # propagated to the chunk (the retrievable unit), so both carry the
+            # same signal_quality and freshness stamp.
+            assert ct["signal_quality"]
+            assert ct["classified_at"]
+            assert "auto_importance" in doc["metadata"]
+        # Chunk inherits the parent's tags rather than being classified alone
+        # (a short chunk in isolation would be marked low-signal).
+        assert (
+            chunk["metadata"]["content_tags"]["signal_quality"]
+            == parent["metadata"]["content_tags"]["signal_quality"]
+        )
+
+    def test_enabled_does_not_auto_set_domain_facet(self, registry, vault, monkeypatch):
+        monkeypatch.setenv(CLASSIFY_ON_INGEST_FLAG, "1")
+        # Content the keyword/source-system classifiers would domain-tag.
+        (vault / "infra.md").write_text(
+            "# infra\n\n" + ("kubernetes helm terraform deployment pipeline. " * 40)
+        )
+        sync_corpus(registry, vault, source_system="obsidian")
+        doc = registry.knowledge.document_store.get(
+            corpus_doc_id("obsidian", "infra.md")
+        )
+        # The hard-excluding facet is not auto-persisted.
+        assert doc["metadata"]["content_tags"]["domain"] == []
+
+    def test_explicit_operator_domain_survives_classification(
+        self, registry, vault, monkeypatch
+    ):
+        monkeypatch.setenv(CLASSIFY_ON_INGEST_FLAG, "1")
+        sync_corpus(
+            registry,
+            vault,
+            source_system="obsidian",
+            extra_metadata={"domain": "personal"},
+        )
+        doc = registry.knowledge.document_store.get(
+            corpus_doc_id("obsidian", "note-a.md")
+        )
+        # Operator's explicit scalar domain is a separate key from the dropped
+        # content_tags.domain facet — it is untouched by classify-on-write.
+        assert doc["metadata"]["domain"] == "personal"
+        assert doc["metadata"]["content_tags"]["domain"] == []
+
+    def test_reingest_preserves_existing_content_tags(
+        self, registry, vault, monkeypatch
+    ):
+        """Fill-if-absent: a re-ingest must not clobber tags a prior run or the
+        enrichment pass already wrote (both persist to content_tags)."""
+        monkeypatch.setenv(CLASSIFY_ON_INGEST_FLAG, "1")
+        note = vault / "note-a.md"
+        sync_corpus(registry, vault, source_system="obsidian")
+        doc_id = corpus_doc_id("obsidian", "note-a.md")
+        store = registry.knowledge.document_store
+
+        # Simulate an enrichment pass promoting the tags to high-confidence.
+        doc = store.get(doc_id)
+        meta = dict(doc["metadata"])
+        meta["content_tags"] = {
+            **meta["content_tags"],
+            "signal_quality": "high",
+            "enriched": True,
+        }
+        store.put(doc_id, doc["content"], meta)
+
+        # Edit the file so the next sync is an update (re-put), not a skip.
+        note.write_text("---\ntitle: Note A\n---\n\nAlpha content EDITED [[Link]].\n")
+        sync_corpus(registry, vault, source_system="obsidian")
+
+        after = store.get(doc_id)["metadata"]["content_tags"]
+        assert after.get("enriched") is True
+        assert after["signal_quality"] == "high"
 
 
 class TestIdempotentResync:
