@@ -2,6 +2,7 @@
 
 from trellis.schemas.advisory import Advisory, AdvisoryCategory, AdvisoryEvidence
 from trellis.schemas.classification import (
+    CONTENT_TYPE_VALUES,
     ContentTags,
     DataClassification,
     Lifecycle,
@@ -9,6 +10,7 @@ from trellis.schemas.classification import (
     RetrievalAffinity,
     Sensitivity,
 )
+from trellis.schemas.document_metadata import DocumentMetadata, document_form_of
 from trellis.schemas.entity import Entity, EntityAlias, EntitySource, GenerationSpec
 from trellis.schemas.enums import (
     EdgeKind,
@@ -72,6 +74,7 @@ from trellis.schemas.trace import (
 from trellis.schemas.trace_builder import TracePayloadBuilder
 
 __all__ = [
+    "CONTENT_TYPE_VALUES",
     "INTENT_FAMILIES",
     "PHASES",
     "Advisory",
@@ -83,6 +86,7 @@ __all__ = [
     "ComponentOutcome",
     "ContentTags",
     "DataClassification",
+    "DocumentMetadata",
     "Edge",
     "EdgeDraft",
     "EdgeKind",
@@ -134,4 +138,5 @@ __all__ = [
     "TracePayloadBuilder",
     "TraceSource",
     "TraceStep",
+    "document_form_of",
 ]

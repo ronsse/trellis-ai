@@ -49,6 +49,15 @@ DEFAULT_SOURCE_SYSTEM = "claude-ai"
 #: Member read out of a ``.zip`` export.
 _EXPORT_MEMBER = "conversations.json"
 
+#: Provenance stamp on every document this reader writes, under
+#: :attr:`~trellis.schemas.document_metadata.DocumentMetadata.document_form`.
+#: It used to be written to a flat ``content_type`` key, which collided with
+#: the closed ``ContentTags.content_type`` facet — "conversation" is a *form*
+#: of document, not a shape of information. See
+#: :mod:`trellis.schemas.document_metadata` for the reconciliation and for what
+#: happens to conversations already stored under the old key.
+CONVERSATION_DOCUMENT_FORM = "conversation"
+
 # claude.ai exports label the person "human"; the API uses "user" — both
 # are you. "assistant"/"model" are the reply side.
 _SPEAKER_LABELS = {
@@ -225,7 +234,7 @@ def _conversation_record(
     metadata: dict[str, Any] = {
         "conversation_id": conversation_id,
         "title": title,
-        "content_type": "conversation",
+        "document_form": CONVERSATION_DOCUMENT_FORM,
         "message_count": len(turns),
     }
     for key in ("created_at", "updated_at"):

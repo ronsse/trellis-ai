@@ -16,6 +16,7 @@ from trellis.ingest_corpus.conversations import (
     sync_conversations,
 )
 from trellis.retrieve.embed_ingest_hook import EMBED_ON_INGEST_FLAG
+from trellis.schemas.document_metadata import document_form_of
 from trellis.stores.base.event_log import EventType
 from trellis.stores.sqlite.document import SQLiteDocumentStore
 from trellis.stores.sqlite.event_log import SQLiteEventLog
@@ -98,7 +99,8 @@ class TestReader:
         assert rec.doc_id == conversation_doc_id("claude-ai", "conv-1")
         assert rec.handler_metadata["title"] == "Retirement planning"
         assert rec.handler_metadata["message_count"] == 2
-        assert rec.handler_metadata["content_type"] == "conversation"
+        assert rec.handler_metadata["document_form"] == "conversation"
+        assert "content_type" not in rec.handler_metadata
         assert rec.handler_metadata["created_at"] == "2026-06-01T10:00:00Z"
         assert "**You:** Set up custodial Roths" in rec.content
         assert "**Claude:** You'll need earned income" in rec.content
@@ -190,7 +192,8 @@ class TestSyncConversations:
         doc = registry.knowledge.document_store.get(
             conversation_doc_id("claude-ai", "conv-1")
         )
-        assert doc["metadata"]["content_type"] == "conversation"
+        assert doc["metadata"]["document_form"] == "conversation"
+        assert document_form_of(doc["metadata"]) == "conversation"
 
         stored = registry.operational.event_log.get_events(
             event_type=EventType.MEMORY_STORED
@@ -285,6 +288,38 @@ class TestSyncConversations:
         report = sync_conversations(registry, src, dry_run=True)
         assert report.counts()["ingested"] == 1
         assert registry.knowledge.document_store.count() == 0
+
+    def test_conversation_stored_under_the_old_shape_still_reads(
+        self, registry, tmp_path: Path
+    ):
+        # A conversation ingested before the content_type → document_form
+        # reconciliation, exactly as it sits in the store today. It must stay
+        # readable, and the next re-sync must migrate it without touching any
+        # other key.
+        doc_id = conversation_doc_id("claude-ai", "conv-1")
+        legacy_metadata = {
+            "conversation_id": "conv-1",
+            "title": "Retirement planning",
+            "content_type": "conversation",
+            "message_count": 2,
+            "source_system": "claude-ai",
+            "source_path": "Retirement planning",
+        }
+        registry.knowledge.document_store.put(
+            doc_id, "stale body", metadata=legacy_metadata
+        )
+        stored = registry.knowledge.document_store.get(doc_id)["metadata"]
+        assert document_form_of(stored) == "conversation"
+
+        report = sync_conversations(registry, _write_export(tmp_path, [_CONV_OLD]))
+        assert report.counts()["updated"] == 1
+
+        metadata = registry.knowledge.document_store.get(doc_id)["metadata"]
+        assert metadata["document_form"] == "conversation"
+        assert "content_type" not in metadata
+        assert metadata["conversation_id"] == "conv-1"
+        assert metadata["message_count"] == 2
+        assert document_form_of(metadata) == "conversation"
 
     def test_extract_off_by_default(self, registry, tmp_path: Path):
         # Without the env flag / --extract, no extraction runs and the

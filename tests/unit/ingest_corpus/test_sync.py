@@ -408,6 +408,111 @@ class TestClassifyOnIngest:
         assert any(is_chunk_doc_id(hit["doc_id"]) for hit in hits)
 
 
+class TestMetadataValidationSeam:
+    """The ingest seam is where document metadata is validated.
+
+    Shape-preserving by design — see
+    :mod:`trellis.schemas.document_metadata`. These tests pin the two
+    properties that make partial adoption safe: arbitrary frontmatter still
+    stores flat, and the only rewrite is the reconciled provenance key.
+    """
+
+    def test_arbitrary_frontmatter_stores_flat_and_unchanged(
+        self, registry, tmp_path: Path
+    ):
+        root = tmp_path / "frontmatter"
+        root.mkdir()
+        (root / "note.md").write_text(
+            "---\n"
+            "title: Odd Note\n"
+            "rating: 4.5\n"
+            "aliases:\n  - alt\n"
+            "sprint: 14\n"
+            "---\n\nBody.\n"
+        )
+        sync_corpus(registry, root, source_system="obsidian")
+
+        metadata = registry.knowledge.document_store.get(
+            corpus_doc_id("obsidian", "note.md")
+        )["metadata"]
+        assert metadata["title"] == "Odd Note"
+        assert metadata["rating"] == 4.5
+        assert metadata["aliases"] == ["alt"]
+        assert metadata["sprint"] == 14
+        assert "custom" not in metadata
+
+    def test_non_string_title_does_not_break_ingest(self, registry, tmp_path: Path):
+        root = tmp_path / "odd-title"
+        root.mkdir()
+        (root / "year.md").write_text("---\ntitle: 2026\n---\n\nBody.\n")
+        report = sync_corpus(registry, root, source_system="obsidian")
+
+        assert report.counts()["ingested"] == 1
+        metadata = registry.knowledge.document_store.get(
+            corpus_doc_id("obsidian", "year.md")
+        )["metadata"]
+        # YAML parses a bare 2026 as an int; the value is preserved verbatim
+        # (demoted to `custom`, re-flattened) rather than coerced or dropped.
+        assert metadata["title"] == 2026
+
+    def test_foreign_flat_content_type_is_reconciled_on_write(
+        self, registry, tmp_path: Path
+    ):
+        # An operator ``--tag content_type=conversation`` is the same drift the
+        # conversation reader used to produce; the seam normalises it.
+        root = tmp_path / "tagged"
+        root.mkdir()
+        (root / "note.md").write_text("Body.\n")
+        sync_corpus(
+            registry,
+            root,
+            source_system="obsidian",
+            extra_metadata={"content_type": "conversation"},
+        )
+
+        metadata = registry.knowledge.document_store.get(
+            corpus_doc_id("obsidian", "note.md")
+        )["metadata"]
+        assert metadata["document_form"] == "conversation"
+        assert "content_type" not in metadata
+
+    def test_in_vocabulary_flat_content_type_is_left_alone(
+        self, registry, tmp_path: Path
+    ):
+        root = tmp_path / "faceted"
+        root.mkdir()
+        (root / "note.md").write_text("Body.\n")
+        sync_corpus(
+            registry,
+            root,
+            source_system="obsidian",
+            extra_metadata={"content_type": "decision"},
+        )
+
+        metadata = registry.knowledge.document_store.get(
+            corpus_doc_id("obsidian", "note.md")
+        )["metadata"]
+        assert metadata["content_type"] == "decision"
+        assert "document_form" not in metadata
+
+    def test_chunk_metadata_is_validated_too(self, registry, tmp_path: Path):
+        root = tmp_path / "chunked"
+        root.mkdir()
+        (root / "long.md").write_text(_long_markdown())
+        sync_corpus(
+            registry,
+            root,
+            source_system="obsidian",
+            extra_metadata={"content_type": "conversation"},
+        )
+
+        parent_id = corpus_doc_id("obsidian", "long.md")
+        chunk = registry.knowledge.document_store.get(chunk_doc_id(parent_id, 0))
+        assert chunk["metadata"]["document_form"] == "conversation"
+        assert "content_type" not in chunk["metadata"]
+        assert chunk["metadata"]["char_span"][0] == 0
+
+
 class TestIdempotentResync:
     def test_second_run_over_unchanged_tree_is_zero_writes(self, registry, vault):
         (vault / "long.md").write_text(_long_markdown())
