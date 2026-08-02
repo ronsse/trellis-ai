@@ -1184,6 +1184,11 @@ components:
         intent:
           title: Intent
           type: string
+        intent_family:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Intent Family
         max_items:
           default: 50
           title: Max Items
@@ -1192,6 +1197,11 @@ components:
           default: 8000
           title: Max Tokens
           type: integer
+        run_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Run Id
         tag_filters:
           anyOf:
           - additionalProperties:
@@ -1517,6 +1527,16 @@ components:
         intent:
           title: Intent
           type: string
+        intent_family:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Intent Family
+        run_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Run Id
         sections:
           items:
             additionalProperties: true
