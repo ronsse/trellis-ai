@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
 from trellis.schemas.pack import PackItem, RejectedItem
 
@@ -57,9 +57,31 @@ _MIN_BOUNDARY_FRACTION = 0.5
 #: ends.
 _SENTENCE_END_RE = re.compile(r"[.!?…](?=\s|$)")
 
+#: Last whitespace run in a window, plus the partial token trailing it. The
+#: match *start* is the index the word boundary sits at.
+_LAST_WORD_BREAK_RE = re.compile(r"\s\S*$")
+
 #: Word-ish token for substance counting. Keeps intra-word apostrophes and
 #: hyphens together so "trellis-ai" and "don't" each count once.
 _WORD_RE = re.compile(r"[\w'-]+")
+
+#: Scripts written without inter-word spacing — CJK ideographs, kana, Thai.
+#: ``\w`` matches these, so a whole Japanese sentence tokenises as a *single*
+#: word and a perfectly substantive memory would read as substance-free.
+#: :func:`count_substance_words` counts their characters individually
+#: instead. That keeps the two populations separated in these scripts too: a
+#: sentence runs to a dozen-plus distinct characters, a bare personal or
+#: product name to two-to-four. (Hangul is deliberately excluded — Korean is
+#: written with spaces, so the word tokenizer already handles it.)
+_UNSPACED_SCRIPT_RE = re.compile(
+    "["
+    "\u0e00-\u0e7f"  # Thai
+    "\u3040-\u30ff"  # hiragana + katakana
+    "\u3400-\u4dbf"  # CJK unified ideographs extension A
+    "\u4e00-\u9fff"  # CJK unified ideographs
+    "\uf900-\ufaff"  # CJK compatibility ideographs
+    "]"
+)
 
 #: Distinct words below which an item is considered substance-free.
 #: Calibrated against the two populations this has to separate: a graph
@@ -71,12 +93,26 @@ _WORD_RE = re.compile(r"[\w'-]+")
 DEFAULT_MIN_DISTINCT_WORDS = 5
 
 #: Multiplier applied to a thin item's relevance score in ``penalize``
-#: mode. Chosen against :class:`~trellis.retrieve.strategies.GraphSearch`'s
-#: position decay (0.05 per rank): 0.35 demotes a top-ranked stub to
-#: roughly the score of the 13th substantive node — past everything with
-#: real content, but still ahead of the tail, so a thin pool can still
-#: serve it.
+#: mode. Calibrated against
+#: :class:`~trellis.retrieve.strategies.GraphSearch`'s position decay (0.05
+#: per rank), which is where the stub population actually comes from: 0.35
+#: demotes a top-ranked stub to roughly the score of the 13th substantive
+#: node — past everything with real content, but still ahead of the tail,
+#: so a thin pool can still serve it. That rank arithmetic is specific to
+#: GraphSearch's 1.0-based scale. Because the floor *multiplies*, its
+#: effect on unbounded BM25 scores, on cosine similarity, and on the
+#: reciprocal-rank sums a reranker substitutes is a fixed ratio rather than
+#: a fixed rank displacement — the demotion always holds, the "13th node"
+#: figure does not generalise.
 DEFAULT_CONTENT_FLOOR_PENALTY = 0.35
+
+#: Item types whose excerpt is assembled from structured fields rather than
+#: free text, so a low distinct-word count describes the *shape* of the item
+#: and not an absence of content. Observation-plane items are exempt by
+#: default: a Measurement's excerpt is rendered as "row_count = 41823" —
+#: complete, and two distinct words by construction — so without an
+#: exemption the floor would demote the entire class on every build forever.
+DEFAULT_FLOOR_EXEMPT_ITEM_TYPES = frozenset({"observation"})
 
 #: Rejection reason recorded when ``mode="exclude"`` drops an item.
 CONTENT_FLOOR_REJECTION_REASON = "content_floor"
@@ -128,9 +164,13 @@ def truncate_excerpt(
     if sentence_ends:
         cut = sentence_ends[-1]
     if cut < keep_at_least:
+        # The retention guard applies to *both* boundary kinds. Discarding
+        # the too-early sentence cut here is what lets the hard-cut fallback
+        # below fire when neither boundary retains enough — otherwise a
+        # "Note. " prefix in front of an unbroken 600-character token would
+        # collapse the excerpt to six characters.
         word_end = _last_word_boundary(window)
-        if word_end >= keep_at_least:
-            cut = word_end
+        cut = word_end if word_end >= keep_at_least else -1
     if cut <= 0:
         cut = budget
 
@@ -148,10 +188,8 @@ def _last_word_boundary(window: str) -> int:
         # ``window`` already ends on a whitespace run, so the cut lands on
         # a word boundary as-is and the full budget is usable.
         return len(stripped)
-    for index in range(len(stripped) - 1, -1, -1):
-        if stripped[index].isspace():
-            return index
-    return -1
+    match = _LAST_WORD_BREAK_RE.search(stripped)
+    return match.start() if match else -1
 
 
 def count_substance_words(text: str) -> int:
@@ -163,16 +201,25 @@ def count_substance_words(text: str) -> int:
     or a padded stub can score high on characters. Case-folded, so
     ``"Trellis trellis"`` counts once. Tokens with no alphanumeric
     character (a stray ``-``) do not count.
+
+    Runs of :data:`_UNSPACED_SCRIPT_RE` characters are counted per
+    character rather than as one token, so a Japanese or Thai memory is
+    scored on what it says rather than on the fact that its script does
+    not use spaces.
     """
-    if not text:
-        return 0
-    return len(
-        {
-            token.lower()
-            for token in _WORD_RE.findall(text)
-            if any(char.isalnum() for char in token)
-        }
-    )
+    units: set[str] = set()
+    for token in _WORD_RE.findall(text):
+        if not any(char.isalnum() for char in token):
+            continue
+        unspaced = _UNSPACED_SCRIPT_RE.findall(token)
+        if not unspaced:
+            units.add(token.lower())
+            continue
+        units.update(unspaced)
+        remainder = _UNSPACED_SCRIPT_RE.sub("", token)
+        if remainder:
+            units.add(remainder.lower())
+    return len(units)
 
 
 @dataclass(frozen=True)
@@ -191,11 +238,16 @@ class ContentFloorConfig:
       hide short-and-good content; opt in deliberately.
     * ``"off"`` — no-op. Kept so the floor can be disabled without
       threading ``None`` through every call site.
+
+    ``exempt_item_types`` skips the measurement entirely for item types
+    whose excerpt is structured rather than prose — see
+    :data:`DEFAULT_FLOOR_EXEMPT_ITEM_TYPES`.
     """
 
     min_distinct_words: int = DEFAULT_MIN_DISTINCT_WORDS
     mode: ContentFloorMode = "penalize"
     penalty: float = DEFAULT_CONTENT_FLOOR_PENALTY
+    exempt_item_types: frozenset[str] = DEFAULT_FLOOR_EXEMPT_ITEM_TYPES
 
     def __post_init__(self) -> None:
         if self.min_distinct_words < 0:
@@ -204,8 +256,10 @@ class ContentFloorConfig:
         if not 0.0 <= self.penalty <= 1.0:
             msg = f"penalty must be in [0.0, 1.0]; got {self.penalty!r}"
             raise ValueError(msg)
-        if self.mode not in ("penalize", "exclude", "off"):
-            msg = f"mode must be one of 'penalize', 'exclude', 'off'; got {self.mode!r}"
+        modes = get_args(ContentFloorMode)
+        if self.mode not in modes:
+            allowed = ", ".join(repr(m) for m in modes)
+            msg = f"mode must be one of {allowed}; got {self.mode!r}"
             raise ValueError(msg)
 
 
@@ -234,6 +288,7 @@ class ContentFloorResult:
             "mode": self.config.mode,
             "min_distinct_words": self.config.min_distinct_words,
             "penalty": self.config.penalty,
+            "exempt_item_types": sorted(self.config.exempt_item_types),
             "penalized_count": len(self.penalized_item_ids),
             "penalized_item_ids": list(self.penalized_item_ids),
             "excluded_count": len(self.rejected),
@@ -246,6 +301,9 @@ def apply_content_floor(
     config: ContentFloorConfig = DEFAULT_CONTENT_FLOOR,
 ) -> ContentFloorResult:
     """Demote (or drop) items whose excerpt carries too little substance.
+
+    Items whose ``item_type`` is in ``config.exempt_item_types`` are passed
+    through unmeasured — their excerpts are structured, not prose.
 
     Item order is preserved; callers sort by ``relevance_score``
     afterwards so the penalty takes effect. Penalised items carry
@@ -261,6 +319,9 @@ def apply_content_floor(
     rejected: list[RejectedItem] = []
     penalized_ids: list[str] = []
     for item in items:
+        if item.item_type in config.exempt_item_types:
+            kept.append(item)
+            continue
         words = count_substance_words(item.excerpt or "")
         if words >= config.min_distinct_words:
             kept.append(item)
@@ -308,6 +369,7 @@ __all__ = [
     "CONTENT_FLOOR_REJECTION_REASON",
     "DEFAULT_CONTENT_FLOOR",
     "DEFAULT_CONTENT_FLOOR_PENALTY",
+    "DEFAULT_FLOOR_EXEMPT_ITEM_TYPES",
     "DEFAULT_MIN_DISTINCT_WORDS",
     "EXCERPT_ELLIPSIS",
     "EXCERPT_MAX_CHARS",

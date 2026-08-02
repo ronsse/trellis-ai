@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from trellis.retrieve.excerpts import (
+from trellis.retrieve import (
     DEFAULT_CONTENT_FLOOR_PENALTY,
     DEFAULT_MIN_DISTINCT_WORDS,
     EXCERPT_ELLIPSIS,
@@ -17,6 +17,7 @@ from trellis.retrieve.excerpts import (
     count_substance_words,
     truncate_excerpt,
 )
+from trellis.retrieve.excerpts import _MIN_BOUNDARY_FRACTION
 from trellis.retrieve.pack_builder import PackBuilder
 from trellis.retrieve.strategies import SearchStrategy
 from trellis.schemas.pack import PackBudget, PackItem
@@ -38,8 +39,16 @@ _LONG_PROSE = (
 )
 
 
-def _assert_clean_break(source: str, result: str) -> None:
-    """Assert ``result`` is a truncation of ``source`` on a clean boundary."""
+def _assert_clean_break(
+    source: str, result: str, limit: int = EXCERPT_MAX_CHARS
+) -> None:
+    """Assert ``result`` is a truncation of ``source`` on a clean boundary.
+
+    Checks the *lower* bound as well as the upper one. Without it a
+    boundary search that collapses a 500-character excerpt to "See.…" still
+    reads as a clean break — the failure this helper exists to catch cuts
+    both ways.
+    """
     assert result.endswith(EXCERPT_ELLIPSIS)
     body = result[: -len(EXCERPT_ELLIPSIS)]
     assert source.startswith(body), "truncation must be a prefix of the source"
@@ -49,6 +58,10 @@ def _assert_clean_break(source: str, result: str) -> None:
     # token (so we did not cut mid-word), or we stopped on a sentence end.
     assert remainder[:1].isspace() or body[-1:] in ".!?…", (
         f"cut mid-word: ...{body[-20:]!r} | {remainder[:20]!r}"
+    )
+    floor = int((limit - len(EXCERPT_ELLIPSIS)) * _MIN_BOUNDARY_FRACTION)
+    assert len(result) >= floor, (
+        f"boundary retained only {len(result)} of {limit} chars: {result!r}"
     )
 
 
@@ -78,7 +91,7 @@ class TestTruncateExcerpt:
         for limit in range(20, len(_LONG_PROSE)):
             result = truncate_excerpt(_LONG_PROSE, limit)
             assert len(result) <= limit
-            _assert_clean_break(_LONG_PROSE, result)
+            _assert_clean_break(_LONG_PROSE, result, limit)
 
     def test_prefers_sentence_boundary(self) -> None:
         text = "First sentence here. " + "tail " * 60
@@ -96,7 +109,7 @@ class TestTruncateExcerpt:
         text = "Ok. " + "alpha beta gamma delta epsilon zeta eta theta"
         result = truncate_excerpt(text, 30)
         assert result.startswith("Ok. alpha")
-        _assert_clean_break(text, result)
+        _assert_clean_break(text, result, 30)
 
     def test_unbroken_token_falls_back_to_a_hard_cut(self) -> None:
         """A single giant token has no clean break — cut, but still mark it."""
@@ -105,10 +118,32 @@ class TestTruncateExcerpt:
         assert len(result) == 100
         assert result.endswith(EXCERPT_ELLIPSIS)
 
+    @pytest.mark.parametrize(
+        "tail",
+        [
+            "x" * 600,  # a single unbroken token
+            "https://example.invalid/" + "a" * 580,  # a signed-URL shape
+            ".".join(["trellis"] * 80),  # a long dotted path
+            '{"a":1,"b":2,' + '"c":3,' * 90 + "}",  # minified JSON
+        ],
+        ids=["unbroken", "url", "dotted-path", "minified-json"],
+    )
+    def test_early_sentence_end_never_guts_the_excerpt(self, tail: str) -> None:
+        """Both boundary kinds are subject to the retention guard.
+
+        The regression: an early sentence terminator was kept even when the
+        word-boundary fallback was *also* too early, so the documented hard
+        cut never ran and a 500-char excerpt collapsed to "Ingest failed.…".
+        """
+        text = "Ingest failed. " + tail
+        result = truncate_excerpt(text)
+        assert len(result) > EXCERPT_MAX_CHARS * _MIN_BOUNDARY_FRACTION
+        assert len(result) <= EXCERPT_MAX_CHARS
+
     def test_does_not_split_a_decimal_or_dotted_path(self) -> None:
         text = "Version 1.2.3 of trellis.retrieve.pack_builder " + "word " * 60
         result = truncate_excerpt(text, 60)
-        _assert_clean_break(text, result)
+        _assert_clean_break(text, result, 60)
         assert "1.2." not in result.removeprefix("Version 1.2.3")
 
     def test_whitespace_exactly_at_the_cut_uses_the_full_budget(self) -> None:
@@ -186,6 +221,23 @@ class TestCountSubstanceWords:
 
     def test_punctuation_only_tokens_do_not_count(self) -> None:
         assert count_substance_words("- - -") == 0
+
+    def test_japanese_sentence_clears_the_floor(self) -> None:
+        """Scripts without inter-word spacing tokenise as one ``\\w`` run.
+
+        Counting that run as a single word demoted every non-English memory
+        to stub rank *and* recorded ``substance_words=1`` in telemetry —
+        an assertion that the item is empty, which is simply wrong.
+        """
+        memory = "デプロイ前にキューをドレインすること。"
+        assert count_substance_words(memory) >= DEFAULT_MIN_DISTINCT_WORDS
+
+    def test_japanese_name_still_reads_as_a_stub(self) -> None:
+        """Per-character counting must not let bare names through."""
+        assert count_substance_words("田中太郎") < DEFAULT_MIN_DISTINCT_WORDS
+
+    def test_mixed_script_counts_both_halves(self) -> None:
+        assert count_substance_words("trellis admin init を実行") == 6
 
     def test_real_one_line_gotcha_clears_the_floor(self) -> None:
         gotcha = (
@@ -275,6 +327,34 @@ class TestApplyContentFloor:
         assert result.rejected[0].reason == "content_floor"
         assert result.rejected[0].strategy_source == "graph"
 
+    def test_exempt_item_type_is_never_measured(self) -> None:
+        """A Measurement excerpt is terse by construction, not by emptiness.
+
+        ``MeasurementRecordHandler`` writes no ``content`` property, so the
+        excerpt renders as "row_count = 41823" — two distinct words for
+        *every* Measurement ever served. Without the exemption the floor
+        demotes the whole item class on every build, permanently.
+        """
+        item = PackItem(
+            item_id="m1",
+            item_type="observation",
+            excerpt="row_count = 41823 rows",
+            relevance_score=1.0,
+        )
+        result = apply_content_floor([item])
+        assert result.items == [item]
+        assert result.penalized_item_ids == []
+
+    def test_exemption_can_be_lifted(self) -> None:
+        item = PackItem(
+            item_id="m1",
+            item_type="observation",
+            excerpt="row_count = 41823",
+            relevance_score=1.0,
+        )
+        config = ContentFloorConfig(exempt_item_types=frozenset())
+        assert apply_content_floor([item], config).penalized_item_ids == ["m1"]
+
     def test_off_mode_is_a_noop(self) -> None:
         config = ContentFloorConfig(mode="off")
         items = [_floor_item("n1", "Nathan Ronsse")]
@@ -338,11 +418,26 @@ class TestPackBuilderContentFloor:
         )
 
     def test_terse_item_survives_a_budget_squeeze_when_nothing_competes(self) -> None:
-        strategy = _strategy("kw", [_floor_item("gotcha", _TERSE_BUT_REAL, score=0.5)])
-        pack = PackBuilder(strategies=[strategy]).build(
-            "q", budget=PackBudget(max_items=1, max_tokens=100)
-        )
-        assert len(pack.items) == 1
+        """The default mode is the difference between served and deleted.
+
+        Asserting only that the item survives is not discriminating — it
+        survives with the floor switched off too. Running the same pack
+        under ``mode="exclude"`` and asserting it comes back *empty* is what
+        pins "penalize never starves a thin pool" as a real property.
+        """
+        budget = PackBudget(max_items=1, max_tokens=100)
+
+        def build(floor: ContentFloorConfig | None) -> list[str]:
+            strategy = _strategy(
+                "kw", [_floor_item("gotcha", _TERSE_BUT_REAL, score=0.5)]
+            )
+            pack = PackBuilder(strategies=[strategy], content_floor=floor).build(
+                "q", budget=budget
+            )
+            return [item.item_id for item in pack.items]
+
+        assert build(None) == ["gotcha"]
+        assert build(ContentFloorConfig(mode="exclude")) == []
 
     def test_exclude_mode_records_a_rejected_item(self) -> None:
         strategy = _strategy(
@@ -427,6 +522,35 @@ class TestContentFloorTelemetry:
             assert [r["reason"] for r in rejected] == ["content_floor"]
         finally:
             event_log.close()
+
+    def test_sectioned_exclusion_is_recorded_on_the_section_report(self) -> None:
+        """The returned object must be self-describing, not only the event.
+
+        The floor runs over the shared pool before section assignment, so a
+        dropped item has no single "best" section; it is recorded on every
+        section whose filter it matched — every report where its absence
+        would otherwise be unexplained.
+        """
+        from trellis.schemas.pack import SectionRequest
+
+        strategy = _strategy(
+            "kw",
+            [
+                _floor_item("stub", _STUB_EXCERPT, score=1.0),
+                _floor_item("real", _SUBSTANTIVE_EXCERPT, score=0.6),
+            ],
+        )
+        builder = PackBuilder(
+            strategies=[strategy],
+            content_floor=ContentFloorConfig(mode="exclude"),
+        )
+        sectioned = builder.build_sectioned(
+            "q", sections=[SectionRequest(name="all", max_items=5, max_tokens=5000)]
+        )
+        section = sectioned.sections[0]
+        assert [item.item_id for item in section.items] == ["real"]
+        rejected = section.retrieval_report.rejected_items
+        assert [(r.item_id, r.reason) for r in rejected] == [("stub", "content_floor")]
 
     def test_sectioned_pack_emits_the_floor_summary(self, tmp_path: Path) -> None:
         from trellis.schemas.pack import SectionRequest

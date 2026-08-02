@@ -769,11 +769,14 @@ class PackBuilder:
                 )
                 raise PackAssemblyError(msg, strategy_failures) from exc
 
-        # 3c. Content floor over the shared pool — mirrors build(). As with
-        # semantic dedup above, per-section reports are built later from the
-        # collapsed pool, so exclusion *records* aren't threaded into section
-        # RetrievalReports; the counts ride the sectioned PACK_ASSEMBLED emit.
+        # 3c. Content floor over the shared pool — mirrors build(). The floor
+        # runs before items are assigned to sections, so a dropped item has
+        # no single "best" section to be attributed to; it is recorded on
+        # every section whose filter it matched, i.e. every report where its
+        # absence would otherwise be unexplained.
         floor_result = apply_content_floor(deduped, self._content_floor)
+        floor_rejections = {r.item_id: r for r in floor_result.rejected}
+        floor_dropped = [i for i in deduped if i.item_id in floor_rejections]
         deduped = floor_result.items
 
         # 4. Fill each section independently
@@ -834,6 +837,11 @@ class PackBuilder:
                 candidates_found=len(raw_sections.get(section_req.name, [])),
                 items_selected=len(annotated),
                 strategies_used=strategies_used,
+                rejected_items=[
+                    floor_rejections[item.item_id]
+                    for item in floor_dropped
+                    if mapper.matches_section(item, section_req)
+                ],
             )
 
             pack_sections.append(

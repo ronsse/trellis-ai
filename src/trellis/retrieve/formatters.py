@@ -11,13 +11,27 @@ from trellis.schemas.advisory import Advisory
 
 logger = structlog.get_logger(__name__)
 
+#: Marker for response-level trimming. Plain ASCII, unlike the excerpt
+#: ellipsis — these strings are rendered markdown, not pack item previews.
+_TRIM_MARKER = "..."
+
 
 def _truncate_to_tokens(text: str, max_tokens: int) -> str:
-    """Truncate text to fit within token budget."""
+    """Truncate text to fit within token budget.
+
+    Deliberately *not*
+    :func:`~trellis.retrieve.excerpts.truncate_excerpt`: this is a
+    last-resort budget enforcer over a whole rendered response, where
+    retaining the maximum number of characters matters more than a
+    readable break, whereas an excerpt is a preview where the opposite is
+    true. The marker is charged against the budget rather than appended on
+    top of it, so a function documented as trimming *to fit* no longer
+    overshoots the limit it enforces.
+    """
     max_chars = max_tokens * 4
     if len(text) <= max_chars:
         return text
-    return text[:max_chars] + "..."
+    return text[: max_chars - len(_TRIM_MARKER)] + _TRIM_MARKER
 
 
 def format_pack_as_markdown(
