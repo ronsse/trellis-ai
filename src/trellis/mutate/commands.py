@@ -127,8 +127,11 @@ class OperationRegistry:
             "target_id",
             "target_type",
         }
+        # ``trace_id`` is optional: trace-mined precedents carry it, but a
+        # learning-scoring promotion (``submit_learning_promotion``) sources a
+        # graph entity, not a trace, and passes ``entity_type`` instead. Both
+        # must reach ``get_lessons``, which reads ``PRECEDENT_PROMOTED`` events.
         self._schemas[Operation.PRECEDENT_PROMOTE] = {
-            "trace_id",
             "title",
             "description",
         }

@@ -380,6 +380,11 @@ def build_learning_promotion_payloads(
         for target_id in candidate.get("target_entity_ids", [])
         if str(target_id).strip()
     ]
+    domain_systems = [
+        str(domain).strip()
+        for domain in candidate.get("domain_systems", [])
+        if str(domain).strip()
+    ]
     entity_payload = {
         "entity_type": "precedent",
         "entity_id": entity_id,
@@ -392,6 +397,9 @@ def build_learning_promotion_payloads(
             "supporting_run_ids": list(candidate.get("supporting_run_ids", [])),
             "source_phases": list(candidate.get("phases", [])),
             "target_entity_ids": target_entity_ids,
+            # Carried so submit_learning_promotion can stamp the promotion
+            # event's ``domain`` for get_lessons(domain=...) filtering.
+            "domain_systems": domain_systems,
         },
     }
     edge_payloads = [
@@ -434,6 +442,12 @@ def submit_learning_promotion(
     :func:`build_learning_promotion_payloads`, which always sets
     ``entity_id`` and a non-empty ``properties`` dict on both — this
     function trusts that contract rather than re-guarding.
+
+    After the entity + edges land, a governed ``PRECEDENT_PROMOTE`` is
+    submitted so the promotion emits a ``PRECEDENT_PROMOTED`` event and
+    becomes visible to ``get_lessons`` / ``list_precedents``. Without it
+    the precedent entity exists in the graph but the lessons read-path —
+    which only queries ``PRECEDENT_PROMOTED`` events — never surfaces it.
     """
     from trellis.mutate import Command, CommandStatus, Operation  # noqa: PLC0415
 
@@ -478,10 +492,33 @@ def submit_learning_promotion(
                 "status": edge_result.status.value,
             }
         )
+
+    entity_props = dict(entity_payload["properties"])
+    domain_systems = entity_props.get("domain_systems") or []
+    primary_domain = str(domain_systems[0]).strip() if domain_systems else None
+    promote_cmd = Command(
+        operation=Operation.PRECEDENT_PROMOTE,
+        args={
+            "title": entity_payload["name"],
+            "description": str(entity_props.get("description", "")),
+            "domain": primary_domain,
+            "entity_type": "precedent",
+            "source_item_id": entity_props.get("source_item_id"),
+        },
+        target_id=entity_payload["entity_id"],
+        target_type="entity",
+        requested_by=requested_by,
+    )
+    promote_result = executor.execute(promote_cmd)
     return {
         "status": "promoted",
         "node_id": entity_result.created_id,
         "edges": edge_outcomes,
+        # Surfaces whether the precedent actually reached the lessons
+        # read-path. A non-SUCCESS here means the entity exists but
+        # get_lessons won't show it — an operator-visible half-state.
+        "precedent_event_status": promote_result.status.value,
+        "precedent_event_id": promote_result.created_id,
     }
 
 

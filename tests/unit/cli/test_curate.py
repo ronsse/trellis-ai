@@ -407,6 +407,12 @@ class TestSubmitPromotion:
                 operation=Operation.LINK_CREATE,
                 message="target not found",
             ),
+            CommandResult(
+                command_id="cmd-4",
+                status=CommandStatus.SUCCESS,
+                operation=Operation.PRECEDENT_PROMOTE,
+                created_id="evt-1",
+            ),
         ]
 
         outcome = submit_learning_promotion(
@@ -421,7 +427,15 @@ class TestSubmitPromotion:
         assert [e["target_id"] for e in outcome["edges"]] == ["doc:t1", "doc:t2"]
         assert outcome["edges"][0]["status"] == CommandStatus.SUCCESS.value
         assert outcome["edges"][1]["status"] == CommandStatus.FAILED.value
-        assert executor.execute.call_count == 3
+        # A PRECEDENT_PROMOTE is submitted after the edges so the precedent
+        # reaches get_lessons; its status is surfaced on the outcome.
+        assert outcome["precedent_event_status"] == CommandStatus.SUCCESS.value
+        assert outcome["precedent_event_id"] == "evt-1"
+        assert executor.execute.call_count == 4
+        promote_cmd = executor.execute.call_args_list[3].args[0]
+        assert promote_cmd.operation == Operation.PRECEDENT_PROMOTE
+        assert promote_cmd.args["entity_type"] == "precedent"
+        assert promote_cmd.target_id == "precedent://learning/test"
 
     def test_passes_payload_fields_into_command_args(self) -> None:
         executor = MagicMock(spec=MutationExecutor)
@@ -439,7 +453,10 @@ class TestSubmitPromotion:
             requested_by="cli:promote-learning",
         )
 
-        submitted: Command = executor.execute.call_args.args[0]
+        # First submitted command is the ENTITY_CREATE (a trailing
+        # PRECEDENT_PROMOTE now follows, so index explicitly rather than
+        # reading the last call).
+        submitted: Command = executor.execute.call_args_list[0].args[0]
         assert submitted.operation == Operation.ENTITY_CREATE
         assert submitted.requested_by == "cli:promote-learning"
         assert submitted.args["entity_type"] == "precedent"
@@ -448,6 +465,76 @@ class TestSubmitPromotion:
         properties = submitted.args["properties"]
         assert properties == {"description": "test"}
         assert properties is not self._entity_payload()["properties"]
+
+
+class TestPromotionVisibleToGetLessons:
+    """End-to-end guarantee (P9): a promoted learning candidate must reach
+    the lessons read-path. Before the PRECEDENT_PROMOTE emit was added,
+    ``submit_learning_promotion`` created the ``precedent://learning/...``
+    entity but ``list_precedents`` (which get_lessons calls) queries only
+    ``PRECEDENT_PROMOTED`` events, so the precedent stayed invisible.
+    """
+
+    def test_promoted_learning_precedent_listed_by_get_lessons(
+        self, tmp_path: Path
+    ) -> None:
+        from trellis.learning import build_learning_promotion_payloads
+        from trellis.mutate import build_curate_executor
+        from trellis.retrieve.precedents import list_precedents
+        from trellis.stores.registry import StoreRegistry
+
+        stores_dir = tmp_path / "stores"
+        stores_dir.mkdir()
+        registry = StoreRegistry(stores_dir=stores_dir)
+        executor = build_curate_executor(registry)
+
+        candidate = {
+            "candidate_id": "source_analysis:abc123",
+            "intent_family": "source_analysis",
+            "recommendation_type": "promote_precedent",
+            "item_id": "doc:evidence-1",
+            "item_type": "precedent",
+            "title": "Profile-before-plan wins",
+            "domain_systems": ["billing"],
+            "target_entity_ids": [],
+            "supporting_run_ids": ["run-1", "run-2"],
+            "phases": ["analyze"],
+            "metrics": {"success_rate": 1.0, "retry_rate": 0.0},
+            "precedent_properties": {
+                "category": "retrieval_precedent",
+                "intent_family": "source_analysis",
+                "source_item_id": "doc:evidence-1",
+                "source_of_truth": "reviewed_promotion",
+            },
+        }
+        payloads = build_learning_promotion_payloads(
+            candidate=candidate,
+            promotion_name="Profile-before-plan wins",
+            rationale="Consistently precedes clean plans.",
+        )
+
+        outcome = submit_learning_promotion(
+            executor,
+            payloads["entity_payload"],
+            payloads["edge_payloads"],
+            requested_by="test:promote-learning",
+        )
+        assert outcome["status"] == "promoted"
+        assert outcome["precedent_event_status"] == CommandStatus.SUCCESS.value
+
+        # The load-bearing assertion: get_lessons' read-path now sees it.
+        lessons = list_precedents(registry.operational.event_log)
+        assert len(lessons) == 1
+        assert lessons[0]["title"] == "Profile-before-plan wins"
+        assert lessons[0]["entity_id"] == payloads["entity_id"]
+
+        # And the domain filter get_lessons(domain=...) uses resolves too.
+        assert (
+            len(list_precedents(registry.operational.event_log, domain="billing")) == 1
+        )
+        assert (
+            len(list_precedents(registry.operational.event_log, domain="shipping")) == 0
+        )
 
 
 class TestCurateHelp:
