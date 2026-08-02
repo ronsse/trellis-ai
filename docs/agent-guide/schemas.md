@@ -307,6 +307,8 @@ ContentTags are embedded in metadata/properties JSON on documents, entities, tra
 
 Each facet under `tag_filters` is a single-key operator dict. Bare lists or scalars raise `ValueError` — the operator must be explicit. Untagged items always pass; the filters narrow tagged items only.
 
+**Empty and absent mean the same thing.** A list facet stored as `[]` carries no value, so it default-passes exactly like a missing key — a tagged document with `domain: []` is *not* excluded by `{"domain": {"in": [...]}}`. Both document stores implement this (SQLite `json_array_length(...) = 0`, Postgres `-> facet = '[]'::jsonb`). Before #282 only a `NULL` facet default-passed, and since classify-on-write deliberately persists `domain: []` (see [operations.md → Document → content tags](operations.md#document--content-tags-opt-in)) every tagged document was hard-excluded from every domain-scoped query while every untagged one passed. If you write tags yourself, `[]` and omission are interchangeable; only a *non-empty* facet narrows.
+
 ```python
 tag_filters={
     "signal_quality": {"not_in": ["noise"]},        # robust to new values
@@ -439,6 +441,18 @@ Cross-system identifier mapped onto a canonical entity.
   "is_primary": true
 }
 ```
+
+### The reserved `name` namespace
+
+`source_system="name"` is reserved for **display-name bindings** minted by the extraction write paths (`trellis.extract.entity_resolution`, used by MCP `save_memory` and the CLI bulk-ingest hook). `raw_id` is the normalized name — trim, collapse whitespace, case-fold, NFC (`normalize_entity_name` in `schemas/well_known.py`) — and `raw_name` keeps the display spelling. The store's unique-per-current `(source_system, raw_id)` constraint therefore gives exactly one entity per normalized name.
+
+Resolution reads this index first (one indexed row) and only falls back to a bounded graph scan to bootstrap a name it has never seen, minting the binding so the scan does not repeat. Three properties are load-bearing:
+
+- **No fuzzy matching.** Exact equality after normalization. Two different entities sharing a normalized name resolve as *ambiguous*: the mention is left unresolved and **no alias is minted**. A wrong merge is unrecoverable; a skipped mention is not.
+- **Only a complete scan mints.** If the bootstrap scan hit its cap, a same-named twin may be in the unseen tail, so the match is used for that call but never cached. Truncation logs `entity_resolution_scan_truncated` rather than reporting a clean miss.
+- **A binding is re-validated on every hit** against the node it points at; a deleted or renamed target drops the binding and re-runs the scan. It cannot see a *second* same-named entity created after the binding — the bound node still matches. Accepted, because this binds `mentions` **edges**, not identity: the path never merges or rewrites nodes, so the worst case is a deletable wrong edge.
+
+`get_aliases(entity_id, source_system="name")` is the audit surface for what got bound. There is no revoke command — `delete_node` on the entity is the only unbind today. Alias writes go straight to the graph store (`upsert_alias` is idempotent via SCD-2); the governed pipeline has no alias verb, matching the existing precedent in `trellis_api/routes/ingest.py`.
 
 ---
 

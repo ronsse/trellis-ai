@@ -132,7 +132,7 @@ The Trellis MCP server exposes a small surface of tools an agent calls during a 
 
 - `get_objective_context(intent, domain?)` — sectioned pack at the objective level (broad strategic context).
 - `get_task_context(intent, ...)` — sectioned pack at the task level (focused tactical context).
-- `record_feedback(pack_id, rating, label, comment)` — closes the variation-selection loop.
+- `record_feedback(pack_id, rating, notes?, helpful_item_ids?, unhelpful_item_ids?)` — closes the variation-selection loop. `rating` is 0.0–1.0; grade whenever you can, since only graded feedback gives the fitness loops any variance to learn from.
 - `execute_mutation(...)` — submits a governed mutation (used sparingly by agents; most writes go through extractors).
 
 Start the server:

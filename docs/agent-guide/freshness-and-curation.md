@@ -411,6 +411,8 @@ The curate cycle reads the **EventLog-authoritative** signal. When the `FEEDBACK
 trellis admin reconcile-feedback --log-dir ./data [--dry-run] [--format json]
 ```
 
+**Which surfaces write the file:** the MCP `record_feedback` tool (since #287), `POST /api/v1/packs/{pack_id}/feedback`, and `TrellisClient.record_feedback` — every one of them appends the JSONL row *and* emits the event in the same call. `trellis curate feedback` and `POST /api/v1/feedback` go through the governed mutation pipeline instead: they emit `FEEDBACK_RECORDED` but write **no** JSONL row, so there is nothing for this command to reconcile from them. An empty log on a deployment whose only grader used the CLI is expected, not a fault. `--log-dir` is required and takes the directory the writers put the file in: `<stores_dir>/feedback/`.
+
 This wraps `reconcile_feedback_log_to_event_log`: it scans `pack_feedback.jsonl`, matches each row against the EventLog by `feedback_id`, and emits only the missing ones — safe to run repeatedly. The JSON output reports `scanned` / `already_present` / `emitted` / `failed` counts (`--dry-run` reports `would_emit` and touches nothing). `worker curate --reconcile-first` runs this same backfill immediately before a cycle, so a scheduled curate pass never misses file-only feedback. The JSONL remains an **audit log, not a second decision path** — reconciliation feeds the authoritative EventLog; it does not create a parallel promote/demote route.
 
 ---

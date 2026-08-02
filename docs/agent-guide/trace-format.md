@@ -270,6 +270,8 @@ Only structured fields are mined — free-text prose (`intent`, `step.args`/`ste
 | artifact File/CreativeWork → Activity | `wasGeneratedBy` |
 | Activity → parent Activity (`context.parent_trace_id`) | `wasInformedBy` |
 
+Edges are de-duplicated on `(source_id, kind, target_id)` *after* kind canonicalization, so a relationship a trace restates across N steps — 40 `tool_call` steps naming the same tool — yields one edge, not 40. Count expected edges from distinct relationships, not from steps.
+
 Every emitted node and edge stamps property-based provenance: `source_trace_id`, `agent_id`, `extractor_tier` (`"deterministic"`), and `extraction_confidence` (the extractor's per-draft confidence — always `1.0` on this path, since every mined value is a structured field read). Edges are emitted with `allow_dangling=True` because trace graphs are inherently cross-batch (e.g. a parent trace's Activity or shared evidence is extracted by a different run).
 
 For example, ingesting Example 1 above with the flag on produces an `Activity` node (`trace:<id>`), an `Agent` node (`agent:code-orchestrator`), a `Concept` node (`domain:backend`), and two `SoftwareApplication` nodes (`tool:search-codebase`, `tool:edit-file`), wired with `wasAttributedTo`, `appliesTo`, and two `used` edges.

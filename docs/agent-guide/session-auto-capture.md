@@ -76,13 +76,16 @@ successful injection's damage to junk, not leakage.
 ## Three ways to run it
 
 All three are the same code path (`run_sweep` in
-`trellis_workers/session_capture/__main__.py`) and read the same environment:
+`trellis_workers/session_capture/sweep.py`) and read the same environment:
 
 ```bash
 trellis worker capture-sessions [--dry-run] [--format text|json]
 trellis-session-capture [--dry-run]            # console script
 python -m trellis_workers.session_capture [--dry-run]
 ```
+
+Only `trellis worker capture-sessions` takes `--format`; the other two
+always emit the JSON `CaptureReport` on stdout.
 
 ## Configuration (environment)
 

@@ -605,8 +605,11 @@ Turn on the feature-flagged tiered-extraction pipeline that the MCP `save_memory
 
 When both an `LLMClient` is obtainable and `TRELLIS_ENABLE_MEMORY_EXTRACTION` is set, every call to `save_memory` runs the `AliasMatchExtractor + LLMExtractor` pipeline (`build_save_memory_extractor` factory, wrapped in `HybridJSONExtractor`). Extracted drafts are routed through the governed `MutationExecutor` — no direct store writes — and produce:
 
-- `mentions` edges from the stored memory document to entities resolved by alias match,
+- a `CreativeWork` entity for the **source document itself**, whose `entity_id` is the document-store id — the `mentions` edge needs a graph node to hang off, and `LinkCreateHandler`'s FK pre-flight rejects an edge whose `source_id` names no entity,
+- `mentions` edges from that document node to entities resolved by alias match,
 - `EntityDraft` records for new mentions the deterministic resolver could not identify.
+
+**How mentions resolve.** The resolver reads the `entity_aliases` index under the reserved `name` namespace first, and only falls back to a bounded graph scan for a name the index has never seen — minting the binding so the scan is self-eliminating rather than permanent. Matching is exact equality after normalization (trim, collapse whitespace, case-fold, NFC); nothing fuzzy, and an ambiguous name is left unresolved rather than guessed. See [schemas.md → EntityAlias → The reserved `name` namespace](schemas.md#the-reserved-name-namespace) for the full rule and its failure modes. To audit what a memory bound, call `graph_store.get_aliases(entity_id, source_system="name")`.
 
 Extraction is purely additive: `save_memory` itself behaves exactly as before, and an extraction failure never causes `save_memory` to fail.
 
