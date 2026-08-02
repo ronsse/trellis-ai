@@ -319,6 +319,64 @@ def _make_trace(intent: str = "test intent") -> Trace:
     )
 
 
+class TestEntityCreateDocumentLink:
+    """``document_ids`` omission semantics must match EntityUpdateHandler.
+
+    ``ENTITY_CREATE`` on an existing id is an upsert (it opens a new SCD-2
+    version). Passing the caller's omitted ``document_ids`` straight
+    through wrote NULL, silently destroying a link another writer had
+    established — e.g. re-extracting an entity ``save_knowledge`` had
+    linked to its document.
+    """
+
+    @staticmethod
+    def _create(registry: StoreRegistry, **extra_args: object) -> None:
+        EntityCreateHandler(registry).handle(
+            Command(
+                operation=Operation.ENTITY_CREATE,
+                args={
+                    "entity_id": "e1",
+                    "entity_type": "Concept",
+                    "name": "E",
+                    **extra_args,
+                },
+                requested_by="test",
+            )
+        )
+
+    def test_omitted_document_ids_carries_stored_link_forward(
+        self, registry: StoreRegistry
+    ) -> None:
+        self._create(registry, document_ids=["doc-1"])
+        self._create(registry)
+        node = registry.knowledge.graph_store.get_node("e1")
+        assert node is not None
+        assert node["document_ids"] == ["doc-1"]
+
+    def test_explicit_document_ids_replaces(self, registry: StoreRegistry) -> None:
+        self._create(registry, document_ids=["doc-1"])
+        self._create(registry, document_ids=["doc-2"])
+        node = registry.knowledge.graph_store.get_node("e1")
+        assert node is not None
+        assert node["document_ids"] == ["doc-2"]
+
+    def test_explicit_empty_list_clears(self, registry: StoreRegistry) -> None:
+        """Unlinking stays possible — omission and ``[]`` are different."""
+        self._create(registry, document_ids=["doc-1"])
+        self._create(registry, document_ids=[])
+        node = registry.knowledge.graph_store.get_node("e1")
+        assert node is not None
+        assert node["document_ids"] == []
+
+    def test_fresh_node_without_link_is_unaffected(
+        self, registry: StoreRegistry
+    ) -> None:
+        self._create(registry)
+        node = registry.knowledge.graph_store.get_node("e1")
+        assert node is not None
+        assert node["document_ids"] == []
+
+
 class TestCreateCurateHandlers:
     def test_returns_all_handlers(self, registry: StoreRegistry) -> None:
         handlers = create_curate_handlers(registry)

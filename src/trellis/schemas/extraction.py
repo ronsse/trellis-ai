@@ -36,6 +36,15 @@ class EntityDraft(TrellisModel):
     *and* ``node_role=NodeRole.STRUCTURAL`` are set, in which case it
     emits an INFO acknowledging the deliberate opt-in.  Either signal
     alone still warns.  Soft enforcement only — never raises.
+
+    ``document_ids`` is the graph↔document link
+    (``adr-planes-and-substrates`` §2.4): the ``DocumentStore`` row(s)
+    this entity was sourced from.  ``EntityCreateHandler`` has accepted
+    the pointer since Phase 4 but no extractor could supply one, so
+    every extractor-minted node wrote an empty link.  ``None`` means "no
+    link" and is forwarded to the handler as an omission, not an empty
+    list — an omitted value is what both entity handlers read as "leave
+    the existing link alone", whereas an explicit value replaces it.
     """
 
     entity_id: str | None = None
@@ -45,6 +54,7 @@ class EntityDraft(TrellisModel):
     node_role: NodeRole = NodeRole.SEMANTIC
     generation_spec: GenerationSpec | None = None
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    document_ids: list[str] | None = None
     allow_structural_leaf: bool = False
 
     @model_validator(mode="after")
