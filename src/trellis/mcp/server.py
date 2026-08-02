@@ -516,6 +516,7 @@ def _flat_context(
     domain: str | None,
     max_tokens: int,
     session_id: str,
+    run_id: str = "",
     max_items: int = _FLAT_MAX_ITEMS,
     title: str | None = None,
     empty_message: str | None = None,
@@ -532,6 +533,13 @@ def _flat_context(
     ``refresh=True`` bypasses session dedup for this call (client
     compaction signal), forwarded to :meth:`PackBuilder.build`.
 
+    ``run_id`` (optional) is forwarded so the ``PACK_ASSEMBLED`` event can
+    credit the run this pack served — ``record_feedback`` carries no run
+    identity, so the pack side is the only place it can enter the learning
+    join. Empty string means "no run identity"; the join then keeps its
+    ``unknown-run`` bucket rather than substituting ``session_id``, which
+    spans many runs.
+
     Failure posture (adopted from PackBuilder for #262): a single-axis
     outage degrades to the surviving axes; only a total retrieval failure
     (``PackAssemblyError``) surfaces as ``INTERNAL_ERROR``.
@@ -542,6 +550,7 @@ def _flat_context(
             intent,
             domain=domain or None,
             session_id=session_id or None,
+            run_id=run_id or None,
             budget=PackBudget(max_items=max_items, max_tokens=max_tokens),
             # Fetch at least as many candidates per axis as the item budget
             # allows — a caller raising ``limit`` above the PackBuilder
@@ -593,6 +602,7 @@ def _sectioned_context(
     domain: str,
     session_id: str,
     tool: str,
+    run_id: str = "",
     refresh: bool = False,
 ) -> str:
     """Assemble a sectioned pack through the one PackBuilder-backed path.
@@ -605,6 +615,7 @@ def _sectioned_context(
 
     ``refresh=True`` bypasses session dedup for this call (client
     compaction signal), forwarded to :meth:`PackBuilder.build_sectioned`.
+    ``run_id`` is forwarded for the same reason as on the flat path.
     """
     try:
         builder = _build_pack_builder(registry)
@@ -614,6 +625,7 @@ def _sectioned_context(
             sections=sections,
             domain=domain or None,
             session_id=session_id or None,
+            run_id=run_id or None,
             refresh=refresh,
         )
         section_dicts = [
@@ -668,6 +680,7 @@ def get_context(
     domain: str | None = None,
     max_tokens: int = 2000,
     session_id: str = "",
+    run_id: str = "",
     sections: list[dict[str, Any]] | None = None,
     refresh: bool = False,
 ) -> str:
@@ -688,6 +701,10 @@ def get_context(
         session_id: Optional conversation/session identifier. When supplied,
             items already returned by recent calls in this session are
             excluded, preventing repetition across calls.
+        run_id: Optional identifier for the unit of work this context is
+            for (one task / job / workflow run — narrower than a session).
+            Recorded on the pack so later feedback can credit the runs a
+            memory actually helped. Leave empty when you have no such id.
         sections: Optional custom section layout — a list of section config
             dicts (each with ``name`` plus optional ``retrieval_affinities``,
             ``content_types``, ``scopes``, ``entity_ids``, ``max_tokens``,
@@ -726,6 +743,7 @@ def get_context(
             domain=domain or "",
             session_id=session_id,
             tool="get_context",
+            run_id=run_id,
             refresh=refresh,
         )
 
@@ -735,6 +753,7 @@ def get_context(
         domain=domain,
         max_tokens=max_tokens,
         session_id=session_id,
+        run_id=run_id,
         operation="get_context",
         refresh=refresh,
     )

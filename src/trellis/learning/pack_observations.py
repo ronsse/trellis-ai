@@ -162,7 +162,16 @@ def _join_one(
         items.append(item)
 
     observation: dict[str, Any] = {
-        "run_id": feedback_payload.get("run_id") or "unknown-run",
+        # Feedback first — it is the closest witness to the run that
+        # actually consumed the pack. The pack payload is the fallback for
+        # callers whose feedback path carries no run identity (the MCP
+        # ``record_feedback`` tool takes no ``run_id``), so a pack built
+        # with one still credits the right run.
+        "run_id": (
+            feedback_payload.get("run_id")
+            or pack_payload.get("run_id")
+            or "unknown-run"
+        ),
         "intent_family": (
             feedback_payload.get("intent_family")
             or pack_payload.get("intent_family")

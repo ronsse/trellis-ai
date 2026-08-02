@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -30,6 +31,9 @@ from trellis.learning import (
     write_learning_review_artifacts,
 )
 from trellis.ops import ParameterRegistry
+from trellis.retrieve.pack_builder import PackBuilder
+from trellis.retrieve.strategies import SearchStrategy
+from trellis.schemas.pack import PackItem
 from trellis.stores.base.event_log import EventType
 from trellis.stores.sqlite.event_log import SQLiteEventLog
 
@@ -457,3 +461,106 @@ class TestPromoteChain:
         # carried; the candidate here didn't seed any. Either way the
         # contract is honoured: ``edge_payloads`` is a list.
         assert isinstance(result["edge_payloads"], list)
+
+
+# ---------------------------------------------------------------------------
+# Real PackBuilder → join (no hand-written PACK_ASSEMBLED payload)
+# ---------------------------------------------------------------------------
+
+
+class TestRealPackBuilderAttribution:
+    """Drive the join off telemetry PackBuilder actually emitted.
+
+    Every other test in this module hand-writes the PACK_ASSEMBLED payload,
+    so the join stayed green while production emitted none of the
+    attribution it reads: candidates came out with ``category=None`` and
+    everything bucketed into ``general_context`` (``run_id`` ``unknown-run``).
+    This class assembles real packs and asserts the candidate is described.
+    """
+
+    @staticmethod
+    def _build_pack(event_log: SQLiteEventLog, *, run_id: str) -> str:
+        item = PackItem(
+            item_id="doc:deploy-runbook",
+            item_type="document",
+            excerpt="rollback steps",
+            relevance_score=0.9,
+            metadata={
+                # Shape KeywordSearch produces: its own strategy stamp plus
+                # the document's stored metadata.
+                "source_strategy": "keyword",
+                "title": "Deploy runbook",
+                "source_system": "dbt",
+                "content_tags": {"content_type": "procedure"},
+            },
+        )
+        strategy = MagicMock(spec=SearchStrategy)
+        strategy.name = "keyword"
+        strategy.search.return_value = [item]
+        builder = PackBuilder(strategies=[strategy], event_log=event_log)
+        pack = builder.build(
+            "validate the deploy convention", domain="platform", run_id=run_id
+        )
+        return pack.pack_id
+
+    def test_candidate_carries_category_and_intent_family(
+        self, event_log, tmp_path: Path, learning_registry: ParameterRegistry
+    ) -> None:
+        # Two runs so the candidate clears the default min_support of 2.
+        for run in ("run-a", "run-b"):
+            pack_id = self._build_pack(event_log, run_id=run)
+            # Mirrors the MCP feedback path, which carries neither a
+            # run_id nor an intent_family — the pack payload is the only
+            # source for both.
+            _record(
+                event_log,
+                tmp_path,
+                pack_id=pack_id,
+                run_id="",
+                intent="validate the deploy convention",
+                intent_family="",
+                items_served=["doc:deploy-runbook"],
+                items_referenced=["doc:deploy-runbook"],
+                outcome="success",
+            )
+
+        observations = build_learning_observations_from_event_log(event_log)
+        assert len(observations) == 2
+        assert {obs["run_id"] for obs in observations} == {"run-a", "run-b"}
+
+        report = analyze_learning_observations(
+            observations=observations, registry=learning_registry
+        )
+        assert report["candidate_count"] == 1
+        candidate = report["candidates"][0]
+        # The payoff: a described candidate in a real bucket, not an
+        # opaque item_id in "general_context".
+        assert candidate["intent_family"] == "validation_diagnostics"
+        assert candidate["category"] == "procedure"
+        assert candidate["title"] == "Deploy runbook"
+        assert candidate["domain_systems"] == ["dbt", "platform"]
+        assert candidate["supporting_run_ids"] == ["run-a", "run-b"]
+        assert candidate["source_strategies"] == {"keyword": 2}
+        assert candidate["precedent_name"] == (
+            "Learning: validation_diagnostics :: Deploy runbook"
+        )
+
+    def test_feedback_run_id_wins_over_pack_run_id(
+        self, event_log, tmp_path: Path
+    ) -> None:
+        """The pack payload is a fallback, not an override — feedback is
+        the closer witness to the run that consumed the pack."""
+        pack_id = self._build_pack(event_log, run_id="pack-run")
+        _record(
+            event_log,
+            tmp_path,
+            pack_id=pack_id,
+            run_id="feedback-run",
+            intent="validate the deploy convention",
+            intent_family="",
+            items_served=["doc:deploy-runbook"],
+            items_referenced=["doc:deploy-runbook"],
+            outcome="success",
+        )
+        observations = build_learning_observations_from_event_log(event_log)
+        assert observations[0]["run_id"] == "feedback-run"

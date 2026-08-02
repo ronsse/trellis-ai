@@ -81,6 +81,8 @@ def assemble_pack(req: PackRequest) -> PackResponse:
         intent=req.intent,
         domain=req.domain,
         agent_id=req.agent_id,
+        run_id=req.run_id,
+        intent_family=req.intent_family,
         budget=budget,
         filters=filters,
         tag_filters=req.tag_filters,
@@ -123,6 +125,8 @@ def assemble_sectioned_pack(req: SectionedPackRequest) -> SectionedPackResponse:
         sections=sections,
         domain=req.domain,
         agent_id=req.agent_id,
+        run_id=req.run_id,
+        intent_family=req.intent_family,
         filters=filters,
     )
     return SectionedPackResponse(

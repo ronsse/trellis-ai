@@ -90,6 +90,18 @@ class Pack(TimestampedModel, VersionedModel):
     agent_id: str | None = None
     session_id: str | None = None
     skill_id: str | None = None
+    #: Request-scoped identifier for the unit of work this pack was served
+    #: to. Carried into ``PACK_ASSEMBLED`` telemetry so the learning join
+    #: (:mod:`trellis.learning.pack_observations`) can attribute a promoted
+    #: precedent to the runs that supported it. ``None`` when the caller has
+    #: no run identity — the join then keeps its ``"unknown-run"`` bucket
+    #: rather than borrowing ``session_id``, which is a coarser unit.
+    run_id: str | None = None
+    #: Canonical intent bucket for this pack, normalized by
+    #: :func:`trellis.learning.scoring.normalize_intent_family`. Callers that
+    #: already know their family (phase-driven workflows) pass it through;
+    #: otherwise PackBuilder derives it from ``intent``.
+    intent_family: str | None = None
     target_entity_ids: list[str] = Field(default_factory=list)
     advisories: list[Advisory] = Field(default_factory=list)
     assembled_at: datetime = Field(default_factory=utc_now)
@@ -145,6 +157,11 @@ class SectionedPack(TimestampedModel, VersionedModel):
     domain: str | None = None
     agent_id: str | None = None
     session_id: str | None = None
+    #: See :attr:`Pack.run_id` / :attr:`Pack.intent_family` — same
+    #: request-scoped attribution, carried on the sectioned pack kind so
+    #: both telemetry payloads describe a pack the same way.
+    run_id: str | None = None
+    intent_family: str | None = None
     advisories: list[Advisory] = Field(default_factory=list)
     assembled_at: datetime = Field(default_factory=utc_now)
     metadata: dict[str, Any] = Field(default_factory=dict)

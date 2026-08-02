@@ -91,6 +91,12 @@ class PackRequest(WireRequestModel):
     intent: str
     domain: str | None = None
     agent_id: str | None = None
+    #: Request-scoped attribution carried into ``PACK_ASSEMBLED`` telemetry
+    #: so the learning loop can credit the run and bucket the intent. Both
+    #: optional: ``run_id`` has no derivation, ``intent_family`` is derived
+    #: from ``intent`` server-side when omitted.
+    run_id: str | None = None
+    intent_family: str | None = None
     max_items: int = 50
     max_tokens: int = 8000
     #: Per-facet operator dict: ``{"signal_quality": {"not_in": ["noise"]}}``.
@@ -127,6 +133,9 @@ class SectionedPackRequest(WireRequestModel):
     sections: list[dict[str, Any]]
     domain: str | None = None
     agent_id: str | None = None
+    #: See :class:`PackRequest` — same request-scoped attribution.
+    run_id: str | None = None
+    intent_family: str | None = None
 
 
 class SectionedPackResponse(WireModel):
