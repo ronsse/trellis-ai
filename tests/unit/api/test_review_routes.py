@@ -221,24 +221,18 @@ class TestAuthRequired:
 
     def test_read_scope_is_forbidden(self, registry, auth_client):
         token = _mint(registry, [SCOPE_READ])
-        resp = auth_client.get(
-            "/api/v1/proposals", headers={"X-API-Key": token}
-        )
+        resp = auth_client.get("/api/v1/proposals", headers={"X-API-Key": token})
         assert resp.status_code == 403
 
     def test_admin_scope_passes(self, registry, auth_client):
         token = _mint(registry, [SCOPE_ADMIN])
-        resp = auth_client.get(
-            "/api/v1/proposals", headers={"X-API-Key": token}
-        )
+        resp = auth_client.get("/api/v1/proposals", headers={"X-API-Key": token})
         assert resp.status_code == 200
 
     def test_promote_requires_admin(self, registry, auth_client):
         _seed_proposal(registry)
         # No credential -> 401.
-        assert (
-            auth_client.post("/api/v1/proposals/x/promote").status_code == 401
-        )
+        assert auth_client.post("/api/v1/proposals/x/promote").status_code == 401
         # read scope -> 403.
         token = _mint(registry, [SCOPE_READ])
         assert (
@@ -261,9 +255,7 @@ class TestTunerProposals:
         assert resp.json() == {"count": 0, "proposals": []}
 
     def test_list_surfaces_metrics(self, client, registry):
-        _seed_proposal(
-            registry, proposed={"max_items": 12}, baseline={"max_items": 10}
-        )
+        _seed_proposal(registry, proposed={"max_items": 12}, baseline={"max_items": 10})
         data = client.get("/api/v1/proposals").json()
         assert data["count"] == 1
         row = data["proposals"][0]
@@ -304,14 +296,10 @@ class TestTunerProposals:
         # Same event the CLI promote path emits.
         assert _count_events(registry, EventType.PARAMS_UPDATED) == before + 1
         # Proposal status flipped in the store.
-        stored = registry.operational.tuner_state_store.get_proposal(
-            p.proposal_id
-        )
+        stored = registry.operational.tuner_state_store.get_proposal(p.proposal_id)
         assert stored.status == "promoted"
 
-    def test_promote_emits_review_audit_with_identity(
-        self, registry, monkeypatch
-    ):
+    def test_promote_emits_review_audit_with_identity(self, registry, monkeypatch):
         monkeypatch.setenv("TRELLIS_AUTH_MODE", "required")
         token = _mint(registry, [SCOPE_ADMIN], name="ada")
         app_client = TestClient(create_app())
@@ -342,14 +330,9 @@ class TestTunerProposals:
         )
         assert resp.status_code == 200
         assert resp.json()["status"] == "rejected"
-        stored = registry.operational.tuner_state_store.get_proposal(
-            p.proposal_id
-        )
+        stored = registry.operational.tuner_state_store.get_proposal(p.proposal_id)
         assert stored.status == "rejected"
-        assert (
-            _count_events(registry, EventType.TUNER_PROPOSAL_REJECTED)
-            == before + 1
-        )
+        assert _count_events(registry, EventType.TUNER_PROPOSAL_REJECTED) == before + 1
 
     def test_reject_unknown_is_skipped(self, client):
         resp = client.post("/api/v1/proposals/nope/reject")
@@ -370,9 +353,7 @@ class TestLearningCandidates:
         assert data["hint"]
 
     def test_serves_artifact(self, client, tmp_path, monkeypatch):
-        _write_learning_candidates(
-            tmp_path, monkeypatch, [_learning_candidate()]
-        )
+        _write_learning_candidates(tmp_path, monkeypatch, [_learning_candidate()])
         data = client.get("/api/v1/learning/candidates").json()
         assert data["candidate_count"] == 1
         assert data["candidates"][0]["candidate_id"] == "source_analysis:abc"
@@ -402,9 +383,7 @@ class TestLearningCandidates:
         # The governed pipeline emitted an entity-created event.
         assert _count_events(registry, EventType.ENTITY_CREATED) == before + 1
         # And a review-decision audit row.
-        assert (
-            _count_events(registry, EventType.REVIEW_DECISION_RECORDED) == 1
-        )
+        assert _count_events(registry, EventType.REVIEW_DECISION_RECORDED) == 1
 
     def test_promotion_without_artifact_409(self, client):
         resp = client.post(
@@ -413,17 +392,13 @@ class TestLearningCandidates:
         )
         assert resp.status_code == 409
 
-    def test_unapproved_not_promoted(
-        self, client, registry, tmp_path, monkeypatch
-    ):
+    def test_unapproved_not_promoted(self, client, registry, tmp_path, monkeypatch):
         cand = _learning_candidate()
         _write_learning_candidates(tmp_path, monkeypatch, [cand])
         resp = client.post(
             "/api/v1/learning/promotions",
             json={
-                "decisions": [
-                    {"candidate_id": cand["candidate_id"], "approved": False}
-                ]
+                "decisions": [{"candidate_id": cand["candidate_id"], "approved": False}]
             },
         )
         assert resp.json()["promoted_count"] == 0
@@ -459,9 +434,7 @@ class TestSchemaEvolution:
         assert "dbt_manifest" in md
         assert body["suggested_canonical_name"] == "DataContract"
         # Drafting the ADR is itself an audited review decision.
-        assert (
-            _count_events(registry, EventType.REVIEW_DECISION_RECORDED) == 1
-        )
+        assert _count_events(registry, EventType.REVIEW_DECISION_RECORDED) == 1
 
     def test_draft_adr_unknown_candidate_404(self, client, registry):
         resp = client.post("/api/v1/schema-evolution/missing/draft-adr")
@@ -472,9 +445,9 @@ class TestSchemaEvolution:
         # The only write action is draft-adr; there is deliberately no
         # promote/approve route — the path simply doesn't exist (404),
         # never mind being method-not-allowed.
-        assert (
-            client.post(f"/api/v1/schema-evolution/{cid}/promote").status_code
-            in (404, 405)
+        assert client.post(f"/api/v1/schema-evolution/{cid}/promote").status_code in (
+            404,
+            405,
         )
 
 

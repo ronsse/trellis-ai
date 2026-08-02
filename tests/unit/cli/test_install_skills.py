@@ -139,9 +139,7 @@ class TestInstallSkillsCommand:
         assert (skills_dir / "retrieve-before-task" / "SKILL.md").exists()
 
     def test_default_scope_is_user(self):
-        result = runner.invoke(
-            app, ["admin", "install-skills", "--format", "json"]
-        )
+        result = runner.invoke(app, ["admin", "install-skills", "--format", "json"])
         assert result.exit_code == 0
         data = json.loads(result.stdout.strip())
         assert data["scope"] == "user"

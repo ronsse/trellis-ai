@@ -62,8 +62,7 @@ class WatermarkStore:
         except OSError:
             return False
         return (
-            cursor.get("size") == stat.st_size
-            and cursor.get("mtime") == stat.st_mtime
+            cursor.get("size") == stat.st_size and cursor.get("mtime") == stat.st_mtime
         )
 
     def record(self, file_path: Path, stat: os.stat_result | None = None) -> None:
@@ -96,9 +95,7 @@ class WatermarkStore:
             return
         payload: dict[str, Any] = {"version": 1, "cursors": self._cursors}
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp_name = tempfile.mkstemp(
-            dir=str(self._path.parent), suffix=".tmp"
-        )
+        fd, tmp_name = tempfile.mkstemp(dir=str(self._path.parent), suffix=".tmp")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 json.dump(payload, handle)

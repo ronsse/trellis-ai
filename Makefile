@@ -17,8 +17,8 @@ setup: install-dev hooks ## One-shot first-time setup: install [dev] deps + regi
 install: ## Install package
 	uv pip install -e .
 
-install-dev: ## Install package with dev + vectors deps (mirrors CI)
-	uv pip install -e ".[dev,vectors]"
+install-dev: ## Install package with dev deps (mirrors CI)
+	uv pip install -e ".[dev]"
 
 hooks: ## Install pre-commit git hooks (safe to re-run)
 	python -m pre_commit install --install-hooks
@@ -31,8 +31,9 @@ fix: ## Auto-fix everything pre-commit can fix (ruff format + ruff --fix + white
 	python -m pre_commit run --all-files || true
 	@echo "Any remaining failures above need manual attention."
 
-lint: ## Run linting
+lint: ## Run linting (matches CI: lint rules + formatting)
 	ruff check src/ tests/
+	ruff format --check src/ tests/
 
 format: ## Format code
 	ruff format src/ tests/

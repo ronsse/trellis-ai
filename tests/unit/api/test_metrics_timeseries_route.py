@@ -99,9 +99,7 @@ class TestAuthRequired:
         return TestClient(create_app())
 
     def test_requires_credential(self, auth_client):
-        resp = auth_client.get(
-            "/api/v1/metrics/timeseries?metric=pack_success_rate"
-        )
+        resp = auth_client.get("/api/v1/metrics/timeseries?metric=pack_success_rate")
         assert resp.status_code == 401
 
     def test_read_scope_forbidden(self, registry, auth_client):
@@ -157,9 +155,7 @@ class TestValidation:
 
 class TestResponseShape:
     def test_empty_store_empty_series(self, client):
-        resp = client.get(
-            "/api/v1/metrics/timeseries?metric=pack_success_rate&days=30"
-        )
+        resp = client.get("/api/v1/metrics/timeseries?metric=pack_success_rate&days=30")
         assert resp.status_code == 200
         data = resp.json()
         assert data["metric"] == "pack_success_rate"
@@ -171,9 +167,7 @@ class TestResponseShape:
     def test_seeded_series_shape(self, client, registry):
         _seed_graded_pack(registry, pack_id="p1", success=True)
         _seed_graded_pack(registry, pack_id="p2", success=False)
-        resp = client.get(
-            "/api/v1/metrics/timeseries?metric=pack_success_rate&days=30"
-        )
+        resp = client.get("/api/v1/metrics/timeseries?metric=pack_success_rate&days=30")
         data = resp.json()
         assert len(data["series"]) == 1
         series = data["series"][0]
@@ -188,8 +182,7 @@ class TestResponseShape:
         _seed_graded_pack(registry, pack_id="p1", success=True, domain="alpha")
         _seed_graded_pack(registry, pack_id="p2", success=False, domain="beta")
         resp = client.get(
-            "/api/v1/metrics/timeseries"
-            "?metric=pack_success_rate&group_by=domain"
+            "/api/v1/metrics/timeseries?metric=pack_success_rate&group_by=domain"
         )
         data = resp.json()
         assert data["group_by"] == "domain"
@@ -198,9 +191,7 @@ class TestResponseShape:
 
     def test_reference_rate_metric(self, client, registry):
         _seed_graded_pack(registry, pack_id="p1", success=True)
-        resp = client.get(
-            "/api/v1/metrics/timeseries?metric=reference_rate&days=30"
-        )
+        resp = client.get("/api/v1/metrics/timeseries?metric=reference_rate&days=30")
         assert resp.status_code == 200
         # 1 referenced / 2 served = 0.5
         assert resp.json()["series"][0]["points"][0]["value"] == 0.5

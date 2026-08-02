@@ -276,9 +276,7 @@ def test_dry_run_writes_nothing(tmp_path: Path) -> None:
     assert not wm.exists()
 
 
-def test_reconcile_flag_on_drops_near_duplicate(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_reconcile_flag_on_drops_near_duplicate(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("TRELLIS_ENABLE_RECONCILE_ON_WRITE", "1")
     registry = _registry(tmp_path)
     root = tmp_path / "projects"
@@ -287,9 +285,7 @@ def test_reconcile_flag_on_drops_near_duplicate(
     # Session 1: writes the original memory.
     _error_session(root / "proj" / "sess-fake-0001.jsonl", "sess-fake-0001")
     client1 = FakeLLMClient([candidates_json(good_candidate())])
-    run_capture(
-        registry, transcripts_root=root, watermark_path=wm, llm_client=client1
-    )
+    run_capture(registry, transcripts_root=root, watermark_path=wm, llm_client=client1)
     assert len(_stored_captures(registry)) == 1
 
     # Session 2: distils a NEAR-duplicate; the reconcile judge returns NOOP.

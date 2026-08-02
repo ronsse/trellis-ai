@@ -819,9 +819,7 @@ class PackBuilder:
                 session_id, window_minutes=session_dedup_window_minutes
             )
             if served.ids:
-                deduped = [
-                    i for i in deduped if not self._is_suppressed(i, served)
-                ]
+                deduped = [i for i in deduped if not self._is_suppressed(i, served)]
 
         # 3b. Rerank the shared candidate pool before section filling.
         # Loud-by-default (C2 Phase 4) — see build().

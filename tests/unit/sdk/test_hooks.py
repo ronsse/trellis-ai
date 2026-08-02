@@ -269,9 +269,7 @@ class TestTraceRecorderHappyPath:
 
     def test_records_failure_trace(self, live_client: TrellisClient) -> None:
         recorder = TraceRecorder(live_client, workflow_id="wf-2")
-        trace_id = recorder.record(
-            "build", "failure", 50, error="compiler exploded"
-        )
+        trace_id = recorder.record("build", "failure", 50, error="compiler exploded")
         assert trace_id is not None
         stored = live_client.get_trace(trace_id)
         assert stored is not None
@@ -304,9 +302,7 @@ class TestTraceRecorderDegradation:
         assert recorder.record("step", "success", 1) is None
 
     def test_midcall_drop_returns_none(self) -> None:
-        recorder = TraceRecorder(
-            _midcall_drop_client("traces"), workflow_id="wf"
-        )
+        recorder = TraceRecorder(_midcall_drop_client("traces"), workflow_id="wf")
         assert recorder.record("step", "success", 1) is None
 
     def test_raise_errors_propagates(self) -> None:
@@ -359,9 +355,7 @@ class TestResultFeedbackHappyPath:
         self, live_client: TrellisClient
     ) -> None:
         target = live_client.create_entity("svc", entity_type="service")
-        result = ResultFeedback(live_client).record_success(
-            target, "doc", "summary"
-        )
+        result = ResultFeedback(live_client).record_success(target, "doc", "summary")
         assert result.ok is True
         assert result.ids is not None
         assert "feedback_id" not in result.ids
@@ -420,9 +414,7 @@ class TestResultFeedbackHappyPath:
 
 class TestResultFeedbackDegradation:
     def test_unreachable_returns_not_ok(self) -> None:
-        result = ResultFeedback(_unreachable_client()).record_success(
-            "t", "n", "s"
-        )
+        result = ResultFeedback(_unreachable_client()).record_success("t", "n", "s")
         assert result.ok is False
 
     def test_client_error_returns_not_ok(self) -> None:
@@ -438,18 +430,18 @@ class TestResultFeedbackDegradation:
 
     def test_midcall_drop_on_edge_returns_not_ok(self) -> None:
         # Entity write succeeds, the DESCRIBED_BY edge write drops.
-        result = ResultFeedback(
-            _midcall_drop_client("links")
-        ).record_success("t", "n", "s")
+        result = ResultFeedback(_midcall_drop_client("links")).record_success(
+            "t", "n", "s"
+        )
         assert result.ok is False
         # The entity id that did land is still surfaced for debugging.
         assert result.ids is not None
         assert "document_id" in result.ids
 
     def test_failure_grade_drop_returns_not_ok(self) -> None:
-        result = ResultFeedback(
-            _midcall_drop_client("feedback")
-        ).record_failure("t", "broke", pack_id="pack:1")
+        result = ResultFeedback(_midcall_drop_client("feedback")).record_failure(
+            "t", "broke", pack_id="pack:1"
+        )
         assert result.ok is False
 
     def test_raise_errors_propagates_on_evidence(self) -> None:
@@ -458,8 +450,6 @@ class TestResultFeedbackDegradation:
             feedback.record_success("t", "n", "s")
 
     def test_raise_errors_propagates_on_failure_grade(self) -> None:
-        feedback = ResultFeedback(
-            _midcall_drop_client("feedback"), raise_errors=True
-        )
+        feedback = ResultFeedback(_midcall_drop_client("feedback"), raise_errors=True)
         with pytest.raises(TrellisError):
             feedback.record_failure("t", "broke", pack_id="pack:1")

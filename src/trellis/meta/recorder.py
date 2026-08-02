@@ -211,9 +211,7 @@ class MetaAnalysisRecord:
         """
         if not self._enabled:
             return
-        self._write_consumed_edge(
-            target_id=observation_id, node_type=wk.OBSERVATION
-        )
+        self._write_consumed_edge(target_id=observation_id, node_type=wk.OBSERVATION)
 
     def produced_finding(self, finding_id: str, finding_type: str) -> None:
         """Record that this Activity produced ``finding_id``.

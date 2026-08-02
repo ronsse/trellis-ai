@@ -75,9 +75,7 @@ def test_search_generic_scalar_filter_hard_excludes_missing_key(
     """
     doc_store.put("has-key", "shared keyword payload", {"source_system": "dbt"})
     doc_store.put("missing-key", "shared keyword payload")
-    doc_store.put(
-        "other-value", "shared keyword payload", {"source_system": "airflow"}
-    )
+    doc_store.put("other-value", "shared keyword payload", {"source_system": "airflow"})
 
     results = doc_store.search("keyword", filters={"source_system": "dbt"})
 

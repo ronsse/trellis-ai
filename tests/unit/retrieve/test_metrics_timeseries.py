@@ -117,9 +117,7 @@ def test_unknown_metric_raises(event_log):
 
 def test_unknown_group_by_raises(event_log):
     with pytest.raises(ValueError, match="Unknown group_by"):
-        compute_timeseries(
-            event_log, metric=METRIC_PACK_SUCCESS_RATE, group_by="nope"
-        )
+        compute_timeseries(event_log, metric=METRIC_PACK_SUCCESS_RATE, group_by="nope")
 
 
 def test_non_positive_days_raises(event_log):
@@ -142,9 +140,7 @@ def test_pack_success_rate_exact_buckets(event_log):
     _emit_feedback(event_log, pack_id="p2", occurred_at=d1, success=False)
     _emit_feedback(event_log, pack_id="p3", occurred_at=d3, success=True)
 
-    result = compute_timeseries(
-        event_log, metric=METRIC_PACK_SUCCESS_RATE, days=30
-    )
+    result = compute_timeseries(event_log, metric=METRIC_PACK_SUCCESS_RATE, days=30)
     assert len(result.series) == 1
     points = {p.bucket_start: p for p in result.series[0].points}
     assert points[d1.date().isoformat()].value == 0.5
@@ -157,9 +153,7 @@ def test_pack_success_rate_omits_empty_buckets(event_log):
     d1 = _day(1)
     _emit_pack(event_log, pack_id="p1", occurred_at=d1)
     _emit_feedback(event_log, pack_id="p1", occurred_at=d1, success=True)
-    result = compute_timeseries(
-        event_log, metric=METRIC_PACK_SUCCESS_RATE, days=30
-    )
+    result = compute_timeseries(event_log, metric=METRIC_PACK_SUCCESS_RATE, days=30)
     # Only the one populated day appears — no zero-filled gaps.
     assert len(result.series[0].points) == 1
 
@@ -167,9 +161,7 @@ def test_pack_success_rate_omits_empty_buckets(event_log):
 def test_pack_success_rate_feedback_without_pack_skipped(event_log):
     # Feedback whose pack_id has no PACK_ASSEMBLED is not counted.
     _emit_feedback(event_log, pack_id="orphan", occurred_at=_day(1), success=True)
-    result = compute_timeseries(
-        event_log, metric=METRIC_PACK_SUCCESS_RATE, days=30
-    )
+    result = compute_timeseries(event_log, metric=METRIC_PACK_SUCCESS_RATE, days=30)
     assert result.series == []
 
 
@@ -208,9 +200,7 @@ def test_reference_rate_pooled_fraction(event_log):
 def test_reference_rate_falls_back_to_injected_items(event_log):
     # Feedback omits items_served; falls back to PACK_ASSEMBLED injected_item_ids.
     d1 = _day(1)
-    _emit_pack(
-        event_log, pack_id="p1", occurred_at=d1, injected=["a", "b"]
-    )
+    _emit_pack(event_log, pack_id="p1", occurred_at=d1, injected=["a", "b"])
     _emit_feedback(
         event_log, pack_id="p1", occurred_at=d1, success=True, referenced=["a"]
     )
@@ -325,9 +315,7 @@ def test_advisory_fitness_mean_confidence_and_suppressed_count(event_log):
             payload={"advisory_id": "adv-3", "new_confidence": 0.9},
         )
     )
-    result = compute_timeseries(
-        event_log, metric=METRIC_ADVISORY_FITNESS, days=30
-    )
+    result = compute_timeseries(event_log, metric=METRIC_ADVISORY_FITNESS, days=30)
     point = result.series[0].points[0]
     # mean(0.2, 0.4, 0.9) = 0.5
     assert point.value == 0.5
@@ -353,9 +341,7 @@ def test_noise_tag_volume_counts_only_noise_transitions(event_log):
                 payload={"item_id": item_id, "after": {"signal_quality": sq}},
             )
         )
-    result = compute_timeseries(
-        event_log, metric=METRIC_NOISE_TAG_VOLUME, days=30
-    )
+    result = compute_timeseries(event_log, metric=METRIC_NOISE_TAG_VOLUME, days=30)
     point = result.series[0].points[0]
     assert point.value == 2.0
     assert point.sample_count == 2
@@ -375,9 +361,7 @@ def test_noise_tag_volume_nested_content_tags_shape(event_log):
             },
         )
     )
-    result = compute_timeseries(
-        event_log, metric=METRIC_NOISE_TAG_VOLUME, days=30
-    )
+    result = compute_timeseries(event_log, metric=METRIC_NOISE_TAG_VOLUME, days=30)
     assert result.series[0].points[0].value == 1.0
 
 
@@ -415,9 +399,7 @@ def test_parameter_promotions_grouped_by_event_type(event_log):
             payload={},
         )
     )
-    result = compute_timeseries(
-        event_log, metric=METRIC_PARAMETER_PROMOTIONS, days=30
-    )
+    result = compute_timeseries(event_log, metric=METRIC_PARAMETER_PROMOTIONS, days=30)
     by_group = {s.group_key: s for s in result.series}
     assert by_group[EventType.PARAMS_UPDATED.value].points[0].value == 2.0
     assert by_group[EventType.TUNER_PROPOSAL_REJECTED.value].points[0].value == 1.0
@@ -436,9 +418,7 @@ def test_days_window_excludes_old_events(event_log):
     _emit_feedback(event_log, pack_id="old", occurred_at=old, success=True)
     _emit_feedback(event_log, pack_id="recent", occurred_at=recent, success=True)
 
-    result = compute_timeseries(
-        event_log, metric=METRIC_PACK_SUCCESS_RATE, days=7
-    )
+    result = compute_timeseries(event_log, metric=METRIC_PACK_SUCCESS_RATE, days=7)
     all_buckets = [p.bucket_start for s in result.series for p in s.points]
     assert recent.date().isoformat() in all_buckets
     assert old.date().isoformat() not in all_buckets

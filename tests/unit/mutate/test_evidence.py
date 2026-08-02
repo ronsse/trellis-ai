@@ -38,9 +38,7 @@ class TestEnsureEvidenceDocument:
         # Exactly one document persisted despite two calls.
         assert registry.knowledge.document_store.count() == 1
 
-    def test_resolves_to_preexisting_doc_by_hash(
-        self, registry: StoreRegistry
-    ) -> None:
+    def test_resolves_to_preexisting_doc_by_hash(self, registry: StoreRegistry) -> None:
         content = "pre-existing memory"
         existing_id = registry.knowledge.document_store.put(None, content)
         resolved = ensure_evidence_document(registry, content)

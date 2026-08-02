@@ -81,8 +81,7 @@ def write_transcript(path: Path, records: list[dict[str, Any] | str]) -> None:
     (used to inject a deliberately malformed line)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = [
-        record if isinstance(record, str) else json.dumps(record)
-        for record in records
+        record if isinstance(record, str) else json.dumps(record) for record in records
     ]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 

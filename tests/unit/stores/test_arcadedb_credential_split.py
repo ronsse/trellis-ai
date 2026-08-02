@@ -101,9 +101,7 @@ class TestRegistryGraphCredentialSplit:
             ),
         ):
             mock_build.return_value = MagicMock()
-            forwarded = registry._inject_arcadedb_driver(
-                dict(_split_config()["graph"])
-            )
+            forwarded = registry._inject_arcadedb_driver(dict(_split_config()["graph"]))
         assert "admin_user" not in forwarded
         assert "admin_password" not in forwarded
         assert "password" not in forwarded  # driver XOR password mutex

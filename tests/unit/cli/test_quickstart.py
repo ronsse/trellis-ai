@@ -282,9 +282,7 @@ class TestQuickstart:
         ).exists()
 
     def test_with_skills_text_output(self):
-        result = runner.invoke(
-            app, ["admin", "quickstart", "--with-skills", "user"]
-        )
+        result = runner.invoke(app, ["admin", "quickstart", "--with-skills", "user"])
         assert result.exit_code == 0
         assert "Skills installed to:" in result.stdout
         assert "retrieve-before-task" in result.stdout
