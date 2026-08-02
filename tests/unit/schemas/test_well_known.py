@@ -380,6 +380,40 @@ class TestNormalizeEntityName:
         # identity merge is not recoverable.
         assert wk.normalize_entity_name(left) != wk.normalize_entity_name(right)
 
+    def test_casefold_collapses_eszett_to_ss(self) -> None:
+        # ACCEPTED WIDENING. ``casefold()`` is the Unicode caseless-matching
+        # primitive (it also handles dotted I and final sigma, which
+        # ``lower()`` does not), and the price is that "Straße" and
+        # "STRASSE" share a key. Pinned so the trade stays visible: two
+        # entities distinguished only by that spelling would be merged.
+        assert wk.normalize_entity_name("Straße") == wk.normalize_entity_name("STRASSE")
+
+    @pytest.mark.parametrize(
+        ("composed", "decomposed"),
+        [
+            ("Ren\u00e9e", "Rene\u0301e"),  # \u00e9  vs  e + combining acute
+            ("\u00c5ngstr\u00f6m", "A\u030angstro\u0308m"),
+        ],
+    )
+    def test_canonically_equivalent_spellings_share_a_key(
+        self, composed: str, decomposed: str
+    ) -> None:
+        # Not a widening: NFC only unifies sequences Unicode already
+        # defines as the *same text*. Without it a name typed on macOS
+        # (decomposed) would silently fail to match the same name stored
+        # composed.
+        assert composed != decomposed
+        assert wk.normalize_entity_name(composed) == wk.normalize_entity_name(
+            decomposed
+        )
+
+    def test_accents_are_not_stripped(self) -> None:
+        # NFC composes; it does not fold. "Ren\u00e9e" and "Renee" stay two
+        # entities.
+        assert wk.normalize_entity_name("Ren\u00e9e") != wk.normalize_entity_name(
+            "Renee"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Observation / Measurement registration — adr-observation-entity-type.md

@@ -38,6 +38,7 @@ data-platform types) define their own values in their own packages.
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import TYPE_CHECKING, Final
 
 import structlog
@@ -435,17 +436,32 @@ _WHITESPACE_RUN: Final = re.compile(r"\s+")
 def normalize_entity_name(value: str) -> str:
     """Return the match key for an entity display name.
 
-    Strips leading/trailing whitespace, collapses internal whitespace runs
-    to a single space, and case-folds. Deliberately **nothing else**:
-    equality on this key is used to decide that two names denote the same
-    entity, and every extra transform widens that claim. Punctuation,
-    separators (``-`` / ``_``) and accents are left alone, so ``"alice-b"``
-    and ``"Alice B"`` stay distinct.
+    Exactly three transforms, in order — trim, collapse internal
+    whitespace runs to one space, then ``casefold()`` + NFC. Equality on
+    this key is used to decide that two names denote the same entity, so
+    each one is a deliberate widening of that claim and is stated here:
+
+    * **Case folding, not ``lower()``.** ``casefold()`` is the Unicode
+      caseless-matching primitive, so it also handles Turkish dotted I and
+      final sigma. It *does* fold ``ß`` to ``ss``, which means
+      ``"Straße"`` and ``"STRASSE"`` share a key. Accepted: two entities
+      distinguished only by that spelling are far rarer than the
+      case-variant mentions the key exists to unify.
+    * **NFC after folding.** Canonical composition is not a widening —
+      ``"é"`` and ``"e" + U+0301`` *are* the same text by Unicode
+      canonical equivalence — but without it they would compare unequal,
+      which is a silent miss for anything typed on macOS. Folding runs
+      first because ``casefold()`` can decompose.
+
+    Deliberately **nothing else**: punctuation, separators (``-`` / ``_``)
+    and accents are left alone, so ``"alice-b"``, ``"Alice B"`` and
+    ``"Alice"`` stay three distinct keys.
 
     Idempotent. Returns ``""`` for whitespace-only input; callers should
     treat an empty key as "not resolvable".
     """
-    return _WHITESPACE_RUN.sub(" ", value.strip()).casefold()
+    collapsed = _WHITESPACE_RUN.sub(" ", value.strip())
+    return unicodedata.normalize("NFC", collapsed.casefold())
 
 
 # ---------------------------------------------------------------------------

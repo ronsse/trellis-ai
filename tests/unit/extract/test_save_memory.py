@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from trellis.extract.alias_match import AliasMatchExtractor
 from trellis.extract.base import ExtractorTier
 from trellis.extract.context import ExtractionContext
@@ -102,7 +104,19 @@ class TestFactoryStructure:
 
 class TestEndToEnd:
     async def test_fully_resolved_skips_llm(self) -> None:
-        """All mentions resolve → deterministic wins, LLM never called."""
+        """All mentions resolve → deterministic wins, LLM never called.
+
+        DELIBERATE, and load-bearing now that the resolver actually
+        resolves: before, no mention ever matched, so this branch was dead
+        and every save_memory paid for an LLM call. The accepted cost is
+        that free-text entities in a memory whose mentions *all* resolve
+        ("@alice found it in the payments-worker retry loop") are not
+        mined — ``payments-worker`` never becomes a node. Firing the LLM
+        anyway would make every extraction-enabled save_memory an
+        unconditional LLM call, which is a per-operator cost decision, not
+        a default. Any unresolved mention still routes to the LLM, which
+        is the case that matters for a name the graph has not seen.
+        """
         llm = _FakeLLMClient()
         ext = build_save_memory_extractor(
             alias_resolver=_resolver({"alice": ["ent-alice"]}),
@@ -139,9 +153,10 @@ class TestEndToEnd:
             context=ExtractionContext(allow_llm_fallback=True),
         )
         assert len(llm.calls) == 1
-        # Hybrid merges edges (from alias) + entities (from LLM)
+        # Hybrid merges edges (from alias) + entities (from LLM), on top of
+        # the document node AliasMatch emits to anchor its edge.
         assert {e.target_id for e in result.edges} == {"ent-alice"}
-        assert {e.name for e in result.entities} == {"Ghost"}
+        assert {e.name for e in result.entities} == {"Ghost", "@alice pinged @ghost"}
         assert result.llm_calls == 1
 
     async def test_no_context_skips_llm_stage(self) -> None:
@@ -157,3 +172,55 @@ class TestEndToEnd:
         )
         assert llm.calls == []
         assert result.llm_calls == 0
+
+
+class TestGovernedWritePath:
+    """The whole pipeline, end to end, against a real registry.
+
+    Nothing used to route AliasMatch's output through the executor, which
+    is how a ``mentions`` edge that the FK pre-flight rejects on every
+    single memory went unnoticed: ``BatchStrategy.CONTINUE_ON_ERROR``
+    keeps going and both callers wrap the pass in ``except Exception``,
+    so a total write failure looked exactly like success.
+    """
+
+    def _registry(self, tmp_path: Path):
+        from trellis.stores.registry import StoreRegistry
+
+        stores = tmp_path / "stores"
+        stores.mkdir()
+        return StoreRegistry(stores_dir=stores)
+
+    async def test_resolved_mention_lands_a_mentions_edge(self, tmp_path: Path) -> None:
+        from trellis.extract.commands import result_to_batch
+        from trellis.extract.entity_resolution import build_name_alias_resolver
+        from trellis.mutate import build_curate_executor
+        from trellis.mutate.commands import CommandStatus
+
+        registry = self._registry(tmp_path)
+        graph = registry.knowledge.graph_store
+        graph.upsert_node(
+            node_id="ent-alice", node_type="person", properties={"name": "Alice"}
+        )
+
+        ext = AliasMatchExtractor(alias_resolver=build_name_alias_resolver(graph))
+        result = await ext.extract(
+            {"doc_id": "mem-1", "text": "shipped it with @Alice"},
+            source_hint="save_memory",
+        )
+        results = build_curate_executor(registry).execute_batch(
+            result_to_batch(result, requested_by="mcp:save_memory")
+        )
+
+        assert [r.status for r in results] == [
+            CommandStatus.SUCCESS,
+            CommandStatus.SUCCESS,
+        ]
+        edges = graph.get_edges("ent-alice")
+        assert [(e["source_id"], e["edge_type"]) for e in edges] == [
+            ("mem-1", "mentions")
+        ]
+        # ...and the document is reachable from the entity as a real node.
+        doc_node = graph.get_node("mem-1")
+        assert doc_node is not None
+        assert doc_node["node_type"] == "CreativeWork"

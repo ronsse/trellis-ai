@@ -366,22 +366,17 @@ def _build_alias_resolver(registry: StoreRegistry) -> Any:
     matching rule (exact after normalization, ambiguity never guessed) is
     documented on that module.
 
-    A graph-store failure during the fallback scan stays loud here: the
-    agent enabled extraction, so a store outage is a real error rather
-    than a silently empty match set.
+    A graph-store failure during the fallback scan is logged and yields no
+    match, exactly as on the CLI ingest path. An earlier revision raised
+    from here instead; it made no observable difference, because the raise
+    originates inside ``extractor.extract(...)`` and
+    :func:`_run_memory_extraction` wraps the whole pass in ``except
+    Exception`` — save_memory still returned success, just with the entire
+    extraction pass abandoned rather than one mention unresolved. Sharing
+    the soft behaviour keeps the two write paths genuinely identical,
+    which is what the resolver module claims.
     """
-
-    def _raise_scan_error(exc: Exception, mention: str) -> None:
-        _raise_internal(
-            f"alias resolver graph query failed: {exc}",
-            cause=exc,
-            data={"alias": mention},
-        )
-
-    return build_name_alias_resolver(
-        registry.knowledge.graph_store,
-        on_scan_error=_raise_scan_error,
-    )
+    return build_name_alias_resolver(registry.knowledge.graph_store)
 
 
 def _run_memory_extraction(

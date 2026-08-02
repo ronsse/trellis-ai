@@ -47,13 +47,20 @@ def log_output() -> Iterator[list[dict]]:
         structlog.configure(**saved)
 
 
-class _CountingStore:
-    """Proxy that records how often the expensive scan is reached."""
+class _SpyStore:
+    """Proxy over a real store that counts the calls the design turns on.
+
+    Everything the resolver does not care about forwards untouched; the
+    three methods it *does* care about are counted, so a test can assert
+    "the scan ran once and never again" rather than inferring it from
+    side effects.
+    """
 
     def __init__(self, inner: SQLiteGraphStore) -> None:
         self._inner = inner
         self.query_calls = 0
         self.resolve_alias_calls = 0
+        self.minted: list[tuple[str, str]] = []
 
     def query(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
         self.query_calls += 1
@@ -62,6 +69,10 @@ class _CountingStore:
     def resolve_alias(self, *args: Any, **kwargs: Any) -> dict[str, Any] | None:
         self.resolve_alias_calls += 1
         return self._inner.resolve_alias(*args, **kwargs)
+
+    def upsert_alias(self, *, entity_id: str, raw_id: str, **kwargs: Any) -> str:
+        self.minted.append((raw_id, entity_id))
+        return self._inner.upsert_alias(entity_id=entity_id, raw_id=raw_id, **kwargs)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._inner, name)
@@ -73,6 +84,10 @@ def _add_entity(store: SQLiteGraphStore, node_id: str, name: str) -> str:
         node_type="Person",
         properties={"name": name},
     )
+
+
+def _truncations(log_output: list[dict]) -> list[dict]:
+    return [e for e in log_output if e["event"] == "entity_resolution_scan_truncated"]
 
 
 class TestResolution:
@@ -107,20 +122,22 @@ class TestResolution:
 
     def test_blank_mention_is_not_resolvable(self, store) -> None:
         _add_entity(store, "ent-alice", "Alice")
-        counting = _CountingStore(store)
-        resolve = build_name_alias_resolver(counting)
+        spy = _SpyStore(store)
+        resolve = build_name_alias_resolver(spy)
 
         assert resolve("   ") == []
-        assert counting.query_calls == 0
-        assert counting.resolve_alias_calls == 0
+        assert spy.query_calls == 0
+        assert spy.resolve_alias_calls == 0
 
 
 class TestAliasMinting:
     def test_alias_minted_on_first_resolve(self, store) -> None:
         _add_entity(store, "ent-alice", "Alice")
-        resolve = build_name_alias_resolver(store)
+        spy = _SpyStore(store)
+        resolve = build_name_alias_resolver(spy)
 
         assert resolve("Alice") == ["ent-alice"]
+        assert spy.minted == [("alice", "ent-alice")]
 
         row = store.resolve_alias(NAME_ALIAS_SOURCE_SYSTEM, "alice")
         assert row is not None
@@ -129,33 +146,35 @@ class TestAliasMinting:
 
     def test_second_resolution_uses_the_index_not_the_scan(self, store) -> None:
         _add_entity(store, "ent-alice", "Alice")
-        counting = _CountingStore(store)
-        resolve = build_name_alias_resolver(counting)
+        spy = _SpyStore(store)
+        resolve = build_name_alias_resolver(spy)
 
         assert resolve("Alice") == ["ent-alice"]
-        assert counting.query_calls == 1  # bootstrap scan
+        assert spy.query_calls == 1  # bootstrap scan
 
         assert resolve("alice") == ["ent-alice"]
-        assert counting.query_calls == 1  # index answered — no second scan
+        assert spy.query_calls == 1  # index answered — no second scan
+        assert len(spy.minted) == 1  # and no second mint
 
     def test_minted_alias_serves_every_case_variant(self, store) -> None:
         _add_entity(store, "ent-alice", "Alice")
-        counting = _CountingStore(store)
-        resolve = build_name_alias_resolver(counting)
+        spy = _SpyStore(store)
+        resolve = build_name_alias_resolver(spy)
 
         resolve("Alice")
         for variant in ("ALICE", " alice ", "aLiCe"):
             assert resolve(variant) == ["ent-alice"]
-        assert counting.query_calls == 1
+        assert spy.query_calls == 1
 
     def test_mint_disabled_keeps_the_index_empty(self, store) -> None:
         _add_entity(store, "ent-alice", "Alice")
-        counting = _CountingStore(store)
-        resolve = build_name_alias_resolver(counting, mint=False)
+        spy = _SpyStore(store)
+        resolve = build_name_alias_resolver(spy, mint=False)
 
         assert resolve("Alice") == ["ent-alice"]
         assert resolve("Alice") == ["ent-alice"]
-        assert counting.query_calls == 2
+        assert spy.query_calls == 2
+        assert spy.minted == []
         assert store.resolve_alias(NAME_ALIAS_SOURCE_SYSTEM, "alice") is None
 
     def test_mint_failure_does_not_break_resolution(self, store, monkeypatch) -> None:
@@ -187,13 +206,13 @@ class TestAmbiguityIsNeverMerged:
     def test_ambiguity_is_rescanned_every_time(self, store) -> None:
         _add_entity(store, "ent-a", "Hermes")
         _add_entity(store, "ent-b", "hermes")
-        counting = _CountingStore(store)
-        resolve = build_name_alias_resolver(counting)
+        spy = _SpyStore(store)
+        resolve = build_name_alias_resolver(spy)
 
         resolve("Hermes")
         resolve("Hermes")
 
-        assert counting.query_calls == 2
+        assert spy.query_calls == 2
 
     def test_distinct_names_get_distinct_aliases(self, store) -> None:
         _add_entity(store, "ent-alice", "Alice")
@@ -204,88 +223,164 @@ class TestAmbiguityIsNeverMerged:
         assert resolve("Alice-B") == ["ent-alice-b"]
 
 
-class _TruncatingStore:
-    """Graph-store double whose scan always returns a full page.
+class TestBindingLifecycle:
+    """What a minted binding does when the graph moves underneath it."""
 
-    Models the state the old resolvers degraded into silently: the graph
-    is bigger than the cap, so the requested name may live in the tail
-    that was never examined.
-    """
+    def test_a_later_same_named_entity_does_not_reopen_the_ambiguity(
+        self, store
+    ) -> None:
+        """ACCEPTED FAILURE MODE, pinned so it stays a decision.
 
-    def __init__(self, page: list[dict[str, Any]]) -> None:
-        self._page = page
-        self.minted: list[tuple[str, str]] = []
+        Once ``hermes`` is bound, a second ``Hermes`` created afterwards
+        is invisible to the resolver: the binding still points at a live,
+        correctly-named node, so nothing re-scans and mentions keep
+        resolving to the first one. Detecting it would cost a full scan on
+        every hit — the O(n) cost this module exists to remove. The blast
+        radius is a ``mentions`` edge on the wrong one of two same-named
+        entities, which is deletable; no node is merged or rewritten.
+        """
+        _add_entity(store, "ent-first", "Hermes")
+        spy = _SpyStore(store)
+        resolve = build_name_alias_resolver(spy)
+        assert resolve("Hermes") == ["ent-first"]
 
-    def resolve_alias(self, source_system: str, raw_id: str, as_of: Any = None):
-        return None
+        _add_entity(store, "ent-second", "Hermes")
 
-    def query(self, *, limit: int, **kwargs: Any) -> list[dict[str, Any]]:
-        return self._page[:limit]
+        assert resolve("Hermes") == ["ent-first"]
+        assert spy.query_calls == 1  # never looked again
 
-    def upsert_alias(self, *, entity_id: str, raw_id: str, **kwargs: Any) -> str:
-        self.minted.append((raw_id, entity_id))
-        return "alias-1"
+    def test_binding_to_a_missing_entity_is_dropped_and_rescanned(
+        self, store, log_output
+    ) -> None:
+        """Without this the binding would outlive its node and every
+        mention would emit an edge the FK pre-flight rejects.
 
+        The alias table has no foreign key, and only SQLite's
+        ``delete_node`` happens to cascade to it — so a row pointing at a
+        node that is not there is reachable on any backend, and via the
+        bulk-ingest alias route on all of them.
+        """
+        store.upsert_alias(
+            entity_id="ent-gone",
+            source_system=NAME_ALIAS_SOURCE_SYSTEM,
+            raw_id="hermes",
+            raw_name="Hermes",
+        )
+        _add_entity(store, "ent-new", "Hermes")
+        resolve = build_name_alias_resolver(store)
 
-def _node(node_id: str, name: str) -> dict[str, Any]:
-    return {"node_id": node_id, "node_type": "Person", "properties": {"name": name}}
+        assert resolve("Hermes") == ["ent-new"]
+        rebound = store.resolve_alias(NAME_ALIAS_SOURCE_SYSTEM, "hermes")
+        assert rebound is not None
+        assert rebound["entity_id"] == "ent-new"
+        dropped = [
+            e
+            for e in log_output
+            if e["event"] == "entity_resolution_stale_binding_dropped"
+        ]
+        assert [e["reason"] for e in dropped] == ["node_missing"]
+
+    def test_renamed_entity_releases_its_binding(self, store, log_output) -> None:
+        _add_entity(store, "ent-a", "Hermes")
+        resolve = build_name_alias_resolver(store)
+        assert resolve("Hermes") == ["ent-a"]
+
+        _add_entity(store, "ent-a", "Hermes Two")  # SCD-2 rename
+
+        assert resolve("Hermes") == []
+        dropped = [
+            e
+            for e in log_output
+            if e["event"] == "entity_resolution_stale_binding_dropped"
+        ]
+        assert [e["reason"] for e in dropped] == ["name_changed"]
+
+    def test_binding_check_failure_keeps_the_binding(self, store, monkeypatch) -> None:
+        """An outage on the validation read must not discard good data."""
+        _add_entity(store, "ent-alice", "Alice")
+        resolve = build_name_alias_resolver(store)
+        assert resolve("Alice") == ["ent-alice"]
+
+        def _boom(*args: Any, **kwargs: Any) -> dict[str, Any] | None:
+            msg = "graph store down"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(store, "get_node", _boom)
+        assert resolve("Alice") == ["ent-alice"]
 
 
 class TestScanCap:
     """Behaviour at and past the scan cap the old resolvers stopped at."""
 
     def test_miss_past_the_cap_warns_instead_of_reporting_absence(
-        self, log_output
+        self, store, log_output
     ) -> None:
-        graph = _TruncatingStore([_node(f"ent-{i}", f"Filler {i}") for i in range(5)])
-        resolve = build_name_alias_resolver(graph, scan_limit=3)
+        for i in range(5):
+            _add_entity(store, f"ent-{i}", f"Filler {i}")
+        resolve = build_name_alias_resolver(store, scan_limit=3)
 
         assert resolve("Target") == []
 
-        warnings = [
-            e for e in log_output if e["event"] == "entity_resolution_scan_truncated"
-        ]
+        warnings = _truncations(log_output)
         assert len(warnings) == 1
         assert warnings[0]["log_level"] == "warning"
         assert warnings[0]["scan_limit"] == 3
 
-    def test_untruncated_miss_does_not_warn(self, log_output) -> None:
-        graph = _TruncatingStore([_node("ent-0", "Filler")])
-        resolve = build_name_alias_resolver(graph, scan_limit=10)
-
-        assert resolve("Target") == []
-        assert not [
-            e for e in log_output if e["event"] == "entity_resolution_scan_truncated"
-        ]
-
-    def test_truncated_scan_does_not_mint(self) -> None:
-        graph = _TruncatingStore([_node("ent-target", "Target"), _node("ent-1", "F")])
-        resolve = build_name_alias_resolver(graph, scan_limit=2)
+    def test_single_match_past_the_cap_still_warns(self, store, log_output) -> None:
+        """The dangerous case: the scan found exactly one ``Target`` but
+        never looked at the tail, where a second one may live. Acting on
+        it is the only outcome that can bind the *wrong* entity, so it
+        must not be the quiet one."""
+        for i in range(4):
+            _add_entity(store, f"ent-{i}", f"Filler {i}")
+        _add_entity(store, "ent-target", "Target")  # newest — inside page 1
+        resolve = build_name_alias_resolver(store, scan_limit=2)
 
         assert resolve("Target") == ["ent-target"]
-        assert graph.minted == []
+
+        warnings = _truncations(log_output)
+        assert len(warnings) == 1
+        assert warnings[0]["matches"] == 1
+
+    def test_untruncated_miss_does_not_warn(self, store, log_output) -> None:
+        _add_entity(store, "ent-0", "Filler")
+        resolve = build_name_alias_resolver(store, scan_limit=10)
+
+        assert resolve("Target") == []
+        assert _truncations(log_output) == []
+
+    def test_truncated_scan_does_not_mint(self, store) -> None:
+        _add_entity(store, "ent-target", "Target")
+        _add_entity(store, "ent-1", "Filler")
+        spy = _SpyStore(store)
+        resolve = build_name_alias_resolver(spy, scan_limit=2)
+
+        assert resolve("Target") == ["ent-target"]
+        assert spy.minted == []
 
     def test_indexed_name_resolves_past_the_cap(self, store) -> None:
         """Once minted, graph size is irrelevant — the lookup is a single
         indexed row read, not a scan."""
         _add_entity(store, "ent-target", "Target")
-        counting = _CountingStore(store)
+        spy = _SpyStore(store)
 
         # Mint while the graph is small enough for the scan to see it.
-        build_name_alias_resolver(counting, scan_limit=10)("Target")
-        assert counting.query_calls == 1
+        build_name_alias_resolver(spy, scan_limit=10)("Target")
+        assert spy.query_calls == 1
 
         for i in range(20):
             _add_entity(store, f"ent-{i}", f"Filler {i}")
 
         # A cap of 1 would defeat any scan-based resolver.
-        resolve = build_name_alias_resolver(counting, scan_limit=1)
+        resolve = build_name_alias_resolver(spy, scan_limit=1)
         assert resolve("Target") == ["ent-target"]
-        assert counting.query_calls == 1  # unchanged: no scan ran
+        assert spy.query_calls == 1  # unchanged: no scan ran
 
 
 class TestStoreFailures:
-    def test_scan_failure_is_soft_by_default(self, store, monkeypatch) -> None:
+    """No store outage may fail the ingest that triggered the resolution."""
+
+    def test_scan_failure_yields_no_match(self, store, monkeypatch) -> None:
         def _boom(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
             msg = "graph store down"
             raise RuntimeError(msg)
@@ -294,24 +389,6 @@ class TestStoreFailures:
         resolve = build_name_alias_resolver(store)
 
         assert resolve("Alice") == []
-
-    def test_scan_failure_can_be_made_loud(self, store, monkeypatch) -> None:
-        def _boom(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
-            msg = "graph store down"
-            raise RuntimeError(msg)
-
-        monkeypatch.setattr(store, "query", _boom)
-        seen: list[str] = []
-
-        def _on_error(exc: Exception, mention: str) -> None:
-            seen.append(mention)
-            raise exc
-
-        resolve = build_name_alias_resolver(store, on_scan_error=_on_error)
-
-        with pytest.raises(RuntimeError, match="graph store down"):
-            resolve("Alice")
-        assert seen == ["Alice"]
 
     def test_index_failure_falls_back_to_the_scan(self, store, monkeypatch) -> None:
         _add_entity(store, "ent-alice", "Alice")
@@ -358,3 +435,24 @@ class TestWritePathWiring:
 
         assert resolve("ALICE") == ["ent-alice"]
         assert graph.resolve_alias(NAME_ALIAS_SOURCE_SYSTEM, "alice") is not None
+
+    def test_mcp_scan_failure_is_soft_like_the_ingest_path(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Both paths share one behaviour on a store outage. The MCP path
+        used to raise, which made no difference — ``_run_memory_extraction``
+        swallows it — but did abandon the whole extraction pass."""
+        from trellis.mcp.server import _build_alias_resolver
+        from trellis.stores.registry import StoreRegistry
+
+        stores = tmp_path / "stores"
+        stores.mkdir()
+        registry = StoreRegistry(stores_dir=stores)
+
+        def _boom(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+            msg = "graph store down"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(registry.knowledge.graph_store, "query", _boom)
+
+        assert _build_alias_resolver(registry)("Alice") == []
