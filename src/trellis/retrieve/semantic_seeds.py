@@ -179,10 +179,16 @@ class SemanticSeedExtractor:
         2. Cache miss: ``embedding_fn(intent)`` → query vector.
         3. ``vector_store.query(vector, top_k=self._top_k)`` → list of
            ``{item_id, score, metadata}`` ordered by descending similarity.
-        4. Filter to hits with ``metadata.content_type ==
-           "entity_summary"``. Hits without that tag are dropped; they
-           are not entity-anchored content and should not seed graph
-           traversal.
+        4. Filter to hits whose
+           :func:`~trellis.schemas.document_metadata.document_form_of`
+           is ``"entity_summary"`` — that reads ``metadata.document_form``
+           and, for documents written before the reconciliation, an
+           out-of-vocabulary flat ``metadata.content_type``. A new
+           loader must stamp one of those two keys; an *in-vocabulary*
+           flat ``content_type`` (``"documentation"``, say) is a
+           ``ContentTags`` facet and is deliberately not read here.
+           Hits without a matching form are dropped; they are not
+           entity-anchored content and should not seed graph traversal.
         5. Strip the ``doc:`` prefix from each surviving ``item_id``
            (or read ``metadata["entity_id"]`` when the prefix is
            absent — both loaders stamp it as a defensive fallback).

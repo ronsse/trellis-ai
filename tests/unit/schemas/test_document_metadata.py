@@ -73,6 +73,26 @@ class TestCustomBag:
         assert meta.custom == {"title": 2026}
         assert meta.to_metadata() == stored
 
+    def test_custom_keys_are_not_whitespace_stripped(self) -> None:
+        # TrellisModel sets str_strip_whitespace, which pydantic applies to
+        # dict *keys* too. Renaming a caller's key would break every
+        # json_extract filter pointed at it.
+        stored = {" spacey ": 1, "title": "  padded  "}
+        assert DocumentMetadata.from_mapping(stored).to_metadata() == stored
+
+    def test_non_string_key_does_not_raise(self) -> None:
+        # YAML parses a bare `2026:` key as an int. from_mapping is total for
+        # JSON-shaped mappings; _apply_record does not wrap it, so a raise
+        # here would abort a whole corpus sync after partial writes.
+        assert DocumentMetadata.from_mapping({2026: "x"}).to_metadata() == {"2026": "x"}
+
+    def test_explicit_none_core_value_survives(self) -> None:
+        # `content_tags: null` gates classify-on-write in sync._apply_record
+        # (`"content_tags" not in metadata`); dropping the key at the seam
+        # would classify a document deliberately left untagged.
+        stored = {"content_tags": None, "title": None}
+        assert DocumentMetadata.from_mapping(stored).to_metadata() == stored
+
     def test_direct_construction_still_forbids_extras(self) -> None:
         # extra="forbid" is the project rule; from_mapping is the only
         # sanctioned way to build one from a stored dict.
@@ -105,6 +125,24 @@ class TestContentTypeReconciliation:
 
         assert meta.document_form == "entity_summary"
         assert meta.to_metadata() == {"document_form": "entity_summary"}
+
+    def test_non_string_document_form_is_not_destroyed_by_the_rename(self) -> None:
+        # The incumbent wins whatever its type; a non-string one is demoted to
+        # `custom` and still round-trips. Only the losing flat content_type is
+        # dropped — the model's one documented lossy path.
+        meta = DocumentMetadata.from_mapping(
+            {"content_type": "conversation", "document_form": 5}
+        )
+
+        assert meta.document_form is None
+        assert meta.to_metadata() == {"document_form": 5}
+
+    def test_blank_document_form_does_not_block_the_rename(self) -> None:
+        meta = DocumentMetadata.from_mapping(
+            {"content_type": "conversation", "document_form": "  "}
+        )
+
+        assert meta.to_metadata() == {"document_form": "conversation"}
 
     def test_content_tags_facet_is_untouched(self) -> None:
         stored = {
@@ -163,15 +201,20 @@ class TestLegacyDocumentsStillRead:
         }
 
 
-class TestRetrievalFiltersUnchanged:
-    """Retrieval keeps matching what it matched before the reconciliation.
+class TestLegacyStoredDictsStillScore:
+    """Hand-built metadata dicts of both eras score the same.
 
-    Two readers of the flat key survive untouched — ``TierMapper`` (section
-    eligibility) and ``BreadthScorer`` (via ``evaluate._item_content_type``).
-    Neither is narrowed to the :data:`ContentType` vocabulary here: eval
+    The composed property — ingest a document, read it back, score it —
+    is pinned end-to-end in
+    ``tests/unit/ingest_corpus/test_sync.py::TestMetadataValidationSeam``;
+    these are the unit-level halves of it.
+
+    Neither reader is narrowed to the :data:`ContentType` vocabulary: eval
     scenarios legitimately declare ``expected_categories`` outside it (e.g.
     ``"tutorial"``), so a vocabulary guard on the *read* side would change
-    scores. The guard belongs on the write side, which is where it now is.
+    scores. The guard belongs on the write side, which is where it now is —
+    and because the write side *renames* the key, the read side had to learn
+    the new name to keep those scores identical.
     """
 
     @staticmethod
@@ -192,16 +235,41 @@ class TestRetrievalFiltersUnchanged:
         assert TierMapper().matches_section(item, match)
         assert not TierMapper().matches_section(item, miss)
 
-    def test_legacy_flat_key_scores_breadth_exactly_as_before(self) -> None:
-        # ``_item_content_type`` falls back to the flat key, so a document
-        # stored before the reconciliation still contributes its category.
-        legacy = self._item({"content_type": "conversation"})
+    @pytest.mark.parametrize(
+        "metadata",
+        [
+            pytest.param({"content_type": "conversation"}, id="legacy-flat-key"),
+            pytest.param({"document_form": "conversation"}, id="reconciled-key"),
+        ],
+    )
+    def test_both_eras_score_breadth_identically(
+        self, metadata: dict[str, object]
+    ) -> None:
+        # ``_item_content_type`` falls back to the flat key and then to
+        # ``document_form``, so rewriting a document at the ingest seam does
+        # not change the categories it contributes.
         scenario = EvaluationScenario(
             name="s", intent="i", expected_categories=["conversation"]
         )
-        pack = Pack(pack_id="p", intent="i", items=[legacy])
+        pack = Pack(pack_id="p", intent="i", items=[self._item(metadata)])
 
         assert BreadthScorer().score(pack, scenario) == 1.0
+
+    def test_facet_still_wins_over_the_document_form_fallback(self) -> None:
+        # The fallback is last: a real content-type facet is what the
+        # dimension is about, and provenance must not shadow it.
+        item = self._item(
+            {
+                "content_tags": {"content_type": "decision"},
+                "document_form": "conversation",
+            }
+        )
+        scenario = EvaluationScenario(
+            name="s", intent="i", expected_categories=["decision", "conversation"]
+        )
+        pack = Pack(pack_id="p", intent="i", items=[item])
+
+        assert BreadthScorer().score(pack, scenario) == 0.5
 
     def test_conversation_documents_are_untyped_for_section_filters(self) -> None:
         # True before *and* after: ``TierMapper._get_content_type`` reads

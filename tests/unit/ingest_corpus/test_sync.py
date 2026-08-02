@@ -23,6 +23,8 @@ from trellis.ingest_corpus.models import (
 )
 from trellis.ingest_corpus.sync import sync_corpus
 from trellis.retrieve.embed_ingest_hook import EMBED_ON_INGEST_FLAG
+from trellis.retrieve.evaluate import BreadthScorer, EvaluationScenario
+from trellis.schemas.pack import Pack, PackItem
 from trellis.stores.base.event_log import EventType
 from trellis.stores.sqlite.document import SQLiteDocumentStore
 from trellis.stores.sqlite.event_log import SQLiteEventLog
@@ -412,9 +414,10 @@ class TestMetadataValidationSeam:
     """The ingest seam is where document metadata is validated.
 
     Shape-preserving by design — see
-    :mod:`trellis.schemas.document_metadata`. These tests pin the two
+    :mod:`trellis.schemas.document_metadata`. These tests pin the three
     properties that make partial adoption safe: arbitrary frontmatter still
-    stores flat, and the only rewrite is the reconciled provenance key.
+    stores flat, the only rewrite is the reconciled provenance key, and a
+    document that has been rewritten still scores what it scored before.
     """
 
     def test_arbitrary_frontmatter_stores_flat_and_unchanged(
@@ -494,6 +497,44 @@ class TestMetadataValidationSeam:
         )["metadata"]
         assert metadata["content_type"] == "decision"
         assert "document_form" not in metadata
+
+    def test_ingested_document_scores_breadth_as_it_did_before(
+        self, registry, tmp_path: Path
+    ):
+        # The composed property the rename can actually break: ingest through
+        # the seam, read the stored metadata back, put it on a PackItem the way
+        # retrieve.strategies does, and score it. "tutorial" is outside the
+        # ContentType vocabulary — exactly the case the read-side fallback in
+        # evaluate._item_content_type exists for — so the seam rewriting the
+        # key must not move the score.
+        root = tmp_path / "foreign"
+        root.mkdir()
+        (root / "note.md").write_text("---\ncontent_type: tutorial\n---\n\nBody.\n")
+        sync_corpus(registry, root, source_system="obsidian")
+
+        stored = registry.knowledge.document_store.get(
+            corpus_doc_id("obsidian", "note.md")
+        )["metadata"]
+        assert stored["document_form"] == "tutorial"
+        assert "content_type" not in stored
+
+        pack = Pack(
+            pack_id="p",
+            intent="i",
+            items=[
+                PackItem(
+                    item_id="doc-1",
+                    item_type="document",
+                    excerpt="Body.",
+                    relevance_score=0.5,
+                    metadata={"source_strategy": "keyword", **stored},
+                )
+            ],
+        )
+        scenario = EvaluationScenario(
+            name="s", intent="i", expected_categories=["tutorial"]
+        )
+        assert BreadthScorer().score(pack, scenario) == 1.0
 
     def test_chunk_metadata_is_validated_too(self, registry, tmp_path: Path):
         root = tmp_path / "chunked"

@@ -396,13 +396,17 @@ meta.title, meta.document_form, meta.custom
 meta.to_metadata()                                          # back to the flat stored dict
 ```
 
-`from_mapping` is lenient: an unknown key lands in `custom`, and a *known* key whose value doesn't validate is demoted to `custom` too (logged, never dropped, still round-trips). Ingest must not fail on a caller's odd frontmatter. Direct construction keeps `extra="forbid"` and raises.
+`from_mapping` is lenient: an unknown key lands in `custom`, and a *known* key whose value doesn't validate is demoted to `custom` too (logged, still round-trips). It never raises for a JSON-shaped mapping — ingest must not fail on a caller's odd frontmatter. Direct construction keeps `extra="forbid"` and raises.
+
+Exactly one value is dropped rather than preserved: a foreign flat `content_type` when the mapping *also* carries an explicit `document_form`. Both keys describe the same dimension, the explicit one is the writer's intent, and parking the loser under a third key would just move the drift. The drop is logged at WARNING (`document_metadata_conflicting_form`). Everything else round-trips, including keys whose stored value is explicitly `null` and keys with incidental whitespace (`str_strip_whitespace` is off on this model — it would rename `custom` keys, and every store filter is a `json_extract` against the exact key).
 
 ### `document_form` vs `content_type`
 
 Two vocabularies used to share the `content_type` name: the closed `ContentTags.content_type` facet (*what shape of information is this*), and a flat `metadata["content_type"]` carrying `"conversation"` / `"entity_summary"` (*where the document came from and what form it takes*). The second is now `document_form`.
 
 Read it with `document_form_of(metadata)`, which accepts both the current key and the pre-reconciliation flat key — documents stored under the old shape are **not** migrated, and are normalised only when the ingest seam next rewrites them.
+
+Because the seam rewrites the key, readers of the flat key have to accept the new one or the rename silently changes behaviour. `retrieve/evaluate._item_content_type` (which feeds `BreadthScorer`) falls through to `document_form_of`, so a document contributes the same category before and after it is rewritten.
 
 **Where it is validated:** `trellis.ingest_corpus.sync` — corpus files, conversation exports, and session capture, parents and chunks. Every other document write path (MCP / REST `save_memory`, the enrichment worker) still hands the store a raw dict.
 

@@ -33,12 +33,10 @@ with the run counts — on dry runs too, flagged ``dry_run=True`` (the
 ``BLOB_GC_SWEPT`` convention). Unlike ``save_memory``, event-emission
 failure does not abort a bulk sync; it is reported as a run warning.
 
-Every document this module writes — parent and chunk — has its metadata
-run through :class:`~trellis.schemas.document_metadata.DocumentMetadata`
-first. This is the ingest seam's validation boundary and the only one in
-the codebase: the core keys are type-checked, anything else rides through
-verbatim, and the stored shape is unchanged apart from the reconciled
-``content_type`` → ``document_form`` provenance key.
+Every document this module writes — parent and chunk — has its metadata run
+through :class:`~trellis.schemas.document_metadata.DocumentMetadata` first.
+That module owns the contract; this is the only place it is currently
+enforced.
 
 Embedding rides the existing flag-gated, fail-soft
 :func:`~trellis.retrieve.embed_ingest_hook.run_embed_on_ingest` hook:
@@ -402,15 +400,8 @@ def _apply_record(
             )
         )
 
-    # The one place document metadata is validated. Every reader that funnels
-    # through sync_records (corpus files, conversation exports, session
-    # capture) is covered; paths that write documents directly — the MCP /
-    # REST save_memory routes, the enrichment worker — still hand the store a
-    # raw dict, deliberately (see the module docstring in
-    # trellis.schemas.document_metadata). The round-trip is shape-preserving:
-    # unknown keys ride in `custom` and come back flat, so nothing downstream
-    # of the store sees a different dict than it did before — except a foreign
-    # flat `content_type`, which is reconciled onto `document_form`.
+    # The validation seam. Shape-preserving apart from the reconciled
+    # `content_type` → `document_form` key; see trellis.schemas.document_metadata.
     metadata = DocumentMetadata.from_mapping(metadata).to_metadata()
 
     doc_store.put(outcome.doc_id, text, metadata=metadata)
@@ -526,9 +517,7 @@ def _write_chunks(
             "chunk_count": len(spans),
             "char_span": [span.start, span.end],
         }
-        # Same validated seam as the parent — chunks are the retrievable unit,
-        # so a chunk whose metadata drifted from its parent's is the case that
-        # actually reaches retrieval.
+        # Same seam as the parent — chunks are the retrievable unit.
         metadata = DocumentMetadata.from_mapping(metadata).to_metadata()
         doc_store.put(cid, chunk_content, metadata=metadata)
         if content_changed:
