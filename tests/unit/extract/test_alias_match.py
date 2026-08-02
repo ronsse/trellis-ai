@@ -191,3 +191,54 @@ class TestResultMetadata:
         assert result.provenance.source_hint == "save_memory"
         assert result.llm_calls == 0
         assert result.tokens_used == 0
+
+
+class TestSourceDocumentNode:
+    """The ``mentions`` edge needs a source node, or ``LinkCreateHandler``'s
+    FK pre-flight rejects it — see ``TestGovernedWritePath`` in
+    ``test_save_memory.py``."""
+
+    async def test_document_node_precedes_the_edges(self) -> None:
+        ext = AliasMatchExtractor(
+            alias_resolver=_make_resolver({"alice": ["ent-alice"]}),
+        )
+        result = await ext.extract({"doc_id": "mem-1", "text": "hi @alice"})
+
+        assert len(result.entities) == 1
+        doc = result.entities[0]
+        assert doc.entity_id == "mem-1"
+        assert doc.entity_type == "CreativeWork"  # canonical for "document"
+        assert result.edges[0].source_id == doc.entity_id
+        assert result.edges[0].allow_dangling is False
+
+    async def test_no_document_node_without_a_resolved_mention(self) -> None:
+        """Nothing to anchor — a memory that links to nothing needs no node."""
+        ext = AliasMatchExtractor(alias_resolver=_make_resolver({}))
+        result = await ext.extract({"doc_id": "mem-1", "text": "hey @ghost"})
+
+        assert result.entities == []
+
+    async def test_document_node_name_is_the_first_line_truncated(self) -> None:
+        ext = AliasMatchExtractor(
+            alias_resolver=_make_resolver({"alice": ["ent-alice"]}),
+        )
+        text = "\n  \n" + "word " * 40 + "\n@alice"
+        result = await ext.extract({"doc_id": "mem-1", "text": text})
+
+        name = result.entities[0].name
+        assert len(name) == 80
+        assert name.endswith("…")
+        assert name.startswith("word word word")
+
+    async def test_document_node_falls_back_to_the_id_when_text_is_blank(
+        self,
+    ) -> None:
+        """Defensive branch — only reachable through a custom pattern,
+        but a nameless node is unreadable in every graph view."""
+        ext = AliasMatchExtractor(
+            alias_resolver=_make_resolver({"": ["ent-alice"]}),
+            mention_pattern=re.compile(r"^()"),
+        )
+        result = await ext.extract({"doc_id": "mem-1", "text": "   "})
+
+        assert result.entities[0].name == "mem-1"

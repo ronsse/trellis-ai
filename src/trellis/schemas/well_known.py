@@ -37,6 +37,8 @@ data-platform types) define their own values in their own packages.
 
 from __future__ import annotations
 
+import re
+import unicodedata
 from typing import TYPE_CHECKING, Final
 
 import structlog
@@ -416,6 +418,50 @@ def expand_edge_kind_query(value: str) -> tuple[str, ...]:
     canonical = canonicalize_edge_kind(value)
     aliases = EDGE_KIND_ALIAS_INVERSE.get(canonical, frozenset())
     return (canonical, *sorted(aliases))
+
+
+# ---------------------------------------------------------------------------
+# Entity-name normalization
+# ---------------------------------------------------------------------------
+#
+# Lives here rather than in one of the callers because *every* path that
+# decides "is this incoming name the entity I already have?" must agree on
+# the answer — the extraction write paths, the alias index they mint into,
+# and any id-derivation helper. A second, subtly different normalizer is
+# how a graph grows seven ``hermes`` nodes.
+
+_WHITESPACE_RUN: Final = re.compile(r"\s+")
+
+
+def normalize_entity_name(value: str) -> str:
+    """Return the match key for an entity display name.
+
+    Exactly three transforms, in order — trim, collapse internal
+    whitespace runs to one space, then ``casefold()`` + NFC. Equality on
+    this key is used to decide that two names denote the same entity, so
+    each one is a deliberate widening of that claim and is stated here:
+
+    * **Case folding, not ``lower()``.** ``casefold()`` is the Unicode
+      caseless-matching primitive, so it also handles Turkish dotted I and
+      final sigma. It *does* fold ``ß`` to ``ss``, which means
+      ``"Straße"`` and ``"STRASSE"`` share a key. Accepted: two entities
+      distinguished only by that spelling are far rarer than the
+      case-variant mentions the key exists to unify.
+    * **NFC after folding.** Canonical composition is not a widening —
+      ``"é"`` and ``"e" + U+0301`` *are* the same text by Unicode
+      canonical equivalence — but without it they would compare unequal,
+      which is a silent miss for anything typed on macOS. Folding runs
+      first because ``casefold()`` can decompose.
+
+    Deliberately **nothing else**: punctuation, separators (``-`` / ``_``)
+    and accents are left alone, so ``"alice-b"``, ``"Alice B"`` and
+    ``"Alice"`` stay three distinct keys.
+
+    Idempotent. Returns ``""`` for whitespace-only input; callers should
+    treat an empty key as "not resolvable".
+    """
+    collapsed = _WHITESPACE_RUN.sub(" ", value.strip())
+    return unicodedata.normalize("NFC", collapsed.casefold())
 
 
 # ---------------------------------------------------------------------------

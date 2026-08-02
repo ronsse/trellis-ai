@@ -19,9 +19,11 @@ The MCP ``save_memory`` path keeps its own cached wiring in
 ``trellis.mcp.server``; this is the non-MCP hook for the CLI ingest paths.
 Both build the *same* extractor, so behaviour cannot drift.
 
-Known caveat carried from the save_memory path: the alias resolver is an
-O(n) full-graph scan (capped at 2000 nodes), acceptable at dogfood scale
-and flagged for an indexed lookup before large-vault use.
+Mention resolution goes through
+:func:`~trellis.extract.entity_resolution.build_name_alias_resolver`: an
+indexed ``entity_aliases`` read, with a bounded scan only to bootstrap a
+name the index has never seen. See that module for the matching rule and
+its failure modes.
 """
 
 from __future__ import annotations
@@ -30,6 +32,8 @@ import os
 from typing import TYPE_CHECKING, Any
 
 import structlog
+
+from trellis.extract.entity_resolution import build_name_alias_resolver
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -47,7 +51,6 @@ _TRUTHY = frozenset({"1", "true", "yes", "on"})
 # save_memory path so cost per extracted document is identical.
 _MAX_LLM_CALLS = 1
 _MAX_EXTRACT_TOKENS = 400
-_ALIAS_SCAN_LIMIT = 2000
 
 
 def memory_extraction_env_enabled() -> bool:
@@ -157,26 +160,14 @@ def _count_created(results: list[Any]) -> tuple[int, int]:
 
 
 def _graph_alias_resolver(registry: StoreRegistry) -> Callable[[str], list[str]]:
-    """Case-insensitive name→entity-id resolver over the graph store.
+    """Name→entity-id resolver over the graph store.
 
-    O(n) scan capped at :data:`_ALIAS_SCAN_LIMIT` nodes — matches the
-    save_memory path; flagged for an indexed lookup before large graphs.
+    Delegates to :func:`trellis.extract.entity_resolution.build_name_alias_resolver`,
+    the same builder the MCP ``save_memory`` path uses: indexed
+    ``entity_aliases`` lookup first, bounded scan only to bootstrap, and
+    the unambiguous result minted back into the index.
+
+    A store failure during the scan stays soft here — a bulk ingest must
+    not die because one mention could not be resolved.
     """
-    graph_store = registry.knowledge.graph_store
-
-    def resolve(alias: str) -> list[str]:
-        target = alias.lower()
-        matches: list[str] = []
-        try:
-            nodes = graph_store.query(limit=_ALIAS_SCAN_LIMIT)
-        except Exception:
-            logger.exception("alias_resolver_query_failed", alias=alias)
-            return []
-        for node in nodes:
-            if str(node.get("name", "")).lower() == target:
-                entity_id = node.get("entity_id") or node.get("id")
-                if entity_id:
-                    matches.append(str(entity_id))
-        return matches
-
-    return resolve
+    return build_name_alias_resolver(registry.knowledge.graph_store)

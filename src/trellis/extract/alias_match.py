@@ -16,6 +16,21 @@ Design notes
   extractor does **not** invent an entity; the unresolved text falls
   through to ``unparsed_residue`` for an LLM-tier extractor downstream.
 
+* **The source document does get a node.**  A ``mentions`` edge needs
+  both endpoints to exist: ``LinkCreateHandler`` runs a strict FK
+  pre-flight and rejects an edge whose ``source_id`` is not a graph
+  node.  The memory lives in the *document* store, so before emitting
+  any edge the extractor emits one ``EntityDraft`` for the document
+  itself — ``entity_id`` = the document id, ``entity_type`` =
+  ``CreativeWork``.
+  ``result_to_batch`` orders entities before edges, so the node exists
+  by the time the link command runs.  The alternative,
+  ``allow_dangling=True``, would land an edge pointing out of nowhere:
+  precisely the orphan the FK check exists to prevent, and unusable for
+  traversal from the entity back to the memory that mentioned it.  Only
+  emitted when at least one mention resolved — a memory that links to
+  nothing does not need a node.
+
 * **Ambiguous mentions skip silently.**  When the resolver returns more
   than one candidate ID, the extractor refuses to guess and treats the
   mention as unresolved (added to residue).  Guessing would break the
@@ -41,6 +56,7 @@ from trellis.schemas.extraction import (
     ExtractionProvenance,
     ExtractionResult,
 )
+from trellis.schemas.well_known import CREATIVE_WORK
 
 if TYPE_CHECKING:
     from trellis.extract.context import ExtractionContext
@@ -101,7 +117,7 @@ class AliasMatchExtractor:
 
         mentions = [m.group(1) for m in self._pattern.finditer(text)]
 
-        entities: list[EntityDraft] = []  # AliasMatch never creates
+        entities: list[EntityDraft] = []  # AliasMatch never creates entities
         edges: list[EdgeDraft] = []
         unmatched: list[str] = []
         matched_count = 0
@@ -139,6 +155,13 @@ class AliasMatchExtractor:
             total_mentions=len(mentions),
         )
 
+        if edges and doc_id is not None:
+            # Anchor for the edges — see "The source document does get a
+            # node" in the module docstring. Prepended because
+            # ``result_to_batch`` preserves order and the FK pre-flight on
+            # the link commands needs this node to already exist.
+            entities.insert(0, _document_draft(doc_id, text))
+
         return ExtractionResult(
             entities=entities,
             edges=edges,
@@ -152,6 +175,43 @@ class AliasMatchExtractor:
                 source_hint=source_hint,
             ),
         )
+
+
+# ----------------------------------------------------------------------
+# Source-document node
+# ----------------------------------------------------------------------
+
+#: Display-name budget for the document node.  Long enough to recognise
+#: the memory in a graph view, short enough that the graph does not
+#: become a second copy of the document store.
+_DOCUMENT_NAME_CHARS = 80
+
+
+def _document_draft(doc_id: str, text: str) -> EntityDraft:
+    """Draft the graph node that anchors this memory's ``mentions`` edges.
+
+    ``entity_id`` is the *document store* id, so the graph node and the
+    document are the same identifier on both planes — no join table, and
+    a traversal that lands on the node can fetch the memory directly.
+    ``CREATIVE_WORK`` is the canonical type ``"document"`` maps to and the
+    one :mod:`trellis.extract.trace` already emits for artifacts, so both
+    extractors leave one vocabulary behind rather than two.
+
+    The name is the first non-blank line, whitespace-collapsed and
+    truncated — falling back to the id, because a node with an empty name
+    is unreadable in every graph view.
+    """
+    name = doc_id
+    for line in text.splitlines():
+        collapsed = " ".join(line.split())
+        if collapsed:
+            name = (
+                collapsed
+                if len(collapsed) <= _DOCUMENT_NAME_CHARS
+                else collapsed[: _DOCUMENT_NAME_CHARS - 1].rstrip() + "…"
+            )
+            break
+    return EntityDraft(entity_id=doc_id, entity_type=CREATIVE_WORK, name=name)
 
 
 # ----------------------------------------------------------------------

@@ -148,9 +148,19 @@ Prose → graph mining reuses `build_save_memory_extractor`
 (AliasMatch + LLM residue → governed `MutationExecutor` batch), gated
 **twice**: the existing `TRELLIS_ENABLE_MEMORY_EXTRACTION` flag *and* an
 explicit `--extract` opt-in — at corpus scale this is an LLM-cost decision
-the operator must make per run, never a default. Known caveat carried over:
-the extractor's alias resolver is an O(n) full-graph scan; acceptable at
-dogfood scale, flagged for optimization before large-vault use.
+the operator must make per run, never a default. Mention resolution is an
+indexed `entity_aliases` lookup (`trellis.extract.entity_resolution`); the
+O(n) full-graph scan survives only to bootstrap a name the index has never
+seen, and each unambiguous resolution is minted into the index so the scan
+does not repeat. Any truncated scan logs `entity_resolution_scan_truncated`
+rather than silently reporting absence — including the truncated scan that
+found exactly one match, which is the case that can bind the wrong entity.
+
+A resolved mention produces two rows, not one: the memory document itself
+becomes a `CreativeWork` graph node keyed by its document-store id, and the
+`mentions` edge runs from that node to the entity. Without the node the
+edge has no source and `LinkCreateHandler`'s FK pre-flight rejects it, so
+a corpus run would report success while writing nothing.
 
 ## 6. Relationship to prior art
 
