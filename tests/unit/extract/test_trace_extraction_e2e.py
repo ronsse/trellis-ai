@@ -14,9 +14,14 @@ from pathlib import Path
 
 import pytest
 
-from trellis.extract.commands import CONFIDENCE_PROPERTY, result_to_batch
+from trellis.extract.commands import (
+    CONFIDENCE_PROPERTY,
+    reconcile_node_roles,
+    result_to_batch,
+)
 from trellis.extract.trace import TraceExtractor
 from trellis.mutate import build_curate_executor
+from trellis.mutate.commands import CommandStatus
 from trellis.retrieve.pack_builder import PackBudget, PackBuilder
 from trellis.retrieve.strategies import GraphSearch
 from trellis.schemas.trace import Trace
@@ -122,3 +127,109 @@ class TestPackGate:
             include_structural=True,
         )
         assert "tool:bash" in {item.item_id for item in pack.items}
+
+
+class TestUnmigratedGraph:
+    """A graph an older extractor populated must not break forever.
+
+    ``node_role`` is immutable across SCD-2 versions, so a ``tool:bash``
+    node a previous release wrote as ``semantic`` cannot be promoted to
+    ``structural`` in place — the ``ENTITY_CREATE`` fails outright, on
+    every re-ingest of every trace using that tool.
+    """
+
+    @staticmethod
+    def _seed_semantic_tool(registry: StoreRegistry) -> None:
+        registry.knowledge.graph_store.upsert_node(
+            node_id="tool:bash",
+            node_type="SoftwareApplication",
+            properties={"name": "bash"},
+            node_role="semantic",
+        )
+
+    async def test_role_conflict_would_fail_the_command_unreconciled(
+        self, registry: StoreRegistry
+    ) -> None:
+        """Baseline: this is the failure reconciliation exists to prevent."""
+        self._seed_semantic_tool(registry)
+        trace = Trace.model_validate(_TRACE_DATA)
+        result = await TraceExtractor().extract(trace, source_hint="trace")
+        batch = result_to_batch(result, requested_by="test")
+        results = build_curate_executor(registry).execute_batch(batch)
+        failed = [r for r in results if r.status is CommandStatus.FAILED]
+        assert len(failed) == 1
+        assert "Cannot change node_role" in failed[0].message
+
+    async def test_reconciled_batch_has_no_failed_commands(
+        self, registry: StoreRegistry
+    ) -> None:
+        self._seed_semantic_tool(registry)
+        trace = Trace.model_validate(_TRACE_DATA)
+        result = await TraceExtractor().extract(trace, source_hint="trace")
+        batch = result_to_batch(result, requested_by="test")
+
+        reconciled = reconcile_node_roles(batch, registry.knowledge.graph_store)
+
+        assert reconciled == ["tool:bash"]
+        results = build_curate_executor(registry).execute_batch(batch)
+        assert [r for r in results if r.status is CommandStatus.FAILED] == []
+        # The stored node keeps its role — reconciliation is not a promotion.
+        node = registry.knowledge.graph_store.get_node("tool:bash")
+        assert node is not None
+        assert node["node_role"] == "semantic"
+        # ...and the `used` edge still lands, so the graph stays connected.
+        edges = registry.knowledge.graph_store.get_edges(
+            f"trace:{trace.trace_id}", direction="outgoing"
+        )
+        assert any(e["target_id"] == "tool:bash" for e in edges)
+
+    async def test_fresh_graph_is_untouched_by_reconciliation(
+        self, registry: StoreRegistry
+    ) -> None:
+        """No pre-existing node -> nothing to reconcile, role lands as minted."""
+        trace = Trace.model_validate(_TRACE_DATA)
+        result = await TraceExtractor().extract(trace, source_hint="trace")
+        batch = result_to_batch(result, requested_by="test")
+
+        assert reconcile_node_roles(batch, registry.knowledge.graph_store) == []
+
+        build_curate_executor(registry).execute_batch(batch)
+        node = registry.knowledge.graph_store.get_node("tool:bash")
+        assert node is not None
+        assert node["node_role"] == "structural"
+
+
+class TestDocumentLinkSurvivesReExtraction:
+    """A re-run that stops naming a document must not wipe the link."""
+
+    #: Pinned so both extractions target the same Activity node.
+    _TRACE_ID = "trace-relink-1"
+
+    async def _extract_with_metadata(
+        self, registry: StoreRegistry, metadata: dict
+    ) -> dict:
+        trace = Trace.model_validate(
+            {**_TRACE_DATA, "trace_id": self._TRACE_ID, "metadata": metadata}
+        )
+        await _extract_into(registry, trace)
+        node = registry.knowledge.graph_store.get_node(f"trace:{self._TRACE_ID}")
+        assert node is not None
+        return node
+
+    async def test_omitted_document_ids_carries_the_stored_link_forward(
+        self, registry: StoreRegistry
+    ) -> None:
+        first = await self._extract_with_metadata(registry, {"document_ids": ["doc-1"]})
+        assert first["document_ids"] == ["doc-1"]
+
+        # Re-extracted after the ingest-time metadata is gone.
+        again = await self._extract_with_metadata(registry, {})
+        assert again["document_ids"] == ["doc-1"]
+
+    async def test_an_explicit_value_still_replaces(
+        self, registry: StoreRegistry
+    ) -> None:
+        """Carry-forward on omission, replace on supply — not merge."""
+        await self._extract_with_metadata(registry, {"document_ids": ["doc-1"]})
+        moved = await self._extract_with_metadata(registry, {"document_ids": ["doc-2"]})
+        assert moved["document_ids"] == ["doc-2"]

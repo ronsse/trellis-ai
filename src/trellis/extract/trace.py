@@ -60,8 +60,20 @@ that role is for: fine-grained, machine-generated plumbing regenerated
 from source on every trace, carrying no standalone content (a ``bash``
 node is three words long).  The role makes them invisible to the pack
 builder's existing default ``node_role == "structural"`` filter while
-leaving them fully traversable in the graph.  Every other minted node
-represents a real thing in the world and stays ``SEMANTIC``.
+leaving them fully traversable in the graph.
+
+Every other minted node stays ``SEMANTIC``, deliberately.  The Activity
+node *is* the trace — demoting it would hide trace memory from packs
+entirely, which is the opposite of the point — and ``evidence:`` /
+``artifact:`` nodes point at real files and datasets that an operator
+searches for by name.  Only the tool node is pure plumbing.
+
+``node_role`` is **immutable across SCD-2 versions** (see
+``check_node_role_immutable``), so a ``tool:<slug>`` node that a previous
+release already wrote as ``SEMANTIC`` cannot be promoted in place.
+:func:`trellis.extract.commands.reconcile_node_roles` detects that
+collision before submission and keeps the stored role, logging the node
+id — see its docstring for the migration.
 
 Document links
 --------------
@@ -72,9 +84,9 @@ the ingest path that produced the trace *did* render it into the
 ``document_ids: list[str]`` or ``document_id: str``); that link is
 carried onto the Activity node — the one node that *is* this trace.  It
 is deliberately not fanned out to the tool / agent / team nodes: those
-are shared across traces and ``ENTITY_CREATE`` *replaces* rather than
-merges ``document_ids``, so fanning out would leave every shared node
-pointing at whichever trace happened to be extracted last.
+are shared across traces and a supplied ``document_ids`` *replaces*
+rather than merges the stored link, so fanning out would leave every
+shared node pointing at whichever trace happened to be extracted last.
 
 Edges (PROV-aligned well-known kinds)
 
@@ -94,8 +106,11 @@ change (column promotion is roadmap item B.3, out of scope here).
 
 from __future__ import annotations
 
+import re
 import unicodedata
 from typing import TYPE_CHECKING, Any
+
+import structlog
 
 from trellis.extract.base import ExtractorTier
 from trellis.schemas.enums import NodeRole
@@ -129,6 +144,8 @@ from trellis.schemas.well_known import (
 if TYPE_CHECKING:
     from trellis.extract.context import ExtractionContext
 
+logger = structlog.get_logger(__name__)
+
 #: Default ``source_hint`` the dispatcher routes on for this extractor.
 TRACE_SOURCE_HINT = "trace"
 
@@ -151,31 +168,35 @@ _METADATA_DOCUMENT_IDS_KEY = "document_ids"
 _METADATA_DOCUMENT_ID_KEY = "document_id"
 
 
+#: Runs of everything that isn't a unicode word character (plus ``_``,
+#: which ``\w`` counts as one).  Splitting on this is what collapses
+#: ``mcp__trellis__search`` and ``Search Codebase`` onto one slug shape.
+_SLUG_SEPARATORS = re.compile(r"[\W_]+")
+
+
 def normalize_slug(value: str) -> str:
     """Collapse a free-text name into a stable, case-insensitive id slug.
 
     NFKC-normalize, casefold, then join every run of alphanumeric
-    characters with a single ``-``.  Unicode letters and digits survive
-    (``isalnum`` is unicode-aware), so a non-ASCII name still yields a
-    meaningful slug rather than a row of separators.
+    characters with a single ``-``.  The split is unicode-aware, so a
+    non-ASCII name still yields a meaningful slug rather than a row of
+    separators (``Zażółć gęślą`` → ``zażółć-gęślą``).
 
     Returns ``""`` when *value* holds no alphanumeric character at all;
     callers skip the entity rather than mint an id with an empty tail.
 
     Idempotent: ``normalize_slug(normalize_slug(x)) == normalize_slug(x)``.
+
+    .. note::
+       Two narrower slug helpers predate this one and are deliberately
+       *not* collapsed onto it: ``learning.scoring._slugify`` (ASCII-only)
+       and ``trellis_workers.enrichment.service.normalize_tag`` (keeps
+       ``/``).  Both feed already-persisted identifiers, so widening them
+       to this unicode-aware rule would silently re-key stored rows.
+       Prefer this one for new call sites.
     """
     folded = unicodedata.normalize("NFKC", value).casefold()
-    parts: list[str] = []
-    run: list[str] = []
-    for char in folded:
-        if char.isalnum():
-            run.append(char)
-        elif run:
-            parts.append("".join(run))
-            run = []
-    if run:
-        parts.append("".join(run))
-    return "-".join(parts)
+    return "-".join(part for part in _SLUG_SEPARATORS.split(folded) if part)
 
 
 class TraceExtractor:
@@ -431,17 +452,32 @@ class _DraftBuilder:
         # De-dup while preserving order: validate_document_ids rejects
         # repeats outright, and a duplicated pointer is a caller typo we
         # can absorb rather than fail the whole extraction on.
-        seen: dict[str, None] = {}
-        for doc_id in raw:
-            if isinstance(doc_id, str) and doc_id:
-                seen[doc_id] = None
-        return list(seen) or None
+        return list(dict.fromkeys(d for d in raw if isinstance(d, str) and d)) or None
+
+    def _slug_or_none(self, raw: str, *, namespace: str) -> str | None:
+        """Slug *raw*, or ``None`` (logged) when it has no alphanumerics.
+
+        Dropping a punctuation-only name is the right call — it would
+        otherwise mint ``agent:`` — but doing it silently means an entity
+        that vanishes from the graph has no explanation anywhere.  Log the
+        raw name and the id namespace so the drop is greppable.
+        """
+        slug = normalize_slug(raw)
+        if not slug:
+            logger.info(
+                "trace_extraction_name_not_sluggable",
+                trace_id=self._trace.trace_id,
+                namespace=namespace,
+                raw_name=raw,
+            )
+            return None
+        return slug
 
     def _build_agent(self, activity_id: str) -> None:
         agent_id = self._trace.context.agent_id
         if not agent_id:
             return
-        slug = normalize_slug(agent_id)
+        slug = self._slug_or_none(agent_id, namespace="agent")
         if not slug:
             return
         entity_id = self._emit_entity(
@@ -463,7 +499,7 @@ class _DraftBuilder:
         team = self._trace.context.team
         if not team:
             return
-        slug = normalize_slug(team)
+        slug = self._slug_or_none(team, namespace="team")
         if not slug:
             return
         entity_id = self._emit_entity(
@@ -481,7 +517,7 @@ class _DraftBuilder:
         domain = self._trace.context.domain
         if not domain:
             return
-        slug = normalize_slug(domain)
+        slug = self._slug_or_none(domain, namespace="domain")
         if not slug:
             return
         entity_id = self._emit_entity(
@@ -514,7 +550,7 @@ class _DraftBuilder:
                 continue
             if not step.name:
                 continue
-            slug = normalize_slug(step.name)
+            slug = self._slug_or_none(step.name, namespace="tool")
             if not slug:
                 continue
             entity_id = self._emit_entity(

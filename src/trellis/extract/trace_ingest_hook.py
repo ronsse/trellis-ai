@@ -22,26 +22,48 @@ Contract (mirrors the ``save_memory`` extraction stage):
   off by default, so turning trace extraction on never *also* turns a
   silent drop on.
 
-Returns a small summary dict (``entities`` / ``edges`` draft counts plus
-``executed``) so callers that want to surface extraction telemetry can,
-without having to re-derive it.  When the flag is off the hook returns
-``None`` and does nothing.
+* Node roles are reconciled against the stored graph before submission
+  (``reconcile_node_roles``) — ``node_role`` is immutable across SCD-2
+  versions, so a batch that would change one is rewritten to keep the
+  stored role instead of failing forever.
+
+Returns a small summary dict (``entities`` / ``edges`` submitted counts,
+``failed``, and ``executed``) so callers that want to surface extraction
+telemetry can, without having to re-derive it.  When the flag is off the
+hook returns ``None`` and does nothing.
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
 from typing import TYPE_CHECKING, Any
 
 import structlog
 
-from trellis.extract.commands import result_to_batch
+from trellis.extract.commands import (
+    batch_draft_counts,
+    reconcile_node_roles,
+    result_to_batch,
+)
 from trellis.extract.trace import TRACE_SOURCE_HINT, TraceExtractor
-from trellis.mutate.commands import Operation
+from trellis.mutate.commands import CommandStatus
 
 if TYPE_CHECKING:
+    from trellis.mutate.commands import CommandBatch
+    from trellis.schemas.extraction import ExtractionResult
     from trellis.schemas.trace import Trace
     from trellis.stores.registry import StoreRegistry
+
+__all__ = [
+    "TRACE_EXTRACTION_FLAG",
+    "TRACE_EXTRACTION_MIN_CONFIDENCE_FLAG",
+    "batch_draft_counts",
+    "extract_trace_batch",
+    "run_trace_extraction",
+    "trace_extraction_enabled",
+    "trace_extraction_min_confidence",
+]
 
 logger = structlog.get_logger(__name__)
 
@@ -55,11 +77,15 @@ TRACE_EXTRACTION_FLAG = "TRELLIS_ENABLE_TRACE_EXTRACTION"
 #: (the default) means no gate — see :func:`trace_extraction_min_confidence`.
 TRACE_EXTRACTION_MIN_CONFIDENCE_FLAG = "TRELLIS_TRACE_EXTRACTION_MIN_CONFIDENCE"
 
+#: Command outcomes that mean "this draft did not land".
+_UNSUCCESSFUL = frozenset({CommandStatus.FAILED, CommandStatus.REJECTED})
+
+#: Cap on failure messages carried into a single log line.
+_MAX_LOGGED_FAILURES = 5
+
 
 def trace_extraction_enabled() -> bool:
     """``True`` iff ``TRELLIS_ENABLE_TRACE_EXTRACTION`` is set truthy."""
-    import os  # noqa: PLC0415
-
     return os.environ.get(TRACE_EXTRACTION_FLAG, "").strip().lower() in _TRUTHY
 
 
@@ -74,8 +100,6 @@ def trace_extraction_min_confidence() -> float | None:
     warning) rather than as ``0.0`` — misreading "0.85" as "drop
     nothing" is recoverable, misreading it as "drop everything" is not.
     """
-    import os  # noqa: PLC0415
-
     raw = os.environ.get(TRACE_EXTRACTION_MIN_CONFIDENCE_FLAG, "").strip()
     if not raw:
         return None
@@ -102,7 +126,7 @@ def extract_trace_batch(
     trace: Trace,
     *,
     requested_by: str,
-) -> tuple[Any, Any | None]:
+) -> tuple[ExtractionResult, CommandBatch | None]:
     """Extract one stored trace and build its governed batch.
 
     The single shared core of trace→graph extraction — the live ingest
@@ -127,21 +151,6 @@ def extract_trace_batch(
     )
 
 
-def batch_draft_counts(batch: Any | None) -> tuple[int, int]:
-    """``(entities, edges)`` a batch will actually write.
-
-    ``result.entities`` / ``result.edges`` count what the *extractor*
-    produced; once a confidence gate is in play that overstates what
-    survives into the batch.  Telemetry should report what was
-    submitted, so count the commands.
-    """
-    if batch is None:
-        return 0, 0
-    entities = sum(1 for c in batch.commands if c.operation is Operation.ENTITY_CREATE)
-    edges = sum(1 for c in batch.commands if c.operation is Operation.LINK_CREATE)
-    return entities, edges
-
-
 def run_trace_extraction(
     registry: StoreRegistry,
     trace: Trace,
@@ -159,11 +168,14 @@ def run_trace_extraction(
 
     Returns:
         ``None`` when the feature flag is off.  Otherwise a summary dict
-        ``{"entities": int, "edges": int, "executed": bool}`` describing
-        the drafts produced and whether the batch was submitted.  Any
-        failure is caught, logged, and reported as
-        ``{"entities": 0, "edges": 0, "executed": False, "error": "..."}``
-        — it never propagates.
+        ``{"entities": int, "edges": int, "failed": int, "executed":
+        bool}``.  ``entities`` / ``edges`` count the commands *submitted*
+        and ``failed`` counts those the executor rejected — the batch runs
+        ``CONTINUE_ON_ERROR``, so reporting only the submitted counts
+        would present a partly-failed batch as a clean one.  Any failure
+        is caught, logged, and reported as ``{"entities": 0, "edges": 0,
+        "failed": 0, "executed": False, "error": "..."}`` — it never
+        propagates.
     """
     if not trace_extraction_enabled():
         return None
@@ -172,11 +184,13 @@ def run_trace_extraction(
 
     try:
         _result, batch = extract_trace_batch(trace, requested_by=requested_by)
-        entity_count, edge_count = batch_draft_counts(batch)
         if batch is None:
-            return {"entities": 0, "edges": 0, "executed": False}
+            return {"entities": 0, "edges": 0, "failed": 0, "executed": False}
 
-        build_curate_executor(registry).execute_batch(batch)
+        reconcile_node_roles(batch, registry.knowledge.graph_store)
+        entity_count, edge_count = batch_draft_counts(batch)
+        results = build_curate_executor(registry).execute_batch(batch)
+        failed = [r for r in results if r.status in _UNSUCCESSFUL]
     except Exception as exc:
         # GRACEFUL-DEGRADATION: trace ingest's success contract is "the
         # trace is durably stored". Trace→graph extraction is a
@@ -184,12 +198,34 @@ def run_trace_extraction(
         # successful trace write. Logged at exception level so persistent
         # breakage is visible in stderr.
         logger.exception("trace_extraction_failed", trace_id=trace.trace_id)
-        return {"entities": 0, "edges": 0, "executed": False, "error": str(exc)}
+        return {
+            "entities": 0,
+            "edges": 0,
+            "failed": 0,
+            "executed": False,
+            "error": str(exc),
+        }
 
+    if failed:
+        # CONTINUE_ON_ERROR means a rejected command is not an exception,
+        # so without this the only trace of a permanently-failing draft is
+        # one executor-level log line nobody reads.
+        logger.warning(
+            "trace_extraction_commands_failed",
+            trace_id=trace.trace_id,
+            failed=len(failed),
+            messages=[r.message for r in failed[:_MAX_LOGGED_FAILURES]],
+        )
     logger.info(
         "trace_extraction_completed",
         trace_id=trace.trace_id,
         entities=entity_count,
         edges=edge_count,
+        failed=len(failed),
     )
-    return {"entities": entity_count, "edges": edge_count, "executed": True}
+    return {
+        "entities": entity_count,
+        "edges": edge_count,
+        "failed": len(failed),
+        "executed": True,
+    }

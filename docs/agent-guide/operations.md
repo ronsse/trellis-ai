@@ -160,8 +160,10 @@ A second, separately opt-in variable gates weak drafts: `TRELLIS_TRACE_EXTRACTIO
 When the flag is on, the CLI JSON output gains an `extraction` block:
 
 ```json
-{"status": "ingested", "trace_id": "01JRK5...", "source": "agent", "intent": "...", "extraction": {"entities": 5, "edges": 4, "executed": true}}
+{"status": "ingested", "trace_id": "01JRK5...", "source": "agent", "intent": "...", "extraction": {"entities": 5, "edges": 4, "failed": 0, "executed": true}}
 ```
+
+`entities` / `edges` count the commands *submitted*; `failed` counts those the executor rejected. The batch runs `CONTINUE_ON_ERROR`, so a non-zero `failed` is not an error for the ingest — the trace is stored either way — but it does mean some drafts did not land. Persistent non-zero `failed` is worth investigating; the `trace_extraction_commands_failed` log line carries the executor messages.
 
 ### `trellis extract traces` (backfill)
 

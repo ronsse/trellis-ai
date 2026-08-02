@@ -17,6 +17,10 @@ property on the created node / edge.  It used to be dropped here, which
 made every downstream confidence question unanswerable — including the
 ``min_confidence`` gate below, which can only be audited if the value it
 filtered on also lands on the rows it kept.
+
+:func:`batch_draft_counts` and :func:`reconcile_node_roles` are the
+post-build companions: what a batch will really write, and the one
+store-state check that has to happen before submitting it.
 """
 
 from __future__ import annotations
@@ -29,6 +33,7 @@ from trellis.mutate.commands import BatchStrategy, Command, CommandBatch, Operat
 
 if TYPE_CHECKING:
     from trellis.schemas.extraction import EdgeDraft, EntityDraft, ExtractionResult
+    from trellis.stores.base.graph import GraphStore
 
 logger = structlog.get_logger(__name__)
 
@@ -96,9 +101,10 @@ def result_to_batch(
             args["entity_id"] = entity.entity_id
         if entity.generation_spec is not None:
             args["generation_spec"] = entity.generation_spec
-        # Only forward a link the draft actually carries — an omitted
-        # ``document_ids`` is what EntityUpdateHandler reads as "leave the
-        # existing graph↔document link untouched".
+        # Only forward a link the draft actually carries.  Omitting the arg
+        # is what both entity handlers read as "leave the existing
+        # graph↔document link alone"; forwarding an empty list would mean
+        # "unlink", which no extractor is ever trying to say.
         if entity.document_ids is not None:
             args["document_ids"] = list(entity.document_ids)
         commands.append(
@@ -155,12 +161,14 @@ def _apply_confidence_gate(
     ``allow_dangling`` — the gate would have "dropped" the node while
     leaving its relationships behind.  Both halves go, or neither does.
     """
-    kept_entities = [e for e in entities if e.confidence >= min_confidence]
-    dropped_ids = {
-        e.entity_id
-        for e in entities
-        if e.confidence < min_confidence and e.entity_id is not None
-    }
+    kept_entities: list[EntityDraft] = []
+    dropped_ids: set[str] = set()
+    for entity in entities:
+        if entity.confidence >= min_confidence:
+            kept_entities.append(entity)
+        elif entity.entity_id is not None:
+            dropped_ids.add(entity.entity_id)
+
     kept_edges = [
         e
         for e in edges
@@ -180,3 +188,67 @@ def _apply_confidence_gate(
             dropped_edges=dropped_edges,
         )
     return kept_entities, kept_edges
+
+
+def batch_draft_counts(batch: CommandBatch | None) -> tuple[int, int]:
+    """``(entities, edges)`` a batch will actually attempt to write.
+
+    ``result.entities`` / ``result.edges`` count what the *extractor*
+    produced; once a confidence gate is in play that overstates what
+    survives into the batch.  Telemetry should report what was
+    submitted, so count the commands.
+    """
+    if batch is None:
+        return 0, 0
+    entities = sum(1 for c in batch.commands if c.operation is Operation.ENTITY_CREATE)
+    edges = sum(1 for c in batch.commands if c.operation is Operation.LINK_CREATE)
+    return entities, edges
+
+
+def reconcile_node_roles(batch: CommandBatch, graph_store: GraphStore) -> list[str]:
+    """Keep the stored ``node_role`` where the batch would change it.
+
+    ``node_role`` is immutable across SCD-2 versions
+    (:func:`~trellis.stores.base.graph.check_node_role_immutable`), so an
+    ``ENTITY_CREATE`` naming an existing node with a *different* role does
+    not update it — it fails the command outright, permanently, on every
+    re-extraction.  A batch built from a newer extractor therefore breaks
+    against a graph an older extractor already populated: trace extraction
+    started minting ``tool:<slug>`` nodes ``STRUCTURAL``, and every
+    deployment that already had ``tool:bash`` as ``SEMANTIC`` would emit a
+    ``FAILED`` command for it forever.
+
+    Rewriting the arg to the stored role makes the batch succeed and leaves
+    the node exactly as it was — no worse than before the role change, and
+    no silent stream of failures.  Each reconciled node is logged and
+    returned so an operator can build a migration list; promoting those
+    nodes for real needs a delete-and-recreate, which is destructive enough
+    that it must stay an explicit human decision, not a side effect of
+    ingest.
+
+    Returns the node ids left at their stored role (empty when none).
+    """
+    reconciled: list[str] = []
+    for command in batch.commands:
+        if command.operation is not Operation.ENTITY_CREATE:
+            continue
+        node_id = command.args.get("entity_id")
+        requested = command.args.get("node_role")
+        if not isinstance(node_id, str) or requested is None:
+            continue
+        existing = graph_store.get_node(node_id)
+        if existing is None:
+            continue
+        stored = existing.get("node_role", "semantic")
+        if stored == requested:
+            continue
+        command.args["node_role"] = stored
+        reconciled.append(node_id)
+        logger.warning(
+            "extraction_node_role_conflict",
+            node_id=node_id,
+            stored_role=stored,
+            requested_role=requested,
+            requested_by=batch.requested_by,
+        )
+    return reconciled

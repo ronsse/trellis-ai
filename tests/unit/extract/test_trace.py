@@ -8,6 +8,8 @@ tests double as a contract check that the documented examples extract.
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import pytest
 
 from trellis.extract.base import ExtractorTier
@@ -460,6 +462,17 @@ class TestIdNormalization:
         trace = _tool_trace(["///"])
         result = await TraceExtractor().extract(trace, source_hint="trace")
         assert not any(e.entity_id.startswith("tool:") for e in result.entities)
+
+    async def test_skipped_name_is_logged_not_silently_dropped(self) -> None:
+        """A vanished entity has to be explainable from the logs."""
+        trace = _tool_trace(["///"])
+        with patch("trellis.extract.trace.logger") as log:
+            await TraceExtractor().extract(trace, source_hint="trace")
+        log.info.assert_called_once()
+        (event,) = log.info.call_args.args
+        assert event == "trace_extraction_name_not_sluggable"
+        assert log.info.call_args.kwargs["raw_name"] == "///"
+        assert log.info.call_args.kwargs["namespace"] == "tool"
 
     def test_normalize_slug_is_idempotent(self) -> None:
         for value in ["Bash", "mcp__trellis__search", "Data Platform", "café"]:

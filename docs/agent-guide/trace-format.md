@@ -284,11 +284,15 @@ Opaque ids are **not** normalized: `trace:`, `evidence:` and `artifact:` ids are
 
 ### Node role and the pack filter
 
-Tool nodes are minted `node_role="structural"` — machine-generated plumbing, regenerated from source on every trace, three words long. That makes them invisible to retrieval by default (`PackBuilder` drops structural items unless `include_structural=True`) while leaving them fully traversable in the graph. Everything else stays `semantic`.
+Tool nodes are minted `node_role="structural"` — machine-generated plumbing, regenerated from source on every trace, three words long. That makes them invisible to retrieval by default (`PackBuilder` drops structural items unless `include_structural=True`) while leaving them fully traversable in the graph. Everything else stays `semantic`, including the per-trace `Activity` node (demoting it would hide trace memory from packs entirely) and `evidence:` / `artifact:` nodes (they point at real files and datasets).
+
+**Existing graphs.** `node_role` is immutable across SCD-2 versions, so a `tool:<slug>` node an earlier release already wrote as `semantic` cannot be promoted in place. Extraction detects the collision before submitting and keeps the stored role, logging `extraction_node_role_conflict` with the node id — the batch succeeds and the node is left exactly as it was. Those nodes keep appearing in packs until they are deleted and re-minted; the log line is the list to work from.
 
 ### Document links
 
-If the ingest path that produced a trace also rendered it into the DocumentStore, it can name the row in `metadata` — either `"document_ids": ["<doc_id>", ...]` or `"document_id": "<doc_id>"` — and the extractor carries that onto the `Activity` node as its `document_ids` link. Only the Activity gets it: `tool:` / `agent:` / `team:` nodes are shared across traces and `entity.create` *replaces* rather than merges the link.
+If the ingest path that produced a trace also rendered it into the DocumentStore, it can name the row in `metadata` — either `"document_ids": ["<doc_id>", ...]` or `"document_id": "<doc_id>"` — and the extractor carries that onto the `Activity` node as its `document_ids` link. Only the Activity gets it: `tool:` / `agent:` / `team:` nodes are shared across traces and a supplied `document_ids` *replaces* rather than merges the link, so fanning out would point every shared node at whichever trace was extracted last.
+
+No in-tree ingest path sets these keys yet, so on a stock deployment trace-minted entities still carry an empty `document_ids`. The convention is here so a producer that *does* write a document alongside the trace has a defined place to name it.
 
 ### Confidence gate (opt-in)
 

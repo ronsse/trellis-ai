@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import structlog
 
@@ -223,6 +223,10 @@ class EntityCreateHandler:
     create structural or curated nodes. Defaults to a semantic node when
     omitted. The graph store rejects invalid combinations (e.g., curated
     without a generation_spec) via ``validate_node_role_args``.
+
+    ``document_ids`` follows the same omission semantics as
+    :class:`EntityUpdateHandler`: an omitted field carries the stored link
+    forward, an explicit value replaces it.
     """
 
     def __init__(self, registry: StoreRegistry) -> None:
@@ -240,8 +244,16 @@ class EntityCreateHandler:
         # ADR planes-and-substrates). Threading it here gives the pointer a
         # governed write path — the pointer-not-prose invariant depends on a
         # created entity being able to carry an ``evidence_ref`` document
-        # pointer without smuggling it through metadata. ``None`` == "no link".
-        document_ids = command.args.get("document_ids")
+        # pointer without smuggling it through metadata.
+        #
+        # ENTITY_CREATE on an existing id is an upsert (it opens a new SCD-2
+        # version), so an *omitted* ``document_ids`` has to carry the stored
+        # link forward the way EntityUpdateHandler does. Passing ``None``
+        # straight through would write NULL and silently destroy a link some
+        # other writer established — e.g. re-extracting an entity that
+        # ``save_knowledge`` had linked to its document. Omission means
+        # "leave it alone"; an explicit value still replaces.
+        document_ids = self._resolve_document_ids(command, caller_id)
         node_id = self._registry.knowledge.graph_store.upsert_node(
             node_id=caller_id,
             node_type=command.args["entity_type"],
@@ -263,6 +275,27 @@ class EntityCreateHandler:
             },
         )
         return node_id, f"Entity created: {command.args['name']}"
+
+    def _resolve_document_ids(
+        self, command: Command, caller_id: str | None
+    ) -> list[str] | None:
+        """Command's ``document_ids``, else the stored link, else ``None``.
+
+        Only reads the store when the caller both named an id and omitted
+        the field — the common create-a-fresh-node path stays a single
+        write.
+        """
+        if "document_ids" in command.args:
+            supplied = command.args["document_ids"]
+            return cast("list[str] | None", supplied)
+        if caller_id is None:
+            return None
+        existing = self._registry.knowledge.graph_store.get_node(caller_id)
+        if existing is None:
+            return None
+        # ``get_node`` returns a (possibly empty) list; normalise empty to
+        # ``None`` so ``validate_document_ids`` sees a clean value.
+        return cast("list[str] | None", existing.get("document_ids") or None)
 
 
 class EntityUpdateHandler:

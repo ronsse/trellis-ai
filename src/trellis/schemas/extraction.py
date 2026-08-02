@@ -43,8 +43,8 @@ class EntityDraft(TrellisModel):
     the pointer since Phase 4 but no extractor could supply one, so
     every extractor-minted node wrote an empty link.  ``None`` means "no
     link" and is forwarded to the handler as an omission, not an empty
-    list — an omitted value is what ``EntityUpdateHandler`` reads as
-    "leave the existing link alone".
+    list — an omitted value is what both entity handlers read as "leave
+    the existing link alone", whereas an explicit value replaces it.
     """
 
     entity_id: str | None = None

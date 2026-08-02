@@ -2,8 +2,15 @@
 
 from __future__ import annotations
 
-from trellis.extract.commands import CONFIDENCE_PROPERTY, result_to_batch
-from trellis.mutate.commands import BatchStrategy, Operation
+from unittest.mock import MagicMock
+
+from trellis.extract.commands import (
+    CONFIDENCE_PROPERTY,
+    batch_draft_counts,
+    reconcile_node_roles,
+    result_to_batch,
+)
+from trellis.mutate.commands import BatchStrategy, CommandBatch, Operation
 from trellis.schemas.enums import NodeRole
 from trellis.schemas.extraction import (
     EdgeDraft,
@@ -245,3 +252,75 @@ class TestDocumentIds:
         forwarded = batch.commands[0].args["document_ids"]
         assert forwarded == ids
         assert forwarded is not ids
+
+
+class TestBatchDraftCounts:
+    def test_none_batch_is_zero(self) -> None:
+        assert batch_draft_counts(None) == (0, 0)
+
+    def test_counts_commands_by_operation(self) -> None:
+        batch = result_to_batch(
+            _result(
+                entities=[EntityDraft(entity_id="a", entity_type="p", name="A")],
+                edges=[
+                    EdgeDraft(source_id="a", target_id="b", edge_kind="relatesTo"),
+                    EdgeDraft(source_id="a", target_id="c", edge_kind="relatesTo"),
+                ],
+            ),
+            requested_by="t",
+        )
+        assert batch_draft_counts(batch) == (1, 2)
+
+
+class TestReconcileNodeRoles:
+    """Guards the branches the end-to-end store test can't reach cheaply."""
+
+    @staticmethod
+    def _batch_with(entity: EntityDraft) -> CommandBatch:
+        return result_to_batch(_result(entities=[entity]), requested_by="t")
+
+    def test_auto_generated_id_is_skipped(self) -> None:
+        """No entity_id means no node to collide with — never read the store."""
+        store = MagicMock()
+        batch = self._batch_with(EntityDraft(entity_type="p", name="A"))
+        assert reconcile_node_roles(batch, store) == []
+        store.get_node.assert_not_called()
+
+    def test_absent_node_is_skipped(self) -> None:
+        store = MagicMock()
+        store.get_node.return_value = None
+        batch = self._batch_with(EntityDraft(entity_id="a", entity_type="p", name="A"))
+        assert reconcile_node_roles(batch, store) == []
+        assert batch.commands[0].args["node_role"] == "semantic"
+
+    def test_matching_role_is_left_alone(self) -> None:
+        store = MagicMock()
+        store.get_node.return_value = {"node_role": "semantic"}
+        batch = self._batch_with(EntityDraft(entity_id="a", entity_type="p", name="A"))
+        assert reconcile_node_roles(batch, store) == []
+        assert batch.commands[0].args["node_role"] == "semantic"
+
+    def test_conflicting_role_is_rewritten_to_the_stored_one(self) -> None:
+        store = MagicMock()
+        store.get_node.return_value = {"node_role": "semantic"}
+        batch = self._batch_with(
+            EntityDraft(
+                entity_id="a",
+                entity_type="p",
+                name="A",
+                node_role=NodeRole.STRUCTURAL,
+            )
+        )
+        assert reconcile_node_roles(batch, store) == ["a"]
+        assert batch.commands[0].args["node_role"] == "semantic"
+
+    def test_edges_are_ignored(self) -> None:
+        store = MagicMock()
+        batch = result_to_batch(
+            _result(
+                edges=[EdgeDraft(source_id="a", target_id="b", edge_kind="relatesTo")]
+            ),
+            requested_by="t",
+        )
+        assert reconcile_node_roles(batch, store) == []
+        store.get_node.assert_not_called()

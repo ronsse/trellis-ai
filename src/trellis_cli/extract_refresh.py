@@ -35,11 +35,15 @@ from rich.console import Console
 
 from trellis.core.base import utc_now
 from trellis.core.error_sanitize import sanitized_error_payload
-from trellis.extract.commands import result_to_batch
+from trellis.extract.commands import (
+    batch_draft_counts,
+    reconcile_node_roles,
+    result_to_batch,
+)
 from trellis.extract.dispatcher import ExtractionDispatcher
 from trellis.extract.registry import ExtractorRegistry
 from trellis.extract.sources import SourceEntry, load_sources
-from trellis.extract.trace_ingest_hook import batch_draft_counts, extract_trace_batch
+from trellis.extract.trace_ingest_hook import extract_trace_batch
 from trellis.mutate import build_curate_executor
 from trellis.schemas.extraction import ExtractionResult
 from trellis.stores.base.event_log import EventType
@@ -541,6 +545,8 @@ def traces(
 
     for trace in stored_traces:
         _result, batch = extract_trace_batch(trace, requested_by="cli:extract-traces")
+        if batch is not None and not dry_run:
+            reconcile_node_roles(batch, registry.knowledge.graph_store)
         # Count the batch, not the raw result: a confidence gate can drop
         # drafts between the two, and the number reported has to be what
         # would actually be written.
