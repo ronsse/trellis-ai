@@ -22,6 +22,7 @@ from typing import Any
 import structlog
 
 from trellis.core.base import TrellisModel
+from trellis.feedback.models import SUCCESS_RATING_THRESHOLD
 from trellis.schemas.advisory import Advisory, AdvisoryCategory, AdvisoryEvidence
 from trellis.stores.advisory_store import AdvisoryStore
 from trellis.stores.base.event_log import EventLog, EventType
@@ -31,7 +32,7 @@ logger = structlog.get_logger(__name__)
 # --- Thresholds ---
 _MIN_SAMPLE_SIZE = 5
 _MIN_EFFECT_SIZE = 0.15
-_SUCCESS_RATING_THRESHOLD = 0.5
+_SUCCESS_RATING_THRESHOLD = SUCCESS_RATING_THRESHOLD
 _CONFIDENCE_SCALE = 0.1  # multiplied by sample_size to cap at 1.0
 _MIN_WORD_LENGTH = 3
 _SCOPE_SMALL = 5

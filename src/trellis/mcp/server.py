@@ -41,6 +41,9 @@ from mcp.types import INTERNAL_ERROR, INVALID_PARAMS, ErrorData
 from trellis.auth import SCOPE_INGEST, SCOPE_MUTATE, SCOPE_READ
 from trellis.classify.ingest import classify_metadata_on_write
 from trellis.extract.trace_ingest_hook import run_trace_extraction
+from trellis.feedback.models import PackFeedback
+from trellis.feedback.recording import feedback_log_dir
+from trellis.feedback.recording import record_feedback as record_pack_feedback
 from trellis.logging import configure_stderr_logging
 from trellis.mcp.auth import (
     TRANSPORT_HTTP,
@@ -1596,7 +1599,8 @@ def get_graph(
 def record_feedback(
     trace_id: str = "",
     pack_id: str = "",
-    success: bool = True,
+    success: bool | None = None,
+    rating: float | None = None,
     notes: str | None = None,
     helpful_item_ids: list[str] | None = None,
     unhelpful_item_ids: list[str] | None = None,
@@ -1607,6 +1611,12 @@ def record_feedback(
     Supply ``pack_id`` (preferred) to attribute feedback to a context
     pack returned by one of the ``get_*_context`` tools. The pack_id is
     shown in the response header of each pack and can be copied verbatim.
+
+    Grade the pack with ``rating`` (0.0 to 1.0) whenever you can: a pack that
+    contained one useful item out of six is not the same signal as one
+    that nailed the task, and only graded feedback gives the fitness loops
+    the variance they need. ``success`` alone still works and is treated
+    as ``rating=1.0`` / ``0.0``.
 
     When citing specific elements:
 
@@ -1627,7 +1637,11 @@ def record_feedback(
         trace_id: Trace ID for trace-level feedback (optional).
         pack_id: Pack ID for pack-level feedback (optional but preferred
             when feedback follows a context retrieval).
-        success: Whether the task succeeded.
+        success: Whether the task succeeded. Omit when passing ``rating``
+            — it is then derived from the grade. Defaults to success only
+            when neither is given.
+        rating: Graded usefulness of the pack, 0.0 (useless) to 1.0
+            (everything served was on point).
         notes: Optional notes about what worked or didn't.
         helpful_item_ids: IDs of pack items that were actually useful.
         unhelpful_item_ids: IDs of pack items that were noise.
@@ -1640,43 +1654,61 @@ def record_feedback(
             "one of trace_id or pack_id must be provided",
             data={"fields": ["trace_id", "pack_id"]},
         )
+    if rating is not None and not 0.0 <= rating <= 1.0:
+        _raise_invalid_params(
+            "rating must be between 0.0 and 1.0",
+            data={"field": "rating", "value": rating},
+        )
 
     registry = _get_registry()
-
-    payload: dict[str, Any] = {
-        "success": success,
-        "notes": notes or "",
-        "rating": 1.0 if success else 0.0,
-    }
-    if helpful_item_ids:
-        payload["helpful_item_ids"] = list(helpful_item_ids)
-    if unhelpful_item_ids:
-        payload["unhelpful_item_ids"] = list(unhelpful_item_ids)
-    if followed_advisory_ids:
-        payload["followed_advisory_ids"] = list(followed_advisory_ids)
-
-    if has_pack:
-        payload["pack_id"] = pack_id
-        registry.operational.event_log.emit(
-            EventType.FEEDBACK_RECORDED,
-            "mcp",
-            entity_id=pack_id,
-            entity_type="pack",
-            payload=payload,
+    stores_dir = registry.stores_dir
+    if stores_dir is None:
+        _raise_internal(
+            "stores_dir is not configured; cannot record feedback",
+            data={"setting": "stores_dir"},
         )
-        target = f"pack: {pack_id}"
-    else:
-        registry.operational.event_log.emit(
-            EventType.FEEDBACK_RECORDED,
-            "mcp",
-            entity_id=trace_id,
-            entity_type="trace",
-            payload=payload,
-        )
-        target = f"trace: {trace_id}"
 
-    status = "positive" if success else "negative"
-    return f"Feedback recorded ({status}) for {target}"
+    # Shared with the REST pack-feedback route so the two agent-facing
+    # surfaces agree on what identical inputs mean — including deriving
+    # ``success`` from ``rating`` and leaving ``items_served`` empty
+    # rather than fabricating it from the cited ids.
+    feedback = PackFeedback.from_agent_signal(
+        run_id=trace_id if has_trace else pack_id,
+        success=success,
+        rating=rating,
+        helpful_item_ids=helpful_item_ids or (),
+        unhelpful_item_ids=unhelpful_item_ids or (),
+        followed_advisory_ids=followed_advisory_ids or (),
+        pack_id=pack_id if has_pack else None,
+        trace_id=trace_id if has_trace else None,
+        notes=notes,
+    )
+
+    # One path writes both sinks: the durable pack_feedback.jsonl row and
+    # the authoritative FEEDBACK_RECORDED event. The emit fails soft in
+    # there, so a sink outage degrades to a file row that
+    # ``trellis admin reconcile-feedback`` replays — it no longer raises
+    # out of an agent-facing tool.
+    result = record_pack_feedback(
+        feedback,
+        log_dir=feedback_log_dir(stores_dir),
+        event_log=registry.operational.event_log,
+        pack_id=pack_id if has_pack else None,
+        source="mcp",
+        entity_id=None if has_pack else trace_id,
+        entity_type=None if has_pack else "trace",
+    )
+
+    target = f"pack: {pack_id}" if has_pack else f"trace: {trace_id}"
+    status = "positive" if feedback.succeeded else "negative"
+    graded = feedback.effective_rating
+    message = f"Feedback recorded ({status}, rating {graded:.2f}) for {target}"
+    if not result.event_log_in_sync:
+        message += (
+            " — event log unavailable, audit row kept;"
+            " run `trellis admin reconcile-feedback` to replay it"
+        )
+    return message
 
 
 # ---------------------------------------------------------------------------

@@ -1097,12 +1097,16 @@ components:
           type: array
         rating:
           anyOf:
-          - type: number
+          - maximum: 1.0
+            minimum: 0.0
+            type: number
           - type: 'null'
           title: Rating
         success:
+          anyOf:
+          - type: boolean
+          - type: 'null'
           title: Success
-          type: boolean
         target_id:
           anyOf:
           - type: string
@@ -1113,8 +1117,6 @@ components:
             type: string
           title: Unhelpful Item Ids
           type: array
-      required:
-      - success
       title: PackFeedbackRequest
       type: object
     PackFeedbackResponse:

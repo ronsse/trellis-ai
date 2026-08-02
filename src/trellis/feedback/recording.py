@@ -24,6 +24,25 @@ logger = structlog.get_logger(__name__)
 #: :func:`record_feedback`.
 _DEFAULT_COMPONENT_ID = "retrieve.pack_builder.PackBuilder"
 
+#: Default ``source`` stamped on the emitted ``FEEDBACK_RECORDED`` event.
+#: Overridable per-call so agent-facing surfaces keep their provenance.
+_DEFAULT_EVENT_SOURCE = "feedback.record"
+
+#: Sub-directory of ``StoreRegistry.stores_dir`` holding the audit log.
+_FEEDBACK_LOG_SUBDIR = "feedback"
+
+
+def feedback_log_dir(stores_dir: Path | str) -> Path:
+    """Directory holding ``pack_feedback.jsonl`` for a given stores dir.
+
+    One spelling of the location, so the MCP tool, the REST route and
+    ``worker curate --reconcile-first`` cannot look in different places.
+    Always derive ``stores_dir`` from ``StoreRegistry.stores_dir`` — it
+    honours ``data_dir:`` in ``config.yaml``, which re-deriving from the
+    environment does not.
+    """
+    return Path(stores_dir) / _FEEDBACK_LOG_SUBDIR
+
 
 @dataclass(frozen=True)
 class FeedbackRecordResult:
@@ -99,6 +118,9 @@ def record_feedback(
     outcome_store: OutcomeStore | None = None,
     pack_id: str | None = None,
     component_id: str = _DEFAULT_COMPONENT_ID,
+    source: str = _DEFAULT_EVENT_SOURCE,
+    entity_id: str | None = None,
+    entity_type: str | None = None,
 ) -> FeedbackRecordResult:
     """Append a feedback signal to the JSONL log.
 
@@ -140,6 +162,16 @@ def record_feedback(
             Ignored when neither emission sink is provided.
         component_id: Stable component identifier written onto the
             :class:`OutcomeEvent`.  Defaults to the PackBuilder.
+        source: ``source`` recorded on the emitted event.  Defaults to
+            ``"feedback.record"``; agent-facing surfaces pass their own
+            (e.g. ``"mcp"``) so provenance stays visible in the log.
+        entity_id: Event ``entity_id`` override.  Defaults to ``pack_id``.
+            Trace-level feedback — a real case on the MCP surface, where
+            an agent grades a trace with no pack involved — passes the
+            ``trace_id`` here so the event is still reachable by entity.
+        entity_type: Event ``entity_type`` override.  Defaults to
+            ``"pack"`` when a ``pack_id`` is given.  Pass alongside
+            ``entity_id`` (e.g. ``"trace"``).
 
     Returns:
         :class:`FeedbackRecordResult` carrying the log path,
@@ -169,9 +201,13 @@ def record_feedback(
             else:
                 event_log.emit(
                     EventType.FEEDBACK_RECORDED,
-                    source="feedback.record",
-                    entity_id=pack_id,
-                    entity_type="pack" if pack_id else None,
+                    source=source,
+                    entity_id=entity_id if entity_id is not None else pack_id,
+                    entity_type=(
+                        entity_type
+                        if entity_id is not None
+                        else ("pack" if pack_id else None)
+                    ),
                     payload=feedback.to_event_payload(pack_id=pack_id),
                 )
                 event_log_emitted = True
@@ -256,10 +292,17 @@ def reconcile_feedback_log_to_event_log(
         log_dir: Directory containing ``pack_feedback.jsonl``.
         event_log: EventLog to backfill.
         pack_id_lookup: Optional ``feedback_id -> pack_id`` map for
-            entries that carry a pack association. ``pack_id`` is not
-            stored in ``PackFeedback`` itself, so reconciliation can
-            only restore it when the caller provides this mapping
-            (otherwise the emitted event has ``entity_id=None``).
+            entries that carry a pack association. ``pack_id`` is not a
+            ``PackFeedback`` field, so it is recovered from this mapping
+            first and from ``metadata["pack_id"]`` second — the writers
+            that know the pack stamp it there precisely so an emit that
+            failed at record time can be replayed with its pack
+            association intact. Trace-level feedback (no pack) falls
+            back to ``metadata["trace_id"]`` and is re-emitted with
+            ``entity_type="trace"``, matching what the original emit
+            would have written. Without any of the three, the emitted
+            event has ``entity_id=None`` and no ``payload.pack_id``,
+            which the advisory/effectiveness joins cannot use.
 
     Returns:
         :class:`ReconcileResult` with counts and the list of
@@ -273,13 +316,20 @@ def reconcile_feedback_log_to_event_log(
         if _feedback_id_in_event_log(event_log, fb.feedback_id):
             result.already_present += 1
             continue
-        pack_id = lookup.get(fb.feedback_id)
+        recovered = lookup.get(fb.feedback_id) or fb.metadata.get("pack_id")
+        pack_id = str(recovered) if recovered else None
+        entity_id: str | None = pack_id
+        entity_type: str | None = "pack" if pack_id else None
+        if entity_id is None:
+            trace_id = fb.metadata.get("trace_id")
+            if trace_id:
+                entity_id, entity_type = str(trace_id), "trace"
         try:
             event_log.emit(
                 EventType.FEEDBACK_RECORDED,
                 source="feedback.reconcile",
-                entity_id=pack_id,
-                entity_type="pack" if pack_id else None,
+                entity_id=entity_id,
+                entity_type=entity_type,
                 payload=fb.to_event_payload(pack_id=pack_id),
             )
             result.emitted += 1
@@ -349,7 +399,7 @@ def _emit_outcome(
     occurred_at = _parse_timestamp(feedback.timestamp_utc)
     items_served = len(feedback.items_served)
     items_referenced = len(feedback.items_referenced)
-    success = feedback.outcome in {"success", "completed"}
+    success = feedback.succeeded
 
     metadata: dict[str, object] = {
         "pack_outcome": feedback.outcome,
@@ -398,6 +448,7 @@ def load_feedback_log(log_dir: Path | str) -> list[PackFeedback]:
             if not stripped:
                 continue
             data = json.loads(stripped)
+            metadata = data.get("metadata") or {}
             kwargs: dict[str, object] = {
                 "run_id": data["run_id"],
                 "phase": data["phase"],
@@ -406,10 +457,19 @@ def load_feedback_log(log_dir: Path | str) -> list[PackFeedback]:
                 "items_served": data.get("items_served", []),
                 "items_referenced": data.get("items_referenced", []),
                 "relevance_scores": data.get("relevance_scores", {}),
+                # Absent on rows written before these fields existed;
+                # the defaults match "ungraded, no attribution". The
+                # ``metadata`` fallback recovers the grade from rows the
+                # REST route wrote while ``rating`` was still a metadata
+                # key — without it a replay would overwrite a real 0.3
+                # with a derived 1.0 at the key consumers read.
+                "rating": data.get("rating", metadata.get("rating")),
+                "unhelpful_item_ids": data.get("unhelpful_item_ids", []),
+                "followed_advisory_ids": data.get("followed_advisory_ids", []),
                 "intent_family": data.get("intent_family", ""),
                 "timestamp_utc": data.get("timestamp_utc", ""),
                 "agent_id": data.get("agent_id"),
-                "metadata": data.get("metadata", {}),
+                "metadata": metadata,
             }
             # Older JSONL rows pre-date feedback_id; only pass through when
             # present so the dataclass default (fresh ULID) doesn't stomp

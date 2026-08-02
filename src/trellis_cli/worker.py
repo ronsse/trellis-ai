@@ -849,19 +849,49 @@ def _reconcile_before_cycle() -> None:
     :func:`trellis.feedback.recording.reconcile_feedback_log_to_event_log`
     so ``--reconcile-first`` replays any file-only feedback rows the
     cycle would otherwise miss. Logs the resulting counts.
+
+    Scans ``<stores_dir>/feedback`` — where the MCP tool and the REST
+    pack-feedback route append — plus ``<data_dir>`` itself, which
+    earlier ad-hoc runs used. Reconciliation is keyed on ``feedback_id``
+    and idempotent, so covering both costs one extra empty scan and
+    never double-emits.
+
+    ``stores_dir`` comes off the registry rather than being re-derived
+    from the environment: ``StoreRegistry.from_config_dir`` lets
+    ``data_dir:`` in ``config.yaml`` override ``$TRELLIS_DATA_DIR``, so
+    an env-only derivation would scan an empty directory and report a
+    healthy no-op on exactly the deployments ``trellis admin init
+    --data-dir`` produces.
     """
     from trellis.feedback.recording import (  # noqa: PLC0415
+        feedback_log_dir,
         reconcile_feedback_log_to_event_log,
     )
 
-    result = reconcile_feedback_log_to_event_log(get_data_dir(), get_event_log())
-    logger.info(
-        "worker_curate.reconciled",
-        scanned=result.scanned,
-        already_present=result.already_present,
-        emitted=result.emitted,
-        failed=result.failed,
-    )
+    event_log = get_event_log()
+    stores_dir = _get_registry().stores_dir
+    log_dirs = [get_data_dir()]
+    if stores_dir is not None:
+        log_dirs.insert(0, feedback_log_dir(stores_dir))
+    found = [d for d in log_dirs if (d / "pack_feedback.jsonl").exists()]
+    if not found:
+        # Loud about the no-op: "reconcile ran and found nothing" and
+        # "reconcile looked in the wrong place" are the same silence.
+        logger.info(
+            "worker_curate.reconcile_no_log",
+            log_dirs=[str(d) for d in log_dirs],
+        )
+        return
+    for log_dir in found:
+        result = reconcile_feedback_log_to_event_log(log_dir, event_log)
+        logger.info(
+            "worker_curate.reconciled",
+            log_dir=str(log_dir),
+            scanned=result.scanned,
+            already_present=result.already_present,
+            emitted=result.emitted,
+            failed=result.failed,
+        )
 
 
 # ---------------------------------------------------------------------------

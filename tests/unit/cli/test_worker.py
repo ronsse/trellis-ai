@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
 import pytest
@@ -24,9 +25,12 @@ from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 from trellis_cli import worker
 from trellis_cli.main import app, worker_app
-from trellis_cli.stores import _reset_registry
+from trellis_cli.stores import _get_registry, _reset_registry
 from trellis_workers.session_capture import sweep as capture_sweep
 from trellis_workers.session_capture.models import CaptureReport
+
+if TYPE_CHECKING:
+    from click.testing import Result
 
 runner = CliRunner()
 
@@ -421,6 +425,118 @@ class TestWorkerCurate:
             event_type=EventType.FEEDBACK_RECORDED, limit=10
         )
         assert len(fb_events) >= 1
+
+    @staticmethod
+    def _invoke_curate(out_dir: Path) -> Result:
+        """Run one reconcile-first curate cycle with the analyses skipped."""
+        return runner.invoke(
+            app,
+            [
+                "worker",
+                "curate",
+                "--output-dir",
+                str(out_dir),
+                "--reconcile-first",
+                "--skip-advisories",
+                "--skip-learning",
+                "--skip-noise-tags",
+                "--format",
+                "json",
+            ],
+        )
+
+    def test_reconcile_first_backfills_stores_feedback_dir(
+        self, tmp_path: Path, temp_stores: StoreRegistry
+    ) -> None:
+        """The MCP / REST surfaces write to ``<stores_dir>/feedback``.
+
+        Rows landing there are the common case in a live deployment, so
+        the cycle has to scan that directory and not only ``<data_dir>``.
+        """
+        from trellis.feedback.recording import feedback_log_dir, record_feedback
+
+        registry = _get_registry()
+        assert registry.stores_dir is not None
+        record_feedback(
+            _make_feedback(outcome="success", items=["x"]),
+            log_dir=feedback_log_dir(registry.stores_dir),
+        )
+        result = self._invoke_curate(tmp_path / "review")
+        assert result.exit_code == 0, result.output
+        fb_events = temp_stores.operational.event_log.get_events(
+            event_type=EventType.FEEDBACK_RECORDED, limit=10
+        )
+        assert len(fb_events) == 1
+
+    def test_reconcile_first_honours_config_yaml_data_dir(
+        self, tmp_path: Path, temp_stores: StoreRegistry
+    ) -> None:
+        """``config.yaml``'s ``data_dir`` beats ``$TRELLIS_DATA_DIR``.
+
+        ``trellis admin init --data-dir`` always writes that key, and
+        ``StoreRegistry.from_config_dir`` lets it override the
+        environment — so the writers land the row under the *config's*
+        stores dir. A worker that re-derived the path from the
+        environment would scan an empty directory and log a clean no-op,
+        which is indistinguishable from "there was nothing to do".
+        """
+        from trellis.feedback.recording import feedback_log_dir, record_feedback
+
+        custom_data = tmp_path / "custom-data"
+        (custom_data / "stores").mkdir(parents=True)
+        config_dir = tmp_path / "config"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "config.yaml").write_text(
+            f"data_dir: {custom_data}\n", encoding="utf-8"
+        )
+        _reset_registry()
+
+        registry = _get_registry()
+        # Precondition: the two derivations genuinely disagree, so the
+        # assertion below can actually fail if the worker uses the wrong one.
+        assert registry.stores_dir == custom_data / "stores"
+        assert registry.stores_dir != Path(str(temp_stores.stores_dir))
+
+        record_feedback(
+            _make_feedback(outcome="success", items=["x"]),
+            log_dir=feedback_log_dir(registry.stores_dir),
+        )
+        result = self._invoke_curate(tmp_path / "review")
+        assert result.exit_code == 0, result.output
+        fb_events = registry.operational.event_log.get_events(
+            event_type=EventType.FEEDBACK_RECORDED, limit=10
+        )
+        assert len(fb_events) == 1
+
+    def test_reconcile_first_recovers_pack_association(
+        self, tmp_path: Path, temp_stores: StoreRegistry
+    ) -> None:
+        """A replayed row keeps the pack it was recorded against.
+
+        The MCP/REST writers stamp ``metadata['pack_id']`` precisely so a
+        soft-failed emit can be replayed with the association the
+        advisory/effectiveness joins need.
+        """
+        from trellis.feedback.models import PackFeedback
+        from trellis.feedback.recording import feedback_log_dir, record_feedback
+
+        registry = _get_registry()
+        assert registry.stores_dir is not None
+        record_feedback(
+            PackFeedback.from_agent_signal(
+                run_id="pack-assoc", rating=0.3, pack_id="pack-assoc"
+            ),
+            log_dir=feedback_log_dir(registry.stores_dir),
+        )
+        result = self._invoke_curate(tmp_path / "review")
+        assert result.exit_code == 0, result.output
+        (event,) = temp_stores.operational.event_log.get_events(
+            event_type=EventType.FEEDBACK_RECORDED, limit=10
+        )
+        assert event.entity_id == "pack-assoc"
+        assert event.entity_type == "pack"
+        assert event.payload["pack_id"] == "pack-assoc"
+        assert event.payload["rating"] == 0.3
 
 
 # ===========================================================================

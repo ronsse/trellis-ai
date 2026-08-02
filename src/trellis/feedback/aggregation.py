@@ -36,7 +36,7 @@ def compute_item_effectiveness(
 
     for signal in signals:
         referenced_set = set(signal.items_referenced)
-        is_success = signal.outcome in ("success", "completed")
+        is_success = signal.succeeded
 
         for item_id in signal.items_served:
             if item_id not in stats:

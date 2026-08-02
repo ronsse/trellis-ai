@@ -127,15 +127,20 @@ class TestLocalModeHappyPath:
             assert payload["success"] is True
             # helpful items become the positive helpful_item_ids signal.
             assert payload["helpful_item_ids"] == ["doc:1", "doc:2"]
-            # The stronger signals ride along in metadata.
-            assert payload["metadata"]["unhelpful_item_ids"] == ["doc:3"]
-            assert payload["metadata"]["followed_advisory_ids"] == ["adv:1"]
+            # The stronger signals are top-level payload keys, where the
+            # fitness loops read them.
+            assert payload["unhelpful_item_ids"] == ["doc:3"]
+            assert payload["followed_advisory_ids"] == ["adv:1"]
+            # Ungraded feedback still carries a rating derived from success.
+            assert payload["rating"] == 1.0
 
         rows = _jsonl_rows(stores_dir)
         assert len(rows) == 1
         assert rows[0]["feedback_id"] == result.feedback_id
         assert rows[0]["outcome"] == "success"
         assert rows[0]["items_referenced"] == ["doc:1", "doc:2"]
+        assert rows[0]["unhelpful_item_ids"] == ["doc:3"]
+        assert rows[0]["followed_advisory_ids"] == ["adv:1"]
 
     def test_sync_failure_outcome(self, tmp_path: Path) -> None:
         stores_dir = tmp_path / "stores"
