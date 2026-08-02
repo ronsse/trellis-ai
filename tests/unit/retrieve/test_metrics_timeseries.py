@@ -44,10 +44,13 @@ def _emit_pack(
     occurred_at: datetime,
     domain: str | None = None,
     injected: list[str] | None = None,
+    intent_family: str | None = None,
 ) -> None:
     payload: dict = {"injected_item_ids": injected or []}
     if domain is not None:
         payload["domain"] = domain
+    if intent_family is not None:
+        payload["intent_family"] = intent_family
     log.append(
         Event(
             event_type=EventType.PACK_ASSEMBLED,
@@ -253,6 +256,31 @@ def test_group_by_intent_family_from_feedback(event_log):
         group_by="intent_family",
     )
     assert result.series[0].group_key == "debug"
+
+
+def test_group_by_intent_family_falls_back_to_the_pack_event(event_log):
+    """An empty feedback ``intent_family`` must not shadow the pack's.
+
+    ``PackFeedback.to_event_payload`` always writes the key, empty string
+    included (the MCP ``record_feedback`` tool takes no intent family), so
+    a plain ``{**pack, **feedback}`` merge would bucket every MCP-sourced
+    grade under ``all`` while the learning report — which resolves the
+    same join with ``or``-precedence — shows the real family.
+    """
+    d1 = _day(1)
+    _emit_pack(
+        event_log, pack_id="p1", occurred_at=d1, intent_family="validation_diagnostics"
+    )
+    _emit_feedback(
+        event_log, pack_id="p1", occurred_at=d1, success=True, intent_family=""
+    )
+    result = compute_timeseries(
+        event_log,
+        metric=METRIC_PACK_SUCCESS_RATE,
+        days=30,
+        group_by="intent_family",
+    )
+    assert [s.group_key for s in result.series] == ["validation_diagnostics"]
 
 
 def test_group_by_none_collapses_to_all(event_log):

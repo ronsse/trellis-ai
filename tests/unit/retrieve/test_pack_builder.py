@@ -2313,17 +2313,23 @@ class TestAttributionTelemetry:
         assert "category" not in injected
         assert "domain_system" not in injected
 
-    def test_item_attribution_flat_content_type_fallback(
+    def test_flat_content_type_is_not_a_category(
         self, session_event_log: SQLiteEventLog
     ) -> None:
-        """Metadata carrying a flat ``content_type`` (no nested tag block)
-        is read too — same nested-then-flat lookup as tier_mapping."""
+        """A flat ``content_type`` belongs to a different vocabulary.
+
+        ``ingest_corpus.conversations`` stamps ``content_type="conversation"``
+        on every conversation export and ``retrieve.semantic_seeds`` uses
+        ``"entity_summary"`` — neither is a ``ContentTags.content_type``
+        value, so reading them would show reviewers a category from a second
+        taxonomy. Title still falls back to ``name``.
+        """
         item = PackItem(
             item_id="d1",
             item_type="document",
             excerpt="text",
             relevance_score=0.9,
-            metadata={"name": "node-name", "content_type": "decision"},
+            metadata={"name": "node-name", "content_type": "conversation"},
         )
         builder = PackBuilder(
             strategies=[_make_strategy("kw", [item])], event_log=session_event_log
@@ -2331,7 +2337,30 @@ class TestAttributionTelemetry:
         builder.build("q")
         injected = self._pack_payload(session_event_log)["injected_items"][0]
         assert injected["title"] == "node-name"
-        assert injected["category"] == "decision"
+        assert "category" not in injected
+
+    def test_title_falls_back_to_session_capture_key(
+        self, session_event_log: SQLiteEventLog
+    ) -> None:
+        """Session-capture documents key their title as ``capture_title``.
+
+        ``trellis_workers.session_capture.capture._candidate_metadata``
+        writes no ``title``, so without this fallback the newest primary
+        write path produces candidates named after an opaque doc id.
+        """
+        item = PackItem(
+            item_id="capture:claude-code:9f3a",
+            item_type="document",
+            excerpt="text",
+            relevance_score=0.9,
+            metadata={"capture_title": "Worktree venv resolves to prod"},
+        )
+        builder = PackBuilder(
+            strategies=[_make_strategy("kw", [item])], event_log=session_event_log
+        )
+        builder.build("q")
+        injected = self._pack_payload(session_event_log)["injected_items"][0]
+        assert injected["title"] == "Worktree venv resolves to prod"
 
     def test_sectioned_payload_carries_pack_attribution(
         self, session_event_log: SQLiteEventLog

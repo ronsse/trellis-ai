@@ -28,6 +28,7 @@ from trellis_sdk._http import (
     SDK_API_MAJOR,
     SDK_API_MINOR,
     check_handshake,
+    pack_attribution,
     raise_for_status,
     wrap_transport_error,
 )
@@ -249,8 +250,7 @@ class AsyncTrellisClient:
             "intent": intent,
             "domain": domain,
             "agent_id": agent_id,
-            "run_id": run_id,
-            "intent_family": intent_family,
+            **pack_attribution(run_id=run_id, intent_family=intent_family),
             "max_items": max_items,
             "max_tokens": max_tokens,
         }
@@ -273,8 +273,7 @@ class AsyncTrellisClient:
             "sections": sections,
             "domain": domain,
             "agent_id": agent_id,
-            "run_id": run_id,
-            "intent_family": intent_family,
+            **pack_attribution(run_id=run_id, intent_family=intent_family),
         }
         resp = await self._request("POST", "/api/v1/packs/sectioned", json=payload)
         return cast("dict[str, Any]", resp.json())

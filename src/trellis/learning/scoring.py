@@ -106,6 +106,7 @@ def _accumulate_item(
             "title": item.get("title"),
             "category": item.get("category"),
             "domain_systems": set(),
+            "pack_domains": set(),
             "phases": set(),
             "target_entity_ids": set(),
             "supporting_run_ids": set(),
@@ -129,13 +130,18 @@ def _accumulate_item(
         for eid in observation.get("seed_entity_ids", [])
         if str(eid).strip()
     )
+    # ``domain_systems`` mixes two vocabularies on purpose (it is a
+    # reviewer-facing provenance list): the operator domain the pack was
+    # served for, plus each item's ``source_system`` (dbt, snowflake, …).
+    # ``pack_domains`` keeps the operator half alone because that is what
+    # the promotion's ``domain`` stamp — and therefore
+    # ``get_lessons(domain=...)`` — must filter on.
+    pack_domain = str(observation.get("domain") or "").strip()
+    item_domain_system = str(item.get("domain_system") or "").strip()
+    if pack_domain:
+        metrics["pack_domains"].add(pack_domain)
     metrics["domain_systems"].update(
-        entry
-        for entry in (
-            observation.get("domain"),
-            item.get("domain_system"),
-        )
-        if str(entry or "").strip()
+        entry for entry in (pack_domain, item_domain_system) if entry
     )
     metrics["evidence_refs"].extend(
         str(ref).strip()
@@ -218,6 +224,10 @@ def analyze_learning_observations(
             "title": metrics.get("title"),
             "category": metrics.get("category"),
             "domain_systems": sorted(metrics["domain_systems"]),
+            # Authoritative for the promotion's ``domain`` — see
+            # ``_accumulate_item``. ``None`` when every observation was
+            # domain-less.
+            "primary_domain": next(iter(sorted(metrics["pack_domains"])), None),
             "phases": sorted(
                 phase for phase in metrics["phases"] if str(phase).strip()
             ),
@@ -385,6 +395,7 @@ def build_learning_promotion_payloads(
         for domain in candidate.get("domain_systems", [])
         if str(domain).strip()
     ]
+    primary_domain = str(candidate.get("primary_domain") or "").strip()
     entity_payload = {
         "entity_type": "precedent",
         "entity_id": entity_id,
@@ -397,9 +408,13 @@ def build_learning_promotion_payloads(
             "supporting_run_ids": list(candidate.get("supporting_run_ids", [])),
             "source_phases": list(candidate.get("phases", [])),
             "target_entity_ids": target_entity_ids,
-            # Carried so submit_learning_promotion can stamp the promotion
-            # event's ``domain`` for get_lessons(domain=...) filtering.
+            # Provenance list (pack domain + per-item source systems),
+            # kept for reviewers.
             "domain_systems": domain_systems,
+            # The single domain submit_learning_promotion stamps on the
+            # promotion event, which is what get_lessons(domain=...) and
+            # list_precedents(domain=...) filter on.
+            "primary_domain": primary_domain or None,
         },
     }
     edge_payloads = [
@@ -494,14 +509,22 @@ def submit_learning_promotion(
         )
 
     entity_props = dict(entity_payload["properties"])
+    # The domain the pack was served for wins. ``domain_systems`` also
+    # collects per-item ``source_system`` values, and those sort ahead of
+    # real domains often enough to file a lesson under "dbt" — invisible to
+    # the ``get_lessons(domain="platform")`` an operator would actually run.
+    # Falling back to it keeps candidates produced before ``primary_domain``
+    # existed (on-disk review artifacts) stamped as they were.
     domain_systems = entity_props.get("domain_systems") or []
-    primary_domain = str(domain_systems[0]).strip() if domain_systems else None
+    primary_domain = str(entity_props.get("primary_domain") or "").strip()
+    if not primary_domain and domain_systems:
+        primary_domain = str(domain_systems[0]).strip()
     promote_cmd = Command(
         operation=Operation.PRECEDENT_PROMOTE,
         args={
             "title": entity_payload["name"],
             "description": str(entity_props.get("description", "")),
-            "domain": primary_domain,
+            "domain": primary_domain or None,
             "entity_type": "precedent",
             "source_item_id": entity_props.get("source_item_id"),
         },

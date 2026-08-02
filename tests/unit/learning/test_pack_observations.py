@@ -538,7 +538,10 @@ class TestRealPackBuilderAttribution:
         assert candidate["intent_family"] == "validation_diagnostics"
         assert candidate["category"] == "procedure"
         assert candidate["title"] == "Deploy runbook"
+        # Provenance keeps both vocabularies; the domain the pack was
+        # actually served for stays separately addressable.
         assert candidate["domain_systems"] == ["dbt", "platform"]
+        assert candidate["primary_domain"] == "platform"
         assert candidate["supporting_run_ids"] == ["run-a", "run-b"]
         assert candidate["source_strategies"] == {"keyword": 2}
         assert candidate["precedent_name"] == (
@@ -564,3 +567,60 @@ class TestRealPackBuilderAttribution:
         )
         observations = build_learning_observations_from_event_log(event_log)
         assert observations[0]["run_id"] == "feedback-run"
+
+    def test_promoted_precedent_is_filed_under_the_pack_domain(
+        self, event_log, tmp_path: Path, learning_registry: ParameterRegistry
+    ) -> None:
+        """A per-item ``source_system`` must not hijack the lesson's domain.
+
+        The promotion event's ``domain`` is what ``get_lessons(domain=...)``
+        / ``list_precedents(domain=...)`` filter on. Now that items carry
+        ``domain_system``, the provenance list holds both ``"dbt"`` and
+        ``"platform"`` — and ``dbt`` sorts first, so picking off that list
+        would file a platform lesson where no operator would look for it.
+        """
+        from trellis.learning import (
+            build_learning_promotion_payloads,
+            submit_learning_promotion,
+        )
+        from trellis.mutate import build_curate_executor
+        from trellis.retrieve.precedents import list_precedents
+        from trellis.stores.registry import StoreRegistry
+
+        for run in ("run-a", "run-b"):
+            pack_id = self._build_pack(event_log, run_id=run)
+            _record(
+                event_log,
+                tmp_path,
+                pack_id=pack_id,
+                run_id=run,
+                intent="validate the deploy convention",
+                intent_family="",
+                items_served=["doc:deploy-runbook"],
+                items_referenced=["doc:deploy-runbook"],
+                outcome="success",
+            )
+        report = analyze_learning_observations(
+            observations=build_learning_observations_from_event_log(event_log),
+            registry=learning_registry,
+        )
+        payloads = build_learning_promotion_payloads(
+            candidate=report["candidates"][0],
+            promotion_name="Deploy runbook",
+            rationale="Consistently precedes clean deploys.",
+        )
+
+        stores_dir = tmp_path / "stores"
+        stores_dir.mkdir()
+        registry = StoreRegistry(stores_dir=stores_dir)
+        outcome = submit_learning_promotion(
+            build_curate_executor(registry),
+            payloads["entity_payload"],
+            payloads["edge_payloads"],
+            requested_by="test:promote-learning",
+        )
+        assert outcome["status"] == "promoted"
+
+        promotion_log = registry.operational.event_log
+        assert len(list_precedents(promotion_log, domain="platform")) == 1
+        assert list_precedents(promotion_log, domain="dbt") == []

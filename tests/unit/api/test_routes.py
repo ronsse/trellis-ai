@@ -514,6 +514,30 @@ def test_assemble_pack(client):
     assert data["intent"] == "test pack"
 
 
+def test_assemble_pack_threads_attribution_into_telemetry(client):
+    """The REST seam forwards run_id / intent_family to PackBuilder.
+
+    The wire DTO accepting the fields is not enough — if the route drops
+    them, every REST-served pack still lands in the learning join's
+    ``unknown-run`` bucket.
+    """
+    from trellis.stores.base.event_log import EventType
+
+    resp = client.post(
+        "/api/v1/packs",
+        json={"intent": "validate the pii convention", "run_id": "run-42"},
+    )
+    assert resp.status_code == 200
+
+    events = app_module._registry.operational.event_log.get_events(
+        event_type=EventType.PACK_ASSEMBLED, limit=10
+    )
+    assert len(events) == 1
+    assert events[0].payload["run_id"] == "run-42"
+    # Derived server-side: the caller sent no intent_family.
+    assert events[0].payload["intent_family"] == "validation_diagnostics"
+
+
 def test_api_pack_builder_wires_semantic_dedup(tmp_path):
     """The HTTP pack path mirrors the MCP server: near-duplicate suppression
     is wired at assembly (F14, #259) so cross-source clones can't re-serve."""

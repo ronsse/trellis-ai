@@ -183,18 +183,23 @@ def _item_attribution(item: PackItem) -> dict[str, str]:
     All three are derived from metadata the strategies already attach —
     nothing new is computed here:
 
-    * ``title`` — the document's ``title`` (graph nodes fall back to
-      ``name``, which the graph strategy folds into the excerpt rather
-      than the metadata, so most entities legitimately have none).
-    * ``category`` — the :class:`~trellis.schemas.classification.ContentTags`
-      ``content_type`` facet. That closed vocabulary (pattern / decision /
-      error-resolution / …) already answers "what shape of information is
-      this", which is exactly what a candidate's category means; reusing it
-      avoids a second taxonomy. Read via the same nested-then-flat lookup
-      :mod:`trellis.retrieve.tier_mapping` uses. An item the tagging
-      pipeline never touched carries no category — a known-unknown is
-      better than borrowing the ``EntityType`` vocabulary, which would make
-      the field's values ambiguous across item kinds.
+    * ``title`` — ``title``, then ``capture_title`` (the key the Claude
+      Code session-capture ingest writes,
+      :mod:`trellis_workers.session_capture.capture`), then ``name`` for
+      graph nodes — whose name the graph strategy folds into the excerpt
+      rather than the metadata, so most entities legitimately have none.
+    * ``category`` — the ``content_type`` facet of
+      :class:`~trellis.schemas.classification.ContentTags`, and *only*
+      that. The closed vocabulary (pattern / decision / error-resolution /
+      …) already answers "what shape of information is this", which is
+      exactly what a candidate's category means. A flat
+      ``metadata["content_type"]`` is deliberately **not** read as a
+      fallback: ingest handlers stamp their own vocabulary on that key
+      (``"conversation"`` in :mod:`trellis.ingest_corpus.conversations`,
+      ``"entity_summary"`` in :mod:`trellis.retrieve.semantic_seeds`), and
+      mixing those in would make the column ambiguous across item kinds.
+      An item the tagging pipeline never touched carries no category — a
+      known-unknown beats a value drawn from a second taxonomy.
     * ``domain_system`` — the ``source_system`` the
       :class:`~trellis.classify.classifiers.source_system.SourceSystemClassifier`
       records (dbt, snowflake, …).
@@ -204,10 +209,9 @@ def _item_attribution(item: PackItem) -> dict[str, str]:
     """
     meta = item.metadata or {}
     tags = meta.get("content_tags")
-    category = tags.get("content_type") if isinstance(tags, dict) else None
     fields = {
-        "title": meta.get("title") or meta.get("name"),
-        "category": category or meta.get("content_type"),
+        "title": meta.get("title") or meta.get("capture_title") or meta.get("name"),
+        "category": tags.get("content_type") if isinstance(tags, dict) else None,
         "domain_system": meta.get("source_system"),
     }
     return {
@@ -956,6 +960,11 @@ class PackBuilder:
                 "agent_id": pack.agent_id,
                 "session_id": pack.session_id,
                 # Symmetric with the flat payload (see _emit_telemetry).
+                # Known gap: this payload carries no ``injected_items``, so
+                # ``pack_observations._join_one`` yields zero per-item rows
+                # for a sectioned pack and these two fields stay inert until
+                # that is fixed. Emitted now so the sectioned path does not
+                # need a second change once it is.
                 "run_id": pack.run_id,
                 "intent_family": pack.intent_family,
                 "section_count": len(pack.sections),

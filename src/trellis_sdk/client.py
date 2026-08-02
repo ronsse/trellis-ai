@@ -25,6 +25,7 @@ from trellis_sdk._http import (
     SDK_API_MAJOR,
     SDK_API_MINOR,
     check_handshake,
+    pack_attribution,
     raise_for_status,
     wrap_transport_error,
 )
@@ -220,14 +221,14 @@ class TrellisClient:
         ``run_id`` / ``intent_family`` are optional request-scoped
         attribution: they ride the ``PACK_ASSEMBLED`` event so the learning
         loop can credit the run and bucket the intent family instead of
-        falling back to ``unknown-run`` / ``general_context``.
+        falling back to ``unknown-run`` / ``general_context``. Both are
+        sent only when set — see :func:`~trellis_sdk._http.pack_attribution`.
         """
         payload = {
             "intent": intent,
             "domain": domain,
             "agent_id": agent_id,
-            "run_id": run_id,
-            "intent_family": intent_family,
+            **pack_attribution(run_id=run_id, intent_family=intent_family),
             "max_items": max_items,
             "max_tokens": max_tokens,
         }
@@ -251,8 +252,7 @@ class TrellisClient:
             "sections": sections,
             "domain": domain,
             "agent_id": agent_id,
-            "run_id": run_id,
-            "intent_family": intent_family,
+            **pack_attribution(run_id=run_id, intent_family=intent_family),
         }
         resp = self._request("POST", "/api/v1/packs/sectioned", json=payload)
         return cast("dict[str, Any]", resp.json())

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
+import httpx
 import pytest
 
 from trellis.testing import in_memory_client
@@ -100,3 +102,32 @@ class TestPack:
         pack = client.assemble_pack("test intent")
         assert pack["intent"] == "test intent"
         assert "pack_id" in pack
+
+    @staticmethod
+    def _capture_pack_body(**kwargs) -> dict:
+        """Assemble a pack against a scripted transport; return the body."""
+        captured: dict = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured.update(json.loads(request.content))
+            return httpx.Response(200, json={"pack_id": "p1", "items": []})
+
+        http = httpx.Client(
+            transport=httpx.MockTransport(handler), base_url="http://testserver"
+        )
+        with TrellisClient(http=http, verify_version=False) as client:
+            client.assemble_pack("test intent", **kwargs)
+        return captured
+
+    def test_attribution_is_sent_when_set(self):
+        body = self._capture_pack_body(run_id="run-7", intent_family="custom")
+        assert body["run_id"] == "run-7"
+        assert body["intent_family"] == "custom"
+
+    def test_attribution_keys_are_omitted_when_unset(self):
+        """Version skew: ``WireRequestModel`` is ``extra="forbid"``, so an
+        SDK newer than its API must not send keys that API can't parse —
+        sending ``None`` would turn every pack assembly into a 422."""
+        body = self._capture_pack_body()
+        assert "run_id" not in body
+        assert "intent_family" not in body
