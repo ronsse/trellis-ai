@@ -84,11 +84,25 @@ Explicit tags are always preferred over heuristics. If you want content to land 
 
 ## Seeding Your Own Domains
 
-`domain` is the primary retrieval slice. During deterministic ingestion, the
-`KeywordDomainClassifier` assigns a `domain` when at least two of that domain's
-keywords appear in an item's content. The built-in keyword map covers
-agent-centric defaults (`data-pipeline`, `infrastructure`, `api`, `frontend`,
-`backend`, `ml-ops`, `security`, `testing`, `observability`).
+`domain` is the primary retrieval slice. The `KeywordDomainClassifier` assigns a
+`domain` when at least two of that domain's keywords appear in an item's
+content. The built-in keyword map covers agent-centric defaults
+(`data-pipeline`, `infrastructure`, `api`, `frontend`, `backend`, `ml-ops`,
+`security`, `testing`, `observability`).
+
+> **Where the auto-`domain` facet actually lands.** Classify-on-write
+> (`TRELLIS_ENABLE_CLASSIFY_ON_INGEST=1`) **drops** the classifier-derived
+> `domain` before persisting, and builds its pipeline from the built-in
+> defaults *without* reading the `classify.domain_keywords` config below.
+> `domain` is the only facet that hard-excludes a document from a
+> domain-scoped query on mismatch, and a deterministic keyword hit will
+> confidently put a code-flavoured domain on personal content — a wrong value
+> there hides content rather than merely re-ranking it. So today the config
+> below shapes exactly one command, `trellis classify backfill`: a keyword hit
+> always contributes `retrieval_affinity` and classifier confidence, and
+> assigns `domain` only under `--include-domain`. The operator-set scalar
+> `metadata['domain']` (the `--domain` / `--tag` flags) is a separate key and
+> is never touched by any of this.
 
 To register a domain specific to your deployment, add a
 `classify.domain_keywords` section to `~/.trellis/config.yaml` — no code change.
@@ -124,8 +138,13 @@ Rules:
   policy system, not the `domain` facet. See
   [`adr-tag-vocabulary-split.md`](../design/adr-tag-vocabulary-split.md).
 
-The ingestion pipeline picks the config up automatically via
-`StoreRegistry.build_ingestion_pipeline()`; operators do not wire anything.
+Any caller that goes through `StoreRegistry.build_ingestion_pipeline()` picks
+the config up automatically; operators do not wire anything. Be aware that in
+this tree that is currently `trellis classify backfill` and nothing else —
+classify-on-write deliberately calls the config-free
+`trellis.classify.ingest.build_ingest_classifier()` instead (see the note
+above), and `trellis worker enrich` drives `EnrichmentService` off the `llm:`
+block rather than a keyword pipeline.
 
 To see which domains actually exist in a deployment, run
 [`trellis analyze domains`](operations.md#analyze-domains) — a read-only usage

@@ -57,7 +57,8 @@ $ trellis admin version --format json | jq '{api_version, mcp_tools_version}'
 | Record an observation | `POST /api/v1/observations` | `record_observation` | `client.record_observation` |
 | Query observations | `GET /api/v1/observations`, `GET /api/v1/measurements` | `query_observations` | — |
 | Advisories / lessons | `GET /api/v1/advisories` | `get_lessons` | — |
-| Record feedback | `POST /api/v1/feedback` | `record_feedback` | — |
+| Grade a pack — `rating` + per-item attribution; writes `pack_feedback.jsonl` **and** the event | `POST /api/v1/packs/{id}/feedback` | `record_feedback` (also takes `trace_id` for trace-level grading) | `client.record_feedback` |
+| Record feedback on a trace / precedent through the governed mutation pipeline — event only, no JSONL row | `POST /api/v1/feedback` | — | — |
 | Submit extraction drafts | `POST /api/v1/extract/drafts` | — | `client.submit_drafts` |
 | Batch mutations | `POST /api/v1/commands/batch` | `execute_mutation` | — |
 | Bulk ingest | `POST /api/v1/ingest/bulk` | — | — |
@@ -70,10 +71,12 @@ documents embed on ingest when `TRELLIS_ENABLE_EMBED_ON_INGEST=1`
 (see [operations.md](operations.md) — "Document → vector embedding").
 
 Retrieval-shaping **content tags** (`domain`, `content_type`, `scope`,
-`signal_quality`) are written at ingest when
-`TRELLIS_ENABLE_CLASSIFY_ON_INGEST=1`; `trellis classify backfill` re-tags
-what is already stored (see [operations.md](operations.md) — "Document →
-content tags").
+`signal_quality`) are written when `TRELLIS_ENABLE_CLASSIFY_ON_INGEST=1`
+— on *every* durable document write, not just bulk ingest: `save_memory`,
+the evidence document `save_knowledge` creates, `POST /documents`,
+`POST /evidence`, and the corpus / conversation / session-capture seam.
+`trellis classify backfill` re-tags what is already stored (see
+[operations.md](operations.md) — "Document → content tags").
 
 ## Why three surfaces?
 

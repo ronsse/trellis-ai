@@ -347,12 +347,12 @@ trellis admin migrate-graph \
 | `get_sectioned_context` | Custom sectioned pack with per-section budgets |
 | `save_experience` | Ingest a trace |
 | `save_knowledge` | Create entity + optional relationship |
-| `save_memory` | Store a document: content-hash + MinHash dedup, embed-on-ingest; tiered extraction when `TRELLIS_ENABLE_MEMORY_EXTRACTION=1` |
+| `save_memory` | Store a document: content-hash + MinHash dedup, classify-on-write, embed-on-ingest; tiered extraction when `TRELLIS_ENABLE_MEMORY_EXTRACTION=1` |
 | `record_observation` | Record an empirical observation about an entity |
 | `query_observations` | Query recorded observations |
 | `get_lessons` | Precedents as markdown |
 | `get_graph` | Entity + neighborhood as markdown |
-| `record_feedback` | Record task success/failure |
+| `record_feedback` | Grade a pack (`rating` 0.0–1.0) or a trace, with per-item attribution; writes the JSONL audit row **and** the authoritative event |
 | `search` | Combined doc (keyword + semantic) + graph search as markdown |
 | `execute_mutation` | Governed mutation escape hatch (validate → policy → execute → audit) |
 
@@ -453,7 +453,7 @@ Graph stores support SCD Type 2 temporal versioning — every node carries `vali
 
 Items are tagged on four orthogonal facets: `domain`, `content_type`, `scope`, `signal_quality`. Deterministic classifiers run inline (microseconds); LLM-backed classifiers only fire when deterministic confidence is below threshold.
 
-Tagging at write time is opt-in: set `TRELLIS_ENABLE_CLASSIFY_ON_INGEST=1` (also accepts `true`/`yes`/`on`) and every document written through the ingest seam — `trellis ingest corpus`, `ingest conversations`, the session-capture sweep — carries tags from its first write. Everything stored before that (and any tags that have since drifted) is covered by `trellis classify backfill`.
+Tagging at write time is opt-in: set `TRELLIS_ENABLE_CLASSIFY_ON_INGEST=1` (also accepts `true`/`yes`/`on`) and every durable document write carries tags from the first write — the bulk-ingest seam (`trellis ingest corpus`, `ingest conversations`, the session-capture sweep), MCP `save_memory` and the evidence document `save_knowledge` creates, and REST `POST /documents` / `POST /evidence`. Fill-if-absent and fail-soft everywhere: existing tags are never clobbered, and a classification error stores the document untagged rather than failing the write. Everything stored before the flag was set (and any tags that have since drifted) is covered by `trellis classify backfill`.
 
 Raw sources (agent messages, dbt manifests, OpenLineage events, …) flow through a **tiered extraction pipeline**: deterministic rule-based extractors run first, then hybrid JSON extractors, then LLM extraction as an opt-in fallback. As patterns stabilize, extraction graduates from expensive-but-universal LLM calls to cheap-and-deterministic rules — so the cost curve drops the more the domain crystallizes.
 

@@ -115,14 +115,25 @@ Provider-agnostic protocols: `LLMClient`, `EmbedderClient`. Reference implementa
 
 ### Feedback path — EventLog authoritative, JSONL audit log
 
-Context curation runs a variation → selection loop: extraction produces candidate context items, feedback grades them, the advisory + learning loops propagate or suppress. The **EventLog is the single authoritative path** for that loop. `record_feedback()` always appends a `PackFeedback` row to `pack_feedback.jsonl` and, when given an `event_log` kwarg, also emits a `FEEDBACK_RECORDED` event; the file is durable, the event is what drives behavior.
+Context curation runs a variation → selection loop: extraction produces candidate context items, feedback grades them, the advisory + learning loops propagate or suppress. The **EventLog is the single authoritative path** for that loop. `trellis.feedback.recording.record_feedback()` always appends a `PackFeedback` row to `pack_feedback.jsonl` and, when given an `event_log` kwarg, also emits a `FEEDBACK_RECORDED` event; the file is durable, the event is what drives behavior.
+
+**Not every feedback surface calls that function**, so the JSONL file is not a record of all feedback. Two families of surface exist, and they emit different `FEEDBACK_RECORDED` payloads:
+
+| Surface | Route | JSONL row | Event payload |
+|---|---|---|---|
+| MCP `record_feedback` (#287), REST `POST /packs/{pack_id}/feedback`, `TrellisClient.record_feedback` (which posts to that route) | `PackFeedback.from_agent_signal` → `recording.record_feedback` | **yes** | Full `PackFeedback.to_event_payload()` — `feedback_id`, `rating`, `success`, `helpful_item_ids` / `unhelpful_item_ids` / `followed_advisory_ids`, `intent_family` |
+| CLI `trellis curate feedback`, REST `POST /feedback` | `Command(FEEDBACK_RECORD)` → `MutationExecutor` → `FeedbackRecordHandler` | **no** | `{target_id, rating, comment}` only — no `feedback_id`, no item attribution |
+
+Before #287 the MCP tool was in the second family, which is why `trellis admin reconcile-feedback` had nothing to reconcile on a deployment whose only grader was Claude Code. It is now in the first: one call writes both sinks, and the emit fails soft so a sink outage degrades to a file row the reconcile replays (`src/trellis/mcp/server.py:1665-1690`).
+
+`recording.record_feedback` is idempotent against the EventLog by `feedback.feedback_id` — a replayed call appends the JSONL row again but skips the emit and reports `event_log_skipped_as_duplicate`. The governed path has no such key.
 
 | Path | Wire format | Persistence | Consumer | Role |
 |---|---|---|---|---|
 | EventLog | `FEEDBACK_RECORDED` event | store backend | `AdvisoryGenerator`, `effectiveness.analyze_*`, `run_advisory_fitness_loop`, `build_learning_observations_from_event_log` → `analyze_learning_observations` | **Authoritative.** Drives both demote (auto-suppress) and promote (human-reviewed `learning.scoring`) halves of the loop. |
 | `pack_feedback.jsonl` | `PackFeedback` dataclass | on disk per run | `compute_item_effectiveness` (ad-hoc), `reconcile_feedback_log_to_event_log` (backfill into EventLog) | **Audit log only.** Durable file record of every pack signal. Not a second decision path. |
 
-`PackFeedback.to_event_payload()` shapes the file row into the event payload; `reconcile_feedback_log_to_event_log()` replays rows missing from the EventLog. A file-only promote path was considered and **rejected** (see [`adr-dual-loop-evolution.md`](docs/design/adr-dual-loop-evolution.md) §8) — `PackFeedback` does not carry the per-item `item_type` / `source_strategy` / `category` fields `analyze_learning_observations` needs, so promotion runs strictly off the EventLog join in `learning/pack_observations.py`.
+`PackFeedback.to_event_payload()` shapes the file row into the event payload; `reconcile_feedback_log_to_event_log()` replays rows missing from the EventLog. A file-only promote path was considered and **rejected** (see [`adr-dual-loop-evolution.md`](docs/design/adr-dual-loop-evolution.md) §8) — `PackFeedback` does not carry the per-item `item_type` / `source_strategy` / `category` fields `analyze_learning_observations` needs, so promotion runs strictly off the EventLog join in `learning/pack_observations.py`. Those fields are read from the **pack** side of the join — `PACK_ASSEMBLED.injected_items[]`, which since #285 also carries `title` / `category` / `domain_system` so a promotion candidate is legible to a human reviewer instead of a bare `item_id`.
 
 ### Test Structure
 
