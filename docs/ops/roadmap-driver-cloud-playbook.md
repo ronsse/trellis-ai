@@ -4,6 +4,8 @@
 
 **Architecture — GitHub is the only shared bus.** This routine runs in Anthropic's cloud and can reach **github.com for both `ronsse/trellis-ai` and `ronsse/skynet-hub`** — but **cannot** reach the skynet host (tailnet-only). Live-instance reality (loop-starvation metric, container drift, `:8420` bind, backups) is produced by the **skynet Layer-2 job** (`skynet-hub/stacks/trellis/roadmap-nightly.sh`) and reaches this routine **only** as fenced-JSON status blocks posted to the board issue. Repo-vs-host is the load-bearing boundary; never assume host reality you can't read from GitHub.
 
+**Tooling — GitHub MCP tools, not the `gh` CLI.** The Anthropic-cloud sandbox this routine runs in does not have `gh` installed (confirmed 2026-08-05: not on `$PATH`, not present anywhere on the filesystem). Every `gh` invocation below is written as the command for readability, but the routine executes it via the equivalent `mcp__github__*` tool — see the mapping table right after the guardrails. One command has **no MCP equivalent**: `gh secret list` (DoD criterion #6, CI-secret purge). That criterion is not computable from this routine; report it as `NEEDS OWNER CHECK`, never as pass/fail. If a future environment ships `gh` authenticated, either tool path is fine — prefer whichever is available; do not install `gh` as a workaround if it's missing.
+
 ---
 
 ## Guardrails (read first — this routine is intentionally low-privilege)
@@ -15,6 +17,21 @@
 - **Report-only bootstrap.** For the first 2–3 weeks, run in `REPORT_ONLY` mode: compute the label diffs and digest but **do not apply label writes** — just print what it *would* change. Flip to active only after the computed `ready`-set has matched reality across several runs.
 
 **Scope of objects it manages:** `ronsse/trellis-ai` milestone `Productionization` (#1) · `ronsse/skynet-hub` issues labelled `ops` · the pinned board issue **`ronsse/trellis-ai#275`**.
+
+---
+
+## `gh` → MCP tool mapping
+
+| `gh` command (spec shorthand below) | MCP tool | Notes |
+|---|---|---|
+| `gh issue list --milestone Productionization --state all --json ...` | `mcp__github__search_issues` — query `repo:ronsse/trellis-ai milestone:Productionization`, `fields: [number,title,state,labels,milestone]` | `list_issues` has no milestone filter; `search_issues` does via query syntax. |
+| `gh api repos/.../milestones/1 --jq .description` | Read `milestone.description` off any one result from the `search_issues` call above (`fields` must include `milestone`) | No dedicated milestone-get tool exists. GitHub embeds the full milestone object, description included, on every issue's `milestone` field — one such issue is enough. |
+| `gh issue list --repo ronsse/skynet-hub --label ops --state all --json ...` | `mcp__github__list_issues` — `owner: ronsse, repo: skynet-hub, labels: ["ops"]` | Direct equivalent. |
+| `gh issue edit <n> --add-label ready --remove-label blocked:dep` | `mcp__github__issue_write` method `update`, `labels: [...]` | **Not additive** — `issue_write`'s `labels` replaces the full label set (a straight PATCH), unlike `gh issue edit --add-label/--remove-label`. Always read the issue's current labels first (`issue_read` method `get_labels`), compute the new full set with only `ready`/`blocked:dep` swapped, and pass that whole array back. Getting this wrong risks silently dropping a human-owned label (`mechanical`, `keystone`, etc.) — treat it as load-bearing. |
+| `gh issue create ... --milestone 1 --label <gate-state>` | `mcp__github__issue_write` method `create`, `milestone: 1`, `labels: [...]` | Direct equivalent. |
+| `gh issue edit 275 --body ...` / comment | `mcp__github__issue_write` method `update` (`body: ...`) for in-place board edits; `mcp__github__add_issue_comment` for the coherence-warning comment | Fetch the current body with `issue_read` method `get` first, edit it in memory, write the whole body back — same replace-not-patch caveat as labels. |
+| `gh run list --repo ronsse/trellis-ai --branch main --limit 8` | `mcp__github__actions_list` method `list_workflow_runs`, `workflow_runs_filter: {branch: "main"}`, `per_page: 8` | Direct equivalent. |
+| `gh secret list --repo ronsse/trellis-ai` | **none** | No MCP tool reads repo secrets (by design — secret *values* and even names are access-sensitive). DoD #6's "CI secrets rotated" half is **owner-only, manual**: the routine reports `NEEDS OWNER CHECK` for that half and computes only the `.env` / dead-AuraDB-creds half it can see from the repo. |
 
 ---
 
@@ -59,7 +76,7 @@ One `/schedule` routine runs both: Job A every day; Job B additionally on Monday
    - Else if every dependency issue is **closed** → it should be `ready`.
    - Else → it should be `blocked:dep`.
 
-4. **Apply the diff** (skip in `REPORT_ONLY`): `gh issue edit <n> --add-label ready --remove-label blocked:dep` (and the inverse). Touch only `ready`/`blocked:dep`. Record each change for the run log.
+4. **Apply the diff** (skip in `REPORT_ONLY`): `gh issue edit <n> --add-label ready --remove-label blocked:dep` (and the inverse) — via `issue_write`, whose `labels` field is a full-set replace, not add/remove; see the mapping table's caveat above. Touch only `ready`/`blocked:dep`. Record each change for the run log.
 
 5. **Coherence invariants** (post one consolidated warning comment on #275 if any fails — do not fix the roadmap):
    - Every **open** milestone issue appears in roadmap §3.H (H.0–H.3 or the Adjacent list).
@@ -77,7 +94,7 @@ One `/schedule` routine runs both: Job A every day; Job B additionally on Monday
 1. **Compute the GitHub-verifiable DoD criteria** (see table): 
    - **#2** — `gh run list --repo ronsse/trellis-ai --branch main --limit 8` all green; note the collected test count.
    - **#5 / #7** — #194 / #200–#203 closed with their acceptance PRs merged.
-   - **#6** — #250 closed; `gh secret list --repo ronsse/trellis-ai` shows the `TRELLIS_TEST_NEO4J_*` secrets purged.
+   - **#6** — #250 closed **and** `.env`/dead-AuraDB-creds purge is verifiable from repo contents (cloud-computable). The `TRELLIS_TEST_NEO4J_*` CI-secret-purge half has no MCP equivalent (`gh secret list` cannot be run from this routine) — render that half as `NEEDS OWNER CHECK`, and treat criterion #6 overall as unmet until the owner confirms it, never as a silent pass.
    - **#8** — #208 closed or re-homed with a disposition comment.
    - **#1** (quickstart cold-install) — heavy; run at most monthly in a clean sandbox (`pip install trellis-ai && trellis admin init && trellis demo load && trellis retrieve pack …`), else carry the last recorded result.
 
