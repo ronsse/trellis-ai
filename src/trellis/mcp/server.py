@@ -151,6 +151,39 @@ def _raise_mutation_failed(
     raise McpError(ErrorData(code=MUTATION_FAILED, message=message, data=data))
 
 
+def _record_boundary_rejection(
+    *,
+    tool: str,
+    error: Exception | None = None,
+    rejections: list[dict[str, str]] | None = None,
+    hints: list[str] | None = None,
+    payload_chars: int | None = None,
+) -> dict[str, Any]:
+    """Record a tool-boundary rejection as a ``WRITE_REJECTED`` event.
+
+    The executor audits every stage after a Command exists; this covers
+    the stage before one does. Doubly fail-soft — a missing registry or a
+    broken event log degrades to classification-only, because telemetry
+    must never turn a rejected write into a crashed tool. Returns
+    ``{rejections, hints}`` for folding into the raised error.
+    """
+    from trellis.ops.write_health import record_write_rejection  # noqa: PLC0415
+
+    event_log = None
+    try:
+        event_log = _get_registry().operational.event_log
+    except Exception:  # pragma: no cover - registry bootstrap failure
+        logger.warning("write_rejection.registry_unavailable", tool=tool)
+    return record_write_rejection(
+        event_log,
+        tool=tool,
+        error=error,
+        rejections=rejections,
+        hints=hints,
+        payload_chars=payload_chars,
+    )
+
+
 mcp = FastMCP(
     "trellis",
     instructions=(
@@ -765,6 +798,13 @@ def save_experience(trace_json: str) -> str:
         trace_json: JSON string conforming to the Trace schema.
     """
     if not trace_json or not trace_json.strip():
+        _record_boundary_rejection(
+            tool="save_experience",
+            rejections=[
+                {"kind": "empty_required", "loc": "trace_json", "msg": "empty"}
+            ],
+            payload_chars=0,
+        )
         _raise_invalid_params(
             "trace_json must not be empty",
             data={"field": "trace_json"},
@@ -773,9 +813,28 @@ def save_experience(trace_json: str) -> str:
     try:
         trace = Trace.model_validate_json(trace_json)
     except Exception as exc:
+        from trellis.ops.write_health import (  # noqa: PLC0415
+            classify_rejection,
+            hints_for_trace_rejections,
+        )
+
+        rows = classify_rejection(exc)
+        hints = hints_for_trace_rejections(rows)
+        _record_boundary_rejection(
+            tool="save_experience",
+            error=exc,
+            rejections=rows,
+            hints=hints,
+            payload_chars=len(trace_json),
+        )
+        hint_suffix = f" | fix: {'; '.join(hints)}" if hints else ""
         _raise_invalid_params(
-            f"invalid trace JSON: {exc}",
-            data={"field": "trace_json", "error_class": type(exc).__name__},
+            f"invalid trace JSON: {exc}{hint_suffix}",
+            data={
+                "field": "trace_json",
+                "error_class": type(exc).__name__,
+                "hints": hints,
+            },
         )
 
     registry = _get_registry()
@@ -842,6 +901,16 @@ def _resolve_evidence_pointer(
     """
     if evidence_ref is not None:
         if registry.knowledge.document_store.get(evidence_ref) is None:
+            _record_boundary_rejection(
+                tool="save_knowledge",
+                rejections=[
+                    {
+                        "kind": "dangling_reference",
+                        "loc": "evidence_ref",
+                        "msg": f"no document {evidence_ref}",
+                    }
+                ],
+            )
             _raise_invalid_params(
                 f"evidence_ref does not reference an existing document: {evidence_ref}",
                 data={"field": "evidence_ref", "evidence_ref": evidence_ref},
@@ -1064,6 +1133,11 @@ def save_memory(
         doc_id: Optional document ID. Auto-generated if not provided.
     """
     if not content or not content.strip():
+        _record_boundary_rejection(
+            tool="save_memory",
+            rejections=[{"kind": "empty_required", "loc": "content", "msg": "empty"}],
+            payload_chars=0,
+        )
         _raise_invalid_params(
             "content must not be empty",
             data={"field": "content"},
@@ -1635,11 +1709,31 @@ def record_feedback(
     has_trace = bool(trace_id and trace_id.strip())
     has_pack = bool(pack_id and pack_id.strip())
     if not has_trace and not has_pack:
+        _record_boundary_rejection(
+            tool="record_feedback",
+            rejections=[
+                {
+                    "kind": "missing",
+                    "loc": "trace_id|pack_id",
+                    "msg": "neither target provided",
+                }
+            ],
+        )
         _raise_invalid_params(
             "one of trace_id or pack_id must be provided",
             data={"fields": ["trace_id", "pack_id"]},
         )
     if rating is not None and not 0.0 <= rating <= 1.0:
+        _record_boundary_rejection(
+            tool="record_feedback",
+            rejections=[
+                {
+                    "kind": "value",
+                    "loc": "rating",
+                    "msg": f"out of range: {rating}",
+                }
+            ],
+        )
         _raise_invalid_params(
             "rating must be between 0.0 and 1.0",
             data={"field": "rating", "value": rating},

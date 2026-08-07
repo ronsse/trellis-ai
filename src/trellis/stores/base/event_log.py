@@ -225,6 +225,23 @@ class EventType(StrEnum):
     SYSTEM_INITIALIZED = "system.initialized"
     MUTATION_EXECUTED = "mutation.executed"
     MUTATION_REJECTED = "mutation.rejected"
+    #: Emitted at an agent-facing write boundary (MCP tool, REST route)
+    #: when a payload is rejected *before* a Command is constructed — the
+    #: stage :attr:`MUTATION_REJECTED` cannot see because no Command ever
+    #: existed. Without this event a schema-shaped rejection (an agent
+    #: repeatedly putting ``artifacts`` under ``outcome``, an invalid
+    #: ``source`` enum value) is visible only to the caller that made it;
+    #: the 2026-08-07 recall-gap study found 13 such rejections across 12
+    #: sessions, none observable from the backend. Payload schema:
+    #: ``{tool, stage: "boundary", error_class, payload_chars,
+    #: rejections: [{kind, loc, msg}], hints: [str]}``. ``kind`` is a
+    #: closed taxonomy slug (see ``trellis.ops.write_health.RejectionKind``),
+    #: ``loc`` the dotted field path, ``hints`` deterministic
+    #: field-relocation guidance derived from the live schema. ``source``
+    #: carries the same ``mcp:<tool>`` string the executor stores in
+    #: ``requested_by``, so acceptance and rejection join per tool.
+    #: Consumed by :func:`trellis.ops.write_health.summarize_write_health`.
+    WRITE_REJECTED = "write.rejected"
 
     #: Emitted by the API Review-queue endpoints (WP10) whenever a human
     #: operator acts on a governance surface from the UI inbox — approving

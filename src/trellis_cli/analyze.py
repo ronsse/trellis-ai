@@ -469,6 +469,91 @@ def token_usage(
         )
 
 
+@analyze_app.command("health")
+def health(
+    days: int = typer.Option(7, help="Days of history to analyze"),
+    output_format: str = typer.Option("text", "--format", help="Output format"),
+    no_meta_trace: bool = typer.Option(
+        False,
+        "--no-meta-trace",
+        help="Skip recording this run as a meta-Activity (Item 6 Phase 2).",
+    ),
+) -> None:
+    """Deterministic backend health: write rejections + serve attribution.
+
+    The write section aggregates WRITE_REJECTED (tool-boundary schema
+    rejections), MUTATION_REJECTED (executor stages), and
+    MUTATION_EXECUTED into per-tool accept/reject rates with a closed
+    rejection taxonomy. The serve section reports the two coverage rates
+    the learning join depends on (packs carrying injected_items[],
+    feedback carrying item attribution). Status is `warn` with named
+    reasons when any deterministic threshold trips — the surface the
+    grooming loop watches.
+    """
+    from trellis.ops.write_health import summarize_backend_health  # noqa: PLC0415
+
+    event_log = get_event_log()
+    with wrap_cli_meta_analysis(
+        agent_suffix="analyze",
+        analyzer_name="cli.analyze.health",
+        disabled=no_meta_trace,
+    ) as _meta_record:
+        report = summarize_backend_health(event_log, days=days)
+        if _meta_record.enabled and report.status != "ok":
+            _meta_record.produced_finding(
+                f"backend-health-warn-d{days}",
+                finding_type="BackendHealthReport",
+            )
+
+    if output_format == "json":
+        print(json.dumps(report.model_dump()))
+        return
+
+    status_style = "green" if report.status == "ok" else "yellow"
+    console.print(
+        f"[bold]Backend Health[/bold] (last {days} days) "
+        f"[{status_style}]{report.status.upper()}[/{status_style}]"
+    )
+    write = report.write
+    console.print(
+        f"  Writes: {write.accepted} accepted, "
+        f"{write.boundary_rejected} rejected at boundary, "
+        f"{write.executor_rejected} rejected in executor "
+        f"({write.rejection_rate:.0%} of {write.attempts} attempts)"
+    )
+    if write.by_tool:
+        tool_table = Table(show_header=True, header_style="bold")
+        tool_table.add_column("surface")
+        tool_table.add_column("accepted", justify="right")
+        tool_table.add_column("boundary rej", justify="right")
+        tool_table.add_column("executor rej", justify="right")
+        for surface, stats in sorted(write.by_tool.items()):
+            tool_table.add_row(
+                surface,
+                str(stats.accepted),
+                str(stats.boundary_rejected),
+                str(stats.executor_rejected),
+            )
+        console.print(tool_table)
+    if write.boundary_kinds:
+        console.print("  Boundary rejection taxonomy:")
+        for label, count in sorted(
+            write.boundary_kinds.items(), key=lambda item: -item[1]
+        ):
+            console.print(f"    {count:>3}  {label}")
+    serve = report.serve
+    console.print(
+        f"  Serve: {serve.packs_with_injected_items}/{serve.packs} packs carry "
+        f"injected_items ({serve.injected_coverage:.0%}); "
+        f"{serve.feedback_attributed}/{serve.feedback_events} feedback events "
+        f"attributed ({serve.attribution_rate:.0%})"
+    )
+    for reason in report.reasons:
+        console.print(f"  [yellow]warn[/yellow] {reason}")
+    if report.status == "ok" and write.attempts == 0 and serve.packs == 0:
+        console.print("[dim]  No write or serve activity in window.[/dim]")
+
+
 @analyze_app.command("cost")
 def cost(
     days: int = typer.Option(7, help="Days of history to analyze"),
