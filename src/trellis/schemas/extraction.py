@@ -19,6 +19,30 @@ from trellis.schemas.entity import GenerationSpec
 from trellis.schemas.enums import NodeRole
 from trellis.schemas.well_known import validate_entity_type_not_anti_pattern
 
+#: Property key carrying an extraction-minted node's confirmation state.
+#: A bare node is an implicit claim ("this exists in the owner's world"),
+#: but extraction from prose can only attest that something was *mentioned*
+#: — so freshly minted nodes are stamped ``unconfirmed`` and excluded from
+#: packs by default (mirroring ``signal_quality="noise"``), until a human
+#: or downstream process confirms them via ``entity.update``. See
+#: trellis-ai#300 for the incident that motivated this: devices a
+#: conversation merely *evaluated* were stored indistinguishably from a
+#: device the owner actually has.
+EXTRACTION_STATUS_PROPERTY = "extraction_status"
+EXTRACTION_STATUS_UNCONFIRMED = "unconfirmed"
+EXTRACTION_STATUS_CONFIRMED = "confirmed"
+
+#: Property key carrying the strongest epistemic claim extraction is
+#: allowed to make about a minted entity. Extraction always writes
+#: ``"mentioned"`` — never ``owned`` / ``used`` / anything stronger — no
+#: matter how confident the extractor is that the entity is real.
+#: ``extraction_confidence`` measures "is this a real named thing";
+#: neither it nor the extractor can attest the *relationship* between the
+#: owner and the thing. Stronger statuses are set by confirmation, not
+#: extraction.
+EPISTEMIC_STATUS_PROPERTY = "epistemic_status"
+EPISTEMIC_STATUS_MENTIONED = "mentioned"
+
 
 class EntityDraft(TrellisModel):
     """An entity candidate produced by an extractor.

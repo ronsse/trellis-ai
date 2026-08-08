@@ -93,6 +93,14 @@ Rules:
   existing entities.
 - Do not produce edges in this mode; the caller wires mentions via a
   separate mechanism.
+- NEVER extract the text's speakers or participants as entities. In a
+  conversation, the turn labels (e.g. "You", "Claude", the author's
+  name) are the frame of the document, not its subject matter — extract
+  only what the text is ABOUT.
+- You are recording MENTIONS, nothing stronger. A text that evaluates,
+  compares, or considers something mentions it; that is not evidence
+  the author owns it, uses it, or chose it. Confidence scores how
+  clearly the entity is named, never how the author relates to it.
 - confidence: 0.9 for explicit named mentions, 0.6 for implied ones.
 """
 
@@ -107,7 +115,7 @@ Memory:
 
 MEMORY_EXTRACTION_V1 = PromptTemplate(
     name="memory_extraction",
-    version="1.0",
+    version="1.1",
     system=_MEMORY_EXTRACTION_SYSTEM,
     user_template=_MEMORY_EXTRACTION_USER,
 )

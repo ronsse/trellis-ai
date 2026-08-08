@@ -431,6 +431,9 @@ def _run_memory_extraction(
 
         from trellis.extract.commands import result_to_batch  # noqa: PLC0415
         from trellis.extract.context import ExtractionContext  # noqa: PLC0415
+        from trellis.extract.draft_policy import (  # noqa: PLC0415
+            apply_memory_draft_policy,
+        )
 
         context = ExtractionContext(
             allow_llm_fallback=True,
@@ -444,6 +447,11 @@ def _run_memory_extraction(
                 context=context,
             )
         )
+        # Same draft policy as the CLI ingest hook (#299/#300): drop
+        # participant drafts, stamp fresh mints with document_ids + the
+        # unconfirmed/mentioned claim floor. The two write paths must
+        # not drift.
+        result = apply_memory_draft_policy(result, doc_id=doc_id)
         if not result.entities and not result.edges:
             return
 

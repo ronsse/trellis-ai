@@ -189,6 +189,7 @@ def sync_records(
     prune: bool = False,
     detect_moves: bool = True,
     extractor: Any = None,
+    extraction_participant_names: Sequence[str] = (),
     unsupported: Sequence[str] = (),
     initial_warnings: Sequence[dict[str, Any]] = (),
 ) -> CorpusSyncReport:
@@ -215,6 +216,11 @@ def sync_records(
             :func:`~trellis.extract.memory_ingest_hook.build_memory_extractor`);
             when set, each new/changed document's text is mined for
             entity/edge drafts routed through the governed executor.
+        extraction_participant_names: Speaker names of this source's
+            documents (e.g. the conversation reader's turn labels),
+            forwarded to the extraction draft policy so person-typed
+            drafts naming a speaker are dropped instead of minted
+            (#299). Ignored when ``extractor`` is ``None``.
         unsupported: Source items with no handler (reported, not
             ingested) — for the run counts.
         initial_warnings: Reader warnings raised before record building
@@ -284,6 +290,7 @@ def sync_records(
                 source_system=source_system,
                 requested_by=requested_by,
                 extractor=extractor,
+                extraction_participant_names=extraction_participant_names,
                 classifier=classifier,
             )
         report.files.append(outcome)
@@ -351,6 +358,7 @@ def _apply_record(
     source_system: str,
     requested_by: str,
     extractor: Any = None,
+    extraction_participant_names: Sequence[str] = (),
     classifier: Any = None,
 ) -> None:
     """Execute the writes for one new / updated / moved record."""
@@ -451,7 +459,12 @@ def _apply_record(
         # and route them through the governed executor. Fully fail-soft —
         # the document is already durably stored.
         entities, edges = run_memory_extraction(
-            registry, extractor, outcome.doc_id, text, requested_by=requested_by
+            registry,
+            extractor,
+            outcome.doc_id,
+            text,
+            requested_by=requested_by,
+            participant_names=extraction_participant_names,
         )
         report.entities_extracted += entities
         report.edges_extracted += edges

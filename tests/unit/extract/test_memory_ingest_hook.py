@@ -117,6 +117,46 @@ class TestRunMemoryExtraction:
             registry, extractor, "doc-1", "text", requested_by="test"
         ) == (0, 0)
 
+    def test_fresh_mints_carry_doc_link_and_claim_floor(self, registry):
+        """#299/#300: every stored mint links its source doc and is unconfirmed."""
+        from trellis.schemas.extraction import (
+            EPISTEMIC_STATUS_PROPERTY,
+            EXTRACTION_STATUS_PROPERTY,
+        )
+
+        extractor = _FakeExtractor(
+            _result_with([EntityDraft(entity_type="Device", name="Oura ring")])
+        )
+        entities, _ = run_memory_extraction(
+            registry, extractor, "doc-9", "Comparing ring options.", requested_by="test"
+        )
+        assert entities == 1
+        (node,) = registry.knowledge.graph_store.query(limit=50)
+        assert node["properties"][EXTRACTION_STATUS_PROPERTY] == "unconfirmed"
+        assert node["properties"][EPISTEMIC_STATUS_PROPERTY] == "mentioned"
+        assert node.get("document_ids") == ["doc-9"]
+
+    def test_participant_drafts_never_reach_the_executor(self, registry):
+        """#299: person-typed speaker drafts are dropped before the batch."""
+        extractor = _FakeExtractor(
+            _result_with(
+                [
+                    EntityDraft(entity_type="Person", name="You"),
+                    EntityDraft(entity_type="Person", name="Nate"),
+                ]
+            )
+        )
+        entities, edges = run_memory_extraction(
+            registry,
+            extractor,
+            "doc-2",
+            "**You:** hi\n**Claude:** hello",
+            requested_by="test",
+            participant_names=["Nate"],
+        )
+        assert (entities, edges) == (0, 0)
+        assert registry.knowledge.graph_store.query(limit=50) == []
+
 
 class TestSyncRecordsWiring:
     """The sync core threads an injected extractor and tallies counts."""
