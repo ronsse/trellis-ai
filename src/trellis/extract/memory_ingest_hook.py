@@ -36,7 +36,7 @@ from trellis.core.write_config import MEMORY_EXTRACTION_FLAG, WriteBehaviourConf
 from trellis.extract.entity_resolution import build_name_alias_resolver
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable
 
     from trellis.stores.registry import StoreRegistry
 
@@ -111,8 +111,17 @@ def run_memory_extraction(
     content: str,
     *,
     requested_by: str,
+    participant_names: Iterable[str] = (),
 ) -> tuple[int, int]:
     """Mine drafts from *content* and route them through the executor.
+
+    Every result passes through
+    :func:`~trellis.extract.draft_policy.apply_memory_draft_policy`
+    before conversion — participant drafts are dropped and fresh mints
+    are stamped with their source ``document_ids`` plus the
+    unconfirmed/mentioned claim floor (#299 / #300). ``participant_names``
+    extends the built-in speaker labels for sources that know their
+    speakers (the conversation reader passes its turn labels).
 
     Best-effort — returns ``(0, 0)`` on any failure or when *extractor*
     is ``None``. Returns ``(entities_created, edges_created)``.
@@ -124,6 +133,9 @@ def run_memory_extraction(
 
         from trellis.extract.commands import result_to_batch  # noqa: PLC0415
         from trellis.extract.context import ExtractionContext  # noqa: PLC0415
+        from trellis.extract.draft_policy import (  # noqa: PLC0415
+            apply_memory_draft_policy,
+        )
         from trellis.mutate import build_curate_executor  # noqa: PLC0415
 
         context = ExtractionContext(
@@ -137,6 +149,9 @@ def run_memory_extraction(
                 source_hint="save_memory",
                 context=context,
             )
+        )
+        result = apply_memory_draft_policy(
+            result, doc_id=doc_id, participant_names=participant_names
         )
         if not result.entities and not result.edges:
             return (0, 0)

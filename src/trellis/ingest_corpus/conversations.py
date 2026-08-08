@@ -123,6 +123,14 @@ def sync_conversations(
         dry_run=dry_run,
         prune=prune,
         extractor=build_memory_extractor(registry, opt_in=extract and not dry_run),
+        # The turn labels this reader renders (plus "Unknown" for
+        # unrecognised senders) — the extraction draft policy drops
+        # person-typed drafts naming a speaker (#299): a conversation's
+        # participants are its frame, not its subject matter.
+        extraction_participant_names=(
+            *sorted(set(_SPEAKER_LABELS.values())),
+            "Unknown",
+        ),
         detect_moves=False,
         initial_warnings=warnings,
     )

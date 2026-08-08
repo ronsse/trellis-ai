@@ -9,6 +9,10 @@ from typing import TYPE_CHECKING, Any, TypedDict
 import structlog
 
 from trellis.retrieve.excerpts import truncate_excerpt
+from trellis.schemas.extraction import (
+    EXTRACTION_STATUS_PROPERTY,
+    EXTRACTION_STATUS_UNCONFIRMED,
+)
 from trellis.schemas.pack import PackItem
 from trellis.schemas.parameters import ParameterScope
 from trellis.schemas.well_known import (
@@ -517,6 +521,16 @@ class GraphSearch(SearchStrategy):
     lines) that is retrieved only as part of its parent's context. Pass
     ``include_structural=True`` via filters to surface them anyway.
 
+    Unconfirmed extraction mints (``properties.extraction_status ==
+    "unconfirmed"``) are likewise excluded by default: extraction from
+    prose attests only that something was *mentioned*, and serving those
+    nodes teaches downstream agents claims the source never made
+    (trellis-ai#300 — the same claims-are-gated principle as the
+    ``signal_quality="noise"`` document filter). Pass
+    ``include_unconfirmed=True`` via filters to surface them (curation /
+    review tooling), or confirm the entity via ``entity.update`` to make
+    it retrievable for good.
+
     Curated nodes (``node_role == "curated"``) are retained and receive a
     relevance boost (``curated_boost``, default 1.3) because they are
     pre-digested synthesis — the highest information density per token.
@@ -611,6 +625,7 @@ class GraphSearch(SearchStrategy):
             seed_ids = filters.pop("seed_ids")
 
         include_structural = bool(filters.pop("include_structural", False))
+        include_unconfirmed = bool(filters.pop("include_unconfirmed", False))
 
         # Extract domain for scoring (keep in filters for graph query too)
         request_domain = filters.get("domain")
@@ -648,6 +663,24 @@ class GraphSearch(SearchStrategy):
         # Filter structural nodes client-side unless explicitly requested.
         if not include_structural:
             nodes = [n for n in nodes if n.get("node_role") != "structural"]
+
+        # Filter unconfirmed extraction mints unless explicitly requested
+        # — client-side like the structural filter, so both the query and
+        # subgraph branches are covered and a store-side property filter
+        # can't hard-exclude the (status-less) majority of nodes.
+        if not include_unconfirmed:
+            before_unconfirmed = len(nodes)
+            nodes = [
+                n
+                for n in nodes
+                if (n.get("properties") or {}).get(EXTRACTION_STATUS_PROPERTY)
+                != EXTRACTION_STATUS_UNCONFIRMED
+            ]
+            if len(nodes) != before_unconfirmed:
+                logger.debug(
+                    "graph_search_unconfirmed_excluded",
+                    excluded=before_unconfirmed - len(nodes),
+                )
 
         # Domain scoping — the same default-pass contract as the keyword
         # facet and the semantic post-filter (#254): a node carrying an

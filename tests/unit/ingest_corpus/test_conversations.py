@@ -327,3 +327,25 @@ class TestSyncConversations:
         report = sync_conversations(registry, _write_export(tmp_path, [_CONV_OLD]))
         assert report.counts()["entities_extracted"] == 0
         assert report.counts()["edges_extracted"] == 0
+
+    def test_speaker_labels_threaded_to_extraction_policy(
+        self, registry, tmp_path: Path, monkeypatch
+    ):
+        # #299: the reader's turn labels reach sync_records so the
+        # extraction draft policy can drop person-typed speaker drafts.
+        import trellis.ingest_corpus.conversations as conv_mod
+
+        captured: dict = {}
+
+        def _capture(reg, records, **kwargs):
+            captured.update(kwargs)
+            from trellis.ingest_corpus.models import CorpusSyncReport
+
+            return CorpusSyncReport(
+                root="x", source_system="claude-ai", dry_run=False, prune=False
+            )
+
+        monkeypatch.setattr(conv_mod, "sync_records", _capture)
+        sync_conversations(registry, _write_export(tmp_path, [_CONV_OLD]))
+        labels = set(captured["extraction_participant_names"])
+        assert labels == {"You", "Claude", "Unknown"}

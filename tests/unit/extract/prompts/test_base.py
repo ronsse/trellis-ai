@@ -136,4 +136,10 @@ class TestShippedTemplates:
         assert ENTITY_EXTRACTION_V1.name == "entity_extraction"
         assert ENTITY_EXTRACTION_V1.version == "1.0"
         assert MEMORY_EXTRACTION_V1.name == "memory_extraction"
-        assert MEMORY_EXTRACTION_V1.version == "1.0"
+        # 1.1: participant/frame-preservation rules (#299/#300).
+        assert MEMORY_EXTRACTION_V1.version == "1.1"
+
+    def test_memory_extraction_frame_rules_present(self) -> None:
+        """1.1 rules: never mint speakers; mentions carry no ownership."""
+        assert "NEVER extract the text's speakers" in MEMORY_EXTRACTION_V1.system
+        assert "MENTIONS, nothing stronger" in MEMORY_EXTRACTION_V1.system

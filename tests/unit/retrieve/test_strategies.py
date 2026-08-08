@@ -529,6 +529,77 @@ class TestGraphSearchNodeRole:
         for item in items:
             assert item.metadata.get("node_role") in {"semantic", "curated"}
 
+    def test_unconfirmed_mints_excluded_by_default(self) -> None:
+        """#300: unconfirmed extraction mints never enter packs unasked."""
+        store = MagicMock()
+        store.query.return_value = [
+            {
+                "node_id": "dev",
+                "node_type": "Device",
+                "node_role": "semantic",
+                "properties": {"name": "Oura ring", "extraction_status": "unconfirmed"},
+            },
+            {
+                "node_id": "svc",
+                "node_type": "service",
+                "node_role": "semantic",
+                "properties": {"name": "auth"},
+            },
+            {
+                "node_id": "ok",
+                "node_type": "Device",
+                "node_role": "semantic",
+                "properties": {"name": "Fenix", "extraction_status": "confirmed"},
+            },
+        ]
+        strategy = GraphSearch(store)
+        ids = {i.item_id for i in strategy.search("", filters={})}
+        assert ids == {"svc", "ok"}
+
+    def test_unconfirmed_mints_included_on_opt_in(self) -> None:
+        store = MagicMock()
+        store.query.return_value = [
+            {
+                "node_id": "dev",
+                "node_type": "Device",
+                "node_role": "semantic",
+                "properties": {"name": "Oura ring", "extraction_status": "unconfirmed"},
+            },
+        ]
+        strategy = GraphSearch(store)
+        ids = {
+            i.item_id
+            for i in strategy.search("", filters={"include_unconfirmed": True})
+        }
+        assert ids == {"dev"}
+
+    def test_unconfirmed_filter_covers_subgraph_branch(self) -> None:
+        """Seeded traversal is gated too — both branches share the filter."""
+        store = MagicMock()
+        store.get_subgraph.return_value = {
+            "nodes": [
+                {
+                    "node_id": "dev",
+                    "node_type": "Device",
+                    "node_role": "semantic",
+                    "properties": {
+                        "name": "Oura ring",
+                        "extraction_status": "unconfirmed",
+                    },
+                },
+                {
+                    "node_id": "svc",
+                    "node_type": "service",
+                    "node_role": "semantic",
+                    "properties": {"name": "auth"},
+                },
+            ],
+            "edges": [],
+        }
+        strategy = GraphSearch(store)
+        ids = {i.item_id for i in strategy.search("", filters={"seed_ids": ["svc"]})}
+        assert ids == {"svc"}
+
     def test_curated_boost_applied(self, role_store: MagicMock) -> None:
         """A curated node should score higher than an equivalently-ranked
         semantic node thanks to the 1.3x boost."""

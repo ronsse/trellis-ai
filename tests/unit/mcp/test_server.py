@@ -857,6 +857,62 @@ class TestSaveMemoryExtractionFeatureFlag:
         # AliasMatch finds no match, residue flows to LLM.
         assert call_count["n"] == 1
 
+    def test_draft_policy_applies_on_mcp_path(
+        self,
+        temp_registry: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#299/#300: the MCP path filters participants and stamps mints.
+
+        The fake LLM returns exactly the defective trial shape — speaker
+        Persons beside a legitimately mentioned Device. Only the Device
+        may reach the graph, and it must carry the unconfirmed/mentioned
+        claim floor plus a link back to the memory document.
+        """
+        import json as _json
+
+        monkeypatch.setenv("TRELLIS_ENABLE_MEMORY_EXTRACTION", "1")
+
+        payload = {
+            "entities": [
+                {"entity_id": None, "entity_type": "Person", "name": "You"},
+                {"entity_id": None, "entity_type": "Person", "name": "Claude"},
+                {
+                    "entity_id": None,
+                    "entity_type": "Device",
+                    "name": "Oura ring",
+                    "confidence": 0.8,
+                },
+            ],
+            "edges": [],
+        }
+
+        class _FakeLLM:
+            async def generate(self, **kwargs):
+                from trellis.llm.types import LLMResponse, TokenUsage
+
+                return LLMResponse(
+                    content=_json.dumps(payload),
+                    model="fake",
+                    usage=TokenUsage(
+                        prompt_tokens=1, completion_tokens=1, total_tokens=2
+                    ),
+                )
+
+        monkeypatch.setattr(server_mod, "_build_llm_client_from_env", _FakeLLM)
+        result = save_memory("Comparing the Oura ring against alternatives.")
+        assert result.startswith("Memory saved:")
+        doc_id = result.split("Memory saved:")[1].strip()
+
+        nodes = temp_registry.knowledge.graph_store.query(limit=50)
+        names = {n["properties"].get("name") for n in nodes}
+        assert "You" not in names
+        assert "Claude" not in names
+        (device,) = [n for n in nodes if n["properties"].get("name") == "Oura ring"]
+        assert device["properties"]["extraction_status"] == "unconfirmed"
+        assert device["properties"]["epistemic_status"] == "mentioned"
+        assert device.get("document_ids") == [doc_id]
+
     def test_extraction_failure_non_fatal(
         self,
         monkeypatch: pytest.MonkeyPatch,
