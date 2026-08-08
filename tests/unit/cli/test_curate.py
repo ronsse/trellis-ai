@@ -149,6 +149,61 @@ class TestCurateLabel:
         assert data["operation"] == "label.add"
 
 
+class TestCurateRedact:
+    def _create_node(self) -> str:
+        r = runner.invoke(
+            app,
+            ["curate", "entity", "person", "Junk Mint", "--format", "json"],
+        )
+        node_id: str = json.loads(r.stdout.strip())["node_id"]
+        return node_id
+
+    def test_redact_purges_entity(self) -> None:
+        node_id = self._create_node()
+        result = runner.invoke(
+            app,
+            [
+                "curate",
+                "redact",
+                node_id,
+                "--reason",
+                "defect-minted entity",
+                "--format",
+                "json",
+            ],
+        )
+        assert result.exit_code == 0
+        data = json.loads(result.stdout.strip())
+        assert data["status"] == "success"
+        assert data["target_id"] == node_id
+        # A second redaction names a target that no longer exists — the
+        # destructive command must fail loud, not succeed silently.
+        rerun = runner.invoke(
+            app,
+            ["curate", "redact", node_id, "--reason", "again", "--format", "json"],
+        )
+        assert rerun.exit_code == 1
+
+    def test_redact_missing_target_exits_nonzero(self) -> None:
+        result = runner.invoke(
+            app,
+            ["curate", "redact", "ghost", "--reason", "r", "--format", "json"],
+        )
+        assert result.exit_code == 1
+        data = json.loads(result.stdout.strip())
+        assert data["status"] == "failed"
+
+    def test_redact_blank_reason_rejected(self) -> None:
+        node_id = self._create_node()
+        result = runner.invoke(
+            app,
+            ["curate", "redact", node_id, "--reason", "  ", "--format", "json"],
+        )
+        assert result.exit_code == 1
+        data = json.loads(result.stdout.strip())
+        assert data["status"] == "rejected"
+
+
 class TestCurateFeedback:
     def test_feedback(self) -> None:
         result = runner.invoke(app, ["curate", "feedback", "trace_1", "0.9"])

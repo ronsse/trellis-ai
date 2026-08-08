@@ -73,6 +73,23 @@ class EventType(StrEnum):
     #: Closes Gap 4.4 by giving operators an audit trail for blob TTL
     #: retention runs. Dry runs emit the event with ``dry_run=True``.
     BLOB_GC_SWEPT = "blob.gc_swept"
+    #: Emitted by ``RedactionApplyHandler`` (``redaction.apply``) after a
+    #: graph entity is hard-purged: all SCD-2 version rows, every edge
+    #: version touching the node (cascade), its alias rows, and its
+    #: vector-store entry. The payload carries the audit justification,
+    #: counts, and id pointers only — never the purged name/properties —
+    #: so the append-only log records *that* a redaction happened and its
+    #: shape without re-containing what was removed. Payload schema:
+    #: ``{target_id, target_kind, entity_type, reason, command_id,
+    #: requested_by, node_versions_purged, edges_purged, aliases_purged,
+    #: vector_deleted, document_ids}``. ``node_versions_purged`` is exact
+    #: (history length); ``edges_purged`` / ``aliases_purged`` count rows
+    #: current at redaction time while the cascade removes all versions.
+    #: ``document_ids`` preserves the purged node's document links so a
+    #: future document-level redaction can locate them. ``command_id``
+    #: joins this semantic event to the executor's ``MUTATION_EXECUTED``
+    #: audit event.
+    REDACTION_APPLIED = "redaction.applied"
 
     # Feedback
     FEEDBACK_RECORDED = "feedback.recorded"

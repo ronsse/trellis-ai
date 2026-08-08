@@ -567,6 +567,42 @@ trellis curate label 01JRK5N7QF critical-path --format json
 }
 ```
 
+### `trellis curate redact`
+
+Redact (hard-purge) a graph entity through the governed pipeline. Irreversible:
+removes **all** SCD-2 versions of the node, every edge touching it, its aliases,
+and its vector entry. The `REDACTION_APPLIED` audit event records the shape of
+what was removed (counts + linked document ids), never the content. Linked
+documents are not cascaded. Exits non-zero on failure or rejection.
+
+```bash
+trellis curate redact <target_id> --reason <text> [--by <caller>] [--format text|json]
+```
+
+| Argument/Option | Required | Default | Description |
+|-----------------|----------|---------|-------------|
+| `target_id` | **Yes** | -- | Entity/node ID to hard-purge |
+| `--reason` | **Yes** | -- | Audit-trail justification (non-empty) |
+| `--by` | No | `cli:redact` | Audit-trail identifier for the caller |
+| `--format` | No | `text` | Output format |
+
+**Example:**
+
+```bash
+trellis curate redact 01JRK5N7QF --reason "defect-minted entity (#299)" --format json
+```
+
+**JSON output (success):**
+
+```json
+{
+  "status": "success",
+  "command_id": "01JRK9C1QF8GHTM2XVZP3CWD9E",
+  "target_id": "01JRK5N7QF",
+  "message": "Entity redacted: 01JRK5N7QF (1 version(s), 0 edge(s), 0 alias(es), vector_deleted=False)"
+}
+```
+
 ### `trellis curate feedback`
 
 Record feedback (rating and optional comment) on a trace or precedent.
@@ -912,8 +948,8 @@ result = executor.execute(cmd)
 
 | Operation | Required Args | Description |
 |-----------|---------------|-------------|
-| `redaction.apply` | `target_id`, `reason` | Redact content from a target |
-| `retention.prune` | (none) | Run retention pruning |
+| `redaction.apply` | `target_id`, `reason` | Hard-purge a graph entity: all SCD-2 versions, its edges, aliases, and vector entry. Emits `REDACTION_APPLIED` (counts + id pointers, never content). Also available via `trellis curate redact`. |
+| `retention.prune` | (none) | Run retention pruning. **No handler registered yet** — commands fail with `No handler registered`; retention runs today as a worker (`trellis_workers.maintenance.retention`). |
 
 ### Batch Execution
 

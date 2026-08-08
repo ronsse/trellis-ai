@@ -678,6 +678,103 @@ class MeasurementRecordHandler:
         return node_id, f"Measurement recorded: {node_id}"
 
 
+class RedactionApplyHandler:
+    """Hard-purge a graph entity, emitting ``REDACTION_APPLIED``.
+
+    Wires :data:`Operation.REDACTION_APPLY` into the governed pipeline. The
+    enum verb shipped with no handler (the same gap ``entity.update`` had
+    before :class:`EntityUpdateHandler`), so the executor rejected every
+    ``redaction.apply`` command with "No handler registered" — defect
+    cleanups had to fall back to *neutralizing* entities via
+    ``entity.update`` because no governed deletion path existed.
+
+    **Redaction is a purge, not an SCD-2 close.** ``delete_node`` physically
+    removes *all* version rows, cascades to every edge version touching the
+    node, and drops its alias rows (pinned by the graph-store contract
+    tests). After redaction the entity is unreachable through ``get_node``,
+    ``as_of`` time-travel, and ``get_node_history`` — a redaction that
+    time-travel can resurrect would not be a redaction. The vector-store
+    entry (``item_id == node_id``) is deleted *before* the graph purge so a
+    vector-backend failure aborts the command cleanly with nothing removed,
+    never a half-redacted state.
+
+    **The EventLog is the audit trail, and it never re-contains content.**
+    The ``REDACTION_APPLIED`` payload carries the ``reason``, counts, and id
+    pointers only — no name, no properties. Scope is the Knowledge Plane:
+    prior Operational-Plane events (e.g. the original ``ENTITY_CREATED``)
+    and traces are immutable by design and are not rewritten. ``command_id``
+    and ``requested_by`` ride the payload so the semantic event joins to the
+    executor's ``MUTATION_EXECUTED`` audit event even when the submitting
+    surface (e.g. MCP ``execute_mutation``) does not populate
+    ``Command.target_id``.
+
+    **Scope: graph entities only.** Documents linked from the purged node
+    are *not* cascaded — a document may back many entities, and document /
+    blob redaction is a separate design. Their ids are preserved in the
+    event payload so a future document-level redaction can locate them. A
+    ``target_id`` that is not a graph node raises
+    :class:`~trellis.errors.NotFoundError` (→ ``CommandStatus.FAILED``).
+
+    Idempotency: re-redacting a purged id fails with ``NotFoundError``; use
+    ``Command.idempotency_key`` when at-most-once semantics are required. A
+    blank ``reason`` is rejected (``code="redaction_reason_required"``) —
+    the recorded justification is the point of governed redaction.
+    """
+
+    def __init__(self, registry: StoreRegistry) -> None:
+        self._registry = registry
+
+    def handle(self, command: Command) -> tuple[str | None, str]:
+        target_id = command.args["target_id"]
+        reason = str(command.args["reason"] or "").strip()
+        if not reason:
+            msg = "redaction.apply requires a non-empty reason for the audit trail"
+            raise ValidationError(msg, code="redaction_reason_required")
+
+        graph = self._registry.knowledge.graph_store
+        node = graph.get_node(target_id)
+        if node is None:
+            raise NotFoundError(entity_type="entity", entity_id=target_id)
+
+        entity_type = node["node_type"]
+        document_ids = list(node.get("document_ids") or [])
+        node_versions = len(graph.get_node_history(target_id))
+        edges = len(graph.get_edges(target_id, direction="both"))
+        aliases = len(graph.get_aliases(target_id))
+
+        # Vector entry first: if the vector backend raises, the command
+        # fails with the graph untouched (a clean abort beats a purged
+        # node whose embedding still serves the redacted content).
+        vector_deleted = self._registry.knowledge.vector_store.delete(target_id)
+
+        graph.delete_node(target_id)
+
+        self._registry.operational.event_log.emit(
+            EventType.REDACTION_APPLIED,
+            source="mutation_executor",
+            entity_id=target_id,
+            entity_type=entity_type,
+            payload={
+                "target_id": target_id,
+                "target_kind": "entity",
+                "entity_type": entity_type,
+                "reason": reason,
+                "command_id": command.command_id,
+                "requested_by": command.requested_by,
+                "node_versions_purged": node_versions,
+                "edges_purged": edges,
+                "aliases_purged": aliases,
+                "vector_deleted": vector_deleted,
+                "document_ids": document_ids,
+            },
+        )
+        return target_id, (
+            f"Entity redacted: {target_id} "
+            f"({node_versions} version(s), {edges} edge(s), "
+            f"{aliases} alias(es), vector_deleted={vector_deleted})"
+        )
+
+
 def create_curate_handlers(
     registry: StoreRegistry,
 ) -> dict[str, Any]:
@@ -693,4 +790,5 @@ def create_curate_handlers(
         Operation.LINK_CREATE: LinkCreateHandler(registry),
         Operation.OBSERVATION_RECORD: ObservationRecordHandler(registry),
         Operation.MEASUREMENT_RECORD: MeasurementRecordHandler(registry),
+        Operation.REDACTION_APPLY: RedactionApplyHandler(registry),
     }
