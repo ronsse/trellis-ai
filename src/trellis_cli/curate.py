@@ -137,6 +137,61 @@ def label(
 
 
 @curate_app.command()
+def redact(
+    target_id: str = typer.Argument(..., help="Entity/node ID to hard-purge"),
+    reason: str = typer.Option(
+        ..., "--reason", help="Audit-trail justification (required, non-empty)"
+    ),
+    requested_by: str = typer.Option(
+        "cli:redact", "--by", help="Audit-trail identifier for the caller."
+    ),
+    output_format: str = typer.Option("text", "--format", help="Output format"),
+) -> None:
+    """Redact (hard-purge) a graph entity via the governed pipeline.
+
+    Irreversibly removes ALL versions of the node, every edge touching
+    it, its aliases, and its vector entry. The REDACTION_APPLIED audit
+    event records the shape of what was removed, never the content.
+    """
+    cmd = Command(
+        operation=Operation.REDACTION_APPLY,
+        args={"target_id": target_id, "reason": reason},
+        target_id=target_id,
+        target_type="entity",
+        requested_by=requested_by,
+    )
+    result = build_curate_executor(_get_registry()).execute(cmd)
+
+    if result.status in (CommandStatus.FAILED, CommandStatus.REJECTED):
+        # Destructive command: error states must exit non-zero so shell
+        # pipelines fail loud (same discipline as ``curate link``).
+        # ``typer.echo`` keeps machine output parseable — rich's
+        # ``console.print`` soft-wraps long JSON lines mid-string.
+        if output_format == "json":
+            typer.echo(
+                json.dumps({"status": result.status.value, "message": result.message})
+            )
+        else:
+            console.print(f"[red]{result.message}[/red]")
+        raise typer.Exit(code=EXIT_INTERNAL)
+
+    if output_format == "json":
+        typer.echo(
+            json.dumps(
+                {
+                    "status": result.status.value,
+                    "command_id": result.command_id,
+                    "target_id": target_id,
+                    "message": result.message,
+                }
+            )
+        )
+    else:
+        console.print(f"[green]✓ Entity redacted[/green]: {target_id}")
+        console.print(f"  Message: {result.message}")
+
+
+@curate_app.command()
 def entity(
     entity_type: str = typer.Argument(
         ..., help="Entity type (concept, person, system, etc.)"
