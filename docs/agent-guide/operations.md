@@ -572,24 +572,43 @@ trellis curate label 01JRK5N7QF critical-path --format json
 Redact (hard-purge) a graph entity through the governed pipeline. Irreversible:
 removes **all** SCD-2 versions of the node, every edge touching it, its aliases,
 and its vector entry. The `REDACTION_APPLIED` audit event records the shape of
-what was removed (counts + linked document ids), never the content. Linked
-documents are not cascaded. Exits non-zero on failure or rejection.
+what was removed (counts + id pointers), never the content.
+
+Scope boundaries, stated plainly:
+
+- **Linked documents are not cascaded** — the union of the purged node's
+  document links across all versions rides the audit payload for a follow-up
+  document-level redaction.
+- **Observation/Measurement nodes about the subject are not cascaded** — they
+  are independent governed nodes and property-based queries
+  (`query_observations`, `GET /measurements`) keep serving them after the
+  purge. Their ids ride the payload (`linked_observation_ids` /
+  `linked_measurement_ids`); redact each individually if needed.
+- **Prior Operational-Plane events are immutable** — the original
+  `entity.created` / `entity.updated` payloads (which include the name) remain
+  readable via the explore API. Redaction clears the Knowledge-Plane serving
+  path; it does not rewrite the audit log.
+
+Prompts for confirmation unless `--yes` is passed (required for scripted use).
+Exit codes follow the `exit_codes` map: `2` (rejected — e.g. blank/over-long
+reason), `5` (failed — e.g. target not found), `0` success.
 
 ```bash
-trellis curate redact <target_id> --reason <text> [--by <caller>] [--format text|json]
+trellis curate redact <target_id> --reason <text> [--yes] [--by <caller>] [--format text|json]
 ```
 
 | Argument/Option | Required | Default | Description |
 |-----------------|----------|---------|-------------|
 | `target_id` | **Yes** | -- | Entity/node ID to hard-purge |
-| `--reason` | **Yes** | -- | Audit-trail justification (non-empty) |
+| `--reason` | **Yes** | -- | Audit-trail justification (non-empty, ≤2000 chars, keep it content-free) |
+| `--yes`, `-y` | No | `false` | Skip the interactive confirmation |
 | `--by` | No | `cli:redact` | Audit-trail identifier for the caller |
 | `--format` | No | `text` | Output format |
 
 **Example:**
 
 ```bash
-trellis curate redact 01JRK5N7QF --reason "defect-minted entity (#299)" --format json
+trellis curate redact 01JRK5N7QF --yes --reason "defect-minted entity (#299)" --format json
 ```
 
 **JSON output (success):**
@@ -602,6 +621,8 @@ trellis curate redact 01JRK5N7QF --reason "defect-minted entity (#299)" --format
   "message": "Entity redacted: 01JRK5N7QF (1 version(s), 0 edge(s), 0 alias(es), vector_deleted=False)"
 }
 ```
+
+On failure/rejection the JSON is `{"status": "failed"|"rejected", "command_id": ..., "message": ...}` — `command_id` joins the attempt to its audit event.
 
 ### `trellis curate feedback`
 

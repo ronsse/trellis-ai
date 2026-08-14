@@ -673,9 +673,9 @@ class GraphStoreContractTests:
         store.upsert_node("b", "service", {})
         store.upsert_edge("a", "b", "depends_on")
         store.delete_node("a")
-        # Either the edge is gone, or attempting to fetch from the
-        # deleted node returns no edges. Both are valid; the contract
-        # is that the edge is unreachable from either endpoint.
+        # The edge must be unreachable from either endpoint. (Since the
+        # purge semantics were pinned — see the tests below — the edge
+        # rows are in fact physically removed, all versions included.)
         edges_from_b = store.get_edges("b", direction="incoming")
         assert edges_from_b == []
 

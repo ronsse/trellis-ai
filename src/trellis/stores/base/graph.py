@@ -492,9 +492,19 @@ class GraphStore(ABC):
 
     @abstractmethod
     def delete_node(self, node_id: str) -> bool:
-        """Delete a node and cascade to its edges.
+        """Physically purge a node: every SCD-2 version row, every edge
+        version touching it (either direction), and its alias rows.
 
-        Returns ``True`` if the node existed.
+        This is a hard delete, not a version close — afterwards the node
+        is unreachable via ``get_node``, ``as_of`` time-travel reads, and
+        ``get_node_history`` (which returns ``[]``), and its aliases no
+        longer resolve. ``redaction.apply`` relies on exactly these
+        guarantees; they are pinned by the graph-store contract tests
+        (``test_delete_node_purges_all_versions`` and siblings), which any
+        new backend must pass.
+
+        Returns ``True`` if the node existed (i.e. this call performed the
+        purge — under concurrent deletion exactly one caller sees ``True``).
         """
 
     @abstractmethod

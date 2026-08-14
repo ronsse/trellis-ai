@@ -80,15 +80,19 @@ class EventType(StrEnum):
     #: counts, and id pointers only — never the purged name/properties —
     #: so the append-only log records *that* a redaction happened and its
     #: shape without re-containing what was removed. Payload schema:
-    #: ``{target_id, target_kind, entity_type, reason, command_id,
-    #: requested_by, node_versions_purged, edges_purged, aliases_purged,
-    #: vector_deleted, document_ids}``. ``node_versions_purged`` is exact
-    #: (history length); ``edges_purged`` / ``aliases_purged`` count rows
-    #: current at redaction time while the cascade removes all versions.
-    #: ``document_ids`` preserves the purged node's document links so a
-    #: future document-level redaction can locate them. ``command_id``
-    #: joins this semantic event to the executor's ``MUTATION_EXECUTED``
-    #: audit event.
+    #: ``{target_id, target_kind, reason, command_id, requested_by,
+    #: node_versions_purged, edges_purged, aliases_purged, vector_deleted,
+    #: document_ids, linked_observation_ids, linked_measurement_ids}``
+    #: (the entity type rides the event's ``entity_type`` column).
+    #: ``node_versions_purged`` is exact (history length); ``edges_purged``
+    #: / ``aliases_purged`` count rows current at redaction time while the
+    #: cascade removes all versions. ``document_ids`` is the union of the
+    #: purged node's document links across all versions so a future
+    #: document-level redaction can locate them;
+    #: ``linked_observation_ids`` / ``linked_measurement_ids`` point at the
+    #: surviving Observation/Measurement nodes about the subject (not
+    #: cascaded — redact individually). ``command_id`` joins this semantic
+    #: event to the executor's ``MUTATION_EXECUTED`` audit event.
     REDACTION_APPLIED = "redaction.applied"
 
     # Feedback

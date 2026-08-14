@@ -166,6 +166,7 @@ class TestCurateRedact:
                 "curate",
                 "redact",
                 node_id,
+                "--yes",
                 "--reason",
                 "defect-minted entity",
                 "--format",
@@ -176,32 +177,66 @@ class TestCurateRedact:
         data = json.loads(result.stdout.strip())
         assert data["status"] == "success"
         assert data["target_id"] == node_id
-        # A second redaction names a target that no longer exists — the
-        # destructive command must fail loud, not succeed silently.
-        rerun = runner.invoke(
-            app,
-            ["curate", "redact", node_id, "--reason", "again", "--format", "json"],
-        )
-        assert rerun.exit_code == 1
+        assert data["command_id"]
 
-    def test_redact_missing_target_exits_nonzero(self) -> None:
+    def test_redact_without_yes_aborts_on_decline(self) -> None:
+        node_id = self._create_node()
+        declined = runner.invoke(
+            app,
+            ["curate", "redact", node_id, "--reason", "r"],
+            input="n\n",
+        )
+        assert declined.exit_code != 0
+        # Declining must leave the entity intact — a subsequent confirmed
+        # redaction still finds it.
+        confirmed = runner.invoke(
+            app,
+            ["curate", "redact", node_id, "--yes", "--reason", "r", "--format", "json"],
+        )
+        assert confirmed.exit_code == 0
+
+    def test_redact_missing_target_exits_store_code(self) -> None:
+        # NotFoundError is a StoreError -> FAILED -> EXIT_STORE (5), per
+        # the exit_codes map; the JSON keeps command_id so the failed
+        # attempt joins its MUTATION_REJECTED/EXECUTED audit event.
         result = runner.invoke(
             app,
-            ["curate", "redact", "ghost", "--reason", "r", "--format", "json"],
+            ["curate", "redact", "ghost", "--yes", "--reason", "r", "--format", "json"],
         )
-        assert result.exit_code == 1
+        assert result.exit_code == 5
         data = json.loads(result.stdout.strip())
         assert data["status"] == "failed"
+        assert data["command_id"]
 
-    def test_redact_blank_reason_rejected(self) -> None:
+    def test_redact_blank_reason_exits_validation_code(self) -> None:
         node_id = self._create_node()
         result = runner.invoke(
             app,
-            ["curate", "redact", node_id, "--reason", "  ", "--format", "json"],
+            [
+                "curate",
+                "redact",
+                node_id,
+                "--yes",
+                "--reason",
+                "  ",
+                "--format",
+                "json",
+            ],
         )
-        assert result.exit_code == 1
+        assert result.exit_code == 2
         data = json.loads(result.stdout.strip())
         assert data["status"] == "rejected"
+        assert data["command_id"]
+
+    def test_redact_markup_in_target_id_is_escaped(self) -> None:
+        # A raw target id containing rich markup must not crash the error
+        # print (MarkupError) or be silently swallowed.
+        result = runner.invoke(
+            app,
+            ["curate", "redact", "ghost[/x]", "--yes", "--reason", "r"],
+        )
+        assert result.exit_code == 5
+        assert "ghost[/x]" in result.stdout
 
 
 class TestCurateFeedback:

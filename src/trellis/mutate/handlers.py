@@ -18,6 +18,7 @@ from trellis.schemas.well_known import (
     OBSERVATION,
 )
 from trellis.stores.base.event_log import EventType
+from trellis.stores.null.event_log import NullEventLog
 from trellis.stores.registry import StoreRegistry
 
 logger = structlog.get_logger(__name__)
@@ -678,6 +679,18 @@ class MeasurementRecordHandler:
         return node_id, f"Measurement recorded: {node_id}"
 
 
+#: Upper bound on ``redaction.apply``'s ``reason`` arg. The reason is
+#: written verbatim into the append-only audit log — the one payload
+#: field that *could* re-contain the redacted content — so it is kept
+#: short and rejected loudly rather than silently truncated.
+MAX_REDACTION_REASON_CHARS = 2000
+
+#: Cap on the linked observation / measurement id lists in the
+#: ``REDACTION_APPLIED`` payload (they are follow-up pointers, not an
+#: exhaustive index).
+_LINKED_SIGNAL_LIMIT = 100
+
+
 class RedactionApplyHandler:
     """Hard-purge a graph entity, emitting ``REDACTION_APPLIED``.
 
@@ -693,32 +706,47 @@ class RedactionApplyHandler:
     node, and drops its alias rows (pinned by the graph-store contract
     tests). After redaction the entity is unreachable through ``get_node``,
     ``as_of`` time-travel, and ``get_node_history`` — a redaction that
-    time-travel can resurrect would not be a redaction. The vector-store
-    entry (``item_id == node_id``) is deleted *before* the graph purge so a
-    vector-backend failure aborts the command cleanly with nothing removed,
-    never a half-redacted state.
+    time-travel can resurrect would not be a redaction. The vector entry is
+    deleted *before* the graph purge (``item_id == node_id`` is the
+    shape-#2 contract on the bolt backends; the standalone stores key
+    vectors by document id, so the delete is a recorded no-op there): a
+    vector-backend failure therefore aborts before anything irreversible
+    happens. The reverse failure — vector gone, graph purge raises — leaves
+    the entity intact minus its re-derivable embedding, never the reverse.
 
     **The EventLog is the audit trail, and it never re-contains content.**
     The ``REDACTION_APPLIED`` payload carries the ``reason``, counts, and id
-    pointers only — no name, no properties. Scope is the Knowledge Plane:
-    prior Operational-Plane events (e.g. the original ``ENTITY_CREATED``)
-    and traces are immutable by design and are not rewritten. ``command_id``
-    and ``requested_by`` ride the payload so the semantic event joins to the
-    executor's ``MUTATION_EXECUTED`` audit event even when the submitting
-    surface (e.g. MCP ``execute_mutation``) does not populate
-    ``Command.target_id``.
+    pointers only — no name, no properties (see
+    :attr:`~trellis.stores.base.event_log.EventType.REDACTION_APPLIED` for
+    the schema). Because that event is the only record that survives the
+    purge, the handler refuses to run against a ``NullEventLog``
+    (``code="redaction_requires_event_log"``), and the emit itself is
+    guarded: if it fails after the purge, the content-free payload is
+    preserved in operator logs rather than reporting FAILED for a redaction
+    that already happened. Scope is the Knowledge Plane: prior
+    Operational-Plane events (e.g. the original ``ENTITY_CREATED`` payload)
+    and traces are immutable by design and are not rewritten.
 
-    **Scope: graph entities only.** Documents linked from the purged node
-    are *not* cascaded — a document may back many entities, and document /
-    blob redaction is a separate design. Their ids are preserved in the
-    event payload so a future document-level redaction can locate them. A
-    ``target_id`` that is not a graph node raises
+    **Scope: graph entities only; linked records become pointers.**
+    Documents linked from any purged version are *not* cascaded — a
+    document may back many entities — and their union across versions rides
+    the payload so a future document-level redaction can locate them.
+    Observations and Measurements *about* the subject are independent
+    governed nodes and are likewise not cascaded, but they carry
+    ``subject_entity_id`` as a property, so property-based queries keep
+    serving them after the purge; their ids ride the payload so the
+    operator can redact each one individually (they are graph nodes — this
+    same verb applies). A ``target_id`` that is not a graph node raises
     :class:`~trellis.errors.NotFoundError` (→ ``CommandStatus.FAILED``).
 
-    Idempotency: re-redacting a purged id fails with ``NotFoundError``; use
+    Idempotency: re-redacting a purged id fails with ``NotFoundError``, and
+    a concurrent-purge race is detected via ``delete_node``'s return value
+    so the loser never emits a second audit event; use
     ``Command.idempotency_key`` when at-most-once semantics are required. A
-    blank ``reason`` is rejected (``code="redaction_reason_required"``) —
-    the recorded justification is the point of governed redaction.
+    blank ``reason`` is rejected (``code="redaction_reason_required"``) and
+    an over-long one too (``code="redaction_reason_too_long"``) — the
+    recorded justification is the point of governed redaction, and it must
+    stay short and content-free.
     """
 
     def __init__(self, registry: StoreRegistry) -> None:
@@ -730,6 +758,22 @@ class RedactionApplyHandler:
         if not reason:
             msg = "redaction.apply requires a non-empty reason for the audit trail"
             raise ValidationError(msg, code="redaction_reason_required")
+        if len(reason) > MAX_REDACTION_REASON_CHARS:
+            msg = (
+                f"redaction.apply reason exceeds {MAX_REDACTION_REASON_CHARS} "
+                "chars; it is written verbatim to the append-only audit log — "
+                "keep it short and content-free"
+            )
+            raise ValidationError(msg, code="redaction_reason_too_long")
+
+        event_log = self._registry.operational.event_log
+        if isinstance(event_log, NullEventLog):
+            msg = (
+                "redaction.apply requires a persisting event log: the "
+                "REDACTION_APPLIED event is the only record that survives "
+                "the purge, and this deployment's event_log backend is 'null'"
+            )
+            raise ValidationError(msg, code="redaction_requires_event_log")
 
         graph = self._registry.knowledge.graph_store
         node = graph.get_node(target_id)
@@ -737,42 +781,90 @@ class RedactionApplyHandler:
             raise NotFoundError(entity_type="entity", entity_id=target_id)
 
         entity_type = node["node_type"]
-        document_ids = list(node.get("document_ids") or [])
-        node_versions = len(graph.get_node_history(target_id))
+        history = graph.get_node_history(target_id)
+        node_versions = len(history)
+        # Union across ALL versions: the purge takes every version's rows
+        # with it, and the payload is the only place the graph→document
+        # pointers survive — the current version alone under-reports when
+        # a later version replaced the link.
+        document_ids = sorted(
+            {d for version in history for d in version.get("document_ids") or []}
+        )
         edges = len(graph.get_edges(target_id, direction="both"))
         aliases = len(graph.get_aliases(target_id))
+        linked_observation_ids = [
+            row["node_id"]
+            for row in graph.query(
+                node_type=OBSERVATION,
+                properties={"subject_entity_id": target_id},
+                limit=_LINKED_SIGNAL_LIMIT,
+            )
+        ]
+        linked_measurement_ids = [
+            row["node_id"]
+            for row in graph.query(
+                node_type=MEASUREMENT,
+                properties={"subject_entity_id": target_id},
+                limit=_LINKED_SIGNAL_LIMIT,
+            )
+        ]
 
         # Vector entry first: if the vector backend raises, the command
-        # fails with the graph untouched (a clean abort beats a purged
-        # node whose embedding still serves the redacted content).
+        # fails with the graph untouched — nothing irreversible has
+        # happened yet.
         vector_deleted = self._registry.knowledge.vector_store.delete(target_id)
 
-        graph.delete_node(target_id)
+        if not graph.delete_node(target_id):
+            # Lost a race: another writer purged the node between our read
+            # and the delete. Fail rather than emit a second
+            # REDACTION_APPLIED carrying counts this command did not purge.
+            raise NotFoundError(entity_type="entity", entity_id=target_id)
 
-        self._registry.operational.event_log.emit(
-            EventType.REDACTION_APPLIED,
-            source="mutation_executor",
-            entity_id=target_id,
-            entity_type=entity_type,
-            payload={
-                "target_id": target_id,
-                "target_kind": "entity",
-                "entity_type": entity_type,
-                "reason": reason,
-                "command_id": command.command_id,
-                "requested_by": command.requested_by,
-                "node_versions_purged": node_versions,
-                "edges_purged": edges,
-                "aliases_purged": aliases,
-                "vector_deleted": vector_deleted,
-                "document_ids": document_ids,
-            },
-        )
-        return target_id, (
+        payload: dict[str, Any] = {
+            "target_id": target_id,
+            "target_kind": "entity",
+            "reason": reason,
+            "command_id": command.command_id,
+            "requested_by": command.requested_by,
+            "node_versions_purged": node_versions,
+            "edges_purged": edges,
+            "aliases_purged": aliases,
+            "vector_deleted": vector_deleted,
+            "document_ids": document_ids,
+            "linked_observation_ids": linked_observation_ids,
+            "linked_measurement_ids": linked_measurement_ids,
+        }
+        message = (
             f"Entity redacted: {target_id} "
             f"({node_versions} version(s), {edges} edge(s), "
             f"{aliases} alias(es), vector_deleted={vector_deleted})"
         )
+        try:
+            event_log.emit(
+                EventType.REDACTION_APPLIED,
+                source="mutation_executor",
+                entity_id=target_id,
+                entity_type=entity_type,
+                payload=payload,
+            )
+        except Exception:
+            # Same discipline as ops/write_health.py: the purge already
+            # happened, so raising would report FAILED for a completed
+            # redaction and (via the executor's own emit against the same
+            # log) lose the record entirely. Preserve the content-free
+            # payload in operator logs instead.
+            logger.warning(
+                "redaction_audit_emit_failed",
+                target_id=target_id,
+                entity_type=entity_type,
+                redaction_payload=payload,
+                exc_info=True,
+            )
+            message += (
+                " (WARNING: REDACTION_APPLIED audit emit failed; "
+                "payload preserved in operator logs)"
+            )
+        return target_id, message
 
 
 def create_curate_handlers(
