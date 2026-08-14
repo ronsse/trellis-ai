@@ -673,11 +673,52 @@ class GraphStoreContractTests:
         store.upsert_node("b", "service", {})
         store.upsert_edge("a", "b", "depends_on")
         store.delete_node("a")
-        # Either the edge is gone, or attempting to fetch from the
-        # deleted node returns no edges. Both are valid; the contract
-        # is that the edge is unreachable from either endpoint.
+        # The edge must be unreachable from either endpoint. (Since the
+        # purge semantics were pinned — see the tests below — the edge
+        # rows are in fact physically removed, all versions included.)
         edges_from_b = store.get_edges("b", direction="incoming")
         assert edges_from_b == []
+
+    def test_delete_node_purges_all_versions(self, store: GraphStore) -> None:
+        # Redaction guarantee (``redaction.apply`` rides ``delete_node``):
+        # a deleted node must be unreachable through every temporal read —
+        # current, ``as_of`` time-travel, and history. A backend that
+        # soft-closed versions instead of purging rows would resurrect
+        # redacted content via ``as_of``.
+        store.upsert_node("n1", "service", {"v": 1})
+        _sleep_for_ordering()
+        mid = _now()
+        _sleep_for_ordering()
+        store.upsert_node("n1", "service", {"v": 2})
+        store.delete_node("n1")
+        assert store.get_node("n1") is None
+        assert store.get_node_history("n1") == []
+        assert store.get_node("n1", as_of=mid) is None
+
+    def test_delete_node_removes_aliases(self, store: GraphStore) -> None:
+        # Part of the same redaction guarantee: an alias row that survived
+        # the purge would keep resolving an external identifier to a node
+        # that no longer exists — a dangling pointer at best, a leak of
+        # the redacted identity at worst.
+        store.upsert_node("n1", "service", {})
+        store.upsert_alias("n1", "github", "auth-svc")
+        store.delete_node("n1")
+        assert store.get_aliases("n1") == []
+        assert store.resolve_alias("github", "auth-svc") is None
+
+    def test_delete_node_purges_edge_history_via_as_of(self, store: GraphStore) -> None:
+        # Edge cascade must remove *all* edge versions, not just close the
+        # current ones — an ``as_of`` read from before the deletion must
+        # not resurrect the association with the deleted node.
+        store.upsert_node("a", "service", {})
+        store.upsert_node("b", "service", {})
+        store.upsert_edge("a", "b", "depends_on")
+        _sleep_for_ordering()
+        before_delete = _now()
+        _sleep_for_ordering()
+        store.delete_node("a")
+        assert store.get_edges("b", direction="both") == []
+        assert store.get_edges("b", direction="both", as_of=before_delete) == []
 
     # ------------------------------------------------------------------
     # counts

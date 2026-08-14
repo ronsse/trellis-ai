@@ -8,6 +8,7 @@ from typing import Any
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 from trellis.learning import prepare_learning_promotions, submit_learning_promotion
@@ -17,7 +18,8 @@ from trellis.mutate import (
     Operation,
     build_curate_executor,
 )
-from trellis_cli.exit_codes import EXIT_INTERNAL
+from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_STORE, EXIT_VALIDATION
+from trellis_cli.output import emit_json
 from trellis_cli.stores import _get_registry
 
 curate_app = typer.Typer(no_args_is_help=True)
@@ -134,6 +136,83 @@ def label(
         requested_by="cli:label",
     )
     _execute_command(cmd, output_format)
+
+
+@curate_app.command()
+def redact(
+    target_id: str = typer.Argument(..., help="Entity/node ID to hard-purge"),
+    reason: str = typer.Option(
+        ..., "--reason", help="Audit-trail justification (required, non-empty)"
+    ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Skip the interactive confirmation (required for scripted use).",
+    ),
+    requested_by: str = typer.Option(
+        "cli:redact", "--by", help="Audit-trail identifier for the caller."
+    ),
+    output_format: str = typer.Option("text", "--format", help="Output format"),
+) -> None:
+    """Redact (hard-purge) a graph entity via the governed pipeline.
+
+    Irreversibly removes ALL versions of the node, every edge touching
+    it, its aliases, and its vector entry. The REDACTION_APPLIED audit
+    event records the shape of what was removed, never the content.
+    Linked documents and observation/measurement nodes are not cascaded;
+    their ids ride the audit payload for follow-up.
+    """
+    if not yes:
+        console.print(
+            f"[yellow]Irreversibly purge entity {escape(target_id)} — all "
+            "versions, edges, aliases, and vector entry?[/yellow]"
+        )
+        if not typer.confirm("Are you sure?"):
+            raise typer.Abort()
+
+    cmd = Command(
+        operation=Operation.REDACTION_APPLY,
+        args={"target_id": target_id, "reason": reason},
+        target_id=target_id,
+        target_type="entity",
+        requested_by=requested_by,
+    )
+    result = build_curate_executor(_get_registry()).execute(cmd)
+
+    if result.status in (CommandStatus.FAILED, CommandStatus.REJECTED):
+        # Destructive command: error states must exit non-zero so shell
+        # pipelines fail loud, and the code follows the exit_codes map —
+        # REJECTED is a validation/policy outcome (EXIT_VALIDATION),
+        # FAILED on this path is a store outcome such as target-not-found
+        # (EXIT_STORE). ``command_id`` rides the JSON so a failed attempt
+        # still joins to its MUTATION_REJECTED audit event.
+        exit_code = (
+            EXIT_VALIDATION if result.status == CommandStatus.REJECTED else EXIT_STORE
+        )
+        if output_format == "json":
+            emit_json(
+                {
+                    "status": result.status.value,
+                    "command_id": result.command_id,
+                    "message": result.message,
+                }
+            )
+        else:
+            console.print(f"[red]{escape(result.message)}[/red]")
+        raise typer.Exit(code=exit_code)
+
+    if output_format == "json":
+        emit_json(
+            {
+                "status": result.status.value,
+                "command_id": result.command_id,
+                "target_id": target_id,
+                "message": result.message,
+            }
+        )
+    else:
+        console.print(f"[green]✓[/green] {escape(result.message)}")
 
 
 @curate_app.command()
