@@ -184,11 +184,50 @@ def _record_boundary_rejection(
     )
 
 
+# The ``instructions`` string is returned in the MCP ``initialize`` response and
+# is the only guidance that travels with the connector itself — every client
+# (Claude Code, claude.ai, Cowork, any other host) receives it without local
+# setup. Host-side skills and hooks cannot be assumed: they exist on one machine
+# and do not follow the server. So the behavioural contract lives here.
+#
+# It earns its tokens by carrying the three things measurement showed were
+# actually going wrong on a live deployment (2026-08-15, skynet corpus), not a
+# description of what the product is:
+#   * retrieval was the starved half of the loop — 6 of 88 sessions ever called
+#     a retrieval tool, against 1143 governed writes and 15 assembled packs;
+#   * feedback arrived without item attribution, which cannot join to the pack
+#     in ``trellis.learning.pack_observations`` and so drove nothing;
+#   * ``domain=`` was widely believed unsafe after a since-fixed hard-exclusion
+#     defect, so callers avoided a working scope.
+# Keep it short — it is injected into every session on every client.
 mcp = FastMCP(
     "trellis",
     instructions=(
-        "Trellis — structured memory and learning for AI agents. "
-        "All responses are concise markdown optimized for LLM context windows."
+        "Trellis — persistent memory for AI agents. Responses are concise "
+        "markdown sized for LLM context windows.\n"
+        "\n"
+        "Use it as a loop, not a lookup table:\n"
+        "\n"
+        "1. BEFORE non-trivial work, call `get_context(intent=...)`. Prior "
+        "traces and precedents are cheap; re-deriving them is not. Pass "
+        "`session_id` to dedup across calls in one conversation. `domain=` is "
+        "safe to pass — it scopes with default-pass semantics and never "
+        "hard-excludes memories that carry no domain. An empty pack is a real "
+        "answer: it means greenfield, so say so.\n"
+        "\n"
+        "2. AFTER meaningful work — a fix, a discovery, an instructive failure "
+        "— call `save_experience`. Put failures in the step's `error` field; a "
+        "workaround the next agent would otherwise rediscover is the most "
+        "reusable thing you can leave behind.\n"
+        "\n"
+        "3. GRADE what you were served: `record_feedback(pack_id=...)` naming "
+        "`helpful_item_ids` and `unhelpful_item_ids`. Feedback without item "
+        "ids cannot join to the pack and is invisible to the learning loop, so "
+        "a reflexive success=true teaches nothing. An honest low `rating` is "
+        "worth more than a polite high one.\n"
+        "\n"
+        "The common failure is retrieval that never happens, not retrieval "
+        "that returns nothing."
     ),
 )
 

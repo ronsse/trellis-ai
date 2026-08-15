@@ -2096,3 +2096,42 @@ class TestStructuredErrorContract:
         assert err.error.data is not None
         assert err.error.data["field"] == "args"
         assert err.error.data["type"] == "str"
+
+
+class TestServerInstructions:
+    """The ``instructions`` string is the contract that travels with the server.
+
+    It is returned in the MCP ``initialize`` response, so it is the only
+    guidance every client gets without local setup — host-side skills and hooks
+    live on one machine and do not follow the connector. These tests pin the
+    behaviours it must keep carrying, so it cannot quietly decay back into a
+    product description (which is what it was before, and why a live deployment
+    ran 6 retrievals across 88 sessions).
+    """
+
+    def test_names_the_three_loop_tools(self) -> None:
+        text = server_mod.mcp.instructions or ""
+        for tool in ("get_context", "save_experience", "record_feedback"):
+            assert tool in text, f"instructions must name {tool}"
+
+    def test_demands_item_level_feedback_attribution(self) -> None:
+        """Unattributed feedback cannot join the pack, so saying so is the point."""
+        text = server_mod.mcp.instructions or ""
+        assert "helpful_item_ids" in text
+        assert "unhelpful_item_ids" in text
+
+    def test_states_domain_is_safe_to_pass(self) -> None:
+        """A since-fixed hard-exclusion defect taught callers to avoid `domain=`."""
+        text = server_mod.mcp.instructions or ""
+        assert "domain=" in text
+        assert "default-pass" in text
+
+    def test_orders_retrieval_before_recording(self) -> None:
+        """Retrieval is the starved half; it has to come first in the text too."""
+        text = server_mod.mcp.instructions or ""
+        assert text.index("get_context") < text.index("save_experience")
+
+    def test_stays_short_enough_to_inject_every_session(self) -> None:
+        """It rides in every session on every client — cap the token cost."""
+        text = server_mod.mcp.instructions or ""
+        assert 400 < len(text) < 2000, f"instructions are {len(text)} chars"
