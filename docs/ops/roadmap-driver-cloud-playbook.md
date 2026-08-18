@@ -108,6 +108,32 @@ One `/schedule` routine runs both: Job A every day; Job B additionally on Monday
 
 ---
 
+## Reading the Layer-2 `loop_dod3` block (revised 2026-08-16)
+
+The skynet job's `loop_dod3` was rewritten to stop conflating three different
+stages of the loop. The pre-08-16 block reported `retrieve precedents` (a
+**human-gated** promote *output*) and `advisory-effectiveness.advisory_scores`
+(delivery effectiveness, *downstream* of generation) over a 7d window — so it
+read `0 / 0 = starved` while generation was demonstrably working at width (2
+advisories at 90d; injected coverage 1.0). Read the new 30d block as:
+
+| Field | What it measures | How to read for DoD #3 |
+|---|---|---|
+| `graded_observations` | graded packs joined (PACK_ASSEMBLED ⋈ FEEDBACK, 30d) | loop **input** flowing when > 0 |
+| `promote_candidates` | items recurring across ≥2 graded packs (real `min_support=2`) | the promote-half **generation** — the honest "lessons > 0" signal |
+| `curate_signal` | `advisories_generated` / `all-zeros` from the 03:30 curate log | the demote-half **generation** signal ("advisories > 0") |
+| `injected_coverage`, `attribution_rate` | the two join-coverage rates (30d) | join is **fed** when injected ≈ 1.0; attribution is item-signal quality |
+| `precedents_promoted` | precedents promoted INTO the graph | **human-gated** — 0 until someone runs `learning-candidates → curate promote-learning`. **A 0 here is NOT "starved."** |
+
+**DoD #3 mapping.** "advisories/lessons > 0" is met when `promote_candidates > 0`
+**or** `curate_signal == advisories_generated`. Never read `precedents_promoted: 0`
+as an unmet loop criterion — it is a human-review output, not a generation
+metric. At single-user throughput `promote_candidates` can legitimately sit at 0
+(no item recurs across ≥2 graded packs) even with a healthy loop, which is why
+the criterion itself is under review — see `dod3-reframe-proposal.md`.
+
+---
+
 ## DoD — the 11 criteria (`cloud` = this routine verifies; `skynet` = arrives via Layer-2 status block)
 
 | # | Criterion | Surface |
