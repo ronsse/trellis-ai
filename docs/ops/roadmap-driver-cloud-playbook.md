@@ -125,12 +125,15 @@ advisories at 90d; injected coverage 1.0). Read the new 30d block as:
 | `injected_coverage`, `attribution_rate` | the two join-coverage rates (30d) | join is **fed** when injected ≈ 1.0; attribution is item-signal quality |
 | `precedents_promoted` | precedents promoted INTO the graph | **human-gated** — 0 until someone runs `learning-candidates → curate promote-learning`. **A 0 here is NOT "starved."** |
 
-**DoD #3 mapping.** "advisories/lessons > 0" is met when `promote_candidates > 0`
-**or** `curate_signal == advisories_generated`. Never read `precedents_promoted: 0`
-as an unmet loop criterion — it is a human-review output, not a generation
-metric. At single-user throughput `promote_candidates` can legitimately sit at 0
-(no item recurs across ≥2 graded packs) even with a healthy loop, which is why
-the criterion itself is under review — see `dod3-reframe-proposal.md`.
+**DoD #3 mapping (reframed 2026-08-16, accepted).** Criterion #3 is now **3a —
+loop fed & wired**: met when `injected_coverage ≥ 0.9` **and** `attribution_rate
+≥ 0.2` **and** `graded_observations ≥ 5` **and** `curate_signal != all-zeros`.
+The nightly emits this as `dod3a_met` (`true`/`false`) — read that directly.
+The standing-output half is **3b** (≥1 `promote_candidate` at `min_support=2`,
+or ≥1 promoted precedent): a `blocked:signal` **maturity gate tracked OUTSIDE
+the 11**, *not* a deployer-#2 launch blocker — never read `promote_candidates: 0`
+or `precedents_promoted: 0` as an unmet launch criterion. Rationale + decisions:
+`dod3-reframe-proposal.md`.
 
 ---
 
@@ -140,7 +143,7 @@ the criterion itself is under review — see `dod3-reframe-proposal.md`.
 |---|---|---|
 | 1 | Quickstart cold-install exits 0 | cloud (monthly deep-check) |
 | 2 | `pytest tests/unit/` green + 6 workflows green on main | cloud |
-| 3 | Loop unstarved: within 30d of #255, advisories/lessons > 0; curate not all-zeros | skynet |
+| 3 | **Loop fed & wired** (30d): `injected_coverage ≥0.9` + `attribution_rate ≥0.2` + `graded_observations ≥5` + curate not all-zeros (nightly `dod3a_met`) | skynet |
 | 4 | Attribution round-trip: flat `get_context` carries `pack_id`; `record_feedback`→`FEEDBACK_RECORDED` | skynet |
 | 5 | #194 enforced (`pytest -k classification`) | cloud |
 | 6 | #250 closed: `.env` exists, dead AuraDB creds purged, CI secrets rotated | cloud + owner |
@@ -149,6 +152,9 @@ the criterion itself is under review — see `dod3-reframe-proposal.md`.
 | 9 | trellis-api container current + `llm:` block live (skynet-hub#4) | skynet |
 | 10 | `:8420` locked down (skynet-hub#5) | skynet |
 | 11 | Backup mirror working (skynet-hub#6) | skynet |
+
+**Maturity signal (outside the 11, `blocked:signal` — not a launch gate):**
+**3b — Loop yields standing memory:** ≥1 `promote_candidate` at `min_support=2`, or ≥1 precedent promoted via `learning-candidates → curate promote-learning`. Deferred to post-adoption; do not block deployer-#2 on it. See `dod3-reframe-proposal.md`.
 
 ---
 

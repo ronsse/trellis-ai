@@ -1,6 +1,6 @@
-# DoD-3 Reframe — Proposal (DRAFT, awaiting owner decision)
+# DoD-3 Reframe — ACCEPTED 2026-08-16
 
-**Status:** draft · **Owner decision required** · Author: loop-starvation diagnosis 2026-08-16
+**Status:** ✅ ACCEPTED 2026-08-16 (all four decisions adopted as recommended) · Author: loop-starvation diagnosis 2026-08-16
 **Context:** board [ronsse/trellis-ai#275](https://github.com/ronsse/trellis-ai/issues/275) · playbook `roadmap-driver-cloud-playbook.md` · memory `trellis-live-on-skynet-2026-07`
 
 ## The problem
@@ -53,12 +53,14 @@ Current: 0 / 0 → **open, correctly gated on throughput**, not on code.
 
 This makes the honest half of the criterion pass now, and pins the genuinely-throughput-bound half as `blocked:signal` — the same label #261 already carries for "needs ≥30 days of feedback." Deployer-#2-readiness can then be defined against **3a** (the loop is correctly built and fed), with **3b** as a post-adoption maturity signal rather than a launch blocker.
 
-## Decision requested from the owner
+## Decisions (accepted 2026-08-16)
 
-1. **Adopt the 3a / 3b split?** (recommended: yes)
-2. **3a thresholds** as proposed (0.9 / 0.2 / 5), or adjust?
-3. **Is 3b a launch blocker for deployer-#2, or a `blocked:signal` maturity gate?** (recommended: maturity gate — do not block adoption on personal-throughput recurrence)
-4. **Low-throughput opt-in mode** (`min_support=1` behind a flag) — build as a separate feature, or reject? (recommended: reject for now; revisit if a multi-user pilot changes throughput)
+1. **Adopt the 3a / 3b split** — ✅ **yes**.
+2. **3a thresholds** `injected_coverage ≥ 0.9 · attribution_rate ≥ 0.2 · ≥5 graded observations · curate not all-zeros` — ✅ **adopted as proposed**.
+3. **3b disposition** — ✅ **maturity gate, `blocked:signal`** — *not* a deployer-#2 launch blocker.
+4. **Low-throughput opt-in mode** (`min_support=1` behind a flag) — ✅ **rejected for now**; revisit only if a multi-user pilot changes throughput.
+
+**Rollout (applied 2026-08-16).** DoD criterion #3 in the 11 becomes **3a** (met today: coverage 1.0, attribution ~0.29, 6 graded obs, curate non-zero). **3b** is tracked as a post-adoption maturity signal *outside* the 11, labelled `blocked:signal`. Applied to: board #275 DoD table + note, the cloud playbook DoD table + mapping, and the Layer-2 nightly (now emits a computed `dod3a_met` verdict).
 
 ## Out of scope (separate follow-ups, not part of this decision)
 
