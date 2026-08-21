@@ -19,6 +19,14 @@ from trellis.extract.alias_match import AliasMatchExtractor, AliasResolver
 from trellis.extract.base import Extractor, ExtractorTier, NoExtractorAvailableError
 from trellis.extract.context import ExtractionContext
 from trellis.extract.dispatcher import ExtractionDispatcher
+from trellis.extract.evidence import (
+    COMMANDS_RUN_PROPERTY,
+    FILES_READ_PROPERTY,
+    FILES_TOUCHED_PROPERTY,
+    TraceEvidence,
+    apply_trace_evidence,
+    parse_trace_evidence,
+)
 from trellis.extract.hybrid import HybridJSONExtractor, ResidueSelector
 from trellis.extract.json_rules import (
     EdgeRule,
@@ -48,6 +56,9 @@ from trellis.extract.validators import (
 )
 
 __all__ = [
+    "COMMANDS_RUN_PROPERTY",
+    "FILES_READ_PROPERTY",
+    "FILES_TOUCHED_PROPERTY",
     "AliasMatchExtractor",
     "AliasResolver",
     "DraftLocalReferenceValidator",
@@ -72,10 +83,13 @@ __all__ = [
     "TRACE_SOURCE_HINT",
     "SourceFallbackStats",
     "SourceValidationStats",
+    "TraceEvidence",
     "TraceExtractor",
     "ValidationFinding",
     "analyze_extraction_validation",
     "analyze_extractor_fallbacks",
+    "apply_trace_evidence",
     "build_save_memory_extractor",
     "default_validators",
+    "parse_trace_evidence",
 ]

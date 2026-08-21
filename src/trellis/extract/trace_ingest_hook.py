@@ -50,6 +50,7 @@ from trellis.extract.commands import (
     reconcile_node_roles,
     result_to_batch,
 )
+from trellis.extract.evidence import apply_trace_evidence, parse_trace_evidence
 from trellis.extract.trace import TRACE_SOURCE_HINT, TraceExtractor
 from trellis.mutate.commands import CommandStatus
 
@@ -116,11 +117,21 @@ def extract_trace_batch(
 
     Returns ``(result, batch)``; ``batch`` is ``None`` when the trace
     produced no drafts.
+
+    The deterministic evidence gate (#308) runs here, between extraction
+    and batch construction: verifiable fields (files touched, files
+    read, commands run) are parsed straight from the trace's tool-call
+    payloads and override whatever the extractor put on the Activity
+    draft — extractor-supplied values may extend the evidence, never
+    contradict it.  Sitting at this seam (rather than inside
+    ``TraceExtractor``) means the same guarantee holds for any future
+    LLM/hybrid extractor routed through this path.
     """
     extractor = TraceExtractor()
     result = asyncio.run(
         extractor.extract(trace, source_hint=TRACE_SOURCE_HINT),
     )
+    result = apply_trace_evidence(result, parse_trace_evidence(trace))
     if not result.entities and not result.edges:
         return result, None
     return result, result_to_batch(

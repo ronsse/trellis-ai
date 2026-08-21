@@ -274,6 +274,22 @@ Edges are de-duplicated on `(source_id, kind, target_id)` *after* kind canonical
 
 Every emitted node and edge stamps property-based provenance: `source_trace_id`, `agent_id`, `extractor_tier` (`"deterministic"`), and `extraction_confidence` (the extractor's per-draft confidence — always `1.0` on this path, since every mined value is a structured field read). Edges are emitted with `allow_dangling=True` because trace graphs are inherently cross-batch (e.g. a parent trace's Activity or shared evidence is extracted by a different run).
 
+### Verifiable fields (deterministic evidence)
+
+`tool_call` step payloads are the one exception to "only structured fields are mined": the `Activity` node additionally carries `files_touched`, `files_read` and `commands_run`, parsed straight from the step `args` (`src/trellis/extract/evidence.py`). These are *evidence*, so an extractor's own claim can never displace them — an unattested value is demoted to a `<field>_unverified` companion property, and for `files_touched` the companion is the only place it appears.
+
+Only these shapes are recognised, so a step that names its tool or arg differently contributes nothing (silently — a missing shape is preferable to a guessed one):
+
+| Tool `name` (slugified) | Contributes to |
+|--------------------------|----------------|
+| `Edit`, `edit_file`, `Write`, `write_file`, `create_file`, `MultiEdit`, `NotebookEdit` | `files_touched` |
+| `str_replace_editor` | `files_touched`, or `files_read` when `args.command == "view"` |
+| `Read`, `read_file`, `View`, `view_file` | `files_read` |
+| `Bash`, `shell`, `run_command`, `execute_command` | `commands_run` |
+| any tool with a `patch` / `diff` / `unified_diff` arg, or whose name contains `patch` / `git_apply` | `files_touched`, from `---`/`+++`/`@@` unified-diff header triples |
+
+Path args are read from `file_path`, `notebook_path`, `path`, `file`, `filename`; commands from `command`, `cmd`, `script` (bounded to 500 chars, ellipsis-marked). Files are **not** inferred from shell command text, and exit codes are not parsed — `step.result` has no payload contract to read one from.
+
 For example, ingesting Example 1 above with the flag on produces an `Activity` node (`trace:<id>`), an `Agent` node (`agent:code-orchestrator`), a `Concept` node (`domain:backend`), and two `SoftwareApplication` nodes (`tool:search-codebase`, `tool:edit-file`), wired with `wasAttributedTo`, `appliesTo`, and two `used` edges.
 
 ### ID normalization
