@@ -5,6 +5,7 @@ from __future__ import annotations
 from trellis.retrieve.formatters import (
     format_advisories_as_markdown,
     format_entities_as_markdown,
+    format_file_context_as_markdown,
     format_lessons_as_markdown,
     format_pack_as_markdown,
     format_sectioned_pack_as_markdown,
@@ -373,3 +374,89 @@ class TestFormatAdvisories:
         assert "2." in result
         assert "approach" in result.lower()
         assert "anti_pattern" in result.lower()
+
+
+class TestFormatFileContext:
+    def test_empty_result(self):
+        empty = format_file_context_as_markdown({"paths": []})
+        assert empty == "No file paths queried."
+
+    def test_path_without_context(self):
+        result = format_file_context_as_markdown(
+            {
+                "paths": [
+                    {
+                        "path": "notes/foo.md",
+                        "documents": [],
+                        "entities": [],
+                        "newest_item_at": None,
+                    }
+                ]
+            }
+        )
+        assert "## notes/foo.md" in result
+        assert "No stored context for this path." in result
+
+    def test_documents_and_entities_rendered_with_timestamps(self):
+        result = format_file_context_as_markdown(
+            {
+                "paths": [
+                    {
+                        "path": "notes/foo.md",
+                        "documents": [
+                            {
+                                "doc_id": "corpus:vault:abc",
+                                "source_path": "notes/foo.md",
+                                "title": "Foo Notes",
+                                "excerpt": "Gotcha about cold starts.",
+                                "created_at": "2026-08-01T00:00:00+00:00",
+                                "updated_at": "2026-08-14T10:00:00+00:00",
+                            }
+                        ],
+                        "entities": [
+                            {
+                                "entity_id": "ent-1",
+                                "name": "Cold Start",
+                                "entity_type": "concept",
+                                "description": "API cold-start latency",
+                                "created_at": "2026-08-02T00:00:00+00:00",
+                                "updated_at": "2026-08-03T00:00:00+00:00",
+                            }
+                        ],
+                        "newest_item_at": "2026-08-14T10:00:00+00:00",
+                    }
+                ]
+            }
+        )
+        assert "Newest memory: 2026-08-14T10:00:00+00:00" in result
+        assert "**Foo Notes** `corpus:vault:abc`" in result
+        assert "updated 2026-08-14T10:00:00+00:00" in result
+        assert "Gotcha about cold starts." in result
+        assert "**Cold Start** (concept) `ent-1`" in result
+        assert "API cold-start latency" in result
+
+    def test_respects_token_budget(self):
+        entities = [
+            {
+                "entity_id": f"ent-{i}",
+                "name": f"Entity {i}",
+                "entity_type": "concept",
+                "description": "x" * 200,
+                "updated_at": "2026-08-03T00:00:00+00:00",
+            }
+            for i in range(50)
+        ]
+        result = format_file_context_as_markdown(
+            {
+                "paths": [
+                    {
+                        "path": "notes/foo.md",
+                        "documents": [],
+                        "entities": entities,
+                        "newest_item_at": "2026-08-03T00:00:00+00:00",
+                    }
+                ]
+            },
+            max_tokens=100,
+        )
+        assert len(result) <= 100 * 4

@@ -191,9 +191,90 @@ class TestRetrievePrecedents:
         assert data["count"] == 0
 
 
+class TestRetrieveFileContext:
+    @staticmethod
+    def _seed(*, extraction_status: str | None = None) -> None:
+        from trellis_cli.stores import get_document_store, get_graph_store
+
+        get_document_store().put(
+            "corpus:vault:abc",
+            "Gotcha: the pack builder truncates before scoring.",
+            metadata={"source_path": "src/trellis/retrieve/pack_builder.py"},
+        )
+        props: dict[str, str] = {"name": "PackBuilder"}
+        if extraction_status is not None:
+            props["extraction_status"] = extraction_status
+        get_graph_store().upsert_node(
+            "ent-packbuilder",
+            "concept",
+            props,
+            document_ids=["corpus:vault:abc"],
+        )
+
+    def test_absolute_query_finds_stored_relpath(self) -> None:
+        self._seed()
+        result = runner.invoke(
+            app,
+            [
+                "retrieve",
+                "file-context",
+                "/home/n/projects/trellis-ai/src/trellis/retrieve/pack_builder.py",
+            ],
+        )
+        assert result.exit_code == 0
+        assert "corpus:vault:abc" in result.stdout
+        assert "PackBuilder" in result.stdout
+
+    def test_json_output_carries_timestamps_for_the_staleness_gate(self) -> None:
+        self._seed()
+        result = runner.invoke(
+            app,
+            [
+                "retrieve",
+                "file-context",
+                "src/trellis/retrieve/pack_builder.py",
+                "--format",
+                "json",
+            ],
+        )
+        assert result.exit_code == 0
+        data = json.loads(result.stdout.strip())
+        assert data["status"] == "ok"
+        assert data["count"] == 1
+        (entry,) = data["paths"]
+        assert entry["path"] == "src/trellis/retrieve/pack_builder.py"
+        assert entry["documents"][0]["doc_id"] == "corpus:vault:abc"
+        assert entry["entities"][0]["entity_id"] == "ent-packbuilder"
+        assert entry["newest_item_at"] is not None
+
+    def test_unknown_path_is_a_clean_empty_answer(self) -> None:
+        result = runner.invoke(
+            app,
+            ["retrieve", "file-context", "never/ingested.py", "--format", "json"],
+        )
+        assert result.exit_code == 0
+        data = json.loads(result.stdout.strip())
+        assert data["paths"] == [
+            {
+                "path": "never/ingested.py",
+                "documents": [],
+                "entities": [],
+                "newest_item_at": None,
+            }
+        ]
+
+    def test_unconfirmed_mints_gated_unless_requested(self) -> None:
+        self._seed(extraction_status="unconfirmed")
+        args = ["retrieve", "file-context", "src/trellis/retrieve/pack_builder.py"]
+        assert "PackBuilder" not in runner.invoke(app, args).stdout
+        assert (
+            "PackBuilder" in runner.invoke(app, [*args, "--include-unconfirmed"]).stdout
+        )
+
+
 class TestRetrieveHelp:
     def test_help(self) -> None:
         result = runner.invoke(app, ["retrieve", "--help"])
         assert result.exit_code == 0
-        for cmd in ["pack", "search", "trace", "entity", "precedents"]:
+        for cmd in ["pack", "search", "trace", "entity", "precedents", "file-context"]:
             assert cmd in result.stdout

@@ -82,8 +82,10 @@ from trellis.mutate import (
 )
 from trellis.ops import ParameterRegistry
 from trellis.retrieve.embed_ingest_hook import run_embed_on_ingest
+from trellis.retrieve.file_context import build_file_context
 from trellis.retrieve.formatters import (
     format_advisories_as_markdown,
+    format_file_context_as_markdown,
     format_lessons_as_markdown,
     format_pack_as_markdown,
     format_sectioned_pack_as_markdown,
@@ -1693,6 +1695,62 @@ def get_graph(
     except Exception:
         # GRACEFUL-DEGRADATION: token tracking is post-success telemetry.
         logger.exception("token_tracking_failed", operation="get_graph")
+    return result
+
+
+# ---------------------------------------------------------------------------
+# get_file_context — file-scoped retrieval (#307, server-side half)
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool(auth=trellis_scope(SCOPE_READ))
+def get_file_context(
+    paths: list[str],
+    include_unconfirmed: bool = False,
+    max_tokens: int = 2000,
+) -> str:
+    """Get stored context about specific files before reading or editing them.
+
+    For each path, returns documents whose ``source_path`` names that file
+    (exact match, or a ``/``-boundary suffix match so absolute paths find
+    stored relpaths) plus graph entities doc-linked to those documents.
+    Every item carries its store timestamps and each path a ``Newest
+    memory`` line, so a caller can staleness-gate: if the file's mtime is
+    newer than the newest memory, the context is about an older version
+    of the file.
+
+    Args:
+        paths: File paths to look up (relative or absolute).
+        include_unconfirmed: Also surface unconfirmed extraction mints
+            (excluded by default — extraction attests mention, not fact).
+        max_tokens: Maximum response size in tokens (default 2000).
+    """
+    cleaned = [p.strip() for p in paths if p and p.strip()] if paths else []
+    if not cleaned:
+        _raise_invalid_params(
+            "paths must contain at least one non-empty path",
+            data={"field": "paths"},
+        )
+
+    registry = _get_registry()
+    file_context = build_file_context(
+        registry.knowledge.document_store,
+        registry.knowledge.graph_store,
+        cleaned,
+        include_unconfirmed=include_unconfirmed,
+    )
+    result = format_file_context_as_markdown(file_context, max_tokens=max_tokens)
+    try:
+        track_token_usage(
+            registry.operational.event_log,
+            layer="mcp",
+            operation="get_file_context",
+            response_tokens=estimate_tokens(result),
+            budget_tokens=max_tokens,
+        )
+    except Exception:
+        # GRACEFUL-DEGRADATION: token tracking is post-success telemetry.
+        logger.exception("token_tracking_failed", operation="get_file_context")
     return result
 
 

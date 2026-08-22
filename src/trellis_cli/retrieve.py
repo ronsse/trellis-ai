@@ -9,9 +9,10 @@ from typing import Any
 import typer
 from rich.console import Console
 
+from trellis.retrieve.file_context import build_file_context
 from trellis.retrieve.precedents import list_precedents as _list_precedents
 from trellis_cli.exit_codes import EXIT_INTERNAL
-from trellis_cli.output import format_output, truncate_values
+from trellis_cli.output import emit_json, format_output, truncate_values
 from trellis_cli.stores import (
     LOCAL_SOURCE_SYSTEM,
     get_document_store,
@@ -289,3 +290,50 @@ def precedents(
                 sys.stdout.write(line.strip() + "\n")
             else:
                 console.print(line)
+
+
+@retrieve_app.command("file-context")
+def file_context(
+    paths: list[str] = typer.Argument(  # noqa: B008 - typer option factory
+        ..., help="File paths to look up"
+    ),
+    include_unconfirmed: bool = typer.Option(
+        False,
+        "--include-unconfirmed",
+        help="Also surface unconfirmed extraction mints (#301)",
+    ),
+    output_format: str = typer.Option("text", "--format", help="Output format"),
+) -> None:
+    """Show what memory already holds about specific files.
+
+    The shell-callable half of read-time file context (#307): a
+    ``PreToolUse`` hook runs this before a file is opened and decides,
+    from each path's ``newest_item_at`` against the file's mtime,
+    whether the stored context still describes the file on disk.
+    """
+    result = build_file_context(
+        get_document_store(),
+        get_graph_store(),
+        paths,
+        include_unconfirmed=include_unconfirmed,
+    )
+    entries: list[dict[str, Any]] = result["paths"]
+
+    if output_format == "json":
+        emit_json({"status": "ok", "count": len(entries), "paths": entries})
+        return
+
+    for entry in entries:
+        console.print(f"[green]{entry['path']}[/green]")
+        if not entry["documents"] and not entry["entities"]:
+            console.print("  (no stored context)")
+            continue
+        console.print(f"  Newest memory: {entry['newest_item_at']}")
+        for doc in entry["documents"]:
+            label = doc.get("title") or doc.get("source_path") or doc["doc_id"]
+            console.print(f"  - doc {doc['doc_id']}: {label}")
+        for node in entry["entities"]:
+            console.print(
+                f"  - entity {node['entity_id']}:"
+                f" {node.get('name') or node['entity_id']}"
+            )

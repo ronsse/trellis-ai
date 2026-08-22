@@ -292,6 +292,67 @@ def format_subgraph_as_markdown(
     return _truncate_to_tokens(result, max_tokens)
 
 
+def format_file_context_as_markdown(
+    file_context: dict[str, Any],
+    max_tokens: int = 2000,
+) -> str:
+    """Format a :func:`~trellis.retrieve.file_context.build_file_context` result.
+
+    Timestamps are rendered verbatim (ISO) on every item and as the
+    per-path ``Newest memory`` line, so a client staleness gate can parse
+    them straight out of the markdown.
+
+    Args:
+        file_context: The ``{"paths": [...]}`` result dict.
+        max_tokens: Maximum token budget.
+
+    Returns:
+        Markdown-formatted string.
+    """
+    path_results = file_context.get("paths", [])
+    if not path_results:
+        return "No file paths queried."
+
+    lines = [f"# File Context ({len(path_results)} paths)"]
+    for result in path_results:
+        documents = result.get("documents", [])
+        entities = result.get("entities", [])
+        lines.append("")
+        lines.append(f"## {result.get('path', '?')}")
+        if not documents and not entities:
+            lines.append("No stored context for this path.")
+            continue
+        newest = result.get("newest_item_at")
+        if newest:
+            lines.append(f"Newest memory: {newest}")
+        if documents:
+            lines.append("")
+            lines.append(f"### Documents ({len(documents)})")
+            for doc in documents:
+                label = doc.get("title") or doc.get("source_path") or "untitled"
+                stamp = doc.get("updated_at") or doc.get("created_at") or "?"
+                lines.append(f"- **{label}** `{doc.get('doc_id')}` (updated {stamp})")
+                excerpt = doc.get("excerpt")
+                if excerpt:
+                    lines.append(f"  {excerpt}")
+        if entities:
+            lines.append("")
+            lines.append(f"### Entities ({len(entities)})")
+            for entity in entities:
+                name = entity.get("name") or entity.get("entity_id") or "?"
+                etype = entity.get("entity_type") or "?"
+                stamp = entity.get("updated_at") or entity.get("created_at") or "?"
+                line = (
+                    f"- **{name}** ({etype}) `{entity.get('entity_id')}`"
+                    f" (updated {stamp})"
+                )
+                if entity.get("description"):
+                    line += f": {entity['description']}"
+                lines.append(line)
+
+    return _truncate_to_tokens("\n".join(lines), max_tokens)
+
+
 def format_sectioned_pack_as_markdown(
     sections: list[dict[str, Any]],
     intent: str,
