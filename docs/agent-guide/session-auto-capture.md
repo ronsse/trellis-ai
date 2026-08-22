@@ -29,9 +29,13 @@ instance are set up here.
    and compaction summaries are tolerated.
 3. **Trigger** deterministically: sessions with errors or user corrections are
    capture-mandatory (failure-bias); clean sessions are sampled ~1-in-N.
-4. **Distil** triggered sessions with the local model. **Fail-closed**: if the
-   model is unavailable the sweep captures *nothing* for that session and
-   leaves it un-watermarked so a later run retries it.
+4. **Distil** triggered sessions with the local model. The judge prompt carries
+   skip discipline: routine operational steps (a clean install, a bare
+   listing, a status check that found nothing) are refused at the source, a
+   skip is the empty array rather than prose, and the judge records what the
+   session did — never what the capture process itself is doing.
+   **Fail-closed**: if the model is unavailable the sweep captures *nothing*
+   for that session and leaves it un-watermarked so a later run retries it.
 5. **Gate** each candidate: the deterministic secret-scan gate (hard drop on a
    hit; the content is never logged), the capture-instruction injection guard
    (drops candidates whose text addresses the memory system — "remember

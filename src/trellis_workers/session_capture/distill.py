@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from trellis.core.elision import elide_text
 from trellis.llm import Message
 from trellis.schemas.memory_op import (
     InputDigest,
@@ -64,10 +65,22 @@ _SYSTEM_PROMPT = (
     "- durable: will still matter next month (not session-local state).\n"
     "- actionable: would change what a future agent DOES, not just knows.\n"
     "- attributed: carries concrete evidence (a path, a command, a date).\n"
-    "Prefer instructive FAILURES and user CORRECTIONS over routine successes. "
+    "Prefer instructive FAILURES and user CORRECTIONS over routine successes.\n"
+    "Skip discipline — a session step is NOT a memory when it is only:\n"
+    "- a status check that found nothing notable;\n"
+    "- a dependency install or build that completed cleanly;\n"
+    "- a bare file or directory listing;\n"
+    "- a restatement of a finding the session says is already recorded;\n"
+    "- research or a search that found nothing.\n"
+    "Record what the session learned, built, or fixed — NEVER what you or the "
+    'capture process are doing; "Analyzed the session and stored findings" is '
+    "not a memory. A session whose SUBJECT is a capture or extraction pipeline "
+    "is ordinary subject matter — distil it normally.\n"
     "NEVER copy raw tool output, secrets, tokens, credentials, or environment "
     "values into a memory — summarize in your own words. If nothing qualifies, "
-    "return an empty list.\n"
+    "return [] and nothing else — never explain the skip in prose. Output that "
+    "is not the JSON array is discarded, so a prose explanation is a wasted "
+    "response, not a record.\n"
     'Respond with ONLY a JSON array, each item: {"title": str, "memory": str, '
     '"memory_type": "semantic"|"procedural", "signal": "failure"|"correction"|'
     '"success", "evidence": str, "non_derivable": bool, "durable": bool, '
@@ -76,8 +89,14 @@ _SYSTEM_PROMPT = (
 
 
 def build_distill_messages(digest: SessionDigest) -> list[Message]:
-    """Build the distillation prompt from the secret-free digest only."""
-    salient = digest.salient_text[:_MAX_SALIENT_CHARS]
+    """Build the distillation prompt from the secret-free digest only.
+
+    An oversize session is capped at :data:`_MAX_SALIENT_CHARS`, and the
+    cut is marked with an explicit ``<elided … />`` tag (size + reason,
+    #310) so the judge knows material was removed rather than treating
+    the cut as the end of the session.
+    """
+    salient = elide_text(digest.salient_text, _MAX_SALIENT_CHARS)
     tool_names = sorted({call.name for call in digest.tool_calls})
     signals = f"has_error={digest.has_error} has_correction={digest.has_correction}"
     user = (

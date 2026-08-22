@@ -535,5 +535,7 @@ def test_observation_excerpt_is_boundary_truncated() -> None:
         _make_observation_node("obs1", subject_entity_id="dataset:x", content=content)
     )
     assert len(item.excerpt) <= EXCERPT_MAX_CHARS
-    assert item.excerpt.endswith(EXCERPT_ELLIPSIS)
-    assert content.startswith(item.excerpt[: -len(EXCERPT_ELLIPSIS)])
+    # Ellipsis + dropped-size note (#310); the body is a prefix of source.
+    assert EXCERPT_ELLIPSIS in item.excerpt
+    assert item.excerpt.endswith("chars]")
+    assert content.startswith(item.excerpt.split(EXCERPT_ELLIPSIS, 1)[0])

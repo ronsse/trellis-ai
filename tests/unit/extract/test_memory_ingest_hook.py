@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -13,6 +14,7 @@ from trellis.extract.memory_ingest_hook import (
     memory_extraction_env_enabled,
     run_memory_extraction,
 )
+from trellis.llm.types import LLMResponse, TokenUsage
 from trellis.schemas.extraction import (
     EntityDraft,
     ExtractionProvenance,
@@ -33,6 +35,21 @@ class _FakeExtractor:
             msg = "extractor exploded"
             raise RuntimeError(msg)
         return self._result
+
+
+class _CapturingLLM:
+    """LLM double that records the messages the extractor hands it."""
+
+    def __init__(self) -> None:
+        self.messages: list[Any] = []
+
+    async def generate(self, **kwargs: Any) -> LLMResponse:
+        self.messages = list(kwargs["messages"])
+        return LLMResponse(
+            content='{"entities": [], "edges": []}',
+            model="fake",
+            usage=TokenUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+        )
 
 
 def _result_with(entities: list[EntityDraft]) -> ExtractionResult:
@@ -156,6 +173,41 @@ class TestRunMemoryExtraction:
         )
         assert (entities, edges) == (0, 0)
         assert registry.knowledge.graph_store.query(limit=50) == []
+
+
+class TestSkipDisciplineOnTheWire:
+    """#311: the prompt this path *sends* carries the skip-discipline rules.
+
+    The hook has no prompt of its own — it reaches ``MEMORY_EXTRACTION_V1``
+    through ``build_save_memory_extractor``, the same factory the MCP
+    ``save_memory`` path uses. Asserting the constant's text (in
+    ``tests/unit/extract/prompts``) would stay green if this path later
+    grew a prompt of its own, so pin the rendered system message instead.
+    """
+
+    def test_ingest_hook_transmits_skip_discipline(self, registry, monkeypatch):
+        monkeypatch.setenv(MEMORY_EXTRACTION_FLAG, "1")
+        llm = _CapturingLLM()
+        monkeypatch.setattr(registry, "build_llm_client", lambda: llm)
+
+        extractor = build_memory_extractor(registry, opt_in=True)
+        assert extractor is not None
+        # The @mention resolves against an empty graph, so the residue
+        # reaches the LLM stage and its rendered prompt is observable.
+        assert run_memory_extraction(
+            registry,
+            extractor,
+            "doc-311",
+            "Rotated the DSN on @nightly-job and the run went green.",
+            requested_by="test",
+        ) == (0, 0)
+
+        assert llm.messages[0].role == "system"
+        # Normalize wrapping — the clauses matter, not the reflow.
+        system = " ".join(llm.messages[0].content.split())
+        assert "Skip discipline" in system
+        assert "never explain the skip in prose" in system
+        assert "NEVER what you or the recording process are doing" in system
 
 
 class TestSyncRecordsWiring:

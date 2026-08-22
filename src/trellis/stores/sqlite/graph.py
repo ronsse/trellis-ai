@@ -29,7 +29,11 @@ from trellis.stores.base.graph import (
     validate_node_role_args,
     validate_subgraph_depth,
 )
-from trellis.stores.base.graph_query import RANGE_OP_GLYPH
+from trellis.stores.base.graph_query import (
+    DOC_LINK_FIELD,
+    RANGE_OP_GLYPH,
+    check_doc_link_clause,
+)
 from trellis.stores.sqlite.base import SQLiteStoreBase
 
 logger = structlog.get_logger(__name__)
@@ -1235,6 +1239,7 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
     @staticmethod
     def _compile_clause_sqlite(clause: Any) -> tuple[str, list[Any]]:
         """Translate one node-side :class:`FilterClause` to a SQLite WHERE fragment."""
+        check_doc_link_clause(clause.field, clause.op)
         if clause.op == "contains":
             return SQLiteGraphStore._render_contains_sqlite(clause.field, clause)
         column = SQLiteGraphStore._field_to_sql_expr(clause.field)
@@ -1324,6 +1329,11 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
         """Map a DSL field path to a SQLite column / ``json_extract`` expression."""
         if field in {"node_type", "node_role", "node_id"}:
             return field
+        if field == DOC_LINK_FIELD:
+            # Stored as a JSON array in its own TEXT column; ``exists``
+            # (the only op ``check_doc_link_clause`` lets through)
+            # renders as the plain ``IS NOT NULL`` on that column.
+            return "document_ids_json"
         if field.startswith("properties."):
             key = field.split(".", 1)[1]
             # SQLite identifier-quoting on JSON path keys is unnecessary

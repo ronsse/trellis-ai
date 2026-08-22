@@ -1115,6 +1115,72 @@ class GraphStoreContractTests:
         assert {r["node_id"] for r in results} == {"a"}
 
     # ------------------------------------------------------------------
+    # DSL — `document_ids` doc-link presence filter (#307)
+    #
+    # The one top-level node field holding a JSON array. Backends store
+    # it in three different shapes (SQLite TEXT column, Postgres JSONB,
+    # Cypher JSON-string property), so only `exists` is in the contract
+    # — enough to narrow a doc→node reverse lookup to the population
+    # that can match, which is what it exists for.
+    # ------------------------------------------------------------------
+
+    def test_exists_on_document_ids_selects_doc_linked_nodes(
+        self, store: GraphStore
+    ) -> None:
+        from trellis.stores.base.graph_query import FilterClause, NodeQuery
+
+        store.upsert_node("linked", "concept", {}, document_ids=["doc-1"])
+        store.upsert_node("unlinked", "concept", {})
+        results = store.execute_node_query(
+            NodeQuery(filters=(FilterClause("document_ids", "exists"),))
+        )
+        assert {r["node_id"] for r in results} == {"linked"}
+
+    def test_exists_on_document_ids_returns_the_links(self, store: GraphStore) -> None:
+        """Callers intersect ``document_ids`` themselves, so it must survive."""
+        from trellis.stores.base.graph_query import FilterClause, NodeQuery
+
+        store.upsert_node("linked", "concept", {}, document_ids=["doc-1", "doc-2"])
+        (row,) = store.execute_node_query(
+            NodeQuery(filters=(FilterClause("document_ids", "exists"),))
+        )
+        assert row["document_ids"] == ["doc-1", "doc-2"]
+
+    def test_exists_on_document_ids_composes_with_other_filters(
+        self, store: GraphStore
+    ) -> None:
+        from trellis.stores.base.graph_query import FilterClause, NodeQuery
+
+        store.upsert_node("a", "concept", {}, document_ids=["doc-1"])
+        store.upsert_node("b", "service", {}, document_ids=["doc-1"])
+        results = store.execute_node_query(
+            NodeQuery(
+                filters=(
+                    FilterClause("document_ids", "exists"),
+                    FilterClause("node_type", "eq", "concept"),
+                )
+            )
+        )
+        assert {r["node_id"] for r in results} == {"a"}
+
+    def test_document_ids_rejects_operators_other_than_exists(
+        self, store: GraphStore
+    ) -> None:
+        """Per-document membership is a caller-side intersection, not a filter.
+
+        ``eq`` against a serialized array would mean something different
+        in each dialect; refusing keeps the DSL honest about what it can
+        translate identically.
+        """
+        from trellis.stores.base.graph_query import FilterClause, NodeQuery
+
+        store.upsert_node("a", "concept", {}, document_ids=["doc-1"])
+        with pytest.raises(ValueError, match="document_ids"):
+            store.execute_node_query(
+                NodeQuery(filters=(FilterClause("document_ids", "eq", "doc-1"),))
+            )
+
+    # ------------------------------------------------------------------
     # Edge provenance — round-trip + NULL semantics (Phase 1 of Item 2)
     # ------------------------------------------------------------------
 

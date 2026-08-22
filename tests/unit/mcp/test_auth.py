@@ -310,6 +310,7 @@ EXPECTED_TOOL_SCOPES = {
     "get_objective_context": SCOPE_READ,
     "get_task_context": SCOPE_READ,
     "get_sectioned_context": SCOPE_READ,
+    "get_file_context": SCOPE_READ,
     "save_experience": SCOPE_INGEST,
     "save_knowledge": SCOPE_INGEST,
     "save_memory": SCOPE_INGEST,

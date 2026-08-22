@@ -48,6 +48,27 @@ def test_parse_candidates_skips_items_missing_fields() -> None:
     assert len(cands) == 1
 
 
+def test_build_messages_mark_an_oversize_cut() -> None:
+    """A capped session announces the cut to the judge — size + reason (#310).
+
+    A silent cut invites the model to confabulate the missing tail; the
+    marker tells it material was removed and how much.
+    """
+    digest = _digest()
+    digest.assistant_texts.append("y" * (distill._MAX_SALIENT_CHARS + 500))
+    user = distill.build_distill_messages(digest)[1].content
+    total = len(digest.salient_text)
+    dropped = total - distill._MAX_SALIENT_CHARS
+    assert (
+        f'<elided chars="{dropped}" original_size_chars="{total}" reason="oversize" />'
+    ) in user
+
+
+def test_build_messages_under_cap_carry_no_elision_marker() -> None:
+    user = distill.build_distill_messages(_digest())[1].content
+    assert "<elided" not in user
+
+
 def test_distill_no_client_returns_none() -> None:
     # None (not []) so the caller leaves the session un-watermarked.
     assert distill.distill_session(None, _digest()) is None
@@ -68,3 +89,43 @@ def test_distill_empty_judgment_returns_empty_list_not_none() -> None:
     # Judge responded with an empty array — "nothing worthy", safe to advance.
     client = FakeLLMClient(["[]"])
     assert distill.distill_session(client, _digest()) == []
+
+
+class TestSkipDisciplineInJudgePrompt:
+    """#311: the judge prompt carries the skip-discipline rules on the wire.
+
+    ``passes_worthiness`` only reads the model's three self-reported booleans
+    plus an evidence string, so a self-certifying judge can land routine noise
+    (a clean install, a bare listing) past the deterministic gate. The prompt
+    is the only place that class is refused, which is why it is pinned here
+    rather than left to the constant.
+    """
+
+    def _system(self) -> str:
+        messages = distill.build_distill_messages(_digest())
+        assert messages[0].role == "system"
+        return " ".join(messages[0].content.split())
+
+    def test_skip_criteria_present(self) -> None:
+        system = self._system()
+        assert "Skip discipline" in system
+        assert "status check that found nothing notable" in system
+        assert "dependency install or build that completed cleanly" in system
+        assert "bare file or directory listing" in system
+        assert "restatement of a finding" in system
+        assert "research or a search that found nothing" in system
+
+    def test_skips_are_silent(self) -> None:
+        system = self._system()
+        assert "return [] and nothing else" in system
+        assert "never explain the skip in prose" in system
+        # Non-schema output is discarded, so prose is not a storable artifact.
+        assert "is not the JSON array is discarded" in system
+
+    def test_anti_meta_guard_present(self) -> None:
+        system = self._system()
+        assert "NEVER what you or the capture process are doing" in system
+        assert '"Analyzed the session and stored findings" is not a memory' in system
+        # Scoped to the process, not the topic: a session ABOUT the capture
+        # pipeline is ordinary subject matter.
+        assert "ordinary subject matter" in system

@@ -80,12 +80,18 @@ from trellis.mutate import (
     build_curate_executor,
     ensure_evidence_document,
 )
-from trellis.ops import ParameterRegistry
+from trellis.ops import (
+    ParameterRegistry,
+    check_capture_health,
+    format_capture_warning,
+)
 from trellis.retrieve.embed_ingest_hook import run_embed_on_ingest
+from trellis.retrieve.file_context import build_file_context
 from trellis.retrieve.formatters import (
     format_advisories_as_markdown,
     format_entity_as_markdown,
     format_fetched_items_as_markdown,
+    format_file_context_as_markdown,
     format_lessons_as_markdown,
     format_pack_as_index_markdown,
     format_pack_as_markdown,
@@ -594,6 +600,32 @@ def _track_tokens(
         logger.exception("token_tracking_failed", operation=operation)
 
 
+def _capture_warning_banner(registry: StoreRegistry) -> str:
+    """Best-effort capture-health banner for pack outputs — never raises.
+
+    #309: write-boundary failures (#297) were invisible unless the
+    operator ran ``trellis analyze health``; when a surface's recent
+    rejections cross the threshold with no accepted write of its own, the
+    warning now rides inside the packs agents already read — including
+    the empty state, which is exactly where a dark capture path otherwise
+    looks like greenfield. Empty string means healthy *or indeterminate*:
+    an indeterminate check must present as healthy.
+
+    Callers prepend the banner *after* budgeting the pack, so it rides
+    outside ``max_tokens`` (~60 tokens) rather than competing with the
+    context it warns about — see :func:`format_capture_warning`.
+    """
+    try:
+        warning = check_capture_health(registry.operational.event_log)
+        return format_capture_warning(warning) if warning is not None else ""
+    except Exception:
+        # GRACEFUL-DEGRADATION: the health check is advisory read-side
+        # telemetry; its failure must never block or corrupt a
+        # successfully assembled pack.
+        logger.exception("capture_health_check_failed")
+        return ""
+
+
 def _flat_context(
     registry: StoreRegistry,
     intent: str,
@@ -677,8 +709,11 @@ def _flat_context(
             data={"tool": operation, "intent": intent},
         )
 
+    banner = _capture_warning_banner(registry)
+
     if not pack.items:
-        return empty_message or f"No context found for: {intent}"
+        empty = empty_message or f"No context found for: {intent}"
+        return f"{banner}\n\n{empty}" if banner else empty
 
     item_dicts = [
         {
@@ -700,6 +735,8 @@ def _flat_context(
         max_tokens=max_tokens,
         pack_id=pack.pack_id,
     )
+    if banner:
+        result = f"{banner}\n\n{result}"
     _track_tokens(registry, operation=operation, result=result, budget=max_tokens)
     return result
 
@@ -763,6 +800,9 @@ def _sectioned_context(
         adv_md = format_advisories_as_markdown(sectioned_pack.advisories)
         if adv_md:
             result = result + "\n\n" + adv_md
+        banner = _capture_warning_banner(registry)
+        if banner:
+            result = f"{banner}\n\n{result}"
         _track_tokens(registry, operation=tool, result=result, budget=resolved_tokens)
     except McpError:
         # Already structured by a deeper helper — let it propagate.
@@ -1892,6 +1932,62 @@ def get_items(
         )
 
     _track_tokens(registry, operation="get_items", result=result, budget=max_tokens)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# get_file_context — file-scoped retrieval (#307, server-side half)
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool(auth=trellis_scope(SCOPE_READ))
+def get_file_context(
+    paths: list[str],
+    include_unconfirmed: bool = False,
+    max_tokens: int = 2000,
+) -> str:
+    """Get stored context about specific files before reading or editing them.
+
+    For each path, returns documents whose ``source_path`` names that file
+    (exact match, or a ``/``-boundary suffix match so absolute paths find
+    stored relpaths) plus graph entities doc-linked to those documents.
+    Every item carries its store timestamps and each path a ``Newest
+    memory`` line, so a caller can staleness-gate: if the file's mtime is
+    newer than the newest memory, the context is about an older version
+    of the file.
+
+    Args:
+        paths: File paths to look up (relative or absolute).
+        include_unconfirmed: Also surface unconfirmed extraction mints
+            (excluded by default — extraction attests mention, not fact).
+        max_tokens: Maximum response size in tokens (default 2000).
+    """
+    cleaned = [p.strip() for p in paths if p and p.strip()] if paths else []
+    if not cleaned:
+        _raise_invalid_params(
+            "paths must contain at least one non-empty path",
+            data={"field": "paths"},
+        )
+
+    registry = _get_registry()
+    file_context = build_file_context(
+        registry.knowledge.document_store,
+        registry.knowledge.graph_store,
+        cleaned,
+        include_unconfirmed=include_unconfirmed,
+    )
+    result = format_file_context_as_markdown(file_context, max_tokens=max_tokens)
+    try:
+        track_token_usage(
+            registry.operational.event_log,
+            layer="mcp",
+            operation="get_file_context",
+            response_tokens=estimate_tokens(result),
+            budget_tokens=max_tokens,
+        )
+    except Exception:
+        # GRACEFUL-DEGRADATION: token tracking is post-success telemetry.
+        logger.exception("token_tracking_failed", operation="get_file_context")
     return result
 
 

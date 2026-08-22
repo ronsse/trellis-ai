@@ -197,7 +197,7 @@ The flag applies identically across the three document-ingest paths: the REST `P
 
 The vector row's metadata carries a `content` excerpt (500 chars — what `SemanticSearch` renders as the pack excerpt), the document metadata, `doc_id`, and a `created_at` recency stamp. Note that metadata-only re-puts (e.g. enrichment tag writes) do not re-embed; run the backfill with `--force` to refresh vector metadata.
 
-That stored excerpt is a **raw `content[:500]` slice**, so it is the one pack excerpt the boundary-aware truncation (see "Pack excerpts and the content floor") does not clean up: `SemanticSearch` runs `truncate_excerpt` over it, but a string already at the 500-char limit is returned verbatim, mid-word cut and all. Keyword, graph and observation items are truncated from full content and do get a clean break.
+That stored excerpt is produced by `truncate_excerpt` **at embed time**, not at retrieval time (#310): `build_vector_row` is the last point on the semantic path that still holds the full document, so it is the only point where the cut can break on a boundary and can name how much it dropped (`… [+12.4k chars]`). Retrieval re-runs `truncate_excerpt` over the stored string, which is a no-op for rows this hook wrote. Rows embedded before #310 hold a raw `content[:500]` slice and keep their mid-word cut until re-embedded — `trellis admin reindex-vectors --force` rewrites them through the same shared builder.
 
 On the retrieval side, embedded documents are visible to every `SemanticSearch`/`PackBuilder` consumer. Since #262 the MCP `get_context` and `search` macro tools route through `PackBuilder`, which fuses the keyword, graph and **semantic** axes with Reciprocal Rank Fusion (deduplicated by `item_id`): when the embedder + vector store pair is configured, the query is embedded and vector hits join the fusion. The semantic axis is additive and degrades gracefully — a down embedder means keyword + graph results only, never a failed tool call.
 
@@ -784,6 +784,67 @@ trellis retrieve precedents [--domain DOMAIN] [--limit N] [--format text|json]
 }
 ```
 
+### `trellis retrieve file-context`
+
+Show what memory already holds about specific files — the shell-callable surface behind read-time file context (#307). Matches stored `metadata.source_path` values (exact, or a `/`-boundary suffix match in either direction where the suffix spans at least one directory, so an absolute path finds the relpath corpus ingest stored) and adds the graph entities doc-linked to those documents.
+
+A **single-segment** stored value matches by equality only. `README.md` / `TODO.md` sit at the root of the vault and of every repo, so treating a bare basename as a suffix would answer a read of one project's file with another's notes.
+
+```bash
+trellis retrieve file-context <path> [<path>...] [--include-unconfirmed] [--format text|json|jsonl] [--quiet]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--include-unconfirmed` | `false` | Also surface unconfirmed extraction mints (#301) |
+| `--format` | `text` | `text`, `json`, or `jsonl` (one object per path). `tsv` is refused with exit 2 — a path entry carries nested document and entity lists, and flattening them into cells would emit Python reprs |
+| `--quiet` / `-q` | `false` | Write raw lines instead of Rich output. Use this from a hook: Rich hard-wraps at 80 columns when stdout is a pipe, splitting long absolute paths across two lines |
+
+Batch the paths into one call — the lookup scans the document store once per call, regardless of how many paths it is given.
+
+**JSON output:**
+
+```json
+{
+  "status": "ok",
+  "count": 1,
+  "paths": [
+    {
+      "path": "src/trellis/retrieve/pack_builder.py",
+      "documents": [
+        {
+          "doc_id": "corpus:vault:9f2c",
+          "source_path": "src/trellis/retrieve/pack_builder.py",
+          "source_system": "vault",
+          "title": "Pack builder notes",
+          "excerpt": "Gotcha: the two-stage budget truncates before scoring.",
+          "created_at": "2026-08-01T09:12:00+00:00",
+          "updated_at": "2026-08-14T10:00:00+00:00"
+        }
+      ],
+      "entities": [
+        {
+          "entity_id": "01JRK5N7QF",
+          "name": "PackBuilder",
+          "entity_type": "concept",
+          "node_role": "semantic",
+          "description": "Assembles token-budgeted packs",
+          "document_ids": ["corpus:vault:9f2c"],
+          "created_at": "2026-08-02T00:00:00+00:00",
+          "updated_at": "2026-08-03T00:00:00+00:00"
+        }
+      ],
+      "newest_item_at": "2026-08-14T10:00:00+00:00"
+    }
+  ],
+  "graph_scan_truncated": false
+}
+```
+
+`newest_item_at` is the newest stamp across a path's documents and entities, or `null` when nothing matched. It is what a client staleness gate compares against the file's mtime: an mtime newer than `newest_item_at` means the stored context describes an older version of the file.
+
+`graph_scan_truncated` is `true` when the graph carries more doc-linked nodes than the scan cap, i.e. the entity lists may be short. It exists so "no entities" and "couldn't look" don't read the same. The scan is narrowed store-side to doc-linked nodes (`FilterClause("document_ids", "exists")`), so unlinked nodes — the bulk of a mature graph — never consume the cap.
+
 ### `trellis retrieve pack`
 
 Assemble a retrieval pack for a given intent.
@@ -848,7 +909,9 @@ Plus the scope keys `intent` / `domain` / `agent_id` / `session_id`, the roll-up
 
 #### Pack excerpts and the content floor
 
-Excerpts are cut at a **sentence boundary, else a word boundary, else hard** and marked with `…` — never mid-word. A boundary is only honoured if it retains at least half the budget, so a leading `"Note. "` cannot gut an excerpt. The 500-character cap (`EXCERPT_MAX_CHARS`) matches the raw slice this replaced, so per-item token estimates did not shift.
+Excerpts are cut at a **sentence boundary, else a word boundary, else hard** — never mid-word — and the cut is marked `… [+2.3k chars]`, naming how much was dropped so a consumer can judge whether fetching the full source is worth the tokens (#310). A boundary is only honoured if it retains at least half the budget, so a leading `"Note. "` cannot gut an excerpt. The 500-character cap (`EXCERPT_MAX_CHARS`) matches the raw slice this replaced, so per-item token estimates did not shift.
+
+Three things to know about the size note. It is charged **against** the cap, not added on top of it — a truncated excerpt gives up ~14 characters of body to carry it, and is still never longer than the raw `text[:500]` slice it replaces. Its count is exact: the truncator reserves the widest possible note before choosing the cut, so what it quotes is what was actually dropped. And `count_substance_words` strips it before measuring, so it can never lift a name-only stub over the content floor below. Limits under 100 characters (`ELISION_NOTE_MIN_LIMIT`) get the bare `…` instead — at those budgets the note would crowd out the text it annotates.
 
 The **content floor** handles substance-free items — the name-only graph stubs whose "excerpt" is a three-word entity name. An item with fewer than `min_distinct_words` (default `5`) distinct words in its excerpt is, by default, **demoted, not dropped**: its `relevance_score` is multiplied by `0.35`.
 
@@ -971,7 +1034,7 @@ result = executor.execute(cmd)
 | Operation | Required Args | Description |
 |-----------|---------------|-------------|
 | `redaction.apply` | `target_id`, `reason` | Hard-purge a graph entity: all SCD-2 versions, its edges, aliases, and vector entry. Emits `REDACTION_APPLIED` (counts + id pointers, never content). Also available via `trellis curate redact`. |
-| `retention.prune` | (none) | Run retention pruning. **No handler registered yet** — commands fail with `No handler registered`; retention runs today as a worker (`trellis_workers.maintenance.retention`). |
+| `retention.prune` | (none) | Run retention pruning. **No handler registered yet** — commands fail with `No handler registered`, and nothing else performs retention either (`trellis_workers.maintenance.retention` is orphaned: no caller, no CLI, no scheduler). Disposition — governed handler or explicit retirement — is an open owner gate; see [`adr-retention-prune.md`](../design/adr-retention-prune.md). |
 
 ### Batch Execution
 
@@ -1516,7 +1579,7 @@ day-window selector drive all charts.
 
 ## MCP Macro Tools
 
-Start with `trellis-mcp`. 15 tools returning token-budgeted markdown — 9 core tools, 3 sectioned-context tools for richer pack assembly, and 3 structured tools (observations + the mutation escape hatch) that return JSON.
+Start with `trellis-mcp`. 16 tools returning token-budgeted markdown — 10 core tools, 3 sectioned-context tools for richer pack assembly, and 3 structured tools (observations + the mutation escape hatch) that return JSON.
 
 **Core tools**
 
@@ -1531,6 +1594,7 @@ Start with `trellis-mcp`. 15 tools returning token-budgeted markdown — 9 core 
 | `get_items` | `item_ids`, `pack_id?`, `max_tokens?` | Markdown bodies for known ids (max 50), resolved against the document store, the graph, then the trace store. Items over budget are omitted whole with their ids listed for a follow-up call — never truncated; unknown ids are listed as not found. Emits `PACK_ITEMS_FETCHED` with the served ids; pass the `pack_id` that surfaced them to keep the fetch attributable. |
 | `record_feedback` | `trace_id?`, `pack_id?`, `success?`, `rating?`, `notes?`, `helpful_item_ids?`, `unhelpful_item_ids?`, `followed_advisory_ids?` | Confirmation |
 | `search` | `query`, `limit?`, `max_tokens?`, `index?` | Markdown search results |
+| `get_file_context` | `paths`, `include_unconfirmed?`, `max_tokens?` | Markdown context per file path (#307): documents whose `metadata.source_path` names the path (exact, or a `/`-boundary suffix match so absolute paths find stored relpaths) plus graph entities doc-linked to them. Every item carries store timestamps and each path a `Newest memory` line so a client can staleness-gate against the file's mtime. Unconfirmed extraction mints are excluded unless `include_unconfirmed=true` (#301). |
 
 **Sectioned-context tools (deprecated aliases — #262)**
 
@@ -1578,6 +1642,32 @@ get_graph("svc-api")   → ## Evidence documents (1)
 
 get_items(["doc-7"], pack_id="01HABCDEF...")   → full body
 ```
+
+### Capture-health banner
+
+Every pack-returning tool — `get_context` (flat and sectioned), `search`, and the three sectioned aliases — prepends a one-block warning when a **write** surface has gone dark (#309):
+
+```markdown
+> **WARNING: memory capture is failing.** 5 write attempt(s) rejected and 0 accepted in the last 24h from: mcp:save_experience (since 2026-08-21 04:12 UTC). New experience from this session is NOT being saved. Diagnose with `trellis analyze health`.
+```
+
+The rule is **per surface**, evaluated over a trailing window: a surface warns when it has at least `TRELLIS_CAPTURE_WARN_THRESHOLD` rejected writes — boundary `WRITE_REJECTED` (#297) plus executor `MUTATION_REJECTED`, aggregated under one `mcp:<tool>` label — and **no** accepted write (`MUTATION_EXECUTED`) of its own. Per-surface, not global, because the incident this exists to catch has successful writes in the same window by construction: every MCP `save_*` call rejected while a nightly `trellis ingest corpus` keeps landing rows. A global "zero accepted anywhere" rule would stay silent through exactly that outage.
+
+Executor rejections with `reason="idempotency_replay"` are excluded — a replayed command is a duplicate submission of a write that already landed, not a write that went dark.
+
+| Knob | Default | Notes |
+|------|---------|-------|
+| `TRELLIS_CAPTURE_WARN_THRESHOLD` | `3` | Rejections one surface needs before it warns (claude-mem's three-consecutive-failures rule). **`0` disables the check entirely** — and skips the store round-trip. |
+| `TRELLIS_CAPTURE_WARN_WINDOW_HOURS` | `24` | Trailing window the counts are taken over. |
+
+These are read-side knobs — they shape what retrieval *serves*, not what ingest *writes* — so they live in `src/trellis/ops/capture_health.py`, not `write_config.py`, and do **not** appear in `trellis admin write-config`.
+
+Two properties worth knowing before you read a banner:
+
+- **It rides outside `max_tokens`.** The pack is budgeted first and the banner prepended after, because a warning the budget can evict is a warning that disappears on exactly the small packs a dark capture path produces. Budget for ~60 extra tokens while capture is down.
+- **The empty state carries it too.** A pack with no items and no banner means greenfield; a pack with no items and a banner means the writes never landed. Distinguishing those is the point.
+
+The check is advisory telemetry and fails soft: if it raises, the pack is served unbannered (the `track_token_usage` GRACEFUL-DEGRADATION posture). Indeterminate presents as healthy. Run `trellis analyze health` for the full per-tool accept/reject breakdown and rejection-kind taxonomy.
 
 ### Citing Pack Elements in Feedback
 
@@ -1663,7 +1753,7 @@ Or install via ClawHub:
 clawhub install trellis-ai
 ```
 
-After restarting OpenClaw, the agent has access to all 15 macro tools above. See [`examples/integrations/openclaw/`](../../examples/integrations/openclaw/) for the full setup guide and skill definition.
+After restarting OpenClaw, the agent has access to all 16 macro tools above. See [`examples/integrations/openclaw/`](../../examples/integrations/openclaw/) for the full setup guide and skill definition.
 
 ---
 
