@@ -784,6 +784,67 @@ trellis retrieve precedents [--domain DOMAIN] [--limit N] [--format text|json]
 }
 ```
 
+### `trellis retrieve file-context`
+
+Show what memory already holds about specific files — the shell-callable surface behind read-time file context (#307). Matches stored `metadata.source_path` values (exact, or a `/`-boundary suffix match in either direction where the suffix spans at least one directory, so an absolute path finds the relpath corpus ingest stored) and adds the graph entities doc-linked to those documents.
+
+A **single-segment** stored value matches by equality only. `README.md` / `TODO.md` sit at the root of the vault and of every repo, so treating a bare basename as a suffix would answer a read of one project's file with another's notes.
+
+```bash
+trellis retrieve file-context <path> [<path>...] [--include-unconfirmed] [--format text|json|jsonl] [--quiet]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--include-unconfirmed` | `false` | Also surface unconfirmed extraction mints (#301) |
+| `--format` | `text` | `text`, `json`, or `jsonl` (one object per path). `tsv` is refused with exit 2 — a path entry carries nested document and entity lists, and flattening them into cells would emit Python reprs |
+| `--quiet` / `-q` | `false` | Write raw lines instead of Rich output. Use this from a hook: Rich hard-wraps at 80 columns when stdout is a pipe, splitting long absolute paths across two lines |
+
+Batch the paths into one call — the lookup scans the document store once per call, regardless of how many paths it is given.
+
+**JSON output:**
+
+```json
+{
+  "status": "ok",
+  "count": 1,
+  "paths": [
+    {
+      "path": "src/trellis/retrieve/pack_builder.py",
+      "documents": [
+        {
+          "doc_id": "corpus:vault:9f2c",
+          "source_path": "src/trellis/retrieve/pack_builder.py",
+          "source_system": "vault",
+          "title": "Pack builder notes",
+          "excerpt": "Gotcha: the two-stage budget truncates before scoring.",
+          "created_at": "2026-08-01T09:12:00+00:00",
+          "updated_at": "2026-08-14T10:00:00+00:00"
+        }
+      ],
+      "entities": [
+        {
+          "entity_id": "01JRK5N7QF",
+          "name": "PackBuilder",
+          "entity_type": "concept",
+          "node_role": "semantic",
+          "description": "Assembles token-budgeted packs",
+          "document_ids": ["corpus:vault:9f2c"],
+          "created_at": "2026-08-02T00:00:00+00:00",
+          "updated_at": "2026-08-03T00:00:00+00:00"
+        }
+      ],
+      "newest_item_at": "2026-08-14T10:00:00+00:00"
+    }
+  ],
+  "graph_scan_truncated": false
+}
+```
+
+`newest_item_at` is the newest stamp across a path's documents and entities, or `null` when nothing matched. It is what a client staleness gate compares against the file's mtime: an mtime newer than `newest_item_at` means the stored context describes an older version of the file.
+
+`graph_scan_truncated` is `true` when the graph carries more doc-linked nodes than the scan cap, i.e. the entity lists may be short. It exists so "no entities" and "couldn't look" don't read the same. The scan is narrowed store-side to doc-linked nodes (`FilterClause("document_ids", "exists")`), so unlinked nodes — the bulk of a mature graph — never consume the cap.
+
 ### `trellis retrieve pack`
 
 Assemble a retrieval pack for a given intent.
@@ -1517,7 +1578,7 @@ day-window selector drive all charts.
 
 ## MCP Macro Tools
 
-Start with `trellis-mcp`. 14 tools returning token-budgeted markdown — 8 core tools, 3 sectioned-context tools for richer pack assembly, and 3 structured tools (observations + the mutation escape hatch) that return JSON.
+Start with `trellis-mcp`. 15 tools returning token-budgeted markdown — 9 core tools, 3 sectioned-context tools for richer pack assembly, and 3 structured tools (observations + the mutation escape hatch) that return JSON.
 
 **Core tools**
 
@@ -1531,6 +1592,7 @@ Start with `trellis-mcp`. 14 tools returning token-budgeted markdown — 8 core 
 | `get_graph` | `entity_id`, `depth?`, `max_tokens?` | Markdown subgraph |
 | `record_feedback` | `trace_id?`, `pack_id?`, `success?`, `rating?`, `notes?`, `helpful_item_ids?`, `unhelpful_item_ids?`, `followed_advisory_ids?` | Confirmation |
 | `search` | `query`, `limit?`, `max_tokens?` | Markdown search results |
+| `get_file_context` | `paths`, `include_unconfirmed?`, `max_tokens?` | Markdown context per file path (#307): documents whose `metadata.source_path` names the path (exact, or a `/`-boundary suffix match so absolute paths find stored relpaths) plus graph entities doc-linked to them. Every item carries store timestamps and each path a `Newest memory` line so a client can staleness-gate against the file's mtime. Unconfirmed extraction mints are excluded unless `include_unconfirmed=true` (#301). |
 
 **Sectioned-context tools (deprecated aliases — #262)**
 

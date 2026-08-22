@@ -42,6 +42,8 @@ Field paths in :class:`FilterClause` use dotted notation:
 * ``"properties.team"`` — JSON property nested one level inside
   ``properties``
 * ``"node_role"`` — ``"semantic"`` / ``"structural"`` / ``"curated"``
+* ``"document_ids"`` — the cross-plane doc-link column, ``exists``
+  only (see :data:`DOC_LINK_FIELD`)
 
 Edge field paths (used with :class:`EdgeQuery`):
 
@@ -88,6 +90,51 @@ RANGE_OP_GLYPH: dict[str, str] = {
     "gt": ">",
     "gte": ">=",
 }
+
+#: Node-side top-level field naming the cross-plane document links
+#: (Phase 4 of ``adr-planes-and-substrates.md``).  Unlike every other
+#: top-level node field it holds a JSON *array*, and every backend
+#: stores it in a different shape (SQLite ``document_ids_json`` TEXT,
+#: Postgres ``document_ids`` JSONB, Cypher ``document_ids_json``
+#: string property).  Only ``exists`` — "is this node doc-linked at
+#: all?" — translates identically everywhere, so that is the one
+#: operator the DSL admits here; per-document membership stays a
+#: caller-side intersection over the returned ``document_ids`` list.
+#:
+#: It earns a place in the DSL because it is the only filter that
+#: narrows a doc→node reverse lookup to the population that can
+#: possibly match.  Without it a caller scanning for doc-linked nodes
+#: pays for every unlinked node in the graph and silently truncates.
+DOC_LINK_FIELD = "document_ids"
+
+#: Operators :data:`DOC_LINK_FIELD` accepts.  ``eq`` / ``in`` / range
+#: ops would compare against a serialized array (nonsense, and shaped
+#: differently per backend); ``contains`` is reserved for
+#: ``properties.<key>`` list membership.
+DOC_LINK_SUPPORTED_OPS: frozenset[str] = frozenset({"exists"})
+
+
+def check_doc_link_clause(field: str, op: str) -> None:
+    """Reject unsupported operators on :data:`DOC_LINK_FIELD`.
+
+    Shared by every backend compiler so the three dialects cannot
+    drift on which operators the doc-link column admits.  A no-op for
+    any other field.
+
+    Raises:
+        ValueError: If ``field`` is the doc-link column and ``op`` is
+            not in :data:`DOC_LINK_SUPPORTED_OPS`.
+    """
+    if field != DOC_LINK_FIELD or op in DOC_LINK_SUPPORTED_OPS:
+        return
+    msg = (
+        f"FilterClause op={op!r} is not supported on {DOC_LINK_FIELD!r}; "
+        f"it is a JSON array column, so only "
+        f"{sorted(DOC_LINK_SUPPORTED_OPS)} translates identically across "
+        "backends.  Filter on doc-link presence, then intersect the "
+        "returned document_ids caller-side."
+    )
+    raise ValueError(msg)
 
 
 @dataclass(frozen=True)

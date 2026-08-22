@@ -37,6 +37,11 @@ from trellis.retrieve.excerpts import (
     count_substance_words,
     truncate_excerpt,
 )
+from trellis.retrieve.file_context import (
+    DEFAULT_GRAPH_SCAN_LIMIT,
+    build_file_context,
+    source_path_matches,
+)
 from trellis.retrieve.observation_strategy import ObservationSearch
 from trellis.retrieve.pack_builder import (
     PackAssemblyError,
@@ -72,6 +77,7 @@ __all__ = [
     "DEFAULT_CONTENT_FLOOR_PENALTY",
     "DEFAULT_DIMENSIONS",
     "DEFAULT_FLOOR_EXEMPT_ITEM_TYPES",
+    "DEFAULT_GRAPH_SCAN_LIMIT",
     "DEFAULT_MIN_DISTINCT_WORDS",
     "DEFAULT_TOKEN_COUNTER",
     "DOMAIN_CONTEXT_PROFILE",
@@ -113,7 +119,9 @@ __all__ = [
     "analyze_dimension_predictiveness",
     "analyze_pack_telemetry",
     "apply_content_floor",
+    "build_file_context",
     "count_substance_words",
     "evaluate_pack",
+    "source_path_matches",
     "truncate_excerpt",
 ]

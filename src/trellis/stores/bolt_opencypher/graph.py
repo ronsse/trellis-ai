@@ -59,7 +59,11 @@ from trellis.stores.base.graph import (
     validate_node_role_args,
     validate_subgraph_depth,
 )
-from trellis.stores.base.graph_query import RANGE_OP_GLYPH
+from trellis.stores.base.graph_query import (
+    DOC_LINK_FIELD,
+    RANGE_OP_GLYPH,
+    check_doc_link_clause,
+)
 from trellis.stores.bolt_opencypher.base import BoltSessionRunner
 
 if TYPE_CHECKING:
@@ -1185,8 +1189,17 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
 
     @staticmethod
     def _compile_top_level_clause(clause: Any, idx: int) -> tuple[str, dict[str, Any]]:
+        check_doc_link_clause(clause.field, clause.op)
         column = clause.field
-        if column not in {"node_type", "node_role", "node_id"}:
+        if column == DOC_LINK_FIELD:
+            # Doc links ride as a serialized JSON string property (Bolt
+            # backends forbid nested values), so the DSL name and the
+            # Cypher property name differ. ``exists`` — the only op
+            # ``check_doc_link_clause`` admits — is ``IS NOT NULL`` on
+            # that property, which stays a native predicate rather than
+            # falling into the over-fetch-then-filter path.
+            column = "document_ids_json"
+        elif column not in {"node_type", "node_role", "node_id"}:
             msg = f"Unsupported DSL field path: {clause.field!r}"
             raise ValueError(msg)
         return BoltOpenCypherGraphStore._compile_native_cypher_clause(
