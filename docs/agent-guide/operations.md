@@ -197,7 +197,7 @@ The flag applies identically across the three document-ingest paths: the REST `P
 
 The vector row's metadata carries a `content` excerpt (500 chars — what `SemanticSearch` renders as the pack excerpt), the document metadata, `doc_id`, and a `created_at` recency stamp. Note that metadata-only re-puts (e.g. enrichment tag writes) do not re-embed; run the backfill with `--force` to refresh vector metadata.
 
-That stored excerpt is a **raw `content[:500]` slice**, so it is the one pack excerpt the boundary-aware truncation (see "Pack excerpts and the content floor") does not clean up: `SemanticSearch` runs `truncate_excerpt` over it, but a string already at the 500-char limit is returned verbatim, mid-word cut and all. Keyword, graph and observation items are truncated from full content and do get a clean break.
+That stored excerpt is produced by `truncate_excerpt` **at embed time**, not at retrieval time (#310): `build_vector_row` is the last point on the semantic path that still holds the full document, so it is the only point where the cut can break on a boundary and can name how much it dropped (`… [+12.4k chars]`). Retrieval re-runs `truncate_excerpt` over the stored string, which is a no-op for rows this hook wrote. Rows embedded before #310 hold a raw `content[:500]` slice and keep their mid-word cut until re-embedded — `trellis admin reindex-vectors --force` rewrites them through the same shared builder.
 
 On the retrieval side, embedded documents are visible to every `SemanticSearch`/`PackBuilder` consumer. Since #262 the MCP `get_context` and `search` macro tools route through `PackBuilder`, which fuses the keyword, graph and **semantic** axes with Reciprocal Rank Fusion (deduplicated by `item_id`): when the embedder + vector store pair is configured, the query is embedded and vector hits join the fusion. The semantic axis is additive and degrades gracefully — a down embedder means keyword + graph results only, never a failed tool call.
 
@@ -847,7 +847,9 @@ Plus the scope keys `intent` / `domain` / `agent_id` / `session_id`, the roll-up
 
 #### Pack excerpts and the content floor
 
-Excerpts are cut at a **sentence boundary, else a word boundary, else hard** and marked with `…` — never mid-word. A boundary is only honoured if it retains at least half the budget, so a leading `"Note. "` cannot gut an excerpt. The 500-character cap (`EXCERPT_MAX_CHARS`) matches the raw slice this replaced, so per-item token estimates did not shift.
+Excerpts are cut at a **sentence boundary, else a word boundary, else hard** — never mid-word — and the cut is marked `… [+2.3k chars]`, naming how much was dropped so a consumer can judge whether fetching the full source is worth the tokens (#310). A boundary is only honoured if it retains at least half the budget, so a leading `"Note. "` cannot gut an excerpt. The 500-character cap (`EXCERPT_MAX_CHARS`) matches the raw slice this replaced, so per-item token estimates did not shift.
+
+Three things to know about the size note. It is charged **against** the cap, not added on top of it — a truncated excerpt gives up ~14 characters of body to carry it, and is still never longer than the raw `text[:500]` slice it replaces. Its count is exact: the truncator reserves the widest possible note before choosing the cut, so what it quotes is what was actually dropped. And `count_substance_words` strips it before measuring, so it can never lift a name-only stub over the content floor below. Limits under 100 characters (`ELISION_NOTE_MIN_LIMIT`) get the bare `…` instead — at those budgets the note would crowd out the text it annotates.
 
 The **content floor** handles substance-free items — the name-only graph stubs whose "excerpt" is a three-word entity name. An item with fewer than `min_distinct_words` (default `5`) distinct words in its excerpt is, by default, **demoted, not dropped**: its `relevance_score` is multiplied by `0.35`.
 

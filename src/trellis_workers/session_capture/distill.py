@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from trellis.core.elision import elide_text
 from trellis.llm import Message
 from trellis.schemas.memory_op import (
     InputDigest,
@@ -88,8 +89,14 @@ _SYSTEM_PROMPT = (
 
 
 def build_distill_messages(digest: SessionDigest) -> list[Message]:
-    """Build the distillation prompt from the secret-free digest only."""
-    salient = digest.salient_text[:_MAX_SALIENT_CHARS]
+    """Build the distillation prompt from the secret-free digest only.
+
+    An oversize session is capped at :data:`_MAX_SALIENT_CHARS`, and the
+    cut is marked with an explicit ``<elided … />`` tag (size + reason,
+    #310) so the judge knows material was removed rather than treating
+    the cut as the end of the session.
+    """
+    salient = elide_text(digest.salient_text, _MAX_SALIENT_CHARS)
     tool_names = sorted({call.name for call in digest.tool_calls})
     signals = f"has_error={digest.has_error} has_correction={digest.has_correction}"
     user = (

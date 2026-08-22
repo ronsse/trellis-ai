@@ -255,11 +255,17 @@ class TestEnrich:
         assert "LLM down" in result.error
 
     async def test_enrich_truncates_long_content(self):
+        """An oversize cut is marked with size + reason, never silent (#310)."""
         llm = _make_llm(VALID_JSON)
         service = EnrichmentService(llm=llm, max_content_length=10)
         await service.enrich(content="A" * 100)
         user_content = llm.generate.call_args.kwargs["messages"][1].content
-        assert "[Content truncated...]" in user_content
+        assert (
+            '<elided chars="90" original_size_chars="100" reason="oversize" />'
+            in user_content
+        )
+        assert "A" * 10 in user_content
+        assert "A" * 11 not in user_content
 
     async def test_enrich_stamps_importance_scored_at_when_score_set(self):
         """Greenfield writer contract (adr-importance-score-freshness §3.5):

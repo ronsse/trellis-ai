@@ -48,6 +48,27 @@ def test_parse_candidates_skips_items_missing_fields() -> None:
     assert len(cands) == 1
 
 
+def test_build_messages_mark_an_oversize_cut() -> None:
+    """A capped session announces the cut to the judge — size + reason (#310).
+
+    A silent cut invites the model to confabulate the missing tail; the
+    marker tells it material was removed and how much.
+    """
+    digest = _digest()
+    digest.assistant_texts.append("y" * (distill._MAX_SALIENT_CHARS + 500))
+    user = distill.build_distill_messages(digest)[1].content
+    total = len(digest.salient_text)
+    dropped = total - distill._MAX_SALIENT_CHARS
+    assert (
+        f'<elided chars="{dropped}" original_size_chars="{total}" reason="oversize" />'
+    ) in user
+
+
+def test_build_messages_under_cap_carry_no_elision_marker() -> None:
+    user = distill.build_distill_messages(_digest())[1].content
+    assert "<elided" not in user
+
+
 def test_distill_no_client_returns_none() -> None:
     # None (not []) so the caller leaves the session un-watermarked.
     assert distill.distill_session(None, _digest()) is None
