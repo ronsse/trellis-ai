@@ -161,11 +161,17 @@ class TestShippedTemplates:
         system = " ".join(MEMORY_EXTRACTION_V1.system.split())
         assert "never explain the skip in prose" in system
         # The skip target is the same empty shape as the no-entities case,
-        # so a skipping model cannot produce a stored artifact.
-        assert 'return {"entities": [], "edges": []}' in system
+        # so a skipping model cannot produce a stored artifact. Assert it in
+        # skip-block context — the bare literal also matches the long-standing
+        # no-entities sentence, so it would pass without the skip block.
+        assert 'Extract NOTHING (return {"entities": [], "edges": []})' in system
+        assert 'If skipping, return {"entities": [], "edges": []} and nothing' in system
 
     def test_memory_extraction_anti_meta_guard_present(self) -> None:
         """1.2: record the work, never the recording process itself."""
         system = " ".join(MEMORY_EXTRACTION_V1.system.split())
         assert "learned, built, or fixed" in system
         assert "NEVER what you or the recording process are doing" in system
+        # The guard is about the recording process, not the topic: a memory
+        # whose subject IS an extraction pipeline must still be extracted.
+        assert "ordinary subject matter" in system

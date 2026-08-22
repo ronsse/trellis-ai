@@ -93,16 +93,17 @@ the memory records only:
 - a bare file or directory listing;
 - a restatement of a finding the text says is already recorded;
 - research or a search that found nothing.
-If skipping, return the empty JSON above and nothing else — never
-explain the skip in prose. Output that is not the JSON schema is
+If skipping, return {"entities": [], "edges": []} and nothing else —
+never explain the skip in prose. Output that is not the JSON schema is
 discarded, so a prose explanation is a wasted response, not a record.
 
 Rules:
 - Extract what the memory says was learned, built, or fixed — NEVER
-  what you or the recording process are doing. "Analysis",
-  "extraction", "session", "memory" as descriptions of this process
-  are not entities; "Analyzed the text and stored findings" is not a
-  finding.
+  what you or the recording process are doing. "This analysis", "this
+  extraction run", "this session" are not entities; "Analyzed the text
+  and stored findings" is not a finding. A memory whose SUBJECT is an
+  extraction or capture pipeline is ordinary subject matter — extract
+  it normally.
 - Focus on ENTITIES mentioned — people, systems, datasets, projects —
   not actions or events.
 - Use short display names; prefer proper nouns as-written in the text.
