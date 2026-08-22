@@ -64,10 +64,22 @@ _SYSTEM_PROMPT = (
     "- durable: will still matter next month (not session-local state).\n"
     "- actionable: would change what a future agent DOES, not just knows.\n"
     "- attributed: carries concrete evidence (a path, a command, a date).\n"
-    "Prefer instructive FAILURES and user CORRECTIONS over routine successes. "
+    "Prefer instructive FAILURES and user CORRECTIONS over routine successes.\n"
+    "Skip discipline — a session step is NOT a memory when it is only:\n"
+    "- a status check that found nothing notable;\n"
+    "- a dependency install or build that completed cleanly;\n"
+    "- a bare file or directory listing;\n"
+    "- a restatement of a finding the session says is already recorded;\n"
+    "- research or a search that found nothing.\n"
+    "Record what the session learned, built, or fixed — NEVER what you or the "
+    'capture process are doing; "Analyzed the session and stored findings" is '
+    "not a memory. A session whose SUBJECT is a capture or extraction pipeline "
+    "is ordinary subject matter — distil it normally.\n"
     "NEVER copy raw tool output, secrets, tokens, credentials, or environment "
     "values into a memory — summarize in your own words. If nothing qualifies, "
-    "return an empty list.\n"
+    "return [] and nothing else — never explain the skip in prose. Output that "
+    "is not the JSON array is discarded, so a prose explanation is a wasted "
+    "response, not a record.\n"
     'Respond with ONLY a JSON array, each item: {"title": str, "memory": str, '
     '"memory_type": "semantic"|"procedural", "signal": "failure"|"correction"|'
     '"success", "evidence": str, "non_derivable": bool, "durable": bool, '

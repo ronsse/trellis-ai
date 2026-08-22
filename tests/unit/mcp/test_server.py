@@ -857,6 +857,43 @@ class TestSaveMemoryExtractionFeatureFlag:
         # AliasMatch finds no match, residue flows to LLM.
         assert call_count["n"] == 1
 
+    def test_extraction_prompt_carries_skip_discipline(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#311: the system prompt this path sends carries the skip rules.
+
+        Pins the wire, not the constant. save_memory reaches
+        ``MEMORY_EXTRACTION_V1`` only via ``build_save_memory_extractor``,
+        so an MCP-local prompt added later would leave the prompt-text
+        tests green while the discipline silently stopped applying here.
+        """
+        monkeypatch.setenv("TRELLIS_ENABLE_MEMORY_EXTRACTION", "1")
+        captured: list[Any] = []
+
+        class _CapturingLLM:
+            async def generate(self, **kwargs):
+                from trellis.llm.types import LLMResponse, TokenUsage
+
+                captured.extend(kwargs["messages"])
+                return LLMResponse(
+                    content='{"entities": [], "edges": []}',
+                    model="fake",
+                    usage=TokenUsage(
+                        prompt_tokens=1, completion_tokens=1, total_tokens=2
+                    ),
+                )
+
+        monkeypatch.setattr(server_mod, "_build_llm_client_from_env", _CapturingLLM)
+        save_memory("observation about @system")
+
+        assert captured[0].role == "system"
+        # Normalize wrapping — the clauses matter, not the reflow.
+        system = " ".join(captured[0].content.split())
+        assert "Skip discipline" in system
+        assert "never explain the skip in prose" in system
+        assert "NEVER what you or the recording process are doing" in system
+
     def test_draft_policy_applies_on_mcp_path(
         self,
         temp_registry: StoreRegistry,
