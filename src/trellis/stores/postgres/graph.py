@@ -29,7 +29,11 @@ from trellis.stores.base.graph import (
     validate_node_role_args,
     validate_subgraph_depth,
 )
-from trellis.stores.base.graph_query import RANGE_OP_GLYPH
+from trellis.stores.base.graph_query import (
+    DOC_LINK_FIELD,
+    RANGE_OP_GLYPH,
+    check_doc_link_clause,
+)
 from trellis.stores.postgres.base import PostgresStoreBase
 
 logger = structlog.get_logger(__name__)
@@ -1176,6 +1180,7 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
         Containment matches the full JSON value at the path.
         ``exists`` uses the JSONB key-existence operator (``?``).
         """
+        check_doc_link_clause(clause.field, clause.op)
         if clause.field.startswith("properties."):
             return PostgresGraphStore._compile_properties_clause(clause)
         column = PostgresGraphStore._field_to_column(clause.field)
@@ -1258,7 +1263,11 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
 
     @staticmethod
     def _field_to_column(field: str) -> str:
-        if field in {"node_type", "node_role", "node_id"}:
+        if field in {"node_type", "node_role", "node_id", DOC_LINK_FIELD}:
+            # ``document_ids`` is a JSONB array column rather than a
+            # scalar; ``check_doc_link_clause`` has already narrowed the
+            # op to ``exists``, which renders as ``IS NOT NULL`` the
+            # same way it does for the scalar columns.
             return field
         msg = f"Unsupported DSL field path: {field!r}"
         raise ValueError(msg)

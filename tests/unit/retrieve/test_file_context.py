@@ -8,6 +8,7 @@ import pytest
 
 from trellis.ingest_corpus.models import chunk_doc_id
 from trellis.retrieve.file_context import (
+    _DOC_PAGE_SIZE,
     build_file_context,
     source_path_matches,
 )
@@ -35,6 +36,23 @@ class TestSourcePathMatches:
 
     def test_different_file_no_match(self) -> None:
         assert not source_path_matches("notes/foo.md", "notes/bar.md")
+
+    def test_bare_basename_does_not_match_another_repos_file(self) -> None:
+        # Corpus ingest stores vault-root files as a bare relpath. Every
+        # repo on the machine also has a TODO.md, and a PreToolUse hook
+        # fires on absolute paths — so a basename-only suffix match
+        # would answer a read of one project's file with another's notes.
+        assert not source_path_matches("TODO.md", "/home/n/projects/other/TODO.md")
+        assert source_path_matches("TODO.md", "TODO.md")
+
+    def test_conversation_title_shaped_like_a_filename_does_not_match(self) -> None:
+        # Conversation ingest reuses ``source_path`` for the chat title,
+        # which is free text and can read exactly like a basename.
+        assert not source_path_matches("server.py", "/srv/app/server.py")
+
+    def test_relpath_query_needs_a_directory_to_anchor_on(self) -> None:
+        assert not source_path_matches("/home/n/vault/notes/foo.md", "foo.md")
+        assert source_path_matches("/home/n/vault/notes/foo.md", "notes/foo.md")
 
     def test_non_string_or_empty_stored_never_matches(self) -> None:
         assert not source_path_matches(None, "notes/foo.md")
@@ -74,7 +92,8 @@ class TestBuildFileContext:
                     "entities": [],
                     "newest_item_at": None,
                 }
-            ]
+            ],
+            "graph_scan_truncated": False,
         }
 
     def test_document_matched_by_source_path(self, registry: StoreRegistry) -> None:
@@ -230,6 +249,22 @@ class TestBuildFileContext:
         result = _build(registry, ["notes/foo.md", "  notes/foo.md  ", "", "   "])
         assert [entry["path"] for entry in result["paths"]] == ["notes/foo.md"]
 
+    def test_all_blank_paths_short_circuit_before_scanning(
+        self, registry: StoreRegistry
+    ) -> None:
+        calls: list[int] = []
+        store = registry.knowledge.document_store
+        original = store.list_documents
+
+        def _counting(*args: object, **kwargs: object) -> list[dict]:
+            calls.append(1)
+            return original(*args, **kwargs)  # type: ignore[arg-type]
+
+        store.list_documents = _counting  # type: ignore[method-assign]
+        result = _build(registry, ["", "   "])
+        assert result == {"paths": [], "graph_scan_truncated": False}
+        assert calls == []
+
     def test_newest_item_at_is_the_max_across_docs_and_entities(
         self, registry: StoreRegistry
     ) -> None:
@@ -248,3 +283,83 @@ class TestBuildFileContext:
         # The reported stamp is the newest of the item stamps (all ISO-UTC,
         # so lexicographic max agrees with chronological max here).
         assert entry["newest_item_at"] >= max(str(s) for s in stamps)
+
+
+class TestScanBoundaries:
+    """The module's two scans — neither is reached by the fixture-sized
+    cases above, where every corpus fits in one page and one node query."""
+
+    def test_unlinked_nodes_do_not_crowd_out_a_doc_linked_one(
+        self, registry: StoreRegistry
+    ) -> None:
+        """The graph cap must bite on doc-linked nodes, not on graph size.
+
+        Without the doc-link filter a graph carrying more than the cap in
+        nodes of *any* kind answered every file with zero entities: the
+        scan spent its whole budget on rows that could not match.
+        """
+        registry.knowledge.document_store.put(
+            "doc-1", "content", metadata={"source_path": "notes/foo.md"}
+        )
+        registry.knowledge.graph_store.upsert_node(
+            "ent-target", "concept", {"name": "Target"}, document_ids=["doc-1"]
+        )
+        registry.knowledge.graph_store.upsert_nodes_bulk(
+            [
+                {"node_id": f"filler-{i}", "node_type": "concept", "properties": {}}
+                for i in range(20)
+            ]
+        )
+        result = _build(registry, ["notes/foo.md"], graph_scan_limit=5)
+        (entry,) = result["paths"]
+        assert [e["entity_id"] for e in entry["entities"]] == ["ent-target"]
+        assert result["graph_scan_truncated"] is False
+
+    def test_saturated_graph_scan_is_reported_not_swallowed(
+        self, registry: StoreRegistry
+    ) -> None:
+        """More doc-linked nodes than the cap: say so, don't imply absence."""
+        registry.knowledge.document_store.put(
+            "doc-1", "content", metadata={"source_path": "notes/foo.md"}
+        )
+        registry.knowledge.graph_store.upsert_nodes_bulk(
+            [
+                {
+                    "node_id": f"linked-{i}",
+                    "node_type": "concept",
+                    "properties": {"name": f"Linked {i}"},
+                    "document_ids": [f"doc-other-{i}"],
+                }
+                for i in range(6)
+            ]
+        )
+        result = _build(registry, ["notes/foo.md"], graph_scan_limit=3)
+        assert result["graph_scan_truncated"] is True
+
+    def test_document_scan_pages_past_the_first_page(
+        self, registry: StoreRegistry
+    ) -> None:
+        """A match beyond ``_DOC_PAGE_SIZE`` rows is still found."""
+        store = registry.knowledge.document_store
+        for i in range(_DOC_PAGE_SIZE + 5):
+            store.put(f"filler-{i:04d}", "filler", metadata={"source_path": "x/f.md"})
+        store.put("late", "the one", metadata={"source_path": "notes/late.md"})
+        (entry,) = _build(registry, ["notes/late.md"])["paths"]
+        assert [d["doc_id"] for d in entry["documents"]] == ["late"]
+
+    def test_backend_without_a_dsl_compiler_falls_back_to_a_plain_scan(
+        self, registry: StoreRegistry
+    ) -> None:
+        """``execute_node_query``'s default routing rejects ``exists``."""
+        graph = registry.knowledge.graph_store
+        registry.knowledge.document_store.put(
+            "doc-1", "content", metadata={"source_path": "notes/foo.md"}
+        )
+        graph.upsert_node("ent-1", "concept", {"name": "T"}, document_ids=["doc-1"])
+
+        def _no_compiler(_query: object) -> list[dict]:
+            raise NotImplementedError
+
+        graph.execute_node_query = _no_compiler  # type: ignore[method-assign]
+        (entry,) = _build(registry, ["notes/foo.md"])["paths"]
+        assert [e["entity_id"] for e in entry["entities"]] == ["ent-1"]

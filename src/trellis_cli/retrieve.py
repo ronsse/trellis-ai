@@ -11,7 +11,7 @@ from rich.console import Console
 
 from trellis.retrieve.file_context import build_file_context
 from trellis.retrieve.precedents import list_precedents as _list_precedents
-from trellis_cli.exit_codes import EXIT_INTERNAL
+from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_VALIDATION
 from trellis_cli.output import emit_json, format_output, truncate_values
 from trellis_cli.stores import (
     LOCAL_SOURCE_SYSTEM,
@@ -302,7 +302,10 @@ def file_context(
         "--include-unconfirmed",
         help="Also surface unconfirmed extraction mints (#301)",
     ),
-    output_format: str = typer.Option("text", "--format", help="Output format"),
+    output_format: str = typer.Option(
+        "text", "--format", help="Output format: text, json, jsonl"
+    ),
+    quiet: bool = typer.Option(False, "--quiet", "-q", help=_QUIET_HELP),
 ) -> None:
     """Show what memory already holds about specific files.
 
@@ -311,6 +314,17 @@ def file_context(
     from each path's ``newest_item_at`` against the file's mtime,
     whether the stored context still describes the file on disk.
     """
+    # ``tsv`` is the one group-wide format this command cannot honour:
+    # a path entry carries nested document and entity lists, and
+    # flattening them into cells would emit Python reprs. Refuse rather
+    # than hand a hook something that parses but means nothing.
+    if output_format not in ("text", "json", "jsonl"):
+        console.print(
+            f"[red]Unsupported --format {output_format!r};"
+            " expected one of: text, json, jsonl[/red]"
+        )
+        raise typer.Exit(EXIT_VALIDATION)
+
     result = build_file_context(
         get_document_store(),
         get_graph_store(),
@@ -318,22 +332,50 @@ def file_context(
         include_unconfirmed=include_unconfirmed,
     )
     entries: list[dict[str, Any]] = result["paths"]
+    truncated = bool(result["graph_scan_truncated"])
 
     if output_format == "json":
-        emit_json({"status": "ok", "count": len(entries), "paths": entries})
+        emit_json(
+            {
+                "status": "ok",
+                "count": len(entries),
+                "paths": entries,
+                "graph_scan_truncated": truncated,
+            }
+        )
+        return
+    if output_format == "jsonl":
+        for entry in entries:
+            emit_json({**entry, "graph_scan_truncated": truncated})
         return
 
+    def _line(text: str, markup: str | None = None) -> None:
+        # Rich hard-wraps at 80 columns when stdout is a pipe, which
+        # splits long absolute paths mid-line for the shell hook this
+        # command exists to serve. ``--quiet`` writes raw, like every
+        # sibling command here.
+        if quiet:
+            sys.stdout.write(text + "\n")
+        else:
+            console.print(markup if markup is not None else text)
+
+    if truncated:
+        _line(
+            "Warning: graph scan hit its cap; entity lists may be incomplete",
+            "[yellow]Warning: graph scan hit its cap;"
+            " entity lists may be incomplete[/yellow]",
+        )
     for entry in entries:
-        console.print(f"[green]{entry['path']}[/green]")
+        _line(entry["path"], f"[green]{entry['path']}[/green]")
         if not entry["documents"] and not entry["entities"]:
-            console.print("  (no stored context)")
+            _line("  (no stored context)")
             continue
-        console.print(f"  Newest memory: {entry['newest_item_at']}")
+        _line(f"  Newest memory: {entry['newest_item_at']}")
         for doc in entry["documents"]:
             label = doc.get("title") or doc.get("source_path") or doc["doc_id"]
-            console.print(f"  - doc {doc['doc_id']}: {label}")
+            _line(f"  - doc {doc['doc_id']}: {label}")
         for node in entry["entities"]:
-            console.print(
+            _line(
                 f"  - entity {node['entity_id']}:"
                 f" {node.get('name') or node['entity_id']}"
             )

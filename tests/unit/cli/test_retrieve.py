@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from trellis_cli.exit_codes import EXIT_VALIDATION
 from trellis_cli.main import app
 
 runner = CliRunner()
@@ -270,6 +271,49 @@ class TestRetrieveFileContext:
         assert (
             "PackBuilder" in runner.invoke(app, [*args, "--include-unconfirmed"]).stdout
         )
+
+    def test_quiet_leaves_long_paths_intact(self) -> None:
+        """Rich wraps at 80 columns when piped, splitting absolute paths.
+
+        A ``PreToolUse`` hook parses this output, so the raw writer is
+        the one that matters for the command's actual consumer.
+        """
+        self._seed()
+        long_path = (
+            "/home/nronsse/projects/trellis-ai/src/trellis/retrieve/pack_builder.py"
+        )
+        result = runner.invoke(app, ["retrieve", "file-context", long_path, "-q"])
+        assert result.exit_code == 0
+        assert long_path in result.stdout.splitlines()
+
+    def test_jsonl_emits_one_object_per_path(self) -> None:
+        self._seed()
+        result = runner.invoke(
+            app,
+            [
+                "retrieve",
+                "file-context",
+                "src/trellis/retrieve/pack_builder.py",
+                "never/ingested.py",
+                "--format",
+                "jsonl",
+            ],
+        )
+        assert result.exit_code == 0
+        rows = [json.loads(line) for line in result.stdout.strip().splitlines()]
+        assert [r["path"] for r in rows] == [
+            "src/trellis/retrieve/pack_builder.py",
+            "never/ingested.py",
+        ]
+        assert rows[0]["documents"][0]["doc_id"] == "corpus:vault:abc"
+
+    def test_unsupported_format_is_refused_not_silently_degraded(self) -> None:
+        result = runner.invoke(
+            app,
+            ["retrieve", "file-context", "notes/foo.md", "--format", "tsv"],
+        )
+        assert result.exit_code == EXIT_VALIDATION
+        assert "tsv" in result.stdout
 
 
 class TestRetrieveHelp:

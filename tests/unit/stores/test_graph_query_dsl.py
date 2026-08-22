@@ -416,3 +416,89 @@ class TestBoltOpenCypherContainsCompiler:
             BoltOpenCypherGraphStore._compile_native_cypher_clause(
                 "n", "node_type", clause, 0
             )
+
+
+class TestDocLinkClauseGuard:
+    """The shared ``document_ids`` operator guard (#307).
+
+    Lives in the DSL module so the three dialects cannot drift on which
+    operators the doc-link column admits.
+    """
+
+    def test_exists_is_allowed(self) -> None:
+        from trellis.stores.base.graph_query import check_doc_link_clause
+
+        check_doc_link_clause("document_ids", "exists")
+
+    @pytest.mark.parametrize("op", ["eq", "in", "contains", "lt"])
+    def test_other_operators_rejected(self, op: str) -> None:
+        from trellis.stores.base.graph_query import check_doc_link_clause
+
+        with pytest.raises(ValueError, match="document_ids"):
+            check_doc_link_clause("document_ids", op)
+
+    def test_other_fields_untouched(self) -> None:
+        from trellis.stores.base.graph_query import check_doc_link_clause
+
+        check_doc_link_clause("node_type", "eq")
+        check_doc_link_clause("properties.tags", "contains")
+
+
+class TestDocLinkFieldCompilers:
+    """Pure-compile tests for ``document_ids`` across the three dialects.
+
+    Each backend names the column differently; the contract suite pins
+    behaviour, these pin that the right column is reached.
+    """
+
+    def test_sqlite_maps_to_the_json_column(self) -> None:
+        from trellis.stores.sqlite.graph import SQLiteGraphStore
+
+        clause = FilterClause("document_ids", "exists")
+        sql, params = SQLiteGraphStore._compile_clause_sqlite(clause)
+        assert sql == "document_ids_json IS NOT NULL"
+        assert params == []
+
+    def test_sqlite_rejects_non_exists_ops(self) -> None:
+        from trellis.stores.sqlite.graph import SQLiteGraphStore
+
+        clause = FilterClause("document_ids", "eq", "doc-1")
+        with pytest.raises(ValueError, match="document_ids"):
+            SQLiteGraphStore._compile_clause_sqlite(clause)
+
+    def test_postgres_maps_to_the_jsonb_column(self) -> None:
+        pytest.importorskip(
+            "psycopg_pool", reason="Postgres optional extras not installed"
+        )
+        from trellis.stores.postgres.graph import PostgresGraphStore
+
+        clause = FilterClause("document_ids", "exists")
+        sql, params = PostgresGraphStore._compile_clause_postgres(clause)
+        assert sql == "document_ids IS NOT NULL"
+        assert params == []
+
+    def test_postgres_rejects_non_exists_ops(self) -> None:
+        pytest.importorskip(
+            "psycopg_pool", reason="Postgres optional extras not installed"
+        )
+        from trellis.stores.postgres.graph import PostgresGraphStore
+
+        clause = FilterClause("document_ids", "in", ("doc-1",))
+        with pytest.raises(ValueError, match="document_ids"):
+            PostgresGraphStore._compile_clause_postgres(clause)
+
+    def test_bolt_maps_to_the_serialized_property(self) -> None:
+        """Native Cypher, not the over-fetch-then-filter client path."""
+        from trellis.stores.bolt_opencypher.graph import BoltOpenCypherGraphStore
+
+        clause = FilterClause("document_ids", "exists")
+        frag, params = BoltOpenCypherGraphStore._compile_top_level_clause(clause, 0)
+        assert frag == "n.document_ids_json IS NOT NULL"
+        assert params == {}
+
+    def test_bolt_rejects_non_exists_ops(self) -> None:
+        from trellis.stores.bolt_opencypher.graph import BoltOpenCypherGraphStore
+
+        clause = FilterClause("document_ids", "eq", "doc-1")
+        with pytest.raises(ValueError, match="document_ids"):
+            BoltOpenCypherGraphStore._compile_top_level_clause(clause, 0)

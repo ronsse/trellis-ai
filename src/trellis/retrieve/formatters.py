@@ -314,6 +314,9 @@ def format_file_context_as_markdown(
         return "No file paths queried."
 
     lines = [f"# File Context ({len(path_results)} paths)"]
+    if file_context.get("graph_scan_truncated"):
+        lines.append("")
+        lines.append("_Graph scan hit its cap — entity lists below may be incomplete._")
     for result in path_results:
         documents = result.get("documents", [])
         entities = result.get("entities", [])

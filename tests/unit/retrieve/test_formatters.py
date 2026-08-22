@@ -460,3 +460,18 @@ class TestFormatFileContext:
             max_tokens=100,
         )
         assert len(result) <= 100 * 4
+
+    def test_truncated_graph_scan_is_flagged(self):
+        """ "No entities" and "couldn't look" must not read the same."""
+        entry = {
+            "path": "notes/foo.md",
+            "documents": [],
+            "entities": [],
+            "newest_item_at": None,
+        }
+        assert "may be incomplete" in format_file_context_as_markdown(
+            {"paths": [entry], "graph_scan_truncated": True}
+        )
+        assert "may be incomplete" not in format_file_context_as_markdown(
+            {"paths": [entry], "graph_scan_truncated": False}
+        )

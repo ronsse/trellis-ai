@@ -18,35 +18,47 @@ scheme is invented for data that does not exist:
   relative to the corpus root in ``metadata.source_path`` (the walker
   yields ``path.relative_to(root).as_posix()``); chunk documents repeat
   the parent's value.
-* Conversation ingest reuses the same key for conversation *titles* —
-  those simply never match a file path.
+* Conversation ingest reuses the same key for conversation *titles*,
+  which are free text and can look exactly like a bare filename
+  (``server.py`` is a legal chat title).
 * ``save_memory`` metadata is caller-supplied; a caller that stamped
   ``source_path`` (relative or absolute) is matched by the same rule.
 
-The rule: a stored value matches a query path when the two are equal or
-when one is a ``/``-boundary suffix of the other — an absolute
-``/home/n/vault/notes/foo.md`` finds the stored relpath ``notes/foo.md``
-and vice versa. Nothing more: no case folding and no separator rewriting,
-because stored values are POSIX already.
+The rule: a stored value matches a query path when the two are equal, or
+when one is a ``/``-boundary suffix of the other **and the suffix itself
+spans a directory** — an absolute ``/home/n/vault/notes/foo.md`` finds
+the stored relpath ``notes/foo.md``. A single-segment value matches by
+equality only. That last clause is the whole reason the rule is not
+plain ``endswith``: ``README.md`` / ``CLAUDE.md`` / ``TODO.md`` sit at
+the root of the vault *and* of every repo, so a bare basename identifies
+a file no better than a coin flip — and those are exactly the files a
+read-time hook asks about most. Nothing more: no case folding and no
+separator rewriting, because stored values are POSIX already.
 
 Graph anchoring
 ---------------
-The doc→node direction has no store-side reverse index — the query DSL's
-``contains`` operator reaches only ``properties.<key>`` paths, and
-``document_ids`` is a top-level column — so linked entities are found by
-scanning current nodes (capped at ``graph_scan_limit``) and intersecting
-``document_ids`` client-side. That is the same over-fetch compromise as
-:class:`~trellis.retrieve.strategies.GraphSearch`, with the same
-client-side gating: structural nodes and unconfirmed extraction mints
-(#301) are excluded unless explicitly requested.
+The doc→node direction has no per-document reverse index — the query
+DSL's ``contains`` operator reaches only ``properties.<key>`` paths —
+so linked entities are found by intersecting ``document_ids``
+client-side. The scan it intersects over is narrowed store-side to the
+population that can possibly match: ``FilterClause(DOC_LINK_FIELD,
+"exists")`` asks the backend for doc-linked nodes only, so unlinked
+nodes (the bulk of a mature graph) never enter the cap. The cap still
+exists, and a saturated scan is reported as ``graph_scan_truncated``
+rather than passed off as "nothing linked" — a client can tell "no
+entities" from "couldn't look". Gating matches
+:class:`~trellis.retrieve.strategies.GraphSearch`: structural nodes and
+unconfirmed extraction mints (#301) are excluded unless explicitly
+requested.
 
 Cost
 ----
-Both lookups are scans — one paged pass over the document store (there is
-no metadata-only listing on the ABC; ``search`` needs an FTS ``MATCH``)
-and one capped node query — so a call is linear in corpus size, not in
-the number of paths asked about. **Batch the paths**: one call for the
-files a hook cares about, not one call per file.
+The document side is a scan: one paged pass over the document store,
+because there is no metadata-only listing on the ABC (``search`` needs
+an FTS ``MATCH``, so it cannot serve a bare ``source_path`` lookup). The
+graph side is one filtered query. Either way a call costs the same
+whether it asks about one path or twenty, so **batch the paths**: one
+call for the files a hook cares about, not one call per file.
 """
 
 from __future__ import annotations
@@ -61,6 +73,7 @@ from trellis.schemas.extraction import (
     EXTRACTION_STATUS_PROPERTY,
     EXTRACTION_STATUS_UNCONFIRMED,
 )
+from trellis.stores.base.graph_query import DOC_LINK_FIELD, FilterClause, NodeQuery
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -73,24 +86,35 @@ logger = structlog.get_logger(__name__)
 #: prune scan (``ingest_corpus.sync._PRUNE_PAGE_SIZE``).
 _DOC_PAGE_SIZE = 500
 
-#: Cap on the client-side node scan used for the doc→node reverse lookup.
-#: The SQLite backend returns newest-first, so when a graph outgrows the
-#: cap it is the oldest doc-linked nodes that fall off.
+#: Cap on the doc-linked node scan backing the doc→node reverse lookup.
+#: The scan is filtered to doc-linked nodes store-side, so the cap bites
+#: only on a graph carrying more than this many linked nodes — and when
+#: it does, the result says so (``graph_scan_truncated``) rather than
+#: reporting the shortfall as an absence.
 DEFAULT_GRAPH_SCAN_LIMIT = 2000
 
 
 def source_path_matches(stored: Any, query: str) -> bool:
     """``True`` when a stored ``source_path`` names the queried file path.
 
-    Equality, or a ``/``-boundary suffix match in either direction — the
-    shapes that actually co-exist: stored relpaths queried by absolute
-    path, and (less commonly) stored absolute paths queried by relpath.
+    Equality, or a ``/``-boundary suffix match in either direction where
+    the suffix spans at least one directory — the shapes that actually
+    co-exist: stored relpaths queried by absolute path, and (less
+    commonly) stored absolute paths queried by relpath.
+
+    A single-segment value matches by equality only. ``TODO.md`` is a
+    real stored ``source_path`` for a vault-root file *and* a real
+    basename in every repo on the machine, so honouring it as a suffix
+    would answer a read of one project's ``TODO.md`` with another's
+    notes.
     """
     if not isinstance(stored, str) or not stored or not query:
         return False
     if stored == query:
         return True
-    return stored.endswith("/" + query) or query.endswith("/" + stored)
+    if "/" in stored and query.endswith("/" + stored):
+        return True
+    return "/" in query and stored.endswith("/" + query)
 
 
 def _parse_timestamp(value: Any) -> datetime | None:
@@ -190,6 +214,29 @@ def _matching_documents(
     return docs_by_path, anchors_by_path
 
 
+def _scan_doc_linked_nodes(graph_store: Any, limit: int) -> list[dict[str, Any]]:
+    """Current nodes carrying any doc link, newest first, capped at ``limit``.
+
+    The ``exists`` filter is what keeps the cap meaningful: without it
+    the scan spends its budget on nodes that cannot match, and a graph
+    with more than ``limit`` nodes of *any* kind answers every file with
+    zero entities.
+    """
+    query = NodeQuery(filters=(FilterClause(DOC_LINK_FIELD, "exists"),), limit=limit)
+    try:
+        return list(graph_store.execute_node_query(query))
+    except NotImplementedError:
+        # A backend without a Phase-2 DSL compiler (the ABC's default
+        # routing rejects ``exists``). Degrade to the unfiltered scan
+        # rather than failing the whole lookup — the saturation check
+        # downstream still reports what the caller got.
+        logger.debug(
+            "file_context_doc_link_filter_unsupported",
+            backend=type(graph_store).__name__,
+        )
+        return list(graph_store.query(node_type=None, properties=None, limit=limit))
+
+
 def _linked_entities(
     graph_store: Any,
     anchors_by_path: dict[str, set[str]],
@@ -197,14 +244,26 @@ def _linked_entities(
     include_unconfirmed: bool,
     include_structural: bool,
     graph_scan_limit: int,
-) -> dict[str, list[dict[str, Any]]]:
-    """Nodes whose ``document_ids`` intersect a path's anchor documents."""
-    entities_by_path: dict[str, list[dict[str, Any]]] = {p: [] for p in anchors_by_path}
-    all_anchor_ids = set().union(*anchors_by_path.values())
-    if not all_anchor_ids:
-        return entities_by_path
+) -> tuple[dict[str, list[dict[str, Any]]], bool]:
+    """Nodes whose ``document_ids`` intersect a path's anchor documents.
 
-    nodes = graph_store.query(node_type=None, properties=None, limit=graph_scan_limit)
+    Returns the per-path entity lists and whether the node scan hit its
+    cap — a saturated scan means the entity half of the answer may be
+    incomplete, which the caller reports rather than swallows.
+    """
+    entities_by_path: dict[str, list[dict[str, Any]]] = {p: [] for p in anchors_by_path}
+    all_anchor_ids: set[str] = set().union(*anchors_by_path.values())
+    if not all_anchor_ids:
+        return entities_by_path, False
+
+    nodes = _scan_doc_linked_nodes(graph_store, graph_scan_limit)
+    truncated = len(nodes) >= graph_scan_limit
+    if truncated:
+        logger.warning(
+            "file_context_graph_scan_truncated",
+            scanned=len(nodes),
+            limit=graph_scan_limit,
+        )
     excluded_unconfirmed = 0
     for node in nodes:
         linked = set(node.get("document_ids") or [])
@@ -225,7 +284,7 @@ def _linked_entities(
                 entities_by_path[path].append(entry)
     if excluded_unconfirmed:
         logger.debug("file_context_unconfirmed_excluded", excluded=excluded_unconfirmed)
-    return entities_by_path
+    return entities_by_path, truncated
 
 
 def build_file_context(
@@ -250,24 +309,29 @@ def build_file_context(
             Off by default — extraction attests *mention*, not fact.
         include_structural: Surface structural plumbing nodes. Off by
             default, mirroring :class:`GraphSearch`.
-        graph_scan_limit: Cap on the client-side node scan used for the
+        graph_scan_limit: Cap on the doc-linked node scan backing the
             doc→node reverse lookup.
 
     Returns:
-        ``{"paths": [{"path", "documents", "entities", "newest_item_at"}]}``
-        — one entry per queried path, in query order. ``newest_item_at``
-        is the ISO timestamp of the most recently written matching item
-        (document or entity), or ``None`` when nothing matched; it is the
-        value a client staleness gate compares against the file's mtime.
+        ``{"paths": [{"path", "documents", "entities", "newest_item_at"}],
+        "graph_scan_truncated": bool}`` — one path entry per queried
+        path, in query order. ``newest_item_at`` is the ISO timestamp of
+        the most recently written matching item (document or entity), or
+        ``None`` when nothing matched; it is the value a client staleness
+        gate compares against the file's mtime. ``graph_scan_truncated``
+        is ``True`` when the graph carries more doc-linked nodes than the
+        scan cap, i.e. the entity lists may be short.
     """
     deduped: list[str] = []
     for raw in paths:
         path = raw.strip()
         if path and path not in deduped:
             deduped.append(path)
+    if not deduped:
+        return {"paths": [], "graph_scan_truncated": False}
 
     docs_by_path, anchors_by_path = _matching_documents(document_store, deduped)
-    entities_by_path = _linked_entities(
+    entities_by_path, graph_scan_truncated = _linked_entities(
         graph_store,
         anchors_by_path,
         include_unconfirmed=include_unconfirmed,
@@ -287,7 +351,7 @@ def build_file_context(
                 "newest_item_at": _newest_timestamp(documents + entities),
             }
         )
-    return {"paths": results}
+    return {"paths": results, "graph_scan_truncated": graph_scan_truncated}
 
 
 __all__ = [
