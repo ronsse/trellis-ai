@@ -57,6 +57,17 @@ class EventType(StrEnum):
     #: correlate per-dimension scores with task success. Never fires when no
     #: evaluator is configured — zero noise for consumers who don't opt in.
     PACK_QUALITY_SCORED = "pack.quality_scored"
+    #: Emitted by the MCP ``get_items`` batch fetch-by-id tool (#305) so a
+    #: full-body fetch stays attributable to the pack whose index served
+    #: the ids. Payload schema: ``{pack_id, requested_item_ids,
+    #: served_item_ids, not_found_item_ids, omitted_item_ids,
+    #: response_tokens, budget_tokens}``. ``pack_id`` is ``None`` for a
+    #: fetch with no originating pack; ``omitted_item_ids`` are ids that
+    #: resolved but did not fit the token budget (re-fetchable);
+    #: ``entity_id`` carries the pack_id when present, so the event joins
+    #: to ``PACK_ASSEMBLED`` / ``FEEDBACK_RECORDED`` the same way
+    #: ``PACK_QUALITY_SCORED`` does.
+    PACK_ITEMS_FETCHED = "pack.items_fetched"
 
     # Graph
     LINK_CREATED = "link.created"

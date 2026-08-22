@@ -2387,3 +2387,118 @@ class TestAttributionTelemetry:
         payload = self._pack_payload(session_event_log)
         assert payload["run_id"] == "run-9"
         assert payload["intent_family"] == "asset_generation"
+
+
+class TestIndexMode:
+    """Index mode changes the budget charge, nothing else (#305)."""
+
+    _BODY = "word " * 200
+
+    @staticmethod
+    def _pack_event(event_log: SQLiteEventLog) -> Event:
+        events = event_log.get_events(event_type=EventType.PACK_ASSEMBLED, limit=10)
+        assert len(events) == 1
+        return events[0]
+
+    @classmethod
+    def _pack_payload(cls, event_log: SQLiteEventLog) -> dict:
+        return cls._pack_event(event_log).payload
+
+    def _items(self, count: int) -> list[PackItem]:
+        return [
+            PackItem(
+                item_id=f"d{i}",
+                item_type="document",
+                excerpt=self._BODY,
+                relevance_score=1.0 - i * 0.01,
+                metadata={"title": f"Doc {i}"},
+            )
+            for i in range(count)
+        ]
+
+    def _builder(self, count: int, event_log: SQLiteEventLog | None = None):
+        return PackBuilder(
+            strategies=[_make_strategy("kw", self._items(count))],
+            event_log=event_log,
+        )
+
+    def test_admits_far_more_items_under_the_same_token_budget(self) -> None:
+        budget = PackBudget(max_items=50, max_tokens=600)
+        full = self._builder(20).build("q", budget=budget)
+        index = self._builder(20).build("q", budget=budget, index_mode=True)
+        assert len(index.items) > len(full.items)
+        assert len(index.items) == 20
+
+    def test_max_items_still_caps_first(self) -> None:
+        pack = self._builder(20).build(
+            "q", budget=PackBudget(max_items=5, max_tokens=100_000), index_mode=True
+        )
+        assert len(pack.items) == 5
+
+    def test_token_budget_is_still_enforced_on_index_lines(self) -> None:
+        pack = self._builder(200).build(
+            "q", budget=PackBudget(max_items=200, max_tokens=60), index_mode=True
+        )
+        assert 0 < len(pack.items) < 200
+
+    def test_items_keep_their_excerpts_and_read_cost(self) -> None:
+        pack = self._builder(3).build(
+            "q", budget=PackBudget(max_items=10, max_tokens=100_000), index_mode=True
+        )
+        for item in pack.items:
+            assert item.excerpt.strip() == self._BODY.strip()
+            # The read cost is the excerpt's, not the index line's — that is
+            # the number the agent uses to decide whether to fetch.
+            assert item.estimated_tokens is not None
+            assert item.estimated_tokens > 100
+
+    def test_pack_id_and_attribution_fields_are_unchanged(
+        self, session_event_log: SQLiteEventLog
+    ) -> None:
+        pack = self._builder(3, session_event_log).build(
+            "q",
+            budget=PackBudget(max_items=10, max_tokens=100_000),
+            index_mode=True,
+        )
+        event = self._pack_event(session_event_log)
+        assert pack.pack_id
+        assert event.entity_id == pack.pack_id
+        assert event.entity_type == "pack"
+        injected = event.payload["injected_items"]
+        assert [i["item_id"] for i in injected] == [i.item_id for i in pack.items]
+        assert all(i["estimated_tokens"] > 100 for i in injected)
+
+    def test_payload_marks_the_index_serve(
+        self, session_event_log: SQLiteEventLog
+    ) -> None:
+        self._builder(2, session_event_log).build("q", index_mode=True)
+        assert self._pack_payload(session_event_log)["index_mode"] is True
+
+    def test_payload_defaults_to_false_for_a_normal_serve(
+        self, session_event_log: SQLiteEventLog
+    ) -> None:
+        self._builder(2, session_event_log).build("q")
+        assert self._pack_payload(session_event_log)["index_mode"] is False
+
+    def test_budget_trace_records_the_charge_that_actually_ran(
+        self, session_event_log: SQLiteEventLog
+    ) -> None:
+        self._builder(3, session_event_log).build(
+            "q",
+            budget=PackBudget(max_items=10, max_tokens=100_000),
+            index_mode=True,
+        )
+        trace = self._pack_payload(session_event_log)["budget_trace"]
+        assert trace
+        # Index lines are an order of magnitude cheaper than the ~250-token
+        # excerpts they stand for.
+        assert all(step["item_tokens"] < 50 for step in trace)
+
+    def test_an_index_serve_counts_as_a_serve_for_session_dedup(
+        self, session_event_log: SQLiteEventLog
+    ) -> None:
+        builder = self._builder(3, session_event_log)
+        first = builder.build("q", session_id="s1", index_mode=True)
+        assert first.items
+        second = builder.build("q", session_id="s1", index_mode=True)
+        assert second.items == []

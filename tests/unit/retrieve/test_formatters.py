@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from trellis.retrieve.formatters import (
     format_advisories_as_markdown,
     format_entities_as_markdown,
+    format_fetched_items_as_markdown,
+    format_index_line,
     format_lessons_as_markdown,
+    format_pack_as_index_markdown,
     format_pack_as_markdown,
     format_sectioned_pack_as_markdown,
     format_subgraph_as_markdown,
@@ -373,3 +378,296 @@ class TestFormatAdvisories:
         assert "2." in result
         assert "approach" in result.lower()
         assert "anti_pattern" in result.lower()
+
+
+# ---------------------------------------------------------------------------
+# Progressive disclosure — index lines, index packs, batch fetch (#305)
+# ---------------------------------------------------------------------------
+
+
+class TestFormatIndexLine:
+    def test_prefers_metadata_title_over_excerpt(self) -> None:
+        line = format_index_line(
+            {
+                "item_id": "doc-1",
+                "item_type": "document",
+                "excerpt": "Body prose that must not appear.",
+                "metadata": {"title": "Postgres failover runbook"},
+                "estimated_tokens": 420,
+            }
+        )
+        assert "Postgres failover runbook" in line
+        assert "Body prose" not in line
+
+    def test_falls_back_through_capture_title_and_name(self) -> None:
+        for key in ("capture_title", "name"):
+            line = format_index_line(
+                {
+                    "item_id": "e-1",
+                    "item_type": "entity",
+                    "excerpt": "ignored",
+                    "metadata": {key: f"From {key}"},
+                }
+            )
+            assert f"From {key}" in line
+
+    def test_falls_back_to_excerpt_when_no_title(self) -> None:
+        line = format_index_line(
+            {
+                "item_id": "doc-2",
+                "item_type": "document",
+                "excerpt": "A short excerpt stands in for a missing title.",
+            }
+        )
+        assert "A short excerpt stands in for a missing title." in line
+
+    def test_excerpt_label_stops_at_the_label_budget(self) -> None:
+        # The label is a char budget, not a first-sentence rule: a short
+        # excerpt survives whole, a long one is cut at a boundary.
+        line = format_index_line(
+            {
+                "item_id": "doc-2b",
+                "item_type": "document",
+                "excerpt": (
+                    "The opening sentence runs long enough to fill the label "
+                    "budget on its own. Everything after it is body prose the "
+                    "index must never carry."
+                ),
+            }
+        )
+        assert "The opening sentence" in line
+        assert "body prose the index must never carry" not in line
+
+    def test_blank_title_falls_through_to_excerpt(self) -> None:
+        line = format_index_line(
+            {
+                "item_id": "doc-3",
+                "item_type": "document",
+                "excerpt": "Real label.",
+                "metadata": {"title": "   "},
+            }
+        )
+        assert "Real label." in line
+
+    def test_stays_one_line_when_excerpt_is_multiline(self) -> None:
+        line = format_index_line(
+            {
+                "item_id": "doc-4",
+                "item_type": "document",
+                "excerpt": "alpha\nbeta\n\ngamma",
+            }
+        )
+        assert "\n" not in line
+
+    def test_renders_read_cost_when_estimated(self) -> None:
+        assert "~250 tok" in format_index_line(
+            {"item_id": "d", "item_type": "document", "estimated_tokens": 250}
+        )
+
+    def test_omits_read_cost_when_absent_or_zero(self) -> None:
+        for item in (
+            {"item_id": "d", "item_type": "document"},
+            {"item_id": "d", "item_type": "document", "estimated_tokens": 0},
+            {"item_id": "d", "item_type": "document", "estimated_tokens": None},
+        ):
+            assert "tok" not in format_index_line(item)
+
+    def test_item_id_is_copy_pastable(self) -> None:
+        line = format_index_line({"item_id": "01ABCDEF", "item_type": "document"})
+        assert "`01ABCDEF`" in line
+
+    def test_long_label_is_truncated(self) -> None:
+        line = format_index_line(
+            {
+                "item_id": "d",
+                "item_type": "document",
+                "excerpt": "word " * 200,
+            }
+        )
+        assert len(line) < 160
+
+
+class TestFormatPackAsIndexMarkdown:
+    @staticmethod
+    def _items(count: int) -> list[dict[str, Any]]:
+        return [
+            {
+                "item_id": f"doc-{i}",
+                "item_type": "document",
+                "excerpt": "SECRET BODY PROSE " * 40,
+                "metadata": {"title": f"Title {i}"},
+                "estimated_tokens": 180,
+            }
+            for i in range(count)
+        ]
+
+    def test_carries_no_excerpt_bodies(self) -> None:
+        result = format_pack_as_index_markdown(self._items(3), "deploy")
+        assert "SECRET BODY PROSE" not in result
+        for i in range(3):
+            assert f"`doc-{i}`" in result
+            assert f"Title {i}" in result
+
+    def test_surfaces_pack_id_and_both_follow_up_calls(self) -> None:
+        result = format_pack_as_index_markdown(
+            self._items(2), "deploy", pack_id="pack-42"
+        )
+        assert "**pack_id:** `pack-42`" in result
+        assert "get_items(" in result
+        assert "record_feedback(" in result
+
+    def test_omits_follow_up_footer_without_pack_id(self) -> None:
+        result = format_pack_as_index_markdown(self._items(2), "deploy")
+        assert "pack_id" not in result
+        assert "get_items(" not in result
+
+    def test_indexes_far_more_items_than_the_full_pack_rendering(self) -> None:
+        items = self._items(40)
+        index = format_pack_as_index_markdown(items, "deploy", max_tokens=500)
+        full = format_pack_as_markdown(items, "deploy", max_tokens=500)
+        assert index.count("- `doc-") > full.count("## [document]")
+
+    def test_reports_omitted_items_when_budget_runs_out(self) -> None:
+        result = format_pack_as_index_markdown(self._items(40), "deploy", max_tokens=60)
+        assert "more items omitted" in result
+
+    def test_empty_items_render_header_only(self) -> None:
+        result = format_pack_as_index_markdown([], "deploy")
+        assert "# Context index for: deploy" in result
+        assert "- `" not in result
+
+
+class TestFormatFetchedItems:
+    @staticmethod
+    def _item(item_id: str, body: str, kind: str = "document") -> dict[str, Any]:
+        return {"item_id": item_id, "kind": kind, "body": body}
+
+    def test_renders_full_bodies_with_ids(self) -> None:
+        result, served, omitted = format_fetched_items_as_markdown(
+            [self._item("a", "alpha body"), self._item("b", "beta body", "entity")]
+        )
+        assert "alpha body" in result
+        assert "beta body" in result
+        assert "## [entity] `b`" in result
+        assert served == ["a", "b"]
+        assert omitted == []
+
+    def test_over_budget_items_are_omitted_whole_not_truncated(self) -> None:
+        big = "B" * 8000
+        result, served, omitted = format_fetched_items_as_markdown(
+            [self._item("small", "tiny"), self._item("big", big)],
+            max_tokens=100,
+        )
+        assert served == ["small"]
+        assert omitted == ["big"]
+        assert big[:200] not in result
+        assert "re-fetch: `big`" in result
+
+    def test_not_found_ids_are_always_listed(self) -> None:
+        result, served, _ = format_fetched_items_as_markdown(
+            [self._item("a", "alpha")], not_found=["ghost"]
+        )
+        assert "not found: `ghost`" in result
+        assert served == ["a"]
+
+    def test_first_item_is_trimmed_when_nothing_fits(self) -> None:
+        result, served, omitted = format_fetched_items_as_markdown(
+            [self._item("a", "A" * 5000), self._item("b", "B" * 5000)],
+            max_tokens=40,
+        )
+        assert served == ["a"]
+        assert omitted == ["b"]
+        assert "AAA" in result
+
+    def test_surfaces_pack_id_when_given(self) -> None:
+        result, _, _ = format_fetched_items_as_markdown(
+            [self._item("a", "alpha")], pack_id="pack-9"
+        )
+        assert "**pack_id:** `pack-9`" in result
+
+    def test_empty_input_renders_header_only(self) -> None:
+        result, served, omitted = format_fetched_items_as_markdown([])
+        assert "# Fetched items" in result
+        assert served == []
+        assert omitted == []
+
+
+class TestFormatSubgraphDocPointers:
+    @staticmethod
+    def _entity(doc_ids: list[str] | None = None) -> dict[str, Any]:
+        entity: dict[str, Any] = {
+            "node_id": "n1",
+            "node_type": "service",
+            "properties": {"name": "API Gateway"},
+        }
+        if doc_ids is not None:
+            entity["document_ids"] = doc_ids
+        return entity
+
+    def test_root_evidence_pointers_are_rendered(self) -> None:
+        entity = self._entity(["doc-a", "doc-b"])
+        result = format_subgraph_as_markdown(entity, {"nodes": [entity], "edges": []})
+        assert "## Evidence documents (2)" in result
+        assert "`doc-a`" in result
+        assert "`doc-b`" in result
+
+    def test_no_evidence_section_when_node_has_no_doc_links(self) -> None:
+        entity = self._entity()
+        result = format_subgraph_as_markdown(entity, {"nodes": [entity], "edges": []})
+        assert "Evidence documents" not in result
+
+    def test_empty_doc_ids_render_no_section(self) -> None:
+        entity = self._entity([])
+        result = format_subgraph_as_markdown(entity, {"nodes": [entity], "edges": []})
+        assert "Evidence documents" not in result
+
+    def test_root_pointer_list_is_capped_and_reports_the_remainder(self) -> None:
+        entity = self._entity([f"doc-{i}" for i in range(14)])
+        result = format_subgraph_as_markdown(
+            entity, {"nodes": [entity], "edges": []}, max_tokens=4000
+        )
+        assert "## Evidence documents (14)" in result
+        assert "`doc-9`" in result
+        assert "`doc-10`" not in result
+        assert "4 more omitted" in result
+
+    def test_neighbor_pointers_ride_inline(self) -> None:
+        entity = self._entity()
+        neighbor = {
+            "node_id": "n2",
+            "node_type": "service",
+            "properties": {"name": "Auth"},
+            "document_ids": ["doc-x"],
+        }
+        result = format_subgraph_as_markdown(
+            entity, {"nodes": [entity, neighbor], "edges": []}
+        )
+        assert "**Auth** (service) — docs: `doc-x`" in result
+
+    def test_neighbor_pointers_are_capped_with_a_count(self) -> None:
+        entity = self._entity()
+        neighbor = {
+            "node_id": "n2",
+            "node_type": "service",
+            "properties": {"name": "Auth"},
+            "document_ids": [f"d{i}" for i in range(6)],
+        }
+        result = format_subgraph_as_markdown(
+            entity, {"nodes": [entity, neighbor], "edges": []}
+        )
+        assert "`d2`" in result
+        assert "`d3`" not in result
+        assert "(+3)" in result
+
+    def test_neighbor_without_doc_links_has_no_suffix(self) -> None:
+        entity = self._entity()
+        neighbor = {
+            "node_id": "n2",
+            "node_type": "service",
+            "properties": {"name": "Auth"},
+        }
+        result = format_subgraph_as_markdown(
+            entity, {"nodes": [entity, neighbor], "edges": []}
+        )
+        assert "**Auth** (service)" in result
+        assert "docs:" not in result

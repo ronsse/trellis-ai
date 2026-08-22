@@ -84,7 +84,9 @@ from trellis.ops import ParameterRegistry
 from trellis.retrieve.embed_ingest_hook import run_embed_on_ingest
 from trellis.retrieve.formatters import (
     format_advisories_as_markdown,
+    format_fetched_items_as_markdown,
     format_lessons_as_markdown,
+    format_pack_as_index_markdown,
     format_pack_as_markdown,
     format_sectioned_pack_as_markdown,
     format_subgraph_as_markdown,
@@ -597,6 +599,7 @@ def _flat_context(
     empty_message: str | None = None,
     operation: str = "get_context",
     refresh: bool = False,
+    index: bool = False,
 ) -> str:
     """Assemble a flat pack through the one PackBuilder-backed path.
 
@@ -607,6 +610,12 @@ def _flat_context(
 
     ``refresh=True`` bypasses session dedup for this call (client
     compaction signal), forwarded to :meth:`PackBuilder.build`.
+
+    ``index=True`` (#305) assembles and renders the pack as an id index —
+    one compact line per item, no excerpt bodies. Still the one
+    PackBuilder path: same ``pack_id``, same ``PACK_ASSEMBLED`` telemetry,
+    unchanged ``record_feedback`` attribution; only the budget charge and
+    the rendering differ.
 
     ``run_id`` (optional) is forwarded so the ``PACK_ASSEMBLED`` event can
     credit the run this pack served — ``record_feedback`` carries no run
@@ -634,6 +643,7 @@ def _flat_context(
             # fetch depth unchanged for small budgets.
             limit_per_strategy=max(20, max_items),
             refresh=refresh,
+            index_mode=index,
         )
     except McpError:
         raise
@@ -655,10 +665,15 @@ def _flat_context(
             "item_type": item.item_type,
             "excerpt": item.excerpt,
             "relevance_score": item.relevance_score,
+            # Read-cost + title inputs for the index line renderer;
+            # format_pack_as_markdown ignores both.
+            "estimated_tokens": item.estimated_tokens,
+            "metadata": item.metadata,
         }
         for item in pack.items
     ]
-    result = format_pack_as_markdown(
+    formatter = format_pack_as_index_markdown if index else format_pack_as_markdown
+    result = formatter(
         item_dicts,
         title or intent,
         max_tokens=max_tokens,
@@ -756,6 +771,7 @@ def get_context(
     run_id: str = "",
     sections: list[dict[str, Any]] | None = None,
     refresh: bool = False,
+    index: bool = False,
 ) -> str:
     """Get relevant context from the experience graph for a task or question.
 
@@ -763,7 +779,10 @@ def get_context(
     Fusion, recency/importance decay, session-aware dedup) into one
     token-budgeted markdown pack with a citable ``pack_id``. This is the
     single retrieval entry point — pass ``sections`` for the sectioned
-    layout that ``get_sectioned_context`` used to provide.
+    layout that ``get_sectioned_context`` used to provide, or ``index=True``
+    for a survey-first workflow: scan the index, walk ``get_graph`` from an
+    interesting item to its evidence pointers, then batch-fetch chosen ids
+    with ``get_items``.
 
     Args:
         intent: What you're trying to do or learn about.
@@ -788,6 +807,13 @@ def get_context(
             compaction) and it needs previously-served items re-injected.
             Only affects this call; ``session_id`` must still be supplied
             for it to matter, and later calls dedup normally.
+        index: Return an id index instead of excerpt bodies (default
+            False): one compact line per item — ``item_id``, type, title,
+            estimated read cost — so the same ``max_tokens`` surveys many
+            more items. The pack is real (same ``pack_id``, same
+            telemetry), so ``record_feedback`` works unchanged; fetch the
+            bodies you choose with ``get_items``. Flat layout only —
+            combining with ``sections`` is an error.
     """
     if not intent or not intent.strip():
         _raise_invalid_params(
@@ -798,6 +824,11 @@ def get_context(
     registry = _get_registry()
 
     if sections is not None:
+        if index:
+            _raise_invalid_params(
+                "index mode applies to the flat layout; drop sections or drop index",
+                data={"fields": ["index", "sections"]},
+            )
         if not sections:
             _raise_invalid_params(
                 "sections must not be empty",
@@ -829,6 +860,7 @@ def get_context(
         run_id=run_id,
         operation="get_context",
         refresh=refresh,
+        index=index,
     )
 
 
@@ -1697,6 +1729,155 @@ def get_graph(
 
 
 # ---------------------------------------------------------------------------
+# Macro Tool: get_items — batch fetch-by-id (#305)
+# ---------------------------------------------------------------------------
+
+#: Hard cap on ids per ``get_items`` call. A pack serves at most
+#: ``_FLAT_MAX_ITEMS`` items, so one call can fetch a whole index pack;
+#: anything larger is a bulk export, which is the REST/CLI surface's job.
+_GET_ITEMS_MAX_IDS = 50
+
+
+def _render_fetched_item(
+    registry: StoreRegistry, item_id: str
+) -> tuple[str, str] | None:
+    """Resolve ``item_id`` to ``(kind, markdown body)``, or ``None``.
+
+    Resolution order mirrors where pack item ids point: the document
+    store (keyword/semantic items — vector ``item_id``s are doc ids),
+    then the graph store (entity/observation items), then the trace
+    store. A graph node renders as properties plus its ``document_ids``
+    evidence pointers — the same entity → evidence links ``get_graph``
+    surfaces — so a fetched entity is itself a hop, not a dead end.
+    """
+    doc = registry.knowledge.document_store.get(item_id)
+    if doc is not None:
+        return "document", doc.get("content", "")
+
+    node = registry.knowledge.graph_store.get_node(item_id)
+    if node is not None:
+        props = node.get("properties", {})
+        name = props.get("name", item_id)
+        lines = [f"**{name}** ({node.get('node_type', 'unknown')})"]
+        lines.extend(
+            f"- **{k}**: {str(v)[:200]}" for k, v in props.items() if k != "name"
+        )
+        doc_ids = node.get("document_ids") or []
+        if doc_ids:
+            listed = ", ".join(f"`{d}`" for d in doc_ids)
+            lines.append(f"Evidence documents: {listed}")
+        return "entity", "\n".join(lines)
+
+    trace = registry.operational.trace_store.get(item_id)
+    if trace is not None:
+        return "trace", f"```json\n{trace.model_dump_json()}\n```"
+
+    return None
+
+
+@mcp.tool(auth=trellis_scope(SCOPE_READ))
+def get_items(
+    item_ids: list[str],
+    pack_id: str = "",
+    max_tokens: int = 4000,
+) -> str:
+    """Fetch full bodies for known item ids, token-budgeted (#305).
+
+    The fetch layer of progressive disclosure: survey an index pack
+    (``get_context(index=True)`` / ``search(index=True)``), follow
+    ``get_graph`` evidence pointers, then batch-fetch the ids worth
+    reading. Ids resolve against the document store, the knowledge
+    graph, and the trace store — a fetched entity includes its
+    ``document_ids`` pointers so you can keep following evidence.
+
+    Items that do not fit ``max_tokens`` are omitted whole (ids listed
+    for a follow-up call), never silently truncated; unknown ids are
+    listed as not found. Every call is recorded as a
+    ``PACK_ITEMS_FETCHED`` event carrying the served ids, so pass the
+    ``pack_id`` of the pack that surfaced the ids — that keeps the fetch,
+    and your later ``record_feedback(pack_id=..., helpful_item_ids=...)``,
+    attributable to the serving pack.
+
+    Args:
+        item_ids: Item ids to fetch (max 50). Copy them verbatim from
+            index lines, pack items, or graph evidence pointers.
+        pack_id: The pack that surfaced these ids (strongly recommended
+            after an index retrieval; empty when there is none).
+        max_tokens: Maximum response size in tokens (default 4000).
+    """
+    if not item_ids:
+        _raise_invalid_params(
+            "item_ids must not be empty",
+            data={"field": "item_ids"},
+        )
+    if len(item_ids) > _GET_ITEMS_MAX_IDS:
+        _raise_invalid_params(
+            f"too many item_ids: {len(item_ids)} (max {_GET_ITEMS_MAX_IDS})",
+            data={"field": "item_ids", "count": len(item_ids)},
+        )
+    if any(not isinstance(i, str) or not i.strip() for i in item_ids):
+        _raise_invalid_params(
+            "item_ids entries must be non-empty strings",
+            data={"field": "item_ids"},
+        )
+
+    registry = _get_registry()
+    # Dedup while preserving order — a repeated id must not be charged
+    # (or recorded as served) twice.
+    unique_ids = list(dict.fromkeys(i.strip() for i in item_ids))
+
+    try:
+        fetched: list[dict[str, Any]] = []
+        not_found: list[str] = []
+        for item_id in unique_ids:
+            resolved = _render_fetched_item(registry, item_id)
+            if resolved is None:
+                not_found.append(item_id)
+            else:
+                kind, body = resolved
+                fetched.append({"item_id": item_id, "kind": kind, "body": body})
+
+        result, served_ids, omitted_ids = format_fetched_items_as_markdown(
+            fetched,
+            not_found=not_found,
+            max_tokens=max_tokens,
+            pack_id=pack_id.strip() or None,
+        )
+
+        # The serve record is the point of the tool (#305): a fetch that
+        # cannot be recorded is invisible to attribution, so this emit is
+        # loud — same posture as PackBuilder's PACK_ASSEMBLED emit on the
+        # serving side. Response-token metering below stays fail-soft.
+        registry.operational.event_log.emit(
+            EventType.PACK_ITEMS_FETCHED,
+            source="mcp:get_items",
+            entity_id=pack_id.strip() or None,
+            entity_type="pack" if pack_id.strip() else None,
+            payload={
+                "pack_id": pack_id.strip() or None,
+                "requested_item_ids": unique_ids,
+                "served_item_ids": served_ids,
+                "not_found_item_ids": not_found,
+                "omitted_item_ids": omitted_ids,
+                "response_tokens": estimate_tokens(result),
+                "budget_tokens": max_tokens,
+            },
+        )
+    except McpError:
+        raise
+    except Exception as exc:
+        logger.exception("get_items_failed")
+        _raise_internal(
+            f"failed to fetch items: {exc}",
+            cause=exc,
+            data={"tool": "get_items", "item_ids": unique_ids},
+        )
+
+    _track_tokens(registry, operation="get_items", result=result, budget=max_tokens)
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Macro Tool 7: record_feedback
 # ---------------------------------------------------------------------------
 
@@ -1847,6 +2028,7 @@ def search(
     query: str,
     limit: int = 10,
     max_tokens: int = 2000,
+    index: bool = False,
 ) -> str:
     """Search the experience graph for documents and entities.
 
@@ -1858,6 +2040,10 @@ def search(
         query: Search query.
         limit: Maximum results (default 10).
         max_tokens: Maximum response size in tokens (default 2000).
+        index: Return an id index instead of excerpt bodies (default
+            False) — one compact line per item; raise ``limit`` to survey
+            more. Fetch chosen bodies with ``get_items``; feedback
+            attribution via the ``pack_id`` is unchanged.
     """
     if not query or not query.strip():
         _raise_invalid_params(
@@ -1875,6 +2061,7 @@ def search(
         title=f"Search: {query}",
         empty_message=f"No results found for: {query}",
         operation="search",
+        index=index,
     )
 
 

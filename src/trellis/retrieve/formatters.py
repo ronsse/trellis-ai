@@ -7,6 +7,7 @@ from typing import Any
 import structlog
 
 from trellis.core.hashing import estimate_tokens as _estimate_tokens
+from trellis.retrieve.excerpts import truncate_excerpt
 from trellis.schemas.advisory import Advisory
 
 logger = structlog.get_logger(__name__)
@@ -14,6 +15,20 @@ logger = structlog.get_logger(__name__)
 #: Marker for response-level trimming. Plain ASCII, unlike the excerpt
 #: ellipsis — these strings are rendered markdown, not pack item previews.
 _TRIM_MARKER = "..."
+
+#: Character budget for the label half of an index line. Long enough for a
+#: title or a first clause of the excerpt, short enough that an index pack
+#: stays one order of magnitude cheaper than the full pack it stands for.
+_INDEX_LABEL_MAX_CHARS = 80
+
+#: Maximum evidence-document pointers rendered per graph entity. Doc-link
+#: provenance is unbounded in storage (#301 stamps every mint); the rendered
+#: pointer list is not — the agent batch-fetches the rest by id if needed.
+_MAX_EVIDENCE_POINTERS = 10
+
+#: Maximum doc pointers appended inline to a single neighbor line in
+#: ``format_subgraph_as_markdown`` — neighbors are a survey, not the subject.
+_MAX_NEIGHBOR_POINTERS = 3
 
 
 def _truncate_to_tokens(text: str, max_tokens: int) -> str:
@@ -110,6 +125,174 @@ def format_pack_as_markdown(
         )
 
     return "\n".join(lines)
+
+
+def format_index_line(item: dict[str, Any]) -> str:
+    """Render one compact index line for a pack item.
+
+    The line carries what an agent needs to *decide whether to fetch*:
+    the copy-pastable ``item_id``, the item type, the estimated read cost
+    (the item's excerpt token estimate — what serving it in a full pack
+    would have charged), and a label. The label is the item's title when
+    the metadata carries one (``title`` / ``capture_title`` / ``name`` —
+    the same derivation the ``PACK_ASSEMBLED`` attribution uses), else the
+    first clause of the excerpt via :func:`truncate_excerpt`. No excerpt
+    bodies: this is the index layer of progressive disclosure (#305) —
+    the bodies come from a follow-up fetch by id.
+
+    Shared between the markdown renderer below and the ``PackBuilder``
+    index-mode budget walk, so the tokens the builder charges are the
+    tokens the rendered line actually costs.
+    """
+    item_id = item.get("item_id", "")
+    item_type = item.get("item_type", "item")
+    meta = item.get("metadata") or {}
+    title = meta.get("title") or meta.get("capture_title") or meta.get("name")
+    if not (isinstance(title, str) and title.strip()):
+        # Flatten newlines first — an index line must stay one line.
+        flattened = " ".join((item.get("excerpt") or "").split())
+        title = truncate_excerpt(flattened, _INDEX_LABEL_MAX_CHARS)
+    else:
+        title = truncate_excerpt(" ".join(title.split()), _INDEX_LABEL_MAX_CHARS)
+
+    read_tokens = item.get("estimated_tokens")
+    cost = (
+        f", ~{read_tokens} tok"
+        if isinstance(read_tokens, int) and read_tokens > 0
+        else ""
+    )
+    label = f" {title}" if title else ""
+    return f"- `{item_id}` ({item_type}{cost}){label}"
+
+
+def format_pack_as_index_markdown(
+    items: list[dict[str, Any]],
+    intent: str,
+    max_tokens: int = 2000,
+    *,
+    pack_id: str | None = None,
+) -> str:
+    """Format pack items as an id index — one line per item, no bodies.
+
+    The index layer of progressive disclosure (#305): the agent surveys
+    cheap lines, follows ``get_graph`` pointers, then batch-fetches the
+    ids it actually wants via ``get_items``. ``pack_id`` and the stable
+    ``item_id``s keep ``record_feedback`` attribution identical to the
+    full-pack rendering.
+
+    Args:
+        items: Pack item dicts with ``item_id``, ``item_type``,
+            ``excerpt``, and optionally ``metadata`` / ``estimated_tokens``
+            (see :func:`format_index_line`).
+        intent: The original query intent.
+        max_tokens: Maximum token budget for the response.
+        pack_id: Optional pack identifier to surface for citation.
+
+    Returns:
+        Markdown-formatted index within token budget.
+    """
+    lines = [f"# Context index for: {intent}"]
+    if pack_id:
+        lines.append(f"**pack_id:** `{pack_id}`")
+    lines.append("")
+    token_budget = max_tokens - _estimate_tokens(lines[0]) - 10  # reserve overhead
+    used = 0
+    included = 0
+
+    for item in items:
+        line = format_index_line(item)
+        line_tokens = _estimate_tokens(line)
+        if used + line_tokens > token_budget:
+            remaining = len(items) - included
+            lines.append(f"\n*[{remaining} more items omitted]*")
+            break
+        lines.append(line)
+        used += line_tokens
+        included += 1  # noqa: SIM113
+
+    if pack_id:
+        lines.append(
+            "\n---\n"
+            "*Fetch bodies via `get_items(item_ids=[...], "
+            'pack_id="' + pack_id + '")`. Cite feedback via '
+            '`record_feedback(pack_id="' + pack_id + '", success=..., '
+            "helpful_item_ids=[...], unhelpful_item_ids=[...])`.*"
+        )
+
+    return "\n".join(lines)
+
+
+def format_fetched_items_as_markdown(
+    items: list[dict[str, Any]],
+    *,
+    not_found: list[str] | None = None,
+    max_tokens: int = 4000,
+    pack_id: str | None = None,
+) -> tuple[str, list[str], list[str]]:
+    """Render batch-fetched item bodies within a token budget (#305).
+
+    The fetch layer of progressive disclosure: full bodies for the ids an
+    agent chose off an index pack or a ``get_graph`` evidence pointer.
+    Items that do not fit the budget are *omitted, never truncated* —
+    their ids are listed so the agent re-fetches them with a fresh budget
+    (except when nothing fits at all, where the first item is trimmed
+    rather than returning an empty response, mirroring
+    :func:`format_pack_as_markdown`). ``not_found`` ids are always listed:
+    a silently absent id would read as a serving decision.
+
+    Args:
+        items: Resolved item dicts with ``item_id``, ``kind`` (document /
+            entity / trace), and ``body`` (pre-rendered markdown).
+        not_found: Ids that resolved to nothing in any store.
+        max_tokens: Maximum token budget for the response.
+        pack_id: Originating pack, when the caller supplied one.
+
+    Returns:
+        ``(markdown, served_item_ids, omitted_item_ids)`` — the id lists
+        feed the ``PACK_ITEMS_FETCHED`` telemetry so the fetch stays
+        attributable to the pack.
+    """
+    lines = ["# Fetched items"]
+    if pack_id:
+        lines.append(f"**pack_id:** `{pack_id}`")
+    lines.append("")
+    token_budget = max_tokens - _estimate_tokens(lines[0]) - 10  # reserve overhead
+    used = 0
+    served: list[str] = []
+    omitted: list[str] = []
+
+    for item in items:
+        item_id = item.get("item_id", "")
+        block = f"## [{item.get('kind', 'item')}] `{item_id}`\n{item.get('body', '')}\n"
+        block_tokens = _estimate_tokens(block)
+        if used + block_tokens > token_budget:
+            omitted.append(item_id)
+            continue
+        lines.append(block)
+        used += block_tokens
+        served.append(item_id)
+
+    if not served and items:
+        # Nothing fit — serve a trimmed first item over an empty response.
+        first = items[0]
+        block = (
+            f"## [{first.get('kind', 'item')}] `{first.get('item_id', '')}`\n"
+            f"{first.get('body', '')}\n"
+        )
+        lines.append(_truncate_to_tokens(block, max(token_budget, 50)))
+        served.append(first.get("item_id", ""))
+        omitted = [i.get("item_id", "") for i in items[1:]]
+
+    if omitted:
+        listed = ", ".join(f"`{item_id}`" for item_id in omitted)
+        lines.append(
+            f"\n*[{len(omitted)} items over token budget — re-fetch: {listed}]*"
+        )
+    if not_found:
+        listed = ", ".join(f"`{item_id}`" for item_id in not_found)
+        lines.append(f"\n*[not found: {listed}]*")
+
+    return "\n".join(lines), served, omitted
 
 
 def format_traces_as_markdown(
@@ -246,6 +429,15 @@ def format_subgraph_as_markdown(
 ) -> str:
     """Format an entity and its subgraph neighborhood as markdown.
 
+    ``document_ids`` — the entity → evidence doc-link provenance the graph
+    stores on every node (``save_knowledge`` pointer-not-prose, #301
+    extraction stamps) — is rendered as copy-pastable pointers (#305): an
+    ``Evidence documents`` section for the root entity and an inline
+    ``docs:`` suffix on each neighbor line. That makes ``get_graph`` the
+    traversal layer between an index pack and a ``get_items`` fetch —
+    without it an agent could see an entity but never follow it to the
+    documents that attest it.
+
     Args:
         entity: The root entity dict.
         subgraph: Dict with "nodes" and "edges" lists.
@@ -264,6 +456,14 @@ def format_subgraph_as_markdown(
     for k, v in props.items():
         if k != "name":
             lines.append(f"- **{k}**: {str(v)[:200]}")
+
+    doc_ids = entity.get("document_ids") or []
+    if doc_ids:
+        lines.append("")
+        lines.append(f"## Evidence documents ({len(doc_ids)})")
+        lines.extend(f"- `{doc_id}`" for doc_id in doc_ids[:_MAX_EVIDENCE_POINTERS])
+        if len(doc_ids) > _MAX_EVIDENCE_POINTERS:
+            lines.append(f"*[{len(doc_ids) - _MAX_EVIDENCE_POINTERS} more omitted]*")
 
     nodes = subgraph.get("nodes", [])
     edges = subgraph.get("edges", [])
@@ -286,7 +486,14 @@ def format_subgraph_as_markdown(
             nprops = node.get("properties", {})
             nname = nprops.get("name", node.get("node_id", "?")[:12])
             ntype = node.get("node_type", "?")
-            lines.append(f"- **{nname}** ({ntype})")
+            line = f"- **{nname}** ({ntype})"
+            ndocs = node.get("document_ids") or []
+            if ndocs:
+                shown = ", ".join(f"`{d}`" for d in ndocs[:_MAX_NEIGHBOR_POINTERS])
+                more = len(ndocs) - _MAX_NEIGHBOR_POINTERS
+                suffix = f" (+{more})" if more > 0 else ""
+                line += f" — docs: {shown}{suffix}"
+            lines.append(line)
 
     result = "\n".join(lines)
     return _truncate_to_tokens(result, max_tokens)

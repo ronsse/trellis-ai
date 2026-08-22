@@ -304,6 +304,7 @@ EXPECTED_TOOL_SCOPES = {
     "get_context": SCOPE_READ,
     "search": SCOPE_READ,
     "get_graph": SCOPE_READ,
+    "get_items": SCOPE_READ,
     "get_lessons": SCOPE_READ,
     "query_observations": SCOPE_READ,
     "get_objective_context": SCOPE_READ,

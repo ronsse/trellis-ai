@@ -1515,20 +1515,21 @@ day-window selector drive all charts.
 
 ## MCP Macro Tools
 
-Start with `trellis-mcp`. 14 tools returning token-budgeted markdown — 8 core tools, 3 sectioned-context tools for richer pack assembly, and 3 structured tools (observations + the mutation escape hatch) that return JSON.
+Start with `trellis-mcp`. 15 tools returning token-budgeted markdown — 9 core tools, 3 sectioned-context tools for richer pack assembly, and 3 structured tools (observations + the mutation escape hatch) that return JSON.
 
 **Core tools**
 
 | Tool | Args | Returns |
 |------|------|---------|
-| `get_context` | `intent`, `domain?`, `max_tokens?`, `session_id?`, `run_id?`, `sections?` | Markdown pack fusing keyword + graph + semantic axes (RRF, recency/importance decay, session dedup) with a citable `pack_id`. Pass `sections` for the sectioned layout. Pass `run_id` (the unit of work this context is for — narrower than `session_id`) so later feedback can credit the runs a memory actually helped; without it the learning join buckets the pack under `unknown-run`. |
+| `get_context` | `intent`, `domain?`, `max_tokens?`, `session_id?`, `run_id?`, `sections?`, `index?` | Markdown pack fusing keyword + graph + semantic axes (RRF, recency/importance decay, session dedup) with a citable `pack_id`. Pass `sections` for the sectioned layout. Pass `run_id` (the unit of work this context is for — narrower than `session_id`) so later feedback can credit the runs a memory actually helped; without it the learning join buckets the pack under `unknown-run`. Pass `index=True` for the id index (see "Progressive disclosure" below); mutually exclusive with `sections`. |
 | `save_experience` | `trace_json` | Confirmation with trace_id |
 | `save_knowledge` | `name`, `entity_type?`, `properties?`, `relates_to?`, `edge_kind?` | Confirmation with entity_id |
 | `save_memory` | `content`, `metadata?`, `doc_id?` | Confirmation with doc_id. Tags the document inline when `TRELLIS_ENABLE_CLASSIFY_ON_INGEST=1` (see "Document → content tags"), embeds it when `TRELLIS_ENABLE_EMBED_ON_INGEST=1`. |
 | `get_lessons` | `domain?`, `limit?`, `max_tokens?` | Markdown list of precedents |
-| `get_graph` | `entity_id`, `depth?`, `max_tokens?` | Markdown subgraph |
+| `get_graph` | `entity_id`, `depth?`, `max_tokens?` | Markdown subgraph. Renders each node's `document_ids` as copy-pastable evidence pointers — an `Evidence documents` section for the root entity, an inline `docs:` suffix per neighbor — so entity → evidence is followable with `get_items`. |
+| `get_items` | `item_ids`, `pack_id?`, `max_tokens?` | Markdown bodies for known ids (max 50), resolved against the document store, the graph, then the trace store. Items over budget are omitted whole with their ids listed for a follow-up call — never truncated; unknown ids are listed as not found. Emits `PACK_ITEMS_FETCHED` with the served ids; pass the `pack_id` that surfaced them to keep the fetch attributable. |
 | `record_feedback` | `trace_id?`, `pack_id?`, `success?`, `rating?`, `notes?`, `helpful_item_ids?`, `unhelpful_item_ids?`, `followed_advisory_ids?` | Confirmation |
-| `search` | `query`, `limit?`, `max_tokens?` | Markdown search results |
+| `search` | `query`, `limit?`, `max_tokens?`, `index?` | Markdown search results |
 
 **Sectioned-context tools (deprecated aliases — #262)**
 
@@ -1551,6 +1552,31 @@ All three now route through the same one retrieval path as `get_context` and are
 `session_id` lets every context tool deduplicate items returned by recent calls in the same session. Token budgets default to the values in `retrieval.budgets` (`config.yaml`); pass `max_tokens > 0` to override.
 
 All read tools track token usage in the event log for observability.
+
+### Progressive Disclosure — index, traverse, fetch
+
+Reading a full pack to decide which items were worth reading is the expensive way round. Three layers let the model filter ids before paying for bodies:
+
+1. **Index** — `get_context(intent, index=True)` (or `search(query, index=True)`) renders one line per item: `- `item_id` (type, ~N tok) Title`. No excerpt bodies, so the same `max_tokens` surveys far more items. The label is the item's `title` metadata when it has one, otherwise the head of its excerpt; `~N tok` is what serving that item in a full pack *would* have cost.
+2. **Traverse** — `get_graph(entity_id)` renders each node's `document_ids` as evidence pointers, so an interesting entity leads to the documents that attest it.
+3. **Fetch** — `get_items(item_ids=[...], pack_id=...)` returns the bodies actually wanted.
+
+The index is a **real pack**, not a preview: same `pack_id`, same `PACK_ASSEMBLED` telemetry (per-item hashes, `injected_items`, session dedup), so `record_feedback(pack_id=..., helpful_item_ids=[...])` attributes exactly as it does for a full pack. Only the budget charge and the rendering differ — the payload carries `index_mode: true` so analysis can tell the two serve shapes apart, and an index serve counts as a serve for session dedup (`refresh=True` is still the re-injection escape hatch).
+
+Passing `pack_id` to `get_items` is what keeps the fetch attributable: the `PACK_ITEMS_FETCHED` event records `served_item_ids` against the pack whose index surfaced them, so "fetched but graded unhelpful" is distinguishable from "never fetched at all".
+
+```
+get_context("pgbouncer failover", index=True)
+  → # Context index for: pgbouncer failover
+    **pack_id:** `01HABCDEF...`
+    - `doc-7` (document, ~410 tok) Failover runbook
+    - `svc-api` (entity, ~28 tok) API Gateway
+
+get_graph("svc-api")   → ## Evidence documents (1)
+                         - `doc-7`
+
+get_items(["doc-7"], pack_id="01HABCDEF...")   → full body
+```
 
 ### Citing Pack Elements in Feedback
 
