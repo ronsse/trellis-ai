@@ -8,7 +8,7 @@
 - [`../../src/trellis/mutate/commands.py`](../../src/trellis/mutate/commands.py) — `Operation.RETENTION_PRUNE` enum verb, registered with an empty required-args schema and **no handler**
 - [`../../src/trellis/mutate/handlers.py`](../../src/trellis/mutate/handlers.py) — `RedactionApplyHandler` (#302), the governance template Option A is modeled on
 - [`../../src/trellis/schemas/classification.py`](../../src/trellis/schemas/classification.py) — `Lifecycle` staleness states (candidate-set input); `ContentTags.signal_quality`
-- [`../../src/trellis_workers/maintenance/retention.py`](../../src/trellis_workers/maintenance/retention.py) — orphaned `RetentionWorker` / `StalenessDetector` (~220 LOC, `KEEP — VALIDATE` in the orphan audit)
+- [`../../src/trellis_workers/maintenance/retention.py`](../../src/trellis_workers/maintenance/retention.py) — orphaned `RetentionWorker` / `StalenessDetector` (266 lines; `KEEP — VALIDATE` in the orphan audit)
 - [`./audit-trellis-workers-orphan-decision-frames.md`](./audit-trellis-workers-orphan-decision-frames.md) — the orphan audit's decision frame for that module
 - [`./adr-tag-vocabulary-split.md`](./adr-tag-vocabulary-split.md) — why `Lifecycle` is a separate axis from `signal_quality`
 
@@ -42,7 +42,8 @@ The vocabulary is half-built, which is the worst of the available states:
 | `ContentTags.signal_quality = "noise"` | **Live.** Populated by the tagging pipeline and by `apply_noise_tags()` (the demote half of the feedback loop); noise items are already excluded from packs by default. |
 | `redaction.apply` (#302) | **Live.** Governed hard-purge of a single graph entity: policy-gated through the standard pipeline, refuses `NullEventLog`, race-checked, emits a content-free `REDACTION_APPLIED` payload. Shipped as a single PR and already exercised for real defect cleanup. |
 | Store-level maintenance primitives | **Live but manual.** `GraphStore.compact_versions` (drops *closed* SCD-2 rows, never current ones; emits `GRAPH_VERSIONS_COMPACTED`) and `BlobStore.sweep_expired` (TTL sweep; emits `BLOB_GC_SWEPT`). Both support `dry_run`, both are direct API calls — not governed commands, no scheduler. |
-| `RetentionWorker` / `StalenessDetector` | Orphaned (~220 LOC in `trellis_workers/maintenance/retention.py`, referenced nowhere in `src/`). The worker only *marks* old traces in the event log — it never deletes, because traces are immutable. `KEEP — VALIDATE BEFORE DELETING` in the orphan audit, conditional on the retention backlog items staying real. **This ADR is that validation:** the disposition here resolves the orphan either way (§3.4, §4). |
+| `RetentionWorker` / `StalenessDetector` | Orphaned (266 lines in `trellis_workers/maintenance/retention.py`, referenced nowhere in `src/`). The worker only *marks* old traces in the event log — it never deletes, because traces are immutable. `KEEP — VALIDATE BEFORE DELETING` in the orphan audit, conditional on the retention backlog items staying real. **This ADR is that validation:** §3.3 and §4.1 answer the audit's driver question — "are the TTL + `DocumentRetentionWorker` P1 items in TODO.md still binding?" — explicitly and differently under each option. |
+| Sibling unhandled verbs | `retention.prune` is not alone in this state. Seven other `Operation` members carry `OperationRegistry` schemas ([`commands.py`](../../src/trellis/mutate/commands.py)) and have **no handler class anywhere in `src/`**: `trace.append_step`, `trace.record_outcome`, `evidence.ingest`, `evidence.attach`, `precedent.update`, `entity.merge`, `link.remove`. `create_curate_handlers` is the only handler factory and registers 11 of the enum's 19 verbs. The half-built verb is a codebase-wide habit, not a retention anomaly — which is why §4.1's cleanup cannot be sold as fixing the class. |
 
 ### Hard constraints any option must respect
 
@@ -79,8 +80,12 @@ Two dispositions, mutually exclusive:
   document explicitly why unbounded growth is acceptable at target scale.
 
 Doing nothing — keeping a verb that always fails, a policy type with no
-consumer, and an orphan worker — is not on the menu. That is claude-mem's
-`relevance_count` column wearing our naming conventions.
+consumer, and an orphan worker — is not on the menu *for retention*. Left
+alone it is claude-mem's `relevance_count` column wearing our naming
+conventions. Seven sibling verbs sit in the same state (§1), so the shape is
+a codebase-wide habit rather than a retention-specific defect. That makes it
+worth naming, not worth ignoring — but the other seven are out of scope here:
+this ADR resolves one instance and does not pretend to resolve the class.
 
 ---
 
@@ -152,9 +157,24 @@ Excluded — never candidates, enforced in the handler, not left to policy:
   re-pruning an already-pruned id is a recorded no-op inside the batch, not a
   failure (unlike redaction's single-target `NotFoundError`, a criteria-driven
   batch tolerates a moving candidate set).
-- **Orphan resolution:** `StalenessDetector` becomes the candidate feeder it
-  was designed to be; `RetentionWorker`'s trace-marking mode is retired (it
-  predates the immutability hard rule doing that job by construction).
+- **Orphan resolution:** the module is retired under Option A too, not
+  rehabilitated. `RetentionWorker`'s trace-marking mode predates the
+  immutability hard rule doing that job by construction.
+  `StalenessDetector.check()` returns exactly one thing — document ids whose
+  `updated_at` is older than `staleness_days` (default 90), a pure age test
+  over `DocumentStore.list_documents`. §3.2's included set contains no
+  documents at all, and its exclusions rule them out on precisely that
+  ground: age alone is not a value signal. Under §3.2's own rules the
+  detector's entire output is non-candidates, so it is not the feeder Option
+  A needs; the handler resolves criteria against the graph and vector stores
+  directly. A document-age candidate class would be a separate decision with
+  its own justification, not an inheritance from this module.
+- **Backlog ruling (the orphan audit's driver question):** the two open
+  `TODO.md` P1 items — "TTL metadata + `DocumentRetentionWorker` for
+  auto-expiry" — are **superseded, not deferred**, under Option A. Auto-expiry
+  becomes a criteria class of the governed verb rather than a standalone
+  worker; the items are rewritten to point at this ADR. Blob TTL already has
+  its mechanical answer in `BlobStore.sweep_expired`.
 
 ### 3.4 Consequences
 
@@ -195,13 +215,34 @@ Negative:
 Retirement is an *action*, not a shrug:
 
 - Delete `Operation.RETENTION_PRUNE`, its `OperationRegistry` entry, and the
-  property-invariants row — the API stops advertising a verb it rejects.
+  property-invariants row. This retires **one of eight** advertised-but-
+  rejected verbs (§1); the other seven still fail at dispatch, three of them
+  core curation (`precedent.update`, `entity.merge`, `link.remove`) rather
+  than maintenance. Option B buys a smaller codebase, not an honest verb
+  surface.
 - Delete `trellis_workers/maintenance/retention.py` per the orphan audit's
-  delete branch (`RetentionWorker` outright; `StalenessDetector` goes with it
-  unless a live consumer materializes first).
+  delete branch — both classes, not just `RetentionWorker`. Under Option A
+  `StalenessDetector` is retired too (§3.3), so no option keeps it.
+- **Strike the backlog items the orphan audit's driver question turns on.**
+  The audit conditions its `KEEP` on "are the TTL + `DocumentRetentionWorker`
+  P1 items in `TODO.md` still binding?" — both are still open and unchecked,
+  in the Agent & Compaction Improvements list and again in the Phase 3
+  integration tail. Option B's answer is **no**: they are struck, not
+  deferred, because a `DocumentRetentionWorker` is exactly the thing being
+  retired. Deleting the module while leaving open P1 items that demand it
+  reproduces the half-built state one level up. (Option A's answer is
+  *superseded* — see §3.3.)
 - Either delete `PolicyType.RETENTION` or annotate it as reserved-for-future
   with a pointer to this ADR — a policy type nothing consumes is the same
-  dead-schema smell either way.
+  dead-schema smell either way. The delete branch is costlier than it looks:
+  `retention` is a `RESERVED_NAMESPACES` entry, so `ContentTags` actively
+  rejects `retention:` tags with the message "retention is expressed via
+  Policy (`PolicyType.RETENTION`), not content tags". That reference is a
+  string literal, not a symbol, and the test asserting it matches on the
+  substring — deleting the enum member breaks no import and leaves the suite
+  green while `ContentTags` points users at a type that no longer exists.
+  Silently pointing at nothing is the very smell §2 rules off the menu, so
+  the delete branch has to fix that message and its assertion too.
 - Add a "Growth posture" note to the PRD/roadmap stating the accepted
   position: unbounded Knowledge-Plane growth is acceptable at target scale
   because retrieval quality is size-independent (noise exclusion, content
@@ -225,8 +266,9 @@ accident, with no gating and no decision*. An explicit Option B is not that.
 
 Positive:
 
-- Zero build cost; removes ~220 LOC of orphan code and a dead verb — the
-  codebase gets *smaller* and stops lying about its capabilities.
+- Zero build cost; removes 266 lines of orphan code and a dead verb — the
+  codebase gets *smaller*, and stops lying about *this* capability (seven
+  other verbs keep lying; §4.1).
 - No deleter to mis-configure; the attribution history stays whole.
 - The decision is recorded and reversible: re-introducing the verb later is
   additive (a new enum member, handler, and event), not a migration.
@@ -279,8 +321,9 @@ projected pressure into a felt one).
 **This ADR does not decide.** The choice between A and B is a product-posture
 call — how much the owner values a complete governance story against build
 effort at current scale — not a technical deduction, and it is explicitly
-reserved as an **owner judgment gate** (`blocked:owner-decision` in the
-roadmap's gate-state labels): the ADR proposes (§5), the owner decides.
+reserved as an **owner judgment gate**: the ADR proposes (§5), the owner
+decides. Issue #312 carries the roadmap's `blocked:owner-decision` label so
+the gate is visible to the roadmap driver, not just asserted here.
 
 The gate resolves by editing this section with the chosen option, the date,
 and the rationale, then flipping **Status** to Accepted (A) or Accepted —
@@ -289,7 +332,9 @@ Retired (B). Until then:
 - `Operation.RETENTION_PRUNE` stays as-is (rejected at dispatch) — neither
   wired nor deleted ahead of the call.
 - The orphan module keeps its `KEEP — VALIDATE` status; this ADR *is* the
-  validation, pending the gate.
+  validation, pending the gate. Either resolution deletes it (§3.3, §4.1), so
+  the gate also disposes of the two `TODO.md` retention P1 items — superseded
+  under A, struck under B.
 - No new writer of `Lifecycle` ships against the assumption of either option.
 
 **Decision:** _pending owner review._

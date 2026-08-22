@@ -970,7 +970,7 @@ result = executor.execute(cmd)
 | Operation | Required Args | Description |
 |-----------|---------------|-------------|
 | `redaction.apply` | `target_id`, `reason` | Hard-purge a graph entity: all SCD-2 versions, its edges, aliases, and vector entry. Emits `REDACTION_APPLIED` (counts + id pointers, never content). Also available via `trellis curate redact`. |
-| `retention.prune` | (none) | Run retention pruning. **No handler registered yet** — commands fail with `No handler registered`; retention runs today as a worker (`trellis_workers.maintenance.retention`). |
+| `retention.prune` | (none) | Run retention pruning. **No handler registered yet** — commands fail with `No handler registered`, and nothing else performs retention either (`trellis_workers.maintenance.retention` is orphaned: no caller, no CLI, no scheduler). Disposition — governed handler or explicit retirement — is an open owner gate; see [`adr-retention-prune.md`](../design/adr-retention-prune.md). |
 
 ### Batch Execution
 
