@@ -2,10 +2,10 @@
 
 The per-layer tests in ``test_trace.py`` / ``test_commands.py`` check the
 drafts and the command args.  This file checks the part that kept
-regressing: whether the values actually *land*.  Confidence, node role
-and the graph↔document link each pass through the extractor, the command
-bridge, the handler and the graph store — a break anywhere in that chain
-is invisible to a per-layer assertion.
+regressing: whether the values actually *land*.  Confidence, node role,
+the graph↔document link and the deterministic evidence each pass through
+the extractor, the command bridge, the handler and the graph store — a
+break anywhere in that chain is invisible to a per-layer assertion.
 """
 
 from __future__ import annotations
@@ -19,7 +19,13 @@ from trellis.extract.commands import (
     reconcile_node_roles,
     result_to_batch,
 )
+from trellis.extract.evidence import (
+    COMMANDS_RUN_PROPERTY,
+    FILES_READ_PROPERTY,
+    FILES_TOUCHED_PROPERTY,
+)
 from trellis.extract.trace import TraceExtractor
+from trellis.extract.trace_ingest_hook import extract_trace_batch
 from trellis.mutate import build_curate_executor
 from trellis.mutate.commands import CommandStatus
 from trellis.retrieve.pack_builder import PackBudget, PackBuilder
@@ -233,3 +239,58 @@ class TestDocumentLinkSurvivesReExtraction:
         await self._extract_with_metadata(registry, {"document_ids": ["doc-1"]})
         moved = await self._extract_with_metadata(registry, {"document_ids": ["doc-2"]})
         assert moved["document_ids"] == ["doc-2"]
+
+
+_EVIDENCE_TRACE_ID = "tr_evidence"
+_EVIDENCE_TRACE_DATA: dict = {
+    "trace_id": _EVIDENCE_TRACE_ID,
+    "source": "agent",
+    "intent": "fix the broken import",
+    "steps": [
+        {
+            "step_type": "tool_call",
+            "name": "Edit",
+            "args": {"file_path": "src/a.py", "old_string": "x"},
+            "result": {},
+        },
+        {
+            "step_type": "tool_call",
+            "name": "Read",
+            "args": {"file_path": "src/b.py"},
+            "result": {},
+        },
+        {
+            "step_type": "tool_call",
+            "name": "Bash",
+            "args": {"command": "pytest -q"},
+            "result": {},
+        },
+    ],
+    "context": {"agent_id": "code-orchestrator", "domain": "backend"},
+}
+
+
+class TestEvidenceLands:
+    """The deterministic evidence (#308) has to survive the whole chain.
+
+    ``extract_trace_batch`` is the seam that applies the gate, so this
+    goes through it rather than through :func:`_extract_into` — the
+    parsed values then still have to clear the command bridge, the
+    handler and the store before anything can read them off the node.
+    """
+
+    def test_verifiable_fields_reach_the_stored_node(
+        self, registry: StoreRegistry
+    ) -> None:
+        trace = Trace.model_validate(_EVIDENCE_TRACE_DATA)
+        # Sync: extract_trace_batch owns its own event loop.
+        _result, batch = extract_trace_batch(trace, requested_by="test")
+        assert batch is not None
+        build_curate_executor(registry).execute_batch(batch)
+
+        node = registry.knowledge.graph_store.get_node(f"trace:{_EVIDENCE_TRACE_ID}")
+        assert node is not None
+        properties = node["properties"]
+        assert properties[FILES_TOUCHED_PROPERTY] == ["src/a.py"]
+        assert properties[FILES_READ_PROPERTY] == ["src/b.py"]
+        assert properties[COMMANDS_RUN_PROPERTY] == ["pytest -q"]

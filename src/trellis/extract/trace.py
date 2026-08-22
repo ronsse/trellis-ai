@@ -14,7 +14,11 @@ The deterministic tier reads only fields that genuinely exist on the
 ``Trace`` / ``TraceStep`` schemas (``src/trellis/schemas/trace.py``).  No
 field is invented; ambiguous free-text (``intent`` prose, ``step.args`` /
 ``step.result`` payload mining) is deliberately left to a future LLM
-residue pass (see module footer).
+residue pass (see module footer).  The *verifiable* subset of the step
+payloads — files touched, files read, commands run — is the exception:
+``trellis.extract.evidence`` parses it deterministically and stamps it
+onto the Activity draft at the shared ingest-hook seam (#308), so those
+fields never depend on an LLM's recollection.
 
 Entities
 
