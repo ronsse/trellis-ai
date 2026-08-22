@@ -9,8 +9,9 @@ contract guarantees the wiring depends on:
                    reason instead of failing the ingest.
 * failure       -> caught + logged, returns an error summary, never raises.
 * row shape     -> ``build_vector_row`` carries the ``content`` excerpt
-                   SemanticSearch renders, the doc metadata, and a
-                   recency stamp.
+                   SemanticSearch renders — boundary-cut and size-marked
+                   here, the last stage holding the full document — plus
+                   the doc metadata and a recency stamp.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from trellis.core.elision import format_char_count
 from trellis.retrieve.embed_ingest_hook import (
     EMBED_INPUT_CHAR_CAP,
     EMBED_ON_INGEST_FLAG,
@@ -27,6 +29,7 @@ from trellis.retrieve.embed_ingest_hook import (
     embed_on_ingest_enabled,
     run_embed_on_ingest,
 )
+from trellis.retrieve.excerpts import EXCERPT_ELLIPSIS
 
 _EMBEDDING = [0.1, 0.2, 0.3]
 
@@ -96,7 +99,35 @@ class TestBuildVectorRow:
             None,
             lambda text: list(_EMBEDDING),
         )
-        assert len(row["metadata"]["content"]) == VECTOR_METADATA_EXCERPT_CHARS
+        assert len(row["metadata"]["content"]) <= VECTOR_METADATA_EXCERPT_CHARS
+
+    def test_metadata_excerpt_is_cut_on_a_boundary_and_marked(self) -> None:
+        """The semantic path's cut happens here, where the full doc is (#310).
+
+        ``SemanticSearch`` renders ``PackItem.excerpt`` straight from this
+        metadata and never sees the document row, so a raw slice stored
+        here is a mid-word cut no later stage can repair — and only this
+        stage knows how much it dropped.
+        """
+        content = (
+            "The mutation executor validates every command before it "
+            "reaches a store. " + "policy gate words " * 200
+        )
+        row = build_vector_row("doc-1", content, None, lambda text: list(_EMBEDDING))
+        excerpt = row["metadata"]["content"]
+
+        assert len(excerpt) <= VECTOR_METADATA_EXCERPT_CHARS
+        body, _, note = excerpt.partition(EXCERPT_ELLIPSIS)
+        assert note.strip() == f"[+{format_char_count(len(content) - len(body))} chars]"
+        assert content.startswith(body)
+        assert content[len(body) : len(body) + 1].isspace(), "cut mid-word"
+
+    def test_short_content_is_stored_verbatim(self) -> None:
+        """No cut, no marker — short memories are unchanged."""
+        row = build_vector_row(
+            "doc-1", "a terse gotcha", None, lambda text: list(_EMBEDDING)
+        )
+        assert row["metadata"]["content"] == "a terse gotcha"
 
     def test_explicit_created_at_wins_over_stamp(self) -> None:
         row = build_vector_row(

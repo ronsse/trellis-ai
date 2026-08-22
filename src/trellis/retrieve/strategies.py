@@ -503,6 +503,10 @@ class SemanticSearch(SearchStrategy):
                 PackItem(
                     item_id=result["item_id"],
                     item_type="vector",
+                    # Vector metadata is written already-truncated by
+                    # ``build_vector_row``, which is the last place the full
+                    # document is in hand; this only bounds rows from some
+                    # other producer.
                     excerpt=truncate_excerpt(
                         metadata.get("content", metadata.get("excerpt", ""))
                     ),

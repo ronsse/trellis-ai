@@ -130,7 +130,7 @@ class TestTruncateExcerpt:
         """A single giant token has no clean break — cut, but still mark it."""
         text = "x" * 900
         result = truncate_excerpt(text, 100)
-        assert len(result) == 100
+        assert len(result) <= 100
         body, marker = _split_marker(result)
         assert set(body) == {"x"}
         assert marker.startswith(EXCERPT_ELLIPSIS)
@@ -171,6 +171,21 @@ class TestTruncateExcerpt:
     def test_degenerate_limit_shorter_than_marker(self) -> None:
         assert truncate_excerpt("abcdef", 1, marker="…") == "a"
 
+    def test_empty_marker_suppresses_the_note_too(self) -> None:
+        """A caller asking for an unmarked cut must not get a size note."""
+        result = truncate_excerpt(_LONG_PROSE, 200, marker="")
+        assert "chars]" not in result
+        assert len(result) <= 200
+        assert _LONG_PROSE.startswith(result)
+
+    def test_caller_marker_too_wide_for_a_note_falls_back_to_bare(self) -> None:
+        """No room for the note under the marker → the marker alone."""
+        marker = "!" * 90
+        result = truncate_excerpt(_LONG_PROSE, 100, marker=marker)
+        assert result.endswith(marker)
+        assert "chars]" not in result
+        assert len(result) <= 100
+
 
 class TestElisionNote:
     """The dropped-size note on truncated excerpts (#310)."""
@@ -205,6 +220,18 @@ class TestElisionNote:
         result = truncate_excerpt(_LONG_PROSE, ELISION_NOTE_MIN_LIMIT)
         assert result.endswith("chars]")
 
+    def test_note_names_the_exact_dropped_count_across_limits(self) -> None:
+        """The reserved-width render is exact, not approximate.
+
+        The earlier fixpoint render could settle either side of a width
+        boundary and undercount by hundreds of characters.
+        """
+        text = _LONG_PROSE * 3
+        for limit in range(ELISION_NOTE_MIN_LIMIT, 900, 3):
+            body, marker = _split_marker(truncate_excerpt(text, limit))
+            expected = format_char_count(len(text) - len(body))
+            assert marker == f"{EXCERPT_ELLIPSIS} [+{expected} chars]", limit
+
     def test_note_is_charged_against_the_budget(self) -> None:
         """Sweep the noted regime: never longer than the raw slice."""
         text = _LONG_PROSE * 3
@@ -215,7 +242,7 @@ class TestElisionNote:
 
 
 class TestTruncationAtStrategySites:
-    """Pin the three call sites that used to slice ``content[:500]``."""
+    """Pin the call sites that used to slice ``content[:500]``."""
 
     def test_keyword_search_excerpt(self) -> None:
         from trellis.retrieve.strategies import KeywordSearch
@@ -240,6 +267,28 @@ class TestTruncationAtStrategySites:
         item = SemanticSearch(store, lambda _q: [0.1, 0.2]).search("q")[0]
         assert len(item.excerpt) <= EXCERPT_MAX_CHARS
         _assert_clean_break(content, item.excerpt)
+
+    def test_semantic_excerpt_end_to_end_from_the_embed_hook(self) -> None:
+        """Serve the row the embed hook actually writes, not a synthetic one.
+
+        In production ``SemanticSearch`` reads an excerpt already capped at
+        500 chars by ``build_vector_row``, so retrieval-side truncation is
+        a no-op over it: a cut not made at embed time is never made at all,
+        and the size note never fires (#310).
+        """
+        from trellis.retrieve.embed_ingest_hook import build_vector_row
+        from trellis.retrieve.strategies import SemanticSearch
+
+        content = _LONG_PROSE * 3
+        row = build_vector_row("d1", content, None, lambda _t: [0.1, 0.2])
+        store = MagicMock()
+        store.query.return_value = [
+            {"item_id": row["item_id"], "score": 0.9, "metadata": row["metadata"]}
+        ]
+        item = SemanticSearch(store, lambda _q: [0.1, 0.2]).search("q")[0]
+        assert len(item.excerpt) <= EXCERPT_MAX_CHARS
+        _assert_clean_break(content, item.excerpt)
+        assert item.excerpt.endswith("chars]")
 
     def test_graph_search_excerpt(self) -> None:
         from trellis.retrieve.strategies import GraphSearch

@@ -57,6 +57,15 @@ EXCERPT_ELLIPSIS = "…"
 #: real pack excerpts (``EXCERPT_MAX_CHARS``-sized), not log previews.
 ELISION_NOTE_MIN_LIMIT = 100
 
+#: Width :func:`truncate_excerpt` reserves for the note before it knows
+#: what the note will say — the widest rendering any excerpt-sized source
+#: produces, ``" [+999.9k chars]"``. Reserving a fixed width instead of
+#: solving for the note's own effect on where the cut lands is what makes
+#: the quoted count exact in a single pass; it over-books two or three
+#: characters in the common case, which is cheaper than an approximate
+#: count.
+_MAX_ELISION_NOTE_CHARS = len(" [+999.9k chars]")
+
 #: Trailing dropped-size note as rendered by :func:`_elision_note`.
 #: :func:`count_substance_words` strips it before measuring — "2", "3k",
 #: and "chars" are bookkeeping, not substance, and without the strip every
@@ -165,38 +174,24 @@ def truncate_excerpt(
     than the raw ``text[:limit]`` slice it replaces — the ``marker``,
     note included, is charged against the budget, not appended on top of
     it. Text at or under ``limit`` is returned verbatim with no marker,
-    so short items are byte-identical to before.
+    so short items are byte-identical to before. An empty ``marker``
+    suppresses the note along with the ellipsis: a caller asking for an
+    unmarked cut gets one.
     """
     if len(text) <= limit:
         return text
 
-    if limit >= ELISION_NOTE_MIN_LIMIT:
-        # The note names the dropped count, but the count depends on where
-        # the cut lands, which depends on the note's own width. Start from
-        # the lower bound (everything past ``limit`` is dropped) and
-        # re-render until the rendering is stable — the width only moves
-        # across order-of-magnitude boundaries, so a second pass is the
-        # practical worst case; three is a proof-free safety bound.
-        dropped = len(text) - limit
-        result: str | None = None
-        for _ in range(3):
-            noted_marker = marker + _elision_note(dropped)
-            result = _truncate_on_boundary(text, limit, noted_marker)
-            if result is None:
-                break  # a caller-supplied marker left no room for a note
-            actual = len(text) - (len(result) - len(noted_marker))
-            if _elision_note(actual) == _elision_note(dropped):
-                return result
-            dropped = actual
-        if result is not None:
-            # The rendering flapped either side of a width boundary. The
-            # budget arithmetic still holds — only the note may undercount
-            # by a few characters — so serve it rather than loop.
-            return result
+    if marker and limit >= ELISION_NOTE_MIN_LIMIT:
+        body = _truncate_on_boundary(text, limit, len(marker) + _MAX_ELISION_NOTE_CHARS)
+        if body is not None:
+            # The slice only bites on a source past ~1 GB, whose note
+            # outgrows the reservation; the cap holds regardless.
+            note = _elision_note(len(text) - len(body))
+            return body + marker + note[:_MAX_ELISION_NOTE_CHARS]
 
-    result = _truncate_on_boundary(text, limit, marker)
-    if result is not None:
-        return result
+    body = _truncate_on_boundary(text, limit, len(marker))
+    if body is not None:
+        return body + marker
     # Degenerate limit (shorter than the marker) — fall back to the
     # raw slice rather than returning a string over ``limit``.
     return text[:limit]
@@ -207,13 +202,15 @@ def _elision_note(dropped: int) -> str:
     return f" [+{format_char_count(dropped)} chars]"
 
 
-def _truncate_on_boundary(text: str, limit: int, marker: str) -> str | None:
-    """Boundary-aware cut of ``text`` to ``limit``, ``marker`` included.
+def _truncate_on_boundary(text: str, limit: int, reserved: int) -> str | None:
+    """Boundary-aware cut of ``text``, leaving ``reserved`` chars unspent.
 
-    Returns ``None`` when ``marker`` alone leaves no budget — the caller
+    ``reserved`` is what the caller will append after the returned body:
+    the marker, plus the dropped-size note when one is rendered. Returns
+    ``None`` when the reservation alone exhausts ``limit`` — the caller
     owns the degenerate-limit fallback.
     """
-    budget = limit - len(marker)
+    budget = limit - reserved
     if budget <= 0:
         return None
 
@@ -239,7 +236,7 @@ def _truncate_on_boundary(text: str, limit: int, marker: str) -> str | None:
     if cut <= 0:
         cut = budget
 
-    return text[:cut].rstrip() + marker
+    return text[:cut].rstrip()
 
 
 def _last_word_boundary(window: str) -> int:
@@ -275,7 +272,10 @@ def count_substance_words(text: str) -> int:
     The trailing dropped-size note :func:`truncate_excerpt` appends
     (``[+2.3k chars]``) is stripped before counting — it is bookkeeping
     about the text, not substance *of* it, and must never lift a thin
-    excerpt over the content floor.
+    excerpt over the content floor. The strip is unconditional, so prose
+    that genuinely ends in that shape (``"we added [+3 chars]"``) loses
+    those tokens too — rare, and under-counting is the safe direction for
+    a floor whose default is to demote.
     """
     text = _ELISION_NOTE_RE.sub("", text)
     units: set[str] = set()

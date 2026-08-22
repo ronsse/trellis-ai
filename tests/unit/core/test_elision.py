@@ -27,6 +27,16 @@ class TestFormatCharCount:
     def test_millions(self) -> None:
         assert format_char_count(1_200_000) == "1.2M"
 
+    def test_rounds_down_so_the_note_never_overstates(self) -> None:
+        """A "+2.4k chars" note over a 2,350-char drop would be a lie."""
+        assert format_char_count(2_350) == "2.3k"
+        assert format_char_count(1_999) == "1.9k"
+
+    def test_a_value_just_under_a_boundary_stays_in_its_unit(self) -> None:
+        """Rounding to nearest rendered this as the nonsense "1000k"."""
+        assert format_char_count(999_999) == "999.9k"
+        assert format_char_count(999_999_999) == "999.9M"
+
 
 class TestElideText:
     def test_under_cap_returned_verbatim(self) -> None:

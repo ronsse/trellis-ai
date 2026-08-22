@@ -4,8 +4,8 @@ Several paths bound how much text a model or a pack consumer sees — the
 excerpt truncator, the distillation prompt cap, the enrichment content
 cap. A silent cut invites an LLM to confabulate the missing middle and
 gives a pack consumer no basis for judging whether the full source is
-worth fetching. This module is the one home for how a cut announces
-itself:
+worth fetching. This module is the one home for how an LLM-payload or
+pack-excerpt cut announces itself:
 
 * :func:`elide_text` caps prompt-bound text and marks any cut with an
   explicit ``<elided … />`` tag carrying dropped size, original size,
@@ -14,6 +14,12 @@ itself:
 * :func:`format_char_count` renders a character count compactly
   (``"734"``, ``"2.3k"``, ``"1.2M"``) for the excerpt truncator's
   dropped-size note in :mod:`trellis.retrieve.excerpts`.
+
+Deliberately *not* in scope: markers that annotate something other than a
+size cap on model- or agent-bound text —
+:func:`trellis.core.error_sanitize.sanitize_error_message`'s
+``…[truncated]`` (telemetry, not a prompt) and
+:mod:`trellis.retrieve.formatters`' whole-response trim marker.
 """
 
 from __future__ import annotations
@@ -31,12 +37,23 @@ def format_char_count(count: int) -> str:
     One decimal place above 1k, with a trailing ``.0`` dropped — the
     number exists to support a fetch-the-full-source judgment, not
     byte-exact accounting.
+
+    Rounds *down*, never to nearest: a dropped-size note must not claim
+    more was withheld than actually was, and flooring also keeps a value
+    just under a unit boundary in its own unit (``999_999`` renders
+    ``"999.9k"``, not the nonsense ``"1000k"`` rounding produced).
     """
     if count >= _MILLION:
-        return f"{count / _MILLION:.1f}".removesuffix(".0") + "M"
+        return _floored_mantissa(count, _MILLION) + "M"
     if count >= _THOUSAND:
-        return f"{count / _THOUSAND:.1f}".removesuffix(".0") + "k"
+        return _floored_mantissa(count, _THOUSAND) + "k"
     return str(count)
+
+
+def _floored_mantissa(count: int, unit: int) -> str:
+    """``count / unit`` truncated to one decimal, trailing ``.0`` dropped."""
+    tenths = (count * 10) // unit
+    return f"{tenths // 10}.{tenths % 10}".removesuffix(".0")
 
 
 def elide_text(

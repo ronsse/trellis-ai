@@ -23,11 +23,15 @@ Contract (mirrors the trace-extraction hook):
 
 The vector row's metadata carries a ``content`` excerpt because
 ``SemanticSearch`` renders ``PackItem.excerpt`` from vector metadata —
-it does not fetch the document row. Document metadata is passed through
-so importance/recency weighting sees the same tags the document store
-holds. Metadata-only re-puts (enrichment tag writes) do NOT re-embed;
-the vector's metadata copy refreshes on the next content write or
-``trellis admin reindex-vectors --force`` run.
+it does not fetch the document row. That excerpt is cut *here*, by
+:func:`~trellis.retrieve.excerpts.truncate_excerpt`, rather than at
+retrieval time: this is the only point on the semantic path that still
+holds the full document, so it is the only point where the cut can be
+boundary-aware and can say how much it dropped (#310). Document metadata
+is passed through so importance/recency weighting sees the same tags the
+document store holds. Metadata-only re-puts (enrichment tag writes) do
+NOT re-embed; the vector's metadata copy refreshes on the next content
+write or ``trellis admin reindex-vectors --force`` run.
 
 ``run_embed_on_ingest`` returns a small summary dict so callers that
 want to surface embedding telemetry can, without re-deriving it. When
@@ -42,6 +46,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from trellis.core.write_config import EMBED_ON_INGEST_FLAG, WriteBehaviourConfig
+from trellis.retrieve.excerpts import truncate_excerpt
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -69,9 +74,12 @@ __all__ = [
 #: covering far more content than a pack excerpt ever renders.
 EMBED_INPUT_CHAR_CAP = 8000
 
-#: Content excerpt stored in vector metadata. ``SemanticSearch`` renders
-#: at most 500 chars into ``PackItem.excerpt``; storing more duplicates
-#: the document store to no benefit.
+#: Cap on the content excerpt stored in vector metadata. Matches
+#: :data:`~trellis.retrieve.excerpts.EXCERPT_MAX_CHARS`, which is what
+#: ``SemanticSearch`` renders into ``PackItem.excerpt``; storing more
+#: duplicates the document store to no benefit. The stored string is the
+#: *truncator's* output, so it is already ``<=`` this many characters —
+#: a boundary-aware, size-marked excerpt rather than a raw slice.
 VECTOR_METADATA_EXCERPT_CHARS = 500
 
 
@@ -98,7 +106,9 @@ def build_vector_row(
     Args:
         doc_id: Document ID; becomes the vector ``item_id`` (1:1).
         content: Full document content. Input to the embedder is capped
-            at :data:`EMBED_INPUT_CHAR_CAP` chars.
+            at :data:`EMBED_INPUT_CHAR_CAP` chars; the stored ``content``
+            excerpt is truncated to
+            :data:`VECTOR_METADATA_EXCERPT_CHARS` on a clean boundary.
         metadata: Document metadata, passed through so retrieval-side
             importance/tag weighting sees it.
         embedding_fn: ``callable(str) -> list[float]``.
@@ -115,7 +125,7 @@ def build_vector_row(
     row_metadata: dict[str, Any] = {
         **(metadata or {}),
         "doc_id": doc_id,
-        "content": content[:VECTOR_METADATA_EXCERPT_CHARS],
+        "content": truncate_excerpt(content, VECTOR_METADATA_EXCERPT_CHARS),
     }
     row_metadata.setdefault("created_at", created_at or datetime.now(UTC).isoformat())
     return {"item_id": doc_id, "vector": vector, "metadata": row_metadata}
