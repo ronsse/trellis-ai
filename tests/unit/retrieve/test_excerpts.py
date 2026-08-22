@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
+from trellis.core.elision import format_char_count
 from trellis.retrieve import (
     DEFAULT_CONTENT_FLOOR_PENALTY,
     DEFAULT_MIN_DISTINCT_WORDS,
@@ -17,7 +19,7 @@ from trellis.retrieve import (
     count_substance_words,
     truncate_excerpt,
 )
-from trellis.retrieve.excerpts import _MIN_BOUNDARY_FRACTION
+from trellis.retrieve.excerpts import _MIN_BOUNDARY_FRACTION, ELISION_NOTE_MIN_LIMIT
 from trellis.retrieve.pack_builder import PackBuilder
 from trellis.retrieve.strategies import SearchStrategy
 from trellis.schemas.pack import PackBudget, PackItem
@@ -39,6 +41,20 @@ _LONG_PROSE = (
 )
 
 
+#: Full truncation marker: the ellipsis, optionally followed by the
+#: dropped-size note that limits >= ELISION_NOTE_MIN_LIMIT get (#310).
+_TRAILING_MARKER_RE = re.compile(
+    re.escape(EXCERPT_ELLIPSIS) + r"(?: \[\+\d+(?:\.\d+)?[kM]? chars\])?$"
+)
+
+
+def _split_marker(result: str) -> tuple[str, str]:
+    """Split a truncated excerpt into ``(body, marker)``."""
+    match = _TRAILING_MARKER_RE.search(result)
+    assert match is not None, f"no truncation marker: {result!r}"
+    return result[: match.start()], match.group(0)
+
+
 def _assert_clean_break(
     source: str, result: str, limit: int = EXCERPT_MAX_CHARS
 ) -> None:
@@ -49,8 +65,7 @@ def _assert_clean_break(
     reads as a clean break — the failure this helper exists to catch cuts
     both ways.
     """
-    assert result.endswith(EXCERPT_ELLIPSIS)
-    body = result[: -len(EXCERPT_ELLIPSIS)]
+    body, marker = _split_marker(result)
     assert source.startswith(body), "truncation must be a prefix of the source"
     remainder = source[len(body) :]
     assert remainder, "nothing was actually truncated"
@@ -59,7 +74,7 @@ def _assert_clean_break(
     assert remainder[:1].isspace() or body[-1:] in ".!?…", (
         f"cut mid-word: ...{body[-20:]!r} | {remainder[:20]!r}"
     )
-    floor = int((limit - len(EXCERPT_ELLIPSIS)) * _MIN_BOUNDARY_FRACTION)
+    floor = int((limit - len(marker)) * _MIN_BOUNDARY_FRACTION)
     assert len(result) >= floor, (
         f"boundary retained only {len(result)} of {limit} chars: {result!r}"
     )
@@ -116,7 +131,9 @@ class TestTruncateExcerpt:
         text = "x" * 900
         result = truncate_excerpt(text, 100)
         assert len(result) == 100
-        assert result.endswith(EXCERPT_ELLIPSIS)
+        body, marker = _split_marker(result)
+        assert set(body) == {"x"}
+        assert marker.startswith(EXCERPT_ELLIPSIS)
 
     @pytest.mark.parametrize(
         "tail",
@@ -153,6 +170,48 @@ class TestTruncateExcerpt:
 
     def test_degenerate_limit_shorter_than_marker(self) -> None:
         assert truncate_excerpt("abcdef", 1, marker="…") == "a"
+
+
+class TestElisionNote:
+    """The dropped-size note on truncated excerpts (#310)."""
+
+    def test_truncation_carries_a_dropped_size_note(self) -> None:
+        result = truncate_excerpt(_LONG_PROSE * 5)
+        _body, marker = _split_marker(result)
+        assert re.fullmatch(
+            re.escape(EXCERPT_ELLIPSIS) + r" \[\+\d+(?:\.\d+)?[kM]? chars\]", marker
+        ), f"missing size note: {marker!r}"
+
+    def test_note_counts_the_chars_actually_dropped(self) -> None:
+        """The note must describe this cut, not a nominal limit-based guess."""
+        text = _LONG_PROSE * 5
+        result = truncate_excerpt(text)
+        body, marker = _split_marker(result)
+        dropped = len(text) - len(body)
+        assert marker == f"{EXCERPT_ELLIPSIS} [+{format_char_count(dropped)} chars]"
+
+    def test_multi_k_drop_uses_the_compact_rendering(self) -> None:
+        result = truncate_excerpt(_LONG_PROSE * 20)
+        _, marker = _split_marker(result)
+        assert re.search(r"\[\+\d+\.?\d*k chars\]$", marker), marker
+
+    def test_small_limit_omits_the_note(self) -> None:
+        """At tiny budgets the note would crowd out the text it annotates."""
+        result = truncate_excerpt(_LONG_PROSE, ELISION_NOTE_MIN_LIMIT - 1)
+        assert result.endswith(EXCERPT_ELLIPSIS)
+        assert "chars]" not in result
+
+    def test_note_appears_from_the_threshold_limit(self) -> None:
+        result = truncate_excerpt(_LONG_PROSE, ELISION_NOTE_MIN_LIMIT)
+        assert result.endswith("chars]")
+
+    def test_note_is_charged_against_the_budget(self) -> None:
+        """Sweep the noted regime: never longer than the raw slice."""
+        text = _LONG_PROSE * 3
+        for limit in range(ELISION_NOTE_MIN_LIMIT, 600, 7):
+            result = truncate_excerpt(text, limit)
+            assert len(result) <= limit
+            _assert_clean_break(text, result, limit)
 
 
 class TestTruncationAtStrategySites:
@@ -246,6 +305,26 @@ class TestCountSubstanceWords:
         )
         assert count_substance_words(gotcha) >= DEFAULT_MIN_DISTINCT_WORDS
 
+    def test_elision_note_does_not_count_as_substance(self) -> None:
+        """The dropped-size note is bookkeeping, not content (#310).
+
+        Without the strip, "[+2.3k chars]" tokenises as "2" + "3k" +
+        "chars" — three free distinct words that would lift a name-only
+        stub over the floor whenever its excerpt happened to be truncated.
+        """
+        assert count_substance_words("alpha beta… [+2.3k chars]") == 2
+        assert count_substance_words("alpha beta… [+734 chars]") == 2
+
+    def test_note_on_real_truncation_output_does_not_count(self) -> None:
+        """Same property, via the actual truncator rather than a literal."""
+        excerpt = truncate_excerpt("x" * 900, ELISION_NOTE_MIN_LIMIT)
+        assert excerpt.endswith("chars]")
+        assert count_substance_words(excerpt) == 1
+
+    def test_bracketed_prose_still_counts(self) -> None:
+        """Only the exact trailing note shape is exempt, not any brackets."""
+        assert count_substance_words("see [the chars] note") == 4
+
 
 class TestContentFloorConfig:
     def test_defaults(self) -> None:
@@ -316,6 +395,14 @@ class TestApplyContentFloor:
         result = apply_content_floor(items)
         assert [i.item_id for i in result.items] == ["n1", "n2"]
         assert result.rejected == []
+
+    def test_elision_note_cannot_lift_a_thin_item_over_the_floor(self) -> None:
+        """A truncated stub is still a stub — the note words don't count."""
+        item = _floor_item("n1", "alpha beta… [+9.9k chars]")
+        result = apply_content_floor([item])
+        assert result.penalized_item_ids == ["n1"]
+        breakdown = result.items[0].score_breakdown
+        assert breakdown["content_floor_substance_words"] == 2.0
 
     def test_exclude_mode_drops_and_records_a_rejection(self) -> None:
         config = ContentFloorConfig(mode="exclude")

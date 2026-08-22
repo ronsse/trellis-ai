@@ -12,6 +12,7 @@ import structlog
 from pydantic import Field
 
 from trellis.core.base import TrellisModel
+from trellis.core.elision import elide_text
 from trellis.core.hashing import content_hash
 from trellis.extract.telemetry import ExtractionFailureKind, emit_extraction_failure
 from trellis.llm import LLMClient, LLMResponse, Message, TokenUsage
@@ -153,9 +154,10 @@ class EnrichmentService:
     ) -> EnrichmentResult:
         """Enrich content with LLM-generated metadata."""
         try:
-            truncated = content[: self.max_content_length]
-            if len(content) > self.max_content_length:
-                truncated += "\n\n[Content truncated...]"
+            # An oversize cut is marked with size + reason (#310) so the
+            # model classifies "a document whose tail was withheld", not
+            # a document that happens to stop mid-thought.
+            truncated = elide_text(content, self.max_content_length)
 
             system_prompt = ENRICHMENT_SYSTEM_PROMPT.format(
                 classifications=", ".join(self.classifications),

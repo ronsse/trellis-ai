@@ -7,10 +7,11 @@ Two related honesty problems with what a pack actually serves an agent:
   routinely mid-word, sometimes mid-token in a code identifier. The agent
   reads a mangled last word and cannot tell whether the text ended or was
   cut. :func:`truncate_excerpt` breaks at a sentence boundary, else a word
-  boundary, and marks the cut with an ellipsis. It never returns more
-  characters than the raw slice did, so the ~4-chars-per-token budget
-  arithmetic in :class:`~trellis.retrieve.pack_builder.PackBuilder` is
-  unchanged.
+  boundary, and marks the cut with an ellipsis plus a compact dropped-size
+  note (``… [+2.3k chars]``) so the consumer can judge whether fetching
+  the full document is worth it (#310). It never returns more characters
+  than the raw slice did, so the ~4-chars-per-token budget arithmetic in
+  :class:`~trellis.retrieve.pack_builder.PackBuilder` is unchanged.
 
 * **Substance-free items.** Roughly 40% of graph nodes in the live corpus
   are name-only stubs whose excerpt falls back to the node name — three
@@ -36,6 +37,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Literal, get_args
 
+from trellis.core.elision import format_char_count
 from trellis.schemas.pack import PackItem, RejectedItem
 
 #: Maximum characters an excerpt may occupy. Matches the raw
@@ -45,7 +47,21 @@ EXCERPT_MAX_CHARS = 500
 
 #: Marker appended when text was cut. Counted against ``EXCERPT_MAX_CHARS``
 #: — a truncated excerpt is never *longer* than the raw slice it replaces.
+#: At real limits (see :data:`ELISION_NOTE_MIN_LIMIT`) it is followed by a
+#: dropped-size note — ``… [+2.3k chars]`` — charged the same way.
 EXCERPT_ELLIPSIS = "…"
+
+#: Limits below this get the bare ellipsis only. The note runs ~15
+#: characters; at tiny budgets it would crowd out the text it annotates,
+#: and the fetch-the-full-document judgment it supports only arises for
+#: real pack excerpts (``EXCERPT_MAX_CHARS``-sized), not log previews.
+ELISION_NOTE_MIN_LIMIT = 100
+
+#: Trailing dropped-size note as rendered by :func:`_elision_note`.
+#: :func:`count_substance_words` strips it before measuring — "2", "3k",
+#: and "chars" are bookkeeping, not substance, and without the strip every
+#: truncated excerpt would carry three free words past the content floor.
+_ELISION_NOTE_RE = re.compile(r"\s*\[\+\d+(?:\.\d+)?[kM]? chars\]\s*$")
 
 #: A boundary is only honoured if it retains at least this fraction of the
 #: available characters. Without it, a lone "Note." in the first 20
@@ -138,19 +154,68 @@ def truncate_excerpt(
     3. **Hard cut** — only when the tail is one unbroken token (a base64
        blob, a giant URL), where no clean break exists at all.
 
+    When the cut fires and ``limit`` affords it (at least
+    :data:`ELISION_NOTE_MIN_LIMIT`), the marker carries a compact
+    dropped-size note — ``… [+2.3k chars]`` — telling the consuming agent
+    how much was withheld, i.e. whether fetching the full document is
+    worth the tokens (#310). The note is invisible to the content floor:
+    :func:`count_substance_words` strips it before measuring.
+
     The returned string is never longer than ``limit`` and never longer
-    than the raw ``text[:limit]`` slice it replaces — the ``marker`` is
-    charged against the budget, not appended on top of it. Text at or
-    under ``limit`` is returned verbatim with no marker, so short items
-    are byte-identical to before.
+    than the raw ``text[:limit]`` slice it replaces — the ``marker``,
+    note included, is charged against the budget, not appended on top of
+    it. Text at or under ``limit`` is returned verbatim with no marker,
+    so short items are byte-identical to before.
     """
     if len(text) <= limit:
         return text
+
+    if limit >= ELISION_NOTE_MIN_LIMIT:
+        # The note names the dropped count, but the count depends on where
+        # the cut lands, which depends on the note's own width. Start from
+        # the lower bound (everything past ``limit`` is dropped) and
+        # re-render until the rendering is stable — the width only moves
+        # across order-of-magnitude boundaries, so a second pass is the
+        # practical worst case; three is a proof-free safety bound.
+        dropped = len(text) - limit
+        result: str | None = None
+        for _ in range(3):
+            noted_marker = marker + _elision_note(dropped)
+            result = _truncate_on_boundary(text, limit, noted_marker)
+            if result is None:
+                break  # a caller-supplied marker left no room for a note
+            actual = len(text) - (len(result) - len(noted_marker))
+            if _elision_note(actual) == _elision_note(dropped):
+                return result
+            dropped = actual
+        if result is not None:
+            # The rendering flapped either side of a width boundary. The
+            # budget arithmetic still holds — only the note may undercount
+            # by a few characters — so serve it rather than loop.
+            return result
+
+    result = _truncate_on_boundary(text, limit, marker)
+    if result is not None:
+        return result
+    # Degenerate limit (shorter than the marker) — fall back to the
+    # raw slice rather than returning a string over ``limit``.
+    return text[:limit]
+
+
+def _elision_note(dropped: int) -> str:
+    """Dropped-size note appended after the ellipsis: ``" [+2.3k chars]"``."""
+    return f" [+{format_char_count(dropped)} chars]"
+
+
+def _truncate_on_boundary(text: str, limit: int, marker: str) -> str | None:
+    """Boundary-aware cut of ``text`` to ``limit``, ``marker`` included.
+
+    Returns ``None`` when ``marker`` alone leaves no budget — the caller
+    owns the degenerate-limit fallback.
+    """
     budget = limit - len(marker)
     if budget <= 0:
-        # Degenerate limit (shorter than the marker) — fall back to the
-        # raw slice rather than returning a string over ``limit``.
-        return text[:limit]
+        return None
 
     # One character of lookahead: if ``text[budget]`` is whitespace the cut
     # already lands on a word boundary and the whole budget is usable.
@@ -206,7 +271,13 @@ def count_substance_words(text: str) -> int:
     character rather than as one token, so a Japanese or Thai memory is
     scored on what it says rather than on the fact that its script does
     not use spaces.
+
+    The trailing dropped-size note :func:`truncate_excerpt` appends
+    (``[+2.3k chars]``) is stripped before counting — it is bookkeeping
+    about the text, not substance *of* it, and must never lift a thin
+    excerpt over the content floor.
     """
+    text = _ELISION_NOTE_RE.sub("", text)
     units: set[str] = set()
     for token in _WORD_RE.findall(text):
         if not any(char.isalnum() for char in token):
@@ -371,6 +442,7 @@ __all__ = [
     "DEFAULT_CONTENT_FLOOR_PENALTY",
     "DEFAULT_FLOOR_EXEMPT_ITEM_TYPES",
     "DEFAULT_MIN_DISTINCT_WORDS",
+    "ELISION_NOTE_MIN_LIMIT",
     "EXCERPT_ELLIPSIS",
     "EXCERPT_MAX_CHARS",
     "ContentFloorConfig",
