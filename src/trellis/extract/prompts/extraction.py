@@ -85,7 +85,24 @@ Schema:
   "edges": []
 }
 
+Skip discipline — most operational noise references nothing worth
+linking. Extract NOTHING (return {"entities": [], "edges": []}) when
+the memory records only:
+- a status check that found nothing notable;
+- a dependency install or build that completed cleanly;
+- a bare file or directory listing;
+- a restatement of a finding the text says is already recorded;
+- research or a search that found nothing.
+If skipping, return the empty JSON above and nothing else — never
+explain the skip in prose. Output that is not the JSON schema is
+discarded, so a prose explanation is a wasted response, not a record.
+
 Rules:
+- Extract what the memory says was learned, built, or fixed — NEVER
+  what you or the recording process are doing. "Analysis",
+  "extraction", "session", "memory" as descriptions of this process
+  are not entities; "Analyzed the text and stored findings" is not a
+  finding.
 - Focus on ENTITIES mentioned — people, systems, datasets, projects —
   not actions or events.
 - Use short display names; prefer proper nouns as-written in the text.
@@ -115,7 +132,7 @@ Memory:
 
 MEMORY_EXTRACTION_V1 = PromptTemplate(
     name="memory_extraction",
-    version="1.1",
+    version="1.2",
     system=_MEMORY_EXTRACTION_SYSTEM,
     user_template=_MEMORY_EXTRACTION_USER,
 )

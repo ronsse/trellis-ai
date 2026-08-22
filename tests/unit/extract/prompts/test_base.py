@@ -137,9 +137,35 @@ class TestShippedTemplates:
         assert ENTITY_EXTRACTION_V1.version == "1.0"
         assert MEMORY_EXTRACTION_V1.name == "memory_extraction"
         # 1.1: participant/frame-preservation rules (#299/#300).
-        assert MEMORY_EXTRACTION_V1.version == "1.1"
+        # 1.2: skip discipline + anti-meta guard (#311).
+        assert MEMORY_EXTRACTION_V1.version == "1.2"
 
     def test_memory_extraction_frame_rules_present(self) -> None:
         """1.1 rules: never mint speakers; mentions carry no ownership."""
         assert "NEVER extract the text's speakers" in MEMORY_EXTRACTION_V1.system
         assert "MENTIONS, nothing stronger" in MEMORY_EXTRACTION_V1.system
+
+    def test_memory_extraction_skip_criteria_present(self) -> None:
+        """1.2: explicit skip criteria for operational noise (#311)."""
+        system = " ".join(MEMORY_EXTRACTION_V1.system.split())
+        assert "Skip discipline" in system
+        assert "status check that found nothing" in system
+        assert "dependency install or build that completed cleanly" in system
+        assert "bare file or directory listing" in system
+        assert "restatement of a finding" in system
+        assert "research or a search that found nothing" in system
+
+    def test_memory_extraction_skips_are_silent(self) -> None:
+        """1.2: a skip is the empty JSON, never a prose explanation."""
+        # Normalize line wrapping — the clause matters, not the reflow.
+        system = " ".join(MEMORY_EXTRACTION_V1.system.split())
+        assert "never explain the skip in prose" in system
+        # The skip target is the same empty shape as the no-entities case,
+        # so a skipping model cannot produce a stored artifact.
+        assert 'return {"entities": [], "edges": []}' in system
+
+    def test_memory_extraction_anti_meta_guard_present(self) -> None:
+        """1.2: record the work, never the recording process itself."""
+        system = " ".join(MEMORY_EXTRACTION_V1.system.split())
+        assert "learned, built, or fixed" in system
+        assert "NEVER what you or the recording process are doing" in system
