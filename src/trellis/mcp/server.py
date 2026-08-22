@@ -80,7 +80,11 @@ from trellis.mutate import (
     build_curate_executor,
     ensure_evidence_document,
 )
-from trellis.ops import ParameterRegistry
+from trellis.ops import (
+    ParameterRegistry,
+    check_capture_health,
+    format_capture_warning,
+)
 from trellis.retrieve.embed_ingest_hook import run_embed_on_ingest
 from trellis.retrieve.formatters import (
     format_advisories_as_markdown,
@@ -584,6 +588,32 @@ def _track_tokens(
         logger.exception("token_tracking_failed", operation=operation)
 
 
+def _capture_warning_banner(registry: StoreRegistry) -> str:
+    """Best-effort capture-health banner for pack outputs — never raises.
+
+    #309: write-boundary failures (#297) were invisible unless the
+    operator ran ``trellis analyze health``; when a surface's recent
+    rejections cross the threshold with no accepted write of its own, the
+    warning now rides inside the packs agents already read — including
+    the empty state, which is exactly where a dark capture path otherwise
+    looks like greenfield. Empty string means healthy *or indeterminate*:
+    an indeterminate check must present as healthy.
+
+    Callers prepend the banner *after* budgeting the pack, so it rides
+    outside ``max_tokens`` (~60 tokens) rather than competing with the
+    context it warns about — see :func:`format_capture_warning`.
+    """
+    try:
+        warning = check_capture_health(registry.operational.event_log)
+        return format_capture_warning(warning) if warning is not None else ""
+    except Exception:
+        # GRACEFUL-DEGRADATION: the health check is advisory read-side
+        # telemetry; its failure must never block or corrupt a
+        # successfully assembled pack.
+        logger.exception("capture_health_check_failed")
+        return ""
+
+
 def _flat_context(
     registry: StoreRegistry,
     intent: str,
@@ -646,8 +676,11 @@ def _flat_context(
             data={"tool": operation, "intent": intent},
         )
 
+    banner = _capture_warning_banner(registry)
+
     if not pack.items:
-        return empty_message or f"No context found for: {intent}"
+        empty = empty_message or f"No context found for: {intent}"
+        return f"{banner}\n\n{empty}" if banner else empty
 
     item_dicts = [
         {
@@ -664,6 +697,8 @@ def _flat_context(
         max_tokens=max_tokens,
         pack_id=pack.pack_id,
     )
+    if banner:
+        result = f"{banner}\n\n{result}"
     _track_tokens(registry, operation=operation, result=result, budget=max_tokens)
     return result
 
@@ -727,6 +762,9 @@ def _sectioned_context(
         adv_md = format_advisories_as_markdown(sectioned_pack.advisories)
         if adv_md:
             result = result + "\n\n" + adv_md
+        banner = _capture_warning_banner(registry)
+        if banner:
+            result = f"{banner}\n\n{result}"
         _track_tokens(registry, operation=tool, result=result, budget=resolved_tokens)
     except McpError:
         # Already structured by a deeper helper — let it propagate.

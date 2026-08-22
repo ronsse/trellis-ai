@@ -1554,6 +1554,32 @@ All three now route through the same one retrieval path as `get_context` and are
 
 All read tools track token usage in the event log for observability.
 
+### Capture-health banner
+
+Every pack-returning tool — `get_context` (flat and sectioned), `search`, and the three sectioned aliases — prepends a one-block warning when a **write** surface has gone dark (#309):
+
+```markdown
+> **WARNING: memory capture is failing.** 5 write attempt(s) rejected and 0 accepted in the last 24h from: mcp:save_experience (since 2026-08-21 04:12 UTC). New experience from this session is NOT being saved. Diagnose with `trellis analyze health`.
+```
+
+The rule is **per surface**, evaluated over a trailing window: a surface warns when it has at least `TRELLIS_CAPTURE_WARN_THRESHOLD` rejected writes — boundary `WRITE_REJECTED` (#297) plus executor `MUTATION_REJECTED`, aggregated under one `mcp:<tool>` label — and **no** accepted write (`MUTATION_EXECUTED`) of its own. Per-surface, not global, because the incident this exists to catch has successful writes in the same window by construction: every MCP `save_*` call rejected while a nightly `trellis ingest corpus` keeps landing rows. A global "zero accepted anywhere" rule would stay silent through exactly that outage.
+
+Executor rejections with `reason="idempotency_replay"` are excluded — a replayed command is a duplicate submission of a write that already landed, not a write that went dark.
+
+| Knob | Default | Notes |
+|------|---------|-------|
+| `TRELLIS_CAPTURE_WARN_THRESHOLD` | `3` | Rejections one surface needs before it warns (claude-mem's three-consecutive-failures rule). **`0` disables the check entirely** — and skips the store round-trip. |
+| `TRELLIS_CAPTURE_WARN_WINDOW_HOURS` | `24` | Trailing window the counts are taken over. |
+
+These are read-side knobs — they shape what retrieval *serves*, not what ingest *writes* — so they live in `src/trellis/ops/capture_health.py`, not `write_config.py`, and do **not** appear in `trellis admin write-config`.
+
+Two properties worth knowing before you read a banner:
+
+- **It rides outside `max_tokens`.** The pack is budgeted first and the banner prepended after, because a warning the budget can evict is a warning that disappears on exactly the small packs a dark capture path produces. Budget for ~60 extra tokens while capture is down.
+- **The empty state carries it too.** A pack with no items and no banner means greenfield; a pack with no items and a banner means the writes never landed. Distinguishing those is the point.
+
+The check is advisory telemetry and fails soft: if it raises, the pack is served unbannered (the `track_token_usage` GRACEFUL-DEGRADATION posture). Indeterminate presents as healthy. Run `trellis analyze health` for the full per-tool accept/reject breakdown and rejection-kind taxonomy.
+
 ### Citing Pack Elements in Feedback
 
 The three sectioned-context tools render each response with a `pack_id` header and full item/advisory IDs in backticks so agents can cite specific elements when calling `record_feedback`:

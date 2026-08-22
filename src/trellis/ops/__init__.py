@@ -7,6 +7,11 @@ every governed call; tuners consume outcomes and propose parameter
 updates through the governed mutation pipeline.
 """
 
+from trellis.ops.capture_health import (
+    CaptureHealthWarning,
+    check_capture_health,
+    format_capture_warning,
+)
 from trellis.ops.recording import record_outcome
 from trellis.ops.registry import ParameterRegistry
 from trellis.ops.write_health import (
@@ -23,10 +28,13 @@ from trellis.ops.write_health import (
 
 __all__ = [
     "BackendHealthReport",
+    "CaptureHealthWarning",
     "ParameterRegistry",
     "ServeAttributionReport",
     "WriteHealthReport",
+    "check_capture_health",
     "classify_rejection",
+    "format_capture_warning",
     "hints_for_trace_rejections",
     "record_outcome",
     "record_write_rejection",
