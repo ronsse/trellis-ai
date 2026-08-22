@@ -37,6 +37,7 @@ from trellis.retrieve.excerpts import (
     ContentFloorConfig,
     apply_content_floor,
 )
+from trellis.retrieve.formatters import format_index_line
 from trellis.retrieve.rerankers.base import Reranker
 from trellis.retrieve.strategies import SearchStrategy
 from trellis.retrieve.tier_mapping import TierMapper
@@ -399,6 +400,7 @@ class PackBuilder:
         include_meta: bool = False,
         session_dedup_window_minutes: int = DEFAULT_SESSION_DEDUP_WINDOW_MINUTES,
         refresh: bool = False,
+        index_mode: bool = False,
     ) -> Pack:
         """Assemble a pack by running all strategies and applying budget.
 
@@ -460,6 +462,25 @@ class PackBuilder:
         rather than a made-up bucket. ``run_id`` has no derivation:
         omitted when the caller has none, and the join keeps its
         ``"unknown-run"`` bucket.
+
+        ``index_mode`` (default ``False``, #305) assembles the pack for an
+        *index* rendering — one compact line per item instead of excerpt
+        bodies. Only the token-budget walk changes: each item is charged
+        its :func:`~trellis.retrieve.formatters.format_index_line` cost
+        rather than its excerpt cost, so the same ``max_tokens`` admits
+        many more items (``max_items`` still caps first, unchanged). The
+        *response*-level overhead is the caller's to reserve — subtract
+        :func:`~trellis.retrieve.formatters.index_render_overhead_tokens`
+        from the response budget before passing it here, so every item
+        charged as served is an item the rendering shows. The
+        assembled :class:`Pack` is otherwise identical — items keep their
+        excerpts, ``pack_id`` and the full ``PACK_ASSEMBLED`` telemetry
+        (per-item hashes, ``injected_items``, session-dedup visibility)
+        are intact, so ``record_feedback`` attribution and the learning
+        join are unchanged. An index serve *counts as a serve* for session
+        dedup; ``refresh=True`` remains the re-injection escape hatch.
+        The payload carries ``index_mode`` so analyzers can tell the two
+        serve shapes apart.
         """
         budget = budget or PackBudget()
         all_items: list[PackItem] = []
@@ -643,9 +664,10 @@ class PackBuilder:
             )
         selected = deduped[: budget.max_items]
 
-        # Apply budget: max_tokens (estimate ~4 chars per token)
+        # Apply budget: max_tokens (estimate ~4 chars per token). In index
+        # mode each item is charged its index-line cost, not its excerpt.
         selected, token_rejected, budget_trace = self._apply_token_budget_tracked(
-            selected, budget.max_tokens
+            selected, budget.max_tokens, index_mode=index_mode
         )
         rejected.extend(token_rejected)
 
@@ -690,6 +712,7 @@ class PackBuilder:
                 strategy_failures=strategy_failures,
                 meta_filtered_count=meta_filtered_count,
                 content_floor=floor_result.as_telemetry(),
+                index_mode=index_mode,
             )
 
         return pack
@@ -1109,6 +1132,7 @@ class PackBuilder:
         strategy_failures: list[StrategyFailure] | None = None,
         meta_filtered_count: int = 0,
         content_floor: dict[str, Any] | None = None,
+        index_mode: bool = False,
     ) -> None:
         """Emit a ContextRetrievalEvent for observability.
 
@@ -1129,11 +1153,25 @@ class PackBuilder:
         demoted item is attributable in telemetry rather than just
         appearing lower in the ranking. Per-item detail also rides
         ``injected_items[].score_breakdown``.
+
+        ``index_mode`` (#305) marks a pack assembled for the one-line-per-
+        item index rendering. Additive — consumers ``payload.get(...)``
+        with a ``False`` default. When set, ``budget_trace`` /
+        ``token_total_estimated`` reflect index-line charges (what was
+        actually served) while ``injected_items[].estimated_tokens``
+        stays the excerpt read cost.
         """
         report = pack.retrieval_report
         token_budget_fields = self._build_token_budget_payload(
             pack.budget.max_tokens,
-            excerpts=lambda: [item.excerpt for item in pack.items],
+            # The validator's second pass must count the same text the
+            # primary count charged, or its drift delta measures the two
+            # renderings against each other instead of the two counters.
+            excerpts=(
+                (lambda: [self._index_line_text(item) for item in pack.items])
+                if index_mode
+                else (lambda: [item.excerpt for item in pack.items])
+            ),
             per_item_estimates=[
                 b.item_tokens for b in report.budget_trace if b.included
             ],
@@ -1213,6 +1251,7 @@ class PackBuilder:
                     sf.to_event_payload() for sf in (strategy_failures or [])
                 ],
                 "meta_filtered_count": meta_filtered_count,
+                "index_mode": index_mode,
                 **token_budget_fields,
             },
         )
@@ -1643,10 +1682,52 @@ class PackBuilder:
             total_tokens += item_tokens
         return result
 
+    def _index_line_text(self, item: PackItem) -> str:
+        """The index line this item will be rendered as (#305).
+
+        Built from the same fields the response renderer reads, and with
+        the same ``estimated_tokens`` expression
+        :meth:`_annotate_selected_items` stamps on the item, so the line
+        the builder charges for is byte-identical to the line the agent
+        is shown.
+        """
+        return format_index_line(
+            {
+                "item_id": item.item_id,
+                "item_type": item.item_type,
+                "excerpt": item.excerpt,
+                "metadata": item.metadata,
+                "estimated_tokens": item.estimated_tokens
+                or self._token_counter.count(item.excerpt),
+            }
+        )
+
+    def _item_budget_tokens(self, item: PackItem, *, index_mode: bool) -> int:
+        """Tokens this item charges against the pack budget.
+
+        Excerpt cost normally; in index mode (#305) the cost of its
+        :meth:`_index_line_text` rendering — the builder charges what the
+        index response will actually serve, so the existing ``max_tokens``
+        budget composes unchanged while admitting many more items. The
+        caller owns the response-level overhead: an index renderer's
+        heading is not free, so callers subtract
+        :func:`~trellis.retrieve.formatters.index_render_overhead_tokens`
+        before handing this budget over.
+        """
+        if not index_mode:
+            return self._token_counter.count(item.excerpt)
+        return self._token_counter.count(self._index_line_text(item))
+
     def _apply_token_budget_tracked(
-        self, items: list[PackItem], max_tokens: int
+        self, items: list[PackItem], max_tokens: int, *, index_mode: bool = False
     ) -> tuple[list[PackItem], list[RejectedItem], list[BudgetStep]]:
-        """Trim items to fit token budget, tracking rejections."""
+        """Trim items to fit token budget, tracking rejections.
+
+        ``index_mode`` switches the per-item charge — see
+        :meth:`_item_budget_tokens`. ``BudgetStep.item_tokens`` records
+        whichever cost was charged, so the trace explains the walk that
+        actually ran.
+        """
         effective = self._effective_token_budget(max_tokens)
         result: list[PackItem] = []
         rejected: list[RejectedItem] = []
@@ -1655,7 +1736,7 @@ class PackBuilder:
         budget_exceeded = False
 
         for item in items:
-            item_tokens = self._token_counter.count(item.excerpt)
+            item_tokens = self._item_budget_tokens(item, index_mode=index_mode)
             if not budget_exceeded and total_tokens + item_tokens <= effective:
                 result.append(item)
                 total_tokens += item_tokens
