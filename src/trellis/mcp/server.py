@@ -84,12 +84,14 @@ from trellis.ops import ParameterRegistry
 from trellis.retrieve.embed_ingest_hook import run_embed_on_ingest
 from trellis.retrieve.formatters import (
     format_advisories_as_markdown,
+    format_entity_as_markdown,
     format_fetched_items_as_markdown,
     format_lessons_as_markdown,
     format_pack_as_index_markdown,
     format_pack_as_markdown,
     format_sectioned_pack_as_markdown,
     format_subgraph_as_markdown,
+    index_render_overhead_tokens,
 )
 from trellis.retrieve.pack_builder import PackBuilder, SemanticDedupConfig
 from trellis.retrieve.rerankers import build_reranker
@@ -558,6 +560,12 @@ def _get_minhash_index(registry: StoreRegistry) -> Any:
 #: token budget; this bounds the candidate list the budget walk considers.
 _FLAT_MAX_ITEMS = 50
 
+#: Floor for the index-mode builder budget once the rendering overhead is
+#: reserved — roughly one index line. A budget too small to survey anything
+#: should still answer with one id, not "no context found" about a corpus
+#: that has some.
+_MIN_INDEX_BUDGET_TOKENS = 20
+
 #: Human-readable label per tool for INTERNAL_ERROR messages on the sectioned
 #: path (keeps the pre-#262 wording the error-contract tests assert).
 _TOOL_LABEL = {
@@ -628,6 +636,19 @@ def _flat_context(
     outage degrades to the surviving axes; only a total retrieval failure
     (``PackAssemblyError``) surfaces as ``INTERNAL_ERROR``.
     """
+    # The index renderer spends tokens on its heading before the first
+    # item line, and re-budgets the lines it is given. Reserve that here
+    # so the builder's walk cannot admit a tail the rendering then drops:
+    # such an item is recorded as served (session dedup suppresses it for
+    # the rest of the session, the learning join grades it) while the
+    # agent never saw its id.
+    budget_tokens = max_tokens
+    if index:
+        budget_tokens = max(
+            max_tokens - index_render_overhead_tokens(title or intent),
+            _MIN_INDEX_BUDGET_TOKENS,
+        )
+
     try:
         builder = _build_pack_builder(registry)
         pack = builder.build(
@@ -635,7 +656,7 @@ def _flat_context(
             domain=domain or None,
             session_id=session_id or None,
             run_id=run_id or None,
-            budget=PackBudget(max_items=max_items, max_tokens=max_tokens),
+            budget=PackBudget(max_items=max_items, max_tokens=budget_tokens),
             # Fetch at least as many candidates per axis as the item budget
             # allows — a caller raising ``limit`` above the PackBuilder
             # default (20) gains recall instead of being silently capped at
@@ -812,8 +833,12 @@ def get_context(
             estimated read cost — so the same ``max_tokens`` surveys many
             more items. The pack is real (same ``pack_id``, same
             telemetry), so ``record_feedback`` works unchanged; fetch the
-            bodies you choose with ``get_items``. Flat layout only —
-            combining with ``sections`` is an error.
+            bodies you choose with ``get_items``. Because it is a real
+            pack, an index survey **counts as a serve**: with a
+            ``session_id``, every id it listed is deduped out of later
+            packs in that session, so pass ``refresh=True`` on a
+            follow-up full retrieval that needs them back. Flat layout
+            only — combining with ``sections`` is an error.
     """
     if not intent or not intent.strip():
         _raise_invalid_params(
@@ -1746,9 +1771,10 @@ def _render_fetched_item(
     Resolution order mirrors where pack item ids point: the document
     store (keyword/semantic items — vector ``item_id``s are doc ids),
     then the graph store (entity/observation items), then the trace
-    store. A graph node renders as properties plus its ``document_ids``
-    evidence pointers — the same entity → evidence links ``get_graph``
-    surfaces — so a fetched entity is itself a hop, not a dead end.
+    store. A graph node goes through the same
+    :func:`~trellis.retrieve.formatters.format_entity_as_markdown` block
+    ``get_graph`` renders, so a fetched entity carries the ``document_ids``
+    evidence pointers that make it a hop rather than a dead end.
     """
     doc = registry.knowledge.document_store.get(item_id)
     if doc is not None:
@@ -1756,17 +1782,7 @@ def _render_fetched_item(
 
     node = registry.knowledge.graph_store.get_node(item_id)
     if node is not None:
-        props = node.get("properties", {})
-        name = props.get("name", item_id)
-        lines = [f"**{name}** ({node.get('node_type', 'unknown')})"]
-        lines.extend(
-            f"- **{k}**: {str(v)[:200]}" for k, v in props.items() if k != "name"
-        )
-        doc_ids = node.get("document_ids") or []
-        if doc_ids:
-            listed = ", ".join(f"`{d}`" for d in doc_ids)
-            lines.append(f"Evidence documents: {listed}")
-        return "entity", "\n".join(lines)
+        return "entity", format_entity_as_markdown(node)
 
     trace = registry.operational.trace_store.get(item_id)
     if trace is not None:
@@ -1790,9 +1806,11 @@ def get_items(
     graph, and the trace store — a fetched entity includes its
     ``document_ids`` pointers so you can keep following evidence.
 
-    Items that do not fit ``max_tokens`` are omitted whole (ids listed
-    for a follow-up call), never silently truncated; unknown ids are
-    listed as not found. Every call is recorded as a
+    Items that do not fit ``max_tokens`` are omitted whole and reported
+    as omitted — never truncated — so re-fetch them with a larger
+    ``max_tokens`` (the index line's ``~N tok`` is the cost to budget
+    for); unknown ids are listed as not found. Every call is recorded as
+    a
     ``PACK_ITEMS_FETCHED`` event carrying the served ids, so pass the
     ``pack_id`` of the pack that surfaced the ids — that keeps the fetch,
     and your later ``record_feedback(pack_id=..., helpful_item_ids=...)``,
@@ -2043,7 +2061,10 @@ def search(
         index: Return an id index instead of excerpt bodies (default
             False) — one compact line per item; raise ``limit`` to survey
             more. Fetch chosen bodies with ``get_items``; feedback
-            attribution via the ``pack_id`` is unchanged.
+            attribution via the ``pack_id`` is unchanged. The index is a
+            real pack, so a survey counts as a serve for session dedup —
+            use ``get_context(..., refresh=True)`` if a later retrieval
+            in the same session needs the surveyed items back.
     """
     if not query or not query.strip():
         _raise_invalid_params(

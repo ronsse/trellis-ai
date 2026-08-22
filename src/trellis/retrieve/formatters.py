@@ -30,6 +30,11 @@ _MAX_EVIDENCE_POINTERS = 10
 #: ``format_subgraph_as_markdown`` — neighbors are a survey, not the subject.
 _MAX_NEIGHBOR_POINTERS = 3
 
+#: Headroom an index rendering keeps back for the ``pack_id`` line and the
+#: follow-up footer, on top of the heading. See
+#: :func:`index_render_overhead_tokens`.
+_INDEX_RENDER_RESERVE = 10
+
 
 def _truncate_to_tokens(text: str, max_tokens: int) -> str:
     """Truncate text to fit within token budget.
@@ -165,6 +170,19 @@ def format_index_line(item: dict[str, Any]) -> str:
     return f"- `{item_id}` ({item_type}{cost}){label}"
 
 
+def index_render_overhead_tokens(intent: str) -> int:
+    """Tokens :func:`format_pack_as_index_markdown` spends before any line.
+
+    The heading plus a small reserve for the ``pack_id`` line and the
+    follow-up footer. A caller that budgets the item lines *upstream* —
+    ``PackBuilder(index_mode=True)`` charges each item its exact rendered
+    line — must subtract this from the response budget it hands the
+    builder, or the two walks disagree and the tail of the pack is
+    recorded as served while never being rendered.
+    """
+    return _estimate_tokens(f"# Context index for: {intent}") + _INDEX_RENDER_RESERVE
+
+
 def format_pack_as_index_markdown(
     items: list[dict[str, Any]],
     intent: str,
@@ -179,6 +197,10 @@ def format_pack_as_index_markdown(
     ids it actually wants via ``get_items``. ``pack_id`` and the stable
     ``item_id``s keep ``record_feedback`` attribution identical to the
     full-pack rendering.
+
+    ``max_tokens`` is the budget for the whole rendered response, so an
+    index-mode ``PackBuilder`` must be given ``max_tokens`` less
+    :func:`index_render_overhead_tokens` — see that function.
 
     Args:
         items: Pack item dicts with ``item_id``, ``item_type``,
@@ -195,20 +217,29 @@ def format_pack_as_index_markdown(
     if pack_id:
         lines.append(f"**pack_id:** `{pack_id}`")
     lines.append("")
-    token_budget = max_tokens - _estimate_tokens(lines[0]) - 10  # reserve overhead
+    token_budget = max_tokens - index_render_overhead_tokens(intent)
     used = 0
-    included = 0
+    rendered: list[str] = []
 
     for item in items:
         line = format_index_line(item)
         line_tokens = _estimate_tokens(line)
         if used + line_tokens > token_budget:
-            remaining = len(items) - included
-            lines.append(f"\n*[{remaining} more items omitted]*")
             break
-        lines.append(line)
+        rendered.append(line)
         used += line_tokens
-        included += 1  # noqa: SIM113
+
+    if not rendered and items:
+        # An index with no id is a dead end — the agent has nothing to
+        # fetch. One line costs ~15 tokens, so render the first anyway
+        # (same posture as format_pack_as_markdown's truncated-first-item
+        # fallback).
+        rendered.append(format_index_line(items[0]))
+
+    lines.extend(rendered)
+    omitted = len(items) - len(rendered)
+    if omitted > 0:
+        lines.append(f"\n*[{omitted} more items omitted]*")
 
     if pack_id:
         lines.append(
@@ -234,11 +265,15 @@ def format_fetched_items_as_markdown(
     The fetch layer of progressive disclosure: full bodies for the ids an
     agent chose off an index pack or a ``get_graph`` evidence pointer.
     Items that do not fit the budget are *omitted, never truncated* —
-    their ids are listed so the agent re-fetches them with a fresh budget
-    (except when nothing fits at all, where the first item is trimmed
-    rather than returning an empty response, mirroring
-    :func:`format_pack_as_markdown`). ``not_found`` ids are always listed:
-    a silently absent id would read as a serving decision.
+    their ids are listed so the agent re-fetches them with a bigger
+    budget, and they are reported as omitted rather than served. That
+    holds without exception, including when nothing fits at all: a
+    half-runbook the agent cannot tell is half is worse than an empty
+    response naming the id to re-fetch, and recording a trimmed prefix as
+    ``served`` would make the audit event lie. The index line the agent
+    chose from carries the item's read cost, so an over-budget fetch is a
+    correctable call, not a dead end. ``not_found`` ids are always
+    listed: a silently absent id would read as a serving decision.
 
     Args:
         items: Resolved item dicts with ``item_id``, ``kind`` (document /
@@ -272,21 +307,11 @@ def format_fetched_items_as_markdown(
         used += block_tokens
         served.append(item_id)
 
-    if not served and items:
-        # Nothing fit — serve a trimmed first item over an empty response.
-        first = items[0]
-        block = (
-            f"## [{first.get('kind', 'item')}] `{first.get('item_id', '')}`\n"
-            f"{first.get('body', '')}\n"
-        )
-        lines.append(_truncate_to_tokens(block, max(token_budget, 50)))
-        served.append(first.get("item_id", ""))
-        omitted = [i.get("item_id", "") for i in items[1:]]
-
     if omitted:
         listed = ", ".join(f"`{item_id}`" for item_id in omitted)
         lines.append(
-            f"\n*[{len(omitted)} items over token budget — re-fetch: {listed}]*"
+            f"\n*[{len(omitted)} items over token budget — re-fetch with a "
+            f"larger max_tokens: {listed}]*"
         )
     if not_found:
         listed = ", ".join(f"`{item_id}`" for item_id in not_found)
@@ -422,6 +447,50 @@ def format_lessons_as_markdown(
     return "\n".join(lines)
 
 
+def _entity_property_lines(properties: dict[str, Any]) -> list[str]:
+    """Property lines for a graph node, minus the ``name`` in its heading.
+
+    Values are cut at 200 chars: a node property is a pointer, not a
+    body — the body is a document the agent fetches by id.
+    """
+    return [f"- **{k}**: {str(v)[:200]}" for k, v in properties.items() if k != "name"]
+
+
+def _capped_doc_pointers(document_ids: list[str], limit: int) -> tuple[list[str], int]:
+    """Backtick-quoted evidence pointers up to ``limit``, plus the remainder.
+
+    One cap for every surface that renders ``document_ids`` — the graph
+    root block, a neighbor line, a fetched entity — so a node's evidence
+    list cannot be unbounded on one surface and capped on another.
+    """
+    shown = [f"`{doc_id}`" for doc_id in document_ids[:limit]]
+    return shown, max(len(document_ids) - limit, 0)
+
+
+def format_entity_as_markdown(node: dict[str, Any]) -> str:
+    """Render one graph node as a standalone body (#305 ``get_items``).
+
+    The same three parts as the root-entity block of
+    :func:`format_subgraph_as_markdown` — name/type heading, properties,
+    evidence pointers — so an entity fetched by id reads like the entity
+    an agent traversed to, and a fetched entity stays a hop rather than a
+    dead end. Headings are bold rather than ``#``: the fetch renderer
+    owns the heading levels around this block.
+    """
+    props = node.get("properties", {}) or {}
+    name = props.get("name", node.get("node_id", "unknown"))
+    lines = [f"**{name}** ({node.get('node_type', 'unknown')})"]
+    lines.extend(_entity_property_lines(props))
+
+    shown, more = _capped_doc_pointers(
+        node.get("document_ids") or [], _MAX_EVIDENCE_POINTERS
+    )
+    if shown:
+        suffix = f" (+{more} more)" if more else ""
+        lines.append(f"Evidence documents: {', '.join(shown)}{suffix}")
+    return "\n".join(lines)
+
+
 def format_subgraph_as_markdown(
     entity: dict[str, Any],
     subgraph: dict[str, Any],
@@ -451,19 +520,16 @@ def format_subgraph_as_markdown(
     node_type = entity.get("node_type", "unknown")
 
     lines = [f"# {name} ({node_type})", ""]
-
-    # Add entity properties
-    for k, v in props.items():
-        if k != "name":
-            lines.append(f"- **{k}**: {str(v)[:200]}")
+    lines.extend(_entity_property_lines(props))
 
     doc_ids = entity.get("document_ids") or []
-    if doc_ids:
+    shown, more = _capped_doc_pointers(doc_ids, _MAX_EVIDENCE_POINTERS)
+    if shown:
         lines.append("")
         lines.append(f"## Evidence documents ({len(doc_ids)})")
-        lines.extend(f"- `{doc_id}`" for doc_id in doc_ids[:_MAX_EVIDENCE_POINTERS])
-        if len(doc_ids) > _MAX_EVIDENCE_POINTERS:
-            lines.append(f"*[{len(doc_ids) - _MAX_EVIDENCE_POINTERS} more omitted]*")
+        lines.extend(f"- {pointer}" for pointer in shown)
+        if more:
+            lines.append(f"*[{more} more omitted]*")
 
     nodes = subgraph.get("nodes", [])
     edges = subgraph.get("edges", [])
@@ -487,12 +553,12 @@ def format_subgraph_as_markdown(
             nname = nprops.get("name", node.get("node_id", "?")[:12])
             ntype = node.get("node_type", "?")
             line = f"- **{nname}** ({ntype})"
-            ndocs = node.get("document_ids") or []
-            if ndocs:
-                shown = ", ".join(f"`{d}`" for d in ndocs[:_MAX_NEIGHBOR_POINTERS])
-                more = len(ndocs) - _MAX_NEIGHBOR_POINTERS
-                suffix = f" (+{more})" if more > 0 else ""
-                line += f" — docs: {shown}{suffix}"
+            nshown, nmore = _capped_doc_pointers(
+                node.get("document_ids") or [], _MAX_NEIGHBOR_POINTERS
+            )
+            if nshown:
+                suffix = f" (+{nmore})" if nmore else ""
+                line += f" — docs: {', '.join(nshown)}{suffix}"
             lines.append(line)
 
     result = "\n".join(lines)

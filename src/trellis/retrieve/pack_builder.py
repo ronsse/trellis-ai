@@ -469,6 +469,10 @@ class PackBuilder:
         its :func:`~trellis.retrieve.formatters.format_index_line` cost
         rather than its excerpt cost, so the same ``max_tokens`` admits
         many more items (``max_items`` still caps first, unchanged). The
+        *response*-level overhead is the caller's to reserve — subtract
+        :func:`~trellis.retrieve.formatters.index_render_overhead_tokens`
+        from the response budget before passing it here, so every item
+        charged as served is an item the rendering shows. The
         assembled :class:`Pack` is otherwise identical — items keep their
         excerpts, ``pack_id`` and the full ``PACK_ASSEMBLED`` telemetry
         (per-item hashes, ``injected_items``, session-dedup visibility)
@@ -1160,7 +1164,14 @@ class PackBuilder:
         report = pack.retrieval_report
         token_budget_fields = self._build_token_budget_payload(
             pack.budget.max_tokens,
-            excerpts=lambda: [item.excerpt for item in pack.items],
+            # The validator's second pass must count the same text the
+            # primary count charged, or its drift delta measures the two
+            # renderings against each other instead of the two counters.
+            excerpts=(
+                (lambda: [self._index_line_text(item) for item in pack.items])
+                if index_mode
+                else (lambda: [item.excerpt for item in pack.items])
+            ),
             per_item_estimates=[
                 b.item_tokens for b in report.budget_trace if b.included
             ],
@@ -1671,29 +1682,41 @@ class PackBuilder:
             total_tokens += item_tokens
         return result
 
-    def _item_budget_tokens(self, item: PackItem, *, index_mode: bool) -> int:
-        """Tokens this item charges against the pack budget.
+    def _index_line_text(self, item: PackItem) -> str:
+        """The index line this item will be rendered as (#305).
 
-        Excerpt cost normally; in index mode (#305) the cost of the
-        :func:`~trellis.retrieve.formatters.format_index_line` rendering —
-        the builder charges what the index response will actually serve,
-        so the existing ``max_tokens`` budget composes unchanged while
-        admitting many more items. The line's ``estimated_tokens`` field
-        is the excerpt read cost, matching what
-        :meth:`_annotate_selected_items` later stamps on the item.
+        Built from the same fields the response renderer reads, and with
+        the same ``estimated_tokens`` expression
+        :meth:`_annotate_selected_items` stamps on the item, so the line
+        the builder charges for is byte-identical to the line the agent
+        is shown.
         """
-        if not index_mode:
-            return self._token_counter.count(item.excerpt)
-        line = format_index_line(
+        return format_index_line(
             {
                 "item_id": item.item_id,
                 "item_type": item.item_type,
                 "excerpt": item.excerpt,
                 "metadata": item.metadata,
-                "estimated_tokens": self._token_counter.count(item.excerpt),
+                "estimated_tokens": item.estimated_tokens
+                or self._token_counter.count(item.excerpt),
             }
         )
-        return self._token_counter.count(line)
+
+    def _item_budget_tokens(self, item: PackItem, *, index_mode: bool) -> int:
+        """Tokens this item charges against the pack budget.
+
+        Excerpt cost normally; in index mode (#305) the cost of its
+        :meth:`_index_line_text` rendering — the builder charges what the
+        index response will actually serve, so the existing ``max_tokens``
+        budget composes unchanged while admitting many more items. The
+        caller owns the response-level overhead: an index renderer's
+        heading is not free, so callers subtract
+        :func:`~trellis.retrieve.formatters.index_render_overhead_tokens`
+        before handing this budget over.
+        """
+        if not index_mode:
+            return self._token_counter.count(item.excerpt)
+        return self._token_counter.count(self._index_line_text(item))
 
     def _apply_token_budget_tracked(
         self, items: list[PackItem], max_tokens: int, *, index_mode: bool = False

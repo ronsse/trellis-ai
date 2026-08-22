@@ -2494,6 +2494,28 @@ class TestIndexMode:
         # excerpts they stand for.
         assert all(step["item_tokens"] < 50 for step in trace)
 
+    def test_validator_second_pass_counts_the_text_that_was_charged(
+        self, tmp_path: Path
+    ) -> None:
+        # The validator exists to measure *counter* drift. Counting
+        # excerpts against an index-line charge measures the two
+        # renderings against each other instead — the delta would be the
+        # whole excerpt total and every index pack would log an overrun.
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        try:
+            PackBuilder(
+                strategies=[_make_strategy("kw", self._items(5))],
+                event_log=event_log,
+                token_budget_validator=_MultiplierTokenCounter(1.0, name="real"),
+            ).build(
+                "q", budget=PackBudget(max_items=50, max_tokens=600), index_mode=True
+            )
+            payload = self._pack_payload(event_log)
+            assert payload["token_total_validated"] == payload["token_total_estimated"]
+            assert payload["token_count_delta"] == 0
+        finally:
+            event_log.close()
+
     def test_an_index_serve_counts_as_a_serve_for_session_dedup(
         self, session_event_log: SQLiteEventLog
     ) -> None:

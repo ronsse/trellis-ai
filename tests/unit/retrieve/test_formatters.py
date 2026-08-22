@@ -7,6 +7,7 @@ from typing import Any
 from trellis.retrieve.formatters import (
     format_advisories_as_markdown,
     format_entities_as_markdown,
+    format_entity_as_markdown,
     format_fetched_items_as_markdown,
     format_index_line,
     format_lessons_as_markdown,
@@ -530,6 +531,20 @@ class TestFormatPackAsIndexMarkdown:
     def test_reports_omitted_items_when_budget_runs_out(self) -> None:
         result = format_pack_as_index_markdown(self._items(40), "deploy", max_tokens=60)
         assert "more items omitted" in result
+        # An omission notice on its own is not a passing render — the
+        # agent still has to come away with ids it can fetch.
+        assert result.count("- `doc-") > 0
+
+    def test_renders_one_id_even_when_nothing_fits(self) -> None:
+        # An index with no id is a dead end. One line is ~15 tokens.
+        result = format_pack_as_index_markdown(
+            self._items(5),
+            "how do I fail over the pgbouncer sidecar safely",
+            max_tokens=30,
+            pack_id="PK1",
+        )
+        assert "- `doc-0`" in result
+        assert "*[4 more items omitted]*" in result
 
     def test_empty_items_render_header_only(self) -> None:
         result = format_pack_as_index_markdown([], "deploy")
@@ -561,7 +576,7 @@ class TestFormatFetchedItems:
         assert served == ["small"]
         assert omitted == ["big"]
         assert big[:200] not in result
-        assert "re-fetch: `big`" in result
+        assert "re-fetch with a larger max_tokens: `big`" in result
 
     def test_not_found_ids_are_always_listed(self) -> None:
         result, served, _ = format_fetched_items_as_markdown(
@@ -570,14 +585,18 @@ class TestFormatFetchedItems:
         assert "not found: `ghost`" in result
         assert served == ["a"]
 
-    def test_first_item_is_trimmed_when_nothing_fits(self) -> None:
+    def test_nothing_is_served_when_nothing_fits(self) -> None:
+        # No trimmed-prefix fallback: a half-body the agent cannot tell is
+        # half, recorded as fully served, is worse than an empty response
+        # naming the ids to re-fetch.
         result, served, omitted = format_fetched_items_as_markdown(
             [self._item("a", "A" * 5000), self._item("b", "B" * 5000)],
             max_tokens=40,
         )
-        assert served == ["a"]
-        assert omitted == ["b"]
-        assert "AAA" in result
+        assert served == []
+        assert omitted == ["a", "b"]
+        assert "AAA" not in result
+        assert "re-fetch with a larger max_tokens: `a`, `b`" in result
 
     def test_surfaces_pack_id_when_given(self) -> None:
         result, _, _ = format_fetched_items_as_markdown(
@@ -590,6 +609,36 @@ class TestFormatFetchedItems:
         assert "# Fetched items" in result
         assert served == []
         assert omitted == []
+
+
+class TestFormatEntityBlock:
+    """The one entity block ``get_graph`` and ``get_items`` both render."""
+
+    @staticmethod
+    def _node(doc_ids: list[str]) -> dict[str, Any]:
+        return {
+            "node_id": "svc-api",
+            "node_type": "service",
+            "properties": {"name": "API Gateway", "owner": "platform"},
+            "document_ids": doc_ids,
+        }
+
+    def test_renders_name_type_and_properties(self) -> None:
+        result = format_entity_as_markdown(self._node([]))
+        assert result.startswith("**API Gateway** (service)")
+        assert "- **owner**: platform" in result
+        assert "Evidence documents" not in result
+
+    def test_evidence_pointers_share_the_graph_cap(self) -> None:
+        # Same cap as the subgraph root block — one definition, so a
+        # fetched entity and a traversed one cannot disagree.
+        result = format_entity_as_markdown(self._node([f"d{i}" for i in range(14)]))
+        assert result.count("`d") == 10
+        assert "(+4 more)" in result
+
+    def test_falls_back_to_node_id_without_a_name(self) -> None:
+        result = format_entity_as_markdown({"node_id": "n1", "properties": {}})
+        assert "**n1** (unknown)" in result
 
 
 class TestFormatSubgraphDocPointers:

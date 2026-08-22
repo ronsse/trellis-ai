@@ -834,8 +834,9 @@ Every `PackBuilder` build with an `event_log` configured emits one `PACK_ASSEMBL
 | `injected_items[]` | Per-item detail — `item_id`, `item_type`, `rank`, `selection_reason`, `score_breakdown`, `estimated_tokens`, `strategy_source`, `injected_advisory_ids`, plus the **attribution fields** below. This is the per-item row the learning join reads. |
 | `rejected_items[]` | `{item_id, item_type, relevance_score, reason, strategy_source}`. Known `reason` values: `dedup`, `structural_filter`, `meta_activity_filter`, `max_items`, `token_budget`, `session_dedup`, `semantic_dedup`, `content_floor`. |
 | `content_floor` | `{mode, min_distinct_words, penalty, exempt_item_types, penalized_count, penalized_item_ids, excluded_count, excluded_item_ids}`. Emitted even when nothing tripped, so "floor ran, nothing thin" is distinguishable from "floor never ran". |
-| `budget_trace[]` | One `{item_id, item_tokens, running_total, included}` row per candidate the token stage weighed, against the `budget_max_items` / `budget_max_tokens` alongside it. |
-| `token_*` | `token_counter`, `token_budget_safety_margin`, `token_budget_effective`, `token_total_estimated` always. `token_counter_validator`, `token_total_validated`, `token_count_delta`, `token_count_delta_pct` **only when a `token_budget_validator` is configured** — check before reading. |
+| `index_mode` | `true` when the pack was assembled for the one-line-per-item index rendering (`get_context(index=True)` / `search(index=True)`, #305) instead of excerpt bodies. Always present on packs built after #305; read it with a `False` default. **Branch on it before aggregating token numbers** — see the two rows below. |
+| `budget_trace[]` | One `{item_id, item_tokens, running_total, included}` row per candidate the token stage weighed, against the `budget_max_items` / `budget_max_tokens` alongside it. `item_tokens` is whichever cost was *charged*: the item's excerpt normally, its rendered index line when `index_mode` is `true`. |
+| `token_*` | `token_counter`, `token_budget_safety_margin`, `token_budget_effective`, `token_total_estimated` always. `token_counter_validator`, `token_total_validated`, `token_count_delta`, `token_count_delta_pct` **only when a `token_budget_validator` is configured** — check before reading. `token_total_estimated` sums the same charge `budget_trace[].item_tokens` records, so on an `index_mode` pack it is index-line tokens, not excerpt tokens — averaging it across a mixed corpus mixes two units. The per-item excerpt read cost stays on `injected_items[].estimated_tokens` in both modes. |
 | `strategy_failures[]` | Strategies that raised but did not block the build (a sibling succeeded). Empty on a clean build. |
 | `meta_filtered_count` | Graph nodes dropped by the default meta-`Activity` filter — the same drops `rejected_items` records under `meta_activity_filter`. |
 
@@ -1662,7 +1663,7 @@ Or install via ClawHub:
 clawhub install trellis-ai
 ```
 
-After restarting OpenClaw, the agent has access to all 11 macro tools above. See [`examples/integrations/openclaw/`](../../examples/integrations/openclaw/) for the full setup guide and skill definition.
+After restarting OpenClaw, the agent has access to all 15 macro tools above. See [`examples/integrations/openclaw/`](../../examples/integrations/openclaw/) for the full setup guide and skill definition.
 
 ---
 

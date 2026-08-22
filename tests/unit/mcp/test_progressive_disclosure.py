@@ -57,6 +57,14 @@ _SUBJECTS = (
     "partition pruning",
     "query planning",
     "buffer eviction",
+    "replica promotion",
+    "sequence drift",
+    "toast compression",
+    "logical decoding",
+    "connection storms",
+    "tablespace layout",
+    "backup retention",
+    "collation upgrades",
 )
 
 
@@ -131,6 +139,43 @@ class TestIndexModeRetrieval:
         # The ids the agent can cite are the ids the pack recorded.
         assert set(payload["injected_item_ids"]) == {"doc-0", "doc-1"}
         assert "record_feedback(" in result
+
+    @pytest.mark.parametrize(
+        ("max_tokens", "intent"),
+        [
+            (200, "failover runbook"),
+            # A long intent makes the renderer's heading overhead large
+            # relative to the budget — the case where a builder budgeting
+            # the same lines against the undiscounted max_tokens admits a
+            # tail the rendering then drops.
+            (120, "failover runbook " * 8),
+        ],
+    )
+    def test_every_id_charged_as_served_is_an_id_the_agent_is_shown(
+        self, temp_registry: StoreRegistry, max_tokens: int, intent: str
+    ) -> None:
+        # A pack item that is recorded but never rendered is invisible
+        # twice over: session dedup suppresses it for the rest of the
+        # session, and the learning join grades it as served-unreferenced.
+        _seed_documents(temp_registry, 20)
+        result = get_context(intent, max_tokens=max_tokens, index=True)
+        payload = temp_registry.operational.event_log.get_events(
+            event_type=EventType.PACK_ASSEMBLED, limit=10
+        )[0].payload
+
+        assert payload["injected_item_ids"]
+        for item_id in payload["injected_item_ids"]:
+            assert f"`{item_id}`" in result
+        assert result.count("- `doc-") == len(payload["injected_item_ids"])
+
+    def test_a_tiny_budget_still_answers_with_one_id(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        # "No context found" about a corpus that has some is the one
+        # wrong answer; a one-line survey is the right degradation.
+        _seed_documents(temp_registry, 5)
+        result = get_context("failover runbook", max_tokens=30, index=True)
+        assert result.count("- `doc-") == 1
 
     def test_normal_retrieval_still_marks_a_non_index_serve(
         self, temp_registry: StoreRegistry
@@ -294,9 +339,22 @@ class TestGetItemsResolution:
         self, temp_registry: StoreRegistry
     ) -> None:
         _seed_documents(temp_registry, 3)
-        result = get_items(["doc-0", "doc-1", "doc-2"], max_tokens=350)
+        result = get_items(["doc-0", "doc-1", "doc-2"], max_tokens=500)
+        assert "## [document] `doc-0`" in result
         assert "over token budget" in result
-        assert "re-fetch:" in result
+        assert "re-fetch with a larger max_tokens" in result
+
+    def test_a_lone_over_budget_item_is_omitted_not_truncated(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        _seed_documents(temp_registry, 1)
+        result = get_items(["doc-0"], max_tokens=100)
+        # No prefix, and the audit event must not claim it was served.
+        assert "## [document] `doc-0`" not in result
+        assert "re-fetch with a larger max_tokens: `doc-0`" in result
+        payload = TestGetItemsAttribution._fetch_event(temp_registry).payload
+        assert payload["served_item_ids"] == []
+        assert payload["omitted_item_ids"] == ["doc-0"]
 
 
 class TestGetItemsAttribution:
@@ -339,7 +397,7 @@ class TestGetItemsAttribution:
         self, temp_registry: StoreRegistry
     ) -> None:
         _seed_documents(temp_registry, 3)
-        get_items(["doc-0", "doc-1", "doc-2", "ghost"], max_tokens=350)
+        get_items(["doc-0", "doc-1", "doc-2", "ghost"], max_tokens=500)
         payload = self._fetch_event(temp_registry).payload
         assert payload["requested_item_ids"] == ["doc-0", "doc-1", "doc-2", "ghost"]
         assert payload["not_found_item_ids"] == ["ghost"]
