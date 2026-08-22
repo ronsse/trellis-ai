@@ -51,6 +51,17 @@ class JudgedOpType(StrEnum):
     RECONCILIATION = "reconciliation"
     DISTILLATION = "distillation"
     CURATION = "curation"
+    #: Shadow-mode tagging (#321) — the LLM classifies a document and the
+    #: verdict is recorded without being served. ``decision`` carries the
+    #: proposed ``content_type`` (a structural label such as ``reference``
+    #: or ``notes``, safe to log); the open-vocabulary ``domain`` tags are
+    #: *not* in the payload, because a domain value like
+    #: ``yellowstone-national-park`` reveals subject matter and the event
+    #: log has a different access/retention profile than the doc store.
+    #: They live on the document as
+    #: :class:`~trellis.schemas.classification.ShadowTags` instead — same
+    #: access path as the content they describe.
+    CLASSIFICATION = "classification"
 
 
 class InputDigest(TrellisModel):

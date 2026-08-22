@@ -9,6 +9,7 @@ from trellis.schemas.classification import (
     LifecycleState,
     RetrievalAffinity,
     Sensitivity,
+    ShadowTags,
 )
 from trellis.schemas.document_metadata import DocumentMetadata, document_form_of
 from trellis.schemas.entity import Entity, EntityAlias, EntitySource, GenerationSpec
@@ -132,6 +133,7 @@ __all__ = [
     "SectionedPack",
     "SectionRequest",
     "Sensitivity",
+    "ShadowTags",
     "SubjectRef",
     "Trace",
     "TraceContext",

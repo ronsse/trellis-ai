@@ -283,6 +283,103 @@ Two things to know about how this differs from classify-on-write:
 {"status": "ok", "scanned": 240, "refreshed": 31, "skipped_fresh": 200, "skipped_unchanged": 0, "skipped_no_signal": 6, "skipped_missing_content": 3, "errors": 0, "dry_run": false, "include_domain": false, "item_ids_refreshed": ["doc-1", "doc-2"]}
 ```
 
+### `trellis classify shadow`
+
+Record what an LLM says about stored documents **without serving it** — the precondition for teaching the deterministic classifier a vocabulary it has never observed ([#321](https://github.com/ronsse/trellis-ai/issues/321) Phase 1).
+
+```bash
+trellis classify shadow [--limit <n>] [--max-age-days <n>] [--page-size <n>] [--model-id <label>] [--dry-run] [--format text|json]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--limit` | `0` (all) | Stop after scanning this many documents. |
+| `--max-age-days` | `-1` | Re-judge shadow records older than this. The default judges only documents with **no** shadow record — each one costs a model call. |
+| `--page-size` | `100` | Documents fetched per store round-trip. |
+| `--model-id` | `""` | Label recorded on each record and event (e.g. `hermes3:8b`). Defaults to the classifier's name. |
+| `--dry-run` | off | Compute records without writing them or emitting events. |
+
+Requires an `llm:` block in `config.yaml`; without one the command exits `1` naming what is missing rather than silently shadowing nothing. A **local** model is the intended configuration — the pass is ~1.6 s per document against a whole corpus, which is free and private on-host and expensive anywhere else.
+
+**Why a separate key.** Verdicts are written to `metadata.content_tags_shadow`, never to `content_tags`. Two things follow, and both are the point:
+
+- **Retrieval does not move.** No pack ranking changes while the corpus accrues, so this is safe to run against a production store. The guarantee is enforced in two independent places: tag filters address the JSON path `$.content_tags.<facet>`, so a sibling top-level key is structurally unaddressable; and `trellis.retrieve.servable` strips the key at the serving boundary so it cannot ride into a `PackItem` on the metadata splat.
+- **It avoids destroying data on a vocabulary collision.** The deterministic path emits `ContentType` values (`error-resolution` / `procedure` / `code`); the enrichment path emits `DEFAULT_CLASSIFICATIONS` (`reference` / `research` / `notes` / …). The two overlap in exactly one value, `documentation`. Writing LLM output into `content_tags` would replace one taxonomy with another — and would in fact raise `ValidationError`, since `ContentTags.content_type` is a closed `Literal`. The shadow record stores the LLM's vocabulary verbatim, because the disagreement is the measurement Phase 2 mines.
+
+Each judged document also emits a leak-safe `MEMORY_OP_JUDGED` event ([#264](https://github.com/ronsse/trellis-ai/issues/264)'s substrate — this is its classify-layer instance, not a parallel channel): digest, `content_type` verdict label, confidence, and a subject pointer. The open-vocabulary `domain` tags stay **off** the event — a value like `yellowstone-national-park` reveals subject matter, and the event log has a different access/retention profile than the doc store. A document that produces no tags still emits a verdict of `unclassified`: "the model looked and produced nothing" is the coverage signal the pass exists to measure.
+
+This is a batch pass only, never an ingest hook. Classify-on-write is deterministic and inline for a reason (microseconds, no network); a model call there would spend the write path's latency budget on a measurement. Documents written since the last pass are covered by re-running it.
+
+**JSON output:**
+
+```json
+{"status": "ok", "scanned": 999, "written": 964, "skipped_fresh": 0, "skipped_no_signal": 31, "skipped_missing_content": 4, "errors": 0, "dry_run": false, "item_ids_written": ["doc-1", "doc-2"]}
+```
+
+### `trellis classify shadow-report`
+
+Compare shadow tags against live tags, per facet and per document. Read-only.
+
+```bash
+trellis classify shadow-report [--limit <n>] [--page-size <n>] [--per-document] [--format text|json]
+```
+
+Answers the two questions that decide whether a shadow corpus is worth promoting from: where does the LLM produce a facet the deterministic pipeline leaves empty (`live_missing` — the coverage gain), and where do the two disagree outright (`disagreed`).
+
+`agreement_rate` is `null` when nothing is comparable, rather than `0.0` or `1.0`. A rate over an empty denominator is not a measurement, and reporting one as a number is how a metric ends up wired to a constant.
+
+An empty `domain` list counts as **absent**, not as a value. Every document classify-on-write tags stores `domain: []` deliberately, so counting it as "live said something different" would report near-total disagreement on the one facet where the live side has, by design, said nothing.
+
+`out_of_vocabulary_content_types` counts shadow `content_type` values outside the live `ContentType` vocabulary — the collision above, made countable. A non-empty map means promoting shadow `content_type` wholesale would mean *adopting a different taxonomy*, not refining the current one.
+
+**JSON output:**
+
+```json
+{"status": "ok", "scanned": 999, "with_shadow": 964, "facets": {"content_type": {"agreed": 88, "disagreed": 42, "live_missing": 780, "shadow_missing": 12, "both_missing": 42, "agreement_rate": 0.677}}, "out_of_vocabulary_content_types": {"reference": 310, "notes": 204}}
+```
+
+### `trellis classify tag-candidates`
+
+Mine the shadow corpus for keyword rules the deterministic classifier could own, so the LLM can be switched off for what has been learned ([#321](https://github.com/ronsse/trellis-ai/issues/321) Phase 2) — "documents containing `todoist` were tagged `task-management` in 40 of 41 cases; propose that keyword".
+
+```bash
+trellis classify tag-candidates [--facet <name>] [--limit <n>] [--emit/--no-emit] [--format text|json]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--facet` | `domain` | Shadow facet to mine. `domain` is the only facet with a config write target. |
+| `--limit` | `50000` | Cap on documents scanned. |
+| `--emit / --no-emit` | emit | Emit a `TAG_KEYWORD_CANDIDATE` event per candidate. `--no-emit` is a dry run and does not advance the cooldown. |
+
+**Surface-only, never auto-applied.** The command proposes; it never writes `config.yaml`. The text output ends with a paste-ready `classify.domain_keywords` block — pasting it promotes, deleting those lines revokes. That is not a missing feature: `domain` is the one facet that *hard-excludes* a document from a domain-scoped query, so a wrong promoted keyword **hides** content rather than merely mis-ranking it (the #282 failure mode). A human approves every domain promotion.
+
+Thresholds come from the `ParameterRegistry` under component `learning.tag_evolution`, and a **missing key raises** rather than falling back to a default — the command exits `1` naming every missing key and its recommended seed. Seed them from `trellis.learning.tag_evolution.RECOMMENDED_SEED_VALUES`:
+
+| Key | Seed | Gate |
+|-----|------|------|
+| `tag_keyword_min_support` | `30` | Documents containing the keyword **and** carrying the tag. |
+| `tag_keyword_min_precision` | `0.75` | `support / keyword_documents` — how reliably the keyword predicts. |
+| `tag_keyword_min_lift` | `0.25` | Minimum `lift - 1` over the tag's base rate. |
+| `tag_keyword_min_corpus` | `30` | Shadow-corpus floor; below it, nothing is surfaced at all. |
+| `tag_keyword_cooldown_days` | `7` | Days before an unchanged candidate re-surfaces. |
+
+`min_support` and `min_lift` follow the precedent in `learning/tuners/auto_promote.py` (30 samples / 0.25 effect) rather than inventing a second statistical convention.
+
+**Lift is the load-bearing gate.** In a corpus where one tag is on most documents, *every* keyword has high precision for it — precision alone would surface the whole vocabulary as "perfectly predictive". Lift measures how much better than the tag's own base rate the keyword does, so a keyword that only matches the base rate dies.
+
+The analyzer shares the four constraints of the well-known promotion loop it is modelled on: read-only against the corpus (the only write is the event), thresholds-or-raise, idempotent across runs (a candidate re-surfaces only on ≥20% support growth or an elapsed cooldown — shared with `schema_evolution` via `trellis.learning.cooldown`), and it **filters its own writes** — a keyword the live classifier already owns is excluded before counting, so a promoted keyword can neither be re-proposed nor read its own prior promotion as fresh evidence.
+
+Two properties of `KeywordDomainClassifier` shape the safety story. It matches keywords as *substrings* while the analyzer mines whole *tokens*, so a mined keyword always fires (the mining is strictly more conservative than the matching). And a domain needs **two** distinct keyword hits before it is assigned — so promoting a single keyword cannot by itself make the classifier assign a domain, and one bad promotion cannot hide a document on its own.
+
+**What this does not measure.** Promotion is gated on *agreement with the LLM*, not on retrieval outcome. Agreement shows the deterministic rule imitates the model; it does not show either was useful. Closing that requires joining promoted tags back to pack feedback — the same attribution machinery `learning/pack_observations.py` runs. Until that join exists this is a distillation step with a human gate, not a closed learning loop, and every candidate's `notes` say so.
+
+**JSON output:**
+
+```json
+{"status": "ok", "facet": "domain", "emitted": true, "candidates": [{"candidate_id": "3f2a...", "facet": "domain", "keyword": "todoist", "tag": "task-management", "support": 40, "keyword_documents": 41, "tag_documents": 44, "corpus_documents": 964, "precision": 0.976, "recall": 0.909, "lift": 21.4, "has_write_target": true, "example_item_ids": ["doc-1"], "recurrence_count": 0, "notes": ["gated on agreement with the LLM, not on retrieval outcome — this shows the rule imitates the model, not that either helped", "domain hard-excludes on mismatch: a wrong keyword hides documents from domain-scoped queries rather than re-ranking them — human approval required"]}], "domain_keywords_fragment": {"task-management": ["todoist"]}}
+```
+
 ### `trellis ingest evidence`
 
 Ingest evidence from a JSON file.

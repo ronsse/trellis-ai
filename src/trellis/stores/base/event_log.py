@@ -230,6 +230,20 @@ class EventType(StrEnum):
     #: cooldown / recurrence tracking can deduplicate. See
     #: ``docs/design/adr-well-known-promotion-loop.md``.
     WELL_KNOWN_CANDIDATE = "well_known.candidate"
+    #: Emitted by the tag-keyword promotion loop
+    #: (:mod:`trellis.learning.tag_evolution`) when a keyword predicts an
+    #: LLM-assigned tag across the shadow corpus strongly enough to be worth
+    #: teaching the deterministic classifier. Sibling of
+    #: :attr:`WELL_KNOWN_CANDIDATE` and surface-only in the same way: the
+    #: analyzer proposes, a human writes ``classify.domain_keywords`` in
+    #: ``config.yaml``. Never auto-applied for the ``domain`` facet — a wrong
+    #: domain keyword *hides* documents from domain-scoped queries rather than
+    #: merely re-ranking them (the #282 failure mode). Payload includes the
+    #: stable ``candidate_id`` for cooldown / recurrence tracking, plus
+    #: ``support`` / ``precision`` / ``lift`` so a reviewer can see the
+    #: strength of the association rather than trusting a bare verdict.
+    #: See ``#321`` Phase 2.
+    TAG_KEYWORD_CANDIDATE = "tag_keyword.candidate"
 
     # Proposal lifecycle (coding-agent self-improvement loop — Item 7).
     #: Emitted by

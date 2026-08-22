@@ -167,6 +167,65 @@ class ContentTags(TrellisModel):
         return self
 
 
+#: Document-metadata key the shadow tag record is stored under.
+#: Lives here, beside the model it names, so both the writer
+#: (:mod:`trellis.classify.shadow`) and the serving-boundary filter
+#: (:mod:`trellis.retrieve.servable`) can key off one definition without
+#: either package importing the other.
+SHADOW_TAGS_KEY = "content_tags_shadow"
+
+
+class ShadowTags(TrellisModel):
+    """LLM-derived tags recorded *beside* :class:`ContentTags`, never in place of it.
+
+    The shadow record is the precondition for the ``DETERMINISTIC > LOCAL >
+    FRONTIER`` ladder (``docs/PRD.md`` §6): the deterministic layer cannot
+    inherit a vocabulary the LLM has never been observed producing. Persisting
+    LLM output under a separate key lets a corpus accrue with **zero effect on
+    retrieval** — nothing overwrites the live tags, so no pack ranking moves
+    while the evidence builds up. See ``#321``.
+
+    **Every facet is an open string, deliberately.** :attr:`ContentTags.content_type`
+    is a closed nine-value ``Literal``; the enrichment path's vocabulary
+    (:data:`trellis_workers.enrichment.service.DEFAULT_CLASSIFICATIONS` —
+    ``reference``, ``research``, ``notes``, ``project``, …) overlaps it in
+    exactly one value, ``documentation``. Coercing LLM output into
+    ``ContentTags`` therefore raises ``ValidationError`` for almost every real
+    classification — and even where it validated it would silently discard the
+    disagreement. That disagreement is the measurement: Phase 2 mines it. So a
+    shadow record stores what the model actually said, verbatim.
+
+    **Reserved namespaces are not rejected here**, unlike
+    :meth:`ContentTags._reject_reserved_namespaces`. A shadow record is an
+    *observation* of what a model proposed, not an assertion the system adopts;
+    refusing to record a reserved proposal would lose the very signal an
+    operator needs to see. Enforcement lives at the promotion gate instead —
+    :func:`trellis.learning.tag_evolution.analyze_tag_keyword_candidates`
+    refuses to surface a candidate whose tag is a reserved name.
+    """
+
+    domain: list[str] = Field(default_factory=list)
+    content_type: str | None = None
+    scope: str | None = None
+    signal_quality: str | None = None
+    retrieval_affinity: list[str] = Field(default_factory=list)
+    custom: dict[str, list[str]] = Field(default_factory=dict)
+    #: Names of the classifiers that produced this record (the ``Classifier``
+    #: protocol's ``name``, e.g. ``"llm_facet"``).
+    classified_by: list[str] = Field(default_factory=list)
+    #: When the shadow pass ran. Drives the "already shadowed / stale" scan in
+    #: :func:`trellis.classify.shadow.shadow_classify_stale`, exactly as
+    #: :attr:`ContentTags.classified_at` drives the live refresh scan.
+    classified_at: datetime | None = None
+    #: Identifier of the model or tier that produced the record (e.g.
+    #: ``"hermes3:8b"``). A label for grouping agreement stats by model — the
+    #: same string that rides ``MemoryOpJudgedPayload.model_id``.
+    model_id: str = ""
+    #: The producing classifier's own confidence, in ``[0.0, 1.0]``.
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    shadow_version: str = "1"
+
+
 Sensitivity = Literal["public", "internal", "confidential", "restricted"]
 
 LifecycleState = Literal[

@@ -38,6 +38,13 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
 
+from trellis.learning.cooldown import (
+    COOLDOWN_GROWTH_RATIO,
+    DEFAULT_PRIOR_SCAN_LIMIT,
+    PriorCandidate,
+    cooldown_blocks_emission,
+    load_prior_candidates,
+)
 from trellis.meta.agents import META_AGENT_PREFIX
 from trellis.schemas import well_known as wk
 from trellis.stores.base.event_log import EventType
@@ -117,10 +124,9 @@ RECOMMENDED_SEED_VALUES: dict[str, float | int | str | bool] = {
 _SIGNAL_QUALITY_ORDER: tuple[str, ...] = ("noise", "low", "standard", "high")
 
 
-# Trigger for re-emission within the cooldown window: a candidate whose
-# count grew by ≥ this fraction since the prior emission re-surfaces
-# regardless of the cooldown. Per ADR §2.3.
-_COOLDOWN_GROWTH_RATIO: float = 0.20
+# Re-emission growth trigger — now owned by :mod:`trellis.learning.cooldown`
+# and aliased here for the pre-existing import path.
+_COOLDOWN_GROWTH_RATIO: float = COOLDOWN_GROWTH_RATIO
 
 
 # Default cap for enumerating current nodes from the GraphStore. The
@@ -611,48 +617,23 @@ def _first_last_seen(items: Iterable[dict[str, Any]]) -> tuple[datetime, datetim
 # Cooldown bookkeeping
 # ---------------------------------------------------------------------------
 
-
-@dataclass(frozen=True, slots=True)
-class _PriorCandidate:
-    """Snapshot of the most recent emission for a ``candidate_id``."""
-
-    emitted_at: datetime
-    count: int
-    recurrence_count: int
+# The re-emission rule (ADR §2.3 / §4.2) is shared with the tag-keyword
+# promotion loop and lives in :mod:`trellis.learning.cooldown` so the two
+# surface-only analyzers cannot drift apart on it. These aliases keep this
+# module's pre-existing private names working for its callers and tests.
+_PriorCandidate = PriorCandidate
 
 
 def _load_prior_candidates(
-    event_log: EventLog, *, scan_limit: int = 5_000
+    event_log: EventLog, *, scan_limit: int = DEFAULT_PRIOR_SCAN_LIMIT
 ) -> dict[str, _PriorCandidate]:
-    """Index the latest WELL_KNOWN_CANDIDATE event per ``candidate_id``.
-
-    Per the swarm directive's "If you hit a blocker": payload predicate
-    push-down is awkward across backends, so we read with ``order=desc``
-    and filter Python-side. The unique candidate space is bounded by
-    the sample size we'd produce anyway.
-    """
-    events = event_log.get_events(
+    """Index the latest WELL_KNOWN_CANDIDATE event per ``candidate_id``."""
+    return load_prior_candidates(
+        event_log,
         event_type=EventType.WELL_KNOWN_CANDIDATE,
-        limit=scan_limit,
-        order="desc",
+        count_key="count",
+        scan_limit=scan_limit,
     )
-    out: dict[str, _PriorCandidate] = {}
-    for event in events:
-        cid = event.payload.get("candidate_id")
-        if not isinstance(cid, str) or cid in out:
-            # Only the most recent emission counts; ``order=desc``
-            # means the first sighting per id is the freshest.
-            continue
-        prior_count = event.payload.get("count")
-        prior_recurrence = event.payload.get("recurrence_count")
-        out[cid] = _PriorCandidate(
-            emitted_at=event.occurred_at,
-            count=int(prior_count) if isinstance(prior_count, int | float) else 0,
-            recurrence_count=int(prior_recurrence)
-            if isinstance(prior_recurrence, int | float)
-            else 0,
-        )
-    return out
 
 
 def _cooldown_blocks_emission(
@@ -663,39 +644,15 @@ def _cooldown_blocks_emission(
     cooldown_days: int,
     now: datetime,
 ) -> tuple[bool, datetime | None, int]:
-    """Return ``(blocked, cooldown_until, recurrence_count)``.
-
-    Per ADR §2.3:
-
-    * No prior emission → not blocked, recurrence_count = 0.
-    * Prior emission, count grew by >= 20% → not blocked, recurrence
-      increments.
-    * Prior emission within cooldown window AND count didn't grow →
-      blocked, cooldown_until = prior_emitted_at + cooldown_days.
-    * Prior emission past cooldown → not blocked, recurrence increments
-      (per ADR §4.2, a persistent candidate is a persistent signal).
-    """
-    if prior is None:
-        return False, None, 0
-
-    growth_ratio = (
-        (current_count - prior.count) / prior.count if prior.count > 0 else 1.0
+    """Return ``(blocked, cooldown_until, recurrence_count)``. See §2.3."""
+    return cooldown_blocks_emission(
+        candidate_id=candidate_id,
+        current_count=current_count,
+        prior=prior,
+        cooldown_days=cooldown_days,
+        now=now,
+        log_event="well_known.candidate_suppressed_cooldown",
     )
-    if growth_ratio >= _COOLDOWN_GROWTH_RATIO:
-        return False, None, prior.recurrence_count + 1
-
-    cooldown_until = prior.emitted_at + timedelta(days=cooldown_days)
-    if now < cooldown_until:
-        logger.info(
-            "well_known.candidate_suppressed_cooldown",
-            candidate_id=candidate_id,
-            cooldown_until=cooldown_until.isoformat(),
-            current_count=current_count,
-            prior_count=prior.count,
-        )
-        return True, cooldown_until, prior.recurrence_count
-
-    return False, None, prior.recurrence_count + 1
 
 
 # ---------------------------------------------------------------------------

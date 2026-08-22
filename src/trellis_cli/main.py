@@ -61,7 +61,7 @@ app.add_typer(
 app.add_typer(
     classify_app,
     name="classify",
-    help="Backfill and refresh content tags",
+    help="Backfill, shadow-tag, and mine promotion candidates for content tags",
 )
 app.add_typer(curate_app, name="curate")
 app.add_typer(retrieve_app, name="retrieve")
