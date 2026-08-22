@@ -1,9 +1,10 @@
 # MCP Setup — Claude Code
 
-Trellis ships an MCP server (`trellis-mcp`) that exposes 11 macro tools to Claude Code:
+Trellis ships an MCP server (`trellis-mcp`) that exposes 16 macro tools to Claude Code:
 
-- **Core (8):** `get_context`, `save_experience`, `save_knowledge`, `save_memory`, `get_lessons`, `get_graph`, `record_feedback`, `search`.
+- **Core (10):** `get_context`, `save_experience`, `save_knowledge`, `save_memory`, `get_lessons`, `get_graph`, `get_items`, `get_file_context`, `record_feedback`, `search`.
 - **Sectioned context (3):** `get_objective_context`, `get_task_context`, `get_sectioned_context`.
+- **Structured (3):** `record_observation`, `query_observations`, `execute_mutation` — these return JSON rather than markdown.
 
 All return token-budgeted markdown sized for the agent's context window.
 

@@ -3,7 +3,7 @@
 ```yaml
 status: active
 owner: nronsse
-last-review: 2026-08-02
+last-review: 2026-08-22
 ```
 
 > Rules: ≤ 2 pages. §3 contains only verifiable facts — every claim cites a path or command.
@@ -33,10 +33,10 @@ Honesty note: verified deployments today = the author's dogfood + that paused pi
 - **v0.9.0** tagged (`git tag`), published on PyPI as `trellis-ai`; Python ≥3.11, MIT (`pyproject.toml`).
 - **Six shipped packages** — `trellis`, `trellis_cli`, `trellis_api`, `trellis_sdk`, `trellis_workers`, `trellis_wire` (`pyproject.toml [tool.hatch.build.targets.wheel]`); entry points `trellis` / `trellis-mcp` / `trellis-api`.
 - **Six store ABCs, multi-backend**: graph = SQLite/Postgres/ArcadeDB/Neo4j, vector = SQLite/pgvector/ArcadeDB/Neo4j, blob = local/S3 (`src/trellis/stores/`, table in `CLAUDE.md`). Backends pass shared contract suites (`tests/unit/stores/contracts/` — 49 graph + 25 vector tests per backend).
-- **14 MCP tools** (`grep -c '@mcp.tool' src/trellis/mcp/server.py` → 14), markdown output, opt-in HTTP transport with scoped API keys (#252, `docs/design/adr-mcp-http-transport.md`).
+- **16 MCP tools** (`grep -c '@mcp.tool' src/trellis/mcp/server.py` → 16), markdown output, opt-in HTTP transport with scoped API keys (#252, `docs/design/adr-mcp-http-transport.md`).
 - **REST API with scoped auth** (`TRELLIS_AUTH_MODE`, PR #242) + Memory Explorer UI (`src/trellis_api/`); dual-mode Python SDK (`src/trellis_sdk/`).
 - **Governed mutation pipeline** — validate → policy → idempotency → execute → emit event (`src/trellis/mutate/executor.py`); traces immutable.
-- **Tests/CI**: 4665 unit tests collected by default, 5215 total, as of 2026-08-02 (`.venv/bin/python -m pytest tests/unit/ -q --co`); all six workflows green on main 2026-08-02 (`gh run list --repo ronsse/trellis-ai --branch main`).
+- **Tests/CI**: 5038 unit tests collected by default, 5609 total, as of 2026-08-22 (`.venv/bin/python -m pytest tests/unit/ -q --co`); all six workflows green on main 2026-08-22 (`gh run list --repo ronsse/trellis-ai --branch main`).
 - **Landed 2026-07-11**: `trellis ingest corpus` (bb5a882), `trellis ingest conversations` (0a7e482), `--extract` entity mining (7431488), `trellis analyze cost` (5ea7cd5).
 - **Live-deployment truth** (dogfood analysis, `TODO.md` §"Dogfood gap analysis — 2026-07-11"): 36 docs / 6 traces / 44 nodes / 187 events / 5 packs and **0 advisories / 0 lessons** — the learning loop runs but is input-starved; three retrieval defects verified live over MCP (`domain=` hard-exclusion, missing `pack_id` on flat `get_context`, `get_context`/`search` bypassing PackBuilder). **All three landed 2026-07-14 (#254/#262, §3.H.0); loop-starvation persists pending the enrichment `llm:` block.**
 

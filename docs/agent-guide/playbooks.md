@@ -568,7 +568,7 @@ Press Ctrl+C after confirming it starts without errors.
 }
 ```
 
-4. Restart OpenClaw. The agent now has access to 11 macro tools (8 core + 3 sectioned-context).
+4. Restart OpenClaw. The agent now has access to 16 macro tools (10 core + 3 sectioned-context + 3 structured).
 
 5. Verify the agent can use Trellis tools by asking it to run:
 

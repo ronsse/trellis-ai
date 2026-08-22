@@ -28,7 +28,7 @@ A **structured experience store for AI agents**. Three jobs:
 2. **Build a knowledge graph** of typed entities and relationships.
 3. **Retrieve token-budgeted context packs** before the agent starts new work.
 
-Agents use it via an MCP server (11 macro tools), a REST API, a Python SDK, or a CLI. Same data underneath, four interfaces on top.
+Agents use it via an MCP server (16 macro tools), a REST API, a Python SDK, or a CLI. Same data underneath, four interfaces on top.
 
 ## 60-second quickstart
 
