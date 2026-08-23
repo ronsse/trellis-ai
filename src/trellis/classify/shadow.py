@@ -116,9 +116,12 @@ logger = structlog.get_logger(__name__)
 PROTECTED_LIVE_KEYS = CLASSIFY_METADATA_KEYS
 
 #: ``decision`` value recorded on the ``MEMORY_OP_JUDGED`` event when the
-#: classifier returned no ``content_type``. A verdict of "produced nothing" is
+#: classifier produced no classification label at all — see
+#: :attr:`~trellis.schemas.classification.ShadowTags.verdict`, which resolves
+#: that label across both tag vocabularies. A verdict of "produced nothing" is
 #: itself a training signal — coverage is the headline number the shadow pass
-#: exists to measure — so it is logged as a label rather than skipped.
+#: exists to measure — so it is logged as a label rather than skipped. It must
+#: mean *the model said nothing*, never *this reader looked in one place*.
 DECISION_UNCLASSIFIED = "unclassified"
 
 #: :attr:`ShadowOutcome.reason` values. Constants, not free text, so the batch
@@ -283,7 +286,7 @@ def shadow_classify_item(
             event_log,
             item_id=item_id,
             content=content,
-            decision=shadow.content_type or DECISION_UNCLASSIFIED,
+            decision=shadow.verdict or DECISION_UNCLASSIFIED,
             confidence=result.confidence,
             model_id=shadow.model_id,
         )

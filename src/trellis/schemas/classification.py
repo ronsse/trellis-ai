@@ -174,6 +174,14 @@ class ContentTags(TrellisModel):
 #: either package importing the other.
 SHADOW_TAGS_KEY = "content_tags_shadow"
 
+#: Tag key carrying a document-form verdict from the *enrichment* vocabulary
+#: (``reference``, ``research``, ``notes``, ``project``, …). Names the same
+#: dimension as :attr:`ContentTags.content_type` but in the open vocabulary
+#: that closed ``Literal`` cannot hold, so the two cannot share a key — see
+#: :mod:`trellis.schemas.document_metadata`, which owns the matching flat
+#: metadata field. Defined here, at the layer both readers already import.
+DOCUMENT_FORM_KEY = "document_form"
+
 #: Tag facets whose stored value is a *list*, as opposed to a single label.
 #: One definition for every reader that has to normalise a facet value, because
 #: getting this wrong is how #282 happened — the flat scalar shape
@@ -269,6 +277,29 @@ class ShadowTags(TrellisModel):
             or self.retrieval_affinity
             or self.custom
         )
+
+    @property
+    def verdict(self) -> str | None:
+        """The single document-classification label this record carries.
+
+        Prefers the modelled :attr:`content_type` facet, then falls back to
+        ``custom[DOCUMENT_FORM_KEY]``. Both are consulted because the two
+        classifier families file *the same dimension* under different keys: a
+        deterministic classifier emits the closed
+        :data:`ContentType` vocabulary as ``content_type``, while the
+        enrichment path emits its open vocabulary as ``document_form``
+        (the closed ``Literal`` rejects 9 of its 10 values, which is why they
+        cannot share a key).
+
+        A reader that consults only ``content_type`` therefore sees ``None``
+        for **every** record an LLM produced, no matter how confident the
+        model was — and a caller that turns that ``None`` into an
+        "unclassified" label is recording a constant, not a measurement.
+        """
+        if self.content_type:
+            return self.content_type
+        form = self.custom.get(DOCUMENT_FORM_KEY)
+        return form[0] if form else None
 
 
 Sensitivity = Literal["public", "internal", "confidential", "restricted"]
