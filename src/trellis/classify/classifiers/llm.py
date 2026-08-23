@@ -33,6 +33,12 @@ _DEGRADED_TO_NEEDS_REVIEW = "needs_llm_review"
 #: here. Documented on :attr:`EventType.CLASSIFICATION_DEGRADED`.
 _UPSTREAM_ENRICHMENT_FAILURE = "enrichment_failure"
 
+#: Tag key carrying the enrichment vocabulary's document-form verdict. Matches
+#: the flat metadata key
+#: :attr:`~trellis.schemas.document_metadata.DocumentMetadata.document_form`,
+#: which names the same dimension for ingest-path provenance.
+DOCUMENT_FORM_KEY = "document_form"
+
 
 class LLMFacetClassifier:
     """Wraps :class:`EnrichmentService` to produce faceted classification.
@@ -40,7 +46,9 @@ class LLMFacetClassifier:
     Maps the existing enrichment output into the faceted tag format:
 
     - ``auto_tags`` → ``domain`` facet
-    - ``auto_class`` → ``content_type`` facet
+    - ``auto_class`` → ``document_form`` (lands in ``ContentTags.custom``) —
+      *not* ``content_type``; see the mapping comment in
+      :meth:`classify_async` for why the two vocabularies cannot be merged
     - ``auto_importance`` / ``auto_summary`` → preserved as ``_auto_*`` keys
 
     **Enrichment-only** — LLM calls are non-deterministic, unbounded cost,
@@ -129,7 +137,20 @@ class LLMFacetClassifier:
             tags["domain"] = result.auto_tags
 
         if result.auto_class:
-            tags["content_type"] = [result.auto_class]
+            # NOT ``content_type``. That facet is a closed nine-value Literal
+            # ("what shape of information is this": pattern / decision /
+            # error-resolution / ...); ``auto_class`` comes from
+            # :data:`DEFAULT_CLASSIFICATIONS` ("what form does this document
+            # take": meeting / journal / project / ...), which overlaps it in
+            # exactly one value. Filing it under the facet made
+            # ``to_content_tags`` raise ``ValidationError`` for nine of the ten
+            # values, so enrichment never produced a usable tag set. The repo
+            # already named this dimension when the same collision appeared on
+            # the flat metadata key — see
+            # :attr:`~trellis.schemas.document_metadata.DocumentMetadata.document_form`
+            # — so it goes there, reaching ``ContentTags.custom`` via
+            # :meth:`MergedClassification.to_content_tags`.
+            tags[DOCUMENT_FORM_KEY] = [result.auto_class]
 
         # Preserve importance and summary as special keys for downstream use
         if result.auto_importance:
