@@ -264,6 +264,8 @@ trellis classify backfill [--max-age-days <n>] [--limit <n>] [--page-size <n>] [
 | `--dry-run` | off | Report what would change without writing tags or emitting events. |
 | `--format` | `text` | `text` or `json`. |
 
+Tag writes pass `preserve_updated_at=True`: re-tagging is derived metadata and does not make a document's information fresher, while `updated_at` drives the recency decay in `retrieve.strategies`. Without it a first backfill over an untagged corpus would rewrite every row and flatten recency ordering across the whole store.
+
 Like the two backfills above, this command does **not** require the `TRELLIS_ENABLE_CLASSIFY_ON_INGEST` flag — invoking it *is* the opt-in. It never deletes tags: an item the pipeline produces no signal for keeps whatever it had, and is counted under `skipped_no_signal`. Each write emits a `TAGS_REFRESHED` event carrying the before/after tag diff; a dry run emits nothing.
 
 Every scanned document lands in exactly one bucket: `refreshed`, `skipped_fresh` (stamp newer than `--max-age-days`), `skipped_unchanged` (stale stamp, but re-running the pipeline produces the same tags — so nothing is written and no event is emitted), `skipped_no_signal`, `skipped_missing_content`, or `errors`. That means **`--dry-run` previews what would *change*, not what is merely stale**, and the two runs agree. An unchanged document keeps its old `classified_at` and is re-scanned (never rewritten) by the next backfill.
@@ -303,7 +305,7 @@ Requires an `llm:` block in `config.yaml`; without one the command exits `1` nam
 
 **Why a separate key.** Verdicts are written to `metadata.content_tags_shadow`, never to `content_tags`. Two things follow, and both are the point:
 
-- **Retrieval does not move.** No pack ranking changes while the corpus accrues, so this is safe to run against a production store. The guarantee is enforced in two independent places: tag filters address the JSON path `$.content_tags.<facet>`, so a sibling top-level key is structurally unaddressable; and `trellis.retrieve.servable` strips the key at the serving boundary so it cannot ride into a `PackItem` on the metadata splat.
+- **Retrieval does not move.** No pack ranking changes while the corpus accrues, so this is safe to run against a production store. The guarantee is enforced in two independent places: tag filters address the JSON path `$.content_tags.<facet>`, so a sibling top-level key is structurally unaddressable; and `trellis.retrieve.servable.strip_non_servable` runs where `PackBuilder` collects every strategy's results, so it covers strategies added later and out of tree, not just the built-ins. Note the scope of that claim — shadow tags never reach a *pack*; they are not confidential. `GET /api/v1/documents` returns them to a read-scoped caller, correctly, since that is the same access path as the content they describe.
 - **It avoids destroying data on a vocabulary collision.** The deterministic path emits `ContentType` values (`error-resolution` / `procedure` / `code`); the enrichment path emits `DEFAULT_CLASSIFICATIONS` (`reference` / `research` / `notes` / …). The two overlap in exactly one value, `documentation`. Writing LLM output into `content_tags` would replace one taxonomy with another — and would in fact raise `ValidationError`, since `ContentTags.content_type` is a closed `Literal`. The shadow record stores the LLM's vocabulary verbatim, because the disagreement is the measurement Phase 2 mines.
 
 Each judged document also emits a leak-safe `MEMORY_OP_JUDGED` event ([#264](https://github.com/ronsse/trellis-ai/issues/264)'s substrate — this is its classify-layer instance, not a parallel channel): digest, `content_type` verdict label, confidence, and a subject pointer. The open-vocabulary `domain` tags stay **off** the event — a value like `yellowstone-national-park` reveals subject matter, and the event log has a different access/retention profile than the doc store. A document that produces no tags still emits a verdict of `unclassified`: "the model looked and produced nothing" is the coverage signal the pass exists to measure.
@@ -354,7 +356,7 @@ trellis classify tag-candidates [--facet <name>] [--limit <n>] [--emit/--no-emit
 
 **Surface-only, never auto-applied.** The command proposes; it never writes `config.yaml`. The text output ends with a paste-ready `classify.domain_keywords` block — pasting it promotes, deleting those lines revokes. That is not a missing feature: `domain` is the one facet that *hard-excludes* a document from a domain-scoped query, so a wrong promoted keyword **hides** content rather than merely mis-ranking it (the #282 failure mode). A human approves every domain promotion.
 
-Thresholds come from the `ParameterRegistry` under component `learning.tag_evolution`, and a **missing key raises** rather than falling back to a default — the command exits `1` naming every missing key and its recommended seed. Seed them from `trellis.learning.tag_evolution.RECOMMENDED_SEED_VALUES`:
+Thresholds come from the `ParameterRegistry` under component `learning.tag_evolution`. The **analyzer** never substitutes a default — a missing key raises, naming it and its recommended seed. The **command** seeds the recommended values for that run and warns on stderr, matching `trellis analyze schema-evolution`; nothing seeds this component automatically, so hard-failing would mean failing on every deployment. Seed them for real (making runs reproducible) from `trellis.learning.tag_evolution.RECOMMENDED_SEED_VALUES`:
 
 | Key | Seed | Gate |
 |-----|------|------|
@@ -365,6 +367,8 @@ Thresholds come from the `ParameterRegistry` under component `learning.tag_evolu
 | `tag_keyword_cooldown_days` | `7` | Days before an unchanged candidate re-surfaces. |
 
 `min_support` and `min_lift` follow the precedent in `learning/tuners/auto_promote.py` (30 samples / 0.25 effect) rather than inventing a second statistical convention.
+
+An out-of-range threshold (`min_precision` outside `(0, 1]`, a negative `min_lift`) or a malformed `classify.domain_keywords` block exits `1` with the message, not a traceback.
 
 **Lift is the load-bearing gate.** In a corpus where one tag is on most documents, *every* keyword has high precision for it — precision alone would surface the whole vocabulary as "perfectly predictive". Lift measures how much better than the tag's own base rate the keyword does, so a keyword that only matches the base rate dies.
 
