@@ -1042,6 +1042,58 @@ def _select_enrichment_candidates(
     return candidates[:limit]
 
 
+def _enriched_content_tags(
+    prior: Any,
+    result: Any,
+    *,
+    stamp: datetime,
+) -> dict[str, Any]:
+    """Merge an ``EnrichmentResult`` into a **valid** ``ContentTags`` mapping.
+
+    This path used to write four keys ``ContentTags`` forbids — ``tags``,
+    ``auto_class``, ``auto_importance``, ``tag_confidence`` — so every
+    enrichment run produced a ``content_tags`` no reader could parse. The
+    refresh path caught the ``ValidationError``, logged
+    ``existing_tags_malformed``, and re-classified from scratch, which is how
+    a whole subsystem's output was discarded in silence.
+
+    Two deliberate omissions:
+
+    * **``auto_tags`` do not become the ``domain`` facet.** ``domain``
+      hard-excludes a document from a domain-scoped query on mismatch, so an
+      LLM's unreviewed topic guesses cannot go there — the same rule that makes
+      ``include_domain=False`` the default everywhere else. They are preserved
+      under ``custom["llm_tags"]``, visible and non-excluding, and the
+      promotion ladder (#321) is the reviewed path from a proposal to real
+      vocabulary.
+    * **``tag_confidence`` is not a tag.** It rides the ``EnrichmentResult``
+      and the event; it has no home in a tag set.
+    """
+    from trellis.schemas.classification import ContentTags  # noqa: PLC0415
+
+    tags = (
+        ContentTags.model_validate(prior) if isinstance(prior, dict) else ContentTags()
+    )
+    custom = dict(tags.custom)
+    if result.auto_tags:
+        custom["llm_tags"] = [str(t) for t in result.auto_tags]
+    classified_by = list(dict.fromkeys([*tags.classified_by, "llm_facet"]))
+
+    update: dict[str, Any] = {
+        "custom": custom,
+        "classified_by": classified_by,
+        "classified_at": stamp,
+        "classified_mode": "enrichment",
+    }
+    if result.importance_scored_at is not None:
+        update["importance_scored_at"] = result.importance_scored_at
+    # Re-validate rather than trusting `model_copy`, which does not coerce —
+    # a string stamp would round-trip as a string and silently violate the
+    # `datetime` field type.
+    merged = ContentTags.model_validate({**tags.model_dump(mode="python"), **update})
+    return merged.model_dump(mode="json")
+
+
 def _run_batch_enrichment(
     llm: Any,
     document_store: DocumentStore,
@@ -1069,7 +1121,7 @@ def _run_batch_enrichment(
     ]
     results = asyncio.run(service.batch_enrich(items, concurrency=concurrency))
 
-    stamp = datetime.now(UTC).isoformat()
+    stamp = datetime.now(UTC)
     enriched = 0
     for doc, result in zip(candidates, results, strict=True):
         if not result.success:
@@ -1081,18 +1133,19 @@ def _run_batch_enrichment(
             )
             continue
         metadata = dict(doc.get("metadata") or {})
-        content_tags = dict(metadata.get("content_tags") or {})
-        content_tags["tags"] = result.auto_tags
-        if result.auto_class is not None:
-            content_tags["auto_class"] = result.auto_class
-        content_tags["auto_importance"] = result.auto_importance
-        content_tags["tag_confidence"] = result.tag_confidence
-        content_tags["classified_at"] = stamp
-        if result.importance_scored_at is not None:
-            content_tags["importance_scored_at"] = (
-                result.importance_scored_at.isoformat()
-            )
-        metadata["content_tags"] = content_tags
+        metadata["content_tags"] = _enriched_content_tags(
+            metadata.get("content_tags"), result, stamp=stamp
+        )
+        # `auto_importance` is read from *flat* metadata by
+        # `retrieve.strategies._apply_importance`; writing it inside
+        # `content_tags` (as this path used to) put it where no reader looks.
+        if result.auto_importance:
+            metadata["auto_importance"] = result.auto_importance
+        # The enrichment vocabulary is a document *form*, not a content-type
+        # facet — same reconciliation `schemas/document_metadata.py` made for
+        # the flat key. See `classify.classifiers.llm` for the full argument.
+        if result.auto_class:
+            metadata["document_form"] = result.auto_class
         document_store.put(doc["doc_id"], doc["content"], metadata)
         enriched += 1
         logger.info("worker_enrich.item_enriched", doc_id=doc.get("doc_id"))

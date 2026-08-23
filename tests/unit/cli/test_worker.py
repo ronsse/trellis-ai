@@ -721,10 +721,22 @@ class TestWorkerEnrich:
         data = json.loads(result.stdout.strip())
         assert data["enriched"] == 1
         doc = doc_store.get("doc-x")
-        tags = doc["metadata"]["content_tags"]
-        assert tags["tags"] == ["alpha", "beta"]
-        assert tags["tag_confidence"] == pytest.approx(0.9)
+        metadata = doc["metadata"]
+        tags = metadata["content_tags"]
+
+        # The written shape must be a real ContentTags — it previously carried
+        # `tags` / `auto_class` / `auto_importance` / `tag_confidence`, none of
+        # which the schema permits, so every reader discarded it.
+        from trellis.schemas.classification import ContentTags
+
+        ContentTags.model_validate(tags)
+        assert tags["custom"]["llm_tags"] == ["alpha", "beta"]
+        assert tags["classified_mode"] == "enrichment"
         assert "classified_at" in tags
+
+        # Flat keys go where their readers actually look.
+        assert metadata["auto_importance"] == pytest.approx(0.6)
+        assert metadata["document_form"] == "reference"
 
 
 # ===========================================================================
@@ -1020,3 +1032,75 @@ class TestWorkerCaptureSessions:
         assert result.exit_code == 0, result.output
         assert "worker capture-sessions" in result.output
         assert "memories written: 1" in result.output
+
+
+class TestEnrichedContentTags:
+    """``worker enrich``'s write-back must produce a parseable ``ContentTags``.
+
+    It used to write four keys the schema forbids — ``tags``, ``auto_class``,
+    ``auto_importance``, ``tag_confidence`` — so every enrichment run produced
+    a ``content_tags`` the refresh path logged as ``existing_tags_malformed``
+    and re-classified from scratch. The subsystem's whole output was discarded
+    in silence.
+    """
+
+    @staticmethod
+    def _result(**overrides):
+        from trellis_workers.enrichment.service import EnrichmentResult
+
+        base = {
+            "auto_tags": ["todoist", "productivity"],
+            "auto_class": "reference",
+            "auto_importance": 0.8,
+            "tag_confidence": 0.9,
+            "success": True,
+        }
+        base.update(overrides)
+        return EnrichmentResult(**base)
+
+    def test_output_validates_as_content_tags(self) -> None:
+        from datetime import UTC, datetime
+
+        from trellis.schemas.classification import ContentTags
+        from trellis_cli.worker import _enriched_content_tags
+
+        out = _enriched_content_tags(None, self._result(), stamp=datetime.now(UTC))
+        tags = ContentTags.model_validate(out)
+        assert tags.classified_mode == "enrichment"
+        assert "llm_facet" in tags.classified_by
+
+    def test_llm_topic_guesses_do_not_land_in_the_domain_facet(self) -> None:
+        """``domain`` hard-excludes; an unreviewed LLM guess cannot go there."""
+        from datetime import UTC, datetime
+
+        from trellis_cli.worker import _enriched_content_tags
+
+        out = _enriched_content_tags(None, self._result(), stamp=datetime.now(UTC))
+        assert out["domain"] == []
+        assert out["custom"]["llm_tags"] == ["todoist", "productivity"]
+
+    def test_preserves_prior_tags(self) -> None:
+        from datetime import UTC, datetime
+
+        from trellis.schemas.classification import ContentTags
+        from trellis_cli.worker import _enriched_content_tags
+
+        prior = ContentTags(
+            content_type="procedure",
+            domain=["ops"],
+            classified_by=["structural"],
+        ).model_dump(mode="json")
+        out = _enriched_content_tags(prior, self._result(), stamp=datetime.now(UTC))
+        assert out["content_type"] == "procedure"
+        assert out["domain"] == ["ops"]
+        assert out["classified_by"] == ["structural", "llm_facet"]
+
+    def test_classified_at_is_a_real_datetime(self) -> None:
+        """``model_copy`` does not coerce — a string stamp would survive as one."""
+        from datetime import UTC, datetime
+
+        from trellis.schemas.classification import ContentTags
+        from trellis_cli.worker import _enriched_content_tags
+
+        out = _enriched_content_tags(None, self._result(), stamp=datetime.now(UTC))
+        assert ContentTags.model_validate(out).classified_at is not None

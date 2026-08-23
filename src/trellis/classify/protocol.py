@@ -63,12 +63,27 @@ class MergedClassification:
         return 1.0
 
     def to_content_tags(self) -> ContentTags:
-        """Convert merged classification into a ContentTags schema object."""
+        """Convert merged classification into a ContentTags schema object.
+
+        Facet keys the schema does not name are routed into
+        :attr:`ContentTags.custom` rather than dropped. A classifier that emits
+        a key nobody models is making a claim about the document; silently
+        discarding it loses the claim *and* hides the mismatch, which is how
+        the enrichment path went unnoticed while producing nothing usable.
+        Keys prefixed with ``_`` are excluded — classifiers use those as
+        out-of-band channels for scores and prose (``_auto_importance`` /
+        ``_auto_summary``), which are not tags.
+        """
         domain = self.tags.get("domain", [])
         content_type_values = self.tags.get("content_type", [])
         scope_values = self.tags.get("scope", [])
         signal_quality_values = self.tags.get("signal_quality", [])
         retrieval_affinity_values = self.tags.get("retrieval_affinity", [])
+        custom = {
+            key: [str(v) for v in values]
+            for key, values in self.tags.items()
+            if key not in _MODELLED_FACETS and not key.startswith("_")
+        }
 
         return ContentTags(
             domain=domain,
@@ -82,10 +97,19 @@ class MergedClassification:
             retrieval_affinity=[
                 cast("RetrievalAffinity", v) for v in retrieval_affinity_values
             ],
+            custom=custom,
             classified_by=self.classified_by,
             classified_at=datetime.now(UTC),
             classified_mode=self.mode,
         )
+
+
+#: Facet keys :meth:`MergedClassification.to_content_tags` maps onto typed
+#: :class:`~trellis.schemas.classification.ContentTags` fields. Anything else a
+#: classifier emits lands in ``custom``.
+_MODELLED_FACETS: frozenset[str] = frozenset(
+    {"domain", "content_type", "scope", "signal_quality", "retrieval_affinity"}
+)
 
 
 # Canonical mode sets — import these instead of redefining per-classifier.

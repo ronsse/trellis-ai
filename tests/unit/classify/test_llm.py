@@ -67,7 +67,8 @@ class TestHappyPath:
 
         assert isinstance(result, ClassificationResult)
         assert result.tags["domain"] == ["security"]
-        assert result.tags["content_type"] == ["reference"]
+        assert "content_type" not in result.tags
+        assert result.tags["document_form"] == ["reference"]
         # confidence = min(tag_confidence, class_confidence) = min(0.8, 0.85)
         assert result.confidence == 0.8
         assert result.classifier_name == "llm_facet"
