@@ -130,6 +130,8 @@ class SQLiteDocumentStore(SQLiteStoreBase, DocumentStore):
         doc_id: str | None,
         content: str,
         metadata: dict[str, Any] | None = None,
+        *,
+        preserve_updated_at: bool = False,
     ) -> str:
         if doc_id is None:
             doc_id = generate_ulid()
@@ -139,6 +141,8 @@ class SQLiteDocumentStore(SQLiteStoreBase, DocumentStore):
         metadata_json = json.dumps(metadata)
         chash = _content_hash(content)
 
+        # `preserve_updated_at` is bound, not spliced: an f-string here would
+        # couple the generated SQL to this block's indentation.
         self._conn.execute(
             """
             INSERT INTO documents
@@ -149,9 +153,10 @@ class SQLiteDocumentStore(SQLiteStoreBase, DocumentStore):
                 content = excluded.content,
                 content_hash = excluded.content_hash,
                 metadata_json = excluded.metadata_json,
-                updated_at = excluded.updated_at
+                updated_at = CASE WHEN ?
+                    THEN documents.updated_at ELSE excluded.updated_at END
             """,
-            (doc_id, content, chash, metadata_json, now, now),
+            (doc_id, content, chash, metadata_json, now, now, preserve_updated_at),
         )
         # FTS5 doesn't support ON CONFLICT — delete+insert
         self._conn.execute("DELETE FROM documents_fts WHERE doc_id = ?", (doc_id,))

@@ -38,6 +38,11 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
 
+from trellis.learning.cooldown import (
+    PriorCandidate,
+    cooldown_blocks_emission,
+    load_prior_candidates,
+)
 from trellis.meta.agents import META_AGENT_PREFIX
 from trellis.schemas import well_known as wk
 from trellis.stores.base.event_log import EventType
@@ -115,12 +120,6 @@ RECOMMENDED_SEED_VALUES: dict[str, float | int | str | bool] = {
 # the last index is the best. The comparison "avg_signal_quality >=
 # min_signal_quality" is computed against this ordering.
 _SIGNAL_QUALITY_ORDER: tuple[str, ...] = ("noise", "low", "standard", "high")
-
-
-# Trigger for re-emission within the cooldown window: a candidate whose
-# count grew by ≥ this fraction since the prior emission re-surfaces
-# regardless of the cooldown. Per ADR §2.3.
-_COOLDOWN_GROWTH_RATIO: float = 0.20
 
 
 # Default cap for enumerating current nodes from the GraphStore. The
@@ -607,95 +606,8 @@ def _first_last_seen(items: Iterable[dict[str, Any]]) -> tuple[datetime, datetim
     return min(timestamps), max(timestamps)
 
 
-# ---------------------------------------------------------------------------
-# Cooldown bookkeeping
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True, slots=True)
-class _PriorCandidate:
-    """Snapshot of the most recent emission for a ``candidate_id``."""
-
-    emitted_at: datetime
-    count: int
-    recurrence_count: int
-
-
-def _load_prior_candidates(
-    event_log: EventLog, *, scan_limit: int = 5_000
-) -> dict[str, _PriorCandidate]:
-    """Index the latest WELL_KNOWN_CANDIDATE event per ``candidate_id``.
-
-    Per the swarm directive's "If you hit a blocker": payload predicate
-    push-down is awkward across backends, so we read with ``order=desc``
-    and filter Python-side. The unique candidate space is bounded by
-    the sample size we'd produce anyway.
-    """
-    events = event_log.get_events(
-        event_type=EventType.WELL_KNOWN_CANDIDATE,
-        limit=scan_limit,
-        order="desc",
-    )
-    out: dict[str, _PriorCandidate] = {}
-    for event in events:
-        cid = event.payload.get("candidate_id")
-        if not isinstance(cid, str) or cid in out:
-            # Only the most recent emission counts; ``order=desc``
-            # means the first sighting per id is the freshest.
-            continue
-        prior_count = event.payload.get("count")
-        prior_recurrence = event.payload.get("recurrence_count")
-        out[cid] = _PriorCandidate(
-            emitted_at=event.occurred_at,
-            count=int(prior_count) if isinstance(prior_count, int | float) else 0,
-            recurrence_count=int(prior_recurrence)
-            if isinstance(prior_recurrence, int | float)
-            else 0,
-        )
-    return out
-
-
-def _cooldown_blocks_emission(
-    *,
-    candidate_id: str,
-    current_count: int,
-    prior: _PriorCandidate | None,
-    cooldown_days: int,
-    now: datetime,
-) -> tuple[bool, datetime | None, int]:
-    """Return ``(blocked, cooldown_until, recurrence_count)``.
-
-    Per ADR §2.3:
-
-    * No prior emission → not blocked, recurrence_count = 0.
-    * Prior emission, count grew by >= 20% → not blocked, recurrence
-      increments.
-    * Prior emission within cooldown window AND count didn't grow →
-      blocked, cooldown_until = prior_emitted_at + cooldown_days.
-    * Prior emission past cooldown → not blocked, recurrence increments
-      (per ADR §4.2, a persistent candidate is a persistent signal).
-    """
-    if prior is None:
-        return False, None, 0
-
-    growth_ratio = (
-        (current_count - prior.count) / prior.count if prior.count > 0 else 1.0
-    )
-    if growth_ratio >= _COOLDOWN_GROWTH_RATIO:
-        return False, None, prior.recurrence_count + 1
-
-    cooldown_until = prior.emitted_at + timedelta(days=cooldown_days)
-    if now < cooldown_until:
-        logger.info(
-            "well_known.candidate_suppressed_cooldown",
-            candidate_id=candidate_id,
-            cooldown_until=cooldown_until.isoformat(),
-            current_count=current_count,
-            prior_count=prior.count,
-        )
-        return True, cooldown_until, prior.recurrence_count
-
-    return False, None, prior.recurrence_count + 1
+# The re-emission rule (ADR §2.3 / §4.2) lives in :mod:`trellis.learning.cooldown`
+# so this loop and the tag-keyword loop cannot drift apart on it.
 
 
 # ---------------------------------------------------------------------------
@@ -782,7 +694,11 @@ def analyze_well_known_candidates(
         scan_limit=node_scan_limit,
     )
 
-    prior_candidates = _load_prior_candidates(event_log)
+    prior_candidates = load_prior_candidates(
+        event_log,
+        event_type=EventType.WELL_KNOWN_CANDIDATE,
+        count_key="count",
+    )
 
     surfaced: list[WellKnownCandidate] = []
 
@@ -866,7 +782,7 @@ def _analyze_kind(
     extractors_by_value: dict[str, set[str]],
     kind: CandidateKind,
     thresholds: _Thresholds,
-    prior_candidates: dict[str, _PriorCandidate],
+    prior_candidates: dict[str, PriorCandidate],
     window_start: datetime,
     eval_now: datetime,
 ) -> list[WellKnownCandidate]:
@@ -911,12 +827,13 @@ def _analyze_kind(
 
         candidate_id = _compute_candidate_id(value, kind)
         prior = prior_candidates.get(candidate_id)
-        blocked, cooldown_until, recurrence_count = _cooldown_blocks_emission(
+        blocked, cooldown_until, recurrence_count = cooldown_blocks_emission(
             candidate_id=candidate_id,
             current_count=count,
             prior=prior,
             cooldown_days=thresholds.cooldown_days,
             now=eval_now,
+            log_event="well_known.candidate_suppressed_cooldown",
         )
         if blocked:
             continue

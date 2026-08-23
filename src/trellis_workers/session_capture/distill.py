@@ -34,6 +34,7 @@ import structlog
 from trellis.core.elision import elide_text
 from trellis.llm import Message
 from trellis.schemas.memory_op import (
+    REF_TYPE_DOCUMENT,
     InputDigest,
     JudgedOpType,
     MemoryOpJudgedPayload,
@@ -229,7 +230,7 @@ def emit_distillation_judged(
         ),
         decision=decision,
         confidence=candidate.confidence,
-        subject_ref=SubjectRef(ref_type="document", ref_id=candidate.doc_id),
+        subject_ref=SubjectRef(ref_type=REF_TYPE_DOCUMENT, ref_id=candidate.doc_id),
     )
     try:
         event_log.emit(

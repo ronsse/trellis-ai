@@ -39,6 +39,7 @@ from trellis.retrieve.excerpts import (
 )
 from trellis.retrieve.formatters import format_index_line
 from trellis.retrieve.rerankers.base import Reranker
+from trellis.retrieve.servable import strip_non_servable
 from trellis.retrieve.strategies import SearchStrategy
 from trellis.retrieve.tier_mapping import TierMapper
 from trellis.retrieve.token_counting import DEFAULT_TOKEN_COUNTER, TokenCounter
@@ -502,10 +503,12 @@ class PackBuilder:
 
         for strategy in self._strategies:
             try:
-                items = strategy.search(
-                    intent,
-                    limit=limit_per_strategy,
-                    filters=dict(merged_filters) if merged_filters else None,
+                items = strip_non_servable(
+                    strategy.search(
+                        intent,
+                        limit=limit_per_strategy,
+                        filters=dict(merged_filters) if merged_filters else None,
+                    )
                 )
                 candidates_found += len(items)
                 all_items.extend(items)
@@ -771,10 +774,12 @@ class PackBuilder:
 
         for strategy in self._strategies:
             try:
-                items = strategy.search(
-                    intent,
-                    limit=limit_per_strategy,
-                    filters=dict(merged_filters) if merged_filters else None,
+                items = strip_non_servable(
+                    strategy.search(
+                        intent,
+                        limit=limit_per_strategy,
+                        filters=dict(merged_filters) if merged_filters else None,
+                    )
                 )
                 candidates_found += len(items)
                 all_items.extend(items)

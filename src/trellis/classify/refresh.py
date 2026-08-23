@@ -158,7 +158,7 @@ def reclassify_item(
     metadata: dict[str, Any] = dict(doc.get("metadata") or {})
     before_tags = _prior_tags(metadata.get("content_tags"), item_id=item_id)
 
-    builder = context_builder or _default_context_builder
+    builder = context_builder or default_context_builder
     context = builder(doc)
 
     merged = pipeline.classify(content, context=context)
@@ -236,7 +236,14 @@ def reclassify_item(
 
     metadata["content_tags"] = fresh_tags
     metadata["auto_importance"] = new_importance
-    document_store.put(item_id, content, metadata)
+    # Derived metadata, so the row is not modified in any sense a reader cares
+    # about: re-tagging does not make the information fresher, and
+    # ``updated_at`` is consumed as an information-freshness proxy by
+    # ``retrieve.strategies``' recency decay. Without this a first backfill
+    # over an untagged corpus rewrites every document and flattens recency
+    # ordering across the whole store — the same failure ``classify.shadow``
+    # documents, at the same scale.
+    document_store.put(item_id, content, metadata, preserve_updated_at=True)
     logger.info(
         "tags_refreshed",
         item_id=item_id,
@@ -410,7 +417,7 @@ def _is_stale(tags: Any, cutoff: datetime) -> bool:
     """
     if not isinstance(tags, dict):
         return True
-    classified_at = _parse_classified_at(tags.get("classified_at"))
+    classified_at = parse_classified_at(tags.get("classified_at"))
     return classified_at is None or classified_at < cutoff
 
 
@@ -452,7 +459,7 @@ def _carried_domain(prior: Any) -> list[str]:
     return list(prior or [])
 
 
-def _default_context_builder(doc: dict[str, Any]) -> ClassificationContext:
+def default_context_builder(doc: dict[str, Any]) -> ClassificationContext:
     """Build a ClassificationContext from a document's metadata.
 
     Extracts the signals already sitting in ``metadata``: source system,
@@ -495,7 +502,7 @@ def _default_context_builder(doc: dict[str, Any]) -> ClassificationContext:
     )
 
 
-def _parse_classified_at(raw: Any) -> datetime | None:
+def parse_classified_at(raw: Any) -> datetime | None:
     """Parse a stored classified_at value (ISO-8601 string) to datetime.
 
     Callers in :func:`reclassify_stale` treat ``None`` as "missing =>

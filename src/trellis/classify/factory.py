@@ -20,7 +20,10 @@ from typing import Any
 
 import structlog
 
-from trellis.classify.classifiers.keyword import KeywordDomainClassifier
+from trellis.classify.classifiers.keyword import (
+    KeywordDomainClassifier,
+    build_domain_keyword_map,
+)
 from trellis.classify.classifiers.source_system import SourceSystemClassifier
 from trellis.classify.classifiers.structural import StructuralClassifier
 from trellis.classify.pipeline import ClassifierPipeline
@@ -70,6 +73,25 @@ def _extract_config_domains(
     return domains
 
 
+def effective_domain_keywords(
+    classify_config: Mapping[str, Any] | None = None,
+) -> dict[str, list[str]]:
+    """The ``domain -> [keywords]`` map a pipeline built here would classify with.
+
+    Built-in defaults with ``classify_config['domain_keywords']`` merged over
+    them — the same merge :func:`build_ingestion_pipeline` performs, which is
+    why that function now calls this one. Two consumers must agree on it
+    forever: the classifier, and the tag-keyword promotion loop
+    (:mod:`trellis.learning.tag_evolution`), which needs to know what is
+    *already* owned so it neither re-proposes a keyword nor reads its own prior
+    promotion as fresh evidence. Deriving both from one function is what makes
+    "already owned" mean the same thing on both sides.
+    """
+    return build_domain_keyword_map(
+        config_domains=_extract_config_domains(classify_config)
+    )
+
+
 def build_ingestion_pipeline(
     classify_config: Mapping[str, Any] | None = None,
 ) -> ClassifierPipeline:
@@ -110,4 +132,5 @@ __all__ = [
     "CLASSIFY_CONFIG_KEY",
     "DOMAIN_KEYWORDS_KEY",
     "build_ingestion_pipeline",
+    "effective_domain_keywords",
 ]

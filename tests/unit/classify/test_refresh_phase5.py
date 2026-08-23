@@ -3,10 +3,10 @@
 Pins the 3 GRACEFUL-DEGRADATION sites in
 ``src/trellis/classify/refresh.py``:
 
-* L287 — malformed stored tags → ``_default_context_builder`` returns
+* L287 — malformed stored tags → ``default_context_builder`` returns
   ``existing_tags=None`` and logs ``existing_tags_malformed`` at warning
   level with ``exc_info`` (rubric: corrupt rows must remain observable).
-* L316 — malformed ``classified_at`` → ``_parse_classified_at`` returns
+* L316 — malformed ``classified_at`` → ``parse_classified_at`` returns
   None (caller-required signal) and logs ``classified_at_parse_failed``.
 * L341 — ``TAGS_REFRESHED`` emit fails → reclassify_item still returns
   refreshed outcome; failure logged via ``logger.exception``.
@@ -24,8 +24,8 @@ from structlog.testing import capture_logs
 from trellis.classify.pipeline import ClassifierPipeline
 from trellis.classify.protocol import ClassificationContext, ClassificationResult
 from trellis.classify.refresh import (
-    _default_context_builder,
-    _parse_classified_at,
+    default_context_builder,
+    parse_classified_at,
     reclassify_item,
 )
 
@@ -73,7 +73,7 @@ class _InMemoryDocStore:
     def __init__(self) -> None:
         self._docs: dict[str, dict[str, Any]] = {}
 
-    def put(self, doc_id, content, metadata=None):
+    def put(self, doc_id, content, metadata=None, *, preserve_updated_at=False):
         self._docs[doc_id] = {
             "doc_id": doc_id,
             "content": content,
@@ -111,7 +111,7 @@ class TestMalformedExistingTagsGraceful:
                 "title": "X",
             },
         }
-        ctx = _default_context_builder(doc)
+        ctx = default_context_builder(doc)
 
         # Primary op succeeded: a ClassificationContext is returned with
         # existing_tags=None.
@@ -131,14 +131,14 @@ class TestParseClassifiedAtGraceful:
         self,
         log_output: list[dict],
     ) -> None:
-        assert _parse_classified_at(None) is None
+        assert parse_classified_at(None) is None
         assert _events_with_key(log_output, "classified_at_parse_failed") == []
 
     def test_malformed_string_returns_none_and_logs(
         self,
         log_output: list[dict],
     ) -> None:
-        assert _parse_classified_at("totally-bogus") is None
+        assert parse_classified_at("totally-bogus") is None
         events = _events_with_key(log_output, "classified_at_parse_failed")
         assert events, log_output
         assert events[0].get("log_level") == "warning"
