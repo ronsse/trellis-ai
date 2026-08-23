@@ -11,6 +11,7 @@ from trellis.classify.protocol import (
     ClassificationContext,
     ClassificationResult,
 )
+from trellis.schemas.classification import DOCUMENT_FORM_KEY
 
 if TYPE_CHECKING:
     from trellis.stores.base.event_log import EventLog
@@ -32,12 +33,6 @@ _DEGRADED_TO_NEEDS_REVIEW = "needs_llm_review"
 #: ``subject_entity_id``, so we don't need to mirror their failure_kind
 #: here. Documented on :attr:`EventType.CLASSIFICATION_DEGRADED`.
 _UPSTREAM_ENRICHMENT_FAILURE = "enrichment_failure"
-
-#: Tag key carrying the enrichment vocabulary's document-form verdict. Matches
-#: the flat metadata key
-#: :attr:`~trellis.schemas.document_metadata.DocumentMetadata.document_form`,
-#: which names the same dimension for ingest-path provenance.
-DOCUMENT_FORM_KEY = "document_form"
 
 
 class LLMFacetClassifier:

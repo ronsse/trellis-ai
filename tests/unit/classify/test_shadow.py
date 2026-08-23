@@ -31,7 +31,11 @@ from trellis.classify.shadow import (
     shadow_classify_stale,
 )
 from trellis.retrieve.strategies import _apply_recency_decay
-from trellis.schemas.classification import ContentTags, ShadowTags
+from trellis.schemas.classification import (
+    DOCUMENT_FORM_KEY,
+    ContentTags,
+    ShadowTags,
+)
 from trellis.schemas.memory_op import JudgedOpType, MemoryOpJudgedPayload
 from trellis.stores.base.event_log import EventType
 from trellis.stores.sqlite.document import SQLiteDocumentStore
@@ -847,3 +851,83 @@ class TestCompareShadowToLive:
         )
         assert report.with_shadow == 1
         assert report.comparisons == []
+
+
+class TestVocabularySeam:
+    """The shadow pass must read the verdict the LLM classifier actually writes.
+
+    #321 was written when :class:`LLMFacetClassifier` filed its
+    ``auto_class`` under ``content_type``. #324 moved it to
+    :data:`~trellis.schemas.classification.DOCUMENT_FORM_KEY`, correctly — the
+    closed ``ContentTags.content_type`` ``Literal`` rejects nine of the ten
+    enrichment values, so the two vocabularies cannot share a key. Both changes
+    were green, because neither suite crossed the seam: this file's
+    ``FakeClassifier`` hand-wrote ``content_type`` tags the real classifier no
+    longer emits.
+
+    The consequence was silent and total. Every judged document recorded
+    ``decision="unclassified"`` on its ``MEMORY_OP_JUDGED`` event however
+    confident the model was — #264's training-pair substrate wired to a
+    constant, which is the failure class this repo keeps finding.
+
+    So these tests derive the tag keys from the **real** classifier rather than
+    restating them. A future rename breaks the test instead of the measurement.
+    """
+
+    @staticmethod
+    def _real_llm_facet_tags() -> dict[str, Any]:
+        """Drive the real classifier with a stub model; return its tag map."""
+        from types import SimpleNamespace
+
+        from trellis.classify.classifiers.llm import LLMFacetClassifier
+
+        class _StubEnrichment:
+            async def enrich(self, content: str, *, title: str = "") -> Any:
+                return SimpleNamespace(
+                    success=True,
+                    auto_tags=["postgres", "infrastructure"],
+                    auto_class="reference",
+                    auto_importance=0.8,
+                    auto_summary="notes on connection pooling",
+                    tag_confidence=0.82,
+                    class_confidence=0.91,
+                    error=None,
+                )
+
+        classifier = LLMFacetClassifier(_StubEnrichment())  # type: ignore[arg-type]
+        return classifier.classify("pgbouncer sits in front of postgres").tags
+
+    def test_real_classifier_does_not_emit_content_type(self) -> None:
+        """Pins the seam itself, so the tests below cannot pass vacuously."""
+        tags = self._real_llm_facet_tags()
+        assert "content_type" not in tags
+        assert tags[DOCUMENT_FORM_KEY] == ["reference"]
+
+    def test_llm_verdict_reaches_the_judged_event(
+        self, document_store: SQLiteDocumentStore, event_log: SQLiteEventLog
+    ) -> None:
+        _seed(document_store, "d1", "pgbouncer sits in front of postgres")
+        shadow_classify_item(
+            "d1",
+            classifier=FakeClassifier(self._real_llm_facet_tags()),
+            document_store=document_store,
+            event_log=event_log,
+            model_id="hermes3:8b",
+        )
+        events = event_log.get_events(event_type=EventType.MEMORY_OP_JUDGED)
+        payload = MemoryOpJudgedPayload.model_validate(events[0].payload)
+        assert payload.decision == "reference"
+
+    def test_verdict_prefers_the_modelled_facet(self) -> None:
+        """A classifier that emits both is read on ``content_type``."""
+        tags = ShadowTags(content_type="pattern", custom={DOCUMENT_FORM_KEY: ["notes"]})
+        assert tags.verdict == "pattern"
+
+    def test_verdict_falls_back_to_document_form(self) -> None:
+        assert (
+            ShadowTags(custom={DOCUMENT_FORM_KEY: ["research"]}).verdict == "research"
+        )
+
+    def test_verdict_is_none_when_the_model_said_nothing(self) -> None:
+        """``None`` must mean *the model produced no label*, not *unread key*."""
+        assert ShadowTags(domain=["postgres"]).verdict is None
