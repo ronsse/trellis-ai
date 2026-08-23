@@ -114,6 +114,27 @@ class TestTagCandidatesCommand:
         assert "tag_keyword_min_support" in result.output
         assert "RECOMMENDED_SEED_VALUES" in result.output
 
+    def test_out_of_range_threshold_reports_cleanly(self, cli_env) -> None:
+        """An out-of-range threshold is misconfiguration, not a crash.
+
+        The missing-key path already reported cleanly; a ValueError from the
+        same resolver (or from a malformed ``classify.domain_keywords`` block
+        reached via ``domain_keyword_map()``) used to escape as a traceback.
+        """
+        _seed_thresholds(tag_keyword_min_precision=1.5)
+        result = runner.invoke(classify_app, ["tag-candidates"])
+        assert result.exit_code != 0
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+        assert "min_precision" in result.output
+
+    def test_out_of_range_threshold_reports_cleanly_as_json(self, cli_env) -> None:
+        _seed_thresholds(tag_keyword_min_lift=-1.0)
+        result = runner.invoke(classify_app, ["tag-candidates", "--format", "json"])
+        assert result.exit_code != 0
+        payload = json.loads(result.output.strip().splitlines()[-1])
+        assert payload["status"] == "error"
+        assert "min_lift" in payload["message"]
+
     def test_surfaces_candidates_and_a_paste_ready_fragment(self, cli_env) -> None:
         _seed_thresholds()
         _seed_shadowed(

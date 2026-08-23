@@ -225,6 +225,26 @@ class ShadowTags(TrellisModel):
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     shadow_version: str = "1"
 
+    @property
+    def has_tags(self) -> bool:
+        """``True`` when this record carries at least one actual tag.
+
+        Provenance alone is not signal: a record can be well-formed —
+        ``classified_by``, ``classified_at``, ``model_id``, ``confidence`` all
+        populated — and still say nothing about the document. Writers use this
+        to tell "the model classified it" from "the model returned, and
+        classified nothing", which are different facts and are counted
+        differently.
+        """
+        return bool(
+            self.domain
+            or self.content_type
+            or self.scope
+            or self.signal_quality
+            or self.retrieval_affinity
+            or self.custom
+        )
+
 
 Sensitivity = Literal["public", "internal", "confidential", "restricted"]
 

@@ -19,10 +19,26 @@ class DocumentStore(ABC):
         doc_id: str | None,
         content: str,
         metadata: dict[str, Any] | None = None,
+        *,
+        preserve_updated_at: bool = False,
     ) -> str:
         """Store or update a document.
 
         Auto-generates an ID if *doc_id* is ``None``.
+
+        Args:
+            doc_id: Document id, or ``None`` to auto-generate one.
+            content: Document content.
+            metadata: Free-form metadata mapping.
+            preserve_updated_at: When ``True`` and the row already exists,
+                its ``updated_at`` is left untouched instead of being set to
+                now. For writers that attach *derived* metadata without
+                changing what the document says — the row is not modified in
+                any sense a reader cares about, and bumping the stamp would
+                silently re-rank it, because ``updated_at`` drives the recency
+                decay in
+                :class:`~trellis.retrieve.strategies.KeywordSearch`. Ignored on
+                insert (a new row's ``updated_at`` is its creation time).
 
         Returns:
             The document ID.

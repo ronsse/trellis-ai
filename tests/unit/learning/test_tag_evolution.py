@@ -416,6 +416,83 @@ class TestMining:
         found = next(c for c in candidates if c.keyword == "todoist")
         assert found.corpus_documents == 10, "unshadowed docs must not inflate counts"
 
+    def test_event_payload_omits_example_item_ids(
+        self,
+        document_store: SQLiteDocumentStore,
+        event_log: SQLiteEventLog,
+        param_store: SQLiteParameterStore,
+    ) -> None:
+        """Aggregate facts go to the log; per-document pointers do not.
+
+        Pairing a mined keyword with specific ids turns an aggregate over
+        ``>= min_support`` documents back into a per-document disclosure, in a
+        log with a different access profile than the doc store. Same rule
+        ``classify.shadow`` applies to ``MEMORY_OP_JUDGED``.
+        """
+        _todoist_corpus(document_store)
+        candidates = analyze_tag_keyword_candidates(
+            document_store=document_store,
+            event_log=event_log,
+            registry=_seed_registry(param_store),
+        )
+        found = next(c for c in candidates if c.keyword == "todoist")
+        assert found.example_item_ids, "the dataclass still carries them for the CLI"
+
+        raw = json.dumps(
+            [
+                e.payload
+                for e in event_log.get_events(
+                    event_type=EventType.TAG_KEYWORD_CANDIDATE
+                )
+            ]
+        )
+        assert "example_item_ids" not in raw
+        for item_id in found.example_item_ids:
+            assert item_id not in raw
+        assert '"example_count"' in raw
+
+    def test_prunes_keywords_that_cannot_reach_min_support(
+        self,
+        document_store: SQLiteDocumentStore,
+        event_log: SQLiteEventLog,
+        param_store: SQLiteParameterStore,
+    ) -> None:
+        """The apriori prune is exact, not a sampling heuristic.
+
+        Pair support is bounded above by keyword support, so a keyword in fewer
+        than ``min_support`` documents can never produce a surfaced candidate.
+        Dropping those before counting pairs is what keeps memory bounded — the
+        single-pass version retained 156k pairs and 549k example ids for a
+        1,000-document corpus. Qualifying candidates must be unaffected.
+        """
+        from trellis.learning.tag_evolution import _scan_corpus
+
+        _todoist_corpus(document_store)
+        # Every one of these carries a token seen exactly once.
+        _seed_docs(
+            document_store,
+            [(f"rare{i}", f"singleton unicorn{i} token", ["exotic"]) for i in range(5)],
+        )
+
+        corpus = _scan_corpus(
+            document_store,
+            facet="domain",
+            excluded_keywords=frozenset(),
+            min_support=3,
+            scan_limit=1000,
+            page_size=100,
+        )
+        assert ("todoist", "task-management") in corpus.pair_documents
+        assert not [kw for kw, _ in corpus.pair_documents if kw.startswith("unicorn")]
+
+        # And the surfaced result is identical to what an unpruned scan gives.
+        candidates = analyze_tag_keyword_candidates(
+            document_store=document_store,
+            event_log=event_log,
+            registry=_seed_registry(param_store),
+        )
+        assert "todoist" in {c.keyword for c in candidates}
+
     def test_notes_state_the_limit_of_the_measurement(
         self,
         document_store: SQLiteDocumentStore,
@@ -554,9 +631,11 @@ class TestPromotion:
                 _candidate("asana", "task-management"),
             ],
         )
-        assert promoted == {"task-management": ["todoist", "asana"]}
+        assert promoted.domain_keywords == {"task-management": ["todoist", "asana"]}
 
-        after = KeywordDomainClassifier(config_domains=promoted).classify(content)
+        after = KeywordDomainClassifier(
+            config_domains=promoted.domain_keywords
+        ).classify(content)
         assert "task-management" in after.tags["domain"]
 
     def test_revocation_restores_the_prior_output_exactly(self) -> None:
@@ -566,7 +645,7 @@ class TestPromotion:
             _candidate("asana", "task-management"),
         ]
         promoted = apply_promotion(None, candidates)
-        revoked = revoke_promotion(promoted, candidates)
+        revoked = revoke_promotion(promoted.domain_keywords, promoted)
 
         assert revoked == {}
         after = KeywordDomainClassifier(config_domains=revoked).classify(content)
@@ -577,8 +656,26 @@ class TestPromotion:
         operator_config = {"payments": ["stripe", "invoice"], "ops": ["pagerduty"]}
         candidates = [_candidate("todoist", "payments")]
         promoted = apply_promotion(operator_config, candidates)
-        assert promoted["payments"] == ["stripe", "invoice", "todoist"]
-        assert revoke_promotion(promoted, candidates) == operator_config
+        assert promoted.domain_keywords["payments"] == ["stripe", "invoice", "todoist"]
+        assert revoke_promotion(promoted.domain_keywords, promoted) == operator_config
+
+    def test_revoke_never_removes_a_keyword_the_operator_already_owned(self) -> None:
+        """The trap a candidate-keyed revoke falls into.
+
+        If a candidate names a keyword the operator already had, ``apply`` is
+        correctly a no-op — so ``revoke`` must be one too. Revoking by
+        re-deriving from candidates deleted the operator's own keyword, and
+        dropped the whole domain when it was the only entry.
+        """
+        operator_config = {"payments": ["stripe"]}
+        candidates = [_candidate("stripe", "payments")]
+
+        promoted = apply_promotion(operator_config, candidates)
+        assert promoted.domain_keywords == operator_config
+        assert promoted.added == ()
+        assert promoted.skipped == (("payments", "stripe"),)
+
+        assert revoke_promotion(promoted.domain_keywords, promoted) == operator_config
 
     def test_apply_never_mutates_the_input(self) -> None:
         operator_config = {"payments": ["stripe"]}
@@ -588,19 +685,25 @@ class TestPromotion:
     def test_apply_is_idempotent(self) -> None:
         candidates = [_candidate("todoist", "task-management")]
         once = apply_promotion(None, candidates)
-        assert apply_promotion(once, candidates) == once
+        twice = apply_promotion(once.domain_keywords, candidates)
+        assert twice.domain_keywords == once.domain_keywords
+        assert twice.added == (), "the second apply inserted nothing"
 
     def test_revoking_an_absent_keyword_is_a_no_op(self) -> None:
         config = {"payments": ["stripe"]}
-        assert revoke_promotion(config, [_candidate("todoist", "payments")]) == config
-        assert revoke_promotion(config, [_candidate("x", "nonexistent")]) == config
+        promotion = apply_promotion({}, [_candidate("todoist", "payments")])
+        assert revoke_promotion(config, promotion) == config
+        assert revoke_promotion({}, promotion) == {}
 
     def test_candidate_without_a_write_target_is_not_promoted(self) -> None:
         """A ``content_type`` rule must not be filed under a domain name."""
         assert "content_type" not in FACETS_WITH_WRITE_TARGET
         candidate = _candidate("todoist", "reference", facet="content_type")
         assert candidate.has_write_target is False
-        assert apply_promotion({"ops": ["x"]}, [candidate]) == {"ops": ["x"]}
+        promoted = apply_promotion({"ops": ["x"]}, [candidate])
+        assert promoted.domain_keywords == {"ops": ["x"]}
+        assert promoted.added == ()
+        assert promoted.skipped == (("reference", "todoist"),)
 
 
 # ---------------------------------------------------------------------------

@@ -83,6 +83,58 @@ class DocumentStoreContractTests:
         assert doc["metadata"] == {}
 
     # ------------------------------------------------------------------
+    # updated_at semantics — the recency-decay input
+    # ------------------------------------------------------------------
+
+    def test_put_bumps_updated_at_by_default(self, store: DocumentStore) -> None:
+        """A plain re-put marks the row modified. The default must not change.
+
+        ``updated_at`` is what ``retrieve.strategies.KeywordSearch`` feeds to
+        its recency decay, so this is a retrieval-visible property, not
+        bookkeeping.
+        """
+        store.put("d1", "v1", {"a": 1})
+        first = store.get("d1")
+        assert first is not None
+        store.put("d1", "v2", {"a": 2})
+        second = store.get("d1")
+        assert second is not None
+        assert str(second["updated_at"]) > str(first["updated_at"])
+
+    def test_put_preserve_updated_at_keeps_prior_stamp(
+        self, store: DocumentStore
+    ) -> None:
+        """``preserve_updated_at`` lets a writer attach derived metadata
+        without re-ranking the document.
+
+        Without it, a whole-corpus pass that only adds derived metadata (the
+        shadow-tagging pass in ``trellis.classify.shadow``) stamps every row
+        with the same fresh timestamp and flattens recency ordering across the
+        entire store.
+        """
+        store.put("d1", "v1", {"a": 1})
+        original = store.get("d1")
+        assert original is not None
+
+        store.put("d1", "v1", {"a": 1, "derived": "x"}, preserve_updated_at=True)
+        after = store.get("d1")
+        assert after is not None
+        assert str(after["updated_at"]) == str(original["updated_at"])
+        # The write still landed — this is a preserved stamp, not a no-op.
+        assert after["metadata"] == {"a": 1, "derived": "x"}
+        assert str(after["created_at"]) == str(original["created_at"])
+
+    def test_preserve_updated_at_still_stamps_a_new_row(
+        self, store: DocumentStore
+    ) -> None:
+        """On insert there is no prior stamp to preserve, so one is minted."""
+        store.put("fresh", "content", {}, preserve_updated_at=True)
+        doc = store.get("fresh")
+        assert doc is not None
+        assert doc["updated_at"]
+        assert doc["created_at"]
+
+    # ------------------------------------------------------------------
     # Idempotency / overwrite — last-write-wins on put
     # ------------------------------------------------------------------
 

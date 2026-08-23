@@ -15,7 +15,13 @@ retrieval path reads.
 Why a separate key rather than the live ``content_tags``:
 
 * **Retrieval does not move.** No pack ranking changes while the corpus
-  accrues, so the pass is safe to run over a production store.
+  accrues, so the pass is safe to run over a production store. That takes two
+  separate guarantees, not one: the shadow key is never *read* (unaddressable
+  by tag filters, stripped at the serving boundary by
+  :mod:`trellis.retrieve.servable`), and the shadow *write* does not perturb
+  the row — it passes ``preserve_updated_at=True``, because ``updated_at``
+  drives recency decay and a whole-corpus pass would otherwise re-rank
+  everything to "brand new".
 * **It sidesteps a vocabulary collision that would otherwise destroy data.**
   The deterministic path emits :data:`~trellis.schemas.classification.ContentType`
   values (``error-resolution`` / ``procedure`` / ``code``); the enrichment path
@@ -201,11 +207,29 @@ def shadow_classify_item(
 
     builder = context_builder or _default_context_builder
     result = classifier.classify(content, context=builder(doc))
+    resolved_model_id = model_id or result.classifier_name or _name_of(classifier)
 
-    if not result.tags:
-        # No tags is still a judged operation: "the model looked and produced
-        # nothing" is the coverage signal this pass exists to measure, so the
-        # event fires even though no record is written.
+    shadow = _to_shadow_tags(
+        result.tags,
+        classifier_name=result.classifier_name or _name_of(classifier),
+        confidence=result.confidence,
+        model_id=resolved_model_id,
+    )
+
+    # The no-signal test is on the *record*, not on the raw tag map. A raw map
+    # can be non-empty and still carry no tags:
+    # :class:`~trellis.classify.classifiers.llm.LLMFacetClassifier` adds
+    # ``_auto_importance`` / ``_auto_summary`` independently of ``domain`` and
+    # ``content_type``, so a model that returns a summary but classifies
+    # nothing yields a truthy map that ``_to_shadow_tags`` reduces to nothing.
+    # Testing the map would persist that empty record, count it as written, and
+    # — because ``_needs_shadow`` only asks whether a record exists — mark the
+    # document judged forever. The coverage number this pass exists to produce
+    # would then overcount its own successes.
+    if not shadow.has_tags:
+        # Still a judged operation: "the model looked and produced nothing" is
+        # the coverage signal, so the event fires even though nothing is
+        # written.
         if event_log is not None and not dry_run:
             _emit_judged(
                 event_log,
@@ -213,7 +237,7 @@ def shadow_classify_item(
                 content=content,
                 decision=DECISION_UNCLASSIFIED,
                 confidence=result.confidence,
-                model_id=model_id or result.classifier_name or _name_of(classifier),
+                model_id=resolved_model_id,
             )
         return ShadowOutcome(
             item_id=item_id,
@@ -222,12 +246,6 @@ def shadow_classify_item(
             live=live,
         )
 
-    shadow = _to_shadow_tags(
-        result.tags,
-        classifier_name=result.classifier_name or _name_of(classifier),
-        confidence=result.confidence,
-        model_id=model_id or result.classifier_name or _name_of(classifier),
-    )
     shadow_json = shadow.model_dump(mode="json")
 
     if dry_run:
@@ -662,19 +680,30 @@ def _write_shadow(
     metadata: dict[str, Any],
     shadow_json: dict[str, Any],
 ) -> None:
-    """Persist the shadow record, preserving every live key byte-for-byte.
+    """Persist the shadow record without disturbing anything retrieval reads.
 
-    The write is a whole-metadata ``put`` (the store API offers no partial
-    update), so the guarantee "shadow mode changes nothing retrieval reads" is
-    enforced here rather than assumed: the live values are captured before the
-    shadow key is set and restored after, so even a caller that handed us a
-    mutated mapping cannot move them.
+    Two distinct things have to hold, and only the first is obvious.
+
+    **The live tag keys must not change.** The write is a whole-metadata
+    ``put`` (the store API offers no partial update), so the live values are
+    captured before the shadow key is set and restored after — even a caller
+    that handed us a mutated mapping cannot move them.
+
+    **The row must not look modified.** ``put`` normally stamps
+    ``updated_at`` with the current time, and ``updated_at`` is what
+    :class:`~trellis.retrieve.strategies.KeywordSearch` feeds to its recency
+    decay. A whole-corpus shadow pass would therefore reset every document to
+    "brand new" and flatten recency ordering across the entire store — the
+    precise opposite of this module's guarantee, and invisible to a test that
+    only checks the shadow *values* stay out of a pack. ``preserve_updated_at``
+    is why the guarantee actually holds; see
+    ``DocumentStoreContractTests.test_put_preserve_updated_at_keeps_prior_stamp``.
     """
     preserved = {key: metadata[key] for key in PROTECTED_LIVE_KEYS if key in metadata}
     to_write = {**metadata, SHADOW_TAGS_KEY: shadow_json, **preserved}
     # A protected key absent before must stay absent: `preserved` can only
     # restore keys that existed, and nothing above adds one.
-    document_store.put(item_id, content, to_write)
+    document_store.put(item_id, content, to_write, preserve_updated_at=True)
 
 
 def _needs_shadow(raw: Any, cutoff: datetime | None) -> bool:

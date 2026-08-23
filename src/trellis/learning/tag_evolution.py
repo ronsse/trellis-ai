@@ -101,7 +101,7 @@ from trellis.schemas.classification import SHADOW_TAGS_KEY, _reserved_name_for
 from trellis.stores.base.event_log import EventType
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping
+    from collections.abc import Iterable, Iterator, Mapping
 
     from trellis.ops import ParameterRegistry
     from trellis.stores.base.document import DocumentStore
@@ -353,7 +353,8 @@ class TagKeywordCandidate:
     #: ``precision / base_rate(tag)`` — how much better than chance.
     lift: float
     candidate_id: str
-    #: A few item ids a reviewer can open to judge the rule. Bounded.
+    #: A few item ids a reviewer can open to judge the rule. Bounded, and
+    #: deliberately **not** part of :meth:`to_event_payload` — see there.
     example_item_ids: tuple[str, ...] = ()
     cooldown_until: datetime | None = None
     recurrence_count: int = 0
@@ -370,6 +371,18 @@ class TagKeywordCandidate:
 
         Stable wire contract — downstream analyzers read this directly. Lists
         are plain ``list[str]`` so JSON round-trips across every backend.
+
+        :attr:`example_item_ids` is **omitted**, and that is the same rule
+        :mod:`trellis.classify.shadow` applies when it keeps open-vocabulary
+        ``domain`` tags off ``MEMORY_OP_JUDGED``: the event log has a different
+        access and retention profile than the document store. ``keyword`` and
+        ``tag`` are aggregate facts — a candidate exists only because the pair
+        recurred across at least ``min_support`` documents — but pairing them
+        with specific ids turns the aggregate back into a per-document
+        disclosure ("these five documents contain this term and are about this
+        subject"), for documents whose live tags were deliberately kept clean.
+        The ids stay on the returned dataclass, where the CLI shows them to the
+        operator who is already authorised to read the corpus.
         """
         return {
             "candidate_id": self.candidate_id,
@@ -384,7 +397,7 @@ class TagKeywordCandidate:
             "recall": self.recall,
             "lift": self.lift,
             "has_write_target": self.has_write_target,
-            "example_item_ids": list(self.example_item_ids),
+            "example_count": len(self.example_item_ids),
             "recurrence_count": self.recurrence_count,
             "notes": list(self.notes),
         }
@@ -479,22 +492,21 @@ class _Corpus:
     )
 
 
-def _scan_corpus(
+def _iter_shadowed(
     document_store: DocumentStore,
     *,
     facet: str,
     excluded_keywords: frozenset[str],
     scan_limit: int,
     page_size: int,
-) -> _Corpus:
-    """Single pass over shadowed documents accumulating co-occurrence counts.
+) -> Iterator[tuple[str, set[str], list[str]]]:
+    """Yield ``(item_id, keywords, tags)`` for each usable shadowed document.
 
     ``excluded_keywords`` is how the loop *filters its own writes*: a keyword
     already in the effective classifier vocabulary is dropped before counting,
     so a promoted keyword neither reappears as a candidate nor accrues support
     the loop could read as its own growing evidence.
     """
-    corpus = _Corpus()
     offset = 0
     scanned = 0
 
@@ -517,20 +529,92 @@ def _scan_corpus(
             content = doc.get("content") or ""
             if not content.strip():
                 continue
+            yield (
+                str(doc.get("doc_id") or ""),
+                extract_keywords(content) - excluded_keywords,
+                tags,
+            )
 
-            corpus.documents += 1
-            keywords = extract_keywords(content) - excluded_keywords
-            item_id = str(doc.get("doc_id") or "")
 
+def _scan_corpus(
+    document_store: DocumentStore,
+    *,
+    facet: str,
+    excluded_keywords: frozenset[str],
+    min_support: int,
+    scan_limit: int,
+    page_size: int,
+) -> _Corpus:
+    """Accumulate co-occurrence counts, pruning keywords that cannot qualify.
+
+    **Two passes, deliberately.** The obvious single-pass version counts a
+    ``(keyword, tag)`` entry for every token in every document, and its memory
+    is the corpus vocabulary times the tag vocabulary — unbounded, and dominated
+    by pairs that can never be surfaced. Measured on 1,000 documents of ~300
+    distinct tokens each: 20k keywords but 156k pairs and, worse, 549k retained
+    example ids, because examples were kept for every pair rather than for the
+    handful that clear the gate. At this module's default ``scan_limit`` of
+    50,000 documents that does not fit in memory.
+
+    The prune is the standard apriori one and it is exact, not a heuristic: a
+    keyword appearing in fewer than ``min_support`` documents cannot possibly
+    form a pair with support ``>= min_support``, because pair support is
+    bounded above by keyword support. So pass 1 counts documents per keyword
+    and per tag, and pass 2 counts pairs for surviving keywords only. Example
+    ids are likewise only retained once a pair has actually reached
+    ``min_support``.
+
+    The cost is a second scan of the store and a second tokenisation. That is
+    the right trade: the scan is I/O the analyzer runs once, while the memory
+    it replaces grows with the corpus and has no ceiling.
+    """
+    corpus = _Corpus()
+
+    for _item_id, keywords, tags in _iter_shadowed(
+        document_store,
+        facet=facet,
+        excluded_keywords=excluded_keywords,
+        scan_limit=scan_limit,
+        page_size=page_size,
+    ):
+        corpus.documents += 1
+        for tag in tags:
+            corpus.tag_documents[tag] += 1
+        for keyword in keywords:
+            corpus.keyword_documents[keyword] += 1
+
+    eligible = {
+        keyword
+        for keyword, count in corpus.keyword_documents.items()
+        if count >= min_support
+    }
+    logger.debug(
+        "tag_evolution.keywords_pruned",
+        total=len(corpus.keyword_documents),
+        eligible=len(eligible),
+        min_support=min_support,
+    )
+    if not eligible:
+        return corpus
+
+    for item_id, keywords, tags in _iter_shadowed(
+        document_store,
+        facet=facet,
+        excluded_keywords=excluded_keywords,
+        scan_limit=scan_limit,
+        page_size=page_size,
+    ):
+        for keyword in keywords & eligible:
             for tag in tags:
-                corpus.tag_documents[tag] += 1
-            for keyword in keywords:
-                corpus.keyword_documents[keyword] += 1
-                for tag in tags:
-                    pair = (keyword, tag)
-                    corpus.pair_documents[pair] += 1
-                    if len(corpus.pair_examples[pair]) < _MAX_EXAMPLES and item_id:
-                        corpus.pair_examples[pair].append(item_id)
+                pair = (keyword, tag)
+                count = corpus.pair_documents[pair] + 1
+                corpus.pair_documents[pair] = count
+                # Examples exist for human review of a *surfaced* candidate, so
+                # they are only worth keeping once the pair has qualified.
+                if count >= min_support and item_id:
+                    examples = corpus.pair_examples[pair]
+                    if len(examples) < _MAX_EXAMPLES:
+                        examples.append(item_id)
 
     return corpus
 
@@ -607,6 +691,7 @@ def analyze_tag_keyword_candidates(
         document_store,
         facet=facet,
         excluded_keywords=excluded,
+        min_support=thresholds.min_support,
         scan_limit=scan_limit,
         page_size=page_size,
     )
@@ -740,16 +825,37 @@ def _surface_candidates(
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class Promotion:
+    """What a promotion actually changed, and how to undo exactly that.
+
+    Revocation needs a record, not a re-derivation. The obvious API — revoke
+    by handing the same candidates back — silently deletes vocabulary the
+    operator wrote by hand whenever a candidate's keyword was already present:
+    :func:`apply_promotion` correctly skips it as a duplicate, then the
+    symmetric revoke removes it anyway, and drops the whole domain when it was
+    the only entry. Carrying the inserted pairs makes the inverse exact by
+    construction, so you cannot revoke more than you promoted.
+    """
+
+    #: The merged ``domain -> [keywords]`` map to write into ``config.yaml``.
+    domain_keywords: dict[str, list[str]]
+    #: ``(tag, keyword)`` pairs this promotion actually inserted.
+    added: tuple[tuple[str, str], ...] = ()
+    #: ``(tag, keyword)`` pairs skipped — already present, or the candidate's
+    #: facet has no config write target.
+    skipped: tuple[tuple[str, str], ...] = ()
+
+
 def apply_promotion(
     config_domains: Mapping[str, list[str]] | None,
     candidates: Iterable[TagKeywordCandidate],
-) -> dict[str, list[str]]:
-    """Return ``config_domains`` with every promotable candidate merged in.
+) -> Promotion:
+    """Merge every promotable candidate into a domain-keyword map.
 
-    A **pure transform** over the ``classify.domain_keywords`` mapping — it
-    reads no file and writes none. The operator owns ``config.yaml``; this
-    produces the block to put in it. That is what keeps the ``domain`` facet
-    surface-only in practice and not just in intent.
+    A **pure transform** — it reads no file and writes none. The operator owns
+    ``config.yaml``; this produces the block to put in it. That is what keeps
+    the ``domain`` facet surface-only in practice and not merely in intent.
 
     Candidates for a facet with no write target
     (:data:`FACETS_WITH_WRITE_TARGET`) are skipped rather than silently coerced
@@ -758,10 +864,16 @@ def apply_promotion(
 
     Keywords are appended (not replaced) and deduplicated, preserving the
     operator's existing ordering — a promotion adds vocabulary, it never
-    removes any.
+    removes any. The returned :class:`Promotion` records which pairs were
+    actually inserted; pass it to :func:`revoke_promotion` to undo precisely
+    those.
     """
     promoted = {k: list(v) for k, v in (config_domains or {}).items()}
+    added: list[tuple[str, str]] = []
+    skipped: list[tuple[str, str]] = []
+
     for candidate in candidates:
+        pair = (candidate.tag, candidate.keyword)
         if not candidate.has_write_target:
             logger.info(
                 "tag_evolution.promotion_skipped_no_write_target",
@@ -769,38 +881,51 @@ def apply_promotion(
                 keyword=candidate.keyword,
                 tag=candidate.tag,
             )
+            skipped.append(pair)
             continue
         existing = promoted.setdefault(candidate.tag, [])
-        if candidate.keyword not in existing:
-            existing.append(candidate.keyword)
-    return promoted
+        if candidate.keyword in existing:
+            # Already the operator's (or an earlier candidate's) — adding
+            # nothing means there is nothing to revoke later.
+            skipped.append(pair)
+            continue
+        existing.append(candidate.keyword)
+        added.append(pair)
+
+    return Promotion(
+        domain_keywords=promoted,
+        added=tuple(added),
+        skipped=tuple(skipped),
+    )
 
 
 def revoke_promotion(
     config_domains: Mapping[str, list[str]] | None,
-    candidates: Iterable[TagKeywordCandidate],
+    promotion: Promotion,
 ) -> dict[str, list[str]]:
-    """Return ``config_domains`` with every candidate's keyword removed.
+    """Undo exactly the pairs ``promotion`` inserted.
 
-    The exact inverse of :func:`apply_promotion` — applying then revoking the
-    same candidates returns the original mapping, including dropping a domain
-    key the promotion created. A promoted keyword that turns out to hide
-    documents has to be removable without an archaeology session, so
-    revocation is a first-class operation rather than a manual edit.
+    The exact inverse of :func:`apply_promotion`: applying then revoking
+    returns the original mapping, including dropping a domain key the
+    promotion created and *keeping* one it did not. A promoted keyword that
+    turns out to hide documents has to be removable without an archaeology
+    session, so revocation is a first-class operation rather than a manual
+    edit — and it must never remove more than it added, because the map it
+    edits also holds hand-written operator vocabulary.
 
-    Revoking a keyword that is not present is a no-op, so a revoke is safe to
-    re-run.
+    Revoking a pair that is no longer present is a no-op, so a revoke is safe
+    to re-run.
     """
     revoked = {k: list(v) for k, v in (config_domains or {}).items()}
-    for candidate in candidates:
-        keywords = revoked.get(candidate.tag)
+    for tag, keyword in promotion.added:
+        keywords = revoked.get(tag)
         if keywords is None:
             continue
-        revoked[candidate.tag] = [k for k in keywords if k != candidate.keyword]
-        if not revoked[candidate.tag]:
+        revoked[tag] = [k for k in keywords if k != keyword]
+        if not revoked[tag]:
             # An empty keyword list is a domain that can never match; drop the
             # key so revoking restores the mapping exactly.
-            del revoked[candidate.tag]
+            del revoked[tag]
     return revoked
 
 
@@ -819,6 +944,7 @@ __all__ = [
     "PARAM_MIN_SUPPORT",
     "RECOMMENDED_SEED_VALUES",
     "REQUIRED_PARAM_KEYS",
+    "Promotion",
     "TagKeywordCandidate",
     "analyze_tag_keyword_candidates",
     "apply_promotion",

@@ -242,7 +242,10 @@ class EventType(StrEnum):
     #: stable ``candidate_id`` for cooldown / recurrence tracking, plus
     #: ``support`` / ``precision`` / ``lift`` so a reviewer can see the
     #: strength of the association rather than trusting a bare verdict.
-    #: See ``#321`` Phase 2.
+    #: Carries ``example_count`` but **not** the example item ids: pairing a
+    #: mined keyword with specific documents would turn an aggregate over
+    #: ``>= min_support`` documents back into a per-document disclosure, which
+    #: is the same rule :attr:`MEMORY_OP_JUDGED` follows. See ``#321`` Phase 2.
     TAG_KEYWORD_CANDIDATE = "tag_keyword.candidate"
 
     # Proposal lifecycle (coding-agent self-improvement loop — Item 7).

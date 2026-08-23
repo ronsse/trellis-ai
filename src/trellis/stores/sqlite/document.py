@@ -130,6 +130,8 @@ class SQLiteDocumentStore(SQLiteStoreBase, DocumentStore):
         doc_id: str | None,
         content: str,
         metadata: dict[str, Any] | None = None,
+        *,
+        preserve_updated_at: bool = False,
     ) -> str:
         if doc_id is None:
             doc_id = generate_ulid()
@@ -139,8 +141,16 @@ class SQLiteDocumentStore(SQLiteStoreBase, DocumentStore):
         metadata_json = json.dumps(metadata)
         chash = _content_hash(content)
 
+        # Omitting the column from the SET list leaves the stored value in
+        # place; the INSERT arm still stamps a fresh row, which is what
+        # ``preserve_updated_at`` is documented to do.
+        touch = (
+            ""
+            if preserve_updated_at
+            else ",\n                updated_at = excluded.updated_at"
+        )
         self._conn.execute(
-            """
+            f"""
             INSERT INTO documents
                 (doc_id, content, content_hash,
                  metadata_json, created_at, updated_at)
@@ -148,8 +158,7 @@ class SQLiteDocumentStore(SQLiteStoreBase, DocumentStore):
             ON CONFLICT(doc_id) DO UPDATE SET
                 content = excluded.content,
                 content_hash = excluded.content_hash,
-                metadata_json = excluded.metadata_json,
-                updated_at = excluded.updated_at
+                metadata_json = excluded.metadata_json{touch}
             """,
             (doc_id, content, chash, metadata_json, now, now),
         )

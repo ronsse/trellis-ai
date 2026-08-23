@@ -101,6 +101,8 @@ class PostgresDocumentStore(PostgresStoreBase, DocumentStore):
         doc_id: str | None,
         content: str,
         metadata: dict[str, Any] | None = None,
+        *,
+        preserve_updated_at: bool = False,
     ) -> str:
         if doc_id is None:
             doc_id = generate_ulid()
@@ -110,17 +112,24 @@ class PostgresDocumentStore(PostgresStoreBase, DocumentStore):
         metadata_json = json.dumps(metadata)
         chash = _content_hash(content)
 
+        # Omitting the column from the SET list leaves the stored value in
+        # place; the INSERT arm still stamps a fresh row. Mirrors the SQLite
+        # backend so both honour the same contract test.
+        touch = (
+            ""
+            if preserve_updated_at
+            else ",\n                    updated_at = EXCLUDED.updated_at"
+        )
         with self._conn() as conn, conn.cursor() as cur:
             cur.execute(
-                """
+                f"""
                 INSERT INTO documents
                     (doc_id, content, content_hash, metadata, created_at, updated_at)
                 VALUES (%s, %s, %s, %s, %s, %s)
                 ON CONFLICT (doc_id) DO UPDATE SET
                     content = EXCLUDED.content,
                     content_hash = EXCLUDED.content_hash,
-                    metadata = EXCLUDED.metadata,
-                    updated_at = EXCLUDED.updated_at
+                    metadata = EXCLUDED.metadata{touch}
                 """,
                 (doc_id, content, chash, metadata_json, now, now),
             )

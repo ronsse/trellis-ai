@@ -24,11 +24,13 @@ from trellis.classify.protocol import (
 )
 from trellis.classify.shadow import (
     PROTECTED_LIVE_KEYS,
+    REASON_NO_SIGNAL,
     SHADOW_TAGS_KEY,
     compare_shadow_to_live,
     shadow_classify_item,
     shadow_classify_stale,
 )
+from trellis.retrieve.strategies import _apply_recency_decay
 from trellis.schemas.classification import ContentTags, ShadowTags
 from trellis.schemas.memory_op import JudgedOpType, MemoryOpJudgedPayload
 from trellis.stores.base.event_log import EventType
@@ -229,6 +231,40 @@ class TestShadowIsInvisibleToRetrieval:
         ):
             assert leaked not in served, f"{leaked!r} leaked into a served pack"
 
+    def test_shadow_pass_does_not_move_recency_scoring(
+        self, document_store: SQLiteDocumentStore
+    ) -> None:
+        """The *write* must not perturb the row either, not just the read.
+
+        ``updated_at`` feeds ``KeywordSearch``'s recency decay, and a plain
+        ``put`` stamps it with now. Before ``preserve_updated_at``, a
+        whole-corpus shadow pass reset every document to "brand new" — a
+        365-day-old document's recency multiplier went 0.30 -> 1.0 — flattening
+        recency ordering across the entire store. Retrieval moved, invisibly to
+        a test that only checked the shadow values stayed out of the pack.
+        """
+        _seed(document_store, "aged", "kubernetes deploy notes", metadata={})
+        aged_stamp = (datetime.now(UTC) - timedelta(days=365)).isoformat()
+        document_store._conn.execute(
+            "UPDATE documents SET created_at=?, updated_at=? WHERE doc_id='aged'",
+            (aged_stamp, aged_stamp),
+        )
+        document_store._conn.commit()
+
+        before = document_store.get("aged")["updated_at"]
+        shadow_classify_stale(
+            classifier=FakeClassifier({"domain": ["x"], "content_type": ["notes"]}),
+            document_store=document_store,
+        )
+        after = document_store.get("aged")
+
+        assert SHADOW_TAGS_KEY in after["metadata"], "the pass must have run"
+        assert str(after["updated_at"]) == str(before)
+        # The decay multiplier the score is built from is therefore unchanged.
+        assert _apply_recency_decay(1.0, after["updated_at"]) == pytest.approx(
+            _apply_recency_decay(1.0, before)
+        )
+
     def test_shadow_domain_does_not_scope_a_domain_filtered_query(
         self, document_store: SQLiteDocumentStore
     ) -> None:
@@ -334,6 +370,46 @@ class TestShadowRecord:
             document_store.get("d1")["metadata"][SHADOW_TAGS_KEY]
         )
         assert record.custom == {}
+
+    def test_out_of_band_only_result_is_no_signal_not_an_empty_record(
+        self, document_store: SQLiteDocumentStore, event_log: SQLiteEventLog
+    ) -> None:
+        """A truthy tag map that reduces to nothing must count as no signal.
+
+        ``LLMFacetClassifier`` adds ``_auto_importance`` / ``_auto_summary``
+        independently of the facets, so a model that summarises but classifies
+        nothing returns a non-empty map carrying no tags. Writing that would
+        persist an empty record, count it as written, and — since
+        ``_needs_shadow`` only asks whether a record exists — mark the document
+        judged forever, inflating the coverage number this pass produces.
+        """
+        _seed(document_store, "d1", "content", metadata={})
+        outcome = shadow_classify_item(
+            "d1",
+            classifier=FakeClassifier(
+                {"_auto_importance": ["0.8"], "_auto_summary": ["a summary"]}
+            ),
+            document_store=document_store,
+            event_log=event_log,
+        )
+        assert outcome.written is False
+        assert outcome.reason == REASON_NO_SIGNAL
+        assert SHADOW_TAGS_KEY not in document_store.get("d1")["metadata"]
+        # The verdict is still logged — coverage is the point.
+        events = event_log.get_events(event_type=EventType.MEMORY_OP_JUDGED)
+        assert len(events) == 1
+        assert events[0].payload["decision"] == "unclassified"
+
+    def test_batch_re_judges_a_document_that_produced_no_signal(
+        self, document_store: SQLiteDocumentStore
+    ) -> None:
+        """No record written means the next pass tries again, as it should."""
+        _seed(document_store, "d1", "content", metadata={})
+        empty = FakeClassifier({"_auto_summary": ["s"]})
+        shadow_classify_stale(classifier=empty, document_store=document_store)
+        assert len(empty.calls) == 1
+        shadow_classify_stale(classifier=empty, document_store=document_store)
+        assert len(empty.calls) == 2, "a no-signal document is not marked judged"
 
     def test_dry_run_persists_nothing(
         self, document_store: SQLiteDocumentStore, event_log: SQLiteEventLog

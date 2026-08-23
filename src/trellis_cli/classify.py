@@ -536,11 +536,14 @@ def tag_candidates(
             emit_events=emit,
             scan_limit=limit,
         )
-    except KeyError as exc:
-        # A missing threshold is operator misconfiguration, not a bug — the
-        # analyzer deliberately refuses to substitute a default it was not
-        # given. Surface the message (it names every missing key and its
-        # recommended seed) rather than a traceback.
+    except (KeyError, ValueError) as exc:
+        # Operator misconfiguration, not a bug, in three flavours: a missing
+        # threshold (KeyError — the analyzer deliberately refuses to substitute
+        # a default it was not given), an out-of-range threshold, and a
+        # malformed `classify.domain_keywords` block reached through
+        # `domain_keyword_map()` (both ValueError). Surface the message — it
+        # names every missing key and its recommended seed — rather than a
+        # traceback. `backfill` scopes its ValueError catch the same way.
         message = str(exc).strip("'\"")
         if output_format == "json":
             emit_json({"status": "error", "message": message})
@@ -555,7 +558,9 @@ def tag_candidates(
                 "facet": facet,
                 "emitted": emit,
                 "candidates": [c.to_event_payload() for c in candidates],
-                "domain_keywords_fragment": apply_promotion({}, candidates),
+                "domain_keywords_fragment": apply_promotion(
+                    {}, candidates
+                ).domain_keywords,
             }
         )
     else:
@@ -589,7 +594,7 @@ def _render_tag_candidates(
             + ("" if candidate.has_write_target else "  [dim](no write target)[/dim]")
         )
 
-    fragment = apply_promotion({}, candidates)
+    fragment = apply_promotion({}, candidates).domain_keywords
     if not fragment:
         return
     console.print(
