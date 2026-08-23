@@ -47,6 +47,7 @@ import structlog
 
 from trellis.core.write_config import EMBED_ON_INGEST_FLAG, WriteBehaviourConfig
 from trellis.retrieve.excerpts import truncate_excerpt
+from trellis.schemas.classification import SHADOW_TAGS_KEY
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -123,7 +124,11 @@ def build_vector_row(
     """
     vector = embedding_fn(content[:EMBED_INPUT_CHAR_CAP])
     row_metadata: dict[str, Any] = {
-        **(metadata or {}),
+        # Shadow tags are a measurement-only record on the document (#321).
+        # Copying them here would duplicate them into a second store whose
+        # write path has no shadow awareness and which the promotion analyzer
+        # never reads — a copy that can only drift.
+        **{k: v for k, v in (metadata or {}).items() if k != SHADOW_TAGS_KEY},
         "doc_id": doc_id,
         "content": truncate_excerpt(content, VECTOR_METADATA_EXCERPT_CHARS),
     }

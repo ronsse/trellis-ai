@@ -174,6 +174,32 @@ class ContentTags(TrellisModel):
 #: either package importing the other.
 SHADOW_TAGS_KEY = "content_tags_shadow"
 
+#: Tag facets whose stored value is a *list*, as opposed to a single label.
+#: One definition for every reader that has to normalise a facet value, because
+#: getting this wrong is how #282 happened — the flat scalar shape
+#: (``domain == "payments"``) is legal, and feeding it to ``set()`` shreds it
+#: into one entry per character. Consumers: :mod:`trellis.classify.shadow`
+#: (shadow-vs-live comparison) and :mod:`trellis.learning.tag_evolution`
+#: (facet mining).
+LIST_FACETS: frozenset[str] = frozenset({"domain", "retrieval_affinity"})
+
+
+def facet_values(raw: object) -> list[str]:
+    """Normalise a stored list-facet value into ``list[str]``.
+
+    Tolerates the three shapes a facet is legally stored as: absent, a flat
+    scalar, or a list. Empty and ``None`` members are dropped, so an
+    ``["", None]`` facet reads as carrying no value — which is what every
+    caller means by "does this facet say anything".
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        return [raw] if raw else []
+    if isinstance(raw, list):
+        return [str(v) for v in raw if v]
+    return []
+
 
 class ShadowTags(TrellisModel):
     """LLM-derived tags recorded *beside* :class:`ContentTags`, never in place of it.
@@ -223,7 +249,6 @@ class ShadowTags(TrellisModel):
     model_id: str = ""
     #: The producing classifier's own confidence, in ``[0.0, 1.0]``.
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
-    shadow_version: str = "1"
 
     @property
     def has_tags(self) -> bool:

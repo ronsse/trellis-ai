@@ -1888,9 +1888,10 @@ class StoreRegistry:
     def domain_keyword_map(self) -> dict[str, list[str]]:
         """The ``domain -> [keywords]`` map this deployment's classifier owns.
 
-        Same merge :meth:`build_ingestion_pipeline` performs (built-in defaults
-        under ``classify.domain_keywords`` from ``config.yaml``), exposed
-        without building a pipeline — the tag-keyword promotion loop
+        Delegates to :func:`~trellis.classify.factory.effective_domain_keywords`,
+        the same function :meth:`build_ingestion_pipeline` merges through, so
+        the classifier and this accessor cannot disagree — the tag-keyword
+        promotion loop
         (:mod:`trellis.learning.tag_evolution`) needs to know which keywords are
         *already* owned so it neither re-proposes them nor reads its own prior
         promotions as fresh evidence. "Already owned" has to mean owned in this
@@ -1902,16 +1903,11 @@ class StoreRegistry:
                 malformed, or names a reserved policy namespace — the same
                 loud failure :meth:`build_ingestion_pipeline` gives.
         """
-        from trellis.classify.classifiers.keyword import (  # noqa: PLC0415
-            build_domain_keyword_map,
-        )
         from trellis.classify.factory import (  # noqa: PLC0415
-            _extract_config_domains,
+            effective_domain_keywords,
         )
 
-        return build_domain_keyword_map(
-            config_domains=_extract_config_domains(self._classify_config)
-        )
+        return effective_domain_keywords(self._classify_config)
 
     def build_llm_client(self) -> LLMClient | None:
         """Construct an ``LLMClient`` from the ``llm:`` config block, if present.

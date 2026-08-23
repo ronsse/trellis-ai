@@ -62,6 +62,8 @@ class _InMemoryDocStore:
         doc_id: str | None,
         content: str,
         metadata: dict[str, Any] | None = None,
+        *,
+        preserve_updated_at: bool = False,
     ) -> str:
         assert doc_id is not None
         self._docs[doc_id] = {

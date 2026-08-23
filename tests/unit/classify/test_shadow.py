@@ -806,12 +806,30 @@ class TestCompareShadowToLive:
                 ).model_dump(mode="json"),
             },
         )
-        report = compare_shadow_to_live(document_store=document_store)
+        report = compare_shadow_to_live(
+            document_store=document_store, collect_comparisons=True
+        )
         assert len(report.comparisons) == 1
         row = report.comparisons[0]
         assert row.item_id == "d1"
         assert row.agreements["content_type"] is False
         assert row.agreements["domain"] is None  # live domain empty
+
+    def test_per_document_rows_are_off_by_default(
+        self, document_store: SQLiteDocumentStore
+    ) -> None:
+        """Retaining a row per document is O(corpus); a caller must ask for it."""
+        _seed(
+            document_store,
+            "d1",
+            "c",
+            metadata={
+                SHADOW_TAGS_KEY: ShadowTags(domain=["x"]).model_dump(mode="json")
+            },
+        )
+        report = compare_shadow_to_live(document_store=document_store)
+        assert report.with_shadow == 1
+        assert report.comparisons == []
 
     def test_collect_comparisons_false_keeps_aggregates_only(
         self, document_store: SQLiteDocumentStore

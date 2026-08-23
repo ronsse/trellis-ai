@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, Any, TypedDict
 import structlog
 
 from trellis.retrieve.excerpts import truncate_excerpt
-from trellis.retrieve.servable import servable_metadata
 from trellis.schemas.extraction import (
     EXTRACTION_STATUS_PROPERTY,
     EXTRACTION_STATUS_UNCONFIRMED,
@@ -411,10 +410,7 @@ class KeywordSearch(SearchStrategy):
                     item_type="document",
                     excerpt=truncate_excerpt(doc.get("content", "")),
                     relevance_score=score,
-                    metadata={
-                        "source_strategy": "keyword",
-                        **servable_metadata(metadata),
-                    },
+                    metadata={"source_strategy": "keyword", **metadata},
                 )
             )
         return sorted(items, key=lambda x: x.relevance_score, reverse=True)
@@ -515,10 +511,7 @@ class SemanticSearch(SearchStrategy):
                         metadata.get("content", metadata.get("excerpt", ""))
                     ),
                     relevance_score=score,
-                    metadata={
-                        "source_strategy": "semantic",
-                        **servable_metadata(metadata),
-                    },
+                    metadata={"source_strategy": "semantic", **metadata},
                 )
             )
         return sorted(items, key=lambda x: x.relevance_score, reverse=True)
@@ -808,7 +801,7 @@ class GraphSearch(SearchStrategy):
                         "node_role": node_role_val,
                         **{
                             k: v
-                            for k, v in servable_metadata(props).items()
+                            for k, v in props.items()
                             if k not in ("name", "description", "comment")
                         },
                     },

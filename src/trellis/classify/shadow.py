@@ -63,15 +63,23 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from trellis.classify.ingest import CLASSIFY_METADATA_KEYS
 from trellis.classify.protocol import ClassificationContext
-from trellis.classify.refresh import _default_context_builder
+from trellis.classify.refresh import (
+    DEFAULT_PAGE_SIZE,
+    default_context_builder,
+    parse_classified_at,
+)
 from trellis.core.hashing import content_hash
 from trellis.schemas.classification import (
     CONTENT_TYPE_VALUES,
+    LIST_FACETS,
     SHADOW_TAGS_KEY,
     ShadowTags,
+    facet_values,
 )
 from trellis.schemas.memory_op import (
+    REF_TYPE_DOCUMENT,
     InputDigest,
     JudgedOpType,
     MemoryOpJudgedPayload,
@@ -99,15 +107,13 @@ logger = structlog.get_logger(__name__)
 # enforced at the serving boundary by :mod:`trellis.retrieve.servable`.
 # Both are pinned by ``tests/unit/classify/test_shadow.py``.
 
-#: Metadata keys the shadow pass must never write. The whole guarantee of
-#: shadow mode is that it changes nothing retrieval reads; these are the keys
-#: retrieval reads. Enforced in :func:`_write_shadow` and pinned by
-#: ``test_shadow_pass_never_touches_live_tags``.
-PROTECTED_LIVE_KEYS = ("content_tags", "auto_importance")
-
-#: Documents fetched per ``list_documents`` round-trip. Matches
-#: :data:`trellis.classify.refresh.DEFAULT_PAGE_SIZE`.
-DEFAULT_PAGE_SIZE = 100
+#: Metadata keys the shadow pass must never write — the keys retrieval reads.
+#: Aliases :data:`~trellis.classify.ingest.CLASSIFY_METADATA_KEYS` rather than
+#: restating it: that constant is pinned by
+#: ``test_classify_metadata_keys_matches_return_shape`` to the classify path's
+#: actual return shape, so a facet added there cannot silently fall out of this
+#: guarantee. Its own docstring asks callers to key off it for exactly this.
+PROTECTED_LIVE_KEYS = CLASSIFY_METADATA_KEYS
 
 #: ``decision`` value recorded on the ``MEMORY_OP_JUDGED`` event when the
 #: classifier returned no ``content_type``. A verdict of "produced nothing" is
@@ -205,13 +211,14 @@ def shadow_classify_item(
     live_tags = metadata.get("content_tags")
     live = dict(live_tags) if isinstance(live_tags, dict) else {}
 
-    builder = context_builder or _default_context_builder
+    builder = context_builder or default_context_builder
     result = classifier.classify(content, context=builder(doc))
-    resolved_model_id = model_id or result.classifier_name or _name_of(classifier)
+    classifier_name = result.classifier_name or str(classifier.name)
+    resolved_model_id = model_id or classifier_name
 
     shadow = _to_shadow_tags(
         result.tags,
-        classifier_name=result.classifier_name or _name_of(classifier),
+        classifier_name=classifier_name,
         confidence=result.confidence,
         model_id=resolved_model_id,
     )
@@ -400,9 +407,6 @@ def shadow_classify_stale(
 #: a list facet (compared as a set); the rest are scalars.
 COMPARED_FACETS = ("domain", "content_type", "scope", "signal_quality")
 
-#: The one facet whose comparison is set-valued.
-_LIST_FACETS = frozenset({"domain"})
-
 
 @dataclass(frozen=True)
 class FacetAgreement:
@@ -471,7 +475,7 @@ def compare_shadow_to_live(
     document_store: DocumentStore,
     limit: int = 0,
     page_size: int = DEFAULT_PAGE_SIZE,
-    collect_comparisons: bool = True,
+    collect_comparisons: bool = False,
 ) -> ShadowAgreementReport:
     """Compare every shadowed document's LLM tags against its live tags.
 
@@ -483,9 +487,10 @@ def compare_shadow_to_live(
         document_store: Store to scan.
         limit: Stop after this many documents (``0`` = all).
         page_size: Documents per round-trip.
-        collect_comparisons: When ``False``, only the aggregate counts are
-            populated — a whole-store scan does not have to materialise a
-            per-document row for every item.
+        collect_comparisons: When ``True``, a per-document row is retained for
+            every shadowed item. Off by default: over a whole store that is an
+            O(corpus) retention (~42 MB at 50k documents) a caller asking for
+            aggregate counts never wanted.
 
     Returns:
         :class:`ShadowAgreementReport`.
@@ -556,9 +561,22 @@ def compare_shadow_to_live(
 def _compare_facet(
     facet: str, live_value: Any, shadow_value: Any
 ) -> tuple[str, bool | None]:
-    """Bucket one facet comparison. Returns ``(bucket_name, agreed_or_None)``."""
-    live_present = _facet_present(facet, live_value)
-    shadow_present = _facet_present(facet, shadow_value)
+    """Bucket one facet comparison. Returns ``(bucket_name, agreed_or_None)``.
+
+    An empty list facet counts as *absent*, not as a value: every document the
+    classify-on-write path tags stores ``domain: []`` deliberately (see
+    :mod:`trellis.classify.ingest`), and counting that as "live produced a
+    domain" would report near-total disagreement on the one facet where the
+    live side has, by design, said nothing at all.
+    """
+    if facet in LIST_FACETS:
+        live: Any = set(facet_values(live_value))
+        shadow: Any = set(facet_values(shadow_value))
+        live_present, shadow_present = bool(live), bool(shadow)
+    else:
+        live, shadow = live_value, shadow_value
+        live_present = live_value is not None and live_value != ""
+        shadow_present = shadow_value is not None and shadow_value != ""
 
     if not live_present and not shadow_present:
         return "both_missing", None
@@ -567,54 +585,13 @@ def _compare_facet(
     if not shadow_present:
         return "shadow_missing", None
 
-    if facet in _LIST_FACETS:
-        agreed = _as_set(live_value) == _as_set(shadow_value)
-    else:
-        agreed = live_value == shadow_value
+    agreed = bool(live == shadow)
     return ("agreed" if agreed else "disagreed"), agreed
-
-
-def _facet_present(facet: str, value: Any) -> bool:
-    """``True`` when a stored facet value carries real signal.
-
-    An empty ``domain`` list is *absent*, not a value: every document the
-    classify-on-write path tags stores ``domain: []`` deliberately (see
-    :mod:`trellis.classify.ingest`), and counting that as "live produced a
-    domain" would report near-total disagreement on the one facet where the
-    live side has, by design, said nothing at all.
-    """
-    if value is None:
-        return False
-    if facet in _LIST_FACETS:
-        return bool(_as_set(value))
-    return bool(value != "")
-
-
-def _as_set(value: Any) -> set[str]:
-    """Normalise a list-facet value to a set of strings.
-
-    Tolerates the flat scalar shape (``domain == "payments"``), which is a
-    legal stored form elsewhere in the repo — feeding it to ``set()`` directly
-    would shred it into one entry per character.
-    """
-    if isinstance(value, str):
-        return {value} if value else set()
-    if isinstance(value, list):
-        return {str(v) for v in value if v}
-    return set()
 
 
 # ---------------------------------------------------------------------------
 # Internals
 # ---------------------------------------------------------------------------
-
-
-def _name_of(classifier: Classifier) -> str:
-    """The classifier's ``name``, tolerating a mock without one."""
-    try:
-        return str(classifier.name)
-    except Exception:  # pragma: no cover - defensive
-        return classifier.__class__.__name__
 
 
 def _to_shadow_tags(
@@ -632,8 +609,8 @@ def _to_shadow_tags(
     (``_auto_importance`` / ``_auto_summary``, which
     :class:`~trellis.classify.classifiers.llm.LLMFacetClassifier` uses as
     out-of-band channels) are dropped rather than smuggled into ``custom``:
-    they are scores and prose, not tags, and ``custom`` feeds the promotion
-    analyzer.
+    they are scores and prose, not tags, and the shadow record is meant to hold
+    what the model said *about classification*.
     """
     scalar = _first_or_none
 
@@ -699,11 +676,15 @@ def _write_shadow(
     is why the guarantee actually holds; see
     ``DocumentStoreContractTests.test_put_preserve_updated_at_keeps_prior_stamp``.
     """
-    preserved = {key: metadata[key] for key in PROTECTED_LIVE_KEYS if key in metadata}
-    to_write = {**metadata, SHADOW_TAGS_KEY: shadow_json, **preserved}
-    # A protected key absent before must stay absent: `preserved` can only
-    # restore keys that existed, and nothing above adds one.
-    document_store.put(item_id, content, to_write, preserve_updated_at=True)
+    # `metadata` is this function's own copy and ``SHADOW_TAGS_KEY`` is not in
+    # :data:`PROTECTED_LIVE_KEYS`, so the splat cannot move a live key — the
+    # guarantee is structural, not a restore step.
+    document_store.put(
+        item_id,
+        content,
+        {**metadata, SHADOW_TAGS_KEY: shadow_json},
+        preserve_updated_at=True,
+    )
 
 
 def _needs_shadow(raw: Any, cutoff: datetime | None) -> bool:
@@ -718,9 +699,7 @@ def _needs_shadow(raw: Any, cutoff: datetime | None) -> bool:
     if cutoff is None:
         # Default mode: a record exists, so it is not re-judged.
         return False
-    from trellis.classify.refresh import _parse_classified_at  # noqa: PLC0415
-
-    classified_at = _parse_classified_at(raw.get("classified_at"))
+    classified_at = parse_classified_at(raw.get("classified_at"))
     return classified_at is None or classified_at < cutoff
 
 
@@ -765,7 +744,7 @@ def _emit_judged(
         ),
         decision=decision,
         confidence=max(0.0, min(1.0, float(confidence))),
-        subject_ref=SubjectRef(ref_type="doc", ref_id=item_id),
+        subject_ref=SubjectRef(ref_type=REF_TYPE_DOCUMENT, ref_id=item_id),
     )
     try:
         event_log.emit(
@@ -783,13 +762,8 @@ def _emit_judged(
 
 __all__ = [
     "COMPARED_FACETS",
-    "DECISION_UNCLASSIFIED",
-    "DEFAULT_PAGE_SIZE",
     "PROTECTED_LIVE_KEYS",
-    "REASON_DRY_RUN",
-    "REASON_NOT_FOUND",
     "REASON_NO_SIGNAL",
-    "REASON_WRITTEN",
     "SHADOW_TAGS_KEY",
     "BatchShadowResult",
     "FacetAgreement",

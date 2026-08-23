@@ -107,12 +107,23 @@ class TestShadowReportCommand:
 
 
 class TestTagCandidatesCommand:
-    def test_missing_thresholds_exit_with_the_seed_hint(self, cli_env) -> None:
-        """A missing threshold is operator misconfiguration, reported as such."""
+    def test_unseeded_deployment_runs_on_recommended_defaults(self, cli_env) -> None:
+        """The command must work out of the box, like its sibling loop.
+
+        Nothing seeds ``learning.tag_evolution`` — ``admin init-learning-params``
+        does not know about it — so hard-failing on an unseeded store meant
+        hard-failing on every deployment. The analyzer keeps its
+        no-silent-defaults rule; the CLI chooses the default, loudly.
+        """
         result = runner.invoke(classify_app, ["tag-candidates"])
-        assert result.exit_code != 0
-        assert "tag_keyword_min_support" in result.output
-        assert "RECOMMENDED_SEED_VALUES" in result.output
+        assert result.exit_code == 0, result.output
+        assert "none surfaced" in result.output
+
+    def test_seeded_thresholds_win_over_the_fallback(self, cli_env) -> None:
+        _seed_thresholds(tag_keyword_min_corpus=999)
+        payload = _run_json("tag-candidates")
+        assert payload["status"] == "ok"
+        assert payload["candidates"] == []
 
     def test_out_of_range_threshold_reports_cleanly(self, cli_env) -> None:
         """An out-of-range threshold is misconfiguration, not a crash.

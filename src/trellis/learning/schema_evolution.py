@@ -39,8 +39,6 @@ from typing import TYPE_CHECKING, Any, Literal
 import structlog
 
 from trellis.learning.cooldown import (
-    COOLDOWN_GROWTH_RATIO,
-    DEFAULT_PRIOR_SCAN_LIMIT,
     PriorCandidate,
     cooldown_blocks_emission,
     load_prior_candidates,
@@ -122,11 +120,6 @@ RECOMMENDED_SEED_VALUES: dict[str, float | int | str | bool] = {
 # the last index is the best. The comparison "avg_signal_quality >=
 # min_signal_quality" is computed against this ordering.
 _SIGNAL_QUALITY_ORDER: tuple[str, ...] = ("noise", "low", "standard", "high")
-
-
-# Re-emission growth trigger — now owned by :mod:`trellis.learning.cooldown`
-# and aliased here for the pre-existing import path.
-_COOLDOWN_GROWTH_RATIO: float = COOLDOWN_GROWTH_RATIO
 
 
 # Default cap for enumerating current nodes from the GraphStore. The
@@ -613,46 +606,8 @@ def _first_last_seen(items: Iterable[dict[str, Any]]) -> tuple[datetime, datetim
     return min(timestamps), max(timestamps)
 
 
-# ---------------------------------------------------------------------------
-# Cooldown bookkeeping
-# ---------------------------------------------------------------------------
-
-# The re-emission rule (ADR §2.3 / §4.2) is shared with the tag-keyword
-# promotion loop and lives in :mod:`trellis.learning.cooldown` so the two
-# surface-only analyzers cannot drift apart on it. These aliases keep this
-# module's pre-existing private names working for its callers and tests.
-_PriorCandidate = PriorCandidate
-
-
-def _load_prior_candidates(
-    event_log: EventLog, *, scan_limit: int = DEFAULT_PRIOR_SCAN_LIMIT
-) -> dict[str, _PriorCandidate]:
-    """Index the latest WELL_KNOWN_CANDIDATE event per ``candidate_id``."""
-    return load_prior_candidates(
-        event_log,
-        event_type=EventType.WELL_KNOWN_CANDIDATE,
-        count_key="count",
-        scan_limit=scan_limit,
-    )
-
-
-def _cooldown_blocks_emission(
-    *,
-    candidate_id: str,
-    current_count: int,
-    prior: _PriorCandidate | None,
-    cooldown_days: int,
-    now: datetime,
-) -> tuple[bool, datetime | None, int]:
-    """Return ``(blocked, cooldown_until, recurrence_count)``. See §2.3."""
-    return cooldown_blocks_emission(
-        candidate_id=candidate_id,
-        current_count=current_count,
-        prior=prior,
-        cooldown_days=cooldown_days,
-        now=now,
-        log_event="well_known.candidate_suppressed_cooldown",
-    )
+# The re-emission rule (ADR §2.3 / §4.2) lives in :mod:`trellis.learning.cooldown`
+# so this loop and the tag-keyword loop cannot drift apart on it.
 
 
 # ---------------------------------------------------------------------------
@@ -739,7 +694,11 @@ def analyze_well_known_candidates(
         scan_limit=node_scan_limit,
     )
 
-    prior_candidates = _load_prior_candidates(event_log)
+    prior_candidates = load_prior_candidates(
+        event_log,
+        event_type=EventType.WELL_KNOWN_CANDIDATE,
+        count_key="count",
+    )
 
     surfaced: list[WellKnownCandidate] = []
 
@@ -823,7 +782,7 @@ def _analyze_kind(
     extractors_by_value: dict[str, set[str]],
     kind: CandidateKind,
     thresholds: _Thresholds,
-    prior_candidates: dict[str, _PriorCandidate],
+    prior_candidates: dict[str, PriorCandidate],
     window_start: datetime,
     eval_now: datetime,
 ) -> list[WellKnownCandidate]:
@@ -868,12 +827,13 @@ def _analyze_kind(
 
         candidate_id = _compute_candidate_id(value, kind)
         prior = prior_candidates.get(candidate_id)
-        blocked, cooldown_until, recurrence_count = _cooldown_blocks_emission(
+        blocked, cooldown_until, recurrence_count = cooldown_blocks_emission(
             candidate_id=candidate_id,
             current_count=count,
             prior=prior,
             cooldown_days=thresholds.cooldown_days,
             now=eval_now,
+            log_event="well_known.candidate_suppressed_cooldown",
         )
         if blocked:
             continue

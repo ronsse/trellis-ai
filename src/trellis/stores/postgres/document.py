@@ -112,26 +112,31 @@ class PostgresDocumentStore(PostgresStoreBase, DocumentStore):
         metadata_json = json.dumps(metadata)
         chash = _content_hash(content)
 
-        # Omitting the column from the SET list leaves the stored value in
-        # place; the INSERT arm still stamps a fresh row. Mirrors the SQLite
-        # backend so both honour the same contract test.
-        touch = (
-            ""
-            if preserve_updated_at
-            else ",\n                    updated_at = EXCLUDED.updated_at"
-        )
+        # `preserve_updated_at` is bound, not spliced: an f-string here would
+        # couple the generated SQL to this block's indentation. Mirrors the
+        # SQLite backend so both honour the same contract test.
         with self._conn() as conn, conn.cursor() as cur:
             cur.execute(
-                f"""
+                """
                 INSERT INTO documents
                     (doc_id, content, content_hash, metadata, created_at, updated_at)
                 VALUES (%s, %s, %s, %s, %s, %s)
                 ON CONFLICT (doc_id) DO UPDATE SET
                     content = EXCLUDED.content,
                     content_hash = EXCLUDED.content_hash,
-                    metadata = EXCLUDED.metadata{touch}
+                    metadata = EXCLUDED.metadata,
+                    updated_at = CASE WHEN %s
+                        THEN documents.updated_at ELSE EXCLUDED.updated_at END
                 """,
-                (doc_id, content, chash, metadata_json, now, now),
+                (
+                    doc_id,
+                    content,
+                    chash,
+                    metadata_json,
+                    now,
+                    now,
+                    preserve_updated_at,
+                ),
             )
         logger.debug("document_stored", doc_id=doc_id)
         return doc_id

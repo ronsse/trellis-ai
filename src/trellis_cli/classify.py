@@ -56,19 +56,26 @@ import structlog
 import typer
 from rich.console import Console
 
+from trellis.classify.factory import CLASSIFY_CONFIG_KEY, DOMAIN_KEYWORDS_KEY
 from trellis.classify.refresh import DEFAULT_PAGE_SIZE, reclassify_stale
 from trellis.classify.shadow import compare_shadow_to_live, shadow_classify_stale
 from trellis.learning.tag_evolution import (
     DEFAULT_SCAN_LIMIT,
+    PARAM_COMPONENT_ID,
+    RECOMMENDED_SEED_VALUES,
+    REQUIRED_PARAM_KEYS,
     analyze_tag_keyword_candidates,
     apply_promotion,
 )
 from trellis.ops import ParameterRegistry
+from trellis.schemas.parameters import ParameterScope, ParameterSet
+from trellis_cli.analyze import _InMemoryParameterStore
 from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_OK
 from trellis_cli.output import emit_json
 from trellis_cli.stores import _get_registry
 
 if TYPE_CHECKING:
+    from trellis.classify.protocol import Classifier
     from trellis.classify.refresh import BatchRefreshResult
     from trellis.classify.shadow import ShadowAgreementReport
     from trellis.learning.tag_evolution import TagKeywordCandidate
@@ -228,7 +235,7 @@ def _render_text(summary: dict[str, object]) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _require_llm_facet_classifier() -> object:
+def _require_llm_facet_classifier() -> Classifier:
     """Build the enrichment-mode LLM classifier, or exit loudly.
 
     Shadow mode is opt-in but must be loud on misuse: an operator running the
@@ -320,7 +327,7 @@ def shadow(
     classifier = _require_llm_facet_classifier()
 
     result = shadow_classify_stale(
-        classifier=classifier,  # type: ignore[arg-type]
+        classifier=classifier,
         document_store=registry.knowledge.document_store,
         # Dry runs stay audit-silent: a MEMORY_OP_JUDGED event claims a
         # judgement that was not persisted.
@@ -474,6 +481,45 @@ def _render_shadow_report(report: ShadowAgreementReport) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _tag_evolution_registry(registry: object) -> ParameterRegistry:
+    """Resolve the analyzer's thresholds, seeding recommended defaults if absent.
+
+    Mirrors ``trellis analyze schema-evolution``'s
+    ``_build_schema_evolution_registry``: the persistent store wins when its
+    snapshot carries every required key, otherwise an in-memory snapshot seeded
+    from :data:`RECOMMENDED_SEED_VALUES` plus one WARN line. Without this the
+    command hard-fails on any deployment nobody has hand-seeded — which is
+    every deployment, since ``trellis admin init-learning-params`` does not know
+    about this component. The analyzer keeps its no-silent-defaults rule; the
+    default is chosen *here*, loudly, by the CLI.
+    """
+    persistent = ParameterRegistry(registry.operational.parameter_store)  # type: ignore[attr-defined]
+    scope = ParameterScope(component_id=PARAM_COMPONENT_ID)
+    if all(k in persistent.get_values(scope) for k in REQUIRED_PARAM_KEYS):
+        return persistent
+
+    err_console.print(
+        "[yellow]learning.tag_evolution thresholds are not seeded — using "
+        "recommended defaults for this run. Seed them to make the run "
+        "reproducible.[/yellow]"
+    )
+    logger.warning(
+        "tag_evolution.parameter_registry.seeded_defaults",
+        component=PARAM_COMPONENT_ID,
+        defaults=dict(RECOMMENDED_SEED_VALUES),
+    )
+    store = _InMemoryParameterStore()
+    store.put(
+        ParameterSet(
+            scope=scope,
+            values=dict(RECOMMENDED_SEED_VALUES),
+            source="cli:classify",
+            notes="seeded by trellis_cli.classify._tag_evolution_registry",
+        )
+    )
+    return ParameterRegistry(store=store)
+
+
 @classify_app.command("tag-candidates")
 def tag_candidates(
     facet: str = typer.Option(
@@ -523,7 +569,7 @@ def tag_candidates(
         candidates = analyze_tag_keyword_candidates(
             document_store=registry.knowledge.document_store,
             event_log=registry.operational.event_log,
-            registry=ParameterRegistry(registry.operational.parameter_store),
+            registry=_tag_evolution_registry(registry),
             facet=facet,
             # Filters its own writes: a keyword the live classifier already
             # owns must not be re-proposed, nor accrue support the next run
@@ -601,8 +647,8 @@ def _render_tag_candidates(
         "\n[dim]To promote, merge into ~/.trellis/config.yaml (delete the "
         "lines to revoke):[/dim]"
     )
-    console.print("classify:")
-    console.print("  domain_keywords:")
+    console.print(f"{CLASSIFY_CONFIG_KEY}:")
+    console.print(f"  {DOMAIN_KEYWORDS_KEY}:")
     for tag, keywords in fragment.items():
         console.print(f"    {tag}:")
         for keyword in keywords:

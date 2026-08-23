@@ -103,6 +103,7 @@ from trellis.retrieve.pack_builder import PackBuilder, SemanticDedupConfig
 from trellis.retrieve.rerankers import build_reranker
 from trellis.retrieve.strategies import build_strategies
 from trellis.retrieve.token_tracker import estimate_tokens, track_token_usage
+from trellis.schemas.memory_op import REF_TYPE_DOCUMENT
 from trellis.schemas.pack import PackBudget, SectionRequest
 from trellis.schemas.trace import Trace
 from trellis.stores.advisory_store import AdvisoryStore
@@ -1594,8 +1595,8 @@ def _reconcile_subject(
     pre-existing candidate that triggered the reconciliation.
     """
     if decision == ReconcileDecision.ADD and stored_id is not None:
-        return "doc", stored_id
-    return "doc", candidate.doc_id
+        return REF_TYPE_DOCUMENT, stored_id
+    return REF_TYPE_DOCUMENT, candidate.doc_id
 
 
 def _reconcile_result_message(

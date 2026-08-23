@@ -4,15 +4,28 @@ from __future__ import annotations
 
 from trellis.retrieve.servable import (
     NON_SERVABLE_METADATA_KEYS,
-    servable_metadata,
+    strip_non_servable,
 )
 from trellis.schemas.classification import SHADOW_TAGS_KEY
+from trellis.schemas.pack import PackItem
 
 
-class TestServableMetadata:
+def _item(item_id: str, metadata: dict | None = None) -> PackItem:
+    return PackItem(
+        item_id=item_id,
+        item_type="document",
+        excerpt="text",
+        relevance_score=0.5,
+        metadata=metadata or {},
+    )
+
+
+class TestStripNonServable:
     def test_strips_shadow_tags(self) -> None:
-        out = servable_metadata({"title": "T", SHADOW_TAGS_KEY: {"domain": ["x"]}})
-        assert out == {"title": "T"}
+        out = strip_non_servable(
+            [_item("d1", {"title": "T", SHADOW_TAGS_KEY: {"domain": ["x"]}})]
+        )
+        assert out[0].metadata == {"title": "T"}
 
     def test_deny_list_is_narrow(self) -> None:
         """Servable-by-default: a new key must not need registering to be served.
@@ -29,24 +42,52 @@ class TestServableMetadata:
             "source_system": "dbt",
             "a_key_invented_tomorrow": 1,
         }
-        assert servable_metadata(meta) == meta
+        assert strip_non_servable([_item("d1", meta)])[0].metadata == meta
 
-    def test_never_mutates_the_caller_mapping(self) -> None:
-        meta = {"title": "T", SHADOW_TAGS_KEY: {"domain": ["x"]}}
-        servable_metadata(meta)
-        assert SHADOW_TAGS_KEY in meta
+    def test_clean_items_are_not_copied(self) -> None:
+        """The no-strip path is the common one; it should cost nothing."""
+        item = _item("d1", {"title": "T"})
+        assert strip_non_servable([item])[0] is item
 
-    def test_returns_a_copy_even_on_the_fast_path(self) -> None:
-        """A strategy splats the result into a PackItem; it must not alias.
+    def test_never_mutates_the_source_item(self) -> None:
+        item = _item("d1", {"title": "T", SHADOW_TAGS_KEY: {"domain": ["x"]}})
+        strip_non_servable([item])
+        assert SHADOW_TAGS_KEY in item.metadata
 
-        The no-strip path is the common one, so it is also the one where an
-        accidental alias would go unnoticed.
+    def test_empty_input(self) -> None:
+        assert strip_non_servable([]) == []
+        assert strip_non_servable([_item("d1")])[0].metadata == {}
+
+    def test_preserves_order_and_other_fields(self) -> None:
+        items = [
+            _item("a", {SHADOW_TAGS_KEY: {}}),
+            _item("b", {"title": "keep"}),
+        ]
+        out = strip_non_servable(items)
+        assert [i.item_id for i in out] == ["a", "b"]
+        assert out[0].excerpt == "text"
+        assert out[0].relevance_score == 0.5
+
+
+class TestEnforcedForEveryStrategy:
+    def test_a_strategy_added_later_is_covered(self) -> None:
+        """The reason this lives in PackBuilder rather than in each strategy.
+
+        ``PackBuilder`` takes strategies by injection, so a rule applied inside
+        the three built-ins would not hold for a fourth. This is that fourth.
         """
-        meta = {"title": "T"}
-        out = servable_metadata(meta)
-        assert out == meta
-        assert out is not meta
+        from unittest.mock import MagicMock
 
-    def test_none_and_empty(self) -> None:
-        assert servable_metadata(None) == {}
-        assert servable_metadata({}) == {}
+        from trellis.retrieve.pack_builder import PackBuilder
+        from trellis.retrieve.strategies import SearchStrategy
+
+        leaky = MagicMock(spec=SearchStrategy)
+        leaky.name = "third_party"
+        leaky.search.return_value = [
+            _item("d1", {"title": "T", SHADOW_TAGS_KEY: {"domain": ["secret"]}})
+        ]
+
+        pack = PackBuilder(strategies=[leaky]).build("anything")
+        assert pack.items, "fixture must retrieve, else the test is vacuous"
+        assert SHADOW_TAGS_KEY not in pack.items[0].metadata
+        assert "secret" not in str(pack.model_dump(mode="json"))

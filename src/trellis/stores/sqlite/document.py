@@ -141,16 +141,10 @@ class SQLiteDocumentStore(SQLiteStoreBase, DocumentStore):
         metadata_json = json.dumps(metadata)
         chash = _content_hash(content)
 
-        # Omitting the column from the SET list leaves the stored value in
-        # place; the INSERT arm still stamps a fresh row, which is what
-        # ``preserve_updated_at`` is documented to do.
-        touch = (
-            ""
-            if preserve_updated_at
-            else ",\n                updated_at = excluded.updated_at"
-        )
+        # `preserve_updated_at` is bound, not spliced: an f-string here would
+        # couple the generated SQL to this block's indentation.
         self._conn.execute(
-            f"""
+            """
             INSERT INTO documents
                 (doc_id, content, content_hash,
                  metadata_json, created_at, updated_at)
@@ -158,9 +152,11 @@ class SQLiteDocumentStore(SQLiteStoreBase, DocumentStore):
             ON CONFLICT(doc_id) DO UPDATE SET
                 content = excluded.content,
                 content_hash = excluded.content_hash,
-                metadata_json = excluded.metadata_json{touch}
+                metadata_json = excluded.metadata_json,
+                updated_at = CASE WHEN ?
+                    THEN documents.updated_at ELSE excluded.updated_at END
             """,
-            (doc_id, content, chash, metadata_json, now, now),
+            (doc_id, content, chash, metadata_json, now, now, preserve_updated_at),
         )
         # FTS5 doesn't support ON CONFLICT — delete+insert
         self._conn.execute("DELETE FROM documents_fts WHERE doc_id = ?", (doc_id,))

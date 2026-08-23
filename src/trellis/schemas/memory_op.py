@@ -64,6 +64,13 @@ class JudgedOpType(StrEnum):
     CLASSIFICATION = "classification"
 
 
+#: ``SubjectRef.ref_type`` for a document referent. A constant because
+#: ``ref_type`` is half the feedback-attribution join key and the emitters are
+#: written independently: the first two spelled it ``doc`` and ``document``, so
+#: a consumer joining on ``(ref_type, ref_id)`` saw two names for one kind.
+REF_TYPE_DOCUMENT = "doc"
+
+
 class InputDigest(TrellisModel):
     """Leak-safe fingerprint of the input a judged op saw.
 
@@ -100,7 +107,9 @@ class SubjectRef(TrellisModel):
 
     ref_type: str
     """Open-string kind of the referent (``doc`` / ``entity`` /
-    ``observation`` / ...), per the CLAUDE.md type-extensibility rule."""
+    ``observation`` / ...), per the CLAUDE.md type-extensibility rule. Open,
+    but not free: it is half the join key, so emitters use the shared
+    constants (:data:`REF_TYPE_DOCUMENT`) rather than spelling one inline."""
 
     ref_id: str
     """Opaque identifier of the referent within its store."""

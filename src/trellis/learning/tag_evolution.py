@@ -97,7 +97,12 @@ from trellis.learning.cooldown import (
     cooldown_blocks_emission,
     load_prior_candidates,
 )
-from trellis.schemas.classification import SHADOW_TAGS_KEY, _reserved_name_for
+from trellis.schemas.classification import (
+    LIST_FACETS,
+    SHADOW_TAGS_KEY,
+    _reserved_name_for,
+    facet_values,
+)
 from trellis.stores.base.event_log import EventType
 
 if TYPE_CHECKING:
@@ -178,9 +183,6 @@ RECOMMENDED_SEED_VALUES: dict[str, float | int | str | bool] = {
 #: docstring.
 FACETS_WITH_WRITE_TARGET: frozenset[str] = frozenset({"domain"})
 
-#: Facets stored as a list on :class:`~trellis.schemas.classification.ShadowTags`.
-_LIST_FACETS: frozenset[str] = frozenset({"domain", "retrieval_affinity"})
-
 #: Note attached to every candidate for a facet with no write target.
 NOTE_NO_WRITE_TARGET = (
     "no config write target for this facet — surfaced for review only"
@@ -204,15 +206,15 @@ NOTE_DOMAIN_HARD_EXCLUDES = (
 # Tokenization
 # ---------------------------------------------------------------------------
 
-#: Token splitter. Keeps ``-`` and ``_`` inside tokens so ``task-management``
+#: Token matcher. Keeps ``-`` and ``_`` inside tokens so ``task-management``
 #: and ``source_system`` survive as single keywords — the multi-word tags an
-#: LLM produces are exactly the interesting candidates.
-_TOKEN_RE = re.compile(r"[^a-z0-9_-]+")
-
-#: Shortest token that can become a keyword. Two-character tokens match far too
+#: LLM produces are exactly the interesting candidates. The ``{3,}`` bound is
+#: in the pattern rather than a filter so the engine never allocates a Python
+#: string for the short tokens (measured 26% faster over a whole scan, and the
+#: analyzer tokenises the corpus twice). Two-character tokens match far too
 #: much under the classifier's substring semantics (``"ml"`` is inside
 #: ``"html"``).
-_MIN_TOKEN_LENGTH = 3
+_TOKEN_RE = re.compile(r"[a-z0-9_-]{3,}")
 
 #: Tokens that never become keywords. Deliberately small — a real stopword list
 #: is a tuning surface, and the support/precision/lift gates already reject a
@@ -309,14 +311,10 @@ def extract_keywords(content: str) -> set[str]:
     "does this keyword appear at all", so counting repeats would let one
     keyword-heavy document look like many.
     """
-    tokens = _TOKEN_RE.split(content.lower())
     return {
         token
-        for token in tokens
-        if len(token) >= _MIN_TOKEN_LENGTH
-        and token not in _STOPWORDS
-        and not token.isdigit()
-        and token.strip("-_") != ""
+        for token in _TOKEN_RE.findall(content.lower())
+        if token not in _STOPWORDS and not token.isdigit() and token.strip("-_")
     }
 
 
@@ -529,11 +527,13 @@ def _iter_shadowed(
             content = doc.get("content") or ""
             if not content.strip():
                 continue
-            yield (
-                str(doc.get("doc_id") or ""),
-                extract_keywords(content) - excluded_keywords,
-                tags,
-            )
+            item_id = str(doc.get("doc_id") or "")
+            if not item_id:
+                # No id means no example pointer and nothing a reviewer could
+                # open — skip it whole rather than counting it in one pass and
+                # excluding it in the other.
+                continue
+            yield item_id, extract_keywords(content) - excluded_keywords, tags
 
 
 def _scan_corpus(
@@ -566,7 +566,14 @@ def _scan_corpus(
 
     The cost is a second scan of the store and a second tokenisation. That is
     the right trade: the scan is I/O the analyzer runs once, while the memory
-    it replaces grows with the corpus and has no ceiling.
+    it replaces grows with the corpus and has no ceiling. Caching the pass-1
+    token sets to avoid the re-read is *worse* than the disease (measured
+    ~3.8 GB at 50k documents against ~2.9 GB for the single-pass explosion);
+    the only shape that removes both the second scan and the second
+    tokenisation at bounded memory is interning tokens to ints and holding one
+    array per document (~281 MB), which buys ~12 s of CPU on a nightly job in
+    exchange for threading token ids through the whole counting path. Not worth
+    it today — but that is the option to reach for if it ever is.
     """
     corpus = _Corpus()
 
@@ -611,7 +618,7 @@ def _scan_corpus(
                 corpus.pair_documents[pair] = count
                 # Examples exist for human review of a *surfaced* candidate, so
                 # they are only worth keeping once the pair has qualified.
-                if count >= min_support and item_id:
+                if count >= min_support:
                     examples = corpus.pair_examples[pair]
                     if len(examples) < _MAX_EXAMPLES:
                         examples.append(item_id)
@@ -620,15 +627,14 @@ def _scan_corpus(
 
 
 def _facet_values(facet: str, raw: Any) -> list[str]:
-    """Normalise a stored facet value to the list of tags it carries."""
-    if raw is None:
-        return []
-    if facet in _LIST_FACETS:
-        if isinstance(raw, str):
-            return [raw] if raw else []
-        if isinstance(raw, list):
-            return [str(v) for v in raw if v]
-        return []
+    """Normalise a stored facet value to the list of tags it carries.
+
+    List facets go through the shared
+    :func:`~trellis.schemas.classification.facet_values`; a single-label facet
+    is its own one-element list.
+    """
+    if facet in LIST_FACETS:
+        return facet_values(raw)
     return [str(raw)] if raw else []
 
 
@@ -753,16 +759,18 @@ def _surface_candidates(
 ) -> list[TagKeywordCandidate]:
     """Apply the gates to every (keyword, tag) pair and build candidates."""
     surfaced: list[TagKeywordCandidate] = []
+    # A reserved policy namespace is never proposable as a tag value —
+    # ContentTags rejects it outright. The shadow record deliberately does not
+    # reject it (recording what a model proposed is the point), so the refusal
+    # lives here, at the gate where it matters. Resolved once per *tag* rather
+    # than once per (keyword, tag) pair — tags number in the tens, pairs in the
+    # thousands.
+    reserved_tags = {t for t in corpus.tag_documents if _reserved_name_for(t)}
+    for tag in sorted(reserved_tags):
+        logger.info("tag_evolution.reserved_tag_skipped", facet=facet, tag=tag)
 
     for (keyword, tag), support in corpus.pair_documents.items():
-        if support < thresholds.min_support:
-            continue
-        # A reserved policy namespace is never proposable as a tag value —
-        # ContentTags rejects it outright. The shadow record deliberately does
-        # not reject it (recording what a model proposed is the point), so the
-        # refusal lives here, at the gate where it matters.
-        if _reserved_name_for(tag) is not None:
-            logger.info("tag_evolution.reserved_tag_skipped", facet=facet, tag=tag)
+        if support < thresholds.min_support or tag in reserved_tags:
             continue
 
         keyword_documents = corpus.keyword_documents[keyword]
