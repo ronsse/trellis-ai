@@ -11,6 +11,7 @@ from trellis.classify.classifiers.keyword import (
 from trellis.classify.factory import (
     build_ingestion_pipeline,
     effective_domain_aliases,
+    effective_domain_aspects,
 )
 
 
@@ -148,3 +149,22 @@ class TestEffectiveDomainAliases:
         ``normalize_domain_tags`` deliberately does not perform."""
         with pytest.raises(ValueError, match="both an alias and a merge destination"):
             effective_domain_aliases({"domain_aliases": {"a": "b", "b": "c"}})
+
+
+class TestEffectiveDomainAspects:
+    def test_absent_block_declares_nothing(self) -> None:
+        assert effective_domain_aspects(None) == frozenset()
+        assert effective_domain_aspects({}) == frozenset()
+
+    def test_a_well_formed_list_round_trips(self) -> None:
+        assert effective_domain_aspects(
+            {"domain_aspects": ["planning", "research"]}
+        ) == frozenset({"planning", "research"})
+
+    def test_a_non_list_block_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="must be a list"):
+            effective_domain_aspects({"domain_aspects": {"planning": True}})
+
+    def test_a_non_string_entry_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="must be a list"):
+            effective_domain_aspects({"domain_aspects": ["planning", 3]})

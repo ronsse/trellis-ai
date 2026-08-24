@@ -59,6 +59,7 @@ from rich.console import Console
 from trellis.classify.factory import (
     CLASSIFY_CONFIG_KEY,
     DOMAIN_ALIASES_KEY,
+    DOMAIN_ASPECTS_KEY,
     DOMAIN_KEYWORDS_KEY,
 )
 from trellis.classify.refresh import DEFAULT_PAGE_SIZE, reclassify_stale
@@ -763,6 +764,7 @@ def domain_candidates(
             event_log=registry.operational.event_log,
             registry=_domain_normalization_registry(registry),
             known_aliases=registry.domain_alias_map(),
+            aspect_tags=registry.domain_aspect_tags(),
             emit_events=emit,
             scan_limit=limit,
         )
@@ -812,23 +814,36 @@ def _render_domain_candidates(
         + (f" ([dim]{suppressed} below --min-gain[/dim])" if suppressed else "")
         + ("" if emitted else " [yellow](dry run — not emitted)[/yellow]")
     )
+    by_canonical: dict[str, list[DomainAliasCandidate]] = {}
     for candidate in candidates:
-        # Literal brackets are escaped: rich reads an unescaped `[...]` as a
-        # markup tag and swallows it, which silently dropped exactly the two
-        # warnings a reviewer most needs to see.
-        marks = ""
-        if candidate.competing_canonicals:
-            marks += (
-                "  [yellow]\\[cross-cutting: also "
-                f"{', '.join(candidate.competing_canonicals)}][/yellow]"
+        by_canonical.setdefault(candidate.canonical, []).append(candidate)
+
+    # Grouped by destination on purpose. A tag that names an *aspect* rather
+    # than a subject gives itself away here and nowhere else: it collects a
+    # pile of unrelated modifiers (`estate`, `trip`, `venture`), where a real
+    # subject collects qualifiers of itself. No structural test found that —
+    # one was built and measured, and it rated `hunting` more modifier-like
+    # than `planning` — so the reviewer's eye is the detector and this is the
+    # view that arms it.
+    for canonical, group in by_canonical.items():
+        console.print(f"  [bold]-> {canonical}[/bold] ({len(group)}):")
+        for candidate in group:
+            # Literal brackets are escaped: rich reads an unescaped `[...]` as
+            # a markup tag and swallows it, which silently dropped exactly the
+            # two warnings a reviewer most needs to see.
+            marks = ""
+            if candidate.competing_canonicals:
+                marks += (
+                    "  [yellow]\\[cross-cutting: also "
+                    f"{', '.join(candidate.competing_canonicals)}][/yellow]"
+                )
+            if candidate.is_lexical_only:
+                marks += "  [dim]\\[spelling only][/dim]"
+            console.print(
+                f"    [bold]{candidate.alias}[/bold]: "
+                f"{candidate.alias_documents} docs, "
+                f"{candidate.documents_gained} newly reachable" + marks
             )
-        if candidate.is_lexical_only:
-            marks += "  [dim]\\[spelling only][/dim]"
-        console.print(
-            f"  [bold]{candidate.alias}[/bold] -> {candidate.canonical}: "
-            f"{candidate.alias_documents} docs, "
-            f"{candidate.documents_gained} newly reachable" + marks
-        )
 
     fragment = apply_normalization({}, candidates).domain_aliases
     console.print(
@@ -843,4 +858,9 @@ def _render_domain_candidates(
         "\n[yellow]Review before merging: 'domain' hard-excludes on mismatch, "
         "so a wrong merge hides every document carrying the alias — in bulk, "
         "which is worse than one wrong keyword.[/yellow]"
+    )
+    console.print(
+        "[dim]If a destination above collects unrelated subjects it names an "
+        f"aspect, not a subject: list it under {CLASSIFY_CONFIG_KEY}."
+        f"{DOMAIN_ASPECTS_KEY} and it stops attracting merges.[/dim]"
     )

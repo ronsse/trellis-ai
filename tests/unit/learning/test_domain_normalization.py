@@ -502,3 +502,69 @@ class TestPromotionMinesNormalizedLabels:
         assert "hunting" in run(
             {"budget-hunting": "hunting", "hunting-options": "hunting"}
         )
+
+
+class TestAspectTags:
+    """Tags that name a mode of engagement are never merge destinations.
+
+    ``planning`` is not a subject some documents are about — it is something
+    you do *to* a subject. ``estate-planning`` is about estates and
+    ``trip-planning`` is about travel; collapsing both into ``planning`` keeps
+    the mode and discards the half that identifies the document.
+
+    This has to be declared. A structural detector was built and measured
+    against a real corpus: it rated ``hunting`` (67%) and ``architecture``
+    (80%) as more modifier-like than ``planning`` (30%), because 701 tokens in
+    that vocabulary happen to stand alone as their own tag, so ``budget`` and
+    ``deer`` read as independent subjects. Subject-vs-aspect is semantic, and
+    the corpus does not carry it.
+    """
+
+    def test_an_aspect_is_never_a_merge_destination(
+        self, document_store: SQLiteDocumentStore, event_log: SQLiteEventLog
+    ) -> None:
+        _seed_canonical(document_store, "planning", 20)
+        _seed(document_store, "d1", "estate-planning")
+
+        assert _analyze(document_store, event_log) != []
+        assert _analyze(document_store, event_log, aspect_tags={"planning"}) == []
+
+    def test_an_alias_redirects_to_the_subject_not_the_aspect(
+        self, document_store: SQLiteDocumentStore, event_log: SQLiteEventLog
+    ) -> None:
+        """``project-planning`` is a project, not a planning."""
+        _seed_canonical(document_store, "planning", 20)
+        _seed_canonical(document_store, "project", 20)
+        _seed(document_store, "d1", "project-planning")
+
+        candidate = next(
+            c
+            for c in _analyze(document_store, event_log, aspect_tags={"planning"})
+            if c.alias == "project-planning"
+        )
+        assert candidate.canonical == "project"
+
+    def test_an_aspect_tag_is_still_a_usable_tag(
+        self, document_store: SQLiteDocumentStore, event_log: SQLiteEventLog
+    ) -> None:
+        """Declaring an aspect stops merges into it; it deletes nothing."""
+        _seed_canonical(document_store, "planning", 20)
+        _seed(document_store, "d1", "estate-planning")
+
+        _analyze(document_store, event_log, aspect_tags={"planning"})
+
+        stored = document_store.get("planning-canon-0")
+        assert stored["metadata"][SHADOW_TAGS_KEY]["domain"] == ["planning"]
+
+    def test_an_aspect_no_longer_counts_as_a_competing_subject(
+        self, document_store: SQLiteDocumentStore, event_log: SQLiteEventLog
+    ) -> None:
+        """``tax-planning`` is not cross-cutting once planning is an aspect —
+        it is ``tax``, qualified."""
+        _seed_canonical(document_store, "tax", 20)
+        _seed_canonical(document_store, "planning", 20)
+        _seed(document_store, "d1", "tax-planning")
+
+        candidate = _analyze(document_store, event_log, aspect_tags={"planning"})[0]
+        assert candidate.canonical == "tax"
+        assert candidate.competing_canonicals == ()

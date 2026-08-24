@@ -1927,6 +1927,21 @@ class StoreRegistry:
 
         return effective_domain_aliases(self._classify_config)
 
+    def domain_aspect_tags(self) -> frozenset[str]:
+        """Domain tags that name an aspect of engagement, not a subject.
+
+        Never valid as a merge destination — see
+        :data:`~trellis.classify.factory.DOMAIN_ASPECTS_KEY`.
+
+        Raises:
+            ValueError: When the ``classify.domain_aspects`` block is malformed.
+        """
+        from trellis.classify.factory import (  # noqa: PLC0415
+            effective_domain_aspects,
+        )
+
+        return effective_domain_aspects(self._classify_config)
+
     def build_llm_client(self) -> LLMClient | None:
         """Construct an ``LLMClient`` from the ``llm:`` config block, if present.
 

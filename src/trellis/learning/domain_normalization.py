@@ -420,6 +420,7 @@ def analyze_domain_alias_candidates(
     event_log: EventLog,
     registry: ParameterRegistry,
     known_aliases: Mapping[str, str] | None = None,
+    aspect_tags: Iterable[str] | None = None,
     emit_events: bool = True,
     scan_limit: int = DEFAULT_SCAN_LIMIT,
     page_size: int = DEFAULT_PAGE_SIZE,
@@ -437,6 +438,14 @@ def analyze_domain_alias_candidates(
             destination for emissions.
         registry: Threshold resolver. Must carry every key in
             :data:`REQUIRED_PARAM_KEYS`; a missing key raises.
+        aspect_tags: Tags that name an *aspect* of engagement rather than a
+            subject (``planning``, ``research``). Excluded as merge
+            *destinations*: collapsing ``estate-planning`` and
+            ``trip-planning`` into ``planning`` keeps the mode and discards
+            the subject, which is the half that identifies the document. An
+            alias with no non-aspect destination is left unmerged rather than
+            merged badly. Declared, never inferred — see
+            :data:`~trellis.classify.factory.DOMAIN_ASPECTS_KEY`.
         known_aliases: The operator's existing ``alias -> canonical`` map.
             Aliases already mapped are not re-proposed — this is how the
             analyzer filters its own writes and cannot bootstrap off a merge
@@ -456,6 +465,7 @@ def analyze_domain_alias_candidates(
     thresholds = _resolve_thresholds(registry)
     eval_now = now if now is not None else datetime.now(tz=UTC)
     already_mapped = {a.lower() for a in (known_aliases or {})}
+    aspects = frozenset(aspect_tags or ())
 
     vocab = _scan_vocabulary(document_store, scan_limit=scan_limit, page_size=page_size)
     if not vocab.documents:
@@ -465,7 +475,9 @@ def analyze_domain_alias_candidates(
     canonicals = sorted(
         tag
         for tag, count in vocab.tag_documents.items()
-        if count >= thresholds.min_canonical_support and not _reserved_name_for(tag)
+        if count >= thresholds.min_canonical_support
+        and not _reserved_name_for(tag)
+        and tag not in aspects
     )
     canonical_set = set(canonicals)
     canonical_tokens = {c: tag_tokens(c) for c in canonicals}
@@ -482,6 +494,7 @@ def analyze_domain_alias_candidates(
         documents=vocab.documents,
         distinct_tags=len(vocab.tag_documents),
         canonicals=len(canonicals),
+        aspects_excluded=len(aspects),
     )
 
     prior = load_prior_candidates(

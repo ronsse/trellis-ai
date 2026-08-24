@@ -35,6 +35,17 @@ CLASSIFY_CONFIG_KEY = "classify"
 #: Sub-key under ``classify`` carrying the ``domain -> [keywords]`` map.
 DOMAIN_KEYWORDS_KEY = "domain_keywords"
 
+#: ``classify`` sub-key listing domain tags that name an *aspect* of
+#: engagement rather than a subject — ``planning``, ``research``,
+#: ``troubleshooting``. They may never be a merge destination: collapsing
+#: ``estate-planning`` and ``trip-planning`` into ``planning`` keeps the mode
+#: and discards the subject, which is the half that identifies the document.
+#: Whether a noun is a subject or an aspect is semantic, not structural — a
+#: corpus cannot distinguish "documents about hunting" from "documents doing
+#: planning", because both head compound tags identically — so this is
+#: declared, never inferred.
+DOMAIN_ASPECTS_KEY = "domain_aspects"
+
 #: ``classify`` sub-key holding the ``alias -> canonical`` domain merge map.
 #: Surface-only in exactly the way :data:`DOMAIN_KEYWORDS_KEY` is: proposed by
 #: :mod:`trellis.learning.domain_normalization`, written by a human.
@@ -76,6 +87,29 @@ def _extract_config_domains(
             raise ValueError(msg)
         domains[str(name)] = list(keywords)
     return domains
+
+
+def effective_domain_aspects(
+    classify_config: Mapping[str, Any] | None = None,
+) -> frozenset[str]:
+    """Pull and validate the ``domain_aspects`` list out of ``classify`` config.
+
+    Empty when absent: every tag is treated as a subject until someone says
+    otherwise, which merges more than it should rather than less. That is the
+    right default only because merges are human-approved.
+    """
+    if not classify_config:
+        return frozenset()
+    raw = classify_config.get(DOMAIN_ASPECTS_KEY)
+    if raw is None:
+        return frozenset()
+    if not isinstance(raw, list) or not all(isinstance(t, str) and t for t in raw):
+        msg = (
+            f"config.yaml {CLASSIFY_CONFIG_KEY}.{DOMAIN_ASPECTS_KEY} must be a "
+            f"list of non-empty tag strings."
+        )
+        raise ValueError(msg)
+    return frozenset(raw)
 
 
 def effective_domain_aliases(
@@ -192,8 +226,10 @@ def build_ingestion_pipeline(
 __all__ = [
     "CLASSIFY_CONFIG_KEY",
     "DOMAIN_ALIASES_KEY",
+    "DOMAIN_ASPECTS_KEY",
     "DOMAIN_KEYWORDS_KEY",
     "build_ingestion_pipeline",
     "effective_domain_aliases",
+    "effective_domain_aspects",
     "effective_domain_keywords",
 ]
