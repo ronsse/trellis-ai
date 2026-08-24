@@ -318,6 +318,30 @@ class TestCountSubstanceWords:
     def test_single_identifier(self) -> None:
         assert count_substance_words("PackBuilder") == 1
 
+    def test_a_bare_path_is_one_unit_not_one_per_segment(self) -> None:
+        """A path is one identifier; scoring it per segment defeated the floor.
+
+        ``pi/config/labwc/rc.xml`` scored 5 — exactly the default
+        ``min_distinct_words`` — because ``/`` and ``.`` are word separators,
+        so a bare file path cleared the check built to demote bare names.
+        Three of 24 slots on a measured failing pack went to path stubs.
+        """
+        assert count_substance_words("pi/config/labwc/rc.xml") == 1
+        assert count_substance_words("src/trellis/retrieve/excerpts.py") == 1
+
+    def test_a_url_does_not_score_as_substance(self) -> None:
+        assert count_substance_words("https://example.com/a/b/c/d/e") < 5
+
+    def test_prose_containing_a_path_still_counts_its_words(self) -> None:
+        """The path collapses; the sentence around it does not."""
+        assert (
+            count_substance_words("we edited src/foo.py and then ran the migration")
+            == 8
+        )
+
+    def test_repeated_paths_deduplicate(self) -> None:
+        assert count_substance_words("a/b a/b a/b") == 1
+
     def test_hyphenated_token_counts_once(self) -> None:
         assert count_substance_words("trellis-ai") == 1
 
