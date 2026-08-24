@@ -1909,6 +1909,39 @@ class StoreRegistry:
 
         return effective_domain_keywords(self._classify_config)
 
+    def domain_alias_map(self) -> dict[str, str]:
+        """The ``alias -> canonical`` domain merge map this deployment owns.
+
+        Read by :mod:`trellis.learning.domain_normalization` so the analyzer
+        neither re-proposes a merge the operator already made nor reads its own
+        prior output as fresh evidence — the same self-filtering rule
+        :meth:`domain_keyword_map` serves for keyword promotion.
+
+        Raises:
+            ValueError: When the ``classify.domain_aliases`` block is
+                malformed, self-mapping, or chained.
+        """
+        from trellis.classify.factory import (  # noqa: PLC0415
+            effective_domain_aliases,
+        )
+
+        return effective_domain_aliases(self._classify_config)
+
+    def domain_aspect_tags(self) -> frozenset[str]:
+        """Domain tags that name an aspect of engagement, not a subject.
+
+        Never valid as a merge destination — see
+        :data:`~trellis.classify.factory.DOMAIN_ASPECTS_KEY`.
+
+        Raises:
+            ValueError: When the ``classify.domain_aspects`` block is malformed.
+        """
+        from trellis.classify.factory import (  # noqa: PLC0415
+            effective_domain_aspects,
+        )
+
+        return effective_domain_aspects(self._classify_config)
+
     def build_llm_client(self) -> LLMClient | None:
         """Construct an ``LLMClient`` from the ``llm:`` config block, if present.
 

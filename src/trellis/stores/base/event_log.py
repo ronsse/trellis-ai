@@ -248,6 +248,19 @@ class EventType(StrEnum):
     #: is the same rule :attr:`MEMORY_OP_JUDGED` follows. See ``#321`` Phase 2.
     TAG_KEYWORD_CANDIDATE = "tag_keyword.candidate"
 
+    #: Emitted by
+    #: :func:`trellis.learning.domain_normalization.analyze_domain_alias_candidates`
+    #: when a low-support ``domain`` tag looks like a spelling of a
+    #: high-support one and is worth merging. Advisory, human-gated, and for
+    #: the same reason its sibling above is: an alias map decides which
+    #: documents a domain-scoped query can *see*, so a wrong merge hides
+    #: content — in bulk, which is strictly worse than one bad keyword.
+    #: Payload carries the evidence a reviewer needs to judge the merge
+    #: (``cooccurrence_rate``, ``neighbor_overlap``, ``shared_tokens``,
+    #: ``documents_gained``) rather than a bare verdict, and omits example
+    #: item ids under the same disclosure rule.
+    DOMAIN_ALIAS_CANDIDATE = "domain_alias.candidate"
+
     # Proposal lifecycle (coding-agent self-improvement loop — Item 7).
     #: Emitted by
     #: :class:`trellis_workers.code_authoring.ProposalGenerator` when a

@@ -7,7 +7,9 @@ stores in a tmp config/data dir.
 from __future__ import annotations
 
 import json
+import os
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -209,3 +211,66 @@ class TestTagCandidatesCommand:
         payload = _run_json("tag-candidates")
         # `kubernetes` is a built-in `infrastructure` keyword.
         assert "kubernetes" not in {c["keyword"] for c in payload["candidates"]}
+
+
+class TestDomainCandidatesCommand:
+    """``trellis classify domain-candidates`` (#321 normalization)."""
+
+    @staticmethod
+    def _seed_fragmented() -> None:
+        _seed_shadowed(
+            [(f"canon-{i}", f"body {i}", ["hunting"]) for i in range(20)]
+            + [("alias-1", "a fragment", ["budget-hunting"])]
+        )
+
+    def test_surfaces_a_merge_and_a_paste_ready_fragment(self, cli_env) -> None:
+        self._seed_fragmented()
+        payload = _run_json("domain-candidates", "--no-emit")
+        assert payload["domain_aliases_fragment"] == {"budget-hunting": "hunting"}
+
+    def test_min_gain_hides_merges_that_change_nothing(self, cli_env) -> None:
+        _seed_shadowed(
+            [(f"canon-{i}", f"body {i}", ["hunting"]) for i in range(20)]
+            + [("both", "carries both", ["hunting", "deer-hunting"])]
+        )
+        assert _run_json("domain-candidates", "--no-emit")["candidates"]
+        assert not _run_json("domain-candidates", "--no-emit", "--min-gain", "1")[
+            "candidates"
+        ]
+
+    def test_review_markers_survive_rich_markup(self, cli_env) -> None:
+        """Regression: an unescaped ``[cross-cutting]`` is read as a markup tag.
+
+        Rich swallowed it, so the run rendered clean while dropping exactly the
+        two warnings a reviewer needs to see. Text mode, deliberately — this
+        bug is invisible to the JSON path.
+        """
+        # Two real subjects, not an activity noun: `planning` is a builtin
+        # aspect now, so `tax-planning` is `tax` qualified and no longer
+        # cross-cutting.
+        _seed_shadowed(
+            [(f"startup-{i}", f"s {i}", ["startup"]) for i in range(20)]
+            + [(f"fin-{i}", f"f {i}", ["finance"]) for i in range(20)]
+            + [("cross", "a cross-cutting doc", ["startup-finance"])]
+        )
+        result = runner.invoke(classify_app, ["domain-candidates", "--no-emit"])
+        assert result.exit_code == 0, result.output
+        assert "cross-cutting" in result.output
+        assert "spelling only" in result.output
+
+    def test_an_operator_mapped_alias_is_not_re_proposed(self, cli_env) -> None:
+        """Filters its own writes, via ``classify.domain_aliases`` in config."""
+        import yaml
+
+        self._seed_fragmented()
+        assert _run_json("domain-candidates", "--no-emit")["candidates"]
+
+        config_path = Path(os.environ["TRELLIS_CONFIG_DIR"]) / "config.yaml"
+        config = yaml.safe_load(config_path.read_text()) or {}
+        config.setdefault("classify", {})["domain_aliases"] = {
+            "budget-hunting": "hunting"
+        }
+        config_path.write_text(yaml.safe_dump(config))
+        _reset_registry()
+
+        assert _run_json("domain-candidates", "--no-emit")["candidates"] == []

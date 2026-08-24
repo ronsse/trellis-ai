@@ -35,6 +35,63 @@ CLASSIFY_CONFIG_KEY = "classify"
 #: Sub-key under ``classify`` carrying the ``domain -> [keywords]`` map.
 DOMAIN_KEYWORDS_KEY = "domain_keywords"
 
+#: ``classify`` sub-key listing domain tags that name an *aspect* of
+#: engagement rather than a subject — ``planning``, ``research``,
+#: ``troubleshooting``. They may never be a merge destination: collapsing
+#: ``estate-planning`` and ``trip-planning`` into ``planning`` keeps the mode
+#: and discards the subject, which is the half that identifies the document.
+#: Whether a noun is a subject or an aspect is semantic, not structural — a
+#: corpus cannot distinguish "documents about hunting" from "documents doing
+#: planning", because both head compound tags identically — so this is
+#: declared, never inferred.
+DOMAIN_ASPECTS_KEY = "domain_aspects"
+
+#: ``classify`` sub-key declaring tags that ARE subjects despite appearing in
+#: :data:`BUILTIN_DOMAIN_ASPECTS`. The inverse of :data:`DOMAIN_ASPECTS_KEY`,
+#: and what makes a shipped default safe: whether a noun names a subject or an
+#: activity depends on the corpus. ``documentation`` is an activity in a
+#: personal vault and a subject to a docs-tooling team, and only they can say.
+DOMAIN_SUBJECTS_KEY = "domain_subjects"
+
+#: Activity nouns that name a *mode of engagement* rather than a subject, and
+#: so may never be a merge destination.
+#:
+#: Generic English rather than corpus-specific, which is what makes a shipped
+#: default defensible where an inferred one was not (see
+#: :mod:`trellis.learning.domain_normalization`): "planning" describes what you
+#: are doing *to* a subject in any vocabulary. Deliberately conservative —
+#: ``automation``, ``migration``, ``testing``, ``deployment`` and
+#: ``negotiation`` are all plausibly real subjects in a technical or
+#: professional corpus, so they are left out, and an operator who wants them
+#: adds them under :data:`DOMAIN_ASPECTS_KEY`.
+BUILTIN_DOMAIN_ASPECTS: frozenset[str] = frozenset(
+    {
+        "analysis",
+        "brainstorming",
+        "comparison",
+        "decision-making",
+        "documentation",
+        "evaluation",
+        "exploration",
+        "learning",
+        "management",
+        "monitoring",
+        "optimization",
+        "organization",
+        "planning",
+        "research",
+        "review",
+        "strategy",
+        "tracking",
+        "troubleshooting",
+    }
+)
+
+#: ``classify`` sub-key holding the ``alias -> canonical`` domain merge map.
+#: Surface-only in exactly the way :data:`DOMAIN_KEYWORDS_KEY` is: proposed by
+#: :mod:`trellis.learning.domain_normalization`, written by a human.
+DOMAIN_ALIASES_KEY = "domain_aliases"
+
 
 def _extract_config_domains(
     classify_config: Mapping[str, Any] | None,
@@ -71,6 +128,106 @@ def _extract_config_domains(
             raise ValueError(msg)
         domains[str(name)] = list(keywords)
     return domains
+
+
+def effective_domain_aspects(
+    classify_config: Mapping[str, Any] | None = None,
+) -> frozenset[str]:
+    """The domain tags that may never be a merge destination.
+
+    :data:`BUILTIN_DOMAIN_ASPECTS` plus ``classify.domain_aspects``, minus
+    ``classify.domain_subjects``. Both directions are overridable because the
+    call is genuinely corpus-dependent, and an operator must be able to say
+    "this default is wrong for my vocabulary" without restating the list.
+
+    Raises:
+        ValueError: When either list is malformed, or a tag is in both.
+    """
+    declared = _tag_list(classify_config, DOMAIN_ASPECTS_KEY)
+    exempted = _tag_list(classify_config, DOMAIN_SUBJECTS_KEY)
+
+    both = sorted(declared & exempted)
+    if both:
+        msg = (
+            f"config.yaml {CLASSIFY_CONFIG_KEY}: {both!r} appear in both "
+            f"{DOMAIN_ASPECTS_KEY} and {DOMAIN_SUBJECTS_KEY}. A tag is one or "
+            f"the other."
+        )
+        raise ValueError(msg)
+
+    return (BUILTIN_DOMAIN_ASPECTS | declared) - exempted
+
+
+def _tag_list(classify_config: Mapping[str, Any] | None, key: str) -> frozenset[str]:
+    """Read one ``classify.<key>`` list of tag strings, or an empty set."""
+    if not classify_config:
+        return frozenset()
+    raw = classify_config.get(key)
+    if raw is None:
+        return frozenset()
+    if not isinstance(raw, list) or not all(isinstance(t, str) and t for t in raw):
+        msg = (
+            f"config.yaml {CLASSIFY_CONFIG_KEY}.{key} must be a list of "
+            f"non-empty tag strings."
+        )
+        raise ValueError(msg)
+    return frozenset(raw)
+
+
+def effective_domain_aliases(
+    classify_config: Mapping[str, Any] | None = None,
+) -> dict[str, str]:
+    """Pull and validate the ``domain_aliases`` map out of ``classify`` config.
+
+    Returns an empty map when the section is absent — the unnormalized
+    vocabulary is the correct default, because an alias map that nobody wrote
+    should merge nothing. Raises ``ValueError`` when the section is present but
+    malformed, so a misconfigured ``config.yaml`` fails loudly rather than
+    silently declining to merge.
+
+    A self-mapping (``a -> a``) and a chain (``a -> b -> c``) are both
+    rejected. The first is a no-op that reads as intent; the second implies a
+    transitive rewrite that
+    :func:`~trellis.learning.domain_normalization.normalize_domain_tags`
+    deliberately does not perform, so accepting it would mean the map does
+    something other than what it says.
+    """
+    if not classify_config:
+        return {}
+    raw = classify_config.get(DOMAIN_ALIASES_KEY)
+    if raw is None:
+        return {}
+    if not isinstance(raw, Mapping):
+        msg = (
+            f"config.yaml {CLASSIFY_CONFIG_KEY}.{DOMAIN_ALIASES_KEY} must be a "
+            f"mapping of alias -> canonical, got {type(raw).__name__}."
+        )
+        raise ValueError(msg)  # noqa: TRY004
+    aliases: dict[str, str] = {}
+    for alias, canonical in raw.items():
+        if not isinstance(canonical, str) or not canonical:
+            msg = (
+                f"config.yaml {CLASSIFY_CONFIG_KEY}.{DOMAIN_ALIASES_KEY}: "
+                f"alias {alias!r} must map to a non-empty canonical tag string."
+            )
+            raise ValueError(msg)
+        if str(alias) == canonical:
+            msg = (
+                f"config.yaml {CLASSIFY_CONFIG_KEY}.{DOMAIN_ALIASES_KEY}: "
+                f"alias {alias!r} maps to itself."
+            )
+            raise ValueError(msg)
+        aliases[str(alias)] = canonical
+
+    chained = sorted(a for a in aliases.values() if a in aliases)
+    if chained:
+        msg = (
+            f"config.yaml {CLASSIFY_CONFIG_KEY}.{DOMAIN_ALIASES_KEY}: "
+            f"{chained!r} appear as both an alias and a merge destination. "
+            f"Merging is one step only — point them at the final canonical."
+        )
+        raise ValueError(msg)
+    return aliases
 
 
 def effective_domain_keywords(
@@ -130,7 +287,13 @@ def build_ingestion_pipeline(
 
 __all__ = [
     "CLASSIFY_CONFIG_KEY",
+    "DOMAIN_ALIASES_KEY",
+    "BUILTIN_DOMAIN_ASPECTS",
+    "DOMAIN_ASPECTS_KEY",
+    "DOMAIN_SUBJECTS_KEY",
     "DOMAIN_KEYWORDS_KEY",
     "build_ingestion_pipeline",
+    "effective_domain_aliases",
+    "effective_domain_aspects",
     "effective_domain_keywords",
 ]
