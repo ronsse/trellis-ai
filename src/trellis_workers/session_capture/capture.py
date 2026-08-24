@@ -108,6 +108,7 @@ def _candidate_metadata(candidate: CandidateMemory) -> dict[str, object]:
         "memory_type": candidate.memory_type,
         "capture_title": candidate.title,
         "distilled": True,
+        "subagent": candidate.is_subagent,
         RECONCILIATION_KEY: candidate.reconciliation or MARKER_PENDING,
     }
     if candidate.updates_doc_id:
@@ -179,7 +180,7 @@ def run_capture(
     records: list[SyncRecord] = []
     for path in discover_sessions(transcripts_root):
         report.sessions_seen += 1
-        if is_ephemeral_project(path):
+        if is_ephemeral_project(path, transcripts_root):
             # No durable project for the memory to be about. Counted, not
             # watermarked: if the rule is ever narrowed, these become
             # eligible again without a watermark reset.
@@ -263,6 +264,10 @@ def _capture_session(
     for candidate in candidates:
         candidate.input_hash = input_hash
         candidate.input_length = input_length
+        # Provenance, not a judgement: a sub-agent transcript's "user" turns
+        # are an orchestrator's prompt, so a reader (and any later weighting)
+        # needs to know which kind of conversation this came from.
+        candidate.is_subagent = digest.is_subagent
 
     survivors = _gate_candidates(candidates, report)
     for candidate in survivors:
