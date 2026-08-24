@@ -245,10 +245,13 @@ class TestDomainCandidatesCommand:
         two warnings a reviewer needs to see. Text mode, deliberately — this
         bug is invisible to the JSON path.
         """
+        # Two real subjects, not an activity noun: `planning` is a builtin
+        # aspect now, so `tax-planning` is `tax` qualified and no longer
+        # cross-cutting.
         _seed_shadowed(
-            [(f"tax-{i}", f"t {i}", ["tax"]) for i in range(20)]
-            + [(f"plan-{i}", f"p {i}", ["planning"]) for i in range(20)]
-            + [("cross", "a cross-cutting doc", ["tax-planning"])]
+            [(f"startup-{i}", f"s {i}", ["startup"]) for i in range(20)]
+            + [(f"fin-{i}", f"f {i}", ["finance"]) for i in range(20)]
+            + [("cross", "a cross-cutting doc", ["startup-finance"])]
         )
         result = runner.invoke(classify_app, ["domain-candidates", "--no-emit"])
         assert result.exit_code == 0, result.output
