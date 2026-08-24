@@ -43,6 +43,7 @@ from trellis_workers.session_capture.models import (
 from trellis_workers.session_capture.secret_scan import scan as scan_for_leak_classes
 from trellis_workers.session_capture.transcripts import (
     discover_sessions,
+    is_ephemeral_project,
     parse_session,
 )
 from trellis_workers.session_capture.watermark import WatermarkStore
@@ -178,6 +179,12 @@ def run_capture(
     records: list[SyncRecord] = []
     for path in discover_sessions(transcripts_root):
         report.sessions_seen += 1
+        if is_ephemeral_project(path):
+            # No durable project for the memory to be about. Counted, not
+            # watermarked: if the rule is ever narrowed, these become
+            # eligible again without a watermark reset.
+            report.sessions_skipped_ephemeral += 1
+            continue
         if watermark.is_unchanged(path):
             report.sessions_skipped_watermark += 1
             continue

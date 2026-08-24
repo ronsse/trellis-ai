@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -44,6 +45,8 @@ from trellis.stores.base.event_log import EventType
 from trellis_workers.session_capture.models import CandidateMemory, SessionDigest
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from trellis.llm import LLMClient
     from trellis.stores.base.event_log import EventLog
 
@@ -53,8 +56,85 @@ logger = structlog.get_logger(__name__)
 DEFAULT_DISTILL_MODEL = "hermes3:8b"
 
 #: Cap on salient text sent to the judge — bounds prompt size on long
-#: sessions; the tail is where corrections and error resolutions cluster.
+#: sessions. The elision keeps a head and a tail, and
+#: :attr:`~trellis_workers.session_capture.models.SessionDigest.salient_text`
+#: is chronological, so the surviving window spans the start and the end of
+#: the conversation rather than one speaker's block.
+#:
+#: **This value is coupled to the judge endpoint's context window, which the
+#: client cannot set.** Ollama's OpenAI-compatible endpoint ignores
+#: ``num_ctx`` in ``extra_body`` (verified — the request is accepted and the
+#: window is unchanged), so a prompt over the server's window is silently
+#: truncated server-side and the model answers from the remnant. hermes3:8b
+#: does not fail on a truncated prompt; it *fabricates* plausible-looking
+#: memories. Raising this constant alone is therefore unsafe. Raise the
+#: server window first (``OLLAMA_CONTEXT_LENGTH``, or a Modelfile
+#: ``PARAMETER num_ctx``), declare it via
+#: :data:`ENV_JUDGE_CONTEXT_TOKENS`, and rely on
+#: :func:`_prompt_exceeds_window` to refuse the case where it was not raised
+#: enough.
 _MAX_SALIENT_CHARS = 8000
+
+#: Chars-per-token estimate for the truncation check — the same ~4:1
+#: convention ``PackBuilder`` uses for its token budgets.
+_CHARS_PER_TOKEN = 4
+
+#: Tokens the judge's context window holds. Declared, not detected — the
+#: response cannot tell us. Ollama reports ``usage.prompt_tokens`` as the
+#: tokens *newly evaluated*, so an identical prompt returns 1 on a cache hit
+#: (measured: 1212, then 1, then 1). Reading it as "prompt size" would fire
+#: hardest on a retry, which is exactly what the fail-closed path does — a
+#: loop that captures nothing. So the check is a pre-flight against a number
+#: the operator declares, and it costs no model call.
+#:
+#: The default matches Ollama's own default window. An operator who raises
+#: ``OLLAMA_CONTEXT_LENGTH`` raises this to match.
+DEFAULT_JUDGE_CONTEXT_TOKENS = 4096
+
+#: Completion budget reserved out of the window (the ``max_tokens`` the judge
+#: is called with). Prompt + completion must both fit, or the server drops
+#: prompt tokens to make room.
+_COMPLETION_RESERVE_TOKENS = 1200
+
+#: Operator override for :data:`_MAX_SALIENT_CHARS`, for a deployment whose
+#: judge endpoint has a larger window than the default assumes.
+ENV_MAX_SALIENT_CHARS = "TRELLIS_CAPTURE_MAX_SALIENT_CHARS"
+
+#: Operator declaration of the judge endpoint's context window.
+ENV_JUDGE_CONTEXT_TOKENS = "TRELLIS_CAPTURE_JUDGE_CONTEXT_TOKENS"
+
+
+def _positive_int_env(flag: str, default: int, env: Mapping[str, str] | None) -> int:
+    """Read a positive-int env knob, falling back loudly rather than raising.
+
+    A typo in one env var must not take out the nightly sweep.
+    """
+    source = os.environ if env is None else env
+    raw = source.get(flag, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("capture_env_unparseable", flag=flag, value=raw)
+        return default
+    if value <= 0:
+        logger.warning("capture_env_out_of_range", flag=flag, value=value)
+        return default
+    return value
+
+
+def max_salient_chars(env: Mapping[str, str] | None = None) -> int:
+    """Resolve the salient-text cap, honouring the operator override."""
+    return _positive_int_env(ENV_MAX_SALIENT_CHARS, _MAX_SALIENT_CHARS, env)
+
+
+def judge_context_tokens(env: Mapping[str, str] | None = None) -> int:
+    """Resolve the declared judge context window."""
+    return _positive_int_env(
+        ENV_JUDGE_CONTEXT_TOKENS, DEFAULT_JUDGE_CONTEXT_TOKENS, env
+    )
+
 
 #: Per-session distillation timeout (seconds).
 DEFAULT_TIMEOUT_S = 60.0
@@ -97,7 +177,7 @@ def build_distill_messages(digest: SessionDigest) -> list[Message]:
     #310) so the judge knows material was removed rather than treating
     the cut as the end of the session.
     """
-    salient = elide_text(digest.salient_text, _MAX_SALIENT_CHARS)
+    salient = elide_text(digest.salient_text, max_salient_chars())
     tool_names = sorted({call.name for call in digest.tool_calls})
     signals = f"has_error={digest.has_error} has_correction={digest.has_correction}"
     user = (
@@ -190,6 +270,8 @@ def distill_session(
         logger.info("distill_skipped_no_client", session_id=digest.session_id)
         return None
     messages = build_distill_messages(digest)
+    if _prompt_exceeds_window(messages, session_id=digest.session_id):
+        return None
     try:
         response = asyncio.run(
             asyncio.wait_for(
@@ -204,6 +286,54 @@ def distill_session(
         logger.warning("distill_model_error", session_id=digest.session_id)
         return None
     return parse_candidates(response.content, digest.session_id)
+
+
+def _prompt_exceeds_window(
+    messages: list[Message],
+    *,
+    session_id: str,
+) -> bool:
+    """Whether the prompt cannot fit the judge's declared context window.
+
+    A prompt over the window is not an error anywhere in the stack: Ollama
+    truncates it server-side, returns 200, and hermes3:8b answers from the
+    remnant rather than declining -- inventing memories that appear nowhere
+    in the transcript ("Learning Python", "First Git Repository"). The
+    worthiness gate cannot catch that, because a fabrication carries
+    confident booleans and plausible-looking evidence. For an autonomous
+    writer that is the worst available failure mode.
+
+    Checked *before* the call, against a declared window, because the
+    response cannot answer the question: Ollama's ``usage.prompt_tokens``
+    counts tokens newly evaluated, so an identical prompt reports 1 on a
+    cache hit. A post-hoc ratio test therefore fires hardest on a retry --
+    the one path the fail-closed contract guarantees -- and would wedge the
+    sweep into capturing nothing at all.
+
+    The estimate is deliberately coarse (the same ~4:1 convention
+    ``PackBuilder`` budgets with). It only has to be right enough to catch a
+    prompt that is multiples over the window, which is the shape this
+    guards; the ``TRELLIS_CAPTURE_MAX_SALIENT_CHARS`` default sits well
+    inside the default window.
+    """
+    window = judge_context_tokens()
+    estimated = sum(len(m.content) for m in messages) // _CHARS_PER_TOKEN
+    if estimated + _COMPLETION_RESERVE_TOKENS <= window:
+        return False
+    logger.warning(
+        "distill_prompt_exceeds_window",
+        session_id=session_id,
+        prompt_tokens_estimated=estimated,
+        completion_reserve_tokens=_COMPLETION_RESERVE_TOKENS,
+        judge_context_tokens=window,
+        remedy=(
+            "prompt does not fit the judge context window; raise the window "
+            "server-side (OLLAMA_CONTEXT_LENGTH or a Modelfile num_ctx) and "
+            "declare it via TRELLIS_CAPTURE_JUDGE_CONTEXT_TOKENS, or lower "
+            "TRELLIS_CAPTURE_MAX_SALIENT_CHARS"
+        ),
+    )
+    return True
 
 
 def emit_distillation_judged(

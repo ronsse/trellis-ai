@@ -11,6 +11,7 @@ from pathlib import Path
 
 from trellis_workers.session_capture.transcripts import (
     discover_sessions,
+    is_ephemeral_project,
     parse_session,
 )
 
@@ -136,3 +137,102 @@ def test_unreadable_file_yields_empty_digest(tmp_path: Path) -> None:
     digest = parse_session(weird)
     assert digest.malformed_lines == 1
     assert digest.is_empty
+
+
+def test_salient_text_preserves_chronological_interleaving(tmp_path: Path) -> None:
+    """A conversation is one ordered stream, not a user block then an assistant block.
+
+    The digest used to hold two independent lists and join them
+    all-users-then-all-assistants. On a long session that put every user turn
+    in the head and every assistant turn in the tail, so the elided window the
+    judge sees never contained an adjacent pair — a correction was separated
+    from the thing it corrected by the whole rest of the session. Measured on
+    a real 51k-char transcript, restoring order took one session from 0 to 3
+    distilled candidates at an unchanged cap.
+    """
+    path = tmp_path / "sess-fake-0002.jsonl"
+    write_transcript(
+        path,
+        [
+            user_turn("add the retry"),
+            assistant_turn("added a retry with backoff", "Edit"),
+            user_turn("no, that is wrong - it must be idempotent first"),
+            assistant_turn("reverted; making the write idempotent", "Edit"),
+        ],
+    )
+    salient = parse_session(path).salient_text
+
+    assert salient.splitlines() == [
+        "USER: add the retry",
+        "ASSISTANT: added a retry with backoff",
+        "USER: no, that is wrong - it must be idempotent first",
+        "ASSISTANT: reverted; making the write idempotent",
+    ]
+    # The correction and the response it provoked stay adjacent — this is the
+    # property the blocked ordering destroyed.
+    correction = salient.index("no, that is wrong")
+    response = salient.index("reverted; making the write idempotent")
+    assert 0 < response - correction < 120
+
+
+def test_role_views_stay_ordered_and_filtered(tmp_path: Path) -> None:
+    """``user_texts`` / ``assistant_texts`` remain usable role-filtered views."""
+    path = tmp_path / "sess-fake-0003.jsonl"
+    write_transcript(
+        path,
+        [
+            user_turn("first ask"),
+            assistant_turn("first answer", "Bash"),
+            user_turn("second ask"),
+        ],
+    )
+    digest = parse_session(path)
+    assert digest.user_texts == ["first ask", "second ask"]
+    assert digest.assistant_texts == ["first answer"]
+    assert not digest.is_empty
+
+
+class TestEphemeralProjectSkip:
+    """A session run in a throwaway directory has no durable project.
+
+    Claude Code names each project directory after the session's working
+    directory with separators flattened, so ``/tmp/tmpa1b2c3`` becomes
+    ``-tmp-tmpa1b2c3``. Tooling that shells out to Claude in a scratch
+    directory produces transcripts whose subject is whatever was pasted in.
+    Measured on a real corpus, every memory distilled from these directories
+    was third-party document content — 29% of a first capture run.
+    """
+
+    def test_temp_root_projects_are_ephemeral(self, tmp_path: Path) -> None:
+        for project in (
+            "-tmp-tmpa1b2c3",
+            "-tmp",
+            "-var-tmp-scratch",
+            "-private-var-tmp-x",
+        ):
+            path = tmp_path / project / "s.jsonl"
+            assert is_ephemeral_project(path), project
+
+    def test_real_projects_are_not_ephemeral(self, tmp_path: Path) -> None:
+        for project in (
+            "-home-nronsse-projects-trellis-ai",
+            "-home-nronsse",
+            "-srv-tmpl-app",
+            "-opt-tmpfiles",
+        ):
+            path = tmp_path / project / "s.jsonl"
+            assert not is_ephemeral_project(path), project
+
+    def test_prefix_match_does_not_catch_a_lookalike(self, tmp_path: Path) -> None:
+        """``-tmpl-...`` is ``/tmpl``, a real directory — not ``/tmp``."""
+        assert not is_ephemeral_project(tmp_path / "-tmpl-project" / "s.jsonl")
+
+    def test_discovery_stays_unfiltered(self, tmp_path: Path) -> None:
+        """The skip belongs to the sweep, so it can be counted in the report.
+
+        Filtering inside discovery would make the gap invisible — which is
+        how a capture gap gets reported as a sampling decision.
+        """
+        write_transcript(tmp_path / "-tmp-tmpxyz" / "s1.jsonl", [user_turn("hi")])
+        write_transcript(tmp_path / "-home-me-proj" / "s2.jsonl", [user_turn("yo")])
+        assert len(discover_sessions(tmp_path)) == 2

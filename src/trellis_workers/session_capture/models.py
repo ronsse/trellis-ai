@@ -27,6 +27,26 @@ class ToolCall:
     is_error: bool = False
 
 
+#: Turn roles, used as the ``salient_text`` speaker labels.
+ROLE_USER = "user"
+ROLE_ASSISTANT = "assistant"
+
+
+@dataclass
+class Turn:
+    """One natural-language turn, in transcript order.
+
+    Order is the point. The digest used to hold two independent lists and
+    join them user-block-then-assistant-block, which is not a conversation:
+    on a long session the judge saw a run of opening user turns, then a run
+    of closing assistant turns, and never a single adjacent pair — so a user
+    correction was structurally separated from the thing it corrected.
+    """
+
+    role: str
+    text: str
+
+
 @dataclass
 class SessionDigest:
     """A secret-free structured view of one transcript file.
@@ -43,23 +63,45 @@ class SessionDigest:
     sidechain_records: int = 0
     summary_records: int = 0
     unknown_records: int = 0
-    user_texts: list[str] = field(default_factory=list)
-    assistant_texts: list[str] = field(default_factory=list)
+    #: Natural-language turns in transcript order — the source of truth.
+    #: ``user_texts`` / ``assistant_texts`` are role-filtered views of this.
+    turns: list[Turn] = field(default_factory=list)
     tool_calls: list[ToolCall] = field(default_factory=list)
     has_error: bool = False
     has_correction: bool = False
 
+    def add_turn(self, role: str, text: str) -> None:
+        """Append one turn, preserving transcript order."""
+        self.turns.append(Turn(role=role, text=text))
+
+    @property
+    def user_texts(self) -> list[str]:
+        """User turns, in order. Read-only view over :attr:`turns`."""
+        return [t.text for t in self.turns if t.role == ROLE_USER]
+
+    @property
+    def assistant_texts(self) -> list[str]:
+        """Assistant turns, in order. Read-only view over :attr:`turns`."""
+        return [t.text for t in self.turns if t.role == ROLE_ASSISTANT]
+
     @property
     def is_empty(self) -> bool:
         """``True`` when no natural-language turns were recovered."""
-        return not self.user_texts and not self.assistant_texts
+        return not self.turns
 
     @property
     def salient_text(self) -> str:
-        """Distiller input: the natural-language turns joined, no tool I/O."""
-        parts = [f"USER: {text}" for text in self.user_texts]
-        parts.extend(f"ASSISTANT: {text}" for text in self.assistant_texts)
-        return "\n".join(parts)
+        """Distiller input: the turns in transcript order, no tool I/O.
+
+        Chronological by construction. The elision the distiller applies
+        keeps a head and a tail, so interleaved order is what lets a
+        surviving window contain both a request and its answer.
+        """
+        return "\n".join(
+            f"{ROLE_USER.upper() if t.role == ROLE_USER else ROLE_ASSISTANT.upper()}:"
+            f" {t.text}"
+            for t in self.turns
+        )
 
 
 @dataclass
@@ -106,6 +148,11 @@ class CaptureReport:
     sessions_parsed: int = 0
     sessions_triggered: int = 0
     sessions_sampled_out: int = 0
+    #: Transcripts skipped because the session ran in a throwaway directory
+    #: (see :func:`~trellis_workers.session_capture.transcripts.is_ephemeral_project`).
+    #: Its own count, never folded into ``sessions_sampled_out`` — a capture
+    #: gap reported as a sampling decision is how one stays unnoticed.
+    sessions_skipped_ephemeral: int = 0
     malformed_lines: int = 0
     candidates_distilled: int = 0
     candidates_rejected_worthiness: int = 0
@@ -135,6 +182,7 @@ class CaptureReport:
             "sessions_parsed": self.sessions_parsed,
             "sessions_triggered": self.sessions_triggered,
             "sessions_sampled_out": self.sessions_sampled_out,
+            "sessions_skipped_ephemeral": self.sessions_skipped_ephemeral,
             "malformed_lines": self.malformed_lines,
             "candidates_distilled": self.candidates_distilled,
             "candidates_rejected_worthiness": self.candidates_rejected_worthiness,

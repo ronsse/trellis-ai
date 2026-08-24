@@ -191,7 +191,7 @@ def test_unworthy_candidate_is_rejected(tmp_path: Path) -> None:
     registry = _registry(tmp_path)
     root = tmp_path / "projects"
     _error_session(root / "proj" / "sess-fake-0001.jsonl")
-    client = FakeLLMClient([candidates_json(good_candidate(non_derivable=False))])
+    client = FakeLLMClient([candidates_json(good_candidate(durable=False))])
 
     report = run_capture(
         registry,
@@ -302,6 +302,54 @@ def test_reconcile_flag_on_drops_near_duplicate(tmp_path: Path, monkeypatch) -> 
     assert report.memories_written == 0
     # Still exactly one stored memory — the near-dup was suppressed.
     assert len(_stored_captures(registry)) == 1
+
+
+def test_ephemeral_project_is_skipped_and_counted(tmp_path: Path) -> None:
+    """A throwaway-directory session is skipped, and the skip is visible.
+
+    Counted on its own field rather than folded into ``sessions_sampled_out``:
+    a capture gap reported as a sampling decision is how one goes unnoticed
+    (see the 61% sub-agent gap this report shape hid, trellis-ai#332).
+    """
+    registry = _registry(tmp_path)
+    root = tmp_path / "projects"
+    _error_session(root / "-tmp-tmpa1b2c3" / "sess-fake-0001.jsonl")
+    _error_session(root / "-home-me-proj" / "sess-fake-0002.jsonl", "sess-fake-0002")
+    client = FakeLLMClient([candidates_json(good_candidate())])
+
+    report = run_capture(
+        registry,
+        transcripts_root=root,
+        watermark_path=tmp_path / "wm.json",
+        llm_client=client,
+    )
+
+    assert report.sessions_seen == 2
+    assert report.sessions_skipped_ephemeral == 1
+    assert report.sessions_sampled_out == 0
+    # Only the durable project's session was parsed and captured.
+    assert report.sessions_parsed == 1
+    assert len(_stored_captures(registry)) == 1
+
+
+def test_ephemeral_skip_does_not_consume_the_watermark(tmp_path: Path) -> None:
+    """Skipped-as-ephemeral must stay eligible if the rule is later narrowed."""
+    registry = _registry(tmp_path)
+    root = tmp_path / "projects"
+    _error_session(root / "-tmp-tmpa1b2c3" / "sess-fake-0001.jsonl")
+    wm = tmp_path / "wm.json"
+
+    run_capture(
+        registry,
+        transcripts_root=root,
+        watermark_path=wm,
+        llm_client=FakeLLMClient([candidates_json(good_candidate())]),
+    )
+
+    import json
+
+    cursors = json.loads(wm.read_text())["cursors"] if wm.exists() else {}
+    assert cursors == {}
 
 
 def _registry(tmp_path: Path) -> MagicMock:
