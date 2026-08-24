@@ -12,6 +12,7 @@ import structlog
 from trellis.core.base import utc_now
 from trellis.core.hashing import content_hash as _content_hash
 from trellis.core.ids import generate_ulid
+from trellis.schemas.classification import LIST_FACETS
 from trellis.stores.base.document import DocumentStore
 from trellis.stores.base.tag_filters import normalize_facet_filter
 from trellis.stores.sqlite.base import SQLiteStoreBase
@@ -19,18 +20,24 @@ from trellis.stores.sqlite.base import SQLiteStoreBase
 logger = structlog.get_logger(__name__)
 
 
-_LIST_FACETS = {"domain"}
-
-
 def _build_tag_conditions(
     tag_filters: dict[str, Any],
 ) -> tuple[list[str], list[Any]]:
     """Build SQL conditions for ``content_tags`` filtering.
 
-    List facets (e.g. ``domain``) match if any filter value is in the
-    JSON array; scalar facets (``content_type``, ``signal_quality``,
-    ``scope``) match by ``IN (...)``. Both wrap in ``IS NULL OR …`` so
-    untagged items pass — mirrors the Postgres path's default-pass.
+    Which facets are lists comes from
+    :data:`~trellis.schemas.classification.LIST_FACETS`, the one definition
+    every reader shares. This module used to keep its own ``{"domain"}``,
+    which silently omitted ``retrieval_affinity`` — a list facet three
+    classifiers write. It took the scalar branch, where ``json_extract``
+    returns the JSON *text* ``["operational"]`` and ``IN ('operational')``
+    is false, so filtering it returned the **inverted set**. A facet added to
+    the schema must not need a second edit here to be filterable.
+
+    List facets match if any filter value is in the JSON array; scalar facets
+    (``content_type``, ``signal_quality``, ``scope``) match by ``IN (...)``.
+    Both wrap in ``IS NULL OR …`` so untagged items pass — mirrors the
+    Postgres path's default-pass.
 
     For a list facet the default-pass also covers an **empty** array:
     ``domain: []`` carries no domain, exactly like a missing key, and
@@ -57,30 +64,42 @@ def _build_tag_conditions(
         if normalized is None:
             continue
         operator, values = normalized
+        # Bound, not interpolated: ``facet`` arrives from wire input, and a
+        # JSON path spliced into SQL is an injection surface. SQLite's JSON
+        # functions take the path as an ordinary parameter.
         json_path = f"$.content_tags.{facet}"
-        if facet in _LIST_FACETS:
+        if facet in LIST_FACETS:
             sub_parts = " OR ".join("je.value = ?" for _ in values)
             inner = (
-                f"EXISTS (SELECT 1 FROM json_each(d.metadata_json,"
-                f" '{json_path}') je WHERE {sub_parts})"
+                "EXISTS (SELECT 1 FROM json_each(d.metadata_json, ?) je"
+                f" WHERE {sub_parts})"
             )
             if operator == "not_in":
                 inner = f"NOT {inner}"
+            # ``json_array_length`` returns 0 for a *scalar* as well as for
+            # an empty array, so the empty-facet default-pass branch has to
+            # be guarded on the value actually being an array. Without the
+            # guard a scalar-shaped facet (``domain: "engineering"``, a legal
+            # shape — ``DocumentMetadata.domain`` is ``list[str] | str |
+            # None``) default-passed every query and so could never filter at
+            # all. It carries a value; it matches by equality, which is what
+            # ``json_each`` over a scalar already yields.
             conditions.append(
-                f"(json_extract(d.metadata_json, '{json_path}') IS NULL"
-                f" OR json_array_length(d.metadata_json, '{json_path}') = 0"
+                "(json_extract(d.metadata_json, ?) IS NULL"
+                " OR (json_type(d.metadata_json, ?) = 'array'"
+                " AND json_array_length(d.metadata_json, ?) = 0)"
                 f" OR {inner})"
             )
-            params.extend(values)
+            params.extend([json_path, json_path, json_path, json_path, *values])
         else:
             placeholders = ", ".join("?" for _ in values)
             membership = "NOT IN" if operator == "not_in" else "IN"
             conditions.append(
-                f"(json_extract(d.metadata_json, '{json_path}') IS NULL"
-                f" OR json_extract(d.metadata_json, '{json_path}')"
-                f" {membership} ({placeholders}))"
+                "(json_extract(d.metadata_json, ?) IS NULL"
+                f" OR json_extract(d.metadata_json, ?) {membership}"
+                f" ({placeholders}))"
             )
-            params.extend(values)
+            params.extend([json_path, json_path, *values])
 
     return conditions, params
 

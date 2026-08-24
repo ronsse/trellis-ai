@@ -35,6 +35,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from trellis.schemas.classification import LIST_FACETS
+
 if TYPE_CHECKING:
     from trellis.stores.base.document import DocumentStore
 
@@ -371,3 +373,93 @@ class DocumentStoreContractTests:
             filters={"content_tags": {"domain": {"in": ["engineering"]}}},
         )
         assert {r["doc_id"] for r in results} == {"untagged", "empty_facet"}
+
+    def test_search_list_facet_matches_a_tagged_document(
+        self, store: DocumentStore
+    ) -> None:
+        """A list facet must MATCH, not merely default-pass.
+
+        This suite pinned only the default-pass half — missing and empty
+        facets stay visible — and never asserted that a document carrying a
+        value is *returned* for it. Postgres consequently read
+        ``metadata -> 'content_tags' ->> 'domain'`` as the text
+        ``'["finance"]'``, which is not NULL, is not ``'[]'``, and is not in
+        ``('finance')``: all three branches false, so a correctly tagged
+        document was hard-excluded from its own domain query on the deployed
+        backend, with CI green throughout.
+
+        Every facet in :data:`LIST_FACETS` is covered rather than ``domain``
+        alone, because the divergence that hid this was one backend keeping
+        its own narrower idea of which facets are lists.
+        """
+        for facet in sorted(LIST_FACETS):
+            store.put(
+                f"match-{facet}",
+                "python programming language",
+                {"content_tags": {facet: ["alpha", "beta"]}},
+            )
+            store.put(
+                f"other-{facet}",
+                "python programming language",
+                {"content_tags": {facet: ["gamma"]}},
+            )
+
+        for facet in sorted(LIST_FACETS):
+            results = store.search(
+                "python", filters={"content_tags": {facet: {"in": ["alpha"]}}}
+            )
+            found = {r["doc_id"] for r in results}
+            assert f"match-{facet}" in found, (
+                f"{facet}: a document tagged with the queried value was excluded"
+            )
+            assert f"other-{facet}" not in found, (
+                f"{facet}: a document tagged with a different value was returned"
+            )
+
+    def test_search_list_facet_not_in_excludes_a_match(
+        self, store: DocumentStore
+    ) -> None:
+        """``not_in`` on a list facet is the inverse, and still default-passes."""
+        store.put("untagged", "python programming language")
+        store.put(
+            "noisy",
+            "python programming language",
+            {"content_tags": {"domain": ["spam"]}},
+        )
+        store.put(
+            "wanted",
+            "python programming language",
+            {"content_tags": {"domain": ["engineering"]}},
+        )
+        results = store.search(
+            "python", filters={"content_tags": {"domain": {"not_in": ["spam"]}}}
+        )
+        assert {r["doc_id"] for r in results} == {"untagged", "wanted"}
+
+    def test_search_list_facet_tolerates_a_scalar_stored_shape(
+        self, store: DocumentStore
+    ) -> None:
+        """``domain`` is legally ``list[str] | str | None`` on the metadata model.
+
+        A backend that assumes the list shape can do worse than mis-filter:
+        Postgres' ``jsonb_array_elements_text`` *raises* on a scalar, which
+        takes down the whole query rather than returning the wrong rows. The
+        scalar must match by equality — the shape #282's shredding failure
+        was about.
+        """
+        store.put(
+            "scalar",
+            "python programming language",
+            {"content_tags": {"domain": "engineering"}},
+        )
+        store.put(
+            "scalar_other",
+            "python programming language",
+            {"content_tags": {"domain": "finance"}},
+        )
+        results = store.search(
+            "python", filters={"content_tags": {"domain": {"in": ["engineering"]}}}
+        )
+        found = {r["doc_id"] for r in results}
+        assert "scalar" in found
+        assert "scalar_other" not in found
