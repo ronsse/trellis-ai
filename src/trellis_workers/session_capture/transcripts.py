@@ -8,10 +8,16 @@ Claude Code writes one JSONL file per session under
   A single bad line must never abort the parse: it is skipped and counted.
 * **Unknown record types** — the format churns (new ``type`` values appear).
   The parser tolerates them (counted as ``unknown_records``), never crashes.
-* **Sidechains** — ``isSidechain: true`` records are sub-agent (Task) threads
-  interleaved into the file; their turns are counted but excluded from the
-  main-thread salient text so the digest does not assume one linear
-  conversation.
+* **Sidechains** — ``isSidechain: true`` records are sub-agent (Task) threads.
+  When they are *interleaved* into a main session's file, their turns are
+  excluded so the digest does not assume one linear conversation. When the
+  whole file is sidechain — Claude Code writes each sub-agent thread to its
+  own ``agent-*.jsonl`` — that file *is* the sub-agent's conversation and is
+  kept, flagged ``is_subagent`` so nothing downstream mistakes the
+  orchestrator's prompt for a person's. The blanket skip discarded 61% of a
+  real corpus to guard against a mixed shape that occurred zero times
+  (#332). Resolved by
+  :meth:`~trellis_workers.session_capture.models.SessionDigest.resolve_thread`.
 * **Summaries / compaction** — ``type: "summary"`` records and compaction
   boundaries are structural artifacts, not turns; counted and skipped.
 * **``tool_result`` content arrays** — a tool result's ``content`` may be a
@@ -78,10 +84,10 @@ def discover_sessions(root: Path) -> list[Path]:
     return sorted(root.glob(_TRANSCRIPT_GLOB))
 
 
-def is_ephemeral_project(path: Path) -> bool:
+def is_ephemeral_project(path: Path, root: Path) -> bool:
     """Whether a transcript belongs to a session run in a throwaway directory.
 
-    Claude Code names each project directory after the session's working
+    Claude Code names each *project* directory after the session's working
     directory with the separators flattened, so ``/tmp/tmpa1b2c3`` becomes
     ``-tmp-tmpa1b2c3``. A session whose cwd was a temp directory has no
     durable project for a memory to be *about*: the directory is gone, and
@@ -94,14 +100,26 @@ def is_ephemeral_project(path: Path) -> bool:
     about the operator's own systems, and they were 29% of a first capture
     run.
 
+    Resolved against *root* rather than reading ``path.parent``: a main
+    session sits directly in its project directory, but a sub-agent
+    transcript is nested at
+    ``<project>/<parent-session>/subagents/[workflows/<wf>/]agent-*.jsonl``,
+    where the immediate parent is ``subagents`` and carries no cwd
+    information at all. Reading the parent would silently exempt every
+    sub-agent transcript from this rule (#332).
+
     Matched on the temp *root* rather than the ``tmpXXXXXXXX`` name shape:
     the point is that the work had no durable home, which is equally true of
     a hand-named directory under ``/tmp``.
     """
-    project = path.parent.name
+    try:
+        project = path.relative_to(root).parts[0]
+    except (ValueError, IndexError):
+        # Outside the sweep root, or the root itself — no project to judge.
+        return False
     return any(
-        project == root or project.startswith(f"{root}-")
-        for root in _EPHEMERAL_PROJECT_ROOTS
+        project == temp_root or project.startswith(f"{temp_root}-")
+        for temp_root in _EPHEMERAL_PROJECT_ROOTS
     )
 
 
@@ -147,10 +165,12 @@ def _tool_result_errored(content: Any) -> bool:
     return False
 
 
-def _add_turns(digest: SessionDigest, role: str, content: Any) -> None:
+def _add_turns(
+    digest: SessionDigest, role: str, content: Any, *, sidechain: bool = False
+) -> None:
     """Append every natural-language block of *content* as a turn, in order."""
     for text in _extract_text(content):
-        digest.add_turn(role, text)
+        digest.add_turn(role, text, sidechain=sidechain)
 
 
 def _collect_tool_names(digest: SessionDigest, content: Any) -> None:
@@ -170,11 +190,9 @@ def _handle_record(record: dict[str, Any], digest: SessionDigest) -> None:
         digest.summary_records += 1
         return
 
-    if record.get("isSidechain"):
-        # Sub-agent thread: count it, but keep its turns out of the
-        # main-thread salient text (no continuity assumption).
+    sidechain = bool(record.get("isSidechain"))
+    if sidechain:
         digest.sidechain_records += 1
-        return
 
     message = record.get("message")
     if not isinstance(message, dict):
@@ -184,11 +202,11 @@ def _handle_record(record: dict[str, Any], digest: SessionDigest) -> None:
     content = message.get("content")
 
     if record_type == _TYPE_USER:
-        _add_turns(digest, ROLE_USER, content)
+        _add_turns(digest, ROLE_USER, content, sidechain=sidechain)
         if _tool_result_errored(content):
             digest.has_error = True
     elif record_type == _TYPE_ASSISTANT:
-        _add_turns(digest, ROLE_ASSISTANT, content)
+        _add_turns(digest, ROLE_ASSISTANT, content, sidechain=sidechain)
         _collect_tool_names(digest, content)
     else:
         digest.unknown_records += 1
@@ -224,6 +242,11 @@ def parse_session(path: Path) -> SessionDigest:
             except (json.JSONDecodeError, ValueError, TypeError, KeyError):
                 # SKIP + COUNT: one bad line never aborts a session parse.
                 digest.malformed_lines += 1
+
+    # Decide which turns are this transcript's conversation before the signal
+    # detectors read them: a mixed file keeps its main thread, a dedicated
+    # sub-agent file keeps its own (#332).
+    digest.resolve_thread()
 
     if detect_correction(digest.user_texts):
         digest.has_correction = True

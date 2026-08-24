@@ -91,7 +91,8 @@ def test_summary_records_counted_not_treated_as_turns(tmp_path: Path) -> None:
     assert "a compaction summary" not in digest.user_texts
 
 
-def test_sidechain_records_excluded_from_salient_text(tmp_path: Path) -> None:
+def test_sidechain_records_excluded_when_a_main_thread_exists(tmp_path: Path) -> None:
+    """The original rule, unchanged: a MIXED file keeps only its main thread."""
     path = tmp_path / "s.jsonl"
     side = assistant_turn("subagent internal reasoning")
     side["isSidechain"] = True
@@ -99,6 +100,79 @@ def test_sidechain_records_excluded_from_salient_text(tmp_path: Path) -> None:
     digest = parse_session(path)
     assert digest.sidechain_records == 1
     assert digest.assistant_texts == ["main thread reply"]
+    assert digest.is_subagent is False
+
+
+class TestDedicatedSubAgentTranscripts:
+    """A file that is *only* sidechain is that sub-agent's conversation (#332).
+
+    The exclusion rule was written for sidechain records interleaved into a
+    main session's file, where dropping them keeps the digest from reading as
+    one linear conversation. Claude Code now writes each sub-agent thread to
+    its own ``agent-*.jsonl``, where every record is sidechain — measured on a
+    real corpus, 158 of 257 transcripts were pure sidechain and **0 were
+    mixed**, so a blanket skip discarded 61% of the corpus (and its largest
+    files) to guard against a shape that no longer occurs.
+    """
+
+    def _subagent_transcript(self, path: Path) -> None:
+        turns = [
+            user_turn("Analyze the store layer and report back."),
+            assistant_turn("Reading the store layer", "Grep"),
+            assistant_turn("The pool is opened per call, not reused."),
+        ]
+        for turn in turns:
+            turn["isSidechain"] = True
+        write_transcript(path, turns)
+
+    def test_pure_sidechain_file_is_captured_and_flagged(self, tmp_path: Path) -> None:
+        path = tmp_path / "agent-a1b2c3.jsonl"
+        self._subagent_transcript(path)
+        digest = parse_session(path)
+
+        assert not digest.is_empty
+        assert digest.is_subagent is True
+        assert digest.assistant_texts == [
+            "Reading the store layer",
+            "The pool is opened per call, not reused.",
+        ]
+        assert digest.user_texts == ["Analyze the store layer and report back."]
+
+    def test_sub_agent_turns_keep_chronological_order(self, tmp_path: Path) -> None:
+        path = tmp_path / "agent-a1b2c3.jsonl"
+        self._subagent_transcript(path)
+        salient = parse_session(path).salient_text
+        assert salient.splitlines() == [
+            "USER: Analyze the store layer and report back.",
+            "ASSISTANT: Reading the store layer",
+            "ASSISTANT: The pool is opened per call, not reused.",
+        ]
+
+    def test_signals_are_detected_on_the_resolved_thread(self, tmp_path: Path) -> None:
+        """Error/correction detection must read the turns actually kept.
+
+        If ``resolve_thread`` ran after the detectors, a sub-agent file would
+        score its signals against an empty turn list and never be
+        capture-mandatory.
+        """
+        path = tmp_path / "agent-a1b2c3.jsonl"
+        turns = [
+            user_turn("no, that's wrong - the pool is per-call"),
+            assistant_turn("Corrected: reusing the pool now."),
+        ]
+        for turn in turns:
+            turn["isSidechain"] = True
+        write_transcript(path, turns)
+
+        digest = parse_session(path)
+        assert digest.is_subagent is True
+        assert digest.has_correction is True
+
+    def test_empty_file_is_not_flagged_as_subagent(self, tmp_path: Path) -> None:
+        write_transcript(tmp_path / "agent-empty.jsonl", [])
+        digest = parse_session(tmp_path / "agent-empty.jsonl")
+        assert digest.is_empty
+        assert digest.is_subagent is False
 
 
 def test_tool_result_content_array_error_sets_flag_but_drops_output(
@@ -211,7 +285,7 @@ class TestEphemeralProjectSkip:
             "-private-var-tmp-x",
         ):
             path = tmp_path / project / "s.jsonl"
-            assert is_ephemeral_project(path), project
+            assert is_ephemeral_project(path, tmp_path), project
 
     def test_real_projects_are_not_ephemeral(self, tmp_path: Path) -> None:
         for project in (
@@ -221,11 +295,27 @@ class TestEphemeralProjectSkip:
             "-opt-tmpfiles",
         ):
             path = tmp_path / project / "s.jsonl"
-            assert not is_ephemeral_project(path), project
+            assert not is_ephemeral_project(path, tmp_path), project
 
     def test_prefix_match_does_not_catch_a_lookalike(self, tmp_path: Path) -> None:
         """``-tmpl-...`` is ``/tmpl``, a real directory — not ``/tmp``."""
-        assert not is_ephemeral_project(tmp_path / "-tmpl-project" / "s.jsonl")
+        assert not is_ephemeral_project(
+            tmp_path / "-tmpl-project" / "s.jsonl", tmp_path
+        )
+
+    def test_nested_subagent_transcript_inherits_its_project(
+        self, tmp_path: Path
+    ) -> None:
+        """A sub-agent transcript is judged by its project, not its parent dir.
+
+        Sub-agents nest at ``<project>/<parent-session>/subagents/agent-*``,
+        so the immediate parent is ``subagents`` and carries no cwd at all.
+        Reading the parent would exempt every sub-agent transcript from the
+        rule — silently, and only once #332 made them capturable.
+        """
+        nested = "sess-uuid/subagents/workflows/wf_1/agent-a1.jsonl"
+        assert is_ephemeral_project(tmp_path / "-tmp-tmpa1b2c3" / nested, tmp_path)
+        assert not is_ephemeral_project(tmp_path / "-home-me-proj" / nested, tmp_path)
 
     def test_discovery_stays_unfiltered(self, tmp_path: Path) -> None:
         """The skip belongs to the sweep, so it can be counted in the report.
