@@ -41,6 +41,26 @@ _CREATE_INDEXES = [
 ]
 
 
+#: An OR-semantics ``tsquery`` over exactly the lexemes ``plainto_tsquery``
+#: produces — same stemming, same stopword removal, ``|`` instead of ``&``.
+#:
+#: ``plainto_tsquery`` ANDs every term, so a natural-language intent had to
+#: appear *in full* in one document. Measured against the production corpus,
+#: ``"implement the classify layer tagging pipeline"`` matched 0 documents
+#: under AND and 267 under OR: recall fell toward zero as the intent got more
+#: specific, which is backwards, and the keyword axis is the only axis that
+#: reads ``content_tags`` — so tag filtering went dark exactly when the query
+#: was most specific. SQLite has always OR-ed (``_sanitize_fts_query`` joins
+#: with ``OR``), so this was also a silent divergence between the two
+#: backends, with every test written against the SQLite one.
+#:
+#: Results stay ordered by ``ts_rank`` and capped by ``LIMIT``, so a loose
+#: match costs rank rather than precision. The string transform is safe
+#: because ``plainto_tsquery`` emits only ``&`` — phrase operators come from
+#: ``phraseto_tsquery``, which is not used here.
+_OR_TSQUERY = "replace(plainto_tsquery('english', %s)::text, ' & ', ' | ')::tsquery"
+
+
 class PostgresDocumentStore(PostgresStoreBase, DocumentStore):
     """Postgres-backed document store with tsvector full-text search."""
 
@@ -179,7 +199,7 @@ class PostgresDocumentStore(PostgresStoreBase, DocumentStore):
         if not query or not query.strip():
             return []
 
-        conditions = ["tsv @@ plainto_tsquery('english', %s)"]
+        conditions = [f"tsv @@ {_OR_TSQUERY}"]
         params: list[Any] = [query]
 
         if filters:
@@ -277,10 +297,11 @@ class PostgresDocumentStore(PostgresStoreBase, DocumentStore):
         where_clause = " AND ".join(conditions)
         params.append(limit)
 
+        rank_query = _OR_TSQUERY
         sql = f"""
             SELECT doc_id, content, content_hash, metadata,
                    created_at, updated_at,
-                   ts_rank(tsv, plainto_tsquery('english', %s)) AS rank
+                   ts_rank(tsv, {rank_query}) AS rank
             FROM documents
             WHERE {where_clause}
             ORDER BY rank DESC

@@ -44,6 +44,7 @@ from trellis.retrieve.strategies import SearchStrategy
 from trellis.retrieve.tier_mapping import TierMapper
 from trellis.retrieve.token_counting import DEFAULT_TOKEN_COUNTER, TokenCounter
 from trellis.schemas.advisory import Advisory
+from trellis.schemas.classification import facet_values
 from trellis.schemas.pack import (
     BudgetStep,
     Pack,
@@ -178,7 +179,7 @@ def _strip_dedup_frontmatter(text: str) -> str:
     return _DEDUP_FRONTMATTER_RE.sub("", text, count=1)
 
 
-def _item_attribution(item: PackItem) -> dict[str, str]:
+def _item_attribution(item: PackItem) -> dict[str, Any]:
     """Per-item attribution stamped onto ``PACK_ASSEMBLED.injected_items``.
 
     ``trellis.learning.pack_observations._join_one`` reads ``title`` /
@@ -209,23 +210,49 @@ def _item_attribution(item: PackItem) -> dict[str, str]:
       known-unknown beats a value drawn from a second taxonomy.
     * ``domain_system`` — the ``source_system`` the
       :class:`~trellis.classify.classifiers.source_system.SourceSystemClassifier`
-      records (dbt, snowflake, …).
+      records (dbt, snowflake, …). Despite the name it is *provenance*, not
+      the ``domain`` facet, which is why the facet is carried separately.
+    * ``domain`` — the ``domain`` facet itself, as a list. Without it the
+      outcome join was tag-blind: every graded row could say which item was
+      served and none could say what it was tagged, so no analysis could ask
+      whether a tag predicts a good pack. That is the question the whole
+      tagging ladder is eventually judged on.
+    * ``signal_quality`` — the facet the noise filter acts on, so an
+      effectiveness analysis can separate "served and unhelpful" from
+      "served despite being marked low".
+
+    **On disclosure.** ``domain`` is open-vocabulary and reveals subject
+    matter, which is why :mod:`trellis.classify.shadow` deliberately keeps it
+    *off* ``MEMORY_OP_JUDGED``. The rule differs here because the payloads
+    differ: that event carries only a digest and a verdict, so a domain tag
+    would be the sole content-revealing field in it, whereas
+    ``injected_items`` has carried ``title`` since #285 — which reveals
+    strictly more about a document than its domain does. Adding the facet
+    changes what this event reveals by a smaller margin than the field
+    already next to it.
 
     Empty values are omitted rather than emitted as ``None`` so thin items
     keep the pre-existing payload shape.
     """
     meta = item.metadata or {}
-    tags = meta.get("content_tags")
+    raw_tags = meta.get("content_tags")
+    tags: dict[str, Any] = raw_tags if isinstance(raw_tags, dict) else {}
     fields = {
         "title": meta.get("title") or meta.get("capture_title") or meta.get("name"),
-        "category": tags.get("content_type") if isinstance(tags, dict) else None,
+        "category": tags.get("content_type"),
         "domain_system": meta.get("source_system"),
+        "signal_quality": tags.get("signal_quality"),
     }
-    return {
+    attribution: dict[str, Any] = {
         key: value.strip()
         for key, value in fields.items()
         if isinstance(value, str) and value.strip()
     }
+
+    domain = [d.strip() for d in facet_values(tags.get("domain")) if d.strip()]
+    if domain:
+        attribution["domain"] = domain
+    return attribution
 
 
 @dataclass(frozen=True)
