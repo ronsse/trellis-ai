@@ -905,10 +905,12 @@ def enrich_cmd(
         3, "--concurrency", help="Parallel enrichment requests."
     ),
     limit: int = typer.Option(50, "--limit", help="Max documents to enrich this run."),
-    confidence_threshold: float = typer.Option(
-        0.5,
-        "--confidence-threshold",
-        help="Re-enrich documents whose tag_confidence is below this value.",
+    reenrich: bool = typer.Option(
+        False,
+        "--reenrich",
+        help=(
+            "Also re-enrich documents already enriched once. Default is to skip them."
+        ),
     ),
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Select + report candidates without calling the LLM."
@@ -917,12 +919,18 @@ def enrich_cmd(
 ) -> None:
     """Batch-enrich under-tagged documents via :class:`EnrichmentService`.
 
-    **Selection predicate.** A document is "unenriched" (a candidate) when
-    its ``metadata.content_tags`` is missing/empty, OR it carries no
-    ``content_tags.tag_confidence`` stamp, OR that stamp is strictly below
-    ``--confidence-threshold``. Documents already tagged at or above the
-    threshold are skipped. The newest ``--limit`` documents matching the
-    predicate are enriched.
+    **Selection predicate.** A document is a candidate when its
+    ``metadata.content_tags`` is missing or empty, or when it has never been
+    through this path — ``content_tags.classified_mode != "enrichment"``.
+    ``--reenrich`` takes the already-enriched too. The newest ``--limit``
+    documents matching the predicate are enriched.
+
+    This used to select on ``content_tags.tag_confidence``, which does not
+    work and cannot: that key is not part of ``ContentTags`` and is never
+    written, so the read returned ``None`` for every document and the
+    threshold could never skip anything. The confidence value behind it was
+    itself a constant copied out of the prompt's own example. ``classified_mode``
+    is a fact the path actually records.
 
     Results are written back through the tagging path: each enriched
     document's ``metadata.content_tags`` is updated with the LLM-suggested
@@ -938,7 +946,7 @@ def enrich_cmd(
     llm = _require_llm_client_or_exit()
 
     candidates = _select_enrichment_candidates(
-        document_store, limit=limit, confidence_threshold=confidence_threshold
+        document_store, limit=limit, reenrich=reenrich
     )
 
     if dry_run:
@@ -1018,9 +1026,9 @@ def _select_enrichment_candidates(
     document_store: DocumentStore,
     *,
     limit: int,
-    confidence_threshold: float,
+    reenrich: bool = False,
 ) -> list[dict[str, Any]]:
-    """Return documents matching the unenriched / low-confidence predicate.
+    """Return documents that have not been through the enrichment path.
 
     See :func:`enrich_cmd` for the predicate definition. Scans the newest
     documents (a generous multiple of ``limit`` so the filter has headroom)
@@ -1034,8 +1042,7 @@ def _select_enrichment_candidates(
         if not content_tags:
             candidates.append(doc)
             continue
-        confidence = content_tags.get("tag_confidence")
-        if confidence is None or float(confidence) < confidence_threshold:
+        if reenrich or content_tags.get("classified_mode") != "enrichment":
             candidates.append(doc)
         if len(candidates) >= limit:
             break

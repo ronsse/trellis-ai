@@ -153,7 +153,13 @@ class LLMFacetClassifier:
         if result.auto_summary:
             tags["_auto_summary"] = [result.auto_summary]
 
-        confidence = min(result.tag_confidence, result.class_confidence)
+        # Min over what the model actually reported. A model that reported
+        # nothing yields 0.0 — "did not say" is not "fairly confident", and
+        # treating it as the latter is what made this field a constant.
+        reported = [
+            c for c in (result.tag_confidence, result.class_confidence) if c is not None
+        ]
+        confidence = min(reported) if reported else 0.0
 
         return ClassificationResult(
             tags=tags,

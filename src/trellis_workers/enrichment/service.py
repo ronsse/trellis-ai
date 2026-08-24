@@ -43,8 +43,12 @@ class EnrichmentResult(TrellisModel):
     auto_class: str | None = None
     auto_summary: str | None = None
     auto_importance: float = 0.0
-    tag_confidence: float = 0.0
-    class_confidence: float = 0.0
+    #: The model's own certainty, or ``None`` when it reported none. Nullable
+    #: on purpose: a substituted default cannot be told apart from a real
+    #: value, and this field was measured returning a constant on every
+    #: document because the prompt's own example was being copied back.
+    tag_confidence: float | None = None
+    class_confidence: float | None = None
     raw_response: str | None = None
     usage: TokenUsage | None = None
     success: bool = True
@@ -89,14 +93,19 @@ IMPORTANT RULES:
   - 0.3-0.5: General notes, routine updates
   - 0.0-0.2: Ephemeral content, scratch notes
 
-Respond in JSON format:
+- Include "tag_confidence" and "class_confidence" (0.0-1.0): YOUR OWN certainty
+  about the tags and the classification respectively. Judge each one — low when
+  the content is ambiguous or no listed classification fits well, high only when
+  it is clear-cut. These two are not shown in the shape below on purpose: an
+  example value gets copied verbatim instead of judged, which turns the field
+  into a constant.
+
+Respond in JSON format, adding the two confidence fields described above:
 {{
   "tags": ["tag1", "tag2"],
   "class": "classification",
   "summary": "Concise summary.",
-  "importance": 0.5,
-  "tag_confidence": 0.85,
-  "class_confidence": 0.90
+  "importance": 0.5
 }}
 """
 
@@ -407,16 +416,27 @@ class EnrichmentService:
             summary = None
 
         importance = float(data.get("importance", 0.0))
-        tag_conf = float(data.get("tag_confidence", 0.8))
-        class_conf = float(data.get("class_confidence", 0.8))
+
+        # No manufactured default. A substituted 0.8 is indistinguishable from
+        # a model that actually said 0.8, so every consumer downstream was
+        # reading a constant it believed was a measurement. ``None`` means the
+        # model did not report one, and says so.
+        def _confidence(key: str) -> float | None:
+            raw = data.get(key)
+            if raw is None:
+                return None
+            try:
+                return min(max(float(raw), 0.0), 1.0)
+            except (TypeError, ValueError):
+                return None
 
         return EnrichmentResult(
             auto_tags=tags,
             auto_class=auto_class,
             auto_summary=summary,
             auto_importance=min(max(importance, 0.0), 1.0),
-            tag_confidence=min(max(tag_conf, 0.0), 1.0),
-            class_confidence=min(max(class_conf, 0.0), 1.0),
+            tag_confidence=_confidence("tag_confidence"),
+            class_confidence=_confidence("class_confidence"),
         )
 
 

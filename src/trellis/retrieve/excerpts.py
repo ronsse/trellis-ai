@@ -90,6 +90,17 @@ _LAST_WORD_BREAK_RE = re.compile(r"\s\S*$")
 #: hyphens together so "trellis-ai" and "don't" each count once.
 _WORD_RE = re.compile(r"[\w'-]+")
 
+#: A run of path-ish characters containing at least one separator — a file
+#: path, a URL, a dotted-and-slashed identifier. Counted as **one** unit.
+#:
+#: Without this, ``/`` and ``.`` are word separators, so the bare path
+#: ``pi/config/labwc/rc.xml`` scored 5 distinct "words" — exactly the default
+#: ``min_distinct_words`` floor — and cleared the very check built to demote
+#: name-only stubs. Three of 24 slots on a measured failing pack went to
+#: file-path graph stubs for this reason. A path is one identifier, and a URL
+#: is one location; neither is five words of substance.
+_PATH_RE = re.compile(r"[\w.~-]*[/\\][\w.~/\\-]*")
+
 #: Scripts written without inter-word spacing — CJK ideographs, kana, Thai.
 #: ``\w`` matches these, so a whole Japanese sentence tokenises as a *single*
 #: word and a perfectly substantive memory would read as substance-free.
@@ -264,6 +275,11 @@ def count_substance_words(text: str) -> int:
     ``"Trellis trellis"`` counts once. Tokens with no alphanumeric
     character (a stray ``-``) do not count.
 
+    A :data:`_PATH_RE` run — a file path, a URL, any slash-joined
+    identifier — counts as **one** unit rather than one per segment. It is a
+    single name, and scoring it per segment let a bare path clear the floor
+    built to demote bare names.
+
     Runs of :data:`_UNSPACED_SCRIPT_RE` characters are counted per
     character rather than as one token, so a Japanese or Thai memory is
     scored on what it says rather than on the fact that its script does
@@ -279,6 +295,17 @@ def count_substance_words(text: str) -> int:
     """
     text = _ELISION_NOTE_RE.sub("", text)
     units: set[str] = set()
+
+    # Path-like runs first, each as a single unit, then removed so the word
+    # tokenizer below cannot re-count their segments.
+    def _take_path(match: re.Match[str]) -> str:
+        run = match.group(0)
+        if any(char.isalnum() for char in run):
+            units.add(run.lower())
+        return " "
+
+    text = _PATH_RE.sub(_take_path, text)
+
     for token in _WORD_RE.findall(text):
         if not any(char.isalnum() for char in token):
             continue
