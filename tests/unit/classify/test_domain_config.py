@@ -8,7 +8,10 @@ from trellis.classify.classifiers.keyword import (
     KeywordDomainClassifier,
     build_domain_keyword_map,
 )
-from trellis.classify.factory import build_ingestion_pipeline
+from trellis.classify.factory import (
+    build_ingestion_pipeline,
+    effective_domain_aliases,
+)
 
 
 class TestBuildDomainKeywordMap:
@@ -106,3 +109,42 @@ class TestBuildIngestionPipeline:
     def test_reserved_config_domain_rejected_at_build(self) -> None:
         with pytest.raises(ValueError, match="reserved namespace"):
             build_ingestion_pipeline({"domain_keywords": {"retention": ["x"]}})
+
+
+class TestEffectiveDomainAliases:
+    """The ``classify.domain_aliases`` block (#321 normalization).
+
+    Fails loudly on a malformed block for the same reason
+    ``domain_keywords`` does: the map decides which documents a domain-scoped
+    query can see, so silently declining to merge is worse than refusing to
+    start.
+    """
+
+    def test_absent_block_merges_nothing(self) -> None:
+        assert effective_domain_aliases(None) == {}
+        assert effective_domain_aliases({}) == {}
+        assert effective_domain_aliases({"domain_keywords": {"a": ["b"]}}) == {}
+
+    def test_a_well_formed_block_round_trips(self) -> None:
+        assert effective_domain_aliases(
+            {"domain_aliases": {"budget-hunting": "hunting"}}
+        ) == {"budget-hunting": "hunting"}
+
+    def test_a_non_mapping_block_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="must be a mapping"):
+            effective_domain_aliases({"domain_aliases": ["budget-hunting"]})
+
+    def test_a_non_string_canonical_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="non-empty canonical"):
+            effective_domain_aliases({"domain_aliases": {"a": ["b"]}})
+
+    def test_a_self_mapping_is_rejected(self) -> None:
+        """A no-op that reads as intent."""
+        with pytest.raises(ValueError, match="maps to itself"):
+            effective_domain_aliases({"domain_aliases": {"hunting": "hunting"}})
+
+    def test_a_chain_is_rejected(self) -> None:
+        """Merging is one step; accepting a chain would promise a rewrite
+        ``normalize_domain_tags`` deliberately does not perform."""
+        with pytest.raises(ValueError, match="both an alias and a merge destination"):
+            effective_domain_aliases({"domain_aliases": {"a": "b", "b": "c"}})

@@ -35,6 +35,11 @@ CLASSIFY_CONFIG_KEY = "classify"
 #: Sub-key under ``classify`` carrying the ``domain -> [keywords]`` map.
 DOMAIN_KEYWORDS_KEY = "domain_keywords"
 
+#: ``classify`` sub-key holding the ``alias -> canonical`` domain merge map.
+#: Surface-only in exactly the way :data:`DOMAIN_KEYWORDS_KEY` is: proposed by
+#: :mod:`trellis.learning.domain_normalization`, written by a human.
+DOMAIN_ALIASES_KEY = "domain_aliases"
+
 
 def _extract_config_domains(
     classify_config: Mapping[str, Any] | None,
@@ -71,6 +76,62 @@ def _extract_config_domains(
             raise ValueError(msg)
         domains[str(name)] = list(keywords)
     return domains
+
+
+def effective_domain_aliases(
+    classify_config: Mapping[str, Any] | None = None,
+) -> dict[str, str]:
+    """Pull and validate the ``domain_aliases`` map out of ``classify`` config.
+
+    Returns an empty map when the section is absent — the unnormalized
+    vocabulary is the correct default, because an alias map that nobody wrote
+    should merge nothing. Raises ``ValueError`` when the section is present but
+    malformed, so a misconfigured ``config.yaml`` fails loudly rather than
+    silently declining to merge.
+
+    A self-mapping (``a -> a``) and a chain (``a -> b -> c``) are both
+    rejected. The first is a no-op that reads as intent; the second implies a
+    transitive rewrite that
+    :func:`~trellis.learning.domain_normalization.normalize_domain_tags`
+    deliberately does not perform, so accepting it would mean the map does
+    something other than what it says.
+    """
+    if not classify_config:
+        return {}
+    raw = classify_config.get(DOMAIN_ALIASES_KEY)
+    if raw is None:
+        return {}
+    if not isinstance(raw, Mapping):
+        msg = (
+            f"config.yaml {CLASSIFY_CONFIG_KEY}.{DOMAIN_ALIASES_KEY} must be a "
+            f"mapping of alias -> canonical, got {type(raw).__name__}."
+        )
+        raise ValueError(msg)  # noqa: TRY004
+    aliases: dict[str, str] = {}
+    for alias, canonical in raw.items():
+        if not isinstance(canonical, str) or not canonical:
+            msg = (
+                f"config.yaml {CLASSIFY_CONFIG_KEY}.{DOMAIN_ALIASES_KEY}: "
+                f"alias {alias!r} must map to a non-empty canonical tag string."
+            )
+            raise ValueError(msg)
+        if str(alias) == canonical:
+            msg = (
+                f"config.yaml {CLASSIFY_CONFIG_KEY}.{DOMAIN_ALIASES_KEY}: "
+                f"alias {alias!r} maps to itself."
+            )
+            raise ValueError(msg)
+        aliases[str(alias)] = canonical
+
+    chained = sorted(a for a in aliases.values() if a in aliases)
+    if chained:
+        msg = (
+            f"config.yaml {CLASSIFY_CONFIG_KEY}.{DOMAIN_ALIASES_KEY}: "
+            f"{chained!r} appear as both an alias and a merge destination. "
+            f"Merging is one step only — point them at the final canonical."
+        )
+        raise ValueError(msg)
+    return aliases
 
 
 def effective_domain_keywords(
@@ -130,7 +191,9 @@ def build_ingestion_pipeline(
 
 __all__ = [
     "CLASSIFY_CONFIG_KEY",
+    "DOMAIN_ALIASES_KEY",
     "DOMAIN_KEYWORDS_KEY",
     "build_ingestion_pipeline",
+    "effective_domain_aliases",
     "effective_domain_keywords",
 ]
