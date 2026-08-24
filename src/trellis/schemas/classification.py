@@ -8,8 +8,9 @@ defined here.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime
-from typing import Literal, get_args
+from typing import Any, Literal, get_args
 
 from pydantic import Field, model_validator
 
@@ -296,10 +297,34 @@ class ShadowTags(TrellisModel):
         model was — and a caller that turns that ``None`` into an
         "unclassified" label is recording a constant, not a measurement.
         """
-        if self.content_type:
-            return self.content_type
-        form = self.custom.get(DOCUMENT_FORM_KEY)
-        return form[0] if form else None
+        return _resolve_verdict(self.content_type, self.custom)
+
+
+def _resolve_verdict(
+    content_type: str | None, custom: dict[str, list[str]] | None
+) -> str | None:
+    """Shared body of :attr:`ShadowTags.verdict` and :func:`shadow_verdict`."""
+    if content_type:
+        return content_type
+    form = facet_values((custom or {}).get(DOCUMENT_FORM_KEY))
+    return form[0] if form else None
+
+
+def shadow_verdict(record: Mapping[str, Any] | None) -> str | None:
+    """:attr:`ShadowTags.verdict` for an *unparsed* shadow record.
+
+    Readers that scan stored metadata hold raw JSON, not a model. Giving them
+    their own ``record.get("content_type")`` is how the reader drifts from
+    what the writer writes — the #325 defect, twice over. One resolution,
+    two entry points.
+    """
+    if not isinstance(record, Mapping):
+        return None
+    custom = record.get("custom")
+    return _resolve_verdict(
+        record.get("content_type"),
+        custom if isinstance(custom, dict) else None,
+    )
 
 
 Sensitivity = Literal["public", "internal", "confidential", "restricted"]

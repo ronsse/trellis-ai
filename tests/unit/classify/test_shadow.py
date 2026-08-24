@@ -35,6 +35,7 @@ from trellis.schemas.classification import (
     DOCUMENT_FORM_KEY,
     ContentTags,
     ShadowTags,
+    shadow_verdict,
 )
 from trellis.schemas.memory_op import JudgedOpType, MemoryOpJudgedPayload
 from trellis.stores.base.event_log import EventType
@@ -931,3 +932,41 @@ class TestVocabularySeam:
     def test_verdict_is_none_when_the_model_said_nothing(self) -> None:
         """``None`` must mean *the model produced no label*, not *unread key*."""
         assert ShadowTags(domain=["postgres"]).verdict is None
+
+    def test_out_of_vocabulary_counts_the_real_record_shape(
+        self, document_store: SQLiteDocumentStore
+    ) -> None:
+        """The collision counter must see the key the LLM actually writes.
+
+        ``out_of_vocabulary_content_types`` is the one measurement that
+        justifies :class:`ShadowTags` existing — "promoting shadow
+        ``content_type`` wholesale would mean adopting a different taxonomy".
+        Reading the raw facet counted **zero** collisions on a production
+        corpus that measured 924/991, because the LLM files its label under
+        ``document_form``.
+        """
+        for doc_id, form in (
+            ("d1", "reference"),
+            ("d2", "research"),
+            ("d3", "documentation"),
+        ):
+            _seed(
+                document_store,
+                doc_id,
+                "c",
+                metadata={
+                    SHADOW_TAGS_KEY: ShadowTags(
+                        custom={DOCUMENT_FORM_KEY: [form]}
+                    ).model_dump(mode="json")
+                },
+            )
+        report = compare_shadow_to_live(document_store=document_store)
+        # `documentation` is the single value the two vocabularies share.
+        assert report.out_of_vocabulary_content_types == {
+            "reference": 1,
+            "research": 1,
+        }
+
+    def test_shadow_verdict_survives_a_scalar_facet_value(self) -> None:
+        """A bare string, not a list — the #282 shape that shreds under set()."""
+        assert shadow_verdict({"custom": {DOCUMENT_FORM_KEY: "notes"}}) == "notes"
