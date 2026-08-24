@@ -23,7 +23,8 @@ instance are set up here.
 1. **Discover** `~/.claude/projects/**/*.jsonl`; a per-file `(mtime, size)`
    watermark skips unchanged sessions before they are opened.
 2. **Parse** each new/changed file into a *secret-free* digest — natural-language
-   turns and tool *names* only. Raw `tool_result` / `toolUseResult` content
+   turns (in transcript order, user and assistant interleaved) and tool
+   *names* only. Raw `tool_result` / `toolUseResult` content
    (where `op`-style secret reads and env dumps live) never enters the digest.
    Malformed lines are skipped and counted; unknown record types, sidechains,
    and compaction summaries are tolerated.
@@ -39,8 +40,9 @@ instance are set up here.
 5. **Gate** each candidate: the deterministic secret-scan gate (hard drop on a
    hit; the content is never logged), the capture-instruction injection guard
    (drops candidates whose text addresses the memory system — "remember
-   this…" shapes or worthiness-rubric stuffing), then the four-test
-   worthiness gate (non-derivable / durable / actionable / attributed).
+   this…" shapes or worthiness-rubric stuffing), then the worthiness gate
+   (durable / actionable / attributed, plus a minimum memory length).
+   `non_derivable` is **recorded but not gated on** — see below.
 6. **Reconcile** (optional, flag-gated) survivors against already-stored
    captures, reusing the #263 reconcile-on-write machinery.
 7. **Write** through `sync_records` — content-hash idempotent, per-source
@@ -102,10 +104,67 @@ always emit the JSON `CaptureReport` on stdout.
 | `TRELLIS_CAPTURE_SOURCE_SYSTEM` | `claude-code` | Corpus namespace / doc-id prefix. |
 | `TRELLIS_DISTILL_MODEL` | `hermes3:8b` | Model id label recorded in training events. |
 | `TRELLIS_CAPTURE_STRICT` | `1` | When truthy (the default), a sweep that left any session unjudged exits non-zero. Set `0`/`false`/`no`/`off` to report the count and exit `0` instead — those sessions stay un-watermarked and are retried next sweep. A sweep with *no* judge at all always fails, strict or not. |
+| `TRELLIS_CAPTURE_MAX_SALIENT_CHARS` | `8000` | Cap on conversation text sent to the judge. **Coupled to the judge endpoint's context window — read the warning below before raising it.** |
 | `TRELLIS_ENABLE_RECONCILE_ON_WRITE` | *(unset)* | When truthy, near-duplicate captures are adjudicated (ADD/UPDATE/SUPERSEDE/NOOP) instead of piling up. Off by default. |
 
 The reconcile step also honours the #263 knobs (`TRELLIS_RECONCILE_MODEL`,
 `TRELLIS_RECONCILE_TIMEOUT_S`).
+
+### Why `non_derivable` is recorded but not enforced
+
+The judge self-reports four booleans; the gate enforces three of them. The
+fourth was dropped after being measured against a real corpus: hermes3:8b
+returned `non_derivable=False` on **every** candidate distilled from real
+sessions (9 of 9 across three transcripts), so the gate rejected 100% of them
+and the sweep could not write a memory at all. The candidates it discarded
+were good ones — a roadmap-drift finding, a stack pivot, a build-vs-buy call.
+
+The tempting explanation is that two of the tests contradict: "attributed"
+asks the judge to cite a path, and "non_derivable" asks whether the memory is
+reconstructable from the repo, so a cited path arguably makes it derivable by
+construction. That was **tested and refuted** — rewording the prompt to judge
+the insight rather than its evidence produced *zero* candidates instead of
+more passing ones.
+
+What the evidence supports is narrower: a small local judge does not reliably
+self-assess this particular abstraction and defaults it to False. The field
+still rides the `MEMORY_OP_JUDGED` training pair (#264), because a
+self-report is worth collecting even when it is not worth trusting. Restoring
+it as a gate requires a judge demonstrated to *vary* on it — a larger model,
+or a prompt carrying the corpus's actual domain vocabulary — not a re-tuned
+threshold. Re-measure before re-enabling.
+
+### The salient-text cap is coupled to the judge's context window
+
+Raising `TRELLIS_CAPTURE_MAX_SALIENT_CHARS` **without also raising the judge
+endpoint's context window makes the judge fabricate.** The failure is silent
+in every layer that would normally catch it:
+
+* Ollama's OpenAI-compatible endpoint **ignores `num_ctx`** in `extra_body`
+  (verified — the request is accepted and the window is unchanged), so the
+  client cannot raise the window. Only the server can.
+* A prompt over the window is truncated **server-side**. The request still
+  returns 200 and the JSON still parses.
+* hermes3:8b does not decline a truncated prompt — it answers from the
+  remnant. Measured on a real session at a 24k cap against a 4096 window, it
+  returned memories that appear nowhere in the transcript ("Learning Python",
+  "First Git Repository", "Claude's Birthday Party").
+* The worthiness gate cannot catch this: a fabricated memory carries
+  confident booleans and plausible-looking evidence.
+
+The default `8000` fits under Ollama's default window; that is why it works,
+and nothing else was protecting it. To capture more per session:
+
+1. Raise the **server** window first — `OLLAMA_CONTEXT_LENGTH` on the Ollama
+   service, or a Modelfile `PARAMETER num_ctx`.
+2. Then raise `TRELLIS_CAPTURE_MAX_SALIENT_CHARS`.
+
+If step 1 is skipped or insufficient, `distill_session` detects the shortfall
+from the response's own `usage.prompt_tokens`, logs `distill_prompt_truncated`
+with both counts and the remedy, and treats the session as a judge outage —
+it is left un-watermarked and retried rather than written. Under the default
+strict mode that also makes the sweep exit non-zero, so the misconfiguration
+surfaces instead of quietly filling memory with fiction.
 
 ---
 

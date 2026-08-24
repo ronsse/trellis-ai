@@ -145,15 +145,36 @@ def looks_like_injection(candidate: CandidateMemory) -> bool:
 
 
 def passes_worthiness(candidate: CandidateMemory) -> bool:
-    """Enforce the four-test gate deterministically over a candidate.
+    """Enforce the worthiness gate deterministically over a candidate.
 
-    All four must hold: non-derivable, durable, actionable (model-assessed),
-    and attributed (evidence present — enforced here regardless of the model's
+    Three tests must hold: durable and actionable (model-assessed), and
+    attributed (evidence present — enforced here regardless of the model's
     claim). A too-short memory is rejected as non-durable restatement.
+
+    **``non_derivable`` is recorded but not gated on.** It was a hard
+    requirement until it was measured against a real corpus: hermes3:8b
+    returned ``non_derivable=False`` on *every* candidate distilled from
+    real sessions (9 of 9 across three transcripts), so the gate rejected
+    100% of them and the sweep could never write a memory. The candidates
+    it was discarding were good ones — a roadmap-drift finding, a stack
+    pivot, a build-vs-buy call.
+
+    The obvious explanation — that "attributed: cite a path" and
+    "non_derivable: not reconstructable from the repo" contradict, since a
+    cited path *is* repo content — was tested and **refuted**: rewording the
+    prompt to judge the insight rather than its evidence produced zero
+    candidates instead of more passing ones. What the evidence supports is
+    narrower and less flattering to the design: a small local judge does not
+    reliably self-assess this particular abstraction, and defaults it to
+    False.
+
+    So the field stays on :class:`CandidateMemory` and in the training-pair
+    events — a self-report worth collecting for #264 — but a boolean that
+    measured out constant cannot be load-bearing. Restoring it as a gate
+    needs a judge shown to vary on it (a larger model, or a prompt carrying
+    the corpus's actual domains), not a re-tuned threshold.
     """
-    if not candidate.non_derivable or not candidate.durable:
-        return False
-    if not candidate.actionable:
+    if not candidate.durable or not candidate.actionable:
         return False
     if not candidate.evidence.strip():
         return False
