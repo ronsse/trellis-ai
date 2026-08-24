@@ -77,6 +77,7 @@ from trellis.schemas.classification import (
     SHADOW_TAGS_KEY,
     ShadowTags,
     facet_values,
+    shadow_verdict,
 )
 from trellis.schemas.memory_op import (
     REF_TYPE_DOCUMENT,
@@ -538,8 +539,12 @@ def compare_shadow_to_live(
                 tallies[facet][bucket] += 1
                 agreements[facet] = verdict
 
-            shadow_ct = shadow.get("content_type")
-            if isinstance(shadow_ct, str) and shadow_ct not in CONTENT_TYPE_VALUES:
+            # The *verdict*, not the raw facet: an LLM record files its label
+            # under ``document_form``, so reading ``content_type`` here counted
+            # zero collisions on a corpus that is 93% collision (#325's defect,
+            # in the one measurement that justifies ShadowTags existing).
+            shadow_ct = shadow_verdict(shadow)
+            if shadow_ct is not None and shadow_ct not in CONTENT_TYPE_VALUES:
                 report.out_of_vocabulary_content_types[shadow_ct] = (
                     report.out_of_vocabulary_content_types.get(shadow_ct, 0) + 1
                 )
