@@ -2306,6 +2306,8 @@ class TestAttributionTelemetry:
         assert injected["title"] == "Deploy checklist"
         assert injected["category"] == "procedure"
         assert injected["domain_system"] == "dbt"
+        # The facet itself, not just the source_system provenance.
+        assert injected["domain"] == ["platform"]
 
     def test_item_attribution_omits_missing_fields(
         self, session_event_log: SQLiteEventLog
@@ -2321,6 +2323,57 @@ class TestAttributionTelemetry:
         assert "title" not in injected
         assert "category" not in injected
         assert "domain_system" not in injected
+        assert "domain" not in injected
+        assert "signal_quality" not in injected
+
+    def test_item_attribution_carries_the_domain_facet(
+        self, session_event_log: SQLiteEventLog
+    ) -> None:
+        """Without it the outcome join is tag-blind.
+
+        Every graded row could say which item was served and none could say
+        what it was tagged, so no analysis could ask whether a tag predicts a
+        good pack — the question the tagging ladder is eventually judged on.
+        ``domain_system`` is provenance (dbt / snowflake), not the facet.
+        """
+        item = PackItem(
+            item_id="d1",
+            item_type="document",
+            excerpt="text",
+            relevance_score=0.9,
+            metadata={
+                "content_tags": {
+                    "domain": ["finance", "tax"],
+                    "signal_quality": "low",
+                }
+            },
+        )
+        builder = PackBuilder(
+            strategies=[_make_strategy("kw", [item])], event_log=session_event_log
+        )
+        builder.build("q")
+        injected = self._pack_payload(session_event_log)["injected_items"][0]
+        assert injected["domain"] == ["finance", "tax"]
+        assert injected["signal_quality"] == "low"
+        assert "domain_system" not in injected
+
+    def test_item_attribution_survives_a_scalar_domain(
+        self, session_event_log: SQLiteEventLog
+    ) -> None:
+        """``domain`` is legally a bare string; it must not shred into chars."""
+        item = PackItem(
+            item_id="d1",
+            item_type="document",
+            excerpt="text",
+            relevance_score=0.9,
+            metadata={"content_tags": {"domain": "finance"}},
+        )
+        builder = PackBuilder(
+            strategies=[_make_strategy("kw", [item])], event_log=session_event_log
+        )
+        builder.build("q")
+        injected = self._pack_payload(session_event_log)["injected_items"][0]
+        assert injected["domain"] == ["finance"]
 
     def test_flat_content_type_is_not_a_category(
         self, session_event_log: SQLiteEventLog

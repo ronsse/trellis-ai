@@ -349,6 +349,41 @@ class DocumentStoreContractTests:
         # Per ABC: search results "with a rank key".
         assert "rank" in results[0]
 
+    def test_search_matches_on_some_terms_not_all(self, store: DocumentStore) -> None:
+        """A multi-word query matches documents carrying *some* of its terms.
+
+        Callers pass natural-language intents — ``get_context(intent=...)``
+        hands the whole sentence to this method — so requiring every term to
+        co-occur makes recall fall toward zero as the intent gets more
+        specific, which is backwards.
+
+        Postgres did exactly that: ``plainto_tsquery`` ANDs its terms, and on
+        the production corpus ``"implement the classify layer tagging
+        pipeline"`` matched **0** documents under AND and 267 under OR.
+        SQLite had always OR-ed, so the two backends disagreed and every test
+        was written against the permissive one. Ranking, not exclusion, is
+        what sorts a loose match down.
+        """
+        store.put("d1", "the classify layer handles tagging for the pipeline")
+        store.put("d2", "an unrelated note about kitchen renovation")
+
+        results = store.search("implement the classify layer tagging pipeline")
+
+        assert [r["doc_id"] for r in results][:1] == ["d1"], (
+            "a document matching most query terms must be returned and ranked first"
+        )
+
+    def test_search_ranks_a_fuller_match_higher(self, store: DocumentStore) -> None:
+        """OR semantics without ranking would be useless; pin the ordering."""
+        store.put("weak", "a document mentioning only pipeline")
+        store.put("strong", "classify layer tagging pipeline all together here")
+
+        results = store.search("classify layer tagging pipeline")
+        ids = [r["doc_id"] for r in results]
+
+        assert "strong" in ids
+        assert ids.index("strong") < ids.index("weak")
+
     def test_search_tag_filter_default_passes_valueless_facets(
         self, store: DocumentStore
     ) -> None:
