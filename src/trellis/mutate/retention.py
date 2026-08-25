@@ -91,6 +91,10 @@ MAX_DOCUMENTS_SCANNED = 20_000
 #: Page size for that scan.
 _SCAN_PAGE = 500
 
+#: Cap on ``already_archived_ids`` — a follow-up pointer for vector
+#: re-sync, not an exhaustive index.
+_ARCHIVED_ID_LIMIT = 1000
+
 CandidateKind = Literal["document", "entity"]
 
 #: Why an item is a candidate. Rides the audit payload so a prune is
@@ -151,6 +155,15 @@ class ResolutionReport(TrellisModel):
     scan_truncated: bool = False
     skipped_already_archived: int = 0
     skipped_confirmed: int = 0
+    skipped_restored: int = 0
+
+    already_archived_ids: list[str] = Field(default_factory=list)
+    """Ids skipped because they are already archived.
+
+    Surfaced so the handler can re-sync their vector rows: a document
+    archived before :func:`~trellis.mutate.handlers._sync_vector_lifecycle`
+    existed still has a stale snapshot, and re-running the prune is the
+    natural place to repair it. Capped like every other id pointer."""
 
     @property
     def truncated_by_max_items(self) -> bool:
@@ -203,6 +216,56 @@ def _is_older_than(value: Any, cutoff: datetime) -> bool:
     """
     parsed = _parse_ts(value)
     return parsed is not None and parsed < cutoff
+
+
+def _classify_document(
+    doc: dict[str, Any],
+    metadata: dict[str, Any],
+    criteria: RetentionCriteria,
+    wanted_states: set[LifecycleState],
+    cutoff: datetime,
+    report: ResolutionReport,
+) -> ReasonCode | None:
+    """Decide whether one document is a candidate, updating skip counters.
+
+    Split out of :func:`_resolve_documents` to keep the paging loop legible;
+    the lifecycle-state guards below are the reason it grew.
+    """
+    state = _lifecycle_state(metadata)
+
+    # Already archived: a re-run must not bump a second version. The id is
+    # still collected so the handler can repair a vector row that was
+    # stamped before the sync existed.
+    if state == ARCHIVED_STATE:
+        report.skipped_already_archived += 1
+        doc_id = doc.get("doc_id") or doc.get("id")
+        if doc_id and len(report.already_archived_ids) < _ARCHIVED_ID_LIMIT:
+            report.already_archived_ids.append(str(doc_id))
+        return None
+
+    # Explicitly restored: never re-select.
+    #
+    # ``Lifecycle`` has exactly one writer — retention — so an explicit
+    # ``state="current"`` can only have come from ``retention.restore``,
+    # i.e. a human looked at this item and said it does not belong in the
+    # archive. The tag that selected it is still on the document (restore
+    # un-archives; it does not re-classify, which is the classify layer's
+    # business), so without this branch the next prune re-archives
+    # everything a human just rescued — which is precisely what the first
+    # production restore set up. A restored item can still be archived
+    # deliberately by naming it: it is protected from the *criteria*, not
+    # from the operator.
+    if state == "current":
+        report.skipped_restored += 1
+        return None
+
+    if criteria.noise_documents and _signal_quality(metadata) == "noise":
+        return "noise_document"
+    if wanted_states and state in wanted_states:
+        if not _is_older_than(doc.get("updated_at") or doc.get("created_at"), cutoff):
+            return None
+        return "lifecycle_stale"
+    return None
 
 
 def resolve_candidates(
@@ -263,21 +326,9 @@ def _resolve_documents(
                 continue
             metadata = doc.get("metadata") or {}
 
-            # Already archived: a re-run must not bump a second version.
-            if _lifecycle_state(metadata) == ARCHIVED_STATE:
-                report.skipped_already_archived += 1
-                continue
-
-            reason: ReasonCode | None = None
-            if criteria.noise_documents and _signal_quality(metadata) == "noise":
-                reason = "noise_document"
-            elif wanted_states and _lifecycle_state(metadata) in wanted_states:
-                if not _is_older_than(
-                    doc.get("updated_at") or doc.get("created_at"), cutoff
-                ):
-                    continue
-                reason = "lifecycle_stale"
-
+            reason = _classify_document(
+                doc, metadata, criteria, wanted_states, cutoff, report
+            )
             if reason is None:
                 continue
 
@@ -343,8 +394,12 @@ def _resolve_entities(
             # signal that a human decided this entity is real.
             report.skipped_confirmed += 1
             continue
-        if _lifecycle_state(props) == ARCHIVED_STATE:
+        node_state = _lifecycle_state(props)
+        if node_state == ARCHIVED_STATE:
             report.skipped_already_archived += 1
+            continue
+        if node_state == "current":
+            report.skipped_restored += 1
             continue
 
         reason: ReasonCode | None = None

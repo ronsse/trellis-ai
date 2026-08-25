@@ -437,7 +437,40 @@ has carried **no item attribution**, so "never cited" is unfalsifiable rather
 than informative. That is a defective input signal, not a quality verdict —
 and archival being reversible is exactly what made it recoverable.
 
-### 6.5 Deliberately deferred
+### 6.5 Two defects the first production run exposed
+
+Both were invisible to the test suite as written and only appeared against
+the real corpus.
+
+**1. Archival did not reach the vector row.** A vector row's metadata is a
+snapshot taken at *embed* time, and the semantic strategy builds its
+`PackItem` from that snapshot rather than from the document store. An
+archival written only through `document_store.put` therefore left the
+semantic path serving the item unchanged — `exclude_archived` reads
+`item.metadata` and never saw a lifecycle key. All 35 archived documents
+kept vector rows still reading `signal_quality="standard"`. The pack-level
+test could not catch it because it exercised `KeywordSearch` alone, which
+reads the document store: **one strategy was tested and a collect-seam
+guarantee was claimed.** Fixed by mirroring the stamp onto the vector row
+(metadata-only re-`upsert`, nothing re-embedded), and a re-run now repairs
+rows stamped before the sync existed.
+
+*This has a pre-existing sibling, filed separately:* the same staleness
+means `signal_quality="noise"` written by `apply_noise_tags` never reaches
+the vector row either, so noise exclusion has silently not held on the
+semantic path.
+
+**2. Restore was not durable.** `retention.restore` un-archives but does not
+re-classify — the noise tag that selected the item is the classify layer's
+data and stays on the document. So the next criteria-driven prune re-archived
+everything a human had just rescued. All 10 restored documents still carried
+`signal_quality="noise"`. Fixed by treating an explicit
+`Lifecycle.state="current"` as a human-decision tombstone: retention is
+`Lifecycle`'s only writer, so that value can only have come from a restore.
+Protected from the *criteria*, not from the operator — a restored item can
+still be archived by naming it.
+
+### 6.6 Deliberately deferred
 
 - **Phase two (physical purge).** `DocumentStore.delete` exists, so the
   primitive is there; what is missing is a real archived population to purge
