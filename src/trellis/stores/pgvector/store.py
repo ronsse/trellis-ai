@@ -7,7 +7,7 @@ from typing import Any
 
 import structlog
 
-from trellis.stores.base.vector import VectorStore
+from trellis.stores.base.vector import VectorStore, as_float_list
 from trellis.stores.postgres.base import PostgresStoreBase
 
 logger = structlog.get_logger(__name__)
@@ -237,7 +237,7 @@ class PgVectorStore(PostgresStoreBase, VectorStore):
         if row is None:
             return None
 
-        vec = list(row[1]) if not isinstance(row[1], list) else row[1]
+        vec = as_float_list(row[1])
         meta = row[2] if isinstance(row[2], dict) else json.loads(row[2])
         return {
             "item_id": row[0],
