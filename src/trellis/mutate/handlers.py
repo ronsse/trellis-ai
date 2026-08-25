@@ -12,6 +12,7 @@ from trellis.mutate.commands import Command, Operation
 from trellis.mutate.retention import (
     ARCHIVED_STATE,
     MAX_DOCUMENTS_SCANNED,
+    ResolutionReport,
     RetentionCandidate,
     RetentionCriteria,
     resolve_candidates,
@@ -879,6 +880,92 @@ class RedactionApplyHandler:
 MAX_RETENTION_REASON_CHARS = 2000
 
 
+def _sync_vector_lifecycle(
+    registry: StoreRegistry,
+    item_id: str,
+    lifecycle: dict[str, Any],
+) -> None:
+    """Mirror a lifecycle stamp onto the item's vector row.
+
+    **A vector row's metadata is a snapshot taken at embed time**, and the
+    semantic strategy builds its :class:`~trellis.schemas.pack.PackItem`
+    from that snapshot rather than from the document store. So an archival
+    written only through ``document_store.put`` leaves the semantic path
+    serving the item as though nothing happened —
+    :func:`~trellis.retrieve.lifecycle.exclude_archived` reads
+    ``item.metadata`` and simply never sees a lifecycle key.
+
+    That is not hypothetical: the first production prune archived 35
+    documents and every one of them kept a vector row whose metadata still
+    read ``signal_quality="standard"``. The keyword path honoured the
+    archival immediately (it reads the document store); the semantic path
+    did not, and a pack-level test written against
+    :class:`~trellis.retrieve.strategies.KeywordSearch` alone could not see
+    the difference.
+
+    Metadata-only update: the existing embedding is re-``upsert``-ed
+    unchanged, so nothing is re-embedded and no cost is incurred. A missing
+    vector row is normal (structural nodes, un-embedded documents) and is a
+    no-op rather than an error — retention must not fail because an item was
+    never embedded.
+    """
+    try:
+        store = registry.knowledge.vector_store
+        row = store.get(item_id)
+        if row is None:
+            return
+        metadata = dict(row.get("metadata") or {})
+        metadata[LIFECYCLE_KEY] = lifecycle
+        store.upsert(item_id, row["vector"], metadata)
+    except Exception:
+        # Fail soft and loud: the document-store stamp is the authoritative
+        # record and has already been written. A vector backend outage must
+        # not roll back an archival, but it does leave the semantic path
+        # stale, so it is logged rather than swallowed.
+        logger.warning(
+            "retention_vector_lifecycle_sync_failed",
+            item_id=item_id,
+            exc_info=True,
+        )
+
+
+def _prune_message(
+    report: ResolutionReport,
+    by_reason: dict[str, int],
+    *,
+    dry_run: bool,
+    archived: int,
+    skipped: int,
+    resynced: int,
+) -> str:
+    """Render the operator-facing summary for one prune run.
+
+    Every qualifier here reports something that would otherwise be silent:
+    a capped scan (the candidate set is a prefix), items that vanished
+    mid-run, vector rows repaired, and items protected because a human
+    restored them.
+    """
+    verb = "would archive" if dry_run else "archived"
+    counts = ", ".join(f"{k}={v}" for k, v in sorted(by_reason.items())) or "none"
+    message = (
+        f"retention.prune ({'dry run' if dry_run else 'applied'}): "
+        f"{verb} {len(report.candidates) if dry_run else archived} item(s) "
+        f"[{counts}]"
+    )
+    if report.scan_truncated:
+        message += (
+            f"; WARNING scan capped at {MAX_DOCUMENTS_SCANNED} documents — "
+            "candidate set is a prefix, re-run to continue"
+        )
+    if skipped:
+        message += f"; {skipped} skipped (vanished between resolve and write)"
+    if resynced:
+        message += f"; {resynced} stale vector row(s) re-synced"
+    if report.skipped_restored:
+        message += f"; {report.skipped_restored} protected (explicitly restored)"
+    return message
+
+
 class RetentionPruneHandler:
     """Resolve retention criteria and archive the resulting candidates.
 
@@ -963,12 +1050,18 @@ class RetentionPruneHandler:
 
         archived = 0
         skipped = 0
+        resynced = 0
         if not dry_run:
             for candidate in report.candidates:
                 if self._archive(candidate, reason):
                     archived += 1
                 else:
                     skipped += 1
+            # Self-healing: an item archived before the vector sync existed
+            # still has a stale snapshot, and the semantic path serves from
+            # that snapshot. Re-running the prune repairs them — no new verb
+            # for what is a one-shot consequence of shipping the sync late.
+            resynced = self._resync_archived(report.already_archived_ids)
 
         by_reason: dict[str, int] = {}
         by_kind: dict[str, int] = {}
@@ -994,23 +1087,20 @@ class RetentionPruneHandler:
             "scan_truncated": report.scan_truncated,
             "skipped_already_archived": report.skipped_already_archived,
             "skipped_confirmed": report.skipped_confirmed,
+            "skipped_restored": report.skipped_restored,
+            "vector_rows_resynced": resynced,
             # Capped pointer, not an index — see _LINKED_SIGNAL_LIMIT.
             "item_ids": [c.item_id for c in report.candidates[:_LINKED_SIGNAL_LIMIT]],
         }
 
-        verb = "would archive" if dry_run else "archived"
-        message = (
-            f"retention.prune ({'dry run' if dry_run else 'applied'}): "
-            f"{verb} {len(report.candidates) if dry_run else archived} item(s) "
-            f"[{', '.join(f'{k}={v}' for k, v in sorted(by_reason.items())) or 'none'}]"
+        message = _prune_message(
+            report,
+            by_reason,
+            dry_run=dry_run,
+            archived=archived,
+            skipped=skipped,
+            resynced=resynced,
         )
-        if report.scan_truncated:
-            message += (
-                f"; WARNING scan capped at {MAX_DOCUMENTS_SCANNED} documents — "
-                "candidate set is a prefix, re-run to continue"
-            )
-        if skipped:
-            message += f"; {skipped} skipped (vanished between resolve and write)"
 
         try:
             event_log.emit(
@@ -1036,6 +1126,37 @@ class RetentionPruneHandler:
             )
         return command.command_id, message
 
+    def _resync_archived(self, item_ids: list[str]) -> int:
+        """Re-stamp vector rows for already-archived items whose row is stale.
+
+        Returns the number actually repaired — a row that already carries the
+        archived stamp is left alone, so a steady-state re-run reports zero.
+        """
+        if not item_ids:
+            return 0
+        lifecycle = Lifecycle(state=ARCHIVED_STATE).model_dump(mode="json")
+        vector_store = self._registry.knowledge.vector_store
+        repaired = 0
+        for item_id in item_ids:
+            try:
+                row = vector_store.get(item_id)
+            except Exception:
+                logger.warning(
+                    "retention_vector_resync_read_failed",
+                    item_id=item_id,
+                    exc_info=True,
+                )
+                continue
+            if row is None:
+                continue
+            metadata = row.get("metadata") or {}
+            record = metadata.get(LIFECYCLE_KEY)
+            if isinstance(record, dict) and record.get("state") == ARCHIVED_STATE:
+                continue
+            _sync_vector_lifecycle(self._registry, item_id, lifecycle)
+            repaired += 1
+        return repaired
+
     def _archive(self, candidate: RetentionCandidate, reason: str) -> bool:
         """Stamp one candidate archived. Returns False if it vanished."""
         lifecycle = Lifecycle(
@@ -1052,6 +1173,7 @@ class RetentionPruneHandler:
             metadata = dict(doc.get("metadata") or {})
             metadata[LIFECYCLE_KEY] = lifecycle
             store.put(candidate.item_id, doc["content"], metadata)
+            _sync_vector_lifecycle(self._registry, candidate.item_id, lifecycle)
             return True
 
         graph = self._registry.knowledge.graph_store
@@ -1172,6 +1294,7 @@ class RetentionRestoreHandler:
                 return False
             metadata[LIFECYCLE_KEY] = current
             doc_store.put(item_id, doc["content"], metadata)
+            _sync_vector_lifecycle(self._registry, item_id, current)
             return True
 
         graph = self._registry.knowledge.graph_store

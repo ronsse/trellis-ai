@@ -555,3 +555,208 @@ class TestRestore:
                 )
             )
         assert exc.value.code == "retention_restore_ids_required"
+
+
+class TestVectorRowSync:
+    """Archival must reach the *vector* row, not just the document store.
+
+    A vector row's metadata is a snapshot taken at embed time and the
+    semantic strategy serves from it. An archival written only through
+    ``document_store.put`` leaves that path serving the item unchanged —
+    ``exclude_archived`` reads ``item.metadata`` and never sees a lifecycle
+    key. The first production prune hit exactly this: 35 documents archived,
+    35 vector rows still reading ``signal_quality="standard"``, and a
+    pack-level test written against ``KeywordSearch`` alone could not see it.
+    """
+
+    @staticmethod
+    def _embed(registry: StoreRegistry, doc_id: str) -> None:
+        registry.knowledge.vector_store.upsert(
+            doc_id,
+            [0.1, 0.2, 0.3],
+            {"excerpt": f"excerpt of {doc_id}", "content_tags": {}},
+        )
+
+    def test_archival_stamps_the_vector_row(self, registry: StoreRegistry) -> None:
+        _put_doc(registry, "noisy", signal_quality="noise")
+        self._embed(registry, "noisy")
+
+        build_curate_executor(registry).execute(
+            _prune({"noise_documents": True}, dry_run=False)
+        )
+
+        row = registry.knowledge.vector_store.get("noisy")
+        assert row is not None
+        assert row["metadata"][LIFECYCLE_KEY]["state"] == ARCHIVED_STATE
+
+    def test_archival_preserves_the_embedding_and_other_metadata(
+        self, registry: StoreRegistry
+    ) -> None:
+        """Metadata-only update — nothing is re-embedded."""
+        _put_doc(registry, "noisy", signal_quality="noise")
+        self._embed(registry, "noisy")
+
+        build_curate_executor(registry).execute(
+            _prune({"noise_documents": True}, dry_run=False)
+        )
+
+        row = registry.knowledge.vector_store.get("noisy")
+        assert row is not None
+        assert row["vector"] == pytest.approx([0.1, 0.2, 0.3])
+        assert row["metadata"]["excerpt"] == "excerpt of noisy"
+
+    def test_archived_vector_item_is_excluded_from_a_pack(self) -> None:
+        """The synced row is what makes the semantic path honour archival."""
+        archived = PackItem(
+            item_id="v1",
+            item_type="document",
+            excerpt="x",
+            relevance_score=1.0,
+            metadata={
+                "source_strategy": "semantic",
+                LIFECYCLE_KEY: {"state": ARCHIVED_STATE},
+            },
+        )
+        assert exclude_archived([archived]) == []
+
+    def test_restore_clears_the_vector_row_stamp(self, registry: StoreRegistry) -> None:
+        _put_doc(registry, "noisy", signal_quality="noise")
+        self._embed(registry, "noisy")
+        executor = build_curate_executor(registry)
+        executor.execute(_prune({"noise_documents": True}, dry_run=False))
+        executor.execute(
+            Command(
+                operation=Operation.RETENTION_RESTORE,
+                args={"item_ids": ["noisy"], "reason": "mis-demoted"},
+            )
+        )
+        row = registry.knowledge.vector_store.get("noisy")
+        assert row is not None
+        assert row["metadata"][LIFECYCLE_KEY]["state"] == "current"
+
+    def test_missing_vector_row_is_not_an_error(self, registry: StoreRegistry) -> None:
+        """Un-embedded documents must still be archivable."""
+        _put_doc(registry, "never_embedded", signal_quality="noise")
+        result = build_curate_executor(registry).execute(
+            _prune({"noise_documents": True}, dry_run=False)
+        )
+        assert result.status == CommandStatus.SUCCESS
+        doc = registry.knowledge.document_store.get("never_embedded")
+        assert doc is not None
+        assert doc["metadata"][LIFECYCLE_KEY]["state"] == ARCHIVED_STATE
+
+
+class TestRestoreIsDurable:
+    """A restored item must survive the next prune.
+
+    ``retention.restore`` un-archives but does not re-classify — the noise
+    tag that selected the item is the classify layer's data and stays on the
+    document. Without a guard the very next criteria-driven prune re-archives
+    everything a human just rescued, which is exactly the state the first
+    production restore left behind: 10 documents restored, all 10 still
+    carrying ``signal_quality="noise"``.
+    """
+
+    def test_restored_document_survives_a_second_prune(
+        self, registry: StoreRegistry
+    ) -> None:
+        _put_doc(registry, "rescued", signal_quality="noise")
+        executor = build_curate_executor(registry)
+        executor.execute(_prune({"noise_documents": True}, dry_run=False))
+        executor.execute(
+            Command(
+                operation=Operation.RETENTION_RESTORE,
+                args={"item_ids": ["rescued"], "reason": "demote loop mis-fired"},
+            )
+        )
+
+        executor.execute(_prune({"noise_documents": True}, dry_run=False))
+
+        doc = registry.knowledge.document_store.get("rescued")
+        assert doc is not None
+        assert doc["metadata"][LIFECYCLE_KEY]["state"] == "current"
+
+    def test_restored_item_is_reported_as_protected(
+        self, registry: StoreRegistry
+    ) -> None:
+        _put_doc(registry, "rescued", signal_quality="noise")
+        executor = build_curate_executor(registry)
+        executor.execute(_prune({"noise_documents": True}, dry_run=False))
+        executor.execute(
+            Command(
+                operation=Operation.RETENTION_RESTORE,
+                args={"item_ids": ["rescued"], "reason": "r"},
+            )
+        )
+        executor.execute(_prune({"noise_documents": True}, dry_run=False))
+
+        events = registry.operational.event_log.get_events(
+            event_type=EventType.RETENTION_PRUNED
+        )
+        assert events[-1].payload["skipped_restored"] == 1
+        assert events[-1].payload["archived"] == 0
+
+    def test_operator_can_still_archive_a_restored_item_by_name(
+        self, registry: StoreRegistry
+    ) -> None:
+        """Protected from the criteria, not from the operator."""
+        _put_doc(registry, "rescued", signal_quality="noise")
+        report = resolve_candidates(RetentionCriteria(noise_documents=True), registry)
+        assert [c.item_id for c in report.candidates] == ["rescued"]
+
+
+class TestVectorResyncBackfill:
+    """Re-running a prune repairs vector rows stamped before the sync existed."""
+
+    def test_stale_archived_vector_row_is_resynced(
+        self, registry: StoreRegistry
+    ) -> None:
+        # Simulate the pre-fix state: document archived, vector row stale.
+        _put_doc(registry, "old", signal_quality="noise", lifecycle_state="archived")
+        registry.knowledge.vector_store.upsert(
+            "old", [0.1, 0.2, 0.3], {"excerpt": "stale snapshot"}
+        )
+
+        build_curate_executor(registry).execute(
+            _prune({"noise_documents": True}, dry_run=False)
+        )
+
+        row = registry.knowledge.vector_store.get("old")
+        assert row is not None
+        assert row["metadata"][LIFECYCLE_KEY]["state"] == ARCHIVED_STATE
+        assert row["metadata"]["excerpt"] == "stale snapshot"
+
+    def test_resync_count_rides_the_audit_payload(
+        self, registry: StoreRegistry
+    ) -> None:
+        _put_doc(registry, "old", signal_quality="noise", lifecycle_state="archived")
+        registry.knowledge.vector_store.upsert("old", [0.1, 0.2, 0.3], {})
+        build_curate_executor(registry).execute(
+            _prune({"noise_documents": True}, dry_run=False)
+        )
+        events = registry.operational.event_log.get_events(
+            event_type=EventType.RETENTION_PRUNED
+        )
+        assert events[-1].payload["vector_rows_resynced"] == 1
+
+    def test_steady_state_rerun_resyncs_nothing(self, registry: StoreRegistry) -> None:
+        """An already-correct row is left alone, so a re-run reports zero."""
+        _put_doc(registry, "noisy", signal_quality="noise")
+        registry.knowledge.vector_store.upsert("noisy", [0.1, 0.2, 0.3], {})
+        executor = build_curate_executor(registry)
+        executor.execute(_prune({"noise_documents": True}, dry_run=False))
+        executor.execute(_prune({"noise_documents": True}, dry_run=False))
+        events = registry.operational.event_log.get_events(
+            event_type=EventType.RETENTION_PRUNED
+        )
+        assert events[-1].payload["vector_rows_resynced"] == 0
+
+    def test_dry_run_resyncs_nothing(self, registry: StoreRegistry) -> None:
+        _put_doc(registry, "old", signal_quality="noise", lifecycle_state="archived")
+        registry.knowledge.vector_store.upsert("old", [0.1, 0.2, 0.3], {})
+        build_curate_executor(registry).execute(
+            _prune({"noise_documents": True}, dry_run=True)
+        )
+        row = registry.knowledge.vector_store.get("old")
+        assert row is not None
+        assert LIFECYCLE_KEY not in row["metadata"]
