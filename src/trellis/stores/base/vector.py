@@ -18,6 +18,32 @@ def format_vector_literal(vec: list[float], *, separator: str = ",") -> str:
     return "[" + separator.join(repr(float(x)) for x in vec) + "]"
 
 
+def as_float_list(value: Any) -> list[float]:
+    """Normalise whatever a driver hands back for a vector column.
+
+    The inverse of :func:`format_vector_literal`, and it lives here for the
+    same reason: the shape is a *driver* concern, not a backend one, and
+    this module has no third-party imports so the behaviour stays testable
+    without the optional postgres extras installed.
+
+    The shape genuinely varies. ``pgvector`` is not pinned and changed it
+    between releases — 0.4.x returns a plain ``list``, 0.5.0 returns a
+    ``pgvector.Vector`` implementing neither ``__iter__`` nor ``__len__``,
+    so a bare ``list(value)`` raises ``TypeError: 'Vector' object is not
+    iterable``. That split was live and asymmetric: a host install on 0.4.2
+    worked while containers rebuilt onto 0.5.0 raised, which reads as
+    "works on my machine" because neither environment is wrong on its own.
+
+    ``to_list()`` is the documented accessor and is tried first; a real list
+    passes through; anything else falls back to iteration so a future driver
+    shape still works.
+    """
+    to_list = getattr(value, "to_list", None)
+    if callable(to_list):
+        return [float(x) for x in to_list()]
+    return [float(x) for x in value]
+
+
 class VectorStore(ABC):
     """Abstract interface for vector storage.
 

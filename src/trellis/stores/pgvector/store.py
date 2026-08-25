@@ -7,7 +7,7 @@ from typing import Any
 
 import structlog
 
-from trellis.stores.base.vector import VectorStore
+from trellis.stores.base.vector import VectorStore, as_float_list
 from trellis.stores.postgres.base import PostgresStoreBase
 
 logger = structlog.get_logger(__name__)
@@ -35,31 +35,6 @@ def _format_vector(vec: list[float]) -> str:
     from trellis.stores.base.vector import format_vector_literal  # noqa: PLC0415
 
     return format_vector_literal(vec)
-
-
-def _as_float_list(value: Any) -> list[float]:
-    """Normalise whatever the driver hands back for a ``vector`` column.
-
-    The shape depends on the installed ``pgvector`` release, which is not
-    pinned: 0.4.x returns a plain ``list``, while 0.5.0 returns a
-    :class:`pgvector.Vector` — and ``Vector`` implements neither
-    ``__iter__`` nor ``__len__``, so the previous ``list(row[1])`` raised
-    ``TypeError: 'Vector' object is not iterable`` on any environment that
-    resolved the newer wheel. That is exactly what happened when the
-    container was rebuilt and picked up 0.5.0 while the host editable
-    install stayed on 0.4.2: :meth:`PgVectorStore.get` worked from the CLI
-    and raised inside the API/MCP containers.
-
-    ``to_list()`` is the documented accessor on ``Vector`` and is checked
-    first; a real list passes through untouched; anything else falls back
-    to iteration so a future driver shape still works.
-    """
-    to_list = getattr(value, "to_list", None)
-    if callable(to_list):
-        return [float(x) for x in to_list()]
-    if isinstance(value, list):
-        return [float(x) for x in value]
-    return [float(x) for x in value]
 
 
 class PgVectorStore(PostgresStoreBase, VectorStore):
@@ -262,7 +237,7 @@ class PgVectorStore(PostgresStoreBase, VectorStore):
         if row is None:
             return None
 
-        vec = _as_float_list(row[1])
+        vec = as_float_list(row[1])
         meta = row[2] if isinstance(row[2], dict) else json.loads(row[2])
         return {
             "item_id": row[0],
