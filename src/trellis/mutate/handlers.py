@@ -2,12 +2,21 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any, cast
 
 import structlog
 
 from trellis.errors import NotFoundError, StoreError, ValidationError
 from trellis.mutate.commands import Command, Operation
+from trellis.mutate.retention import (
+    ARCHIVED_STATE,
+    MAX_DOCUMENTS_SCANNED,
+    RetentionCandidate,
+    RetentionCriteria,
+    resolve_candidates,
+)
+from trellis.schemas.classification import LIFECYCLE_KEY, Lifecycle
 from trellis.schemas.measurement import Measurement
 from trellis.schemas.observation import Observation
 from trellis.schemas.trace import Trace
@@ -867,6 +876,324 @@ class RedactionApplyHandler:
         return target_id, message
 
 
+MAX_RETENTION_REASON_CHARS = 2000
+
+
+class RetentionPruneHandler:
+    """Resolve retention criteria and archive the resulting candidates.
+
+    Wires :data:`Operation.RETENTION_PRUNE` into the governed pipeline. The
+    enum verb shipped with an empty ``set()`` args schema and no handler, so
+    the executor rejected every ``retention.prune`` command with "No handler
+    registered" — the exact gap ``redaction.apply`` had before
+    :class:`RedactionApplyHandler`, and the reason 24 noise-tagged captures
+    had to be demoted-and-kept rather than removed. Decision record:
+    ``docs/design/adr-retention-prune.md`` (Option A, phase one).
+
+    **Phase one is archival, not purge.** The handler stamps
+    :class:`~trellis.schemas.classification.Lifecycle`
+    ``state="archived"`` and retrieval stops serving the item
+    (:mod:`trellis.retrieve.lifecycle`). Physical removal is deliberately
+    deferred until the archived population is real: retention is criteria-
+    driven and a criteria bug is a *batch* mistake, so the version an
+    operator can walk back is the one worth shipping first. This makes
+    ``Lifecycle`` — schema-without-behaviour since it landed — both its
+    first writer and its first enforcement point.
+
+    **Dry-run by default.** ``dry_run`` defaults to ``True`` when the caller
+    omits it. Destructive-by-default is right for a single named redaction
+    target and wrong for a predicate that resolves to a set the caller has
+    not seen; a dry run emits the same event flagged ``dry_run=True`` so the
+    preview is as auditable as the real thing.
+
+    **Criteria-driven batches tolerate a moving candidate set.** An item
+    that vanishes between resolution and write is counted in ``skipped``,
+    not raised — unlike redaction's single-target
+    :class:`~trellis.errors.NotFoundError`, a batch whose population shifts
+    underneath it has not failed. Items already archived are filtered during
+    resolution, so a re-run is a no-op rather than a second version bump.
+    Use ``Command.idempotency_key`` when at-most-once semantics are needed.
+
+    **Never traces, never event rows.** Enforced by construction:
+    :func:`~trellis.mutate.retention.resolve_candidates` reads the document
+    and graph stores and nothing else. Confirmed entities are dropped on
+    every criterion — confirmation is a human's judgment that the entity is
+    real, and age is not evidence against it.
+
+    ``PolicyType.RETENTION`` gets its first consumer here: a deny rule on
+    ``retention.prune`` is evaluated by the executor's standard policy stage
+    before this handler runs, which is the operator's kill switch.
+    """
+
+    def __init__(self, registry: StoreRegistry) -> None:
+        self._registry = registry
+
+    def handle(self, command: Command) -> tuple[str | None, str]:
+        raw_criteria = command.args["criteria"]
+        if not isinstance(raw_criteria, dict):
+            msg = "retention.prune criteria must be an object"
+            raise ValidationError(msg, code="retention_criteria_invalid")
+        criteria = RetentionCriteria.model_validate(raw_criteria)
+
+        reason = str(command.args["reason"] or "").strip()
+        if not reason:
+            msg = "retention.prune requires a non-empty reason for the audit trail"
+            raise ValidationError(msg, code="retention_reason_required")
+        if len(reason) > MAX_RETENTION_REASON_CHARS:
+            msg = (
+                f"retention.prune reason exceeds {MAX_RETENTION_REASON_CHARS} "
+                "chars; it is written verbatim to the append-only audit log — "
+                "keep it short and content-free"
+            )
+            raise ValidationError(msg, code="retention_reason_too_long")
+
+        dry_run = bool(command.args.get("dry_run", True))
+
+        event_log = self._registry.operational.event_log
+        if not dry_run and isinstance(event_log, NullEventLog):
+            msg = (
+                "retention.prune requires a persisting event log for a "
+                "non-dry run: the RETENTION_PRUNED event is the only record "
+                "that the archival happened, and this deployment's event_log "
+                "backend is 'null'"
+            )
+            raise ValidationError(msg, code="retention_requires_event_log")
+
+        report = resolve_candidates(criteria, self._registry)
+
+        archived = 0
+        skipped = 0
+        if not dry_run:
+            for candidate in report.candidates:
+                if self._archive(candidate, reason):
+                    archived += 1
+                else:
+                    skipped += 1
+
+        by_reason: dict[str, int] = {}
+        by_kind: dict[str, int] = {}
+        for candidate in report.candidates:
+            code = candidate.reason_code
+            by_reason[code] = by_reason.get(code, 0) + 1
+            by_kind[candidate.kind] = by_kind.get(candidate.kind, 0) + 1
+
+        payload: dict[str, Any] = {
+            "criteria": criteria.model_dump(mode="json"),
+            "reason": reason,
+            "command_id": command.command_id,
+            "requested_by": command.requested_by,
+            "dry_run": dry_run,
+            "phase": "archival",
+            "candidates": len(report.candidates),
+            "archived": archived,
+            "skipped": skipped,
+            "by_reason": by_reason,
+            "by_kind": by_kind,
+            "documents_scanned": report.documents_scanned,
+            "entities_scanned": report.entities_scanned,
+            "scan_truncated": report.scan_truncated,
+            "skipped_already_archived": report.skipped_already_archived,
+            "skipped_confirmed": report.skipped_confirmed,
+            # Capped pointer, not an index — see _LINKED_SIGNAL_LIMIT.
+            "item_ids": [c.item_id for c in report.candidates[:_LINKED_SIGNAL_LIMIT]],
+        }
+
+        verb = "would archive" if dry_run else "archived"
+        message = (
+            f"retention.prune ({'dry run' if dry_run else 'applied'}): "
+            f"{verb} {len(report.candidates) if dry_run else archived} item(s) "
+            f"[{', '.join(f'{k}={v}' for k, v in sorted(by_reason.items())) or 'none'}]"
+        )
+        if report.scan_truncated:
+            message += (
+                f"; WARNING scan capped at {MAX_DOCUMENTS_SCANNED} documents — "
+                "candidate set is a prefix, re-run to continue"
+            )
+        if skipped:
+            message += f"; {skipped} skipped (vanished between resolve and write)"
+
+        try:
+            event_log.emit(
+                EventType.RETENTION_PRUNED,
+                source="mutation_executor",
+                entity_id=command.command_id,
+                entity_type="retention_run",
+                payload=payload,
+            )
+        except Exception:
+            # Same discipline as RedactionApplyHandler: for a non-dry run the
+            # archival already happened, so raising would report FAILED for
+            # completed work. Preserve the payload in operator logs.
+            logger.warning(
+                "retention_audit_emit_failed",
+                command_id=command.command_id,
+                retention_payload=payload,
+                exc_info=True,
+            )
+            message += (
+                " (WARNING: RETENTION_PRUNED audit emit failed; "
+                "payload preserved in operator logs)"
+            )
+        return command.command_id, message
+
+    def _archive(self, candidate: RetentionCandidate, reason: str) -> bool:
+        """Stamp one candidate archived. Returns False if it vanished."""
+        lifecycle = Lifecycle(
+            state=ARCHIVED_STATE,
+            valid_until=datetime.now(UTC),
+            deprecation_reason=reason,
+        ).model_dump(mode="json")
+
+        if candidate.kind == "document":
+            store = self._registry.knowledge.document_store
+            doc = store.get(candidate.item_id)
+            if doc is None:
+                return False
+            metadata = dict(doc.get("metadata") or {})
+            metadata[LIFECYCLE_KEY] = lifecycle
+            store.put(candidate.item_id, doc["content"], metadata)
+            return True
+
+        graph = self._registry.knowledge.graph_store
+        node = graph.get_node(candidate.item_id)
+        if node is None:
+            return False
+        props = dict(node["properties"])
+        props[LIFECYCLE_KEY] = lifecycle
+        # SCD-2: re-upserting closes the current version and opens a new one,
+        # so the pre-archival state stays readable via get_node_history and
+        # ``as_of``. Role and generation_spec are immutable across versions.
+        graph.upsert_node(
+            node_id=candidate.item_id,
+            node_type=node["node_type"],
+            properties=props,
+            node_role=node.get("node_role", "semantic"),
+            generation_spec=node.get("generation_spec"),
+            document_ids=node.get("document_ids") or None,
+        )
+        return True
+
+
+class RetentionRestoreHandler:
+    """Return archived items to ``Lifecycle.state="current"``.
+
+    Wires :data:`Operation.RETENTION_RESTORE`. This is the half that makes
+    :class:`RetentionPruneHandler`'s central claim true: phase one is
+    archival rather than purge *because* "a wrong prune is walked back by
+    re-stamping" — and re-stamping needs a governed path, or the claim is
+    only rhetorical. Direct store writes are not an option
+    (``CLAUDE.md``: all mutations go through the governed pipeline), so
+    without this verb an operator who over-pruned had no sanctioned remedy
+    at all.
+
+    **Explicit ids, not a predicate.** ``retention.prune`` resolves criteria
+    because it selects a population nobody has enumerated. Restore is the
+    opposite situation: the operator knows exactly which items were wrong,
+    because their ids ride the ``RETENTION_PRUNED`` payload. Re-deriving
+    them from criteria would re-run the selection that was wrong the first
+    time.
+
+    Restoring sets ``state="current"`` and clears the archival's
+    ``valid_until`` / ``deprecation_reason`` rather than deleting the
+    lifecycle record — the item is current again, and the ``RETENTION_PRUNED``
+    → ``RETENTION_RESTORED`` event pair is the history.
+
+    An id that is not archived is counted in ``skipped``, not raised: a
+    corrective batch assembled from an audit payload will legitimately name
+    items someone else already restored.
+    """
+
+    def __init__(self, registry: StoreRegistry) -> None:
+        self._registry = registry
+
+    def handle(self, command: Command) -> tuple[str | None, str]:
+        raw_ids = command.args["item_ids"]
+        if not isinstance(raw_ids, list) or not raw_ids:
+            msg = "retention.restore requires a non-empty item_ids list"
+            raise ValidationError(msg, code="retention_restore_ids_required")
+        item_ids = [str(i) for i in raw_ids]
+
+        reason = str(command.args["reason"] or "").strip()
+        if not reason:
+            msg = "retention.restore requires a non-empty reason for the audit trail"
+            raise ValidationError(msg, code="retention_reason_required")
+        if len(reason) > MAX_RETENTION_REASON_CHARS:
+            msg = f"retention.restore reason exceeds {MAX_RETENTION_REASON_CHARS} chars"
+            raise ValidationError(msg, code="retention_reason_too_long")
+
+        restored: list[str] = []
+        skipped: list[str] = []
+        for item_id in item_ids:
+            if self._restore(item_id):
+                restored.append(item_id)
+            else:
+                skipped.append(item_id)
+
+        payload: dict[str, Any] = {
+            "reason": reason,
+            "command_id": command.command_id,
+            "requested_by": command.requested_by,
+            "restored": len(restored),
+            "skipped": len(skipped),
+            "restored_ids": restored,
+            "skipped_ids": skipped,
+        }
+        message = f"retention.restore: restored {len(restored)} item(s)" + (
+            f", {len(skipped)} not archived (skipped)" if skipped else ""
+        )
+        try:
+            self._registry.operational.event_log.emit(
+                EventType.RETENTION_RESTORED,
+                source="mutation_executor",
+                entity_id=command.command_id,
+                entity_type="retention_restore",
+                payload=payload,
+            )
+        except Exception:
+            logger.warning(
+                "retention_restore_audit_emit_failed",
+                command_id=command.command_id,
+                restore_payload=payload,
+                exc_info=True,
+            )
+            message += " (WARNING: RETENTION_RESTORED audit emit failed)"
+        return command.command_id, message
+
+    def _restore(self, item_id: str) -> bool:
+        """Un-archive one item. Returns False if it was not archived."""
+        current = Lifecycle(state="current").model_dump(mode="json")
+
+        doc_store = self._registry.knowledge.document_store
+        doc = doc_store.get(item_id)
+        if doc is not None:
+            metadata = dict(doc.get("metadata") or {})
+            record = metadata.get(LIFECYCLE_KEY)
+            if not isinstance(record, dict) or record.get("state") != ARCHIVED_STATE:
+                return False
+            metadata[LIFECYCLE_KEY] = current
+            doc_store.put(item_id, doc["content"], metadata)
+            return True
+
+        graph = self._registry.knowledge.graph_store
+        node = graph.get_node(item_id)
+        if node is None:
+            return False
+        props = dict(node["properties"])
+        record = props.get(LIFECYCLE_KEY)
+        if not isinstance(record, dict) or record.get("state") != ARCHIVED_STATE:
+            return False
+        props[LIFECYCLE_KEY] = current
+        graph.upsert_node(
+            node_id=item_id,
+            node_type=node["node_type"],
+            properties=props,
+            node_role=node.get("node_role", "semantic"),
+            generation_spec=node.get("generation_spec"),
+            document_ids=node.get("document_ids") or None,
+        )
+        return True
+
+
 def create_curate_handlers(
     registry: StoreRegistry,
 ) -> dict[str, Any]:
@@ -883,4 +1210,6 @@ def create_curate_handlers(
         Operation.OBSERVATION_RECORD: ObservationRecordHandler(registry),
         Operation.MEASUREMENT_RECORD: MeasurementRecordHandler(registry),
         Operation.REDACTION_APPLY: RedactionApplyHandler(registry),
+        Operation.RETENTION_PRUNE: RetentionPruneHandler(registry),
+        Operation.RETENTION_RESTORE: RetentionRestoreHandler(registry),
     }

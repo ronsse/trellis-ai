@@ -1,6 +1,6 @@
 # ADR: `retention.prune` disposition — governed handler or explicit retirement
 
-**Status:** Proposed — final call is an **owner judgment gate**; see §6. This ADR proposes, the owner decides.
+**Status:** **Accepted (Option A)** — decided 2026-08-25; see §6. Phase one (archival) implemented.
 **Date:** 2026-08-21
 **Deciders:** Trellis core (recommendation); owner (decision)
 **Related:**
@@ -327,14 +327,125 @@ the gate is visible to the roadmap driver, not just asserted here.
 
 The gate resolves by editing this section with the chosen option, the date,
 and the rationale, then flipping **Status** to Accepted (A) or Accepted —
-Retired (B). Until then:
+Retired (B).
 
-- `Operation.RETENTION_PRUNE` stays as-is (rejected at dispatch) — neither
-  wired nor deleted ahead of the call.
-- The orphan module keeps its `KEEP — VALIDATE` status; this ADR *is* the
-  validation, pending the gate. Either resolution deletes it (§3.3, §4.1), so
-  the gate also disposes of the two `TODO.md` retention P1 items — superseded
-  under A, struck under B.
-- No new writer of `Lifecycle` ships against the assumption of either option.
+**Decision: Option A, phase one (archival). Owner, 2026-08-25.**
 
-**Decision:** _pending owner review._
+### 6.1 Why the gate reopened
+
+The gate was never actually resolved — it went *invisible*. Issue #312 was
+closed as COMPLETED on 2026-08-22 with zero comments, and `TODO.md` marked it
+`[x] LANDED via #314`. But #314 was this ADR: 340 lines of docs and a
+one-line doc tweak, no code. The TODO entry's own wording gives it away — it
+says #314 *"supports closing"* the chip. Supporting the closure was recorded
+as being the closure. Because `blocked:owner-decision` is only read on *open*
+issues, closing it also removed it from the roadmap driver's view, so nothing
+would have surfaced the gate again.
+
+### 6.2 What changed since §5 was written
+
+§5 recommended Option A but sequenced it behind loop-starvation work,
+"recommended ahead of any scale-up of ingestion volume (Claude Code session
+auto-capture would multiply the derived-item mint rate and turns this
+projected pressure into a felt one)."
+
+That scale-up shipped on 2026-08-24, the day after this ADR was written.
+Measured against the live corpus on 2026-08-25:
+
+| Metric | Value |
+|---|---|
+| Documents created 2026-08-24 | **103** (prior baseline: 1 on 08-19, 1 on 08-15) |
+| Corpus total | 1102 — the top of §1's own 10²–10³ target band |
+| Noise-tagged among that day's 103 | **24 (23%)** |
+| Share of the corpus's entire lifetime noise population minted that day | **24 of 45 — 53%** |
+
+Those 24 are job-description captures that had to be demoted to
+`signal_quality="noise"` rather than removed, and they remain stored and
+embedded. §1's "growth pressure is real but not acute" was true when written
+and expired within 24 hours.
+
+### 6.3 Correction to §3.2's candidate set
+
+**§3.2's first bullet names an empty set.** It lists "graph entities tagged
+`signal_quality='noise'`", but `signal_quality` is a `ContentTags` facet and
+the demote loop that writes it — `apply_noise_tags` — takes a `DocumentStore`
+and writes through `document_store.put`. Zero graph nodes carry the facet in
+production, and none ever have. Implemented literally, that criterion could
+only ever return zero — the exact defect class this ADR exists to end.
+
+Measured population of §3.2 as literally written, at decision time:
+
+| §3.2 criterion | Prod population |
+|---|---|
+| Graph entities tagged `signal_quality="noise"` | **0** |
+| `Lifecycle.state` ∈ {deprecated, superseded, archived} | **0** (nothing populates `Lifecycle`) |
+| Unconfirmed mints | **3** |
+| *(not in §3.2)* noise-tagged **documents** | **24** |
+
+The implementation follows the ADR's *reasoning* over its wording, and takes
+noise **documents** as the primary candidate class. §3.4 promises "the demote
+loop closes physically: today `apply_noise_tags` demotes items into a
+store-forever purgatory; pruning is the missing terminal state" — a promise
+only documents can keep. And §3.2's exclusion is explicitly age-based
+("confirmed entities and their documents, *regardless of age*"), which a
+noise tag is not: it is a quality verdict recorded by the feedback loop, and
+§3.3 rejects `StalenessDetector` precisely *because* it is a pure age test.
+
+Consequently **grace periods gate the age-based criteria only**
+(`unconfirmed_mints`, `lifecycle_states`) and not `noise_documents`. Under a
+30-day default grace the 24 documents that motivated this decision would have
+been unarchivable for a month.
+
+### 6.4 What shipped
+
+- `RetentionPruneHandler` wired into `create_curate_handlers`;
+  `Operation.RETENTION_PRUNE`'s empty `set()` args schema replaced with
+  `{"criteria", "reason"}`.
+- Phase one is **archival**: candidates are stamped
+  `Lifecycle.state="archived"` — its first writer — and
+  `trellis.retrieve.lifecycle.exclude_archived` drops them at the
+  `PackBuilder` collect seam, its first enforcement point. Physical purge is
+  deferred until the archived population is real.
+- **Dry-run by default.** `trellis curate prune` previews and writes nothing
+  unless `--apply` is passed. Both modes emit `RETENTION_PRUNED`.
+- Traces and EventLog rows are excluded *by construction* — the resolver
+  reads the document and graph stores and nothing else, pinned by a test that
+  greps the module source.
+- The orphan `trellis_workers/maintenance/retention.py` (266 LOC) and its
+  414-line test file are **deleted**, per §3.3.
+- The two `TODO.md` P1 items ("TTL metadata + `DocumentRetentionWorker`") are
+  **superseded**, per §3.3's backlog ruling, and rewritten to point here.
+- **`retention.restore`** (`Operation.RETENTION_RESTORE`, `trellis curate
+  restore`) — the governed inverse. Phase one is archival *because* "a wrong
+  prune is walked back by re-stamping" (§3.1), and re-stamping needs a
+  sanctioned path: direct store writes are forbidden, and no governed
+  document-update verb exists, so without this the reversibility argument was
+  rhetorical. It takes **explicit ids rather than criteria** — the ids ride
+  the `RETENTION_PRUNED` payload, and re-deriving them from criteria would
+  re-run the selection that was wrong in the first place. Emits
+  `RETENTION_RESTORED`; a non-archived id is skipped, not raised.
+
+**Why that verb was needed immediately.** The first production run archived
+45 documents. Grouping them by *who* applied the noise tag showed two
+distinct populations: 24 manually demoted job-description captures
+(correctly noise), and **21 demoted by the nightly `curate` effectiveness
+pass** — which include durable technical memories such as "Hermes: local
+patches that must be re-applied after any hermes-agent update" and "Any
+trellis test that enters the real FastAPI lifespan". Effectiveness analysis
+demotes items that were served but never cited as helpful, and pack feedback
+has carried **no item attribution**, so "never cited" is unfalsifiable rather
+than informative. That is a defective input signal, not a quality verdict —
+and archival being reversible is exactly what made it recoverable.
+
+### 6.5 Deliberately deferred
+
+- **Phase two (physical purge).** `DocumentStore.delete` exists, so the
+  primitive is there; what is missing is a real archived population to purge
+  and a grace period calibrated against it.
+- **Store-level pushdown of the archived filter.** Post-filtering at the
+  collect seam is backend-agnostic and correct for every strategy including
+  injected ones, but an archived item still consumes its strategy's `limit`
+  budget. That cost is negligible at 24 items and becomes real later; the
+  count that decides it is `RETENTION_PRUNED.payload["archived"]`.
+- **A document-age candidate class.** Still a separate decision with its own
+  justification, exactly as §3.3 says — nothing here inherits it.

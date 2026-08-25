@@ -175,6 +175,20 @@ class ContentTags(TrellisModel):
 #: either package importing the other.
 SHADOW_TAGS_KEY = "content_tags_shadow"
 
+#: Document-metadata / node-property key the :class:`Lifecycle` record is
+#: stored under. Defined beside the model it names so the writer
+#: (:class:`~trellis.mutate.handlers.RetentionPruneHandler`) and the
+#: retrieval-side exclusion (:mod:`trellis.retrieve.lifecycle`) key off one
+#: definition without either package importing the other — the same
+#: arrangement :data:`SHADOW_TAGS_KEY` uses.
+#:
+#: Deliberately a sibling of ``content_tags``, not a facet inside it:
+#: ``Lifecycle`` is a separate axis from ``ContentTags.signal_quality``
+#: (see ``docs/design/adr-tag-vocabulary-split.md``), and tag filters
+#: address ``$.content_tags.<facet>`` — so folding lifecycle in there would
+#: make "archived" silently filterable as a retrieval tag.
+LIFECYCLE_KEY = "lifecycle"
+
 #: Tag key carrying a document-form verdict from the *enrichment* vocabulary
 #: (``reference``, ``research``, ``notes``, ``project``, …). Names the same
 #: dimension as :attr:`ContentTags.content_type` but in the open vocabulary
