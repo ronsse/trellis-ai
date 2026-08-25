@@ -157,7 +157,12 @@ class OperationRegistry:
         self._schemas[Operation.OBSERVATION_RECORD] = {"observation"}
         self._schemas[Operation.MEASUREMENT_RECORD] = {"measurement"}
         self._schemas[Operation.REDACTION_APPLY] = {"target_id", "reason"}
-        self._schemas[Operation.RETENTION_PRUNE] = set()
+        # ``criteria`` names the candidate predicate and ``reason`` is
+        # written verbatim to the audit log — the same discipline
+        # ``redaction.apply`` uses. ``dry_run`` is optional and defaults to
+        # True in the handler: destructive-by-default is right for a single
+        # named redaction target and wrong for a criteria-driven batch.
+        self._schemas[Operation.RETENTION_PRUNE] = {"criteria", "reason"}
 
     def validate(self, command: Command) -> tuple[bool, list[str]]:
         """Validate a command's args against its operation's schema.

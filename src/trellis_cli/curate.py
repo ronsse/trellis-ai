@@ -139,6 +139,117 @@ def label(
 
 
 @curate_app.command()
+def prune(
+    reason: str = typer.Option(
+        ..., "--reason", help="Audit-trail justification (required, non-empty)"
+    ),
+    noise_documents: bool = typer.Option(
+        False,
+        "--noise-documents",
+        help="Select documents tagged signal_quality=noise (the demote loop's output).",
+    ),
+    unconfirmed_mints: bool = typer.Option(
+        False,
+        "--unconfirmed-mints",
+        help="Select unconfirmed extraction mints older than --older-than-days.",
+    ),
+    lifecycle_state: list[str] = typer.Option(  # noqa: B008 - typer option factory
+        [],
+        "--lifecycle-state",
+        help="Select items in this lifecycle state (repeatable): "
+        "draft, deprecated, superseded.",
+    ),
+    older_than_days: int = typer.Option(
+        30,
+        "--older-than-days",
+        help="Grace period for the age-based criteria. Does not gate "
+        "--noise-documents: a noise tag is a verdict, not an age.",
+    ),
+    max_items: int = typer.Option(
+        500, "--max-items", help="Cap on candidates selected in one pass."
+    ),
+    apply: bool = typer.Option(
+        False,
+        "--apply",
+        help="Actually archive. Without this the command is a DRY RUN that "
+        "reports what it would take and writes nothing.",
+    ),
+    requested_by: str = typer.Option(
+        "cli:prune", "--by", help="Audit-trail identifier for the caller."
+    ),
+    output_format: str = typer.Option("text", "--format", help="Output format"),
+) -> None:
+    """Archive low-value derived items via the governed retention pipeline.
+
+    Phase one is ARCHIVAL, not deletion: selected items are stamped
+    ``Lifecycle.state="archived"`` and retrieval stops serving them. The
+    content stays in the store, so a wrong prune is walked back by
+    re-stamping rather than restored from a backup.
+
+    Dry-run by default — pass ``--apply`` to write. Both modes emit a
+    RETENTION_PRUNED audit event; the dry run's carries ``dry_run=true``.
+
+    Traces and event-log rows are never candidates, and confirmed entities
+    are never candidates regardless of age.
+    """
+    criteria = {
+        "noise_documents": noise_documents,
+        "unconfirmed_mints": unconfirmed_mints,
+        "lifecycle_states": list(lifecycle_state),
+        "older_than_days": older_than_days,
+        "max_items": max_items,
+    }
+    if not (noise_documents or unconfirmed_mints or lifecycle_state):
+        console.print(
+            "[red]No criteria selected — a prune must say what it is pruning. "
+            "Pass at least one of --noise-documents / --unconfirmed-mints / "
+            "--lifecycle-state.[/red]"
+        )
+        raise typer.Exit(code=EXIT_VALIDATION)
+
+    cmd = Command(
+        operation=Operation.RETENTION_PRUNE,
+        args={"criteria": criteria, "reason": reason, "dry_run": not apply},
+        target_type="retention_run",
+        requested_by=requested_by,
+    )
+    result = build_curate_executor(_get_registry()).execute(cmd)
+
+    if result.status in (CommandStatus.FAILED, CommandStatus.REJECTED):
+        exit_code = (
+            EXIT_VALIDATION if result.status == CommandStatus.REJECTED else EXIT_STORE
+        )
+        if output_format == "json":
+            emit_json(
+                {
+                    "status": result.status.value,
+                    "command_id": result.command_id,
+                    "message": result.message,
+                }
+            )
+        else:
+            console.print(f"[red]{escape(result.message)}[/red]")
+        raise typer.Exit(code=exit_code)
+
+    if output_format == "json":
+        emit_json(
+            {
+                "status": result.status.value,
+                "command_id": result.command_id,
+                "dry_run": not apply,
+                "message": result.message,
+            }
+        )
+    else:
+        console.print(f"[green]✓[/green] {escape(result.message)}")
+        if not apply:
+            console.print(
+                "[yellow]Dry run — nothing was written. Re-run with --apply "
+                "to archive.[/yellow]"
+            )
+
+
+@curate_app.command()
 def redact(
     target_id: str = typer.Argument(..., help="Entity/node ID to hard-purge"),
     reason: str = typer.Option(

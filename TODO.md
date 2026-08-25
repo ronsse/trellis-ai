@@ -20,7 +20,7 @@ Source: comparison audit of [thedotmack/claude-mem](https://github.com/thedotmac
 - [x] **Capture-health surfacing inside served packs** ([#309](https://github.com/ronsse/trellis-ai/issues/309)) — **LANDED** 2026-08-22 via [#315](https://github.com/ronsse/trellis-ai/pull/315). Their observer-health ledger prepends a loud outage warning to *every* injected context after 3 consecutive capture failures (built after a 17-hour silent outage). Trellis half-has this: #297 emits `WRITE_REJECTED` telemetry + `trellis analyze health`; the missing step is surfacing "capture has been failing since X" in pack output so the operator sees it without running the analyzer.
 - [x] **Elision markers on truncation** ([#310](https://github.com/ronsse/trellis-ai/issues/310)) — **LANDED** 2026-08-22 via [#317](https://github.com/ronsse/trellis-ai/pull/317). Oversize payloads cut head-60%/tail-30% with an explicit `<elided chars=… reason="oversize">` marker so the model knows what it can't see. Cheap adoption in trace ingest and `truncate_excerpt` (which ellipsis-marks but doesn't say how much was dropped).
 - [x] **Skip-discipline extraction prompts** ([#311](https://github.com/ronsse/trellis-ai/issues/311)) — **LANDED** 2026-08-22 via [#313](https://github.com/ronsse/trellis-ai/pull/313). Field-tested language for #298's same-day-stub noise: explicit skip criteria (clean installs, bare listings, repeats, empty status checks) + "if skipping, return an empty response only — never explain the skip in prose" + "non-XML text is discarded".
-- [x] **Retention urgency (anti-lesson)** ([#312](https://github.com/ronsse/trellis-ai/issues/312)) — **LANDED** 2026-08-22 via [#314](https://github.com/ronsse/trellis-ai/pull/314). claude-mem has *no* retention story — unbounded observation/vector growth, an unused `relevance_count`, dead schema migrated on every install. Supports closing the open `retention.prune` handler-or-retire chip before dogfood scale makes it hurt.
+- [x] **Retention urgency (anti-lesson)** ([#312](https://github.com/ronsse/trellis-ai/issues/312)) — **ANALYSIS landed** 2026-08-22 via [#314](https://github.com/ronsse/trellis-ai/pull/314) (the ADR — 340 lines of docs, no code); the *disposition* it teed up was decided 2026-08-25 (**Option A**, see [adr-retention-prune.md](docs/design/adr-retention-prune.md) §6) and phase one is implemented. Marking the ADR as closing the chip is what made the owner gate invisible for three days — #312 was closed COMPLETED while the ADR still read "pending owner review". claude-mem has *no* retention story — unbounded observation/vector growth, an unused `relevance_count`, dead schema migrated on every install. Supports closing the open `retention.prune` handler-or-retire chip before dogfood scale makes it hurt.
 
 ## Corpus ingestion & memory-system capture (2026-07-11)
 
@@ -246,7 +246,7 @@ Sibling to the Self-Improvement Program. Closes the gap surfaced 2026-05-18: sol
   - `docs/design/plan-next-swarm-wave.md` line 305
   - `docs/design/adr-llm-client-abstraction.md` lines 60, 185, 219, 259
   - `eval/scenarios/agent_loop_convergence/README.md` line 49
-- **[L][scope:follow-up]** Three other 2026-05-16-audited orphan-suspects still in `KEEP — VALIDATE`: `extract/query_pattern_observer.py`, `learning/miner.py`, `maintenance/retention.py` (~876 LOC total). Re-evaluate if any align with Phase F skill or evolver needs.
+- **[L][scope:follow-up]** Two other 2026-05-16-audited orphan-suspects still in `KEEP — VALIDATE`: `extract/query_pattern_observer.py`, `learning/miner.py` (~610 LOC total). `maintenance/retention.py` was **deleted** 2026-08-25 ([adr-retention-prune.md](docs/design/adr-retention-prune.md) §3.3). Re-evaluate if any align with Phase F skill or evolver needs.
 - **[L][scope:follow-up]** ~~`docs/design/implementation-roadmap.md` is dated 2026-04-27 and predates Items 1–7 + Phase F. CLAUDE.md positions it as the canonical agent-entry doc; refresh the "State of the project" table.~~ — **DONE 2026-07-02**: §1 rewritten (current state + changed-since digest + container-based live-test reality), B.3/E.5 statuses corrected to landed, §4 rebalanced to the gate table, §5 hand-off updated (incl. the Bolt-substrate validation discipline).
 
 **From the F6 eval skeleton (Unit D):**
@@ -1244,7 +1244,7 @@ The mutation pipeline produces every signal we'd want. A UI layer on top turns o
 - [x] **P0:** Dedup check + event emission in `save_memory` (`mcp/server.py`) — shipped 2026-04-15 (Sprint A) with `EventType.MEMORY_STORED`
 - [ ] **P1:** Wire `save_memory` into enrichment pipeline (`DocumentEnrichmentWorker`)
 - [ ] **P1:** `DocumentPromotionWorker` — route high-value docs to precedents/graph
-- [ ] **P1:** TTL metadata + `DocumentRetentionWorker` for auto-expiry
+- [x] ~~**P1:** TTL metadata + `DocumentRetentionWorker` for auto-expiry~~ — **SUPERSEDED** 2026-08-25 by the governed `retention.prune` verb ([adr-retention-prune.md](docs/design/adr-retention-prune.md) §3.3 backlog ruling, §6.4). Auto-expiry becomes a criteria class of the governed verb, not a standalone worker; blob TTL already has its answer in `BlobStore.sweep_expired`.
 - [ ] **P1:** Tier 1 compaction worker — strip old tool outputs from traces >30 days
 - [ ] **P2:** `get_detail(item_id)` MCP tool for lazy/deferred content loading
 - [ ] **P2:** Tier 2 compaction — fuzzy document dedup via similarity threshold
@@ -1570,7 +1570,7 @@ Reference implementation: the consumer deployment repo's `agents/{graph_context,
 - [ ] Design doc: `save_memory` as observation ingestion funnel (see `docs/research/compaction-and-agent-patterns.md`) — folded into Tiered Extraction Phase 5 docs.
 - [ ] `DocumentEnrichmentWorker` (classify + enrich new documents) — [blocked: Tiered Extraction Phase 3 integration + LLMClient ADR]
 - [ ] `DocumentPromotionWorker` (route high-value docs to precedents/graph) — promoted precedents are **curated nodes** (`node_role=CURATED`, `generation_spec.generator_name="precedent_promotion"`). Depends on Phase 4 `trellis curate regenerate` machinery.
-- [ ] TTL metadata + `DocumentRetentionWorker` for auto-expiry
+- [x] ~~TTL metadata + `DocumentRetentionWorker` for auto-expiry~~ — **SUPERSEDED** 2026-08-25, see [adr-retention-prune.md](docs/design/adr-retention-prune.md) §6.4.
 
 ### Self-Learning Classification (reduce LLM cost over time)
 - [ ] Investigate: train a lightweight model (logistic regression, small transformer, or decision tree) on accumulated LLM classification outputs to progressively replace LLM calls

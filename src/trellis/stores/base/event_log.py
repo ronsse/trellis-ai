@@ -106,6 +106,19 @@ class EventType(StrEnum):
     #: event to the executor's ``MUTATION_EXECUTED`` audit event.
     REDACTION_APPLIED = "redaction.applied"
 
+    #: Emitted by :class:`~trellis.mutate.handlers.RetentionPruneHandler`
+    #: for every ``retention.prune`` run, dry or not. Phase one is
+    #: *archival*: the payload carries the resolved ``criteria``, per-kind
+    #: counts, the operator's ``reason``, and a **capped** sample of item
+    #: ids (``item_ids``, the ``_LINKED_SIGNAL_LIMIT`` convention — a
+    #: follow-up pointer, not an exhaustive index; ``archived`` is the
+    #: authoritative count). ``dry_run=True`` means nothing was written and
+    #: the ids are a preview of what a real run would take.
+    #: ``scan_truncated=True`` means the candidate set is a prefix of the
+    #: real population because the scan cap bit first. ``command_id`` joins
+    #: this semantic event to the executor's ``MUTATION_EXECUTED``.
+    RETENTION_PRUNED = "retention.pruned"
+
     # Feedback
     FEEDBACK_RECORDED = "feedback.recorded"
 

@@ -38,6 +38,7 @@ from trellis.retrieve.excerpts import (
     apply_content_floor,
 )
 from trellis.retrieve.formatters import format_index_line
+from trellis.retrieve.lifecycle import exclude_archived
 from trellis.retrieve.rerankers.base import Reranker
 from trellis.retrieve.servable import strip_non_servable
 from trellis.retrieve.strategies import SearchStrategy
@@ -530,11 +531,15 @@ class PackBuilder:
 
         for strategy in self._strategies:
             try:
-                items = strip_non_servable(
-                    strategy.search(
-                        intent,
-                        limit=limit_per_strategy,
-                        filters=dict(merged_filters) if merged_filters else None,
+                items = exclude_archived(
+                    strip_non_servable(
+                        strategy.search(
+                            intent,
+                            limit=limit_per_strategy,
+                            filters=(
+                                dict(merged_filters) if merged_filters else None
+                            ),
+                        )
                     )
                 )
                 candidates_found += len(items)
@@ -801,11 +806,15 @@ class PackBuilder:
 
         for strategy in self._strategies:
             try:
-                items = strip_non_servable(
-                    strategy.search(
-                        intent,
-                        limit=limit_per_strategy,
-                        filters=dict(merged_filters) if merged_filters else None,
+                items = exclude_archived(
+                    strip_non_servable(
+                        strategy.search(
+                            intent,
+                            limit=limit_per_strategy,
+                            filters=(
+                                dict(merged_filters) if merged_filters else None
+                            ),
+                        )
                     )
                 )
                 candidates_found += len(items)

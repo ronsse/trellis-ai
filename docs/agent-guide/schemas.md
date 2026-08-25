@@ -1028,7 +1028,7 @@ Examples of domain-specific edge types: `reads_from`, `writes_to`, `materializes
 | `label.remove` | Curate | Remove a label |
 | `feedback.record` | Curate | Record feedback |
 | `redaction.apply` | Maintain | Hard-purge a graph entity (all versions, edges, aliases, vector entry) |
-| `retention.prune` | Maintain | Run retention pruning (no handler yet — runs as a worker) |
+| `retention.prune` | Maintain | Archive low-value derived items (governed; dry-run by default) |
 
 ### CommandStatus
 

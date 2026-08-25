@@ -1135,7 +1135,7 @@ result = executor.execute(cmd)
 | Operation | Required Args | Description |
 |-----------|---------------|-------------|
 | `redaction.apply` | `target_id`, `reason` | Hard-purge a graph entity: all SCD-2 versions, its edges, aliases, and vector entry. Emits `REDACTION_APPLIED` (counts + id pointers, never content). Also available via `trellis curate redact`. |
-| `retention.prune` | (none) | Run retention pruning. **No handler registered yet** — commands fail with `No handler registered`, and nothing else performs retention either (`trellis_workers.maintenance.retention` is orphaned: no caller, no CLI, no scheduler). Disposition — governed handler or explicit retirement — is an open owner gate; see [`adr-retention-prune.md`](../design/adr-retention-prune.md). |
+| `retention.prune` | `criteria`, `reason` | Archive low-value derived items. **Phase one is archival, not deletion**: candidates are stamped `Lifecycle.state="archived"` and retrieval stops serving them; content stays in the store, so a wrong prune is walked back by re-stamping. **`dry_run` defaults to `true`** — a run writes nothing unless it is passed `false` (CLI: `--apply`). `criteria` selects `noise_documents` / `unconfirmed_mints` / `lifecycle_states`, with `older_than_days` gating the age-based two only. Traces and event-log rows are never candidates (the resolver cannot reach them); confirmed entities are never candidates at any age. Emits `RETENTION_PRUNED` in both modes. See [`adr-retention-prune.md`](../design/adr-retention-prune.md) §6. |
 
 ### Batch Execution
 
