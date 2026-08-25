@@ -250,6 +250,82 @@ def prune(
 
 
 @curate_app.command()
+def restore(
+    item_id: list[str] = typer.Option(  # noqa: B008 - typer option factory
+        [],
+        "--item-id",
+        help="Archived item id to restore (repeatable). Ids ride the "
+        "RETENTION_PRUNED audit payload.",
+    ),
+    reason: str = typer.Option(
+        ..., "--reason", help="Audit-trail justification (required, non-empty)"
+    ),
+    from_file: str = typer.Option(
+        "",
+        "--from-file",
+        help="Read ids from a file, one per line (alternative to --item-id).",
+    ),
+    requested_by: str = typer.Option(
+        "cli:restore", "--by", help="Audit-trail identifier for the caller."
+    ),
+    output_format: str = typer.Option("text", "--format", help="Output format"),
+) -> None:
+    """Return archived items to ``Lifecycle.state="current"``.
+
+    The governed inverse of ``curate prune``. Ids that are not currently
+    archived are skipped, not treated as errors — a corrective batch built
+    from an audit payload will legitimately name items already restored.
+    """
+    ids = list(item_id)
+    if from_file:
+        ids.extend(
+            line.strip()
+            for line in Path(from_file).read_text().splitlines()
+            if line.strip()
+        )
+    if not ids:
+        console.print(
+            "[red]No ids supplied — pass --item-id (repeatable) or --from-file.[/red]"
+        )
+        raise typer.Exit(code=EXIT_VALIDATION)
+
+    cmd = Command(
+        operation=Operation.RETENTION_RESTORE,
+        args={"item_ids": ids, "reason": reason},
+        target_type="retention_restore",
+        requested_by=requested_by,
+    )
+    result = build_curate_executor(_get_registry()).execute(cmd)
+
+    if result.status in (CommandStatus.FAILED, CommandStatus.REJECTED):
+        exit_code = (
+            EXIT_VALIDATION if result.status == CommandStatus.REJECTED else EXIT_STORE
+        )
+        if output_format == "json":
+            emit_json(
+                {
+                    "status": result.status.value,
+                    "command_id": result.command_id,
+                    "message": result.message,
+                }
+            )
+        else:
+            console.print(f"[red]{escape(result.message)}[/red]")
+        raise typer.Exit(code=exit_code)
+
+    if output_format == "json":
+        emit_json(
+            {
+                "status": result.status.value,
+                "command_id": result.command_id,
+                "message": result.message,
+            }
+        )
+    else:
+        console.print(f"[green]✓[/green] {escape(result.message)}")
+
+
+@curate_app.command()
 def redact(
     target_id: str = typer.Argument(..., help="Entity/node ID to hard-purge"),
     reason: str = typer.Option(

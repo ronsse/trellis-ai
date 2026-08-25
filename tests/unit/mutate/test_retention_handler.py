@@ -468,3 +468,112 @@ class TestRetrievalExclusion:
 
         after = builder.build(intent="kangaroo")
         assert not any(i.item_id == "target" for i in after.items)
+
+
+class TestRestore:
+    """The half that makes phase-one archival's reversibility claim true.
+
+    Archival is chosen over purge *because* "a wrong prune is walked back by
+    re-stamping". Re-stamping needs a governed path — direct store writes are
+    not an option — so without this verb an over-prune had no remedy.
+    """
+
+    def test_registered_in_curate_handlers(self, registry: StoreRegistry) -> None:
+        assert Operation.RETENTION_RESTORE in create_curate_handlers(registry)
+
+    def test_round_trip_restores_the_document(self, registry: StoreRegistry) -> None:
+        _put_doc(registry, "noisy", signal_quality="noise")
+        executor = build_curate_executor(registry)
+        executor.execute(_prune({"noise_documents": True}, dry_run=False))
+
+        doc = registry.knowledge.document_store.get("noisy")
+        assert doc is not None
+        assert doc["metadata"][LIFECYCLE_KEY]["state"] == ARCHIVED_STATE
+
+        result = executor.execute(
+            Command(
+                operation=Operation.RETENTION_RESTORE,
+                args={"item_ids": ["noisy"], "reason": "mis-tagged by demote loop"},
+            )
+        )
+        assert result.status == CommandStatus.SUCCESS
+        doc = registry.knowledge.document_store.get("noisy")
+        assert doc is not None
+        assert doc["metadata"][LIFECYCLE_KEY]["state"] == "current"
+
+    def test_restored_document_is_servable_again(
+        self, registry: StoreRegistry
+    ) -> None:
+        from trellis.retrieve.pack_builder import PackBuilder
+        from trellis.retrieve.strategies import KeywordSearch
+
+        registry.knowledge.document_store.put(
+            "target", "distinctive wombat content", {"title": "t"}
+        )
+        strategy = KeywordSearch(registry.knowledge.document_store)
+        builder = PackBuilder(strategies=[strategy])
+
+        doc = registry.knowledge.document_store.get("target")
+        assert doc is not None
+        metadata = dict(doc["metadata"])
+        metadata[LIFECYCLE_KEY] = {"state": ARCHIVED_STATE}
+        registry.knowledge.document_store.put("target", doc["content"], metadata)
+        assert not any(
+            i.item_id == "target" for i in builder.build(intent="wombat").items
+        )
+
+        build_curate_executor(registry).execute(
+            Command(
+                operation=Operation.RETENTION_RESTORE,
+                args={"item_ids": ["target"], "reason": "restored"},
+            )
+        )
+        assert any(
+            i.item_id == "target" for i in builder.build(intent="wombat").items
+        )
+
+    def test_non_archived_id_is_skipped_not_raised(
+        self, registry: StoreRegistry
+    ) -> None:
+        _put_doc(registry, "plain")
+        result = build_curate_executor(registry).execute(
+            Command(
+                operation=Operation.RETENTION_RESTORE,
+                args={"item_ids": ["plain", "nonexistent"], "reason": "corrective"},
+            )
+        )
+        assert result.status == CommandStatus.SUCCESS
+        events = registry.operational.event_log.get_events(
+            event_type=EventType.RETENTION_RESTORED
+        )
+        assert events[0].payload["restored"] == 0
+        assert events[0].payload["skipped"] == 2
+
+    def test_emits_restored_event_with_ids(self, registry: StoreRegistry) -> None:
+        _put_doc(registry, "noisy", signal_quality="noise")
+        executor = build_curate_executor(registry)
+        executor.execute(_prune({"noise_documents": True}, dry_run=False))
+        executor.execute(
+            Command(
+                operation=Operation.RETENTION_RESTORE,
+                args={"item_ids": ["noisy"], "reason": "demote loop mis-fired"},
+            )
+        )
+        events = registry.operational.event_log.get_events(
+            event_type=EventType.RETENTION_RESTORED
+        )
+        assert len(events) == 1
+        assert events[0].payload["restored_ids"] == ["noisy"]
+        assert events[0].payload["reason"] == "demote loop mis-fired"
+
+    def test_empty_ids_rejected(self, registry: StoreRegistry) -> None:
+        from trellis.mutate.handlers import RetentionRestoreHandler
+
+        with pytest.raises(ValidationError) as exc:
+            RetentionRestoreHandler(registry).handle(
+                Command(
+                    operation=Operation.RETENTION_RESTORE,
+                    args={"item_ids": [], "reason": "x"},
+                )
+            )
+        assert exc.value.code == "retention_restore_ids_required"

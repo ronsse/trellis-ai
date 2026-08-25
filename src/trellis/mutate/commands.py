@@ -39,6 +39,7 @@ class Operation(StrEnum):
     # Maintain
     REDACTION_APPLY = "redaction.apply"
     RETENTION_PRUNE = "retention.prune"
+    RETENTION_RESTORE = "retention.restore"
 
 
 class CommandStatus(StrEnum):
@@ -163,6 +164,11 @@ class OperationRegistry:
         # True in the handler: destructive-by-default is right for a single
         # named redaction target and wrong for a criteria-driven batch.
         self._schemas[Operation.RETENTION_PRUNE] = {"criteria", "reason"}
+        # Restore takes explicit ids rather than a predicate: it is a
+        # corrective act on a known set (the ids ride the
+        # ``RETENTION_PRUNED`` payload), and a criteria-driven undo would
+        # re-derive the same population that was wrong the first time.
+        self._schemas[Operation.RETENTION_RESTORE] = {"item_ids", "reason"}
 
     def validate(self, command: Command) -> tuple[bool, list[str]]:
         """Validate a command's args against its operation's schema.

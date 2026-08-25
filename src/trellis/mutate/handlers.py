@@ -1074,6 +1074,129 @@ class RetentionPruneHandler:
         return True
 
 
+class RetentionRestoreHandler:
+    """Return archived items to ``Lifecycle.state="current"``.
+
+    Wires :data:`Operation.RETENTION_RESTORE`. This is the half that makes
+    :class:`RetentionPruneHandler`'s central claim true: phase one is
+    archival rather than purge *because* "a wrong prune is walked back by
+    re-stamping" — and re-stamping needs a governed path, or the claim is
+    only rhetorical. Direct store writes are not an option
+    (``CLAUDE.md``: all mutations go through the governed pipeline), so
+    without this verb an operator who over-pruned had no sanctioned remedy
+    at all.
+
+    **Explicit ids, not a predicate.** ``retention.prune`` resolves criteria
+    because it selects a population nobody has enumerated. Restore is the
+    opposite situation: the operator knows exactly which items were wrong,
+    because their ids ride the ``RETENTION_PRUNED`` payload. Re-deriving
+    them from criteria would re-run the selection that was wrong the first
+    time.
+
+    Restoring sets ``state="current"`` and clears the archival's
+    ``valid_until`` / ``deprecation_reason`` rather than deleting the
+    lifecycle record — the item is current again, and the ``RETENTION_PRUNED``
+    → ``RETENTION_RESTORED`` event pair is the history.
+
+    An id that is not archived is counted in ``skipped``, not raised: a
+    corrective batch assembled from an audit payload will legitimately name
+    items someone else already restored.
+    """
+
+    def __init__(self, registry: StoreRegistry) -> None:
+        self._registry = registry
+
+    def handle(self, command: Command) -> tuple[str | None, str]:
+        raw_ids = command.args["item_ids"]
+        if not isinstance(raw_ids, list) or not raw_ids:
+            msg = "retention.restore requires a non-empty item_ids list"
+            raise ValidationError(msg, code="retention_restore_ids_required")
+        item_ids = [str(i) for i in raw_ids]
+
+        reason = str(command.args["reason"] or "").strip()
+        if not reason:
+            msg = "retention.restore requires a non-empty reason for the audit trail"
+            raise ValidationError(msg, code="retention_reason_required")
+        if len(reason) > MAX_RETENTION_REASON_CHARS:
+            msg = (
+                f"retention.restore reason exceeds {MAX_RETENTION_REASON_CHARS} chars"
+            )
+            raise ValidationError(msg, code="retention_reason_too_long")
+
+        restored: list[str] = []
+        skipped: list[str] = []
+        for item_id in item_ids:
+            if self._restore(item_id):
+                restored.append(item_id)
+            else:
+                skipped.append(item_id)
+
+        payload: dict[str, Any] = {
+            "reason": reason,
+            "command_id": command.command_id,
+            "requested_by": command.requested_by,
+            "restored": len(restored),
+            "skipped": len(skipped),
+            "restored_ids": restored,
+            "skipped_ids": skipped,
+        }
+        message = (
+            f"retention.restore: restored {len(restored)} item(s)"
+            + (f", {len(skipped)} not archived (skipped)" if skipped else "")
+        )
+        try:
+            self._registry.operational.event_log.emit(
+                EventType.RETENTION_RESTORED,
+                source="mutation_executor",
+                entity_id=command.command_id,
+                entity_type="retention_restore",
+                payload=payload,
+            )
+        except Exception:
+            logger.warning(
+                "retention_restore_audit_emit_failed",
+                command_id=command.command_id,
+                restore_payload=payload,
+                exc_info=True,
+            )
+            message += " (WARNING: RETENTION_RESTORED audit emit failed)"
+        return command.command_id, message
+
+    def _restore(self, item_id: str) -> bool:
+        """Un-archive one item. Returns False if it was not archived."""
+        current = Lifecycle(state="current").model_dump(mode="json")
+
+        doc_store = self._registry.knowledge.document_store
+        doc = doc_store.get(item_id)
+        if doc is not None:
+            metadata = dict(doc.get("metadata") or {})
+            record = metadata.get(LIFECYCLE_KEY)
+            if not isinstance(record, dict) or record.get("state") != ARCHIVED_STATE:
+                return False
+            metadata[LIFECYCLE_KEY] = current
+            doc_store.put(item_id, doc["content"], metadata)
+            return True
+
+        graph = self._registry.knowledge.graph_store
+        node = graph.get_node(item_id)
+        if node is None:
+            return False
+        props = dict(node["properties"])
+        record = props.get(LIFECYCLE_KEY)
+        if not isinstance(record, dict) or record.get("state") != ARCHIVED_STATE:
+            return False
+        props[LIFECYCLE_KEY] = current
+        graph.upsert_node(
+            node_id=item_id,
+            node_type=node["node_type"],
+            properties=props,
+            node_role=node.get("node_role", "semantic"),
+            generation_spec=node.get("generation_spec"),
+            document_ids=node.get("document_ids") or None,
+        )
+        return True
+
+
 def create_curate_handlers(
     registry: StoreRegistry,
 ) -> dict[str, Any]:
@@ -1091,4 +1214,5 @@ def create_curate_handlers(
         Operation.MEASUREMENT_RECORD: MeasurementRecordHandler(registry),
         Operation.REDACTION_APPLY: RedactionApplyHandler(registry),
         Operation.RETENTION_PRUNE: RetentionPruneHandler(registry),
+        Operation.RETENTION_RESTORE: RetentionRestoreHandler(registry),
     }

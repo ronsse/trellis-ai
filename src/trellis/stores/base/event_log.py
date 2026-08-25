@@ -119,6 +119,15 @@ class EventType(StrEnum):
     #: this semantic event to the executor's ``MUTATION_EXECUTED``.
     RETENTION_PRUNED = "retention.pruned"
 
+    #: Emitted by :class:`~trellis.mutate.handlers.RetentionRestoreHandler`
+    #: when archived items are returned to ``Lifecycle.state="current"``.
+    #: A distinct verb from ``RETENTION_PRUNED`` so "what did we walk back,
+    #: and why" is a single query rather than a filter over prune events.
+    #: Payload carries the operator's ``reason``, ``restored`` / ``skipped``
+    #: counts and the item ids — restore is corrective, so the ids are the
+    #: point and are not sampled.
+    RETENTION_RESTORED = "retention.restored"
+
     # Feedback
     FEEDBACK_RECORDED = "feedback.recorded"
 

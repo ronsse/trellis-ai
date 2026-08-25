@@ -415,6 +415,27 @@ been unarchivable for a month.
   414-line test file are **deleted**, per §3.3.
 - The two `TODO.md` P1 items ("TTL metadata + `DocumentRetentionWorker`") are
   **superseded**, per §3.3's backlog ruling, and rewritten to point here.
+- **`retention.restore`** (`Operation.RETENTION_RESTORE`, `trellis curate
+  restore`) — the governed inverse. Phase one is archival *because* "a wrong
+  prune is walked back by re-stamping" (§3.1), and re-stamping needs a
+  sanctioned path: direct store writes are forbidden, and no governed
+  document-update verb exists, so without this the reversibility argument was
+  rhetorical. It takes **explicit ids rather than criteria** — the ids ride
+  the `RETENTION_PRUNED` payload, and re-deriving them from criteria would
+  re-run the selection that was wrong in the first place. Emits
+  `RETENTION_RESTORED`; a non-archived id is skipped, not raised.
+
+**Why that verb was needed immediately.** The first production run archived
+45 documents. Grouping them by *who* applied the noise tag showed two
+distinct populations: 24 manually demoted job-description captures
+(correctly noise), and **21 demoted by the nightly `curate` effectiveness
+pass** — which include durable technical memories such as "Hermes: local
+patches that must be re-applied after any hermes-agent update" and "Any
+trellis test that enters the real FastAPI lifespan". Effectiveness analysis
+demotes items that were served but never cited as helpful, and pack feedback
+has carried **no item attribution**, so "never cited" is unfalsifiable rather
+than informative. That is a defective input signal, not a quality verdict —
+and archival being reversible is exactly what made it recoverable.
 
 ### 6.5 Deliberately deferred
 
