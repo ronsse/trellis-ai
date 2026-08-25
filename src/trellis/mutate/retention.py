@@ -288,9 +288,7 @@ def _resolve_documents(
                     kind="document",
                     reason_code=reason,
                     name=(
-                        metadata.get("title")
-                        if isinstance(metadata, dict)
-                        else None
+                        metadata.get("title") if isinstance(metadata, dict) else None
                     ),
                 )
             )

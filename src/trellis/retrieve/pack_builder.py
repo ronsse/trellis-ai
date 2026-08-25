@@ -536,9 +536,7 @@ class PackBuilder:
                         strategy.search(
                             intent,
                             limit=limit_per_strategy,
-                            filters=(
-                                dict(merged_filters) if merged_filters else None
-                            ),
+                            filters=(dict(merged_filters) if merged_filters else None),
                         )
                     )
                 )
@@ -811,9 +809,7 @@ class PackBuilder:
                         strategy.search(
                             intent,
                             limit=limit_per_strategy,
-                            filters=(
-                                dict(merged_filters) if merged_filters else None
-                            ),
+                            filters=(dict(merged_filters) if merged_filters else None),
                         )
                     )
                 )

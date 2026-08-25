@@ -1118,9 +1118,7 @@ class RetentionRestoreHandler:
             msg = "retention.restore requires a non-empty reason for the audit trail"
             raise ValidationError(msg, code="retention_reason_required")
         if len(reason) > MAX_RETENTION_REASON_CHARS:
-            msg = (
-                f"retention.restore reason exceeds {MAX_RETENTION_REASON_CHARS} chars"
-            )
+            msg = f"retention.restore reason exceeds {MAX_RETENTION_REASON_CHARS} chars"
             raise ValidationError(msg, code="retention_reason_too_long")
 
         restored: list[str] = []
@@ -1140,9 +1138,8 @@ class RetentionRestoreHandler:
             "restored_ids": restored,
             "skipped_ids": skipped,
         }
-        message = (
-            f"retention.restore: restored {len(restored)} item(s)"
-            + (f", {len(skipped)} not archived (skipped)" if skipped else "")
+        message = f"retention.restore: restored {len(restored)} item(s)" + (
+            f", {len(skipped)} not archived (skipped)" if skipped else ""
         )
         try:
             self._registry.operational.event_log.emit(

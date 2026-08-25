@@ -92,9 +92,7 @@ class TestRegistration:
     def test_registered_in_curate_handlers(self, registry: StoreRegistry) -> None:
         assert Operation.RETENTION_PRUNE in create_curate_handlers(registry)
 
-    def test_executor_no_longer_rejects_the_verb(
-        self, registry: StoreRegistry
-    ) -> None:
+    def test_executor_no_longer_rejects_the_verb(self, registry: StoreRegistry) -> None:
         """The gap this closes: every command used to be REJECTED."""
         _put_doc(registry, "d1", signal_quality="noise")
         result = build_curate_executor(registry).execute(
@@ -120,9 +118,7 @@ class TestNoiseDocumentResolution:
     def test_noise_documents_are_candidates(self, registry: StoreRegistry) -> None:
         _put_doc(registry, "noisy", signal_quality="noise")
         _put_doc(registry, "good", signal_quality="high")
-        report = resolve_candidates(
-            RetentionCriteria(noise_documents=True), registry
-        )
+        report = resolve_candidates(RetentionCriteria(noise_documents=True), registry)
         assert [c.item_id for c in report.candidates] == ["noisy"]
         assert report.candidates[0].kind == "document"
         assert report.candidates[0].reason_code == "noise_document"
@@ -131,14 +127,10 @@ class TestNoiseDocumentResolution:
         self, registry: StoreRegistry
     ) -> None:
         _put_doc(registry, "plain")
-        report = resolve_candidates(
-            RetentionCriteria(noise_documents=True), registry
-        )
+        report = resolve_candidates(RetentionCriteria(noise_documents=True), registry)
         assert report.candidates == []
 
-    def test_noise_is_not_gated_by_grace_period(
-        self, registry: StoreRegistry
-    ) -> None:
+    def test_noise_is_not_gated_by_grace_period(self, registry: StoreRegistry) -> None:
         """A noise tag is a verdict, not an age.
 
         The 24 captures that motivated this were demoted the day before the
@@ -291,9 +283,7 @@ class TestArchival:
         _put_doc(registry, "noisy", signal_quality="noise")
         executor = build_curate_executor(registry)
         executor.execute(_prune({"noise_documents": True}, dry_run=False))
-        report = resolve_candidates(
-            RetentionCriteria(noise_documents=True), registry
-        )
+        report = resolve_candidates(RetentionCriteria(noise_documents=True), registry)
         assert report.candidates == []
         assert report.skipped_already_archived == 1
 
@@ -310,9 +300,7 @@ class TestArchival:
             },
         )
         build_curate_executor(registry).execute(
-            _prune(
-                {"unconfirmed_mints": True, "older_than_days": 0}, dry_run=False
-            )
+            _prune({"unconfirmed_mints": True, "older_than_days": 0}, dry_run=False)
         )
         node = graph.get_node(node_id)
         assert node is not None
@@ -398,9 +386,7 @@ class TestAuditTrail:
 
 
 class TestHardExclusions:
-    def test_traces_are_structurally_unreachable(
-        self, registry: StoreRegistry
-    ) -> None:
+    def test_traces_are_structurally_unreachable(self, registry: StoreRegistry) -> None:
         """Traces are immutable — the resolver must not read the trace store."""
         import inspect
 
@@ -409,9 +395,7 @@ class TestHardExclusions:
         source = inspect.getsource(retention)
         assert "trace_store" not in source
 
-    def test_event_log_is_not_a_candidate_source(
-        self, registry: StoreRegistry
-    ) -> None:
+    def test_event_log_is_not_a_candidate_source(self, registry: StoreRegistry) -> None:
         import inspect
 
         from trellis.mutate import retention
@@ -445,9 +429,7 @@ class TestRetrievalExclusion:
         )
         assert [i.item_id for i in exclude_archived([keep, drop])] == ["keep"]
 
-    def test_archived_document_leaves_the_pack(
-        self, registry: StoreRegistry
-    ) -> None:
+    def test_archived_document_leaves_the_pack(self, registry: StoreRegistry) -> None:
         """End-to-end: archival must actually stop retrieval serving it."""
         from trellis.retrieve.pack_builder import PackBuilder
         from trellis.retrieve.strategies import KeywordSearch
@@ -501,9 +483,7 @@ class TestRestore:
         assert doc is not None
         assert doc["metadata"][LIFECYCLE_KEY]["state"] == "current"
 
-    def test_restored_document_is_servable_again(
-        self, registry: StoreRegistry
-    ) -> None:
+    def test_restored_document_is_servable_again(self, registry: StoreRegistry) -> None:
         from trellis.retrieve.pack_builder import PackBuilder
         from trellis.retrieve.strategies import KeywordSearch
 
@@ -528,9 +508,7 @@ class TestRestore:
                 args={"item_ids": ["target"], "reason": "restored"},
             )
         )
-        assert any(
-            i.item_id == "target" for i in builder.build(intent="wombat").items
-        )
+        assert any(i.item_id == "target" for i in builder.build(intent="wombat").items)
 
     def test_non_archived_id_is_skipped_not_raised(
         self, registry: StoreRegistry
