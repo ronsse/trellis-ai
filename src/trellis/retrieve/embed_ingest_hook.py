@@ -29,9 +29,12 @@ retrieval time: this is the only point on the semantic path that still
 holds the full document, so it is the only point where the cut can be
 boundary-aware and can say how much it dropped (#310). Document metadata
 is passed through so importance/recency weighting sees the same tags the
-document store holds. Metadata-only re-puts (enrichment tag writes) do
-NOT re-embed; the vector's metadata copy refreshes on the next content
-write or ``trellis admin reindex-vectors --force`` run.
+document store holds — but that copy is a **snapshot taken here**, and a
+metadata-only re-put to the document store does not re-embed. Post-embed
+writers therefore have to mirror their change across explicitly, via
+:func:`trellis.core.vector_metadata.sync_vector_metadata` (#338); rows that
+diverged before those writers existed are repaired by ``trellis admin
+resync-vector-metadata``, which needs no embedder.
 
 ``run_embed_on_ingest`` returns a small summary dict so callers that
 want to surface embedding telemetry can, without re-deriving it. When

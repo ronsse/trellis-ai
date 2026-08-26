@@ -108,13 +108,42 @@ One `/schedule` routine runs both: Job A every day; Job B additionally on Monday
 
 ---
 
+## Reading the Layer-2 `loop_dod3` block (revised 2026-08-16)
+
+The skynet job's `loop_dod3` was rewritten to stop conflating three different
+stages of the loop. The pre-08-16 block reported `retrieve precedents` (a
+**human-gated** promote *output*) and `advisory-effectiveness.advisory_scores`
+(delivery effectiveness, *downstream* of generation) over a 7d window — so it
+read `0 / 0 = starved` while generation was demonstrably working at width (2
+advisories at 90d; injected coverage 1.0). Read the new 30d block as:
+
+| Field | What it measures | How to read for DoD #3 |
+|---|---|---|
+| `graded_observations` | graded packs joined (PACK_ASSEMBLED ⋈ FEEDBACK, 30d) | loop **input** flowing when > 0 |
+| `promote_candidates` | items recurring across ≥2 graded packs (real `min_support=2`) | the promote-half **generation** — the honest "lessons > 0" signal |
+| `curate_signal` | `advisories_generated` / `all-zeros` from the 03:30 curate log | the demote-half **generation** signal ("advisories > 0") |
+| `injected_coverage`, `attribution_rate` | the two join-coverage rates (30d) | join is **fed** when injected ≈ 1.0; attribution is item-signal quality |
+| `precedents_promoted` | precedents promoted INTO the graph | **human-gated** — 0 until someone runs `learning-candidates → curate promote-learning`. **A 0 here is NOT "starved."** |
+
+**DoD #3 mapping (reframed 2026-08-16, accepted).** Criterion #3 is now **3a —
+loop fed & wired**: met when `injected_coverage ≥ 0.9` **and** `attribution_rate
+≥ 0.2` **and** `graded_observations ≥ 5` **and** `curate_signal != all-zeros`.
+The nightly emits this as `dod3a_met` (`true`/`false`) — read that directly.
+The standing-output half is **3b** (≥1 `promote_candidate` at `min_support=2`,
+or ≥1 promoted precedent): a `blocked:signal` **maturity gate tracked OUTSIDE
+the 11**, *not* a deployer-#2 launch blocker — never read `promote_candidates: 0`
+or `precedents_promoted: 0` as an unmet launch criterion. Rationale + decisions:
+`dod3-reframe-proposal.md`.
+
+---
+
 ## DoD — the 11 criteria (`cloud` = this routine verifies; `skynet` = arrives via Layer-2 status block)
 
 | # | Criterion | Surface |
 |---|---|---|
 | 1 | Quickstart cold-install exits 0 | cloud (monthly deep-check) |
 | 2 | `pytest tests/unit/` green + 6 workflows green on main | cloud |
-| 3 | Loop unstarved: within 30d of #255, advisories/lessons > 0; curate not all-zeros | skynet |
+| 3 | **Loop fed & wired** (30d): `injected_coverage ≥0.9` + `attribution_rate ≥0.2` + `graded_observations ≥5` + curate not all-zeros (nightly `dod3a_met`) | skynet |
 | 4 | Attribution round-trip: flat `get_context` carries `pack_id`; `record_feedback`→`FEEDBACK_RECORDED` | skynet |
 | 5 | #194 enforced (`pytest -k classification`) | cloud |
 | 6 | #250 closed: `.env` exists, dead AuraDB creds purged, CI secrets rotated | cloud + owner |
@@ -123,6 +152,9 @@ One `/schedule` routine runs both: Job A every day; Job B additionally on Monday
 | 9 | trellis-api container current + `llm:` block live (skynet-hub#4) | skynet |
 | 10 | `:8420` locked down (skynet-hub#5) | skynet |
 | 11 | Backup mirror working (skynet-hub#6) | skynet |
+
+**Maturity signal (outside the 11, `blocked:signal` — not a launch gate):**
+**3b — Loop yields standing memory:** ≥1 `promote_candidate` at `min_support=2`, or ≥1 precedent promoted via `learning-candidates → curate promote-learning`. Deferred to post-adoption; do not block deployer-#2 on it. See `dod3-reframe-proposal.md`.
 
 ---
 

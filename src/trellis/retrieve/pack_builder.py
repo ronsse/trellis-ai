@@ -39,6 +39,7 @@ from trellis.retrieve.excerpts import (
 )
 from trellis.retrieve.formatters import format_index_line
 from trellis.retrieve.lifecycle import exclude_archived
+from trellis.retrieve.noise import exclude_noise, resolve_signal_quality_spec
 from trellis.retrieve.rerankers.base import Reranker
 from trellis.retrieve.servable import strip_non_servable
 from trellis.retrieve.strategies import SearchStrategy
@@ -523,6 +524,7 @@ class PackBuilder:
             domain, filters, tag_filters
         )
         merged_filters = self._build_filters(scoped_filters, scoped_tag_filters)
+        signal_quality_spec = resolve_signal_quality_spec(scoped_tag_filters)
         # Propagate structural preference into the per-strategy filter so
         # GraphSearch can skip the client-side filter when requested.
         if include_structural:
@@ -531,14 +533,19 @@ class PackBuilder:
 
         for strategy in self._strategies:
             try:
-                items = exclude_archived(
-                    strip_non_servable(
-                        strategy.search(
-                            intent,
-                            limit=limit_per_strategy,
-                            filters=(dict(merged_filters) if merged_filters else None),
+                items = exclude_noise(
+                    exclude_archived(
+                        strip_non_servable(
+                            strategy.search(
+                                intent,
+                                limit=limit_per_strategy,
+                                filters=(
+                                    dict(merged_filters) if merged_filters else None
+                                ),
+                            )
                         )
-                    )
+                    ),
+                    signal_quality_spec,
                 )
                 candidates_found += len(items)
                 all_items.extend(items)
@@ -798,20 +805,26 @@ class PackBuilder:
             domain, filters, tag_filters
         )
         merged_filters = self._build_filters(scoped_filters, scoped_tag_filters)
+        signal_quality_spec = resolve_signal_quality_spec(scoped_tag_filters)
         if include_structural:
             merged_filters = dict(merged_filters) if merged_filters else {}
             merged_filters["include_structural"] = True
 
         for strategy in self._strategies:
             try:
-                items = exclude_archived(
-                    strip_non_servable(
-                        strategy.search(
-                            intent,
-                            limit=limit_per_strategy,
-                            filters=(dict(merged_filters) if merged_filters else None),
+                items = exclude_noise(
+                    exclude_archived(
+                        strip_non_servable(
+                            strategy.search(
+                                intent,
+                                limit=limit_per_strategy,
+                                filters=(
+                                    dict(merged_filters) if merged_filters else None
+                                ),
+                            )
                         )
-                    )
+                    ),
+                    signal_quality_spec,
                 )
                 candidates_found += len(items)
                 all_items.extend(items)
@@ -1858,6 +1871,17 @@ class PackBuilder:
         applied — express the negation directly instead of enumerating
         the inverse allowlist (which would silently miss any new
         ``signal_quality`` value added later).
+
+        **This is the pushdown, not the guarantee.** It reaches only the
+        axes whose store speaks the facet, and only when ``tag_filters``
+        is not ``None`` (the early return below) — neither of which held
+        on the semantic axis or on MCP's calling convention. The noise
+        boundary is enforced at the collect seam by
+        :func:`~trellis.retrieve.noise.exclude_noise`, which resolves the
+        same default through
+        :func:`~trellis.retrieve.noise.resolve_signal_quality_spec`. What
+        survives here is the cheap half: a row filtered in SQL never
+        spends a strategy's ``limit`` budget.
         """
         if tag_filters is None:
             return filters
