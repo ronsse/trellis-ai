@@ -80,12 +80,59 @@ Either gate the demotion behind sufficient attribution, or fix the attribution t
 feeds it. Depends on A4 for the second option.
 
 **A4 — Raise feedback attribution from 32%.** `class: panel`
+*(measured 2026-08-26; the framing below was wrong and the correction is the finding)*
 Live attribution rate is 0.32 (12 of 37 feedback events over 30 days). Per-item rows
 are what `learning/pack_observations.py` joins on; unattributed feedback contributes
-nothing. This is the single biggest constraint on the learning loop and it is an
-*ergonomics* problem at the MCP surface, not a missing feature — `pack_id` and item ids
-must be hard to omit. Acceptance: attribution rate measurably rises over a 7-day window
-after the change; the mechanism does not fabricate attribution when the caller has none.
+nothing. This was written up as an *ergonomics* problem at the MCP surface —
+`pack_id` and item ids being too easy to omit. **The event log says otherwise.**
+Decomposing the 37:
+
+| bucket | n | attributable in principle? |
+|---|---|---|
+| names a `pack_id`, cites item ids | 12 | already is |
+| names a `pack_id`, cites nothing | **1** | yes — the only pure ergonomic loss |
+| names only a `trace_id`, **no pack assembled anywhere in the preceding 6h** | **19** | no — no pack existed |
+| names only a `trace_id`, some pack within 6h | 4 | maybe |
+
+So the citation rate *given a pack was named* is **12/13 = 0.92**, and 107 of 109 cited
+ids resolve to their pack's `injected_item_ids`. The surface works for the population it
+can serve. What the headline number is mostly measuring is that **retrieval did not
+happen before the graded work** — a retrieve-adoption problem, not a citation one, and
+no change to the feedback surface can reach it. Sampled trace-level events say so in
+their own notes: *"No context pack informed this work (no `get_context` call this
+session)."*
+
+Landed instead:
+- **`attribution_rate` decomposed** (`ops/write_health.py`, `trellis analyze health`) into
+  `pack_targeted_feedback` / `pack_targeted_attributed` / `pack_attribution_rate` /
+  `untargeted_feedback`. The headline keeps its original denominator — narrowing it
+  quietly would be the "metric improves because it was redefined" failure this repo
+  keeps rediscovering.
+- **Latent defect fixed:** `FeedbackRecordHandler` accepted a caller-supplied `pack_id`
+  through `POST /feedback` and dropped it before emitting, so that whole family of
+  feedback was unjoinable regardless of what the caller sent. It now forwards `pack_id`
+  and derives `success` from `rating` (without which `_join_one` reads every governed
+  grade as a failure). `trellis curate feedback` gained `--pack-id`.
+- **`TRELLIS_REQUIRE_PACK_ATTRIBUTION`**, default **off**: enforcement at the MCP
+  surface, shipped in the off position. See the escalation below.
+
+**Escalated to the operator — panel split (exit 3), 2026-08-26.** On whether an uncited
+pack-targeted `record_feedback` call should be **refused**: `openai/gpt-5.5` said yes
+(0.78) — refusal is the only route to a joinable call that does not emit a second event
+for the same pack, given the recording layer is idempotent per-call rather than
+per-pack. `moonshotai/kimi-k3` said no (0.62) — the enforcement ceiling is ~1 event on
+today's traffic and refusing risks losing the single highest-information event in the
+corpus. Both independently said the *primary* investment is the metric decomposition,
+and both flagged that "warn and ask for a follow-up call" double-counts unless
+superseding is also built. The knob makes the operator's decision an environment
+variable rather than another PR; it defaults to today's behaviour because changing
+production posture is not the agent's call.
+
+Acceptance, restated honestly: `pack_attribution_rate` is the number an ergonomic change
+can move, and the mechanism does not fabricate attribution when the caller has none —
+enforcement fails open whenever the pack resolves to nothing citable, and never touches
+trace-level feedback. Depends-on for A3 should read `pack_attribution_rate`, not the
+headline.
 
 ## Wave 1b — token economics: prove memory returns more than it costs
 

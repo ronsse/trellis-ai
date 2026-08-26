@@ -730,7 +730,7 @@ On failure/rejection the JSON is `{"status": "failed"|"rejected", "command_id": 
 Record feedback (rating and optional comment) on a trace or precedent.
 
 ```bash
-trellis curate feedback <target_id> <rating> [--comment <text>] [--format text|json]
+trellis curate feedback <target_id> <rating> [--comment <text>] [--pack-id <id>] [--format text|json]
 ```
 
 | Argument/Option | Required | Default | Description |
@@ -738,7 +738,15 @@ trellis curate feedback <target_id> <rating> [--comment <text>] [--format text|j
 | `target_id` | **Yes** | -- | Trace or precedent ID |
 | `rating` | **Yes** | -- | Rating as float (0.0 to 1.0 by convention) |
 | `--comment` | No | `null` | Optional text comment |
+| `--pack-id` | No | `null` | Context pack the feedback is about — the join key |
 | `--format` | No | `text` | Output format |
+
+`--pack-id` is what lets the learning loop see the event at all:
+`join_pack_feedback` matches `FEEDBACK_RECORDED` to `PACK_ASSEMBLED` strictly
+on `payload.pack_id` and skips events without it. This command still records a
+**pack-level grade only** — the per-item `helpful_item_ids` /
+`unhelpful_item_ids` attribution the promote half consumes comes from the MCP
+`record_feedback` tool or `POST /packs/{pack_id}/feedback`.
 
 **Example:**
 
@@ -1565,7 +1573,7 @@ Start with `trellis admin serve` or `trellis-api`. Base path: `/api/v1/`.
 | POST | `/precedents` | `{trace_id, title, description}` | Promote trace |
 | POST | `/links` | `{source_id, target_id, edge_kind?}` | Create edge |
 | POST | `/entities` | `{entity_type, name, properties?}` | Create entity |
-| POST | `/feedback` | `{target_id, rating, comment?}` | Record feedback |
+| POST | `/feedback` | `{target_id, rating, comment?, pack_id?}` | Record feedback (pass `pack_id` so it joins) |
 | POST | `/packs/{pack_id}/feedback` | `{rating, success?, notes?}` | Pack-specific feedback |
 
 ### Admin

@@ -75,6 +75,26 @@ RECONCILE_MODEL_ENV = "TRELLIS_RECONCILE_MODEL"
 #: Per-verdict timeout, in seconds, for the reconcile tier.
 RECONCILE_TIMEOUT_ENV = "TRELLIS_RECONCILE_TIMEOUT_S"
 
+#: Require element attribution on pack-targeted feedback
+#: (``trellis.mcp.server.record_feedback``).  **Default off**, and off is
+#: the shipped behaviour: a caller that names a ``pack_id`` and cites no
+#: items still records a rating.  Turned on, that call is rejected and the
+#: rejection hands back the ids the pack actually served, so the retry is
+#: a selection rather than a recollection.
+#:
+#: A cross-lab model panel split on whether this should be the default
+#: (2026-08-26): one panelist argued refusal is the only thing that
+#: converts an uncited call into a joinable one without emitting a second
+#: event for the same pack; the other argued the citation rate *given a
+#: pack was named* is already ~0.92 on the reference deployment, so the
+#: enforcement ceiling is roughly one event and the cost of a lost rating
+#: is not obviously worth it.  Both agreed the dominant loss is feedback
+#: on work no pack informed, which no feedback-surface change can reach.
+#: The knob exists so that decision is an environment variable rather
+#: than another pull request, and it defaults to today's behaviour
+#: because changing production posture is the operator's call.
+REQUIRE_PACK_ATTRIBUTION_FLAG = "TRELLIS_REQUIRE_PACK_ATTRIBUTION"
+
 # ---------------------------------------------------------------------------
 # Defaults.  Unchanged from the per-module values they were lifted from.
 # ---------------------------------------------------------------------------
@@ -164,6 +184,7 @@ class WriteBehaviourConfig:
     reconcile_on_write: bool = False
     trace_extraction: bool = False
     trace_extraction_min_confidence: float | None = None
+    require_pack_attribution: bool = False
     reconcile_model: str = DEFAULT_RECONCILE_MODEL
     reconcile_timeout_s: float = DEFAULT_RECONCILE_TIMEOUT_S
 
@@ -178,6 +199,7 @@ class WriteBehaviourConfig:
             reconcile_on_write=_truthy(src, RECONCILE_FLAG_ENV),
             trace_extraction=_truthy(src, TRACE_EXTRACTION_FLAG),
             trace_extraction_min_confidence=_min_confidence(src),
+            require_pack_attribution=_truthy(src, REQUIRE_PACK_ATTRIBUTION_FLAG),
             reconcile_model=src.get(RECONCILE_MODEL_ENV, "").strip()
             or DEFAULT_RECONCILE_MODEL,
             reconcile_timeout_s=_reconcile_timeout(src),
@@ -221,6 +243,7 @@ ENV_VAR_BY_FIELD: dict[str, str] = {
     "reconcile_on_write": RECONCILE_FLAG_ENV,
     "trace_extraction": TRACE_EXTRACTION_FLAG,
     "trace_extraction_min_confidence": TRACE_EXTRACTION_MIN_CONFIDENCE_FLAG,
+    "require_pack_attribution": REQUIRE_PACK_ATTRIBUTION_FLAG,
     "reconcile_model": RECONCILE_MODEL_ENV,
     "reconcile_timeout_s": RECONCILE_TIMEOUT_ENV,
 }
@@ -236,6 +259,7 @@ __all__ = [
     "RECONCILE_FLAG_ENV",
     "RECONCILE_MODEL_ENV",
     "RECONCILE_TIMEOUT_ENV",
+    "REQUIRE_PACK_ATTRIBUTION_FLAG",
     "TRACE_EXTRACTION_FLAG",
     "TRACE_EXTRACTION_MIN_CONFIDENCE_FLAG",
     "TRUTHY",

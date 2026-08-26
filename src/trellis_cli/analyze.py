@@ -548,6 +548,17 @@ def health(
         f"{serve.feedback_attributed}/{serve.feedback_events} feedback events "
         f"attributed ({serve.attribution_rate:.0%})"
     )
+    if serve.feedback_events:
+        # The headline rate mixes callers who could cite with callers who
+        # had no pack to cite. Show the split so the reader can tell an
+        # ergonomics problem from a retrieval-adoption one.
+        console.print(
+            f"    of which pack-targeted: "
+            f"{serve.pack_targeted_attributed}/{serve.pack_targeted_feedback} "
+            f"cited ({serve.pack_attribution_rate:.0%}); "
+            f"{serve.untargeted_feedback} named no pack "
+            "(unjoinable by construction)"
+        )
     for reason in report.reasons:
         console.print(f"  [yellow]warn[/yellow] {reason}")
     if report.status == "ok" and write.attempts == 0 and serve.packs == 0:

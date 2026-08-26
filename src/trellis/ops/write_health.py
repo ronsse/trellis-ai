@@ -41,6 +41,7 @@ import structlog
 from pydantic import Field, ValidationError
 
 from trellis.core.base import TrellisModel
+from trellis.feedback.attribution import payload_is_attributed, payload_pack_id
 from trellis.schemas.enums import TraceSource
 from trellis.schemas.trace import Outcome, Trace, TraceContext
 from trellis.stores.base.event_log import EventLog, EventType
@@ -254,6 +255,28 @@ class ServeAttributionReport(TrellisModel):
     ``injected_items[]`` (without which the promote join has no rows) and
     feedback carrying item attribution (without which the demote half has
     no signal).
+
+    ``attribution_rate`` divides by *every* feedback event, and that
+    denominator mixes two populations with nothing in common (backlog A4).
+    A caller who names a ``pack_id`` and cites no items lost signal it
+    held. A caller grading a trace it produced with no pack in hand held no
+    signal to lose: nothing in the payload could ever join, because there
+    is no pack on the other side of the join. Measured on the reference
+    deployment over 30 days, 19 of 25 unattributed events were the second
+    kind — feedback on work for which no pack had been assembled anywhere
+    in the preceding six hours.
+
+    One number over both answers neither question. So the pack-targeted
+    population is reported separately: ``pack_attribution_rate`` is the
+    citation rate among callers who *could* cite, and is the number an
+    ergonomic change at the feedback surface can actually move.
+    ``untargeted_feedback`` counts the rest — not a failure, and not
+    something to suppress, but not evidence about attribution either.
+
+    ``attribution_rate`` itself is unchanged and still divides by
+    ``feedback_events``: DoD-3 thresholds and the nightly roadmap driver
+    read it, and a metric that improves because its denominator was
+    quietly narrowed is the failure this decomposition exists to expose.
     """
 
     packs: int = 0
@@ -262,6 +285,18 @@ class ServeAttributionReport(TrellisModel):
     feedback_events: int = 0
     feedback_attributed: int = 0
     attribution_rate: float = 0.0
+    #: Feedback events naming a ``pack_id`` — the population where
+    #: attribution is possible at all, and the exact predicate
+    #: ``join_pack_feedback`` uses to decide whether an event can join.
+    pack_targeted_feedback: int = 0
+    #: Of those, the events that cited at least one element.
+    pack_targeted_attributed: int = 0
+    #: ``pack_targeted_attributed / pack_targeted_feedback``. Zero when no
+    #: pack-targeted feedback exists — which reads as "no evidence", not
+    #: as "nobody cited".
+    pack_attribution_rate: float = 0.0
+    #: Feedback naming no pack. Structurally unjoinable, legitimately so.
+    untargeted_feedback: int = 0
 
 
 class BackendHealthReport(TrellisModel):
@@ -398,16 +433,21 @@ def summarize_serve_attribution(
             packs_with_items += 1
 
     feedback = attributed = 0
+    pack_targeted = pack_targeted_attributed = 0
     for event in event_log.get_events(
         event_type=EventType.FEEDBACK_RECORDED, since=since, limit=limit
     ):
         feedback += 1
-        if (
-            event.payload.get("helpful_item_ids")
-            or event.payload.get("unhelpful_item_ids")
-            or event.payload.get("followed_advisory_ids")
-        ):
+        # Both predicates come from ``trellis.feedback.attribution`` so the
+        # health surface and the MCP boundary cannot drift on what
+        # "attributed" or "pack-targeted" means in one deployment.
+        is_attributed = payload_is_attributed(event.payload)
+        if is_attributed:
             attributed += 1
+        if payload_pack_id(event.payload):
+            pack_targeted += 1
+            if is_attributed:
+                pack_targeted_attributed += 1
 
     return ServeAttributionReport(
         packs=packs,
@@ -416,6 +456,12 @@ def summarize_serve_attribution(
         feedback_events=feedback,
         feedback_attributed=attributed,
         attribution_rate=round(attributed / feedback, 4) if feedback else 0.0,
+        pack_targeted_feedback=pack_targeted,
+        pack_targeted_attributed=pack_targeted_attributed,
+        pack_attribution_rate=(
+            round(pack_targeted_attributed / pack_targeted, 4) if pack_targeted else 0.0
+        ),
+        untargeted_feedback=feedback - pack_targeted,
     )
 
 
@@ -437,9 +483,25 @@ def summarize_backend_health(
             f"{_ATTRIBUTION_COVERAGE_WARN:.0%} coverage"
         )
     if serve.feedback_events > 0 and serve.feedback_attributed == 0:
+        # Same trigger condition as before — ``status`` is read by the
+        # nightly roadmap driver and must not shift under a wording
+        # change. What is new is naming *which* population is responsible,
+        # because the two call for opposite fixes: uncited pack feedback is
+        # an ergonomics problem at the feedback surface, whereas feedback
+        # that names no pack means retrieval is not happening at all, and
+        # no change to the feedback surface can reach it.
+        if serve.pack_targeted_feedback == 0:
+            detail = (
+                f"all {serve.feedback_events} name no pack, so none could "
+                "join — retrieval is not happening before the graded work"
+            )
+        else:
+            detail = (
+                f"{serve.pack_targeted_feedback} named a pack and cited nothing from it"
+            )
         reasons.append(
             f"{serve.feedback_events} feedback event(s), none carrying item "
-            "attribution — demote/promote loops receive zero signal"
+            f"attribution ({detail}) — demote/promote loops receive zero signal"
         )
 
     return BackendHealthReport(
