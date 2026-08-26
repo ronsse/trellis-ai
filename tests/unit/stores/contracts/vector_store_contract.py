@@ -110,6 +110,53 @@ class VectorStoreContractTests:
         store.upsert("a", _vec(0, 1, 0))
         assert store.count() == 1
 
+    def test_get_then_reupsert_preserves_vector(self, store: VectorStore) -> None:
+        """A read-modify-write of metadata alone must not disturb the embedding.
+
+        This is the store-level guarantee the post-embed metadata sync
+        depends on (``trellis.core.vector_metadata.sync_vector_metadata``,
+        and ``trellis.mutate.handlers._sync_vector_lifecycle`` before it):
+        both refresh a row's metadata by feeding ``get()``'s ``vector`` back
+        into ``upsert()``, precisely so nothing is re-embedded. If a backend
+        hands back a vector shape its own ``upsert`` cannot accept, that
+        round-trip breaks — which is not hypothetical, since #339 found
+        ``pgvector`` 0.5.0 returning a ``Vector`` object that raised
+        ``TypeError`` on iteration where 0.4.x returned a list.
+
+        Pinned here rather than per backend so every current and future
+        backend inherits it.
+        """
+        original = _vec(0.1, 0.2, 0.3)
+        store.upsert("a", original, metadata={"content_tags": {"q": "standard"}})
+        row = store.get("a")
+        assert row is not None
+
+        store.upsert("a", row["vector"], {"content_tags": {"q": "noise"}})
+
+        result = store.get("a")
+        assert result is not None
+        assert result["metadata"] == {"content_tags": {"q": "noise"}}
+        assert store.count() == 1
+        for got, want in zip(result["vector"], original, strict=False):
+            assert abs(got - want) < 1e-5
+
+    def test_get_then_reupsert_keeps_row_queryable(self, store: VectorStore) -> None:
+        """…and the re-upserted row is still found by similarity search.
+
+        Preserving the stored floats is not sufficient on backends where the
+        vector lives in an index — a metadata-only rewrite must leave the row
+        retrievable, or the sync would silently un-index everything it
+        repaired.
+        """
+        store.upsert("a", _vec(1, 0, 0), metadata={"v": 1})
+        row = store.get("a")
+        assert row is not None
+        store.upsert("a", row["vector"], {"v": 2})
+
+        results = store.query(_vec(1, 0, 0), top_k=1)
+        assert [r["item_id"] for r in results] == ["a"]
+        assert results[0]["metadata"] == {"v": 2}
+
     # ------------------------------------------------------------------
     # Metadata round-trip
     # ------------------------------------------------------------------

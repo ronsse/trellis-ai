@@ -12,6 +12,7 @@ from rich.console import Console
 from rich.table import Table
 
 from trellis.analyze.domains import analyze_domains
+from trellis.core.vector_metadata import resolve_vector_store
 from trellis.extract.telemetry import analyze_extractor_fallbacks
 from trellis.learning import (
     LEARNING_NOISE_RETRY_KEY,
@@ -56,6 +57,7 @@ from trellis_cli.config import get_config_dir
 from trellis_cli.exit_codes import EXIT_INTERNAL
 from trellis_cli.output import emit_json
 from trellis_cli.stores import (
+    _get_registry,
     get_document_store,
     get_event_log,
     get_graph_store,
@@ -334,6 +336,9 @@ def apply_noise_tags(
     """
     event_log = get_event_log()
     document_store = get_document_store()
+    # #338: a demotion that reaches only the document store leaves the
+    # semantic axis serving the item's pre-demotion snapshot.
+    vector_store = resolve_vector_store(_get_registry())
 
     with wrap_cli_meta_analysis(
         agent_suffix="analyze",
@@ -345,6 +350,7 @@ def apply_noise_tags(
             document_store,
             days=days,
             min_appearances=min_appearances,
+            vector_store=vector_store,
         )
         if _meta_record.enabled and report.noise_candidates:
             _meta_record.produced_finding(

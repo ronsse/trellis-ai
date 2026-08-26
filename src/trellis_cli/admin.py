@@ -2270,3 +2270,14 @@ from trellis_cli.admin_reindex_vectors import (  # noqa: E402
 )
 
 _register_reindex_vectors(admin_app)
+
+
+# ---------------------------------------------------------------------------
+# resync-vector-metadata — post-embed metadata divergence repair (#338)
+# ---------------------------------------------------------------------------
+
+from trellis_cli.admin_resync_vector_metadata import (  # noqa: E402
+    register as _register_resync_vector_metadata,
+)
+
+_register_resync_vector_metadata(admin_app)

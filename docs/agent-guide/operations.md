@@ -195,7 +195,9 @@ By default document ingestion is write-only to the DocumentStore — the documen
 
 The flag applies identically across the three document-ingest paths: the REST `POST /api/v1/documents`, the REST `POST /api/v1/evidence`, and the MCP `save_memory` tool. It requires an `embeddings:` block in `config.yaml` (or `TRELLIS_EMBEDDING_FN`) *and* a configured vector store — when either is missing the hook logs a warning and no-ops. Embedding always runs *after* the document is durably stored and is fully fail-soft: a broken or unreachable embedder is logged and swallowed, never failing the ingest.
 
-The vector row's metadata carries a `content` excerpt (500 chars — what `SemanticSearch` renders as the pack excerpt), the document metadata, `doc_id`, and a `created_at` recency stamp. Note that metadata-only re-puts (e.g. enrichment tag writes) do not re-embed; run the backfill with `--force` to refresh vector metadata.
+The vector row's metadata carries a `content` excerpt (500 chars — what `SemanticSearch` renders as the pack excerpt), the document metadata, `doc_id`, and a `created_at` recency stamp.
+
+**That metadata is a snapshot taken at embed time.** A metadata-only re-put to the document store does not re-embed, so anything written to a document *after* it was embedded is invisible to `SemanticSearch` unless something mirrors it across. Two writers now do: retention's archive/restore mirrors the `lifecycle` stamp (#337), and the classify layer — `apply_noise_tags` and `reclassify_item` — mirrors `content_tags` / `auto_importance` (#338), both through `trellis.core.vector_metadata.sync_vector_metadata`, a metadata-only re-upsert that re-embeds nothing. Rows that diverged **before** those writers existed are repaired by `trellis admin resync-vector-metadata` (below), not by `reindex-vectors --force`, which would pay one embedding call per document to fix metadata already sitting in the document store for free.
 
 That stored excerpt is produced by `truncate_excerpt` **at embed time**, not at retrieval time (#310): `build_vector_row` is the last point on the semantic path that still holds the full document, so it is the only point where the cut can break on a boundary and can name how much it dropped (`… [+12.4k chars]`). Retrieval re-runs `truncate_excerpt` over the stored string, which is a no-op for rows this hook wrote. Rows embedded before #310 hold a raw `content[:500]` slice and keep their mid-word cut until re-embedded — `trellis admin reindex-vectors --force` rewrites them through the same shared builder.
 
@@ -223,6 +225,31 @@ This command does **not** require the `TRELLIS_ENABLE_EMBED_ON_INGEST` flag — 
 
 ```json
 {"status": "ok", "scanned": 240, "embedded": 198, "skipped_existing": 30, "skipped_empty": 12, "errors": 0, "dry_run": false}
+```
+
+### `trellis admin resync-vector-metadata` (divergence repair)
+
+Re-sync stale vector-row metadata from the document store. Pages the DocumentStore, compares each document against its vector row on `content_tags` / `auto_importance`, and metadata-only re-upserts the ones that disagree — **calling no embedder and needing none configured**.
+
+```bash
+trellis admin resync-vector-metadata [--batch-size <n>] [--limit <n>] [--dry-run] [--format text|json]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--batch-size` | `500` | Documents per `list_documents` page. |
+| `--limit` | `0` (all) | Stop after scanning this many documents. |
+| `--dry-run` | off | Count divergent rows without rewriting any. |
+| `--format` | `text` | `text` or `json`. |
+
+This is the one-time repair for rows written before the write-through shipped (#338 measured 45 noise-tagged documents in production, none of whose vector rows agreed — so the default `signal_quality="noise"` exclusion could not hold for any of them on the semantic axis). Documents with no vector row are counted under `no_vector_row`, not as errors — embed-on-ingest is opt-in. Per-row failures are counted and logged, never fatal.
+
+It is **idempotent**: a row already in agreement is not rewritten, so a second run reports `repaired: 0`. That makes it safe to schedule and turns "is the write-through holding?" into a question with an answer — a steady-state run reporting non-zero means some writer is still bypassing it.
+
+**JSON output:**
+
+```json
+{"status": "ok", "scanned": 1019, "divergent": 45, "repaired": 45, "no_vector_row": 109, "errors": 0, "keys": ["content_tags", "auto_importance"], "dry_run": false}
 ```
 
 #### Document → content tags (opt-in)

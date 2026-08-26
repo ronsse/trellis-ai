@@ -64,6 +64,7 @@ from trellis.classify.factory import (
 )
 from trellis.classify.refresh import DEFAULT_PAGE_SIZE, reclassify_stale
 from trellis.classify.shadow import compare_shadow_to_live, shadow_classify_stale
+from trellis.core.vector_metadata import resolve_vector_store
 from trellis.learning import domain_normalization as dn
 from trellis.learning.domain_normalization import (
     analyze_domain_alias_candidates,
@@ -182,6 +183,10 @@ def backfill(
         page_size=page_size,
         include_domain=include_domain,
         dry_run=dry_run,
+        # Dry runs sync nothing either — ``reclassify_item`` returns before
+        # the write. #338: without this the backfill's tags reach the
+        # document store and never the vector row the semantic axis reads.
+        vector_store=None if dry_run else resolve_vector_store(registry),
     )
 
     summary = _summary(result, dry_run=dry_run, include_domain=include_domain)

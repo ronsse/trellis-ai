@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -19,6 +20,7 @@ from trellis.classify.refresh import (
     reclassify_stale,
 )
 from trellis.stores.base.event_log import EventType
+from trellis.stores.base.vector import VectorStore
 
 
 class _StubClassifier:
@@ -947,3 +949,93 @@ class TestReclassifyDryRun:
         live_doc = store.get("doc-a")
         assert live_doc is not None
         assert live_doc["metadata"]["content_tags"]
+
+
+class TestVectorWriteThrough:
+    """A backfill's tags have to reach the vector row too (trellis-ai#338).
+
+    ``trellis classify backfill`` re-tags documents that were embedded long
+    ago. A vector row's metadata is an embed-time snapshot, so without the
+    mirror the freshly-derived tags are invisible to
+    :class:`~trellis.retrieve.strategies.SemanticSearch` — the same defect
+    the demote loop had, on the path that tagged the corpus in the first
+    place.
+    """
+
+    @staticmethod
+    def _pipeline() -> ClassifierPipeline:
+        return ClassifierPipeline(
+            classifiers=[
+                _StubClassifier(
+                    "stub",
+                    tags={"domain": ["engineering"], "content_type": ["procedure"]},
+                )
+            ]
+        )
+
+    @staticmethod
+    def _vector_store(metadata: dict[str, Any] | None = None) -> Any:
+        store = MagicMock(spec=VectorStore)
+        store.get.return_value = {
+            "item_id": "doc-1",
+            "vector": [0.1, 0.2, 0.3],
+            "metadata": metadata if metadata is not None else {"content": "excerpt"},
+        }
+        return store
+
+    def test_refreshed_tags_reach_the_vector_row(self) -> None:
+        store = _InMemoryDocStore()
+        store.put("doc-1", "a pattern for retrying network calls", {})
+        vector_store = self._vector_store()
+
+        reclassify_item(
+            "doc-1",
+            pipeline=self._pipeline(),
+            document_store=store,
+            vector_store=vector_store,
+        )
+
+        vector_store.upsert.assert_called_once()
+        _, vector, metadata = vector_store.upsert.call_args.args
+        assert vector == [0.1, 0.2, 0.3]
+        assert metadata["content_tags"]["content_type"] == "procedure"
+        assert metadata["content"] == "excerpt"
+
+    def test_dry_run_writes_nothing(self) -> None:
+        """A dry run returns before the document write, so before the mirror."""
+        store = _InMemoryDocStore()
+        store.put("doc-1", "a pattern for retrying network calls", {})
+        vector_store = self._vector_store()
+
+        reclassify_item(
+            "doc-1",
+            pipeline=self._pipeline(),
+            document_store=store,
+            vector_store=vector_store,
+            dry_run=True,
+        )
+
+        vector_store.upsert.assert_not_called()
+
+    def test_batch_forwards_the_store(self) -> None:
+        store = _InMemoryDocStore()
+        store.put("doc-1", "a pattern for retrying network calls", {})
+        vector_store = self._vector_store()
+
+        reclassify_stale(
+            pipeline=self._pipeline(),
+            document_store=store,
+            vector_store=vector_store,
+        )
+
+        vector_store.upsert.assert_called_once()
+
+    def test_omitting_the_store_still_refreshes(self) -> None:
+        store = _InMemoryDocStore()
+        store.put("doc-1", "a pattern for retrying network calls", {})
+
+        outcome = reclassify_item(
+            "doc-1", pipeline=self._pipeline(), document_store=store
+        )
+
+        assert outcome.refreshed is True
