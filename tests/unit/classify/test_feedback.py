@@ -13,6 +13,7 @@ from unittest.mock import MagicMock
 
 from trellis.classify.feedback import apply_noise_tags
 from trellis.stores.base.document import DocumentStore
+from trellis.stores.base.vector import VectorStore
 
 
 def _make_store(docs: dict[str, dict]) -> MagicMock:
@@ -118,3 +119,87 @@ class TestPartialBatch:
         updated = apply_noise_tags(["doc_present", "doc_missing"], store)
         assert updated == 1
         assert store.put.call_count == 1
+
+
+class TestVectorWriteThrough:
+    """The demotion has to reach the vector row too (trellis-ai#338).
+
+    A vector row's metadata is a snapshot taken at embed time, so a
+    demotion written only through ``document_store.put`` leaves
+    ``SemanticSearch`` serving the item's pre-demotion tags. Production
+    measured 45 noise-tagged documents and not one whose row agreed.
+    """
+
+    @staticmethod
+    def _docs() -> dict[str, dict]:
+        return {
+            "doc1": {
+                "content": "noisy content",
+                "metadata": {"content_tags": {"signal_quality": "standard"}},
+            }
+        }
+
+    def test_mirrors_the_tags_onto_the_vector_row(self) -> None:
+        store = _make_store(self._docs())
+        vector_store = MagicMock(spec=VectorStore)
+        vector_store.get.return_value = {
+            "item_id": "doc1",
+            "vector": [0.1, 0.2, 0.3],
+            "metadata": {"content": "excerpt", "content_tags": {}},
+        }
+
+        apply_noise_tags(["doc1"], store, vector_store)
+
+        vector_store.upsert.assert_called_once()
+        item_id, _vector, metadata = vector_store.upsert.call_args.args
+        assert item_id == "doc1"
+        assert metadata["content_tags"]["signal_quality"] == "noise"
+
+    def test_re_embeds_nothing(self) -> None:
+        """The row's own vector is handed straight back — metadata-only."""
+        store = _make_store(self._docs())
+        vector_store = MagicMock(spec=VectorStore)
+        vector_store.get.return_value = {
+            "item_id": "doc1",
+            "vector": [0.1, 0.2, 0.3],
+            "metadata": {"content": "excerpt"},
+        }
+
+        apply_noise_tags(["doc1"], store, vector_store)
+
+        _, vector, metadata = vector_store.upsert.call_args.args
+        assert vector == [0.1, 0.2, 0.3]
+        assert metadata["content"] == "excerpt"
+
+    def test_document_write_happens_first(self) -> None:
+        """The document row is the authority a re-run repairs from."""
+        store = _make_store(self._docs())
+        vector_store = MagicMock(spec=VectorStore)
+        vector_store.get.return_value = {
+            "item_id": "doc1",
+            "vector": [0.1],
+            "metadata": {},
+        }
+        order: list[str] = []
+        store.put.side_effect = lambda *a, **k: order.append("document")
+        vector_store.upsert.side_effect = lambda *a, **k: order.append("vector")
+
+        apply_noise_tags(["doc1"], store, vector_store)
+
+        assert order == ["document", "vector"]
+
+    def test_vector_backend_failure_does_not_lose_the_demotion(self) -> None:
+        """Fail soft: the tag landed, so the call must not raise."""
+        store = _make_store(self._docs())
+        vector_store = MagicMock(spec=VectorStore)
+        vector_store.get.side_effect = RuntimeError("vector backend down")
+
+        assert apply_noise_tags(["doc1"], store, vector_store) == 1
+        store.put.assert_called_once()
+
+    def test_omitting_the_vector_store_still_demotes(self) -> None:
+        """A deployment with no vector store can still demote a document."""
+        store = _make_store(self._docs())
+
+        assert apply_noise_tags(["doc1"], store) == 1
+        store.put.assert_called_once()

@@ -455,10 +455,18 @@ guarantee was claimed.** Fixed by mirroring the stamp onto the vector row
 (metadata-only re-`upsert`, nothing re-embedded), and a re-run now repairs
 rows stamped before the sync existed.
 
-*This has a pre-existing sibling, filed separately:* the same staleness
-means `signal_quality="noise"` written by `apply_noise_tags` never reaches
-the vector row either, so noise exclusion has silently not held on the
-semantic path.
+*This had a pre-existing sibling, filed separately and since fixed in #338:*
+the same staleness meant `signal_quality="noise"` written by
+`apply_noise_tags` never reached the vector row either, so noise exclusion
+had silently not held on the semantic path. That fix generalised the mirror
+into `trellis.core.vector_metadata.sync_vector_metadata` and added
+`trellis admin resync-vector-metadata` as the backfill for rows that
+diverged before either writer existed. It also found that a *correctly
+synced* vector row would still have been served: `SemanticSearch` strips
+`content_tags` from the filters it forwards, so the store-side noise
+predicate never reached that axis at all. The boundary is now enforced at
+the collect seam (`trellis.retrieve.noise.exclude_noise`), beside
+`exclude_archived` and for the same reason.
 
 **2. Restore was not durable.** `retention.restore` un-archives but does not
 re-classify — the noise tag that selected the item is the classify layer's

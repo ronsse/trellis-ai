@@ -33,6 +33,7 @@ from trellis.stores.base.event_log import EventLog, EventType
 
 if TYPE_CHECKING:
     from trellis.ops.registry import ParameterRegistry
+    from trellis.stores.base.vector import VectorStore
 
 logger = structlog.get_logger(__name__)
 
@@ -338,6 +339,7 @@ def run_effectiveness_feedback(
     days: int = 30,
     min_appearances: int = 2,
     registry: ParameterRegistry | None = None,
+    vector_store: VectorStore | None = None,
 ) -> EffectivenessReport:
     """Analyse effectiveness **and** apply noise tags in one call.
 
@@ -346,7 +348,10 @@ def run_effectiveness_feedback(
 
     1. Run :func:`analyze_effectiveness` to find noise candidates.
     2. Call :func:`~trellis.classify.feedback.apply_noise_tags` to set
-       ``signal_quality="noise"`` on those items in the document store.
+       ``signal_quality="noise"`` on those items in the document store
+       **and mirror the demotion onto their vector rows** when
+       ``vector_store`` is supplied (#338 — without it the semantic axis
+       keeps serving the pre-demotion snapshot).
     3. Log the outcome for operational visibility.
 
     Returns the :class:`EffectivenessReport` (unchanged from step 1).
@@ -361,7 +366,9 @@ def run_effectiveness_feedback(
     )
 
     if report.noise_candidates:
-        updated = apply_noise_tags(report.noise_candidates, document_store)
+        updated = apply_noise_tags(
+            report.noise_candidates, document_store, vector_store
+        )
         logger.info(
             "effectiveness_feedback_applied",
             noise_candidates=len(report.noise_candidates),
