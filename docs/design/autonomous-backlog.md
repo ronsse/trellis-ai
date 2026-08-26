@@ -87,6 +87,76 @@ nothing. This is the single biggest constraint on the learning loop and it is an
 must be hard to omit. Acceptance: attribution rate measurably rises over a 7-day window
 after the change; the mechanism does not fabricate attribution when the caller has none.
 
+## Wave 1b — token economics: prove memory returns more than it costs
+
+Added 2026-08-26 at operator request. The thesis of this system is that injected
+memory is worth more than the tokens it consumes. **Nothing currently computes that
+ratio**, so the thesis is an assumption. This wave makes it a number.
+
+State of the instrumentation, measured 2026-08-26 — most of it already exists:
+
+| Half of the ratio | Where it lives | Joinable? |
+|---|---|---|
+| Cost per *item* | `PACK_ASSEMBLED.injected_items[].estimated_tokens` | **yes** |
+| Benefit per *item* | `FEEDBACK_RECORDED.helpful_item_ids` / `unhelpful_item_ids` | **yes** |
+| Cost per *call* | `TOKEN_TRACKED.response_tokens` (+ `budget_tokens`, `trimmed`) | **no — see F1** |
+| Cost in dollars | `trellis_cost.summarize_trellis_cost` → `overhead_dollars`, `by_operation` | n/a |
+
+`trellis_cost.py`'s own docstring names the missing piece as deliberately out of
+scope: *"what this deliberately does not claim: the agent's total spend ... or a ratio
+against it."* This wave closes exactly that.
+
+**F1 — Give `TOKEN_TRACKED` a `pack_id`, then compute value-per-token.** `class: panel`
+The item-level join is arithmetically available today and nothing performs it. The
+call-level join is blocked by **one missing field**: `track_token_usage`
+([`retrieve/token_tracker.py:39`](../../src/trellis/retrieve/token_tracker.py)) emits
+`layer` / `operation` / `response_tokens` / `budget_tokens` / `trimmed` / `agent_id`
+and **no `pack_id`**, so response cost cannot be attributed to the pack that caused it.
+Add it (free-form payload, additive, no schema break), then build the analyzer.
+
+Primary metric — **useful-token fraction**: of the tokens injected into a pack, what
+share went to items later marked helpful? This is directly actionable: if most injected
+tokens land on items never cited, the pack is too wide and trimming is justified by
+measurement rather than by taste. Report per strategy, per item type, and per intent
+family, because the answer almost certainly differs by axis and a single global number
+would hide which axis to trim.
+
+Acceptance:
+- `trellis analyze value` (or equivalent) reports useful-token fraction and
+  dollars-per-cited-item over a window, with `--format json`.
+- It reports **coverage** alongside every ratio, and refuses to state a ratio computed
+  from too few attributed packs. See the dependency note below — a number derived from
+  32% attribution that does not say so is exactly the measurement-wired-to-a-constant
+  failure this repo keeps finding.
+- Sectioned packs are handled or explicitly excluded with a stated reason
+  (`build_sectioned` emits no `injected_items[]`, so it contributes zero rows).
+
+**Depends on A4.** The benefit half is only as good as feedback attribution, currently
+**32%**. F1 can be built first and will report honest low coverage; it should not be
+*trusted* until A4 raises attribution. Build order A4 → F1 is preferable; F1 before A4
+is acceptable only if the coverage refusal above is implemented first.
+
+**F2 — Act on the measurement: trimming and disclosure policy.** `class: panel`
+Once F1 produces a number, the levers become tunable instead of guessed:
+- **Excerpt width** — `truncate_excerpt` and the embed-time cut in `build_vector_row`.
+- **Progressive disclosure** — #305 shipped index-mode packs and `get_items` batch
+  fetch. The open question F1 answers is whether index-mode should become the
+  **default** for exploratory intents, with full excerpts fetched only for items the
+  agent actually opens. That trade is currently made by taste; it should be made by the
+  useful-token fraction of each mode.
+- **Skill size** — the retrieve/record skills are themselves injected context on every
+  session. They are a fixed per-session cost and belong in the same budget.
+Acceptance: each lever change is justified by a before/after useful-token fraction on
+the same window, not by a plausibility argument.
+
+**F3 — Counterfactual benefit (deferred, named so it is not forgotten).** `class: human`
+F1 measures *precision of what was served* — the honest name for it is a value-density
+proxy, not benefit. True benefit is counterfactual: does an agent with memory
+outperform the same agent without it? That needs a withhold arm — deliberately serving
+empty packs for a sampled fraction of tasks and comparing outcomes. That is a decision
+about degrading live retrieval to learn something, which is an operator call, not a
+panel one. Do not let F1's number get described as "benefit" in prose; it is not.
+
 ## Wave 2 — retrieval quality
 
 **B1 — [#298](https://github.com/ronsse/trellis-ai/issues/298) same-day trace/artifact stubs outrank topical content.** `class: panel`
