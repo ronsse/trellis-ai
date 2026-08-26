@@ -23,7 +23,10 @@ class TestOperation:
 
     def test_operation_count(self) -> None:
         # 17 base + OBSERVATION_RECORD + MEASUREMENT_RECORD (Item 1 Phase 1)
-        assert len(Operation) == 19
+        # + RETENTION_RESTORE (adr-retention-prune.md §6 — the governed
+        # inverse of retention.prune, without which phase-one archival's
+        # "walk it back by re-stamping" claim has no sanctioned path)
+        assert len(Operation) == 20
 
 
 class TestCommand:

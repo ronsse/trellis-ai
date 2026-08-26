@@ -10,6 +10,7 @@ import structlog
 from trellis.core.base import utc_now
 from trellis.core.hashing import content_hash as _content_hash
 from trellis.core.ids import generate_ulid
+from trellis.schemas.classification import LIST_FACETS
 from trellis.stores.base.document import DocumentStore
 from trellis.stores.base.tag_filters import normalize_facet_filter
 from trellis.stores.postgres.base import PostgresStoreBase
@@ -38,6 +39,26 @@ _CREATE_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_documents_hash ON documents(content_hash)",
     "CREATE INDEX IF NOT EXISTS idx_documents_tsv ON documents USING GIN(tsv)",
 ]
+
+
+#: An OR-semantics ``tsquery`` over exactly the lexemes ``plainto_tsquery``
+#: produces — same stemming, same stopword removal, ``|`` instead of ``&``.
+#:
+#: ``plainto_tsquery`` ANDs every term, so a natural-language intent had to
+#: appear *in full* in one document. Measured against the production corpus,
+#: ``"implement the classify layer tagging pipeline"`` matched 0 documents
+#: under AND and 267 under OR: recall fell toward zero as the intent got more
+#: specific, which is backwards, and the keyword axis is the only axis that
+#: reads ``content_tags`` — so tag filtering went dark exactly when the query
+#: was most specific. SQLite has always OR-ed (``_sanitize_fts_query`` joins
+#: with ``OR``), so this was also a silent divergence between the two
+#: backends, with every test written against the SQLite one.
+#:
+#: Results stay ordered by ``ts_rank`` and capped by ``LIMIT``, so a loose
+#: match costs rank rather than precision. The string transform is safe
+#: because ``plainto_tsquery`` emits only ``&`` — phrase operators come from
+#: ``phraseto_tsquery``, which is not used here.
+_OR_TSQUERY = "replace(plainto_tsquery('english', %s)::text, ' & ', ' | ')::tsquery"
 
 
 class PostgresDocumentStore(PostgresStoreBase, DocumentStore):
@@ -178,7 +199,7 @@ class PostgresDocumentStore(PostgresStoreBase, DocumentStore):
         if not query or not query.strip():
             return []
 
-        conditions = ["tsv @@ plainto_tsquery('english', %s)"]
+        conditions = [f"tsv @@ {_OR_TSQUERY}"]
         params: list[Any] = [query]
 
         if filters:
@@ -219,13 +240,56 @@ class PostgresDocumentStore(PostgresStoreBase, DocumentStore):
                         # which would otherwise make every tagged document
                         # invisible to domain-scoped queries. Mirrors the
                         # SQLite path's json_array_length branch.
-                        conditions.append(
-                            "(metadata -> 'content_tags' ->> %s IS NULL "
-                            "OR metadata -> 'content_tags' -> %s = '[]'::jsonb "
-                            f"OR metadata -> 'content_tags' ->> %s "
-                            f"{membership} ({placeholders}))"
-                        )
-                        params.extend([facet, facet, facet, *values_list])
+                        if facet in LIST_FACETS:
+                            # A list facet stored as ``["finance"]`` reads
+                            # through ``->>`` as the *text* '["finance"]',
+                            # which matches no value — so before this branch
+                            # existed all three conditions were false and a
+                            # correctly tagged document was hard-excluded
+                            # from its own domain query. On the deployed
+                            # Postgres backend, that was every tagged
+                            # document. Mirrors the SQLite ``json_each`` path.
+                            #
+                            # The CASE is not defensive padding: the stored
+                            # shape is genuinely either
+                            # (``DocumentMetadata.domain`` is
+                            # ``list[str] | str | None``), and
+                            # ``jsonb_array_elements_text`` *raises* on a
+                            # scalar rather than returning nothing — an error
+                            # that would take down the whole query, not just
+                            # mis-filter it. Wrapping a scalar into a
+                            # one-element array makes both shapes take one
+                            # path, which is what SQLite's ``json_each``
+                            # already does.
+                            exists = (
+                                "EXISTS (SELECT 1 FROM jsonb_array_elements_text("
+                                "CASE WHEN jsonb_typeof("
+                                "metadata -> 'content_tags' -> %s) = 'array' "
+                                "THEN metadata -> 'content_tags' -> %s "
+                                "ELSE jsonb_build_array("
+                                "metadata -> 'content_tags' -> %s) END"
+                                f") AS v WHERE v IN ({placeholders}))"
+                            )
+                            if operator == "not_in":
+                                exists = f"NOT {exists}"
+                            conditions.append(
+                                "(metadata -> 'content_tags' -> %s IS NULL "
+                                "OR metadata -> 'content_tags' -> %s "
+                                "= '[]'::jsonb "
+                                f"OR {exists})"
+                            )
+                            params.extend(
+                                [facet, facet, facet, facet, facet, *values_list]
+                            )
+                        else:
+                            conditions.append(
+                                "(metadata -> 'content_tags' ->> %s IS NULL "
+                                "OR metadata -> 'content_tags' -> %s "
+                                "= '[]'::jsonb "
+                                f"OR metadata -> 'content_tags' ->> %s "
+                                f"{membership} ({placeholders}))"
+                            )
+                            params.extend([facet, facet, facet, *values_list])
                 elif isinstance(value, str | int | float | bool):
                     conditions.append("metadata->>%s = %s")
                     params.extend([key, str(value)])
@@ -233,10 +297,11 @@ class PostgresDocumentStore(PostgresStoreBase, DocumentStore):
         where_clause = " AND ".join(conditions)
         params.append(limit)
 
+        rank_query = _OR_TSQUERY
         sql = f"""
             SELECT doc_id, content, content_hash, metadata,
                    created_at, updated_at,
-                   ts_rank(tsv, plainto_tsquery('english', %s)) AS rank
+                   ts_rank(tsv, {rank_query}) AS rank
             FROM documents
             WHERE {where_clause}
             ORDER BY rank DESC

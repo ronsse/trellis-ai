@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 from trellis_workers.session_capture import gating
-from trellis_workers.session_capture.models import CandidateMemory, SessionDigest
+from trellis_workers.session_capture.models import (
+    ROLE_USER,
+    CandidateMemory,
+    SessionDigest,
+)
 
 from .conftest import good_candidate
 
 
 def _digest(**kwargs: object) -> SessionDigest:
     digest = SessionDigest(session_id="sess-fake-0001", source_path="x")
-    digest.user_texts.append("did something")
+    digest.add_turn(ROLE_USER, "did something")
     for key, value in kwargs.items():
         setattr(digest, key, value)
     return digest
@@ -59,9 +63,18 @@ def test_worthiness_rejects_unattributed() -> None:
     assert not gating.passes_worthiness(cand)
 
 
-def test_worthiness_rejects_derivable() -> None:
+def test_worthiness_records_but_does_not_gate_on_non_derivable() -> None:
+    """``non_derivable`` is collected, not enforced.
+
+    It was a hard requirement until measured: hermes3:8b returned False on
+    9 of 9 candidates distilled from real sessions, so the gate rejected
+    everything and the sweep could never write a memory. The field is still
+    recorded (it rides the #264 training pair), but a boolean that measured
+    out constant cannot decide whether a memory is kept.
+    """
     cand = CandidateMemory(**good_candidate(non_derivable=False))
-    assert not gating.passes_worthiness(cand)
+    assert cand.non_derivable is False
+    assert gating.passes_worthiness(cand)
 
 
 def test_worthiness_rejects_non_actionable() -> None:

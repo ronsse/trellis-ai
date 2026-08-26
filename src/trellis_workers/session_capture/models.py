@@ -27,6 +27,28 @@ class ToolCall:
     is_error: bool = False
 
 
+#: Turn roles, used as the ``salient_text`` speaker labels.
+ROLE_USER = "user"
+ROLE_ASSISTANT = "assistant"
+
+
+@dataclass
+class Turn:
+    """One natural-language turn, in transcript order.
+
+    Order is the point. The digest used to hold two independent lists and
+    join them user-block-then-assistant-block, which is not a conversation:
+    on a long session the judge saw a run of opening user turns, then a run
+    of closing assistant turns, and never a single adjacent pair — so a user
+    correction was structurally separated from the thing it corrected.
+    """
+
+    role: str
+    text: str
+    #: Whether the turn came from a sub-agent (``isSidechain``) record.
+    sidechain: bool = False
+
+
 @dataclass
 class SessionDigest:
     """A secret-free structured view of one transcript file.
@@ -43,23 +65,75 @@ class SessionDigest:
     sidechain_records: int = 0
     summary_records: int = 0
     unknown_records: int = 0
-    user_texts: list[str] = field(default_factory=list)
-    assistant_texts: list[str] = field(default_factory=list)
+    #: Natural-language turns in transcript order — the source of truth.
+    #: ``user_texts`` / ``assistant_texts`` are role-filtered views of this.
+    turns: list[Turn] = field(default_factory=list)
     tool_calls: list[ToolCall] = field(default_factory=list)
     has_error: bool = False
     has_correction: bool = False
+    #: ``True`` when every recovered turn came from sub-agent records — a
+    #: dedicated ``agent-*.jsonl`` transcript rather than a main session.
+    #: Rides the captured memory's metadata so a reader can tell that the
+    #: "user" turns were an orchestrator's prompt, not a person's.
+    is_subagent: bool = False
+
+    def add_turn(self, role: str, text: str, *, sidechain: bool = False) -> None:
+        """Append one turn, preserving transcript order."""
+        self.turns.append(Turn(role=role, text=text, sidechain=sidechain))
+
+    def resolve_thread(self) -> None:
+        """Decide which turns are *this transcript's* conversation.
+
+        The sidechain-exclusion rule exists so that a file mixing a main
+        thread with interleaved sub-agent records does not read as one linear
+        conversation. That is still right — for a mixed file. But Claude Code
+        now writes each sub-agent thread to its own ``agent-*.jsonl``, where
+        *every* record is sidechain, and a blanket skip discards the entire
+        file. Measured on a real corpus: 158 of 257 transcripts were pure
+        sidechain, 0 were mixed, so the rule was discarding 61% of the corpus
+        (and its largest files) to protect against a shape that no longer
+        occurs (#332).
+
+        So the rule is narrowed to what it always said: drop sidechain turns
+        only when there is a main thread for them to interleave with. A file
+        that is *only* sub-agent turns is that sub-agent's conversation, and
+        is kept — marked, so nothing downstream mistakes the orchestrator's
+        prompt for a human's.
+        """
+        if any(not turn.sidechain for turn in self.turns):
+            self.turns = [turn for turn in self.turns if not turn.sidechain]
+            self.is_subagent = False
+        elif self.turns:
+            self.is_subagent = True
+
+    @property
+    def user_texts(self) -> list[str]:
+        """User turns, in order. Read-only view over :attr:`turns`."""
+        return [t.text for t in self.turns if t.role == ROLE_USER]
+
+    @property
+    def assistant_texts(self) -> list[str]:
+        """Assistant turns, in order. Read-only view over :attr:`turns`."""
+        return [t.text for t in self.turns if t.role == ROLE_ASSISTANT]
 
     @property
     def is_empty(self) -> bool:
         """``True`` when no natural-language turns were recovered."""
-        return not self.user_texts and not self.assistant_texts
+        return not self.turns
 
     @property
     def salient_text(self) -> str:
-        """Distiller input: the natural-language turns joined, no tool I/O."""
-        parts = [f"USER: {text}" for text in self.user_texts]
-        parts.extend(f"ASSISTANT: {text}" for text in self.assistant_texts)
-        return "\n".join(parts)
+        """Distiller input: the turns in transcript order, no tool I/O.
+
+        Chronological by construction. The elision the distiller applies
+        keeps a head and a tail, so interleaved order is what lets a
+        surviving window contain both a request and its answer.
+        """
+        return "\n".join(
+            f"{ROLE_USER.upper() if t.role == ROLE_USER else ROLE_ASSISTANT.upper()}:"
+            f" {t.text}"
+            for t in self.turns
+        )
 
 
 @dataclass
@@ -82,6 +156,9 @@ class CandidateMemory:
     actionable: bool
     confidence: float
     session_id: str = ""
+    #: Whether the session was a sub-agent thread rather than a main session.
+    #: Stamped from the digest by the sweep, not self-reported by the judge.
+    is_subagent: bool = False
     # Leak-safe fingerprint of the session input the judge saw (for the
     # distillation training-pair event) — a hash + length, never content.
     input_hash: str = ""
@@ -106,6 +183,11 @@ class CaptureReport:
     sessions_parsed: int = 0
     sessions_triggered: int = 0
     sessions_sampled_out: int = 0
+    #: Transcripts skipped because the session ran in a throwaway directory
+    #: (see :func:`~trellis_workers.session_capture.transcripts.is_ephemeral_project`).
+    #: Its own count, never folded into ``sessions_sampled_out`` — a capture
+    #: gap reported as a sampling decision is how one stays unnoticed.
+    sessions_skipped_ephemeral: int = 0
     malformed_lines: int = 0
     candidates_distilled: int = 0
     candidates_rejected_worthiness: int = 0
@@ -135,6 +217,7 @@ class CaptureReport:
             "sessions_parsed": self.sessions_parsed,
             "sessions_triggered": self.sessions_triggered,
             "sessions_sampled_out": self.sessions_sampled_out,
+            "sessions_skipped_ephemeral": self.sessions_skipped_ephemeral,
             "malformed_lines": self.malformed_lines,
             "candidates_distilled": self.candidates_distilled,
             "candidates_rejected_worthiness": self.candidates_rejected_worthiness,

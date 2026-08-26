@@ -106,6 +106,28 @@ class EventType(StrEnum):
     #: event to the executor's ``MUTATION_EXECUTED`` audit event.
     REDACTION_APPLIED = "redaction.applied"
 
+    #: Emitted by :class:`~trellis.mutate.handlers.RetentionPruneHandler`
+    #: for every ``retention.prune`` run, dry or not. Phase one is
+    #: *archival*: the payload carries the resolved ``criteria``, per-kind
+    #: counts, the operator's ``reason``, and a **capped** sample of item
+    #: ids (``item_ids``, the ``_LINKED_SIGNAL_LIMIT`` convention — a
+    #: follow-up pointer, not an exhaustive index; ``archived`` is the
+    #: authoritative count). ``dry_run=True`` means nothing was written and
+    #: the ids are a preview of what a real run would take.
+    #: ``scan_truncated=True`` means the candidate set is a prefix of the
+    #: real population because the scan cap bit first. ``command_id`` joins
+    #: this semantic event to the executor's ``MUTATION_EXECUTED``.
+    RETENTION_PRUNED = "retention.pruned"
+
+    #: Emitted by :class:`~trellis.mutate.handlers.RetentionRestoreHandler`
+    #: when archived items are returned to ``Lifecycle.state="current"``.
+    #: A distinct verb from ``RETENTION_PRUNED`` so "what did we walk back,
+    #: and why" is a single query rather than a filter over prune events.
+    #: Payload carries the operator's ``reason``, ``restored`` / ``skipped``
+    #: counts and the item ids — restore is corrective, so the ids are the
+    #: point and are not sampled.
+    RETENTION_RESTORED = "retention.restored"
+
     # Feedback
     FEEDBACK_RECORDED = "feedback.recorded"
 
@@ -247,6 +269,19 @@ class EventType(StrEnum):
     #: ``>= min_support`` documents back into a per-document disclosure, which
     #: is the same rule :attr:`MEMORY_OP_JUDGED` follows. See ``#321`` Phase 2.
     TAG_KEYWORD_CANDIDATE = "tag_keyword.candidate"
+
+    #: Emitted by
+    #: :func:`trellis.learning.domain_normalization.analyze_domain_alias_candidates`
+    #: when a low-support ``domain`` tag looks like a spelling of a
+    #: high-support one and is worth merging. Advisory, human-gated, and for
+    #: the same reason its sibling above is: an alias map decides which
+    #: documents a domain-scoped query can *see*, so a wrong merge hides
+    #: content — in bulk, which is strictly worse than one bad keyword.
+    #: Payload carries the evidence a reviewer needs to judge the merge
+    #: (``cooccurrence_rate``, ``neighbor_overlap``, ``shared_tokens``,
+    #: ``documents_gained``) rather than a bare verdict, and omits example
+    #: item ids under the same disclosure rule.
+    DOMAIN_ALIAS_CANDIDATE = "domain_alias.candidate"
 
     # Proposal lifecycle (coding-agent self-improvement loop — Item 7).
     #: Emitted by

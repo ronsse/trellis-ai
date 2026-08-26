@@ -97,6 +97,7 @@ from trellis.learning.cooldown import (
     cooldown_blocks_emission,
     load_prior_candidates,
 )
+from trellis.learning.domain_normalization import normalize_domain_tags
 from trellis.schemas.classification import (
     LIST_FACETS,
     SHADOW_TAGS_KEY,
@@ -497,6 +498,7 @@ def _iter_shadowed(
     excluded_keywords: frozenset[str],
     scan_limit: int,
     page_size: int,
+    domain_aliases: Mapping[str, str] | None = None,
 ) -> Iterator[tuple[str, set[str], list[str]]]:
     """Yield ``(item_id, keywords, tags)`` for each usable shadowed document.
 
@@ -522,6 +524,13 @@ def _iter_shadowed(
             if not isinstance(shadow, dict):
                 continue
             tags = _facet_values(facet, shadow.get(facet))
+            if facet == "domain" and domain_aliases:
+                # Mine the *normalized* vocabulary. Without this a keyword's
+                # support is split across every spelling the model invented —
+                # `budget-hunting`, `hunting-options`, `hunting-opportunities`
+                # — so a rule that predicts the subject perfectly can sit under
+                # the support floor for each fragment and never surface.
+                tags = normalize_domain_tags(tags, domain_aliases)
             if not tags:
                 continue
             content = doc.get("content") or ""
@@ -544,6 +553,7 @@ def _scan_corpus(
     min_support: int,
     scan_limit: int,
     page_size: int,
+    domain_aliases: Mapping[str, str] | None = None,
 ) -> _Corpus:
     """Accumulate co-occurrence counts, pruning keywords that cannot qualify.
 
@@ -583,6 +593,7 @@ def _scan_corpus(
         excluded_keywords=excluded_keywords,
         scan_limit=scan_limit,
         page_size=page_size,
+        domain_aliases=domain_aliases,
     ):
         corpus.documents += 1
         for tag in tags:
@@ -610,6 +621,7 @@ def _scan_corpus(
         excluded_keywords=excluded_keywords,
         scan_limit=scan_limit,
         page_size=page_size,
+        domain_aliases=domain_aliases,
     ):
         for keyword in keywords & eligible:
             for tag in tags:
@@ -650,6 +662,7 @@ def analyze_tag_keyword_candidates(
     registry: ParameterRegistry,
     facet: str = "domain",
     known_keywords: Iterable[str] | None = None,
+    domain_aliases: Mapping[str, str] | None = None,
     emit_events: bool = True,
     scan_limit: int = DEFAULT_SCAN_LIMIT,
     page_size: int = DEFAULT_PAGE_SIZE,
@@ -671,6 +684,11 @@ def analyze_tag_keyword_candidates(
         facet: Which shadow facet to mine. ``"domain"`` is the only facet with
             a config write target (:data:`FACETS_WITH_WRITE_TARGET`); others
             are surfaced for review only.
+        domain_aliases: The operator's ``alias -> canonical`` merge map (see
+            :mod:`trellis.learning.domain_normalization`). Applied to the
+            ``domain`` facet before counting, so support accrues to the merged
+            subject instead of being split across every spelling the model
+            invented. ``None`` mines the raw vocabulary.
         known_keywords: Keywords the deterministic classifier already owns —
             pass
             :func:`~trellis.classify.classifiers.keyword.build_domain_keyword_map`'s
@@ -697,6 +715,7 @@ def analyze_tag_keyword_candidates(
         document_store,
         facet=facet,
         excluded_keywords=excluded,
+        domain_aliases=domain_aliases,
         min_support=thresholds.min_support,
         scan_limit=scan_limit,
         page_size=page_size,

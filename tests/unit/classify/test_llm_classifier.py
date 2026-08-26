@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 import pytest
 
@@ -242,3 +243,73 @@ class TestEnrichmentProducesValidContentTags:
         tags = merged.to_content_tags()
         assert tags.domain == ["ops"]
         assert tags.custom == {"some_future_facet": ["v"]}
+
+
+class TestConfidenceIsNotManufactured:
+    """A confidence the model did not report must not become a number.
+
+    The enrichment prompt used to carry ``"tag_confidence": 0.85`` in its own
+    JSON exemplar, and the parser substituted 0.8 when the field was absent.
+    Between them, every document in a 999-document production corpus recorded
+    the same confidence, and no consumer could tell a measurement from a
+    default. ``MEMORY_OP_JUDGED.confidence`` was recording that constant too.
+    """
+
+    @staticmethod
+    def _service() -> Any:
+        from unittest.mock import MagicMock
+
+        from trellis.llm.protocol import LLMClient
+        from trellis_workers.enrichment.service import EnrichmentService
+
+        return EnrichmentService(llm=MagicMock(spec=LLMClient))
+
+    _BASE = '{"tags": ["a"], "class": "reference", "summary": "s", "importance": 0.5'
+
+    def test_absent_confidence_parses_as_none_not_a_default(self) -> None:
+        result = self._service()._parse_response(self._BASE + "}")
+        assert result.tag_confidence is None
+        assert result.class_confidence is None
+
+    def test_reported_confidence_is_preserved(self) -> None:
+        result = self._service()._parse_response(
+            self._BASE + ', "tag_confidence": 0.3, "class_confidence": 0.7}'
+        )
+        assert result.tag_confidence == 0.3
+        assert result.class_confidence == 0.7
+
+    def test_a_malformed_confidence_is_none_not_a_default(self) -> None:
+        result = self._service()._parse_response(
+            self._BASE + ', "tag_confidence": "high"}'
+        )
+        assert result.tag_confidence is None
+
+    def test_the_prompt_shows_no_confidence_value_to_copy(self) -> None:
+        """The example value was echoed back verbatim instead of judged."""
+        from trellis_workers.enrichment.service import ENRICHMENT_SYSTEM_PROMPT
+
+        exemplar = ENRICHMENT_SYSTEM_PROMPT.split("Respond in JSON format")[-1]
+        assert "0.85" not in exemplar
+        assert "0.90" not in exemplar
+
+    def test_classifier_confidence_is_zero_when_the_model_said_nothing(self) -> None:
+        """ "Did not say" is not "fairly confident"."""
+        from types import SimpleNamespace
+
+        from trellis.classify.classifiers.llm import LLMFacetClassifier
+
+        class _Stub:
+            async def enrich(self, content: str, *, title: str = "") -> Any:
+                return SimpleNamespace(
+                    success=True,
+                    auto_tags=["x"],
+                    auto_class="reference",
+                    auto_importance=0.5,
+                    auto_summary="s",
+                    tag_confidence=None,
+                    class_confidence=None,
+                    error=None,
+                )
+
+        out = LLMFacetClassifier(_Stub()).classify("some content")  # type: ignore[arg-type]
+        assert out.confidence == 0.0

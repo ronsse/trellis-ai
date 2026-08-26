@@ -57,7 +57,14 @@ _OPS_WITH_SIMPLE_ARGS: list[tuple[Operation, dict[str, Any]]] = [
     (Operation.PRECEDENT_PROMOTE, {"trace_id": "t1", "title": "x", "description": "y"}),
     (Operation.PRECEDENT_UPDATE, {"precedent_id": "p1"}),
     (Operation.REDACTION_APPLY, {"target_id": "n1", "reason": "pii"}),
-    (Operation.RETENTION_PRUNE, {}),
+    # ``retention.prune`` shipped with an empty ``set()`` required-args
+    # schema, so ``{}`` used to validate against a verb that had no
+    # handler at all. Now that it is wired (adr-retention-prune.md,
+    # Option A) the alphabet has to carry a real command shape.
+    (
+        Operation.RETENTION_PRUNE,
+        {"criteria": {"noise_documents": True}, "reason": "noise"},
+    ),
 ]
 
 # Identifier-ish strings — printable, bounded, non-empty. Avoid surrogates and

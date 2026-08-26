@@ -56,9 +56,19 @@ import structlog
 import typer
 from rich.console import Console
 
-from trellis.classify.factory import CLASSIFY_CONFIG_KEY, DOMAIN_KEYWORDS_KEY
+from trellis.classify.factory import (
+    CLASSIFY_CONFIG_KEY,
+    DOMAIN_ALIASES_KEY,
+    DOMAIN_ASPECTS_KEY,
+    DOMAIN_KEYWORDS_KEY,
+)
 from trellis.classify.refresh import DEFAULT_PAGE_SIZE, reclassify_stale
 from trellis.classify.shadow import compare_shadow_to_live, shadow_classify_stale
+from trellis.learning import domain_normalization as dn
+from trellis.learning.domain_normalization import (
+    analyze_domain_alias_candidates,
+    apply_normalization,
+)
 from trellis.learning.tag_evolution import (
     DEFAULT_SCAN_LIMIT,
     PARAM_COMPONENT_ID,
@@ -78,6 +88,7 @@ if TYPE_CHECKING:
     from trellis.classify.protocol import Classifier
     from trellis.classify.refresh import BatchRefreshResult
     from trellis.classify.shadow import ShadowAgreementReport
+    from trellis.learning.domain_normalization import DomainAliasCandidate
     from trellis.learning.tag_evolution import TagKeywordCandidate
 
 logger = structlog.get_logger(__name__)
@@ -579,6 +590,11 @@ def tag_candidates(
                 for keywords in registry.domain_keyword_map().values()
                 for kw in keywords
             ],
+            # Mine the normalized vocabulary: without this a keyword's support
+            # is split across every spelling the model invented, so a rule that
+            # predicts the subject perfectly can miss the support floor on
+            # every fragment.
+            domain_aliases=registry.domain_alias_map(),
             emit_events=emit,
             scan_limit=limit,
         )
@@ -657,4 +673,194 @@ def _render_tag_candidates(
         "\n[yellow]Review before promoting: 'domain' hard-excludes on "
         "mismatch, so a wrong keyword hides documents from domain-scoped "
         "queries rather than re-ranking them.[/yellow]"
+    )
+
+
+def _domain_normalization_registry(registry: object) -> ParameterRegistry:
+    """Resolve the normalizer's thresholds, seeding recommended defaults if absent.
+
+    Same shape and same reasoning as :func:`_tag_evolution_registry`: the
+    analyzer keeps its no-silent-defaults rule, and the default is chosen
+    *here*, loudly, by the CLI — because otherwise the command hard-fails on
+    every deployment nobody has hand-seeded, which is every deployment.
+    """
+    persistent = ParameterRegistry(registry.operational.parameter_store)  # type: ignore[attr-defined]
+    scope = ParameterScope(component_id=dn.PARAM_COMPONENT_ID)
+    if all(k in persistent.get_values(scope) for k in dn.REQUIRED_PARAM_KEYS):
+        return persistent
+
+    err_console.print(
+        "[yellow]learning.domain_normalization thresholds are not seeded — "
+        "using recommended defaults for this run. Seed them to make the run "
+        "reproducible.[/yellow]"
+    )
+    logger.warning(
+        "domain_normalization.parameter_registry.seeded_defaults",
+        component=dn.PARAM_COMPONENT_ID,
+        defaults=dict(dn.RECOMMENDED_SEED_VALUES),
+    )
+    store = _InMemoryParameterStore()
+    store.put(
+        ParameterSet(
+            scope=scope,
+            values=dict(dn.RECOMMENDED_SEED_VALUES),
+            source="cli:classify",
+            notes="seeded by trellis_cli.classify._domain_normalization_registry",
+        )
+    )
+    return ParameterRegistry(store=store)
+
+
+@classify_app.command("domain-candidates")
+def domain_candidates(
+    limit: int = typer.Option(
+        dn.DEFAULT_SCAN_LIMIT, "--limit", min=1, help="Cap on documents scanned."
+    ),
+    min_gain: int = typer.Option(
+        0,
+        "--min-gain",
+        min=0,
+        help=(
+            "Only show merges that would make at least this many documents "
+            "newly reachable under the canonical tag. 0 shows all, including "
+            "the redundant ones that only tidy the vocabulary."
+        ),
+    ),
+    emit: bool = typer.Option(
+        True,
+        "--emit/--no-emit",
+        help=(
+            "Emit a DOMAIN_ALIAS_CANDIDATE event per surfaced candidate. "
+            "--no-emit is a dry run (and does not advance the cooldown)."
+        ),
+    ),
+    output_format: str = typer.Option(
+        "text", "--format", help="Output format: text or json"
+    ),
+) -> None:
+    """Propose ``alias -> canonical`` merges for the ``domain`` vocabulary.
+
+    An open-vocabulary model invents a fresh near-synonym per document. Left
+    alone that produces a facet whose values are mostly singletons, which
+    cannot function as a filter — and ``domain`` is the one facet that
+    *hard-excludes*, so a query scoped to ``hunting`` cannot see a document
+    tagged only ``budget-hunting``.
+
+    Proposes; never writes ``config.yaml``. The gate is deliberately narrow:
+    a merge is generated only when the alias contains the canonical as a whole
+    token, because co-occurrence — measured against a real corpus — proposes
+    ``playwright -> hunting`` in any corpus where one subject dominates. It
+    measures topical association, not synonymy. Here it corroborates, and the
+    output labels every merge that spelling alone supports.
+
+    Review the rows marked cross-cutting hardest: those aliases name two
+    canonical subjects, so merging into either hides them from the other.
+    """
+    registry = _get_registry()
+
+    try:
+        candidates = analyze_domain_alias_candidates(
+            document_store=registry.knowledge.document_store,
+            event_log=registry.operational.event_log,
+            registry=_domain_normalization_registry(registry),
+            known_aliases=registry.domain_alias_map(),
+            aspect_tags=registry.domain_aspect_tags(),
+            emit_events=emit,
+            scan_limit=limit,
+        )
+    except (KeyError, ValueError) as exc:
+        message = str(exc).strip("'\"")
+        if output_format == "json":
+            emit_json({"status": "error", "message": message})
+        else:
+            console.print(f"[red]{message}[/red]")
+        raise typer.Exit(code=EXIT_INTERNAL) from exc
+
+    shown = [c for c in candidates if c.documents_gained >= min_gain]
+
+    if output_format == "json":
+        emit_json(
+            {
+                "status": "ok",
+                "emitted": emit,
+                "scanned_candidates": len(candidates),
+                "candidates": [c.to_event_payload() for c in shown],
+                "domain_aliases_fragment": apply_normalization(
+                    {}, shown
+                ).domain_aliases,
+            }
+        )
+    else:
+        _render_domain_candidates(shown, total=len(candidates), emitted=emit)
+    raise typer.Exit(code=EXIT_OK)
+
+
+def _render_domain_candidates(
+    candidates: list[DomainAliasCandidate], *, total: int, emitted: bool
+) -> None:
+    """Human-readable rendering, ending in a paste-ready config block."""
+    if not candidates:
+        console.print(
+            "[green]Domain alias candidates:[/green] none surfaced.\n"
+            "[dim]Either no low-support tag contains a canonical tag as a "
+            "whole token, every candidate is inside its cooldown, or the "
+            "shadow corpus is empty. Run 'trellis classify shadow' first.[/dim]"
+        )
+        return
+
+    suppressed = total - len(candidates)
+    console.print(
+        f"[green]Domain alias candidates:[/green] {len(candidates)} shown"
+        + (f" ([dim]{suppressed} below --min-gain[/dim])" if suppressed else "")
+        + ("" if emitted else " [yellow](dry run — not emitted)[/yellow]")
+    )
+    by_canonical: dict[str, list[DomainAliasCandidate]] = {}
+    for candidate in candidates:
+        by_canonical.setdefault(candidate.canonical, []).append(candidate)
+
+    # Grouped by destination on purpose. A tag that names an *aspect* rather
+    # than a subject gives itself away here and nowhere else: it collects a
+    # pile of unrelated modifiers (`estate`, `trip`, `venture`), where a real
+    # subject collects qualifiers of itself. No structural test found that —
+    # one was built and measured, and it rated `hunting` more modifier-like
+    # than `planning` — so the reviewer's eye is the detector and this is the
+    # view that arms it.
+    for canonical, group in by_canonical.items():
+        console.print(f"  [bold]-> {canonical}[/bold] ({len(group)}):")
+        for candidate in group:
+            # Literal brackets are escaped: rich reads an unescaped `[...]` as
+            # a markup tag and swallows it, which silently dropped exactly the
+            # two warnings a reviewer most needs to see.
+            marks = ""
+            if candidate.competing_canonicals:
+                marks += (
+                    "  [yellow]\\[cross-cutting: also "
+                    f"{', '.join(candidate.competing_canonicals)}][/yellow]"
+                )
+            if candidate.is_lexical_only:
+                marks += "  [dim]\\[spelling only][/dim]"
+            console.print(
+                f"    [bold]{candidate.alias}[/bold]: "
+                f"{candidate.alias_documents} docs, "
+                f"{candidate.documents_gained} newly reachable" + marks
+            )
+
+    fragment = apply_normalization({}, candidates).domain_aliases
+    console.print(
+        "\n[dim]To merge, add to ~/.trellis/config.yaml (delete the lines to "
+        "revoke):[/dim]"
+    )
+    console.print(f"{CLASSIFY_CONFIG_KEY}:")
+    console.print(f"  {DOMAIN_ALIASES_KEY}:")
+    for alias, canonical in fragment.items():
+        console.print(f"    {alias}: {canonical}")
+    console.print(
+        "\n[yellow]Review before merging: 'domain' hard-excludes on mismatch, "
+        "so a wrong merge hides every document carrying the alias — in bulk, "
+        "which is worse than one wrong keyword.[/yellow]"
+    )
+    console.print(
+        "[dim]If a destination above collects unrelated subjects it names an "
+        f"aspect, not a subject: list it under {CLASSIFY_CONFIG_KEY}."
+        f"{DOMAIN_ASPECTS_KEY} and it stops attracting merges.[/dim]"
     )

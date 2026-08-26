@@ -663,11 +663,14 @@ class TestWorkerEnrich:
         # Seed an unenriched document (no content_tags).
         doc_store = temp_stores.knowledge.document_store
         doc_store.put("doc-untagged", "some content", {"title": "Untagged"})
-        # Seed a fully-enriched document (high confidence) — must be excluded.
+        # Seed a document already through the enrichment path — must be
+        # excluded. Note the shape: `classified_mode` is a real ContentTags
+        # field, unlike the `tag_confidence` / `tags` keys this test used to
+        # seed, which ContentTags forbids and nothing ever wrote.
         doc_store.put(
             "doc-tagged",
             "other content",
-            {"content_tags": {"tag_confidence": 0.95, "tags": ["x"]}},
+            {"content_tags": {"classified_mode": "enrichment"}},
         )
 
         # Inject a stub LLM so the client check passes; dry-run won't call it.
@@ -683,20 +686,50 @@ class TestWorkerEnrich:
         assert "doc-untagged" in data["doc_ids"]
         assert "doc-tagged" not in data["doc_ids"]
 
-    def test_selection_predicate_low_confidence(
+    def test_selection_predicate_uses_classified_mode(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        """Candidacy is "has not been enriched", a fact the path records.
+
+        It used to be "``tag_confidence`` below a threshold", which could
+        never skip anything: that key is not part of ``ContentTags`` and is
+        never written, so the read returned ``None`` for every document.
+        """
+        doc_store = temp_stores.knowledge.document_store
+        doc_store.put(
+            "doc-ingested",
+            "c",
+            {"content_tags": {"classified_mode": "ingestion"}},
+        )
+        doc_store.put(
+            "doc-enriched",
+            "c",
+            {"content_tags": {"classified_mode": "enrichment"}},
+        )
+
+        ids = {
+            c["doc_id"]
+            for c in worker._select_enrichment_candidates(doc_store, limit=50)
+        }
+        assert "doc-ingested" in ids
+        assert "doc-enriched" not in ids
+
+    def test_reenrich_takes_already_enriched_documents(
         self, temp_stores: StoreRegistry
     ) -> None:
         doc_store = temp_stores.knowledge.document_store
         doc_store.put(
-            "doc-lowconf",
+            "doc-enriched",
             "c",
-            {"content_tags": {"tag_confidence": 0.2, "tags": ["x"]}},
+            {"content_tags": {"classified_mode": "enrichment"}},
         )
-        candidates = worker._select_enrichment_candidates(
-            doc_store, limit=50, confidence_threshold=0.5
-        )
-        ids = {c["doc_id"] for c in candidates}
-        assert "doc-lowconf" in ids
+        ids = {
+            c["doc_id"]
+            for c in worker._select_enrichment_candidates(
+                doc_store, limit=50, reenrich=True
+            )
+        }
+        assert "doc-enriched" in ids
 
     def test_enrich_writes_tags_back(
         self, temp_stores: StoreRegistry, monkeypatch
