@@ -472,12 +472,30 @@ def feedback(
     target_id: str = typer.Argument(..., help="Trace or precedent ID"),
     rating: float = typer.Argument(..., help="Rating (0.0 to 1.0)"),
     comment: str = typer.Option(None, help="Optional comment"),
+    pack_id: str = typer.Option(
+        None,
+        "--pack-id",
+        help=(
+            "Context pack this feedback is about. Without it the event "
+            "cannot join to the pack and the learning loop never sees it. "
+            "For per-item attribution use the MCP record_feedback tool or "
+            "POST /packs/{pack_id}/feedback."
+        ),
+    ),
     output_format: str = typer.Option("text", "--format", help="Output format"),
 ) -> None:
-    """Record feedback on a trace or precedent."""
+    """Record feedback on a trace or precedent.
+
+    ``--pack-id`` is the join key. This command records a pack-level grade
+    only; the per-item ``helpful_item_ids`` / ``unhelpful_item_ids``
+    attribution the promote half of the loop consumes is carried by the
+    MCP ``record_feedback`` tool and ``POST /packs/{pack_id}/feedback``.
+    """
     args: dict[str, object] = {"target_id": target_id, "rating": rating}
     if comment:
         args["comment"] = comment
+    if pack_id:
+        args["pack_id"] = pack_id
     cmd = Command(
         operation=Operation.FEEDBACK_RECORD,
         args=args,

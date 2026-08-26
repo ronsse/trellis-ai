@@ -325,3 +325,169 @@ class TestAttributionSurvives:
         result = compute_timeseries(event_log, metric=METRIC_REFERENCE_RATE, days=1)
         (point,) = result.series[0].points
         assert point.value == pytest.approx(0.2)
+
+
+class TestPackAttributionRequirement:
+    """The default-off enforcement knob (``TRELLIS_REQUIRE_PACK_ATTRIBUTION``).
+
+    Shipped **off**: today's behaviour is unchanged and an uncited
+    pack-targeted call still records a rating. A cross-lab panel split on
+    whether refusal should be the default, so the default stays the
+    operator's call — see
+    :data:`trellis.core.write_config.REQUIRE_PACK_ATTRIBUTION_FLAG`.
+
+    What the tests pin either way is the fail-open boundary. Enforcement
+    may only fire when the pack demonstrably served ids the caller could
+    have cited; every other case has to let the call through, because
+    refusing someone for not citing ids nobody can produce converts a
+    recorded rating into a lost one.
+    """
+
+    def _serve_pack(
+        self, registry: StoreRegistry, pack_id: str, item_ids: list[str]
+    ) -> None:
+        registry.operational.event_log.emit(
+            EventType.PACK_ASSEMBLED,
+            source="test",
+            entity_id=pack_id,
+            entity_type="pack",
+            payload={"intent": "t", "injected_item_ids": item_ids},
+        )
+
+    def test_off_by_default_uncited_pack_feedback_is_recorded(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Explicit: a developer's shell must not decide what "default" means.
+        monkeypatch.delenv("TRELLIS_REQUIRE_PACK_ATTRIBUTION", raising=False)
+        self._serve_pack(temp_registry, "pack_a", ["doc_1", "doc_2"])
+
+        result = record_feedback(pack_id="pack_a", rating=0.4)
+
+        assert "Feedback recorded" in result
+        (payload,) = _payloads(temp_registry)
+        assert payload["pack_id"] == "pack_a"
+        assert payload["helpful_item_ids"] == []
+
+    def test_enforced_rejects_and_hands_back_the_served_ids(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("TRELLIS_REQUIRE_PACK_ATTRIBUTION", "1")
+        self._serve_pack(temp_registry, "pack_a", ["doc_1", "doc_2"])
+
+        with pytest.raises(McpError) as excinfo:
+            record_feedback(pack_id="pack_a", rating=0.4)
+
+        assert excinfo.value.error.code == INVALID_PARAMS
+        data = excinfo.value.error.data
+        assert isinstance(data, dict)
+        # The ids come from the pack's own event, so the retry is a
+        # selection among what was served rather than a recollection.
+        assert data["item_ids"] == ["doc_1", "doc_2"]
+        assert data["pack_id"] == "pack_a"
+        # Neither sink was written: the refusal precedes the record, so a
+        # retry cannot double-count the same grade.
+        assert _payloads(temp_registry) == []
+        assert _rows(temp_registry) == []
+
+    def test_enforced_call_is_recorded_once_cited(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("TRELLIS_REQUIRE_PACK_ATTRIBUTION", "1")
+        self._serve_pack(temp_registry, "pack_a", ["doc_1", "doc_2"])
+
+        record_feedback(pack_id="pack_a", rating=0.4, helpful_item_ids=["doc_1"])
+
+        (payload,) = _payloads(temp_registry)
+        assert payload["helpful_item_ids"] == ["doc_1"]
+
+    def test_a_pack_that_missed_is_cited_as_unhelpful(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """ "None of it helped" is a citation, not an exemption.
+
+        The escape hatch from the requirement is the more valuable of the
+        two signals, not a cheaper one — there is no flag that means
+        "I looked and decline to say".
+        """
+        monkeypatch.setenv("TRELLIS_REQUIRE_PACK_ATTRIBUTION", "1")
+        self._serve_pack(temp_registry, "pack_a", ["doc_1", "doc_2"])
+
+        record_feedback(
+            pack_id="pack_a", rating=0.0, unhelpful_item_ids=["doc_1", "doc_2"]
+        )
+
+        (payload,) = _payloads(temp_registry)
+        assert payload["unhelpful_item_ids"] == ["doc_1", "doc_2"]
+
+    def test_followed_advisory_satisfies_the_requirement(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("TRELLIS_REQUIRE_PACK_ATTRIBUTION", "1")
+        self._serve_pack(temp_registry, "pack_a", ["doc_1"])
+
+        record_feedback(pack_id="pack_a", rating=0.7, followed_advisory_ids=["adv_1"])
+
+        (payload,) = _payloads(temp_registry)
+        assert payload["followed_advisory_ids"] == ["adv_1"]
+
+    def test_trace_level_feedback_is_never_rejected(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Grading work that no pack informed stays a first-class signal.
+
+        This is the case the deployment's unattributed feedback is
+        overwhelmingly made of, and it is honest: there is no pack, so
+        there is nothing to cite. Enforcement must not reach it.
+        """
+        monkeypatch.setenv("TRELLIS_REQUIRE_PACK_ATTRIBUTION", "1")
+
+        result = record_feedback(trace_id="trace_1", rating=0.9)
+
+        assert "Feedback recorded" in result
+        (payload,) = _payloads(temp_registry)
+        assert "pack_id" not in payload
+        assert payload["helpful_item_ids"] == []
+
+    def test_unknown_pack_fails_open(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No PACK_ASSEMBLED event means no ids to offer — let it through."""
+        monkeypatch.setenv("TRELLIS_REQUIRE_PACK_ATTRIBUTION", "1")
+
+        result = record_feedback(pack_id="pack_missing", rating=0.4)
+
+        assert "Feedback recorded" in result
+        assert len(_payloads(temp_registry)) == 1
+
+    def test_sectioned_pack_fails_open(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``build_sectioned`` emits no per-item rows, so nothing is citable."""
+        monkeypatch.setenv("TRELLIS_REQUIRE_PACK_ATTRIBUTION", "1")
+        temp_registry.operational.event_log.emit(
+            EventType.PACK_ASSEMBLED,
+            source="test",
+            entity_id="pack_sectioned",
+            entity_type="pack",
+            payload={"intent": "t", "section_count": 2},
+        )
+
+        result = record_feedback(pack_id="pack_sectioned", rating=0.4)
+
+        assert "Feedback recorded" in result
+
+    def test_rejection_is_recorded_as_boundary_telemetry(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A refusal has to be visible in ``trellis analyze health`` (#297)."""
+        monkeypatch.setenv("TRELLIS_REQUIRE_PACK_ATTRIBUTION", "1")
+        self._serve_pack(temp_registry, "pack_a", ["doc_1"])
+
+        with pytest.raises(McpError):
+            record_feedback(pack_id="pack_a", rating=0.4)
+
+        rejections = temp_registry.operational.event_log.get_events(
+            event_type=EventType.WRITE_REJECTED, limit=10
+        )
+        assert len(rejections) == 1
+        assert rejections[0].payload["tool"] == "record_feedback"

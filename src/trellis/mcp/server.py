@@ -40,9 +40,11 @@ from mcp.types import INTERNAL_ERROR, INVALID_PARAMS, ErrorData
 
 from trellis.auth import SCOPE_INGEST, SCOPE_MUTATE, SCOPE_READ
 from trellis.classify.ingest import classify_metadata_on_write
+from trellis.core.write_config import WriteBehaviourConfig
 from trellis.core.write_provenance import get_write_provenance
 from trellis.extract.entity_resolution import build_name_alias_resolver
 from trellis.extract.trace_ingest_hook import run_trace_extraction
+from trellis.feedback.attribution import lookup_pack_item_ids
 from trellis.feedback.models import PackFeedback
 from trellis.feedback.recording import feedback_log_dir
 from trellis.feedback.recording import record_feedback as record_pack_feedback
@@ -1997,6 +1999,72 @@ def get_file_context(
 # ---------------------------------------------------------------------------
 
 
+#: Most item ids handed back in an attribution rejection. A pack is
+#: budget-capped well below this; the cap only bounds the error payload
+#: against a pathological pack, it is not a normal truncation point.
+_MAX_CITABLE_IDS_IN_ERROR = 60
+
+
+def _require_pack_attribution(registry: StoreRegistry, pack_id: str) -> None:
+    """Reject an uncited pack-targeted feedback call, when configured to.
+
+    Off by default — see
+    :data:`trellis.core.write_config.REQUIRE_PACK_ATTRIBUTION_FLAG` for
+    why the default is the operator's call and not this module's.
+
+    Fails **open** in every uncertain case. The rejection is only raised
+    when the pack resolves to at least one item the caller could have
+    cited: an unknown ``pack_id``, a pack that predates
+    ``injected_item_ids``, a sectioned pack (which emits no per-item rows
+    at all), or an event-log outage each let the call through. Refusing a
+    caller for not citing ids nobody can produce would convert a recorded
+    rating into a lost one and teach the agent that the tool is
+    unreliable — the opposite of the intent.
+
+    Nothing here writes attribution. The served ids ride the error so the
+    caller can *choose* among them; which of them helped is a judgement
+    only the caller holds, and synthesising it would manufacture exactly
+    the signal this whole change exists to measure honestly.
+    """
+    if not WriteBehaviourConfig.from_env().require_pack_attribution:
+        return
+
+    item_ids = lookup_pack_item_ids(registry.operational.event_log, pack_id)
+    if not item_ids:
+        logger.debug("pack_attribution_not_enforceable", pack_id=pack_id)
+        return
+
+    _record_boundary_rejection(
+        tool="record_feedback",
+        rejections=[
+            {
+                "kind": "missing",
+                "loc": "helpful_item_ids|unhelpful_item_ids",
+                "msg": f"pack {pack_id} served {len(item_ids)} item(s), none cited",
+            }
+        ],
+        hints=[
+            "cite the item_ids that helped in helpful_item_ids",
+            "a pack that missed is cited in unhelpful_item_ids, not left blank",
+        ],
+    )
+    _raise_invalid_params(
+        f"feedback on pack {pack_id} must cite at least one item — it served "
+        f"{len(item_ids)} and uncited pack feedback joins to nothing. Put the "
+        "ids that helped in helpful_item_ids; if none did, put the ones that "
+        "were noise in unhelpful_item_ids.",
+        data={
+            "pack_id": pack_id,
+            "item_ids": item_ids[:_MAX_CITABLE_IDS_IN_ERROR],
+            "fields": [
+                "helpful_item_ids",
+                "unhelpful_item_ids",
+                "followed_advisory_ids",
+            ],
+        },
+    )
+
+
 @mcp.tool(auth=trellis_scope(SCOPE_MUTATE))
 def record_feedback(
     trace_id: str = "",
@@ -2032,8 +2100,22 @@ def record_feedback(
     loops (``trellis analyze apply-noise-tags`` and ``trellis analyze
     advisory-effectiveness``) to attribute outcomes more precisely.
 
+    **Feedback naming a pack but citing no items joins to nothing.** The
+    learning loop matches per-item rows from the pack against the ids you
+    cite; a pack-level rating with no ids grades the delivery but teaches
+    nothing about which memories earned their tokens. If the pack was a
+    miss, that is not a reason to cite nothing — it is what
+    ``unhelpful_item_ids`` is for, and it is the more valuable signal of
+    the two. Deployments can require this (``TRELLIS_REQUIRE_PACK_ATTRIBUTION``);
+    where they do, an uncited pack-targeted call is rejected and the
+    rejection carries the ids the pack served so the retry is a choice
+    among them.
+
     ``trace_id`` is still accepted for trace-level feedback when no pack
-    is involved.
+    is involved — grading work that no pack informed is a legitimate,
+    honest signal, and it is *not* what the requirement above is about.
+    It carries no attribution because there is none to carry, and the
+    health report counts it separately for exactly that reason.
 
     Args:
         trace_id: Trace ID for trace-level feedback (optional).
@@ -2089,6 +2171,11 @@ def record_feedback(
             "stores_dir is not configured; cannot record feedback",
             data={"setting": "stores_dir"},
         )
+
+    if has_pack and not (
+        helpful_item_ids or unhelpful_item_ids or followed_advisory_ids
+    ):
+        _require_pack_attribution(registry, pack_id.strip())
 
     # Shared with the REST pack-feedback route so the two agent-facing
     # surfaces agree on what identical inputs mean — including deriving

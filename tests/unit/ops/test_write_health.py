@@ -281,6 +281,76 @@ class TestServeAttribution:
         assert report.feedback_attributed == 1
         assert report.attribution_rate == pytest.approx(0.5)
 
+    def test_pack_targeted_split_isolates_the_citable_population(
+        self, tmp_path: Path
+    ) -> None:
+        """The headline rate mixes two populations; the split separates them.
+
+        Shaped after the reference deployment: most unattributed feedback
+        grades work no pack informed (unjoinable by construction), and the
+        callers who *did* name a pack cite at a much higher rate. One
+        number over both is evidence about neither.
+        """
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        # Two callers named a pack; one of them cited.
+        event_log.emit(
+            EventType.FEEDBACK_RECORDED,
+            "mcp:record_feedback",
+            payload={"pack_id": "p1", "helpful_item_ids": ["a"]},
+        )
+        event_log.emit(
+            EventType.FEEDBACK_RECORDED,
+            "mcp:record_feedback",
+            payload={"pack_id": "p2", "rating": 0.2},
+        )
+        # Two graded a trace with no pack in hand — nothing to cite.
+        for _ in range(2):
+            event_log.emit(
+                EventType.FEEDBACK_RECORDED,
+                "mcp:record_feedback",
+                payload={"rating": 1.0},
+            )
+
+        report = summarize_serve_attribution(event_log, days=1)
+
+        # Unchanged: the headline still divides by every feedback event.
+        assert report.feedback_events == 4
+        assert report.feedback_attributed == 1
+        assert report.attribution_rate == pytest.approx(0.25)
+        # New: the population where citing was possible at all.
+        assert report.pack_targeted_feedback == 2
+        assert report.pack_targeted_attributed == 1
+        assert report.pack_attribution_rate == pytest.approx(0.5)
+        assert report.untargeted_feedback == 2
+
+    def test_all_untargeted_reports_no_citation_evidence(self, tmp_path: Path) -> None:
+        """No pack-targeted feedback is "no evidence", not "nobody cited"."""
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        event_log.emit(
+            EventType.FEEDBACK_RECORDED,
+            "mcp:record_feedback",
+            payload={"rating": 1.0},
+        )
+
+        report = summarize_serve_attribution(event_log, days=1)
+
+        assert report.pack_targeted_feedback == 0
+        assert report.pack_attribution_rate == pytest.approx(0.0)
+        assert report.untargeted_feedback == 1
+
+    def test_followed_advisory_counts_as_attribution(self, tmp_path: Path) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        event_log.emit(
+            EventType.FEEDBACK_RECORDED,
+            "mcp:record_feedback",
+            payload={"pack_id": "p1", "followed_advisory_ids": ["adv_1"]},
+        )
+
+        report = summarize_serve_attribution(event_log, days=1)
+
+        assert report.pack_targeted_attributed == 1
+        assert report.pack_attribution_rate == pytest.approx(1.0)
+
 
 class TestBackendHealth:
     def test_unattributed_feedback_warns(self, tmp_path: Path) -> None:
@@ -294,6 +364,23 @@ class TestBackendHealth:
         report = summarize_backend_health(event_log, days=1)
         assert report.status == "warn"
         assert any("attribution" in reason for reason in report.reasons)
+        # The two starvation causes call for opposite fixes, so the reason
+        # has to say which one it is: no pack was ever named here.
+        assert any("name no pack" in reason for reason in report.reasons)
+
+    def test_uncited_pack_feedback_names_the_ergonomic_cause(
+        self, tmp_path: Path
+    ) -> None:
+        """Same warn, different cause — a pack was named and not cited."""
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        event_log.emit(
+            EventType.FEEDBACK_RECORDED,
+            "mcp:record_feedback",
+            payload={"pack_id": "p1", "rating": 0.4},
+        )
+        report = summarize_backend_health(event_log, days=1)
+        assert report.status == "warn"
+        assert any("cited nothing from it" in reason for reason in report.reasons)
 
     def test_low_injected_coverage_warns(self, tmp_path: Path) -> None:
         event_log = SQLiteEventLog(tmp_path / "events.db")

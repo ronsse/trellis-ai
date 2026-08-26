@@ -221,6 +221,84 @@ class TestFeedbackRecordHandler:
         assert created_id is not None
         assert "0.9" in message
 
+    def _payload(self, registry: StoreRegistry) -> dict:
+        (event,) = registry.operational.event_log.get_events(
+            event_type=EventType.FEEDBACK_RECORDED, limit=5
+        )
+        return event.payload
+
+    def test_forwards_pack_id_so_the_event_can_join(
+        self, registry: StoreRegistry
+    ) -> None:
+        """``pack_id`` is the join key and was being dropped here.
+
+        ``POST /feedback`` has always accepted a ``pack_id`` ("Link
+        feedback to a context pack") and put it in ``command.args``; this
+        handler emitted a payload of three fixed keys, so the link the
+        caller asked for was silently discarded and
+        ``join_pack_feedback`` — which reads ``payload["pack_id"]`` and
+        skips events without it — could never see the event.
+        """
+        handler = FeedbackRecordHandler(registry)
+        cmd = Command(
+            operation=Operation.FEEDBACK_RECORD,
+            args={"target_id": "t1", "rating": 0.9, "pack_id": "pack_1"},
+            target_id="t1",
+        )
+        handler.handle(cmd)
+
+        assert self._payload(registry)["pack_id"] == "pack_1"
+
+    def test_success_is_derived_from_the_rating(self, registry: StoreRegistry) -> None:
+        """Without ``success`` the join reads any governed grade as failure.
+
+        ``_join_one`` resolves an absent ``success`` to ``"failure"``, so
+        forwarding the join key alone would have wired a *wrong* signal
+        into the learning loop — worse than the unjoinable silence it
+        replaces.
+        """
+        handler = FeedbackRecordHandler(registry)
+        expected = {0.9: True, 0.5: True, 0.49: False, 0.0: False}
+        for rating in expected:
+            handler.handle(
+                Command(
+                    operation=Operation.FEEDBACK_RECORD,
+                    args={"target_id": "t1", "rating": rating},
+                    target_id="t1",
+                )
+            )
+
+        recorded = {
+            event.payload["rating"]: event.payload["success"]
+            for event in registry.operational.event_log.get_events(
+                event_type=EventType.FEEDBACK_RECORDED, limit=50
+            )
+        }
+        assert recorded == expected
+
+    def test_blank_pack_id_stays_absent(self, registry: StoreRegistry) -> None:
+        """An absent pack is not invented — the key simply is not there."""
+        handler = FeedbackRecordHandler(registry)
+        cmd = Command(
+            operation=Operation.FEEDBACK_RECORD,
+            args={"target_id": "t1", "rating": 0.9, "pack_id": "   "},
+            target_id="t1",
+        )
+        handler.handle(cmd)
+
+        assert "pack_id" not in self._payload(registry)
+
+    def test_pack_id_omitted_entirely(self, registry: StoreRegistry) -> None:
+        handler = FeedbackRecordHandler(registry)
+        cmd = Command(
+            operation=Operation.FEEDBACK_RECORD,
+            args={"target_id": "t1", "rating": 0.9},
+            target_id="t1",
+        )
+        handler.handle(cmd)
+
+        assert "pack_id" not in self._payload(registry)
+
 
 class TestEntityCreateHandler:
     def test_creates_entity(self, registry: StoreRegistry) -> None:

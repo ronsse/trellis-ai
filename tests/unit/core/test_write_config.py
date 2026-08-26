@@ -78,6 +78,7 @@ BOOLEAN_FIELDS = (
     "memory_extraction",
     "reconcile_on_write",
     "trace_extraction",
+    "require_pack_attribution",
 )
 
 

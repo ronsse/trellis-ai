@@ -157,6 +157,69 @@ class TestBuildLearningObservations:
         observations = build_learning_observations_from_event_log(event_log)
         assert observations == []
 
+    def test_governed_path_feedback_joins_when_it_names_a_pack(self, event_log) -> None:
+        """The governed ``FEEDBACK_RECORD`` payload reaches the join.
+
+        ``FeedbackRecordHandler`` used to emit exactly three keys and drop
+        the ``pack_id`` the caller supplied through ``POST /feedback``, so
+        this family of feedback could never join no matter what the caller
+        sent. The payload shape is thinner than the ``PackFeedback`` one —
+        no per-item citations — so it contributes a joined observation
+        with no referenced items rather than nothing at all.
+        """
+        _emit_pack_assembled(
+            event_log,
+            pack_id="pack_gov",
+            domain="platform",
+            intent="ship the thing",
+            items=[{"item_id": "i1", "item_type": "precedent"}],
+        )
+        event_log.emit(
+            EventType.FEEDBACK_RECORDED,
+            source="mutation_executor",
+            entity_id="trace_1",
+            payload={
+                "target_id": "trace_1",
+                "rating": 0.9,
+                "comment": None,
+                "success": True,
+                "pack_id": "pack_gov",
+            },
+        )
+
+        (observation,) = build_learning_observations_from_event_log(event_log)
+
+        assert [item["item_id"] for item in observation["items"]] == ["i1"]
+        # ``_join_one`` resolves a missing ``success`` to "failure", so the
+        # handler has to emit it: forwarding only the join key would have
+        # made a 0.9 grade join as a failed delivery.
+        assert observation["outcome"] == "success"
+
+    def test_governed_low_rating_joins_as_a_failure(self, event_log) -> None:
+        _emit_pack_assembled(
+            event_log,
+            pack_id="pack_gov2",
+            domain="platform",
+            intent="ship the thing",
+            items=[{"item_id": "i1", "item_type": "precedent"}],
+        )
+        event_log.emit(
+            EventType.FEEDBACK_RECORDED,
+            source="mutation_executor",
+            entity_id="trace_1",
+            payload={
+                "target_id": "trace_1",
+                "rating": 0.1,
+                "comment": None,
+                "success": False,
+                "pack_id": "pack_gov2",
+            },
+        )
+
+        (observation,) = build_learning_observations_from_event_log(event_log)
+
+        assert observation["outcome"] == "failure"
+
     def test_join_produces_expected_observation_shape(
         self, event_log, tmp_path: Path
     ) -> None:

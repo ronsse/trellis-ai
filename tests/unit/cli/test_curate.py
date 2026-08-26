@@ -261,6 +261,25 @@ class TestCurateFeedback:
         data = json.loads(result.stdout.strip())
         assert data["operation"] == "feedback.record"
 
+    def test_feedback_with_pack_id(self) -> None:
+        """The CLI can name a pack — without one the event cannot join."""
+        result = runner.invoke(
+            app,
+            [
+                "curate",
+                "feedback",
+                "trace_1",
+                "0.8",
+                "--pack-id",
+                "pack_1",
+                "--format",
+                "json",
+            ],
+        )
+        assert result.exit_code == 0
+        data = json.loads(result.stdout.strip())
+        assert data["operation"] == "feedback.record"
+
 
 def _candidate_payload(
     *,
