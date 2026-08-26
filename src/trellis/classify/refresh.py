@@ -45,11 +45,13 @@ import structlog
 from trellis.classify.importance import compute_importance
 from trellis.classify.pipeline import ClassifierPipeline
 from trellis.classify.protocol import ClassificationContext
+from trellis.core.vector_metadata import sync_vector_metadata
 from trellis.stores.base.event_log import EventType
 
 if TYPE_CHECKING:
     from trellis.stores.base.document import DocumentStore
     from trellis.stores.base.event_log import EventLog
+    from trellis.stores.base.vector import VectorStore
 
 logger = structlog.get_logger(__name__)
 
@@ -108,6 +110,7 @@ def reclassify_item(
     context_builder: Any | None = None,
     include_domain: bool = False,
     dry_run: bool = False,
+    vector_store: VectorStore | None = None,
 ) -> RefreshOutcome:
     """Re-run the classifier pipeline against a single item and persist
     updated tags.
@@ -140,6 +143,15 @@ def reclassify_item(
             ``after`` but nothing is persisted and no event is emitted.
             ``refreshed`` still reports whether a real run *would* have
             written, so a dry-run and a live run agree on the counts.
+        vector_store: Optional — when provided, the refreshed
+            ``content_tags`` / ``auto_importance`` are mirrored onto the
+            item's vector row by
+            :func:`~trellis.core.vector_metadata.sync_vector_metadata`. A
+            vector row's metadata is an embed-time snapshot, so without this
+            a backfill's tags are invisible to
+            :class:`~trellis.retrieve.strategies.SemanticSearch` until
+            something re-embeds the document (#338). Metadata-only: nothing
+            is re-embedded, and an un-embedded document is a no-op.
 
     Returns:
         :class:`RefreshOutcome` with the before/after tag diffs and a
@@ -244,10 +256,16 @@ def reclassify_item(
     # ordering across the whole store — the same failure ``classify.shadow``
     # documents, at the same scale.
     document_store.put(item_id, content, metadata, preserve_updated_at=True)
+    # A vector row's metadata is an embed-time snapshot, so a tag write that
+    # stops at the document store is invisible to the semantic axis (#338).
+    # Mirrored after the authoritative write, metadata-only: nothing is
+    # re-embedded, and a document that was never embedded is a no-op.
+    vector_synced = sync_vector_metadata(vector_store, item_id, metadata)
     logger.info(
         "tags_refreshed",
         item_id=item_id,
         classifier_count=len(merged.classified_by),
+        vector_synced=vector_synced,
     )
 
     if event_log is not None:
@@ -273,6 +291,7 @@ def reclassify_stale(
     context_builder: Any | None = None,
     include_domain: bool = False,
     dry_run: bool = False,
+    vector_store: VectorStore | None = None,
 ) -> BatchRefreshResult:
     """Scan the document store for items with stale or missing
     ``classified_at`` and reclassify them.
@@ -307,6 +326,8 @@ def reclassify_stale(
         dry_run: Forwarded to :func:`reclassify_item`. Nothing is persisted
             and no event is emitted; the counts report what a live run would
             have done.
+        vector_store: Forwarded to :func:`reclassify_item` so the refreshed
+            tags reach the semantic axis, not just the document store.
 
     Returns:
         :class:`BatchRefreshResult` with counts and the list of refreshed
@@ -360,6 +381,7 @@ def reclassify_stale(
                     context_builder=context_builder,
                     include_domain=include_domain,
                     dry_run=dry_run,
+                    vector_store=vector_store,
                 )
             # GRACEFUL-DEGRADATION: counted in `errors` and surfaced to the
             # operator in the CLI summary; logged with a traceback so the

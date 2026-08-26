@@ -23,6 +23,7 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from trellis.core.error_sanitize import sanitize_error_message
+from trellis.core.vector_metadata import resolve_vector_store
 from trellis.learning.scoring import (
     prepare_learning_promotions,
     submit_learning_promotion,
@@ -120,6 +121,9 @@ def apply_noise_tags(
         registry.knowledge.document_store,
         days=days,
         min_appearances=min_appearances,
+        # #338: mirror the demotion onto the vector row, or the semantic
+        # axis keeps serving the pre-demotion snapshot.
+        vector_store=resolve_vector_store(registry),
     )
     return {
         "status": "ok",
