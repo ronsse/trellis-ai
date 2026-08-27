@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import inspect
 import json
 from pathlib import Path
 from typing import Any
@@ -285,6 +286,16 @@ class TestGetContextDomainFilter:
 
 
 class TestSaveExperience:
+    def test_documented_minimal_trace_is_valid(self) -> None:
+        doc = inspect.getdoc(save_experience)
+        assert doc is not None
+        marker = "Example minimal valid trace:\n"
+        assert marker in doc
+
+        result = save_experience(doc.split(marker, maxsplit=1)[1])
+
+        assert result.startswith("Trace saved:")
+
     def test_empty_trace_raises_invalid_params(self) -> None:
         with pytest.raises(McpError) as excinfo:
             save_experience("")
