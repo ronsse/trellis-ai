@@ -971,9 +971,11 @@ def save_experience(trace_json: str) -> str:
             ``system``. Put execution details such as ``agent_id``, ``domain``,
             ``started_at``, and ``ended_at`` inside ``context``. Each entry in
             ``steps`` requires ``step_type`` and ``name``; do not use
-            ``action``/``observation`` as field names. Unknown top-level or
-            context fields are rejected, so put additional data in top-level
-            ``metadata`` (or outcome measurements in ``outcome.metrics``).
+            ``action``/``observation`` as field names. Validation is
+            all-or-nothing: an unknown top-level or context field rejects the
+            **entire trace** and nothing is recorded — not just that field. So
+            put additional data in top-level ``metadata`` (or outcome
+            measurements in ``outcome.metrics``).
 
             Example minimal valid trace:
             {

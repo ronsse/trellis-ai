@@ -296,6 +296,25 @@ class TestSaveExperience:
 
         assert result.startswith("Trace saved:")
 
+    def test_one_unknown_key_rejects_the_whole_trace(self) -> None:
+        """The docstring's all-or-nothing claim, pinned.
+
+        The same payload that succeeds above is rejected outright once a
+        single unrecognised top-level key is added — not stored-with-the-key
+        -dropped. This is the behaviour that makes a stray ``task`` or
+        ``artifacts`` key cost a whole trace in production, so the
+        description says so and this asserts it stays true.
+        """
+        doc = inspect.getdoc(save_experience)
+        assert doc is not None
+        payload = json.loads(doc.split("Example minimal valid trace:\n", maxsplit=1)[1])
+        payload["definitely_not_a_trace_field"] = "anything"
+
+        with pytest.raises(McpError) as excinfo:
+            save_experience(json.dumps(payload))
+
+        assert excinfo.value.error.code == INVALID_PARAMS
+
     def test_empty_trace_raises_invalid_params(self) -> None:
         with pytest.raises(McpError) as excinfo:
             save_experience("")
