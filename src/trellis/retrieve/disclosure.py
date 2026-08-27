@@ -1,9 +1,9 @@
 """Graduated disclosure: full bodies at the head of a pack, pointers in the tail.
 
-Measured on the reference deployment (30-day window, 15 attributed packs,
-251 injected items. The two shape facts below come from a per-rank
+Measured on the reference deployment: a 30-day window, 15 attributed
+packs, 251 injected items. The two shape facts below come from a per-rank
 breakdown of that window; every before/after figure comes from
-``trellis analyze replay``:
+``trellis analyze replay``.
 
 * The bottom fifth of a pack by rank carries **23% of its tokens and 2.4%
   of its cited-helpful tokens.** The top fifth carries 20.4%.
