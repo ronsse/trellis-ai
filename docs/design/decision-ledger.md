@@ -194,6 +194,28 @@ would have made vector rows honest while the reported symptom continued.
 
 ## Deferred
 
+### F-2 · `trellis-evals` has no CI at all
+
+Measured 2026-08-27: `ronsse/trellis-evals` (private) has **no `.github/workflows/`
+directory** and was last pushed 2026-07-12 — six weeks and roughly 25 merged PRs behind
+`trellis-ai` `main`. Nothing runs the eval suite automatically, on any trigger.
+
+This matters more than a normal missing-CI gap because of *what that repo is for*.
+Evals are the mechanism that is supposed to catch behavioural regressions in retrieval
+and the learning loop — and [#342](https://github.com/ronsse/trellis-ai/issues/342)
+proposes putting the promote→review→serve chain there specifically so it is
+"known-working rather than merely unexercised" (ledger T-1). A scenario added to a suite
+nothing executes is unexercised in exactly the way T-1 was trying to fix.
+
+It also breaks the merge gate: [`swarm-handoff.md`](./swarm-handoff.md) §4 is written
+around eight green checks, and an agent opening a PR there has nothing to be green
+against.
+
+**Trigger:** before #342 lands, or before any agent is dispatched to that repo. Whoever
+takes it should decide whether the suite is cheap enough to run per-PR or needs a
+nightly, and whether it can run without live LLM credentials — several scenarios
+(`*_real_llm`) plainly cannot.
+
 ### F-1 · Sectioned packs cannot contribute per-item rows
 
 `build_sectioned` emits no `injected_items[]`, so sectioned packs (4 of 40 all-time) can
