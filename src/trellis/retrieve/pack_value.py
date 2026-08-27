@@ -5,8 +5,16 @@ costs. Nothing computed that ratio, so the thesis was an assumption. This
 module makes it a number, from telemetry that already existed on both
 sides of the join:
 
-* **Cost per item** — ``PACK_ASSEMBLED.injected_items[].estimated_tokens``,
-  the excerpt actually placed in the agent's prompt.
+* **Cost per item** — what the pack actually charged for it. That is
+  ``PACK_ASSEMBLED.budget_trace[].item_tokens`` where the event records
+  one, falling back to ``injected_items[].estimated_tokens``. The two are
+  byte-identical for an ordinary pack (both are the excerpt's token
+  count), and they diverge exactly where an item was served as something
+  other than its excerpt: an index-mode pack (#305) charges an index line
+  while ``estimated_tokens`` deliberately keeps carrying the excerpt
+  *read* cost, and a graduated pack
+  (:mod:`trellis.retrieve.disclosure`) serves a pointer. Reading the
+  read cost there would price a body the prompt never carried.
 * **Citation per item** — ``FEEDBACK_RECORDED.helpful_item_ids`` /
   ``unhelpful_item_ids``, the caller's verdict on what it used.
 
@@ -465,6 +473,7 @@ def _accumulate(
         family_cell.attributed_packs += 1
 
         served: set[str] = set()
+        charged = _charged_tokens(flat_packs[pack_id])
         for raw in flat_packs[pack_id].get("injected_items") or []:
             if not isinstance(raw, Mapping):
                 continue
@@ -473,7 +482,8 @@ def _accumulate(
                 continue
             served.add(item_id)
             raw_tokens = raw.get("estimated_tokens")
-            tokens = int(raw_tokens) if isinstance(raw_tokens, int | float) else 0
+            fallback = int(raw_tokens) if isinstance(raw_tokens, int | float) else 0
+            tokens = charged.get(item_id, fallback)
             strategy = str(raw.get("strategy_source") or "(none)")
             item_type = str(raw.get("item_type") or "(none)")
 
@@ -521,6 +531,31 @@ def _accumulate(
         "distinct_helpful": distinct_helpful,
         "cited_not_served": cited_not_served,
     }
+
+
+def _charged_tokens(payload: Mapping[str, Any]) -> dict[str, int]:
+    """Per-item tokens the pack's budget walk actually charged.
+
+    Built from ``budget_trace[]``, which records what was spent rather than
+    what the item would have cost as an excerpt. Only *included* steps are
+    read: an excluded step describes an item the pack never served.
+
+    Returns an empty mapping for an event with no ``budget_trace`` — every
+    caller then falls back to ``estimated_tokens``, which is the same
+    number on any pack that served excerpts.
+    """
+    trace = payload.get("budget_trace")
+    if not isinstance(trace, list):
+        return {}
+    out: dict[str, int] = {}
+    for step in trace:
+        if not isinstance(step, Mapping) or not step.get("included"):
+            continue
+        item_id = step.get("item_id")
+        tokens = step.get("item_tokens")
+        if isinstance(item_id, str) and item_id and isinstance(tokens, int | float):
+            out[item_id] = int(tokens)
+    return out
 
 
 def _clean_ids(raw: Any) -> set[str]:
