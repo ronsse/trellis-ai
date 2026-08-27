@@ -72,7 +72,6 @@ what "joins to a pack" means.
 from __future__ import annotations
 
 import re
-
 from collections import defaultdict
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
@@ -497,6 +496,44 @@ def collect_pack_verdicts(
     }
 
 
+class _Axis:
+    """One breakdown axis: its cells, and the packs that reached each cell.
+
+    A cell's ``n`` is the number of attributed packs that contributed at
+    least one item to it — not the window's pack count — so a namespace
+    seen in one pack is suppressed while the headline states a ratio. The
+    two are tracked together here because keeping them in parallel dicts
+    is how they drift apart.
+    """
+
+    __slots__ = ("cells", "seen")
+
+    def __init__(self) -> None:
+        self.cells: dict[str, ValueBreakdown] = {}
+        self.seen: dict[str, set[str]] = defaultdict(set)
+
+    def cell(self, key: str, pack_id: str) -> ValueBreakdown:
+        self.seen[key].add(pack_id)
+        return self.cells.setdefault(key, ValueBreakdown(key=key))
+
+    def finalize(self) -> dict[str, ValueBreakdown]:
+        for key, packs_seen in self.seen.items():
+            self.cells[key].attributed_packs = len(packs_seen)
+        return self.cells
+
+
+def _charge_cells(cells: tuple[ValueBreakdown, ...], tokens: int, verdict: str) -> None:
+    """Add one item's tokens to every axis cell it belongs to."""
+    for cell in cells:
+        cell.injected_tokens += tokens
+        if verdict == "helpful":
+            cell.helpful_tokens += tokens
+        elif verdict == "unhelpful":
+            cell.unhelpful_tokens += tokens
+        else:
+            cell.unjudged_tokens += tokens
+
+
 def _accumulate(
     attributed_ids: list[str],
     *,
@@ -507,13 +544,8 @@ def _accumulate(
 ) -> dict[str, Any]:
     """Sum injected tokens into helpful / unhelpful / unjudged, per axis."""
     totals = {"injected": 0, "helpful": 0, "unhelpful": 0}
-    by_strategy: dict[str, ValueBreakdown] = {}
-    by_item_type: dict[str, ValueBreakdown] = {}
-    by_namespace: dict[str, ValueBreakdown] = {}
+    strategy_axis, type_axis, namespace_axis = _Axis(), _Axis(), _Axis()
     by_family: dict[str, ValueBreakdown] = {}
-    seen_strategy: dict[str, set[str]] = defaultdict(set)
-    seen_item_type: dict[str, set[str]] = defaultdict(set)
-    seen_namespace: dict[str, set[str]] = defaultdict(set)
     distinct_helpful: set[str] = set()
     cited_not_served = 0
 
@@ -536,55 +568,43 @@ def _accumulate(
             raw_tokens = raw.get("estimated_tokens")
             fallback = int(raw_tokens) if isinstance(raw_tokens, int | float) else 0
             tokens = charged.get(item_id, fallback)
-            strategy = str(raw.get("strategy_source") or "(none)")
-            item_type = str(raw.get("item_type") or "(none)")
-            namespace = item_namespace(item_id)
 
             # An item cannot be both; helpful wins, so a contradictory
             # pair can never inflate the denominator's judged share.
-            is_helpful = item_id in helpful
-            is_unhelpful = not is_helpful and item_id in unhelpful
+            if item_id in helpful:
+                verdict = "helpful"
+            elif item_id in unhelpful:
+                verdict = "unhelpful"
+            else:
+                verdict = "unjudged"
 
-            cells = (
-                by_strategy.setdefault(strategy, ValueBreakdown(key=strategy)),
-                by_item_type.setdefault(item_type, ValueBreakdown(key=item_type)),
-                by_namespace.setdefault(namespace, ValueBreakdown(key=namespace)),
-                family_cell,
+            _charge_cells(
+                (
+                    strategy_axis.cell(
+                        str(raw.get("strategy_source") or "(none)"), pack_id
+                    ),
+                    type_axis.cell(str(raw.get("item_type") or "(none)"), pack_id),
+                    namespace_axis.cell(item_namespace(item_id), pack_id),
+                    family_cell,
+                ),
+                tokens,
+                verdict,
             )
-            seen_strategy[strategy].add(pack_id)
-            seen_item_type[item_type].add(pack_id)
-            seen_namespace[namespace].add(pack_id)
-            for cell in cells:
-                cell.injected_tokens += tokens
-                if is_helpful:
-                    cell.helpful_tokens += tokens
-                elif is_unhelpful:
-                    cell.unhelpful_tokens += tokens
-                else:
-                    cell.unjudged_tokens += tokens
 
             totals["injected"] += tokens
-            if is_helpful:
+            if verdict == "helpful":
                 totals["helpful"] += tokens
                 distinct_helpful.add(item_id)
-            elif is_unhelpful:
+            elif verdict == "unhelpful":
                 totals["unhelpful"] += tokens
 
         cited_not_served += len((helpful | unhelpful) - served)
 
-    # A cell's ``n`` is the packs that reached it, not the packs overall.
-    for key, packs_seen in seen_strategy.items():
-        by_strategy[key].attributed_packs = len(packs_seen)
-    for key, packs_seen in seen_item_type.items():
-        by_item_type[key].attributed_packs = len(packs_seen)
-    for key, packs_seen in seen_namespace.items():
-        by_namespace[key].attributed_packs = len(packs_seen)
-
     return {
         "totals": totals,
-        "by_strategy": by_strategy,
-        "by_item_type": by_item_type,
-        "by_item_namespace": by_namespace,
+        "by_strategy": strategy_axis.finalize(),
+        "by_item_type": type_axis.finalize(),
+        "by_item_namespace": namespace_axis.finalize(),
         "by_family": by_family,
         "distinct_helpful": distinct_helpful,
         "cited_not_served": cited_not_served,
