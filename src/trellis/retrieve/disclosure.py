@@ -1,67 +1,78 @@
 """Graduated disclosure: full bodies at the head of a pack, pointers in the tail.
 
-Measured on the reference deployment: a 30-day window, 15 attributed
-packs, 251 injected items. The two shape facts below come from a per-rank
-breakdown of that window; every before/after figure comes from
-``trellis analyze replay``.
+Measured on the reference deployment over the 30 days to **2026-08-27**:
+37 packs, 17 of them attributed (a pack that both joined a feedback event
+and was cited), 317 injected items, 35 cited-helpful servings. That window
+*rolls*, so re-derive rather than trusting these figures indefinitely —
+every before/after below is one ``trellis analyze replay`` invocation, and
+the shape facts come from a per-rank breakdown of the same window. The
+conclusions have now held across two windows (n=15 and n=17) and
+strengthened on the larger one.
 
-* The bottom fifth of a pack by rank carries **23% of its tokens and 2.4%
-  of its cited-helpful tokens.** The top fifth carries 20.4%.
-* Nine of the fifteen attributed packs ran to the *token* budget, not the
-  item budget — 17 to 35 items each. Nobody chose 35 items; the number
-  fell out of ``max_tokens ÷ ~90 tokens per excerpt``.
+* The bottom fifth of a pack by rank carries **23.5% of its tokens and
+  1.9% of its cited-helpful tokens.** The top fifth: 16.9% and 19.3%.
+* **Zero of the 37 packs served every candidate they found.** Seventeen
+  ran out of *tokens*, twenty hit ``max_items``. The token-bound ones run
+  17 to 35 items each; nobody chose 35, the number fell out of
+  ``max_tokens / ~90 tokens per excerpt``.
 
-That second fact is the defect. ``PackBudget.max_tokens`` is documented as
-a ceiling and implemented as a **quota**: the greedy walk keeps admitting
-items while any budget remains, so a caller who asks for "up to 2000
-tokens" always gets 2000 tokens, the last several hundred of which buy
-almost nothing. Graduated disclosure spends the head of that budget on
-bodies and refuses to spend the tail on more of them.
+That second fact is the defect, and it is the one to carry forward.
+``PackBudget.max_tokens`` is documented as a ceiling and implemented as a
+**quota**: the greedy walk keeps admitting items while any budget remains,
+so a caller who asks for "up to 2000 tokens" always gets 2000 tokens, the
+last several hundred of which buy almost nothing. It also means any change
+that makes items *cheaper* makes the pack *wider* rather than cheaper.
+Graduated disclosure spends the head of that budget on bodies and refuses
+to spend the tail on more of them.
 
 **Why not just serve fewer items.** A hard item cap at the same rank is
-cheaper still — ``--max-items 12`` replays at -37.9% tokens against
-graduation's -26.4%, and lifts the fraction further — but it *deletes* the
-tail. Ninety-six of 251 items become unreachable, and **four of the
-twenty-eight cited-helpful servings in the window sat past rank 12**: a
-caller who found those useful would simply not have been given them.
-Graduation withholds one, and withholds it as a fetchable pointer rather
-than a deletion. The tail is low-yield, not worthless, and the same
-commitment that makes the content floor a penalty rather than an exclusion
-applies here — a legitimately terse memory, or a genuinely good one the
-ranker put eighteenth, must not be silently dropped.
+cheaper still — ``--max-items 12`` replays at -43.0% tokens against
+graduation's -30.3%, and lifts the fraction further — but it *deletes* the
+tail. A hundred and thirty-eight of 317 items become unreachable, and
+**eight of the thirty-five cited-helpful servings in the window sat past
+rank 12**: a caller who found those useful would simply not have been
+given them, and that count grew (from four of twenty-eight) as the sample
+grew. Graduation withholds **one**, and withholds it as a fetchable
+pointer rather than a deletion. The tail is low-yield, not worthless, and
+the same commitment that makes the content floor a penalty rather than an
+exclusion applies here — a legitimately terse memory, or a genuinely good
+one the ranker put eighteenth, must not be silently dropped.
 
 **Why not make index mode the default instead.** Measured, an index line
 costs 33 tokens against a 90-token mean excerpt — 2.7:1, not the order of
-magnitude the name suggests, because ``item_id`` alone averages 45
-characters. Surveying all 251 items as lines costs 37% of the full pack,
+magnitude the name suggests, because ``item_id`` alone averages 44
+characters. Surveying all 317 items as lines costs 37% of the full pack,
 so index mode only pays if the agent then opens fewer than ~63% of what it
-surveyed. Nothing measures that: index mode (#305) fired on **zero** of
-the 37 packs assembled in the window. Graduated disclosure applies the
-index line exactly where the fetch rate is demonstrably near zero — the
-tail nobody cites — and leaves the head alone.
+surveyed. Nothing measures that: index mode (#305) has fired on **zero**
+of the 37 packs in the window. Graduated disclosure applies the index line
+exactly where the fetch rate is demonstrably near zero — the tail nobody
+cites — and leaves the head alone.
 
 **Why rank and not score.** A relative-score stop would be the more
 principled rule, and it is not available: after RRF fusion every item in a
-pack scores within 0.87-1.00 of the pack's top item (helpful items median
-0.976, unjudged 0.910), so no threshold separates them. Rank is the only
-signal that does, which is why the cut is an integer and not a ratio.
+pack scores within 0.74-1.00 of the pack's top item, and the medians barely
+separate (helpful 0.968, unhelpful 0.938, unjudged 0.910), so no threshold
+divides them — at a ratio of 0.7 nothing is cut at all. Rank does separate
+(mean relative position: helpful 0.374, unhelpful 0.496, unjudged 0.595),
+which is why the cut is an integer and not a ratio.
 
 **Where it runs.** *After* the token-budget walk, never before. Rewriting
 excerpts first makes each item cheaper and the greedy simply admits more
-of them — the saving is spent on more tail. That is not a hypothesis: it
+of them — the saving is spent on more tail. That is not a hypothesis, it
 is what the width lever does. ``trellis analyze replay
 --excerpt-max-chars 300`` prices a narrower excerpt against the same
-window and returns -5.5% tokens with the useful-token fraction falling
-from 0.102 to 0.076, because the walk backfilled 92 items nobody had ever
-graded. Suppress the refill (``--no-refill``, diagnostic only, the shipped
-walk does refill) and the same cap saves 30.9% with the fraction flat at
-0.104 — a ratio is close to invariant under a uniform width scaling,
-since the numerator shrinks with the denominator.
+window and returns -4.1% tokens with the useful-token fraction falling
+from 0.088 to 0.066, because the walk backfilled 116 items nobody had ever
+graded. Suppress the refill (``--no-refill``, diagnostic only — the
+shipped walk does refill) and the same cap saves 30.3% with the fraction
+flat at 0.090. **A uniform width scaling cannot move this metric: it is a
+ratio, and scaling every excerpt scales both halves.** Width is a cost
+lever where the item count binds, and never a precision lever.
 
 Applied after the walk instead, the pack keeps exactly the items it
 already chose and simply costs less: ``--body-items 12`` replays at
-**-26.4% tokens and a useful-token fraction of 0.131 against 0.102, a
-+28.6% relative lift, with one of twenty-eight cited-helpful servings
+**-30.3% tokens and a useful-token fraction of 0.120 against 0.088, a
++36.2% relative lift, with one of thirty-five cited-helpful servings
 demoted to a pointer and none dropped.** The pack comes in *under* its
 ceiling, which is what a ceiling is for.
 
@@ -81,17 +92,21 @@ from trellis.schemas.pack import PackItem
 
 #: Full excerpts served before the tail becomes pointers.
 #:
-#: Chosen on the replay above, which is a 15-pack sample — small, and the
-#: value is fitted to it, so treat it as the best current estimate rather
-#: than a constant with a proof behind it. On that window ``12`` dominates
-#: ``15``: same cost (one withheld cited-helpful serving of 28), more
-#: saving (-26.4% against -18.8%), better fraction (+28.6% against
-#: +16.5%). Going lower keeps paying — ``8`` reaches -36.9% — but starts
-#: withholding a second body, and the risk is asymmetric: a token spent on
-#: a tail nobody reads is cheap, a memory the caller needed and did not
-#: fetch is not. Twelve is the deepest cut the window supports at a cost
-#: of one. Re-run ``trellis analyze replay --body-items N`` as the
-#: attributed sample grows; the number should move with the evidence.
+#: Chosen on the replay above — a 17-pack sample, small, and the value is
+#: fitted to it, so treat it as the best current estimate rather than a
+#: constant with a proof behind it. It has now been re-derived on two
+#: windows (n=15 and n=17) and came out at 12 both times, which is weak
+#: evidence that it is not an artifact of one sample.
+#:
+#: On the current window ``12`` dominates ``15``: same cost (one withheld
+#: cited-helpful serving of 35), more saving (-30.3% against -23.1%),
+#: better fraction (+36.2% against +23.5%). Going lower keeps paying —
+#: ``8`` reaches -40.2% — but starts withholding a second body, and the
+#: risk is asymmetric: a token spent on a tail nobody reads is cheap, a
+#: memory the caller needed and did not fetch is not. Twelve is the
+#: deepest cut the window supports at a cost of one. Re-run ``trellis
+#: analyze replay --body-items N`` as the attributed sample grows; the
+#: number should move with the evidence.
 DEFAULT_BODY_ITEMS = 12
 
 #: Characters of label a pointer carries. Matches the index line's label
