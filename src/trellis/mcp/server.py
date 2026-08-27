@@ -965,7 +965,31 @@ def save_experience(trace_json: str) -> str:
     """Save an experience trace to the graph.
 
     Args:
-        trace_json: JSON string conforming to the Trace schema.
+        trace_json: JSON string conforming to the Trace schema. The required
+            top-level keys are ``source``, ``intent``, and ``context``.
+            ``source`` must be one of ``agent``, ``human``, ``workflow``, or
+            ``system``. Put execution details such as ``agent_id``, ``domain``,
+            ``started_at``, and ``ended_at`` inside ``context``. Each entry in
+            ``steps`` requires ``step_type`` and ``name``; do not use
+            ``action``/``observation`` as field names. Unknown top-level or
+            context fields are rejected, so put additional data in top-level
+            ``metadata`` (or outcome measurements in ``outcome.metrics``).
+
+            Example minimal valid trace:
+            {
+              "source": "agent",
+              "intent": "Fix a failing test",
+              "context": {
+                "agent_id": "coder-1",
+                "domain": "bugfix",
+                "started_at": "2026-08-27T00:00:00Z",
+                "ended_at": "2026-08-27T00:01:00Z"
+              },
+              "metadata": {"repo": "my/repo"},
+              "steps": [
+                {"step_type": "tool_call", "name": "search"}
+              ]
+            }
     """
     if not trace_json or not trace_json.strip():
         _record_boundary_rejection(
