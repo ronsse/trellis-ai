@@ -942,7 +942,24 @@ def save_experience(trace_json: str) -> str:
     """Save an experience trace to the graph.
 
     Args:
-        trace_json: JSON string conforming to the Trace schema.
+        trace_json: JSON string conforming to the Trace schema. Must contain EXACTLY
+            the 6 required top-level keys (`agent_id`, `domain`, `ended_at`, 
+            `schema_version`, `started_at`, `steps`) plus optional `parent_trace_id`, 
+            `team`, `workflow_id`. Any other keys MUST go in `metadata`. The `steps` array
+            requires `step_type` and `name` per step, not `action`/`observation`.
+            
+            Example minimal valid trace:
+            {
+              "agent_id": "coder-1",
+              "domain": "bugfix",
+              "schema_version": "1.0",
+              "started_at": "2026-08-27T00:00:00Z",
+              "ended_at": "2026-08-27T00:01:00Z",
+              "metadata": {"repo": "my/repo"},
+              "steps": [
+                {"step_type": "tool", "name": "search", "outcome": "success"}
+              ]
+            }
     """
     if not trace_json or not trace_json.strip():
         _record_boundary_rejection(
