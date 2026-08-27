@@ -104,6 +104,42 @@ between an agent and `main`.
 **Cost of being wrong:** during an Actions outage nothing can merge at all. Given the
 alternative is *unverified merges* during an outage, that is the better failure.
 
+**Measured state** (2026-08-27): branch protection *does* exist on `main` — force-pushes
+and deletions are already blocked — but it carries **no `required_status_checks` key at
+all**, and `allow_auto_merge` is `false`.
+
+**Runnable, if the answer is yes.** `strict: true` is the mechanised form of the
+"green against *current* `main`" rule in [`swarm-handoff.md`](./swarm-handoff.md) §4 —
+it makes GitHub enforce the thing an orchestrator has so far been enforcing by hand.
+
+```bash
+gh api --method PUT /repos/ronsse/trellis-ai/branches/main/protection --input - <<'JSON'
+{
+  "required_status_checks": {
+    "strict": true,
+    "contexts": ["lint", "typecheck", "test (3.11)", "test (3.12)", "test (3.13)",
+                 "openapi-check", "CodeQL", "Analyze (python)"]
+  },
+  "enforce_admins": false,
+  "required_pull_request_reviews": {
+    "dismiss_stale_reviews": false,
+    "require_code_owner_reviews": false,
+    "required_approving_review_count": 0
+  },
+  "restrictions": null
+}
+JSON
+gh api --method PATCH /repos/ronsse/trellis-ai --field allow_auto_merge=true
+```
+
+**Two honest caveats**, neither fatal:
+- The matrix legs are pinned **by name**. Dropping 3.11 or adding 3.14 to
+  `.github/workflows/tests.yml` blocks every merge until this payload is updated too.
+  That coupling is a real maintenance cost, not a hypothetical one.
+- `strict: true` means every PR must be rebased onto `main` before merging, so a busy
+  queue serialises. At current volume (7 PRs in a day, one merger) that is free; it
+  would not be with ten concurrent agents.
+
 ## Pending — access
 
 ### A-1 · Delete Aura API credentials `985676d4` / `d664924e`
@@ -157,6 +193,56 @@ would have made vector rows honest while the reported symptom continued.
 ---
 
 ## Deferred
+
+### F-3 · Should capture-health warn on a surface that has gone *quiet*, not just one being rejected?
+
+**Measured 2026-08-27**, 7-day window on the reference deployment: `mcp:record_feedback`
+shows **0 accepted, 1 rejected**. The grading half of the loop has produced nothing for a
+week, and **nothing warned**.
+
+The banner ([`ops/capture_health.py`](../../src/trellis/ops/capture_health.py), #309)
+fires on ≥3 rejections **and** zero accepted for a surface. Here rejections were 1, so
+the condition was not met — working as specified. But the specified condition cannot
+detect a surface that simply stops being called, which for `record_feedback` is the more
+likely failure: an agent that never grades produces no rejections at all.
+
+This interacts with everything downstream. `pack_attribution_rate` is 0.875 over 8
+pack-targeted events, and no amount of surface ergonomics can move it while nothing is
+being graded — the same conclusion A4 reached about retrieve-adoption, one layer over.
+
+**Recommendation: yes, but as a distinct signal — "was active, now silent" rather than
+"silent".** Bare silence is not evidence: most surfaces are unused most of the time, and a
+banner that fires on every quiet tool is one nobody reads. A surface with a *prior* accept
+history that has since gone to zero is a real signal, and it is the shape of the
+motivating incident. Keep it advisory, keep it failing soft, and keep it out of
+`write_config.py` — like the existing thresholds these are **read-side** knobs.
+
+**Cost of being wrong:** a noisier banner. Reversible in a threshold.
+
+**Trigger:** anyone touching `capture_health.py`, or the next time a write surface goes
+dark unnoticed.
+
+### F-2 · `trellis-evals` has no CI at all
+
+Measured 2026-08-27: `ronsse/trellis-evals` (private) has **no `.github/workflows/`
+directory** and was last pushed 2026-07-12 — six weeks and roughly 25 merged PRs behind
+`trellis-ai` `main`. Nothing runs the eval suite automatically, on any trigger.
+
+This matters more than a normal missing-CI gap because of *what that repo is for*.
+Evals are the mechanism that is supposed to catch behavioural regressions in retrieval
+and the learning loop — and [#342](https://github.com/ronsse/trellis-ai/issues/342)
+proposes putting the promote→review→serve chain there specifically so it is
+"known-working rather than merely unexercised" (ledger T-1). A scenario added to a suite
+nothing executes is unexercised in exactly the way T-1 was trying to fix.
+
+It also breaks the merge gate: [`swarm-handoff.md`](./swarm-handoff.md) §4 is written
+around eight green checks, and an agent opening a PR there has nothing to be green
+against.
+
+**Trigger:** before #342 lands, or before any agent is dispatched to that repo. Whoever
+takes it should decide whether the suite is cheap enough to run per-PR or needs a
+nightly, and whether it can run without live LLM credentials — several scenarios
+(`*_real_llm`) plainly cannot.
 
 ### F-1 · Sectioned packs cannot contribute per-item rows
 

@@ -8,16 +8,43 @@
 > [`implementation-roadmap.md`](./implementation-roadmap.md) (**authoritative** — when it
 > and the backlog disagree, the roadmap wins).
 >
-> Last updated 2026-08-27 at `c356ed6`.
+> Last updated 2026-08-27 at `61533ef`.
 
 ## 1. State
 
-`main` = `c356ed6`. PR queue clear. Prod containers on skynet run current `main`.
+`main` = `61533ef`. See §1.1 for work in flight. Prod containers on skynet run current `main`.
 
 Landed 2026-08-26: doc reconciliation + backlog (#340), token-economics wave (#341),
 DoD-3 reframe (#304), **noise exclusion actually holding** (#343), dependabot ruff
 0.16.4/mypy (#328), **attribution decomposed + join key restored** (#344), Wave 1
-bookkeeping (#346).
+bookkeeping (#346). Landed 2026-08-27: this handoff + the ledger (#347), **F1 token
+economics** (#353).
+
+### 1.1 In flight — four agents were interrupted mid-task
+
+A swarm of four ran on 2026-08-27 and **all four were killed by a shared session limit**,
+not by task failure. Work was committed unverified onto its branches to preserve it. Each
+is marked `NOT REVIEWED, NOT CI-VERIFIED` in its commit message.
+
+| branch | state | note |
+|---|---|---|
+| `swarm/a1` | ~2200 lines, **uncommitted → WIP commit** | `trellis_workers/trace_embed/` + 7 test modules incl. watermark and resume-without-skipping |
+| `swarm/345` | 77 lines, WIP commit | pgvector fixture + `live-infra.yml` + `CLAUDE.md` claim |
+| `swarm/349` | 367 lines, WIP commit | overlaps outside PR #352 — reconcile, do not merge alongside |
+
+**Resume by re-running the item against these branches, not from scratch.** Rebase onto
+current `main` first; all three were cut from `9d3d59e`.
+
+**The headline measurement F1 produced**, which the rest of Wave 1b now builds on:
+**`useful_token_fraction` = 0.1148** (n=14 attributed packs). **88.5% of injected tokens
+land on items never cited helpful.** Per-pack it ranges 0.0–0.905, so the number moves.
+Keyword is the weakest axis (0.049, n=6). Trimming is now justified by measurement.
+
+Filed the same day, unstarted: [#348](https://github.com/ronsse/trellis-ai/issues/348)
+(write_provenance staleness), [#349](https://github.com/ronsse/trellis-ai/issues/349)
+(`save_experience` description), [#350](https://github.com/ronsse/trellis-ai/issues/350)
+(pgvector cannot create its own extension), [#351](https://github.com/ronsse/trellis-ai/issues/351)
+(ArcadeDB contract never runs in CI).
 
 Live measurements to build against — re-measure rather than trusting these:
 
@@ -100,8 +127,10 @@ merge its own work.
 | Local `make test` | deselects 635 tests (`postgres`, `pgvector`, `neo`, `arcadedb`, `live`, `slow`) | local green ≠ CI green |
 | pgvector contract suite | **has never run anywhere**; fixture broken (#345) | production runs pgvector — vector changes are unverified on it |
 | Scratch pgvector without `CREATE EXTENSION vector` | **hangs** on `futex_wait_queue`, ~30 idle conns, no error | create the extension; never point `TRELLIS_TEST_PG_DSN` at prod (`:5433`) — the fixture `TRUNCATE`s |
-| Concurrent subagents in one tree | uncommitted work collides | give each a `git worktree`; the shared `.venv` `.pth` points at the *main* tree, so set `PYTHONPATH=<worktree>/src` or tests silently run against main's code |
+| Concurrent subagents in one tree | uncommitted work collides | give each a `git worktree` under `/mnt/ssd/trellis-worktrees/` |
+| A worktree using the main tree's `.venv` | `import trellis` resolves to **main's** code, so the worktree's tests pass green without executing the changes under test — silently | prefix every `python`/`pytest` with `PYTHONPATH=<worktree>/src`. Verified 2026-08-27 by marker probe. Works *only because* `_editable_impl_trellis_ai.pth` is a plain-path `.pth`; a setuptools `__editable___*_finder` meta-path hook would beat `PYTHONPATH` and the same mitigation would fail silently. Re-check after any reinstall. |
 | `git checkout -b` then commit | HEAD reverted mid-session once; a commit landed on `main` | `git branch --show-current` immediately before committing |
+| Agent killed mid-task by a shared session limit | four agents died at once with hours of uncommitted work in their worktrees; nothing is lost *yet*, but nothing is durable either | **tell agents to commit early and often on their own branch.** A WIP commit costs nothing and survives; an uncommitted worktree is one `git checkout` from gone. The orchestrator should sweep worktrees for uncommitted work the moment an agent reports failure |
 | GitHub Actions outage | runs sit `queued`, then `CANCELLED` | watch `githubstatus.com` components, not `gh pr checks` (which errors); re-trigger cancelled runs with `update-branch` |
 
 ## 6. The queue
