@@ -70,14 +70,29 @@ criteria:
 Acceptance: a trace written today is retrievable by semantic search after one worker
 pass; a deliberately-interrupted pass resumes without skipping or double-embedding.
 
-**A2 — [#338](https://github.com/ronsse/trellis-ai/issues/338) vector row metadata is a stale embed-time snapshot.** `class: panel`
-Noise exclusion never held on the semantic path because the vector row's metadata is
-frozen at embed time. Interacts with A1: whatever A1 writes must not inherit this bug.
-Sequence A1 and A2 together or A2 first.
+**A2 — [#338](https://github.com/ronsse/trellis-ai/issues/338) vector row metadata is a stale embed-time snapshot.** ✅ **LANDED** 2026-08-26 via [#343](https://github.com/ronsse/trellis-ai/pull/343)
+The write-through alone would have fixed nothing observable. Two further defects sat behind
+it, both verified on `main` first: `SemanticSearch` strips `content_tags` from the filters it
+forwards, and — the larger one — `_build_filters` **returns early when `tag_filters is None`**,
+so the `{"not_in": ["noise"]}` default was never constructed on the path MCP `get_context`
+uses without a `domain`. Noise exclusion held on **neither** axis. Writing the acceptance test
+is what exposed this; option 1 alone could not have passed it.
 
-**A3 — [#336](https://github.com/ronsse/trellis-ai/issues/336) effectiveness-based noise demotion is unsound without item attribution.** `class: panel`
-Either gate the demotion behind sufficient attribution, or fix the attribution that
-feeds it. Depends on A4 for the second option.
+⚠️ **This changed what production packs return for every `get_context` call**, not just the 45
+divergent rows. Worth watching the next packs served.
+
+⚠️ Coverage caveat: the two new `VectorStoreContractTests` run against **SQLite only**. The
+pgvector contract suite has never executed anywhere and its fixture is broken — see
+[#345](https://github.com/ronsse/trellis-ai/issues/345). pgvector is the production backend.
+
+**A3 — [#336](https://github.com/ronsse/trellis-ai/issues/336) effectiveness-based noise demotion is unsound without item attribution.** `class: panel` — **unblocked 2026-08-26**
+Either gate the demotion behind sufficient attribution, or fix the attribution that feeds
+it. **Read `pack_attribution_rate` (0.933), not the headline `attribution_rate` (0.359)** —
+correcting an error in this file's first draft. The headline is dragged down by feedback on
+work where no pack was served, which says nothing about whether a *served* pack's items were
+cited. Demotion soundness depends on the latter, and by that measure the signal is much
+healthier than the headline implied. The real weakness is **sample size** — 15 pack-targeted
+events over 30 days — not citation rate.
 
 **A4 — Raise feedback attribution from 32%.** `class: panel`
 *(measured 2026-08-26; the framing below was wrong and the correction is the finding)*
@@ -178,10 +193,12 @@ Acceptance:
 - Sectioned packs are handled or explicitly excluded with a stated reason
   (`build_sectioned` emits no `injected_items[]`, so it contributes zero rows).
 
-**Depends on A4.** The benefit half is only as good as feedback attribution, currently
-**32%**. F1 can be built first and will report honest low coverage; it should not be
-*trusted* until A4 raises attribution. Build order A4 → F1 is preferable; F1 before A4
-is acceptable only if the coverage refusal above is implemented first.
+**A4 landed 2026-08-26, and it changes this dependency.** The number F1's coverage refusal
+must read is **`pack_attribution_rate` (0.933)**, not the headline `attribution_rate` (0.359)
+— an error in this file's first draft. Of packs actually served and graded, 93% carry item
+citations, so the join is far better fed than the headline suggested. F1's real constraint is
+**sample size**: 15 pack-targeted feedback events across 31 packs in 30 days. State `n`
+alongside every ratio and refuse to report one below a stated minimum.
 
 **F2 — Act on the measurement: trimming and disclosure policy.** `class: panel`
 Once F1 produces a number, the levers become tunable instead of guessed:
