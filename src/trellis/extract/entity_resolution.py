@@ -123,8 +123,8 @@ NAME_ALIAS_SOURCE_SYSTEM = "name"
 #:   nodes, or matches ambiguously, never mints — so it scans once per
 #:   occurrence, forever. Of 119 ``@mention`` occurrences across 1239
 #:   production documents, **118 match nothing**: they are email-address
-#:   and package-scope fragments (``@gmail`` ×21, ``@modelcontextprotocol``
-#:   ×6, ``@upstash``, ``@react-native-async-storage``). Minting is
+#:   and package-scope fragments (``@gmail`` x21, ``@modelcontextprotocol``
+#:   x6, ``@upstash``, ``@react-native-async-storage``). Minting is
 #:   structurally unable to retire those; not repeating them within a
 #:   document is (see :mod:`trellis.extract.alias_match`).
 #: * **Past the cap the resolver stops learning, and starts being wrong.**
