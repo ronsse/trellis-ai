@@ -1,7 +1,9 @@
 """Graduated disclosure: full bodies at the head of a pack, pointers in the tail.
 
 Measured on the reference deployment (30-day window, 15 attributed packs,
-251 injected items, ``trellis analyze replay``):
+251 injected items. The two shape facts below come from a per-rank
+breakdown of that window; every before/after figure comes from
+``trellis analyze replay``:
 
 * The bottom fifth of a pack by rank carries **23% of its tokens and 2.4%
   of its cited-helpful tokens.** The top fifth carries 20.4%.
@@ -18,7 +20,7 @@ bodies and refuses to spend the tail on more of them.
 
 **Why not just serve fewer items.** A hard item cap at the same rank is
 cheaper still — ``--max-items 12`` replays at -37.9% tokens against
-graduation's -27.7%, and lifts the fraction further — but it *deletes* the
+graduation's -26.4%, and lifts the fraction further — but it *deletes* the
 tail. Ninety-six of 251 items become unreachable, and **four of the
 twenty-eight cited-helpful servings in the window sat past rank 12**: a
 caller who found those useful would simply not have been given them.
@@ -58,8 +60,8 @@ since the numerator shrinks with the denominator.
 
 Applied after the walk instead, the pack keeps exactly the items it
 already chose and simply costs less: ``--body-items 12`` replays at
-**-27.7% tokens and a useful-token fraction of 0.133 against 0.102, a
-+30.8% relative lift, with one of twenty-eight cited-helpful servings
+**-26.4% tokens and a useful-token fraction of 0.131 against 0.102, a
++28.6% relative lift, with one of twenty-eight cited-helpful servings
 demoted to a pointer and none dropped.** The pack comes in *under* its
 ceiling, which is what a ceiling is for.
 
@@ -83,8 +85,8 @@ from trellis.schemas.pack import PackItem
 #: value is fitted to it, so treat it as the best current estimate rather
 #: than a constant with a proof behind it. On that window ``12`` dominates
 #: ``15``: same cost (one withheld cited-helpful serving of 28), more
-#: saving (-27.7% against -19.7%), better fraction (+30.8% against
-#: +17.8%). Going lower keeps paying — ``8`` reaches -38.7% — but starts
+#: saving (-26.4% against -18.8%), better fraction (+28.6% against
+#: +16.5%). Going lower keeps paying — ``8`` reaches -36.9% — but starts
 #: withholding a second body, and the risk is asymmetric: a token spent on
 #: a tail nobody reads is cheap, a memory the caller needed and did not
 #: fetch is not. Twelve is the deepest cut the window supports at a cost
