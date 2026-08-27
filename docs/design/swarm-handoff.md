@@ -8,16 +8,16 @@
 > [`implementation-roadmap.md`](./implementation-roadmap.md) (**authoritative** — when it
 > and the backlog disagree, the roadmap wins).
 >
-> Last updated 2026-08-27 at `c356ed6`.
+> Last updated 2026-08-27 at `9d3d59e`.
 
 ## 1. State
 
-`main` = `c356ed6`. PR queue clear. Prod containers on skynet run current `main`.
+`main` = `9d3d59e`. PR queue clear. Prod containers on skynet run current `main`.
 
 Landed 2026-08-26: doc reconciliation + backlog (#340), token-economics wave (#341),
 DoD-3 reframe (#304), **noise exclusion actually holding** (#343), dependabot ruff
 0.16.4/mypy (#328), **attribution decomposed + join key restored** (#344), Wave 1
-bookkeeping (#346).
+bookkeeping (#346). Landed 2026-08-27: this handoff + the ledger (#347).
 
 Live measurements to build against — re-measure rather than trusting these:
 
@@ -100,7 +100,8 @@ merge its own work.
 | Local `make test` | deselects 635 tests (`postgres`, `pgvector`, `neo`, `arcadedb`, `live`, `slow`) | local green ≠ CI green |
 | pgvector contract suite | **has never run anywhere**; fixture broken (#345) | production runs pgvector — vector changes are unverified on it |
 | Scratch pgvector without `CREATE EXTENSION vector` | **hangs** on `futex_wait_queue`, ~30 idle conns, no error | create the extension; never point `TRELLIS_TEST_PG_DSN` at prod (`:5433`) — the fixture `TRUNCATE`s |
-| Concurrent subagents in one tree | uncommitted work collides | give each a `git worktree`; the shared `.venv` `.pth` points at the *main* tree, so set `PYTHONPATH=<worktree>/src` or tests silently run against main's code |
+| Concurrent subagents in one tree | uncommitted work collides | give each a `git worktree` under `/mnt/ssd/trellis-worktrees/` |
+| A worktree using the main tree's `.venv` | `import trellis` resolves to **main's** code, so the worktree's tests pass green without executing the changes under test — silently | prefix every `python`/`pytest` with `PYTHONPATH=<worktree>/src`. Verified 2026-08-27 by marker probe. Works *only because* `_editable_impl_trellis_ai.pth` is a plain-path `.pth`; a setuptools `__editable___*_finder` meta-path hook would beat `PYTHONPATH` and the same mitigation would fail silently. Re-check after any reinstall. |
 | `git checkout -b` then commit | HEAD reverted mid-session once; a commit landed on `main` | `git branch --show-current` immediately before committing |
 | GitHub Actions outage | runs sit `queued`, then `CANCELLED` | watch `githubstatus.com` components, not `gh pr checks` (which errors); re-trigger cancelled runs with `update-branch` |
 
