@@ -23,6 +23,9 @@ surfaces from ``docs/design/adr-autonomy-ladder.md``:
   Claude Code session-capture sweep, delegating to the same
   :func:`~trellis_workers.session_capture.sweep.run_sweep` the
   ``trellis-session-capture`` console script runs.
+* :func:`embed_traces_cmd` (``trellis worker embed-traces``) — one
+  trace-summary embed pass, so traces are reachable by semantic search at
+  all; see :mod:`trellis_workers.trace_embed`.
 
 The ``worker_app`` lived in ``trellis_cli.main`` as an empty group; it has
 moved here. ``main`` imports it from this module.
@@ -1365,4 +1368,136 @@ def _render_capture_text(payload: dict[str, Any]) -> None:
             f"[red]  {payload['sessions_judge_unavailable']} session(s) left "
             f"unjudged — the judge was unreachable; they stay un-watermarked "
             f"for a later retry.[/red]"
+        )
+
+
+# ---------------------------------------------------------------------------
+# trellis worker embed-traces
+# ---------------------------------------------------------------------------
+
+
+@worker_app.command("embed-traces")
+def embed_traces_cmd(
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Count what would be embedded; write nothing, move no cursor.",
+    ),
+    limit: int = typer.Option(
+        0, "--limit", help="Stop after this many traces (0 = no limit)."
+    ),
+    max_scan: int = typer.Option(
+        0,
+        "--max-scan",
+        help=(
+            "Traces processed per pass (0 = the worker default). Bounds the "
+            "work, not the reads: the pass refuses rather than reading less, "
+            "because slicing the oldest traces soundly needs the whole range."
+        ),
+    ),
+    page_size: int = typer.Option(
+        0, "--page-size", help="Traces per trace-store query (0 = default)."
+    ),
+    reset_watermark: bool = typer.Option(
+        False,
+        "--reset-watermark",
+        help=(
+            "Forget the cursor and re-scan from the beginning. Costs time, "
+            "never rows — traces that already have a vector row are skipped."
+        ),
+    ),
+    no_step_errors: bool = typer.Option(
+        False,
+        "--no-step-errors",
+        help="Render only intent and outcome, omitting recorded step errors.",
+    ),
+    watermark: Path | None = typer.Option(  # noqa: B008 - typer option default
+        None, "--watermark", help="Cursor file (default: <config dir>/…)."
+    ),
+    output_format: str = typer.Option("text", "--format", help="Output format."),
+) -> None:
+    """Embed trace summaries so traces are reachable by semantic search.
+
+    ``save_experience`` writes a trace and nothing else, and no retrieval
+    strategy reads the trace store — keyword reads documents, semantic reads
+    vectors, graph reads the graph. A trace's only surface has been the
+    name-only ``trace:<id>`` Activity node trace extraction mints. This pass
+    renders each trace's intent, outcome summary and recorded step errors into
+    a document, embeds it, and records the write through the governed
+    :class:`~trellis.mutate.MutationExecutor`. It never modifies a trace.
+
+    **Requires an embedder and a vector store.** Like ``trellis admin
+    reindex-vectors``, running the command is the opt-in — no feature flag —
+    but a missing embedder exits non-zero rather than reporting a clean pass
+    over zero rows.
+
+    Safe to interrupt. The cursor advances only through a contiguous run of
+    traces confirmed to have a vector row, and correctness does not depend on
+    it: the check that decides whether a trace is done asks the vector store.
+    """
+    from trellis_workers.trace_embed import (  # noqa: PLC0415
+        TraceEmbedScanLimitError,
+        TraceEmbedUnavailableError,
+        run_trace_embed_pass,
+    )
+
+    # ``0`` means "leave the worker's own default alone" — the constants live
+    # in trellis_workers, which is a lazy import here (it is an optional
+    # install alongside the CLI), so restating them as typer defaults would
+    # duplicate a number that could drift.
+    overrides: dict[str, Any] = {}
+    if max_scan > 0:
+        overrides["max_scan"] = max_scan
+    if page_size > 0:
+        overrides["page_size"] = page_size
+
+    try:
+        report = run_trace_embed_pass(
+            _get_registry(),
+            watermark_path=watermark,
+            limit=limit,
+            dry_run=dry_run,
+            reset_watermark=reset_watermark,
+            include_step_errors=not no_step_errors,
+            **overrides,
+        )
+    except (TraceEmbedUnavailableError, TraceEmbedScanLimitError) as exc:
+        if output_format == "json":
+            emit_json({"status": "error", "message": str(exc)})
+        else:
+            console.print(f"[red]worker embed-traces: {escape(str(exc))}[/red]")
+        raise typer.Exit(code=EXIT_INTERNAL) from exc
+
+    payload = report.to_dict()
+    if output_format == "json":
+        emit_json(payload)
+    else:
+        _render_embed_traces_text(payload)
+
+    if report.failed or report.skipped_empty:
+        # A pass that left traces unreachable did not do the job it was
+        # scheduled to do, and a green exit would hide exactly the silent gap
+        # this worker exists to close.
+        raise typer.Exit(code=EXIT_INTERNAL)
+
+
+def _render_embed_traces_text(payload: dict[str, Any]) -> None:
+    mode = "DRY-RUN" if payload["dry_run"] else "LIVE"
+    console.print(f"[bold]worker embed-traces[/bold] mode={mode}")
+    console.print(
+        f"  traces: {payload['scanned']} scanned  "
+        f"{payload['embedded']} embedded  "
+        f"{payload['skipped_existing']} already embedded  "
+        f"{payload['skipped_empty']} nothing to render"
+    )
+    console.print(
+        f"  cursor: {payload['watermark_before'] or '(none)'} -> "
+        f"{payload['watermark_after'] or '(none)'}"
+        + ("  [yellow](stopped early)[/yellow]" if payload["stopped_early"] else "")
+    )
+    if payload["more_remaining"]:
+        console.print("[yellow]  more traces remain — run again to continue.[/yellow]")
+    for failure in payload["failures"]:
+        console.print(
+            f"[red]  {failure['trace_id']}: {escape(str(failure['error']))}[/red]"
         )
