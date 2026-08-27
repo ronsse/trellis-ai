@@ -37,6 +37,23 @@ Design notes
   deterministic contract; an LLM-tier fallback can disambiguate using
   surrounding context.
 
+* **Repeated mentions resolve once.**  A resolution can cost a bounded
+  full-graph scan (:mod:`trellis.extract.entity_resolution`), and the
+  same token repeats freely inside one document — an email address puts
+  ``@gmail`` in the text once per address.  Each *distinct* token is
+  therefore resolved once per ``extract`` call and the answer reused for
+  its other occurrences.  Measured on the reference deployment's 1239
+  documents: 119 mention occurrences over 71 distinct
+  ``(document, token)`` pairs, so **40% of resolver calls were exact
+  repeats**; the worst single document spent 11 scans on 2 names.  The
+  cache is scoped to the call — one document, one pass — so it cannot go
+  stale against a concurrent write, unlike a resolver-lifetime cache
+  (the MCP path holds one resolver for the life of the process).
+  Occurrence-level accounting is deliberately *not* deduplicated:
+  ``matched_count``, ``unmatched`` and ``total_mentions`` still count
+  occurrences, so ``_summarize``'s confidence and residue are unchanged
+  by this.  Only the number of resolver invocations drops.
+
 * **Alias resolution is fully injected.**  The ``Callable[[str], list[str]]``
   signature keeps ``trellis.extract`` decoupled from ``GraphStore``.
   The MCP wiring layer (step 7 of the Phase 2 plan) provides the
@@ -122,9 +139,18 @@ class AliasMatchExtractor:
         unmatched: list[str] = []
         matched_count = 0
         seen_targets: set[str] = set()
+        # One resolution per *distinct* token, not per occurrence — see
+        # "Repeated mentions resolve once" in the module docstring. Keyed on
+        # the raw captured token, so two tokens that only differ by case are
+        # never merged here; collapsing them is the resolver's job, and doing
+        # it twice would hide a resolver change behind this cache.
+        resolutions: dict[str, list[str]] = {}
 
         for candidate in mentions:
-            resolved = self._resolver(candidate)
+            resolved = resolutions.get(candidate)
+            if resolved is None:
+                resolved = self._resolver(candidate)
+                resolutions[candidate] = resolved
             if len(resolved) != 1:
                 # 0 = no match, >1 = ambiguous — both go to residue.
                 unmatched.append(candidate)
