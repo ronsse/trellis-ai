@@ -160,7 +160,7 @@ class TestDefaultPolicyGate:
         gate = DefaultPolicyGate()
         assert gate.remove_policy("nope") is False
 
-    def test_multiple_policies_most_specific_wins(self) -> None:
+    def test_narrow_deny_blocks_under_a_broad_allow(self) -> None:
         # Global allows, but domain-level denies
         global_policy = _policy(
             level="global",
@@ -175,3 +175,133 @@ class TestDefaultPolicyGate:
         # Domain=restricted should be denied (domain policy checked after global)
         allowed, _, _ = gate.check(_cmd(metadata={"domain": "restricted"}))
         assert allowed is False
+
+
+class TestDenyWinsResolution:
+    """Pin the actual scope-resolution semantics.
+
+    The gate's docstring used to claim "more specific policies override
+    broader ones". It does not: matching policies are evaluated
+    broadest-first and the first blocking rule returns, so the *broadest*
+    deny wins and a narrow ``allow`` cannot carve an exception out of it.
+    These tests pin the behaviour that exists rather than the sentence that
+    described it, so a future change to either has to change the other.
+    """
+
+    def test_broad_deny_is_not_overridden_by_a_narrow_allow(self) -> None:
+        global_deny = _policy(
+            level="global",
+            rules=[PolicyRule(operation="entity.create", action="deny")],
+        )
+        domain_allow = _policy(
+            level="domain",
+            value="permitted",
+            rules=[PolicyRule(operation="entity.create", action="allow")],
+        )
+        gate = DefaultPolicyGate(policies=[global_deny, domain_allow])
+
+        # The narrow allow does NOT rescue the command.
+        allowed, msg, _ = gate.check(_cmd(metadata={"domain": "permitted"}))
+        assert allowed is False
+        assert "Denied" in msg
+
+    def test_allow_rule_alone_grants_nothing_beyond_the_default(self) -> None:
+        """``allow`` is inert — an unmatched command is already allowed."""
+        gate = DefaultPolicyGate(
+            policies=[_policy(rules=[PolicyRule(operation="*", action="allow")])]
+        )
+        assert gate.check(_cmd()) == (True, "", [])
+
+
+class TestWarnActionIsLive:
+    """``action="warn"`` used to be dead code — no branch ever read it."""
+
+    def test_warn_action_under_enforce_warns_without_blocking(self) -> None:
+        policy = _policy(
+            rules=[
+                PolicyRule(
+                    operation="entity.create",
+                    action="warn",
+                    condition="review this",
+                )
+            ],
+            enforcement=Enforcement.ENFORCE,
+        )
+        gate = DefaultPolicyGate(policies=[policy])
+        allowed, msg, warnings = gate.check(_cmd())
+
+        assert allowed is True
+        assert msg == ""
+        assert len(warnings) == 1
+        assert "review this" in warnings[0]
+
+    def test_warn_action_under_warn_enforcement_warns(self) -> None:
+        policy = _policy(
+            rules=[PolicyRule(operation="entity.create", action="warn")],
+            enforcement=Enforcement.WARN,
+        )
+        gate = DefaultPolicyGate(policies=[policy])
+        allowed, _, warnings = gate.check(_cmd())
+        assert allowed is True
+        assert len(warnings) == 1
+
+    def test_warn_action_under_audit_only_is_silent(self) -> None:
+        policy = _policy(
+            rules=[PolicyRule(operation="entity.create", action="warn")],
+            enforcement=Enforcement.AUDIT_ONLY,
+        )
+        gate = DefaultPolicyGate(policies=[policy])
+        allowed, _, warnings = gate.check(_cmd())
+        assert allowed is True
+        assert warnings == []
+
+    def test_require_approval_under_warn_enforcement_warns(self) -> None:
+        """Previously fell through silently — neither blocked nor warned."""
+        policy = _policy(
+            rules=[
+                PolicyRule(operation="entity.create", action="require_approval")
+            ],
+            enforcement=Enforcement.WARN,
+        )
+        gate = DefaultPolicyGate(policies=[policy])
+        allowed, _, warnings = gate.check(_cmd())
+        assert allowed is True
+        assert len(warnings) == 1
+
+    def test_warnings_accumulate_across_matching_policies(self) -> None:
+        gate = DefaultPolicyGate(
+            policies=[
+                _policy(
+                    rules=[PolicyRule(operation="entity.create", action="warn")],
+                    enforcement=Enforcement.WARN,
+                ),
+                _policy(
+                    rules=[PolicyRule(operation="*", action="warn")],
+                    enforcement=Enforcement.WARN,
+                ),
+            ]
+        )
+        allowed, _, warnings = gate.check(_cmd())
+        assert allowed is True
+        assert len(warnings) == 2
+
+    def test_a_later_deny_still_blocks_after_earlier_warnings(self) -> None:
+        """Warnings collected before a block are returned with the rejection."""
+        gate = DefaultPolicyGate(
+            policies=[
+                _policy(
+                    rules=[PolicyRule(operation="entity.create", action="warn")],
+                    enforcement=Enforcement.WARN,
+                ),
+                _policy(
+                    level="entity_type",
+                    value="service",
+                    rules=[PolicyRule(operation="entity.create", action="deny")],
+                    enforcement=Enforcement.ENFORCE,
+                ),
+            ]
+        )
+        allowed, msg, warnings = gate.check(_cmd(target_type="service"))
+        assert allowed is False
+        assert "Denied" in msg
+        assert len(warnings) == 1
