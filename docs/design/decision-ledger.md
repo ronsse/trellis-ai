@@ -104,6 +104,42 @@ between an agent and `main`.
 **Cost of being wrong:** during an Actions outage nothing can merge at all. Given the
 alternative is *unverified merges* during an outage, that is the better failure.
 
+**Measured state** (2026-08-27): branch protection *does* exist on `main` — force-pushes
+and deletions are already blocked — but it carries **no `required_status_checks` key at
+all**, and `allow_auto_merge` is `false`.
+
+**Runnable, if the answer is yes.** `strict: true` is the mechanised form of the
+"green against *current* `main`" rule in [`swarm-handoff.md`](./swarm-handoff.md) §4 —
+it makes GitHub enforce the thing an orchestrator has so far been enforcing by hand.
+
+```bash
+gh api --method PUT /repos/ronsse/trellis-ai/branches/main/protection --input - <<'JSON'
+{
+  "required_status_checks": {
+    "strict": true,
+    "contexts": ["lint", "typecheck", "test (3.11)", "test (3.12)", "test (3.13)",
+                 "openapi-check", "CodeQL", "Analyze (python)"]
+  },
+  "enforce_admins": false,
+  "required_pull_request_reviews": {
+    "dismiss_stale_reviews": false,
+    "require_code_owner_reviews": false,
+    "required_approving_review_count": 0
+  },
+  "restrictions": null
+}
+JSON
+gh api --method PATCH /repos/ronsse/trellis-ai --field allow_auto_merge=true
+```
+
+**Two honest caveats**, neither fatal:
+- The matrix legs are pinned **by name**. Dropping 3.11 or adding 3.14 to
+  `.github/workflows/tests.yml` blocks every merge until this payload is updated too.
+  That coupling is a real maintenance cost, not a hypothetical one.
+- `strict: true` means every PR must be rebased onto `main` before merging, so a busy
+  queue serialises. At current volume (7 PRs in a day, one merger) that is free; it
+  would not be with ten concurrent agents.
+
 ## Pending — access
 
 ### A-1 · Delete Aura API credentials `985676d4` / `d664924e`
