@@ -190,13 +190,22 @@ class ReplayReport(TrellisModel):
     fraction_delta: float | None = None
 
     # -- what the change cost ------------------------------------------
-    #: Cited-helpful items whose body the policy replaced with a pointer.
-    #: The id stayed addressable; the substance did not arrive unfetched.
+    #: Cited-helpful *servings* whose body the policy replaced with a
+    #: pointer. The id stayed addressable; the substance did not arrive
+    #: unfetched.
     helpful_bodies_withheld: int = 0
-    #: Cited-helpful items the policy removed from the pack entirely.
+    #: Cited-helpful servings the policy removed from their pack entirely.
     helpful_items_dropped: int = 0
-    #: Distinct cited-helpful items in the window — the denominator for
-    #: both counts above.
+    #: Cited-helpful ``(pack, item)`` servings in the window — the
+    #: denominator for both counts above.
+    #:
+    #: **Servings, not distinct items**, deliberately. One memory can be
+    #: cited helpful in two packs and sit at rank 4 in one and rank 16 in
+    #: the other; counting distinct ids would let the pack that served its
+    #: body mask the pack that withheld it, and the cost column would read
+    #: zero for a policy that had really withheld a body from a caller who
+    #: wanted it. The question this answers is per delivery: in the pack
+    #: that served it, did the caller get the substance?
     helpful_items_total: int = 0
     #: Items the counterfactual admitted that the original pack never
     #: served, and which therefore carry no verdict. They enter the
@@ -406,9 +415,10 @@ def replay_pack_value(
     counter_served: list[tuple[_Candidate, int, bool]] = []
     admitted_ungraded = 0
     no_trace = 0
-    helpful_ids: set[str] = set()
-    counter_body_ids: set[str] = set()
-    counter_served_ids: set[str] = set()
+    # Keyed by ``(pack_id, item_id)`` — see ``helpful_items_total``.
+    helpful_servings: set[tuple[str, str]] = set()
+    counter_body_servings: set[tuple[str, str]] = set()
+    counter_served_servings: set[tuple[str, str]] = set()
 
     for pack_id in attributed:
         payload = flat_packs[pack_id]
@@ -420,7 +430,11 @@ def replay_pack_value(
         if candidates is None:
             no_trace += 1
             continue
-        helpful_ids |= {c.item_id for c in candidates if c.verdict == "helpful"}
+        helpful_servings |= {
+            (pack_id, c.item_id)
+            for c in candidates
+            if c.included and c.verdict == "helpful"
+        }
         baseline_served.extend(
             (c, c.served_tokens, False) for c in candidates if c.included
         )
@@ -429,9 +443,9 @@ def replay_pack_value(
         served, ungraded = _price(candidates, max_tokens=max_tokens, policy=policy)
         counter_served.extend(served)
         admitted_ungraded += ungraded
-        counter_served_ids |= {c.item_id for c, _, _ in served}
-        counter_body_ids |= {
-            c.item_id for c, _, is_pointer in served if not is_pointer
+        counter_served_servings |= {(pack_id, c.item_id) for c, _, _ in served}
+        counter_body_servings |= {
+            (pack_id, c.item_id) for c, _, is_pointer in served if not is_pointer
         }
 
     attributed_packs = len(attributed) - no_trace
@@ -442,8 +456,10 @@ def replay_pack_value(
         baseline.useful_token_fraction = None
         counterfactual.useful_token_fraction = None
 
-    withheld = len((helpful_ids & counter_served_ids) - counter_body_ids)
-    dropped = len(helpful_ids - counter_served_ids)
+    withheld = len(
+        (helpful_servings & counter_served_servings) - counter_body_servings
+    )
+    dropped = len(helpful_servings - counter_served_servings)
 
     report = ReplayReport(
         window_days=days,
@@ -472,7 +488,7 @@ def replay_pack_value(
         ),
         helpful_bodies_withheld=withheld,
         helpful_items_dropped=dropped,
-        helpful_items_total=len(helpful_ids),
+        helpful_items_total=len(helpful_servings),
         admitted_ungraded_items=admitted_ungraded,
         packs_without_budget_trace=no_trace,
         notes=_notes(
@@ -524,14 +540,14 @@ def _notes(
         )
     if withheld:
         notes.append(
-            f"{withheld} cited-helpful item(s) were served as a pointer "
+            f"{withheld} cited-helpful serving(s) were a pointer "
             "rather than a body. Their id stayed addressable via get_items; "
             "their substance did not arrive unfetched, and they contribute "
             "zero helpful tokens here."
         )
     if dropped:
         notes.append(
-            f"{dropped} cited-helpful item(s) were removed from the pack "
+            f"{dropped} cited-helpful serving(s) were removed from the pack "
             "entirely by the item ceiling — not demoted, dropped."
         )
     if no_trace:
