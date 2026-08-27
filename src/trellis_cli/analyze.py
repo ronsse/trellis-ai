@@ -602,6 +602,157 @@ def _print_value_axis(title: str, cells: list[Any], *, minimum: int) -> None:
     console.print(table)
 
 
+@analyze_app.command("replay")
+def replay(
+    days: int = typer.Option(30, help="Days of history to replay"),
+    excerpt_max_chars: int | None = typer.Option(
+        None,
+        "--excerpt-max-chars",
+        help="Counterfactual uniform excerpt cap (the width lever).",
+    ),
+    body_items: int | None = typer.Option(
+        None,
+        "--body-items",
+        help="Graduated-disclosure cut: items past this rank priced as pointers.",
+    ),
+    max_items: int | None = typer.Option(
+        None,
+        "--max-items",
+        help="Hard item ceiling. Items past it are DROPPED, not demoted.",
+    ),
+    no_refill: bool = typer.Option(
+        False,
+        "--no-refill",
+        help=(
+            "Suppress the greedy re-fill so the pricing effect is isolated "
+            "from the admission effect. The shipped walk DOES re-fill, so "
+            "this arm is diagnostic, not a prediction."
+        ),
+    ),
+    output_format: str = typer.Option("text", "--format", help="Output format"),
+    no_meta_trace: bool = typer.Option(
+        False,
+        "--no-meta-trace",
+        help="Skip recording this run as a meta-Activity (Item 6 Phase 2).",
+    ),
+) -> None:
+    """Replay a window's packs under a different serving policy.
+
+    ``analyze value`` says what the served packs delivered. This says what
+    a *different* policy would have delivered on the same packs, same
+    citations — the only honest before/after available, because a trimming
+    change affects future packs while the window is already assembled.
+
+    The walk is re-run, not modelled: PACK_ASSEMBLED.budget_trace[] records
+    every candidate the budget saw and what each was charged, including the
+    ones it rejected.
+
+    Read the saving next to what it cost. Two lines always print: how many
+    cited-helpful items lost their body to a pointer (still fetchable by
+    id), and how many an item ceiling removed outright (not fetchable).
+    A policy can always raise the fraction by serving less.
+
+    Examples::
+
+        trellis analyze replay --body-items 12
+        trellis analyze replay --excerpt-max-chars 300
+        trellis analyze replay --excerpt-max-chars 300 --no-refill
+        trellis analyze replay --max-items 12
+    """
+    from trellis.retrieve.pack_replay import (  # noqa: PLC0415
+        ReplayPolicy,
+        replay_pack_value,
+    )
+
+    try:
+        policy = ReplayPolicy(
+            excerpt_max_chars=excerpt_max_chars,
+            body_items=body_items,
+            max_items=max_items,
+            refill=not no_refill,
+        )
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=2) from exc
+
+    event_log = get_event_log()
+    with wrap_cli_meta_analysis(
+        agent_suffix="analyze",
+        analyzer_name="cli.analyze.replay",
+        disabled=no_meta_trace,
+    ) as _meta_record:
+        report = replay_pack_value(event_log, policy=policy, days=days)
+        if _meta_record.enabled and report.attributed_packs > 0:
+            _meta_record.produced_finding(
+                f"pack-replay-report-d{days}",
+                finding_type="ReplayReport",
+            )
+
+    if output_format == "json":
+        print(json.dumps(report.model_dump()))
+        return
+
+    _render_replay(report)
+
+
+def _render_replay(report: Any) -> None:
+    """Render a ReplayReport, saving and cost side by side."""
+    console.print(
+        f"[bold]Pack Policy Replay[/bold] (last {report.window_days} days, "
+        f"n={report.attributed_packs} attributed packs)"
+    )
+    console.print(f"  policy: [cyan]{report.policy}[/cyan]")
+    console.print()
+
+    for arm in (report.baseline, report.counterfactual):
+        frac = (
+            f"{arm.useful_token_fraction:.1%}"
+            if arm.useful_token_fraction is not None
+            else "suppressed"
+        )
+        shape = f"{arm.body_items_served} bodies"
+        if arm.pointer_items_served:
+            shape += f" + {arm.pointer_items_served} pointers"
+        console.print(
+            f"  [bold]{arm.label:<28}[/bold] {arm.injected_tokens:>7,} tok  "
+            f"useful-token fraction {frac:>10}   ({shape})"
+        )
+
+    console.print()
+    if report.token_delta is not None:
+        style = "green" if report.token_delta < 0 else "yellow"
+        console.print(f"  tokens: [{style}]{report.token_delta:+.1%}[/{style}]")
+    if report.fraction_delta is not None:
+        style = "green" if report.fraction_delta > 0 else "red"
+        console.print(
+            f"  useful-token fraction: [{style}]{report.fraction_delta:+.1%}[/{style}]"
+        )
+
+    console.print()
+    console.print("  [bold]What the policy cost[/bold]")
+    withheld_style = "yellow" if report.helpful_bodies_withheld else "green"
+    console.print(
+        f"    cited-helpful servings, body withheld (id fetchable): "
+        f"[{withheld_style}]{report.helpful_bodies_withheld}[/{withheld_style}]"
+        f"/{report.helpful_items_total}"
+    )
+    dropped_style = "red" if report.helpful_items_dropped else "green"
+    console.print(
+        f"    cited-helpful servings dropped (unreachable):       "
+        f"[{dropped_style}]{report.helpful_items_dropped}[/{dropped_style}]"
+        f"/{report.helpful_items_total}"
+    )
+    console.print(
+        f"    items admitted that nobody graded:                  "
+        f"{report.admitted_ungraded_items}"
+    )
+
+    if report.notes:
+        console.print()
+        for note in report.notes:
+            console.print(f"  [dim]{note}[/dim]")
+
+
 @analyze_app.command("value")
 def value(
     days: int = typer.Option(30, help="Days of history to analyze"),

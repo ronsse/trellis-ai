@@ -31,6 +31,12 @@ from trellis.core.base import utc_now
 from trellis.core.hashing import content_hash
 from trellis.learning.scoring import normalize_intent_family
 from trellis.meta.agents import META_AGENT_PREFIX
+from trellis.retrieve.disclosure import (
+    DEFAULT_DISCLOSURE,
+    DISCLOSURE_OFF,
+    DisclosureConfig,
+    apply_disclosure,
+)
 from trellis.retrieve.evaluate import QualityReport
 from trellis.retrieve.excerpts import (
     DEFAULT_CONTENT_FLOOR,
@@ -367,6 +373,7 @@ class PackBuilder:
         token_budget_safety_margin: float = 0.0,
         token_budget_validator: TokenCounter | None = None,
         content_floor: ContentFloorConfig | None = None,
+        disclosure: DisclosureConfig | None = None,
     ) -> None:
         self._strategies = strategies or []
         self._event_log = event_log
@@ -408,6 +415,13 @@ class PackBuilder:
         #: demote name-only stubs, never drop them. Pass an explicit
         #: config for ``mode="exclude"`` or ``mode="off"``.
         self._content_floor = content_floor or DEFAULT_CONTENT_FLOOR
+        #: Graduated-disclosure policy for flat packs. Defaults to
+        #: :data:`~trellis.retrieve.disclosure.DEFAULT_DISCLOSURE` — the
+        #: first ``body_items`` items keep their excerpts, the tail is
+        #: served as pointers. Pass
+        #: :data:`~trellis.retrieve.disclosure.DISCLOSURE_OFF` for the
+        #: every-item-gets-a-body behaviour that preceded it.
+        self._disclosure = disclosure or DEFAULT_DISCLOSURE
 
     def add_strategy(self, strategy: SearchStrategy) -> None:
         """Add a search strategy."""
@@ -711,6 +725,19 @@ class PackBuilder:
         )
         rejected.extend(token_rejected)
 
+        # Graduated disclosure runs *after* the walk, on the item set the
+        # walk chose, so the tokens it frees are not spent (see
+        # :mod:`trellis.retrieve.disclosure`). An index pack is already all
+        # pointers, so it is exempt rather than cut twice.
+        disclosure_result = apply_disclosure(
+            selected,
+            DISCLOSURE_OFF if index_mode else self._disclosure,
+        )
+        selected = disclosure_result.items
+        budget_trace = self._recharge_budget_trace(
+            budget_trace, selected, index_mode=index_mode
+        )
+
         selected = self._annotate_selected_items(selected)
 
         report = RetrievalReport(
@@ -752,6 +779,7 @@ class PackBuilder:
                 strategy_failures=strategy_failures,
                 meta_filtered_count=meta_filtered_count,
                 content_floor=floor_result.as_telemetry(),
+                disclosure=disclosure_result.as_telemetry(),
                 index_mode=index_mode,
             )
 
@@ -1182,6 +1210,7 @@ class PackBuilder:
         strategy_failures: list[StrategyFailure] | None = None,
         meta_filtered_count: int = 0,
         content_floor: dict[str, Any] | None = None,
+        disclosure: dict[str, Any] | None = None,
         index_mode: bool = False,
     ) -> None:
         """Emit a ContextRetrievalEvent for observability.
@@ -1203,6 +1232,14 @@ class PackBuilder:
         demoted item is attributable in telemetry rather than just
         appearing lower in the ranking. Per-item detail also rides
         ``injected_items[].score_breakdown``.
+
+        ``disclosure`` carries the graduated-disclosure summary (mode,
+        body-item cut, the ids demoted to pointers, and the pack's excerpt
+        cost either side of the pass) so the saving is attributable per
+        pack. A demoted item is still a served item: it keeps its id, its
+        rank and its row in ``injected_items[]``, and its
+        ``estimated_tokens`` is the pointer's cost, not the withheld
+        body's.
 
         ``index_mode`` (#305) marks a pack assembled for the one-line-per-
         item index rendering. Additive — consumers ``payload.get(...)``
@@ -1282,6 +1319,7 @@ class PackBuilder:
                     for r in report.rejected_items
                 ],
                 "content_floor": content_floor or {},
+                "disclosure": disclosure or {},
                 "budget_trace": [
                     {
                         "item_id": b.item_id,
@@ -1893,6 +1931,61 @@ class PackBuilder:
         merged = dict(filters) if filters else {}
         merged["content_tags"] = effective_tags
         return merged
+
+    def _recharge_budget_trace(
+        self,
+        budget_trace: list[BudgetStep],
+        items: list[PackItem],
+        *,
+        index_mode: bool,
+    ) -> list[BudgetStep]:
+        """Re-price the included steps against the text actually served.
+
+        Graduated disclosure rewrites tail excerpts after the walk has
+        run, so the walk's charges describe bodies the pack no longer
+        carries. Left alone, three consumers would read a cost that was
+        never paid: ``budget_trace`` itself, the token-total validator
+        (which counts the rendered excerpts and would report the
+        difference as estimator drift), and any analysis joining the two.
+
+        Only *included* steps are re-priced. An excluded step records why
+        an item did not make the pack, and it did not make the pack on the
+        pre-disclosure arithmetic — rewriting its charge would claim the
+        walk had rejected it at a price it was never offered at.
+
+        Returns the trace unchanged when nothing was demoted, so the
+        common path allocates nothing.
+        """
+        served = {item.item_id: item for item in items}
+
+        def repriced(step: BudgetStep) -> bool:
+            item = served.get(step.item_id)
+            if not step.included or item is None:
+                return False
+            charge = self._item_budget_tokens(item, index_mode=index_mode)
+            return charge != step.item_tokens
+
+        if not any(repriced(step) for step in budget_trace):
+            return budget_trace
+
+        recharged: list[BudgetStep] = []
+        running = 0
+        for step in budget_trace:
+            item = served.get(step.item_id)
+            if not step.included or item is None:
+                recharged.append(step)
+                continue
+            tokens = self._item_budget_tokens(item, index_mode=index_mode)
+            running += tokens
+            recharged.append(
+                BudgetStep(
+                    item_id=step.item_id,
+                    item_tokens=tokens,
+                    running_total=running,
+                    included=True,
+                )
+            )
+        return recharged
 
     def _annotate_selected_items(self, items: list[PackItem]) -> list[PackItem]:
         """Attach deterministic observability fields to selected items."""

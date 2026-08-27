@@ -170,6 +170,111 @@ class TestCost:
         assert "$" in result.stdout
 
 
+class TestReplay:
+    """``trellis analyze replay`` — the same window under a different policy."""
+
+    @staticmethod
+    def _seed(registry: StoreRegistry, count: int, *, items: int = 12) -> None:
+        """Packs with a fat, uncited tail and a full budget_trace."""
+        event_log = registry.operational.event_log
+        for index in range(count):
+            pack_id = f"rpack_{index}"
+            ids = [f"{pack_id}_{k}" for k in range(items)]
+            event_log.emit(
+                EventType.PACK_ASSEMBLED,
+                source="test",
+                entity_id=pack_id,
+                entity_type="pack",
+                payload={
+                    "pack_id": pack_id,
+                    "intent_family": "general_context",
+                    "budget_max_tokens": 2000,
+                    "injected_item_ids": ids,
+                    "injected_items": [
+                        {
+                            "item_id": item_id,
+                            "item_type": "vector",
+                            "strategy_source": "semantic",
+                            "estimated_tokens": 120,
+                            "rank": rank,
+                            "title": f"Memory {rank}",
+                        }
+                        for rank, item_id in enumerate(ids, start=1)
+                    ],
+                    "budget_trace": [
+                        {
+                            "item_id": item_id,
+                            "item_tokens": 120,
+                            "running_total": 120 * (rank + 1),
+                            "included": True,
+                        }
+                        for rank, item_id in enumerate(ids)
+                    ],
+                },
+            )
+            event_log.emit(
+                EventType.FEEDBACK_RECORDED,
+                source="mcp",
+                entity_id=pack_id,
+                payload={
+                    "pack_id": pack_id,
+                    "helpful_item_ids": [ids[0]],
+                    "unhelpful_item_ids": [ids[-1]],
+                    "intent_family": "general_context",
+                    "rating": 0.5,
+                    "success": True,
+                },
+            )
+
+    def test_empty_events_refuse_the_ratio(self) -> None:
+        result = runner.invoke(app, ["analyze", "replay", "--format", "json"])
+        assert result.exit_code == 0
+        data = json.loads(result.stdout.strip())
+        assert data["attributed_packs"] == 0
+        assert data["suppressed"] is True
+        assert data["baseline"]["useful_token_fraction"] is None
+
+    def test_no_policy_is_an_identity(self, temp_stores: StoreRegistry) -> None:
+        """Every delta is measured against this; it must be exact."""
+        self._seed(temp_stores, 6)
+        result = runner.invoke(app, ["analyze", "replay", "--format", "json"])
+        assert result.exit_code == 0
+        data = json.loads(result.stdout.strip())
+        assert data["token_delta"] == 0.0
+        assert data["fraction_delta"] == 0.0
+
+    def test_graduation_saves_tokens_and_lifts_the_fraction(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        self._seed(temp_stores, 6)
+        result = runner.invoke(
+            app, ["analyze", "replay", "--body-items", "4", "--format", "json"]
+        )
+        assert result.exit_code == 0
+        data = json.loads(result.stdout.strip())
+        assert data["token_delta"] < 0
+        assert data["fraction_delta"] > 0
+        assert data["counterfactual"]["pointer_items_served"] > 0
+        # The head was cited, so nothing useful lost its body.
+        assert data["helpful_bodies_withheld"] == 0
+        assert data["helpful_items_dropped"] == 0
+
+    def test_text_output_prints_the_cost_beside_the_saving(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        """A saving reported without its recall cost is the failure mode."""
+        self._seed(temp_stores, 6)
+        result = runner.invoke(app, ["analyze", "replay", "--body-items", "4"])
+        assert result.exit_code == 0
+        assert "What the policy cost" in result.stdout
+        assert "body withheld" in result.stdout
+        assert "dropped" in result.stdout
+
+    def test_degenerate_policy_exits_two(self) -> None:
+        result = runner.invoke(app, ["analyze", "replay", "--body-items", "0"])
+        assert result.exit_code == 2
+
+
 class TestValue:
     """``trellis analyze value`` — serving precision, with its coverage."""
 

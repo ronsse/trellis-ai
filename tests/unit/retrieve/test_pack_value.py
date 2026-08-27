@@ -487,3 +487,125 @@ def test_never_describes_itself_as_benefit() -> None:
     assert "not benefit" in blob
     for field in report.model_dump():
         assert "benefit" not in field
+
+
+def test_cost_is_what_the_walk_charged_not_the_excerpt_read_cost() -> None:
+    """An index-mode or graduated pack serves something other than its excerpt.
+
+    ``injected_items[].estimated_tokens`` deliberately keeps carrying the
+    excerpt *read* cost in index mode (#305), so pricing an index pack from
+    it charges a body the prompt never carried. ``budget_trace[]`` records
+    what was actually spent, and that is what the fraction is computed over.
+    """
+    log = _FakeEventLog()
+    for index in range(MIN_ATTRIBUTED_PACKS):
+        pack_id = f"idx-{index}"
+        log.append(
+            Event(
+                event_type=EventType.PACK_ASSEMBLED,
+                source="pack_builder",
+                entity_id=pack_id,
+                entity_type="pack",
+                payload={
+                    "pack_id": pack_id,
+                    "index_mode": True,
+                    "injected_items": [
+                        {
+                            "item_id": f"{pack_id}-a",
+                            "item_type": "vector",
+                            "strategy_source": "semantic",
+                            # Read cost of the body the index line stands for.
+                            "estimated_tokens": 120,
+                        },
+                        {
+                            "item_id": f"{pack_id}-b",
+                            "item_type": "vector",
+                            "strategy_source": "semantic",
+                            "estimated_tokens": 120,
+                        },
+                    ],
+                    "budget_trace": [
+                        # What the index lines actually cost.
+                        {
+                            "item_id": f"{pack_id}-a",
+                            "item_tokens": 30,
+                            "running_total": 30,
+                            "included": True,
+                        },
+                        {
+                            "item_id": f"{pack_id}-b",
+                            "item_tokens": 30,
+                            "running_total": 60,
+                            "included": True,
+                        },
+                    ],
+                },
+            )
+        )
+        log.append(
+            Event(
+                event_type=EventType.FEEDBACK_RECORDED,
+                source="mcp",
+                entity_id=pack_id,
+                entity_type="pack",
+                payload={
+                    "pack_id": pack_id,
+                    "helpful_item_ids": [f"{pack_id}-a"],
+                    "unhelpful_item_ids": [f"{pack_id}-b"],
+                    "rating": 0.5,
+                    "success": True,
+                },
+            )
+        )
+
+    report = summarize_pack_value(log)
+
+    # 2 lines x 30 tokens x n packs — not 2 x 120.
+    assert report.injected_tokens == 60 * MIN_ATTRIBUTED_PACKS
+    assert report.helpful_tokens == 30 * MIN_ATTRIBUTED_PACKS
+    assert report.useful_token_fraction == pytest.approx(0.5, abs=1e-4)
+
+
+def test_a_pack_without_a_budget_trace_falls_back_to_estimated_tokens() -> None:
+    """Every event written before budget_trace existed must still price."""
+    log = _FakeEventLog()
+    for index in range(MIN_ATTRIBUTED_PACKS):
+        pack_id = f"old-{index}"
+        log.append(
+            Event(
+                event_type=EventType.PACK_ASSEMBLED,
+                source="pack_builder",
+                entity_id=pack_id,
+                entity_type="pack",
+                payload={
+                    "pack_id": pack_id,
+                    "injected_items": [
+                        {
+                            "item_id": f"{pack_id}-a",
+                            "item_type": "vector",
+                            "strategy_source": "semantic",
+                            "estimated_tokens": 100,
+                        }
+                    ],
+                },
+            )
+        )
+        log.append(
+            Event(
+                event_type=EventType.FEEDBACK_RECORDED,
+                source="mcp",
+                entity_id=pack_id,
+                entity_type="pack",
+                payload={
+                    "pack_id": pack_id,
+                    "helpful_item_ids": [f"{pack_id}-a"],
+                    "rating": 1.0,
+                    "success": True,
+                },
+            )
+        )
+
+    report = summarize_pack_value(log)
+
+    assert report.injected_tokens == 100 * MIN_ATTRIBUTED_PACKS
+    assert report.useful_token_fraction == pytest.approx(1.0, abs=1e-4)
