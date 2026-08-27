@@ -179,6 +179,23 @@ Detailed operational reference lives in `docs/agent-guide/`:
 | [playbooks.md](docs/agent-guide/playbooks.md) | Step-by-step procedures for common tasks |
 | [pack-quality-evaluation.md](docs/agent-guide/pack-quality-evaluation.md) | Assembly-time pack scoring (6 dimensions, one opt-in via `expected_shapes`), profiles, scenario fixtures, optional `PackBuilder(evaluator=...)` hook |
 
+## Autonomous / swarm work
+
+Picking up implementation work as an autonomous agent? Read
+[`docs/design/swarm-handoff.md`](docs/design/swarm-handoff.md) — the autonomy contract,
+the merge gate (**green against *current* `main`**), the traps that have already cost
+time, and the dependency-ordered queue. Decisions taken and pending live in
+[`docs/design/decision-ledger.md`](docs/design/decision-ledger.md); the work items are in
+[`docs/design/autonomous-backlog.md`](docs/design/autonomous-backlog.md).
+
+**Test-coverage caveat worth knowing before you trust a green run:** local `make test`
+deselects 635 tests (`postgres`, `pgvector`, `neo`, `arcadedb`, `live`, `slow`), and the
+**pgvector contract suite has never executed anywhere** — its fixture is broken
+([#345](https://github.com/ronsse/trellis-ai/issues/345)). pgvector is the production
+backend. The claim above that contract suites "run in CI against SQLite, Postgres, and a
+containerized Neo4j on every push to main" holds for the *graph* contract; for the
+**vector** contract only SQLite runs on PRs.
+
 ## Product docs
 
 - `docs/PRD.md` — product thesis, adopter profiles, component disposition
