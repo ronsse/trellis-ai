@@ -31,18 +31,17 @@ from trellis.core.base import utc_now
 from trellis.core.hashing import content_hash
 from trellis.learning.scoring import normalize_intent_family
 from trellis.meta.agents import META_AGENT_PREFIX
+from trellis.retrieve.disclosure import (
+    DEFAULT_DISCLOSURE,
+    DISCLOSURE_OFF,
+    DisclosureConfig,
+    apply_disclosure,
+)
 from trellis.retrieve.evaluate import QualityReport
 from trellis.retrieve.excerpts import (
     DEFAULT_CONTENT_FLOOR,
     ContentFloorConfig,
     apply_content_floor,
-)
-from trellis.retrieve.disclosure import (
-    DEFAULT_DISCLOSURE,
-    DISCLOSURE_OFF,
-    DisclosureConfig,
-    DisclosureResult,
-    apply_disclosure,
 )
 from trellis.retrieve.formatters import format_index_line
 from trellis.retrieve.lifecycle import exclude_archived
@@ -1958,12 +1957,15 @@ class PackBuilder:
         common path allocates nothing.
         """
         served = {item.item_id: item for item in items}
-        if not any(
-            step.included
-            and (item := served.get(step.item_id)) is not None
-            and self._item_budget_tokens(item, index_mode=index_mode) != step.item_tokens
-            for step in budget_trace
-        ):
+
+        def repriced(step: BudgetStep) -> bool:
+            item = served.get(step.item_id)
+            if not step.included or item is None:
+                return False
+            charge = self._item_budget_tokens(item, index_mode=index_mode)
+            return charge != step.item_tokens
+
+        if not any(repriced(step) for step in budget_trace):
             return budget_trace
 
         recharged: list[BudgetStep] = []

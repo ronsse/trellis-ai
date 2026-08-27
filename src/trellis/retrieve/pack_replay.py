@@ -367,9 +367,7 @@ def _arm(label: str, served: list[tuple[_Candidate, int, bool]]) -> ReplayArm:
         helpful_tokens=helpful,
         unhelpful_tokens=unhelpful,
         unjudged_tokens=injected - helpful - unhelpful,
-        useful_token_fraction=(
-            round(helpful / injected, 4) if injected else None
-        ),
+        useful_token_fraction=(round(helpful / injected, 4) if injected else None),
         body_items_served=sum(1 for _, _, is_pointer in served if not is_pointer),
         pointer_items_served=sum(1 for _, _, is_pointer in served if is_pointer),
     )
@@ -456,9 +454,7 @@ def replay_pack_value(
         baseline.useful_token_fraction = None
         counterfactual.useful_token_fraction = None
 
-    withheld = len(
-        (helpful_servings & counter_served_servings) - counter_body_servings
-    )
+    withheld = len((helpful_servings & counter_served_servings) - counter_body_servings)
     dropped = len(helpful_servings - counter_served_servings)
 
     report = ReplayReport(
@@ -470,16 +466,13 @@ def replay_pack_value(
         baseline=baseline,
         counterfactual=counterfactual,
         token_delta=(
-            round(
-                counterfactual.injected_tokens / baseline.injected_tokens - 1.0, 4
-            )
+            round(counterfactual.injected_tokens / baseline.injected_tokens - 1.0, 4)
             if baseline.injected_tokens
             else None
         ),
         fraction_delta=(
             round(
-                counterfactual.useful_token_fraction
-                / baseline.useful_token_fraction
+                counterfactual.useful_token_fraction / baseline.useful_token_fraction
                 - 1.0,
                 4,
             )

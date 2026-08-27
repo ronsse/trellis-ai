@@ -17,8 +17,8 @@ almost nothing. Graduated disclosure spends the head of that budget on
 bodies and refuses to spend the tail on more of them.
 
 **Why not just serve fewer items.** A hard item cap at the same rank is
-cheaper still — ``--max-items 12`` replays at −37.9% tokens against
-graduation's −27.7%, and lifts the fraction further — but it *deletes* the
+cheaper still — ``--max-items 12`` replays at -37.9% tokens against
+graduation's -27.7%, and lifts the fraction further — but it *deletes* the
 tail. Ninety-six of 251 items become unreachable, and **four of the
 twenty-eight cited-helpful servings in the window sat past rank 12**: a
 caller who found those useful would simply not have been given them.
@@ -49,7 +49,7 @@ excerpts first makes each item cheaper and the greedy simply admits more
 of them — the saving is spent on more tail. That is not a hypothesis: it
 is what the width lever does. ``trellis analyze replay
 --excerpt-max-chars 300`` prices a narrower excerpt against the same
-window and returns −5.5% tokens with the useful-token fraction falling
+window and returns -5.5% tokens with the useful-token fraction falling
 from 0.102 to 0.076, because the walk backfilled 92 items nobody had ever
 graded. Suppress the refill (``--no-refill``, diagnostic only, the shipped
 walk does refill) and the same cap saves 30.9% with the fraction flat at
@@ -58,7 +58,7 @@ since the numerator shrinks with the denominator.
 
 Applied after the walk instead, the pack keeps exactly the items it
 already chose and simply costs less: ``--body-items 12`` replays at
-**−27.7% tokens and a useful-token fraction of 0.133 against 0.102, a
+**-27.7% tokens and a useful-token fraction of 0.133 against 0.102, a
 +30.8% relative lift, with one of twenty-eight cited-helpful servings
 demoted to a pointer and none dropped.** The pack comes in *under* its
 ceiling, which is what a ceiling is for.
@@ -83,8 +83,8 @@ from trellis.schemas.pack import PackItem
 #: value is fitted to it, so treat it as the best current estimate rather
 #: than a constant with a proof behind it. On that window ``12`` dominates
 #: ``15``: same cost (one withheld cited-helpful serving of 28), more
-#: saving (−27.7% against −19.7%), better fraction (+30.8% against
-#: +17.8%). Going lower keeps paying — ``8`` reaches −38.7% — but starts
+#: saving (-27.7% against -19.7%), better fraction (+30.8% against
+#: +17.8%). Going lower keeps paying — ``8`` reaches -38.7% — but starts
 #: withholding a second body, and the risk is asymmetric: a token spent on
 #: a tail nobody reads is cheap, a memory the caller needed and did not
 #: fetch is not. Twelve is the deepest cut the window supports at a cost

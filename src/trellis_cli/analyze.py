@@ -721,14 +721,11 @@ def _render_replay(report: Any) -> None:
     console.print()
     if report.token_delta is not None:
         style = "green" if report.token_delta < 0 else "yellow"
-        console.print(
-            f"  tokens: [{style}]{report.token_delta:+.1%}[/{style}]"
-        )
+        console.print(f"  tokens: [{style}]{report.token_delta:+.1%}[/{style}]")
     if report.fraction_delta is not None:
         style = "green" if report.fraction_delta > 0 else "red"
         console.print(
-            f"  useful-token fraction: "
-            f"[{style}]{report.fraction_delta:+.1%}[/{style}]"
+            f"  useful-token fraction: [{style}]{report.fraction_delta:+.1%}[/{style}]"
         )
 
     console.print()
