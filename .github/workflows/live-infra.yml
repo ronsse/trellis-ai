@@ -81,6 +81,28 @@ jobs:
       - name: Install Trellis with live-infra extras
         run: pip install -e ".[dev,cloud,neo4j]"
 
+      # ``PgVectorStore`` cannot bootstrap its own extension. Its pool is
+      # opened with ``on_connect=register_vector``, and ``register_vector``
+      # looks the ``vector`` type up in the database — so on a DB where the
+      # extension is absent EVERY pooled connection fails and ``pool.wait()``
+      # raises ``PoolTimeout`` after 30s, long before ``_init_schema`` (which
+      # holds the ``CREATE EXTENSION IF NOT EXISTS vector``) is reached. The
+      # pgvector/pgvector image ships the extension files but does not create
+      # the extension in ``POSTGRES_DB``, so it has to be created here or the
+      # whole pgvector suite stalls 30s per test. Tracked as issue #350.
+      - name: Ensure the pgvector extension exists
+        env:
+          TRELLIS_TEST_PG_DSN: postgresql://trellis:trellis@localhost:5432/trellis
+        run: |
+          python - <<'PY'
+          import os
+          import psycopg
+
+          with psycopg.connect(os.environ["TRELLIS_TEST_PG_DSN"], autocommit=True) as conn:
+              conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
+          print("pgvector extension ensured")
+          PY
+
       - name: Run live + contract suites against the containers
         env:
           TRELLIS_TEST_NEO4J_URI: bolt://localhost:7687
@@ -90,16 +112,27 @@ jobs:
           TRELLIS_TEST_PG_DSN: postgresql://trellis:trellis@localhost:5432/trellis
           # Backend-marked tests are deselected by default (tests/conftest.py);
           # these toggles opt the gated suites in. The loop suites are marked
-          # live + slow + neo4j + postgres, so ALL FOUR toggles are needed.
+          # live + slow + neo4j + postgres, so those four are needed for them;
+          # `pgvector` is a fifth marker carried by the pgvector suites alone.
           TRELLIS_TEST_LIVE: "1"
           TRELLIS_TEST_SLOW: "1"
           TRELLIS_TEST_NEO: "1"
           TRELLIS_TEST_POSTGRES: "1"
-        # The graph contract suites (tests/unit/stores/contracts/) run the
-        # GraphStoreContractTests against every configured backend — that's
-        # where cross-backend SCD-2 drift (e.g. issue #195 edge re-ingest)
-        # surfaces. pgvector's contract needs its own toggle + extension and
-        # stays deselected here.
+          TRELLIS_TEST_PGVECTOR: "1"
+        # The contract suites (tests/unit/stores/contracts/) run the shared
+        # ABC semantics against every configured backend — that's where
+        # cross-backend drift (e.g. issue #195 edge re-ingest) surfaces.
+        # GraphStoreContractTests covers Postgres + Neo4j here;
+        # VectorStoreContractTests covers pgvector, which is the production
+        # vector backend and whose contract had never executed anywhere
+        # before #345 — its fixture predated the connection-pool refactor
+        # (#84) and called ``_conn`` as an attribute rather than the
+        # context-manager method it became.
+        #
+        # Still not covered: the ArcadeDB graph contract
+        # (tests/unit/stores/contracts/test_arcadedb_graph_contract.py) has
+        # no service container here, so the blessed substrate's contract does
+        # not run in CI either. Tracked as issue #351.
         run: |
           pytest \
             tests/integration/test_neo4j_e2e.py \
