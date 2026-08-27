@@ -18,5 +18,5 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-      - run: pip install -e ".[dev,vectors]"
+      - run: pip install -e ".[dev]"
       - run: pytest tests/ -v

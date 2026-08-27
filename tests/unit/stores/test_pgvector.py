@@ -27,10 +27,11 @@ def store():
     from trellis.stores.pgvector.store import PgVectorStore
 
     s = PgVectorStore(dsn=DSN, dimensions=3)
-    # Truncate between tests for isolation.
-    with s._conn.cursor() as cur:
+    # Truncate between tests for isolation. ``_conn`` is the pooled-
+    # connection *context manager* inherited from ``PostgresStoreBase``,
+    # not a connection object, and it commits on block exit.
+    with s._conn() as conn, conn.cursor() as cur:
         cur.execute("TRUNCATE TABLE vectors")
-    s._conn.commit()
     yield s
     s.close()
 

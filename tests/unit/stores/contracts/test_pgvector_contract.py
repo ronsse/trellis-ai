@@ -33,8 +33,12 @@ class TestPgVectorContract(VectorStoreContractTests):
         from trellis.stores.pgvector.store import PgVectorStore
 
         s = PgVectorStore(dsn=DSN, dimensions=DIMS)
-        with s._conn.cursor() as cur:
+        # Each contract test starts from an empty vectors table.
+        # ``_conn`` is the pooled-connection *context manager* inherited
+        # from ``PostgresStoreBase``, not a connection object, and it
+        # commits on block exit — see the sibling Postgres contract
+        # fixtures.
+        with s._conn() as conn, conn.cursor() as cur:
             cur.execute("TRUNCATE TABLE vectors")
-        s._conn.commit()
         yield s
         s.close()
