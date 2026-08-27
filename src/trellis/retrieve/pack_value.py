@@ -283,7 +283,7 @@ def summarize_pack_value(
     }
     sectioned = len(pack_payloads) - len(flat_packs)
 
-    verdicts = _collect_verdicts(feedback_events, flat_packs)
+    verdicts = collect_pack_verdicts(feedback_events, flat_packs)
     helpful_by_pack = verdicts["helpful"]
     unhelpful_by_pack = verdicts["unhelpful"]
     families_by_pack = verdicts["families"]
@@ -388,7 +388,7 @@ def summarize_pack_value(
     return report
 
 
-def _collect_verdicts(
+def collect_pack_verdicts(
     feedback_events: list[Any],
     flat_packs: Mapping[str, Mapping[str, Any]],
 ) -> dict[str, Any]:
@@ -629,6 +629,7 @@ def _build_notes(
 
 __all__ = [
     "MIN_ATTRIBUTED_PACKS",
+    "collect_pack_verdicts",
     "SUPPRESSED_THIN_SAMPLE",
     "PackValueReport",
     "ValueBreakdown",
