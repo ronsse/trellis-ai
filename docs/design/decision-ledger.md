@@ -177,6 +177,50 @@ promote→review→serve chain. **The test refined the scope rather than flippin
 **Reopen if:** an integration audit shows eval fixtures cannot execute the same promote
 pipeline code production uses.
 
+### T-3 · Govern the document and vector planes (issue #360)
+
+**Panel: unanimous** (2026-08-27, $0.0243) — `openai/gpt-5.5` → B (0.74),
+`moonshotai/kimi-k3` → B (0.70). Of three options — (A) scope the hard rule honestly to
+the planes it actually covers, (B) promote a governed `evidence.ingest` to core, (C)
+govern only the policy-relevant subset — both chose **B**, and for the same reason: the
+failure B prevents has occurred **twice in one month in production** (#337, #338), and a
+guarantee held by ten callers remembering to mirror is a convention, not a guarantee.
+
+**Measured state that prompted it:** `create_curate_handlers` registers 13 operations and
+**not one writes a document or vector row**, so 100% of those writes are direct across
+~10 caller sites. `sync_vector_metadata` and `trellis admin resync-vector-metadata` exist
+solely to paper over, and repair, the resulting divergence.
+
+**Verified the panel's falsifiable condition before accepting.** Both panelists named the
+*same* risk and the same thing that would change their mind: per-embed events causing
+event-log write amplification on the highest-frequency path. Measured on the reference
+deployment 2026-08-27:
+
+| | |
+|---|---|
+| event log | 5,325 events, **6.7 MB** (~1.26 KB/event) |
+| events, last 30d | 4,684 |
+| documents | 1,238 rows, 16 MB — **1,182 created in last 30d** |
+| vectors | 1,164 rows, 11 MB |
+
+Governing both planes adds roughly **2,350 events / 30d — a +50% event count but only
+~+3 MB/month**, against 27 MB of documents+vectors that those events describe. **The risk
+does not materialise at this scale**, so B stands.
+
+**Two things the measurement adds that the panel could not.** Document writes are
+**bursty, not steady** — the 1,182 is dominated by corpus and conversation-export ingest
+runs, so a single bulk ingest emits thousands of events at once; the implementation should
+support a batched emit rather than strictly one-event-per-document. And governing today
+buys **validation + idempotency + an audit event, not access control**: stage 2 is a
+no-op everywhere until a policy gate is wired (C1), so B should not be sold as a security
+improvement.
+
+**Reopen if:** a deployment ingests at ~100× this rate (≈100k documents/month), where
++3 MB/month becomes +300 MB/month and the burst case dominates; or if a store-layer
+transactional mirror lands that makes a direct write structurally incapable of forgetting
+the vector row — `kimi-k3` named that as the alternative that would change its answer, and
+it would make B redundant rather than wrong.
+
 ### T-2 · Ship #338's fix wider than the issue specified
 
 The write-through [#338](https://github.com/ronsse/trellis-ai/issues/338) asked for would

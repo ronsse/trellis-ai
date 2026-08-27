@@ -78,7 +78,7 @@ Two things it deliberately is **not**. `env_flags` is the write-behaviour *envir
 
 Six ABCs in `stores/base/`: TraceStore, DocumentStore, GraphStore, VectorStore, EventLog, BlobStore. `StoreRegistry` uses `importlib` for late-binding dynamic module loading — config determines which backend class to instantiate at runtime.
 
-**Contract test suites** in `tests/unit/stores/contracts/` define the shared semantics every backend must honour. New `GraphStore` backends subclass `GraphStoreContractTests` (96 tests covering CRUD, SCD-2, `as_of`, query, subgraph, aliases, deletion — pinned as a physical purge of all versions/edges/aliases, which `redaction.apply` relies on — counts, role validation, document_ids, temporal reads); new `VectorStore` backends subclass `VectorStoreContractTests` (25 tests covering CRUD, metadata round-trip, similarity ordering, top_k, metadata filters). See [`docs/design/adr-canonical-graph-layer.md`](docs/design/adr-canonical-graph-layer.md) for the rationale and the deliberate deviation for `Neo4jVectorStore` (shape #2 — vectors are properties on graph nodes, not an independent store). The contract suites are the authoritative spec — prose docstrings on the ABCs are not.
+**Contract test suites** in `tests/unit/stores/contracts/` define the shared semantics every backend must honour. New `GraphStore` backends subclass `GraphStoreContractTests` (100 tests covering CRUD, SCD-2, `as_of`, query, subgraph, aliases, deletion — pinned as a physical purge of all versions/edges/aliases, which `redaction.apply` relies on — counts, role validation, document_ids, temporal reads); new `VectorStore` backends subclass `VectorStoreContractTests` (34 tests covering CRUD, metadata round-trip, similarity ordering, top_k, metadata filters, bulk upsert, and the metadata-only re-upsert that `sync_vector_metadata` rests on). See [`docs/design/adr-canonical-graph-layer.md`](docs/design/adr-canonical-graph-layer.md) for the rationale and the deliberate deviation for `Neo4jVectorStore` (shape #2 — vectors are properties on graph nodes, not an independent store). The contract suites are the authoritative spec — prose docstrings on the ABCs are not.
 
 | Store | Default | Cloud |
 |-------|---------|-------|
@@ -189,12 +189,38 @@ time, and the dependency-ordered queue. Decisions taken and pending live in
 [`docs/design/autonomous-backlog.md`](docs/design/autonomous-backlog.md).
 
 **Test-coverage caveat worth knowing before you trust a green run:** local `make test`
-deselects 635 tests (`postgres`, `pgvector`, `neo`, `arcadedb`, `live`, `slow`), and the
-**pgvector contract suite has never executed anywhere** — its fixture is broken
-([#345](https://github.com/ronsse/trellis-ai/issues/345)). pgvector is the production
-backend. The claim above that contract suites "run in CI against SQLite, Postgres, and a
-containerized Neo4j on every push to main" holds for the *graph* contract; for the
-**vector** contract only SQLite runs on PRs.
+deselects 635 tests (`postgres`, `pgvector`, `neo`, `arcadedb`, `live`, `slow`), so
+a green local run says nothing about any cloud backend. What CI actually covers:
+
+- **On pull requests** (`tests.yml`): SQLite backends only. Every `postgres` / `pgvector` /
+  `neo` / `arcadedb` test is deselected — for the *graph* and *vector* contracts alike.
+- **On push to `main`** (`live-infra.yml`): the Postgres + Neo4j graph contracts, the
+  Postgres document / trace / event-log contracts, and — since
+  [#345](https://github.com/ronsse/trellis-ai/issues/345) — the **pgvector vector
+  contract**, against `pgvector/pgvector:pg16` and `neo4j:2025.12` service containers.
+- **Nowhere at all:** the ArcadeDB graph contract (`test_arcadedb_graph_contract.py`).
+  ArcadeDB is the *blessed* graph + vector substrate and its contract has no service
+  container in any workflow ([#351](https://github.com/ronsse/trellis-ai/issues/351)).
+  Nor does anything under `tests/unit/stores/` outside `contracts/` — `live-infra.yml` names
+  paths, not markers, so 59 Postgres-marked tests there are simply unwired (they pass; they
+  have just never been run by CI). Sweeping the whole directory in does not work yet:
+  `test_neo4j_vector.py::TestQuery` issues AuraDB-only Cypher that self-hosted
+  `neo4j:2025.12` cannot parse, and unlike the e2e suite it has no capability probe
+  ([#356](https://github.com/ronsse/trellis-ai/issues/356)).
+
+Note the shape of the #345 defect, because it is the one this repo keeps producing: the
+pgvector contract had *never executed anywhere*, because its fixture called `_conn` as an
+attribute — which it stopped being when #84 pooled connections — so the one env combination
+that would have run it (`TRELLIS_TEST_PG_DSN` **and** `TRELLIS_TEST_PGVECTOR=1`) errored
+instead, and nobody ran that combination. `tests/unit/stores/test_pgvector.py` carried the
+identical dead fixture. All 47 now pass, against pgvector 0.4.2 and 0.5.0 both.
+
+Running them locally needs a Postgres whose database already has `CREATE EXTENSION vector`.
+`PgVectorStore` cannot create it: `register_vector` is the pool's `on_connect` hook, so on a
+database without the extension every pooled connection fails and `pool.wait()` raises
+`PoolTimeout` after 30s — per test — long before `_init_schema`'s
+`CREATE EXTENSION IF NOT EXISTS vector` is reached
+([#350](https://github.com/ronsse/trellis-ai/issues/350)).
 
 ## Product docs
 
