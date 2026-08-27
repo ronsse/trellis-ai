@@ -194,6 +194,34 @@ would have made vector rows honest while the reported symptom continued.
 
 ## Deferred
 
+### F-3 · Should capture-health warn on a surface that has gone *quiet*, not just one being rejected?
+
+**Measured 2026-08-27**, 7-day window on the reference deployment: `mcp:record_feedback`
+shows **0 accepted, 1 rejected**. The grading half of the loop has produced nothing for a
+week, and **nothing warned**.
+
+The banner ([`ops/capture_health.py`](../../src/trellis/ops/capture_health.py), #309)
+fires on ≥3 rejections **and** zero accepted for a surface. Here rejections were 1, so
+the condition was not met — working as specified. But the specified condition cannot
+detect a surface that simply stops being called, which for `record_feedback` is the more
+likely failure: an agent that never grades produces no rejections at all.
+
+This interacts with everything downstream. `pack_attribution_rate` is 0.875 over 8
+pack-targeted events, and no amount of surface ergonomics can move it while nothing is
+being graded — the same conclusion A4 reached about retrieve-adoption, one layer over.
+
+**Recommendation: yes, but as a distinct signal — "was active, now silent" rather than
+"silent".** Bare silence is not evidence: most surfaces are unused most of the time, and a
+banner that fires on every quiet tool is one nobody reads. A surface with a *prior* accept
+history that has since gone to zero is a real signal, and it is the shape of the
+motivating incident. Keep it advisory, keep it failing soft, and keep it out of
+`write_config.py` — like the existing thresholds these are **read-side** knobs.
+
+**Cost of being wrong:** a noisier banner. Reversible in a threshold.
+
+**Trigger:** anyone touching `capture_health.py`, or the next time a write surface goes
+dark unnoticed.
+
 ### F-2 · `trellis-evals` has no CI at all
 
 Measured 2026-08-27: `ronsse/trellis-evals` (private) has **no `.github/workflows/`
