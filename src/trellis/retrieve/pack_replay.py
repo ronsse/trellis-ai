@@ -78,7 +78,9 @@ _DEFAULT_EVENT_LIMIT = 5000
 #: rendering. Kept as a constant rather than re-deriving
 #: :func:`~trellis.retrieve.disclosure.pointer_excerpt` because the replay
 #: has no excerpt text to derive a label from (limit 1 above).
-_POINTER_SCAFFOLD_CHARS = len(" … [+999.9k chars — fetch id for full text]")
+_POINTER_SCAFFOLD_CHARS = len(
+    " … [+999.9k chars withheld — get_items fetches the source]"
+)
 
 
 def _chars_from_tokens(tokens: int) -> int:

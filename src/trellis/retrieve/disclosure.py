@@ -186,17 +186,20 @@ def pointer_excerpt(item: PackItem) -> str:
     with, so an agent reads one convention for "there is more text than
     this" wherever it meets one.
 
-    The size quoted is what this *pack* withheld — the excerpt the item
-    was carrying, which may itself already be a 500-character cut of a far
-    longer document. Quoting the document's full length would be a number
-    this function cannot know and ``get_items`` would not return.
+    The size quoted is what this *pack* withheld — the excerpt the item was
+    carrying, which may itself already be a 500-character cut of a far
+    longer document. That is why the note says ``get_items`` fetches *the
+    source* rather than "the rest": the fetch resolves the id against the
+    document, graph and trace stores and returns the whole record, which
+    for a long document is more than the number quoted here. An agent
+    budgeting a fetch should read the size as a floor, not an amount.
     """
     label = item_label(
         {"metadata": item.metadata, "excerpt": item.excerpt},
         POINTER_LABEL_MAX_CHARS,
     )
-    withheld = len(item.excerpt or "")
-    note = f"[+{format_char_count(withheld)} chars — fetch id for full text]"
+    withheld = format_char_count(len(item.excerpt or ""))
+    note = f"[+{withheld} chars withheld — get_items fetches the source]"
     return f"{label} … {note}" if label else note
 
 

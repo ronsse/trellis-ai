@@ -96,7 +96,7 @@ def test_pointer_names_the_item_and_the_size_it_withheld() -> None:
     pointer = pointer_excerpt(item)
 
     assert "Northwind loader runbook" in pointer
-    assert "fetch id for full text" in pointer
+    assert "get_items fetches the source" in pointer
     # The size quoted is what this pack withheld, in the same rendering
     # truncate_excerpt marks its own cuts with.
     assert f"[+{format_char_count(len(item.excerpt))} chars" in pointer
