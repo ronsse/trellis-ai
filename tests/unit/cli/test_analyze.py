@@ -170,6 +170,141 @@ class TestCost:
         assert "$" in result.stdout
 
 
+class TestValue:
+    """``trellis analyze value`` — serving precision, with its coverage."""
+
+    @staticmethod
+    def _seed_attributed_packs(
+        registry: StoreRegistry, count: int, *, helpful: bool = True
+    ) -> None:
+        event_log = registry.operational.event_log
+        for index in range(count):
+            pack_id = f"vpack_{index}"
+            event_log.emit(
+                EventType.PACK_ASSEMBLED,
+                source="test",
+                entity_id=pack_id,
+                entity_type="pack",
+                payload={
+                    "intent_family": "general_context",
+                    "injected_item_ids": [f"{pack_id}_a", f"{pack_id}_b"],
+                    "injected_items": [
+                        {
+                            "item_id": f"{pack_id}_a",
+                            "item_type": "vector",
+                            "strategy_source": "semantic",
+                            "estimated_tokens": 100,
+                            "rank": 0,
+                        },
+                        {
+                            "item_id": f"{pack_id}_b",
+                            "item_type": "document",
+                            "strategy_source": "keyword",
+                            "estimated_tokens": 100,
+                            "rank": 1,
+                        },
+                    ],
+                },
+            )
+            event_log.emit(
+                EventType.FEEDBACK_RECORDED,
+                source="mcp",
+                entity_id=pack_id,
+                payload={
+                    "pack_id": pack_id,
+                    "helpful_item_ids": [f"{pack_id}_a"] if helpful else [],
+                    "unhelpful_item_ids": [f"{pack_id}_b"]
+                    if helpful
+                    else [f"{pack_id}_a", f"{pack_id}_b"],
+                    "intent_family": "general_context",
+                    "rating": 0.5,
+                    "success": True,
+                },
+            )
+
+    def test_empty_events_json_refuses_ratio(self) -> None:
+        result = runner.invoke(app, ["analyze", "value", "--format", "json"])
+        assert result.exit_code == 0
+        data = json.loads(result.stdout.strip())
+        assert data["attributed_packs"] == 0
+        # Refused, not zero — the distinction the whole report turns on.
+        assert data["useful_token_fraction"] is None
+        assert data["suppressed"] is True
+        assert data["min_attributed_packs"] > 0
+
+    def test_reports_fraction_with_sample_size(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        self._seed_attributed_packs(temp_stores, 6)
+        result = runner.invoke(app, ["analyze", "value", "--format", "json"])
+        assert result.exit_code == 0
+        data = json.loads(result.stdout.strip())
+
+        assert data["attributed_packs"] == 6
+        assert data["useful_token_fraction"] == 0.5
+        assert data["suppressed"] is False
+        # Coverage rides alongside the ratio, never separately.
+        assert data["pack_targeted_feedback"] == 6
+        assert data["pack_targeted_attributed"] == 6
+        assert data["injected_tokens"] == 1200
+        assert data["helpful_tokens"] == 600
+
+    def test_json_carries_every_axis(self, temp_stores: StoreRegistry) -> None:
+        self._seed_attributed_packs(temp_stores, 6)
+        result = runner.invoke(app, ["analyze", "value", "--format", "json"])
+        data = json.loads(result.stdout.strip())
+
+        assert {c["key"] for c in data["by_strategy"]} == {"semantic", "keyword"}
+        assert {c["key"] for c in data["by_item_type"]} == {"vector", "document"}
+        assert {c["key"] for c in data["by_intent_family"]} == {"general_context"}
+        for cell in data["by_strategy"]:
+            assert "attributed_packs" in cell
+
+    def test_text_output_states_n_and_never_says_benefit(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        self._seed_attributed_packs(temp_stores, 6)
+        result = runner.invoke(app, ["analyze", "value"])
+        assert result.exit_code == 0
+        assert "useful-token fraction" in result.stdout
+        assert "n=6" in result.stdout
+        # Naming discipline: this is serving precision, not benefit. Rich
+        # wraps, so normalise whitespace before reading the phrase — every
+        # occurrence of the word must be the disclaimer denying it.
+        flat = " ".join(result.stdout.split())
+        assert flat.count("benefit") == flat.count("not benefit") >= 1
+
+    def test_text_output_refuses_thin_sample_visibly(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        self._seed_attributed_packs(temp_stores, 2)
+        result = runner.invoke(app, ["analyze", "value"])
+        assert result.exit_code == 0
+        assert "Ratio refused" in result.stdout
+        assert "minimum" in result.stdout
+
+    def test_price_override_moves_dollars_per_cited_item(
+        self, temp_stores: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("TRELLIS_COST_PRICE_PER_MTOK", raising=False)
+        self._seed_attributed_packs(temp_stores, 6)
+        cheap = json.loads(
+            runner.invoke(
+                app,
+                ["analyze", "value", "--price-per-mtok", "3", "--format", "json"],
+            ).stdout.strip()
+        )
+        dear = json.loads(
+            runner.invoke(
+                app,
+                ["analyze", "value", "--price-per-mtok", "30", "--format", "json"],
+            ).stdout.strip()
+        )
+        assert dear["dollars_per_cited_item"] == pytest.approx(
+            cheap["dollars_per_cited_item"] * 10, rel=1e-6
+        )
+
+
 class TestAdvisoryEffectiveness:
     def test_empty_events(self) -> None:
         result = runner.invoke(app, ["analyze", "advisory-effectiveness"])

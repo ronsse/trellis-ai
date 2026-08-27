@@ -100,6 +100,28 @@ def test_track_token_usage_emits_event():
     assert event.payload["agent_id"] == "test-agent"
 
 
+def test_track_token_usage_records_pack_id():
+    """The join key that makes response cost attributable to a pack."""
+    log = _FakeEventLog()
+    track_token_usage(
+        log,
+        layer="mcp",
+        operation="get_context",
+        response_tokens=500,
+        pack_id="pack_abc",
+    )
+
+    assert log.events[0].payload["pack_id"] == "pack_abc"
+
+
+def test_track_token_usage_pack_id_defaults_to_none():
+    """Pack-free operations record absence, never a fabricated id."""
+    log = _FakeEventLog()
+    track_token_usage(log, layer="mcp", operation="get_graph", response_tokens=50)
+
+    assert log.events[0].payload["pack_id"] is None
+
+
 def test_track_token_usage_optional_fields():
     log = _FakeEventLog()
     track_token_usage(

@@ -586,9 +586,19 @@ _TOOL_LABEL = {
 
 
 def _track_tokens(
-    registry: StoreRegistry, *, operation: str, result: str, budget: int
+    registry: StoreRegistry,
+    *,
+    operation: str,
+    result: str,
+    budget: int,
+    pack_id: str | None = None,
 ) -> None:
-    """Best-effort response-token telemetry — never fails the tool call."""
+    """Best-effort response-token telemetry — never fails the tool call.
+
+    ``pack_id`` is passed by the two pack-assembling paths so response
+    cost is attributable to the pack that caused it; pack-free callers
+    (``get_items``) leave it ``None`` rather than inventing one.
+    """
     try:
         track_token_usage(
             registry.operational.event_log,
@@ -596,6 +606,7 @@ def _track_tokens(
             operation=operation,
             response_tokens=estimate_tokens(result),
             budget_tokens=budget,
+            pack_id=pack_id,
         )
     except Exception:
         # GRACEFUL-DEGRADATION: token tracking is post-success telemetry;
@@ -740,7 +751,13 @@ def _flat_context(
     )
     if banner:
         result = f"{banner}\n\n{result}"
-    _track_tokens(registry, operation=operation, result=result, budget=max_tokens)
+    _track_tokens(
+        registry,
+        operation=operation,
+        result=result,
+        budget=max_tokens,
+        pack_id=pack.pack_id,
+    )
     return result
 
 
@@ -806,7 +823,13 @@ def _sectioned_context(
         banner = _capture_warning_banner(registry)
         if banner:
             result = f"{banner}\n\n{result}"
-        _track_tokens(registry, operation=tool, result=result, budget=resolved_tokens)
+        _track_tokens(
+            registry,
+            operation=tool,
+            result=result,
+            budget=resolved_tokens,
+            pack_id=sectioned_pack.pack_id,
+        )
     except McpError:
         # Already structured by a deeper helper — let it propagate.
         raise
