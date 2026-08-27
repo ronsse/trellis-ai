@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import structlog
 import typer
@@ -569,6 +570,168 @@ def health(
         console.print(f"  [yellow]warn[/yellow] {reason}")
     if report.status == "ok" and write.attempts == 0 and serve.packs == 0:
         console.print("[dim]  No write or serve activity in window.[/dim]")
+
+
+def _print_value_axis(title: str, cells: list[Any], *, minimum: int) -> None:
+    """Render one value-density axis, showing every cell's ``n``.
+
+    A suppressed cell prints why it was refused rather than a fraction —
+    the reader must never have to infer that a number is missing.
+    """
+    if not cells:
+        return
+    table = Table(title=f"Useful-token fraction by {title.lower()}")
+    table.add_column(title, style="cyan")
+    table.add_column("packs (n)", justify="right")
+    table.add_column("injected tok", justify="right")
+    table.add_column("helpful tok", justify="right")
+    table.add_column("fraction", justify="right")
+    for cell in cells:
+        rendered = (
+            f"[dim]refused (n<{minimum})[/dim]"
+            if cell.suppressed
+            else f"{cell.useful_token_fraction or 0.0:.1%}"
+        )
+        table.add_row(
+            cell.key,
+            str(cell.attributed_packs),
+            f"{cell.injected_tokens:,}",
+            f"{cell.helpful_tokens:,}",
+            rendered,
+        )
+    console.print(table)
+
+
+@analyze_app.command("value")
+def value(
+    days: int = typer.Option(30, help="Days of history to analyze"),
+    model: str | None = typer.Option(
+        None, "--model", help="Consuming model for pricing (e.g. claude-opus)"
+    ),
+    price_per_mtok: float | None = typer.Option(
+        None, "--price-per-mtok", help="Override input price, USD per 1M tokens"
+    ),
+    output_format: str = typer.Option("text", "--format", help="Output format"),
+    no_meta_trace: bool = typer.Option(
+        False,
+        "--no-meta-trace",
+        help="Skip recording this run as a meta-Activity (Item 6 Phase 2).",
+    ),
+) -> None:
+    """Value density of served context: what share of injected tokens got cited.
+
+    Joins PACK_ASSEMBLED.injected_items[].estimated_tokens (the cost of
+    each item placed in an agent's prompt) against
+    FEEDBACK_RECORDED.helpful_item_ids (the caller's verdict), and reports
+    the resulting useful-token fraction per strategy, item type, and
+    intent family, plus what one cited item cost in dollars.
+
+    This measures the PRECISION OF WHAT WAS SERVED — a value-density
+    proxy. It is not benefit: it cannot say whether memory improved an
+    outcome, only what share of the tokens it injected the caller went on
+    to cite. Answering the benefit question needs a withhold arm this
+    system does not have.
+
+    Every ratio is reported with the number of attributed packs behind it,
+    and a ratio computed from fewer than the stated minimum is refused
+    rather than rounded — per axis cell as well as overall.
+    """
+    from trellis.retrieve.pack_value import summarize_pack_value  # noqa: PLC0415
+
+    event_log = get_event_log()
+    with wrap_cli_meta_analysis(
+        agent_suffix="analyze",
+        analyzer_name="cli.analyze.value",
+        disabled=no_meta_trace,
+    ) as _meta_record:
+        report = summarize_pack_value(
+            event_log, days=days, model=model, price_per_mtok=price_per_mtok
+        )
+        if _meta_record.enabled and report.attributed_packs > 0:
+            _meta_record.produced_finding(
+                f"pack-value-report-d{days}",
+                finding_type="PackValueReport",
+            )
+
+    if output_format == "json":
+        print(json.dumps(report.model_dump()))
+        return
+
+    console.print(f"[bold]Served-Context Value Density[/bold] (last {days} days)")
+    console.print(
+        f"  Coverage: {report.attributed_packs} attributed pack(s) "
+        f"[dim](n for every ratio below; minimum "
+        f"{report.min_attributed_packs})[/dim]"
+    )
+    console.print(
+        f"    {report.pack_targeted_attributed}/{report.pack_targeted_feedback} "
+        f"pack-targeted feedback events cited items; "
+        f"{report.flat_packs}/{report.packs} packs were attributable"
+    )
+    if report.sectioned_packs_excluded:
+        console.print(
+            f"    [dim]{report.sectioned_packs_excluded} sectioned pack(s) "
+            "excluded — build_sectioned emits no injected_items[].[/dim]"
+        )
+
+    console.print()
+    if report.suppressed:
+        console.print(
+            f"  [yellow]Ratio refused[/yellow]: {report.attributed_packs} "
+            f"attributed pack(s) is below the "
+            f"{report.min_attributed_packs}-pack minimum."
+        )
+        console.print(
+            f"  [dim]Raw counts: {report.helpful_tokens:,} cited-helpful of "
+            f"{report.injected_tokens:,} injected tokens.[/dim]"
+        )
+    else:
+        frac = report.useful_token_fraction or 0.0
+        style = "green" if frac >= _RATE_YELLOW else "yellow"
+        console.print(
+            f"  [bold]useful-token fraction: "
+            f"[{style}]{frac:.1%}[/{style}][/bold] "
+            f"({report.helpful_tokens:,} of {report.injected_tokens:,} "
+            f"injected tokens were cited helpful, n={report.attributed_packs})"
+        )
+        console.print(
+            f"    cited unhelpful: {report.unhelpful_token_fraction or 0.0:.1%}"
+            f"   no verdict: {report.unjudged_token_fraction or 0.0:.1%}"
+        )
+        if report.dollars_per_cited_item is not None:
+            console.print(
+                f"  [bold]${report.dollars_per_cited_item:,.5f} per cited "
+                f"item[/bold] "
+                f"[dim](${report.injected_dollars:,.4f} across "
+                f"{report.distinct_helpful_items} cited items, at "
+                f"${report.price_per_mtok:g}/Mtok {report.model}, "
+                f"{report.price_source})[/dim]"
+            )
+
+    for title, cells in (
+        ("Strategy", report.by_strategy),
+        ("Item type", report.by_item_type),
+        ("Intent family", report.by_intent_family),
+    ):
+        _print_value_axis(title, cells, minimum=report.min_attributed_packs)
+
+    console.print()
+    console.print(
+        f"  Response-token attribution: "
+        f"{report.response_events_with_pack_id}/{report.response_events} "
+        f"TOKEN_TRACKED events carry a pack_id "
+        f"({report.response_pack_id_coverage:.0%}); "
+        f"{report.attributed_packs_with_response_tokens} attributed pack(s) "
+        "priced by rendered response"
+    )
+    if report.response_dollars_per_cited_item is not None:
+        console.print(
+            f"    ${report.response_dollars_per_cited_item:,.5f} per cited item "
+            "measured on rendered response tokens"
+        )
+
+    for note in report.notes:
+        console.print(f"  [dim]note: {note}[/dim]")
 
 
 @analyze_app.command("cost")
