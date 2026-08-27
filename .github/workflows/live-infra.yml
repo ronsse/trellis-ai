@@ -129,6 +129,21 @@ jobs:
         # (#84) and called ``_conn`` as an attribute rather than the
         # context-manager method it became.
         #
+        # tests/unit/stores/test_pgvector.py is named explicitly because it
+        # carried the same dead fixture as the contract file and is the other
+        # half of the pgvector surface. It is NOT covered by the contracts
+        # directory.
+        #
+        # Deliberately NOT widened to all of tests/unit/stores/, though 59
+        # more Postgres-marked tests there (test_postgres_stores.py,
+        # test_api_key_store.py) also run in no workflow: the same sweep picks
+        # up tests/unit/stores/test_neo4j_vector.py, whose TestQuery cases
+        # issue the Cypher `SEARCH ... IN (VECTOR INDEX ...)` clause. That is
+        # AuraDB-grade syntax which self-hosted neo4j:2025.12 cannot parse, so
+        # 4 of them fail against this job's own Neo4j container. The e2e
+        # fixture probes for the clause and self-skips; this unit file does
+        # not. Verified locally against the same image. Tracked as issue #356.
+        #
         # Still not covered: the ArcadeDB graph contract
         # (tests/unit/stores/contracts/test_arcadedb_graph_contract.py) has
         # no service container here, so the blessed substrate's contract does
@@ -138,4 +153,5 @@ jobs:
             tests/integration/test_neo4j_e2e.py \
             tests/integration/loops/ \
             tests/unit/stores/contracts/ \
+            tests/unit/stores/test_pgvector.py \
             -v
