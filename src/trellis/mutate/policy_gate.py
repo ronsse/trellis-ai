@@ -21,13 +21,37 @@ _SCOPE_SPECIFICITY: dict[str, int] = {
 class DefaultPolicyGate:
     """Matches policies by scope and enforces rules on commands.
 
-    Scope matching priority: global < domain < team < entity_type.
-    More specific policies override broader ones.
+    **Deny wins.** Every policy whose scope matches the command is
+    evaluated, and the first rule that resolves to a block stops the
+    command. Scope specificity (``global`` < ``domain`` < ``team`` <
+    ``entity_type``) determines *evaluation order only* — it is not an
+    override mechanism. A narrow ``allow`` therefore cannot carve an
+    exception out of a broad ``deny``: the broad policy is evaluated
+    first and returns. This is the same posture as an explicit-deny-wins
+    IAM policy, and it is deliberate — for an access-control mechanism,
+    the conservative resolution is the safe one. Express an exception by
+    narrowing the ``deny`` rule's ``operation`` pattern or its scope, not
+    by layering an ``allow`` on top of it.
 
-    Enforcement levels:
-    - enforce: block the command, return not allowed
-    - warn: allow but add warning
-    - audit_only: allow silently, just log
+    ``allow`` rules are consequently inert: they document intent and
+    match the default posture, but they grant nothing that was not
+    already permitted (a command matching no policy is allowed).
+
+    Enforcement level scales what a matching rule *does*, never which
+    rules match:
+
+    ==================  ==========================  =====================
+    ``rule.action``     ``enforce``                 ``warn`` / ``audit_only``
+    ==================  ==========================  =====================
+    ``allow``           pass                        pass
+    ``deny``            **block**                   warn / log only
+    ``require_approval``  **block**                 warn / log only
+    ``warn``            warn                        warn / log only
+    ==================  ==========================  =====================
+
+    Warnings are returned to the caller and surface on the resulting
+    ``CommandResult.warnings``; ``audit_only`` is silent to the caller
+    and leaves only a structlog record.
     """
 
     def __init__(self, policies: list[Policy] | None = None) -> None:
@@ -46,7 +70,9 @@ class DefaultPolicyGate:
     def check(self, command: Command) -> tuple[bool, str, list[str]]:
         """Check command against all matching policies.
 
-        Returns ``(allowed, message, warnings)``.
+        Returns ``(allowed, message, warnings)``. An empty gate — and any
+        gate whose policies do not match this command — returns
+        ``(True, "", [])``, which the executor treats as a pass-through.
         """
         warnings: list[str] = []
 
@@ -59,41 +85,52 @@ class DefaultPolicyGate:
                 if not self._rule_matches_operation(rule, command.operation):
                     continue
 
-                action = rule.action  # allow, deny, require_approval, warn
+                # ``allow`` grants nothing that is not already the default
+                # posture, so it never blocks and never warns.
+                if rule.action == "allow":
+                    continue
 
-                if action == "deny" and policy.enforcement == Enforcement.ENFORCE:
+                blocking = rule.action in ("deny", "require_approval")
+
+                if blocking and policy.enforcement == Enforcement.ENFORCE:
+                    message = (
+                        f"Denied by policy: {rule.condition}"
+                        if rule.action == "deny"
+                        else f"Approval required: {rule.condition}"
+                    )
                     logger.warning(
-                        "policy_denied",
+                        "policy_denied"
+                        if rule.action == "deny"
+                        else "policy_requires_approval",
                         policy_id=policy.policy_id,
                         operation=command.operation,
                         rule_condition=rule.condition,
                     )
-                    return False, f"Denied by policy: {rule.condition}", warnings
+                    return False, message, warnings
 
-                if (
-                    action == "require_approval"
-                    and policy.enforcement == Enforcement.ENFORCE
-                ):
-                    logger.warning(
-                        "policy_requires_approval",
-                        policy_id=policy.policy_id,
-                        operation=command.operation,
-                    )
-                    return False, f"Approval required: {rule.condition}", warnings
-
-                if action == "deny" and policy.enforcement == Enforcement.WARN:
-                    warnings.append(
-                        f"Policy warning ({policy.policy_id}): {rule.condition}"
-                    )
-                    logger.info("policy_warning", policy_id=policy.policy_id)
-
-                if action == "deny" and policy.enforcement == Enforcement.AUDIT_ONLY:
+                if policy.enforcement == Enforcement.AUDIT_ONLY:
+                    # Silent to the caller by definition; the structlog
+                    # record is the whole point of the level.
                     logger.info(
                         "policy_audit",
                         policy_id=policy.policy_id,
                         operation=command.operation,
+                        action=rule.action,
                     )
-                    # audit_only: don't block, don't warn
+                    continue
+
+                # Reaches here for: a blocking action under WARN
+                # enforcement, or an ``action="warn"`` rule under either
+                # ENFORCE or WARN. All three mean "allow, but say so".
+                warnings.append(
+                    f"Policy warning ({policy.policy_id}): {rule.condition}"
+                )
+                logger.info(
+                    "policy_warning",
+                    policy_id=policy.policy_id,
+                    operation=command.operation,
+                    action=rule.action,
+                )
 
         return True, "", warnings
 
