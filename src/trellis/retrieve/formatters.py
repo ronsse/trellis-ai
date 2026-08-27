@@ -132,6 +132,31 @@ def format_pack_as_markdown(
     return "\n".join(lines)
 
 
+def item_label(item: dict[str, Any], limit: int = _INDEX_LABEL_MAX_CHARS) -> str:
+    """One-line human label for a pack item, at most ``limit`` characters.
+
+    The item's title when its metadata carries one (``title`` /
+    ``capture_title`` / ``name`` — the same derivation
+    :func:`trellis.retrieve.pack_builder._item_attribution` uses), else the
+    first clause of its excerpt. Newlines are flattened first: every caller
+    renders this inside a single line.
+
+    Shared by :func:`format_index_line` and
+    :func:`trellis.retrieve.disclosure.apply_disclosure` so an item stands
+    for itself identically whether it is surveyed in an index pack or
+    demoted to a pointer in the tail of a full one. Without the shared
+    helper the two renderings would drift, and an agent comparing a
+    pointer against the index line for the same id would see two different
+    descriptions of one memory.
+    """
+    meta = item.get("metadata") or {}
+    title = meta.get("title") or meta.get("capture_title") or meta.get("name")
+    if isinstance(title, str) and title.strip():
+        return truncate_excerpt(" ".join(title.split()), limit)
+    flattened = " ".join((item.get("excerpt") or "").split())
+    return truncate_excerpt(flattened, limit)
+
+
 def format_index_line(item: dict[str, Any]) -> str:
     """Render one compact index line for a pack item.
 
@@ -151,14 +176,7 @@ def format_index_line(item: dict[str, Any]) -> str:
     """
     item_id = item.get("item_id", "")
     item_type = item.get("item_type", "item")
-    meta = item.get("metadata") or {}
-    title = meta.get("title") or meta.get("capture_title") or meta.get("name")
-    if not (isinstance(title, str) and title.strip()):
-        # Flatten newlines first — an index line must stay one line.
-        flattened = " ".join((item.get("excerpt") or "").split())
-        title = truncate_excerpt(flattened, _INDEX_LABEL_MAX_CHARS)
-    else:
-        title = truncate_excerpt(" ".join(title.split()), _INDEX_LABEL_MAX_CHARS)
+    title = item_label(item)
 
     read_tokens = item.get("estimated_tokens")
     cost = (
