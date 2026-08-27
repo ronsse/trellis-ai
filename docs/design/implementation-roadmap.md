@@ -358,7 +358,7 @@ Read in order:
 1. **`CLAUDE.md`** — project conventions, hard rules, terminology.
 2. **This file** — what's done, what's gated, where the gates are (§4).
 3. **The ADR / plan for whichever gate fired.** Don't read every ADR cold; they're long.
-4. **The contract test suites under `tests/unit/stores/contracts/`** — the authoritative behavioural spec for the storage layer. They run in CI against SQLite, Postgres, and a containerized Neo4j on every push to main.
+4. **The contract test suites under `tests/unit/stores/contracts/`** — the authoritative behavioural spec for the storage layer. **Which of them actually run, and where, is in `CLAUDE.md`'s test-coverage caveat** — it is not the same on PRs as on push to `main`, and the ArcadeDB contract runs nowhere at all ([#351](https://github.com/ronsse/trellis-ai/issues/351)). Deliberately a pointer, not a restatement, for the reason given two bullets below.
 
 Before writing code:
 
