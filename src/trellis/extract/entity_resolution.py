@@ -18,9 +18,24 @@ full-node scan duplicated in both callers. Three problems:
    graph accumulated seven separate ``hermes`` nodes with an empty
    ``entity_aliases`` table.
 2. **They rescanned from scratch every time.** Nothing learned. The
-   ``entity_aliases`` table — an indexed, SCD-2, unique-per-current
-   ``(source_system, raw_id)`` mapping that already exists on all four
-   backends — was populated only by callers of the bulk-ingest API.
+   ``entity_aliases`` table — an indexed, SCD-2 ``(source_system, raw_id)``
+   mapping that already exists on all four backends — was populated only
+   by callers of the bulk-ingest API.
+
+   *How strongly uniqueness is enforced differs by backend*, and this
+   module is a consumer of that difference rather than a guarantor of it.
+   SQLite and Postgres carry a real partial unique index
+   (``idx_aliases_current ON entity_aliases(source_system, raw_id)
+   WHERE valid_to IS NULL``), so a duplicate current binding is
+   *impossible*. The two Bolt backends (Neo4j, ArcadeDB — neither
+   overrides ``SCHEMA_STATEMENTS``) index the lookup
+   (``alias_lookup_idx FOR (a:Alias) ON (a.source_system, a.raw_id)``)
+   but constrain uniqueness only on ``version_id``; one-current-per-pair
+   there rests on ``upsert_alias``'s close-then-insert, not on DDL. The
+   resolver is safe either way — it reads a *single* row
+   (``resolve_alias`` returns one record) and re-validates the binding
+   before use — but do not read "the store's unique-current alias index"
+   below as a claim that every backend enforces it.
 3. **They degraded silently.** Past 2000 nodes the scan simply stopped
    seeing the tail and reported "no match", which is indistinguishable
    from a genuine miss.
@@ -100,6 +115,33 @@ NAME_ALIAS_SOURCE_SYSTEM = "name"
 #: successful resolution removes one future scan. No production caller
 #: overrides it — the ``scan_limit`` kwarg exists so tests can drive the
 #: truncation branch without building a 2000-node graph.
+#:
+#: Two things the "self-extinguishing bootstrap" framing does *not* cover,
+#: both measured on the reference deployment (2026-08-27):
+#:
+#: * **Only a resolvable name extinguishes.** A mention that matches zero
+#:   nodes, or matches ambiguously, never mints — so it scans once per
+#:   occurrence, forever. Of 119 ``@mention`` occurrences across 1239
+#:   production documents, **118 match nothing**: they are email-address
+#:   and package-scope fragments (``@gmail`` x21, ``@modelcontextprotocol``
+#:   x6, ``@upstash``, ``@react-native-async-storage``). Minting is
+#:   structurally unable to retire those; not repeating them within a
+#:   document is (see :mod:`trellis.extract.alias_match`).
+#: * **Past the cap the resolver stops learning, and starts being wrong.**
+#:   ``GraphStore.query`` is ``ORDER BY created_at DESC LIMIT n``, so above
+#:   ``scan_limit`` current nodes the scan sees only the newest window:
+#:   an older entity reports a clean "no match" — the duplicate-``hermes``
+#:   failure this module was built to end, returning by a different door —
+#:   and ``mintable`` is permanently ``False``, so the index can never
+#:   bootstrap. The reference graph held 964 current nodes growing
+#:   ~30/day (~17/day excluding a one-off backfill), i.e. the cliff is
+#:   weeks out, not years.
+#:
+#: Raising this number is deliberately **not** the fix: it delays the
+#: cliff, multiplies the per-mention fetch linearly, and leaves the silent
+#: wrong answer intact. The fix is to stop needing the scan — mint a
+#: ``name`` alias when the entity is written, plus a one-off backfill for
+#: existing nodes — which lives on the write path, not here.
 DEFAULT_NAME_SCAN_LIMIT = 2000
 
 

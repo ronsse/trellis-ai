@@ -233,10 +233,45 @@ remaining gap may be smaller than the issue describes.
 and spend the budget twice. Group by `parent_doc_id` at assembly. Also default-filter
 `chunk_index` rows out of the documents list view.
 
-**B3 — Index the alias resolver (roadmap §G.4).** `class: panel`
-`memory_ingest_hook._graph_alias_resolver` and its `save_memory` twin are an O(n)
-full-graph scan capped at 2000 nodes. Fine at current scale, a bottleneck on a real
-vault. Replace with an indexed name→entity lookup.
+**B3 — Index the alias resolver (roadmap §G.4).** ~~`class: panel`~~ — **DONE 2026-08-02, verified 2026-08-27.**
+The premise is stale. [#289](https://github.com/ronsse/trellis-ai/issues/289) (`a889c85`)
+replaced both duplicated scans with the shared
+[`entity_resolution.build_name_alias_resolver`](../../src/trellis/extract/entity_resolution.py):
+an indexed `resolve_alias(source_system="name", key)` row read first, a bounded scan only
+to bootstrap, and the unambiguous result minted back into `entity_aliases` so the next
+lookup is indexed. Both call sites delegate to it
+(`memory_ingest_hook._graph_alias_resolver`, `mcp/server.py:_build_alias_resolver`), and
+all four backends index the lookup — SQLite/Postgres with a partial *unique* index on
+`(source_system, raw_id) WHERE valid_to IS NULL`, the Bolt pair (Neo4j, ArcadeDB) with a
+non-unique composite index plus close-then-insert. ~20 tests in
+`tests/unit/extract/test_entity_resolution.py`. **Do not rebuild this.**
+
+Three findings from the verification, none of which the original item anticipated:
+
+- **The resolver has never executed in production.** `TRELLIS_ENABLE_MEMORY_EXTRACTION`
+  is unset on both the `trellis-api` and `trellis-mcp` containers, so
+  `_build_memory_extractor` short-circuits to `None` on every surface except the
+  `trellis-skynet` CLI wrapper with an explicit `--extract`. Measured evidence: **zero
+  rows in `entity_aliases` (all namespaces) and zero `mentions` edges**, against 964
+  current nodes and 1239 documents. So an empty alias table is *not* evidence the
+  write-back is broken — the path is dark. Anyone measuring this loop must check the env
+  flag first.
+- **Minting only extinguishes scans for names that resolve.** 118 of 119 `@mention`
+  occurrences in the corpus match nothing (`@gmail` ×21 from email addresses,
+  `@modelcontextprotocol` ×6 from npm scopes), and a zero-match scan has nothing to bind,
+  so it rescans forever. Partly addressed: the extractor now resolves each *distinct*
+  token once per document, which removed 40% of resolver calls on this corpus.
+- **B3′ — the real residual gap: past `DEFAULT_NAME_SCAN_LIMIT` the resolver stops
+  learning and starts being wrong.** `class: panel` — this is the item worth queueing.
+  `query` is `ORDER BY created_at DESC LIMIT n`, so above 2000 current nodes an older
+  entity reports a clean "no match" (the duplicate-`hermes` failure #289 ended, returning
+  by another door) and `mintable` is permanently `False`. 964 current nodes growing
+  ~30/day (~17/day excluding a one-off backfill) puts the cliff weeks out. Raising the
+  cap is not the fix — it delays the cliff and leaves the silent wrong answer. The fix is
+  to stop needing the scan: mint a `name` alias when the entity is written, plus a one-off
+  backfill. That spans the mutation write path and a CLI admin command, **not**
+  `extract/`, so it needs its own item and owner sign-off on touching a store-adjacent
+  write path.
 
 ## Wave 3 — security floor (Productionization §3.H.1)
 
