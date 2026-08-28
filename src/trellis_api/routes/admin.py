@@ -125,9 +125,17 @@ def apply_noise_tags(
         # axis keeps serving the pre-demotion snapshot.
         vector_store=resolve_vector_store(registry),
     )
+    # What the evidence gate admitted, not what the usage-rate rule
+    # proposed (#336) — the key says "tagged", so it has to count writes.
+    # ``demotion_screen`` in the dumped report carries the full accounting.
+    screen = report.demotion_screen
+    tagged = (
+        len(screen.admitted) if screen is not None else len(report.noise_candidates)
+    )
     return {
         "status": "ok",
-        "noise_candidates_tagged": len(report.noise_candidates),
+        "noise_candidates_tagged": tagged,
+        "noise_candidates_proposed": len(report.noise_candidates),
         **report.model_dump(),
     }
 

@@ -22,6 +22,11 @@ from typing import TYPE_CHECKING, Any
 import structlog
 from pydantic import Field
 
+from trellis.classify.demotion_gate import (
+    DemotionEvidence,
+    NoiseDemotionScreen,
+    screen_noise_candidates,
+)
 from trellis.core.base import TrellisModel
 from trellis.feedback.models import SUCCESS_RATING_THRESHOLD
 from trellis.learning.pack_observations import join_pack_feedback
@@ -132,6 +137,7 @@ def _score_items(
     pack_helpful: dict[str, set[str]],
     min_appearances: int,
     noise_threshold: float,
+    pack_unhelpful: dict[str, set[str]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Aggregate per-item counts and produce ``(item_scores, noise_candidates)``.
 
@@ -145,16 +151,24 @@ def _score_items(
     item_failures: dict[str, int] = defaultdict(int)
     item_appearances: dict[str, int] = defaultdict(int)
     item_referenced: dict[str, int] = defaultdict(int)
+    # Explicit negative citations. Not read by the noise *proposal* below —
+    # they are the evidence the demotion gate screens the proposal against
+    # (#336, ``trellis.classify.demotion_gate``).
+    item_unhelpful: dict[str, int] = defaultdict(int)
+    unhelpful_by_pack = pack_unhelpful or {}
 
     for pack_id, items in pack_items.items():
         if pack_id not in pack_feedback:
             continue
         success = pack_feedback[pack_id]
         helpful = pack_helpful.get(pack_id, set())
+        unhelpful = unhelpful_by_pack.get(pack_id, set())
         for item_id in items:
             item_appearances[item_id] += 1
             if item_id in helpful:
                 item_referenced[item_id] += 1
+            if item_id in unhelpful:
+                item_unhelpful[item_id] += 1
             if success:
                 item_successes[item_id] += 1
             else:
@@ -189,6 +203,7 @@ def _score_items(
                 "success_rate": round(success_rate, 3),
                 "referenced_count": referenced,
                 "usage_rate": round(usage_rate, 3),
+                "unhelpful_count": item_unhelpful[item_id],
             }
         )
 
@@ -205,13 +220,28 @@ def _score_items(
 
 
 class EffectivenessReport(TrellisModel):
-    """Report on context pack effectiveness."""
+    """Report on context pack effectiveness.
+
+    ``noise_candidates`` is the *proposal* — what the usage-rate rule
+    flags. It is not what gets demoted. :attr:`demotion_screen` carries
+    the evidence gate's verdict over that proposal, and
+    ``demotion_screen.admitted`` is the list
+    :func:`run_effectiveness_feedback` actually writes (#336). The two
+    are reported separately on purpose: a proposal that shrinks by 60%
+    at the gate is a fact about the proposal rule, and collapsing them
+    into one number would hide it.
+    """
 
     total_packs: int
     total_feedback: int
     success_rate: float
     item_scores: list[dict[str, Any]]
     noise_candidates: list[str]
+    #: Packs in the window whose feedback carried any per-item verdict.
+    attributed_packs: int = 0
+    #: Gate verdict over ``noise_candidates``. ``None`` only when the
+    #: report was built by a caller that did not screen.
+    demotion_screen: NoiseDemotionScreen | None = None
 
 
 def analyze_effectiveness(
@@ -298,6 +328,7 @@ def analyze_effectiveness(
     # alone.
     pack_feedback: dict[str, bool] = {}
     pack_helpful: dict[str, set[str]] = {}
+    pack_unhelpful: dict[str, set[str]] = {}
     for event in feedback_events:
         pack_id = event.payload.get("pack_id") or event.entity_id
         if not pack_id or pack_id not in pack_items:
@@ -309,6 +340,9 @@ def analyze_effectiveness(
         helpful_raw = event.payload.get("helpful_item_ids")
         if helpful_raw is not None:
             pack_helpful[pack_id] = set(helpful_raw)
+        unhelpful_raw = event.payload.get("unhelpful_item_ids")
+        if unhelpful_raw:
+            pack_unhelpful[pack_id] = set(unhelpful_raw)
 
     item_scores, noise_candidates = _score_items(
         pack_items=pack_items,
@@ -316,6 +350,14 @@ def analyze_effectiveness(
         pack_helpful=pack_helpful,
         min_appearances=min_appearances,
         noise_threshold=noise_threshold,
+        pack_unhelpful=pack_unhelpful,
+    )
+
+    # Packs carrying *any* per-item verdict — the coverage the demotion
+    # gate judges a batch on. A pack that was served and graded but cited
+    # nothing contributes no evidence and is deliberately not counted.
+    attributed_packs = len(
+        {p for p in pack_feedback if pack_helpful.get(p) or pack_unhelpful.get(p)}
     )
 
     # Overall success rate
@@ -329,6 +371,12 @@ def analyze_effectiveness(
         success_rate=round(overall_rate, 3),
         item_scores=item_scores,
         noise_candidates=noise_candidates,
+        attributed_packs=attributed_packs,
+        demotion_screen=screen_noise_candidates(
+            noise_candidates,
+            [DemotionEvidence.from_score_row(row) for row in item_scores],
+            attributed_packs=attributed_packs,
+        ),
     )
 
 
@@ -365,16 +413,33 @@ def run_effectiveness_feedback(
         registry=registry,
     )
 
-    if report.noise_candidates:
-        updated = apply_noise_tags(
-            report.noise_candidates, document_store, vector_store
-        )
+    screen = report.demotion_screen
+    admitted = list(screen.admitted) if screen is not None else []
+
+    if admitted:
+        updated = apply_noise_tags(admitted, document_store, vector_store)
         logger.info(
             "effectiveness_feedback_applied",
             noise_candidates=len(report.noise_candidates),
+            admitted=len(admitted),
+            refused=screen.refused_count if screen is not None else 0,
+            refused_by_reason=screen.refused_by_reason if screen is not None else {},
+            attributed_packs=report.attributed_packs,
             items_updated=updated,
             days=days,
             success_rate=report.success_rate,
+        )
+    elif report.noise_candidates:
+        # The proposal rule fired and the gate refused all of it. This is
+        # the #336 posture and it is a *result*, not a no-op — say so.
+        logger.info(
+            "effectiveness_feedback_withheld",
+            noise_candidates=len(report.noise_candidates),
+            admitted=0,
+            refused_by_reason=screen.refused_by_reason if screen is not None else {},
+            attributed_packs=report.attributed_packs,
+            suppressed_reason=screen.suppressed_reason if screen is not None else "",
+            days=days,
         )
     else:
         logger.debug(

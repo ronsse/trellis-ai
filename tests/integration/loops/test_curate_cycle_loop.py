@@ -44,12 +44,19 @@ _NOISY = "cc:doc:noisy"
 _INTENT_FAMILY = "curate_cycle"
 
 
-def _seed_events(event_log: SQLiteEventLog, *, rounds: int = 4) -> None:
+def _seed_events(event_log: SQLiteEventLog, *, rounds: int = 5) -> None:
     """Seed graded packs.
 
     The helpful doc is served + referenced + successful every round (a
-    promote candidate). The noisy doc is served every round but never
-    referenced and the pack fails (a noise candidate for the demote half).
+    promote candidate). The noisy doc is served every round and cited
+    **unhelpful** every round (a noise candidate for the demote half).
+
+    ``rounds`` defaults to 5 so the window clears
+    ``demotion_gate.MIN_ATTRIBUTED_PACKS``. The explicit
+    ``unhelpful_item_ids`` matter as much: since #336 the demote half
+    requires evidence of unhelpfulness, and this fixture previously only
+    withheld a *helpful* citation — which is what the docstring said it
+    modelled, but not what it did.
     """
     for i in range(rounds):
         pack_id = f"cc-pack-{i}"
@@ -91,9 +98,10 @@ def _seed_events(event_log: SQLiteEventLog, *, rounds: int = 4) -> None:
                 "intent_family": _INTENT_FAMILY,
                 "outcome": "success" if success else "failure",
                 "success": success,
-                # Helpful doc referenced; noisy doc never referenced => the
-                # usage-first noise path flags the noisy doc.
+                # Helpful doc referenced; noisy doc explicitly rejected =>
+                # the demote half has evidence to act on (#336).
                 "helpful_item_ids": [_HELPFUL],
+                "unhelpful_item_ids": [_NOISY],
             },
         )
 

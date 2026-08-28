@@ -513,7 +513,14 @@ def _curate_stage_noise_tags(
             report = analyze_effectiveness(event_log, days=days)
         else:
             report = run_effectiveness_feedback(event_log, document_store, days=days)
-        noise_tagged = len(report.noise_candidates)
+        # What the evidence gate admitted, not what the usage-rate rule
+        # proposed (#336). The two differ by ~60% on the reference
+        # deployment, and reporting the proposal here would put a number
+        # in the nightly log that no write ever matched.
+        screen = report.demotion_screen
+        noise_tagged = (
+            len(screen.admitted) if screen is not None else len(report.noise_candidates)
+        )
         if record.enabled and noise_tagged:
             record.produced_finding(
                 f"curate-noise-tags-d{days}",
