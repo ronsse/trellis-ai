@@ -52,6 +52,7 @@ from trellis.retrieve.telemetry import analyze_pack_telemetry
 from trellis.retrieve.token_usage import analyze_token_usage
 from trellis.retrieve.trellis_cost import summarize_trellis_cost
 from trellis.schemas.parameters import ParameterScope, ParameterSet
+from trellis.stores.advisory_source import resolve_advisory_path
 from trellis.stores.advisory_store import AdvisoryStore
 from trellis.stores.base.parameter import ParameterStore
 from trellis_cli._meta_wiring import wrap_cli_meta_analysis
@@ -1043,8 +1044,9 @@ def generate_advisories(
     from trellis_cli.config import get_data_dir  # noqa: PLC0415
 
     event_log = get_event_log()
-    data_dir = get_data_dir()
-    store = AdvisoryStore(data_dir / "advisories.json")
+    # #373: resolve through the one seam, so this writer lands on the file
+    # every pack-assembling reader opens.
+    store = AdvisoryStore(resolve_advisory_path(get_data_dir() / "stores"))
 
     with wrap_cli_meta_analysis(
         agent_suffix="analyze",
@@ -1142,8 +1144,9 @@ def advisory_effectiveness(
     from trellis_cli.config import get_data_dir  # noqa: PLC0415
 
     event_log = get_event_log()
-    data_dir = get_data_dir()
-    store = AdvisoryStore(data_dir / "advisories.json")
+    # #373: same seam as ``generate-advisories`` — the fitness loop must
+    # score the advisories that were actually served.
+    store = AdvisoryStore(resolve_advisory_path(get_data_dir() / "stores"))
 
     with wrap_cli_meta_analysis(
         agent_suffix="analyze",

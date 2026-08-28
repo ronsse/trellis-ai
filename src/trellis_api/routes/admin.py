@@ -40,7 +40,7 @@ from trellis.retrieve.effectiveness import (
     run_effectiveness_feedback,
 )
 from trellis.retrieve.metrics_timeseries import compute_timeseries
-from trellis.stores.advisory_store import AdvisoryStore
+from trellis.stores.advisory_source import load_advisory_store
 from trellis.stores.base.event_log import EventLog, EventType
 from trellis_api.app import get_registry
 from trellis_api.auth import AuthContext, authenticate
@@ -210,10 +210,9 @@ def generate_advisories(
     then stores deterministic advisories for delivery alongside packs.
     """
     registry = get_registry()
-    stores_dir = registry.stores_dir
-    if stores_dir is None:
+    store = load_advisory_store(registry.stores_dir, surface="api.admin.generate")
+    if store is None:
         return {"status": "error", "message": "stores_dir not configured"}
-    store = AdvisoryStore(stores_dir / "advisories.json")
     generator = AdvisoryGenerator(
         registry.operational.event_log,
         store,
@@ -231,10 +230,9 @@ def list_advisories(
 ) -> dict[str, Any]:
     """List stored advisories."""
     registry = get_registry()
-    stores_dir = registry.stores_dir
-    if stores_dir is None:
+    store = load_advisory_store(registry.stores_dir, surface="api.admin.list")
+    if store is None:
         return {"status": "error", "message": "stores_dir not configured"}
-    store = AdvisoryStore(stores_dir / "advisories.json")
     advisories = store.list(scope=scope, min_confidence=min_confidence)
     return {
         "count": len(advisories),

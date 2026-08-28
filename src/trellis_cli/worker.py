@@ -65,6 +65,7 @@ from trellis.retrieve.effectiveness import (
     run_advisory_fitness_loop,
     run_effectiveness_feedback,
 )
+from trellis.stores.advisory_source import resolve_advisory_path
 from trellis.stores.advisory_store import AdvisoryStore
 from trellis_cli._meta_wiring import wrap_cli_meta_analysis
 from trellis_cli.analyze import _build_learning_registry_or_exit
@@ -624,12 +625,17 @@ def _curate_stage_learning(
 
 
 def _advisory_store_from_data_dir() -> AdvisoryStore:
-    """Build the AdvisoryStore over ``<data_dir>/advisories.json``.
+    """Build the AdvisoryStore this deployment reads and writes.
 
-    Mirrors ``trellis_cli.analyze.generate_advisories`` so the worker
-    cycle writes to the same advisory file the analyze commands use.
+    Resolved through :func:`trellis.stores.advisory_source.resolve_advisory_path`
+    (#373) rather than by joining a filename here. Mirroring
+    ``trellis_cli.analyze`` is no longer enough on its own: this writer and
+    the analyze commands agreed with each other and disagreed with every
+    *reader*, which is how 37 nightly-refreshed advisories stayed invisible
+    to every pack. Resolution is symmetric, so an existing legacy-path file
+    keeps being written in place rather than being orphaned by a second one.
     """
-    return AdvisoryStore(get_data_dir() / "advisories.json")
+    return AdvisoryStore(resolve_advisory_path(get_data_dir() / "stores"))
 
 
 def _render_cycle_text(result: CurateCycleResult) -> None:
