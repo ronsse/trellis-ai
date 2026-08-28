@@ -108,6 +108,11 @@ _REJECTION_RATE_WARN = 0.10
 #: Warn when one (kind, loc) pair recurs this often — the signature of a
 #: schema/docs collision rather than a one-off agent mistake.
 _REPEAT_COLLISION_WARN = 3
+#: Marker every ``ScanCoverage.note`` opens with. Matched rather than
+#: re-derived so the composed report can recognise — and supersede — the
+#: write section's own truncation line.
+_TRUNCATION_PREFIX = "TRUNCATED:"
+
 #: Warn when fewer than this fraction of packs carry ``injected_items[]``
 #: — below it, the learning join is starved regardless of feedback volume.
 _ATTRIBUTION_COVERAGE_WARN = 0.5
@@ -576,9 +581,13 @@ def summarize_backend_health(
 
     scan = merge_coverage(write.scan, serve.scan, capture.scan)
 
-    reasons = list(write.reasons)
-    if scan.truncated and scan.note not in reasons:
-        reasons.append(scan.note)
+    # The write section states its own truncation so it reads correctly
+    # standalone; here that is superseded by the merged note, which covers
+    # the serve and capture reads too. Dropping the narrower line keeps one
+    # truncation statement per report instead of two overlapping ones.
+    reasons = [r for r in write.reasons if not r.startswith(_TRUNCATION_PREFIX)]
+    if scan.truncated and scan.note:
+        reasons.insert(0, scan.note)
     if serve.packs > 0 and serve.injected_coverage < _ATTRIBUTION_COVERAGE_WARN:
         reasons.append(
             f"only {serve.packs_with_injected_items}/{serve.packs} packs "

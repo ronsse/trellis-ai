@@ -255,3 +255,35 @@ def test_pack_value_puts_truncation_first_among_its_notes(
     assert "TRUNCATED" in capped.notes[1]
     assert clean.scan.truncated is False
     assert not any("TRUNCATED" in note for note in clean.notes)
+
+
+def test_backend_health_states_truncation_once(log: SQLiteEventLog) -> None:
+    """Two capped reads must not produce two overlapping truncation lines.
+
+    The write section carries its own note so it reads correctly on its
+    own; the composed report supersedes it with the merged one rather than
+    printing both.
+    """
+    for index in range(6):
+        _append(
+            log,
+            EventType.MUTATION_EXECUTED,
+            minutes_ago=100 - index,
+            payload={"requested_by": "mcp:save_memory"},
+        )
+        _append(
+            log,
+            EventType.PACK_ASSEMBLED,
+            minutes_ago=100 - index,
+            entity_id=f"pack_{index}",
+            payload={"injected_items": [{"item_id": "a"}]},
+        )
+    report = summarize_backend_health(log, days=30, limit=3)
+
+    truncation_lines = [r for r in report.reasons if r.startswith("TRUNCATED:")]
+    assert len(truncation_lines) == 1
+    # And it leads, so a reader who stops at the first line learns the
+    # window is short before reading any count.
+    assert report.reasons[0] is truncation_lines[0]
+    assert "mutation.executed" in truncation_lines[0]
+    assert "pack.assembled" in truncation_lines[0]
