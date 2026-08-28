@@ -847,12 +847,13 @@ class GraphSearch(SearchStrategy):
         filters: dict[str, Any] | None = None,
     ) -> list[PackItem]:
         filters = dict(filters) if filters else {}
-        seed_ids: list[str] = []
+        seed_ids: list[str]
         if "seed_ids" in filters:
-            # An explicit seed set always wins: the caller has already
-            # decided which neighbourhood it wants (the entity-neighbourhood
-            # REST/MCP routes), and re-deriving seeds from prose would
-            # silently widen a deliberately narrow request.
+            # An explicit seed set always wins: a caller that passed
+            # ``seed_ids`` has already decided which neighbourhood it
+            # wants, and re-deriving seeds from prose would silently widen
+            # a deliberately narrow request. No in-repo production caller
+            # does this today — see the class docstring.
             seed_ids = filters.pop("seed_ids")
         else:
             seed_ids = self._seeds_from_extractor(query)
