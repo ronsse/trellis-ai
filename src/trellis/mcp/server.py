@@ -108,7 +108,7 @@ from trellis.retrieve.token_tracker import estimate_tokens, track_token_usage
 from trellis.schemas.memory_op import REF_TYPE_DOCUMENT
 from trellis.schemas.pack import PackBudget, SectionRequest
 from trellis.schemas.trace import Trace
-from trellis.stores.advisory_store import AdvisoryStore
+from trellis.stores.advisory_source import load_advisory_store
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 
@@ -257,13 +257,15 @@ def _get_registry() -> StoreRegistry:
 
 
 def _build_pack_builder(registry: StoreRegistry) -> PackBuilder:
-    """Create a PackBuilder with advisory store if available."""
-    advisory_store: AdvisoryStore | None = None
-    stores_dir = registry.stores_dir
-    if stores_dir is not None:
-        adv_path = stores_dir / "advisories.json"
-        if adv_path.exists():
-            advisory_store = AdvisoryStore(adv_path)
+    """Create a PackBuilder wired to this deployment's advisory store.
+
+    The store is resolved through :func:`load_advisory_store` (#373) rather
+    than by joining a filename onto ``stores_dir`` here. That is the seam
+    that keeps this reader on the same file the nightly advisory worker
+    writes, and it is why there is no ``if path.exists()`` guard: a missing
+    file yields an empty store plus a log line, not a silent ``None``.
+    """
+    advisory_store = load_advisory_store(registry.stores_dir, surface="mcp")
     param_registry = ParameterRegistry(registry.operational.parameter_store)
     return PackBuilder(
         strategies=build_strategies(registry, parameter_registry=param_registry),

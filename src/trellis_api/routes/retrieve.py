@@ -13,7 +13,7 @@ from trellis.retrieve.precedents import list_precedents as _list_precedents
 from trellis.retrieve.rerankers import build_reranker
 from trellis.retrieve.strategies import build_strategies
 from trellis.schemas.pack import PackBudget, SectionRequest
-from trellis.stores.advisory_store import AdvisoryStore
+from trellis.stores.advisory_source import load_advisory_store
 from trellis_api.app import get_registry
 from trellis_wire.dtos import (
     PackRequest,
@@ -28,18 +28,15 @@ router = APIRouter()
 def _build_pack_builder(registry: Any) -> PackBuilder:
     """Wire a PackBuilder the same way the MCP server does.
 
-    Advisories load lazily from the registry's stores_dir when a
-    generated advisories.json exists; PackBuilder filters by
-    ``_ADVISORY_MIN_CONFIDENCE`` and pack domain scope, so passing the
-    store unconditionally is safe.
+    The advisory store is resolved through :func:`load_advisory_store`
+    (#373), which is the one place that decides where advisories live —
+    so this reader and the nightly writer cannot drift onto two files
+    again. PackBuilder filters by ``_ADVISORY_MIN_CONFIDENCE`` and pack
+    domain scope, so passing the store unconditionally is safe; an empty
+    store behaves exactly as the old ``None`` did.
     """
     param_registry = ParameterRegistry(registry.operational.parameter_store)
-    advisory_store: AdvisoryStore | None = None
-    stores_dir = registry.stores_dir
-    if stores_dir is not None:
-        adv_path = stores_dir / "advisories.json"
-        if adv_path.exists():
-            advisory_store = AdvisoryStore(adv_path)
+    advisory_store = load_advisory_store(registry.stores_dir, surface="api.retrieve")
     return PackBuilder(
         strategies=build_strategies(registry, parameter_registry=param_registry),
         event_log=registry.operational.event_log,
