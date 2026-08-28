@@ -333,17 +333,10 @@ def test_min_appearances_filter(event_log):
 class TestRunEffectivenessFeedback:
     """Tests for the wired feedback loop."""
 
-    def test_applies_noise_tags_to_candidates(self, event_log, doc_store):
-        """Items identified as noise candidates get signal_quality='noise'."""
-        # Insert a document that will become a noise candidate
-        doc_id = doc_store.put(
-            "item-noise",
-            "noisy content",
-            {"content_tags": {"signal_quality": "standard"}},
-        )
-
-        # Create 3 packs all with item-noise, all failed
-        for i in range(3):
+    @staticmethod
+    def _serve_and_grade(event_log, doc_id, *, packs, unhelpful=False):
+        """Emit ``packs`` served-then-graded pairs carrying ``doc_id``."""
+        for i in range(packs):
             pack_id = f"pack-{i}"
             event_log.emit(
                 EventType.PACK_ASSEMBLED,
@@ -352,23 +345,67 @@ class TestRunEffectivenessFeedback:
                 entity_type="pack",
                 payload={"injected_item_ids": [doc_id]},
             )
+            payload = {"pack_id": pack_id, "success": False}
+            if unhelpful:
+                payload["unhelpful_item_ids"] = [doc_id]
             event_log.emit(
                 EventType.FEEDBACK_RECORDED,
                 source="test",
                 entity_id=pack_id,
                 entity_type="pack",
-                payload={"pack_id": pack_id, "success": False},
+                payload=payload,
             )
+
+    def test_applies_noise_tags_when_citations_support_it(self, event_log, doc_store):
+        """An item repeatedly cited *unhelpful* is demoted (#336)."""
+        doc_id = doc_store.put(
+            "item-noise",
+            "noisy content",
+            {"content_tags": {"signal_quality": "standard"}},
+        )
+        self._serve_and_grade(event_log, doc_id, packs=5, unhelpful=True)
 
         report = run_effectiveness_feedback(
             event_log, doc_store, days=30, min_appearances=2
         )
 
-        # The doc should now be tagged as noise
         doc = doc_store.get(doc_id)
         assert doc is not None
         assert doc["metadata"]["content_tags"]["signal_quality"] == "noise"
         assert doc_id in report.noise_candidates
+        assert report.demotion_screen is not None
+        assert report.demotion_screen.admitted == [doc_id]
+
+    def test_withholds_demotion_when_feedback_cites_nothing(
+        self, event_log, doc_store
+    ):
+        """#336: served, graded, but no item attribution — not demoted.
+
+        This is the population the effectiveness pass used to demote, and
+        the reason it archived durable technical memories in production.
+        "Never cited helpful" is not evidence of unhelpfulness when the
+        grader cited nothing at all.
+        """
+        doc_id = doc_store.put(
+            "item-uncited",
+            "durable content nobody graded",
+            {"content_tags": {"signal_quality": "standard"}},
+        )
+        self._serve_and_grade(event_log, doc_id, packs=5, unhelpful=False)
+
+        report = run_effectiveness_feedback(
+            event_log, doc_store, days=30, min_appearances=2
+        )
+
+        doc = doc_store.get(doc_id)
+        assert doc is not None
+        assert doc["metadata"]["content_tags"]["signal_quality"] == "standard"
+        # The proposal still names it — the gate is what withholds, and it
+        # says so rather than silently returning an empty list.
+        assert doc_id in report.noise_candidates
+        assert report.demotion_screen is not None
+        assert report.demotion_screen.admitted == []
+        assert report.demotion_screen.refused_count == 1
 
     def test_noop_when_no_noise(self, event_log, doc_store):
         """When there are no noise candidates, no docs are modified."""
