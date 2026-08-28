@@ -8,6 +8,10 @@ as a function against tmp_path SQLite stores, and asserts the cycle
 produced:
 
 * noise tags on a consistently-unhelpful item (demote half),
+* **the demoted item's vector row agreeing with its document** — the
+  nightly cron is the only automated demotion path, and it ran without a
+  vector store from #338's fix until #381, so every tag it wrote was
+  invisible to the semantic axis,
 * advisory store updates (advisory generation + fitness),
 * learning-candidate review artifacts on disk (promote half — surface
   only; promotion stays human-gated via ``trellis curate
@@ -23,6 +27,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from trellis.core.vector_metadata import vector_metadata_diverges
 from trellis.learning import (
     LEARNING_NOISE_RETRY_KEY,
     LEARNING_NOISE_SUCCESS_KEY,
@@ -37,6 +42,7 @@ from trellis.stores.base.event_log import EventType
 from trellis.stores.sqlite.document import SQLiteDocumentStore
 from trellis.stores.sqlite.event_log import SQLiteEventLog
 from trellis.stores.sqlite.parameter import SQLiteParameterStore
+from trellis.stores.sqlite.vector import SQLiteVectorStore
 from trellis_cli.worker import run_curation_cycle
 
 _HELPFUL = "cc:doc:helpful"
@@ -109,6 +115,7 @@ def _seed_events(event_log: SQLiteEventLog, *, rounds: int = 5) -> None:
 def test_worker_curate_cycle_end_to_end(tmp_path: Path) -> None:
     event_log = SQLiteEventLog(tmp_path / "events.db")
     document_store = SQLiteDocumentStore(tmp_path / "docs.db")
+    vector_store = SQLiteVectorStore(tmp_path / "vectors.db")
     parameter_store = SQLiteParameterStore(tmp_path / "params.db")
     advisory_store = AdvisoryStore(tmp_path / "advisories.json")
     output_dir = tmp_path / "review"
@@ -130,13 +137,30 @@ def test_worker_curate_cycle_end_to_end(tmp_path: Path) -> None:
             )
         )
 
-        # Seed the noisy doc so apply_noise_tags has something to tag.
-        document_store.put(_NOISY, "noisy content nobody uses", {})
+        # Seed the noisy doc so apply_noise_tags has something to tag,
+        # plus its vector row carrying the *pre-demotion* snapshot the
+        # semantic axis would serve. This is the #338 shape: the row's
+        # metadata is frozen at embed time and nothing refreshes it.
+        document_store.put(
+            _NOISY,
+            "noisy content nobody uses",
+            {"content_tags": {"signal_quality": "standard"}},
+        )
+        vector_store.upsert(
+            _NOISY,
+            [0.1, 0.2, 0.3],
+            {
+                "doc_id": _NOISY,
+                "content": "noisy content nobody uses",
+                "content_tags": {"signal_quality": "standard"},
+            },
+        )
         _seed_events(event_log)
 
         result = run_curation_cycle(
             event_log=event_log,
             document_store=document_store,
+            vector_store=vector_store,
             advisory_store=advisory_store,
             learning_registry=ParameterRegistry(parameter_store),
             output_dir=output_dir,
@@ -149,6 +173,25 @@ def test_worker_curate_cycle_end_to_end(tmp_path: Path) -> None:
         noisy_doc = document_store.get(_NOISY)
         assert noisy_doc is not None
         assert noisy_doc["metadata"]["content_tags"]["signal_quality"] == "noise"
+
+        # --- #381: the demotion reached the VECTOR row, not just the
+        # document. Asserted on the row itself rather than on a call
+        # argument, because the defect this pins was a parameter that was
+        # never passed while every document-store assertion above still
+        # passed. `vector_metadata_diverges` is the same predicate the
+        # writer enforces, so the test cannot drift from the invariant.
+        noisy_row = vector_store.get(_NOISY)
+        assert noisy_row is not None
+        assert noisy_row["metadata"]["content_tags"]["signal_quality"] == "noise"
+        assert not vector_metadata_diverges(
+            noisy_doc["metadata"], noisy_row["metadata"]
+        )
+        # The embedding rode through untouched — a metadata-only re-upsert,
+        # nothing re-embedded.
+        assert [round(v, 3) for v in noisy_row["vector"]] == [0.1, 0.2, 0.3]
+        # The row's own excerpt survived: `sync_vector_metadata` mirrors
+        # only SYNCED_METADATA_KEYS, never the whole document bag.
+        assert noisy_row["metadata"]["content"] == "noisy content nobody uses"
 
         # --- Advisory half ran (generation + fitness, no crash). ---
         assert "advisories" not in result.skipped_stages
@@ -172,4 +215,5 @@ def test_worker_curate_cycle_end_to_end(tmp_path: Path) -> None:
     finally:
         event_log.close()
         document_store.close()
+        vector_store.close()
         parameter_store.close()
