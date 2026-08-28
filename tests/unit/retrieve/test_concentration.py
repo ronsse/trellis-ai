@@ -185,9 +185,7 @@ def test_pointer_extras_excluded_from_body_totals() -> None:
     Counting it as reclaimable body would claim the same saving twice.
     """
     items = [_chunk(0), _chunk(1), _chunk(2)]
-    result = measure_parent_concentration(
-        items, pointer_item_ids={items[2].item_id}
-    )
+    result = measure_parent_concentration(items, pointer_item_ids={items[2].item_id})
     assert result.extra_servings == 2
     assert result.extra_tokens == 120
     assert result.extra_body_servings == 1

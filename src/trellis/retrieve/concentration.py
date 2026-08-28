@@ -64,6 +64,10 @@ __all__ = [
     "resolve_parent_id",
 ]
 
+#: Servings from one parent below which there is nothing to concentrate.
+#: A single serving is the normal case and is not a "group".
+_MIN_GROUP_SIZE = 2
+
 
 def resolve_parent_id(item: PackItem) -> str:
     """The source document *item* is a serving of.
@@ -175,7 +179,7 @@ def measure_parent_concentration(
 
     for members in by_parent.values():
         max_group_size = max(max_group_size, len(members))
-        if len(members) < 2:
+        if len(members) < _MIN_GROUP_SIZE:
             continue
         groups += 1
         for item in members[1:]:
