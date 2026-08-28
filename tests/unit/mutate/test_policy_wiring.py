@@ -311,9 +311,7 @@ class TestLoadPolicies:
         loaded = load_policies(stores_dir)
         assert [p.policy_id for p in loaded] == [policy.policy_id]
 
-    def test_malformed_json_raises_rather_than_degrading(
-        self, tmp_path: Path
-    ) -> None:
+    def test_malformed_json_raises_rather_than_degrading(self, tmp_path: Path) -> None:
         """Fail closed: a corrupt policy file must not silently mean 'allow all'."""
         stores_dir = tmp_path / "stores"
         stores_dir.mkdir(parents=True)

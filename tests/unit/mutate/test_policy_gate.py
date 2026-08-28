@@ -258,9 +258,7 @@ class TestWarnActionIsLive:
     def test_require_approval_under_warn_enforcement_warns(self) -> None:
         """Previously fell through silently — neither blocked nor warned."""
         policy = _policy(
-            rules=[
-                PolicyRule(operation="entity.create", action="require_approval")
-            ],
+            rules=[PolicyRule(operation="entity.create", action="require_approval")],
             enforcement=Enforcement.WARN,
         )
         gate = DefaultPolicyGate(policies=[policy])
