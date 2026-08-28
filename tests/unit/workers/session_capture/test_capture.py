@@ -410,9 +410,7 @@ class TestSweepFunnelEvent:
         assert payload["sessions_with_memory"] == 1
         assert payload["source_system"] == "claude-code"
 
-    def test_a_sweep_that_captures_nothing_still_reports(
-        self, tmp_path: Path
-    ) -> None:
+    def test_a_sweep_that_captures_nothing_still_reports(self, tmp_path: Path) -> None:
         """The #255 shape. CORPUS_SYNCED cannot see this — it fires from the
         write seam, so a sweep that wrote nothing emits nothing and looks
         exactly like a sweep that never ran."""
@@ -431,9 +429,7 @@ class TestSweepFunnelEvent:
         assert report.memories_written == 0
         log = registry.operational.event_log
         assert log.get_events(event_type=EventType.CORPUS_SYNCED, limit=10) == []
-        sweeps = log.get_events(
-            event_type=EventType.CAPTURE_SWEEP_COMPLETED, limit=10
-        )
+        sweeps = log.get_events(event_type=EventType.CAPTURE_SWEEP_COMPLETED, limit=10)
         assert len(sweeps) == 1
         assert sweeps[0].payload["sessions_triggered"] == 1
         assert sweeps[0].payload["sessions_with_memory"] == 0

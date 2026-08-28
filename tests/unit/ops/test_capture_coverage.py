@@ -103,9 +103,7 @@ class TestStatesAreDistinguished:
         assert report.suppressed_reason == SUPPRESSED_UNOBSERVED
         assert any("absence of measurement" in note for note in report.notes)
 
-    def test_sweeps_outside_the_window_are_stale_not_zero(
-        self, tmp_path: Path
-    ) -> None:
+    def test_sweeps_outside_the_window_are_stale_not_zero(self, tmp_path: Path) -> None:
         """The pipeline ran and stopped — a different fix from 'it never ran'."""
         event_log = SQLiteEventLog(tmp_path / "events.db")
         old = datetime.now(tz=UTC) - timedelta(days=40)
@@ -170,9 +168,7 @@ class TestDegradedReasonNamesTheStage:
         assert "#332" in report.degraded_reason
         assert "not a sampling decision" in report.degraded_reason
 
-    def test_sampled_out_is_named_as_a_knob_not_a_defect(
-        self, tmp_path: Path
-    ) -> None:
+    def test_sampled_out_is_named_as_a_knob_not_a_defect(self, tmp_path: Path) -> None:
         event_log = SQLiteEventLog(tmp_path / "events.db")
         _emit_sweep(
             event_log,
@@ -184,9 +180,7 @@ class TestDegradedReasonNamesTheStage:
         report = summarize_capture_coverage(event_log, days=7)
         assert "SAMPLE_DENOMINATOR" in report.degraded_reason
 
-    def test_all_watermark_skipped_names_the_skip_counts(
-        self, tmp_path: Path
-    ) -> None:
+    def test_all_watermark_skipped_names_the_skip_counts(self, tmp_path: Path) -> None:
         event_log = SQLiteEventLog(tmp_path / "events.db")
         _emit_sweep(
             event_log,
@@ -373,7 +367,10 @@ class TestFailsSoft:
             "worker:session-capture",
             payload={"metadata": "not-a-dict"},
         )
-        assert summarize_capture_coverage(event_log, days=7).sessions_with_stored_memory == 0
+        assert (
+            summarize_capture_coverage(event_log, days=7).sessions_with_stored_memory
+            == 0
+        )
 
     def test_mock_event_log_with_no_events(self) -> None:
         event_log = MagicMock()
@@ -406,7 +403,8 @@ class TestTheMetricIsNotAConstant:
             )
             observed.add(summarize_capture_coverage(event_log, days=7).capture_rate)
         assert len(observed) == 6, f"rate collapsed to {observed}"
-        assert 0.0 in observed and 1.0 in observed
+        assert 0.0 in observed
+        assert 1.0 in observed
 
     def test_every_state_is_reachable(self, tmp_path: Path) -> None:
         """All four states, or the three-way distinction is decorative."""
@@ -477,9 +475,7 @@ class TestTheMetricIsNotAConstant:
             "",
         }
 
-    def test_the_332_regression_is_visible_in_the_funnel(
-        self, tmp_path: Path
-    ) -> None:
+    def test_the_332_regression_is_visible_in_the_funnel(self, tmp_path: Path) -> None:
         """The regression this metric exists to catch, before and after.
 
         #332: ``resolve_thread`` dropped every turn of a pure-sidechain

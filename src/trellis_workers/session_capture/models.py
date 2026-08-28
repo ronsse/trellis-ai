@@ -204,7 +204,8 @@ class CaptureReport:
     #: Sessions whose distillation could not run because the judge was
     #: unreachable. They are left un-watermarked for a later retry, so they
     #: are *not* coverage failures — they had no chance to produce anything.
-    #: Mirrors :func:`~trellis_workers.session_capture.sweep.judge_unavailable_sessions`,
+    #: Mirrors
+    #: :func:`~trellis_workers.session_capture.sweep.judge_unavailable_sessions`,
     #: which reads the same outcome off ``warnings``.
     sessions_judge_unavailable: int = 0
     #: Distinct sessions that yielded at least one memory surviving every

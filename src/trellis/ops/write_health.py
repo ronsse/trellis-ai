@@ -357,8 +357,10 @@ class BackendHealthReport(TrellisModel):
     #: What fraction of eligible sessions produced a memory, and — when it
     #: cannot be known — which of "not deployed", "stopped" and "running but
     #: capturing nothing" the log actually supports. See
-    #: :mod:`trellis.ops.capture_coverage`.
-    capture: CaptureCoverageReport = Field(default_factory=CaptureCoverageReport)
+    #: :mod:`trellis.ops.capture_coverage`. Required, not defaulted: an
+    #: absent capture section and one reporting ``state="unobserved"`` say
+    #: different things, and only the second is a measurement.
+    capture: CaptureCoverageReport
     status: str = "ok"
     reasons: list[str] = Field(default_factory=list)
 
@@ -574,8 +576,7 @@ def summarize_backend_health(
     # noise — and a health surface that always warns is one nobody reads.
     if capture.state == "degraded":
         reasons.append(
-            f"capture sweeps ran but adjudicated no sessions: "
-            f"{capture.degraded_reason}"
+            f"capture sweeps ran but adjudicated no sessions: {capture.degraded_reason}"
         )
     elif capture.state == "stale":
         reasons.append(
