@@ -20,14 +20,19 @@ unhelpful citations                              140
 servings inside a pack carrying any verdict   0.932
 ===========================================  =======
 
-A *perfectly ordinary* item served twice is cited helpful zero times
-with probability ``(1 - 0.1029)^2 = 0.805``. The proposal rule therefore
-flags 80% of good items by construction, and measured against the live
-corpus it flagged **64 of 79 scored items (81%)** — including durable
-technical memories that #336 had already restored once. Raising
-``min_appearances`` does not rescue it: at five appearances the
-false-flag probability is still 0.58, and no production item has been
-served more than five times.
+The observed consequence needs no model: the proposal rule flagged
+**64 of 79 scored items (81%)** on the live corpus — including durable
+technical memories that #336 had already restored once, and which the
+nightly loop re-demoted on 2026-08-27.
+
+What explains it, treating citations as independent draws at the base
+rate (an approximation — citations within one pack are not independent,
+and a genuinely useful item should draw above base), is that an ordinary
+item served twice goes uncited with probability ``0.897^2 = 0.805``.
+Raising ``min_appearances`` does not rescue it: at five appearances that
+is still 0.58, and no production item has been served more than five
+times. The approximation is only used to explain the 81%; nothing in the
+gate depends on it.
 
 The negative signal, meanwhile, is **four times denser** than the
 positive one and goes completely unread: the proposal rule never looks
