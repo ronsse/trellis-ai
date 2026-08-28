@@ -14,8 +14,42 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
-      # Keep in sync with the ruff pin in pyproject.toml [dev] and .pre-commit-config.yaml
-      - run: pip install "ruff==0.15.22"
+
+      # The pin is DERIVED from pyproject.toml, never restated here.
+      #
+      # This job used to install a hardcoded ruff version under a comment
+      # saying "keep in sync with pyproject.toml [dev]" — which by then pinned
+      # a newer one. Two ruff versions ran in CI at once: this job on the old
+      # one, staying green, and publish.yml (which installs `.[dev]`) on the
+      # newer one, where the same `ruff check` finds errors this job never
+      # showed. Dependabot bumps the pyproject pin and carries the trailing
+      # comment across verbatim, so a hand-maintained mirror here cannot
+      # survive. Reading the version out of the source of truth costs one
+      # step and cannot drift.
+      #
+      # Note that check_tool_pins.py greps this file for `ruff==` / `mypy==`
+      # literals and does not exempt comments. That is deliberate: a version
+      # literal in a comment is exactly the thing that goes stale, so the
+      # rule has no hole to fall through.
+      - name: Resolve the ruff pin from pyproject.toml [dev]
+        id: pin
+        run: |
+          RUFF_PIN=$(python -c "
+          import tomllib, pathlib
+          dev = tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['optional-dependencies']['dev']
+          print(next(s for s in dev if s.split('==')[0].strip() == 'ruff'))
+          ")
+          echo "Resolved: $RUFF_PIN"
+          echo "spec=$RUFF_PIN" >> "$GITHUB_OUTPUT"
+      - run: pip install "${{ steps.pin.outputs.spec }}"
+
+      # Fails when pyproject.toml, .pre-commit-config.yaml and the workflows
+      # disagree about a tool version. The mirrors that cannot be eliminated
+      # (pre-commit's `rev:`) are verified rather than asserted — three
+      # comments claimed a sync that had silently stopped holding (#378).
+      - name: Check tool pins agree across the repo
+        run: python scripts/check_tool_pins.py
+
       - run: ruff check src/ tests/
       # Formatting drifted to 25 files before this gate existed: `make format`
       # was available but nothing enforced it, so a PR could add unformatted
