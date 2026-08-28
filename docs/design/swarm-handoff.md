@@ -46,7 +46,14 @@ implement**:
 
 Three defects where **a mechanism reported success while doing nothing**, all live:
 
-- **[#373](https://github.com/ronsse/trellis-ai/issues/373) — every advisory is invisible to every pack.** Writers use `<data_dir>/advisories.json` (37 advisories, refreshed nightly); readers use `<data_dir>/stores/advisories.json`, which does not exist. `if adv_path.exists()` binds `None` silently. **This supersedes the standing "the loop is starved because feedback carries no item attribution" diagnosis** — the generator was never starved; nothing could read its output. Two independent failures were being read as one.
+- **[#373](https://github.com/ronsse/trellis-ai/issues/373) — every advisory is invisible to every pack** (fixed by [#382](https://github.com/ronsse/trellis-ai/pull/382)). Writers use `<data_dir>/advisories.json`; readers use `<data_dir>/stores/advisories.json`, which does not exist, and `if adv_path.exists()` binds `None` silently.
+  **Read the whole causal chain, not the headline** — the first correction of this was itself wrong. "0 advisories served" has **at least four** sufficient causes, and the path split is not the binding one:
+  1. item attribution (the original diagnosis — partly fixed by #287 / #344),
+  2. the path split (#373, fixed),
+  3. **the flat path does not render advisories at all** — `format_advisories_as_markdown` is called only from `_sectioned_context`, and production has served **37 flat packs and 0 sectioned**, so fixing the path serves *zero additional tokens today* and buys telemetry,
+  4. **the generator emits unusable output** ([#383](https://github.com/ronsse/trellis-ai/issues/383)) — 36 of 37 rows have `success_rate_without = 0.0`, so `effect_size` is the pack success rate wearing a causal claim.
+
+  The instructive part is the failure *of the correction*: a single-cause explanation was replaced with a different single-cause explanation, which is the same error in a new position. When a metric reads zero, enumerate every path that could produce the zero before naming one.
 - **[#371](https://github.com/ronsse/trellis-ai/issues/371) / [#375](https://github.com/ronsse/trellis-ai/issues/375) — the graph axis is a recency feed, not a search.** `GraphSearch.search()` carries `query: str,  # noqa: ARG002` and nothing supplies `seed_ids`, so it falls through to `GraphStore.query` = `ORDER BY created_at DESC`. Measured: a **median 8.6% of servable nodes over a median 58-hour window**, and coverage is **falling monotonically** (0.150 → 0.072) as the graph grows, because the reach is a fixed row count and decays as 1/N. One pack's window spanned **0.0 hours**.
 - **[#374](https://github.com/ronsse/trellis-ai/issues/374) — the health analyzers will drop the NEWEST events.** `get_events` defaults to ascending; three analyzers cap at 5,000; production sits at **4,705**. For a health metric that is the worst truncation direction — a new outage falls outside the window, so the capture-health banner stays silent through exactly the incident it exists to catch.
 
