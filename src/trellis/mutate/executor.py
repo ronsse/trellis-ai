@@ -132,8 +132,19 @@ class MutationExecutor:
             )
 
         # Stage 2: Policy Check
+        #
+        # ``policy_warnings`` carries a non-blocking verdict (an
+        # ``Enforcement.WARN`` policy, or an ``action="warn"`` rule)
+        # forward to the SUCCESS result and its audit event. Before this,
+        # warnings were computed and then dropped on the allow path, so
+        # the entire ``warn`` enforcement level was unobservable to
+        # callers — a policy could fire on every write and nothing
+        # downstream could tell. An empty gate yields ``[]``, which is
+        # ``CommandResult.warnings``' own default, so the transparency of
+        # the default posture is unaffected.
+        policy_warnings: list[str] = []
         if self._policy_gate is not None:
-            allowed, message, warnings = self._policy_gate.check(command)
+            allowed, message, policy_warnings = self._policy_gate.check(command)
             if not allowed:
                 log.warning("policy_rejected", message=message)
                 self._emit_rejection(
@@ -146,7 +157,7 @@ class MutationExecutor:
                     status=CommandStatus.REJECTED,
                     operation=command.operation,
                     message=message,
-                    warnings=warnings,
+                    warnings=policy_warnings,
                 )
 
         # Stage 3: Idempotency Check
@@ -302,7 +313,12 @@ class MutationExecutor:
             )
 
         # Stage 5: Emit Event
-        self._emit(command, CommandStatus.SUCCESS, message)
+        self._emit(
+            command,
+            CommandStatus.SUCCESS,
+            message,
+            policy_warnings=policy_warnings,
+        )
 
         log.info("command_executed", created_id=created_id)
         return CommandResult(
@@ -312,6 +328,7 @@ class MutationExecutor:
             target_id=command.target_id,
             created_id=created_id,
             message=message,
+            warnings=policy_warnings,
         )
 
     def execute_batch(self, batch: CommandBatch) -> list[CommandResult]:
@@ -385,7 +402,14 @@ class MutationExecutor:
                 )
         self._seen_idempotency_keys[key] = None
 
-    def _emit(self, command: Command, status: CommandStatus, message: str) -> None:
+    def _emit(
+        self,
+        command: Command,
+        status: CommandStatus,
+        message: str,
+        *,
+        policy_warnings: list[str] | None = None,
+    ) -> None:
         """Emit a SUCCESS or FAILED event to the event log if available.
 
         Rejection paths (validate / policy / idempotency) emit through
@@ -397,7 +421,13 @@ class MutationExecutor:
             if status == CommandStatus.SUCCESS
             else EventType.MUTATION_REJECTED
         )
-        self._emit_event(event_type, command, status, message)
+        self._emit_event(
+            event_type,
+            command,
+            status,
+            message,
+            policy_warnings=policy_warnings,
+        )
 
     def _emit_rejection(
         self,
@@ -428,6 +458,7 @@ class MutationExecutor:
         message: str,
         *,
         reason: str | None = None,
+        policy_warnings: list[str] | None = None,
     ) -> None:
         """Build the payload and emit a single executor event."""
         if self._event_log is None:
@@ -442,6 +473,12 @@ class MutationExecutor:
         }
         if reason is not None:
             payload["reason"] = reason
+        # Added only when a policy actually fired non-blockingly. Keeping
+        # the key absent otherwise means a deployment with no policies
+        # emits a byte-identical payload to the pre-gate world, which is
+        # what makes the default posture verifiably transparent.
+        if policy_warnings:
+            payload["policy_warnings"] = policy_warnings
         self._event_log.emit(
             event_type,
             "mutation_executor",

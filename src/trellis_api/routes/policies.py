@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from trellis.auth import SCOPE_ADMIN
+from trellis.mutate import resolve_policy_path
 from trellis.schemas.enums import Enforcement, PolicyType
 from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
 from trellis.stores.policy_store import PolicyStore
@@ -30,11 +31,14 @@ def _get_policy_store() -> PolicyStore:
     registry = get_registry()
     reg_id = id(registry)
     if _policy_store_cache is None or _policy_store_registry_id != reg_id:
-        stores_dir = registry.stores_dir
-        if stores_dir is None:
+        # Resolve through the shared helper so this route writes the file
+        # the mutation pipeline's Stage 2 reads — and the same file
+        # ``trellis policy`` writes. See trellis.mutate.policy_source.
+        path = resolve_policy_path(registry.stores_dir)
+        if path is None:
             msg = "stores_dir must be set on registry to use PolicyStore"
             raise ValueError(msg)
-        _policy_store_cache = PolicyStore(stores_dir / "policies.json")
+        _policy_store_cache = PolicyStore(path)
         _policy_store_registry_id = reg_id
     return _policy_store_cache
 

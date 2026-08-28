@@ -8,6 +8,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from trellis.mutate import resolve_policy_path
 from trellis.schemas.enums import Enforcement, PolicyType
 from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
 from trellis.stores.policy_store import PolicyStore
@@ -19,9 +20,17 @@ console = Console()
 
 
 def _get_policy_store() -> PolicyStore:
-    """Get the policy store from the default data directory."""
-    data_dir = get_data_dir()
-    return PolicyStore(data_dir / "policies.json")
+    """Get the policy store the mutation pipeline will actually read.
+
+    Resolves through :func:`trellis.mutate.resolve_policy_path` rather
+    than picking a path locally. This CLI used to write
+    ``<data_dir>/policies.json`` while the REST API read
+    ``<data_dir>/stores/policies.json`` — two surfaces, two files, and
+    (until the gate was wired) nothing read either. Sharing the resolver
+    is what guarantees the file this command writes is the file Stage 2
+    enforces.
+    """
+    return PolicyStore(resolve_policy_path(get_data_dir() / "stores"))
 
 
 def _print_json(obj: object) -> None:

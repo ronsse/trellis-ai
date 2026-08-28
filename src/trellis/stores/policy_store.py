@@ -67,10 +67,20 @@ class PolicyStore:
                 policy = Policy.model_validate(entry)
                 self._policies[policy.policy_id] = policy
             logger.info("policies_loaded", count=len(self._policies))
-        # GRACEFUL-DEGRADATION: an unreadable policy file should not
-        # crash the registry — the MutationExecutor's policy stage
-        # falls back to deny-by-default semantics when no policies
-        # are loaded. The loud error preserves operator visibility.
+        # GRACEFUL-DEGRADATION: this is the *CRUD* reader. An unreadable
+        # file must not stop an operator running ``trellis policy list``
+        # to see what state they are in, so it degrades loudly here.
+        #
+        # It is emphatically NOT the enforcement path. The mutation
+        # pipeline loads policies through
+        # :func:`trellis.mutate.policy_source.load_policies`, which is
+        # strict and raises: degrading to zero policies there would mean
+        # a corrupt file silently disables access control. (An earlier
+        # comment here claimed the executor "falls back to deny-by-default
+        # semantics when no policies are loaded". That was wrong twice:
+        # Stage 2 was skipped entirely because nothing wired a gate, and
+        # ``DefaultPolicyGate.check`` allows — not denies — when no policy
+        # matches.)
         except Exception:
             logger.exception("policy_load_failed", path=str(self._path))
 
