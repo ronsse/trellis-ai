@@ -49,9 +49,9 @@ candidates by ``item_id`` so the union pays no double-counting cost.
    ``item_id`` prefix, or an ``entity_id`` metadata key.
 
    A production seeding path needs a producer that stamps entity-summary
-   documents on the memory-ingest path — or a different extractor. Until
-   one exists, ``build_strategies`` leaves ``graph_seed_extractor=None``
-   on purpose.
+   documents on the memory-ingest path — or a different extractor; that
+   is #375. Until one exists, ``build_strategies`` leaves
+   ``graph_seed_extractor=None`` on purpose.
 
 No fallback paths (greenfield writer contract — see CLAUDE.md):
 

@@ -119,7 +119,7 @@ class GraphSeedExtractor(Protocol):
       embeds the intent and maps top-K vector hits back to entity ids.
       Requires entity-summary documents in the vector store; read that
       module's docstring before wiring it, because a corpus without them
-      makes it a measured no-op (#371).
+      makes it a measured no-op (#371); a production path needs #375 first.
     """
 
     def extract(self, intent: str) -> list[str]:
