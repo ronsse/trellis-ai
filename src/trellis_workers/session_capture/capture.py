@@ -21,6 +21,7 @@ One nightly pass over the Claude Code transcript directory:
 from __future__ import annotations
 
 import os
+from collections import Counter
 from typing import TYPE_CHECKING
 
 import structlog
@@ -34,6 +35,7 @@ from trellis.mcp.reconcile import (
     UPDATES_DOC_KEY,
     reconcile_on_write_enabled,
 )
+from trellis.stores.base.event_log import EventType
 from trellis_workers.session_capture import distill, gating, reconcile_pass
 from trellis_workers.session_capture.models import (
     CandidateMemory,
@@ -200,7 +202,14 @@ def run_capture(
         report.malformed_lines += digest.malformed_lines
 
         if not gating.should_distill(digest, sample_denominator):
-            report.sessions_sampled_out += 1
+            # Two different outcomes hide behind one `False`. An empty digest
+            # is the reader finding no conversation; sampling is a deliberate
+            # cost decision. Counting them together is how #332 stayed
+            # invisible — see ``CaptureReport.sessions_skipped_empty``.
+            if digest.is_empty:
+                report.sessions_skipped_empty += 1
+            else:
+                report.sessions_sampled_out += 1
             if not dry_run and pre_read_stat is not None:
                 watermark.record(path, stat=pre_read_stat)
             continue
@@ -231,13 +240,56 @@ def run_capture(
         if not dry_run and pre_read_stat is not None:
             watermark.record(path, stat=pre_read_stat)
 
+    report.sessions_with_memory = len({c.session_id for c in written})
     _write_records(registry, records, report, source_system, id_prefix, dry_run)
     if not dry_run:
         _emit_training_pairs(registry, written, distill_model_id)
         watermark.save()
 
+    _emit_sweep_completed(registry, report, source_system=source_system)
     logger.info("capture_sweep_complete", **report.to_payload())
     return report
+
+
+def _emit_sweep_completed(
+    registry: StoreRegistry,
+    report: CaptureReport,
+    *,
+    source_system: str,
+) -> None:
+    """Persist the sweep funnel as one ``CAPTURE_SWEEP_COMPLETED`` event.
+
+    **Unconditional**, including a sweep that adjudicated nothing and a dry
+    run (flagged, the ``CORPUS_SYNCED`` convention). A conditional emit would
+    reproduce the hole this exists to close: ``CORPUS_SYNCED`` fires from the
+    write seam and so only when something was written, which makes a sweep
+    that judged forty sessions and kept none look identical to a sweep that
+    never ran.
+
+    Fail-soft, for the same reason :func:`trellis.ops.write_health.
+    record_write_rejection` is: a telemetry outage must not turn a completed
+    sweep into a crashed one, and the sweep's real output is already durable
+    in the document store by the time this runs.
+    """
+    payload = report.to_payload()
+    # Warning *bodies* carry transcript paths and near-duplicate doc ids;
+    # the funnel only needs their shape, and the event log has a different
+    # retention profile than the run log.
+    warnings = payload.pop("warnings", [])
+    payload["warning_kinds"] = dict(
+        Counter(str(w.get("kind", "unknown")) for w in warnings)
+    )
+    payload["source_system"] = source_system
+    try:
+        registry.operational.event_log.emit(
+            EventType.CAPTURE_SWEEP_COMPLETED,
+            source=_REQUESTED_BY,
+            entity_id=f"capture:{source_system}",
+            entity_type="capture_sweep",
+            payload=payload,
+        )
+    except Exception:
+        logger.warning("capture_sweep_event_emit_failed", exc_info=True)
 
 
 def _capture_session(
@@ -253,6 +305,7 @@ def _capture_session(
     """Distil, gate, and reconcile one session; ``None`` if the judge is down."""
     candidates = distill.distill_session(llm_client, digest)
     if candidates is None:
+        report.sessions_judge_unavailable += 1
         report.warnings.append(
             {"kind": "distill_unavailable", "session_id": digest.session_id}
         )

@@ -273,6 +273,38 @@ would have made vector rows honest while the reported symptom continued.
 
 ## Deferred
 
+### F-4 · The two richer shapes in [#365](https://github.com/ronsse/trellis-ai/issues/365)
+
+E2's PR shipped #365's **third** option: `analyze health` now states that
+`untargeted_feedback` assumes non-retrieval and that retrieval availability is
+unmeasured. The other two remain open, and both were considered and deliberately not
+built.
+
+- **Record a retrieval attempt on arrival at the MCP server.** Cannot see a call that
+  never arrives — which is the only failure actually observed. The issue says this
+  itself. It would still be worth having as a denominator for `packs_assembled`, but it
+  does not close the gap it was proposed for.
+- **Client-side reporting through the surviving path** (skills / `trellis-skynet` write
+  a failed retrieval via CLI or REST, since in every observed instance at least one path
+  stayed up). This is the one that would actually work, and it is also the one that adds
+  a **second unmeasured write path to compensate for an unmeasured read path** — it
+  fails the same way and hides it the same way. Building it needs its own health signal
+  first, or it is measurement debt paid with more measurement debt.
+
+**Recommendation: leave both deferred until there is a second incident.** The one that
+prompted #365 was partial and time-boxed; the issue is explicit that it is filed for the
+structural gap, not as damage control. The disclosure now prevents the specific harm —
+`untargeted_feedback` being read as stronger evidence than it is — at zero new failure
+surface. A second incident would change the calculus, and the client-side reporter is
+then the one to build.
+
+**Cost of being wrong:** an availability outage overlapping a measurement window goes
+undetected. Bounded now by the disclosure, which tells the reader the number is an upper
+bound on non-retrieval rather than a count of it.
+
+**Trigger:** a second transport-level retrieval outage, or anyone proposing to move
+`attribution_rate` by changing feedback ergonomics.
+
 ### F-3 · Should capture-health warn on a surface that has gone *quiet*, not just one being rejected?
 
 **Measured 2026-08-27**, 7-day window on the reference deployment: `mcp:record_feedback`

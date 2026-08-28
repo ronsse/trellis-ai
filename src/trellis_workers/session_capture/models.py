@@ -188,6 +188,32 @@ class CaptureReport:
     #: Its own count, never folded into ``sessions_sampled_out`` — a capture
     #: gap reported as a sampling decision is how one stays unnoticed.
     sessions_skipped_ephemeral: int = 0
+    #: Transcripts that parsed to **zero natural-language turns**, so
+    #: :func:`~trellis_workers.session_capture.gating.should_distill` refused
+    #: them before sampling was ever consulted.
+    #:
+    #: Split out for exactly the reason ``sessions_skipped_ephemeral`` is: an
+    #: empty parse is a *reader* outcome, and folding it into
+    #: ``sessions_sampled_out`` reports a capture gap as a sampling decision.
+    #: This is not hypothetical — it is the shape of #332. That bug made
+    #: ``resolve_thread`` drop every turn of a pure-sidechain transcript, so
+    #: 61% of the corpus parsed empty and was counted as sampled out. A
+    #: reader regression looked like a knob setting, and the funnel could not
+    #: have told anyone otherwise.
+    sessions_skipped_empty: int = 0
+    #: Sessions whose distillation could not run because the judge was
+    #: unreachable. They are left un-watermarked for a later retry, so they
+    #: are *not* coverage failures — they had no chance to produce anything.
+    #: Mirrors
+    #: :func:`~trellis_workers.session_capture.sweep.judge_unavailable_sessions`,
+    #: which reads the same outcome off ``warnings``.
+    sessions_judge_unavailable: int = 0
+    #: Distinct sessions that yielded at least one memory surviving every
+    #: gate — the coverage numerator. Counted per **session**, not per
+    #: document: one session commonly distils to several memories, and
+    #: ``memories_written`` therefore cannot answer "did this session produce
+    #: anything at all".
+    sessions_with_memory: int = 0
     malformed_lines: int = 0
     candidates_distilled: int = 0
     candidates_rejected_worthiness: int = 0
@@ -218,6 +244,9 @@ class CaptureReport:
             "sessions_triggered": self.sessions_triggered,
             "sessions_sampled_out": self.sessions_sampled_out,
             "sessions_skipped_ephemeral": self.sessions_skipped_ephemeral,
+            "sessions_skipped_empty": self.sessions_skipped_empty,
+            "sessions_judge_unavailable": self.sessions_judge_unavailable,
+            "sessions_with_memory": self.sessions_with_memory,
             "malformed_lines": self.malformed_lines,
             "candidates_distilled": self.candidates_distilled,
             "candidates_rejected_worthiness": self.candidates_rejected_worthiness,

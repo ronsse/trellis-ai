@@ -319,11 +319,38 @@ not actually run until August because of blocked turn ordering and a context-win
 coupling where Ollama ignores `num_ctx` and hermes fabricates. Verify the observer
 produces non-fabricated output on a held-out transcript *before* wiring it to writes.
 
-**E2 — Capture-coverage measurement.** `class: panel`
+**E2 — Capture-coverage measurement.** `class: panel` — **DONE, PR #372 (unmerged).**
 [#332](https://github.com/ronsse/trellis-ai/issues/332) fixed the sidechain rule that
-discarded 61% of transcripts. Nothing currently measures what fraction of sessions
-produce a memory, so the next silent coverage regression is invisible. Build the metric
-before adding capture surface in E1.
+discarded 61% of transcripts. Nothing measured what fraction of sessions produce a
+memory, so the next silent coverage regression was invisible. Built before E1 adds
+capture surface, as the item asked.
+
+Landed as `sessions_with_memory / sessions_triggered` in `trellis analyze health`
+([`ops/capture_coverage.py`](../../src/trellis/ops/capture_coverage.py)). Three things
+worth carrying into E1:
+
+- **The denominator is `should_distill`, the pipeline's own deployed gate** — not a new
+  eligibility rule. `sessions_seen` is dominated by watermark skips (production
+  2026-08-27: 291 seen, 21 adjudicated), and sampled-out sessions are excluded so the
+  rate cannot track a cost knob.
+- **Absence is a state, not a zero.** `unobserved` / `stale` / `degraded` / `measured`,
+  with `capture_rate = None` below `MIN_ELIGIBLE_SESSIONS`. Pointed at production it
+  correctly reads `unobserved` while noting 59 sessions *did* store a memory — a naive
+  metric would have reported 0% on a working pipeline. It is **not** keyed on
+  `write_provenance`: the sweep is a host-run worker, and that stamp is wrong rather
+  than stale ([#348](https://github.com/ronsse/trellis-ai/issues/348)).
+- **`CORPUS_SYNCED` is not a sweep-liveness signal** and cannot be made into one — it
+  fires from the write seam, so a sweep that kept nothing emits nothing. 8 events in 30
+  days against a nightly cron. Hence `CAPTURE_SWEEP_COMPLETED`, emitted unconditionally.
+
+Also split `sessions_skipped_empty` out of `sessions_sampled_out`: under the old
+counter, #332's 61% presented as a sampling decision.
+
+**#365 — retrieval availability.** Option three shipped in the same PR: `analyze health`
+states that `untargeted_feedback` assumes non-retrieval and that retrieval availability
+is unmeasured. The other two shapes remain open and are follow-ups; the issue's own
+ordering holds, since recording an attempt *on arrival* cannot see a call that never
+arrives.
 
 ---
 

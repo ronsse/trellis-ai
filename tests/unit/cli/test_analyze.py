@@ -980,3 +980,76 @@ class TestSchemaEvolutionCLI:
             app, ["analyze", "schema-evolution", "--kinds", "not_a_kind"]
         )
         assert result.exit_code != 0
+
+
+class TestAnalyzeHealthCaptureSection:
+    """E2 + #365 reach the operator surface, in both output formats."""
+
+    def _emit_sweep(self, registry: StoreRegistry, **payload: object) -> None:
+        base: dict[str, object] = {
+            "dry_run": False,
+            "sessions_seen": 40,
+            "sessions_parsed": 20,
+            "sessions_triggered": 20,
+            "sessions_skipped_watermark": 20,
+            "sessions_skipped_empty": 0,
+            "sessions_sampled_out": 0,
+            "sessions_judge_unavailable": 0,
+            "sessions_with_memory": 12,
+        }
+        base.update(payload)
+        registry.operational.event_log.emit(
+            EventType.CAPTURE_SWEEP_COMPLETED,
+            source="worker:session-capture",
+            payload=base,
+        )
+
+    def test_json_carries_capture_and_availability_fields(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        self._emit_sweep(temp_stores)
+        temp_stores.operational.event_log.emit(
+            EventType.FEEDBACK_RECORDED,
+            source="mcp:record_feedback",
+            payload={"rating": 0.9, "success": True},
+        )
+
+        result = runner.invoke(app, ["analyze", "health", "--format", "json"])
+        assert result.exit_code == 0
+        data = json.loads(result.stdout)
+
+        assert data["capture"]["state"] == "measured"
+        assert data["capture"]["capture_rate"] == pytest.approx(0.6)
+        assert data["capture"]["eligible_sessions"] == 20
+        assert data["capture"]["funnel"]["sessions_seen"] == 40
+        assert "#365" in data["serve"]["retrieval_availability_note"]
+        assert data["serve"]["retrieval_availability_measured"] is False
+
+    def test_text_output_prints_the_rate_and_the_funnel(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        self._emit_sweep(temp_stores)
+        result = runner.invoke(app, ["analyze", "health"])
+        assert result.exit_code == 0
+        assert "Capture:" in result.stdout
+        assert "funnel:" in result.stdout
+
+    def test_absent_capture_data_prints_a_state_not_a_zero(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        """The whole point: no sweeps must not render as 0% coverage."""
+        result = runner.invoke(app, ["analyze", "health"])
+        assert result.exit_code == 0
+        capture_line = next(
+            line for line in result.stdout.splitlines() if "Capture:" in line
+        )
+        assert "unobserved" in capture_line
+        assert "%" not in capture_line
+
+    def test_json_capture_rate_is_null_when_unobserved(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        result = runner.invoke(app, ["analyze", "health", "--format", "json"])
+        data = json.loads(result.stdout)
+        assert data["capture"]["capture_rate"] is None
+        assert data["capture"]["state"] == "unobserved"

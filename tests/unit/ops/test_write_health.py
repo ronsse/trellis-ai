@@ -401,3 +401,116 @@ class TestBackendHealth:
         assert report.status == "ok"
         assert report.reasons == []
         assert report.model_dump()["write"]["attempts"] == 0
+
+
+class TestRetrievalAvailabilityDisclosure:
+    """#365 — untargeted feedback must not be read as measured non-retrieval.
+
+    ``write.rejected`` records a write that fails at the boundary; nothing
+    records a read that never arrives. So an agent that chose not to retrieve
+    and an agent whose ``get_context`` died in transport produce byte-identical
+    rows, and #344's reading of ``untargeted_feedback`` as retrieve-adoption
+    rests on an assumption the report cannot check.
+    """
+
+    def test_note_is_attached_when_untargeted_feedback_exists(
+        self, tmp_path: Path
+    ) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        event_log.emit(
+            EventType.FEEDBACK_RECORDED,
+            "mcp:record_feedback",
+            payload={"rating": 0.9, "success": True},
+        )
+        serve = summarize_serve_attribution(event_log, days=1)
+        assert serve.untargeted_feedback == 1
+        assert "UNMEASURED" in serve.retrieval_availability_note
+        assert "#365" in serve.retrieval_availability_note
+        assert serve.retrieval_availability_measured is False
+
+    def test_note_is_absent_when_there_is_nothing_to_over_read(
+        self, tmp_path: Path
+    ) -> None:
+        """The disclosure varies — it is not printed unconditionally.
+
+        A caveat that always prints is one that always gets skipped. It is
+        attached only when a number exists that could be over-read.
+        """
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        event_log.emit(
+            EventType.FEEDBACK_RECORDED,
+            "mcp:record_feedback",
+            payload={
+                "pack_id": "pack-1",
+                "rating": 0.9,
+                "helpful_item_ids": ["i1"],
+            },
+        )
+        serve = summarize_serve_attribution(event_log, days=1)
+        assert serve.untargeted_feedback == 0
+        assert serve.retrieval_availability_note == ""
+
+    def test_zero_attribution_reason_no_longer_asserts_non_retrieval(
+        self, tmp_path: Path
+    ) -> None:
+        """The pre-#365 wording stated a conclusion the data cannot support."""
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        for _ in range(3):
+            event_log.emit(
+                EventType.FEEDBACK_RECORDED,
+                "mcp:record_feedback",
+                payload={"rating": 0.9, "success": True},
+            )
+        report = summarize_backend_health(event_log, days=1)
+        reason = next(r for r in report.reasons if "attribution" in r)
+        assert "failing unobserved" in reason
+        assert "#365" in reason
+
+
+class TestCaptureCoverageIsComposedIn:
+    def test_absent_capture_data_does_not_warn(self, tmp_path: Path) -> None:
+        """A store with no capture worker must not warn forever.
+
+        ``unobserved`` is a fact, not a defect of this deployment, and a
+        health surface that always warns is one nobody reads.
+        """
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        report = summarize_backend_health(event_log, days=1)
+        assert report.capture.state == "unobserved"
+        assert report.status == "ok"
+
+    def test_degraded_capture_warns(self, tmp_path: Path) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        event_log.emit(
+            EventType.CAPTURE_SWEEP_COMPLETED,
+            "worker:session-capture",
+            payload={
+                "dry_run": False,
+                "sessions_seen": 40,
+                "sessions_parsed": 40,
+                "sessions_triggered": 0,
+                "sessions_judge_unavailable": 40,
+                "sessions_with_memory": 0,
+            },
+        )
+        report = summarize_backend_health(event_log, days=1)
+        assert report.capture.state == "degraded"
+        assert report.status == "warn"
+        assert any("adjudicated no sessions" in r for r in report.reasons)
+
+    def test_healthy_capture_reports_a_rate_without_warning(
+        self, tmp_path: Path
+    ) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        event_log.emit(
+            EventType.CAPTURE_SWEEP_COMPLETED,
+            "worker:session-capture",
+            payload={
+                "dry_run": False,
+                "sessions_triggered": 10,
+                "sessions_with_memory": 6,
+            },
+        )
+        report = summarize_backend_health(event_log, days=1)
+        assert report.capture.capture_rate == pytest.approx(0.6)
+        assert report.status == "ok"

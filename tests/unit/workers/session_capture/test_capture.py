@@ -362,3 +362,212 @@ def _registry(tmp_path: Path) -> MagicMock:
     reg.knowledge.vector_store = SQLiteVectorStore(tmp_path / "vectors.db")
     reg.operational.event_log = SQLiteEventLog(tmp_path / "events.db")
     return reg
+
+
+def _clean_session(path: Path, session_id: str) -> None:
+    """A transcript with turns but no error and no correction."""
+    write_transcript(
+        path,
+        [
+            user_turn("summarise the readme", session_id),
+            assistant_turn("here is the summary", None, session_id),
+        ],
+    )
+
+
+def _empty_session(path: Path) -> None:
+    """A transcript with records but no recoverable natural-language turns.
+
+    The #332 shape: the reader finds nothing to distil, which is a *reader*
+    outcome and not a sampling decision.
+    """
+    write_transcript(path, [tool_result_turn(is_error=False, session_id="sess-empty")])
+
+
+class TestSweepFunnelEvent:
+    """E2 — the sweep's funnel is the only place the denominator exists."""
+
+    def test_sweep_emits_the_funnel(self, tmp_path: Path) -> None:
+        registry = _registry(tmp_path)
+        root = tmp_path / "projects"
+        _error_session(root / "proj" / "sess-fake-0001.jsonl")
+        client = FakeLLMClient([candidates_json(good_candidate())])
+
+        run_capture(
+            registry,
+            transcripts_root=root,
+            watermark_path=tmp_path / "wm.json",
+            llm_client=client,
+        )
+
+        events = registry.operational.event_log.get_events(
+            event_type=EventType.CAPTURE_SWEEP_COMPLETED, limit=10
+        )
+        assert len(events) == 1
+        payload = events[0].payload
+        assert payload["sessions_seen"] == 1
+        assert payload["sessions_triggered"] == 1
+        assert payload["sessions_with_memory"] == 1
+        assert payload["source_system"] == "claude-code"
+
+    def test_a_sweep_that_captures_nothing_still_reports(self, tmp_path: Path) -> None:
+        """The #255 shape. CORPUS_SYNCED cannot see this — it fires from the
+        write seam, so a sweep that wrote nothing emits nothing and looks
+        exactly like a sweep that never ran."""
+        registry = _registry(tmp_path)
+        root = tmp_path / "projects"
+        _error_session(root / "proj" / "sess-fake-0001.jsonl")
+        client = FakeLLMClient([candidates_json(good_candidate(durable=False))])
+
+        report = run_capture(
+            registry,
+            transcripts_root=root,
+            watermark_path=tmp_path / "wm.json",
+            llm_client=client,
+        )
+
+        assert report.memories_written == 0
+        log = registry.operational.event_log
+        assert log.get_events(event_type=EventType.CORPUS_SYNCED, limit=10) == []
+        sweeps = log.get_events(event_type=EventType.CAPTURE_SWEEP_COMPLETED, limit=10)
+        assert len(sweeps) == 1
+        assert sweeps[0].payload["sessions_triggered"] == 1
+        assert sweeps[0].payload["sessions_with_memory"] == 0
+
+    def test_judge_outage_is_counted_on_the_report(self, tmp_path: Path) -> None:
+        registry = _registry(tmp_path)
+        root = tmp_path / "projects"
+        _error_session(root / "proj" / "sess-fake-0001.jsonl")
+
+        report = run_capture(
+            registry,
+            transcripts_root=root,
+            watermark_path=tmp_path / "wm.json",
+            llm_client=BrokenLLMClient(),
+        )
+
+        assert report.sessions_judge_unavailable == 1
+        assert report.sessions_triggered == 0
+        sweeps = registry.operational.event_log.get_events(
+            event_type=EventType.CAPTURE_SWEEP_COMPLETED, limit=10
+        )
+        assert sweeps[0].payload["sessions_judge_unavailable"] == 1
+
+    def test_dry_run_is_flagged_not_suppressed(self, tmp_path: Path) -> None:
+        registry = _registry(tmp_path)
+        root = tmp_path / "projects"
+        _error_session(root / "proj" / "sess-fake-0001.jsonl")
+        client = FakeLLMClient([candidates_json(good_candidate())])
+
+        run_capture(
+            registry,
+            transcripts_root=root,
+            watermark_path=tmp_path / "wm.json",
+            llm_client=client,
+            dry_run=True,
+        )
+
+        sweeps = registry.operational.event_log.get_events(
+            event_type=EventType.CAPTURE_SWEEP_COMPLETED, limit=10
+        )
+        assert len(sweeps) == 1
+        assert sweeps[0].payload["dry_run"] is True
+
+    def test_warning_bodies_are_reduced_to_kinds(self, tmp_path: Path) -> None:
+        """Warning bodies carry transcript paths and doc ids; the funnel needs
+        only their shape, and the event log has a different retention profile
+        than the run log."""
+        registry = _registry(tmp_path)
+        root = tmp_path / "projects"
+        _error_session(root / "proj" / "sess-fake-0001.jsonl")
+
+        run_capture(
+            registry,
+            transcripts_root=root,
+            watermark_path=tmp_path / "wm.json",
+            llm_client=BrokenLLMClient(),
+        )
+
+        payload = registry.operational.event_log.get_events(
+            event_type=EventType.CAPTURE_SWEEP_COMPLETED, limit=10
+        )[0].payload
+        assert "warnings" not in payload
+        assert payload["warning_kinds"] == {"distill_unavailable": 1}
+
+    def test_emit_failure_does_not_break_the_sweep(self, tmp_path: Path) -> None:
+        """Telemetry must never turn a completed sweep into a crashed one."""
+        registry = _registry(tmp_path)
+        root = tmp_path / "projects"
+        _error_session(root / "proj" / "sess-fake-0001.jsonl")
+        client = FakeLLMClient([candidates_json(good_candidate())])
+
+        real_log = registry.operational.event_log
+        broken = MagicMock(wraps=real_log)
+
+        def _emit(event_type, *args, **kwargs):  # type: ignore[no-untyped-def]
+            if event_type is EventType.CAPTURE_SWEEP_COMPLETED:
+                msg = "event log down"
+                raise RuntimeError(msg)
+            return real_log.emit(event_type, *args, **kwargs)
+
+        broken.emit = _emit
+        registry.operational.event_log = broken
+
+        report = run_capture(
+            registry,
+            transcripts_root=root,
+            watermark_path=tmp_path / "wm.json",
+            llm_client=client,
+        )
+        assert report.memories_written == 1
+
+
+class TestEmptyParseIsNotSampling:
+    """#332 detector — an empty parse is a reader outcome, not a knob.
+
+    Before the split, a transcript that parsed to zero turns was counted as
+    ``sessions_sampled_out``, so the bug that emptied 61% of the corpus
+    presented as a sampling decision.
+    """
+
+    def test_empty_transcript_counts_as_empty_not_sampled_out(
+        self, tmp_path: Path
+    ) -> None:
+        registry = _registry(tmp_path)
+        root = tmp_path / "projects"
+        _empty_session(root / "proj" / "sess-empty.jsonl")
+        client = FakeLLMClient([candidates_json(good_candidate())])
+
+        report = run_capture(
+            registry,
+            transcripts_root=root,
+            watermark_path=tmp_path / "wm.json",
+            llm_client=client,
+        )
+
+        assert report.sessions_parsed == 1
+        assert report.sessions_skipped_empty == 1
+        assert report.sessions_sampled_out == 0
+        assert report.sessions_triggered == 0
+
+    def test_sampled_out_still_counts_as_sampled_out(self, tmp_path: Path) -> None:
+        """The two counters must be genuinely distinguishable, or the split
+        is decorative."""
+        registry = _registry(tmp_path)
+        root = tmp_path / "projects"
+        _clean_session(root / "proj" / "sess-clean-a.jsonl", "sess-clean-a")
+        client = FakeLLMClient([candidates_json(good_candidate())])
+
+        report = run_capture(
+            registry,
+            transcripts_root=root,
+            watermark_path=tmp_path / "wm.json",
+            llm_client=client,
+            # Denominator large enough that a clean session is very unlikely
+            # to be sampled in; asserted below rather than assumed.
+            sample_denominator=10_000,
+        )
+
+        assert report.sessions_parsed == 1
+        assert report.sessions_sampled_out == 1
+        assert report.sessions_skipped_empty == 0
