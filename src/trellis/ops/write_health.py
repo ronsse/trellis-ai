@@ -21,7 +21,8 @@ Three pieces close that hole:
   executor stores in ``requested_by``, so accept/reject join per tool.
 * :func:`summarize_backend_health` — the operator/grooming surface:
   acceptance vs rejection rates per tool and stage, repeated schema
-  collisions, pack-attribution coverage, and a deterministic
+  collisions, pack-attribution coverage, session-capture coverage
+  (:mod:`trellis.ops.capture_coverage`), and a deterministic
   ``ok | warn`` status with named reasons. ``trellis analyze health``
   is a thin shell over it.
 
@@ -42,6 +43,10 @@ from pydantic import Field, ValidationError
 
 from trellis.core.base import TrellisModel
 from trellis.feedback.attribution import payload_is_attributed, payload_pack_id
+from trellis.ops.capture_coverage import (
+    CaptureCoverageReport,
+    summarize_capture_coverage,
+)
 from trellis.schemas.enums import TraceSource
 from trellis.schemas.trace import Outcome, Trace, TraceContext
 from trellis.stores.base.event_log import EventLog, EventType
@@ -93,6 +98,40 @@ _REPEAT_COLLISION_WARN = 3
 #: Warn when fewer than this fraction of packs carry ``injected_items[]``
 #: — below it, the learning join is starved regardless of feedback volume.
 _ATTRIBUTION_COVERAGE_WARN = 0.5
+
+#: The assumption ``untargeted_feedback`` silently makes, stated so the
+#: number is not read as stronger evidence than it is (#365).
+#:
+#: ``write.rejected`` (#297) means a *write* that fails at the tool boundary
+#: is recorded. There is no equivalent for a *read*. A ``get_context`` that
+#: fails in transport — a permission or host-channel failure, rather than a
+#: store error — leaves no trace anywhere: no ``PACK_ASSEMBLED``, therefore
+#: feedback with no ``pack_id``, therefore a row in ``untargeted_feedback``.
+#: Which is byte-for-byte what an agent that simply never retrieved
+#: produces.
+#:
+#: #344 reads that population as **retrieve-adoption**, and mostly it is.
+#: But that reading assumes every non-retrieval was a *choice*, and on
+#: 2026-08-27 the assumption was violated: every ``mcp__trellis__*`` call
+#: from several agents failed with ``PreToolUse hook did not respond before
+#: its timeout``, so the tool never executed. The damage was small and
+#: time-boxed — that is not the point. The point is that nothing in this
+#: report could have told anyone, and if a longer outage ever overlapped a
+#: measurement window the conclusion drawn would be "agents are not
+#: retrieving" and the remedy chosen would be prompting or ergonomics,
+#: neither of which touches an unreachable transport.
+#:
+#: Stating it is the whole fix, deliberately. The two alternatives #365
+#: lists are worse first steps: recording an attempt *on arrival* cannot see
+#: a call that never arrives, which is this exact failure; and a client-side
+#: reporter is a second unmeasured write path added to compensate for an
+#: unmeasured read path, which fails the same way and hides it the same way.
+RETRIEVAL_AVAILABILITY_ASSUMPTION = (
+    "retrieval availability is UNMEASURED: a get_context that fails in "
+    "transport leaves no trace and lands here, indistinguishable from an "
+    "agent that chose not to retrieve. Read untargeted_feedback as an upper "
+    "bound on non-retrieval, not as a count of it (#365)."
+)
 
 
 def _kind_for(pydantic_type: str) -> str:
@@ -297,14 +336,29 @@ class ServeAttributionReport(TrellisModel):
     pack_attribution_rate: float = 0.0
     #: Feedback naming no pack. Structurally unjoinable, legitimately so.
     untargeted_feedback: int = 0
+    #: Whether retrieval *availability* was measured for this window. Always
+    #: ``False`` — and that is the point (#365). See
+    #: :data:`RETRIEVAL_AVAILABILITY_ASSUMPTION`.
+    retrieval_availability_measured: bool = False
+    #: The assumption ``untargeted_feedback`` rests on, stated in full, and
+    #: attached **only when there is a number to over-read** — empty when
+    #: ``untargeted_feedback`` is zero. A disclosure nobody can miss is worth
+    #: more than a caveat in a docstring, but one that prints unconditionally
+    #: is noise that gets skipped.
+    retrieval_availability_note: str = ""
 
 
 class BackendHealthReport(TrellisModel):
-    """Composed backend health: write boundary + serve attribution."""
+    """Composed backend health: write boundary + serve + capture coverage."""
 
     window_days: int
     write: WriteHealthReport
     serve: ServeAttributionReport
+    #: What fraction of eligible sessions produced a memory, and — when it
+    #: cannot be known — which of "not deployed", "stopped" and "running but
+    #: capturing nothing" the log actually supports. See
+    #: :mod:`trellis.ops.capture_coverage`.
+    capture: CaptureCoverageReport = Field(default_factory=CaptureCoverageReport)
     status: str = "ok"
     reasons: list[str] = Field(default_factory=list)
 
@@ -462,6 +516,9 @@ def summarize_serve_attribution(
             round(pack_targeted_attributed / pack_targeted, 4) if pack_targeted else 0.0
         ),
         untargeted_feedback=feedback - pack_targeted,
+        retrieval_availability_note=(
+            RETRIEVAL_AVAILABILITY_ASSUMPTION if feedback - pack_targeted else ""
+        ),
     )
 
 
@@ -474,6 +531,7 @@ def summarize_backend_health(
     """One deterministic health verdict for the grooming loop to watch."""
     write = summarize_write_health(event_log, days=days, limit=limit)
     serve = summarize_serve_attribution(event_log, days=days, limit=limit)
+    capture = summarize_capture_coverage(event_log, days=days, limit=limit)
 
     reasons = list(write.reasons)
     if serve.packs > 0 and serve.injected_coverage < _ATTRIBUTION_COVERAGE_WARN:
@@ -491,9 +549,14 @@ def summarize_backend_health(
         # that names no pack means retrieval is not happening at all, and
         # no change to the feedback surface can reach it.
         if serve.pack_targeted_feedback == 0:
+            # Deliberately hedged. The pre-#365 wording said "retrieval is
+            # not happening before the graded work" — an assertion this
+            # report cannot support, because a retrieval that failed in
+            # transport produces an identical row.
             detail = (
                 f"all {serve.feedback_events} name no pack, so none could "
-                "join — retrieval is not happening before the graded work"
+                "join — either retrieval is not happening before the graded "
+                "work, or it is failing unobserved (see #365)"
             )
         else:
             detail = (
@@ -504,10 +567,28 @@ def summarize_backend_health(
             f"attribution ({detail}) — demote/promote loops receive zero signal"
         )
 
+    # Capture states warn on different evidence, and only "degraded" is a
+    # defect in *this* deployment. "unobserved" and "stale" are reported as
+    # facts without escalating status: on a fresh install, or on any store
+    # that simply has no capture worker pointed at it, a permanent warn is
+    # noise — and a health surface that always warns is one nobody reads.
+    if capture.state == "degraded":
+        reasons.append(
+            f"capture sweeps ran but adjudicated no sessions: "
+            f"{capture.degraded_reason}"
+        )
+    elif capture.state == "stale":
+        reasons.append(
+            f"no capture sweep in {days} day(s) "
+            f"(last {capture.last_sweep_at:%Y-%m-%d %H:%M} UTC) — "
+            "session capture has stopped, so coverage is unmeasured, not zero"
+        )
+
     return BackendHealthReport(
         window_days=days,
         write=write,
         serve=serve,
+        capture=capture,
         status="warn" if reasons else "ok",
         reasons=reasons,
     )

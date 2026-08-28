@@ -493,9 +493,13 @@ def health(
     MUTATION_EXECUTED into per-tool accept/reject rates with a closed
     rejection taxonomy. The serve section reports the two coverage rates
     the learning join depends on (packs carrying injected_items[],
-    feedback carrying item attribution). Status is `warn` with named
-    reasons when any deterministic threshold trips — the surface the
-    grooming loop watches.
+    feedback carrying item attribution), and states the retrieval-
+    availability assumption untargeted feedback rests on (#365). The
+    capture section reports what fraction of eligible sessions produced a
+    memory, distinguishing "never deployed", "stopped" and "running but
+    capturing nothing" instead of collapsing them into a low rate. Status
+    is `warn` with named reasons when any deterministic threshold trips —
+    the surface the grooming loop watches.
     """
     from trellis.ops.write_health import summarize_backend_health  # noqa: PLC0415
 
@@ -566,6 +570,41 @@ def health(
             f"{serve.untargeted_feedback} named no pack "
             "(unjoinable by construction)"
         )
+    if serve.retrieval_availability_note:
+        # #365. Printed next to the number it qualifies, not in a footnote:
+        # untargeted feedback is routinely read as "agents are not
+        # retrieving", and this report cannot distinguish that from a
+        # retrieval that failed in transport.
+        console.print(f"    [yellow]assumption[/yellow] {serve.retrieval_availability_note}")
+
+    capture = report.capture
+    if capture.capture_rate is not None:
+        console.print(
+            f"  Capture: {capture.sessions_with_memory}/"
+            f"{capture.eligible_sessions} eligible sessions produced a memory "
+            f"({capture.capture_rate:.0%}) over {capture.funnel.sweeps} sweep(s)"
+        )
+    else:
+        console.print(
+            f"  Capture: [yellow]{capture.state}[/yellow] — no rate "
+            f"({capture.suppressed_reason or 'unavailable'})"
+        )
+        if capture.degraded_reason:
+            console.print(f"    {capture.degraded_reason}")
+    if capture.funnel.sweeps:
+        funnel = capture.funnel
+        console.print(
+            f"    funnel: {funnel.sessions_seen} seen -> "
+            f"{funnel.sessions_parsed} parsed -> "
+            f"{funnel.sessions_triggered} eligible "
+            f"({funnel.sessions_skipped_watermark} watermark, "
+            f"{funnel.sessions_skipped_ephemeral} ephemeral, "
+            f"{funnel.sessions_skipped_empty} empty, "
+            f"{funnel.sessions_sampled_out} sampled out, "
+            f"{funnel.sessions_judge_unavailable} judge down)"
+        )
+    for note in capture.notes:
+        console.print(f"    [dim]{note}[/dim]")
     for reason in report.reasons:
         console.print(f"  [yellow]warn[/yellow] {reason}")
     if report.status == "ok" and write.attempts == 0 and serve.packs == 0:
