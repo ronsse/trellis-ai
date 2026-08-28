@@ -14,6 +14,7 @@ from typing import Any
 
 import pytest
 
+from tests.structlog_isolation import IsolatedCliRunner
 from trellis.errors import ConfigError
 from trellis.mutate import build_curate_executor
 from trellis.mutate.commands import Command, CommandStatus, Operation
@@ -391,10 +392,15 @@ class TestSurfacesAgreeOnOneFile:
     """
 
     def test_cli_writes_the_file_enforcement_reads(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        cli_runner: IsolatedCliRunner,
     ) -> None:
-        from typer.testing import CliRunner
-
+        # ``cli_runner``, not a bare ``CliRunner``: a Trellis CLI invocation
+        # pins structlog's global logger factory to a stream Click closes on
+        # return, and this test logs afterwards (the deny path warns). See
+        # tests/structlog_isolation.py.
         from trellis_cli.main import app
 
         data_dir = tmp_path / "data"
@@ -402,7 +408,7 @@ class TestSurfacesAgreeOnOneFile:
         monkeypatch.setenv("TRELLIS_CONFIG_DIR", str(tmp_path / "config"))
         monkeypatch.setenv("TRELLIS_DATA_DIR", str(data_dir))
 
-        result = CliRunner().invoke(
+        result = cli_runner.invoke(
             app,
             [
                 "policy",
