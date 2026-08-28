@@ -55,14 +55,14 @@ class _RecordingEventLog:
             }
         )
 
-    def has_idempotency_key(self, key: str) -> bool:  # noqa: ARG002
+    def has_idempotency_key(self, key: str) -> bool:
         return False
 
 
 class _EchoHandler:
     """Handler that succeeds and reports a stable id."""
 
-    def handle(self, command: Command) -> tuple[str | None, str]:  # noqa: ARG002
+    def handle(self, command: Command) -> tuple[str | None, str]:
         return "created-1", "ok"
 
 

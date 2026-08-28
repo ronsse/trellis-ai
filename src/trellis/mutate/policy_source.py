@@ -53,7 +53,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, overload
 
 import structlog
 from pydantic import ValidationError as PydanticValidationError
@@ -69,6 +69,14 @@ logger = structlog.get_logger(__name__)
 
 #: Filename holding a deployment's governance policies, under ``stores_dir``.
 POLICY_FILENAME = "policies.json"
+
+
+@overload
+def resolve_policy_path(stores_dir: Path) -> Path: ...
+
+
+@overload
+def resolve_policy_path(stores_dir: None) -> None: ...
 
 
 def resolve_policy_path(stores_dir: Path | None) -> Path | None:
