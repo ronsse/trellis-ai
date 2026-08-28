@@ -376,9 +376,7 @@ class TestRunEffectivenessFeedback:
         assert report.demotion_screen is not None
         assert report.demotion_screen.admitted == [doc_id]
 
-    def test_withholds_demotion_when_feedback_cites_nothing(
-        self, event_log, doc_store
-    ):
+    def test_withholds_demotion_when_feedback_cites_nothing(self, event_log, doc_store):
         """#336: served, graded, but no item attribution — not demoted.
 
         This is the population the effectiveness pass used to demote, and

@@ -239,6 +239,50 @@ def _build_learning_registry_or_exit() -> ParameterRegistry:
         raise typer.Exit(code=EXIT_INTERNAL) from exc
 
 
+def _print_demotion_outcome(report: Any) -> None:
+    """Print what was demoted, beside what was proposed and withheld.
+
+    ``noise_candidates`` is the proposal; the evidence gate decides what
+    is written (#336). Printing the proposal count as "applied" is the
+    kind of measurement-wired-to-the-wrong-number this repo keeps
+    producing, so both numbers are always shown.
+    """
+    screen = getattr(report, "demotion_screen", None)
+    proposed = len(report.noise_candidates)
+    if screen is None:
+        if proposed:
+            console.print(
+                f"  [yellow]Noise tags applied to {proposed} item(s)[/yellow]"
+            )
+        else:
+            console.print("  [green]No noise candidates found.[/green]")
+        return
+
+    console.print(
+        f"  Attributed packs: {screen.attributed_packs}"
+        f" (minimum {screen.min_attributed_packs})"
+    )
+    if screen.admitted:
+        console.print(
+            f"  [yellow]Noise tags applied to {len(screen.admitted)}"
+            f" of {proposed} proposed item(s)[/yellow]:"
+        )
+        for item_id in screen.admitted:
+            console.print(f"    - {item_id}")
+    elif proposed:
+        console.print(
+            f"  [green]Withheld all {proposed} proposed demotion(s)[/green]"
+            " — insufficient citation evidence."
+        )
+    else:
+        console.print("  [green]No noise candidates found.[/green]")
+
+    if screen.refused_by_reason:
+        console.print("  Withheld by reason:")
+        for reason, count in sorted(screen.refused_by_reason.items()):
+            console.print(f"    {reason}: {count}")
+
+
 @analyze_app.command("context-effectiveness")
 def context_effectiveness(
     days: int = typer.Option(30, help="Days of history to analyze"),
@@ -275,6 +319,13 @@ def context_effectiveness(
         console.print(f"  Packs assembled: {report.total_packs}")
         console.print(f"  Feedback received: {report.total_feedback}")
         console.print(f"  Overall success rate: {report.success_rate:.1%}")
+        if report.demotion_screen is not None:
+            screen = report.demotion_screen
+            console.print(
+                f"  Noise proposed: {len(report.noise_candidates)}"
+                f" — would demote {len(screen.admitted)}"
+                f" (attributed packs: {screen.attributed_packs})"
+            )
 
         if report.item_scores:
             console.print()
@@ -367,15 +418,7 @@ def apply_noise_tags(
         console.print(f"  Packs analyzed: {report.total_packs}")
         console.print(f"  Feedback events: {report.total_feedback}")
         console.print(f"  Overall success rate: {report.success_rate:.1%}")
-        if report.noise_candidates:
-            console.print(
-                f"  [yellow]Noise tags applied to {len(report.noise_candidates)}"
-                f" item(s)[/yellow]:"
-            )
-            for item_id in report.noise_candidates:
-                console.print(f"    - {item_id}")
-        else:
-            console.print("  [green]No noise candidates found.[/green]")
+        _print_demotion_outcome(report)
 
 
 @analyze_app.command("token-usage")

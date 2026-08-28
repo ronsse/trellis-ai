@@ -10,6 +10,7 @@ so both directions are pinned.
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from trellis.classify.demotion_gate import (
     MIN_ATTRIBUTED_PACKS,
@@ -77,7 +78,7 @@ class TestIssue336Acceptance:
         """
         for appearances in (2, 5, 50, 500):
             result = screen(ev("popular-but-ungraded", appearances=appearances))
-            assert result.admitted == [], f"demoted at appearances={appearances}"
+            assert result.admitted == [], f"demoted at n={appearances}"
 
 
 class TestGateIsNotAConstant:
@@ -104,7 +105,7 @@ class TestGateIsNotAConstant:
         """
         verdicts = [
             screen(ev("x", appearances=8, unhelpful=u)).admitted == ["x"]
-            for u in range(0, 6)
+            for u in range(6)
         ]
 
         assert True in verdicts, "gate never admits — constant refuse"
@@ -124,8 +125,10 @@ class TestGateIsNotAConstant:
     def test_coverage_floor_is_actually_read(self):
         candidate = ev("x", appearances=8, unhelpful=5)
 
-        assert screen(candidate, attributed_packs=MIN_ATTRIBUTED_PACKS).admitted == ["x"]
-        assert screen(candidate, attributed_packs=MIN_ATTRIBUTED_PACKS - 1).admitted == []
+        at_floor = screen(candidate, attributed_packs=MIN_ATTRIBUTED_PACKS)
+        below = screen(candidate, attributed_packs=MIN_ATTRIBUTED_PACKS - 1)
+        assert at_floor.admitted == ["x"]
+        assert below.admitted == []
 
 
 class TestCoverageSuppression:
@@ -190,17 +193,13 @@ class TestPerItemRules:
 
     def test_missing_evidence_refuses_rather_than_admits(self):
         """Absent evidence must never be the permissive branch."""
-        result = screen_noise_candidates(
-            ["ghost"], {}, attributed_packs=AMPLE
-        )
+        result = screen_noise_candidates(["ghost"], {}, attributed_packs=AMPLE)
 
         assert result.admitted == []
         assert result.decisions[0].reason == REFUSED_NO_EVIDENCE
 
     def test_evidence_none_refuses_everything(self):
-        result = screen_noise_candidates(
-            ["a", "b"], None, attributed_packs=AMPLE
-        )
+        result = screen_noise_candidates(["a", "b"], None, attributed_packs=AMPLE)
 
         assert result.admitted == []
         assert result.refused_by_reason == {REFUSED_NO_EVIDENCE: 2}
@@ -290,5 +289,5 @@ class TestScreenShape:
         assert len(payload["decisions"]) == 2
 
     def test_extra_fields_forbidden(self):
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError):
             NoiseDemotionScreen(candidates_considered=1, bogus=True)

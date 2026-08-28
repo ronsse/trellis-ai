@@ -12,7 +12,7 @@ was never measured. On the reference deployment, 30 days to 2026-08-28:
 ===========================================  =======
 measurement                                    value
 ===========================================  =======
-servings (item × graded pack)                    340
+servings (item x graded pack)                    340
 helpful citations                                 35
 ``P(item cited helpful | item served)``       0.1029
 unhelpful citations                              140
@@ -71,6 +71,7 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 import structlog
+from pydantic import Field
 
 from trellis.core.base import TrellisModel
 
@@ -153,11 +154,11 @@ class NoiseDemotionScreen(TrellisModel):
     #: Candidates handed to the screen.
     candidates_considered: int = 0
     #: Item ids cleared for demotion — what a caller should actually write.
-    admitted: list[str] = []
+    admitted: list[str] = Field(default_factory=list)
     #: Every verdict, admitted and refused alike, in candidate order.
-    decisions: list[DemotionDecision] = []
+    decisions: list[DemotionDecision] = Field(default_factory=list)
     #: Refusal slug → count. Present even when empty so the shape is stable.
-    refused_by_reason: dict[str, int] = {}
+    refused_by_reason: dict[str, int] = Field(default_factory=dict)
     #: Packs in the window that carried any per-item verdict.
     attributed_packs: int = 0
     min_attributed_packs: int = MIN_ATTRIBUTED_PACKS
@@ -187,27 +188,35 @@ def _judge(
 
     unhelpful = evidence.unhelpful_count
     helpful = evidence.helpful_count
-    base = {
-        "item_id": item_id,
-        "appearances": evidence.appearances,
-        "helpful_count": helpful,
-        "unhelpful_count": unhelpful,
-    }
+
+    def verdict(*, admitted: bool, reason: str) -> DemotionDecision:
+        return DemotionDecision(
+            item_id=item_id,
+            admitted=admitted,
+            reason=reason,
+            appearances=evidence.appearances,
+            helpful_count=helpful,
+            unhelpful_count=unhelpful,
+        )
 
     if unhelpful <= 0:
-        return DemotionDecision(admitted=False, reason=REFUSED_NO_UNHELPFUL, **base)
+        return verdict(admitted=False, reason=REFUSED_NO_UNHELPFUL)
     if unhelpful < min_unhelpful_citations:
-        return DemotionDecision(admitted=False, reason=REFUSED_INSUFFICIENT, **base)
+        return verdict(admitted=False, reason=REFUSED_INSUFFICIENT)
     if helpful >= unhelpful:
         # Graders disagreed about this item. Disagreement is a reason to
         # leave it alone, not a tiebreak in favour of removal.
-        return DemotionDecision(admitted=False, reason=REFUSED_CONTESTED, **base)
-    return DemotionDecision(admitted=True, reason="", **base)
+        return verdict(admitted=False, reason=REFUSED_CONTESTED)
+    return verdict(admitted=True, reason="")
 
 
 def screen_noise_candidates(
     candidates: Iterable[str],
-    evidence: Mapping[str, DemotionEvidence] | Iterable[Mapping[str, Any]] | None,
+    evidence: (
+        Mapping[str, DemotionEvidence]
+        | Iterable[DemotionEvidence | Mapping[str, Any]]
+        | None
+    ),
     *,
     attributed_packs: int,
     min_unhelpful_citations: int = MIN_UNHELPFUL_CITATIONS,
@@ -286,7 +295,7 @@ def screen_noise_candidates(
     ]
 
     admitted = [d.item_id for d in decisions if d.admitted]
-    refused_by_reason: dict[str, int] = {}
+    refused_by_reason: dict[str, int] = Field(default_factory=dict)
     for d in decisions:
         if not d.admitted:
             refused_by_reason[d.reason] = refused_by_reason.get(d.reason, 0) + 1
