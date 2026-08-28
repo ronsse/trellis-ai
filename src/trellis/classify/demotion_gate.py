@@ -295,7 +295,7 @@ def screen_noise_candidates(
     ]
 
     admitted = [d.item_id for d in decisions if d.admitted]
-    refused_by_reason: dict[str, int] = Field(default_factory=dict)
+    refused_by_reason: dict[str, int] = {}
     for d in decisions:
         if not d.admitted:
             refused_by_reason[d.reason] = refused_by_reason.get(d.reason, 0) + 1
