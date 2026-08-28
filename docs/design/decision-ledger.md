@@ -156,6 +156,41 @@ Pilot-infra blockage (ArcadeDB secret + expired AWS SSO), not a trellis-ai code 
 that still carries an unresolved gate is how [#312](https://github.com/ronsse/trellis-ai/issues/312)
 hid an owner decision for three days — gate labels are only read on *open* issues.
 
+### A-3 · Rebuild the production containers (16 commits behind `main`)
+
+Measured 2026-08-27. `trellis-api` and `trellis-mcp` are both "Up 2 days" reporting
+`write_provenance.commit = 5f5a1d779`; `main` is `738cb74`. **The entire 2026-08-27 wave is
+undeployed** — ten PRs, including #343 (noise exclusion actually holding on the semantic
+axis), #344 (attribution join key), #353 (F1), #357 (A1 trace embedding), #359 (F2
+graduated disclosure).
+
+Container rebuild + restart is a **production mutation**, so it is not panel-eligible and
+not the swarm's call at any confidence.
+
+**Recommendation: rebuild.** Three concrete costs of the current state:
+
+1. **Packs served through MCP do not have the noise fix.** `CLAUDE.md` describes #343 as
+   landed and the noise boundary as holding. On the container path it does not hold, and
+   has not for two days.
+2. **[#363](https://github.com/ronsse/trellis-ai/issues/363) is pinned at 0.0 by
+   construction** — `TOKEN_TRACKED.pack_id` cannot be populated by code that lacks the
+   field, so response-cost attribution stays unmeasurable until this happens.
+3. **F2's graduated disclosure is measured but not live.** The −30.3% token saving exists
+   only in counterfactual replay.
+
+Cost of being wrong: low and reversible — the previous image can be re-pinned. The real
+risk is the opposite one, that the gap keeps widening while docs describe the fixed state.
+
+**Do not use `make docker-build`.** Production runs the skynet-hub compose stack; the
+Makefile target builds a different image than the deploy expects. That mistake has already
+been made once (recorded 2026-08-24).
+
+Related and separable: **the host CLI's own stamp is 43 commits stale and reports
+`dirty: false`** — see [#348](https://github.com/ronsse/trellis-ai/issues/348), where the
+measurement is written up. Re-running `pip install -e` on the production editable install
+would repair the stamp without changing which code runs. Also operator-only, also low risk,
+but worth doing in the same pass.
+
 ---
 
 ## Taken
