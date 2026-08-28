@@ -31,6 +31,7 @@ from trellis.core.base import utc_now
 from trellis.core.hashing import content_hash
 from trellis.learning.scoring import normalize_intent_family
 from trellis.meta.agents import META_AGENT_PREFIX
+from trellis.retrieve.concentration import measure_parent_concentration
 from trellis.retrieve.disclosure import (
     DEFAULT_DISCLOSURE,
     DISCLOSURE_OFF,
@@ -753,6 +754,16 @@ class PackBuilder:
 
         selected = self._annotate_selected_items(selected)
 
+        # Repeat-source measurement (B2). Read-only, and taken *after*
+        # disclosure so an extra serving already reduced to a pointer is
+        # not counted as a body a rollup could reclaim. See
+        # :mod:`trellis.retrieve.concentration` for the production numbers
+        # that refused the rollup this measures.
+        concentration = measure_parent_concentration(
+            selected,
+            pointer_item_ids=frozenset(disclosure_result.pointer_item_ids),
+        )
+
         report = RetrievalReport(
             queries_run=len(strategies_used),
             candidates_found=candidates_found,
@@ -793,6 +804,7 @@ class PackBuilder:
                 meta_filtered_count=meta_filtered_count,
                 content_floor=floor_result.as_telemetry(),
                 disclosure=disclosure_result.as_telemetry(),
+                parent_concentration=concentration.as_telemetry(),
                 index_mode=index_mode,
             )
 
@@ -1224,6 +1236,7 @@ class PackBuilder:
         meta_filtered_count: int = 0,
         content_floor: dict[str, Any] | None = None,
         disclosure: dict[str, Any] | None = None,
+        parent_concentration: dict[str, Any] | None = None,
         index_mode: bool = False,
     ) -> None:
         """Emit a ContextRetrievalEvent for observability.
@@ -1253,6 +1266,14 @@ class PackBuilder:
         rank and its row in ``injected_items[]``, and its
         ``estimated_tokens`` is the pointer's cost, not the withheld
         body's.
+
+        ``parent_concentration`` (B2) records how many servings this pack
+        drew from repeat source documents — the quantity a chunk rollup
+        would have merged away. Measurement only: production numbers
+        refused the rollup (see
+        :mod:`trellis.retrieve.concentration`), and this field is what
+        lets that refusal be re-checked at a larger ``n`` instead of being
+        re-derived by string-matching ``item_id``.
 
         ``index_mode`` (#305) marks a pack assembled for the one-line-per-
         item index rendering. Additive — consumers ``payload.get(...)``
@@ -1333,6 +1354,7 @@ class PackBuilder:
                 ],
                 "content_floor": content_floor or {},
                 "disclosure": disclosure or {},
+                "parent_concentration": parent_concentration or {},
                 "budget_trace": [
                     {
                         "item_id": b.item_id,
