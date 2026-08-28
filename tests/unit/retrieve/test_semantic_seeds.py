@@ -322,3 +322,84 @@ class TestPipelineCompositionShape:
         literal_seeds = ["e3"]
         union = list(dict.fromkeys(literal_seeds + seeds))
         assert union == ["e3", "e1", "e2"]
+
+
+class TestMemoryCorpusIsANoOp:
+    """The aggregate consequence of the entity-summary filter (#371).
+
+    Per-hit filtering is covered above. What is pinned here is the thing
+    that made wiring this extractor into ``build_strategies`` look like a
+    fix and behave like nothing: the memory-ingest paths
+    (``save_memory``, ``ingest corpus``, ``ingest conversations``, session
+    capture) stamp their *own* ``content_type`` vocabulary and never
+    ``entity_summary``, so on such a corpus every hit is discarded and the
+    extractor returns ``[]`` for every intent.
+
+    Replayed against the reference deployment's own pgvector store (1,166
+    rows) over all 37 real intents in its 30-day pack history: 0 seeds on
+    37/37, 0/37 packs changed. If someone later makes the ingest paths
+    stamp entity-summary documents, this test starts failing — which is
+    the signal that wiring the extractor is finally worth measuring again.
+    """
+
+    def _production_shaped_hits(self) -> list[dict[str, Any]]:
+        # Namespaces and content_type values taken from the reference
+        # deployment's vector rows.
+        return [
+            {
+                "item_id": "conversation:01ABC#3",
+                "score": 0.81,
+                "metadata": {"document_form": "conversation"},
+            },
+            {
+                "item_id": "capture:claude-code-01DEF",
+                "score": 0.78,
+                "metadata": {},
+            },
+            {
+                "item_id": "corpus:notes-01GHI",
+                "score": 0.74,
+                "metadata": {"content_type": "analysis"},
+            },
+            {
+                "item_id": "01JKLMNOPQRSTUVWXYZ012345",
+                "score": 0.70,
+                "metadata": {"content_tags": {"content_type": "documentation"}},
+            },
+        ]
+
+    def test_no_seeds_from_a_memory_corpus(self) -> None:
+        store = MagicMock()
+        store.query.return_value = self._production_shaped_hits()
+        embed = MagicMock(return_value=[0.1, 0.2])
+        extractor = SemanticSeedExtractor(store, embed)
+        assert extractor.extract("Fix the pgvector contract test fixture") == []
+
+    def test_the_embed_is_still_paid_for(self) -> None:
+        """The no-op is not free — it costs one embed call per pack."""
+        store = MagicMock()
+        store.query.return_value = self._production_shaped_hits()
+        embed = MagicMock(return_value=[0.1, 0.2])
+        SemanticSeedExtractor(store, embed).extract("any intent")
+        embed.assert_called_once_with("any intent")
+
+    def test_an_in_vocabulary_content_type_is_not_mistaken_for_a_summary(
+        self,
+    ) -> None:
+        """``ContentTags.content_type`` is a different taxonomy entirely.
+
+        ``document_form_of`` reads the flat legacy key, so it is worth
+        pinning that a *valid* ``ContentTags`` value on that key still
+        fails the entity-summary test rather than accidentally passing.
+        """
+        store = MagicMock()
+        store.query.return_value = [
+            _hit(
+                item_id="doc:e1",
+                score=0.9,
+                content_type="documentation",
+                entity_id="e1",
+            ),
+        ]
+        embed = MagicMock(return_value=[0.1, 0.2])
+        assert SemanticSeedExtractor(store, embed).extract("intent") == []
