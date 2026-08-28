@@ -587,13 +587,18 @@ class GraphSearch(SearchStrategy):
       axis therefore returns **the most recently created nodes**, filtered
       structurally and scored — without consulting what was asked.
 
-    The second branch is the production default: ``build_strategies``
-    injects no extractor and the MCP / REST / CLI ``get_context`` paths
-    supply no ``seed_ids`` (the one ``seed_ids`` producer is the explicit
-    entity-neighbourhood route). This is deliberate as of #371, not an
-    oversight — see :func:`build_strategies` for why the obvious wiring
-    was measured and refused — but the consequences are sharp and worth
-    stating where a reader meets them:
+    The second branch is the production default, and the first has **no
+    production producer at all**: ``build_strategies`` injects no
+    extractor, and nothing in the repo puts ``seed_ids`` into the filters
+    a pack is assembled with. The entity-neighbourhood surfaces
+    (``GET /entities/{id}``, MCP ``get_graph``) call
+    ``graph_store.get_subgraph`` *directly* and never reach this class; a
+    section's ``entity_ids`` is a
+    :class:`~trellis.retrieve.tier_mapping.TierMapper` routing filter over
+    items already retrieved, not a seed. This is deliberate as of #371,
+    not an oversight — see :func:`build_strategies` for why the obvious
+    wiring was measured and refused — but the consequences are sharp and
+    worth stating where a reader meets them:
 
     * The reachable set is a **fixed row count**
       (``limit * _GRAPH_RECENCY_OVERFETCH``), not a fraction of the graph,
