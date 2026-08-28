@@ -28,6 +28,31 @@ the right tool for intents that mention short-names verbatim; the
 semantic path catches paraphrases. PackBuilder dedups the resulting
 candidates by ``item_id`` so the union pays no double-counting cost.
 
+.. warning::
+
+   **Check your corpus before wiring this into pack assembly** (#371).
+   Step 3 below filters every hit to ``document_form == "entity_summary"``,
+   and that stamp is written by the **eval corpus loaders** — nothing on
+   the memory-ingest paths (``save_memory``, ``ingest corpus``,
+   ``ingest conversations``, session capture) writes it. On a corpus
+   without entity-summary documents the extractor embeds the intent,
+   queries the store, discards every hit, and returns ``[]``.
+   :class:`~trellis.retrieve.strategies.GraphSearch` then falls back to
+   its recency window, so the net effect is one embed call per pack and
+   no change to what is served.
+
+   That is not hypothetical. Replayed over all 37 real intents in the
+   reference deployment's 30-day pack history, against its own pgvector
+   store (1,166 rows) with a live embedder: **0 seeds on 37/37 intents,
+   0/37 packs changed**. Zero of those rows carried
+   ``document_form``/``content_type`` ``entity_summary``, a ``doc:``
+   ``item_id`` prefix, or an ``entity_id`` metadata key.
+
+   A production seeding path needs a producer that stamps entity-summary
+   documents on the memory-ingest path — or a different extractor; that
+   is #375. Until one exists, ``build_strategies`` leaves
+   ``graph_seed_extractor=None`` on purpose.
+
 No fallback paths (greenfield writer contract — see CLAUDE.md):
 
 * Missing ``embedding_fn`` raises at construction.

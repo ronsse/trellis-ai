@@ -51,7 +51,10 @@ from trellis.retrieve.pack_builder import (
     StrategyFailure,
 )
 from trellis.retrieve.strategies import (
+    GRAPH_SELECTION_RECENCY_WINDOW,
+    GRAPH_SELECTION_SEEDED,
     GraphSearch,
+    GraphSeedExtractor,
     KeywordSearch,
     SearchStrategy,
     SemanticSearch,
@@ -94,7 +97,10 @@ __all__ = [
     "EfficiencyScorer",
     "EvaluationProfile",
     "EvaluationScenario",
+    "GRAPH_SELECTION_RECENCY_WINDOW",
+    "GRAPH_SELECTION_SEEDED",
     "GraphSearch",
+    "GraphSeedExtractor",
     "HeuristicTokenCounter",
     "KNOWN_REJECTION_REASONS",
     "KeywordSearch",

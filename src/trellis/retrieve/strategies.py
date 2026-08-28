@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, TypedDict
+from typing import TYPE_CHECKING, Any, Protocol, TypedDict, runtime_checkable
 
 import structlog
 
@@ -74,6 +74,57 @@ _GRAPH_COMPONENT = "retrieve.strategies.GraphSearch"
 #: ``limit``. Over-fetching keeps a heavily-mismatched domain from thinning
 #: semantic recall (the trade-off #254 accepted, closed here for #262).
 _SEMANTIC_DOMAIN_OVERFETCH = 4
+
+#: Over-fetch multiplier for the unseeded graph branch. ``GraphStore.query``
+#: is ``ORDER BY created_at DESC LIMIT n`` on every shipped backend, so this
+#: multiplier is not a recall knob — it is the *entire* candidate window, and
+#: it is a fixed row count rather than a fraction of the graph. See
+#: :data:`GRAPH_SELECTION_RECENCY_WINDOW`.
+_GRAPH_RECENCY_OVERFETCH = 4
+
+#: Value of ``PackItem.metadata["graph_selection"]`` when the graph axis
+#: picked its candidates by recency because nothing supplied seeds. Stamped
+#: on every item so the two selection modes are distinguishable in
+#: ``PACK_ASSEMBLED.injected_items[]`` — the axis's query-independence is a
+#: measurable property of a served pack, not a claim in a docstring.
+GRAPH_SELECTION_RECENCY_WINDOW = "recency_window"
+
+#: Value of ``PackItem.metadata["graph_selection"]`` when the graph axis
+#: expanded a seed set — the only mode in which the axis is a function of
+#: the caller's query.
+GRAPH_SELECTION_SEEDED = "seeded"
+
+
+@runtime_checkable
+class GraphSeedExtractor(Protocol):
+    """Turns a retrieval intent into graph node ids to expand from.
+
+    This is the *only* place query relevance can enter
+    :class:`GraphSearch`. The unseeded branch calls
+    ``GraphStore.query``, which every shipped backend implements as
+    ``ORDER BY created_at DESC LIMIT n`` — it takes no query argument and
+    has no text index to consult. So an extractor is not an optimisation
+    on top of a search; without one there is no search.
+
+    Implementations must be **total and cheap**: ``extract`` runs inline
+    on the pack-assembly path, once per pack. Returning ``[]`` is a valid
+    answer meaning "this intent anchors on no entity I can name", and
+    :class:`GraphSearch` treats it as such — it falls back to the recency
+    window rather than emptying the axis, because a seeding miss must not
+    cost the caller an axis it had before.
+
+    Known implementations:
+
+    * :class:`~trellis.retrieve.semantic_seeds.SemanticSeedExtractor` —
+      embeds the intent and maps top-K vector hits back to entity ids.
+      Requires entity-summary documents in the vector store; read that
+      module's docstring before wiring it, because a corpus without them
+      makes it a measured no-op (#371); a production path needs #375 first.
+    """
+
+    def extract(self, intent: str) -> list[str]:
+        """Return graph node ids to seed traversal from, best first."""
+        ...  # pragma: no cover - protocol declaration
 
 
 def _passes_domain_scope(metadata: dict[str, Any], domain: str) -> bool:
@@ -520,6 +571,53 @@ class SemanticSearch(SearchStrategy):
 class GraphSearch(SearchStrategy):
     """Graph traversal search via GraphStore.
 
+    **Query-independent unless seeded — read this before trusting the axis
+    to answer an intent** (#371). The strategy has two branches, and only
+    one of them is a search:
+
+    * **Seeded** — ``filters["seed_ids"]`` was supplied, or a
+      :class:`GraphSeedExtractor` was injected and produced ids. The
+      strategy expands ``get_subgraph(seeds, depth=...)``. The seeds are
+      where query relevance enters; everything downstream is scoring.
+    * **Recency window** — no seeds. The strategy calls
+      ``GraphStore.query``, which is ``ORDER BY created_at DESC LIMIT n``
+      on every shipped backend (`stores/sqlite/graph.py`,
+      `stores/postgres/graph.py`, `stores/bolt_opencypher/graph.py`). It
+      takes no query argument, and there is no text index behind it. The
+      axis therefore returns **the most recently created nodes**, filtered
+      structurally and scored — without consulting what was asked.
+
+    The second branch is the production default, and the first has **no
+    production producer at all**: ``build_strategies`` injects no
+    extractor, and nothing in the repo puts ``seed_ids`` into the filters
+    a pack is assembled with. The entity-neighbourhood surfaces
+    (``GET /entities/{id}``, MCP ``get_graph``) call
+    ``graph_store.get_subgraph`` *directly* and never reach this class; a
+    section's ``entity_ids`` is a
+    :class:`~trellis.retrieve.tier_mapping.TierMapper` routing filter over
+    items already retrieved, not a seed. This is deliberate as of #371,
+    not an oversight — see :func:`build_strategies` for why the obvious
+    wiring was measured and refused — but the consequences are sharp and
+    worth stating where a reader meets them:
+
+    * The reachable set is a **fixed row count**
+      (``limit * _GRAPH_RECENCY_OVERFETCH``), not a fraction of the graph,
+      so **coverage decays as 1/N as the graph grows**. Measured on the
+      reference deployment across the 37 packs assembled in the 30 days to
+      2026-08-28: the window covered a median **8.6%** of servable nodes
+      (range 7.2%-15.0%, falling monotonically as the graph grew from 286
+      to 665 servable nodes) and spanned a median of **58 hours**.
+    * An old, perfectly on-topic entity is **unreachable**, at any rank,
+      for every intent.
+    * A single bulk ingest of ``limit * _GRAPH_RECENCY_OVERFETCH`` nodes
+      evicts the whole window. One pack in that measurement had a window
+      spanning **0.0 hours** — every candidate came from one write batch.
+
+    Every item carries ``metadata["graph_selection"]``
+    (:data:`GRAPH_SELECTION_SEEDED` / :data:`GRAPH_SELECTION_RECENCY_WINDOW`)
+    so which branch ran is legible in ``PACK_ASSEMBLED.injected_items[]``
+    rather than inferred from the wiring.
+
     Structural nodes (``node_role == "structural"``) are excluded by default
     — they represent fine-grained plumbing (columns, parameters, file
     lines) that is retrieved only as part of its parent's context. Pass
@@ -547,11 +645,31 @@ class GraphSearch(SearchStrategy):
         curated_boost: float = GRAPH_CURATED_BOOST,
         recency_half_life_days: float = DEFAULT_RECENCY_HALF_LIFE_DAYS,
         registry: ParameterRegistry | None = None,
+        seed_extractor: GraphSeedExtractor | None = None,
     ) -> None:
+        """Build the graph axis.
+
+        Args:
+            graph_store: Any :class:`~trellis.stores.base.graph.GraphStore`.
+            curated_boost: Score multiplier for ``node_role == "curated"``.
+            recency_half_life_days: Half-life for the recency decay applied
+                to *scores* — unrelated to the recency *selection* the
+                unseeded branch performs.
+            registry: Optional :class:`ParameterRegistry` for per-domain
+                scoring overrides.
+            seed_extractor: Optional :class:`GraphSeedExtractor`. **Default
+                ``None`` is the query-independent recency window** described
+                in the class docstring. Supply one to make the axis a
+                function of the intent. An extractor that returns ``[]`` or
+                raises falls back to the recency window — seeding is
+                additive, and a seeding miss must never cost the caller an
+                axis it would otherwise have had.
+        """
         self._store = graph_store
         self._curated_boost = curated_boost
         self._recency_half_life_days = recency_half_life_days
         self._registry = registry
+        self._seed_extractor = seed_extractor
 
     @property
     def name(self) -> str:
@@ -616,17 +734,129 @@ class GraphSearch(SearchStrategy):
         )
         return rows
 
+    def _seeds_from_extractor(self, query: str) -> list[str]:
+        """Ask the injected extractor for seeds; never let it break a pack.
+
+        Returns ``[]`` when no extractor is configured, when the extractor
+        declines, or when it raises. The caller reads an empty list as "run
+        the recency window" — the seeding path is additive by contract.
+        """
+        if self._seed_extractor is None:
+            return []
+        try:
+            seeds = list(self._seed_extractor.extract(query))
+        # GRACEFUL-DEGRADATION: an extractor typically embeds the intent
+        # and queries the vector store. Neither is required for the graph
+        # axis to return something, so a seeding failure degrades to the
+        # unseeded branch rather than costing the caller an axis. Mirrors
+        # PackBuilder's per-strategy failure handling one level down.
+        except Exception:
+            logger.exception(
+                "graph_seed_extractor_failed",
+                extractor=type(self._seed_extractor).__name__,
+            )
+            return []
+        if not seeds:
+            logger.debug(
+                "graph_seed_extractor_returned_none",
+                extractor=type(self._seed_extractor).__name__,
+            )
+        return seeds
+
+    def _expand_seeds(
+        self,
+        seed_ids: list[str],
+        *,
+        filters: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        """The seeded branch: expand a neighbourhood around known ids.
+
+        This is the only branch in which the caller's intent has reached
+        the store — via ``filters["seed_ids"]`` or a
+        :class:`GraphSeedExtractor`. Consumes ``depth`` / ``edge_types``
+        from *filters*.
+        """
+        depth = filters.pop("depth", 2)
+        edge_types = filters.pop("edge_types", None)
+        subgraph = self._store.get_subgraph(
+            seed_ids,
+            depth=depth,
+            edge_types=edge_types,
+        )
+        nodes: list[dict[str, Any]] = subgraph.get("nodes", [])
+        logger.debug(
+            "graph_search_seeded",
+            seed_count=len(seed_ids),
+            depth=depth,
+            nodes_returned=len(nodes),
+        )
+        return nodes
+
+    def _recency_window_nodes(
+        self,
+        *,
+        filters: dict[str, Any],
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        """The unseeded branch: the newest ``limit * overfetch`` node rows.
+
+        **The caller's query is not an input here and cannot be.**
+        ``GraphStore.query`` is ``ORDER BY created_at DESC LIMIT n`` on
+        every shipped backend and has no text index behind it, so this
+        method selects on recency and structure alone. See the class
+        docstring for what that costs. Consumes ``node_type`` from
+        *filters*.
+        """
+        node_type = filters.pop("node_type", None)
+        # ``domain`` and ``content_tags`` are scoping hints, not graph
+        # properties: ``domain`` is applied client-side with default-pass
+        # semantics by the caller (a domain-less node is never
+        # hard-excluded, mirroring the other axes for #262), and
+        # ``content_tags`` is a document-store facet the graph store cannot
+        # interpret. Neither is forwarded as a property filter — a
+        # store-side property filter compiles to hard equality and would
+        # hard-exclude every domain-less node (#254).
+        query_props = {
+            k: v for k, v in filters.items() if k not in ("domain", "content_tags")
+        }
+        # The multiplier is the whole candidate window (see the class
+        # docstring), not headroom over a relevance-ordered result — it
+        # exists so the client-side structural / unconfirmed filters have
+        # rows to discard before the slice to ``limit``.
+        scan_limit = limit * _GRAPH_RECENCY_OVERFETCH
+        nodes = self._query_nodes(
+            node_type=node_type,
+            properties=query_props or None,
+            limit=scan_limit,
+        )
+        logger.debug(
+            "graph_search_recency_window",
+            scan_limit=scan_limit,
+            rows_returned=len(nodes),
+            # True means the window was saturated: every row older than the
+            # oldest one returned is unreachable, for *any* intent.
+            window_saturated=len(nodes) >= scan_limit,
+        )
+        return nodes
+
     def search(
         self,
-        query: str,  # noqa: ARG002
+        query: str,
         *,
         limit: int = 20,
         filters: dict[str, Any] | None = None,
     ) -> list[PackItem]:
         filters = dict(filters) if filters else {}
-        seed_ids: list[str] = []
+        seed_ids: list[str]
         if "seed_ids" in filters:
+            # An explicit seed set always wins: a caller that passed
+            # ``seed_ids`` has already decided which neighbourhood it
+            # wants, and re-deriving seeds from prose would silently widen
+            # a deliberately narrow request. No in-repo production caller
+            # does this today — see the class docstring.
             seed_ids = filters.pop("seed_ids")
+        else:
+            seed_ids = self._seeds_from_extractor(query)
 
         include_structural = bool(filters.pop("include_structural", False))
         include_unconfirmed = bool(filters.pop("include_unconfirmed", False))
@@ -635,34 +865,11 @@ class GraphSearch(SearchStrategy):
         request_domain = filters.get("domain")
 
         if seed_ids:
-            depth = filters.pop("depth", 2)
-            edge_types = filters.pop("edge_types", None)
-            subgraph = self._store.get_subgraph(
-                seed_ids,
-                depth=depth,
-                edge_types=edge_types,
-            )
-            nodes = subgraph.get("nodes", [])
+            selection = GRAPH_SELECTION_SEEDED
+            nodes = self._expand_seeds(seed_ids, filters=filters)
         else:
-            node_type = filters.pop("node_type", None)
-            # ``domain`` and ``content_tags`` are scoping hints, not graph
-            # properties: ``domain`` is applied client-side with default-pass
-            # semantics below (a domain-less node is never hard-excluded,
-            # mirroring the other axes for #262), and ``content_tags`` is a
-            # document-store facet the graph store cannot interpret. Neither
-            # is forwarded as a property filter — a store-side property
-            # filter compiles to hard equality and would hard-exclude every
-            # domain-less node (#254).
-            query_props = {
-                k: v for k, v in filters.items() if k not in ("domain", "content_tags")
-            }
-            # Over-fetch 4x to leave room for structural filtering before
-            # slicing to the caller's limit.
-            nodes = self._query_nodes(
-                node_type=node_type,
-                properties=query_props or None,
-                limit=limit * 4,
-            )
+            selection = GRAPH_SELECTION_RECENCY_WINDOW
+            nodes = self._recency_window_nodes(filters=filters, limit=limit)
 
         # Filter structural nodes client-side unless explicitly requested.
         if not include_structural:
@@ -804,6 +1011,12 @@ class GraphSearch(SearchStrategy):
                             for k, v in props.items()
                             if k not in ("name", "description", "comment")
                         },
+                        # After the property spread, deliberately: entity
+                        # types are open strings, so a node is free to carry
+                        # a property of this name. How the candidate was
+                        # selected is a fact about *this* search, and a
+                        # stored property must not be able to misreport it.
+                        "graph_selection": selection,
                     },
                 )
             )
@@ -820,11 +1033,43 @@ def build_strategies(
     embedding_fn: Any | None = None,
     *,
     parameter_registry: ParameterRegistry | None = None,
+    graph_seed_extractor: GraphSeedExtractor | None = None,
 ) -> list[SearchStrategy]:
     """Build the standard strategy list from a registry.
 
     Always includes KeywordSearch and GraphSearch.  Adds SemanticSearch when
     both a VectorStore and an ``embedding_fn`` callable are available.
+
+    **The graph axis is query-independent unless you pass
+    ``graph_seed_extractor``**, and the default is deliberately ``None``.
+    See :class:`GraphSearch` for what that means for a served pack. The
+    reasoning behind the default, recorded so it is not re-litigated on
+    taste (#371):
+
+    * The obvious wiring — construct a
+      :class:`~trellis.retrieve.semantic_seeds.SemanticSeedExtractor`
+      whenever ``embedding_fn`` resolves — was **measured, not argued**.
+      Replayed over all 37 real intents from the reference deployment's
+      30-day ``PACK_ASSEMBLED`` history, against that deployment's own
+      Postgres graph + pgvector stores and a live embedder, it produced
+      **0 seeds on 37/37 intents** and changed the returned item set on
+      **0/37**. The extractor filters vector hits to entity-summary
+      documents and the corpus holds none, so it costs one embed per pack
+      and returns the recency window regardless. Wiring it by default
+      would have shipped a change that reports success and does nothing —
+      exactly the failure shape `docs/design/swarm-handoff.md` §8 is about.
+    * Auto-wiring on ``embedding_fn`` would also couple the graph axis to
+      an embedder that this function otherwise treats as strictly
+      optional, so a deployment without one would silently get a
+      *differently-behaved* graph axis under the same name.
+    * The axis measures well today (``useful_token_fraction`` 0.1744 vs
+      semantic 0.1069, keyword 0.0241, 30d to 2026-08-28), so a
+      speculative change risks a regression the headline would not show —
+      the axis is only 7% of injected tokens.
+
+    Making it non-``None`` is therefore an explicit, per-deployment
+    decision, and the corpus has to be able to satisfy the extractor
+    before it is worth making.
 
     Args:
         registry: The StoreRegistry providing stores.
@@ -836,10 +1081,18 @@ def build_strategies(
             strategies consult at call-time for per-(component, domain)
             scoring overrides.  When ``None`` the module-level defaults
             apply unchanged.
+        graph_seed_extractor: Optional :class:`GraphSeedExtractor` handed
+            to :class:`GraphSearch`.  ``None`` (the default, and what every
+            in-repo caller passes) keeps the recency-window behaviour.
+            Never derived from ``embedding_fn`` — see above.
     """
     strategies: list[SearchStrategy] = [
         KeywordSearch(registry.knowledge.document_store, registry=parameter_registry),
-        GraphSearch(registry.knowledge.graph_store, registry=parameter_registry),
+        GraphSearch(
+            registry.knowledge.graph_store,
+            registry=parameter_registry,
+            seed_extractor=graph_seed_extractor,
+        ),
     ]
 
     fn = embedding_fn or getattr(registry, "embedding_fn", None)
