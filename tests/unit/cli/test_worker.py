@@ -18,6 +18,7 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
+from trellis.core.vector_metadata import vector_metadata_diverges
 from trellis.llm import LLMResponse, Message
 from trellis.schemas.enums import OutcomeStatus, TraceSource
 from trellis.schemas.trace import Outcome, Trace, TraceContext
@@ -265,6 +266,36 @@ def test_looser_than_manual_rejected_via_exit(config_dir: Path) -> None:
 
 
 class TestWorkerCurate:
+    def test_curation_cycle_requires_an_explicit_vector_store(self) -> None:
+        """``vector_store`` must have no default — omission has to be loud.
+
+        #381: the nightly cron is the only *automated* demotion path, and
+        it called ``run_effectiveness_feedback`` without a vector store for
+        the whole life of #338's fix. Every tag it wrote reached the
+        document store and no vector row, so the semantic axis — 65% of
+        injected tokens — kept serving the pre-demotion snapshot.
+
+        A default of ``None`` is what made that omission invisible, so the
+        parameter is required keyword-only. ``None`` remains a legal
+        *value* (a deployment may have no vector store); what is not legal
+        is declining to say. This test exists so the next person who hits
+        the ``TypeError`` fixes the call site rather than the signature.
+        """
+        import inspect
+
+        params = inspect.signature(worker.run_curation_cycle).parameters
+        assert "vector_store" in params, (
+            "run_curation_cycle must accept a vector_store — without it the "
+            "nightly demotion cannot reach the semantic axis (#381)"
+        )
+        vector_store = params["vector_store"]
+        assert vector_store.kind is inspect.Parameter.KEYWORD_ONLY
+        assert vector_store.default is inspect.Parameter.empty, (
+            "vector_store must not default to None — that is exactly how "
+            "#381 stayed invisible. Pass resolve_vector_store(registry), or "
+            "an explicit None on a deployment that has no vector store."
+        )
+
     def test_worker_app_exposes_new_subcommands(self) -> None:
         names = {
             cmd.name or cmd.callback.__name__ for cmd in worker_app.registered_commands
@@ -770,6 +801,91 @@ class TestWorkerEnrich:
         # Flat keys go where their readers actually look.
         assert metadata["auto_importance"] == pytest.approx(0.6)
         assert metadata["document_form"] == "reference"
+
+    def test_enrich_mirrors_tags_onto_the_vector_row(
+        self, temp_stores: StoreRegistry, monkeypatch
+    ) -> None:
+        """#338 on a second path, found while fixing #381.
+
+        ``worker enrich`` is a *post-embed* writer: it selects documents
+        that are already stored and already embedded, then rewrites exactly
+        the two keys ``SYNCED_METADATA_KEYS`` covers. Writing them to the
+        document store alone leaves ``SemanticSearch`` scoring the document
+        on its pre-enrichment ``auto_importance`` and serving its
+        pre-enrichment ``content_tags``, because the vector row's metadata
+        is a snapshot frozen at embed time.
+
+        Asserted on the row, not on a call argument — the whole defect
+        class is a parameter nobody passed while every document-store
+        assertion still passed.
+        """
+        doc_store = temp_stores.knowledge.document_store
+        vector_store = temp_stores.knowledge.vector_store
+        doc_store.put("doc-x", "enrich me", {"title": "X"})
+        # The pre-enrichment snapshot the semantic axis would keep serving.
+        vector_store.upsert(
+            "doc-x",
+            [0.4, 0.5, 0.6],
+            {
+                "doc_id": "doc-x",
+                "content": "enrich me",
+                "content_tags": {"classified_mode": "ingestion"},
+                "auto_importance": 0.1,
+            },
+        )
+        canned = json.dumps(
+            {
+                "tags": ["alpha", "beta"],
+                "class": "reference",
+                "summary": "A summary.",
+                "importance": 0.6,
+                "tag_confidence": 0.9,
+                "class_confidence": 0.9,
+            }
+        )
+        monkeypatch.setattr(
+            worker, "_require_llm_client_or_exit", lambda: _StubLLM(canned)
+        )
+        result = runner.invoke(app, ["worker", "enrich", "--format", "json"])
+        assert result.exit_code == 0, result.output
+
+        doc = doc_store.get("doc-x")
+        row = vector_store.get("doc-x")
+        assert row is not None
+        assert row["metadata"]["auto_importance"] == pytest.approx(0.6)
+        assert row["metadata"]["content_tags"]["classified_mode"] == "enrichment"
+        # Same predicate the writer enforces, so the test cannot drift from
+        # the invariant it is pinning.
+        assert not vector_metadata_diverges(doc["metadata"], row["metadata"])
+        # Metadata-only: the embedding rode through, nothing re-embedded,
+        # and the row's own excerpt was not clobbered by the document bag.
+        assert [round(v, 3) for v in row["vector"]] == [0.4, 0.5, 0.6]
+        assert row["metadata"]["content"] == "enrich me"
+
+    def test_enrich_without_a_vector_store_still_writes_the_document(
+        self, temp_stores: StoreRegistry, monkeypatch
+    ) -> None:
+        """A deployment with no vector store must still enrich.
+
+        The mirror is fail-soft by design: the document store is the
+        authority and has already been written by the time the sync runs.
+        Refusing the enrichment to report a mirror failure would lose the
+        tag, which is strictly worse than the divergence.
+        """
+        doc_store = temp_stores.knowledge.document_store
+        doc_store.put("doc-x", "enrich me", {"title": "X"})
+        monkeypatch.setattr(worker, "resolve_vector_store", lambda _registry: None)
+        monkeypatch.setattr(
+            worker,
+            "_require_llm_client_or_exit",
+            lambda: _StubLLM(json.dumps({"tags": ["a"], "importance": 0.6})),
+        )
+        result = runner.invoke(app, ["worker", "enrich", "--format", "json"])
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.stdout.strip())["enriched"] == 1
+        assert doc_store.get("doc-x")["metadata"]["auto_importance"] == pytest.approx(
+            0.6
+        )
 
 
 # ===========================================================================

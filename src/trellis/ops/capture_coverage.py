@@ -78,7 +78,14 @@ import structlog
 from pydantic import Field
 
 from trellis.core.base import TrellisModel
-from trellis.stores.base.event_log import EventLog, EventType
+from trellis.stores.base.event_log import (
+    DEFAULT_SCAN_LIMIT,
+    EventLog,
+    EventType,
+    ScanCoverage,
+    merge_coverage,
+    scan_events,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -104,7 +111,14 @@ SUPPRESSED_DEGRADED = "no_eligible_sessions_adjudicated"
 #: distinguishes "never ran" from "stopped running", so it is generous.
 UNOBSERVED_LOOKBACK_DAYS = 365
 
-_DEFAULT_EVENT_LIMIT = 5000
+#: Per-event-type read cap, applied through
+#: :func:`~trellis.stores.base.event_log.scan_events` so the newest events
+#: survive it and a capped report says so (#374). ``last_sweep_at`` is the
+#: field that cared most: under the old ascending default a truncated read
+#: made it the newest sweep *of the oldest slice*, which is a plausible
+#: timestamp for a pipeline that has since stopped — the exact reading
+#: this module exists to distinguish.
+_DEFAULT_EVENT_LIMIT = DEFAULT_SCAN_LIMIT
 
 
 class CaptureFunnel(TrellisModel):
@@ -171,6 +185,8 @@ class CaptureCoverageReport(TrellisModel):
     #: write path disagree.
     sessions_with_stored_memory: int = 0
     dry_run_sweeps_excluded: int = 0
+    #: Coverage of the EventLog reads behind this report (#374).
+    scan: ScanCoverage = Field(default_factory=ScanCoverage)
     notes: list[str] = Field(default_factory=list)
 
 
@@ -227,7 +243,7 @@ def _degraded_reason(funnel: CaptureFunnel) -> str:
 
 def _sessions_with_stored_memory(
     event_log: EventLog, *, since: datetime, limit: int
-) -> int:
+) -> tuple[int, ScanCoverage]:
     """Distinct capture ``session_id``s seen in ``MEMORY_STORED``.
 
     Derived from the write path rather than the sweep's own report, so it
@@ -235,9 +251,10 @@ def _sessions_with_stored_memory(
     ``CAPTURE_SWEEP_COMPLETED`` — and disagrees loudly if the two ever drift.
     """
     session_ids: set[str] = set()
-    for event in event_log.get_events(
-        event_type=EventType.MEMORY_STORED, since=since, limit=limit
-    ):
+    scan = scan_events(
+        event_log, event_type=EventType.MEMORY_STORED, since=since, limit=limit
+    )
+    for event in scan.events:
         if event.source != CAPTURE_SOURCE:
             continue
         metadata = (event.payload or {}).get("metadata")
@@ -246,7 +263,7 @@ def _sessions_with_stored_memory(
         session_id = metadata.get("session_id")
         if isinstance(session_id, str) and session_id:
             session_ids.add(session_id)
-    return len(session_ids)
+    return len(session_ids), scan.coverage
 
 
 def summarize_capture_coverage(
@@ -265,19 +282,29 @@ def summarize_capture_coverage(
     since = now - timedelta(days=days)
     report = CaptureCoverageReport(window_days=days)
 
-    events = event_log.get_events(
-        event_type=EventType.CAPTURE_SWEEP_COMPLETED, since=since, limit=limit
+    sweep_scan = scan_events(
+        event_log,
+        event_type=EventType.CAPTURE_SWEEP_COMPLETED,
+        since=since,
+        limit=limit,
     )
-    report.sessions_with_stored_memory = _sessions_with_stored_memory(
+    events = sweep_scan.events
+    stored_sessions, stored_coverage = _sessions_with_stored_memory(
         event_log, since=since, limit=limit
     )
+    report.sessions_with_stored_memory = stored_sessions
+    report.scan = merge_coverage(sweep_scan.coverage, stored_coverage)
+    if report.scan.truncated and report.scan.note:
+        report.notes.append(report.scan.note)
 
     if not events:
-        earlier = event_log.get_events(
+        earlier_scan = scan_events(
+            event_log,
             event_type=EventType.CAPTURE_SWEEP_COMPLETED,
             since=now - timedelta(days=UNOBSERVED_LOOKBACK_DAYS),
             limit=limit,
         )
+        earlier = earlier_scan.events
         if earlier:
             report.state = "stale"
             report.suppressed_reason = SUPPRESSED_STALE

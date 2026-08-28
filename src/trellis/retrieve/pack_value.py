@@ -50,6 +50,45 @@ Three honesty rules, each earned by a failure this repo has already had:
    different conclusions. ``useful_token_fraction`` is therefore a
    *lower bound* on usefulness, and its docstring says so wherever it is
    rendered.
+4. **A bound is stated as an interval, not as a number with a caveat**
+   (#364). On the reference deployment 42.0% of injected tokens got no
+   verdict at all, so the headline 0.0884 described 58% of what it was
+   named after and a footnote was carrying the other 42%. Three numbers
+   now travel together and the reader picks the reading:
+
+   * ``useful_token_fraction`` — ``helpful / injected``. **Unchanged**,
+     denominator and all. Every ungraded token counted as not-useful:
+     the pessimistic end.
+   * ``useful_token_fraction_upper_bound`` — ``(helpful + unjudged) /
+     injected``. Every ungraded token counted as useful: the optimistic
+     end. Its only job is to make the interval visible, and the interval
+     is the honest epistemic state. **Its width is exactly
+     ``unjudged_token_fraction``** — an identity, pinned by test — so
+     "how much of this is guesswork" is readable off the JSON without
+     arithmetic.
+   * ``useful_token_fraction_judged`` — ``helpful / judged``, over the
+     tokens that actually got a verdict, with ``judged_tokens`` and
+     ``judged_token_coverage`` beside it. A *conditional* reading, not a
+     third estimate of the whole: extending it to the ungraded tokens
+     assumes they are missing at random, and #364 argues at length that
+     they are not (graders cite what helped, not what they ignored).
+
+   What is deliberately **not** done: widen ``useful_token_fraction``'s
+   denominator to the judged tokens. That would triple the headline
+   (0.0884 → 0.1524) by discarding the population that makes it
+   uncertain, which is the ``attribution_rate`` failure mode
+   (``write_health.ServeAttributionReport``) run backwards. The new
+   numbers are additive; the old one is load-bearing and untouched.
+
+The unjudged share is **not uniform across axes**, which is why every
+per-axis cell carries it too. Measured over the 30 days to 2026-08-28
+(n=17 attributed packs), ``unjudged_token_fraction`` by strategy runs
+graph 0.548 / semantic 0.431 / keyword 0.362 — so the axis with the best
+citation rate is also the least graded, and reads 0.174 pessimistic
+against 0.386 conditional. The *ranking* of the three axes happens to be
+identical under both readings on this corpus; the *levels* differ by more
+than 2x. A trimming decision that only needs the ranking survives the
+ambiguity, and one that needs the level does not.
 
 Two structural exclusions, both stated rather than silent:
 
@@ -82,9 +121,15 @@ from pydantic import Field
 
 from trellis.core.base import TrellisModel
 from trellis.feedback.attribution import payload_pack_id
-from trellis.learning.pack_observations import join_pack_feedback
+from trellis.learning.pack_observations import join_pack_feedback_with_coverage
 from trellis.retrieve.token_pricing import estimate_dollars, resolve_pricing
-from trellis.stores.base.event_log import EventType
+from trellis.stores.base.event_log import (
+    DEFAULT_SCAN_LIMIT,
+    EventType,
+    ScanCoverage,
+    merge_coverage,
+    scan_events,
+)
 
 if TYPE_CHECKING:
     from trellis.stores.base.event_log import EventLog
@@ -100,7 +145,12 @@ MIN_ATTRIBUTED_PACKS = 5
 #: Reason slug attached when a cell is below :data:`MIN_ATTRIBUTED_PACKS`.
 SUPPRESSED_THIN_SAMPLE = "below_min_attributed_packs"
 
-_DEFAULT_EVENT_LIMIT = 5000
+#: Reason slug for a conditional fraction whose denominator is empty —
+#: nothing in the cell got a verdict at all, so ``helpful / judged`` is
+#: undefined rather than zero.
+SUPPRESSED_NO_JUDGED_TOKENS = "no_judged_tokens"
+
+_DEFAULT_EVENT_LIMIT = DEFAULT_SCAN_LIMIT
 
 
 #: Fallback key for an id that carries no namespace prefix — a bare ULID
@@ -160,8 +210,28 @@ class ValueBreakdown(TrellisModel):
     helpful_tokens: int = 0
     unhelpful_tokens: int = 0
     unjudged_tokens: int = 0
+    #: ``helpful_tokens + unhelpful_tokens`` — the tokens that got a
+    #: verdict, and the denominator of the conditional reading.
+    judged_tokens: int = 0
     #: ``helpful_tokens / injected_tokens``, or ``None`` when suppressed.
+    #: The pessimistic end: every ungraded token counted as not-useful.
     useful_token_fraction: float | None = None
+    #: ``(helpful_tokens + unjudged_tokens) / injected_tokens`` — the
+    #: optimistic end. ``useful_token_fraction`` and this bracket the
+    #: truth, and the gap between them is :attr:`unjudged_token_fraction`.
+    useful_token_fraction_upper_bound: float | None = None
+    #: ``helpful_tokens / judged_tokens``. ``None`` when suppressed **or**
+    #: when nothing in this cell was graded — an undefined ratio, not a
+    #: zero. Judgement coverage varies by more than 1.5x across strategies
+    #: on the reference corpus, which is what this per-cell field exists
+    #: to expose.
+    useful_token_fraction_judged: float | None = None
+    #: ``unjudged_tokens / injected_tokens`` — this cell's share of the
+    #: bucket nobody graded.
+    unjudged_token_fraction: float | None = None
+    #: ``judged_tokens / injected_tokens`` — how much of this cell the
+    #: conditional reading rests on.
+    judged_token_coverage: float | None = None
     suppressed: bool = False
     suppressed_reason: str = ""
 
@@ -211,12 +281,45 @@ class PackValueReport(TrellisModel):
     #: no verdict was given. This bucket is why the headline is a lower
     #: bound rather than a point estimate.
     unjudged_tokens: int = 0
+    #: ``helpful_tokens + unhelpful_tokens`` — tokens that got a verdict.
+    judged_tokens: int = 0
     #: ``helpful_tokens / injected_tokens``. ``None`` when suppressed.
+    #: **The headline, and deliberately unchanged by #364**: the
+    #: pessimistic end of the interval, with every ungraded token counted
+    #: as not-useful. Read it together with
+    #: :attr:`useful_token_fraction_upper_bound`.
     useful_token_fraction: float | None = None
     unhelpful_token_fraction: float | None = None
     unjudged_token_fraction: float | None = None
+    #: ``(helpful_tokens + unjudged_tokens) / injected_tokens``. The
+    #: optimistic end: every ungraded token counted as useful. Nothing
+    #: this analyzer can see distinguishes the two ends, so the pair is
+    #: the measurement and either one alone is an assertion.
+    useful_token_fraction_upper_bound: float | None = None
+    #: ``helpful_tokens / judged_tokens`` — the conditional reading, over
+    #: the tokens that actually got a verdict. ``None`` when suppressed or
+    #: when ``judged_tokens`` is zero. **Not a substitute for the
+    #: headline**: applying it to the ungraded tokens assumes they are
+    #: missing at random, and they are not (#364).
+    useful_token_fraction_judged: float | None = None
+    #: ``judged_tokens / injected_tokens`` — the share of the population
+    #: :attr:`useful_token_fraction_judged` actually rests on. Publish the
+    #: conditional without this and a 3%-coverage ratio reads like a
+    #: 90%-coverage one.
+    judged_token_coverage: float | None = None
+    #: Why :attr:`useful_token_fraction_judged` is ``None``, when it is:
+    #: :data:`SUPPRESSED_THIN_SAMPLE` or
+    #: :data:`SUPPRESSED_NO_JUDGED_TOKENS`.
+    judged_suppressed_reason: str = ""
     suppressed: bool = False
     suppressed_reason: str = ""
+
+    # -- Scan coverage: what the event-log cap did to this report -------
+    #: Whether the underlying EventLog reads hit their cap, and what that
+    #: excluded (#374). A truncated report is computed over a shorter
+    #: window than :attr:`window_days` claims; ``scan.covered_since`` names
+    #: where its evidence actually begins.
+    scan: ScanCoverage = Field(default_factory=ScanCoverage)
 
     # -- Citation hygiene ----------------------------------------------
     #: Ids a caller cited that the pack did not serve. These silently
@@ -280,15 +383,28 @@ def _fraction(numerator: int, denominator: int) -> float | None:
 
 
 def _finalize(cell: ValueBreakdown) -> ValueBreakdown:
-    """Apply the suppression rule to one axis cell."""
+    """Apply the suppression rule and both bound readings to one axis cell."""
+    cell.judged_tokens = cell.helpful_tokens + cell.unhelpful_tokens
     if cell.attributed_packs < MIN_ATTRIBUTED_PACKS:
         cell.suppressed = True
         cell.suppressed_reason = SUPPRESSED_THIN_SAMPLE
         cell.useful_token_fraction = None
-    else:
-        cell.useful_token_fraction = _fraction(
-            cell.helpful_tokens, cell.injected_tokens
-        )
+        cell.useful_token_fraction_upper_bound = None
+        cell.useful_token_fraction_judged = None
+        cell.unjudged_token_fraction = None
+        cell.judged_token_coverage = None
+        return cell
+    cell.useful_token_fraction = _fraction(cell.helpful_tokens, cell.injected_tokens)
+    cell.useful_token_fraction_upper_bound = _fraction(
+        cell.helpful_tokens + cell.unjudged_tokens, cell.injected_tokens
+    )
+    # ``_fraction`` already returns None on a zero denominator, which is
+    # exactly the "nothing here was graded" case: undefined, not zero.
+    cell.useful_token_fraction_judged = _fraction(
+        cell.helpful_tokens, cell.judged_tokens
+    )
+    cell.unjudged_token_fraction = _fraction(cell.unjudged_tokens, cell.injected_tokens)
+    cell.judged_token_coverage = _fraction(cell.judged_tokens, cell.injected_tokens)
     return cell
 
 
@@ -325,8 +441,8 @@ def summarize_pack_value(
         mistake "refused" for "measured zero".
     """
     since = datetime.now(tz=UTC) - timedelta(days=days)
-    feedback_events, pack_payloads, pack_event_count = join_pack_feedback(
-        event_log, since=since, limit=limit
+    feedback_events, pack_payloads, pack_event_count, join_coverage = (
+        join_pack_feedback_with_coverage(event_log, since=since, limit=limit)
     )
 
     # Sectioned packs carry no per-item rows; separate them before any
@@ -365,8 +481,14 @@ def summarize_pack_value(
 
     attributed_packs = len(attributed_ids)
     injected = totals["injected"]
-    unjudged = injected - totals["helpful"] - totals["unhelpful"]
+    judged = totals["helpful"] + totals["unhelpful"]
+    unjudged = injected - judged
     thin = attributed_packs < MIN_ATTRIBUTED_PACKS
+    judged_reason = ""
+    if thin:
+        judged_reason = SUPPRESSED_THIN_SAMPLE
+    elif not judged:
+        judged_reason = SUPPRESSED_NO_JUDGED_TOKENS
 
     resolved_model, price, price_source = resolve_pricing(model, price_per_mtok)
     injected_dollars = estimate_dollars(injected, price)
@@ -375,6 +497,7 @@ def summarize_pack_value(
         event_log, since=since, limit=limit, attributed_ids=set(attributed_ids)
     )
     response_dollars = estimate_dollars(response["tokens"], price)
+    scan = merge_coverage(join_coverage, response["coverage_scan"])
 
     report = PackValueReport(
         window_days=days,
@@ -391,6 +514,7 @@ def summarize_pack_value(
         helpful_tokens=totals["helpful"],
         unhelpful_tokens=totals["unhelpful"],
         unjudged_tokens=unjudged,
+        judged_tokens=judged,
         useful_token_fraction=(
             None if thin else _fraction(totals["helpful"], injected)
         ),
@@ -398,8 +522,17 @@ def summarize_pack_value(
             None if thin else _fraction(totals["unhelpful"], injected)
         ),
         unjudged_token_fraction=None if thin else _fraction(unjudged, injected),
+        useful_token_fraction_upper_bound=(
+            None if thin else _fraction(totals["helpful"] + unjudged, injected)
+        ),
+        useful_token_fraction_judged=(
+            None if judged_reason else _fraction(totals["helpful"], judged)
+        ),
+        judged_token_coverage=None if thin else _fraction(judged, injected),
+        judged_suppressed_reason=judged_reason,
         suppressed=thin,
         suppressed_reason=SUPPRESSED_THIN_SAMPLE if thin else "",
+        scan=scan,
         cited_ids_not_served=cited_not_served,
         model=resolved_model,
         price_per_mtok=price,
@@ -432,6 +565,9 @@ def summarize_pack_value(
             cited_not_served=cited_not_served,
             unjudged=unjudged,
             injected=injected,
+            judged=judged,
+            helpful=totals["helpful"],
+            scan=scan,
             response=response,
         ),
     )
@@ -662,10 +798,16 @@ def _response_token_join(
     events = 0
     with_pack_id = 0
     tokens_by_pack: dict[str, int] = {}
+    coverage = ScanCoverage()
     try:
-        for event in event_log.get_events(
-            event_type=EventType.TOKEN_TRACKED, since=since, limit=limit
-        ):
+        scan = scan_events(
+            event_log, event_type=EventType.TOKEN_TRACKED, since=since, limit=limit
+        )
+        coverage = scan.coverage
+        # ``scan.events`` is ascending, which is what "last write wins"
+        # below means by "last". A descending feed would silently invert
+        # that rule into "first write wins".
+        for event in scan.events:
             events += 1
             payload = event.payload or {}
             pack_id = payload.get("pack_id")
@@ -691,6 +833,7 @@ def _response_token_join(
         "coverage": round(with_pack_id / events, 4) if events else 0.0,
         "packs_covered": len(tokens_by_pack),
         "tokens": sum(tokens_by_pack.values()),
+        "coverage_scan": coverage,
     }
 
 
@@ -701,6 +844,9 @@ def _build_notes(
     cited_not_served: int,
     unjudged: int,
     injected: int,
+    judged: int,
+    helpful: int,
+    scan: ScanCoverage,
     response: dict[str, Any],
 ) -> list[str]:
     """Caveats that travel with the numbers, in both output formats."""
@@ -711,17 +857,35 @@ def _build_notes(
             "only what share of injected tokens the caller cited."
         ),
     ]
+    if scan.truncated and scan.note:
+        # First after the definitional note, and before every other
+        # caveat: if the window is not the window, nothing below it means
+        # what it says.
+        notes.append(scan.note)
     if attributed_packs < MIN_ATTRIBUTED_PACKS:
         notes.append(
             f"Ratios suppressed: {attributed_packs} attributed pack(s) is "
             f"below the {MIN_ATTRIBUTED_PACKS}-pack minimum."
         )
     if unjudged and injected:
+        lower = helpful / injected
+        upper = (helpful + unjudged) / injected
         notes.append(
             f"{unjudged / injected:.0%} of injected tokens got no verdict "
             "(neither helpful nor unhelpful), so useful_token_fraction is a "
-            "lower bound on usefulness."
+            f"lower bound: the true share lies in [{lower:.1%}, {upper:.1%}] "
+            "(useful_token_fraction .. useful_token_fraction_upper_bound), "
+            "and the width of that interval IS the unjudged share."
         )
+        if judged:
+            notes.append(
+                f"Conditional on being graded, {helpful / judged:.1%} of the "
+                f"{judged:,} judged tokens were cited helpful "
+                "(useful_token_fraction_judged). This is NOT a corrected "
+                "headline: extending it to the ungraded tokens assumes they "
+                "are missing at random, and graders cite what helped rather "
+                "than enumerating what they ignored (#364)."
+            )
     if sectioned:
         notes.append(
             f"{sectioned} sectioned pack(s) excluded: build_sectioned emits "
@@ -746,6 +910,7 @@ __all__ = [
     "MIN_ATTRIBUTED_PACKS",
     "NO_NAMESPACE",
     "collect_pack_verdicts",
+    "SUPPRESSED_NO_JUDGED_TOKENS",
     "SUPPRESSED_THIN_SAMPLE",
     "PackValueReport",
     "ValueBreakdown",
