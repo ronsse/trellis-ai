@@ -1,0 +1,358 @@
+"""Tests for advisory-file resolution — one file, and never a silent ``None``.
+
+Two properties carry the whole of #373.
+
+:class:`TestSurfacesAgreeOnOneFile` is the regression test proper. Writers
+resolved ``<data_dir>/advisories.json`` and readers resolved
+``<stores_dir>/advisories.json``; both halves worked, the nightly worker
+reported success every night for 17 days, and no advisory it produced was
+ever readable by a pack. These tests fail if any surface picks a path
+locally again.
+
+:class:`TestReaderNeverBindsNoneSilently` covers the *mechanism* that made
+that cost weeks rather than minutes. The readers guarded on
+``if adv_path.exists()``, so a misresolved path fell through into
+``advisory_store = None`` — which PackBuilder treats as "this deployment
+has no advisories". A wrong directory and an empty deployment were
+indistinguishable. These tests fail if that guard, or anything with its
+shape, comes back.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+import pytest
+from structlog.testing import capture_logs
+
+from trellis.schemas.advisory import Advisory, AdvisoryCategory, AdvisoryEvidence
+from trellis.stores.advisory_source import (
+    ADVISORY_FILENAME,
+    load_advisory_store,
+    resolve_advisory_path,
+)
+from trellis.stores.advisory_store import AdvisoryStore
+
+
+def _advisory(advisory_id: str = "adv_1", *, confidence: float = 0.5) -> Advisory:
+    return Advisory(
+        advisory_id=advisory_id,
+        category=AdvisoryCategory.APPROACH,
+        confidence=confidence,
+        message="test advisory",
+        evidence=AdvisoryEvidence(
+            sample_size=5,
+            success_rate_with=0.6,
+            success_rate_without=0.2,
+            effect_size=0.4,
+        ),
+        scope="global",
+    )
+
+
+def _write_advisories(path: Path, advisories: list[Advisory]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"advisories": [a.model_dump(mode="json") for a in advisories]}),
+        encoding="utf-8",
+    )
+
+
+@pytest.fixture
+def dirs(tmp_path: Path) -> tuple[Path, Path]:
+    """``(data_dir, stores_dir)`` with the real production relationship."""
+    data_dir = tmp_path / "data"
+    stores_dir = data_dir / "stores"
+    stores_dir.mkdir(parents=True)
+    return data_dir, stores_dir
+
+
+# ---------------------------------------------------------------------------
+# Path resolution
+# ---------------------------------------------------------------------------
+
+
+class TestResolveAdvisoryPath:
+    def test_canonical_path_is_under_stores_dir(self, dirs: tuple[Path, Path]) -> None:
+        _data_dir, stores_dir = dirs
+        assert resolve_advisory_path(stores_dir) == stores_dir / ADVISORY_FILENAME
+
+    def test_existing_canonical_file_wins(self, dirs: tuple[Path, Path]) -> None:
+        data_dir, stores_dir = dirs
+        _write_advisories(stores_dir / ADVISORY_FILENAME, [_advisory()])
+        _write_advisories(data_dir / ADVISORY_FILENAME, [_advisory("adv_legacy")])
+        assert resolve_advisory_path(stores_dir) == stores_dir / ADVISORY_FILENAME
+
+    def test_legacy_file_is_honoured(self, dirs: tuple[Path, Path]) -> None:
+        """The reference deployment's live file is at the legacy path.
+
+        It is written nightly by cron. Resolution must find it where it is
+        — #373 explicitly forbids moving or rewriting it.
+        """
+        data_dir, stores_dir = dirs
+        _write_advisories(data_dir / ADVISORY_FILENAME, [_advisory()])
+        assert resolve_advisory_path(stores_dir) == data_dir / ADVISORY_FILENAME
+
+    def test_legacy_hit_warns_naming_both_paths(self, dirs: tuple[Path, Path]) -> None:
+        data_dir, stores_dir = dirs
+        _write_advisories(data_dir / ADVISORY_FILENAME, [_advisory()])
+
+        with capture_logs() as cap:
+            resolve_advisory_path(stores_dir)
+
+        warnings = [e for e in cap if e["event"] == "advisory_file_at_legacy_path"]
+        assert len(warnings) == 1
+        assert warnings[0]["log_level"] == "warning"
+        # Both paths, so an operator can act without reading the source.
+        assert warnings[0]["legacy_path"] == str(data_dir / ADVISORY_FILENAME)
+        assert warnings[0]["canonical_path"] == str(stores_dir / ADVISORY_FILENAME)
+
+    def test_no_file_anywhere_returns_canonical(self, dirs: tuple[Path, Path]) -> None:
+        """So a fresh deployment's first write creates the right file."""
+        _data_dir, stores_dir = dirs
+        assert resolve_advisory_path(stores_dir) == stores_dir / ADVISORY_FILENAME
+
+    def test_none_stores_dir_returns_none(self) -> None:
+        assert resolve_advisory_path(None) is None
+
+    def test_resolution_never_moves_or_writes(self, dirs: tuple[Path, Path]) -> None:
+        """#373 constraint 2: migration is the operator's call, not ours."""
+        data_dir, stores_dir = dirs
+        legacy = data_dir / ADVISORY_FILENAME
+        _write_advisories(legacy, [_advisory()])
+        before = legacy.read_bytes()
+
+        resolve_advisory_path(stores_dir)
+        load_advisory_store(stores_dir, surface="test")
+
+        assert legacy.exists()
+        assert legacy.read_bytes() == before
+        assert not (stores_dir / ADVISORY_FILENAME).exists()
+
+
+# ---------------------------------------------------------------------------
+# The reader must never bind ``None`` in silence
+# ---------------------------------------------------------------------------
+
+
+class TestReaderNeverBindsNoneSilently:
+    """#373 constraint 1, and the structural fix behind it.
+
+    "A deployment with genuinely no advisories and a deployment reading the
+    wrong directory must not present identically."
+    """
+
+    def test_missing_file_yields_a_store_not_none(
+        self, dirs: tuple[Path, Path]
+    ) -> None:
+        store = load_advisory_store(dirs[1], surface="test")
+        assert store is not None
+        assert isinstance(store, AdvisoryStore)
+        # Behaviourally identical to the old ``None`` for PackBuilder.
+        assert store.list() == []
+
+    def test_missing_file_is_logged_naming_every_path_searched(
+        self, dirs: tuple[Path, Path]
+    ) -> None:
+        data_dir, stores_dir = dirs
+        with capture_logs() as cap:
+            load_advisory_store(stores_dir, surface="mcp")
+
+        absent = [e for e in cap if e["event"] == "advisory_file_absent"]
+        assert len(absent) == 1, "an absent advisory file must not be silent"
+        assert absent[0]["surface"] == "mcp"
+        assert set(absent[0]["searched"]) == {
+            str(stores_dir / ADVISORY_FILENAME),
+            str(data_dir / ADVISORY_FILENAME),
+        }
+
+    def test_found_file_is_logged_with_counts(self, dirs: tuple[Path, Path]) -> None:
+        _data_dir, stores_dir = dirs
+        _write_advisories(
+            stores_dir / ADVISORY_FILENAME, [_advisory("a"), _advisory("b")]
+        )
+        with capture_logs() as cap:
+            load_advisory_store(stores_dir, surface="mcp")
+
+        loaded = [e for e in cap if e["event"] == "advisory_store_loaded"]
+        assert len(loaded) == 1
+        assert loaded[0]["advisory_count"] == 2
+        assert loaded[0]["servable_count"] == 2
+        assert loaded[0]["path"] == str(stores_dir / ADVISORY_FILENAME)
+
+    def test_unconfigured_stores_dir_is_logged_too(self) -> None:
+        with capture_logs() as cap:
+            assert load_advisory_store(None, surface="test") is None
+        assert [e["event"] for e in cap] == ["advisory_store_unconfigured"]
+
+    def test_mcp_pack_builder_binds_a_store_when_no_file_exists(
+        self, monkeypatch: pytest.MonkeyPatch, dirs: tuple[Path, Path]
+    ) -> None:
+        """The exact anti-regression: no ``if path.exists()`` guard.
+
+        The bug was not that ``None`` is wrong for an empty deployment — it
+        is fine. The bug was that ``None`` was also what a *misresolved*
+        path produced. Binding a real (empty) store unconditionally is what
+        makes the two cases distinguishable.
+        """
+        builder = _build_mcp_pack_builder(monkeypatch, dirs[1])
+        assert builder._advisory_store is not None
+        assert builder._get_matching_advisories(None) == []
+
+
+# ---------------------------------------------------------------------------
+# Every surface, one file
+# ---------------------------------------------------------------------------
+
+
+def _build_mcp_pack_builder(monkeypatch: pytest.MonkeyPatch, stores_dir: Path) -> Any:
+    """Call the real MCP ``_build_pack_builder`` against ``stores_dir``.
+
+    Stubs only the strategy/reranker wiring, which needs live backends —
+    the advisory branch under test runs unmodified.
+    """
+    from trellis.mcp import server as mcp_server
+
+    monkeypatch.setattr(mcp_server, "build_strategies", lambda *a, **k: [])
+    monkeypatch.setattr(mcp_server, "build_reranker", lambda *a, **k: None)
+    monkeypatch.setattr(mcp_server, "ParameterRegistry", lambda *a, **k: None)
+
+    class _Registry:
+        stores_dir = None
+        operational = type("_Op", (), {"event_log": None, "parameter_store": None})()
+
+    registry = _Registry()
+    registry.stores_dir = stores_dir  # type: ignore[assignment]
+    return mcp_server._build_pack_builder(registry)  # type: ignore[arg-type]
+
+
+def _build_api_pack_builder(monkeypatch: pytest.MonkeyPatch, stores_dir: Path) -> Any:
+    """Call the real REST ``_build_pack_builder`` against ``stores_dir``."""
+    from trellis_api.routes import retrieve as retrieve_routes
+
+    monkeypatch.setattr(retrieve_routes, "build_strategies", lambda *a, **k: [])
+    monkeypatch.setattr(retrieve_routes, "build_reranker", lambda *a, **k: None)
+    monkeypatch.setattr(retrieve_routes, "ParameterRegistry", lambda *a, **k: None)
+
+    class _Registry:
+        stores_dir = None
+        operational = type("_Op", (), {"event_log": None, "parameter_store": None})()
+
+    registry = _Registry()
+    registry.stores_dir = stores_dir  # type: ignore[assignment]
+    return retrieve_routes._build_pack_builder(registry)
+
+
+class TestSurfacesAgreeOnOneFile:
+    """Writers and readers must land on the same advisory file.
+
+    Before unification the nightly worker and ``trellis analyze`` wrote
+    ``<data_dir>/advisories.json`` while the MCP pack builder, the REST
+    pack builder and the REST admin routes read
+    ``<stores_dir>/advisories.json``. Both halves "worked". Neither could
+    see the other.
+    """
+
+    def test_worker_writer_and_mcp_reader_share_a_file(
+        self, monkeypatch: pytest.MonkeyPatch, dirs: tuple[Path, Path]
+    ) -> None:
+        """The #373 regression test: write as the nightly worker, read as MCP."""
+        data_dir, stores_dir = dirs
+        monkeypatch.setenv("TRELLIS_DATA_DIR", str(data_dir))
+
+        from trellis_cli.worker import _advisory_store_from_data_dir
+
+        _advisory_store_from_data_dir().put(_advisory("adv_from_worker"))
+
+        builder = _build_mcp_pack_builder(monkeypatch, stores_dir)
+        served = builder._get_matching_advisories(None)
+        assert [a.advisory_id for a in served] == ["adv_from_worker"]
+
+    def test_worker_writer_and_api_reader_share_a_file(
+        self, monkeypatch: pytest.MonkeyPatch, dirs: tuple[Path, Path]
+    ) -> None:
+        data_dir, stores_dir = dirs
+        monkeypatch.setenv("TRELLIS_DATA_DIR", str(data_dir))
+
+        from trellis_cli.worker import _advisory_store_from_data_dir
+
+        _advisory_store_from_data_dir().put(_advisory("adv_from_worker"))
+
+        builder = _build_api_pack_builder(monkeypatch, stores_dir)
+        served = builder._get_matching_advisories(None)
+        assert [a.advisory_id for a in served] == ["adv_from_worker"]
+
+    def test_cli_data_dir_and_registry_stores_dir_resolve_the_same_path(
+        self, dirs: tuple[Path, Path]
+    ) -> None:
+        """The CLI derives ``stores_dir`` from ``data_dir``; the API takes it
+        from the registry. Same input, same file."""
+        from trellis.stores.registry import StoreRegistry
+
+        data_dir, stores_dir = dirs
+        registry = StoreRegistry(config={}, stores_dir=stores_dir)
+        assert resolve_advisory_path(data_dir / "stores") == resolve_advisory_path(
+            registry.stores_dir
+        )
+
+    def test_the_live_legacy_file_is_visible_to_every_reader(
+        self, monkeypatch: pytest.MonkeyPatch, dirs: tuple[Path, Path]
+    ) -> None:
+        """Reproduce the production shape exactly.
+
+        A file at ``<data_dir>/advisories.json`` and nothing at
+        ``<stores_dir>/advisories.json`` is the reference deployment as of
+        2026-08-27: 37 advisories, refreshed nightly, invisible to all
+        three readers. Every reader must now see it, without the file
+        having been moved.
+        """
+        data_dir, stores_dir = dirs
+        _write_advisories(data_dir / ADVISORY_FILENAME, [_advisory("adv_live")])
+        assert not (stores_dir / ADVISORY_FILENAME).exists()
+
+        mcp_ids = [
+            a.advisory_id
+            for a in _build_mcp_pack_builder(
+                monkeypatch, stores_dir
+            )._get_matching_advisories(None)
+        ]
+        api_ids = [
+            a.advisory_id
+            for a in _build_api_pack_builder(
+                monkeypatch, stores_dir
+            )._get_matching_advisories(None)
+        ]
+        direct = load_advisory_store(stores_dir, surface="test")
+        assert direct is not None
+
+        assert mcp_ids == api_ids == [a.advisory_id for a in direct.list()]
+        assert mcp_ids == ["adv_live"]
+        # And the live file stayed exactly where cron writes it.
+        assert (data_dir / ADVISORY_FILENAME).exists()
+        assert not (stores_dir / ADVISORY_FILENAME).exists()
+
+    @pytest.mark.parametrize("surface", ["mcp", "api.retrieve", "cli.worker"])
+    def test_no_surface_joins_the_filename_itself(self, surface: str) -> None:
+        """Guard the seam by source inspection.
+
+        A behavioural test can only cover the surfaces it knows about. This
+        one fails when a *new* call site joins ``advisories.json`` onto a
+        directory by hand instead of resolving through this module — which
+        is precisely how the split was introduced.
+        """
+        import trellis.mcp.server
+        import trellis_api.routes.retrieve
+        import trellis_cli.worker
+
+        module = {
+            "mcp": trellis.mcp.server,
+            "api.retrieve": trellis_api.routes.retrieve,
+            "cli.worker": trellis_cli.worker,
+        }[surface]
+        source = Path(module.__file__).read_text(encoding="utf-8")  # type: ignore[arg-type]
+        assert ADVISORY_FILENAME not in source, (
+            f"{surface} names {ADVISORY_FILENAME!r} directly; resolve through "
+            "trellis.stores.advisory_source instead"
+        )
