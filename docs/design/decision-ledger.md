@@ -199,6 +199,42 @@ measurement is written up. Re-running `pip install -e` on the production editabl
 would repair the stamp without changing which code runs. Also operator-only, also low risk,
 but worth doing in the same pass.
 
+### A-4 · Restore 22 memories demoted by the unsound noise gate
+
+Measured 2026-08-28 while fixing [#336](https://github.com/ronsse/trellis-ai/issues/336)
+(landed as [#380](https://github.com/ronsse/trellis-ai/pull/380)). Production data
+mutation, so operator-only at any confidence.
+
+Production holds **58 noise-tagged documents**. 24 were the correct manual demotion of
+2026-08-24. The other **34 came from the automated effectiveness pass**, and under the
+evidence gate #380 ships, only **12 are evidence-backed**. The remaining **22 were demoted
+for absence of praise, not evidence of unhelpfulness.**
+
+| lifecycle | n | what restoring costs |
+|---|---|---|
+| `current` | 10 | clear the tag — cheap, reversible |
+| none | 4 | clear the tag — cheap, reversible |
+| `archived` | 8 | needs `retention.prune`'s inverse, `retention.restore` |
+
+**Recommendation: restore the 14 tag-only cases; treat the 8 archived ones as optional.**
+The 14 include every memory #336 named by title — the Hermes local-patch gotcha, the
+uvicorn SIGTERM behaviour, the FastAPI-lifespan test constraint, Nate's LLM cost posture,
+the fincore PII constraint, the roadmap-driver record. These are exactly the durable
+gotchas the system exists to preserve, and clearing a tag is trivially reversible.
+
+The 8 archived are mostly claude.ai conversation chunks (Google Calendar imports, hunt
+calendar sync). Restoring them is *principled* — they were demoted by a rule now known to
+be miscalibrated — but low-benefit, and `retention.restore` is a heavier operation. Either
+choice is defensible; leaving them archived is not a correctness problem.
+
+**Note that the harm recurred once already.** #336 documented these being demoted, they
+were restored, and **the nightly cron re-demoted all 8 on 2026-08-27** because the
+producing rule was untouched. #380 fixes the rule, so a restore now should hold — but
+verify after the next `curate-nightly` run rather than assuming it.
+
+Full list: `RESTORE-LIST.txt` from the A3 session scratchpad, reproducible from
+`trellis-skynet` plus the gate in `src/trellis/classify/demotion_gate.py`.
+
 ---
 
 ## Taken
