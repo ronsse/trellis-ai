@@ -27,10 +27,16 @@ from __future__ import annotations
 
 import os
 import re
+from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 import pytest
 from hypothesis import HealthCheck, settings
+
+from tests.structlog_isolation import (
+    IsolatedCliRunner,
+    reset_structlog_global_state,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -130,3 +136,30 @@ def _reset_write_provenance() -> Iterator[None]:
     get_write_provenance.cache_clear()
     yield
     get_write_provenance.cache_clear()
+
+
+@pytest.fixture
+def cli_runner() -> Iterator[IsolatedCliRunner]:
+    """A ``CliRunner`` that is safe to use from any test directory.
+
+    Invoking a Trellis CLI command reconfigures structlog's *global* logger
+    factory and pins it to ``CliRunner``'s temporary stderr, which is closed
+    when ``invoke`` returns. Without isolation that poisons every later test
+    that logs, anywhere in the session.
+
+    ``tests/unit/cli/`` has a package-scoped fixture covering its own tests.
+    **Use this fixture for CLI invocations anywhere else** — see
+    :class:`tests.structlog_isolation.IsolatedCliRunner` for the mechanism
+    and the incident it comes from.
+    """
+    with _isolated_structlog():
+        yield IsolatedCliRunner()
+
+
+@contextmanager
+def _isolated_structlog() -> Iterator[None]:
+    """Belt-and-braces reset around a whole test, on top of per-invoke resets."""
+    try:
+        yield
+    finally:
+        reset_structlog_global_state()
