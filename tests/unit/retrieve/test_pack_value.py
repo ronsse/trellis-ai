@@ -17,7 +17,9 @@ import pytest
 
 from trellis.retrieve.pack_value import (
     MIN_ATTRIBUTED_PACKS,
+    NO_NAMESPACE,
     SUPPRESSED_THIN_SAMPLE,
+    item_namespace,
     summarize_pack_value,
 )
 from trellis.stores.base.event_log import Event, EventLog, EventType
@@ -609,3 +611,164 @@ def test_a_pack_without_a_budget_trace_falls_back_to_estimated_tokens() -> None:
 
     assert report.injected_tokens == 100 * MIN_ATTRIBUTED_PACKS
     assert report.useful_token_fraction == pytest.approx(1.0, abs=1e-4)
+
+
+# ---------------------------------------------------------------------------
+# by_item_namespace — the axis that separates what by_item_type collapses
+# (#298)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("item_id", "expected"),
+    [
+        ("trace:01M0ZC5EQW0N77HHCKMX8F7MGZ", "trace"),
+        ("artifact:src/trellis/retrieve/noise.py", "artifact"),
+        # Only the FIRST segment is the namespace: a URL or a nested id
+        # must not mint a bucket of one.
+        ("artifact:https://github.com/ronsse/trellis-ai/pull/301", "artifact"),
+        ("conversation:claude-ai:d0c5ee50#chunk-0", "conversation"),
+        ("capture:claude-code:70da37f8664eb590", "capture"),
+        ("corpus:notes/2026/x.md", "corpus"),
+        # A bare ULID carries no namespace and must not be guessed at.
+        ("01KZDAAGQK33PJSZE7HWFJ1B72", NO_NAMESPACE),
+        ("", NO_NAMESPACE),
+        ("plain-id-with-no-colon", NO_NAMESPACE),
+        # Anchored lowercase, so an uppercase Crockford ULID cannot match
+        # even if something later puts a colon in one.
+        ("01KZD:SOMETHING", NO_NAMESPACE),
+        ("UPPER:x", NO_NAMESPACE),
+        # Bounded, so a pathological id cannot mint a giant axis key.
+        (("a" * 40) + ":x", NO_NAMESPACE),
+    ],
+)
+def test_item_namespace_reads_the_id_prefix(item_id: str, expected: str) -> None:
+    assert item_namespace(item_id) == expected
+
+
+def test_namespace_axis_separates_populations_item_type_collapses() -> None:
+    """The #298 regression: one ``item_type``, three citation populations.
+
+    Every row the graph strategy emits carries ``item_type="entity"``, so
+    ``by_item_type`` reports one cell — the *average* of a name-only
+    ``artifact:`` stub, a ``trace:`` stub and a curated entity. On the
+    reference deployment those differ by more than an order of magnitude,
+    which is why #298 could sit open against an instrument that could not
+    show it.
+    """
+    log = _FakeEventLog()
+    for index in range(MIN_ATTRIBUTED_PACKS):
+        pack_id = f"pack_{index}"
+        _emit_pack(
+            log,
+            pack_id,
+            [
+                # All three are item_type="entity", strategy_source="graph".
+                (f"artifact:src/mod_{index}.py", 100, "graph", "entity"),
+                (f"trace:01TRACE{index}", 100, "graph", "entity"),
+                (f"01ENTITY{index}", 100, "graph", "entity"),
+            ],
+        )
+        _emit_feedback(
+            log,
+            pack_id,
+            helpful=[f"01ENTITY{index}"],
+            unhelpful=[f"artifact:src/mod_{index}.py"],
+        )
+
+    report = summarize_pack_value(log, days=30)
+
+    # The old axis sees exactly one cell and reports the blended figure.
+    assert [c.key for c in report.by_item_type] == ["entity"]
+    # One helpful item in three: the average, which describes none of them.
+    assert report.by_item_type[0].useful_token_fraction == pytest.approx(
+        1 / 3, abs=1e-4
+    )
+
+    cells = {c.key: c for c in report.by_item_namespace}
+    assert set(cells) == {"artifact", "trace", NO_NAMESPACE}
+    # ...and the new one separates them: never cited, uncited, always cited.
+    assert cells["artifact"].useful_token_fraction == 0.0
+    assert cells["trace"].useful_token_fraction == 0.0
+    assert cells[NO_NAMESPACE].useful_token_fraction == 1.0
+    # trace: was never *judged* — that is not the same as unhelpful, and
+    # the buckets must keep saying so.
+    assert cells["trace"].unhelpful_tokens == 0
+    assert cells["trace"].unjudged_tokens == 100 * MIN_ATTRIBUTED_PACKS
+    assert cells["artifact"].unhelpful_tokens == 100 * MIN_ATTRIBUTED_PACKS
+
+
+def test_namespace_axis_partitions_injected_tokens_exactly() -> None:
+    """Every injected token lands in exactly one namespace cell."""
+    log = _FakeEventLog()
+    for index in range(MIN_ATTRIBUTED_PACKS):
+        pack_id = f"pack_{index}"
+        _emit_pack(
+            log,
+            pack_id,
+            [
+                (f"conversation:c{index}#chunk-0", 250, "semantic", "vector"),
+                (f"artifact:a{index}.py", 7, "graph", "entity"),
+                (f"01BARE{index}", 90, "keyword", "document"),
+            ],
+        )
+        _emit_feedback(log, pack_id, helpful=[f"01BARE{index}"])
+
+    report = summarize_pack_value(log, days=30)
+    assert (
+        sum(c.injected_tokens for c in report.by_item_namespace)
+        == report.injected_tokens
+    )
+    for field in ("helpful_tokens", "unhelpful_tokens", "unjudged_tokens"):
+        assert sum(getattr(c, field) for c in report.by_item_namespace) == getattr(
+            report, field
+        )
+
+
+def test_namespace_cells_are_suppressed_independently() -> None:
+    """A thin namespace refuses its ratio while the headline states one."""
+    log = _FakeEventLog()
+    for index in range(MIN_ATTRIBUTED_PACKS):
+        pack_id = f"pack_{index}"
+        items = [(f"conversation:c{index}", 100, "semantic", "vector")]
+        # One pack alone carries an ``artifact:`` item.
+        if index == 0:
+            items.append(("artifact:only_once.py", 100, "graph", "entity"))
+        _emit_pack(log, pack_id, items)
+        _emit_feedback(log, pack_id, helpful=[f"conversation:c{index}"])
+
+    report = summarize_pack_value(log, days=30)
+    cells = {c.key: c for c in report.by_item_namespace}
+    assert report.useful_token_fraction is not None
+    assert cells["artifact"].attributed_packs == 1
+    assert cells["artifact"].suppressed is True
+    assert cells["artifact"].suppressed_reason == SUPPRESSED_THIN_SAMPLE
+    assert cells["artifact"].useful_token_fraction is None
+    # The raw evidence survives suppression — the operator sees the
+    # counts, just not a ratio dressed as a finding.
+    assert cells["artifact"].injected_tokens == 100
+    assert cells["conversation"].suppressed is False
+
+
+def test_namespace_axis_is_sorted_by_denominator() -> None:
+    """Largest spender first — the same convention the other axes use."""
+    log = _FakeEventLog()
+    for index in range(MIN_ATTRIBUTED_PACKS):
+        pack_id = f"pack_{index}"
+        _emit_pack(
+            log,
+            pack_id,
+            [
+                (f"artifact:a{index}.py", 10, "graph", "entity"),
+                (f"conversation:c{index}", 500, "semantic", "vector"),
+                (f"trace:01T{index}", 60, "graph", "entity"),
+            ],
+        )
+        _emit_feedback(log, pack_id, helpful=[f"conversation:c{index}"])
+
+    report = summarize_pack_value(log, days=30)
+    assert [c.key for c in report.by_item_namespace] == [
+        "conversation",
+        "trace",
+        "artifact",
+    ]

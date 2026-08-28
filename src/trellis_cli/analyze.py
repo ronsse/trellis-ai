@@ -862,6 +862,7 @@ def value(
     for title, cells in (
         ("Strategy", report.by_strategy),
         ("Item type", report.by_item_type),
+        ("Item namespace", report.by_item_namespace),
         ("Intent family", report.by_intent_family),
     ):
         _print_value_axis(title, cells, minimum=report.min_attributed_packs)
