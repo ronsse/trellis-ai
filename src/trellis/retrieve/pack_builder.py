@@ -228,6 +228,18 @@ def _item_attribution(item: PackItem) -> dict[str, Any]:
     * ``signal_quality`` — the facet the noise filter acts on, so an
       effectiveness analysis can separate "served and unhelpful" from
       "served despite being marked low".
+    * ``graph_selection`` — how the graph axis chose the candidate:
+      ``"seeded"`` (the intent reached the store, via
+      :class:`~trellis.retrieve.strategies.GraphSeedExtractor` or an
+      explicit ``seed_ids``) or ``"recency_window"`` (it did not — the
+      axis returned the newest rows and never consulted the query, #371).
+      Only graph items carry it. Without it, whether a served entity was
+      query-relevant at all is not a property of the record — it has to be
+      inferred from which wiring was deployed that week, which §1.2 of
+      `docs/design/swarm-handoff.md` shows is exactly the inference that
+      goes wrong. It reveals nothing about content: two enum values
+      describing the *mechanism*, next to a ``title`` that already names
+      the thing.
 
     **On disclosure.** ``domain`` is open-vocabulary and reveals subject
     matter, which is why :mod:`trellis.classify.shadow` deliberately keeps it
@@ -250,6 +262,7 @@ def _item_attribution(item: PackItem) -> dict[str, Any]:
         "category": tags.get("content_type"),
         "domain_system": meta.get("source_system"),
         "signal_quality": tags.get("signal_quality"),
+        "graph_selection": meta.get("graph_selection"),
     }
     attribution: dict[str, Any] = {
         key: value.strip()
