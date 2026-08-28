@@ -18,6 +18,7 @@ import pytest
 from trellis.retrieve.pack_value import (
     MIN_ATTRIBUTED_PACKS,
     NO_NAMESPACE,
+    SUPPRESSED_NO_JUDGED_TOKENS,
     SUPPRESSED_THIN_SAMPLE,
     item_namespace,
     summarize_pack_value,
@@ -780,3 +781,250 @@ def test_namespace_axis_is_sorted_by_denominator() -> None:
         "trace",
         "artifact",
     ]
+
+
+# ---------------------------------------------------------------------------
+# The unjudged bucket — bound the headline, do not widen it (#364)
+# ---------------------------------------------------------------------------
+
+
+def _populate_with_unjudged(
+    log: _FakeEventLog,
+    count: int,
+    *,
+    helpful_tokens: int,
+    unhelpful_tokens: int,
+    unjudged_tokens: int,
+) -> None:
+    """``count`` packs, each with one item per verdict at the given weight."""
+    for index in range(count):
+        pack_id = f"pack_{index}"
+        _emit_pack(
+            log,
+            pack_id,
+            [
+                (f"{pack_id}_h", helpful_tokens, "semantic", "vector"),
+                (f"{pack_id}_u", unhelpful_tokens, "semantic", "vector"),
+                (f"{pack_id}_n", unjudged_tokens, "graph", "entity"),
+            ],
+        )
+        _emit_feedback(
+            log, pack_id, helpful=[f"{pack_id}_h"], unhelpful=[f"{pack_id}_u"]
+        )
+
+
+def test_headline_denominator_is_still_every_injected_token() -> None:
+    """The one thing #364 must NOT do.
+
+    Narrowing ``useful_token_fraction`` to the judged tokens would nearly
+    triple it (0.0884 -> 0.1524 on the reference deployment) by discarding
+    the population that makes it uncertain. That is the ``attribution_rate``
+    failure mode run backwards, and it is pinned here rather than trusted
+    to a docstring.
+    """
+    log = _FakeEventLog()
+    _populate_with_unjudged(
+        log,
+        MIN_ATTRIBUTED_PACKS,
+        helpful_tokens=100,
+        unhelpful_tokens=300,
+        unjudged_tokens=600,
+    )
+    report = summarize_pack_value(log, days=30)
+
+    assert report.injected_tokens == 1000 * MIN_ATTRIBUTED_PACKS
+    assert report.useful_token_fraction == 0.1  # 100 / 1000, NOT 100 / 400
+    assert report.judged_tokens == 400 * MIN_ATTRIBUTED_PACKS
+    assert report.useful_token_fraction_judged == 0.25
+
+
+def test_bound_interval_width_is_exactly_the_unjudged_share() -> None:
+    """The identity that makes "how much of this is guesswork" readable.
+
+    Held to full float precision rather than a tolerance: both ends are
+    computed from the same integer counts over the same denominator, so
+    any drift means one of them stopped being what it says it is.
+    """
+    log = _FakeEventLog()
+    _populate_with_unjudged(
+        log,
+        MIN_ATTRIBUTED_PACKS,
+        helpful_tokens=100,
+        unhelpful_tokens=300,
+        unjudged_tokens=600,
+    )
+    report = summarize_pack_value(log, days=30)
+
+    assert report.useful_token_fraction == 0.1
+    assert report.useful_token_fraction_upper_bound == 0.7
+    assert report.unjudged_token_fraction == 0.6
+    lower = report.useful_token_fraction or 0.0
+    upper = report.useful_token_fraction_upper_bound or 0.0
+    assert round(upper - lower, 4) == report.unjudged_token_fraction
+
+
+@pytest.mark.parametrize(
+    ("helpful", "unhelpful", "unjudged", "expected_lower", "expected_judged"),
+    [
+        (100, 300, 600, 0.1, 0.25),
+        (400, 100, 500, 0.4, 0.8),
+        (0, 500, 500, 0.0, 0.0),
+        (500, 500, 0, 0.5, 0.5),
+    ],
+)
+def test_conditional_fraction_is_not_a_constant(
+    helpful: int,
+    unhelpful: int,
+    unjudged: int,
+    expected_lower: float,
+    expected_judged: float,
+) -> None:
+    """Four reachable readings, including the one where the two coincide.
+
+    With nothing unjudged the conditional collapses onto the headline —
+    the boundary case that proves the second number is a function of the
+    unjudged bucket and not a differently-scaled copy of the first.
+    """
+    log = _FakeEventLog()
+    _populate_with_unjudged(
+        log,
+        MIN_ATTRIBUTED_PACKS,
+        helpful_tokens=helpful,
+        unhelpful_tokens=unhelpful,
+        unjudged_tokens=unjudged,
+    )
+    report = summarize_pack_value(log, days=30)
+
+    assert report.useful_token_fraction == expected_lower
+    assert report.useful_token_fraction_judged == expected_judged
+    if unjudged == 0:
+        assert report.useful_token_fraction_judged == report.useful_token_fraction
+        assert report.useful_token_fraction_upper_bound == report.useful_token_fraction
+
+
+def test_judged_coverage_travels_with_the_conditional() -> None:
+    """A conditional published without its coverage reads like a full one."""
+    log = _FakeEventLog()
+    _populate_with_unjudged(
+        log,
+        MIN_ATTRIBUTED_PACKS,
+        helpful_tokens=100,
+        unhelpful_tokens=300,
+        unjudged_tokens=600,
+    )
+    report = summarize_pack_value(log, days=30)
+    assert report.judged_token_coverage == 0.4
+    assert report.judged_suppressed_reason == ""
+
+
+def test_conditional_is_refused_when_nothing_was_graded() -> None:
+    """``helpful / judged`` with an empty denominator is undefined, not 0.0.
+
+    Reachable without a thin sample: every pack is cited, but with an id it
+    never served (the malformed-id case ``cited_ids_not_served`` counts), so
+    the packs are attributed while no served token carries a verdict.
+    """
+    log = _FakeEventLog()
+    for index in range(MIN_ATTRIBUTED_PACKS):
+        pack_id = f"pack_{index}"
+        _emit_pack(log, pack_id, [(f"{pack_id}_a", 100, "semantic", "vector")])
+        _emit_feedback(log, pack_id, helpful=[f"entity:{pack_id}_a"])
+    report = summarize_pack_value(log, days=30)
+
+    assert report.attributed_packs == MIN_ATTRIBUTED_PACKS
+    assert report.suppressed is False
+    assert report.judged_tokens == 0
+    assert report.useful_token_fraction == 0.0
+    assert report.useful_token_fraction_judged is None
+    assert report.judged_suppressed_reason == SUPPRESSED_NO_JUDGED_TOKENS
+    assert report.cited_ids_not_served == MIN_ATTRIBUTED_PACKS
+
+
+def test_thin_sample_refuses_the_conditional_too() -> None:
+    """Suppression is applied to every reading, not just the headline —
+    otherwise the refusal is trivially routed around."""
+    log = _FakeEventLog()
+    _populate_with_unjudged(
+        log,
+        MIN_ATTRIBUTED_PACKS - 1,
+        helpful_tokens=100,
+        unhelpful_tokens=300,
+        unjudged_tokens=600,
+    )
+    report = summarize_pack_value(log, days=30)
+
+    assert report.suppressed is True
+    assert report.useful_token_fraction is None
+    assert report.useful_token_fraction_upper_bound is None
+    assert report.useful_token_fraction_judged is None
+    assert report.judged_token_coverage is None
+    assert report.judged_suppressed_reason == SUPPRESSED_THIN_SAMPLE
+    # The evidence still ships; only the ratios are refused.
+    assert report.judged_tokens == 400 * (MIN_ATTRIBUTED_PACKS - 1)
+
+
+def test_unjudged_share_varies_by_axis() -> None:
+    """The per-axis story a single global unjudged fraction hides.
+
+    Measured on the reference deployment, ``unjudged_token_fraction`` by
+    strategy runs graph 0.548 / semantic 0.431 / keyword 0.362 — the axis
+    with the best citation rate is also the least graded. If the per-cell
+    field could only report the global figure it would be worthless, so
+    this asserts the cells actually disagree.
+    """
+    log = _FakeEventLog()
+    for index in range(MIN_ATTRIBUTED_PACKS):
+        pack_id = f"pack_{index}"
+        _emit_pack(
+            log,
+            pack_id,
+            [
+                # semantic: fully graded.
+                (f"{pack_id}_s1", 100, "semantic", "vector"),
+                (f"{pack_id}_s2", 100, "semantic", "vector"),
+                # graph: half graded.
+                (f"{pack_id}_g1", 100, "graph", "entity"),
+                (f"{pack_id}_g2", 100, "graph", "entity"),
+                # keyword: never graded at all.
+                (f"{pack_id}_k1", 100, "keyword", "document"),
+            ],
+        )
+        _emit_feedback(
+            log,
+            pack_id,
+            helpful=[f"{pack_id}_s1", f"{pack_id}_g1"],
+            unhelpful=[f"{pack_id}_s2"],
+        )
+    report = summarize_pack_value(log, days=30)
+    by_strategy = {cell.key: cell for cell in report.by_strategy}
+
+    assert by_strategy["semantic"].unjudged_token_fraction == 0.0
+    assert by_strategy["graph"].unjudged_token_fraction == 0.5
+    assert by_strategy["keyword"].unjudged_token_fraction == 1.0
+    # And the conditional reading differs from the pessimistic one exactly
+    # where grading is incomplete.
+    assert by_strategy["semantic"].useful_token_fraction == 0.5
+    assert by_strategy["semantic"].useful_token_fraction_judged == 0.5
+    assert by_strategy["graph"].useful_token_fraction == 0.5
+    assert by_strategy["graph"].useful_token_fraction_judged == 1.0
+    # Nothing graded on the keyword axis: undefined, never zero.
+    assert by_strategy["keyword"].useful_token_fraction == 0.0
+    assert by_strategy["keyword"].useful_token_fraction_judged is None
+
+
+def test_notes_state_the_interval_and_disclaim_the_conditional() -> None:
+    """A reader who sees only the JSON must not be able to misread either."""
+    log = _FakeEventLog()
+    _populate_with_unjudged(
+        log,
+        MIN_ATTRIBUTED_PACKS,
+        helpful_tokens=100,
+        unhelpful_tokens=300,
+        unjudged_tokens=600,
+    )
+    notes = " ".join(summarize_pack_value(log, days=30).notes)
+
+    assert "lower bound" in notes
+    assert "[10.0%, 70.0%]" in notes
+    assert "missing at random" in notes
+    assert "NOT a corrected" in notes
