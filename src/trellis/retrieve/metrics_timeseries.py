@@ -63,8 +63,14 @@ from typing import TYPE_CHECKING
 
 import structlog
 
-from trellis.learning.pack_observations import join_pack_feedback
-from trellis.stores.base.event_log import EventType
+from trellis.learning.pack_observations import join_pack_feedback_with_coverage
+from trellis.stores.base.event_log import (
+    DEFAULT_SCAN_LIMIT,
+    EventType,
+    ScanCoverage,
+    merge_coverage,
+    scan_events,
+)
 
 if TYPE_CHECKING:
     from trellis.stores.base.event_log import Event, EventLog
@@ -73,8 +79,12 @@ logger = structlog.get_logger(__name__)
 
 #: Per-event-type scan cap. Matches :mod:`trellis.retrieve.effectiveness`
 #: and :mod:`trellis.learning.pack_observations` so all three read the
-#: same window depth.
-_DEFAULT_EVENT_LIMIT = 5000
+#: same window depth. Every read goes through
+#: :func:`~trellis.stores.base.event_log.scan_events`, so hitting it drops
+#: the *oldest* events and says so (#374) — which matters more here than
+#: anywhere else, because a truncated series does not go blank, it goes
+#: flat at its recent end and looks like a quiet week.
+_DEFAULT_EVENT_LIMIT = DEFAULT_SCAN_LIMIT
 
 #: The ``group_by`` axes the dashboard exposes. ``"none"`` collapses
 #: every event into a single ``"all"`` series.
@@ -131,13 +141,22 @@ class TimeseriesSeries:
 
 @dataclass
 class TimeseriesResult:
-    """A computed metric across one or more grouped series."""
+    """A computed metric across one or more grouped series.
+
+    ``scan`` reports whether the underlying EventLog reads hit their cap.
+    A truncated series is the quietest failure this module has: it does
+    not go empty, it goes *flat at its recent end*, because the omitted
+    buckets are simply absent and absent buckets are documented as "no
+    signal". ``scan.covered_since`` is where the series actually starts
+    having evidence, whatever ``days`` says.
+    """
 
     metric: str
     bucket: str
     group_by: str
     days: int
     series: list[TimeseriesSeries] = field(default_factory=list)
+    scan: ScanCoverage = field(default_factory=ScanCoverage)
 
 
 # ---------------------------------------------------------------------------
@@ -232,7 +251,7 @@ def _feedback_pack_id(feedback: Event) -> str | None:
 
 def _compute_pack_success_rate(
     event_log: EventLog, *, since: datetime, group_by: str, limit: int
-) -> dict[str, dict[str, _RatioBucket]]:
+) -> tuple[dict[str, dict[str, _RatioBucket]], ScanCoverage]:
     """share of graded packs with a positive outcome, per (group, bucket).
 
     Parity (conditional): equals ``round_success_rate`` in
@@ -250,7 +269,7 @@ def _compute_pack_success_rate(
     the key even when it is empty, so a plain dict merge would let that
     empty value shadow the family PackBuilder derived.
     """
-    feedback_events, pack_payloads, _ = join_pack_feedback(
+    feedback_events, pack_payloads, _, coverage = join_pack_feedback_with_coverage(
         event_log, since=since, limit=limit
     )
     buckets: dict[str, dict[str, _RatioBucket]] = defaultdict(
@@ -269,7 +288,7 @@ def _compute_pack_success_rate(
         bucket.samples += 1
         if _feedback_success(fb_payload):
             bucket.numerator += 1
-    return buckets
+    return buckets, coverage
 
 
 def _feedback_success(payload: dict[str, object]) -> bool:
@@ -287,7 +306,7 @@ def _feedback_success(payload: dict[str, object]) -> bool:
 
 def _compute_reference_rate(
     event_log: EventLog, *, since: datetime, group_by: str, limit: int
-) -> dict[str, dict[str, _RatioBucket]]:
+) -> tuple[dict[str, dict[str, _RatioBucket]], ScanCoverage]:
     """``items_referenced / items_served`` per (group, bucket).
 
     Parity (conditional): equals ``round_useful_fraction_overall`` (sum
@@ -307,7 +326,7 @@ def _compute_reference_rate(
     ``items_served`` it falls back to the joined PACK_ASSEMBLED
     ``injected_item_ids`` so older feedback rows still count.
     """
-    feedback_events, pack_payloads, _ = join_pack_feedback(
+    feedback_events, pack_payloads, _, coverage = join_pack_feedback_with_coverage(
         event_log, since=since, limit=limit
     )
     buckets: dict[str, dict[str, _RatioBucket]] = defaultdict(
@@ -331,12 +350,12 @@ def _compute_reference_rate(
         bucket.numerator += referenced_count
         bucket.denominator += served_count
         bucket.samples += 1
-    return buckets
+    return buckets, coverage
 
 
 def _compute_advisory_fitness(
     event_log: EventLog, *, since: datetime, group_by: str, limit: int
-) -> dict[str, dict[str, _MeanCountBucket]]:
+) -> tuple[dict[str, dict[str, _MeanCountBucket]], ScanCoverage]:
     """Mean advisory confidence + suppressed count per (group, bucket).
 
     Reads the fitness loop's audit events
@@ -358,16 +377,16 @@ def _compute_advisory_fitness(
     Advisory events carry no domain / intent_family, so they all land
     under ``"all"`` regardless of ``group_by``.
     """
-    suppressed = event_log.get_events(
-        event_type=EventType.ADVISORY_SUPPRESSED, since=since, limit=limit
+    suppressed = scan_events(
+        event_log, event_type=EventType.ADVISORY_SUPPRESSED, since=since, limit=limit
     )
-    restored = event_log.get_events(
-        event_type=EventType.ADVISORY_RESTORED, since=since, limit=limit
+    restored = scan_events(
+        event_log, event_type=EventType.ADVISORY_RESTORED, since=since, limit=limit
     )
     buckets: dict[str, dict[str, _MeanCountBucket]] = defaultdict(
         lambda: defaultdict(_MeanCountBucket)
     )
-    for event in (*suppressed, *restored):
+    for event in (*suppressed.events, *restored.events):
         payload = event.payload or {}
         group_key = _resolve_group_key(payload, group_by)
         bucket = buckets[group_key][_bucket_key(event.occurred_at)]
@@ -377,12 +396,12 @@ def _compute_advisory_fitness(
             bucket.mean_samples += 1
         if event.event_type == EventType.ADVISORY_SUPPRESSED:
             bucket.count += 1
-    return buckets
+    return buckets, merge_coverage(suppressed.coverage, restored.coverage)
 
 
 def _compute_noise_tag_volume(
     event_log: EventLog, *, since: datetime, group_by: str, limit: int
-) -> dict[str, dict[str, _CountBucket]]:
+) -> tuple[dict[str, dict[str, _CountBucket]], ScanCoverage]:
     """Items flipped to ``signal_quality="noise"`` per (group, bucket).
 
     Counts :attr:`EventType.TAGS_REFRESHED` events whose ``after`` tags
@@ -392,19 +411,19 @@ def _compute_noise_tag_volume(
     persists the tag; the per-item TAGS_REFRESHED event (emitted on the
     reclassification path) is what makes the volume observable here.
     """
-    events = event_log.get_events(
-        event_type=EventType.TAGS_REFRESHED, since=since, limit=limit
+    scan = scan_events(
+        event_log, event_type=EventType.TAGS_REFRESHED, since=since, limit=limit
     )
     buckets: dict[str, dict[str, _CountBucket]] = defaultdict(
         lambda: defaultdict(_CountBucket)
     )
-    for event in events:
+    for event in scan.events:
         payload = event.payload or {}
         if not _after_is_noise(payload):
             continue
         group_key = _resolve_group_key(payload, group_by)
         buckets[group_key][_bucket_key(event.occurred_at)].count += 1
-    return buckets
+    return buckets, scan.coverage
 
 
 def _after_is_noise(payload: dict[str, object]) -> bool:
@@ -449,7 +468,7 @@ def _compute_parameter_promotions(
     since: datetime,
     group_by: str,  # noqa: ARG001 — strip groups by event type, not a payload axis
     limit: int,
-) -> dict[str, dict[str, _CountBucket]]:
+) -> tuple[dict[str, dict[str, _CountBucket]], ScanCoverage]:
     """Governance event counts per (event-type group, bucket).
 
     Unlike the other metrics, ``group_by`` is ignored for the series
@@ -461,12 +480,14 @@ def _compute_parameter_promotions(
     buckets: dict[str, dict[str, _CountBucket]] = defaultdict(
         lambda: defaultdict(_CountBucket)
     )
+    coverages: list[ScanCoverage] = []
     for event_type in _PROMOTION_EVENT_TYPES:
-        events = event_log.get_events(event_type=event_type, since=since, limit=limit)
+        scan = scan_events(event_log, event_type=event_type, since=since, limit=limit)
+        coverages.append(scan.coverage)
         series_key = event_type.value
-        for event in events:
+        for event in scan.events:
             buckets[series_key][_bucket_key(event.occurred_at)].count += 1
-    return buckets
+    return buckets, merge_coverage(*coverages)
 
 
 # ---------------------------------------------------------------------------
@@ -554,7 +575,8 @@ def compute_timeseries(
     Returns:
         A :class:`TimeseriesResult` with one :class:`TimeseriesSeries`
         per resolved group key, each holding bucket points sorted by
-        ``bucket_start`` ascending.
+        ``bucket_start`` ascending, plus a :class:`ScanCoverage` saying
+        whether the ``limit`` cap excluded anything (#374).
 
     Raises:
         ValueError: on an unknown ``metric`` / ``group_by`` or a
@@ -564,36 +586,32 @@ def compute_timeseries(
     since = datetime.now(tz=UTC) - timedelta(days=days)
 
     series: list[TimeseriesSeries]
+    scan: ScanCoverage
     if metric == METRIC_PACK_SUCCESS_RATE:
-        series = _ratio_series(
-            _compute_pack_success_rate(
-                event_log, since=since, group_by=group_by, limit=limit
-            )
+        ratio_buckets, scan = _compute_pack_success_rate(
+            event_log, since=since, group_by=group_by, limit=limit
         )
+        series = _ratio_series(ratio_buckets)
     elif metric == METRIC_REFERENCE_RATE:
-        series = _ratio_series(
-            _compute_reference_rate(
-                event_log, since=since, group_by=group_by, limit=limit
-            )
+        ratio_buckets, scan = _compute_reference_rate(
+            event_log, since=since, group_by=group_by, limit=limit
         )
+        series = _ratio_series(ratio_buckets)
     elif metric == METRIC_ADVISORY_FITNESS:
-        series = _mean_count_series(
-            _compute_advisory_fitness(
-                event_log, since=since, group_by=group_by, limit=limit
-            )
+        mean_buckets, scan = _compute_advisory_fitness(
+            event_log, since=since, group_by=group_by, limit=limit
         )
+        series = _mean_count_series(mean_buckets)
     elif metric == METRIC_NOISE_TAG_VOLUME:
-        series = _count_series(
-            _compute_noise_tag_volume(
-                event_log, since=since, group_by=group_by, limit=limit
-            )
+        count_buckets, scan = _compute_noise_tag_volume(
+            event_log, since=since, group_by=group_by, limit=limit
         )
+        series = _count_series(count_buckets)
     else:  # METRIC_PARAMETER_PROMOTIONS
-        series = _count_series(
-            _compute_parameter_promotions(
-                event_log, since=since, group_by=group_by, limit=limit
-            )
+        count_buckets, scan = _compute_parameter_promotions(
+            event_log, since=since, group_by=group_by, limit=limit
         )
+        series = _count_series(count_buckets)
 
     logger.debug(
         "timeseries_computed",
@@ -601,6 +619,7 @@ def compute_timeseries(
         days=days,
         group_by=group_by,
         series=len(series),
+        scan_truncated=scan.truncated,
     )
     return TimeseriesResult(
         metric=metric,
@@ -608,6 +627,7 @@ def compute_timeseries(
         group_by=group_by,
         days=days,
         series=series,
+        scan=scan,
     )
 
 
