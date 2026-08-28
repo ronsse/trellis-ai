@@ -554,7 +554,9 @@ def health(
             )
 
     if output_format == "json":
-        print(json.dumps(report.model_dump()))
+        # ``mode="json"`` because the capture section carries
+        # ``last_sweep_at`` as a datetime, which json.dumps cannot encode.
+        print(json.dumps(report.model_dump(mode="json")))
         return
 
     status_style = "green" if report.status == "ok" else "yellow"
