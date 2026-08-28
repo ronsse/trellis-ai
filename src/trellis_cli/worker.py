@@ -47,6 +47,10 @@ import yaml
 from rich.console import Console
 from rich.markup import escape
 
+from trellis.core.vector_metadata import (
+    resolve_vector_store,
+    sync_vector_metadata,
+)
 from trellis.errors import BackendNotInstalledError
 from trellis.learning import (
     analyze_learning_observations,
@@ -87,6 +91,7 @@ if TYPE_CHECKING:
     from trellis.stores.base.document import DocumentStore
     from trellis.stores.base.event_log import EventLog
     from trellis.stores.base.trace import TraceStore
+    from trellis.stores.base.vector import VectorStore
 
 logger = structlog.get_logger(__name__)
 
@@ -405,6 +410,7 @@ def run_curation_cycle(
     *,
     event_log: EventLog,
     document_store: DocumentStore,
+    vector_store: VectorStore | None,
     advisory_store: AdvisoryStore,
     learning_registry: ParameterRegistry,
     output_dir: Path,
@@ -426,6 +432,16 @@ def run_curation_cycle(
     meta-trace graph attributes findings per stage rather than lumping the
     whole cycle into one Activity.
 
+    ``vector_store`` is **required and keyword-only, but may be ``None``**.
+    It is required precisely because it was once absent: this function is
+    what production's nightly ``curate-nightly`` cron runs, and it demoted
+    document-store-only for the whole life of #338's fix, re-opening the
+    divergence that fix closed on the one path nobody watches (#381). A
+    default of ``None`` would have made that omission look deliberate. A
+    deployment with no vector store still passes ``None`` explicitly, and
+    :func:`~trellis.core.vector_metadata.resolve_vector_store` is the
+    helper that produces one (or ``None``, loudly) from a registry.
+
     ``dry_run`` semantics:
 
     * noise-tag stage — analysis only via the read-only
@@ -442,6 +458,7 @@ def run_curation_cycle(
     noise = _curate_stage_noise_tags(
         event_log,
         document_store,
+        vector_store=vector_store,
         days=days,
         dry_run=dry_run,
         skip=skip_noise_tags,
@@ -486,6 +503,7 @@ def _curate_stage_noise_tags(
     event_log: EventLog,
     document_store: DocumentStore,
     *,
+    vector_store: VectorStore | None,
     days: int,
     dry_run: bool,
     skip: bool,
@@ -495,7 +513,14 @@ def _curate_stage_noise_tags(
     """Stage 1 — effectiveness feedback (demote / noise-tag).
 
     In dry-run the read-only :func:`analyze_effectiveness` is used so the
-    candidate count is still reported without writing noise tags.
+    candidate count is still reported without writing noise tags — and no
+    vector row is touched either, since nothing was written to mirror.
+
+    ``vector_store`` is forwarded so the demotion reaches the *semantic*
+    axis. Without it the write lands in the document store alone and
+    :class:`~trellis.retrieve.strategies.SemanticSearch` keeps serving the
+    item's pre-demotion embed-time snapshot (#338, re-opened on this path
+    by #381).
     """
     if skip:
         skipped.append("noise_tags")
@@ -513,7 +538,12 @@ def _curate_stage_noise_tags(
         if dry_run:
             report = analyze_effectiveness(event_log, days=days)
         else:
-            report = run_effectiveness_feedback(event_log, document_store, days=days)
+            report = run_effectiveness_feedback(
+                event_log,
+                document_store,
+                days=days,
+                vector_store=vector_store,
+            )
         # What the evidence gate admitted, not what the usage-rate rule
         # proposed (#336). The two differ by ~60% on the reference
         # deployment, and reporting the proposal here would put a number
@@ -727,6 +757,7 @@ def _run_curate_loop(
         result = run_curation_cycle(
             event_log=get_event_log(),
             document_store=get_document_store(),
+            vector_store=resolve_vector_store(_get_registry()),
             advisory_store=_advisory_store_from_data_dir(),
             learning_registry=_build_learning_registry_or_exit(),
             output_dir=output_dir,
@@ -841,6 +872,7 @@ def curate_cmd(
     result = run_curation_cycle(
         event_log=get_event_log(),
         document_store=get_document_store(),
+        vector_store=resolve_vector_store(_get_registry()),
         advisory_store=_advisory_store_from_data_dir(),
         learning_registry=_build_learning_registry_or_exit(),
         output_dir=output_dir,
@@ -990,6 +1022,7 @@ def enrich_cmd(
         candidates,
         concurrency=concurrency,
         event_log=get_event_log(),
+        vector_store=resolve_vector_store(_get_registry()),
     )
 
     if output_format == "json":
@@ -1124,10 +1157,23 @@ def _run_batch_enrichment(
     *,
     concurrency: int,
     event_log: EventLog,
+    vector_store: VectorStore | None,
 ) -> int:
     """Enrich candidates and write successful results back via the tag path.
 
-    Returns the number of documents whose tags were updated.
+    Returns the number of documents whose tags were updated **in the
+    document store** — the authoritative count, unchanged by whether a
+    vector row existed to mirror onto.
+
+    ``vector_store`` is required keyword-only (``None`` is allowed) for the
+    same reason it is on :func:`run_curation_cycle`: this is a *post-embed*
+    writer of exactly the two keys
+    :data:`~trellis.core.vector_metadata.SYNCED_METADATA_KEYS` covers, and
+    it selects documents that are already stored and already embedded. A
+    write here that skips the mirror leaves the semantic axis scoring the
+    document on its pre-enrichment ``auto_importance`` and serving its
+    pre-enrichment ``content_tags`` — #338 again, on a second path (found
+    while fixing #381).
     """
     from trellis_workers.enrichment.service import EnrichmentService  # noqa: PLC0415
 
@@ -1146,6 +1192,7 @@ def _run_batch_enrichment(
 
     stamp = datetime.now(UTC)
     enriched = 0
+    vector_rows_synced = 0
     for doc, result in zip(candidates, results, strict=True):
         if not result.success:
             logger.warning(
@@ -1171,7 +1218,18 @@ def _run_batch_enrichment(
             metadata["document_form"] = result.auto_class
         document_store.put(doc["doc_id"], doc["content"], metadata)
         enriched += 1
+        # After the authoritative write, never before — the document row is
+        # what a re-run repairs from, so it has to land first. Fail-soft: a
+        # mirror failure must not lose the tag that was already written.
+        if sync_vector_metadata(vector_store, doc["doc_id"], metadata):
+            vector_rows_synced += 1
         logger.info("worker_enrich.item_enriched", doc_id=doc.get("doc_id"))
+    logger.info(
+        "worker_enrich.batch_written",
+        enriched=enriched,
+        vector_rows_synced=vector_rows_synced,
+        vector_store_supplied=vector_store is not None,
+    )
     return enriched
 
 
