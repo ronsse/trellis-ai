@@ -177,6 +177,24 @@ class EventType(StrEnum):
     #: audit record. See ``docs/design/adr-corpus-ingestion.md`` §4.
     CORPUS_SYNCED = "corpus.synced"
 
+    #: Emitted once per session-capture sweep
+    #: (:func:`trellis_workers.session_capture.run_capture`) with the whole
+    #: session funnel — seen / ephemeral / watermark-skipped / parsed /
+    #: empty / sampled-out / triggered / judge-unavailable, and the count of
+    #: distinct sessions that yielded a memory. Dry runs emit it too, flagged
+    #: ``dry_run=True`` (the :attr:`CORPUS_SYNCED` convention).
+    #:
+    #: It exists because :attr:`CORPUS_SYNCED` cannot see the failure that
+    #: matters: that event is emitted by the write seam and therefore only
+    #: when the sweep wrote something, so a sweep that adjudicated forty
+    #: sessions and produced nothing is indistinguishable from a sweep that
+    #: never ran. That is precisely the #255 shape — capture shipped in July
+    #: and did not write a memory until August while reporting success — and
+    #: the denominator :mod:`trellis.ops.capture_coverage` needs lives
+    #: nowhere else. Unconditional and fail-soft: a sweep that adjudicates
+    #: nothing still says so.
+    CAPTURE_SWEEP_COMPLETED = "capture.sweep_completed"
+
     # Judged memory operation (north star — the memory system generates its
     # own training curriculum; plan-memory-lifecycle.md §0.1).
     #: Emitted once per **judged** memory-lifecycle operation — an
