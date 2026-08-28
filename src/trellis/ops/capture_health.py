@@ -53,7 +53,7 @@ import structlog
 from pydantic import Field
 
 from trellis.core.base import TrellisModel
-from trellis.stores.base.event_log import EventLog, EventType
+from trellis.stores.base.event_log import EventLog, EventType, scan_events
 
 logger = structlog.get_logger(__name__)
 
@@ -65,8 +65,19 @@ DEFAULT_WINDOW_HOURS = 24
 
 #: Cap on the detail fetch once the counts have crossed the threshold —
 #: enough to attribute surfaces and date the outage without pulling an
-#: unbounded window. Ascending order keeps the earliest rejection inside
-#: the cap, so ``since`` stays truthful even when the cap truncates.
+#: unbounded window.
+#:
+#: The fetch is **newest-first** (#374). It used to be ascending, on the
+#: reasoning that keeping the earliest rejection inside the cap keeps
+#: ``since`` truthful. That trade was backwards for this check: the
+#: per-surface counts are computed *from this slice*, so a surface whose
+#: rejections are all newer than the cap boundary contributes zero and
+#: never warns — the banner going silent through a fresh outage while a
+#: noisy older one fills the slice. Under ``desc`` the cost is inverted
+#: and much smaller: a truncated slice can only *understate* how long a
+#: surface has been dark, and :attr:`CaptureHealthWarning.truncated` says
+#: when that is possible. Missing an outage is worse than dating one
+#: conservatively.
 _DETAIL_LIMIT = 500
 
 #: Surfaces named in the rendered banner; the model keeps the full list.
@@ -88,7 +99,8 @@ class CaptureHealthWarning(TrellisModel):
     ordered most-rejected first; each one has ``threshold``-or-more
     rejections and no accepted write in the window. ``rejected`` counts
     only those surfaces' rejections. ``since`` is their earliest rejection
-    — the "dark since when" an operator needs.
+    *within the scanned slice* — the "dark since when" an operator needs,
+    and exact unless :attr:`truncated` is set.
     """
 
     window_hours: int
@@ -98,6 +110,11 @@ class CaptureHealthWarning(TrellisModel):
     accepted: int = 0
     failing_surfaces: list[str] = Field(default_factory=list)
     since: datetime
+    #: The detail fetch hit :data:`_DETAIL_LIMIT`, so ``rejected`` is a
+    #: floor and ``since`` may be later than the true onset. Never affects
+    #: whether the banner fires — the threshold gate is a ``count()`` over
+    #: the whole window and is not capped.
+    truncated: bool = False
 
 
 def _env_int(name: str, default: int) -> int:
@@ -137,17 +154,20 @@ def _surface_label(name: str, payload_key: str) -> str:
 
 def _rejections_by_surface(
     event_log: EventLog, since: datetime
-) -> tuple[dict[str, int], dict[str, datetime]]:
-    """Count rejections per surface and date each surface's earliest."""
+) -> tuple[dict[str, int], dict[str, datetime], bool]:
+    """Count rejections per surface, date each surface's earliest, flag caps."""
     counts: dict[str, int] = {}
     earliest: dict[str, datetime] = {}
+    truncated = False
     for event_type, payload_key in (
         (EventType.WRITE_REJECTED, "tool"),
         (EventType.MUTATION_REJECTED, "requested_by"),
     ):
-        for event in event_log.get_events(
-            event_type=event_type, since=since, limit=_DETAIL_LIMIT, order="asc"
-        ):
+        scan = scan_events(
+            event_log, event_type=event_type, since=since, limit=_DETAIL_LIMIT
+        )
+        truncated = truncated or scan.coverage.truncated
+        for event in scan.events:
             if str(event.payload.get("reason") or "") == _REPLAY_REASON:
                 continue
             name = str(event.payload.get(payload_key) or "") or _UNKNOWN_SURFACE
@@ -156,7 +176,7 @@ def _rejections_by_surface(
             occurred = _as_utc(event.occurred_at)
             if label not in earliest or occurred < earliest[label]:
                 earliest[label] = occurred
-    return counts, earliest
+    return counts, earliest, truncated
 
 
 def _surface_has_accepts(event_log: EventLog, label: str, since: datetime) -> bool:
@@ -198,6 +218,11 @@ def check_capture_health(
     rejections bound every per-surface count, so falling short of the
     threshold rules out every surface at once and no event rows are
     fetched. This runs on every retrieval call.
+
+    Because that gate is a ``count()`` over the whole window rather than a
+    capped read, the detail fetch's cap can never *silence* the banner —
+    only understate how many rejections a surface has and how long it has
+    been dark, which :attr:`CaptureHealthWarning.truncated` discloses.
     """
     resolved_threshold = (
         threshold
@@ -219,7 +244,7 @@ def check_capture_health(
     if total_rejected < resolved_threshold:
         return None
 
-    counts, earliest = _rejections_by_surface(event_log, since)
+    counts, earliest, truncated = _rejections_by_surface(event_log, since)
     failing = [
         (label, count)
         for label, count in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
@@ -234,6 +259,7 @@ def check_capture_health(
         rejected=sum(count for _, count in failing),
         failing_surfaces=[label for label, _ in failing],
         since=min(earliest[label] for label, _ in failing),
+        truncated=truncated,
     )
 
 
@@ -255,10 +281,14 @@ def format_capture_warning(warning: CaptureHealthWarning) -> str:
     if overflow > 0:
         named += f" (+{overflow} more)"
     since = _as_utc(warning.since).strftime("%Y-%m-%d %H:%M UTC")
+    at_least = "at least " if warning.truncated else ""
+    since_clause = (
+        f"since at or before {since}" if warning.truncated else f"since {since}"
+    )
     return (
         "> **WARNING: memory capture is failing.** "
-        f"{warning.rejected} write attempt(s) rejected and 0 accepted in the "
-        f"last {warning.window_hours}h from: {named} (since {since}). "
+        f"{at_least}{warning.rejected} write attempt(s) rejected and 0 accepted "
+        f"in the last {warning.window_hours}h from: {named} ({since_clause}). "
         "New experience from this session is NOT being saved. "
         "Diagnose with `trellis analyze health`."
     )

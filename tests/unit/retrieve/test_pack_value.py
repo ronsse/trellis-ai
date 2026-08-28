@@ -43,6 +43,8 @@ class _FakeEventLog(EventLog):
         since: datetime | None = None,
         until: datetime | None = None,
         limit: int = 100,
+        order: str = "asc",
+        payload_filters: dict[str, str] | None = None,
     ) -> list[Event]:
         result = self.events
         if event_type is not None:
@@ -51,6 +53,12 @@ class _FakeEventLog(EventLog):
             result = [e for e in result if e.entity_id == entity_id]
         if since is not None:
             result = [e for e in result if e.occurred_at >= since]
+        if until is not None:
+            result = [e for e in result if e.occurred_at <= until]
+        # Honouring ``order`` is what makes the truncation direction
+        # testable at all: a fake that ignores it cannot fail when the
+        # analyzers go back to silently dropping the newest rows (#374).
+        result = sorted(result, key=lambda e: e.occurred_at, reverse=order == "desc")
         return result[:limit]
 
     def count(

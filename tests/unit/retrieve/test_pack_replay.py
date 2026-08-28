@@ -45,10 +45,13 @@ class _FakeEventLog(EventLog):
         since: datetime | None = None,
         until: datetime | None = None,
         limit: int = 100,
+        order: str = "asc",
+        payload_filters: dict[str, str] | None = None,
     ) -> list[Event]:
         result = self.events
         if event_type is not None:
             result = [e for e in result if e.event_type == event_type]
+        result = sorted(result, key=lambda e: e.occurred_at, reverse=order == "desc")
         return result[:limit]
 
     def emit(self, *args: Any, **kwargs: Any) -> Event:  # pragma: no cover
