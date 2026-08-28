@@ -1,16 +1,25 @@
-"""EventLog — abstract interface, Event model, and EventType enum."""
+"""EventLog — abstract interface, Event model, and EventType enum.
+
+Also home to :func:`scan_events`, the capped-read helper every analyzer
+should use instead of calling :meth:`EventLog.get_events` with a bare
+``limit``. See its docstring for why (#374).
+"""
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Literal
 
+import structlog
 from pydantic import Field
 
-from trellis.core.base import VersionedModel, utc_now
+from trellis.core.base import TrellisModel, VersionedModel, utc_now
 from trellis.core.ids import generate_ulid
+
+logger = structlog.get_logger(__name__)
 
 #: Sort order for ``EventLog.get_events``. ``"asc"`` returns the oldest
 #: events first (chronological), ``"desc"`` returns the most recent
@@ -523,3 +532,234 @@ class EventLog(ABC):
         )
         self.append(event)
         return event
+
+
+# ---------------------------------------------------------------------------
+# Capped reads — scan_events (#374)
+# ---------------------------------------------------------------------------
+
+#: Cap every analyzer applies to a single ``get_events`` read. Kept here
+#: rather than re-declared per module so the three analyzers that share
+#: it cannot drift, and so a reader of a truncated report can look up one
+#: number.
+DEFAULT_SCAN_LIMIT = 5000
+
+
+class ScanCoverage(TrellisModel):
+    """What a capped :func:`scan_events` read did — and did not — cover.
+
+    A report that hit its cap has to say so. Before #374 the three health
+    and value analyzers each passed ``limit=5000`` and took the default
+    ``order="asc"``, so a window with more matches than the cap silently
+    returned **the oldest** rows: the newest events — a write outage that
+    started this morning — fell outside the answer, and nothing in the
+    output distinguished that from a healthy window. Both failure modes
+    point at "looks healthy", which is the expensive direction.
+
+    Two things fix it, and both live in :func:`scan_events`: the read is
+    issued newest-first so truncation drops the *oldest* rows, and the
+    fact that it truncated travels with the numbers in this model.
+
+    ``matched`` and ``dropped`` are ``None`` when the true total could not
+    be established (the backend's ``count`` raised, or the scan carried an
+    ``until`` bound ``count`` cannot express). ``None`` there means
+    *unknown*, never zero — the same distinction ``useful_token_fraction``
+    makes between a refused ratio and a measured one.
+    """
+
+    #: The cap that was applied to each underlying read.
+    limit: int = 0
+    #: Events actually returned and aggregated.
+    scanned: int = 0
+    #: Events matching the filters in the window, when knowable.
+    matched: int | None = None
+    #: ``matched - scanned``: events the cap excluded. ``None`` when
+    #: ``matched`` is unknown.
+    dropped: int | None = None
+    #: True when at least one read came back full, i.e. the window holds
+    #: at least ``limit`` matching events and the cap may have bitten.
+    truncated: bool = False
+    #: Which event types were capped, sorted. Empty when nothing was.
+    truncated_event_types: list[str] = Field(default_factory=list)
+    #: ISO-8601 UTC timestamp of the oldest event this scan could see, set
+    #: only when truncated. **This, not the requested window, is where the
+    #: report's evidence actually begins.** A string rather than a
+    #: ``datetime`` so ``model_dump()`` stays JSON-encodable for every
+    #: report that embeds it.
+    covered_since: str = ""
+    #: Human-readable rendering of the above, empty when not truncated.
+    note: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class EventScan:
+    """One capped read: the events, in chronological order, plus coverage.
+
+    ``events`` is ascending by ``occurred_at`` — the order aggregators
+    already consume — even though the underlying read is issued
+    descending. The reversal is what lets the cap drop the oldest rows
+    without asking any caller to revisit whether its aggregation assumes
+    chronological arrival.
+    """
+
+    events: list[Event]
+    coverage: ScanCoverage
+
+
+def _as_utc(moment: datetime) -> datetime:
+    """Normalise a stored timestamp to aware UTC.
+
+    Backends differ: SQLite round-trips the UTC ISO string it was given
+    (naive), Postgres hands back a ``timestamptz``. Comparing the two
+    without normalising raises on the naive/aware mix.
+    """
+    if moment.tzinfo is None:
+        return moment.replace(tzinfo=UTC)
+    return moment.astimezone(UTC)
+
+
+def scan_events(
+    event_log: EventLog,
+    *,
+    event_type: EventType | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    limit: int = DEFAULT_SCAN_LIMIT,
+) -> EventScan:
+    """Read a capped window newest-first, and report whether the cap bit.
+
+    Use this instead of ``event_log.get_events(..., limit=N)`` anywhere the
+    result is aggregated into a reported number.
+
+    Two guarantees, in the order they matter:
+
+    1. **The newest events survive the cap.** The read is issued
+       ``order="desc"`` and the result reversed, so a window holding more
+       than ``limit`` matches yields the most recent ``limit`` of them, in
+       ascending order. Reversing rather than propagating descending order
+       is deliberate: it keeps the *arrival* order every existing
+       aggregation was written against, so the change is confined to
+       *which* events are dropped.
+    2. **Truncation is stated, never silent.** ``coverage.truncated`` is
+       set when the read came back full, and ``coverage.covered_since``
+       names the oldest event the caller could see — the real start of its
+       evidence, as opposed to the window it asked for.
+
+    ``matched`` is resolved with :meth:`EventLog.count`, which accepts only
+    ``event_type`` and ``since``; a scan bounded by ``until`` therefore
+    reports ``matched=None`` rather than a count over a wider window. A
+    ``count`` that raises degrades the same way — telemetry about a read
+    must never turn that read into a failure.
+
+    A non-positive ``limit`` is passed through untouched and never
+    reported as truncated; backends treat it as their own no-op.
+    """
+    events = event_log.get_events(
+        event_type=event_type,
+        since=since,
+        until=until,
+        limit=limit,
+        order="desc",
+    )
+    truncated = limit > 0 and len(events) >= limit
+    scanned = len(events)
+    matched: int | None = scanned
+    covered_since = ""
+
+    if truncated:
+        matched = None
+        if until is None:
+            try:
+                matched = event_log.count(event_type=event_type, since=since)
+            except Exception:
+                # GRACEFUL-DEGRADATION: an unknown total is reported as
+                # unknown. Guessing one would be the silent-truncation
+                # failure wearing a number.
+                logger.warning(
+                    "scan_events.count_failed",
+                    event_type=str(event_type) if event_type else None,
+                    exc_info=True,
+                )
+        oldest = min((_as_utc(event.occurred_at) for event in events), default=None)
+        if oldest is not None:
+            covered_since = oldest.isoformat()
+
+    # Restore chronological consumption order (see guarantee 1).
+    events.reverse()
+
+    type_label = event_type.value if event_type is not None else "(any)"
+    coverage = ScanCoverage(
+        limit=limit,
+        scanned=scanned,
+        matched=matched,
+        dropped=None if matched is None else max(matched - scanned, 0),
+        truncated=truncated,
+        truncated_event_types=[type_label] if truncated else [],
+        covered_since=covered_since,
+        note=_scan_note(type_label, limit, scanned, matched, covered_since)
+        if truncated
+        else "",
+    )
+    return EventScan(events=events, coverage=coverage)
+
+
+def _scan_note(
+    type_label: str,
+    limit: int,
+    scanned: int,
+    matched: int | None,
+    covered_since: str,
+) -> str:
+    total = f"{matched:,}" if matched is not None else "an unknown number of"
+    tail = (
+        f" This report's evidence begins at {covered_since}, not at the "
+        "start of the requested window."
+        if covered_since
+        else ""
+    )
+    return (
+        f"TRUNCATED: the {limit:,}-event cap was reached scanning "
+        f"{type_label} ({scanned:,} of {total} matching events read). "
+        f"The newest events were kept and the oldest dropped.{tail}"
+    )
+
+
+def merge_coverage(*coverages: ScanCoverage) -> ScanCoverage:
+    """Combine the per-read coverages of one report into a single verdict.
+
+    A report is truncated if any of its reads was. ``covered_since`` takes
+    the **latest** of the truncated reads' starts, because the narrowest
+    slice bounds what the whole report can claim — reporting the earliest
+    would overstate coverage, which is the failure this model exists to
+    prevent. ``matched`` is ``None`` as soon as any contributing read
+    could not establish its own total.
+    """
+    present = [c for c in coverages if c is not None]
+    if not present:
+        return ScanCoverage()
+
+    truncated = [c for c in present if c.truncated]
+    scanned = sum(c.scanned for c in present)
+    matched: int | None = None
+    if all(c.matched is not None for c in present):
+        matched = sum(c.matched or 0 for c in present)
+
+    types = sorted({t for c in truncated for t in c.truncated_event_types})
+    starts = sorted(c.covered_since for c in truncated if c.covered_since)
+    covered_since = starts[-1] if starts else ""
+    limit = max((c.limit for c in present), default=0)
+
+    note = ""
+    if truncated:
+        note = " ".join(c.note for c in truncated if c.note)
+
+    return ScanCoverage(
+        limit=limit,
+        scanned=scanned,
+        matched=matched,
+        dropped=None if matched is None else max(matched - scanned, 0),
+        truncated=bool(truncated),
+        truncated_event_types=types,
+        covered_since=covered_since,
+        note=note,
+    )

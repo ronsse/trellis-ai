@@ -15,6 +15,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from trellis.ops import capture_health
 from trellis.ops.capture_health import (
     DEFAULT_THRESHOLD,
     DEFAULT_WINDOW_HOURS,
@@ -237,15 +238,55 @@ class TestCheckCaptureHealth:
         assert check_capture_health(event_log) is None
         event_log.get_events.assert_not_called()
 
-    def test_detail_fetch_reads_oldest_first(self, tmp_path: Path) -> None:
-        """``since`` stays truthful under the detail cap only because the
-        fetch is ascending — pin the order the call depends on."""
+    def test_detail_fetch_reads_newest_first(self, tmp_path: Path) -> None:
+        """The detail cap must drop the OLDEST rejections, not the newest.
+
+        Reversed from the pre-#374 behaviour deliberately. The per-surface
+        counts are computed from this slice, so an ascending fetch that
+        truncates cannot see a surface whose rejections are all recent —
+        i.e. the banner goes silent through a *fresh* outage, which is the
+        one thing it exists to catch.
+        """
         event_log = MagicMock(spec=EventLog)
         event_log.count.return_value = DEFAULT_THRESHOLD
         event_log.get_events.return_value = []
         check_capture_health(event_log)
         orders = {call.kwargs.get("order") for call in event_log.get_events.mock_calls}
-        assert orders == {"asc"}
+        assert orders == {"desc"}
+
+    def test_truncated_detail_still_sees_a_fresh_outage(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The regression #374 describes, end to end.
+
+        A noisy older surface fills the detail slice; a different surface
+        goes dark just now. Under the old ascending fetch the new one was
+        invisible and the banner named only the stale problem.
+        """
+        monkeypatch.setattr(capture_health, "_DETAIL_LIMIT", 4)
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        _reject_boundary(event_log, tool="old_and_noisy", n=4)
+        _reject_boundary(event_log, tool="just_went_dark", n=DEFAULT_THRESHOLD)
+
+        warning = check_capture_health(event_log)
+        assert warning is not None
+        assert "mcp:just_went_dark" in warning.failing_surfaces
+        # And the report admits the slice was capped, so `rejected` and
+        # `since` are read as bounds rather than as exact.
+        assert warning.truncated is True
+        assert "at least" in format_capture_warning(warning)
+
+    def test_untruncated_warning_states_exact_counts(self, tmp_path: Path) -> None:
+        """The truncation disclosure must be able to read False — otherwise
+        it is a constant that always hedges."""
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        _reject_boundary(event_log, n=DEFAULT_THRESHOLD)
+        warning = check_capture_health(event_log)
+        assert warning is not None
+        assert warning.truncated is False
+        rendered = format_capture_warning(warning)
+        assert "at least" not in rendered
+        assert "since at or before" not in rendered
 
 
 class TestFormatCaptureWarning:

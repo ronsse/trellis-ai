@@ -28,10 +28,10 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
-from trellis.stores.base.event_log import EventType
+from trellis.stores.base.event_log import EventType, merge_coverage, scan_events
 
 if TYPE_CHECKING:
-    from trellis.stores.base.event_log import Event, EventLog
+    from trellis.stores.base.event_log import Event, EventLog, ScanCoverage
 
 logger = structlog.get_logger(__name__)
 
@@ -116,18 +116,46 @@ def join_pack_feedback(
     the window — distinct from ``len(pack_payloads)``, which dedups by
     ``entity_id`` and drops falsy ids. Returned so callers needing the
     raw count (e.g. effectiveness ``total_packs``) don't re-scan.
+
+    Both reads go through :func:`~trellis.stores.base.event_log.scan_events`,
+    so a window with more than ``limit`` events of either type keeps the
+    **newest** ones rather than the oldest (#374). Callers that want to
+    know whether that happened should use
+    :func:`join_pack_feedback_with_coverage`, which returns the same
+    values plus the merged :class:`ScanCoverage`.
     """
-    pack_events = event_log.get_events(
-        event_type=EventType.PACK_ASSEMBLED, since=since, limit=limit
+    feedback_events, pack_payloads, pack_event_count, _ = (
+        join_pack_feedback_with_coverage(event_log, since=since, limit=limit)
     )
-    feedback_events = event_log.get_events(
-        event_type=EventType.FEEDBACK_RECORDED, since=since, limit=limit
+    return feedback_events, pack_payloads, pack_event_count
+
+
+def join_pack_feedback_with_coverage(
+    event_log: EventLog, *, since: datetime, limit: int
+) -> tuple[list[Event], dict[str, dict[str, Any]], int, ScanCoverage]:
+    """:func:`join_pack_feedback` plus the coverage of the two reads.
+
+    Split from the three-tuple rather than widening it because six call
+    sites across four modules consume that shape, and a truncation
+    disclosure is worth exactly nothing if adding it breaks the analyzers
+    that would carry it.
+    """
+    pack_scan = scan_events(
+        event_log, event_type=EventType.PACK_ASSEMBLED, since=since, limit=limit
+    )
+    feedback_scan = scan_events(
+        event_log, event_type=EventType.FEEDBACK_RECORDED, since=since, limit=limit
     )
     pack_payloads: dict[str, dict[str, Any]] = {}
-    for event in pack_events:
+    for event in pack_scan.events:
         if event.entity_id:
             pack_payloads[event.entity_id] = event.payload or {}
-    return feedback_events, pack_payloads, len(pack_events)
+    return (
+        feedback_scan.events,
+        pack_payloads,
+        len(pack_scan.events),
+        merge_coverage(pack_scan.coverage, feedback_scan.coverage),
+    )
 
 
 def _join_one(

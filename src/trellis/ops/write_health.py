@@ -49,7 +49,14 @@ from trellis.ops.capture_coverage import (
 )
 from trellis.schemas.enums import TraceSource
 from trellis.schemas.trace import Outcome, Trace, TraceContext
-from trellis.stores.base.event_log import EventLog, EventType
+from trellis.stores.base.event_log import (
+    DEFAULT_SCAN_LIMIT,
+    EventLog,
+    EventType,
+    ScanCoverage,
+    merge_coverage,
+    scan_events,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -85,7 +92,13 @@ _PYDANTIC_KIND_PREFIXES: tuple[tuple[str, str], ...] = (
 )
 
 _MAX_MSG = 240
-_DEFAULT_EVENT_LIMIT = 5000
+#: Per-event-type read cap. Every read goes through
+#: :func:`~trellis.stores.base.event_log.scan_events`, so a window with
+#: more matches keeps the **newest** ones and the report says it capped
+#: (#374). The direction matters most here: this is the surface that is
+#: supposed to notice a write outage that started this morning, and under
+#: the old ascending default those rejections were the first rows dropped.
+_DEFAULT_EVENT_LIMIT = DEFAULT_SCAN_LIMIT
 
 #: Attempts below this leave rates statistically meaningless — a single
 #: rejection out of two attempts is not a 50%-bad system.
@@ -95,6 +108,11 @@ _REJECTION_RATE_WARN = 0.10
 #: Warn when one (kind, loc) pair recurs this often — the signature of a
 #: schema/docs collision rather than a one-off agent mistake.
 _REPEAT_COLLISION_WARN = 3
+#: Marker every ``ScanCoverage.note`` opens with. Matched rather than
+#: re-derived so the composed report can recognise — and supersede — the
+#: write section's own truncation line.
+_TRUNCATION_PREFIX = "TRUNCATED:"
+
 #: Warn when fewer than this fraction of packs carry ``injected_items[]``
 #: — below it, the learning join is starved regardless of feedback volume.
 _ATTRIBUTION_COVERAGE_WARN = 0.5
@@ -281,6 +299,10 @@ class WriteHealthReport(TrellisModel):
     boundary_kinds: dict[str, int] = Field(default_factory=dict)
     executor_reasons: dict[str, int] = Field(default_factory=dict)
     repeated_collisions: list[dict[str, Any]] = Field(default_factory=list)
+    #: Whether the EventLog reads behind these counts hit their cap, and
+    #: what that excluded. A capped write-health report is a report whose
+    #: window is shorter than ``window_days`` claims (#374).
+    scan: ScanCoverage = Field(default_factory=ScanCoverage)
     status: str = "ok"
     reasons: list[str] = Field(default_factory=list)
 
@@ -346,6 +368,8 @@ class ServeAttributionReport(TrellisModel):
     #: more than a caveat in a docstring, but one that prints unconditionally
     #: is noise that gets skipped.
     retrieval_availability_note: str = ""
+    #: Coverage of the PACK_ASSEMBLED / FEEDBACK_RECORDED reads (#374).
+    scan: ScanCoverage = Field(default_factory=ScanCoverage)
 
 
 class BackendHealthReport(TrellisModel):
@@ -361,6 +385,12 @@ class BackendHealthReport(TrellisModel):
     #: absent capture section and one reporting ``state="unobserved"`` say
     #: different things, and only the second is a measurement.
     capture: CaptureCoverageReport
+    #: The merged coverage of every EventLog read behind this report. When
+    #: ``truncated`` is set, ``status`` is ``warn`` and ``reasons`` names
+    #: it: a health verdict computed over a silently shortened window is
+    #: the failure mode #374 exists to end, so it must never present as a
+    #: clean ``ok``.
+    scan: ScanCoverage = Field(default_factory=ScanCoverage)
     status: str = "ok"
     reasons: list[str] = Field(default_factory=list)
 
@@ -391,26 +421,27 @@ def summarize_write_health(
     def stats(key: str) -> ToolWriteStats:
         return by_tool.setdefault(key or "(unknown)", ToolWriteStats())
 
-    accepted_events = event_log.get_events(
-        event_type=EventType.MUTATION_EXECUTED, since=since, limit=limit
+    accepted_scan = scan_events(
+        event_log, event_type=EventType.MUTATION_EXECUTED, since=since, limit=limit
     )
-    for event in accepted_events:
+    for event in accepted_scan.events:
         stats(str(event.payload.get("requested_by") or "")).accepted += 1
 
     executor_reasons: dict[str, int] = {}
-    for event in event_log.get_events(
-        event_type=EventType.MUTATION_REJECTED, since=since, limit=limit
-    ):
+    rejected_scan = scan_events(
+        event_log, event_type=EventType.MUTATION_REJECTED, since=since, limit=limit
+    )
+    for event in rejected_scan.events:
         stats(str(event.payload.get("requested_by") or "")).executor_rejected += 1
         reason = str(event.payload.get("reason") or "failed")
         executor_reasons[reason] = executor_reasons.get(reason, 0) + 1
 
     boundary_kinds: dict[str, int] = {}
     collision_counts: dict[tuple[str, str], int] = {}
-    boundary_events = event_log.get_events(
-        event_type=EventType.WRITE_REJECTED, since=since, limit=limit
+    boundary_scan = scan_events(
+        event_log, event_type=EventType.WRITE_REJECTED, since=since, limit=limit
     )
-    for event in boundary_events:
+    for event in boundary_scan.events:
         tool = str(event.payload.get("tool") or "")
         stats(
             f"mcp:{tool}" if tool and ":" not in tool else tool
@@ -436,7 +467,16 @@ def summarize_write_health(
         if count >= _REPEAT_COLLISION_WARN
     ]
 
+    scan = merge_coverage(
+        accepted_scan.coverage, rejected_scan.coverage, boundary_scan.coverage
+    )
+
     reasons: list[str] = []
+    if scan.truncated:
+        # First reason, deliberately: every count below it was computed
+        # over a shorter window than ``window_days`` names, so a reader
+        # who stops at the first line still learns the right thing.
+        reasons.append(scan.note)
     if attempts >= _MIN_ATTEMPTS_FOR_RATE and rate > _REJECTION_RATE_WARN:
         reasons.append(
             f"rejection rate {rate:.0%} over {attempts} attempts "
@@ -466,6 +506,7 @@ def summarize_write_health(
         boundary_kinds=boundary_kinds,
         executor_reasons=executor_reasons,
         repeated_collisions=repeated,
+        scan=scan,
         status="warn" if reasons else "ok",
         reasons=reasons,
     )
@@ -481,18 +522,20 @@ def summarize_serve_attribution(
     since = datetime.now(tz=UTC) - timedelta(days=days)
 
     packs = packs_with_items = 0
-    for event in event_log.get_events(
-        event_type=EventType.PACK_ASSEMBLED, since=since, limit=limit
-    ):
+    pack_scan = scan_events(
+        event_log, event_type=EventType.PACK_ASSEMBLED, since=since, limit=limit
+    )
+    for event in pack_scan.events:
         packs += 1
         if event.payload.get("injected_items"):
             packs_with_items += 1
 
     feedback = attributed = 0
     pack_targeted = pack_targeted_attributed = 0
-    for event in event_log.get_events(
-        event_type=EventType.FEEDBACK_RECORDED, since=since, limit=limit
-    ):
+    feedback_scan = scan_events(
+        event_log, event_type=EventType.FEEDBACK_RECORDED, since=since, limit=limit
+    )
+    for event in feedback_scan.events:
         feedback += 1
         # Both predicates come from ``trellis.feedback.attribution`` so the
         # health surface and the MCP boundary cannot drift on what
@@ -521,6 +564,7 @@ def summarize_serve_attribution(
         retrieval_availability_note=(
             RETRIEVAL_AVAILABILITY_ASSUMPTION if feedback - pack_targeted else ""
         ),
+        scan=merge_coverage(pack_scan.coverage, feedback_scan.coverage),
     )
 
 
@@ -535,7 +579,15 @@ def summarize_backend_health(
     serve = summarize_serve_attribution(event_log, days=days, limit=limit)
     capture = summarize_capture_coverage(event_log, days=days, limit=limit)
 
-    reasons = list(write.reasons)
+    scan = merge_coverage(write.scan, serve.scan, capture.scan)
+
+    # The write section states its own truncation so it reads correctly
+    # standalone; here that is superseded by the merged note, which covers
+    # the serve and capture reads too. Dropping the narrower line keeps one
+    # truncation statement per report instead of two overlapping ones.
+    reasons = [r for r in write.reasons if not r.startswith(_TRUNCATION_PREFIX)]
+    if scan.truncated and scan.note:
+        reasons.insert(0, scan.note)
     if serve.packs > 0 and serve.injected_coverage < _ATTRIBUTION_COVERAGE_WARN:
         reasons.append(
             f"only {serve.packs_with_injected_items}/{serve.packs} packs "
@@ -590,6 +642,7 @@ def summarize_backend_health(
         write=write,
         serve=serve,
         capture=capture,
+        scan=scan,
         status="warn" if reasons else "ok",
         reasons=reasons,
     )

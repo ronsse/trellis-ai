@@ -608,6 +608,10 @@ def health(
         f"[bold]Backend Health[/bold] (last {days} days) "
         f"[{status_style}]{report.status.upper()}[/{status_style}]"
     )
+    if report.scan.truncated:
+        # #374. Printed before any number, because every count below was
+        # computed over a shorter window than the header just claimed.
+        console.print(f"  [yellow]window[/yellow] {report.scan.note}")
     write = report.write
     console.print(
         f"  Writes: {write.accepted} accepted, "
@@ -669,6 +673,36 @@ def health(
         console.print("[dim]  No write or serve activity in window.[/dim]")
 
 
+def _print_value_bounds(report: Any, *, lower: float) -> None:
+    """Print the interval and the conditional beside the headline (#364).
+
+    The headline alone is a point estimate over the 58% of injected tokens
+    that got a verdict. The interval says how much of it is guesswork; the
+    conditional says what the graded tokens looked like, labelled so it
+    cannot be mistaken for a corrected headline.
+    """
+    upper = report.useful_token_fraction_upper_bound
+    if upper is not None:
+        console.print(
+            f"    [bold]true share lies in [{lower:.1%}, {upper:.1%}][/bold] "
+            "[dim](every ungraded token counted as useless .. as useful; "
+            "the width IS the unjudged share)[/dim]"
+        )
+    if report.useful_token_fraction_judged is not None:
+        console.print(
+            f"    conditional on being graded: "
+            f"{report.useful_token_fraction_judged:.1%} of "
+            f"{report.judged_tokens:,} judged tokens "
+            f"[dim]({report.judged_token_coverage or 0.0:.0%} of injected; "
+            "NOT a corrected headline — the ungraded tokens are not "
+            "missing at random)[/dim]"
+        )
+    elif report.judged_suppressed_reason:
+        console.print(
+            f"    [dim]conditional refused: {report.judged_suppressed_reason}[/dim]"
+        )
+
+
 def _print_value_axis(title: str, cells: list[Any], *, minimum: int) -> None:
     """Render one value-density axis, showing every cell's ``n``.
 
@@ -683,11 +717,25 @@ def _print_value_axis(title: str, cells: list[Any], *, minimum: int) -> None:
     table.add_column("injected tok", justify="right")
     table.add_column("helpful tok", justify="right")
     table.add_column("fraction", justify="right")
+    # #364: judgement coverage is not uniform across axes, so a cell's
+    # fraction cannot be read without knowing how much of it was graded.
+    table.add_column("no verdict", justify="right")
+    table.add_column("of graded", justify="right")
     for cell in cells:
         rendered = (
             f"[dim]refused (n<{minimum})[/dim]"
             if cell.suppressed
             else f"{cell.useful_token_fraction or 0.0:.1%}"
+        )
+        unjudged = (
+            "[dim]—[/dim]"
+            if cell.unjudged_token_fraction is None
+            else f"{cell.unjudged_token_fraction:.0%}"
+        )
+        conditional = (
+            "[dim]—[/dim]"
+            if cell.useful_token_fraction_judged is None
+            else f"{cell.useful_token_fraction_judged:.1%}"
         )
         table.add_row(
             cell.key,
@@ -695,6 +743,8 @@ def _print_value_axis(title: str, cells: list[Any], *, minimum: int) -> None:
             f"{cell.injected_tokens:,}",
             f"{cell.helpful_tokens:,}",
             rendered,
+            unjudged,
+            conditional,
         )
     console.print(table)
 
@@ -906,6 +956,8 @@ def value(
         return
 
     console.print(f"[bold]Served-Context Value Density[/bold] (last {days} days)")
+    if report.scan.truncated:
+        console.print(f"  [yellow]window[/yellow] {report.scan.note}")
     console.print(
         f"  Coverage: {report.attributed_packs} attributed pack(s) "
         f"[dim](n for every ratio below; minimum "
@@ -946,6 +998,7 @@ def value(
             f"    cited unhelpful: {report.unhelpful_token_fraction or 0.0:.1%}"
             f"   no verdict: {report.unjudged_token_fraction or 0.0:.1%}"
         )
+        _print_value_bounds(report, lower=frac)
         if report.dollars_per_cited_item is not None:
             console.print(
                 f"  [bold]${report.dollars_per_cited_item:,.5f} per cited "
