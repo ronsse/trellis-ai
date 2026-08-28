@@ -276,6 +276,36 @@ Health signals in the JSON `CaptureReport`:
   zero exit.
 - `sessions_skipped_watermark` should dominate on steady-state runs (only new
   work is processed).
+- `sessions_skipped_empty` > 0 → transcripts parsed to **zero
+  natural-language turns**. This is a *reader* outcome, not a sampling
+  decision, and it has its own counter for that reason: #332 emptied 61% of
+  the corpus and, folded into `sessions_sampled_out` as it then was, looked
+  like a knob setting. A jump here means the transcript parser stopped
+  understanding a transcript shape.
+
+## Coverage over time
+
+One sweep's report is a snapshot; the question "what fraction of sessions
+produce a memory" is a question about a *window*, and until E2 nothing
+persisted the funnel to answer it. Every sweep now emits its whole report as
+one `CAPTURE_SWEEP_COMPLETED` event — unconditionally, dry runs included and
+flagged, and fail-soft — so:
+
+```bash
+trellis analyze health --days 30 --format json | jq .capture
+```
+
+reports `capture_rate = sessions_with_memory / sessions_triggered` with its
+`n`, or `capture_rate: null` plus a `state` of `unobserved` / `stale` /
+`degraded` when the log cannot support a rate. **A missing number is not a
+zero**: "capture was never deployed here", "capture stopped three weeks ago"
+and "capture runs nightly and keeps nothing" are three different problems, and
+only the third is a defect in the pipeline. See
+[`capture_coverage.py`](../../src/trellis/ops/capture_coverage.py).
+
+`CORPUS_SYNCED` does not answer this and cannot: it is emitted by the write
+seam, so a sweep that judged forty sessions and kept none emits nothing and is
+indistinguishable from a sweep that never ran.
 
 ## Rollback
 
