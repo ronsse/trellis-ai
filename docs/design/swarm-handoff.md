@@ -8,45 +8,58 @@
 > [`implementation-roadmap.md`](./implementation-roadmap.md) (**authoritative** — when it
 > and the backlog disagree, the roadmap wins).
 >
-> Last updated 2026-08-27 at `738cb74`.
+> Last updated 2026-08-28 at `99f63da`.
 
 ## 1. State
 
-`main` = `738cb74`. **The prod containers on skynet do _not_ run current `main`** — §1.2.
-That sentence used to read the other way round in this file; it stopped being true and
-nothing noticed, which is the failure shape §8 is about.
+`main` = `99f63da`. **The prod containers on skynet do _not_ run current `main`** — §1.2.
 
-Landed 2026-08-26: doc reconciliation + backlog (#340), token-economics wave (#341),
-DoD-3 reframe (#304), **noise exclusion actually holding** (#343), dependabot ruff
-0.16.4/mypy (#328), **attribution decomposed + join key restored** (#344), Wave 1
-bookkeeping (#346).
+Landed 2026-08-26: #340, #341, #304, **noise exclusion actually holding** (#343), #328,
+**attribution decomposed + join key restored** (#344), #346.
 
-Landed 2026-08-27 — ten PRs, closing Waves 1 and 1b entirely:
+Landed 2026-08-27 — ten PRs closing Waves 1 and 1b: #347, **#352 (the first outside
+contribution)**, **#353 (F1 — value density measured)**, #354, #355,
+**#357 (A1 — traces reachable by semantic search at all)**,
+**#358 (#345 — the pgvector contract suite actually executes)**,
+**#359 (F2 — graduated disclosure)**, #361.
 
-| PR | What |
-|---|---|
-| [#347](https://github.com/ronsse/trellis-ai/pull/347) | this handoff + the decision ledger |
-| [#352](https://github.com/ronsse/trellis-ai/pull/352) | `save_experience` schema docs — **the first outside contribution to this repo** |
-| [#353](https://github.com/ronsse/trellis-ai/pull/353) | **F1** — value density measured; response cost made attributable to packs |
-| [#354](https://github.com/ronsse/trellis-ai/pull/354) | swarm state + the traps that wave taught |
-| [#355](https://github.com/ronsse/trellis-ai/pull/355) | one unknown key discards the whole trace — said plainly, pinned by test |
-| [#357](https://github.com/ronsse/trellis-ai/pull/357) | **A1** — traces reachable by semantic search at all |
-| [#358](https://github.com/ronsse/trellis-ai/pull/358) | **#345** — the pgvector contract suite actually executes, and is wired into CI |
-| [#359](https://github.com/ronsse/trellis-ai/pull/359) | **F2** — graduated disclosure, justified by counterfactual replay |
-| [#361](https://github.com/ronsse/trellis-ai/pull/361) | T-3 governance decision; the roadmap stops restating CI coverage |
+Landed 2026-08-28 — six PRs, and **four of the six refuted the premise they were sent to
+implement**:
+
+| PR | Item | Outcome |
+|---|---|---|
+| [#367](https://github.com/ronsse/trellis-ai/pull/367) | B3 alias indexing | **Already done in #289.** Built no index; fixed a real cost it found instead (40% of resolver calls were exact within-document repeats) and corrected the module's false claim that all four backends enforce a unique-current alias index |
+| [#366](https://github.com/ronsse/trellis-ai/pull/366) | orchestrator docs | the deployment lag (§1.2) |
+| [#368](https://github.com/ronsse/trellis-ai/pull/368) | B1 / #298 | **All three proposed directions refuted by data.** Shipped `by_item_namespace`, the axis that could show it |
+| [#372](https://github.com/ronsse/trellis-ai/pull/372) | E2 capture coverage | denominator taken from the *deployed* gate, not a new eligibility rule |
+| [#370](https://github.com/ronsse/trellis-ai/pull/370) | C1 policy gate | **Stage 2 now runs.** A full policy CRUD surface already existed and was wired to nothing |
+| [#376](https://github.com/ronsse/trellis-ai/pull/376) | #371 graph axis | **The obvious fix measured as a literal no-op** — 0 seeds on 37/37 intents |
 
 ### 1.1 In flight
 
-Three agents dispatched 2026-08-27 from `738cb74`, on non-colliding lanes:
+| branch | item |
+|---|---|
+| `swarm/a3-noise-demotion` | A3 / [#336](https://github.com/ronsse/trellis-ai/issues/336) — premise likely expired, re-measure first |
+| `swarm/373-advisory-path` | [#373](https://github.com/ronsse/trellis-ai/issues/373) — **the highest-value open item** |
 
-| branch | item | lane |
-|---|---|---|
-| `swarm/b1-stub-noise` | B1 / [#298](https://github.com/ronsse/trellis-ai/issues/298) — **re-measure before implementing** | `retrieve/` |
-| `swarm/c1-policy-gate` | C1 — wire the policy gate | `mutate/`, `core/` |
-| `swarm/b3-alias-index` | B3 — probably already done; verify before building | `extract/` |
+### 1.0 What the 2026-08-28 wave actually found
 
-The previous wave's three interrupted branches are all resolved and their worktrees removed:
-`swarm/a1` → #357, `swarm/345` → #358, `swarm/349` → #352 + #355.
+Three defects where **a mechanism reported success while doing nothing**, all live:
+
+- **[#373](https://github.com/ronsse/trellis-ai/issues/373) — every advisory is invisible to every pack** (fixed by [#382](https://github.com/ronsse/trellis-ai/pull/382)). Writers use `<data_dir>/advisories.json`; readers use `<data_dir>/stores/advisories.json`, which does not exist, and `if adv_path.exists()` binds `None` silently.
+  **Read the whole causal chain, not the headline** — the first correction of this was itself wrong. "0 advisories served" has **at least four** sufficient causes, and the path split is not the binding one:
+  1. item attribution (the original diagnosis — partly fixed by #287 / #344),
+  2. the path split (#373, fixed),
+  3. **the flat path does not render advisories at all** — `format_advisories_as_markdown` is called only from `_sectioned_context`, and production has served **37 flat packs and 0 sectioned**, so fixing the path serves *zero additional tokens today* and buys telemetry,
+  4. **the generator emits unusable output** ([#383](https://github.com/ronsse/trellis-ai/issues/383)) — 36 of 37 rows have `success_rate_without = 0.0`, so `effect_size` is the pack success rate wearing a causal claim.
+
+  The instructive part is the failure *of the correction*: a single-cause explanation was replaced with a different single-cause explanation, which is the same error in a new position. When a metric reads zero, enumerate every path that could produce the zero before naming one.
+- **[#371](https://github.com/ronsse/trellis-ai/issues/371) / [#375](https://github.com/ronsse/trellis-ai/issues/375) — the graph axis is a recency feed, not a search.** `GraphSearch.search()` carries `query: str,  # noqa: ARG002` and nothing supplies `seed_ids`, so it falls through to `GraphStore.query` = `ORDER BY created_at DESC`. Measured: a **median 8.6% of servable nodes over a median 58-hour window**, and coverage is **falling monotonically** (0.150 → 0.072) as the graph grows, because the reach is a fixed row count and decays as 1/N. One pack's window spanned **0.0 hours**.
+- **[#374](https://github.com/ronsse/trellis-ai/issues/374) — the health analyzers will drop the NEWEST events.** `get_events` defaults to ascending; three analyzers cap at 5,000; production sits at **4,705**. For a health metric that is the worst truncation direction — a new outage falls outside the window, so the capture-health banner stays silent through exactly the incident it exists to catch.
+
+Plus two CI-integrity defects: **[#377](https://github.com/ronsse/trellis-ai/issues/377)** (one bare `CliRunner` poisons structlog process-wide — 109 failures across 23 directories) and **[#378](https://github.com/ronsse/trellis-ai/issues/378)** (**two ruff versions run in CI at once**, 0.15.22 in `lint.yml` and 0.16.4 in `[dev]`, *and both carry a comment claiming they match*).
+
+**The pattern to internalise:** four of six agents this wave were sent to implement something and came back having refuted it. That only happened because every brief demanded a measurement *before* a patch, and ended with "report anything you found that contradicts this brief." Keep both.
 
 ### 1.2 The deployment lag — read this before trusting any production measurement
 
@@ -180,11 +193,14 @@ merge its own work.
 | pgvector contract suite | **has never run anywhere**; fixture broken (#345) | production runs pgvector — vector changes are unverified on it |
 | Scratch pgvector without `CREATE EXTENSION vector` | **hangs** on `futex_wait_queue`, ~30 idle conns, no error | create the extension; never point `TRELLIS_TEST_PG_DSN` at prod (`:5433`) — the fixture `TRUNCATE`s |
 | Concurrent subagents in one tree | uncommitted work collides | give each a `git worktree` under `/mnt/ssd/trellis-worktrees/` |
-| A worktree using the main tree's `.venv` | `import trellis` resolves to **main's** code, so the worktree's tests pass green without executing the changes under test — silently | prefix every `python`/`pytest` with `PYTHONPATH=<worktree>/src`. Verified 2026-08-27 by marker probe. Works *only because* `_editable_impl_trellis_ai.pth` is a plain-path `.pth`; a setuptools `__editable___*_finder` meta-path hook would beat `PYTHONPATH` and the same mitigation would fail silently. Re-check after any reinstall. |
+| A worktree using the main tree's `.venv` | `import trellis` resolves to **main's** code — but **only for bare `python`**, not for `pytest` | `pyproject.toml` sets `pythonpath = ["src", "."]`, so **pytest already resolves to the worktree's `src`** with or without the env var. Verified empirically 2026-08-28 by marker probe in a scratch worktree: pytest → worktree `src` either way; bare `python -c "import trellis"` → **main's** `src`. So prefix bare `python`/scripts with `PYTHONPATH=<worktree>/src`; for pytest it is harmless but not load-bearing. **This entry previously claimed pytest was affected and was propagated to six agents before being measured** — the original probe tested bare `python` and the result was generalised. |
 | `git checkout -b` then commit | HEAD reverted mid-session once; a commit landed on `main` | `git branch --show-current` immediately before committing |
 | Agent killed mid-task by a shared session limit | four agents died at once with hours of uncommitted work in their worktrees; nothing is lost *yet*, but nothing is durable either | **tell agents to commit early and often on their own branch.** A WIP commit costs nothing and survives; an uncommitted worktree is one `git checkout` from gone. The orchestrator should sweep worktrees for uncommitted work the moment an agent reports failure |
 | A measurement taken against production | the containers may not run the code you just merged (§1.2) — you measure the absence of a *deployment*, not the absence of a fix | check `write_provenance.commit` on both the CLI (`trellis-skynet admin write-config`) and the API (`GET /api/version`) before believing a production number. They disagree with each other and with `main`. |
 | Trusting a rolling-window figure copied from a doc | the 30-day window moves; the headline shifted 0.1148 → 0.0884 with **no code change** | re-derive every time; treat any figure without an as-of date as unusable |
+| Trusting a green local `pytest` run | **the shared `.venv` is not CI's dependency set.** click 8.3.2 / structlog 25.5.0 locally vs **8.5.0 / 26.1.0** in CI. This produced **109 CI failures across 23 directories** on a PR whose author had a fully green local run of CI's exact command | check against **`/mnt/ssd/trellis-worktrees/.ci-venv`** (fresh 3.12, CI-resolved versions) before opening a PR. It reproduced that failure from a single test file in ~1s. **Do not modify the shared `.venv`** — it is production's editable install. Caveat: `.ci-venv` is authoritative for the click/structlog problem it was built for, **not** for lint or typecheck — see [#378](https://github.com/ronsse/trellis-ai/issues/378) |
+| A bare `CliRunner()` in a test | `configure_stderr_logging()` bakes `sys.stderr` into structlog's **global** factory at call time; `CliRunner.invoke()` pins it to a buffer Click then closes, so **every later log call in the process** dies on `I/O operation on closed file` — surfacing at whatever logs next, arbitrarily far from the cause | use the `cli_runner` fixture in the root `tests/conftest.py` (#370). Root cause filed as [#377](https://github.com/ronsse/trellis-ai/issues/377); a dormant instance survives in `tests/unit/workers/trace_embed/conftest.py`, harmless only because `workers` sorts last |
+| Comparing two code paths by `relevance_score` | reports 100% divergence at 12 decimal places | `_apply_recency_decay` reads `datetime.now()`, so a 2-second gap between runs moves every score ~1e-7. **Diff on `item_id` order and excerpt, never on float scores** |
 | GitHub Actions outage | runs sit `queued`, then `CANCELLED` | watch `githubstatus.com` components, not `gh pr checks` (which errors); re-trigger cancelled runs with `update-branch` |
 
 ## 6. The queue

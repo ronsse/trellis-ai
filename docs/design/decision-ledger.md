@@ -185,11 +185,55 @@ risk is the opposite one, that the gap keeps widening while docs describe the fi
 Makefile target builds a different image than the deploy expects. That mistake has already
 been made once (recorded 2026-08-24).
 
+**A third thing to fix in the same pass — write-behaviour flags, not just code.** Neither
+container sets `TRELLIS_ENABLE_MEMORY_EXTRACTION`. Measured consequence: production holds
+**zero `entity_aliases` rows and zero `mentions` edges** against ~966 nodes / ~1,240
+documents. The extractor short-circuits to `None` on every deployed surface, so the only
+place the path runs is `trellis-skynet` with an explicit `--extract`. This is a *dark path,
+not a defect* — and it is worth stating plainly because the zero has previously been read
+as a code failure. A rebuild that does not also set the flag changes nothing here.
+
 Related and separable: **the host CLI's own stamp is 43 commits stale and reports
 `dirty: false`** — see [#348](https://github.com/ronsse/trellis-ai/issues/348), where the
 measurement is written up. Re-running `pip install -e` on the production editable install
 would repair the stamp without changing which code runs. Also operator-only, also low risk,
 but worth doing in the same pass.
+
+### A-4 · Restore 22 memories demoted by the unsound noise gate
+
+Measured 2026-08-28 while fixing [#336](https://github.com/ronsse/trellis-ai/issues/336)
+(landed as [#380](https://github.com/ronsse/trellis-ai/pull/380)). Production data
+mutation, so operator-only at any confidence.
+
+Production holds **58 noise-tagged documents**. 24 were the correct manual demotion of
+2026-08-24. The other **34 came from the automated effectiveness pass**, and under the
+evidence gate #380 ships, only **12 are evidence-backed**. The remaining **22 were demoted
+for absence of praise, not evidence of unhelpfulness.**
+
+| lifecycle | n | what restoring costs |
+|---|---|---|
+| `current` | 10 | clear the tag — cheap, reversible |
+| none | 4 | clear the tag — cheap, reversible |
+| `archived` | 8 | needs `retention.prune`'s inverse, `retention.restore` |
+
+**Recommendation: restore the 14 tag-only cases; treat the 8 archived ones as optional.**
+The 14 include every memory #336 named by title — the Hermes local-patch gotcha, the
+uvicorn SIGTERM behaviour, the FastAPI-lifespan test constraint, Nate's LLM cost posture,
+the fincore PII constraint, the roadmap-driver record. These are exactly the durable
+gotchas the system exists to preserve, and clearing a tag is trivially reversible.
+
+The 8 archived are mostly claude.ai conversation chunks (Google Calendar imports, hunt
+calendar sync). Restoring them is *principled* — they were demoted by a rule now known to
+be miscalibrated — but low-benefit, and `retention.restore` is a heavier operation. Either
+choice is defensible; leaving them archived is not a correctness problem.
+
+**Note that the harm recurred once already.** #336 documented these being demoted, they
+were restored, and **the nightly cron re-demoted all 8 on 2026-08-27** because the
+producing rule was untouched. #380 fixes the rule, so a restore now should hold — but
+verify after the next `curate-nightly` run rather than assuming it.
+
+Full list: `RESTORE-LIST.txt` from the A3 session scratchpad, reproducible from
+`trellis-skynet` plus the gate in `src/trellis/classify/demotion_gate.py`.
 
 ---
 
@@ -249,6 +293,15 @@ support a batched emit rather than strictly one-event-per-document. And governin
 buys **validation + idempotency + an audit event, not access control**: stage 2 is a
 no-op everywhere until a policy gate is wired (C1), so B should not be sold as a security
 improvement.
+
+> **Amended 2026-08-28 — C1 landed ([#370](https://github.com/ronsse/trellis-ai/pull/370)).**
+> "Stage 2 is a no-op everywhere" is no longer true: `build_curate_executor` now wires a
+> gate and stage 2 runs on every governed write. **The conclusion survives unchanged**,
+> because the shipped posture is **zero policies**, and an empty gate is transparent by
+> construction (`DefaultPolicyGate.check` returns `(True, "", [])` when nothing matches,
+> pinned by test). So B still buys validation + idempotency + an audit event, and becomes
+> a security improvement only for a deployment that actually declares a policy. Restate it
+> that way rather than as "stage 2 does nothing".
 
 **Reopen if:** a deployment ingests at ~100× this rate (≈100k documents/month), where
 +3 MB/month becomes +300 MB/month and the burst case dominates; or if a store-layer
