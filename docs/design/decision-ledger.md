@@ -185,6 +185,14 @@ risk is the opposite one, that the gap keeps widening while docs describe the fi
 Makefile target builds a different image than the deploy expects. That mistake has already
 been made once (recorded 2026-08-24).
 
+**A third thing to fix in the same pass — write-behaviour flags, not just code.** Neither
+container sets `TRELLIS_ENABLE_MEMORY_EXTRACTION`. Measured consequence: production holds
+**zero `entity_aliases` rows and zero `mentions` edges** against ~966 nodes / ~1,240
+documents. The extractor short-circuits to `None` on every deployed surface, so the only
+place the path runs is `trellis-skynet` with an explicit `--extract`. This is a *dark path,
+not a defect* — and it is worth stating plainly because the zero has previously been read
+as a code failure. A rebuild that does not also set the flag changes nothing here.
+
 Related and separable: **the host CLI's own stamp is 43 commits stale and reports
 `dirty: false`** — see [#348](https://github.com/ronsse/trellis-ai/issues/348), where the
 measurement is written up. Re-running `pip install -e` on the production editable install
@@ -249,6 +257,15 @@ support a batched emit rather than strictly one-event-per-document. And governin
 buys **validation + idempotency + an audit event, not access control**: stage 2 is a
 no-op everywhere until a policy gate is wired (C1), so B should not be sold as a security
 improvement.
+
+> **Amended 2026-08-28 — C1 landed ([#370](https://github.com/ronsse/trellis-ai/pull/370)).**
+> "Stage 2 is a no-op everywhere" is no longer true: `build_curate_executor` now wires a
+> gate and stage 2 runs on every governed write. **The conclusion survives unchanged**,
+> because the shipped posture is **zero policies**, and an empty gate is transparent by
+> construction (`DefaultPolicyGate.check` returns `(True, "", [])` when nothing matches,
+> pinned by test). So B still buys validation + idempotency + an audit event, and becomes
+> a security improvement only for a deployment that actually declares a policy. Restate it
+> that way rather than as "stage 2 does nothing".
 
 **Reopen if:** a deployment ingests at ~100× this rate (≈100k documents/month), where
 +3 MB/month becomes +300 MB/month and the burst case dominates; or if a store-layer
