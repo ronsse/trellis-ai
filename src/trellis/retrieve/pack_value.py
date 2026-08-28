@@ -851,9 +851,11 @@ def _build_notes(
 ) -> list[str]:
     """Caveats that travel with the numbers, in both output formats."""
     notes: list[str] = [
-        "useful_token_fraction measures the precision of what was served, "
-        "not benefit: it cannot say whether memory improved the outcome, "
-        "only what share of injected tokens the caller cited.",
+        (
+            "useful_token_fraction measures the precision of what was served, "
+            "not benefit: it cannot say whether memory improved the outcome, "
+            "only what share of injected tokens the caller cited."
+        ),
     ]
     if scan.truncated and scan.note:
         # First after the definitional note, and before every other

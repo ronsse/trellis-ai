@@ -54,8 +54,13 @@ dev = [
     "pytest-asyncio>=0.24",
     "pytest-cov>=4.0",
     "hypothesis>=6.92",
-    "ruff==0.16.4",           # pinned: matches .pre-commit-config.yaml, avoids local/CI drift
-    "mypy==2.3.1",           # pinned: matches .pre-commit-config.yaml
+    # THE source of truth for both tool versions. .pre-commit-config.yaml
+    # mirrors these (its `rev:` cannot reference a file) and the workflows
+    # derive them; `scripts/check_tool_pins.py` fails CI on any divergence.
+    # Do not write "matches X" here — three such comments were carried
+    # verbatim across Dependabot bumps that broke what they asserted (#378).
+    "ruff==0.16.4",
+    "mypy==2.3.1",
     "types-PyYAML>=6.0",
     "pre-commit>=4.0",
 ]
@@ -161,6 +166,14 @@ ignore = [
     "ANN401",  # dynamically typed expressions (Any)
     "S101",    # use of assert (ok in tests)
     "PLR0913", # too many arguments
+    # Same judgement as PLR0913 above, applied to positional arity. Stores,
+    # handlers and pack builders take many *injected* collaborators by
+    # design — that is the dependency-injection the architecture rests on,
+    # not an accident of growth. Splitting a 6-store constructor to satisfy
+    # an arity count would make the wiring less legible, not more. Graduated
+    # out of ruff preview in 0.16.x and inherited automatically because the
+    # repo selects the whole `PL` group.
+    "PLR0917", # too many positional arguments
     "TC001",   # move import into TYPE_CHECKING block
     "TC003",   # move stdlib import into TYPE_CHECKING block
     "RUF022",  # __all__ not sorted
@@ -174,6 +187,15 @@ ignore = [
 "src/trellis/mutate/executor.py" = ["PLR0911"]  # pipeline method has many return points
 "src/trellis/mcp/**/*.py" = ["PLR0911"]  # many return paths in tool handlers
 "src/trellis_api/**/*.py" = ["PLR0911"]  # routes may have many return paths
+# LOG004 flags `logger.exception()` outside a lexical `except` block. Both
+# sites below ARE handling an exception — `sys.exc_info()` is set — but via a
+# function boundary the rule cannot see through: `_store_error(exc, ...)` is
+# only ever called as `raise _store_error(...) from exc` inside `except`, and
+# `unhandled_exception_handler` IS the ASGI exception handler, invoked by the
+# framework with the caught exception. The suggested fix (`.error()`) would
+# DELETE the traceback, which is the one thing these calls exist to capture.
+"src/trellis_cli/admin_api_keys.py" = ["LOG004"]
+"src/trellis_api/middleware.py" = ["LOG004"]
 
 [tool.mypy]
 python_version = "3.11"

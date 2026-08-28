@@ -11,17 +11,25 @@
 #
 # The same ruff + mypy commands also run in CI (see .github/workflows/).
 # Catching issues locally avoids round-trip failures on push.
+#
+# TOOL VERSIONS: pyproject.toml [dev] is the single source of truth. The two
+# `rev:` values below are MIRRORS of it — pre-commit's `rev` cannot reference
+# another file, so this duplication is unavoidable. It is not asserted to be
+# in sync; `scripts/check_tool_pins.py` FAILS CI when it is not. If you bump a
+# pin, bump it in pyproject.toml and run that script — it names the edit.
 
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.15.22
+    # mirror of pyproject.toml [dev] ruff pin — enforced by scripts/check_tool_pins.py
+    rev: v0.16.4
     hooks:
       - id: ruff-format
       - id: ruff
         args: [--fix]
 
   - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v2.3.0
+    # mirror of pyproject.toml [dev] mypy pin — enforced by scripts/check_tool_pins.py
+    rev: v2.3.1
     hooks:
       - id: mypy
         args: [--ignore-missing-imports]

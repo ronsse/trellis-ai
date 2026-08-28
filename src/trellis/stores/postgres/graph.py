@@ -1242,8 +1242,10 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
             # literal in ``->`` because that operand isn't a bindable
             # position.
             return (
-                f"(jsonb_typeof(properties->{_pg_text_lit(key)}) = 'array' "
-                f"AND properties @> %s::jsonb)",
+                (
+                    f"(jsonb_typeof(properties->{_pg_text_lit(key)}) = 'array' "
+                    f"AND properties @> %s::jsonb)"
+                ),
                 [json.dumps({key: [clause.value]})],
             )
         sql_op = RANGE_OP_GLYPH.get(clause.op)

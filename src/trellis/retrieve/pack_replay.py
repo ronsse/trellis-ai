@@ -517,10 +517,12 @@ def _notes(
 ) -> list[str]:
     """Caveats that travel with the numbers, in both output formats."""
     notes = [
-        "Counterfactual over the SAME packs and the SAME citations: only "
-        "the serving policy differs. Excerpt lengths are inverted from "
-        "estimated_tokens (~4 chars/token), so per-item costs are accurate "
-        "to about one token.",
+        (
+            "Counterfactual over the SAME packs and the SAME citations: only "
+            "the serving policy differs. Excerpt lengths are inverted from "
+            "estimated_tokens (~4 chars/token), so per-item costs are accurate "
+            "to about one token."
+        ),
     ]
     if thin:
         notes.append(

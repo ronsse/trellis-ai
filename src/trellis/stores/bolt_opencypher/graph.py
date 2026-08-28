@@ -119,9 +119,11 @@ def _temporal_where(as_of: datetime | None, var: str) -> tuple[str, dict[str, An
     if as_of is None:
         return f"{var}.valid_to IS NULL", {}
     return (
-        f"datetime({var}.valid_from) <= datetime($as_of) "
-        f"AND ({var}.valid_to IS NULL "
-        f"OR datetime({var}.valid_to) > datetime($as_of))",
+        (
+            f"datetime({var}.valid_from) <= datetime($as_of) "
+            f"AND ({var}.valid_to IS NULL "
+            f"OR datetime({var}.valid_to) > datetime($as_of))"
+        ),
         {"as_of": as_of.isoformat()},
     )
 
@@ -215,23 +217,33 @@ _DEFAULT_SCHEMA_STATEMENTS: tuple[str, ...] = (
     # Backends without DDL-level constraints (e.g. Neptune) override
     # ``SCHEMA_STATEMENTS`` to omit these — close-then-insert is the
     # only invariant.
-    "CREATE CONSTRAINT node_version_unique IF NOT EXISTS "
-    "FOR (n:Node) REQUIRE n.version_id IS UNIQUE",
-    "CREATE CONSTRAINT alias_version_unique IF NOT EXISTS "
-    "FOR (a:Alias) REQUIRE a.version_id IS UNIQUE",
+    (
+        "CREATE CONSTRAINT node_version_unique IF NOT EXISTS "
+        "FOR (n:Node) REQUIRE n.version_id IS UNIQUE"
+    ),
+    (
+        "CREATE CONSTRAINT alias_version_unique IF NOT EXISTS "
+        "FOR (a:Alias) REQUIRE a.version_id IS UNIQUE"
+    ),
     # Lookup indexes
     "CREATE INDEX node_id_idx IF NOT EXISTS FOR (n:Node) ON (n.node_id)",
     "CREATE INDEX node_type_idx IF NOT EXISTS FOR (n:Node) ON (n.node_type)",
     "CREATE INDEX node_role_idx IF NOT EXISTS FOR (n:Node) ON (n.node_role)",
-    "CREATE INDEX node_valid_idx IF NOT EXISTS "
-    "FOR (n:Node) ON (n.valid_from, n.valid_to)",
+    (
+        "CREATE INDEX node_valid_idx IF NOT EXISTS "
+        "FOR (n:Node) ON (n.valid_from, n.valid_to)"
+    ),
     "CREATE INDEX alias_entity_idx IF NOT EXISTS FOR (a:Alias) ON (a.entity_id)",
-    "CREATE INDEX alias_lookup_idx IF NOT EXISTS "
-    "FOR (a:Alias) ON (a.source_system, a.raw_id)",
+    (
+        "CREATE INDEX alias_lookup_idx IF NOT EXISTS "
+        "FOR (a:Alias) ON (a.source_system, a.raw_id)"
+    ),
     "CREATE INDEX edge_id_idx IF NOT EXISTS FOR ()-[r:EDGE]-() ON (r.edge_id)",
     "CREATE INDEX edge_type_idx IF NOT EXISTS FOR ()-[r:EDGE]-() ON (r.edge_type)",
-    "CREATE INDEX edge_valid_idx IF NOT EXISTS "
-    "FOR ()-[r:EDGE]-() ON (r.valid_from, r.valid_to)",
+    (
+        "CREATE INDEX edge_valid_idx IF NOT EXISTS "
+        "FOR ()-[r:EDGE]-() ON (r.valid_from, r.valid_to)"
+    ),
 )
 
 
@@ -1424,30 +1436,42 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
 
         queries = {
             "nodes": (
-                "MATCH (n:Node) "
-                "WHERE n.valid_to IS NOT NULL AND n.valid_to < $before "
-                "RETURN count(n) AS cnt, min(n.valid_to) AS lo, "
-                "       max(n.valid_to) AS hi",
-                "MATCH (n:Node) "
-                "WHERE n.valid_to IS NOT NULL AND n.valid_to < $before "
-                "DETACH DELETE n",
+                (
+                    "MATCH (n:Node) "
+                    "WHERE n.valid_to IS NOT NULL AND n.valid_to < $before "
+                    "RETURN count(n) AS cnt, min(n.valid_to) AS lo, "
+                    "       max(n.valid_to) AS hi"
+                ),
+                (
+                    "MATCH (n:Node) "
+                    "WHERE n.valid_to IS NOT NULL AND n.valid_to < $before "
+                    "DETACH DELETE n"
+                ),
             ),
             "edges": (
-                "MATCH ()-[r:EDGE]->() "
-                "WHERE r.valid_to IS NOT NULL AND r.valid_to < $before "
-                "RETURN count(r) AS cnt, min(r.valid_to) AS lo, "
-                "       max(r.valid_to) AS hi",
-                "MATCH ()-[r:EDGE]->() "
-                "WHERE r.valid_to IS NOT NULL AND r.valid_to < $before DELETE r",
+                (
+                    "MATCH ()-[r:EDGE]->() "
+                    "WHERE r.valid_to IS NOT NULL AND r.valid_to < $before "
+                    "RETURN count(r) AS cnt, min(r.valid_to) AS lo, "
+                    "       max(r.valid_to) AS hi"
+                ),
+                (
+                    "MATCH ()-[r:EDGE]->() "
+                    "WHERE r.valid_to IS NOT NULL AND r.valid_to < $before DELETE r"
+                ),
             ),
             "aliases": (
-                "MATCH (a:Alias) "
-                "WHERE a.valid_to IS NOT NULL AND a.valid_to < $before "
-                "RETURN count(a) AS cnt, min(a.valid_to) AS lo, "
-                "       max(a.valid_to) AS hi",
-                "MATCH (a:Alias) "
-                "WHERE a.valid_to IS NOT NULL AND a.valid_to < $before "
-                "DETACH DELETE a",
+                (
+                    "MATCH (a:Alias) "
+                    "WHERE a.valid_to IS NOT NULL AND a.valid_to < $before "
+                    "RETURN count(a) AS cnt, min(a.valid_to) AS lo, "
+                    "       max(a.valid_to) AS hi"
+                ),
+                (
+                    "MATCH (a:Alias) "
+                    "WHERE a.valid_to IS NOT NULL AND a.valid_to < $before "
+                    "DETACH DELETE a"
+                ),
             ),
         }
 

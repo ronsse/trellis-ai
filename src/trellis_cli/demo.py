@@ -684,10 +684,14 @@ def _build_traces() -> list[Trace]:
                     args={},
                     result={
                         "findings": [
-                            "Rate limiter uses fixed window — sliding window "
-                            "would be more accurate",
-                            "Missing Redis fallback — will block all traffic "
-                            "if Redis is down",
+                            (
+                                "Rate limiter uses fixed window — sliding window "
+                                "would be more accurate"
+                            ),
+                            (
+                                "Missing Redis fallback — will block all traffic "
+                                "if Redis is down"
+                            ),
                             "Good: per-endpoint configuration via envoy filter",
                         ],
                     },
@@ -993,57 +997,65 @@ def _build_documents() -> list[tuple[str, str, dict]]:
     return [
         (
             _id("doc-deploy-guide"),
-            "# Deployment Guide\n\n"
-            "All services use canary deployments via Kubernetes. "
-            "The deploy-bot agent handles the standard flow:\n\n"
-            "1. Run integration tests\n"
-            "2. Build container image\n"
-            "3. Deploy to 10% canary\n"
-            "4. Monitor for 5 minutes\n"
-            "5. Promote to 100%\n\n"
-            "Rollback is automatic if error rate exceeds 1%.",
+            (
+                "# Deployment Guide\n\n"
+                "All services use canary deployments via Kubernetes. "
+                "The deploy-bot agent handles the standard flow:\n\n"
+                "1. Run integration tests\n"
+                "2. Build container image\n"
+                "3. Deploy to 10% canary\n"
+                "4. Monitor for 5 minutes\n"
+                "5. Promote to 100%\n\n"
+                "Rollback is automatic if error rate exceeds 1%."
+            ),
             {"domain": "backend", "type": "guide", "author": "alice"},
         ),
         (
             _id("doc-ml-serving"),
-            "# ML Model Serving Architecture\n\n"
-            "Models are served via Ray Serve behind the api-gateway. "
-            "Key considerations:\n\n"
-            "- Memory limits: 4Gi per pod (increase for large models)\n"
-            "- Shadow mode testing before canary promotion\n"
-            "- Feature cache in Redis (TTL: 5 minutes)\n"
-            "- Fallback to previous model version on failure\n\n"
-            "## Lessons Learned\n"
-            "- Always run memory profiling in staging\n"
-            "- Monitor OOMKill events in Datadog",
+            (
+                "# ML Model Serving Architecture\n\n"
+                "Models are served via Ray Serve behind the api-gateway. "
+                "Key considerations:\n\n"
+                "- Memory limits: 4Gi per pod (increase for large models)\n"
+                "- Shadow mode testing before canary promotion\n"
+                "- Feature cache in Redis (TTL: 5 minutes)\n"
+                "- Fallback to previous model version on failure\n\n"
+                "## Lessons Learned\n"
+                "- Always run memory profiling in staging\n"
+                "- Monitor OOMKill events in Datadog"
+            ),
             {"domain": "machine-learning", "type": "architecture", "author": "bob"},
         ),
         (
             _id("doc-oncall-handbook"),
-            "# On-Call Handbook\n\n"
-            "## Priority Levels\n"
-            "- **P1**: User-facing service down. Page immediately.\n"
-            "- **P2**: Degraded performance. Respond within 30 min.\n"
-            "- **P3**: Non-urgent. Handle next business day.\n\n"
-            "## First Steps\n"
-            "1. Check Datadog service dashboard\n"
-            "2. Review recent deployments in deploy-bot traces\n"
-            "3. Check the Trellis knowledge graph for related incidents\n"
-            "4. Consult service runbooks in the document store",
+            (
+                "# On-Call Handbook\n\n"
+                "## Priority Levels\n"
+                "- **P1**: User-facing service down. Page immediately.\n"
+                "- **P2**: Degraded performance. Respond within 30 min.\n"
+                "- **P3**: Non-urgent. Handle next business day.\n\n"
+                "## First Steps\n"
+                "1. Check Datadog service dashboard\n"
+                "2. Review recent deployments in deploy-bot traces\n"
+                "3. Check the Trellis knowledge graph for related incidents\n"
+                "4. Consult service runbooks in the document store"
+            ),
             {"domain": "infrastructure", "type": "handbook", "author": "carol"},
         ),
         (
             _id("doc-api-v2-spec"),
-            "# API v2 Specification\n\n"
-            "## Breaking Changes from v1\n"
-            "- Authentication moved from query params to Bearer tokens\n"
-            "- Pagination uses cursor-based instead of offset\n"
-            "- Rate limiting: 1000 req/min per API key\n\n"
-            "## New Endpoints\n"
-            "- POST /v2/users/batch — bulk user creation\n"
-            "- GET /v2/users/search — full-text search\n"
-            "- POST /v2/events/stream — server-sent events\n"
-            "- GET /v2/health/detailed — component-level health",
+            (
+                "# API v2 Specification\n\n"
+                "## Breaking Changes from v1\n"
+                "- Authentication moved from query params to Bearer tokens\n"
+                "- Pagination uses cursor-based instead of offset\n"
+                "- Rate limiting: 1000 req/min per API key\n\n"
+                "## New Endpoints\n"
+                "- POST /v2/users/batch — bulk user creation\n"
+                "- GET /v2/users/search — full-text search\n"
+                "- POST /v2/events/stream — server-sent events\n"
+                "- GET /v2/health/detailed — component-level health"
+            ),
             {"domain": "backend", "type": "specification", "author": "alice"},
         ),
     ]
@@ -1060,11 +1072,13 @@ def _build_precedents() -> list[
         (
             _id("prec-conn-pool"),
             "Connection Pool Exhaustion Resolution Pattern",
-            "When PostgreSQL connection pool is exhausted: "
-            "1) Check pg_stat_activity for long-running queries, "
-            "2) Identify missing indexes, "
-            "3) Add indexes and increase pool size, "
-            "4) Set up connection utilization alerting.",
+            (
+                "When PostgreSQL connection pool is exhausted: "
+                "1) Check pg_stat_activity for long-running queries, "
+                "2) Identify missing indexes, "
+                "3) Add indexes and increase pool size, "
+                "4) Set up connection utilization alerting."
+            ),
             "carol",
             [_id("trace-incident")],
             ["backend", "database", "incident-response"],
@@ -1074,12 +1088,14 @@ def _build_precedents() -> list[
         (
             _id("prec-canary-deploy"),
             "Safe Canary Deployment Checklist",
-            "Before promoting canary to full production: "
-            "1) Verify error rate < 1%, "
-            "2) Check p99 latency within 2x baseline, "
-            "3) Monitor memory and CPU for 5 minutes, "
-            "4) Ensure rollback is tested and ready. "
-            "If any metric degrades, auto-rollback immediately.",
+            (
+                "Before promoting canary to full production: "
+                "1) Verify error rate < 1%, "
+                "2) Check p99 latency within 2x baseline, "
+                "3) Monitor memory and CPU for 5 minutes, "
+                "4) Ensure rollback is tested and ready. "
+                "If any metric degrades, auto-rollback immediately."
+            ),
             "alice",
             [_id("trace-deploy"), _id("trace-ml-fail")],
             ["deployment", "backend", "machine-learning"],
@@ -1089,10 +1105,12 @@ def _build_precedents() -> list[
         (
             _id("prec-memory-profiling"),
             "ML Model Memory Profiling Before Production",
-            "After model v3.1 OOMKill incident: always run memory "
-            "profiling in staging with production-scale data before "
-            "deploying new model versions. Check peak memory during "
-            "batch inference, not just single-request latency.",
+            (
+                "After model v3.1 OOMKill incident: always run memory "
+                "profiling in staging with production-scale data before "
+                "deploying new model versions. Check peak memory during "
+                "batch inference, not just single-request latency."
+            ),
             "bob",
             [_id("trace-ml-fail")],
             ["machine-learning", "deployment", "performance"],
