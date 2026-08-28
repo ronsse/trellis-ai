@@ -795,6 +795,127 @@ trellis curate feedback 01JRK5N7QF 0.9 --comment "Solid pattern, well-documented
 
 ---
 
+## Policy Commands
+
+Stage 2 of the [governed mutation pipeline](#python-only-mutation-api) evaluates
+governance policies against every command. These commands declare them.
+
+**Default posture: Trellis ships zero policies, and a deployment with none
+behaves exactly as if no gate existed.** An empty gate allows every command and
+adds nothing to the audit payload. You have to write a policy for anything here
+to have an effect. Wiring the gate is not itself a restriction.
+
+### Where policies live
+
+`<data_dir>/stores/policies.json` — written by `trellis policy add` and by
+`POST /policies`, read by the mutation pipeline. All three are resolved through
+one helper (`trellis.mutate.resolve_policy_path`) so the file you write is the
+file that gets enforced.
+
+A file at the pre-unification CLI path `<data_dir>/policies.json` is still
+honoured, with a warning naming both paths; the canonical path wins if both
+exist. Move it when you see the warning.
+
+The file is **loaded strictly**: if it exists but is corrupt, unparseable, or
+contains an invalid policy, mutation surfaces raise `ConfigError` rather than
+degrading to zero policies. Silently falling back would mean a damaged
+access-control file disables access control while the caller believes it is
+governed. A deployment with *no* policy file is unaffected — strictness only
+begins once you have declared something.
+
+Policies are read per call, so an edit takes effect without a restart.
+
+### Scope levels — which commands a policy matches
+
+| Level | Matches when |
+|-------|--------------|
+| `global` | always |
+| `domain` | `command.metadata["domain"]` equals the scope value |
+| `team` | `command.metadata["team"]` equals the scope value |
+| `entity_type` | `command.target_type` equals the scope value |
+
+**Deny wins.** Every matching policy is evaluated, broadest first, and the first
+blocking rule stops the command. Specificity orders evaluation; it is **not** an
+override mechanism — a narrow `allow` cannot carve an exception out of a broad
+`deny`, because the broad policy is evaluated first and returns. This is the
+explicit-deny-wins posture of an IAM policy, and it is deliberate: for access
+control, the conservative resolution is the safe one. Express an exception by
+narrowing the `deny` rule's `operation` pattern or its scope.
+
+`allow` rules are therefore inert — a command matching no policy is already
+allowed, so an `allow` documents intent without granting anything.
+
+### Enforcement levels — what a matching rule does
+
+| `rule.action` | `--enforcement enforce` | `--enforcement warn` | `--enforcement audit_only` |
+|---|---|---|---|
+| `allow` | pass | pass | pass |
+| `deny` | **block** | warn | log only |
+| `require_approval` | **block** | warn | log only |
+| `warn` | warn | warn | log only |
+
+"Warn" means the command **succeeds** and the warning is returned on
+`CommandResult.warnings` and recorded as `policy_warnings` on the
+`MUTATION_EXECUTED` audit event. "Log only" is silent to the caller and leaves
+only a structlog record. Use `warn` to stage a policy before enforcing it.
+
+### `trellis policy add`
+
+```bash
+trellis policy add --operation <pattern> [--action ...] [--scope ...] [--enforcement ...]
+```
+
+| Option | Required | Default | Description |
+|--------|----------|---------|-------------|
+| `--operation` | **Yes** | -- | Operation pattern: `entity.create`, `entity.*`, or `*` |
+| `--action` | No | `deny` | `allow`, `deny`, `require_approval`, `warn` |
+| `--scope` | No | `global` | `global`, `domain`, `team`, `entity_type` |
+| `--scope-value` | No | `null` | Required for non-global scopes |
+| `--type` | No | `mutation` | `mutation`, `access`, `retention`, `redaction` |
+| `--condition` | No | `always` | Human-readable label; echoed in the rejection message |
+| `--enforcement` | No | `enforce` | `enforce`, `warn`, `audit_only` |
+| `--format` | No | `text` | Output format |
+
+`--condition` is a **label, not a predicate** — it is not evaluated. It exists
+so the rejection message explains itself to whoever hits it. Write it for that
+reader.
+
+**Example — freeze entity creation, warning first:**
+
+```bash
+trellis policy add --operation entity.create --action deny \
+  --enforcement warn --condition "entity freeze pending schema review" --format json
+```
+
+Promote to blocking by removing that policy and re-adding it with
+`--enforcement enforce`.
+
+### `trellis policy list` / `show` / `remove`
+
+```bash
+trellis policy list [--format text|json]
+trellis policy show <policy_id_or_prefix> [--format text|json]
+trellis policy remove <policy_id_or_prefix> [--format text|json]
+```
+
+`show` and `remove` accept an ID prefix.
+
+### What a blocked command looks like
+
+A denied command returns a `CommandResult` with `status="rejected"` and a
+message naming the condition, and emits a `MUTATION_REJECTED` event with
+`payload.reason="policy_violation"`. The handler is never reached, so there is
+no partial write.
+
+That rejection is **loud by design**: it lands in the same channel
+`trellis analyze health` counts (`executor_reasons.policy_violation`) and that
+the MCP capture-health banner reads. A policy that blocks every write on a
+surface will therefore trip the banner — that is correct, not a false positive.
+A policy silently dropping writes is the failure mode this observability exists
+to prevent, so check `trellis analyze health` after adding an enforcing policy.
+
+---
+
 ## Retrieve Commands
 
 ### `trellis retrieve trace`

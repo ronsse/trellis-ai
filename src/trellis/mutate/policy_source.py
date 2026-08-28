@@ -126,7 +126,15 @@ def load_policies(stores_dir: Path | None) -> list[Policy]:
             an entry that is not a valid :class:`Policy`. Never degrades to
             an empty list — see the module docstring on failure posture.
     """
-    path = resolve_policy_path(stores_dir)
+    return _load_from_path(resolve_policy_path(stores_dir))
+
+
+def _load_from_path(path: Path | None) -> list[Policy]:
+    """Load and validate policies from an already-resolved path.
+
+    Split out so callers that need the path for their own logging resolve
+    it once — re-resolving would repeat the legacy-path warning.
+    """
     if path is None or not path.exists():
         return []
 
@@ -179,11 +187,15 @@ def build_policy_gate(registry: StoreRegistry) -> DefaultPolicyGate:
     genuinely present and inspectable rather than skipped. See
     :func:`load_policies` for the failure posture.
     """
-    policies = load_policies(registry.stores_dir)
+    # Resolve once: ``resolve_policy_path`` warns on a legacy-path hit, and
+    # calling it again just to build the log line would double that warning
+    # on every mutation.
+    path = resolve_policy_path(registry.stores_dir)
+    policies = _load_from_path(path)
     if policies:
         logger.info(
             "policy_gate_loaded",
             policy_count=len(policies),
-            path=str(resolve_policy_path(registry.stores_dir)),
+            path=str(path),
         )
     return DefaultPolicyGate(policies=policies)

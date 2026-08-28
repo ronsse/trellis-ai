@@ -381,6 +381,66 @@ class TestBuildPolicyGate:
         assert gate.check(_cmd()) == (True, "", [])
 
 
+class TestSurfacesAgreeOnOneFile:
+    """The CLI, the REST route, and enforcement must read one file.
+
+    Before unification ``trellis policy`` wrote ``<data_dir>/policies.json``
+    while the REST route read ``<data_dir>/stores/policies.json``. Nothing
+    read either, so the divergence was invisible. Now that Stage 2 is
+    load-bearing, a surface writing to the wrong path would mean an
+    operator declaring a policy that never fires — silently. These tests
+    fail if any surface picks a path locally again.
+    """
+
+    def test_cli_writes_the_file_enforcement_reads(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from typer.testing import CliRunner
+
+        from trellis_cli.main import app
+
+        data_dir = tmp_path / "data"
+        (data_dir / "stores").mkdir(parents=True)
+        monkeypatch.setenv("TRELLIS_CONFIG_DIR", str(tmp_path / "config"))
+        monkeypatch.setenv("TRELLIS_DATA_DIR", str(data_dir))
+
+        result = CliRunner().invoke(
+            app,
+            [
+                "policy",
+                "add",
+                "--operation",
+                "entity.create",
+                "--action",
+                "deny",
+                "--format",
+                "json",
+            ],
+        )
+        assert result.exit_code == 0, result.stdout
+        policy_id = json.loads(result.stdout.strip())["policy_id"]
+
+        # The gate — reading through its own resolver — must see it.
+        gate = DefaultPolicyGate(policies=load_policies(data_dir / "stores"))
+        assert [p.policy_id for p in gate._policies] == [policy_id]
+        assert gate.check(_cmd())[0] is False
+
+    def test_cli_and_api_resolve_the_same_path(self, tmp_path: Path) -> None:
+        """Both surfaces derive their path from ``<data_dir>/stores``."""
+        from trellis.stores.registry import StoreRegistry
+
+        data_dir = tmp_path / "data"
+        stores_dir = data_dir / "stores"
+        stores_dir.mkdir(parents=True)
+
+        # CLI derives stores_dir from data_dir; the API takes it from the
+        # registry. Same input, same file.
+        registry = StoreRegistry(config={}, stores_dir=stores_dir)
+        assert resolve_policy_path(data_dir / "stores") == resolve_policy_path(
+            registry.stores_dir
+        )
+
+
 # ---------------------------------------------------------------------------
 # End-to-end: a denied command is REJECTED *and* observable
 # ---------------------------------------------------------------------------
