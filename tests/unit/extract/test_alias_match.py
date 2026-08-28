@@ -242,3 +242,102 @@ class TestSourceDocumentNode:
         result = await ext.extract({"doc_id": "mem-1", "text": "   "})
 
         assert result.entities[0].name == "mem-1"
+
+
+class TestResolverCallEconomy:
+    """A resolution can cost a bounded full-graph scan, so the extractor
+    must not pay for the same token twice inside one document — while the
+    occurrence-level accounting ``_summarize`` reads stays untouched."""
+
+    @staticmethod
+    def _counting_resolver(mapping: dict[str, list[str]]) -> tuple:
+        calls: list[str] = []
+
+        def resolver(alias: str) -> list[str]:
+            calls.append(alias)
+            return list(mapping.get(alias, []))
+
+        return resolver, calls
+
+    async def test_repeated_mention_resolves_once(self) -> None:
+        resolver, calls = self._counting_resolver({"alice": ["ent-alice"]})
+        ext = AliasMatchExtractor(alias_resolver=resolver)
+
+        result = await ext.extract(
+            {"doc_id": "d1", "text": "@alice ping @alice again @alice"}
+        )
+
+        assert calls == ["alice"]
+        assert len(result.edges) == 1
+
+    async def test_unresolvable_repeat_also_resolves_once(self) -> None:
+        """The case the production corpus is made of: 118 of 119 mention
+        occurrences match nothing, so minting can never retire them — the
+        scan is only removed by not repeating it."""
+        resolver, calls = self._counting_resolver({})
+        ext = AliasMatchExtractor(alias_resolver=resolver)
+
+        result = await ext.extract(
+            {"doc_id": "d1", "text": "a@gmail.com b@gmail.com c@gmail.com"}
+        )
+
+        assert calls == ["gmail"]
+        # Occurrence-level accounting is unchanged: three occurrences,
+        # three residue entries, one resolver call.
+        assert result.unparsed_residue["unmatched_mentions"] == [
+            "gmail",
+            "gmail",
+            "gmail",
+        ]
+
+    async def test_distinct_tokens_each_resolve_once(self) -> None:
+        resolver, calls = self._counting_resolver({"alice": ["ent-alice"]})
+        ext = AliasMatchExtractor(alias_resolver=resolver)
+
+        await ext.extract({"doc_id": "d1", "text": "@alice @bob @alice @bob"})
+
+        assert calls == ["alice", "bob"]
+
+    async def test_case_variants_are_not_merged_by_the_cache(self) -> None:
+        """Collapsing case is the resolver's rule, not the cache's — a
+        cache that merged them would silently apply a matching rule the
+        injected resolver never agreed to."""
+        resolver, calls = self._counting_resolver({})
+        ext = AliasMatchExtractor(alias_resolver=resolver)
+
+        await ext.extract({"doc_id": "d1", "text": "@Alice and @alice"})
+
+        assert calls == ["Alice", "alice"]
+
+    async def test_cache_does_not_survive_the_call(self) -> None:
+        """Scoped to one document, so a mention that resolves to nothing
+        now can resolve on the next document once its entity exists."""
+        mapping: dict[str, list[str]] = {}
+        resolver, calls = self._counting_resolver(mapping)
+        ext = AliasMatchExtractor(alias_resolver=resolver)
+
+        first = await ext.extract({"doc_id": "d1", "text": "@alice"})
+        assert first.edges == []
+
+        mapping["alice"] = ["ent-alice"]
+        second = await ext.extract({"doc_id": "d2", "text": "@alice"})
+
+        assert calls == ["alice", "alice"]
+        assert [e.target_id for e in second.edges] == ["ent-alice"]
+
+    async def test_partial_resolution_summary_unchanged_by_caching(self) -> None:
+        """Pin the whole ``_summarize`` output for a document with both a
+        repeated hit and a repeated miss — this is the assertion that
+        fails if the cache ever starts deduplicating the counts."""
+        resolver, calls = self._counting_resolver({"alice": ["ent-alice"]})
+        ext = AliasMatchExtractor(alias_resolver=resolver)
+
+        text = "@alice @ghost @alice @ghost"
+        result = await ext.extract({"doc_id": "d1", "text": text})
+
+        assert calls == ["alice", "ghost"]
+        assert result.overall_confidence == 0.5
+        assert result.unparsed_residue == {
+            "text": text,
+            "unmatched_mentions": ["ghost", "ghost"],
+        }
