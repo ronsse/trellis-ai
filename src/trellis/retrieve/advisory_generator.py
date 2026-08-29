@@ -11,10 +11,24 @@ The five analysis methods correspond to the ADR categories:
 3. **Scope analysis** — pack breadth correlation with outcome
 4. **Anti-pattern detection** — patterns disproportionately in failures
 5. **Query improvement** — query terms that lead to high-scoring packs
+
+**Every advisory is a comparison, so it needs two arms.** ``effect_size``
+is ``success_rate_with - success_rate_without``, which is only a
+statement about the thing being advised when packs *without* it were
+also observed. Four of the five methods previously computed
+``rate_without`` inline with an ``else 0.0`` fallback, so a feature
+present on **every** pack in the window scored
+``effect_size == success_rate_with`` — the deployment's overall success
+rate wearing a causal claim (#383). Both arms now go through
+:meth:`AdvisoryGenerator._supported_effect`, which defers the arithmetic
+to :func:`trellis.retrieve.effectiveness._lift_vs_baseline` (the
+module-level authoritative zero-sample policy) and emits **nothing**
+when the comparison arm is too small to support a claim.
 """
 
 from __future__ import annotations
 
+import hashlib
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -23,6 +37,7 @@ import structlog
 
 from trellis.core.base import TrellisModel
 from trellis.feedback.models import SUCCESS_RATING_THRESHOLD
+from trellis.retrieve.effectiveness import _lift_vs_baseline
 from trellis.schemas.advisory import Advisory, AdvisoryCategory, AdvisoryEvidence
 from trellis.stores.advisory_store import AdvisoryStore
 from trellis.stores.base.event_log import EventLog, EventType
@@ -30,6 +45,13 @@ from trellis.stores.base.event_log import EventLog, EventType
 logger = structlog.get_logger(__name__)
 
 # --- Thresholds ---
+#: Minimum observations required of *each* arm. Applied to the comparison
+#: ("without") arm as well as the presented ("with") arm: the generator
+#: already declares that fewer than this many observations is not
+#: evidence, and there is no reason that judgement is weaker on the side
+#: it is being compared against. This is deliberately the same number
+#: rather than a new tunable — a second threshold would need its own base
+#: rate before it meant anything.
 _MIN_SAMPLE_SIZE = 5
 _MIN_EFFECT_SIZE = 0.15
 _SUCCESS_RATING_THRESHOLD = SUCCESS_RATING_THRESHOLD
@@ -111,9 +133,16 @@ class AdvisoryGenerator:
         advisories.extend(self._anti_pattern_detection(packs))
         advisories.extend(self._query_improvement(packs))
 
-        # Store results (replaces previous advisories for same scope)
+        # Replaces the previous run's row for each finding: advisory ids
+        # are derived from the finding's identity (:meth:`_stable_id`), so
+        # ``put_many`` overwrites in place instead of minting a fresh ULID
+        # nightly. The append behaviour reached 37 rows carrying 3
+        # underlying findings, and split every finding's presentation count
+        # across a new id each night — which is why no advisory could ever
+        # accumulate the presentations the fitness loop scores on (#383).
         stored = 0
         if advisories:
+            advisories = [self._carry_forward_status(a) for a in advisories]
             stored = self._advisory_store.put_many(advisories)
 
         logger.info(
