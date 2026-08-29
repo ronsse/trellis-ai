@@ -8,43 +8,56 @@
 > [`implementation-roadmap.md`](./implementation-roadmap.md) (**authoritative** — when it
 > and the backlog disagree, the roadmap wins).
 >
-> Last updated 2026-08-28 at `99f63da`.
+> Last updated 2026-08-29 at `9ed98f7`.
 
 ## 1. State
 
-`main` = `99f63da`. **The prod containers on skynet do _not_ run current `main`** — §1.2.
+`main` = `9ed98f7`. **The prod containers on skynet do _not_ run current `main`** — §1.2.
 
 Landed 2026-08-26: #340, #341, #304, **noise exclusion actually holding** (#343), #328,
 **attribution decomposed + join key restored** (#344), #346.
 
-Landed 2026-08-27 — ten PRs closing Waves 1 and 1b: #347, **#352 (the first outside
-contribution)**, **#353 (F1 — value density measured)**, #354, #355,
-**#357 (A1 — traces reachable by semantic search at all)**,
-**#358 (#345 — the pgvector contract suite actually executes)**,
-**#359 (F2 — graduated disclosure)**, #361.
+Landed 2026-08-27 — nine PRs closing Waves 1 and 1b: #347, **#352 (first outside
+contribution)**, **#353 (F1)**, #354, #355, **#357 (A1)**, **#358 (#345)**, **#359 (F2)**, #361.
 
-Landed 2026-08-28 — six PRs, and **four of the six refuted the premise they were sent to
-implement**:
+Landed 2026-08-28 (all thirteen merged between 00:00Z and 03:21Z UTC). **Five of eleven
+agent PRs came back having refuted the item they were sent to implement** — #367, #368,
+#376, #380, #384. A sixth, #389, corrected its issue's premise but shipped the fix anyway;
+count it or not, but say which. This is the wave's most reusable outcome:
 
 | PR | Item | Outcome |
 |---|---|---|
-| [#367](https://github.com/ronsse/trellis-ai/pull/367) | B3 alias indexing | **Already done in #289.** Built no index; fixed a real cost it found instead (40% of resolver calls were exact within-document repeats) and corrected the module's false claim that all four backends enforce a unique-current alias index |
-| [#366](https://github.com/ronsse/trellis-ai/pull/366) | orchestrator docs | the deployment lag (§1.2) |
-| [#368](https://github.com/ronsse/trellis-ai/pull/368) | B1 / #298 | **All three proposed directions refuted by data.** Shipped `by_item_namespace`, the axis that could show it |
+| [#367](https://github.com/ronsse/trellis-ai/pull/367) | B3 alias indexing | **already done in #289** — fixed a real cost it found instead (40.3% of resolver calls were exact **within-document** repeats — the cache is per-document, which is what makes the number actionable) |
+| [#368](https://github.com/ronsse/trellis-ai/pull/368) | B1 / #298 | **all three proposed directions refuted**; shipped `by_item_namespace`, the axis that could show it |
+| [#370](https://github.com/ronsse/trellis-ai/pull/370) | C1 policy gate | **stage 2 now runs**; a full policy CRUD surface already existed wired to nothing |
 | [#372](https://github.com/ronsse/trellis-ai/pull/372) | E2 capture coverage | denominator taken from the *deployed* gate, not a new eligibility rule |
-| [#370](https://github.com/ronsse/trellis-ai/pull/370) | C1 policy gate | **Stage 2 now runs.** A full policy CRUD surface already existed and was wired to nothing |
-| [#376](https://github.com/ronsse/trellis-ai/pull/376) | #371 graph axis | **The obvious fix measured as a literal no-op** — 0 seeds on 37/37 intents |
+| [#376](https://github.com/ronsse/trellis-ai/pull/376) | #371 graph axis | **the obvious fix produced 0 seeds on 37/37 packs** (30 distinct intents) and changed no served item — but it is not free: `test_the_embed_is_still_paid_for` pins one embed call per pack |
+| [#380](https://github.com/ronsse/trellis-ai/pull/380) | A3 / #336 | **no threshold could have worked** — `usage_rate` is degenerate (`{0.0: 64, 0.333: 4, 0.5: 8, 0.8: 1, 1.0: 2}`), so every value in (0, 0.333] flags the same 64/79. #380 left the threshold alone and added a downstream evidence predicate; 64 → 24, all 8 named memories spared |
+| [#382](https://github.com/ronsse/trellis-ai/pull/382) | #373 advisories | one resolver; **and the advisories are degenerate** (#383) — 37 when measured, **51 today**, growing ~2/night because nothing is ever replaced |
+| [#384](https://github.com/ronsse/trellis-ai/pull/384) | B2 chunk rollup | **refused** — every cap loses cited-helpful bodies faster than it saves tokens |
+| [#386](https://github.com/ronsse/trellis-ai/pull/386) | #381 | nightly curate now syncs vector metadata, **proven on scratch stores** not asserted |
+| [#387](https://github.com/ronsse/trellis-ai/pull/387) | #378 | one ruff version, **enforced by a check instead of a comment** |
+| [#389](https://github.com/ronsse/trellis-ai/pull/389) | #374 / #364 | `scan_events`; `useful_token_fraction` keeps its denominator and gains a bound |
+| #366, #379 | orchestrator docs | the deployment lag, and a trap propagated to six agents |
+
+**At least six of the orchestrator's own claims were wrong and agents caught every one** —
+#374's urgency (~3.2x overstated), where #374's fix actually lives, #374's banner-suppression
+mechanism, #371's "one production seed producer" (it is zero), #336's premise, and the
+`PYTHONPATH` trap. The first draft of this sentence said *four*: do not trust a count in this
+file that flatters its author.
 
 ### 1.1 In flight
 
 | branch | item |
 |---|---|
-| `swarm/a3-noise-demotion` | A3 / [#336](https://github.com/ronsse/trellis-ai/issues/336) — premise likely expired, re-measure first |
-| `swarm/373-advisory-path` | [#373](https://github.com/ronsse/trellis-ai/issues/373) — **the highest-value open item** |
+| `swarm/383-advisory-generator` | [#383](https://github.com/ronsse/trellis-ai/issues/383) + [#385](https://github.com/ronsse/trellis-ai/issues/385) — carries a **WIP commit that does not import**; resume, do not restart |
+| `swarm/388-chunk-sync-and-order` | [#388](https://github.com/ronsse/trellis-ai/issues/388) (third #338 site) + the six remaining ascending-default event reads |
 
 ### 1.0 What the 2026-08-28 wave actually found
 
-Three defects where **a mechanism reported success while doing nothing**, all live:
+Three defects where **a mechanism reported success while doing nothing**. Two were live;
+**#374 is latent** — it has never actually truncated, and the urgency in the issue as filed
+was ~3.2x overstated (see the correction on it):
 
 - **[#373](https://github.com/ronsse/trellis-ai/issues/373) — every advisory is invisible to every pack** (fixed by [#382](https://github.com/ronsse/trellis-ai/pull/382)). Writers use `<data_dir>/advisories.json`; readers use `<data_dir>/stores/advisories.json`, which does not exist, and `if adv_path.exists()` binds `None` silently.
   **Read the whole causal chain, not the headline** — the first correction of this was itself wrong. "0 advisories served" has **at least four** sufficient causes, and the path split is not the binding one:
@@ -180,6 +193,61 @@ not pedantry — a dependabot bump of ruff/mypy landed mid-session and could leg
 have failed the next PR's lint. `main` has **no required status checks**, so nothing but
 this discipline stands between an agent and an unverified merge (ledger D-3).
 
+### 4.1 The review gate — every PR, before merge
+
+Operator instruction, 2026-08-29: **every PR goes through a simplify pass and a review pass.**
+
+The relevant agent definitions ship with the official plugin marketplace and are on disk at:
+
+```
+~/.claude/plugins/marketplaces/claude-plugins-official/plugins/pr-review-toolkit/agents/
+  code-simplifier.md        · clarity/consistency, functionality preserved exactly
+  code-reviewer.md          · CLAUDE.md compliance + bugs; reports only confidence >= 80
+  silent-failure-hunter.md  · error handling, fallbacks, swallowed exceptions
+  comment-analyzer.md       · comments that lie or restate the code
+  pr-test-analyzer.md       · does the test actually exercise the change
+  type-design-analyzer.md
+```
+
+**`pr-review-toolkit` is not installed — but check it the right way.** `ListPlugins` returns
+empty and there is no `enabledPlugins` key in `~/.claude.json` or `~/.claude/settings.json`,
+and **neither fact establishes that.** `ListPlugins` reads the *claude.ai* plugin namespace;
+Claude Code marketplace plugins are recorded under `~/.claude.json` → **`pluginUsage`**, where
+three (`anthropic-skills`, `desktop-commander`, `productivity`) are registered `@inline` and
+demonstrably active. A probe that returns a clean empty result **while measuring a different
+system** is precisely the defect §4.1 exists to hunt — and it was committed in the paragraph
+that introduced §4.1.
+
+So: check `pluginUsage`. Installing needs `/plugin`, which is interactive. Until then, **read
+the definitions and dispatch them as ordinary subagents against the PR diff** — they are plain
+markdown with a system prompt in the body, which is all the plugin adds. Check first whether
+the session offers a built-in `/code-review`; it is user-triggered and billed, so an agent
+cannot launch it, but the operator can.
+
+Suggested run order — **untested**. Nothing had run these agents when this was written, so
+this is a prediction, not experience:
+
+1. **`silent-failure-hunter` first.** This repo's defining defect is *a mechanism that
+   reports success while doing nothing*, and the week's record holds many instances
+   (#338/#343, #344, #345/#358, #363, #370, #381/#386, #383, #385, #388). Two that do
+   **not** belong in that set, because the boundary matters: #377 is a false *red* (a bare
+   `CliRunner` caused 109 CI failures — the inverse), and #374 is **latent**, having never
+   actually truncated.
+2. **`code-simplifier`** — but hold it to its own rule: *preserve functionality exactly*.
+   A simplification that changes behaviour is a bug wearing a tidy diff.
+3. **`code-reviewer`** — reports only confidence >= 80, which is the right filter for a
+   swarm that already produces long reports.
+
+Two rules for using them:
+
+- **Subagents self-review before opening the PR; the orchestrator reviews again before
+  merging.** The second pass is the one that matters — an agent reviewing its own diff
+  shares the blind spot that produced it.
+- **A review finding is a claim, not a verdict.** Verify it the same way you verify a
+  panel's assertions (§3) or an agent's report. Several agent claims this week were
+  materially wrong in *both* directions, including two of the orchestrator's own filed
+  issues.
+
 **One merge authority.** Subagents open PRs; the orchestrator merges. Never let a subagent
 merge its own work.
 
@@ -208,16 +276,26 @@ merge its own work.
 Dependency-ordered. Items are sized for one subagent and one PR. Full specs in
 [`autonomous-backlog.md`](./autonomous-backlog.md).
 
-**Waves 1 and 1b are closed.** #345, A1, F1 and F2 all landed 2026-08-27; B1, B3 and C1
-are in flight (§1.1). What remains, roughly in dependency order:
+**Waves 1, 1b and 2 are closed**, along with A3 and C1. What remains, roughly in
+dependency order:
 
-1. **A3 — [#336](https://github.com/ronsse/trellis-ai/issues/336) noise-demotion soundness.**
-   Read `pack_attribution_rate` (**0.944**, §1.3), *not* the headline. The weakness is
-   sample size — 18 pack-targeted events — not citation rate.
-2. **B2 — PackBuilder chunk rollup.** `PackBuilder` dedups by `item_id`, so two chunks of
-   one document can both enter a pack and spend the budget twice. Group by `parent_doc_id`
-   at assembly. Wait for B1 to land — same file territory.
-3. **[#360](https://github.com/ronsse/trellis-ai/issues/360) — govern the document and
+> **Two items were removed from this list because they were *answered*, not done, and a
+> stale queue is how an agent gets dispatched to build something already rejected.**
+>
+> - **A3 / #336** — closed by [#380](https://github.com/ronsse/trellis-ai/pull/380). The
+>   old entry said "read `pack_attribution_rate` (0.944); the weakness is sample size."
+>   **Both halves were wrong.** The gate reads `helpful_item_ids` *only* (0.778 on that
+>   denominator), and the weakness was neither sample size nor calibration: `usage_rate` is
+>   degenerate, so every threshold in (0, 0.333] flags the same 64 of 79 items.
+> - **B2 chunk rollup** — the old entry said "group by `parent_doc_id` at assembly."
+>   [#384](https://github.com/ronsse/trellis-ai/pull/384) **measured that and refused it**:
+>   the extra servings are top-ranked (cited-helpful at ranks 3, 3, 4, 5, 5), a per-parent
+>   cap of K=1 demotes 5 of 5 cited-helpful bodies, chunk overlap is only ~6.7% so they are
+>   not duplicate text, and the freed budget would be re-spent anyway (20 of 37 packs hit
+>   `max_items` with 436 candidates unserved). **Do not re-propose it without new evidence.**
+>   The live remainder is #385, the documents *list view*, which is a display defect.
+
+1. **[#360](https://github.com/ronsse/trellis-ai/issues/360) — govern the document and
    vector planes.** Panel-decided (unanimous, option B) and recorded as ledger **T-3**;
    implementation not started. #357's worker-local handler is the natural seed. Gains most
    of its point *after* C1, since stage 2 is a no-op until a gate is wired.
@@ -276,6 +354,23 @@ stopped holding while everything reported green.**
   production backend.
 - Earlier instances: filters hiding stored memory (#282), silent capture outages (#297),
   feedback that never joined (pre-#287), a reference rate that could only read 1.00.
+
+**A corollary learned the hard way (#336):** *a rule of the form `rate < threshold` is
+not a measurement until someone has measured the base rate the rate is drawn from.* The
+noise-demotion gate demoted below `helpful/appearances < 0.3` against a distribution whose
+mean was **0.103** — a threshold 3x its own base rate, so demotion was the default outcome
+rather than an inference, and 81% of scored items were flagged. It read as unfalsifiability
+for weeks. Apply this to any future "served often, rarely used" heuristic.
+
+**And a second (#374, #373):** when a metric reads zero, **enumerate every path that could
+produce the zero before naming one.** "0 advisories served" drew three successive wrong
+single-cause explanations. Genuinely independent *and* sufficient: **two** — the writer/reader
+path split (#373), and the flat pack path never rendering advisories at all. Item attribution
+is **not** one — `AdvisoryGenerator` reads `injected_item_ids` from the *pack* side and never
+touches `helpful_item_ids`, and it was never starved (51 rows, ~2/night since 2026-08-08).
+Nor is degeneracy (#383): a degenerate advisory still renders, since every live confidence
+clears `_ADVISORY_MIN_CONFIDENCE`. Counting a quality defect as an availability one is the
+same error one level down.
 
 **The panel never caught any of these. Measurement did, every time.** Before implementing
 against a number, verify the number can move — query it, and check it can return more than
