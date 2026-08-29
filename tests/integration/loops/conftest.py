@@ -63,6 +63,19 @@ from trellis.classify.demotion_gate import (
 )
 from trellis.stores.registry import StoreRegistry
 
+# The loops below drive ``MIN_ATTRIBUTED_PACKS`` rounds and read the
+# below-floor phase as ``- 1``, which is only the right shape while the
+# coverage floor is the binding constraint. If the citation floor ever
+# overtakes it, the below-floor phase would already clear coverage and
+# both loops would fail pointing at suppression rather than at this
+# assumption — so state it here, where the failure names itself.
+assert MIN_UNHELPFUL_CITATIONS <= MIN_ATTRIBUTED_PACKS, (
+    f"loop fixtures assume the coverage floor binds, but "
+    f"MIN_UNHELPFUL_CITATIONS={MIN_UNHELPFUL_CITATIONS} now exceeds "
+    f"MIN_ATTRIBUTED_PACKS={MIN_ATTRIBUTED_PACKS}; the round count and the "
+    f"'one short of the floor' phase both need rethinking."
+)
+
 #: Graded rounds a demote loop drives before the evidence gate will
 #: admit anything.
 #:
@@ -71,13 +84,20 @@ from trellis.stores.registry import StoreRegistry
 #: verdict, **and** at least ``MIN_UNHELPFUL_CITATIONS`` explicit
 #: ``unhelpful_item_ids`` citations naming the item. One round of
 #: serve-then-grade supplies one of each, so the coverage floor is the
-#: binding one and the round count follows it.
+#: binding constraint (asserted above) and the round count follows it.
 #:
-#: Derived from the constants rather than written as a literal so the
-#: fixtures track the policy. The constants themselves are pinned by
-#: value in ``tests/unit/classify/test_demotion_gate.py`` — that is
-#: where a change to the *policy* has to be argued, not here.
-DEMOTION_ROUNDS = max(MIN_ATTRIBUTED_PACKS, MIN_UNHELPFUL_CITATIONS)
+#: Derived from the constant rather than written as a literal so that a
+#: *deliberate* policy change fails in the unit tests that argue policy,
+#: rather than here with a confusing "suppressed" error.
+#:
+#: That derivation is only safe because
+#: ``TestConstantsArePinnedByValue`` in
+#: ``tests/unit/classify/test_demotion_gate.py`` pins both constants by
+#: value. Without it these fixtures silently retune themselves to
+#: whatever the policy says: lowering the floor 5 -> 3 left all 368
+#: tests in ``tests/unit/classify/`` and this directory green, and
+#: loosening a safety floor is the direction that matters.
+DEMOTION_ROUNDS = MIN_ATTRIBUTED_PACKS
 
 
 @dataclass(frozen=True)

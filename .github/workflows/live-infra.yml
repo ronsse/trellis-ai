@@ -30,12 +30,13 @@ name: Live infrastructure tests
 # `pgvector` markers those tests carry, so the PR was green by
 # construction and `main` broke on merge. That is how #380 (the noise
 # demotion evidence gate) shipped against two loop fixtures encoding the
-# behaviour it deliberately removed: green PR, red main, twelve
+# behaviour it deliberately removed: green PR, red main, thirteen
 # consecutive failed runs and an alert on every merge.
 #
 # The cost is small and was measured, not assumed: the pytest step is
-# ~90s and the whole job ~2m45s wall, and it needs no secrets (both
-# backends are service containers), so it works on fork PRs too. Run
+# ~90s and the whole job 2m30s-3m40s wall (the wider end is this
+# workflow's own first `pull_request` run), and it needs no secrets
+# (both backends are service containers), so it works on fork PRs. Run
 # history before the #380 breakage is 36 consecutive green with one
 # infrastructure `startup_failure` — this is not a flaky job being
 # promoted into the merge path.
@@ -44,8 +45,8 @@ name: Live infrastructure tests
 # `src/` to cover what these tests reach — #380 touched `classify/`,
 # `retrieve/` and `trellis_api/routes/` for a defect that surfaced in
 # `tests/integration/loops/` — and a filter that misses is this same bug
-# with extra steps. At under three minutes, running it always is cheaper
-# than maintaining the list of paths that matter.
+# with extra steps. At three-and-a-bit minutes, running it always is
+# cheaper than maintaining the list of paths that matter.
 #
 # Note this workflow appearing on a PR does not by itself *block* the
 # merge: `main`'s branch protection carries no `required_status_checks`
@@ -59,10 +60,25 @@ on:
   workflow_dispatch:
 
 # A PR branch that is pushed to repeatedly should not queue up runs of a
-# service-container job. Superseded PR runs are cancelled; runs on `main`
-# are not, because each one is the verification of a distinct merge.
+# service-container job, so PR runs coalesce by ref and supersede each
+# other.
+#
+# **Pushes to `main` are grouped by SHA, one group each — and that is
+# load-bearing, not cosmetic.** `cancel-in-progress: false` protects a
+# run that has already *started*; it does nothing for a *pending* one.
+# GitHub cancels any previously pending run when a third queues into the
+# same group, so a single shared `main` group would silently drop the
+# middle merge's verification and report it grey "cancelled" rather than
+# red. This job takes 144-217s and merges land closer together than that
+# (2026-08-28T02:38:48 ran 160s; the next push came 116s later), so the
+# collision is routine, not theoretical — and an unverified commit
+# wearing a non-red status is exactly the green-by-construction failure
+# this workflow was put on `pull_request` to close.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  # Redundant for `main` now that each push owns its group, and kept as
+  # the second lock: if the group expression above is ever simplified
+  # back to a shared key, this still refuses to cancel a merge.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
