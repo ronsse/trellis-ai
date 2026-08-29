@@ -8,7 +8,7 @@ etc.) can be backfilled into the authoritative EventLog and then
 drives the same downstream analytics a live emission would have:
 
     seed corpus →
-    N-1 × (pack → JSONL feedback ONLY, no ``event_log`` kwarg) →
+    N-1 rounds of (pack → JSONL feedback ONLY, no ``event_log`` kwarg) →
     confirm the EventLog has no matching ``FEEDBACK_RECORDED`` →
     reconcile → the events land, and the demotion gate *counts them*
       but still refuses: one pack short of the coverage floor →
@@ -171,9 +171,7 @@ async def test_reconciliation_loop(loop_env: LoopEnvironment) -> None:
     # of the coverage floor, and the gate says so rather than demoting.
     withheld = trigger_apply_noise_tags(loop_env.api_url)
     assert withheld["status"] == "ok"
-    assert_demotion_withheld_below_floor(
-        withheld, attributed_packs=DEMOTION_ROUNDS - 1
-    )
+    assert_demotion_withheld_below_floor(withheld, attributed_packs=DEMOTION_ROUNDS - 1)
 
     # One more file-only round, then reconcile again: the new row emits
     # and the already-healed rows do not. Mixing both in one call is a

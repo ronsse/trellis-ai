@@ -4,7 +4,7 @@ Proves the full closed loop the project shipped in PR #65 works end
 to end at the public surface:
 
     seed corpus →
-    DEMOTION_ROUNDS × (pack → per-item feedback rejecting the distractor) →
+    DEMOTION_ROUNDS rounds of (pack → feedback rejecting the distractor) →
     apply-noise-tags →
     pack N+1 (distractor excluded by signal_quality filter)
 
@@ -93,7 +93,10 @@ async def _serve_and_reject(
         },
     )
     text = getattr(result, "data", "") or ""
-    assert "Feedback recorded" in text, text
+    # Reported against the whole result, not against ``text``: a tool
+    # call that came back without a ``data`` attribute at all would
+    # otherwise fail with an empty message.
+    assert "Feedback recorded" in text, f"unexpected record_feedback result: {result!r}"
     return pack
 
 
@@ -114,11 +117,10 @@ async def test_noise_demote_loop(loop_env: LoopEnvironment) -> None:
 
     withheld = trigger_apply_noise_tags(loop_env.api_url)
     assert withheld["status"] == "ok"
-    assert_demotion_withheld_below_floor(
-        withheld, attributed_packs=DEMOTION_ROUNDS - 1
-    )
+    assert_demotion_withheld_below_floor(withheld, attributed_packs=DEMOTION_ROUNDS - 1)
 
-    still_served = item_ids(build_pack(loop_env.api_url, intent=_INTENT, tag_filters={}))
+    withheld_pack = build_pack(loop_env.api_url, intent=_INTENT, tag_filters={})
+    still_served = item_ids(withheld_pack)
     assert distractor_id in still_served, (
         f"a withheld demotion must not tag anything — distractor "
         f"{distractor_id!r} disappeared anyway: {sorted(still_served)}"

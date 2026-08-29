@@ -287,7 +287,9 @@ def build_pack_with_distractor(
     return pack, helpful_present
 
 
-def assert_demotion_withheld_below_floor(report: dict, *, attributed_packs: int) -> None:
+def assert_demotion_withheld_below_floor(
+    report: dict, *, attributed_packs: int
+) -> None:
     """Assert the gate refused this batch on corpus coverage, and said so.
 
     The refusal is as much the governed behaviour as the demotion is
@@ -320,7 +322,13 @@ def assert_demotion_admitted(report: dict, *, item_id: str) -> None:
     screen = report["demotion_screen"]
     assert screen["suppressed"] is False, screen
     assert item_id in screen["admitted"], screen
-    decision = next(d for d in screen["decisions"] if d["item_id"] == item_id)
+    # Looked up defensively: a bare ``next(...)`` raises StopIteration,
+    # which pytest reports without ever naming the id that was missing.
+    decision = next((d for d in screen["decisions"] if d["item_id"] == item_id), None)
+    assert decision is not None, (
+        f"{item_id!r} is in `admitted` but has no decision row — the screen "
+        f"contradicts itself: {screen}"
+    )
     assert decision["admitted"] is True, decision
     assert decision["unhelpful_count"] >= MIN_UNHELPFUL_CITATIONS, decision
     assert decision["helpful_count"] < decision["unhelpful_count"], decision
