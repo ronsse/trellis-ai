@@ -235,6 +235,63 @@ verify after the next `curate-nightly` run rather than assuming it.
 Full list: `RESTORE-LIST.txt` from the A3 session scratchpad, reproducible from
 `trellis-skynet` plus the gate in `src/trellis/classify/demotion_gate.py`.
 
+### D-4 · Should the flat pack path render advisories at all? — **panel split**
+
+Reversible, panel-eligible, **consulted 2026-08-29 and the panel split.** Per protocol this
+does not get tie-broken; both positions are recorded and the safe default ships.
+
+**The chicken-and-egg.** Advisories are mined nightly from the event log and are meant to be
+prepended to packs; a fitness loop then scores each by whether packs containing it succeeded.
+Measured: **0 of 46 all-time packs carry a single advisory id**, so `presentations == 0` and
+**the scoring body has never executed.** The cause is structural — `format_advisories_as_markdown`
+is called only from the *sectioned* renderer, and production has served **37 flat packs and 0
+sectioned**, with **zero** of 33 tracked agent calls requesting one. The loop cannot validate an
+advisory that is never served, and serving is the only source of the evidence that would justify
+serving.
+
+| Option | |
+|---|---|
+| **A** | render on the flat path now, including the 51 existing rows |
+| **B** | render, but only rows generated after the #394 repair |
+| **C** | do not render; leave the subsystem dormant and call that the honest state |
+
+**The panel (5 models, 3 responded per run, two runs — 4 votes B, 1 vote C):**
+
+- **B** — `openai/gpt-5.5` (0.74), `moonshotai/kimi-k3` (0.70), `nemotron-3-ultra` (0.72).
+  The loop is the only validation path and cannot start without presentations; blast radius is
+  bounded (single user, ~37 packs/month, and advisories **overrun** the token ceiling rather
+  than displacing retrieved memories); but the 51 legacy rows are known-degenerate output from
+  the pre-#394 generator and would contaminate the first evidence.
+- **C** — `nvidia/nemotron-3-super-120b-a12b` (0.70), on a ground no other panelist raised:
+  *"Rendering advisories adds extra tokens beyond the budget, further lowering the already low
+  `useful_token_fraction`, with no evidence they improve outcomes."* Its stated
+  would-change-mind is **a controlled A/B test** showing packs with advisories beat packs
+  without.
+
+**Why the dissent is the finding.** C's condition is exactly backlog item **F3** — the
+counterfactual withhold arm, already classified `human` because it means deliberately degrading
+live retrieval to learn something. So the split is not noise: one panelist says *start the loop
+to get evidence*, the other says *the evidence you need is a different experiment, and shipping
+this is not it*. Both are coherent, which is precisely the case where operator input is worth
+most.
+
+**Recommendation: B, but not yet — and the sequencing is the actual recommendation.** Wait for
+**three post-repair nightly runs** and inspect them, which is the trigger *both* B voters named
+unprompted (`kimi-k3`: *"if `success_rate_without` is still 0.0 or the new comparison arms remain
+degenerate, switch to C"*). The #394 repair has never executed end-to-end. If the first
+post-repair rows still show `success_rate_without = 0.0` or an `effect_size` equal to the base
+rate, the fix failed and B ships polished garbage — so the cheap check comes first and costs
+three days.
+
+Cost of being wrong: bounded and reversible either way. B ships extra tokens and possible
+misdirection on one user's tasks, revertable by a flag. C leaves a built subsystem inert, which
+is the status quo and costs only opportunity.
+
+**Shipped default: C** — nothing rendered, no code change. The capability exists and is off.
+
+Also unresolved and *not* panel-eligible: **whether to clear the 51 legacy rows.** That is a
+live-store mutation and stays with the operator regardless of which option is chosen.
+
 ---
 
 ## Taken
