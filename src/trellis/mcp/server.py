@@ -540,26 +540,18 @@ def _get_minhash_index(registry: StoreRegistry) -> Any:
         _minhash_index = MinHashIndex()
         # Seed the index from existing documents (up to a reasonable limit).
         #
-        # #396 asked whether this ``DocumentStore.search`` caller should
-        # exclude chunk rows. It cannot: an empty query returns an empty
-        # list on every backend — a documented store-contract property
-        # (``test_search_empty_query_returns_empty_list``), asserted by both
-        # implementations' explicit early return, and confirmed against the
-        # reference deployment (1,319 documents, 0 rows seeded, 2026-08-29).
-        # So this seed reads nothing, the index only ever holds documents
-        # written by the *same process*, and ``include_chunks`` here would
-        # decorate a call that returns no rows of either kind. Deliberately
-        # left alone: repairing the seed turns on fuzzy dedup that has never
-        # been on, which changes what ``save_memory`` rejects on a live
-        # deployment — a behaviour change that belongs in its own review,
-        # not appended to a read-surface chunk filter. Filed as #402.
+        # Reads nothing. ``search("")`` returns ``[]`` on every backend — a
+        # store-contract property (``test_search_empty_query_returns_empty_list``)
+        # both implementations honour with an explicit early return, and 0
+        # rows against the 1,319-document reference deployment. So the index
+        # only ever holds documents written by the *same process*, and #396's
+        # "should this exclude chunk rows?" has no answer here: it would
+        # decorate a call that returns no rows of either kind.
         #
-        # When it *is* repaired, chunks should be excluded, for two reasons
-        # that are not the ones the read surfaces use: the 500-row cap is a
-        # scarce budget and chunks are duplicates-by-construction of parents
-        # competing for the same slots (56% of the reference corpus), and a
-        # "Fuzzy duplicate: <parent>#chunk-3" verdict hands the agent a
-        # fragment id instead of the document it should go read.
+        # Left alone deliberately: repairing the seed turns on fuzzy dedup
+        # that has never been on, changing what ``save_memory`` rejects on a
+        # live deployment. That is its own review — #402, which also carries
+        # the chunk decision for whoever does it.
         docs = registry.knowledge.document_store.search("", limit=500)
         for doc in docs:
             _minhash_index.add(doc["doc_id"], doc.get("content", ""))

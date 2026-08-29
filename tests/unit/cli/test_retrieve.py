@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from tests.chunk_corpus import seed_chunk_favouring, seed_chunked
 from trellis_cli.exit_codes import EXIT_VALIDATION
 from trellis_cli.main import app
 
@@ -81,88 +82,60 @@ class TestRetrieveChunkVisibility:
     default; these did not, and an operator running ``trellis retrieve
     search`` against the reference deployment (56% chunk rows) saw the same
     noise the REST fix removed.
-
-    Every assertion below reads ``--format json --quiet``. That is not
-    stylistic: the non-quiet path prints through ``console.print``, and Rich
-    both rewrites ``:name:`` emoji shortcodes inside string values and
-    line-wraps at the console width, which puts literal newlines inside JSON
-    strings and makes a wide payload fail to parse at all (#403). Only the
-    *printing* differs between the two paths — both run the same
-    ``store.search(..., include_chunks=...)`` call — so chunk visibility is
-    tested faithfully here while #403 owns the emission channel.
     """
+
+    #: The production id shape, with a source system Rich does not render
+    #: as an emoji — see :func:`tests.chunk_corpus.seed_chunked` and #403.
+    _ID_PREFIX = "corpus:obsidian"
 
     @staticmethod
     def _seed(parents: int = 3, per_parent: int = 3) -> list[str]:
-        """Seed the production id shape: ``corpus:<source_system>:<id>``."""
         from trellis_cli.stores import get_document_store
 
-        store = get_document_store()
-        parent_ids = []
-        for p in range(parents):
-            parent_id = f"corpus:obsidian:doc{p}"
-            store.put(parent_id, f"parent {p} distinctive body text")
-            parent_ids.append(parent_id)
-            for c in range(per_parent):
-                store.put(
-                    f"{parent_id}#chunk-{c}",
-                    f"parent {p} distinctive body text slice {c}",
-                    {"parent_doc_id": parent_id, "chunk_index": c},
-                )
-        return parent_ids
+        return seed_chunked(
+            get_document_store(),
+            parents=parents,
+            per_parent=per_parent,
+            id_prefix=TestRetrieveChunkVisibility._ID_PREFIX,
+        )
+
+    @staticmethod
+    def _seed_chunk_favouring(parents: int = 25) -> list[str]:
+        from trellis_cli.stores import get_document_store
+
+        return seed_chunk_favouring(
+            get_document_store(),
+            parents=parents,
+            id_prefix=TestRetrieveChunkVisibility._ID_PREFIX,
+        )
+
+    @staticmethod
+    def _json(*args: str) -> dict:
+        """Invoke the CLI on the machine-safe path and parse the payload.
+
+        ``--quiet`` is not stylistic: without it the payload prints through
+        ``console.print``, and Rich both rewrites ``:name:`` emoji
+        shortcodes inside string values and line-wraps at the console
+        width, putting literal newlines inside JSON strings so a wide
+        payload does not parse at all (#403). Only the *printing* differs
+        between the two paths — both run the same
+        ``store.search(..., include_chunks=...)`` call — so chunk
+        visibility is tested faithfully here while #403 owns the channel.
+        """
+        result = runner.invoke(app, [*args, "--format", "json", "--quiet"])
+        assert result.exit_code == 0, result.output
+        return json.loads(result.stdout.strip())
 
     def test_search_excludes_chunks_by_default(self) -> None:
         parent_ids = self._seed()
-        result = runner.invoke(
-            app, ["retrieve", "search", "distinctive", "--format", "json", "--quiet"]
-        )
-        assert result.exit_code == 0, result.output
-        data = json.loads(result.stdout.strip())
+        data = self._json("retrieve", "search", "distinctive")
         assert {r["doc_id"] for r in data["results"]} == set(parent_ids)
 
     def test_search_include_chunks_opt_in(self) -> None:
         self._seed()
-        result = runner.invoke(
-            app,
-            [
-                "retrieve",
-                "search",
-                "distinctive",
-                "--include-chunks",
-                "--format",
-                "json",
-                "--quiet",
-            ],
-        )
-        assert result.exit_code == 0, result.output
-        data = json.loads(result.stdout.strip())
+        data = self._json("retrieve", "search", "distinctive", "--include-chunks")
         assert data["count"] == 12
         assert any("#chunk-" in r["doc_id"] for r in data["results"])
-
-    @staticmethod
-    def _seed_chunk_favouring(parents: int = 25) -> None:
-        """Seed a corpus whose chunks *outrank* their parents.
-
-        ``search`` applies ``LIMIT`` after ordering by relevance, so a
-        post-hoc filter is only distinguishable from a pushdown when the
-        top-N contains chunks. Under :meth:`_seed` the chunks are longer
-        than their parents and carry the term once, so BM25 puts every
-        parent first and a 20-row page over 25 parents is all parents — a
-        page filter would pass. Here the term appears three times in a
-        short chunk and once in a long parent.
-        """
-        from trellis_cli.stores import get_document_store
-
-        store = get_document_store()
-        for p in range(parents):
-            filler = " ".join(f"filler{p}x{i}" for i in range(40))
-            store.put(f"corpus:obsidian:doc{p}", f"distinctive parent {p} {filler}")
-            for c in range(3):
-                store.put(
-                    f"corpus:obsidian:doc{p}#chunk-{c}",
-                    "distinctive distinctive distinctive",
-                    {"parent_doc_id": f"corpus:obsidian:doc{p}", "chunk_index": c},
-                )
 
     def test_search_limit_is_not_shortened_by_the_chunk_filter(self) -> None:
         """``--limit N`` returns N documents, not N minus the chunks.
@@ -173,79 +146,27 @@ class TestRetrieveChunkVisibility:
         """
         self._seed_chunk_favouring()
 
-        unfiltered = runner.invoke(
-            app,
-            [
-                "retrieve",
-                "search",
-                "distinctive",
-                "--limit",
-                "20",
-                "--include-chunks",
-                "--format",
-                "json",
-                "--quiet",
-            ],
+        # Precondition: the fixture really does rank chunks first, so the
+        # assertion below tests the pushdown rather than the seed data.
+        unfiltered = self._json(
+            "retrieve", "search", "distinctive", "--limit", "20", "--include-chunks"
         )
-        assert unfiltered.exit_code == 0, unfiltered.output
-        # Precondition: the fixture really does rank chunks first.
-        assert all(
-            "#chunk-" in r["doc_id"]
-            for r in json.loads(unfiltered.stdout.strip())["results"]
-        )
-        result = runner.invoke(
-            app,
-            [
-                "retrieve",
-                "search",
-                "distinctive",
-                "--limit",
-                "20",
-                "--format",
-                "json",
-                "--quiet",
-            ],
-        )
-        assert result.exit_code == 0, result.output
-        data = json.loads(result.stdout.strip())
+        assert all("#chunk-" in r["doc_id"] for r in unfiltered["results"])
+
+        data = self._json("retrieve", "search", "distinctive", "--limit", "20")
         assert data["count"] == 20
         assert not [r for r in data["results"] if "#chunk-" in r["doc_id"]]
 
     def test_pack_excludes_chunks_by_default(self) -> None:
         parent_ids = self._seed()
-        result = runner.invoke(
-            app,
-            [
-                "retrieve",
-                "pack",
-                "--intent",
-                "distinctive",
-                "--format",
-                "json",
-                "--quiet",
-            ],
-        )
-        assert result.exit_code == 0, result.output
-        data = json.loads(result.stdout.strip())
+        data = self._json("retrieve", "pack", "--intent", "distinctive")
         assert set(data["items"]) == set(parent_ids)
 
     def test_pack_include_chunks_opt_in(self) -> None:
         self._seed()
-        result = runner.invoke(
-            app,
-            [
-                "retrieve",
-                "pack",
-                "--intent",
-                "distinctive",
-                "--include-chunks",
-                "--format",
-                "json",
-                "--quiet",
-            ],
+        data = self._json(
+            "retrieve", "pack", "--intent", "distinctive", "--include-chunks"
         )
-        assert result.exit_code == 0, result.output
-        data = json.loads(result.stdout.strip())
         assert data["count"] == 12
         assert any("#chunk-" in item for item in data["items"])
 

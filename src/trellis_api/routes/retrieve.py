@@ -61,19 +61,16 @@ def _build_pack_builder(registry: Any) -> PackBuilder:
 # displaced fragment.
 #
 # That refill is the point, and it is why the exclusion is pushed into the
-# store rather than applied to the response: the ``LIMIT`` is applied after
-# the predicate, so the caller trades fragments for documents at no cost in
-# result count. A page-level filter would hand back a short list that is
-# indistinguishable from "that is all there is" — the same argument
-# :meth:`~trellis.stores.base.document.DocumentStore.list_documents` makes,
-# and ``tests/unit/stores/contracts/document_store_contract.py`` pins it for
-# both ``search`` and ``list_documents`` on every backend.
+# store rather than applied to the response — see
+# :meth:`~trellis.stores.base.document.DocumentStore.list_documents` for the
+# argument, which this route does not restate.
 #
-# It can still return fewer rows than ``limit``, and that is not the same
-# defect: one of the eight (``postgres``) went 15 → 10 because the corpus
-# genuinely holds fewer than 20 non-chunk matches for it. A pushdown short
-# page means "that is all there is"; a post-hoc filter's short page means
-# "there was more, off the end of the window you asked for".
+# What is worth saying here: the result set can still come back shorter than
+# ``limit``, and that is not the defect the pushdown avoids. One of the eight
+# queries (``postgres``) went 15 → 10 because the corpus genuinely holds
+# fewer than 20 non-chunk matches for it. A pushdown short page means "that
+# is all there is"; a post-hoc filter's short page means "there was more, off
+# the end of the window you asked for".
 #
 # Deliberately *not* scoped to browser operators. ``TrellisClient.search``
 # targets this route, so the default changes for SDK agents too — correctly:

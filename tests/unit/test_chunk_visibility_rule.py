@@ -51,13 +51,6 @@ _ROW_SURFACE_PACKAGES = ("trellis_api/routes", "trellis_cli")
 #: it to whichever ``list_documents`` call it is reported beside.
 _ROW_READS = frozenset({"search", "list_documents"})
 
-#: ``.search()`` is also ``re.Pattern.search``. A ``DocumentStore.search``
-#: call is distinguished by naming one of these keyword-only parameters
-#: (``re``'s ``search`` takes none) or by reading off something called a
-#: store. Both conditions are checked — a call matching either is held to
-#: the rule.
-_STORE_SEARCH_KWARGS = frozenset({"limit", "filters", "include_chunks", "query"})
-
 
 def _src_root() -> Path:
     root = Path(__file__).resolve().parents[2] / "src"
@@ -66,16 +59,29 @@ def _src_root() -> Path:
 
 
 def _is_document_store_read(node: ast.Call) -> bool:
-    """Does *node* look like a ``DocumentStore`` row read?"""
+    """Does *node* look like a ``DocumentStore`` row read?
+
+    Receiver name only. ``.search()`` is also ``re.Pattern.search``, so
+    some discriminator is needed, and an earlier version also matched on
+    keyword-only parameter names (``limit`` / ``filters`` / ``query``).
+    That found the same call sites and carried a trap: ``SearchStrategy``
+    has the same ``search(query, *, limit, filters)`` signature and no
+    ``include_chunks``, so routing a command through a strategy — the
+    obvious future fix for ``trellis retrieve pack``, which reaches past
+    ``PackBuilder`` today — would have made this test demand a parameter
+    that does not exist, and the repair would have been to weaken it.
+
+    The cost of the narrower rule is that a document store reached through
+    a receiver not named ``*store*`` slips the scan.
+    :func:`test_the_scan_finds_the_call_sites_it_is_meant_to_police` is the
+    guard against that class of drift.
+    """
     func = node.func
-    if not isinstance(func, ast.Attribute) or func.attr not in _ROW_READS:
-        return False
-    if func.attr == "list_documents":
-        return True
-    names = {kw.arg for kw in node.keywords if kw.arg}
-    if names & _STORE_SEARCH_KWARGS:
-        return True
-    return "store" in ast.unparse(func.value)
+    return (
+        isinstance(func, ast.Attribute)
+        and func.attr in _ROW_READS
+        and "store" in ast.unparse(func.value)
+    )
 
 
 def _row_read_call_sites() -> list[tuple[Path, ast.Call]]:
