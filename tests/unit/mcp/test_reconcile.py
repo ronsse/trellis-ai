@@ -638,17 +638,11 @@ class TestDeterministicTierUnderFlag:
 
 
 class TestSupersedePreservesRecency:
-    """``mark_document_superseded`` is a metadata-only write.
+    """Two things: the stamp survives the write, and the ranking follows.
 
-    ``updated_at`` is what :class:`~trellis.retrieve.strategies.KeywordSearch`
-    feeds to its recency decay, and nothing filters ``state="superseded"`` out
-    of retrieval (``retrieve.lifecycle.is_archived`` tests ``"archived"``, a
-    different state). ``docs/design/plan-memory-lifecycle.md`` §4 keeps it that
-    way on purpose — "SCD-2 supersede + recency-wins-at-retrieval, with the
-    losing version retrievable on demand" — so the loser's recency rank is the
-    mechanism, not an incidental score. Bumping the stamp inverts it: the
-    operation that exists to demote the old document instead makes it the
-    freshest thing in the corpus.
+    Why either matters is argued once, at
+    :func:`trellis.mcp.reconcile.mark_document_superseded` — not restated here,
+    so the two cannot drift apart.
     """
 
     @staticmethod
@@ -659,11 +653,12 @@ class TestSupersedePreservesRecency:
         ``updated_at`` from this one call, so a holder gives the test exact
         stamps instead of two wall-clock reads that merely *tend* to differ.
 
-        The patch is by module path, so it silently patches *nothing* if
-        ``temp_registry`` ever stops being SQLite-backed — and the stamp test
-        would still pass, since two real wall-clock reads also leave a
-        preserved stamp equal to itself. The ranking test below is what fails
-        loudly in that case. Keep the pair together; neither is redundant.
+        The patch is by module path, so it would still succeed but have **no
+        effect on the store under test** if ``temp_registry`` ever stopped
+        being SQLite-backed — and the stamp test would still pass, since two
+        real wall-clock reads also leave a preserved stamp equal to itself.
+        The ranking test below is what fails loudly in that case. Keep the
+        pair together; neither is redundant.
         """
         from datetime import UTC, datetime
 
@@ -690,12 +685,13 @@ class TestSupersedePreservesRecency:
         docs = temp_registry.knowledge.document_store
         clock = self._fake_clock(monkeypatch)
 
-        clock["now"] = clock["now"] - timedelta(days=365)
+        now = clock["now"]
+        clock["now"] = now - timedelta(days=365)
         docs.put("old-doc", "A year-old note about widget calibration.", {})
         stamp_before = docs.get("old-doc")["updated_at"]
 
         # A year passes; the successor lands and supersedes the old note.
-        clock["now"] = clock["now"] + timedelta(days=365)
+        clock["now"] = now
         docs.put("new-doc", "The current note about widget calibration.", {})
         assert mark_document_superseded(
             docs, old_doc_id="old-doc", new_doc_id="new-doc"
@@ -740,10 +736,11 @@ class TestSupersedePreservesRecency:
         clock = self._fake_clock(monkeypatch)
         body = "Widget calibration runs at sixty hertz."
 
-        clock["now"] = clock["now"] - timedelta(days=365)
+        now = clock["now"]
+        clock["now"] = now - timedelta(days=365)
         docs.put("old-doc", body, {})
 
-        clock["now"] = clock["now"] + timedelta(days=365)
+        clock["now"] = now
         docs.put("new-doc", body, {})
         assert mark_document_superseded(
             docs, old_doc_id="old-doc", new_doc_id="new-doc"
