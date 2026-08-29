@@ -1053,3 +1053,68 @@ class TestAnalyzeHealthCaptureSection:
         data = json.loads(result.stdout)
         assert data["capture"]["capture_rate"] is None
         assert data["capture"]["state"] == "unobserved"
+
+
+class TestTruncationReachesTheOperator:
+    """A capped report must say so on the surface a human reads (#374).
+
+    `tests/unit/ops/test_analyzer_truncation.py` pins the note into
+    `report.notes` / `report.scan`. That is not the same claim. Both
+    `pack-telemetry` and `extractor-fallbacks` rendered `report.notes` only
+    inside their `== 0` early return — and a truncated scan has
+    `total_packs == limit`, so the branch that printed the caveat was
+    exactly the branch truncation guarantees is not taken. The note was
+    reachable in text mode only in the one state where it cannot exist.
+
+    Asserting a value lands in a model is not asserting an operator sees it,
+    so these drive the real CLI and read stdout.
+    """
+
+    @staticmethod
+    def _flood(registry: StoreRegistry, event_type: EventType, count: int) -> None:
+        event_log = registry.operational.event_log
+        for index in range(count):
+            event_log.emit(
+                event_type,
+                source="test",
+                entity_id=f"e_{index}",
+                payload={
+                    "injected_items": [],
+                    "rejected_items": [],
+                    "source_hint": "src",
+                },
+            )
+
+    def test_pack_telemetry_prints_the_truncation_note(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        self._flood(temp_stores, EventType.PACK_ASSEMBLED, 5001)
+        result = runner.invoke(app, ["analyze", "pack-telemetry", "--days", "30"])
+        assert result.exit_code == 0
+        assert "TRUNCATED" in result.stdout
+        # And the paired negative: an uncapped window makes no such claim.
+        assert "Packs assembled: 5000" in result.stdout
+
+    def test_pack_telemetry_makes_no_truncation_claim_when_uncapped(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        self._flood(temp_stores, EventType.PACK_ASSEMBLED, 3)
+        result = runner.invoke(app, ["analyze", "pack-telemetry", "--days", "30"])
+        assert result.exit_code == 0
+        assert "TRUNCATED" not in result.stdout
+
+    def test_extractor_fallbacks_prints_the_truncation_note(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        self._flood(temp_stores, EventType.EXTRACTION_DISPATCHED, 5001)
+        result = runner.invoke(app, ["analyze", "extractor-fallbacks", "--days", "30"])
+        assert result.exit_code == 0
+        assert "TRUNCATED" in result.stdout
+
+    def test_extractor_fallbacks_makes_no_claim_when_uncapped(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        self._flood(temp_stores, EventType.EXTRACTION_DISPATCHED, 3)
+        result = runner.invoke(app, ["analyze", "extractor-fallbacks", "--days", "30"])
+        assert result.exit_code == 0
+        assert "TRUNCATED" not in result.stdout

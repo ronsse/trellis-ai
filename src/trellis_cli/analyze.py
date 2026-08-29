@@ -1817,11 +1817,16 @@ def pack_telemetry(
         return
 
     console.print(f"[bold]Pack Telemetry Report[/bold] (last {days} days)")
+    # Above the numbers, and unconditional. These notes used to render only
+    # inside the `total_packs == 0` branch below — but a truncated scan has
+    # `total_packs == limit`, so the branch that printed the truncation
+    # caveat was exactly the branch truncation guarantees is not taken
+    # (#374). Every count below is computed over `report.scan.scanned`
+    # packs, not over the window the header just claimed.
+    for note in report.notes:
+        console.print(f"  [dim]- {note}[/dim]")
     console.print(f"  Packs assembled: {report.total_packs}")
     if report.total_packs == 0:
-        console.print()
-        for note in report.notes:
-            console.print(f"  [dim]- {note}[/dim]")
         return
 
     console.print(
@@ -1939,14 +1944,16 @@ def extractor_fallbacks(
         return
 
     console.print(f"[bold]Extractor Fallback Report[/bold] (last {days} days)")
+    # Same hoist as `pack-telemetry`, same reason: the truncation caveat used
+    # to render only when `total_dispatches == 0`, and a truncated scan has
+    # `total_dispatches == limit` (#374).
+    for note in report.notes:
+        console.print(f"  [dim]- {note}[/dim]")
     console.print(f"  Total dispatches: {report.total_dispatches}")
     console.print(f"  Total fallbacks: {report.total_fallbacks}")
     console.print(f"  Overall fallback rate: {report.overall_fallback_rate:.1%}")
 
     if report.total_dispatches == 0:
-        console.print()
-        for note in report.notes:
-            console.print(f"  [dim]- {note}[/dim]")
         return
 
     if report.reason_counts:

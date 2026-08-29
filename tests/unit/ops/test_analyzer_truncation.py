@@ -31,7 +31,6 @@ from trellis.ops.write_health import (
     summarize_serve_attribution,
     summarize_write_health,
 )
-from trellis.retrieve import evaluate as evaluate_module
 from trellis.retrieve.evaluate import analyze_dimension_predictiveness
 from trellis.retrieve.metrics_timeseries import (
     METRIC_NOISE_TAG_VOLUME,
@@ -377,9 +376,7 @@ def test_token_usage_over_budget_list_holds_the_newest_overruns(
 ) -> None:
     """``over_budget`` is the one output whose *contents* the cap chose.
 
-    It is appended in iteration order and returned whole, so an ascending
-    truncation handed an operator the oldest budget overruns and hid
-    today's — the inversion, not merely a smaller sample.
+    Rationale lives on :func:`analyze_token_usage`; this pins it.
     """
     for index in range(6):
         _append(
@@ -541,7 +538,6 @@ def test_predictiveness_last_write_still_means_last_by_arrival(
 
 def test_predictiveness_capped_read_keeps_the_newest_pairs(
     log: SQLiteEventLog,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Truncation drops matched *pairs* faster than it drops events: the
     join only sees a pack whose quality event and whose feedback event both
@@ -554,10 +550,8 @@ def test_predictiveness_capped_read_keeps_the_newest_pairs(
             minutes_ago=100 - index,
             payload={"pack_id": f"pack_{index}", "success": True},
         )
-    monkeypatch.setattr(evaluate_module, "_PREDICTIVENESS_EVENT_LIMIT", 3)
-    capped = analyze_dimension_predictiveness(log, days=30)
-    monkeypatch.setattr(evaluate_module, "_PREDICTIVENESS_EVENT_LIMIT", 100)
-    clean = analyze_dimension_predictiveness(log, days=30)
+    capped = analyze_dimension_predictiveness(log, days=30, limit=3)
+    clean = analyze_dimension_predictiveness(log, days=30, limit=100)
 
     assert capped.scan.truncated is True
     assert capped.total_packs_scored == 3

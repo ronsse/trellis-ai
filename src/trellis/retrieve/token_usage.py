@@ -26,10 +26,10 @@ class TokenUsageReport(TrellisModel):
     avg_tokens_per_response: float
     by_layer: dict[str, dict[str, Any]]
     by_operation: list[dict[str, Any]]
-    #: Every over-budget response the scan saw, oldest first. Unbounded and
-    #: unsorted, so this list is the one output here that a truncated read
-    #: changes the *contents* of rather than just the totals — see
-    #: :func:`analyze_token_usage`.
+    #: Every over-budget response the scan saw, oldest first. Unbounded,
+    #: and never re-ranked by severity — so this list is the one output here
+    #: whose *contents* a truncated read changes, rather than just its
+    #: totals. See :func:`analyze_token_usage`.
     over_budget: list[dict[str, Any]]
     #: Whether the ``TOKEN_TRACKED`` read behind these counts hit its cap,
     #: and what that excluded (#374).

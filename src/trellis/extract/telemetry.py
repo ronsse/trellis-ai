@@ -41,7 +41,13 @@ import structlog
 from pydantic import Field
 
 from trellis.core.base import TrellisModel
-from trellis.stores.base.event_log import ScanCoverage
+from trellis.stores.base.event_log import (
+    DEFAULT_SCAN_LIMIT,
+    EventType,
+    ScanCoverage,
+    merge_coverage,
+    scan_events,
+)
 
 if TYPE_CHECKING:
     from trellis.stores.base.event_log import EventLog
@@ -286,8 +292,6 @@ def emit_extraction_failure(
     See ``docs/design/adr-extraction-failure-telemetry.md`` §2 for the
     payload schema; this helper is the only place that constructs it.
     """
-    from trellis.stores.base.event_log import EventType  # noqa: PLC0415
-
     if event_log is None:
         return
 
@@ -354,8 +358,8 @@ def emit_extraction_failure(
         _SAMPLER.set_last_event_id(cluster_key, event.event_id)
 
 
-_FALLBACK_EVENT_LIMIT = 5000
-_VALIDATION_EVENT_LIMIT = 5000
+_FALLBACK_EVENT_LIMIT = DEFAULT_SCAN_LIMIT
+_VALIDATION_EVENT_LIMIT = DEFAULT_SCAN_LIMIT
 
 #: Fraction of dispatches on a single source_hint that must fall back before
 #: the source is flagged in findings. Deliberately high — we want a loud
@@ -423,12 +427,6 @@ def analyze_extractor_fallbacks(
     so the denominator of ``overall_fallback_rate`` was the one an operator
     could not raise, which is the read that saturates first.
     """
-    from trellis.stores.base.event_log import (  # noqa: PLC0415
-        EventType,
-        merge_coverage,
-        scan_events,
-    )
-
     since = datetime.now(tz=UTC) - timedelta(days=days)
     fallback_scan = scan_events(
         event_log,
@@ -576,12 +574,10 @@ class ExtractionValidationReport(TrellisModel):
     overall_rejection_rate: float
     code_counts: dict[str, int] = Field(default_factory=dict)
     per_source: list[SourceValidationStats] = Field(default_factory=list)
-    #: Coverage of the **two** EventLog reads behind this report (#374),
-    #: merged. Both the numerator and the denominator of
-    #: ``overall_rejection_rate`` come from independently capped reads, so a
-    #: report where either one truncated is reporting a ratio between two
-    #: differently-sized slices — which is why the merged coverage is
-    #: carried rather than each read's own.
+    #: Merged coverage of the two EventLog reads behind
+    #: ``overall_rejection_rate`` — see
+    #: :class:`ExtractorFallbackReport.scan` for why the merge, and not each
+    #: read's own coverage, is what a reader needs (#374).
     scan: ScanCoverage = Field(default_factory=ScanCoverage)
     findings: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
@@ -605,12 +601,6 @@ def analyze_extraction_validation(
     :func:`~trellis.stores.base.event_log.scan_events` and ``limit``
     governs both — see :func:`analyze_extractor_fallbacks` for why (#374).
     """
-    from trellis.stores.base.event_log import (  # noqa: PLC0415
-        EventType,
-        merge_coverage,
-        scan_events,
-    )
-
     since = datetime.now(tz=UTC) - timedelta(days=days)
     rejected_scan = scan_events(
         event_log,

@@ -13,10 +13,17 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from structlog.testing import capture_logs
 
 from trellis.classify.feedback import apply_noise_tags
-from trellis.classify.ingest import CLASSIFY_ON_INGEST_FLAG
-from trellis.core.vector_metadata import vector_metadata_diverges
+from trellis.classify.ingest import (
+    CLASSIFY_METADATA_KEYS,
+    CLASSIFY_ON_INGEST_FLAG,
+)
+from trellis.core.vector_metadata import (
+    SYNCED_METADATA_KEYS,
+    vector_metadata_diverges,
+)
 from trellis.ingest_corpus.models import (
     chunk_doc_id,
     corpus_doc_id,
@@ -968,3 +975,106 @@ class TestChunkVectorMetadataMirror:
         for index in range(chunk_count):
             meta = store.get(chunk_doc_id(parent_id, index))["metadata"]
             assert meta["content_tags"]["signal_quality"] == "noise"
+
+
+def test_classify_keys_are_covered_by_the_mirror() -> None:
+    """The containment `_write_chunks`' mirror silently depends on.
+
+    `_write_chunks` propagates ``CLASSIFY_METADATA_KEYS`` to chunk documents
+    and mirrors with ``sync_vector_metadata``'s **default** key set,
+    ``SYNCED_METADATA_KEYS``. The two are equal today, and the docstring
+    said so — but ``CLASSIFY_METADATA_KEYS``' own comment anticipates
+    growth ("adding a facet here cannot silently stop propagating"). Add a
+    third key there and the chunk document gets it while the vector row
+    silently does not: #388 reintroduced, under a docstring asserting it
+    cannot happen.
+
+    Containment, not equality, is the real dependency — the mirror may
+    legitimately carry keys the classify layer does not write. Fixing a
+    failure here by passing ``keys=CLASSIFY_METADATA_KEYS`` would be the
+    wrong repair: ``SYNCED_METADATA_KEYS`` is deliberately narrow about what
+    a vector row may receive, and coupling it to the classify layer subverts
+    that. Widen the mirror's key set deliberately, or say why the new facet
+    is document-only.
+    """
+    assert set(CLASSIFY_METADATA_KEYS) <= set(SYNCED_METADATA_KEYS)
+
+
+class TestVectorMirrorIsObservable:
+    """A mirror that silently did nothing must say so (#388).
+
+    The first cut of this fix reported the mirror on a per-document
+    ``logger.debug`` line. That is a no-op under the CLI's default config —
+    ``configure_stderr_logging`` installs
+    ``make_filtering_bound_logger(INFO)``, under which ``debug`` is not
+    merely filtered downstream but never constructed — so a corpus sync
+    could propagate tags to thousands of chunk documents, mirror none of
+    them, and say nothing at any visible level. Which is #338's failure
+    wearing a fixed label.
+
+    It is now one run-level line at a level that fires, and the count it
+    reports is paired with the only denominator it *can* be a fraction of.
+    """
+
+    def test_absent_vector_store_warns_and_names_the_repair(
+        self, registry, vault, monkeypatch
+    ):
+        registry.knowledge.vector_store = None
+        monkeypatch.setenv(EMBED_ON_INGEST_FLAG, "1")
+        with capture_logs() as logs:
+            TestChunkVectorMetadataMirror._ingest_untagged_then_tag_parent(
+                registry, vault, monkeypatch
+            )
+
+        warnings = [
+            entry
+            for entry in logs
+            if entry["event"] == "corpus_sync_vector_mirror_unavailable"
+        ]
+        assert len(warnings) == 1, "exactly one run-level line, not one per document"
+        assert warnings[0]["log_level"] == "warning"
+        assert warnings[0]["metadata_only_writes"] > 0
+        # Loud is not enough — it has to be actionable.
+        assert "resync-vector-metadata" in warnings[0]["consequence"]
+
+    def test_mirror_count_is_reported_against_its_own_denominator(
+        self, registry, vault, monkeypatch
+    ):
+        """``chunks_written`` is *not* the denominator of ``rows_synced``.
+
+        Only the metadata-only branch can mirror, so pairing the mirror
+        count with the total chunks written would print two numbers that
+        look like a ratio and are not — a first sync that legitimately
+        re-embeds every chunk would read ``N written, 0 synced`` and look
+        broken.
+        """
+        with capture_logs() as logs:
+            parent_id, chunk_count = (
+                TestChunkVectorMetadataMirror._ingest_untagged_then_tag_parent(
+                    registry, vault, monkeypatch
+                )
+            )
+
+        lines = [
+            entry for entry in logs if entry["event"] == "corpus_sync_vector_mirror"
+        ]
+        assert len(lines) == 1
+        # Every chunk but the one whose bytes changed took the mirror path,
+        # and every one of those was mirrored.
+        assert lines[0]["metadata_only_writes"] == chunk_count - 1
+        assert lines[0]["rows_synced"] == chunk_count - 1
+
+    def test_a_run_with_nothing_to_mirror_stays_quiet(
+        self, registry, vault, monkeypatch
+    ):
+        """A zero line on every sync trains the reader to skip it."""
+        monkeypatch.setenv(EMBED_ON_INGEST_FLAG, "1")
+        (vault / "long.md").write_text(_long_markdown())
+        with capture_logs() as logs:
+            sync_corpus(registry, vault, source_system="obsidian")
+
+        assert not [
+            entry
+            for entry in logs
+            if entry["event"].startswith("corpus_sync_vector_mirror")
+        ]

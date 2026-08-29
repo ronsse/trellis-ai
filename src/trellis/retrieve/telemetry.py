@@ -23,14 +23,19 @@ import structlog
 from pydantic import Field
 
 from trellis.core.base import TrellisModel
-from trellis.stores.base.event_log import ScanCoverage
+from trellis.stores.base.event_log import (
+    DEFAULT_SCAN_LIMIT,
+    EventType,
+    ScanCoverage,
+    scan_events,
+)
 
 if TYPE_CHECKING:
     from trellis.stores.base.event_log import EventLog
 
 logger = structlog.get_logger(__name__)
 
-_TELEMETRY_EVENT_LIMIT = 5000
+_TELEMETRY_EVENT_LIMIT = DEFAULT_SCAN_LIMIT
 
 #: Rejection reasons emitted by :class:`~trellis.retrieve.pack_builder.PackBuilder`.
 #: Listed here as a documented surface — analyzer treats any string the payload
@@ -113,8 +118,6 @@ def analyze_pack_telemetry(  # noqa: PLR0915
         Aggregated counts and rates. Empty window → zero-valued report with
         a descriptive note rather than raising.
     """
-    from trellis.stores.base.event_log import EventType, scan_events  # noqa: PLC0415
-
     since = datetime.now(tz=UTC) - timedelta(days=days)
     scan = scan_events(
         event_log,
@@ -202,7 +205,7 @@ def analyze_pack_telemetry(  # noqa: PLR0915
         max_tokens_hit_rate=max_tokens_hit_rate,
         contributions=contributions,
     )
-    notes = _build_notes(total_packs, scan.coverage)
+    notes = _build_notes(total_packs=total_packs, coverage=scan.coverage)
 
     report = PackTelemetryReport(
         total_packs=total_packs,
@@ -229,7 +232,7 @@ def analyze_pack_telemetry(  # noqa: PLR0915
     return report
 
 
-def _build_notes(total_packs: int, coverage: ScanCoverage) -> list[str]:
+def _build_notes(*, total_packs: int, coverage: ScanCoverage) -> list[str]:
     """Caveats an operator needs before reading the numbers above."""
     notes: list[str] = []
     if total_packs == 0:

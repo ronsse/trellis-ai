@@ -38,7 +38,13 @@ from pydantic import Field, model_validator
 from trellis.core.base import TrellisModel
 from trellis.schemas.document_metadata import document_form_of
 from trellis.schemas.pack import Pack, PackItem
-from trellis.stores.base.event_log import ScanCoverage
+from trellis.stores.base.event_log import (
+    DEFAULT_SCAN_LIMIT,
+    EventType,
+    ScanCoverage,
+    merge_coverage,
+    scan_events,
+)
 
 if TYPE_CHECKING:
     from trellis.stores.base.event_log import EventLog
@@ -656,7 +662,7 @@ _NOISE_CORRELATION_THRESHOLD = 0.1
 _MODERATE_CORRELATION_THRESHOLD = 0.3
 _STRONG_CORRELATION_THRESHOLD = 0.5
 
-_PREDICTIVENESS_EVENT_LIMIT = 5000
+_PREDICTIVENESS_EVENT_LIMIT = DEFAULT_SCAN_LIMIT
 
 #: Minimum observations for Pearson correlation to be mathematically defined.
 _PEARSON_MIN_SAMPLES = 2
@@ -730,6 +736,7 @@ def analyze_dimension_predictiveness(  # noqa: PLR0912, PLR0915
     *,
     days: int = 30,
     success_threshold: float = 0.5,
+    limit: int = _PREDICTIVENESS_EVENT_LIMIT,
 ) -> DimensionPredictivenessReport:
     """Correlate quality-dimension scores with task success.
 
@@ -753,6 +760,13 @@ def analyze_dimension_predictiveness(  # noqa: PLR0912, PLR0915
     Both reads go through
     :func:`~trellis.stores.base.event_log.scan_events`, so hitting the cap
     keeps the **newest** events and says so in ``report.scan`` (#374).
+    ``limit`` governs both, for the reason
+    :func:`~trellis.extract.telemetry.analyze_extractor_fallbacks` gives —
+    and it matters more here than anywhere else in the set, because this is
+    a *join*: it sees a pack only when its quality event **and** its
+    feedback event both survived their own cap, so truncation drops matched
+    pairs faster than it drops events. The analyzer with superlinear loss
+    should not be the one without a lever.
 
     This function carries the one ordering assumption in the set, twice:
     ``pack_scores`` and ``pack_success`` are both last-write-wins over a
@@ -763,24 +777,18 @@ def analyze_dimension_predictiveness(  # noqa: PLR0912, PLR0915
     are read and not to how they are folded. Pinned by
     ``tests/unit/ops/test_analyzer_truncation.py``.
     """
-    from trellis.stores.base.event_log import (  # noqa: PLC0415
-        EventType,
-        merge_coverage,
-        scan_events,
-    )
-
     since = datetime.now(tz=UTC) - timedelta(days=days)
     quality_scan = scan_events(
         event_log,
         event_type=EventType.PACK_QUALITY_SCORED,
         since=since,
-        limit=_PREDICTIVENESS_EVENT_LIMIT,
+        limit=limit,
     )
     feedback_scan = scan_events(
         event_log,
         event_type=EventType.FEEDBACK_RECORDED,
         since=since,
-        limit=_PREDICTIVENESS_EVENT_LIMIT,
+        limit=limit,
     )
     quality_events = quality_scan.events
     feedback_events = feedback_scan.events
