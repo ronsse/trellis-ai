@@ -179,6 +179,28 @@ class NoiseDemotionScreen(TrellisModel):
         return self.candidates_considered - len(self.admitted)
 
 
+def _counts(evidence: DemotionEvidence | None) -> dict[str, int]:
+    """Citation counts to stamp on a decision record.
+
+    ``{}`` when there is no evidence, so the decision keeps its zero
+    defaults — and a zero then means what
+    :data:`REFUSED_NO_EVIDENCE` says it means. Every decision that *has*
+    evidence reports it, including one refused on corpus coverage: the
+    counts describe the item, and the coverage floor is a statement
+    about the *window*, not about what was cited. Reporting zeros there
+    made a refusal-on-coverage indistinguishable from a refusal for want
+    of evidence, and contradicted the ``item_scores`` row in the same
+    report.
+    """
+    if evidence is None:
+        return {}
+    return {
+        "appearances": evidence.appearances,
+        "helpful_count": evidence.helpful_count,
+        "unhelpful_count": evidence.unhelpful_count,
+    }
+
+
 def _judge(
     evidence: DemotionEvidence | None,
     item_id: str,
@@ -199,9 +221,7 @@ def _judge(
             item_id=item_id,
             admitted=admitted,
             reason=reason,
-            appearances=evidence.appearances,
-            helpful_count=helpful,
-            unhelpful_count=unhelpful,
+            **_counts(evidence),
         )
 
     if unhelpful <= 0:
@@ -267,7 +287,12 @@ def screen_noise_candidates(
     # reason over, so per-item verdicts would be theatre.
     if attributed_packs < min_attributed_packs:
         decisions = [
-            DemotionDecision(item_id=i, admitted=False, reason=REFUSED_THIN_CORPUS)
+            DemotionDecision(
+                item_id=i,
+                admitted=False,
+                reason=REFUSED_THIN_CORPUS,
+                **_counts(evidence_by_id.get(i)),
+            )
             for i in ids
         ]
         screen = NoiseDemotionScreen(

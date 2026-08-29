@@ -46,6 +46,52 @@ def screen(*evidence: DemotionEvidence, attributed_packs: int = AMPLE, **kw):
     )
 
 
+class TestConstantsArePinnedByValue:
+    """The two thresholds, asserted as the numbers they actually are.
+
+    Every other test in this file expresses itself *relative to* the
+    constants, and the loop fixtures in
+    ``tests/integration/loops/conftest.py`` derive their round count from
+    ``MIN_ATTRIBUTED_PACKS`` for the same reason — so both are
+    value-invariant by construction. Measured: lower the coverage floor
+    from 5 to 3 and ``tests/unit/classify/`` plus
+    ``tests/integration/loops/`` is **368 passed**. The whole suite
+    retunes itself to the new policy, and the direction it cannot see is
+    *loosening a safety floor*.
+
+    So these two lines are the pin, and they are the place a policy
+    change has to be argued. Both numbers carry a measured justification
+    in :mod:`trellis.classify.demotion_gate`'s docstring — the coverage
+    floor because below it a rate is not a measurement, and
+    ``MIN_UNHELPFUL_CITATIONS = 2`` because one citation is produced by
+    chance roughly two times in five at the observed 0.41 unhelpful base
+    rate, while two puts that near 0.17 and still admits 24 of 79 live
+    items. Changing either means updating that argument, not just the
+    number, and this test failing is the prompt to do it.
+    """
+
+    def test_coverage_floor_value(self):
+        assert MIN_ATTRIBUTED_PACKS == 5
+
+    def test_unhelpful_citation_floor_value(self):
+        assert MIN_UNHELPFUL_CITATIONS == 2
+
+    def test_coverage_floor_agrees_with_the_retrieve_surface(self):
+        """The gate's docstring claims it shares ``pack_value``'s value.
+
+        It is imported by value, not by reference, to keep ``classify``
+        free of a dependency on ``retrieve`` — which means nothing stops
+        the two drifting apart and quietly applying two different
+        standards to the same question. Pinned here because the claim is
+        made in prose one module away from the number.
+        """
+        from trellis.retrieve.pack_value import (
+            MIN_ATTRIBUTED_PACKS as RETRIEVE_MIN_ATTRIBUTED_PACKS,
+        )
+
+        assert MIN_ATTRIBUTED_PACKS == RETRIEVE_MIN_ATTRIBUTED_PACKS
+
+
 # --------------------------------------------------------------------
 # #336's own acceptance criterion, stated verbatim in the issue:
 #
@@ -144,6 +190,51 @@ class TestCoverageSuppression:
         assert result.admitted == []
         assert result.refused_by_reason == {REFUSED_THIN_CORPUS: 2}
         assert all(d.reason == REFUSED_THIN_CORPUS for d in result.decisions)
+
+    def test_suppressed_decisions_still_report_the_counts(self):
+        """A coverage refusal must not fabricate zero citations.
+
+        The suppressed branch used to build its decisions from
+        ``item_id`` / ``admitted`` / ``reason`` alone, so all three
+        counts fell back to their field defaults. That made a refusal on
+        *window coverage* byte-identical to :data:`REFUSED_NO_EVIDENCE`'s
+        honest zeros, and put the screen in direct contradiction with the
+        ``item_scores`` row for the same id in the same report — which is
+        exactly how it read in the CI failure that surfaced it.
+
+        The verdict is unchanged either way; only the accounting was
+        wrong. It is pinned because the counts are what a reader uses to
+        decide whether the floor is the *only* thing standing between a
+        candidate and demotion.
+        """
+        result = screen(
+            ev("has-evidence", appearances=9, helpful=1, unhelpful=4),
+            attributed_packs=1,
+        )
+
+        assert result.suppressed is True
+        decision = result.decisions[0]
+        assert decision.reason == REFUSED_THIN_CORPUS
+        assert (decision.appearances, decision.helpful_count) == (9, 1)
+        assert decision.unhelpful_count == 4
+
+    def test_suppression_keeps_absent_evidence_at_zero(self):
+        """The other half: a candidate with no evidence still reads zero.
+
+        Without this the fix could have been "stamp counts from anywhere"
+        — the zeros have to stay zero exactly where they are true, or
+        ``REFUSED_NO_EVIDENCE`` and ``REFUSED_THIN_CORPUS`` swap which
+        one is lying.
+        """
+        result = screen_noise_candidates(
+            ["never-scored"],
+            {"other": ev("other", appearances=9, unhelpful=9)},
+            attributed_packs=1,
+        )
+
+        decision = result.decisions[0]
+        assert decision.reason == REFUSED_THIN_CORPUS
+        assert (decision.appearances, decision.unhelpful_count) == (0, 0)
 
     def test_ample_corpus_is_not_suppressed(self):
         result = screen(ev("a", appearances=9, unhelpful=9))
