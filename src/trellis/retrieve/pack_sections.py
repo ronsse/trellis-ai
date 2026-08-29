@@ -25,6 +25,14 @@ from trellis.stores.base.event_log import (
 #: Sections whose empty rate is at or above this threshold are flagged.
 EMPTY_RATE_FLAG_THRESHOLD = 0.5
 
+#: Default scan cap for this analyzer. Deliberately **not**
+#: :data:`~trellis.stores.base.event_log.DEFAULT_SCAN_LIMIT`: the cap here
+#: is applied to *all* ``PACK_ASSEMBLED`` events and sectioned packs are
+#: filtered out afterwards, so the two numbers are not comparable. Named
+#: so the CLI can default its ``--limit`` to the analyzer's own value
+#: instead of silently widening this report's coverage 1000 -> 5000.
+PACK_SECTIONS_SCAN_LIMIT = 1000
+
 
 class SectionStats(TrellisModel):
     """Aggregate statistics for one section name across many packs."""
@@ -63,7 +71,7 @@ def analyze_pack_sections(
     *,
     days: int = 30,
     empty_rate_threshold: float = EMPTY_RATE_FLAG_THRESHOLD,
-    limit: int = 1000,
+    limit: int = PACK_SECTIONS_SCAN_LIMIT,
 ) -> PackSectionsReport:
     """Analyze sectioned pack composition over the given window.
 

@@ -1059,10 +1059,20 @@ class TestVectorMirrorIsObservable:
             entry for entry in logs if entry["event"] == "corpus_sync_vector_mirror"
         ]
         assert len(lines) == 1
+        # The level, not just the event. `capture_logs` swaps the processor
+        # chain but leaves `wrapper_class` alone, so under pytest the bound
+        # logger is `BoundLoggerFilteringAtNotset` and records `debug` too —
+        # which means every assertion above passes just as well against the
+        # `logger.debug` this fix exists to remove. Verified: flipping it
+        # back leaves the rest of this class green. The sibling test asserts
+        # `"warning"` for the same reason.
+        assert lines[0]["log_level"] == "info"
+
         # Every chunk but the one whose bytes changed took the mirror path,
         # and every one of those was mirrored.
         assert lines[0]["metadata_only_writes"] == chunk_count - 1
         assert lines[0]["rows_synced"] == chunk_count - 1
+        assert lines[0]["rows_absent"] == 0
 
     def test_a_run_with_nothing_to_mirror_stays_quiet(
         self, registry, vault, monkeypatch
@@ -1078,3 +1088,162 @@ class TestVectorMirrorIsObservable:
             for entry in logs
             if entry["event"].startswith("corpus_sync_vector_mirror")
         ]
+
+    def test_absent_rows_are_counted_apart_from_failed_mirrors(
+        self, registry, vault, monkeypatch
+    ):
+        """``rows_synced=0`` must not read the same for two opposite causes.
+
+        With embed-on-ingest off no chunk has a vector row at all — the
+        expected, harmless case. Without ``rows_absent`` that is
+        indistinguishable in the log from every mirror throwing, which is an
+        outage. The vector store is present, so the WARNING branch does not
+        fire and this line is the only report there is.
+        """
+        note = vault / "long.md"
+        note.write_text(_long_markdown())
+        sync_corpus(registry, vault, source_system="obsidian")
+
+        store = registry.knowledge.document_store
+        parent_id = corpus_doc_id("obsidian", "long.md")
+        parent = store.get(parent_id)
+        chunk_count = parent["metadata"]["chunk_count"]
+        store.put(
+            parent_id,
+            parent["content"],
+            metadata={**parent["metadata"], "auto_importance": 0.42},
+        )
+
+        note.write_text(_long_markdown() + " tail.")
+        with capture_logs() as logs:
+            sync_corpus(registry, vault, source_system="obsidian")
+
+        lines = [
+            entry for entry in logs if entry["event"] == "corpus_sync_vector_mirror"
+        ]
+        assert len(lines) == 1
+        assert lines[0]["rows_synced"] == 0
+        assert lines[0]["rows_absent"] == chunk_count - 1
+
+
+class TestDemoteSurvivesAChunkCountChange:
+    """A metadata-only re-put must not undo `apply_noise_tags` (#395-B1).
+
+    The trigger and the write disagreed. `tags_missing` is missing-only —
+    and the docstring promised the write was too — but the metadata dict
+    splatted the parent's *whole* tag bag over the chunk's own on every
+    path. `count_stale` alone is enough to reach it, and it fires on every
+    byte-identical chunk of any document whose chunk count moved: append one
+    section to a note and every earlier chunk was re-put with the parent's
+    `signal_quality` over its own.
+
+    This was pre-existing in the document store. What made it worth blocking
+    a PR over is that mirroring the re-put onto the vector row carried it to
+    the copy `SemanticSearch` actually serves — before the mirror the demote
+    still held there, which is where it mattered.
+    """
+
+    @staticmethod
+    def _sync(registry, vault, topics):
+        (vault / "long.md").write_text(_long_markdown(topics=topics))
+        sync_corpus(registry, vault, source_system="obsidian")
+
+    def test_a_demoted_chunk_keeps_its_demote_when_the_chunk_count_moves(
+        self, registry, vault, monkeypatch
+    ):
+        monkeypatch.setenv(CLASSIFY_ON_INGEST_FLAG, "1")
+        monkeypatch.setenv(EMBED_ON_INGEST_FLAG, "1")
+        self._sync(registry, vault, ("kubernetes", "grapes", "violins"))
+
+        store = registry.knowledge.document_store
+        vectors = registry.knowledge.vector_store
+        parent_id = corpus_doc_id("obsidian", "long.md")
+        demoted = chunk_doc_id(parent_id, 0)
+
+        # The feedback loop demotes the *served* item, which is a chunk. Both
+        # stores agree on `noise` before the re-sync (#343 fixed that half).
+        apply_noise_tags([demoted], store, vector_store=vectors)
+        assert store.get(demoted)["metadata"]["content_tags"]["signal_quality"] == (
+            "noise"
+        )
+        assert vectors.get(demoted)["metadata"]["content_tags"]["signal_quality"] == (
+            "noise"
+        )
+        parent_quality = store.get(parent_id)["metadata"]["content_tags"][
+            "signal_quality"
+        ]
+        assert parent_quality != "noise", (
+            "the parent must disagree with the chunk, or nothing is proved"
+        )
+
+        # Append sections: chunk 0's bytes are untouched, but chunk_count
+        # moves, so `count_stale` re-puts it.
+        before_count = store.get(parent_id)["metadata"]["chunk_count"]
+        self._sync(
+            registry,
+            vault,
+            ("kubernetes", "grapes", "violins", "sourdough", "kayaks"),
+        )
+        assert store.get(parent_id)["metadata"]["chunk_count"] > before_count
+
+        # The demote survives in both stores.
+        assert store.get(demoted)["metadata"]["content_tags"]["signal_quality"] == (
+            "noise"
+        )
+        assert vectors.get(demoted)["metadata"]["content_tags"]["signal_quality"] == (
+            "noise"
+        )
+
+    def test_the_demoted_chunk_is_still_withheld_from_the_semantic_axis(
+        self, registry, vault, monkeypatch
+    ):
+        """The consequence, on the axis the mirror exists to reach."""
+        monkeypatch.setenv(CLASSIFY_ON_INGEST_FLAG, "1")
+        monkeypatch.setenv(EMBED_ON_INGEST_FLAG, "1")
+        self._sync(registry, vault, ("kubernetes", "grapes", "violins"))
+        parent_id = corpus_doc_id("obsidian", "long.md")
+        apply_noise_tags(
+            [chunk_doc_id(parent_id, 0)],
+            registry.knowledge.document_store,
+            vector_store=registry.knowledge.vector_store,
+        )
+        self._sync(
+            registry,
+            vault,
+            ("kubernetes", "grapes", "violins", "sourdough", "kayaks"),
+        )
+
+        semantic = SemanticSearch(registry.knowledge.vector_store, _embed)
+        served = [
+            item
+            for item in semantic.search("kubernetes grapes violins facts", limit=50)
+            if item.item_id.startswith(f"{parent_id}#chunk-")
+        ]
+        kept = exclude_noise(served)
+        assert len(kept) == len(served) - 1
+        assert chunk_doc_id(parent_id, 0) not in {item.item_id for item in kept}
+
+    def test_a_missing_key_is_still_filled_on_the_same_path(
+        self, registry, vault, monkeypatch
+    ):
+        """The repair must not disable the propagation #388 exists for.
+
+        Gap-fill and overwrite are different operations. A chunk that lacks
+        `content_tags` entirely still receives the parent's.
+        """
+        monkeypatch.setenv(EMBED_ON_INGEST_FLAG, "1")
+        self._sync(registry, vault, ("kubernetes", "grapes", "violins"))
+        store = registry.knowledge.document_store
+        parent_id = corpus_doc_id("obsidian", "long.md")
+        assert "content_tags" not in store.get(chunk_doc_id(parent_id, 0))["metadata"]
+
+        monkeypatch.setenv(CLASSIFY_ON_INGEST_FLAG, "1")
+        self._sync(
+            registry,
+            vault,
+            ("kubernetes", "grapes", "violins", "sourdough", "kayaks"),
+        )
+        parent_tags = store.get(parent_id)["metadata"]["content_tags"]
+        for index in range(store.get(parent_id)["metadata"]["chunk_count"]):
+            meta = store.get(chunk_doc_id(parent_id, index))["metadata"]
+            assert meta["content_tags"] == parent_tags

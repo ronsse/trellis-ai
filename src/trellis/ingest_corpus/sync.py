@@ -60,7 +60,7 @@ from trellis.classify.ingest import (
     classify_on_ingest_enabled,
 )
 from trellis.core.hashing import content_hash
-from trellis.core.vector_metadata import sync_vector_metadata
+from trellis.core.vector_metadata import sync_vector_metadata_outcome
 from trellis.extract.memory_ingest_hook import (
     build_memory_extractor,
     run_memory_extraction,
@@ -188,6 +188,12 @@ class _VectorMirrorTally:
     are not — a run that legitimately re-embeds every chunk would read
     ``5000 written, 0 synced`` and look broken.
 
+    ``rows_absent`` separates the third state. Without it,
+    ``metadata_only_writes=5000, rows_synced=0`` reads identically for "none
+    of these chunks was ever embedded" (expected, harmless) and "every mirror
+    threw" (an outage), and those call for opposite responses. A line that
+    cannot distinguish them cannot answer the question it exists to ask.
+
     Reported once per run rather than per document. A corpus sync touches
     thousands of chunks, and a per-document line is either invisible (DEBUG
     is a no-op under the CLI's default ``INFO`` filtering bound logger) or a
@@ -197,6 +203,7 @@ class _VectorMirrorTally:
 
     metadata_only_writes: int = 0
     rows_synced: int = 0
+    rows_absent: int = 0
 
 
 def sync_records(
@@ -521,16 +528,29 @@ def _write_chunks(
     Stored chunk metadata is merged *under* the freshly computed metadata, the
     same contract the parent re-put honours: keys this run does not own (an
     earlier run's operator tags, a chunk-local flag) survive the re-put instead
-    of being rebuilt away. ``inherited_tags`` is the deliberate exception —
-    when a chunk is written, the parent's tags win over the chunk's own, so a
-    parent and its chunks can never disagree about what the document is.
+    of being rebuilt away.
 
-    A chunk whose bytes did not change is normally skipped, with one addition:
-    it is re-put when it is *missing* a key the parent carries, so enabling
-    classify-on-write (or backfilling tags onto parents) reaches the chunks
-    without an unrelated content edit. Missing-only, not differing — an
-    unedited chunk's tags may carry a demote signal from the feedback loop
-    (``apply_noise_tags``) that no sync should overwrite.
+    ``inherited_tags`` is the deliberate exception, and **how far the
+    exception reaches depends on why the chunk is being written**. These two
+    rules used to be stated as one, which made the docstring assert both that
+    the parent always wins and that an unedited chunk's tags are never
+    overwritten:
+
+    * **The chunk's bytes changed** — it is genuinely being rewritten, so the
+      parent's tags win outright. A rewritten chunk and its parent cannot
+      disagree about what the document is.
+    * **Only its metadata is being refreshed** (``count_stale`` or
+      ``tags_missing``) — the parent's tags fill keys the chunk *lacks* and
+      overwrite nothing. An unedited chunk's tags may carry a demote signal
+      the feedback loop put there (``apply_noise_tags`` writes
+      ``signal_quality="noise"`` onto the *served* item, which is a chunk),
+      and no sync may undo it.
+
+    A chunk whose bytes did not change is otherwise skipped entirely. It is
+    re-put only when it is missing a key the parent carries, or when the
+    document's chunk count moved — so enabling classify-on-write, or
+    backfilling tags onto parents, reaches the chunks without an unrelated
+    content edit.
 
     That metadata-only re-put is a **post-embed write**, so it has to mirror
     onto the vector row explicitly (#388) — see
@@ -554,7 +574,7 @@ def _write_chunks(
     inconsistent rather than merely old. ``reindex-vectors`` owns that case.
     """
     doc_store = registry.knowledge.document_store
-    # Resolved here rather than passed in: `_apply_record` (line 367) and
+    # Resolved here rather than passed in: `_apply_record` and
     # `_prune_vanished` both resolve it off the registry the same way, so
     # this is the module's convention, and `_get` caches — by the time this
     # runs, `_apply_record` has already instantiated the store.
@@ -574,10 +594,23 @@ def _write_chunks(
         tags_missing = not (inherited_tags.keys() <= stored.keys())
         if not content_changed and not count_stale and not tags_missing:
             continue
+        # The trigger above is missing-only; this write must be too, or the
+        # promise it makes is void (#395-B1). `count_stale` alone re-puts
+        # every byte-identical chunk of any document whose chunk count moved
+        # — append one section to a note and a splat of the parent's whole
+        # bag would overwrite a `signal_quality="noise"` the feedback loop
+        # put on the chunk. Parent tags win only where the chunk is being
+        # genuinely rewritten; on a metadata-only refresh they fill gaps and
+        # nothing more.
+        applied_tags = (
+            inherited_tags
+            if content_changed
+            else {k: v for k, v in inherited_tags.items() if k not in stored}
+        )
         metadata: dict[str, Any] = {
             **stored,
             **extra_metadata,
-            **inherited_tags,
+            **applied_tags,
             "source_system": source_system,
             "source_path": relpath,
             "parent_doc_id": parent_doc_id,
@@ -599,8 +632,11 @@ def _write_chunks(
             # document row is what a re-run repairs from, and the mirror is
             # fail-soft, so losing it must not lose the tag that landed.
             mirror.metadata_only_writes += 1
-            if sync_vector_metadata(vector_store, cid, metadata):
+            outcome = sync_vector_metadata_outcome(vector_store, cid, metadata)
+            if outcome == "synced":
                 mirror.rows_synced += 1
+            elif outcome == "absent":
+                mirror.rows_absent += 1
         written += 1
     return written
 
@@ -772,6 +808,7 @@ def _log_vector_mirror(
         "corpus_sync_vector_mirror",
         metadata_only_writes=mirror.metadata_only_writes,
         rows_synced=mirror.rows_synced,
+        rows_absent=mirror.rows_absent,
     )
 
 

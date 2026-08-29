@@ -47,7 +47,10 @@ from trellis.retrieve.evaluate import (
     analyze_dimension_predictiveness,
     evaluate_pack,
 )
-from trellis.retrieve.pack_sections import analyze_pack_sections
+from trellis.retrieve.pack_sections import (
+    PACK_SECTIONS_SCAN_LIMIT,
+    analyze_pack_sections,
+)
 from trellis.retrieve.telemetry import analyze_pack_telemetry
 from trellis.retrieve.token_usage import analyze_token_usage
 from trellis.retrieve.trellis_cost import summarize_trellis_cost
@@ -1369,7 +1372,7 @@ def pack_sections(
     ),
     output_format: str = typer.Option("text", "--format", help="Output format"),
     limit: int = typer.Option(
-        DEFAULT_SCAN_LIMIT,
+        PACK_SECTIONS_SCAN_LIMIT,
         "--limit",
         help=(
             "Max events to scan. Raise it when the report says TRUNCATED; "
