@@ -34,7 +34,12 @@ from trellis.schemas.advisory import DriftPattern
 from trellis.schemas.parameters import ParameterScope
 from trellis.stores.advisory_store import AdvisoryStore
 from trellis.stores.base.document import DocumentStore
-from trellis.stores.base.event_log import EventLog, EventType
+from trellis.stores.base.event_log import (
+    DEFAULT_SCAN_LIMIT,
+    EventLog,
+    EventType,
+    scan_events,
+)
 
 if TYPE_CHECKING:
     from trellis.ops.registry import ParameterRegistry
@@ -103,7 +108,7 @@ def _resolve_param(
     return registry.get(ParameterScope(component_id=component_id), key, default)
 
 
-def _lift_vs_baseline(
+def lift_vs_baseline(
     successes: int,
     presentations: int,
     total_successes: int,
@@ -116,7 +121,18 @@ def _lift_vs_baseline(
     (``packs_without == 0``), we fall back to the overall window rate
     so downstream math still produces a meaningful number instead of
     dividing by zero — this single fallback is the authoritative
-    zero-sample policy for the module.
+    zero-sample policy, and it is deliberately **not** ``0.0``: a
+    baseline of zero would make ``lift`` equal ``success_rate``, i.e.
+    the window's own success rate wearing a causal claim (#383).
+    Falling back to the window rate yields ``lift == 0``, which is the
+    honest reading of "no comparison arm was observed".
+
+    Public, not module-private, because
+    :class:`~trellis.retrieve.advisory_generator.AdvisoryGenerator` also
+    defers to it. It carried a leading underscore while the generator
+    duplicated a broken copy of this arithmetic inline; single-sourcing
+    it is the fix for #383, so the name now says the audience is the
+    package rather than the module.
     """
     rate = successes / presentations if presentations > 0 else 0.0
     packs_without = total_feedback - presentations
@@ -597,7 +613,7 @@ def _detect_drift_alerts(
             continue
 
         recent_successes = recent.successes.get(score.advisory_id, 0)
-        recent_rate, _, recent_lift = _lift_vs_baseline(
+        recent_rate, _, recent_lift = lift_vs_baseline(
             recent_successes,
             recent_presentations,
             recent.total_successes,
@@ -690,16 +706,21 @@ def analyze_advisory_effectiveness(
 
     since = datetime.now(tz=UTC) - timedelta(days=days)
 
-    pack_events = event_log.get_events(
+    # Capped reads go through scan_events so the cap drops the *oldest*
+    # events rather than the newest (#374). Same defect, same fix as the
+    # generator's two reads.
+    pack_events = scan_events(
+        event_log,
         event_type=EventType.PACK_ASSEMBLED,
         since=since,
-        limit=5000,
-    )
-    feedback_events = event_log.get_events(
+        limit=DEFAULT_SCAN_LIMIT,
+    ).events
+    feedback_events = scan_events(
+        event_log,
         event_type=EventType.FEEDBACK_RECORDED,
         since=since,
-        limit=5000,
-    )
+        limit=DEFAULT_SCAN_LIMIT,
+    ).events
 
     pack_advisories: dict[str, list[str]] = {}
     pack_occurred_at: dict[str, datetime] = {}
@@ -727,7 +748,7 @@ def analyze_advisory_effectiveness(
         if presentations < min_presentations:
             continue
         s = full.successes.get(adv_id, 0)
-        rate, baseline, lift = _lift_vs_baseline(
+        rate, baseline, lift = lift_vs_baseline(
             s, presentations, full.total_successes, full.total_feedback
         )
         advisory_scores.append(
@@ -886,7 +907,15 @@ def run_advisory_fitness_loop(
             # Suppressed branch: only two outcomes — restore (with margin)
             # or remain suppressed. Confidence is still updated either way
             # so the store reflects the latest evidence.
-            updated = advisory.model_copy(update={"confidence": new_confidence})
+            updated = advisory.model_copy(
+                update={
+                    "confidence": new_confidence,
+                    # Records the ownership handoff: from here on the
+                    # generator must not overwrite this field, or the blend
+                    # can never compound down to suppress_below (#383).
+                    "fitness_scored_at": datetime.now(tz=UTC),
+                }
+            )
             advisory_store.put(updated)
             if new_confidence >= restore_above:
                 advisory_store.restore(score.advisory_id)
@@ -922,7 +951,15 @@ def run_advisory_fitness_loop(
             # Soft-suppress: flip status, keep the record for potential
             # restoration. Persist new confidence first so scoring remains
             # consistent with evidence on subsequent passes.
-            updated = advisory.model_copy(update={"confidence": new_confidence})
+            updated = advisory.model_copy(
+                update={
+                    "confidence": new_confidence,
+                    # Records the ownership handoff: from here on the
+                    # generator must not overwrite this field, or the blend
+                    # can never compound down to suppress_below (#383).
+                    "fitness_scored_at": datetime.now(tz=UTC),
+                }
+            )
             advisory_store.put(updated)
             advisory_store.suppress(score.advisory_id, reason=reason)
             suppressed.append(score.advisory_id)
@@ -945,7 +982,15 @@ def run_advisory_fitness_loop(
             )
         else:
             # Active branch: adjust confidence, record boost if applicable.
-            updated = advisory.model_copy(update={"confidence": new_confidence})
+            updated = advisory.model_copy(
+                update={
+                    "confidence": new_confidence,
+                    # Records the ownership handoff: from here on the
+                    # generator must not overwrite this field, or the blend
+                    # can never compound down to suppress_below (#383).
+                    "fitness_scored_at": datetime.now(tz=UTC),
+                }
+            )
             advisory_store.put(updated)
             if new_confidence > old_confidence:
                 boosted.append(score.advisory_id)
