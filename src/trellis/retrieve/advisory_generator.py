@@ -21,26 +21,74 @@ present on **every** pack in the window scored
 ``effect_size == success_rate_with`` — the deployment's overall success
 rate wearing a causal claim (#383). Both arms now go through
 :meth:`AdvisoryGenerator._supported_effect`, which defers the arithmetic
-to :func:`trellis.retrieve.effectiveness._lift_vs_baseline` (the
-module-level authoritative zero-sample policy) and emits **nothing**
-when the comparison arm is too small to support a claim.
+to :func:`trellis.retrieve.effectiveness.lift_vs_baseline` (the
+authoritative zero-sample policy) and returns **nothing** when the
+comparison arm is too small to support a claim. ``_scope_analysis`` is
+the exception and always was: its two arms are disjoint pack-count bins,
+each already gated at ``min_sample_size``, so it never had the fallback.
+
+Measured against the reference deployment's 30-day window (18 packs with
+feedback, 3 successes) the gate is doing real work and is not a blanket
+refusal:
+
+===========  =======  ==========  ===============  ==============
+finding      with     without     before           after
+===========  =======  ==========  ===============  ==============
+``semantic``  18       0          ``+0.167``       refused, lift 0
+``graph``     17       1          ``+0.176``       refused, arm=1
+``keyword``    9       9          ``-0.333``       ``-0.333``
+4 entities     5      13          ``-0.231``       ``-0.231``
+===========  =======  ==========  ===============  ==============
+
+The two refusals are exactly the two findings with no usable comparison
+arm; the five with an arm are unchanged. An ``effect_size`` that can only
+read back the window's success rate is a constant, and the ``keyword``
+row is the evidence that this one is not.
+
+**Advisory ids are derived from the finding, not minted per run.** The
+generator used the ``Advisory.advisory_id`` ULID default, so each nightly
+pass wrote a *new* row for a finding it had already written — 51 rows
+carrying 29 distinct messages and roughly 5 underlying findings on the
+reference deployment, growing without bound. The append also split every
+finding's presentation count across a fresh id each night, so no advisory
+could accumulate the presentations
+:func:`~trellis.retrieve.effectiveness.analyze_advisory_effectiveness`
+scores on — a second, independent reason the fitness loop cannot
+self-correct. :meth:`AdvisoryGenerator._stable_id` keys the id on the
+finding's subject so ``put_many`` replaces in place, which is what the
+call site's comment always claimed it did.
 """
 
 from __future__ import annotations
 
 import hashlib
 from collections import defaultdict
+from collections.abc import Callable, Iterable, Sequence
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import structlog
+from pydantic import Field
 
 from trellis.core.base import TrellisModel
 from trellis.feedback.models import SUCCESS_RATING_THRESHOLD
-from trellis.retrieve.effectiveness import _lift_vs_baseline
-from trellis.schemas.advisory import Advisory, AdvisoryCategory, AdvisoryEvidence
+from trellis.retrieve.effectiveness import lift_vs_baseline
+from trellis.schemas.advisory import (
+    Advisory,
+    AdvisoryCategory,
+    AdvisoryEvidence,
+    AdvisoryStatus,
+)
 from trellis.stores.advisory_store import AdvisoryStore
-from trellis.stores.base.event_log import EventLog, EventType
+from trellis.stores.base.event_log import (
+    DEFAULT_SCAN_LIMIT,
+    EventLog,
+    EventType,
+    ScanCoverage,
+    merge_coverage,
+    scan_events,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -60,6 +108,32 @@ _MIN_WORD_LENGTH = 3
 _SCOPE_SMALL = 5
 _SCOPE_LARGE = 15
 _MIN_BIN_COUNT = 2
+#: How many pack ids to carry as evidence on one advisory. Enough for a
+#: reviewer to spot-check the claim, short enough that the row stays small.
+_MAX_REPRESENTATIVE = 5
+
+
+@dataclass(slots=True)
+class _KeyOutcomes:
+    """Which packs carried one key, split by outcome.
+
+    Replaces four near-identical ``defaultdict(int)`` pairs *and* the
+    rescans that followed them (``[p for p in packs if key in ...]``, run
+    once per surviving key) — the pack ids are already in hand at counting
+    time, so the evidence pointers cost nothing extra to keep.
+    """
+
+    success_packs: list[str] = field(default_factory=list)
+    failure_packs: list[str] = field(default_factory=list)
+    domains: set[str] = field(default_factory=set)
+
+    @property
+    def successes(self) -> int:
+        return len(self.success_packs)
+
+    @property
+    def presentations(self) -> int:
+        return len(self.success_packs) + len(self.failure_packs)
 
 
 class AdvisoryReport(TrellisModel):
@@ -70,6 +144,11 @@ class AdvisoryReport(TrellisModel):
     total_packs: int
     total_feedback: int
     analysis_window_days: int
+    #: Coverage of the two capped event reads. A run whose window held
+    #: more than ``DEFAULT_SCAN_LIMIT`` events of either type analysed
+    #: only the newest of them, and says so here rather than reporting a
+    #: partial window as a whole one (#374).
+    coverage: ScanCoverage = Field(default_factory=ScanCoverage)
 
 
 class AdvisoryGenerator:
@@ -101,28 +180,35 @@ class AdvisoryGenerator:
         """
         since = datetime.now(tz=UTC) - timedelta(days=days)
 
-        # Gather raw data
-        pack_events = self._event_log.get_events(
+        # Capped reads go through scan_events so a window with more than
+        # DEFAULT_SCAN_LIMIT matches keeps the *newest* events. The
+        # ascending default dropped them, which on a busy deployment means
+        # advisories mined from the oldest slice of the window (#374).
+        pack_scan = scan_events(
+            self._event_log,
             event_type=EventType.PACK_ASSEMBLED,
             since=since,
-            limit=5000,
+            limit=DEFAULT_SCAN_LIMIT,
         )
-        feedback_events = self._event_log.get_events(
+        feedback_scan = scan_events(
+            self._event_log,
             event_type=EventType.FEEDBACK_RECORDED,
             since=since,
-            limit=5000,
+            limit=DEFAULT_SCAN_LIMIT,
         )
+        coverage = merge_coverage(pack_scan.coverage, feedback_scan.coverage)
 
         # Build joined dataset
-        packs = self._join_packs_feedback(pack_events, feedback_events)
+        packs = self._join_packs_feedback(pack_scan.events, feedback_scan.events)
 
         if not packs:
             return AdvisoryReport(
                 advisories_generated=0,
                 advisories_stored=0,
-                total_packs=len(pack_events),
-                total_feedback=len(feedback_events),
+                total_packs=len(pack_scan.events),
+                total_feedback=len(feedback_scan.events),
                 analysis_window_days=days,
+                coverage=coverage,
             )
 
         # Run all five analysis methods
@@ -136,10 +222,10 @@ class AdvisoryGenerator:
         # Replaces the previous run's row for each finding: advisory ids
         # are derived from the finding's identity (:meth:`_stable_id`), so
         # ``put_many`` overwrites in place instead of minting a fresh ULID
-        # nightly. The append behaviour reached 37 rows carrying 3
-        # underlying findings, and split every finding's presentation count
-        # across a new id each night — which is why no advisory could ever
-        # accumulate the presentations the fitness loop scores on (#383).
+        # nightly. That in-place overwrite is why _carry_forward_status has
+        # to run first — a regenerated row defaults to ACTIVE, and writing
+        # it over a row the fitness loop suppressed would revive it in
+        # silence, which is worse than the unbounded append it replaces.
         stored = 0
         if advisories:
             advisories = [self._carry_forward_status(a) for a in advisories]
@@ -150,14 +236,16 @@ class AdvisoryGenerator:
             count=len(advisories),
             stored=stored,
             packs_analyzed=len(packs),
+            truncated=coverage.truncated,
         )
 
         return AdvisoryReport(
             advisories_generated=len(advisories),
             advisories_stored=stored,
-            total_packs=len(pack_events),
-            total_feedback=len(feedback_events),
+            total_packs=len(pack_scan.events),
+            total_feedback=len(feedback_scan.events),
             analysis_window_days=days,
+            coverage=coverage,
         )
 
     # --- Data preparation ---
@@ -205,67 +293,56 @@ class AdvisoryGenerator:
             )
         return rows
 
+    @staticmethod
+    def _tally(
+        packs: list[dict[str, Any]],
+        keys_of: Callable[[dict[str, Any]], Iterable[str]],
+    ) -> dict[str, _KeyOutcomes]:
+        """Group packs by the keys ``keys_of`` extracts from each of them."""
+        tally: dict[str, _KeyOutcomes] = defaultdict(_KeyOutcomes)
+        for pack in packs:
+            for key in keys_of(pack):
+                outcomes = tally[key]
+                if pack["success"]:
+                    outcomes.success_packs.append(pack["pack_id"])
+                else:
+                    outcomes.failure_packs.append(pack["pack_id"])
+                outcomes.domains.add(pack["domain"])
+        return tally
+
     # --- Analysis methods ---
 
     def _entity_correlation(self, packs: list[dict[str, Any]]) -> list[Advisory]:
         """Find entities disproportionately present in successful packs."""
-        # Count per-item appearances in success/failure
-        item_success: dict[str, int] = defaultdict(int)
-        item_failure: dict[str, int] = defaultdict(int)
-
-        for pack in packs:
-            for item_id in pack["item_ids"]:
-                if pack["success"]:
-                    item_success[item_id] += 1
-                else:
-                    item_failure[item_id] += 1
-
-        all_items = set(item_success) | set(item_failure)
         total_success = sum(1 for p in packs if p["success"])
 
         advisories: list[Advisory] = []
-        for item_id in all_items:
-            s = item_success.get(item_id, 0)
-            f = item_failure.get(item_id, 0)
-            total = s + f
-            if total < self._min_sample_size:
+        for item_id, outcomes in self._tally(packs, lambda p: p["item_ids"]).items():
+            supported = self._supported_effect(outcomes, total_success, len(packs))
+            if supported is None:
                 continue
-
-            rate_with = s / total if total > 0 else 0.0
-            # Rate without: success rate of packs that don't contain item
-            packs_without = len(packs) - total
-            success_without = total_success - s
-            rate_without = success_without / packs_without if packs_without > 0 else 0.0
-            effect = rate_with - rate_without
-
+            rate_with, rate_without, effect = supported
             if effect < self._min_effect_size:
                 continue
 
-            # Determine domain scope from packs containing this item
-            domains = {p["domain"] for p in packs if item_id in p["item_ids"]}
-            scope = domains.pop() if len(domains) == 1 else "global"
-
-            confidence = self._compute_confidence(total, effect)
-            traces = [
-                p["pack_id"] for p in packs if item_id in p["item_ids"] and p["success"]
-            ][:5]
-
+            scope = self._scope_of(outcomes)
             advisories.append(
                 Advisory(
+                    advisory_id=self._stable_id(
+                        AdvisoryCategory.ENTITY, scope, item_id
+                    ),
                     category=AdvisoryCategory.ENTITY,
-                    confidence=confidence,
+                    confidence=self._compute_confidence(
+                        outcomes.presentations, effect
+                    ),
                     message=(
                         f"Entity {item_id} appears in"
                         f" {rate_with:.0%} of successful packs"
-                        f" (n={total}, effect=+{effect:.0%})."
+                        f" (n={outcomes.presentations}, effect=+{effect:.0%})."
                         f" Consider including it."
                     ),
-                    evidence=AdvisoryEvidence(
-                        sample_size=total,
-                        success_rate_with=round(rate_with, 3),
-                        success_rate_without=round(rate_without, 3),
-                        effect_size=round(effect, 3),
-                        representative_trace_ids=traces,
+                    evidence=self._evidence(
+                        outcomes, rate_with, rate_without, effect, outcomes.success_packs
                     ),
                     scope=scope,
                     entity_id=item_id,
@@ -280,57 +357,45 @@ class AdvisoryGenerator:
         This is a proxy for step-pattern mining (ADR method 2) using the
         strategy_source data from Phase 1's decision trail.
         """
-        strategy_success: dict[str, int] = defaultdict(int)
-        strategy_failure: dict[str, int] = defaultdict(int)
-
-        for pack in packs:
-            strategies_in_pack: set[str] = set()
-            for item in pack.get("items", []):
-                src = item.get("strategy_source")
-                if src:
-                    strategies_in_pack.add(src)
-
-            for strategy in strategies_in_pack:
-                if pack["success"]:
-                    strategy_success[strategy] += 1
-                else:
-                    strategy_failure[strategy] += 1
-
         total_success = sum(1 for p in packs if p["success"])
+        tally = self._tally(
+            packs,
+            lambda p: {
+                item["strategy_source"]
+                for item in p.get("items", [])
+                if item.get("strategy_source")
+            },
+        )
 
         advisories: list[Advisory] = []
-        for strategy in set(strategy_success) | set(strategy_failure):
-            s = strategy_success.get(strategy, 0)
-            f = strategy_failure.get(strategy, 0)
-            total = s + f
-            if total < self._min_sample_size:
+        for strategy, outcomes in tally.items():
+            supported = self._supported_effect(outcomes, total_success, len(packs))
+            if supported is None:
                 continue
-
-            rate_with = s / total if total > 0 else 0.0
-            packs_without = len(packs) - total
-            success_without = total_success - s
-            rate_without = success_without / packs_without if packs_without > 0 else 0.0
-            effect = rate_with - rate_without
-
+            rate_with, rate_without, effect = supported
             if abs(effect) < self._min_effect_size:
                 continue
 
-            confidence = self._compute_confidence(total, abs(effect))
+            exemplars = (
+                outcomes.success_packs if effect > 0 else outcomes.failure_packs
+            )
             advisories.append(
                 Advisory(
+                    advisory_id=self._stable_id(
+                        AdvisoryCategory.APPROACH, "global", strategy
+                    ),
                     category=AdvisoryCategory.APPROACH,
-                    confidence=confidence,
+                    confidence=self._compute_confidence(
+                        outcomes.presentations, abs(effect)
+                    ),
                     message=(
                         f"Packs using the '{strategy}' strategy"
                         f" succeeded {rate_with:.0%} of the time"
                         f" vs {rate_without:.0%} without"
-                        f" (n={total}, effect={effect:+.0%})."
+                        f" (n={outcomes.presentations}, effect={effect:+.0%})."
                     ),
-                    evidence=AdvisoryEvidence(
-                        sample_size=total,
-                        success_rate_with=round(rate_with, 3),
-                        success_rate_without=round(rate_without, 3),
-                        effect_size=round(effect, 3),
+                    evidence=self._evidence(
+                        outcomes, rate_with, rate_without, effect, exemplars
                     ),
                     scope="global",
                     metadata={"strategy": strategy},
@@ -340,9 +405,15 @@ class AdvisoryGenerator:
         return advisories
 
     def _scope_analysis(self, packs: list[dict[str, Any]]) -> list[Advisory]:
-        """Analyze whether narrower or broader packs correlate with success."""
+        """Analyze whether narrower or broader packs correlate with success.
+
+        The one method that never needed :meth:`_supported_effect`: its two
+        arms are disjoint pack-count bins and *both* are already gated at
+        ``min_sample_size`` below, so there is no arm it can compare
+        against nothing.
+        """
         # Bin packs by item count: small, medium, large
-        bins: dict[str, list[bool]] = {
+        bins: dict[str, list[dict[str, Any]]] = {
             "small": [],
             "medium": [],
             "large": [],
@@ -350,18 +421,20 @@ class AdvisoryGenerator:
         for pack in packs:
             n_items = len(pack["item_ids"])
             if n_items <= _SCOPE_SMALL:
-                bins["small"].append(pack["success"])
+                bins["small"].append(pack)
             elif n_items <= _SCOPE_LARGE:
-                bins["medium"].append(pack["success"])
+                bins["medium"].append(pack)
             else:
-                bins["large"].append(pack["success"])
+                bins["large"].append(pack)
 
         advisories: list[Advisory] = []
         bin_rates: dict[str, float] = {}
 
-        for bin_name, outcomes in bins.items():
-            if len(outcomes) >= self._min_sample_size:
-                bin_rates[bin_name] = sum(outcomes) / len(outcomes)
+        for bin_name, members in bins.items():
+            if len(members) >= self._min_sample_size:
+                bin_rates[bin_name] = sum(1 for p in members if p["success"]) / len(
+                    members
+                )
 
         # Compare best vs worst bin
         if len(bin_rates) < _MIN_BIN_COUNT:
@@ -386,6 +459,7 @@ class AdvisoryGenerator:
 
         advisories.append(
             Advisory(
+                advisory_id=self._stable_id(AdvisoryCategory.SCOPE, "global", ""),
                 category=AdvisoryCategory.SCOPE,
                 confidence=confidence,
                 message=(
@@ -400,6 +474,9 @@ class AdvisoryGenerator:
                     success_rate_with=round(bin_rates[best_bin], 3),
                     success_rate_without=round(bin_rates[worst_bin], 3),
                     effect_size=round(effect, 3),
+                    representative_trace_ids=self._representative(
+                        [p["pack_id"] for p in bins[best_bin] if p["success"]]
+                    ),
                 ),
                 scope="global",
                 metadata={
@@ -412,60 +489,36 @@ class AdvisoryGenerator:
 
     def _anti_pattern_detection(self, packs: list[dict[str, Any]]) -> list[Advisory]:
         """Find entities disproportionately present in failed packs."""
-        item_success: dict[str, int] = defaultdict(int)
-        item_failure: dict[str, int] = defaultdict(int)
-
-        for pack in packs:
-            for item_id in pack["item_ids"]:
-                if pack["success"]:
-                    item_success[item_id] += 1
-                else:
-                    item_failure[item_id] += 1
+        total_success = sum(1 for p in packs if p["success"])
 
         advisories: list[Advisory] = []
-        for item_id in set(item_success) | set(item_failure):
-            s = item_success.get(item_id, 0)
-            f = item_failure.get(item_id, 0)
-            total = s + f
-            if total < self._min_sample_size:
+        for item_id, outcomes in self._tally(packs, lambda p: p["item_ids"]).items():
+            supported = self._supported_effect(outcomes, total_success, len(packs))
+            if supported is None:
                 continue
-
-            rate_with = s / total if total > 0 else 0.0
-            packs_without = len(packs) - total
-            success_without = sum(1 for p in packs if p["success"]) - s
-            rate_without = success_without / packs_without if packs_without > 0 else 0.0
-            effect = rate_with - rate_without
-
+            rate_with, rate_without, effect = supported
             # Anti-patterns have *negative* effect (presence hurts)
             if effect >= -self._min_effect_size:
                 continue
 
-            domains = {p["domain"] for p in packs if item_id in p["item_ids"]}
-            scope = domains.pop() if len(domains) == 1 else "global"
-
-            confidence = self._compute_confidence(total, abs(effect))
-            failure_traces = [
-                p["pack_id"]
-                for p in packs
-                if item_id in p["item_ids"] and not p["success"]
-            ][:5]
-
+            scope = self._scope_of(outcomes)
             advisories.append(
                 Advisory(
+                    advisory_id=self._stable_id(
+                        AdvisoryCategory.ANTI_PATTERN, scope, item_id
+                    ),
                     category=AdvisoryCategory.ANTI_PATTERN,
-                    confidence=confidence,
+                    confidence=self._compute_confidence(
+                        outcomes.presentations, abs(effect)
+                    ),
                     message=(
                         f"Entity {item_id} correlates with failure:"
                         f" {rate_with:.0%} success when present vs"
                         f" {rate_without:.0%} without"
-                        f" (n={total}, effect={effect:+.0%})."
+                        f" (n={outcomes.presentations}, effect={effect:+.0%})."
                     ),
-                    evidence=AdvisoryEvidence(
-                        sample_size=total,
-                        success_rate_with=round(rate_with, 3),
-                        success_rate_without=round(rate_without, 3),
-                        effect_size=round(effect, 3),
-                        representative_trace_ids=failure_traces,
+                    evidence=self._evidence(
+                        outcomes, rate_with, rate_without, effect, outcomes.failure_packs
                     ),
                     scope=scope,
                     entity_id=item_id,
@@ -476,55 +529,41 @@ class AdvisoryGenerator:
 
     def _query_improvement(self, packs: list[dict[str, Any]]) -> list[Advisory]:
         """Find intent keywords that correlate with successful packs."""
-        # Tokenise intents and track per-word success rates
-        word_success: dict[str, int] = defaultdict(int)
-        word_failure: dict[str, int] = defaultdict(int)
-
-        for pack in packs:
-            intent = pack.get("intent", "")
-            words = set(intent.lower().split())
-            for word in words:
-                if len(word) < _MIN_WORD_LENGTH:
-                    continue
-                if pack["success"]:
-                    word_success[word] += 1
-                else:
-                    word_failure[word] += 1
-
         total_success = sum(1 for p in packs if p["success"])
+        tally = self._tally(
+            packs,
+            lambda p: {
+                word
+                for word in p.get("intent", "").lower().split()
+                if len(word) >= _MIN_WORD_LENGTH
+            },
+        )
 
         advisories: list[Advisory] = []
-        for word in set(word_success) | set(word_failure):
-            s = word_success.get(word, 0)
-            f = word_failure.get(word, 0)
-            total = s + f
-            if total < self._min_sample_size:
+        for word, outcomes in tally.items():
+            supported = self._supported_effect(outcomes, total_success, len(packs))
+            if supported is None:
                 continue
-
-            rate_with = s / total if total > 0 else 0.0
-            packs_without = len(packs) - total
-            success_without = total_success - s
-            rate_without = success_without / packs_without if packs_without > 0 else 0.0
-            effect = rate_with - rate_without
-
+            rate_with, rate_without, effect = supported
             if effect < self._min_effect_size:
                 continue
 
-            confidence = self._compute_confidence(total, effect)
             advisories.append(
                 Advisory(
+                    advisory_id=self._stable_id(
+                        AdvisoryCategory.QUERY, "global", word
+                    ),
                     category=AdvisoryCategory.QUERY,
-                    confidence=confidence,
+                    confidence=self._compute_confidence(
+                        outcomes.presentations, effect
+                    ),
                     message=(
                         f"Including '{word}' in your context query"
                         f" correlates with {rate_with:.0%} success"
-                        f" (n={total}, effect=+{effect:.0%})."
+                        f" (n={outcomes.presentations}, effect=+{effect:.0%})."
                     ),
-                    evidence=AdvisoryEvidence(
-                        sample_size=total,
-                        success_rate_with=round(rate_with, 3),
-                        success_rate_without=round(rate_without, 3),
-                        effect_size=round(effect, 3),
+                    evidence=self._evidence(
+                        outcomes, rate_with, rate_without, effect, outcomes.success_packs
                     ),
                     scope="global",
                     metadata={"keyword": word},
@@ -534,6 +573,136 @@ class AdvisoryGenerator:
         return advisories
 
     # --- Helpers ---
+
+    def _supported_effect(
+        self,
+        outcomes: _KeyOutcomes,
+        total_successes: int,
+        total_packs: int,
+    ) -> tuple[float, float, float] | None:
+        """``(rate_with, rate_without, effect)``, or ``None`` if unsupported.
+
+        ``None`` is the whole point: it is the generator declining to make
+        a claim, and every caller drops the candidate on it. Two ways to
+        earn it, and they are the same rule applied to each arm —
+
+        * fewer than ``min_sample_size`` packs *carried* the key (the
+          pre-existing check, unchanged), or
+        * fewer than ``min_sample_size`` packs *did not* carry it, so
+          there is no comparison arm to subtract.
+
+        The arithmetic itself is
+        :func:`~trellis.retrieve.effectiveness.lift_vs_baseline` — the one
+        implementation, rather than the second, divergent copy that made
+        this a bug. That function's own zero-sample fallback (baseline =
+        the window rate, so lift = 0) is now unreachable from here, since
+        ``without == 0`` is refused before it is called. That is
+        deliberate belt-and-braces: an unsupported claim should not be
+        emitted at all, and if it somehow were, the shared fallback would
+        still report lift 0 rather than the old ``0.0`` literal's
+        fabricated effect.
+        """
+        presentations = outcomes.presentations
+        if presentations < self._min_sample_size:
+            return None
+        if total_packs - presentations < self._min_sample_size:
+            return None
+        return lift_vs_baseline(
+            outcomes.successes, presentations, total_successes, total_packs
+        )
+
+    @staticmethod
+    def _scope_of(outcomes: _KeyOutcomes) -> str:
+        """Domain scope for an item-keyed advisory, or ``global`` if mixed."""
+        if len(outcomes.domains) == 1:
+            return next(iter(outcomes.domains))
+        return "global"
+
+    @staticmethod
+    def _representative(pack_ids: Sequence[str]) -> list[str]:
+        """Up to :data:`_MAX_REPRESENTATIVE` evidence pointers."""
+        return list(pack_ids[:_MAX_REPRESENTATIVE])
+
+    def _evidence(
+        self,
+        outcomes: _KeyOutcomes,
+        rate_with: float,
+        rate_without: float,
+        effect: float,
+        exemplars: Sequence[str],
+    ) -> AdvisoryEvidence:
+        """Assemble the evidence block, including its pointers."""
+        return AdvisoryEvidence(
+            sample_size=outcomes.presentations,
+            success_rate_with=round(rate_with, 3),
+            success_rate_without=round(rate_without, 3),
+            effect_size=round(effect, 3),
+            representative_trace_ids=self._representative(exemplars),
+        )
+
+    @staticmethod
+    def _stable_id(category: AdvisoryCategory, scope: str, subject: str) -> str:
+        """Deterministic advisory id for one *finding*.
+
+        Keyed on what the advisory is **about** — its category, its scope
+        and its subject (the entity id, strategy name or keyword; the
+        empty string for SCOPE, which yields at most one finding per
+        scope) — and deliberately **not** on the numbers, which move every
+        night. Two runs that rediscover the same finding must produce the
+        same id or the fitness loop's presentation counts fragment across
+        ids and never clear ``min_presentations``.
+
+        Hashed rather than concatenated because subjects are open text
+        (keywords, ULIDs, future strategy names) and an id is not the
+        place to worry about a separator appearing in one. The category
+        stays in the clear so a row is greppable.
+        """
+        digest = hashlib.sha256(
+            "\x00".join((category.value, scope, subject)).encode()
+        ).hexdigest()
+        return f"adv-{category.value}-{digest[:16]}"
+
+    def _carry_forward_status(self, advisory: Advisory) -> Advisory:
+        """Merge a regenerated finding onto the row it replaces.
+
+        The generator owns the *finding* — message, evidence, and the
+        confidence those imply. The fitness loop
+        (:func:`~trellis.retrieve.effectiveness.run_advisory_fitness_loop`)
+        owns the *fitness* — status, suppression, and the confidence blend
+        that drives them. Stable ids make the generator's nightly write
+        land on the loop's row, so the loop's fields have to survive it.
+
+        Carried forward:
+
+        * ``created_at`` — when the finding was *first* observed. A
+          regenerated row is the same finding, not a new one.
+        * ``status`` / ``suppressed_at`` / ``suppression_reason`` — a
+          fresh :class:`Advisory` defaults to ``ACTIVE``, so without this
+          every nightly run would silently un-suppress everything the
+          fitness loop had suppressed. Restoration is the loop's decision
+          (it applies hysteresis); the generator must not make it by
+          accident.
+        * ``confidence``, **but only while suppressed.** Otherwise the
+          generator would reset a suppressed advisory's confidence to a
+          fresh statistical value each night and the very next fitness
+          pass — which runs immediately after generation in the same
+          curation cycle — could blend it back above the restore
+          threshold. Suppression that undoes itself nightly is
+          suppression that does nothing.
+        """
+        prior = self._advisory_store.get(advisory.advisory_id)
+        if prior is None:
+            return advisory
+        carried: dict[str, Any] = {
+            "created_at": prior.created_at,
+            "updated_at": datetime.now(tz=UTC),
+            "status": prior.status,
+            "suppressed_at": prior.suppressed_at,
+            "suppression_reason": prior.suppression_reason,
+        }
+        if prior.status == AdvisoryStatus.SUPPRESSED:
+            carried["confidence"] = prior.confidence
+        return advisory.model_copy(update=carried)
 
     @staticmethod
     def _compute_confidence(sample_size: int, effect_size: float) -> float:

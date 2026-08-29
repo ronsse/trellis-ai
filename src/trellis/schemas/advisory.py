@@ -55,8 +55,19 @@ class AdvisoryEvidence(VersionedModel):
 
     sample_size: int
     success_rate_with: float
+    #: Success rate of the packs that did **not** carry the subject. The
+    #: generator refuses to emit an advisory at all when that arm is too
+    #: small to measure, so this is never a stand-in zero — see
+    #: :meth:`~trellis.retrieve.advisory_generator.AdvisoryGenerator._supported_effect`
+    #: and #383, where a ``0.0`` fallback made every ``effect_size`` a
+    #: restatement of the deployment's own success rate.
     success_rate_without: float
     effect_size: float  # success_rate_with - success_rate_without
+    #: **Pack ids**, not trace ids — the ``entity_id`` of the
+    #: ``PACK_ASSEMBLED`` events that exemplify the claim (successes for a
+    #: positive effect, failures for a negative one). The field name
+    #: predates the generator ever populating it and is kept because
+    #: renaming it would fail validation on every advisory already stored.
     representative_trace_ids: list[str] = Field(default_factory=list)
 
 
