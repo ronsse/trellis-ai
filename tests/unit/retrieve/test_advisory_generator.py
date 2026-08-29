@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 from trellis.retrieve.advisory_generator import AdvisoryGenerator
-from trellis.schemas.advisory import AdvisoryCategory
+from trellis.schemas.advisory import AdvisoryCategory, AdvisoryStatus
 from trellis.stores.advisory_store import AdvisoryStore
 from trellis.stores.base.event_log import EventLog, EventType
 
@@ -324,3 +324,330 @@ class TestAdvisoryReport:
         assert report.total_feedback == 0
         assert report.advisories_generated == 0
         assert report.advisories_stored == 0
+
+
+def _strategy_pack(
+    pack_id: str,
+    strategies: list[str],
+    *,
+    item_ids: list[str] | None = None,
+    intent: str = "constant intent for every pack",
+) -> MagicMock:
+    """A PACK_ASSEMBLED event whose items came from ``strategies``."""
+    return _pack_event(
+        pack_id,
+        item_ids if item_ids is not None else [f"item-{pack_id}"],
+        intent=intent,
+        items=[{"strategy_source": s} for s in strategies],
+    )
+
+
+def _two_arm_corpus() -> tuple[list[MagicMock], list[MagicMock]]:
+    """20 packs carrying three strategies with deliberately different arms.
+
+    * ``ubiquitous`` — on all 20 packs, so there is no comparison arm at all.
+    * ``narrow``     — on 19, leaving a one-pack arm: present, but not evidence.
+    * ``real``       — on 10, against 10 without: the arm that can be measured.
+
+    Outcomes: packs 0-7 succeed, 8-9 fail, 10-11 succeed, 12-19 fail — so
+    ``real`` runs 8/10 against 2/10 and its effect (+0.6) is nothing like its
+    own success rate (0.8). That gap is the point: an ``effect_size`` that
+    can only ever read back ``success_rate_with`` is a constant.
+    """
+    packs: list[MagicMock] = []
+    feedback: list[MagicMock] = []
+    for i in range(20):
+        strategies = ["ubiquitous"]
+        if i < 19:
+            strategies.append("narrow")
+        if i < 10:
+            strategies.append("real")
+        packs.append(_strategy_pack(f"p{i}", strategies))
+        feedback.append(_feedback_event(f"p{i}", success=i < 8 or i in (10, 11)))
+    return packs, feedback
+
+
+def _run(
+    tmp_path: Path,
+    packs: list[MagicMock],
+    feedback: list[MagicMock],
+    *,
+    runs: int = 1,
+    store: AdvisoryStore | None = None,
+    **kwargs: object,
+) -> tuple[AdvisoryStore, MagicMock]:
+    """Generate ``runs`` times over the same events; return store + event log."""
+    event_log = MagicMock(spec=EventLog)
+    event_log.get_events.side_effect = [packs, feedback] * runs
+    adv_store = store if store is not None else AdvisoryStore(tmp_path / "adv.json")
+    gen = AdvisoryGenerator(event_log, adv_store, **kwargs)  # type: ignore[arg-type]
+    for _ in range(runs):
+        gen.generate(days=30)
+    return adv_store, event_log
+
+
+class TestComparisonArmRequired:
+    """#383 — an advisory with no comparison arm is not emitted."""
+
+    def test_effect_size_is_not_the_success_rate(self, tmp_path: Path) -> None:
+        """The measurable arm survives, and its effect is not its own rate.
+
+        This is the assertion that fails if ``success_rate_without`` ever
+        reverts to a ``0.0`` fallback: with that fallback ``effect_size``
+        equals ``success_rate_with`` *exactly*, which is how all 36 of the
+        reference deployment's 37 advisories read.
+        """
+        packs, feedback = _two_arm_corpus()
+        store, _ = _run(tmp_path, packs, feedback)
+
+        by_strategy = {
+            a.metadata["strategy"]: a
+            for a in store.list()
+            if a.category == AdvisoryCategory.APPROACH
+        }
+        assert set(by_strategy) == {"real"}
+
+        real = by_strategy["real"]
+        assert real.evidence.success_rate_with == 0.8
+        assert real.evidence.success_rate_without == 0.2
+        assert real.evidence.effect_size == 0.6
+        assert real.evidence.effect_size != real.evidence.success_rate_with
+
+    def test_feature_on_every_pack_is_refused(self, tmp_path: Path) -> None:
+        """``packs_without == 0`` — the exact shape of the live defect."""
+        packs, feedback = _two_arm_corpus()
+        store, _ = _run(tmp_path, packs, feedback)
+
+        assert not [
+            a
+            for a in store.list()
+            if a.category == AdvisoryCategory.APPROACH
+            and a.metadata.get("strategy") == "ubiquitous"
+        ]
+
+    def test_one_pack_comparison_arm_is_refused(self, tmp_path: Path) -> None:
+        """A comparison arm below ``min_sample_size`` is not evidence either.
+
+        ``lift_vs_baseline`` alone would happily divide by a single pack and
+        return a lift; the sample floor on the *without* arm is what stops it.
+        """
+        packs, feedback = _two_arm_corpus()
+        store, _ = _run(tmp_path, packs, feedback)
+
+        assert not [a for a in store.list() if a.metadata.get("strategy") == "narrow"]
+
+    def test_ubiquitous_query_term_is_refused(self, tmp_path: Path) -> None:
+        """Every intent shares the same words, so no word has an arm."""
+        packs, feedback = _two_arm_corpus()
+        store, _ = _run(tmp_path, packs, feedback)
+
+        assert not [a for a in store.list() if a.category == AdvisoryCategory.QUERY]
+
+    @staticmethod
+    def _entity_corpus(
+        outside_successes: int,
+    ) -> tuple[list[MagicMock], list[MagicMock]]:
+        """Item ``shared`` on 6 packs, against 6 packs without it.
+
+        ``outside_successes`` of the six packs *without* the item succeed,
+        which is the only thing that moves ``success_rate_without``.
+        """
+        packs: list[MagicMock] = []
+        feedback: list[MagicMock] = []
+        for i in range(6):
+            packs.append(_strategy_pack(f"in{i}", ["s"], item_ids=["shared"]))
+            feedback.append(_feedback_event(f"in{i}", success=i < 5))
+        for i in range(6):
+            packs.append(_strategy_pack(f"out{i}", ["s"], item_ids=[f"solo{i}"]))
+            feedback.append(_feedback_event(f"out{i}", success=i < outside_successes))
+        return packs, feedback
+
+    def test_a_real_arm_still_produces_an_entity_advisory(self, tmp_path: Path) -> None:
+        """The gate is not a blanket refusal — items with an arm still land.
+
+        Note ``success_rate_without == 0.0`` here, and that is *correct*:
+        six packs without the item were observed and none of them
+        succeeded. The defect this suite guards was never "the value is
+        zero", it was "no comparison arm was observed and zero was
+        substituted for one" — which is why the gate is on the arm's size
+        and not on the value it produces.
+        """
+        packs, feedback = self._entity_corpus(outside_successes=0)
+        store, _ = _run(tmp_path, packs, feedback)
+
+        entity = [a for a in store.list() if a.category == AdvisoryCategory.ENTITY]
+        assert len(entity) == 1
+        assert entity[0].entity_id == "shared"
+        assert entity[0].evidence.sample_size == 6
+        assert entity[0].evidence.success_rate_without == 0.0
+
+    def test_without_rate_moves_with_the_comparison_arm(self, tmp_path: Path) -> None:
+        """Same item, same with-arm; only the other side of the join changes.
+
+        ``success_rate_with`` is identical across the two corpora, so if
+        ``effect_size`` reads the same in both, the comparison arm is not
+        being consulted at all.
+        """
+        results = {}
+        for outside in (0, 2, 4):
+            packs, feedback = self._entity_corpus(outside_successes=outside)
+            store, _ = _run(tmp_path / f"n{outside}", packs, feedback)
+            adv = next(a for a in store.list() if a.category == AdvisoryCategory.ENTITY)
+            results[outside] = (
+                adv.evidence.success_rate_with,
+                adv.evidence.success_rate_without,
+                adv.evidence.effect_size,
+            )
+
+        assert {r[0] for r in results.values()} == {0.833}
+        assert [results[k][1] for k in (0, 2, 4)] == [0.0, 0.333, 0.667]
+        assert [results[k][2] for k in (0, 2, 4)] == [0.833, 0.5, 0.167]
+
+
+class TestEvidencePointers:
+    """#383 — advisories name the packs behind the claim."""
+
+    def test_approach_advisory_carries_pack_ids(self, tmp_path: Path) -> None:
+        packs, feedback = _two_arm_corpus()
+        store, _ = _run(tmp_path, packs, feedback)
+
+        real = next(a for a in store.list() if a.metadata.get("strategy") == "real")
+        assert real.evidence.representative_trace_ids
+        # Positive effect → the exemplars are the successful packs.
+        assert set(real.evidence.representative_trace_ids) <= {
+            f"p{i}" for i in range(8)
+        }
+
+    def test_every_emitted_advisory_has_pointers(self, tmp_path: Path) -> None:
+        packs: list[MagicMock] = []
+        feedback: list[MagicMock] = []
+        # Small packs succeed, large packs fail → a SCOPE finding too.
+        for i in range(6):
+            packs.append(_strategy_pack(f"s{i}", ["narrowly"], item_ids=["good"]))
+            feedback.append(_feedback_event(f"s{i}", success=True))
+        for i in range(6):
+            packs.append(
+                _strategy_pack(
+                    f"l{i}",
+                    ["broadly"],
+                    item_ids=[f"x{j}" for j in range(20)],
+                    intent=f"unshared intent {i}",
+                )
+            )
+            feedback.append(_feedback_event(f"l{i}", success=False))
+
+        store, _ = _run(tmp_path, packs, feedback, min_sample_size=5)
+        emitted = store.list()
+        assert emitted
+        assert all(a.evidence.representative_trace_ids for a in emitted)
+        assert {a.category for a in emitted} >= {
+            AdvisoryCategory.APPROACH,
+            AdvisoryCategory.SCOPE,
+        }
+
+
+class TestStableIds:
+    """#383 — a finding keeps one id across runs so presentations accumulate."""
+
+    def test_regeneration_replaces_rather_than_appends(self, tmp_path: Path) -> None:
+        packs, feedback = _two_arm_corpus()
+        store, _ = _run(tmp_path, packs, feedback, runs=1)
+        first = {a.advisory_id for a in store.list()}
+        assert first
+
+        _run(tmp_path, packs, feedback, runs=1, store=store)
+        assert {a.advisory_id for a in store.list()} == first
+
+    def test_id_is_deterministic_and_subject_scoped(self) -> None:
+        gen = AdvisoryGenerator.__new__(AdvisoryGenerator)
+        first = gen._stable_id(AdvisoryCategory.QUERY, "global", "deploy")
+        again = gen._stable_id(AdvisoryCategory.QUERY, "global", "deploy")
+        other_subject = gen._stable_id(AdvisoryCategory.QUERY, "global", "rollback")
+        other_scope = gen._stable_id(AdvisoryCategory.QUERY, "infra", "deploy")
+        other_category = gen._stable_id(AdvisoryCategory.ENTITY, "global", "deploy")
+
+        assert first == again
+        assert len({first, other_subject, other_scope, other_category}) == 4
+        assert first.startswith("adv-query-")
+
+    def test_created_at_survives_regeneration(self, tmp_path: Path) -> None:
+        packs, feedback = _two_arm_corpus()
+        store, _ = _run(tmp_path, packs, feedback)
+        before = {a.advisory_id: a.created_at for a in store.list()}
+
+        _run(tmp_path, packs, feedback, store=store)
+        after = {a.advisory_id: a.created_at for a in store.list()}
+        assert after == before
+
+
+class TestSuppressionSurvivesRegeneration:
+    """#383 — the in-place write must not undo the fitness loop's decisions."""
+
+    def test_suppressed_advisory_is_not_revived(self, tmp_path: Path) -> None:
+        packs, feedback = _two_arm_corpus()
+        store, _ = _run(tmp_path, packs, feedback)
+        target = store.list()[0].advisory_id
+        store.suppress(target, reason="fitness loop said so")
+
+        _run(tmp_path, packs, feedback, store=store)
+
+        revived = store.get(target)
+        assert revived is not None
+        assert revived.status == AdvisoryStatus.SUPPRESSED
+        assert revived.suppression_reason == "fitness loop said so"
+        assert revived.suppressed_at is not None
+        assert target not in {a.advisory_id for a in store.list()}
+
+    def test_suppressed_confidence_is_not_reset(self, tmp_path: Path) -> None:
+        """A reset would let the next fitness pass blend it back above the bar."""
+        packs, feedback = _two_arm_corpus()
+        store, _ = _run(tmp_path, packs, feedback)
+        target = store.list()[0]
+        store.suppress(target.advisory_id, reason="weak")
+        floored = store.get(target.advisory_id)
+        assert floored is not None
+        store.put(floored.model_copy(update={"confidence": 0.01}))
+
+        _run(tmp_path, packs, feedback, store=store)
+
+        after = store.get(target.advisory_id)
+        assert after is not None
+        assert after.confidence == 0.01
+
+    def test_active_advisory_confidence_tracks_fresh_evidence(
+        self, tmp_path: Path
+    ) -> None:
+        """The carry-forward is scoped to suppression, not to every field."""
+        packs, feedback = _two_arm_corpus()
+        store, _ = _run(tmp_path, packs, feedback)
+        target = store.list()[0]
+        store.put(target.model_copy(update={"confidence": 0.02}))
+
+        _run(tmp_path, packs, feedback, store=store)
+
+        after = store.get(target.advisory_id)
+        assert after is not None
+        assert after.confidence == target.confidence
+
+
+class TestCappedReads:
+    """#374 — the cap must drop the oldest events, not the newest."""
+
+    def test_reads_are_issued_newest_first(self, tmp_path: Path) -> None:
+        packs, feedback = _two_arm_corpus()
+        _, event_log = _run(tmp_path, packs, feedback)
+
+        assert event_log.get_events.call_count == 2
+        for call in event_log.get_events.call_args_list:
+            assert call.kwargs["order"] == "desc"
+
+    def test_report_carries_scan_coverage(self, tmp_path: Path) -> None:
+        packs, feedback = _two_arm_corpus()
+        event_log = MagicMock(spec=EventLog)
+        event_log.get_events.side_effect = [packs, feedback]
+        gen = AdvisoryGenerator(event_log, AdvisoryStore(tmp_path / "adv.json"))
+
+        report = gen.generate(days=30)
+
+        assert report.coverage.scanned == len(packs) + len(feedback)
+        assert report.coverage.truncated is False

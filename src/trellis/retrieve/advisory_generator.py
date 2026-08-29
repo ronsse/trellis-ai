@@ -332,9 +332,7 @@ class AdvisoryGenerator:
                         AdvisoryCategory.ENTITY, scope, item_id
                     ),
                     category=AdvisoryCategory.ENTITY,
-                    confidence=self._compute_confidence(
-                        outcomes.presentations, effect
-                    ),
+                    confidence=self._compute_confidence(outcomes.presentations, effect),
                     message=(
                         f"Entity {item_id} appears in"
                         f" {rate_with:.0%} of successful packs"
@@ -342,7 +340,11 @@ class AdvisoryGenerator:
                         f" Consider including it."
                     ),
                     evidence=self._evidence(
-                        outcomes, rate_with, rate_without, effect, outcomes.success_packs
+                        outcomes,
+                        rate_with,
+                        rate_without,
+                        effect,
+                        outcomes.success_packs,
                     ),
                     scope=scope,
                     entity_id=item_id,
@@ -376,9 +378,7 @@ class AdvisoryGenerator:
             if abs(effect) < self._min_effect_size:
                 continue
 
-            exemplars = (
-                outcomes.success_packs if effect > 0 else outcomes.failure_packs
-            )
+            exemplars = outcomes.success_packs if effect > 0 else outcomes.failure_packs
             advisories.append(
                 Advisory(
                     advisory_id=self._stable_id(
@@ -518,7 +518,11 @@ class AdvisoryGenerator:
                         f" (n={outcomes.presentations}, effect={effect:+.0%})."
                     ),
                     evidence=self._evidence(
-                        outcomes, rate_with, rate_without, effect, outcomes.failure_packs
+                        outcomes,
+                        rate_with,
+                        rate_without,
+                        effect,
+                        outcomes.failure_packs,
                     ),
                     scope=scope,
                     entity_id=item_id,
@@ -550,20 +554,20 @@ class AdvisoryGenerator:
 
             advisories.append(
                 Advisory(
-                    advisory_id=self._stable_id(
-                        AdvisoryCategory.QUERY, "global", word
-                    ),
+                    advisory_id=self._stable_id(AdvisoryCategory.QUERY, "global", word),
                     category=AdvisoryCategory.QUERY,
-                    confidence=self._compute_confidence(
-                        outcomes.presentations, effect
-                    ),
+                    confidence=self._compute_confidence(outcomes.presentations, effect),
                     message=(
                         f"Including '{word}' in your context query"
                         f" correlates with {rate_with:.0%} success"
                         f" (n={outcomes.presentations}, effect=+{effect:.0%})."
                     ),
                     evidence=self._evidence(
-                        outcomes, rate_with, rate_without, effect, outcomes.success_packs
+                        outcomes,
+                        rate_with,
+                        rate_without,
+                        effect,
+                        outcomes.success_packs,
                     ),
                     scope="global",
                     metadata={"keyword": word},
@@ -657,9 +661,8 @@ class AdvisoryGenerator:
         place to worry about a separator appearing in one. The category
         stays in the clear so a row is greppable.
         """
-        digest = hashlib.sha256(
-            "\x00".join((category.value, scope, subject)).encode()
-        ).hexdigest()
+        key = f"{category.value}\x00{scope}\x00{subject}"
+        digest = hashlib.sha256(key.encode()).hexdigest()
         return f"adv-{category.value}-{digest[:16]}"
 
     def _carry_forward_status(self, advisory: Advisory) -> Advisory:
