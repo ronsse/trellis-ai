@@ -16,6 +16,7 @@ import pytest
 
 from trellis.classify.feedback import apply_noise_tags
 from trellis.classify.ingest import CLASSIFY_ON_INGEST_FLAG
+from trellis.core.vector_metadata import vector_metadata_diverges
 from trellis.ingest_corpus.models import (
     chunk_doc_id,
     corpus_doc_id,
@@ -24,6 +25,8 @@ from trellis.ingest_corpus.models import (
 from trellis.ingest_corpus.sync import sync_corpus
 from trellis.retrieve.embed_ingest_hook import EMBED_ON_INGEST_FLAG
 from trellis.retrieve.evaluate import BreadthScorer, EvaluationScenario
+from trellis.retrieve.noise import exclude_noise
+from trellis.retrieve.strategies import SemanticSearch
 from trellis.schemas.pack import Pack, PackItem
 from trellis.stores.base.event_log import EventType
 from trellis.stores.sqlite.document import SQLiteDocumentStore
@@ -805,3 +808,163 @@ class TestSemanticRetrieval:
         sync_corpus(registry, vault, source_system="obsidian")
         doc_id = corpus_doc_id("obsidian", "sub/note-b.md")
         assert registry.knowledge.vector_store.get(doc_id) is not None
+
+
+class TestChunkVectorMetadataMirror:
+    """#388 — the metadata-only chunk re-put must reach the vector row.
+
+    A vector row's metadata is a snapshot taken at embed time, and
+    ``SemanticSearch`` builds its ``PackItem`` from that snapshot rather than
+    from the document store. ``_write_chunks`` re-puts an unchanged chunk when
+    it is missing a key the parent carries — and deliberately does not
+    re-embed it — so before this was fixed the propagated tags landed in the
+    document store alone and the semantic axis kept serving the chunk's
+    pre-propagation tags. Third site of #338, after ``apply_noise_tags``
+    (#343) and the curate/enrich paths (#386).
+
+    Every assertion here is on the **row**, not on a call argument: the whole
+    defect class is a mirror nobody performed while every document-store
+    assertion still passed.
+    """
+
+    @staticmethod
+    def _ingest_untagged_then_tag_parent(registry, vault, monkeypatch):
+        """The dominant production shape, in three steps.
+
+        1. Sync a long document with classify-on-write *off* — chunks are
+           embedded and carry no ``content_tags`` at all.
+        2. The enrichment pass tags the parent (a document-store write; the
+           parent of a chunked document has no vector row of its own).
+        3. A tail edit re-syncs: only the last chunk's bytes change, so every
+           earlier chunk takes the ``tags_missing`` re-put — the branch that
+           does not re-embed.
+
+        Returns ``(parent_id, chunk_count)``.
+        """
+        monkeypatch.setenv(EMBED_ON_INGEST_FLAG, "1")
+        note = vault / "long.md"
+        note.write_text(_long_markdown())
+        sync_corpus(registry, vault, source_system="obsidian")
+
+        store = registry.knowledge.document_store
+        parent_id = corpus_doc_id("obsidian", "long.md")
+        parent = store.get(parent_id)
+        chunk_count = parent["metadata"]["chunk_count"]
+        assert chunk_count >= 3
+        assert "content_tags" not in store.get(chunk_doc_id(parent_id, 0))["metadata"]
+
+        store.put(
+            parent_id,
+            parent["content"],
+            metadata={
+                **parent["metadata"],
+                # `signal_quality` is the facet the noise boundary acts on;
+                # `importance_scored_at` is the stamp `_apply_importance`
+                # requires beside a non-zero `auto_importance`, which is why
+                # the two keys are mirrored together and never singly.
+                "content_tags": {
+                    "signal_quality": "noise",
+                    "importance_scored_at": "2026-08-29T00:00:00+00:00",
+                },
+                "auto_importance": 0.91,
+            },
+        )
+
+        note.write_text(_long_markdown() + " tail.")
+        sync_corpus(registry, vault, source_system="obsidian")
+        return parent_id, chunk_count
+
+    def test_metadata_only_reput_mirrors_tags_onto_the_chunk_vector_row(
+        self, registry, vault, monkeypatch
+    ):
+        parent_id, chunk_count = self._ingest_untagged_then_tag_parent(
+            registry, vault, monkeypatch
+        )
+        store = registry.knowledge.document_store
+        vectors = registry.knowledge.vector_store
+
+        for index in range(chunk_count):
+            cid = chunk_doc_id(parent_id, index)
+            doc_meta = store.get(cid)["metadata"]
+            row = vectors.get(cid)
+            assert row is not None, cid
+            # The same predicate the writer enforces, not a hand-rolled twin.
+            assert not vector_metadata_diverges(doc_meta, row["metadata"]), cid
+            assert row["metadata"]["content_tags"]["signal_quality"] == "noise"
+            assert row["metadata"]["auto_importance"] == 0.91
+
+    def test_mirror_is_metadata_only_and_keeps_the_embedding_and_excerpt(
+        self, registry, vault, monkeypatch
+    ):
+        """The mirror is a re-upsert, so it must carry the vector through.
+
+        Re-embedding here would be both a cost and a lie: the chunk's bytes
+        did not change. The row's ``content`` excerpt is its own — cut at
+        embed time by ``build_vector_row`` — and copying the document bag
+        wholesale would clobber it.
+        """
+        monkeypatch.setenv(EMBED_ON_INGEST_FLAG, "1")
+        note = vault / "long.md"
+        note.write_text(_long_markdown())
+        sync_corpus(registry, vault, source_system="obsidian")
+
+        parent_id = corpus_doc_id("obsidian", "long.md")
+        first_chunk = chunk_doc_id(parent_id, 0)
+        before = registry.knowledge.vector_store.get(first_chunk)
+
+        store = registry.knowledge.document_store
+        parent = store.get(parent_id)
+        store.put(
+            parent_id,
+            parent["content"],
+            metadata={**parent["metadata"], "auto_importance": 0.42},
+        )
+        note.write_text(_long_markdown() + " tail.")
+        sync_corpus(registry, vault, source_system="obsidian")
+
+        after = registry.knowledge.vector_store.get(first_chunk)
+        assert after["vector"] == before["vector"]
+        assert after["metadata"]["content"] == before["metadata"]["content"]
+        assert after["metadata"]["doc_id"] == before["metadata"]["doc_id"]
+        assert after["metadata"]["created_at"] == before["metadata"]["created_at"]
+        assert after["metadata"]["auto_importance"] == 0.42
+
+    def test_demoted_chunks_stop_being_served_by_the_semantic_axis(
+        self, registry, vault, monkeypatch
+    ):
+        """The consequence, end to end.
+
+        ``exclude_noise`` reads ``content_tags.signal_quality`` off the
+        ``PackItem``, and on the semantic axis that metadata *is* the vector
+        row's snapshot. Un-mirrored, every chunk the parent demoted was still
+        served.
+        """
+        parent_id, chunk_count = self._ingest_untagged_then_tag_parent(
+            registry, vault, monkeypatch
+        )
+        semantic = SemanticSearch(registry.knowledge.vector_store, _embed)
+        served = [
+            item
+            for item in semantic.search("kubernetes grapes violins facts", limit=50)
+            if item.item_id.startswith(f"{parent_id}#chunk-")
+        ]
+        assert len(served) == chunk_count
+        assert exclude_noise(served) == []
+
+    def test_document_is_still_written_without_a_vector_store(
+        self, registry, vault, monkeypatch
+    ):
+        """A deployment with no vector store must still propagate tags.
+
+        The document store is the authority; the mirror is a best-effort
+        second write. Losing it must never lose the tag.
+        """
+        registry.knowledge.vector_store = None
+        monkeypatch.setenv(EMBED_ON_INGEST_FLAG, "1")
+        parent_id, chunk_count = self._ingest_untagged_then_tag_parent(
+            registry, vault, monkeypatch
+        )
+        store = registry.knowledge.document_store
+        for index in range(chunk_count):
+            meta = store.get(chunk_doc_id(parent_id, index))["metadata"]
+            assert meta["content_tags"]["signal_quality"] == "noise"

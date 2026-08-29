@@ -59,6 +59,7 @@ from trellis.classify.ingest import (
     classify_on_ingest_enabled,
 )
 from trellis.core.hashing import content_hash
+from trellis.core.vector_metadata import sync_vector_metadata
 from trellis.extract.memory_ingest_hook import (
     build_memory_extractor,
     run_memory_extraction,
@@ -502,9 +503,35 @@ def _write_chunks(
     without an unrelated content edit. Missing-only, not differing — an
     unedited chunk's tags may carry a demote signal from the feedback loop
     (``apply_noise_tags``) that no sync should overwrite.
+
+    That metadata-only re-put is a **post-embed write**, so it has to mirror
+    onto the vector row explicitly (#388). A vector row's metadata is a
+    snapshot taken at embed time and
+    :class:`~trellis.retrieve.strategies.SemanticSearch` builds its
+    ``PackItem`` from that snapshot, not from the document store — and this
+    branch deliberately does *not* re-embed, so nothing else would refresh
+    it. The keys it propagates are ``inherited_tags``, i.e.
+    :data:`~trellis.classify.ingest.CLASSIFY_METADATA_KEYS`, which is the
+    same pair as
+    :data:`~trellis.core.vector_metadata.SYNCED_METADATA_KEYS`: exactly the
+    keys the semantic axis reads for noise exclusion, domain scoping and
+    importance weighting. Un-mirrored, a chunk demoted on its parent stayed
+    servable on the semantic axis — #338's failure, third site.
+
+    The mirror is scoped to the metadata-only path on purpose. When the
+    bytes *did* change, ``run_embed_on_ingest`` is the row's writer and
+    rewrites the whole snapshot; when that hook is switched off, the row is
+    stale in content, excerpt and embedding as well, and freshening its tags
+    alone would pair new tags with an old excerpt — a row that is internally
+    inconsistent rather than merely old. ``reindex-vectors`` owns that case.
     """
     doc_store = registry.knowledge.document_store
+    # Resolved here rather than passed in: `_write_chunks` has a single
+    # caller and already takes the registry, so a parameter could only add a
+    # way to forget it — which is how #381/#386 happened one layer up.
+    vector_store = getattr(registry.knowledge, "vector_store", None)
     written = 0
+    vector_rows_synced = 0
     for span in spans:
         cid = chunk_doc_id(parent_doc_id, span.index)
         chunk_content = text[span.start : span.end]
@@ -539,7 +566,20 @@ def _write_chunks(
             run_embed_on_ingest(
                 registry, cid, chunk_content, metadata, source=requested_by
             )
+        # After the authoritative document write, never before: the document
+        # row is what a re-run repairs from, and the mirror is fail-soft, so
+        # losing it must not lose the tag that already landed.
+        elif sync_vector_metadata(vector_store, cid, metadata):
+            vector_rows_synced += 1
         written += 1
+    if written:
+        logger.debug(
+            "corpus_sync.chunks_written",
+            parent_doc_id=parent_doc_id,
+            chunks_written=written,
+            vector_rows_synced=vector_rows_synced,
+            vector_store_present=vector_store is not None,
+        )
     return written
 
 
