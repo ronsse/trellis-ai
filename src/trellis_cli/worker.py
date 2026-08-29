@@ -72,7 +72,10 @@ from trellis.retrieve.effectiveness import (
 from trellis.stores.advisory_source import resolve_advisory_path
 from trellis.stores.advisory_store import AdvisoryStore
 from trellis_cli._meta_wiring import wrap_cli_meta_analysis
-from trellis_cli.analyze import _build_learning_registry_or_exit
+from trellis_cli.analyze import (
+    _build_learning_registry_or_exit,
+    _render_advisory_degradation,
+)
 from trellis_cli.config import get_config_dir, get_data_dir
 from trellis_cli.exit_codes import EXIT_INTERNAL
 from trellis_cli.output import emit_json
@@ -403,6 +406,26 @@ class CurateCycleResult:
     #: quiet night unless something says which it was.
     advisory_store_degraded: dict[str, Any] | None = None
 
+    @property
+    def status(self) -> str:
+        """``"degraded"`` when a stage was skipped for a broken store.
+
+        The headline, not just the body. ``"ok"`` over a cycle that skipped
+        advisory generation is the same lie as an unexplained zero: a
+        wrapper reading only ``status`` would record a clean nightly run
+        against a file the store could not read (#393).
+
+        The **exit code stays 0** on purpose, and that is a decision rather
+        than an oversight. Unlike ``trellis analyze advisory-effectiveness``
+        — which does nothing at all when it refuses, so exit 2 *is* the
+        result — a curation cycle with a degraded advisory store still ran
+        its noise-tag and learning stages and did real work. Failing the
+        cron job would misreport those. The degradation is carried in
+        ``status``, in ``advisory_store_degraded``, in a red banner on the
+        text surface, and in an ``error``-level log line.
+        """
+        return "degraded" if self.advisory_store_degraded else "ok"
+
     def to_dict(self) -> dict[str, Any]:
         """Flat JSON-friendly view for ``--format json`` and structured logs."""
         return {
@@ -601,8 +624,12 @@ def _curate_stage_advisories(
     that never check.
     """
     degradation = advisory_store.degradation
-    if not skip and not dry_run and degradation is not None:
+    if skip or dry_run or degradation is not None:
         skipped.append("advisories")
+    # Reported whether or not the stage was going to run: a ``--dry-run`` is
+    # the natural "is my nightly healthy?" probe, and staying silent there
+    # hides the state from the one command an operator runs to look for it.
+    if degradation is not None:
         logger.error(
             "worker_curate.advisories_skipped_degraded_store",
             **degradation.to_dict(),
@@ -612,22 +639,13 @@ def _curate_stage_advisories(
                 "no new advisories were produced."
             ),
         )
+    if skip or dry_run or degradation is not None:
         return {
             "advisories_generated": 0,
             "advisories_refused": 0,
             "advisories_suppressed": 0,
             "advisories_boosted": 0,
-            "store_degradation": degradation.to_dict(),
-        }
-
-    if skip or dry_run:
-        skipped.append("advisories")
-        return {
-            "advisories_generated": 0,
-            "advisories_refused": 0,
-            "advisories_suppressed": 0,
-            "advisories_boosted": 0,
-            "store_degradation": None,
+            "store_degradation": degradation.to_dict() if degradation else None,
         }
 
     with wrap_cli_meta_analysis(
@@ -744,21 +762,14 @@ def _render_cycle_text(result: CurateCycleResult) -> None:
         # Not dim, and above the skipped line: the zeros in the advisory
         # counts printed above are not a quiet night, and the operator has
         # to act before the next cycle does anything (#393).
-        degraded = result.advisory_store_degraded
-        console.print(
-            f"  [bold red]ADVISORY STORE DEGRADED[/bold red] — "
-            f"{degraded['reason']}: {degraded['detail']}"
+        _render_advisory_degradation(
+            result.advisory_store_degraded,
+            console,
+            aftermath=(
+                "Advisory generation and the fitness loop were skipped; "
+                "writes are refused so the file is intact."
+            ),
         )
-        console.print(
-            f"    file: [cyan]{degraded['path']}[/cyan] "
-            f"({degraded['rows_loaded']} row(s) readable, "
-            f"{degraded['rows_skipped']} not)"
-        )
-        console.print(
-            "    Advisory generation and the fitness loop were skipped; "
-            "writes are refused so the file is intact."
-        )
-        console.print(f"    To reset: [bold]{degraded['recovery']}[/bold]")
     if result.skipped_stages:
         console.print(f"  [dim]skipped: {', '.join(result.skipped_stages)}[/dim]")
     if result.candidates_path:
@@ -840,7 +851,7 @@ def _run_curate_loop(
         )
         logger.info("worker_curate.cycle", cycle=cycle, **result.to_dict())
         if output_format == "json":
-            emit_json({"status": "ok", "cycle": cycle, **result.to_dict()})
+            emit_json({"status": result.status, "cycle": cycle, **result.to_dict()})
         else:
             _render_cycle_text(result)
 
@@ -955,7 +966,7 @@ def curate_cmd(
     )
 
     if output_format == "json":
-        emit_json({"status": "ok", **result.to_dict()})
+        emit_json({"status": result.status, **result.to_dict()})
         return
     _render_cycle_text(result)
 

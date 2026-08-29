@@ -173,7 +173,7 @@ def load_advisory_store(
     path that was searched, so "no advisories here" and "looking in the
     wrong directory" no longer present identically.
 
-    A *degraded* file is the opposite case and gets ``warning``: it is not
+    A *degraded* file is the opposite case and gets ``error``: it is not
     normal, it is not self-correcting, and the store it returns will refuse
     every write until an operator acts. The returned store is still usable
     for reads, so callers need not branch on it — pack assembly carries on
@@ -211,11 +211,12 @@ def load_advisory_store(
         # exists to attach the *surface* to it: "advisories are degraded"
         # and "the MCP pack builder is serving degraded advisories" are
         # different facts, and only the second tells an operator what their
-        # agents are actually getting. ``warning`` rather than ``info``
-        # because the CLI pins WARNING by default — see
-        # ``trellis_cli.main._root`` — so an info line would be invisible on
-        # the surface that runs nightly.
-        logger.warning(
+        # agents are actually getting. ``error``, matching the store's own
+        # line rather than sitting a level below it: this is the *more*
+        # informative of the two, and the quieter half of a pair is the half
+        # that gets filtered. Both clear the CLI's pinned WARNING — see
+        # ``trellis_cli.main._root`` — but an ``info`` line would not.
+        logger.error(
             "advisory_store_degraded",
             surface=surface,
             **degradation.to_dict(),

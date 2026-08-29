@@ -246,9 +246,16 @@ def list_advisories(
     if store is None:
         return {"status": "error", "message": "stores_dir not configured"}
     advisories = store.list(scope=scope, min_confidence=min_confidence)
+    degradation = store.degradation
+    # ``count`` silently under-reports on a partial load, so a corrupt file
+    # would present to an API client (and to the Memory Explorer) exactly as
+    # a deployment that has never generated an advisory — the state
+    # ``advisory_source`` exists to make distinguishable (#393). The rows
+    # that parsed are still returned: the read stays lenient.
     return {
         "count": len(advisories),
         "advisories": [a.model_dump(mode="json") for a in advisories],
+        "store_degradation": degradation.to_dict() if degradation else None,
     }
 
 

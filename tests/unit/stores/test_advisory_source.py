@@ -391,7 +391,7 @@ class TestDegradedFileIsVisibleAtTheReadSurfaces:
         assert store is not None
         assert [a.advisory_id for a in store.list()] == ["adv_good"]
 
-    def test_degradation_is_logged_at_warning_with_the_surface(
+    def test_degradation_is_logged_at_error_with_the_surface(
         self, dirs: tuple[Path, Path]
     ) -> None:
         """The level is the assertion.
@@ -410,7 +410,7 @@ class TestDegradedFileIsVisibleAtTheReadSurfaces:
 
         lines = [e for e in logs if e["event"] == "advisory_store_degraded"]
         assert len(lines) == 1
-        assert lines[0]["log_level"] == "warning"
+        assert lines[0]["log_level"] == "error"
         assert lines[0]["surface"] == "mcp"
         assert lines[0]["path"] == str(path)
         assert lines[0]["recovery"] == f"mv {path} {path}.corrupt"

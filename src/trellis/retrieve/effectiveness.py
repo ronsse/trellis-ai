@@ -835,7 +835,20 @@ def run_advisory_fitness_loop(
     Returns:
         AdvisoryEffectivenessReport including lists of boosted and
         suppressed advisory IDs.
+
+    Raises:
+        DegradedStoreWriteError: the advisory store could not read its file
+            in full. Steps 2-4 all write, so the loop would score a set
+            missing whatever failed to parse and then be refused mid-pass.
+            The check is here rather than only in the two callers because
+            this is public API: a third caller would otherwise take the
+            raise from somewhere in the middle of the pass, and on the REST
+            surface the message never reaches the operator at all
+            (``unhandled_exception_handler`` deliberately hides it), taking
+            the ``mv`` recovery command with it (#393).
     """
+    advisory_store.refuse_if_degraded()
+
     if min_presentations is None:
         min_presentations = _resolve_param(
             registry,

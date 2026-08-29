@@ -10,6 +10,7 @@ import structlog
 import typer
 import yaml
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 from trellis.analyze.domains import analyze_domains
@@ -1149,43 +1150,59 @@ def cost(
         )
 
 
-def _render_advisory_degradation(degraded: dict[str, Any] | None) -> None:
+def _render_advisory_degradation(
+    degraded: dict[str, Any] | None,
+    target: Console | None = None,
+    *,
+    aftermath: str = (
+        "Writes are refused so the file is intact. Advisories that parsed "
+        "are still served in packs."
+    ),
+) -> None:
     """Print the advisory store's degraded state, or nothing at all.
 
-    One renderer for both advisory commands so the text and JSON branches
-    cannot drift — a warning that exists only in ``--format json`` is a
-    warning no operator reading a terminal ever sees.
+    One renderer for every text surface — both ``analyze`` commands and
+    ``worker curate`` — so a warning cannot exist in ``--format json``
+    alone, and so the three cannot drift apart.
+
+    **Every interpolated value is escaped.** ``detail`` is arbitrary
+    exception text and ``path`` is an arbitrary filesystem path, and Rich
+    reads ``[...]`` as markup: an unescaped ``detail`` of
+    ``'expected [advisories] key'`` renders as ``expected  key``, and a path
+    under ``/tmp/my [staging] dir/`` turns the recovery line into a command
+    that does not run. The recovery command is the entire justification for
+    this design — an operator at 03:00 needs the fix, not a diagnosis — so
+    it is the one string that must survive rendering byte-for-byte.
     """
     if not degraded:
         return
-    console.print(
+    out = target if target is not None else console
+    out.print(
         f"  [bold red]ADVISORY STORE DEGRADED[/bold red] — "
-        f"{degraded['reason']}: {degraded['detail']}"
+        f"{escape(str(degraded['reason']))}: {escape(str(degraded['detail']))}"
     )
-    console.print(
-        f"    file: [cyan]{degraded['path']}[/cyan] "
+    out.print(
+        f"    file: [cyan]{escape(str(degraded['path']))}[/cyan] "
         f"({degraded['rows_loaded']} row(s) readable, "
-        f"{degraded['rows_skipped']} not)"
+        f"{escape(str(degraded['rows_skipped_display']))} not)"
     )
-    console.print(
-        "    Writes are refused so the file is intact. Advisories that "
-        "parsed are still served in packs."
-    )
-    console.print(f"    To reset: [bold]{degraded['recovery']}[/bold]")
+    out.print(f"    {aftermath}")
+    out.print(f"    To reset: [bold]{escape(str(degraded['recovery']))}[/bold]")
 
 
 def _exit_if_advisory_store_degraded(store: AdvisoryStore, output_format: str) -> None:
     """Stop a command that cannot act on a store which loaded degraded.
 
-    Exit code 2 rather than 0-with-a-warning: the caller asked for the
-    fitness loop to run and it did not, and a cron wrapper that only checks
-    the status code has to be able to see that.
+    Exit code 2 rather than 0-with-a-warning: the caller asked for work
+    that did not happen, and a cron wrapper that only checks the status
+    code has to be able to see that. Both ``analyze`` advisory commands
+    use it, so the two agree.
     """
     if not store.is_degraded:
         return
     degraded = store.degradation.to_dict() if store.degradation else None
     if output_format == "json":
-        emit_json({"status": "error", "store_degradation": degraded})
+        emit_json({"status": "degraded", "store_degradation": degraded})
     else:
         _render_advisory_degradation(degraded)
     raise typer.Exit(code=2)
@@ -1240,6 +1257,12 @@ def generate_advisories(
 
     if output_format == "json":
         print(json.dumps(report.model_dump(), indent=2, default=str))
+        # Same rule as ``advisory-effectiveness``: the caller asked for
+        # advisories and got none, so a wrapper reading only the status code
+        # has to see it. The report is emitted first, so the payload stays
+        # parseable either way (#393).
+        if report.store_degradation:
+            raise typer.Exit(code=2)
     else:
         console.print(f"[bold]Advisory Generation Report[/bold] (last {days} days)")
         # Before the counts, not after: every number below is zero because
@@ -1292,6 +1315,9 @@ def generate_advisories(
                 " 'trellis curate feedback' or the MCP record_feedback"
                 " tool to enable advisory generation.[/dim]"
             )
+
+        if report.store_degradation:
+            raise typer.Exit(code=2)
 
 
 @analyze_app.command("advisory-effectiveness")
