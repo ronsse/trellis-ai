@@ -605,15 +605,90 @@ class TestStableIds:
 
     def test_id_is_deterministic_and_subject_scoped(self) -> None:
         gen = AdvisoryGenerator.__new__(AdvisoryGenerator)
-        first = gen._stable_id(AdvisoryCategory.QUERY, "global", "deploy")
-        again = gen._stable_id(AdvisoryCategory.QUERY, "global", "deploy")
-        other_subject = gen._stable_id(AdvisoryCategory.QUERY, "global", "rollback")
-        other_scope = gen._stable_id(AdvisoryCategory.QUERY, "infra", "deploy")
-        other_category = gen._stable_id(AdvisoryCategory.ENTITY, "global", "deploy")
+        first = gen._stable_id(AdvisoryCategory.QUERY, "deploy")
+        again = gen._stable_id(AdvisoryCategory.QUERY, "deploy")
+        other_subject = gen._stable_id(AdvisoryCategory.QUERY, "rollback")
+        other_category = gen._stable_id(AdvisoryCategory.ENTITY, "deploy")
 
         assert first == again
-        assert len({first, other_subject, other_scope, other_category}) == 4
+        assert len({first, other_subject, other_category}) == 3
         assert first.startswith("adv-query-")
+
+    def test_id_survives_a_scope_change(self, tmp_path: Path) -> None:
+        """An entity that turns up in a second domain keeps its row.
+
+        ``scope`` is derived from the evidence, so it moves. If it were in
+        the id key, the move would mint a second row and orphan the first
+        — the very defect stable ids exist to remove.
+        """
+
+        def corpus(second_domain: str) -> tuple[list[MagicMock], list[MagicMock]]:
+            packs: list[MagicMock] = []
+            feedback: list[MagicMock] = []
+            for i in range(6):
+                domain = "infra" if i < 5 else second_domain
+                packs.append(
+                    _pack_event(
+                        f"in{i}",
+                        ["shared"],
+                        domain=domain,
+                        intent="",
+                        items=[{"strategy_source": "s"}],
+                    )
+                )
+                feedback.append(_feedback_event(f"in{i}", success=i < 5))
+            for i in range(6):
+                packs.append(
+                    _pack_event(
+                        f"out{i}",
+                        [f"solo{i}"],
+                        domain="infra",
+                        intent="",
+                        items=[{"strategy_source": "s"}],
+                    )
+                )
+                feedback.append(_feedback_event(f"out{i}", success=False))
+            return packs, feedback
+
+        store, _ = _run(tmp_path, *corpus("infra"))
+        narrow = next(a for a in store.list() if a.category == AdvisoryCategory.ENTITY)
+        assert narrow.scope == "infra"
+
+        _run(tmp_path, *corpus("platform"), store=store)
+        widened = store.get(narrow.advisory_id)
+        assert widened is not None
+        assert widened.scope == "global"
+        assert len([a for a in store.list() if a.entity_id == "shared"]) == 1
+
+
+class TestDomainNormalisation:
+    """``PACK_ASSEMBLED.payload["domain"]`` is present-and-null in production."""
+
+    def test_null_domain_does_not_abort_the_run(self, tmp_path: Path) -> None:
+        """A null domain used to reach ``Advisory.scope: str`` and raise.
+
+        Not "one advisory is lost" — the ValidationError propagates out of
+        ``generate()``, so the whole nightly run dies. 36 of the reference
+        deployment's 46 packs carry ``"domain": None``.
+        """
+        packs: list[MagicMock] = []
+        feedback: list[MagicMock] = []
+        for i in range(12):
+            packs.append(
+                _pack_event(
+                    f"p{i}",
+                    ["shared"] if i < 6 else [f"solo{i}"],
+                    domain=None,  # type: ignore[arg-type]
+                    intent="",
+                )
+            )
+            feedback.append(_feedback_event(f"p{i}", success=i < 5))
+
+        store, _ = _run(tmp_path, packs, feedback)
+
+        entity = [a for a in store.list() if a.category == AdvisoryCategory.ENTITY]
+        assert len(entity) == 1
+        assert entity[0].scope == "global"
 
     def test_created_at_survives_regeneration(self, tmp_path: Path) -> None:
         packs, feedback = _two_arm_corpus()

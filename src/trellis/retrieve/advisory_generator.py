@@ -306,7 +306,15 @@ class AdvisoryGenerator:
                     "item_ids": payload.get("injected_item_ids", []),
                     "items": payload.get("injected_items", []),
                     "strategies": payload.get("strategies_used", []),
-                    "domain": payload.get("domain", "global"),
+                    # ``or "global"``, not ``.get(..., "global")``: the key is
+                    # *present and null* on 36 of the reference deployment's 46
+                    # packs, which the default never sees. An unnormalised None
+                    # reaches ``Advisory.scope: str`` through ``_scope_of`` and
+                    # raises out of ``generate()`` — losing the whole nightly
+                    # run, not one advisory. It has not fired only because no
+                    # surviving candidate has yet had *every* one of its packs
+                    # undomained.
+                    "domain": payload.get("domain") or "global",
                     "intent": payload.get("intent", ""),
                     "rejected": payload.get("rejected_items", []),
                     "budget_trace": payload.get("budget_trace", []),
@@ -349,9 +357,7 @@ class AdvisoryGenerator:
             scope = self._scope_of(outcomes)
             advisories.append(
                 Advisory(
-                    advisory_id=self._stable_id(
-                        AdvisoryCategory.ENTITY, scope, item_id
-                    ),
+                    advisory_id=self._stable_id(AdvisoryCategory.ENTITY, item_id),
                     category=AdvisoryCategory.ENTITY,
                     confidence=self._compute_confidence(outcomes.presentations, effect),
                     message=(
@@ -402,9 +408,7 @@ class AdvisoryGenerator:
             exemplars = outcomes.success_packs if effect > 0 else outcomes.failure_packs
             advisories.append(
                 Advisory(
-                    advisory_id=self._stable_id(
-                        AdvisoryCategory.APPROACH, "global", strategy
-                    ),
+                    advisory_id=self._stable_id(AdvisoryCategory.APPROACH, strategy),
                     category=AdvisoryCategory.APPROACH,
                     confidence=self._compute_confidence(
                         outcomes.presentations, abs(effect)
@@ -480,7 +484,7 @@ class AdvisoryGenerator:
 
         advisories.append(
             Advisory(
-                advisory_id=self._stable_id(AdvisoryCategory.SCOPE, "global", ""),
+                advisory_id=self._stable_id(AdvisoryCategory.SCOPE, ""),
                 category=AdvisoryCategory.SCOPE,
                 confidence=confidence,
                 message=(
@@ -525,9 +529,7 @@ class AdvisoryGenerator:
             scope = self._scope_of(outcomes)
             advisories.append(
                 Advisory(
-                    advisory_id=self._stable_id(
-                        AdvisoryCategory.ANTI_PATTERN, scope, item_id
-                    ),
+                    advisory_id=self._stable_id(AdvisoryCategory.ANTI_PATTERN, item_id),
                     category=AdvisoryCategory.ANTI_PATTERN,
                     confidence=self._compute_confidence(
                         outcomes.presentations, abs(effect)
@@ -575,7 +577,7 @@ class AdvisoryGenerator:
 
             advisories.append(
                 Advisory(
-                    advisory_id=self._stable_id(AdvisoryCategory.QUERY, "global", word),
+                    advisory_id=self._stable_id(AdvisoryCategory.QUERY, word),
                     category=AdvisoryCategory.QUERY,
                     confidence=self._compute_confidence(outcomes.presentations, effect),
                     message=(
@@ -668,24 +670,37 @@ class AdvisoryGenerator:
         )
 
     @staticmethod
-    def _stable_id(category: AdvisoryCategory, scope: str, subject: str) -> str:
+    def _stable_id(category: AdvisoryCategory, subject: str) -> str:
         """Deterministic advisory id for one *finding*.
 
-        Keyed on what the advisory is **about** — its category, its scope
-        and its subject (the entity id, strategy name or keyword; the
-        empty string for SCOPE, which yields at most one finding per
-        scope) — and deliberately **not** on the numbers, which move every
-        night. Two runs that rediscover the same finding must produce the
-        same id or the fitness loop's presentation counts fragment across
-        ids and never clear ``min_presentations``.
+        Keyed on what the advisory is **about** — its category and its
+        subject (the entity id, strategy name or keyword; the empty string
+        for SCOPE, which yields at most one finding per run) — and
+        deliberately **not** on the numbers, which move every night. Two
+        runs that rediscover the same finding must produce the same id or
+        the fitness loop's presentation counts fragment across ids and
+        never clear ``min_presentations``.
+
+        ``scope`` is deliberately **not** in the key, though it is a field
+        on the row. It is derived from the evidence — :meth:`_scope_of`
+        returns a domain only while every pack carrying the subject shares
+        one — so it moves as evidence accrues, exactly like ``message`` and
+        ``confidence``, which are rewritten in place. Keying on it would
+        mint a second id the first time an entity turned up in a second
+        domain and orphan the first, which is the unreplaceable-row defect
+        this method exists to fix. It also cannot disambiguate: ``_tally``
+        yields one entry per subject per category, so within a run no two
+        findings differ only by scope. And nothing is lost by leaving it
+        out, because the fitness loop re-derives presentations from
+        ``PACK_ASSEMBLED.advisory_ids`` each run rather than reading a
+        counter off the row.
 
         Hashed rather than concatenated because subjects are open text
         (keywords, ULIDs, future strategy names) and an id is not the
         place to worry about a separator appearing in one. The category
         stays in the clear so a row is greppable.
         """
-        key = f"{category.value}\x00{scope}\x00{subject}"
-        digest = hashlib.sha256(key.encode()).hexdigest()
+        digest = hashlib.sha256(f"{category.value}\x00{subject}".encode()).hexdigest()
         return f"adv-{category.value}-{digest[:16]}"
 
     def _carry_forward_status(self, advisory: Advisory) -> Advisory:
