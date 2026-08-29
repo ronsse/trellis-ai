@@ -202,10 +202,19 @@ class AsyncTrellisClient:
         *,
         domain: str | None = None,
         limit: int = 20,
+        include_chunks: bool | None = None,
     ) -> list[dict[str, Any]]:
+        """Full-text search.
+
+        ``include_chunks`` is sent only when set, so the route's default
+        (exclude ``<parent>#chunk-N`` fragment rows, #396) governs and the
+        SDK does not pin a second copy of it that could drift.
+        """
         params: dict[str, Any] = {"q": query, "limit": limit}
         if domain:
             params["domain"] = domain
+        if include_chunks is not None:
+            params["include_chunks"] = include_chunks
         resp = await self._request("GET", "/api/v1/search", params=params)
         return cast("list[dict[str, Any]]", resp.json().get("results", []))
 

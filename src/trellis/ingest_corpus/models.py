@@ -9,30 +9,50 @@ from typing import Any, Literal
 #: Separator between a parent document id and its chunk suffix. Chunk doc
 #: ids are ``f"{parent_doc_id}{CHUNK_ID_SEPARATOR}{index}"``.
 #:
-#: This marker is the repo's chunk discriminator, and the surfaces that use
-#: it are named here rather than described in the aggregate: the sentence
-#: this replaces said "the explore/documents views filter chunk rows by this
-#: marker", which was **false** — ``GET /api/v1/documents`` applied no chunk
-#: filter at all and served 740 of 1,317 rows as fragments (#385). A reader
-#: consulting the code to find out whether chunks were filtered got a
-#: confident yes.
+#: This marker is the repo's chunk discriminator. **Who filters on it is a
+#: rule, not a roster**, and the rule is:
 #:
-#: Filters by this marker:
+#:     A surface that hands back *whole document rows* excludes chunks by
+#:     default. A surface that feeds the pack budget keeps them, because
+#:     there the chunk is the retrievable unit and the excerpt is what the
+#:     budget prices.
 #:
-#: * :meth:`~trellis.stores.base.document.DocumentStore.list_documents`,
-#:   ``count`` and ``search`` when passed ``include_chunks=False`` — via
-#:   :func:`~trellis.stores.base.document.chunk_id_like_pattern`. That is
-#:   what ``GET /api/v1/documents`` now calls, and it is the only filtering
-#:   path the REST view has.
-#: * :func:`trellis.ingest_corpus.sync.sync_records` (dedup lookup, prune).
-#: * :mod:`trellis.retrieve.file_context` and
-#:   :mod:`trellis_workers.session_capture.reconcile_pass`, both via
-#:   :func:`is_chunk_doc_id`.
+#: Stated as a rule because the roster form has now been wrong twice in
+#: three changes. It first said "the explore/documents views filter chunk
+#: rows by this marker", which was false — ``GET /api/v1/documents``
+#: applied no filter at all and served 740 of 1,317 rows as fragments
+#: (#385). The enumeration that replaced it listed only the
+#: ``list_documents`` callers, so it omitted every
+#: :meth:`~trellis.stores.base.document.DocumentStore.search` caller —
+#: including a second unfiltered REST surface, ``GET /api/v1/search``
+#: (#396). A list of call sites is a snapshot of one commit; both times it
+#: was already stale in the commit that wrote it.
 #:
-#: Does **not** filter: :mod:`trellis.retrieve.concentration`, which rolls a
-#: chunk id up to its parent rather than dropping it, and every other
-#: ``list_documents`` caller (reindex, resync, retention, classify passes),
-#: which need chunk rows because chunks are what carry the embeddings.
+#: Both halves of the rule are enforced by
+#: ``tests/unit/test_chunk_visibility_rule.py``, not asserted here: every
+#: ``search`` / ``list_documents`` call in :mod:`trellis_api.routes` and
+#: :mod:`trellis_cli` must pass ``include_chunks`` explicitly, so a new
+#: whole-row surface cannot inherit a default nobody chose; and
+#: :class:`~trellis.retrieve.strategies.KeywordSearch` must keep returning
+#: chunk rows, so a future "cleanup" cannot quietly cost the pack its
+#: retrievable unit.
+#:
+#: The mechanism is ``include_chunks`` on ``list_documents`` / ``search`` /
+#: ``count``, pushed into SQL by
+#: :func:`~trellis.stores.base.document.chunk_exclusion_clause` and
+#: :func:`~trellis.stores.base.document.chunk_id_like_pattern`. Never a
+#: filter over the returned page: ``LIMIT`` is applied after the predicate,
+#: so pushing down refills the page with real documents whereas a post-hoc
+#: filter yields a short one the caller cannot tell from the end of the
+#: data. It defaults to ``True`` at the store, so a caller that does not
+#: name it keeps seeing every row — which is what the reindex, resync,
+#: retention and classify walkers need, chunks being what carry the
+#: embeddings.
+#:
+#: Code that reads the marker directly rather than through the store flag
+#: uses :func:`is_chunk_doc_id` (or, to roll a chunk id up to its parent
+#: instead of dropping it, splits on the constant). ``grep`` finds those;
+#: this comment deliberately no longer tries to.
 CHUNK_ID_SEPARATOR = "#chunk-"
 
 #: Actions the sync plan can assign to a walked file.

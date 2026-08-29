@@ -28,6 +28,15 @@ _FMT_HELP = "Output format: text, json, jsonl, tsv"
 _FIELDS_HELP = "Comma-separated fields to include"
 _TRUNC_HELP = "Max characters for text fields"
 _QUIET_HELP = "Suppress Rich formatting"
+#: Both commands below hand back whole document rows, so they exclude
+#: ``<parent>#chunk-N`` fragments by default — see
+#: :data:`trellis.ingest_corpus.models.CHUNK_ID_SEPARATOR` for the rule.
+#: The exclusion is pushed into the store, so ``--limit N`` still returns N
+#: rows; it swaps fragments for the documents they were sliced from.
+_CHUNKS_HELP = (
+    "Include <parent>#chunk-N fragment rows. Excluded by default: they are"
+    " slices of documents the same search already ranks."
+)
 
 
 def _doc_preview(doc: dict[str, Any], width: int) -> str:
@@ -43,6 +52,9 @@ def pack(
     agent: str = typer.Option(None, "--agent", help="Agent ID scope"),
     max_items: int = typer.Option(50, help="Maximum items in pack"),
     output_format: str = typer.Option("text", "--format", help="Output format"),
+    include_chunks: bool = typer.Option(
+        False, "--include-chunks", help=_CHUNKS_HELP
+    ),
     quiet: bool = typer.Option(False, "--quiet", "-q", help=_QUIET_HELP),
 ) -> None:
     """Assemble a retrieval pack for a given intent."""
@@ -50,7 +62,9 @@ def pack(
     filters = {}
     if domain:
         filters["domain"] = domain
-    results = store.search(query=intent, limit=max_items, filters=filters)
+    results = store.search(
+        query=intent, limit=max_items, filters=filters, include_chunks=include_chunks
+    )
 
     if output_format == "json":
         payload = json.dumps(
@@ -90,6 +104,9 @@ def search(
     output_format: str = typer.Option("text", "--format", help=_FMT_HELP),
     fields: str = typer.Option(None, "--fields", help=_FIELDS_HELP),
     truncate: int = typer.Option(None, "--truncate", help=_TRUNC_HELP),
+    include_chunks: bool = typer.Option(
+        False, "--include-chunks", help=_CHUNKS_HELP
+    ),
     quiet: bool = typer.Option(False, "--quiet", "-q", help=_QUIET_HELP),
 ) -> None:
     """Search the experience graph."""
@@ -97,7 +114,9 @@ def search(
     filters = {}
     if domain:
         filters["domain"] = domain
-    results = store.search(query=query, limit=limit, filters=filters)
+    results = store.search(
+        query=query, limit=limit, filters=filters, include_chunks=include_chunks
+    )
 
     if output_format in ("json", "jsonl", "tsv"):
         if output_format == "json" and not fields:

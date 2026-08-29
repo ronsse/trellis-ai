@@ -48,19 +48,67 @@ def _build_pack_builder(registry: Any) -> PackBuilder:
     )
 
 
+# Chunk rows are excluded from this route by default (#396) — the sibling
+# of the same change on ``GET /api/v1/documents`` (#385/#391), which left
+# this one behind.
+#
+# ``search`` hands back whole document rows, and a ``<parent>#chunk-N`` row
+# is a slice of a parent the *same result set* already ranks. On the
+# reference deployment (2026-08-29, 1,319 documents, 740 of them chunks) six
+# representative queries at ``limit=20`` returned 115 rows of which 29
+# (25.2%) were chunks; re-running them with ``include_chunks=False`` returned
+# 20 rows each again, not 15.
+#
+# That refill is the point, and it is why the exclusion is pushed into the
+# store rather than applied to the response: the ``LIMIT`` is applied after
+# the predicate, so the caller trades fragments for documents at no cost in
+# result count. A page-level filter would hand back a short list that is
+# indistinguishable from "that is all there is" — the same argument
+# :meth:`~trellis.stores.base.document.DocumentStore.list_documents` makes,
+# and ``tests/unit/stores/contracts/document_store_contract.py`` pins it for
+# both ``search`` and ``list_documents`` on every backend.
+#
+# Deliberately *not* scoped to browser operators. ``TrellisClient.search``
+# targets this route, so the default changes for SDK agents too — correctly:
+# an agent reading whole rows gets strictly more content per row from the
+# parent. The surface that must keep seeing chunks is the pack's keyword
+# axis (``retrieve/strategies.py``), where the excerpt is what the token
+# budget prices and the chunk is the retrievable unit. See
+# :data:`trellis.ingest_corpus.models.CHUNK_ID_SEPARATOR` for the rule and
+# ``tests/unit/test_chunk_visibility_rule.py`` for its enforcement.
 @router.get("/search")
 def search(
     q: str = Query(..., description="Search query"),
     domain: str | None = Query(None, description="Domain filter"),
     limit: int = Query(20, description="Max results"),
+    include_chunks: bool = Query(
+        False,
+        description=(
+            "Include <parent>#chunk-N fragment rows. Excluded by default:"
+            " they are slices of documents the same search already ranks."
+        ),
+    ),
 ) -> dict[str, Any]:
-    """Full-text search across documents."""
+    """Full-text search across documents.
+
+    ``<parent>#chunk-N`` fragment rows are excluded by default; pass
+    ``include_chunks=true`` for the unfiltered result set. The applied
+    setting is echoed back on the response.
+    """
     registry = get_registry()
     filters: dict[str, Any] = {}
     if domain:
         filters["domain"] = domain
-    results = registry.knowledge.document_store.search(q, limit=limit, filters=filters)
-    return {"status": "ok", "query": q, "count": len(results), "results": results}
+    results = registry.knowledge.document_store.search(
+        q, limit=limit, filters=filters, include_chunks=include_chunks
+    )
+    return {
+        "status": "ok",
+        "query": q,
+        "count": len(results),
+        "include_chunks": include_chunks,
+        "results": results,
+    }
 
 
 @router.post("/packs", response_model=PackResponse)
