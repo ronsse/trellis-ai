@@ -149,7 +149,16 @@ class TestRetrieveChunkVisibility:
         self._seed(parents=25, per_parent=3)
         result = runner.invoke(
             app,
-            ["retrieve", "search", "distinctive", "--limit", "20", "--format", "json", "--quiet"],
+            [
+                "retrieve",
+                "search",
+                "distinctive",
+                "--limit",
+                "20",
+                "--format",
+                "json",
+                "--quiet",
+            ],
         )
         assert result.exit_code == 0, result.output
         data = json.loads(result.stdout.strip())
@@ -160,7 +169,15 @@ class TestRetrieveChunkVisibility:
         parent_ids = self._seed()
         result = runner.invoke(
             app,
-            ["retrieve", "pack", "--intent", "distinctive", "--format", "json", "--quiet"],
+            [
+                "retrieve",
+                "pack",
+                "--intent",
+                "distinctive",
+                "--format",
+                "json",
+                "--quiet",
+            ],
         )
         assert result.exit_code == 0, result.output
         data = json.loads(result.stdout.strip())

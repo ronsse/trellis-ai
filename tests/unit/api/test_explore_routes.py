@@ -239,9 +239,7 @@ def test_search_result_set_is_not_shortened_by_the_chunk_filter(client, registry
     """
     _seed_chunked(registry.knowledge.document_store, parents=25, per_parent=3)
 
-    data = client.get(
-        "/api/v1/search", params={"q": "distinctive", "limit": 20}
-    ).json()
+    data = client.get("/api/v1/search", params={"q": "distinctive", "limit": 20}).json()
 
     assert data["count"] == 20
     assert not [d for d in data["results"] if "#chunk-" in d["doc_id"]]

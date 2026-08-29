@@ -52,9 +52,7 @@ def pack(
     agent: str = typer.Option(None, "--agent", help="Agent ID scope"),
     max_items: int = typer.Option(50, help="Maximum items in pack"),
     output_format: str = typer.Option("text", "--format", help="Output format"),
-    include_chunks: bool = typer.Option(
-        False, "--include-chunks", help=_CHUNKS_HELP
-    ),
+    include_chunks: bool = typer.Option(False, "--include-chunks", help=_CHUNKS_HELP),
     quiet: bool = typer.Option(False, "--quiet", "-q", help=_QUIET_HELP),
 ) -> None:
     """Assemble a retrieval pack for a given intent."""
@@ -104,9 +102,7 @@ def search(
     output_format: str = typer.Option("text", "--format", help=_FMT_HELP),
     fields: str = typer.Option(None, "--fields", help=_FIELDS_HELP),
     truncate: int = typer.Option(None, "--truncate", help=_TRUNC_HELP),
-    include_chunks: bool = typer.Option(
-        False, "--include-chunks", help=_CHUNKS_HELP
-    ),
+    include_chunks: bool = typer.Option(False, "--include-chunks", help=_CHUNKS_HELP),
     quiet: bool = typer.Option(False, "--quiet", "-q", help=_QUIET_HELP),
 ) -> None:
     """Search the experience graph."""

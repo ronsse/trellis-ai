@@ -86,9 +86,11 @@ def _row_read_call_sites() -> list[tuple[Path, ast.Call]]:
         assert package_dir.is_dir(), f"package not found: {package_dir}"
         for py_file in sorted(package_dir.rglob("*.py")):
             tree = ast.parse(py_file.read_text(encoding="utf-8"))
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Call) and _is_document_store_read(node):
-                    sites.append((py_file, node))
+            sites.extend(
+                (py_file, node)
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Call) and _is_document_store_read(node)
+            )
     return sites
 
 
@@ -123,8 +125,7 @@ def test_row_surfaces_name_include_chunks_explicitly() -> None:
     choosing it.
     """
     offenders = [
-        f"{path.relative_to(_src_root())}:{node.lineno} "
-        f"{ast.unparse(node.func)}(...)"
+        f"{path.relative_to(_src_root())}:{node.lineno} {ast.unparse(node.func)}(...)"
         for path, node in _row_read_call_sites()
         if "include_chunks" not in {kw.arg for kw in node.keywords if kw.arg}
     ]
