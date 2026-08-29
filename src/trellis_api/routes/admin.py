@@ -228,7 +228,11 @@ def generate_advisories(
         min_effect_size=min_effect,
     )
     report = generator.generate(days=days)
-    return {"status": "ok", **report.model_dump()}
+    # ``ok`` over a refused run is the same lie as an unexplained zero: the
+    # payload carries ``store_degradation``, but a caller that reads only the
+    # headline would record a clean nightly generation (#393).
+    status = "degraded" if report.store_degradation else "ok"
+    return {"status": status, **report.model_dump()}
 
 
 @router.get("/advisories")
