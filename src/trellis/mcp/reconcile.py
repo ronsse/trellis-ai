@@ -319,7 +319,46 @@ def mark_document_superseded(
 
     Sets the old document's :class:`Lifecycle` to ``state="superseded"`` with
     ``superseded_by`` pointing at the successor, preserving content and audit.
-    Returns ``False`` if the old doc has vanished (the caller downgrades).
+
+    Returns ``False`` if the old doc has vanished. Neither caller reads it, but
+    only one of them needs to. ``mcp.server._commit_reconcile_verdict`` is
+    preceded, inside the same ``_save_memory_lock`` hold, by
+    ``_reverify_candidate`` → ``_candidate_is_stale``, which treats a missing
+    row as stale — so a vanished candidate is downgraded to a *logged*
+    ``stale_recheck`` ADD and never reaches this function at all. That guard is
+    process-local, so a cross-process delete still slips past it.
+    ``session_capture.reconcile_pass._apply_verdict`` has no equivalent: it
+    judges against an ``existing`` snapshot loaded once per sweep, discards the
+    bool, and stamps ``supersedes_doc_id`` regardless, so there the ``False``
+    really does become a dangling pointer with no log line (#407).
+
+    ``preserve_updated_at`` is load-bearing, not hygiene (#397). A supersession
+    stamp is a metadata-only write by definition — the content passed back in is
+    the row's own — and ``updated_at`` is what
+    :class:`~trellis.retrieve.strategies.KeywordSearch` feeds to its recency
+    decay. Without the flag, *declaring a document stale resets its recency
+    clock to zero*: a year-old note becomes the freshest thing in the corpus at
+    the instant it is superseded, ranked above the successor that replaced it.
+    The failure is perfectly inverted — the operation exists to demote the old
+    document and its side effect promotes it.
+
+    That matters here and not merely in principle, because nothing filters this
+    state out. ``retrieve.lifecycle.is_archived`` tests ``state == "archived"``
+    and ``"superseded"`` is a different state, so a superseded document stays
+    servable — deliberately. ``docs/design/plan-memory-lifecycle.md`` §4 pins
+    the design as "SCD-2 supersede + **recency-wins-at-retrieval**, with the
+    losing version retrievable on demand", which makes the loser's recency rank
+    the whole mechanism rather than an incidental score.
+
+    **Scoped to the keyword axis, and only that.** ``SemanticSearch`` decays off
+    the *vector row's* metadata, and would honour an ``updated_at`` key there —
+    but no writer produces one, because ``updated_at`` is a store *column*, not
+    a metadata key, and ``build_vector_row`` sets only ``created_at``. So the
+    semantic axis was never exposed to this. Nor does this write reach the
+    vector row at all: ``SYNCED_METADATA_KEYS`` is ``content_tags`` /
+    ``auto_importance``, so the row never learns of the supersession — the #337
+    shape, inert only for as long as the state goes unfiltered. Add such a
+    filter and the mirror becomes required.
     """
     doc = document_store.get(old_doc_id)
     if doc is None:
@@ -328,7 +367,9 @@ def mark_document_superseded(
     metadata[LIFECYCLE_KEY] = Lifecycle(
         state="superseded", superseded_by=new_doc_id
     ).model_dump(mode="json")
-    document_store.put(old_doc_id, doc["content"], metadata=metadata)
+    document_store.put(
+        old_doc_id, doc["content"], metadata=metadata, preserve_updated_at=True
+    )
     return True
 
 
