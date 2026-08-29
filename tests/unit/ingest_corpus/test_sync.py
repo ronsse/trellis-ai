@@ -1049,7 +1049,7 @@ class TestVectorMirrorIsObservable:
         broken.
         """
         with capture_logs() as logs:
-            parent_id, chunk_count = (
+            _, chunk_count = (
                 TestChunkVectorMetadataMirror._ingest_untagged_then_tag_parent(
                     registry, vault, monkeypatch
                 )
