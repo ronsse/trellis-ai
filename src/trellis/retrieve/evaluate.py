@@ -38,6 +38,7 @@ from pydantic import Field, model_validator
 from trellis.core.base import TrellisModel
 from trellis.schemas.document_metadata import document_form_of
 from trellis.schemas.pack import Pack, PackItem
+from trellis.stores.base.event_log import ScanCoverage
 
 if TYPE_CHECKING:
     from trellis.stores.base.event_log import EventLog
@@ -680,6 +681,12 @@ class DimensionPredictivenessReport(TrellisModel):
     overall_success_rate: float
     dimensions: list[DimensionPredictiveness] = Field(default_factory=list)
     weighted_score_predictiveness: DimensionPredictiveness | None = None
+    #: Coverage of the two EventLog reads this join rests on (#374),
+    #: merged. Truncation is worse here than for a plain counter: the join
+    #: only sees a pack whose quality event *and* whose feedback event both
+    #: survived their own cap, so a truncated read drops matched pairs
+    #: faster than it drops events.
+    scan: ScanCoverage = Field(default_factory=ScanCoverage)
     notes: list[str] = Field(default_factory=list)
 
 
@@ -742,20 +749,42 @@ def analyze_dimension_predictiveness(  # noqa: PLR0912, PLR0915
     The report is read-only — no mutation of profiles, scorers, or
     classification state. Auto-calibration of profile weights is separate
     P3 work that depends on this analysis as its substrate.
+
+    Both reads go through
+    :func:`~trellis.stores.base.event_log.scan_events`, so hitting the cap
+    keeps the **newest** events and says so in ``report.scan`` (#374).
+
+    This function carries the one ordering assumption in the set, twice:
+    ``pack_scores`` and ``pack_success`` are both last-write-wins over a
+    dict keyed by ``pack_id``, and "last" means *last by arrival* — the
+    re-scored pack and the amended feedback are supposed to win.
+    ``scan_events`` reverses its descending read precisely so that
+    assumption survives, which is why this is a change to *which* events
+    are read and not to how they are folded. Pinned by
+    ``tests/unit/ops/test_analyzer_truncation.py``.
     """
-    from trellis.stores.base.event_log import EventType  # noqa: PLC0415
+    from trellis.stores.base.event_log import (  # noqa: PLC0415
+        EventType,
+        merge_coverage,
+        scan_events,
+    )
 
     since = datetime.now(tz=UTC) - timedelta(days=days)
-    quality_events = event_log.get_events(
+    quality_scan = scan_events(
+        event_log,
         event_type=EventType.PACK_QUALITY_SCORED,
         since=since,
         limit=_PREDICTIVENESS_EVENT_LIMIT,
     )
-    feedback_events = event_log.get_events(
+    feedback_scan = scan_events(
+        event_log,
         event_type=EventType.FEEDBACK_RECORDED,
         since=since,
         limit=_PREDICTIVENESS_EVENT_LIMIT,
     )
+    quality_events = quality_scan.events
+    feedback_events = feedback_scan.events
+    coverage = merge_coverage(quality_scan.coverage, feedback_scan.coverage)
 
     #: pack_id -> {dimension -> score, "_weighted": score}
     pack_scores: dict[str, dict[str, float]] = {}
@@ -855,6 +884,8 @@ def analyze_dimension_predictiveness(  # noqa: PLR0912, PLR0915
             "Dimensions classified as noise (|r| < 0.1) are candidates for "
             f"weight reduction in profiles: {', '.join(noise_dims)}."
         )
+    if coverage.truncated and coverage.note:
+        notes.append(coverage.note)
 
     report = DimensionPredictivenessReport(
         total_packs_scored=len(pack_scores),
@@ -862,6 +893,7 @@ def analyze_dimension_predictiveness(  # noqa: PLR0912, PLR0915
         overall_success_rate=overall_success_rate,
         dimensions=dimensions,
         weighted_score_predictiveness=weighted_entry,
+        scan=coverage,
         notes=notes,
     )
     logger.info(

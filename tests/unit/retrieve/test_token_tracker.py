@@ -32,12 +32,19 @@ class _FakeEventLog(EventLog):
         since: datetime | None = None,
         until: datetime | None = None,
         limit: int = 100,
+        order: str = "asc",
     ) -> list[Event]:
         result = self.events
         if event_type is not None:
             result = [e for e in result if e.event_type == event_type]
         if since is not None:
             result = [e for e in result if e.occurred_at >= since]
+        # Honouring ``order`` is what makes the truncation direction
+        # observable at all: this fake previously neither accepted nor
+        # applied it, so no test here *could* have caught the ascending
+        # default dropping the newest events (#374). Same repair #389 made
+        # to the two fakes it found.
+        result = sorted(result, key=lambda e: e.occurred_at, reverse=order == "desc")
         return result[:limit]
 
     def count(

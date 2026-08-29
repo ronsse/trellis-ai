@@ -41,6 +41,7 @@ import structlog
 from pydantic import Field
 
 from trellis.core.base import TrellisModel
+from trellis.stores.base.event_log import ScanCoverage
 
 if TYPE_CHECKING:
     from trellis.stores.base.event_log import EventLog
@@ -354,7 +355,6 @@ def emit_extraction_failure(
 
 
 _FALLBACK_EVENT_LIMIT = 5000
-_DISPATCH_EVENT_LIMIT = 5000
 _VALIDATION_EVENT_LIMIT = 5000
 
 #: Fraction of dispatches on a single source_hint that must fall back before
@@ -388,6 +388,13 @@ class ExtractorFallbackReport(TrellisModel):
     overall_fallback_rate: float
     reason_counts: dict[str, int] = Field(default_factory=dict)
     per_source: list[SourceFallbackStats] = Field(default_factory=list)
+    #: Coverage of the **two** EventLog reads behind this report (#374),
+    #: merged. Both the numerator and the denominator of
+    #: ``overall_fallback_rate`` come from independently capped reads, so a
+    #: report where either one truncated is reporting a ratio between two
+    #: differently-sized slices — which is why the merged coverage is
+    #: carried rather than each read's own.
+    scan: ScanCoverage = Field(default_factory=ScanCoverage)
     findings: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
 
@@ -404,20 +411,40 @@ def analyze_extractor_fallbacks(
     compute an overall fallback rate and per-source aggregates. When no
     dispatch events exist in the window, returns a zero-valued report with
     a descriptive note rather than raising.
+
+    Both reads go through
+    :func:`~trellis.stores.base.event_log.scan_events`, so hitting the cap
+    keeps the **newest** events and says so in ``report.scan`` (#374). Every
+    aggregate here is an unordered count, so the change is confined to
+    *which* events are dropped.
+
+    ``limit`` governs **both** reads. It used to cap only the fallback
+    read while the dispatch read carried its own equal, private constant —
+    so the denominator of ``overall_fallback_rate`` was the one an operator
+    could not raise, which is the read that saturates first.
     """
-    from trellis.stores.base.event_log import EventType  # noqa: PLC0415
+    from trellis.stores.base.event_log import (  # noqa: PLC0415
+        EventType,
+        merge_coverage,
+        scan_events,
+    )
 
     since = datetime.now(tz=UTC) - timedelta(days=days)
-    fallback_events = event_log.get_events(
+    fallback_scan = scan_events(
+        event_log,
         event_type=EventType.EXTRACTOR_FALLBACK,
         since=since,
         limit=limit,
     )
-    dispatch_events = event_log.get_events(
+    dispatch_scan = scan_events(
+        event_log,
         event_type=EventType.EXTRACTION_DISPATCHED,
         since=since,
-        limit=_DISPATCH_EVENT_LIMIT,
+        limit=limit,
     )
+    fallback_events = fallback_scan.events
+    dispatch_events = dispatch_scan.events
+    coverage = merge_coverage(fallback_scan.coverage, dispatch_scan.coverage)
 
     total_fallbacks = len(fallback_events)
     total_dispatches = len(dispatch_events)
@@ -475,6 +502,8 @@ def analyze_extractor_fallbacks(
             "dispatcher is unused or no ``event_log`` is wired — check "
             "``ExtractionDispatcher(event_log=...)`` at construction."
         )
+    if coverage.truncated and coverage.note:
+        notes.append(coverage.note)
 
     report = ExtractorFallbackReport(
         total_dispatches=total_dispatches,
@@ -482,6 +511,7 @@ def analyze_extractor_fallbacks(
         overall_fallback_rate=overall_rate,
         reason_counts=dict(reason_counts),
         per_source=per_source,
+        scan=coverage,
         findings=findings,
         notes=notes,
     )
@@ -546,6 +576,13 @@ class ExtractionValidationReport(TrellisModel):
     overall_rejection_rate: float
     code_counts: dict[str, int] = Field(default_factory=dict)
     per_source: list[SourceValidationStats] = Field(default_factory=list)
+    #: Coverage of the **two** EventLog reads behind this report (#374),
+    #: merged. Both the numerator and the denominator of
+    #: ``overall_rejection_rate`` come from independently capped reads, so a
+    #: report where either one truncated is reporting a ratio between two
+    #: differently-sized slices — which is why the merged coverage is
+    #: carried rather than each read's own.
+    scan: ScanCoverage = Field(default_factory=ScanCoverage)
     findings: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
 
@@ -563,20 +600,33 @@ def analyze_extraction_validation(
     per-source aggregates. Mirrors the shape of
     :func:`analyze_extractor_fallbacks` so consumers can swap one for the
     other when wiring CLI surfaces. Closes Logic Gap 1.3 telemetry.
+
+    Both reads go through
+    :func:`~trellis.stores.base.event_log.scan_events` and ``limit``
+    governs both — see :func:`analyze_extractor_fallbacks` for why (#374).
     """
-    from trellis.stores.base.event_log import EventType  # noqa: PLC0415
+    from trellis.stores.base.event_log import (  # noqa: PLC0415
+        EventType,
+        merge_coverage,
+        scan_events,
+    )
 
     since = datetime.now(tz=UTC) - timedelta(days=days)
-    rejected_events = event_log.get_events(
+    rejected_scan = scan_events(
+        event_log,
         event_type=EventType.EXTRACTION_REJECTED,
         since=since,
         limit=limit,
     )
-    dispatch_events = event_log.get_events(
+    dispatch_scan = scan_events(
+        event_log,
         event_type=EventType.EXTRACTION_DISPATCHED,
         since=since,
-        limit=_DISPATCH_EVENT_LIMIT,
+        limit=limit,
     )
+    rejected_events = rejected_scan.events
+    dispatch_events = dispatch_scan.events
+    coverage = merge_coverage(rejected_scan.coverage, dispatch_scan.coverage)
 
     total_rejected = len(rejected_events)
     total_dispatches = len(dispatch_events)
@@ -635,6 +685,8 @@ def analyze_extraction_validation(
             "wired, or no validators are configured — check "
             "``ExtractionDispatcher(event_log=..., validators=[...])``."
         )
+    if coverage.truncated and coverage.note:
+        notes.append(coverage.note)
 
     report = ExtractionValidationReport(
         total_dispatches=total_dispatches,
@@ -642,6 +694,7 @@ def analyze_extraction_validation(
         overall_rejection_rate=overall_rate,
         code_counts=dict(code_counts),
         per_source=per_source,
+        scan=coverage,
         findings=findings,
         notes=notes,
     )
