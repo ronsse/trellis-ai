@@ -139,14 +139,60 @@ class TestRetrieveChunkVisibility:
         assert data["count"] == 12
         assert any("#chunk-" in r["doc_id"] for r in data["results"])
 
+    @staticmethod
+    def _seed_chunk_favouring(parents: int = 25) -> None:
+        """Seed a corpus whose chunks *outrank* their parents.
+
+        ``search`` applies ``LIMIT`` after ordering by relevance, so a
+        post-hoc filter is only distinguishable from a pushdown when the
+        top-N contains chunks. Under :meth:`_seed` the chunks are longer
+        than their parents and carry the term once, so BM25 puts every
+        parent first and a 20-row page over 25 parents is all parents — a
+        page filter would pass. Here the term appears three times in a
+        short chunk and once in a long parent.
+        """
+        from trellis_cli.stores import get_document_store
+
+        store = get_document_store()
+        for p in range(parents):
+            filler = " ".join(f"filler{p}x{i}" for i in range(40))
+            store.put(f"corpus:obsidian:doc{p}", f"distinctive parent {p} {filler}")
+            for c in range(3):
+                store.put(
+                    f"corpus:obsidian:doc{p}#chunk-{c}",
+                    "distinctive distinctive distinctive",
+                    {"parent_doc_id": f"corpus:obsidian:doc{p}", "chunk_index": c},
+                )
+
     def test_search_limit_is_not_shortened_by_the_chunk_filter(self) -> None:
         """``--limit N`` returns N documents, not N minus the chunks.
 
-        Pins the store-level pushdown from the CLI side: a post-hoc filter
-        would print 5 rows for ``--limit 20`` and the operator would read
-        that as "only 5 matched".
+        Pins the store-level pushdown from the CLI side: with chunks
+        ranking above parents, a post-hoc filter would print *nothing* for
+        ``--limit 20`` and the operator would read that as "no matches".
         """
-        self._seed(parents=25, per_parent=3)
+        self._seed_chunk_favouring()
+
+        unfiltered = runner.invoke(
+            app,
+            [
+                "retrieve",
+                "search",
+                "distinctive",
+                "--limit",
+                "20",
+                "--include-chunks",
+                "--format",
+                "json",
+                "--quiet",
+            ],
+        )
+        assert unfiltered.exit_code == 0, unfiltered.output
+        # Precondition: the fixture really does rank chunks first.
+        assert all(
+            "#chunk-" in r["doc_id"]
+            for r in json.loads(unfiltered.stdout.strip())["results"]
+        )
         result = runner.invoke(
             app,
             [

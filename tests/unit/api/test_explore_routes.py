@@ -228,16 +228,46 @@ def test_search_include_chunks_opt_in(client, registry):
     assert any("#chunk-" in d["doc_id"] for d in data["results"])
 
 
+def _seed_chunk_favouring(store, parents=25):
+    """Seed a corpus whose chunks *outrank* their parents on ``distinctive``.
+
+    ``search`` applies ``LIMIT`` after ordering by relevance, so a post-hoc
+    filter is only distinguishable from a pushdown when the top-N contains
+    chunks. Under ``_seed_chunked`` the chunks are longer than their parents
+    and carry the term once, so BM25 puts every parent first and a 20-row
+    page over 25 parents is all parents — a page filter would pass and the
+    test would prove nothing. Here the term appears three times in a short
+    chunk and once in a long parent.
+    """
+    for p in range(parents):
+        filler = " ".join(f"filler{p}x{i}" for i in range(40))
+        store.put(f"corpus:notes:doc{p}", f"distinctive parent {p} {filler}")
+        for c in range(3):
+            store.put(
+                f"corpus:notes:doc{p}#chunk-{c}",
+                "distinctive distinctive distinctive",
+                {"parent_doc_id": f"corpus:notes:doc{p}", "chunk_index": c},
+            )
+
+
 def test_search_result_set_is_not_shortened_by_the_chunk_filter(client, registry):
     """A ``limit`` of N returns N non-chunk rows, not N minus the chunks.
 
-    Pins the store-level pushdown for the search path specifically. With 3
-    chunks per parent, filtering the result set after the read would return
-    5 rows for ``limit=20`` and the caller would read that as "only 5
-    documents matched" — the same defect the ``/documents`` sibling pins,
+    Pins the store-level pushdown for the search path specifically: with
+    chunks ranking above parents, filtering the result set after the read
+    would return *zero* rows for ``limit=20`` and the caller would read that
+    as "nothing matched" — the same defect the ``/documents`` sibling pins,
     reached through a different store method.
     """
-    _seed_chunked(registry.knowledge.document_store, parents=25, per_parent=3)
+    _seed_chunk_favouring(registry.knowledge.document_store)
+
+    unfiltered = client.get(
+        "/api/v1/search",
+        params={"q": "distinctive", "limit": 20, "include_chunks": "true"},
+    ).json()
+    # Precondition: the fixture really does rank chunks first, so the
+    # assertion below tests the pushdown rather than the seed data.
+    assert all("#chunk-" in d["doc_id"] for d in unfiltered["results"])
 
     data = client.get("/api/v1/search", params={"q": "distinctive", "limit": 20}).json()
 

@@ -345,6 +345,36 @@ class DocumentStoreContractTests:
         filtered = store.search("searchable", limit=50, include_chunks=False)
         assert {d["doc_id"] for d in filtered} == set(parent_ids)
 
+    @staticmethod
+    def _seed_chunk_favouring_corpus(store: DocumentStore, parents: int) -> None:
+        """Seed a corpus whose *chunks* outrank their parents on the query.
+
+        The ranking is load-bearing and is the reason this does not reuse
+        :meth:`_seed_chunked_corpus`. ``search`` applies ``LIMIT`` after
+        ordering by relevance, so a post-hoc filter is only distinguishable
+        from a pushdown when the top-N *contains chunks*. With the shared
+        fixture's content the chunks are strictly longer than their parents
+        and carry the query term once, so BM25 ranks every parent above
+        every chunk and a 20-row page over 25 parents is all parents — a
+        page filter passes and the test proves nothing.
+
+        Here the term appears three times in a short chunk and once in a
+        long parent, which puts chunks first on term frequency (Postgres
+        ``ts_rank``) and on frequency *and* brevity (SQLite ``bm25``).
+        """
+        for p in range(parents):
+            store.put(
+                f"corpus:notes:doc{p}",
+                f"searchable parent {p} "
+                + " ".join(f"filler{p}x{i}" for i in range(40)),
+            )
+            for c in range(3):
+                store.put(
+                    f"corpus:notes:doc{p}#chunk-{c}",
+                    "searchable searchable searchable",
+                    {"parent_doc_id": f"corpus:notes:doc{p}", "chunk_index": c},
+                )
+
     def test_excluding_chunks_still_fills_the_search_limit(
         self, store: DocumentStore
     ) -> None:
@@ -353,13 +383,19 @@ class DocumentStoreContractTests:
         The ``list_documents`` sibling of this test pins the same property
         for the listing; this one pins it for search, which is where
         ``GET /api/v1/search`` reads (#396). The regression it catches is
-        filtering the result set instead of the query: with 3 chunks per
-        parent, a post-hoc filter over a 20-row page yields 5 rows, and a
-        caller who asked for 20 cannot tell that from "there were only 5
-        matches". The predicate has to run before ``LIMIT`` for the count
+        filtering the result set instead of the query: with chunks ranking
+        above parents, a post-hoc filter over a 20-row page yields *zero*
+        rows, and a caller who asked for 20 cannot tell that from "nothing
+        matched". The predicate has to run before ``LIMIT`` for the count
         the caller gets back to mean anything.
         """
-        self._seed_chunked_corpus(store, parents=25, per_parent=3)
+        self._seed_chunk_favouring_corpus(store, parents=25)
+
+        # Precondition: chunks really do outrank parents here, so the
+        # assertion below is testing the pushdown and not the fixture.
+        unfiltered = store.search("searchable", limit=20)
+        assert all("#chunk-" in d["doc_id"] for d in unfiltered)
+
         page = store.search("searchable", limit=20, include_chunks=False)
         assert len(page) == 20
         assert not [d for d in page if "#chunk-" in d["doc_id"]]
