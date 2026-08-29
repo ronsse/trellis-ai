@@ -23,13 +23,19 @@ import structlog
 from pydantic import Field
 
 from trellis.core.base import TrellisModel
+from trellis.stores.base.event_log import (
+    DEFAULT_SCAN_LIMIT,
+    EventType,
+    ScanCoverage,
+    scan_events,
+)
 
 if TYPE_CHECKING:
     from trellis.stores.base.event_log import EventLog
 
 logger = structlog.get_logger(__name__)
 
-_TELEMETRY_EVENT_LIMIT = 5000
+_TELEMETRY_EVENT_LIMIT = DEFAULT_SCAN_LIMIT
 
 #: Rejection reasons emitted by :class:`~trellis.retrieve.pack_builder.PackBuilder`.
 #: Listed here as a documented surface — analyzer treats any string the payload
@@ -74,6 +80,10 @@ class PackTelemetryReport(TrellisModel):
     rejection_reason_counts: dict[str, int] = Field(default_factory=dict)
     rejection_reason_rates: dict[str, float] = Field(default_factory=dict)
     strategy_contributions: list[StrategyContribution] = Field(default_factory=list)
+    #: Whether the ``PACK_ASSEMBLED`` read behind these counts hit its cap,
+    #: and what that excluded (#374). Every rate here is computed over
+    #: ``scanned`` packs, not over the window ``days`` names.
+    scan: ScanCoverage = Field(default_factory=ScanCoverage)
     findings: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
 
@@ -96,6 +106,11 @@ def analyze_pack_telemetry(  # noqa: PLR0915
         Maximum number of ``PACK_ASSEMBLED`` events to scan. Defaults to
         5000 — enough to cover a month of light-traffic deployments
         without pulling unbounded memory. Bump when window exceeds capacity.
+        The read goes through
+        :func:`~trellis.stores.base.event_log.scan_events`, so hitting the
+        cap keeps the **newest** packs and says so in ``report.scan``
+        (#374). Every aggregate below is an unordered count or mean, so the
+        change is confined to *which* packs are dropped.
 
     Returns
     -------
@@ -103,14 +118,14 @@ def analyze_pack_telemetry(  # noqa: PLR0915
         Aggregated counts and rates. Empty window → zero-valued report with
         a descriptive note rather than raising.
     """
-    from trellis.stores.base.event_log import EventType  # noqa: PLC0415
-
     since = datetime.now(tz=UTC) - timedelta(days=days)
-    events = event_log.get_events(
+    scan = scan_events(
+        event_log,
         event_type=EventType.PACK_ASSEMBLED,
         since=since,
         limit=limit,
     )
+    events = scan.events
 
     total_packs = len(events)
     total_injected = 0
@@ -190,12 +205,7 @@ def analyze_pack_telemetry(  # noqa: PLR0915
         max_tokens_hit_rate=max_tokens_hit_rate,
         contributions=contributions,
     )
-    notes: list[str] = []
-    if total_packs == 0:
-        notes.append(
-            "No PACK_ASSEMBLED events in this window. Either the window is "
-            "too narrow, or no PackBuilder instance is emitting telemetry."
-        )
+    notes = _build_notes(total_packs=total_packs, coverage=scan.coverage)
 
     report = PackTelemetryReport(
         total_packs=total_packs,
@@ -209,6 +219,7 @@ def analyze_pack_telemetry(  # noqa: PLR0915
         rejection_reason_counts=dict(rejection_counts),
         rejection_reason_rates=rejection_rates,
         strategy_contributions=contributions,
+        scan=scan.coverage,
         findings=findings,
         notes=notes,
     )
@@ -219,6 +230,19 @@ def analyze_pack_telemetry(  # noqa: PLR0915
         any_budget_hit_rate=any_budget_hit_rate,
     )
     return report
+
+
+def _build_notes(*, total_packs: int, coverage: ScanCoverage) -> list[str]:
+    """Caveats an operator needs before reading the numbers above."""
+    notes: list[str] = []
+    if total_packs == 0:
+        notes.append(
+            "No PACK_ASSEMBLED events in this window. Either the window is "
+            "too narrow, or no PackBuilder instance is emitting telemetry."
+        )
+    if coverage.truncated and coverage.note:
+        notes.append(coverage.note)
+    return notes
 
 
 def _build_findings(

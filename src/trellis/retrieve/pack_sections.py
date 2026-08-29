@@ -12,11 +12,26 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 
+from pydantic import Field
+
 from trellis.core.base import TrellisModel
-from trellis.stores.base.event_log import EventLog, EventType
+from trellis.stores.base.event_log import (
+    EventLog,
+    EventType,
+    ScanCoverage,
+    scan_events,
+)
 
 #: Sections whose empty rate is at or above this threshold are flagged.
 EMPTY_RATE_FLAG_THRESHOLD = 0.5
+
+#: Default scan cap for this analyzer. Deliberately **not**
+#: :data:`~trellis.stores.base.event_log.DEFAULT_SCAN_LIMIT`: the cap here
+#: is applied to *all* ``PACK_ASSEMBLED`` events and sectioned packs are
+#: filtered out afterwards, so the two numbers are not comparable. Named
+#: so the CLI can default its ``--limit`` to the analyzer's own value
+#: instead of silently widening this report's coverage 1000 -> 5000.
+PACK_SECTIONS_SCAN_LIMIT = 1000
 
 
 class SectionStats(TrellisModel):
@@ -43,6 +58,12 @@ class PackSectionsReport(TrellisModel):
     total_sectioned_packs: int
     section_stats: list[SectionStats]
     empty_section_flags: list[str]
+    #: Whether the ``PACK_ASSEMBLED`` read behind these stats hit its cap,
+    #: and what that excluded (#374). Note the cap is applied to *all*
+    #: pack events, then sectioned packs are filtered out of the result —
+    #: so on a deployment where sectioned packs are a minority, truncation
+    #: shrinks this report far more than ``limit`` suggests.
+    scan: ScanCoverage = Field(default_factory=ScanCoverage)
 
 
 def analyze_pack_sections(
@@ -50,7 +71,7 @@ def analyze_pack_sections(
     *,
     days: int = 30,
     empty_rate_threshold: float = EMPTY_RATE_FLAG_THRESHOLD,
-    limit: int = 1000,
+    limit: int = PACK_SECTIONS_SCAN_LIMIT,
 ) -> PackSectionsReport:
     """Analyze sectioned pack composition over the given window.
 
@@ -59,16 +80,21 @@ def analyze_pack_sections(
         days: How many days of history to analyze.
         empty_rate_threshold: Sections whose empty rate meets or exceeds
             this value are listed in ``empty_section_flags``.
-        limit: Max events to read.
+        limit: Max events to read. The read goes through
+            :func:`~trellis.stores.base.event_log.scan_events`, so hitting
+            the cap keeps the **newest** packs and says so in
+            ``report.scan`` (#374). Every aggregate below is an unordered
+            count or set union, so the change is confined to *which* packs
+            are dropped.
     """
     since = datetime.now(tz=UTC) - timedelta(days=days)
-    events = event_log.get_events(
-        event_type=EventType.PACK_ASSEMBLED, since=since, limit=limit
+    scan = scan_events(
+        event_log, event_type=EventType.PACK_ASSEMBLED, since=since, limit=limit
     )
 
     sectioned = [
         e
-        for e in events
+        for e in scan.events
         if e.entity_type == "sectioned_pack" or e.payload.get("sections")
     ]
 
@@ -108,4 +134,5 @@ def analyze_pack_sections(
         total_sectioned_packs=len(sectioned),
         section_stats=stats,
         empty_section_flags=flags,
+        scan=scan.coverage,
     )

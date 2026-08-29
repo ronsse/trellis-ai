@@ -32,7 +32,7 @@ no other reason to import.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
 
@@ -71,6 +71,63 @@ logger = structlog.get_logger(__name__)
 #: the reason ``build_vector_row`` already excludes them: a measurement-only
 #: record duplicated into a store with no shadow awareness can only drift.
 SYNCED_METADATA_KEYS: tuple[str, ...] = ("content_tags", "auto_importance")
+
+
+#: What one :func:`sync_vector_metadata_outcome` call actually did.
+#:
+#: ``sync_vector_metadata`` collapses all of these to a bool, which is enough
+#: for a caller that only wants to count repairs — but not for one reporting
+#: coverage. ``0 rows synced`` reads identically for "every row was already
+#: in agreement", "none of these documents was ever embedded" and "every
+#: mirror threw", and those call for opposite responses.
+VectorSyncOutcome = Literal["synced", "unchanged", "absent", "failed", "no_store"]
+
+
+def sync_vector_metadata_outcome(
+    vector_store: VectorStore | None,
+    item_id: str,
+    document_metadata: dict[str, Any] | None,
+    *,
+    keys: tuple[str, ...] = SYNCED_METADATA_KEYS,
+) -> VectorSyncOutcome:
+    """:func:`sync_vector_metadata`, saying *which* of its no-ops occurred.
+
+    Same work, same fail-soft contract; only the return type is wider. See
+    :data:`VectorSyncOutcome` for why the distinction is worth a second
+    entry point rather than a change to the existing one — four callers want
+    the bool, and widening it under them would make every `if sync(...)` a
+    truthiness bug waiting on a new outcome value.
+    """
+    if vector_store is None:
+        return "no_store"
+    try:
+        row = vector_store.get(item_id)
+        if row is None:
+            return "absent"
+        metadata = dict(row.get("metadata") or {})
+        source = document_metadata or {}
+        changed = False
+        for key in keys:
+            if key in source:
+                if metadata.get(key) != source[key] or key not in metadata:
+                    metadata[key] = source[key]
+                    changed = True
+            elif key in metadata:
+                del metadata[key]
+                changed = True
+        if not changed:
+            return "unchanged"
+        vector_store.upsert(item_id, row["vector"], metadata)
+    except Exception:
+        logger.warning(
+            "vector_metadata_sync_failed",
+            item_id=item_id,
+            keys=list(keys),
+            exc_info=True,
+        )
+        return "failed"
+    logger.debug("vector_metadata_synced", item_id=item_id, keys=list(keys))
+    return "synced"
 
 
 def sync_vector_metadata(
@@ -112,36 +169,12 @@ def sync_vector_metadata(
     and loud, exactly as :func:`trellis.mutate.handlers._sync_vector_lifecycle`
     does for the lifecycle stamp.
     """
-    if vector_store is None:
-        return False
-    try:
-        row = vector_store.get(item_id)
-        if row is None:
-            return False
-        metadata = dict(row.get("metadata") or {})
-        source = document_metadata or {}
-        changed = False
-        for key in keys:
-            if key in source:
-                if metadata.get(key) != source[key] or key not in metadata:
-                    metadata[key] = source[key]
-                    changed = True
-            elif key in metadata:
-                del metadata[key]
-                changed = True
-        if not changed:
-            return False
-        vector_store.upsert(item_id, row["vector"], metadata)
-    except Exception:
-        logger.warning(
-            "vector_metadata_sync_failed",
-            item_id=item_id,
-            keys=list(keys),
-            exc_info=True,
+    return (
+        sync_vector_metadata_outcome(
+            vector_store, item_id, document_metadata, keys=keys
         )
-        return False
-    logger.debug("vector_metadata_synced", item_id=item_id, keys=list(keys))
-    return True
+        == "synced"
+    )
 
 
 def resolve_vector_store(registry: StoreRegistry) -> VectorStore | None:
@@ -191,7 +224,9 @@ def vector_metadata_diverges(
 
 __all__ = [
     "SYNCED_METADATA_KEYS",
+    "VectorSyncOutcome",
     "resolve_vector_store",
     "sync_vector_metadata",
+    "sync_vector_metadata_outcome",
     "vector_metadata_diverges",
 ]

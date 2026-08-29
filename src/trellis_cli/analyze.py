@@ -47,13 +47,17 @@ from trellis.retrieve.evaluate import (
     analyze_dimension_predictiveness,
     evaluate_pack,
 )
-from trellis.retrieve.pack_sections import analyze_pack_sections
+from trellis.retrieve.pack_sections import (
+    PACK_SECTIONS_SCAN_LIMIT,
+    analyze_pack_sections,
+)
 from trellis.retrieve.telemetry import analyze_pack_telemetry
 from trellis.retrieve.token_usage import analyze_token_usage
 from trellis.retrieve.trellis_cost import summarize_trellis_cost
 from trellis.schemas.parameters import ParameterScope, ParameterSet
 from trellis.stores.advisory_source import resolve_advisory_path
 from trellis.stores.advisory_store import AdvisoryStore
+from trellis.stores.base.event_log import DEFAULT_SCAN_LIMIT
 from trellis.stores.base.parameter import ParameterStore
 from trellis_cli._meta_wiring import wrap_cli_meta_analysis
 from trellis_cli.config import get_config_dir
@@ -426,6 +430,14 @@ def apply_noise_tags(
 def token_usage(
     days: int = typer.Option(7, help="Days of history to analyze"),
     output_format: str = typer.Option("text", "--format", help="Output format"),
+    limit: int = typer.Option(
+        DEFAULT_SCAN_LIMIT,
+        "--limit",
+        help=(
+            "Max events to scan. Raise it when the report says TRUNCATED; "
+            "the newest events are kept, so the note names what was cut."
+        ),
+    ),
     no_meta_trace: bool = typer.Option(
         False,
         "--no-meta-trace",
@@ -439,7 +451,7 @@ def token_usage(
         analyzer_name="cli.analyze.token-usage",
         disabled=no_meta_trace,
     ) as _meta_record:
-        report = analyze_token_usage(event_log, days=days)
+        report = analyze_token_usage(event_log, days=days, limit=limit)
         if _meta_record.enabled and report.total_responses > 0:
             _meta_record.produced_finding(
                 f"token-usage-report-d{days}",
@@ -451,6 +463,11 @@ def token_usage(
         return
 
     console.print(f"[bold]Token Usage Report[/bold] (last {days} days)")
+    if report.scan.truncated:
+        # #374, same placement as `analyze backend-health`: before any
+        # number, because every count below was computed over a shorter
+        # window than the header just claimed.
+        console.print(f"  [yellow]window[/yellow] {report.scan.note}")
     console.print(f"  Total responses: {report.total_responses}")
     console.print(f"  Total tokens: {report.total_tokens:,}")
     console.print(f"  Avg tokens/response: {report.avg_tokens_per_response:.1f}")
@@ -1046,6 +1063,14 @@ def cost(
         None, "--price-per-mtok", help="Override input price, USD per 1M tokens"
     ),
     output_format: str = typer.Option("text", "--format", help="Output format"),
+    limit: int = typer.Option(
+        DEFAULT_SCAN_LIMIT,
+        "--limit",
+        help=(
+            "Max events to scan. Raise it when the report says TRUNCATED; "
+            "the newest events are kept, so the note names what was cut."
+        ),
+    ),
     no_meta_trace: bool = typer.Option(
         False,
         "--no-meta-trace",
@@ -1060,7 +1085,11 @@ def cost(
         disabled=no_meta_trace,
     ) as _meta_record:
         report = summarize_trellis_cost(
-            event_log, days=days, model=model, price_per_mtok=price_per_mtok
+            event_log,
+            days=days,
+            model=model,
+            price_per_mtok=price_per_mtok,
+            limit=limit,
         )
         if _meta_record.enabled and report.overhead_events > 0:
             _meta_record.produced_finding(
@@ -1073,6 +1102,11 @@ def cost(
         return
 
     console.print(f"[bold]Trellis Cost Overhead[/bold] (last {days} days)")
+    if report.scan.truncated:
+        # #374, and it matters most here: this is the only surface that turns
+        # a capped read into a dollar figure. A silently shortened window
+        # understates spend, which is the direction nobody investigates.
+        console.print(f"  [yellow]window[/yellow] {report.scan.note}")
     console.print(
         f"  Injected {report.overhead_tokens:,} tokens "
         f"across {report.overhead_events} retrievals"
@@ -1337,6 +1371,14 @@ def pack_sections(
         help="Flag sections whose empty rate meets or exceeds this value",
     ),
     output_format: str = typer.Option("text", "--format", help="Output format"),
+    limit: int = typer.Option(
+        PACK_SECTIONS_SCAN_LIMIT,
+        "--limit",
+        help=(
+            "Max events to scan. Raise it when the report says TRUNCATED; "
+            "the newest events are kept, so the note names what was cut."
+        ),
+    ),
     no_meta_trace: bool = typer.Option(
         False,
         "--no-meta-trace",
@@ -1360,6 +1402,7 @@ def pack_sections(
             event_log,
             days=days,
             empty_rate_threshold=empty_rate_threshold,
+            limit=limit,
         )
         if _meta_record.enabled and report.section_stats:
             _meta_record.produced_finding(
@@ -1386,6 +1429,10 @@ def pack_sections(
                     "total_sectioned_packs": report.total_sectioned_packs,
                     "section_stats": rows,
                     "empty_section_flags": report.empty_section_flags,
+                    # Hand-assembled rather than `report.model_dump()`, so
+                    # a new report field reaches this surface only when
+                    # named here — which is why the coverage is explicit.
+                    "scan": report.scan.model_dump(),
                 },
                 indent=2,
             )
@@ -1393,6 +1440,12 @@ def pack_sections(
         return
 
     console.print(f"[bold]Pack Sections Report[/bold] (last {days} days)")
+    if report.scan.truncated:
+        # #374. Worth reading twice here: the cap applies to ALL pack
+        # events and sectioned packs are filtered out of the result
+        # afterwards, so on a deployment where they are a minority this
+        # report shrinks by far more than the cap suggests.
+        console.print(f"  [yellow]window[/yellow] {report.scan.note}")
     console.print(f"  Sectioned packs analyzed: {report.total_sectioned_packs}")
 
     if not report.section_stats:
@@ -1678,6 +1731,14 @@ def dimension_predictiveness(
         0.5, help="Rating threshold to consider a pack successful"
     ),
     output_format: str = typer.Option("text", "--format", help="Output format"),
+    limit: int = typer.Option(
+        DEFAULT_SCAN_LIMIT,
+        "--limit",
+        help=(
+            "Max events to scan. Raise it when the report says TRUNCATED; "
+            "the newest events are kept, so the note names what was cut."
+        ),
+    ),
     no_meta_trace: bool = typer.Option(
         False,
         "--no-meta-trace",
@@ -1704,6 +1765,7 @@ def dimension_predictiveness(
             event_log,
             days=days,
             success_threshold=success_threshold,
+            limit=limit,
         )
         if _meta_record.enabled and report.dimensions:
             _meta_record.produced_finding(
@@ -1771,6 +1833,14 @@ def dimension_predictiveness(
 def pack_telemetry(
     days: int = typer.Option(7, help="Days of history to analyze"),
     output_format: str = typer.Option("text", "--format", help="Output format"),
+    limit: int = typer.Option(
+        DEFAULT_SCAN_LIMIT,
+        "--limit",
+        help=(
+            "Max events to scan. Raise it when the report says TRUNCATED; "
+            "the newest events are kept, so the note names what was cut."
+        ),
+    ),
     no_meta_trace: bool = typer.Option(
         False,
         "--no-meta-trace",
@@ -1790,7 +1860,7 @@ def pack_telemetry(
         analyzer_name="cli.analyze.pack-telemetry",
         disabled=no_meta_trace,
     ) as _meta_record:
-        report = analyze_pack_telemetry(event_log, days=days)
+        report = analyze_pack_telemetry(event_log, days=days, limit=limit)
         if _meta_record.enabled and report.total_packs > 0:
             _meta_record.produced_finding(
                 f"pack-telemetry-report-d{days}",
@@ -1802,11 +1872,16 @@ def pack_telemetry(
         return
 
     console.print(f"[bold]Pack Telemetry Report[/bold] (last {days} days)")
+    # Above the numbers, and unconditional. These notes used to render only
+    # inside the `total_packs == 0` branch below — but a truncated scan has
+    # `total_packs == limit`, so the branch that printed the truncation
+    # caveat was exactly the branch truncation guarantees is not taken
+    # (#374). Every count below is computed over `report.scan.scanned`
+    # packs, not over the window the header just claimed.
+    for note in report.notes:
+        console.print(f"  [dim]- {note}[/dim]")
     console.print(f"  Packs assembled: {report.total_packs}")
     if report.total_packs == 0:
-        console.print()
-        for note in report.notes:
-            console.print(f"  [dim]- {note}[/dim]")
         return
 
     console.print(
@@ -1892,6 +1967,14 @@ def pack_telemetry(
 def extractor_fallbacks(
     days: int = typer.Option(30, help="Days of history to analyze"),
     output_format: str = typer.Option("text", "--format", help="Output format"),
+    limit: int = typer.Option(
+        DEFAULT_SCAN_LIMIT,
+        "--limit",
+        help=(
+            "Max events to scan. Raise it when the report says TRUNCATED; "
+            "the newest events are kept, so the note names what was cut."
+        ),
+    ),
     no_meta_trace: bool = typer.Option(
         False,
         "--no-meta-trace",
@@ -1912,7 +1995,7 @@ def extractor_fallbacks(
         analyzer_name="cli.analyze.extractor-fallbacks",
         disabled=no_meta_trace,
     ) as _meta_record:
-        report = analyze_extractor_fallbacks(event_log, days=days)
+        report = analyze_extractor_fallbacks(event_log, days=days, limit=limit)
         if _meta_record.enabled and report.total_dispatches > 0:
             _meta_record.produced_finding(
                 f"extractor-fallbacks-report-d{days}",
@@ -1924,14 +2007,16 @@ def extractor_fallbacks(
         return
 
     console.print(f"[bold]Extractor Fallback Report[/bold] (last {days} days)")
+    # Same hoist as `pack-telemetry`, same reason: the truncation caveat used
+    # to render only when `total_dispatches == 0`, and a truncated scan has
+    # `total_dispatches == limit` (#374).
+    for note in report.notes:
+        console.print(f"  [dim]- {note}[/dim]")
     console.print(f"  Total dispatches: {report.total_dispatches}")
     console.print(f"  Total fallbacks: {report.total_fallbacks}")
     console.print(f"  Overall fallback rate: {report.overall_fallback_rate:.1%}")
 
     if report.total_dispatches == 0:
-        console.print()
-        for note in report.notes:
-            console.print(f"  [dim]- {note}[/dim]")
         return
 
     if report.reason_counts:

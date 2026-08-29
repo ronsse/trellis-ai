@@ -13,9 +13,17 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from structlog.testing import capture_logs
 
 from trellis.classify.feedback import apply_noise_tags
-from trellis.classify.ingest import CLASSIFY_ON_INGEST_FLAG
+from trellis.classify.ingest import (
+    CLASSIFY_METADATA_KEYS,
+    CLASSIFY_ON_INGEST_FLAG,
+)
+from trellis.core.vector_metadata import (
+    SYNCED_METADATA_KEYS,
+    vector_metadata_diverges,
+)
 from trellis.ingest_corpus.models import (
     chunk_doc_id,
     corpus_doc_id,
@@ -24,6 +32,8 @@ from trellis.ingest_corpus.models import (
 from trellis.ingest_corpus.sync import sync_corpus
 from trellis.retrieve.embed_ingest_hook import EMBED_ON_INGEST_FLAG
 from trellis.retrieve.evaluate import BreadthScorer, EvaluationScenario
+from trellis.retrieve.noise import exclude_noise
+from trellis.retrieve.strategies import SemanticSearch
 from trellis.schemas.pack import Pack, PackItem
 from trellis.stores.base.event_log import EventType
 from trellis.stores.sqlite.document import SQLiteDocumentStore
@@ -805,3 +815,435 @@ class TestSemanticRetrieval:
         sync_corpus(registry, vault, source_system="obsidian")
         doc_id = corpus_doc_id("obsidian", "sub/note-b.md")
         assert registry.knowledge.vector_store.get(doc_id) is not None
+
+
+class TestChunkVectorMetadataMirror:
+    """#388 — the metadata-only chunk re-put must reach the vector row.
+
+    A vector row's metadata is a snapshot taken at embed time, and
+    ``SemanticSearch`` builds its ``PackItem`` from that snapshot rather than
+    from the document store. ``_write_chunks`` re-puts an unchanged chunk when
+    it is missing a key the parent carries — and deliberately does not
+    re-embed it — so before this was fixed the propagated tags landed in the
+    document store alone and the semantic axis kept serving the chunk's
+    pre-propagation tags. Third site of #338, after ``apply_noise_tags``
+    (#343) and the curate/enrich paths (#386).
+
+    Every assertion here is on the **row**, not on a call argument: the whole
+    defect class is a mirror nobody performed while every document-store
+    assertion still passed.
+    """
+
+    @staticmethod
+    def _ingest_untagged_then_tag_parent(registry, vault, monkeypatch):
+        """The dominant production shape, in three steps.
+
+        1. Sync a long document with classify-on-write *off* — chunks are
+           embedded and carry no ``content_tags`` at all.
+        2. The enrichment pass tags the parent (a document-store write; the
+           parent of a chunked document has no vector row of its own).
+        3. A tail edit re-syncs: only the last chunk's bytes change, so every
+           earlier chunk takes the ``tags_missing`` re-put — the branch that
+           does not re-embed.
+
+        Returns ``(parent_id, chunk_count)``.
+        """
+        monkeypatch.setenv(EMBED_ON_INGEST_FLAG, "1")
+        note = vault / "long.md"
+        note.write_text(_long_markdown())
+        sync_corpus(registry, vault, source_system="obsidian")
+
+        store = registry.knowledge.document_store
+        parent_id = corpus_doc_id("obsidian", "long.md")
+        parent = store.get(parent_id)
+        chunk_count = parent["metadata"]["chunk_count"]
+        assert chunk_count >= 3
+        assert "content_tags" not in store.get(chunk_doc_id(parent_id, 0))["metadata"]
+
+        store.put(
+            parent_id,
+            parent["content"],
+            metadata={
+                **parent["metadata"],
+                # `signal_quality` is the facet the noise boundary acts on;
+                # `importance_scored_at` is the stamp `_apply_importance`
+                # requires beside a non-zero `auto_importance`, which is why
+                # the two keys are mirrored together and never singly.
+                "content_tags": {
+                    "signal_quality": "noise",
+                    "importance_scored_at": "2026-08-29T00:00:00+00:00",
+                },
+                "auto_importance": 0.91,
+            },
+        )
+
+        note.write_text(_long_markdown() + " tail.")
+        sync_corpus(registry, vault, source_system="obsidian")
+        return parent_id, chunk_count
+
+    def test_metadata_only_reput_mirrors_tags_onto_the_chunk_vector_row(
+        self, registry, vault, monkeypatch
+    ):
+        parent_id, chunk_count = self._ingest_untagged_then_tag_parent(
+            registry, vault, monkeypatch
+        )
+        store = registry.knowledge.document_store
+        vectors = registry.knowledge.vector_store
+
+        for index in range(chunk_count):
+            cid = chunk_doc_id(parent_id, index)
+            doc_meta = store.get(cid)["metadata"]
+            row = vectors.get(cid)
+            assert row is not None, cid
+            # The same predicate the writer enforces, not a hand-rolled twin.
+            assert not vector_metadata_diverges(doc_meta, row["metadata"]), cid
+            assert row["metadata"]["content_tags"]["signal_quality"] == "noise"
+            assert row["metadata"]["auto_importance"] == 0.91
+
+    def test_mirror_is_metadata_only_and_keeps_the_embedding_and_excerpt(
+        self, registry, vault, monkeypatch
+    ):
+        """The mirror is a re-upsert, so it must carry the vector through.
+
+        Re-embedding here would be both a cost and a lie: the chunk's bytes
+        did not change. The row's ``content`` excerpt is its own — cut at
+        embed time by ``build_vector_row`` — and copying the document bag
+        wholesale would clobber it.
+        """
+        monkeypatch.setenv(EMBED_ON_INGEST_FLAG, "1")
+        note = vault / "long.md"
+        note.write_text(_long_markdown())
+        sync_corpus(registry, vault, source_system="obsidian")
+
+        parent_id = corpus_doc_id("obsidian", "long.md")
+        first_chunk = chunk_doc_id(parent_id, 0)
+        before = registry.knowledge.vector_store.get(first_chunk)
+
+        store = registry.knowledge.document_store
+        parent = store.get(parent_id)
+        store.put(
+            parent_id,
+            parent["content"],
+            metadata={**parent["metadata"], "auto_importance": 0.42},
+        )
+        note.write_text(_long_markdown() + " tail.")
+        sync_corpus(registry, vault, source_system="obsidian")
+
+        after = registry.knowledge.vector_store.get(first_chunk)
+        assert after["vector"] == before["vector"]
+        assert after["metadata"]["content"] == before["metadata"]["content"]
+        assert after["metadata"]["doc_id"] == before["metadata"]["doc_id"]
+        assert after["metadata"]["created_at"] == before["metadata"]["created_at"]
+        assert after["metadata"]["auto_importance"] == 0.42
+
+    def test_demoted_chunks_stop_being_served_by_the_semantic_axis(
+        self, registry, vault, monkeypatch
+    ):
+        """The consequence, end to end.
+
+        ``exclude_noise`` reads ``content_tags.signal_quality`` off the
+        ``PackItem``, and on the semantic axis that metadata *is* the vector
+        row's snapshot. Un-mirrored, every chunk the parent demoted was still
+        served.
+        """
+        parent_id, chunk_count = self._ingest_untagged_then_tag_parent(
+            registry, vault, monkeypatch
+        )
+        semantic = SemanticSearch(registry.knowledge.vector_store, _embed)
+        served = [
+            item
+            for item in semantic.search("kubernetes grapes violins facts", limit=50)
+            if item.item_id.startswith(f"{parent_id}#chunk-")
+        ]
+        assert len(served) == chunk_count
+        assert exclude_noise(served) == []
+
+    def test_document_is_still_written_without_a_vector_store(
+        self, registry, vault, monkeypatch
+    ):
+        """A deployment with no vector store must still propagate tags.
+
+        The document store is the authority; the mirror is a best-effort
+        second write. Losing it must never lose the tag.
+        """
+        registry.knowledge.vector_store = None
+        monkeypatch.setenv(EMBED_ON_INGEST_FLAG, "1")
+        parent_id, chunk_count = self._ingest_untagged_then_tag_parent(
+            registry, vault, monkeypatch
+        )
+        store = registry.knowledge.document_store
+        for index in range(chunk_count):
+            meta = store.get(chunk_doc_id(parent_id, index))["metadata"]
+            assert meta["content_tags"]["signal_quality"] == "noise"
+
+
+def test_classify_keys_are_covered_by_the_mirror() -> None:
+    """The containment `_write_chunks`' mirror silently depends on.
+
+    `_write_chunks` propagates ``CLASSIFY_METADATA_KEYS`` to chunk documents
+    and mirrors with ``sync_vector_metadata``'s **default** key set,
+    ``SYNCED_METADATA_KEYS``. The two are equal today, and the docstring
+    said so — but ``CLASSIFY_METADATA_KEYS``' own comment anticipates
+    growth ("adding a facet here cannot silently stop propagating"). Add a
+    third key there and the chunk document gets it while the vector row
+    silently does not: #388 reintroduced, under a docstring asserting it
+    cannot happen.
+
+    Containment, not equality, is the real dependency — the mirror may
+    legitimately carry keys the classify layer does not write. Fixing a
+    failure here by passing ``keys=CLASSIFY_METADATA_KEYS`` would be the
+    wrong repair: ``SYNCED_METADATA_KEYS`` is deliberately narrow about what
+    a vector row may receive, and coupling it to the classify layer subverts
+    that. Widen the mirror's key set deliberately, or say why the new facet
+    is document-only.
+    """
+    assert set(CLASSIFY_METADATA_KEYS) <= set(SYNCED_METADATA_KEYS)
+
+
+class TestVectorMirrorIsObservable:
+    """A mirror that silently did nothing must say so (#388).
+
+    The first cut of this fix reported the mirror on a per-document
+    ``logger.debug`` line. That is a no-op under the CLI's default config —
+    ``configure_stderr_logging`` installs
+    ``make_filtering_bound_logger(INFO)``, under which ``debug`` is not
+    merely filtered downstream but never constructed — so a corpus sync
+    could propagate tags to thousands of chunk documents, mirror none of
+    them, and say nothing at any visible level. Which is #338's failure
+    wearing a fixed label.
+
+    It is now one run-level line at a level that fires, and the count it
+    reports is paired with the only denominator it *can* be a fraction of.
+    """
+
+    def test_absent_vector_store_warns_and_names_the_repair(
+        self, registry, vault, monkeypatch
+    ):
+        registry.knowledge.vector_store = None
+        monkeypatch.setenv(EMBED_ON_INGEST_FLAG, "1")
+        with capture_logs() as logs:
+            TestChunkVectorMetadataMirror._ingest_untagged_then_tag_parent(
+                registry, vault, monkeypatch
+            )
+
+        warnings = [
+            entry
+            for entry in logs
+            if entry["event"] == "corpus_sync_vector_mirror_unavailable"
+        ]
+        assert len(warnings) == 1, "exactly one run-level line, not one per document"
+        assert warnings[0]["log_level"] == "warning"
+        assert warnings[0]["metadata_only_writes"] > 0
+        # Loud is not enough — it has to be actionable.
+        assert "resync-vector-metadata" in warnings[0]["consequence"]
+
+    def test_mirror_count_is_reported_against_its_own_denominator(
+        self, registry, vault, monkeypatch
+    ):
+        """``chunks_written`` is *not* the denominator of ``rows_synced``.
+
+        Only the metadata-only branch can mirror, so pairing the mirror
+        count with the total chunks written would print two numbers that
+        look like a ratio and are not — a first sync that legitimately
+        re-embeds every chunk would read ``N written, 0 synced`` and look
+        broken.
+        """
+        with capture_logs() as logs:
+            _, chunk_count = (
+                TestChunkVectorMetadataMirror._ingest_untagged_then_tag_parent(
+                    registry, vault, monkeypatch
+                )
+            )
+
+        lines = [
+            entry for entry in logs if entry["event"] == "corpus_sync_vector_mirror"
+        ]
+        assert len(lines) == 1
+        # The level, not just the event. `capture_logs` swaps the processor
+        # chain but leaves `wrapper_class` alone, so under pytest the bound
+        # logger is `BoundLoggerFilteringAtNotset` and records `debug` too —
+        # which means every assertion above passes just as well against the
+        # `logger.debug` this fix exists to remove. Verified: flipping it
+        # back leaves the rest of this class green. The sibling test asserts
+        # `"warning"` for the same reason.
+        assert lines[0]["log_level"] == "info"
+
+        # Every chunk but the one whose bytes changed took the mirror path,
+        # and every one of those was mirrored.
+        assert lines[0]["metadata_only_writes"] == chunk_count - 1
+        assert lines[0]["rows_synced"] == chunk_count - 1
+        assert lines[0]["rows_absent"] == 0
+
+    def test_a_run_with_nothing_to_mirror_stays_quiet(
+        self, registry, vault, monkeypatch
+    ):
+        """A zero line on every sync trains the reader to skip it."""
+        monkeypatch.setenv(EMBED_ON_INGEST_FLAG, "1")
+        (vault / "long.md").write_text(_long_markdown())
+        with capture_logs() as logs:
+            sync_corpus(registry, vault, source_system="obsidian")
+
+        assert not [
+            entry
+            for entry in logs
+            if entry["event"].startswith("corpus_sync_vector_mirror")
+        ]
+
+    def test_absent_rows_are_counted_apart_from_failed_mirrors(
+        self, registry, vault, monkeypatch
+    ):
+        """``rows_synced=0`` must not read the same for two opposite causes.
+
+        With embed-on-ingest off no chunk has a vector row at all — the
+        expected, harmless case. Without ``rows_absent`` that is
+        indistinguishable in the log from every mirror throwing, which is an
+        outage. The vector store is present, so the WARNING branch does not
+        fire and this line is the only report there is.
+        """
+        note = vault / "long.md"
+        note.write_text(_long_markdown())
+        sync_corpus(registry, vault, source_system="obsidian")
+
+        store = registry.knowledge.document_store
+        parent_id = corpus_doc_id("obsidian", "long.md")
+        parent = store.get(parent_id)
+        chunk_count = parent["metadata"]["chunk_count"]
+        store.put(
+            parent_id,
+            parent["content"],
+            metadata={**parent["metadata"], "auto_importance": 0.42},
+        )
+
+        note.write_text(_long_markdown() + " tail.")
+        with capture_logs() as logs:
+            sync_corpus(registry, vault, source_system="obsidian")
+
+        lines = [
+            entry for entry in logs if entry["event"] == "corpus_sync_vector_mirror"
+        ]
+        assert len(lines) == 1
+        assert lines[0]["rows_synced"] == 0
+        assert lines[0]["rows_absent"] == chunk_count - 1
+
+
+class TestDemoteSurvivesAChunkCountChange:
+    """A metadata-only re-put must not undo `apply_noise_tags` (#395-B1).
+
+    The trigger and the write disagreed. `tags_missing` is missing-only —
+    and the docstring promised the write was too — but the metadata dict
+    splatted the parent's *whole* tag bag over the chunk's own on every
+    path. `count_stale` alone is enough to reach it, and it fires on every
+    byte-identical chunk of any document whose chunk count moved: append one
+    section to a note and every earlier chunk was re-put with the parent's
+    `signal_quality` over its own.
+
+    This was pre-existing in the document store. What made it worth blocking
+    a PR over is that mirroring the re-put onto the vector row carried it to
+    the copy `SemanticSearch` actually serves — before the mirror the demote
+    still held there, which is where it mattered.
+    """
+
+    @staticmethod
+    def _sync(registry, vault, topics):
+        (vault / "long.md").write_text(_long_markdown(topics=topics))
+        sync_corpus(registry, vault, source_system="obsidian")
+
+    def test_a_demoted_chunk_keeps_its_demote_when_the_chunk_count_moves(
+        self, registry, vault, monkeypatch
+    ):
+        monkeypatch.setenv(CLASSIFY_ON_INGEST_FLAG, "1")
+        monkeypatch.setenv(EMBED_ON_INGEST_FLAG, "1")
+        self._sync(registry, vault, ("kubernetes", "grapes", "violins"))
+
+        store = registry.knowledge.document_store
+        vectors = registry.knowledge.vector_store
+        parent_id = corpus_doc_id("obsidian", "long.md")
+        demoted = chunk_doc_id(parent_id, 0)
+
+        # The feedback loop demotes the *served* item, which is a chunk. Both
+        # stores agree on `noise` before the re-sync (#343 fixed that half).
+        apply_noise_tags([demoted], store, vector_store=vectors)
+        assert store.get(demoted)["metadata"]["content_tags"]["signal_quality"] == (
+            "noise"
+        )
+        assert vectors.get(demoted)["metadata"]["content_tags"]["signal_quality"] == (
+            "noise"
+        )
+        parent_quality = store.get(parent_id)["metadata"]["content_tags"][
+            "signal_quality"
+        ]
+        assert parent_quality != "noise", (
+            "the parent must disagree with the chunk, or nothing is proved"
+        )
+
+        # Append sections: chunk 0's bytes are untouched, but chunk_count
+        # moves, so `count_stale` re-puts it.
+        before_count = store.get(parent_id)["metadata"]["chunk_count"]
+        self._sync(
+            registry,
+            vault,
+            ("kubernetes", "grapes", "violins", "sourdough", "kayaks"),
+        )
+        assert store.get(parent_id)["metadata"]["chunk_count"] > before_count
+
+        # The demote survives in both stores.
+        assert store.get(demoted)["metadata"]["content_tags"]["signal_quality"] == (
+            "noise"
+        )
+        assert vectors.get(demoted)["metadata"]["content_tags"]["signal_quality"] == (
+            "noise"
+        )
+
+    def test_the_demoted_chunk_is_still_withheld_from_the_semantic_axis(
+        self, registry, vault, monkeypatch
+    ):
+        """The consequence, on the axis the mirror exists to reach."""
+        monkeypatch.setenv(CLASSIFY_ON_INGEST_FLAG, "1")
+        monkeypatch.setenv(EMBED_ON_INGEST_FLAG, "1")
+        self._sync(registry, vault, ("kubernetes", "grapes", "violins"))
+        parent_id = corpus_doc_id("obsidian", "long.md")
+        apply_noise_tags(
+            [chunk_doc_id(parent_id, 0)],
+            registry.knowledge.document_store,
+            vector_store=registry.knowledge.vector_store,
+        )
+        self._sync(
+            registry,
+            vault,
+            ("kubernetes", "grapes", "violins", "sourdough", "kayaks"),
+        )
+
+        semantic = SemanticSearch(registry.knowledge.vector_store, _embed)
+        served = [
+            item
+            for item in semantic.search("kubernetes grapes violins facts", limit=50)
+            if item.item_id.startswith(f"{parent_id}#chunk-")
+        ]
+        kept = exclude_noise(served)
+        assert len(kept) == len(served) - 1
+        assert chunk_doc_id(parent_id, 0) not in {item.item_id for item in kept}
+
+    def test_a_missing_key_is_still_filled_on_the_same_path(
+        self, registry, vault, monkeypatch
+    ):
+        """The repair must not disable the propagation #388 exists for.
+
+        Gap-fill and overwrite are different operations. A chunk that lacks
+        `content_tags` entirely still receives the parent's.
+        """
+        monkeypatch.setenv(EMBED_ON_INGEST_FLAG, "1")
+        self._sync(registry, vault, ("kubernetes", "grapes", "violins"))
+        store = registry.knowledge.document_store
+        parent_id = corpus_doc_id("obsidian", "long.md")
+        assert "content_tags" not in store.get(chunk_doc_id(parent_id, 0))["metadata"]
+
+        monkeypatch.setenv(CLASSIFY_ON_INGEST_FLAG, "1")
+        self._sync(
+            registry,
+            vault,
+            ("kubernetes", "grapes", "violins", "sourdough", "kayaks"),
+        )
+        parent_tags = store.get(parent_id)["metadata"]["content_tags"]
+        for index in range(store.get(parent_id)["metadata"]["chunk_count"]):
+            meta = store.get(chunk_doc_id(parent_id, index))["metadata"]
+            assert meta["content_tags"] == parent_tags

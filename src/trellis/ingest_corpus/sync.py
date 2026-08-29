@@ -47,6 +47,7 @@ by construction), unchunked documents embed the parent row itself.
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -59,6 +60,7 @@ from trellis.classify.ingest import (
     classify_on_ingest_enabled,
 )
 from trellis.core.hashing import content_hash
+from trellis.core.vector_metadata import sync_vector_metadata_outcome
 from trellis.extract.memory_ingest_hook import (
     build_memory_extractor,
     run_memory_extraction,
@@ -176,6 +178,34 @@ def sync_corpus(
     )
 
 
+@dataclass
+class _VectorMirrorTally:
+    """Run-level count of the post-embed vector mirror (#388).
+
+    ``metadata_only_writes`` is the **denominator**, not ``chunks_written``:
+    only the metadata-only branch can mirror at all, so pairing the mirror
+    count with the total would print two numbers that look like a ratio and
+    are not — a run that legitimately re-embeds every chunk would read
+    ``5000 written, 0 synced`` and look broken.
+
+    ``rows_absent`` separates the third state. Without it,
+    ``metadata_only_writes=5000, rows_synced=0`` reads identically for "none
+    of these chunks was ever embedded" (expected, harmless) and "every mirror
+    threw" (an outage), and those call for opposite responses. A line that
+    cannot distinguish them cannot answer the question it exists to ask.
+
+    Reported once per run rather than per document. A corpus sync touches
+    thousands of chunks, and a per-document line is either invisible (DEBUG
+    is a no-op under the CLI's default ``INFO`` filtering bound logger) or a
+    flood. One line, at a level that fires, answering the one question worth
+    asking: did this run's tags reach the vector rows?
+    """
+
+    metadata_only_writes: int = 0
+    rows_synced: int = 0
+    rows_absent: int = 0
+
+
 def sync_records(
     registry: StoreRegistry,
     records: Iterable[SyncRecord],
@@ -250,6 +280,7 @@ def sync_records(
     # session capture) inherits tagging through this single seam; disabled →
     # None → documents are stored untagged exactly as before.
     classifier = build_ingest_classifier() if classify_on_ingest_enabled() else None
+    mirror = _VectorMirrorTally()
 
     for record in records:
         report.warnings.extend(record.warnings)
@@ -292,6 +323,7 @@ def sync_records(
                 extractor=extractor,
                 extraction_participant_names=extraction_participant_names,
                 classifier=classifier,
+                mirror=mirror,
             )
         report.files.append(outcome)
 
@@ -304,6 +336,7 @@ def sync_records(
             dry_run=dry_run,
         )
 
+    _log_vector_mirror(registry, mirror, dry_run=dry_run)
     _emit_summary(registry, report, requested_by=requested_by)
     return report
 
@@ -360,6 +393,7 @@ def _apply_record(
     extractor: Any = None,
     extraction_participant_names: Sequence[str] = (),
     classifier: Any = None,
+    mirror: _VectorMirrorTally,
 ) -> None:
     """Execute the writes for one new / updated / moved record."""
     doc_store = registry.knowledge.document_store
@@ -429,6 +463,7 @@ def _apply_record(
         inherited_tags={
             key: metadata[key] for key in CLASSIFY_METADATA_KEYS if key in metadata
         },
+        mirror=mirror,
     )
     for index in range(len(spans), old_chunk_count):
         _delete_doc_and_vector(
@@ -481,6 +516,7 @@ def _write_chunks(
     extra_metadata: dict[str, Any],
     requested_by: str,
     inherited_tags: dict[str, Any],
+    mirror: _VectorMirrorTally,
 ) -> int:
     """Write (and embed) chunk documents; skip byte-identical chunks.
 
@@ -492,18 +528,57 @@ def _write_chunks(
     Stored chunk metadata is merged *under* the freshly computed metadata, the
     same contract the parent re-put honours: keys this run does not own (an
     earlier run's operator tags, a chunk-local flag) survive the re-put instead
-    of being rebuilt away. ``inherited_tags`` is the deliberate exception —
-    when a chunk is written, the parent's tags win over the chunk's own, so a
-    parent and its chunks can never disagree about what the document is.
+    of being rebuilt away.
 
-    A chunk whose bytes did not change is normally skipped, with one addition:
-    it is re-put when it is *missing* a key the parent carries, so enabling
-    classify-on-write (or backfilling tags onto parents) reaches the chunks
-    without an unrelated content edit. Missing-only, not differing — an
-    unedited chunk's tags may carry a demote signal from the feedback loop
-    (``apply_noise_tags``) that no sync should overwrite.
+    ``inherited_tags`` is the deliberate exception, and **how far the
+    exception reaches depends on why the chunk is being written**. These two
+    rules used to be stated as one, which made the docstring assert both that
+    the parent always wins and that an unedited chunk's tags are never
+    overwritten:
+
+    * **The chunk's bytes changed** — it is genuinely being rewritten, so the
+      parent's tags win outright. A rewritten chunk and its parent cannot
+      disagree about what the document is.
+    * **Only its metadata is being refreshed** (``count_stale`` or
+      ``tags_missing``) — the parent's tags fill keys the chunk *lacks* and
+      overwrite nothing. An unedited chunk's tags may carry a demote signal
+      the feedback loop put there (``apply_noise_tags`` writes
+      ``signal_quality="noise"`` onto the *served* item, which is a chunk),
+      and no sync may undo it.
+
+    A chunk whose bytes did not change is otherwise skipped entirely. It is
+    re-put only when it is missing a key the parent carries, or when the
+    document's chunk count moved — so enabling classify-on-write, or
+    backfilling tags onto parents, reaches the chunks without an unrelated
+    content edit.
+
+    That metadata-only re-put is a **post-embed write**, so it has to mirror
+    onto the vector row explicitly (#388) — see
+    :mod:`trellis.core.vector_metadata` for why a document-store-only write
+    is invisible to the semantic axis. What is local to *this* branch: it
+    deliberately does not re-embed, so nothing else would refresh the row;
+    and the keys it propagates are ``inherited_tags``, i.e.
+    :data:`~trellis.classify.ingest.CLASSIFY_METADATA_KEYS`, which the
+    mirror covers because it is contained in
+    :data:`~trellis.core.vector_metadata.SYNCED_METADATA_KEYS` (pinned by
+    ``test_classify_keys_are_covered_by_the_mirror`` — prose asserting an
+    invariant is not the same as enforcing it). Un-mirrored, a chunk
+    demoted on its parent stayed servable on the semantic axis — #338's
+    failure, third site.
+
+    The mirror is scoped to the metadata-only path on purpose. When the
+    bytes *did* change, ``run_embed_on_ingest`` is the row's writer and
+    rewrites the whole snapshot; when that hook is switched off, the row is
+    stale in content, excerpt and embedding as well, and freshening its tags
+    alone would pair new tags with an old excerpt — a row that is internally
+    inconsistent rather than merely old. ``reindex-vectors`` owns that case.
     """
     doc_store = registry.knowledge.document_store
+    # Resolved here rather than passed in: `_apply_record` and
+    # `_prune_vanished` both resolve it off the registry the same way, so
+    # this is the module's convention, and `_get` caches — by the time this
+    # runs, `_apply_record` has already instantiated the store.
+    vector_store = getattr(registry.knowledge, "vector_store", None)
     written = 0
     for span in spans:
         cid = chunk_doc_id(parent_doc_id, span.index)
@@ -519,10 +594,23 @@ def _write_chunks(
         tags_missing = not (inherited_tags.keys() <= stored.keys())
         if not content_changed and not count_stale and not tags_missing:
             continue
+        # The trigger above is missing-only; this write must be too, or the
+        # promise it makes is void (#395-B1). `count_stale` alone re-puts
+        # every byte-identical chunk of any document whose chunk count moved
+        # — append one section to a note and a splat of the parent's whole
+        # bag would overwrite a `signal_quality="noise"` the feedback loop
+        # put on the chunk. Parent tags win only where the chunk is being
+        # genuinely rewritten; on a metadata-only refresh they fill gaps and
+        # nothing more.
+        applied_tags = (
+            inherited_tags
+            if content_changed
+            else {k: v for k, v in inherited_tags.items() if k not in stored}
+        )
         metadata: dict[str, Any] = {
             **stored,
             **extra_metadata,
-            **inherited_tags,
+            **applied_tags,
             "source_system": source_system,
             "source_path": relpath,
             "parent_doc_id": parent_doc_id,
@@ -539,6 +627,16 @@ def _write_chunks(
             run_embed_on_ingest(
                 registry, cid, chunk_content, metadata, source=requested_by
             )
+        else:
+            # After the authoritative document write, never before: the
+            # document row is what a re-run repairs from, and the mirror is
+            # fail-soft, so losing it must not lose the tag that landed.
+            mirror.metadata_only_writes += 1
+            outcome = sync_vector_metadata_outcome(vector_store, cid, metadata)
+            if outcome == "synced":
+                mirror.rows_synced += 1
+            elif outcome == "absent":
+                mirror.rows_absent += 1
         written += 1
     return written
 
@@ -674,6 +772,44 @@ def _emit_memory_stored(
                 "detail": str(exc),
             }
         )
+
+
+def _log_vector_mirror(
+    registry: StoreRegistry,
+    mirror: _VectorMirrorTally,
+    *,
+    dry_run: bool,
+) -> None:
+    """Say once, per run, whether propagated tags reached the vector rows.
+
+    Silent when the run performed no metadata-only chunk writes — there was
+    nothing to mirror, and a zero line every sync trains the reader to skip
+    it. When there *were* such writes and no vector store is configured, the
+    consequence is stated outright and the repair named: this is exactly the
+    state in which an operator runs a tag backfill, sees a clean sync, and
+    concludes the semantic axis now honours the tags (#338/#388).
+    """
+    if dry_run or not mirror.metadata_only_writes:
+        return
+    vector_store = getattr(registry.knowledge, "vector_store", None)
+    if vector_store is None:
+        logger.warning(
+            "corpus_sync_vector_mirror_unavailable",
+            metadata_only_writes=mirror.metadata_only_writes,
+            consequence=(
+                "propagated tags did not reach any vector row; the semantic "
+                "axis will keep serving pre-propagation metadata. Run "
+                "`trellis admin resync-vector-metadata` once a vector store "
+                "is configured."
+            ),
+        )
+        return
+    logger.info(
+        "corpus_sync_vector_mirror",
+        metadata_only_writes=mirror.metadata_only_writes,
+        rows_synced=mirror.rows_synced,
+        rows_absent=mirror.rows_absent,
+    )
 
 
 def _emit_summary(
