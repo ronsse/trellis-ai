@@ -451,6 +451,11 @@ def token_usage(
         return
 
     console.print(f"[bold]Token Usage Report[/bold] (last {days} days)")
+    if report.scan.truncated:
+        # #374, same placement as `analyze backend-health`: before any
+        # number, because every count below was computed over a shorter
+        # window than the header just claimed.
+        console.print(f"  [yellow]window[/yellow] {report.scan.note}")
     console.print(f"  Total responses: {report.total_responses}")
     console.print(f"  Total tokens: {report.total_tokens:,}")
     console.print(f"  Avg tokens/response: {report.avg_tokens_per_response:.1f}")
@@ -1386,6 +1391,10 @@ def pack_sections(
                     "total_sectioned_packs": report.total_sectioned_packs,
                     "section_stats": rows,
                     "empty_section_flags": report.empty_section_flags,
+                    # Hand-assembled rather than `report.model_dump()`, so
+                    # a new report field reaches this surface only when
+                    # named here — which is why the coverage is explicit.
+                    "scan": report.scan.model_dump(),
                 },
                 indent=2,
             )
@@ -1393,6 +1402,12 @@ def pack_sections(
         return
 
     console.print(f"[bold]Pack Sections Report[/bold] (last {days} days)")
+    if report.scan.truncated:
+        # #374. Worth reading twice here: the cap applies to ALL pack
+        # events and sectioned packs are filtered out of the result
+        # afterwards, so on a deployment where they are a minority this
+        # report shrinks by far more than the cap suggests.
+        console.print(f"  [yellow]window[/yellow] {report.scan.note}")
     console.print(f"  Sectioned packs analyzed: {report.total_sectioned_packs}")
 
     if not report.section_stats:
