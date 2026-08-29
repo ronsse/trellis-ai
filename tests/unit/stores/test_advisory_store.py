@@ -706,6 +706,13 @@ class TestSaveIsAtomic:
         assert path.read_text(encoding="utf-8") == before
         assert [p.name for p in tmp_path.iterdir()] == ["a.json"]
 
+        # And memory rolled back with it. This is the case the degraded-path
+        # refusal cannot cover — the store loaded cleanly, so nothing refuses
+        # ahead of the mutation, and without the rollback the object would go
+        # on serving an advisory that is not on disk and never will be.
+        assert {a.scope for a in store.list()} == {"original"}
+        assert store.get(_advisory(scope="doomed").advisory_id) is None
+
     def test_an_existing_file_keeps_its_mode(self, tmp_path: Path) -> None:
         """``mkstemp`` creates 0600; inheriting it would narrow a live file.
 
