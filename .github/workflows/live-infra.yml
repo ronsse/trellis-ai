@@ -18,13 +18,52 @@ name: Live infrastructure tests
 # the core wiring is covered; cloud-specific quirks are validated at
 # deploy time.
 #
-# Triggered on push to main and workflow_dispatch. No periodic schedule —
-# the containers are recreated each run, so there is nothing to drift.
+# Triggered on pull request and on push to main, plus workflow_dispatch.
+# No periodic schedule — the containers are recreated each run, so there
+# is nothing to drift.
+#
+# **Why this runs on pull_request.** It used to run on push-to-main only,
+# which meant every test it owns — the loop suite, the graph/vector store
+# contracts, the Neo4j e2e suite, the pgvector suite — was verified only
+# *after* merge. `tests.yml` is the PR check and `pyproject.toml`'s
+# `addopts` deselects the `live` / `slow` / `neo` / `postgres` /
+# `pgvector` markers those tests carry, so the PR was green by
+# construction and `main` broke on merge. That is how #380 (the noise
+# demotion evidence gate) shipped against two loop fixtures encoding the
+# behaviour it deliberately removed: green PR, red main, twelve
+# consecutive failed runs and an alert on every merge.
+#
+# The cost is small and was measured, not assumed: the pytest step is
+# ~90s and the whole job ~2m45s wall, and it needs no secrets (both
+# backends are service containers), so it works on fork PRs too. Run
+# history before the #380 breakage is 36 consecutive green with one
+# infrastructure `startup_failure` — this is not a flaky job being
+# promoted into the merge path.
+#
+# Deliberately NOT path-filtered. A filter would have to name most of
+# `src/` to cover what these tests reach — #380 touched `classify/`,
+# `retrieve/` and `trellis_api/routes/` for a defect that surfaced in
+# `tests/integration/loops/` — and a filter that misses is this same bug
+# with extra steps. At under three minutes, running it always is cheaper
+# than maintaining the list of paths that matter.
+#
+# Note this workflow appearing on a PR does not by itself *block* the
+# merge: `main`'s branch protection carries no `required_status_checks`
+# at all. Making it blocking is a repo-settings change, not a file.
 
 on:
+  pull_request:
+    branches: [main]
   push:
     branches: [main]
   workflow_dispatch:
+
+# A PR branch that is pushed to repeatedly should not queue up runs of a
+# service-container job. Superseded PR runs are cancelled; runs on `main`
+# are not, because each one is the verification of a distinct merge.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   live-infra:
