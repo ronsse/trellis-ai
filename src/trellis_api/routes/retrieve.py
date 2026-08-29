@@ -54,10 +54,11 @@ def _build_pack_builder(registry: Any) -> PackBuilder:
 #
 # ``search`` hands back whole document rows, and a ``<parent>#chunk-N`` row
 # is a slice of a parent the *same result set* already ranks. On the
-# reference deployment (2026-08-29, 1,319 documents, 740 of them chunks) six
-# representative queries at ``limit=20`` returned 115 rows of which 29
-# (25.2%) were chunks; re-running them with ``include_chunks=False`` returned
-# 20 rows each again, not 15.
+# reference deployment (2026-08-29, 1,319 documents, 740 of them chunks)
+# eight representative queries at ``limit=20`` returned 155 rows of which 39
+# (25.2%) were chunks; re-running them with ``include_chunks=False`` surfaced
+# **34 whole documents the unfiltered view never showed** — one per
+# displaced fragment.
 #
 # That refill is the point, and it is why the exclusion is pushed into the
 # store rather than applied to the response: the ``LIMIT`` is applied after
@@ -67,6 +68,12 @@ def _build_pack_builder(registry: Any) -> PackBuilder:
 # :meth:`~trellis.stores.base.document.DocumentStore.list_documents` makes,
 # and ``tests/unit/stores/contracts/document_store_contract.py`` pins it for
 # both ``search`` and ``list_documents`` on every backend.
+#
+# It can still return fewer rows than ``limit``, and that is not the same
+# defect: one of the eight (``postgres``) went 15 → 10 because the corpus
+# genuinely holds fewer than 20 non-chunk matches for it. A pushdown short
+# page means "that is all there is"; a post-hoc filter's short page means
+# "there was more, off the end of the window you asked for".
 #
 # Deliberately *not* scoped to browser operators. ``TrellisClient.search``
 # targets this route, so the default changes for SDK agents too — correctly:
