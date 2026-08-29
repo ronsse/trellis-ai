@@ -746,9 +746,18 @@ class TestSupersedePreservesRecency:
             docs, old_doc_id="old-doc", new_doc_id="new-doc"
         )
 
+        # Half-life pinned at the call site rather than inherited from
+        # ``DEFAULT_RECENCY_HALF_LIFE_DAYS``. Retuning that global is an
+        # ordinary retrieval change with nothing to do with supersession, but
+        # at 365.0 the ratio rises to 0.65 and *this* assertion — the
+        # regression assertion — fails, which reads as "#397 is back". Pinning
+        # costs no fix-sensitivity: under the bug both stamps are identical, so
+        # the ratio is 1.0 at every half-life.
         scores = {
             item.item_id: item.relevance_score
-            for item in KeywordSearch(docs).search("calibration", limit=10)
+            for item in KeywordSearch(docs, recency_half_life_days=30.0).search(
+                "calibration", limit=10
+            )
         }
         assert set(scores) == {"old-doc", "new-doc"}, scores
         ratio = scores["old-doc"] / scores["new-doc"]
@@ -764,3 +773,18 @@ class TestSupersedePreservesRecency:
         # to that constant: dropping the floor below 0.25 should fail here and
         # be argued for, not absorbed silently.
         assert ratio > 0.25, scores
+
+    def test_superseded_is_not_excluded_from_retrieval(self) -> None:
+        """The premise the ranking test rests on, pinned separately.
+
+        Everything above is only *interesting* while a superseded document is
+        still servable — a filtered document's rank would not matter. That is
+        the §4 commitment, but it lives in another module as the absence of a
+        branch, so nothing would fail if someone added ``exclude_superseded``
+        beside ``exclude_archived``: the rationale would die and both tests
+        above would keep passing.
+        """
+        from trellis.retrieve.lifecycle import is_archived
+
+        assert is_archived({"lifecycle": {"state": "archived"}}) is True
+        assert is_archived({"lifecycle": {"state": "superseded"}}) is False
