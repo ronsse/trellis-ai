@@ -22,6 +22,7 @@ from trellis.core.vector_metadata import vector_metadata_diverges
 from trellis.llm import LLMResponse, Message
 from trellis.schemas.enums import OutcomeStatus, TraceSource
 from trellis.schemas.trace import Outcome, Trace, TraceContext
+from trellis.stores.advisory_source import ADVISORY_FILENAME
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 from trellis_cli import worker
@@ -573,6 +574,94 @@ class TestWorkerCurate:
 # ===========================================================================
 # worker curate --interval — loop mode (WP3)
 # ===========================================================================
+
+
+class TestCurateSurvivesADegradedAdvisoryStore:
+    """#393 — the nightly surface is where a corrupt file goes unnoticed.
+
+    Two failures live here. The fitness loop's ``put`` / ``suppress`` /
+    ``restore`` all raise on a degraded store, so an unguarded cycle dies
+    mid-stage and takes the learning stage with it. And a cycle that simply
+    reported zeros for the advisory counts would be indistinguishable from
+    a quiet night — which is how a corrupt file survives for weeks.
+    """
+
+    @staticmethod
+    def _corrupt_advisory_file(tmp_path: Path) -> Path:
+        """Write an unreadable advisories.json where the CLI will resolve it."""
+        path = tmp_path / "data" / "stores" / ADVISORY_FILENAME
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{"advisories": [ torn write', encoding="utf-8")
+        return path
+
+    def test_the_cycle_completes_and_the_file_is_untouched(
+        self, tmp_path: Path, temp_stores: StoreRegistry
+    ) -> None:
+        _seed_promote_signal(temp_stores)
+        path = self._corrupt_advisory_file(tmp_path)
+        before = path.read_text(encoding="utf-8")
+
+        result = runner.invoke(
+            app,
+            [
+                "worker",
+                "curate",
+                "--output-dir",
+                str(tmp_path / "review"),
+                "--format",
+                "json",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout.strip())
+        assert data["advisory_store_degraded"] is not None
+        assert data["advisory_store_degraded"]["reason"] == "malformed_json"
+        assert (
+            data["advisory_store_degraded"]["recovery"] == f"mv {path} {path}.corrupt"
+        )
+        assert "advisories" in data["skipped_stages"]
+        # The rest of the cycle still ran — this is a skip, not a crash.
+        assert data["learning_observations"] >= 3
+        assert path.read_text(encoding="utf-8") == before
+
+    def test_the_text_surface_says_so_too(
+        self, tmp_path: Path, temp_stores: StoreRegistry
+    ) -> None:
+        """A warning honest only in ``--format json`` is a warning nobody reads."""
+        _seed_promote_signal(temp_stores)
+        path = self._corrupt_advisory_file(tmp_path)
+
+        result = runner.invoke(
+            app,
+            ["worker", "curate", "--output-dir", str(tmp_path / "review")],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "ADVISORY STORE DEGRADED" in result.output
+        assert f"mv {path}" in result.output.replace("\n", "")
+
+    def test_a_clean_cycle_carries_no_degradation(
+        self, tmp_path: Path, temp_stores: StoreRegistry
+    ) -> None:
+        """The field must stay ``None`` on the happy path, or it means nothing."""
+        _seed_promote_signal(temp_stores)
+
+        result = runner.invoke(
+            app,
+            [
+                "worker",
+                "curate",
+                "--output-dir",
+                str(tmp_path / "review"),
+                "--format",
+                "json",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.stdout.strip())["advisory_store_degraded"] is None
+        assert "ADVISORY STORE DEGRADED" not in result.output
 
 
 class TestWorkerCurateLoop:

@@ -447,6 +447,69 @@ class TestAdvisoryEffectiveness:
         assert result.exit_code == 0
 
 
+class TestAdvisoryCommandsOnADegradedStore:
+    """#393 — the two operator-facing advisory commands must not lie or crash.
+
+    ``generate-advisories`` refuses, and its zeros need an explanation
+    beside them or they read as "nothing found". ``advisory-effectiveness``
+    calls the fitness loop, whose writes raise on a degraded store — the
+    guard turns a traceback into the recovery command.
+    """
+
+    @staticmethod
+    def _corrupt(tmp_path: Path) -> Path:
+        path = tmp_path / "data" / "stores" / "advisories.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{"advisories": [ torn', encoding="utf-8")
+        return path
+
+    def test_generate_reports_the_degradation_in_text(self, tmp_path: Path) -> None:
+        path = self._corrupt(tmp_path)
+        before = path.read_text(encoding="utf-8")
+
+        result = runner.invoke(app, ["analyze", "generate-advisories"])
+
+        assert result.exit_code == 0, result.output
+        assert "ADVISORY STORE DEGRADED" in result.stdout
+        assert path.read_text(encoding="utf-8") == before
+
+    def test_generate_reports_the_degradation_in_json(self, tmp_path: Path) -> None:
+        """Both formats or neither — a JSON-only warning is invisible."""
+        path = self._corrupt(tmp_path)
+
+        result = runner.invoke(
+            app, ["analyze", "generate-advisories", "--format", "json"]
+        )
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout.strip())
+        assert data["store_degradation"]["reason"] == "malformed_json"
+        assert data["store_degradation"]["recovery"] == f"mv {path} {path}.corrupt"
+        assert data["advisories_stored"] == 0
+
+    def test_effectiveness_exits_two_rather_than_traceback(
+        self, tmp_path: Path
+    ) -> None:
+        """A cron wrapper that only reads the status code has to see this."""
+        path = self._corrupt(tmp_path)
+
+        result = runner.invoke(app, ["analyze", "advisory-effectiveness"])
+
+        assert result.exit_code == 2, result.output
+        assert "ADVISORY STORE DEGRADED" in result.stdout
+        assert path.read_text(encoding="utf-8") == '{"advisories": [ torn'
+
+    def test_effectiveness_json_stays_parseable(self, tmp_path: Path) -> None:
+        self._corrupt(tmp_path)
+
+        result = runner.invoke(
+            app, ["analyze", "advisory-effectiveness", "--format", "json"]
+        )
+
+        assert result.exit_code == 2
+        assert json.loads(result.stdout.strip())["status"] == "error"
+
+
 class TestPackSections:
     def test_empty_events(self) -> None:
         result = runner.invoke(app, ["analyze", "pack-sections"])
