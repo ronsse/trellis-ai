@@ -2048,7 +2048,16 @@ paths:
       - mutations
   /api/v1/documents:
     get:
-      description: List or search documents, returning previews only.
+      description: 'List or search documents, returning previews only.
+
+
+        ``<parent>#chunk-N`` fragment rows are excluded by default; pass
+
+        ``include_chunks=true`` for the unfiltered listing. ``total`` is
+
+        counted under the same filter as the rows, and the applied setting is
+
+        echoed back on the response.'
       operationId: list_documents_api_v1_documents_get
       parameters:
       - description: Full-text search query
@@ -2082,6 +2091,17 @@ paths:
           minimum: 0
           title: Offset
           type: integer
+      - description: 'Include <parent>#chunk-N fragment rows. Excluded by default: they are slices of documents already in
+          the list.'
+        in: query
+        name: include_chunks
+        required: false
+        schema:
+          default: false
+          description: 'Include <parent>#chunk-N fragment rows. Excluded by default: they are slices of documents already
+            in the list.'
+          title: Include Chunks
+          type: boolean
       responses:
         '200':
           content:

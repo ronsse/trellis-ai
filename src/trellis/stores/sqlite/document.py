@@ -13,7 +13,11 @@ from trellis.core.base import utc_now
 from trellis.core.hashing import content_hash as _content_hash
 from trellis.core.ids import generate_ulid
 from trellis.schemas.classification import LIST_FACETS
-from trellis.stores.base.document import DocumentStore
+from trellis.stores.base.document import (
+    DocumentStore,
+    chunk_exclusion_clause,
+    chunk_id_like_pattern,
+)
 from trellis.stores.base.tag_filters import normalize_facet_filter
 from trellis.stores.sqlite.base import SQLiteStoreBase
 
@@ -216,6 +220,7 @@ class SQLiteDocumentStore(SQLiteStoreBase, DocumentStore):
         *,
         limit: int = 20,
         filters: dict[str, Any] | None = None,
+        include_chunks: bool = True,
     ) -> list[dict[str, Any]]:
         sanitized = self._sanitize_fts_query(query)
         if not sanitized:
@@ -247,6 +252,10 @@ class SQLiteDocumentStore(SQLiteStoreBase, DocumentStore):
 
         where_parts = ["documents_fts MATCH ?"]
         sql_params: list[Any] = [sanitized]
+
+        if not include_chunks:
+            where_parts.append("d.doc_id NOT LIKE ?")
+            sql_params.append(chunk_id_like_pattern())
 
         if filter_conditions:
             where_parts.extend(filter_conditions)
@@ -297,19 +306,20 @@ class SQLiteDocumentStore(SQLiteStoreBase, DocumentStore):
         *,
         limit: int = 50,
         offset: int = 0,
+        include_chunks: bool = True,
     ) -> list[dict[str, Any]]:
+        where, params = chunk_exclusion_clause("?", include_chunks=include_chunks)
         cursor = self._conn.execute(
-            """
-            SELECT * FROM documents
-            ORDER BY created_at DESC
-            LIMIT ? OFFSET ?
-            """,
-            (limit, offset),
+            f"SELECT * FROM documents{where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            (*params, limit, offset),
         )
         return [self._row_to_dict(row) for row in cursor.fetchall()]
 
-    def count(self) -> int:
-        cursor = self._conn.execute("SELECT COUNT(*) as cnt FROM documents")
+    def count(self, *, include_chunks: bool = True) -> int:
+        where, params = chunk_exclusion_clause("?", include_chunks=include_chunks)
+        cursor = self._conn.execute(
+            f"SELECT COUNT(*) as cnt FROM documents{where}", params
+        )
         row = cursor.fetchone()
         assert row is not None
         return int(row["cnt"])

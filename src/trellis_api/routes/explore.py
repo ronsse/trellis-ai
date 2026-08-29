@@ -51,25 +51,64 @@ def _document_row(doc: dict[str, Any]) -> dict[str, Any]:
     return row
 
 
+# Chunks are excluded from this view by default (#385). Corpus ingestion
+# writes a ``<parent>#chunk-N`` row per embeddable slice alongside the
+# parent it was cut from, and on the reference deployment those are 740 of
+# 1,317 rows (56%) — so the unfiltered listing an operator sees is mostly
+# fragments of documents the same listing already shows.
+#
+# Three things this deliberately is not:
+#
+# * Not a filter over the returned page. The exclusion is pushed into the
+#   store (``include_chunks``) because a page filtered after the fact would
+#   return ~22 rows for ``limit=50`` and the caller could not tell a short
+#   page from the end of the data. Chunks are also not evenly spread: the
+#   newest 50 rows on the reference deployment contain none, so the page
+#   composition swings with the offset.
+# * Not a recall loss on ``q``. The parent row holds the full content its
+#   chunks were sliced from, so it matches whatever they match.
+# * Not hidden. Chunks stay addressable at ``GET /documents/{doc_id}``
+#   (percent-encode the ``#`` — an unencoded chunk id is truncated at the
+#   fragment delimiter before the request leaves the client; the Memory
+#   Explorer already calls ``encodeURIComponent``), every other
+#   ``list_documents`` caller still sees them (the store default is
+#   ``include_chunks=True``), and ``?include_chunks=true`` restores the
+#   old response here.
 @router.get("/documents")
 def list_documents(
     q: str | None = Query(None, description="Full-text search query"),
     limit: int = Query(50, ge=1, le=500, description="Max results"),
     offset: int = Query(0, ge=0, description="Offset (ignored when q is set)"),
+    include_chunks: bool = Query(
+        False,
+        description=(
+            "Include <parent>#chunk-N fragment rows. Excluded by default:"
+            " they are slices of documents already in the list."
+        ),
+    ),
 ) -> dict[str, Any]:
-    """List or search documents, returning previews only."""
+    """List or search documents, returning previews only.
+
+    ``<parent>#chunk-N`` fragment rows are excluded by default; pass
+    ``include_chunks=true`` for the unfiltered listing. ``total`` is
+    counted under the same filter as the rows, and the applied setting is
+    echoed back on the response.
+    """
     registry = get_registry()
     store = registry.knowledge.document_store
     if q:
-        docs = store.search(q, limit=limit)
+        docs = store.search(q, limit=limit, include_chunks=include_chunks)
     else:
-        docs = store.list_documents(limit=limit, offset=offset)
+        docs = store.list_documents(
+            limit=limit, offset=offset, include_chunks=include_chunks
+        )
     rows = [_document_row(d) for d in docs]
     return {
         "status": "ok",
-        "total": store.count(),
+        "total": store.count(include_chunks=include_chunks),
         "count": len(rows),
         "offset": offset,
+        "include_chunks": include_chunks,
         "documents": rows,
     }
 

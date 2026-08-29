@@ -11,7 +11,11 @@ from trellis.core.base import utc_now
 from trellis.core.hashing import content_hash as _content_hash
 from trellis.core.ids import generate_ulid
 from trellis.schemas.classification import LIST_FACETS
-from trellis.stores.base.document import DocumentStore
+from trellis.stores.base.document import (
+    DocumentStore,
+    chunk_exclusion_clause,
+    chunk_id_like_pattern,
+)
 from trellis.stores.base.tag_filters import normalize_facet_filter
 from trellis.stores.postgres.base import PostgresStoreBase
 
@@ -195,12 +199,17 @@ class PostgresDocumentStore(PostgresStoreBase, DocumentStore):
         *,
         limit: int = 20,
         filters: dict[str, Any] | None = None,
+        include_chunks: bool = True,
     ) -> list[dict[str, Any]]:
         if not query or not query.strip():
             return []
 
         conditions = [f"tsv @@ {_OR_TSQUERY}"]
         params: list[Any] = [query]
+
+        if not include_chunks:
+            conditions.append("doc_id NOT LIKE %s")
+            params.append(chunk_id_like_pattern())
 
         if filters:
             for key, value in filters.items():
@@ -325,24 +334,24 @@ class PostgresDocumentStore(PostgresStoreBase, DocumentStore):
         *,
         limit: int = 50,
         offset: int = 0,
+        include_chunks: bool = True,
     ) -> list[dict[str, Any]]:
+        where, params = chunk_exclusion_clause("%s", include_chunks=include_chunks)
         with self._conn() as conn, conn.cursor() as cur:
             cur.execute(
-                """
-                SELECT doc_id, content, content_hash, metadata,
-                       created_at, updated_at
-                FROM documents
-                ORDER BY created_at DESC
-                LIMIT %s OFFSET %s
-                """,
-                (limit, offset),
+                "SELECT doc_id, content, content_hash, metadata, "
+                "created_at, updated_at "
+                f"FROM documents{where}"
+                " ORDER BY created_at DESC LIMIT %s OFFSET %s",
+                (*params, limit, offset),
             )
             rows = cur.fetchall()
         return [self._row_to_dict(row) for row in rows]
 
-    def count(self) -> int:
+    def count(self, *, include_chunks: bool = True) -> int:
+        where, params = chunk_exclusion_clause("%s", include_chunks=include_chunks)
         with self._conn() as conn, conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) FROM documents")
+            cur.execute(f"SELECT COUNT(*) FROM documents{where}", params)
             row = cur.fetchone()
         assert row is not None
         return int(row[0])
