@@ -42,7 +42,7 @@ $ trellis admin version --format json | jq '{api_version, mcp_tools_version}'
 | Ingest a trace | `POST /api/v1/traces` | `save_experience` | `client.ingest_trace` |
 | Ingest evidence | `POST /api/v1/evidence` | `save_knowledge` | `client.ingest_evidence` |
 | Save a memory / note | `POST /api/v1/documents` | `save_memory` (adds dedup + optional extraction) | — |
-| Full-text + semantic search | `GET /api/v1/search` | `search` | `client.search` |
+| Full-text + semantic search | `GET /api/v1/search` | `search` | `client.search` |[^chunks]
 | Assemble context pack | `POST /api/v1/packs` | `get_context` | `client.assemble_pack` |
 | Sectioned context pack | `POST /api/v1/packs/sectioned` | `get_sectioned_context` | `client.assemble_sectioned_pack` |
 | Objective context (markdown) | — | `get_objective_context` | `client.get_objective_context` |
@@ -64,6 +64,16 @@ $ trellis admin version --format json | jq '{api_version, mcp_tools_version}'
 | Bulk ingest | `POST /api/v1/ingest/bulk` | — | — |
 | Policy CRUD | `/api/v1/policies[/...]` | — | — |
 | Stats / effectiveness | `/api/v1/stats`, `/api/v1/effectiveness`, `/api/v1/metrics/timeseries` | — | — |
+
+[^chunks]: The three are not interchangeable on chunk rows, and the
+    difference is deliberate. `GET /api/v1/search` and `client.search`
+    return whole document rows and therefore **exclude**
+    `<parent>#chunk-N` fragments by default (`include_chunks=true` opts
+    back in, #396). MCP `search` routes through `PackBuilder` (#262), whose
+    keyword axis keeps chunks because there the chunk *is* the retrievable
+    unit and the excerpt is what the token budget prices. See
+    `CHUNK_ID_SEPARATOR` in `trellis/ingest_corpus/models.py` for the rule
+    and `tests/unit/test_chunk_visibility_rule.py` for its enforcement.
 
 Retrieval carries a **semantic axis** when embeddings are configured:
 `search` / `get_context` blend keyword, vector, and graph results, and

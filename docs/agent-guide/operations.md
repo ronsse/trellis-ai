@@ -958,7 +958,7 @@ trellis retrieve traces [--domain DOMAIN] [--limit N] [--fields FIELDS] [--trunc
 Full-text search across the document store.
 
 ```bash
-trellis retrieve search <query> [--limit N] [--domain DOMAIN] [--format text|json]
+trellis retrieve search <query> [--limit N] [--domain DOMAIN] [--include-chunks] [--format text|json]
 ```
 
 | Argument/Option | Required | Default | Description |
@@ -966,6 +966,7 @@ trellis retrieve search <query> [--limit N] [--domain DOMAIN] [--format text|jso
 | `query` | **Yes** | -- | Search query string |
 | `--limit` | No | `20` | Maximum results |
 | `--domain` | No | `null` | Domain scope filter |
+| `--include-chunks` | No | `false` | Include `<parent>#chunk-N` fragment rows. Excluded by default (#396): they are slices of documents the same search already ranks. Pushed into the store, so `--limit N` still returns N rows |
 | `--format` | No | `text` | Output format |
 
 **Example:**
@@ -1107,7 +1108,7 @@ Batch the paths into one call — the lookup scans the document store once per c
 Assemble a retrieval pack for a given intent.
 
 ```bash
-trellis retrieve pack --intent <text> [--domain DOMAIN] [--agent AGENT_ID] [--max-items N] [--format text|json]
+trellis retrieve pack --intent <text> [--domain DOMAIN] [--agent AGENT_ID] [--max-items N] [--include-chunks] [--format text|json]
 ```
 
 | Option | Required | Default | Description |
@@ -1116,6 +1117,7 @@ trellis retrieve pack --intent <text> [--domain DOMAIN] [--agent AGENT_ID] [--ma
 | `--domain` | No | `null` | Domain scope |
 | `--agent` | No | `null` | Agent ID scope |
 | `--max-items` | No | `50` | Maximum items |
+| `--include-chunks` | No | `false` | Include `<parent>#chunk-N` fragment rows (#396). Excluded by default, same rule as `retrieve search` |
 | `--format` | No | `text` | Output format |
 
 **Example:**
@@ -1707,7 +1709,7 @@ Start with `trellis admin serve` or `trellis-api`. Base path: `/api/v1/`.
 
 | Method | Endpoint | Params/Body | Description |
 |--------|----------|-------------|-------------|
-| GET | `/search` | `?q=...&domain=...&limit=20` | Full-text search |
+| GET | `/search` | `?q=...&domain=...&limit=20&include_chunks=false` | Full-text search. `<parent>#chunk-N` fragment rows are **excluded by default** (#396) — they are slices of documents the same search already ranks, and on the reference deployment 56% of rows are chunks. The exclusion is pushed into the store, so `limit=20` still returns 20 rows; it swaps fragments for the documents they were sliced from. Pass `include_chunks=true` for the unfiltered set; the applied setting is echoed on the response. |
 | POST | `/packs` | `{intent, domain?, max_items?, max_tokens?, run_id?, intent_family?}` | Assemble context pack. `run_id` / `intent_family` ride the `PACK_ASSEMBLED` event so the learning loop can credit the run and bucket the intent instead of falling back to `unknown-run` / `general_context`; `intent_family` is derived from `intent` when omitted. |
 | GET | `/entities/{id}` | — | Get entity with subgraph |
 | GET | `/traces` | `?domain=...&limit=20` | List traces |
