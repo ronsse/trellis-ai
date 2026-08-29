@@ -38,10 +38,14 @@ from typing import Any, Literal
 #: retrievable unit.
 #:
 #: The mechanism is ``include_chunks`` on ``list_documents`` / ``search`` /
-#: ``count``, pushed into SQL by
-#: :func:`~trellis.stores.base.document.chunk_exclusion_clause` and
-#: :func:`~trellis.stores.base.document.chunk_id_like_pattern`. Never a
-#: filter over the returned page: ``LIMIT`` is applied after the predicate,
+#: ``count``, always pushed into SQL. ``list_documents`` and ``count`` take
+#: the whole standalone ``WHERE`` from
+#: :func:`~trellis.stores.base.document.chunk_exclusion_clause`; ``search``
+#: already has a ``WHERE`` (the full-text match), so it appends
+#: ``doc_id NOT LIKE`` to its own condition list with
+#: :func:`~trellis.stores.base.document.chunk_id_like_pattern` — the same
+#: predicate, spelled for a different clause structure. Never a filter over
+#: the returned page: ``LIMIT`` is applied after the predicate,
 #: so pushing down refills the page with real documents whereas a post-hoc
 #: filter yields a short one the caller cannot tell from the end of the
 #: data. It defaults to ``True`` at the store, so a caller that does not
