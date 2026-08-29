@@ -320,6 +320,24 @@ def mark_document_superseded(
     Sets the old document's :class:`Lifecycle` to ``state="superseded"`` with
     ``superseded_by`` pointing at the successor, preserving content and audit.
     Returns ``False`` if the old doc has vanished (the caller downgrades).
+
+    ``preserve_updated_at`` is load-bearing, not hygiene (#397). A supersession
+    stamp is a metadata-only write by definition — the content passed back in is
+    the row's own — and ``updated_at`` is what
+    :class:`~trellis.retrieve.strategies.KeywordSearch` feeds to its recency
+    decay. Without the flag, *declaring a document stale resets its recency
+    clock to zero*: a year-old note becomes the freshest thing in the corpus at
+    the instant it is superseded, ranked above the successor that replaced it.
+    The failure is perfectly inverted — the operation exists to demote the old
+    document and its side effect promotes it.
+
+    That matters here and not merely in principle, because nothing filters this
+    state out. ``retrieve.lifecycle.is_archived`` tests ``state == "archived"``
+    and ``"superseded"`` is a different state, so a superseded document stays
+    servable — deliberately. ``docs/design/plan-memory-lifecycle.md`` §4 pins
+    the design as "SCD-2 supersede + **recency-wins-at-retrieval**, with the
+    losing version retrievable on demand", which makes the loser's recency rank
+    the whole mechanism rather than an incidental score.
     """
     doc = document_store.get(old_doc_id)
     if doc is None:
@@ -328,7 +346,9 @@ def mark_document_superseded(
     metadata[LIFECYCLE_KEY] = Lifecycle(
         state="superseded", superseded_by=new_doc_id
     ).model_dump(mode="json")
-    document_store.put(old_doc_id, doc["content"], metadata=metadata)
+    document_store.put(
+        old_doc_id, doc["content"], metadata=metadata, preserve_updated_at=True
+    )
     return True
 
 

@@ -630,3 +630,131 @@ class TestDeterministicTierUnderFlag:
         assert client.calls == 0
         assert _judged_events(temp_registry) == []
         assert temp_registry.knowledge.document_store.count() == 1
+
+
+# ---------------------------------------------------------------------------
+# Supersession must not reset the recency clock (#397)
+# ---------------------------------------------------------------------------
+
+
+class TestSupersedePreservesRecency:
+    """``mark_document_superseded`` is a metadata-only write.
+
+    ``updated_at`` is what :class:`~trellis.retrieve.strategies.KeywordSearch`
+    feeds to its recency decay, and nothing filters ``state="superseded"`` out
+    of retrieval (``retrieve.lifecycle.is_archived`` tests ``"archived"``, a
+    different state). ``docs/design/plan-memory-lifecycle.md`` §4 keeps it that
+    way on purpose — "SCD-2 supersede + recency-wins-at-retrieval, with the
+    losing version retrievable on demand" — so the loser's recency rank is the
+    mechanism, not an incidental score. Bumping the stamp inverts it: the
+    operation that exists to demote the old document instead makes it the
+    freshest thing in the corpus.
+    """
+
+    @staticmethod
+    def _fake_clock(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+        """Bind the document store's clock to a mutable holder.
+
+        ``SQLiteDocumentStore.put`` stamps both ``created_at`` and
+        ``updated_at`` from this one call, so a holder gives the test exact
+        stamps instead of two wall-clock reads that merely *tend* to differ.
+        """
+        from datetime import UTC, datetime
+
+        holder: dict[str, Any] = {"now": datetime.now(UTC)}
+        monkeypatch.setattr(
+            "trellis.stores.sqlite.document.utc_now",
+            lambda: holder["now"],
+        )
+        return holder
+
+    def test_supersede_keeps_the_prior_updated_at(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The stamp survives the supersession verbatim.
+
+        Fails against the un-fixed call site, which omits
+        ``preserve_updated_at`` and therefore re-stamps the row with the
+        supersession's own wall-clock time.
+        """
+        from datetime import timedelta
+
+        from trellis.mcp.reconcile import mark_document_superseded
+
+        docs = temp_registry.knowledge.document_store
+        clock = self._fake_clock(monkeypatch)
+
+        clock["now"] = clock["now"] - timedelta(days=365)
+        docs.put("old-doc", "A year-old note about widget calibration.", {})
+        stamp_before = docs.get("old-doc")["updated_at"]
+
+        # A year passes; the successor lands and supersedes the old note.
+        clock["now"] = clock["now"] + timedelta(days=365)
+        docs.put("new-doc", "The current note about widget calibration.", {})
+        assert mark_document_superseded(
+            docs, old_doc_id="old-doc", new_doc_id="new-doc"
+        )
+
+        superseded = docs.get("old-doc")
+        # The supersession landed...
+        assert superseded["metadata"]["lifecycle"]["state"] == "superseded"
+        assert superseded["metadata"]["lifecycle"]["superseded_by"] == "new-doc"
+        # ...and the row does not claim to have been modified by it.
+        assert superseded["updated_at"] == stamp_before
+        # created_at was never in question; pinned so a future "just rewrite
+        # the whole row" refactor cannot quietly move it either.
+        assert superseded["created_at"] == stamp_before
+
+    def test_superseded_doc_does_not_outrank_its_successor(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The consequence the stamp assertion stands for.
+
+        The two documents carry byte-identical content, so their FTS base
+        ranks are equal by construction and **recency is the only variable
+        left** — which is exactly the comparison §4 says decides a
+        contradiction. Un-fixed, both stamps are the same instant and the
+        year-old loser is served level with the note that replaced it.
+
+        The margin is asserted, not the bare ordering, and that is not
+        fussiness. ``_apply_recency_decay`` resolves its reference time with
+        its own ``datetime.now(UTC)`` call **per item**, so two items with
+        identical stamps still come out a few hundred nanoseconds apart in
+        whatever order the store returned them. A plain
+        ``old < new`` therefore passes against the un-fixed code roughly
+        whenever the successor happens to be scored first — measured, not
+        supposed: it did, on the first run of this test.
+        """
+        from datetime import timedelta
+
+        from trellis.mcp.reconcile import mark_document_superseded
+        from trellis.retrieve.strategies import KeywordSearch
+
+        docs = temp_registry.knowledge.document_store
+        clock = self._fake_clock(monkeypatch)
+        body = "Widget calibration runs at sixty hertz."
+
+        clock["now"] = clock["now"] - timedelta(days=365)
+        docs.put("old-doc", body, {})
+
+        clock["now"] = clock["now"] + timedelta(days=365)
+        docs.put("new-doc", body, {})
+        assert mark_document_superseded(
+            docs, old_doc_id="old-doc", new_doc_id="new-doc"
+        )
+
+        scores = {
+            item.item_id: item.relevance_score
+            for item in KeywordSearch(docs).search("calibration", limit=10)
+        }
+        assert set(scores) == {"old-doc", "new-doc"}, scores
+        ratio = scores["old-doc"] / scores["new-doc"]
+        # A year at the 30-day half-life leaves the floor and almost nothing
+        # else: 0.3 + 0.7 * 0.5**(365/30) ≈ 0.30. Anything near 1.0 means the
+        # supersession re-stamped the row.
+        assert ratio < 0.5, scores
+        # Demoted, not excluded — §4 keeps the losing version "retrievable on
+        # demand", and RECENCY_FLOOR is what makes that true. A superseded
+        # document that scored ~0 would satisfy the line above and still
+        # break the design.
+        assert ratio > 0.25, scores
