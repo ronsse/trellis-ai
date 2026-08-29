@@ -145,6 +145,51 @@ class TestCoverageSuppression:
         assert result.refused_by_reason == {REFUSED_THIN_CORPUS: 2}
         assert all(d.reason == REFUSED_THIN_CORPUS for d in result.decisions)
 
+    def test_suppressed_decisions_still_report_the_counts(self):
+        """A coverage refusal must not fabricate zero citations.
+
+        The suppressed branch used to build its decisions from
+        ``item_id`` / ``admitted`` / ``reason`` alone, so all three
+        counts fell back to their field defaults. That made a refusal on
+        *window coverage* byte-identical to :data:`REFUSED_NO_EVIDENCE`'s
+        honest zeros, and put the screen in direct contradiction with the
+        ``item_scores`` row for the same id in the same report — which is
+        exactly how it read in the CI failure that surfaced it.
+
+        The verdict is unchanged either way; only the accounting was
+        wrong. It is pinned because the counts are what a reader uses to
+        decide whether the floor is the *only* thing standing between a
+        candidate and demotion.
+        """
+        result = screen(
+            ev("has-evidence", appearances=9, helpful=1, unhelpful=4),
+            attributed_packs=1,
+        )
+
+        assert result.suppressed is True
+        decision = result.decisions[0]
+        assert decision.reason == REFUSED_THIN_CORPUS
+        assert (decision.appearances, decision.helpful_count) == (9, 1)
+        assert decision.unhelpful_count == 4
+
+    def test_suppression_keeps_absent_evidence_at_zero(self):
+        """The other half: a candidate with no evidence still reads zero.
+
+        Without this the fix could have been "stamp counts from anywhere"
+        — the zeros have to stay zero exactly where they are true, or
+        ``REFUSED_NO_EVIDENCE`` and ``REFUSED_THIN_CORPUS`` swap which
+        one is lying.
+        """
+        result = screen_noise_candidates(
+            ["never-scored"],
+            {"other": ev("other", appearances=9, unhelpful=9)},
+            attributed_packs=1,
+        )
+
+        decision = result.decisions[0]
+        assert decision.reason == REFUSED_THIN_CORPUS
+        assert (decision.appearances, decision.unhelpful_count) == (0, 0)
+
     def test_ample_corpus_is_not_suppressed(self):
         result = screen(ev("a", appearances=9, unhelpful=9))
 
