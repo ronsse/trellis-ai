@@ -907,7 +907,15 @@ def run_advisory_fitness_loop(
             # Suppressed branch: only two outcomes — restore (with margin)
             # or remain suppressed. Confidence is still updated either way
             # so the store reflects the latest evidence.
-            updated = advisory.model_copy(update={"confidence": new_confidence})
+            updated = advisory.model_copy(
+                update={
+                    "confidence": new_confidence,
+                    # Records the ownership handoff: from here on the
+                    # generator must not overwrite this field, or the blend
+                    # can never compound down to suppress_below (#383).
+                    "fitness_scored_at": datetime.now(tz=UTC),
+                }
+            )
             advisory_store.put(updated)
             if new_confidence >= restore_above:
                 advisory_store.restore(score.advisory_id)
@@ -943,7 +951,15 @@ def run_advisory_fitness_loop(
             # Soft-suppress: flip status, keep the record for potential
             # restoration. Persist new confidence first so scoring remains
             # consistent with evidence on subsequent passes.
-            updated = advisory.model_copy(update={"confidence": new_confidence})
+            updated = advisory.model_copy(
+                update={
+                    "confidence": new_confidence,
+                    # Records the ownership handoff: from here on the
+                    # generator must not overwrite this field, or the blend
+                    # can never compound down to suppress_below (#383).
+                    "fitness_scored_at": datetime.now(tz=UTC),
+                }
+            )
             advisory_store.put(updated)
             advisory_store.suppress(score.advisory_id, reason=reason)
             suppressed.append(score.advisory_id)
@@ -966,7 +982,15 @@ def run_advisory_fitness_loop(
             )
         else:
             # Active branch: adjust confidence, record boost if applicable.
-            updated = advisory.model_copy(update={"confidence": new_confidence})
+            updated = advisory.model_copy(
+                update={
+                    "confidence": new_confidence,
+                    # Records the ownership handoff: from here on the
+                    # generator must not overwrite this field, or the blend
+                    # can never compound down to suppress_below (#383).
+                    "fitness_scored_at": datetime.now(tz=UTC),
+                }
+            )
             advisory_store.put(updated)
             if new_confidence > old_confidence:
                 boosted.append(score.advisory_id)

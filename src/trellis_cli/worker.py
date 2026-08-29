@@ -381,6 +381,12 @@ class CurateCycleResult:
 
     noise_tagged: int = 0
     advisories_generated: int = 0
+    #: Findings that cleared the sample floor on the arm carrying them but
+    #: had no comparison arm to be measured against, so nothing was emitted
+    #: for them. Carried to the nightly surface because this is where an
+    #: operator sees the generated count drop and has nothing to explain it
+    #: (#383).
+    advisories_refused: int = 0
     advisories_suppressed: int = 0
     advisories_boosted: int = 0
     learning_observations: int = 0
@@ -395,6 +401,7 @@ class CurateCycleResult:
         return {
             "noise_tagged": self.noise_tagged,
             "advisories_generated": self.advisories_generated,
+            "advisories_refused": self.advisories_refused,
             "advisories_suppressed": self.advisories_suppressed,
             "advisories_boosted": self.advisories_boosted,
             "learning_observations": self.learning_observations,
@@ -488,6 +495,7 @@ def run_curation_cycle(
     return CurateCycleResult(
         noise_tagged=noise["noise_tagged"],
         advisories_generated=advisory["advisories_generated"],
+        advisories_refused=advisory["advisories_refused"],
         advisories_suppressed=advisory["advisories_suppressed"],
         advisories_boosted=advisory["advisories_boosted"],
         learning_observations=learning["learning_observations"],
@@ -579,6 +587,7 @@ def _curate_stage_advisories(
         skipped.append("advisories")
         return {
             "advisories_generated": 0,
+            "advisories_refused": 0,
             "advisories_suppressed": 0,
             "advisories_boosted": 0,
         }
@@ -591,6 +600,7 @@ def _curate_stage_advisories(
         gen = AdvisoryGenerator(event_log, advisory_store).generate(days=days)
         fitness = run_advisory_fitness_loop(event_log, advisory_store, days=days)
         generated = gen.advisories_generated
+        refused = gen.findings_refused_no_comparison_arm
         suppressed = len(fitness.advisories_suppressed)
         if record.enabled and (generated or suppressed):
             record.produced_finding(
@@ -599,6 +609,7 @@ def _curate_stage_advisories(
             )
     return {
         "advisories_generated": generated,
+        "advisories_refused": refused,
         "advisories_suppressed": suppressed,
         "advisories_boosted": len(fitness.advisories_boosted),
     }
@@ -682,6 +693,7 @@ def _render_cycle_text(result: CurateCycleResult) -> None:
     console.print(
         f"  noise-tagged: {result.noise_tagged}  "
         f"advisories generated: {result.advisories_generated}  "
+        f"refused (no comparison arm): {result.advisories_refused}  "
         f"suppressed: {result.advisories_suppressed}  "
         f"boosted: {result.advisories_boosted}"
     )

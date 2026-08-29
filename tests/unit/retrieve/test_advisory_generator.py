@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 from trellis.retrieve.advisory_generator import AdvisoryGenerator
+from trellis.retrieve.effectiveness import run_advisory_fitness_loop
 from trellis.schemas.advisory import AdvisoryCategory, AdvisoryStatus
 from trellis.stores.advisory_store import AdvisoryStore
 from trellis.stores.base.event_log import EventLog, EventType
@@ -719,7 +720,13 @@ class TestSuppressionSurvivesRegeneration:
         assert target not in {a.advisory_id for a in store.list()}
 
     def test_suppressed_confidence_is_not_reset(self, tmp_path: Path) -> None:
-        """A reset would let the next fitness pass blend it back above the bar."""
+        """A reset would let the next fitness pass blend it back above the bar.
+
+        Deliberately leaves ``fitness_scored_at`` unset — the shape a
+        hand-suppression through the public :meth:`AdvisoryStore.suppress`
+        would leave. Carrying confidence for a suppressed row is a second,
+        independent clause for exactly this case.
+        """
         packs, feedback = _two_arm_corpus()
         store, _ = _run(tmp_path, packs, feedback)
         target = store.list()[0]
@@ -733,14 +740,23 @@ class TestSuppressionSurvivesRegeneration:
         after = store.get(target.advisory_id)
         assert after is not None
         assert after.confidence == 0.01
+        assert after.status == AdvisoryStatus.SUPPRESSED
 
-    def test_active_advisory_confidence_tracks_fresh_evidence(
+    def test_unscored_advisory_confidence_tracks_fresh_evidence(
         self, tmp_path: Path
     ) -> None:
-        """The carry-forward is scoped to suppression, not to every field."""
+        """Until the loop has scored a row, the generator keeps it current.
+
+        This is not a nicety. Measured on the reference deployment, a
+        finding's statistic moved 0.4 -> 0.6 over two days of window roll as
+        feedback accrued — and since no advisory there has ever been served,
+        every row is in this state. Freezing confidence at creation would
+        pin the delivery gate to a stale number for the entire corpus.
+        """
         packs, feedback = _two_arm_corpus()
         store, _ = _run(tmp_path, packs, feedback)
         target = store.list()[0]
+        assert target.fitness_scored_at is None
         store.put(target.model_copy(update={"confidence": 0.02}))
 
         _run(tmp_path, packs, feedback, store=store)
@@ -748,6 +764,37 @@ class TestSuppressionSurvivesRegeneration:
         after = store.get(target.advisory_id)
         assert after is not None
         assert after.confidence == target.confidence
+
+    def test_scored_advisory_confidence_is_the_loops_to_keep(
+        self, tmp_path: Path
+    ) -> None:
+        """Once ``fitness_scored_at`` is set, the generator stops writing it.
+
+        The inverse of the test above, and the one that keeps demotion
+        reachable: an advisory the loop has blended down must not be reset
+        to its statistical value by the next night's generation.
+        """
+        packs, feedback = _two_arm_corpus()
+        store, _ = _run(tmp_path, packs, feedback)
+        target = store.list()[0]
+        store.put(
+            target.model_copy(
+                update={
+                    "confidence": 0.12,
+                    "fitness_scored_at": datetime(2026, 8, 1, tzinfo=UTC),
+                }
+            )
+        )
+
+        _run(tmp_path, packs, feedback, store=store)
+
+        after = store.get(target.advisory_id)
+        assert after is not None
+        assert after.confidence == 0.12
+        # The handoff marker itself survives, or it would be forgotten nightly.
+        assert after.fitness_scored_at == datetime(2026, 8, 1, tzinfo=UTC)
+        # The fresh statistic is not lost — it moves to the evidence block.
+        assert after.evidence.evidence_confidence == target.confidence
 
 
 class TestCappedReads:
@@ -771,3 +818,106 @@ class TestCappedReads:
 
         assert report.coverage.scanned == len(packs) + len(feedback)
         assert report.coverage.truncated is False
+
+
+class TestDemotionRemainsReachable:
+    """#383 review — the fix must not make the *demote* half unreachable.
+
+    The generator and the fitness loop run in one nightly cycle
+    (``trellis_cli/worker.py``), and stable ids make the generator's write
+    land on the loop's row. If the generator also rewrites ``confidence``,
+    the blend can never compound: an emitted advisory has
+    ``confidence >= 0.15`` by construction, so ``0.7 * 0.15 = 0.105`` stays
+    above ``suppress_below = 0.1`` in a single pass, at any success rate.
+
+    These run the **real** ``run_advisory_fitness_loop`` rather than
+    simulating the arithmetic, because the arithmetic was not the thing
+    that was wrong — the ownership was.
+    """
+
+    @staticmethod
+    def _event_log(packs: list[MagicMock], feedback: list[MagicMock]) -> MagicMock:
+        """An event log that answers any number of reads, keyed by type."""
+        log = MagicMock(spec=EventLog)
+
+        def get_events(
+            *, event_type: EventType | None = None, **_kwargs: object
+        ) -> list[MagicMock]:
+            if event_type == EventType.PACK_ASSEMBLED:
+                return list(packs)
+            if event_type == EventType.FEEDBACK_RECORDED:
+                return list(feedback)
+            return []
+
+        log.get_events.side_effect = get_events
+        return log
+
+    def _cycle_until_suppressed(
+        self, tmp_path: Path, *, cycles: int = 8
+    ) -> tuple[AdvisoryStore, str, list[float]]:
+        packs, feedback = _two_arm_corpus()
+        store = AdvisoryStore(tmp_path / "adv.json")
+
+        # Learn the finding's id, which is stable — that is the property
+        # under test, so the test is entitled to rely on it.
+        seed_log = self._event_log(packs, feedback)
+        AdvisoryGenerator(seed_log, store).generate(days=30)
+        target = next(a for a in store.list() if a.metadata.get("strategy") == "real")
+        advisory_id = target.advisory_id
+
+        # Six more packs that carried the advisory and all failed. No items
+        # and no intent, so they add nothing the generator would mine.
+        for i in range(6):
+            pack_id = f"served{i}"
+            packs.append(
+                _event(
+                    EventType.PACK_ASSEMBLED,
+                    pack_id,
+                    {
+                        "injected_item_ids": [],
+                        "injected_items": [],
+                        "domain": None,
+                        "intent": "",
+                        "advisory_ids": [advisory_id],
+                    },
+                )
+            )
+            feedback.append(_feedback_event(pack_id, success=False))
+
+        log = self._event_log(packs, feedback)
+        trail: list[float] = []
+        for _ in range(cycles):
+            AdvisoryGenerator(log, store).generate(days=30)
+            run_advisory_fitness_loop(log, store, days=30)
+            current = store.get(advisory_id)
+            assert current is not None
+            trail.append(current.confidence)
+            if current.status == AdvisoryStatus.SUPPRESSED:
+                break
+        return store, advisory_id, trail
+
+    def test_an_advisory_that_only_ever_fails_is_suppressed(
+        self, tmp_path: Path
+    ) -> None:
+        store, advisory_id, trail = self._cycle_until_suppressed(tmp_path)
+
+        final = store.get(advisory_id)
+        assert final is not None
+        assert final.status == AdvisoryStatus.SUPPRESSED, (
+            f"confidence never crossed suppress_below; trail={trail}"
+        )
+        # Monotonically decreasing — proof the blend compounds across
+        # cycles instead of being reset by each night's generation.
+        assert trail == sorted(trail, reverse=True)
+        assert trail[-1] < 0.1
+
+    def test_the_generator_records_the_handoff(self, tmp_path: Path) -> None:
+        """After the loop scores it, the row says the loop owns confidence."""
+        store, advisory_id, _ = self._cycle_until_suppressed(tmp_path)
+
+        final = store.get(advisory_id)
+        assert final is not None
+        assert final.fitness_scored_at is not None
+        # The generator's statistic is still current beside the blended gate.
+        assert final.evidence.evidence_confidence is not None
+        assert final.evidence.evidence_confidence > final.confidence

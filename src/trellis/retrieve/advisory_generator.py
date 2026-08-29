@@ -244,6 +244,9 @@ class AdvisoryGenerator:
         # to run first — a regenerated row defaults to ACTIVE, and writing
         # it over a row the fitness loop suppressed would revive it in
         # silence, which is worse than the unbounded append it replaces.
+        # It is also what hands `confidence` over to the loop once the loop
+        # has scored the row — see that method for why anything less makes
+        # demotion arithmetically unreachable.
         stored = 0
         if advisories:
             advisories = [self._carry_forward_status(a) for a in advisories]
@@ -499,6 +502,7 @@ class AdvisoryGenerator:
                     success_rate_with=round(bin_rates[best_bin], 3),
                     success_rate_without=round(bin_rates[worst_bin], 3),
                     effect_size=round(effect, 3),
+                    evidence_confidence=confidence,
                     representative_trace_ids=self._representative(
                         [p["pack_id"] for p in bins[best_bin] if p["success"]]
                     ),
@@ -666,6 +670,12 @@ class AdvisoryGenerator:
             success_rate_with=round(rate_with, 3),
             success_rate_without=round(rate_without, 3),
             effect_size=round(effect, 3),
+            # Same inputs and same pure function as the ``confidence`` this
+            # row is created with, so the two agree on night one and diverge
+            # only when the fitness loop takes ownership of ``confidence``.
+            evidence_confidence=self._compute_confidence(
+                outcomes.presentations, abs(effect)
+            ),
             representative_trace_ids=self._representative(exemplars),
         )
 
@@ -706,30 +716,67 @@ class AdvisoryGenerator:
     def _carry_forward_status(self, advisory: Advisory) -> Advisory:
         """Merge a regenerated finding onto the row it replaces.
 
-        The generator owns the *finding* — message, evidence, and the
-        confidence those imply. The fitness loop
+        The generator owns the *finding* — message and evidence, including
+        ``evidence.evidence_confidence``, the statistic those imply. The
+        fitness loop
         (:func:`~trellis.retrieve.effectiveness.run_advisory_fitness_loop`)
-        owns the *fitness* — status, suppression, and the confidence blend
-        that drives them. Stable ids make the generator's nightly write
-        land on the loop's row, so the loop's fields have to survive it.
+        owns the *fitness* — status, suppression, and the outcome-blended
+        ``confidence`` that drives them. Stable ids make the generator's
+        nightly write land on the loop's row, so the loop's fields have to
+        survive it.
 
-        Carried forward:
+        Always carried: ``created_at`` (a regenerated row is the same
+        finding, not a new one), ``status`` / ``suppressed_at`` /
+        ``suppression_reason`` (a fresh :class:`Advisory` defaults to
+        ``ACTIVE``, so without this every nightly run would silently
+        un-suppress everything the loop had suppressed — restoration is the
+        loop's decision, with hysteresis, and the generator must not make it
+        by accident), and ``fitness_scored_at`` itself, without which the
+        handoff below would be forgotten every night.
 
-        * ``created_at`` — when the finding was *first* observed. A
-          regenerated row is the same finding, not a new one.
-        * ``status`` / ``suppressed_at`` / ``suppression_reason`` — a
-          fresh :class:`Advisory` defaults to ``ACTIVE``, so without this
-          every nightly run would silently un-suppress everything the
-          fitness loop had suppressed. Restoration is the loop's decision
-          (it applies hysteresis); the generator must not make it by
-          accident.
-        * ``confidence``, **but only while suppressed.** Otherwise the
-          generator would reset a suppressed advisory's confidence to a
-          fresh statistical value each night and the very next fitness
-          pass — which runs immediately after generation in the same
-          curation cycle — could blend it back above the restore
-          threshold. Suppression that undoes itself nightly is
-          suppression that does nothing.
+        **``confidence`` is carried once — and only once — the loop has
+        scored the row.** Not "while suppressed", which was this method's
+        first cut and was wrong in a way worth recording, because it makes
+        the *demote* half of the loop arithmetically unreachable:
+
+        * curation runs ``generate()`` then the fitness loop in one cycle,
+          so a generator write to ``confidence`` is immediately followed by
+          the blend ``0.7 * C + 0.3 * rate``;
+        * every *emitted* advisory has ``C >= 0.15`` by construction
+          (``n >= min_sample_size = 5`` gives a sample factor ``>= 0.5``,
+          ``|effect| >= min_effect_size = 0.15`` gives an effect factor
+          ``>= 0.3``);
+        * so ``0.7 * C >= 0.105 > 0.1 = suppress_below`` **even at
+          ``rate = 0.0``** — one pass can never cross the threshold, and
+          resetting ``C`` nightly stops passes from accumulating.
+
+        That is general, not a tuning accident: any scheme where the
+        generator repeatedly pushes ``confidence`` toward a value bounded
+        below by 0.15 makes 0.1 unreachable. Blending the fresh statistic in
+        rather than replacing it does not escape it — the fixed point of
+        ``C = 0.7((1-w)C + w*C_fresh)`` sits at 0.41 for a strong-evidence
+        advisory, so the advisories demotion exists for are exactly the ones
+        it would still never demote. The only fix is for the generator to
+        stop writing the field, which is what ``fitness_scored_at`` records.
+
+        Before the loop has spoken the generator *does* keep ``confidence``
+        current, and that matters: measured against the reference
+        deployment, the ``keyword`` finding's statistic moved 0.4 -> 0.6 over
+        two days of window roll as feedback accrued. Freezing it at creation
+        would pin the delivery gate to a number already stale by night three
+        — and since no advisory there has ever been served, *every* row
+        would be frozen.
+
+        A ``SUPPRESSED`` status carries ``confidence`` too, independently of
+        the stamp. Today only the fitness loop suppresses, and it always
+        stamps, so the clause is unreachable — but
+        :meth:`AdvisoryStore.suppress` is public, and a hand-suppressed row
+        left unstamped would have its confidence reset to the statistic,
+        which the loop's suppressed branch restores from as soon as it
+        clears ``suppress_below + hysteresis``. That is the same
+        undoes-itself failure in a different doorway, and it costs one
+        clause to close. It cannot revive the arithmetic problem: an
+        already-suppressed advisory is not on the demote path.
         """
         prior = self._advisory_store.get(advisory.advisory_id)
         if prior is None:
@@ -740,8 +787,11 @@ class AdvisoryGenerator:
             "status": prior.status,
             "suppressed_at": prior.suppressed_at,
             "suppression_reason": prior.suppression_reason,
+            "fitness_scored_at": prior.fitness_scored_at,
         }
-        if prior.status == AdvisoryStatus.SUPPRESSED:
+        if prior.fitness_scored_at is not None or prior.status == (
+            AdvisoryStatus.SUPPRESSED
+        ):
             carried["confidence"] = prior.confidence
         return advisory.model_copy(update=carried)
 
