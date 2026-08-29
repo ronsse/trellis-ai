@@ -56,7 +56,28 @@ from tests.integration._live_server import (
     wipe_live_state_for_config,
     write_cloud_config,
 )
+from trellis.classify.demotion_gate import (
+    MIN_ATTRIBUTED_PACKS,
+    MIN_UNHELPFUL_CITATIONS,
+    REFUSED_THIN_CORPUS,
+)
 from trellis.stores.registry import StoreRegistry
+
+#: Graded rounds a demote loop drives before the evidence gate will
+#: admit anything.
+#:
+#: Since #380 a demotion needs two independent things: at least
+#: ``MIN_ATTRIBUTED_PACKS`` packs in the window carrying a per-item
+#: verdict, **and** at least ``MIN_UNHELPFUL_CITATIONS`` explicit
+#: ``unhelpful_item_ids`` citations naming the item. One round of
+#: serve-then-grade supplies one of each, so the coverage floor is the
+#: binding one and the round count follows it.
+#:
+#: Derived from the constants rather than written as a literal so the
+#: fixtures track the policy. The constants themselves are pinned by
+#: value in ``tests/unit/classify/test_demotion_gate.py`` — that is
+#: where a change to the *policy* has to be argued, not here.
+DEMOTION_ROUNDS = max(MIN_ATTRIBUTED_PACKS, MIN_UNHELPFUL_CITATIONS)
 
 
 @dataclass(frozen=True)
@@ -232,6 +253,77 @@ def build_pack(
         resp = client.post("/api/v1/packs", json=body)
         assert resp.status_code == 200, resp.text
         return resp.json()
+
+
+def build_pack_with_distractor(
+    api_url: str,
+    *,
+    intent: str,
+    distractor_id: str,
+    helpful_ids: list[str],
+) -> tuple[dict, list[str]]:
+    """Assemble a pack and check it carries the contrast the loop needs.
+
+    A demote loop is only meaningful while the distractor is still being
+    served *and* at least one helpful doc rides alongside it — without
+    the second, the feedback signal has nothing to contrast against and
+    a green test would prove nothing. Both loops re-check this every
+    round rather than once, because a round that quietly stopped
+    serving the distractor would silently stop contributing evidence.
+
+    Returns ``(pack, helpful_ids_present_in_it)``.
+    """
+    pack = build_pack(api_url, intent=intent, tag_filters={})
+    served = item_ids(pack)
+    assert distractor_id in served, (
+        f"the loop's value depends on the distractor being served; "
+        f"got items={sorted(served)}"
+    )
+    helpful_present = sorted(served.intersection(helpful_ids))
+    assert helpful_present, (
+        "expected at least one helpful doc alongside the distractor — "
+        "without one, the feedback signal carries no contrast"
+    )
+    return pack, helpful_present
+
+
+def assert_demotion_withheld_below_floor(report: dict, *, attributed_packs: int) -> None:
+    """Assert the gate refused this batch on corpus coverage, and said so.
+
+    The refusal is as much the governed behaviour as the demotion is
+    (#380 — demote on evidence of unhelpfulness, never on absence of
+    praise), so both loops pin it before they clear the floor. Reading
+    ``attributed_packs`` back off the screen is what makes this a
+    measurement rather than a restatement: it fails both if the gate
+    stops refusing and if the loop miscounts the evidence it supplied.
+    """
+    assert report["noise_candidates_tagged"] == 0, report
+    assert report["noise_candidates_proposed"] >= 1, (
+        f"the usage-rate rule should still *propose* the distractor — "
+        f"without a proposal the gate is never consulted: {report}"
+    )
+    screen = report["demotion_screen"]
+    assert screen["suppressed"] is True, screen
+    assert screen["suppressed_reason"] == REFUSED_THIN_CORPUS, screen
+    assert screen["attributed_packs"] == attributed_packs, screen
+    assert screen["min_attributed_packs"] == MIN_ATTRIBUTED_PACKS, screen
+
+
+def assert_demotion_admitted(report: dict, *, item_id: str) -> None:
+    """Assert the gate admitted ``item_id`` on the evidence supplied.
+
+    Asserts on the screen's own decision row, not just on the tag count:
+    the point of the loop is that the *evidence path* carried the
+    citations through to the gate, and a count alone cannot distinguish
+    that from a gate that stopped reading them.
+    """
+    screen = report["demotion_screen"]
+    assert screen["suppressed"] is False, screen
+    assert item_id in screen["admitted"], screen
+    decision = next(d for d in screen["decisions"] if d["item_id"] == item_id)
+    assert decision["admitted"] is True, decision
+    assert decision["unhelpful_count"] >= MIN_UNHELPFUL_CITATIONS, decision
+    assert decision["helpful_count"] < decision["unhelpful_count"], decision
 
 
 def trigger_apply_noise_tags(api_url: str, *, days: int = 30) -> dict:
