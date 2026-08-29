@@ -59,6 +59,18 @@ def pack(
     quiet: bool = typer.Option(False, "--quiet", "-q", help=_QUIET_HELP),
 ) -> None:
     """Assemble a retrieval pack for a given intent."""
+    # ``pack`` is treated as a row surface (#396) on the strength of what it
+    # does, not what it is called: despite the name and the "#262 — one
+    # retrieval path" claim, it reaches past ``PackBuilder`` straight to
+    # ``DocumentStore.search`` and prints doc ids to a human. Under the rule
+    # that makes it a whole-row surface, and the operator previewing a
+    # 56%-chunk corpus should not be shown fragments.
+    #
+    # This is the one classification in #396 that a later change can
+    # invalidate rather than extend: routing this through ``PackBuilder``
+    # (#410) would make it a *pack* surface, where chunks are the
+    # retrievable unit — and ``--include-chunks`` should then be removed,
+    # not inverted.
     store = get_document_store()
     filters = {}
     if domain:
@@ -75,6 +87,10 @@ def pack(
                 "domain": domain,
                 "agent_id": agent,
                 "count": len(results),
+                # Echoed for the same reason the REST route echoes it: a
+                # machine consumer of ``--format json`` must be able to tell
+                # which of the two result sets it is holding.
+                "include_chunks": include_chunks,
                 "items": [r["doc_id"] for r in results],
             }
         )
@@ -126,6 +142,7 @@ def search(
                     "status": "ok",
                     "query": query,
                     "count": len(out_items),
+                    "include_chunks": include_chunks,
                     "results": out_items,
                 }
             )

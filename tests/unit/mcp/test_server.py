@@ -2140,6 +2140,59 @@ class TestStructuredErrorContract:
         assert err.error.data == {"stage": "minhash_index_init"}
         assert excinfo.value.__cause__ is boom
 
+    def test_minhash_seed_warns_when_it_reads_nothing_from_a_stocked_store(
+        self,
+        temp_registry: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A knowingly-inert safety feature has to say so at WARNING.
+
+        ``_get_minhash_index`` seeds from ``search("")``, which returns
+        ``[]`` on every backend (#402), so fuzzy dedup only ever sees
+        memories written by the same process. The pre-existing
+        ``minhash_index_initialized`` line reports ``size=0`` at DEBUG,
+        which is how this went unnoticed — nobody watches DEBUG. The warning
+        this pins is the runtime signal that the repair is outstanding, and
+        it must survive until the seed is fixed.
+        """
+        monkeypatch.setattr(server_mod, "_minhash_index", None)
+        temp_registry.knowledge.document_store.put("seeded", "prior memory content")
+        recorded: list[tuple[str, dict[str, Any]]] = []
+        monkeypatch.setattr(
+            server_mod.logger,
+            "warning",
+            lambda event, **kw: recorded.append((event, kw)),
+        )
+
+        index = server_mod._get_minhash_index(temp_registry)
+
+        assert index.size == 0
+        (fields,) = [kw for event, kw in recorded if event == "minhash_index_seed_empty"]
+        assert fields["issue"] == 402
+
+    def test_minhash_seed_is_silent_on_an_empty_store(
+        self,
+        temp_registry: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An empty store legitimately seeds nothing — that is not a defect.
+
+        Without this guard the warning fires on every fresh install and in
+        every unit test, which is how a real warning becomes noise nobody
+        reads.
+        """
+        monkeypatch.setattr(server_mod, "_minhash_index", None)
+        recorded: list[str] = []
+        monkeypatch.setattr(
+            server_mod.logger,
+            "warning",
+            lambda event, **kw: recorded.append(event),
+        )
+
+        server_mod._get_minhash_index(temp_registry)
+
+        assert "minhash_index_seed_empty" not in recorded
+
     def test_record_feedback_missing_ids_data_lists_both_fields(self) -> None:
         """The ``data`` payload lists every field involved in the
         validation rule (one-of), not just the singular ``field`` key.

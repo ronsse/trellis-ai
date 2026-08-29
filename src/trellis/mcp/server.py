@@ -526,10 +526,17 @@ def _run_memory_extraction(
 def _get_minhash_index(registry: StoreRegistry) -> Any:
     """Get or create a cached MinHash index for fuzzy dedup.
 
-    Lazily populates the index from the document store on first access.
-    Raises ``McpError(INTERNAL_ERROR)`` if the dedup module is broken —
-    silent disable used to mean memories were stored without fuzzy
-    dedup, producing invisible duplicates.
+    **The seed below reads zero rows on every backend (#402), so today this
+    index only ever holds documents written by the same process** — a fresh
+    server cannot detect a fuzzy duplicate of anything already stored. This
+    docstring used to say it "lazily populates the index from the document
+    store", and that a broken dedup module is raised rather than silently
+    disabled *because* silent disable "used to mean memories were stored
+    without fuzzy dedup, producing invisible duplicates". The raise is still
+    real and still worth having; the guarantee it protects is not currently
+    being delivered. Saying so here rather than only at the call site,
+    because a reader checking whether fuzzy dedup covers a live deployment
+    reads the docstring.
     """
     global _minhash_index  # noqa: PLW0603
     if _minhash_index is not None:
@@ -556,6 +563,19 @@ def _get_minhash_index(registry: StoreRegistry) -> Any:
         for doc in docs:
             _minhash_index.add(doc["doc_id"], doc.get("content", ""))
         logger.debug("minhash_index_initialized", size=_minhash_index.size)
+        # A knowingly-inert safety feature has to say so somewhere an
+        # operator looks. The line above is DEBUG and has reported size=0
+        # on every process since the seed was written; nobody watches DEBUG,
+        # which is how this went unnoticed. Warn only when the store has
+        # rows the seed failed to pick up — an empty store legitimately
+        # seeds nothing, and that is every unit test.
+        if _minhash_index.size == 0 and registry.knowledge.document_store.count() > 0:
+            logger.warning(
+                "minhash_index_seed_empty",
+                reason="search('') returns no rows on any backend",
+                effect="fuzzy dedup only sees memories written by this process",
+                issue=402,
+            )
     except Exception as exc:
         logger.exception("minhash_index_init_failed")
         _raise_internal(
