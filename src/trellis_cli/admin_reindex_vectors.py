@@ -79,7 +79,11 @@ def run_reindex_vectors(
         page_size = batch_size if limit == 0 else min(batch_size, limit - scanned)
         if page_size <= 0:
             break
-        page = document_store.list_documents(limit=page_size, offset=offset)
+        # ``include_chunks`` is named rather than defaulted (#396): this
+        # walker embeds, and chunk rows are what carry the embeddings.
+        page = document_store.list_documents(
+            limit=page_size, offset=offset, include_chunks=True
+        )
         if not page:
             break
         offset += len(page)

@@ -1095,7 +1095,11 @@ def _select_enrichment_candidates(
     documents (a generous multiple of ``limit`` so the filter has headroom)
     and returns at most ``limit`` matches.
     """
-    scanned = document_store.list_documents(limit=max(limit * 5, limit))
+    # ``include_chunks`` is named rather than defaulted (#396): enrichment
+    # tags every stored row, chunk rows included.
+    scanned = document_store.list_documents(
+        limit=max(limit * 5, limit), include_chunks=True
+    )
     candidates: list[dict[str, Any]] = []
     for doc in scanned:
         metadata = doc.get("metadata") or {}

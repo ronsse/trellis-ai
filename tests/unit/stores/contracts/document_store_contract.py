@@ -345,6 +345,25 @@ class DocumentStoreContractTests:
         filtered = store.search("searchable", limit=50, include_chunks=False)
         assert {d["doc_id"] for d in filtered} == set(parent_ids)
 
+    def test_excluding_chunks_still_fills_the_search_limit(
+        self, store: DocumentStore
+    ) -> None:
+        """A ``limit=N`` search returns N *non-chunk* rows, not N-minus-chunks.
+
+        The ``list_documents`` sibling of this test pins the same property
+        for the listing; this one pins it for search, which is where
+        ``GET /api/v1/search`` reads (#396). The regression it catches is
+        filtering the result set instead of the query: with 3 chunks per
+        parent, a post-hoc filter over a 20-row page yields 5 rows, and a
+        caller who asked for 20 cannot tell that from "there were only 5
+        matches". The predicate has to run before ``LIMIT`` for the count
+        the caller gets back to mean anything.
+        """
+        self._seed_chunked_corpus(store, parents=25, per_parent=3)
+        page = store.search("searchable", limit=20, include_chunks=False)
+        assert len(page) == 20
+        assert not [d for d in page if "#chunk-" in d["doc_id"]]
+
     def test_chunk_documents_remain_addressable_when_excluded(
         self, store: DocumentStore
     ) -> None:
