@@ -658,6 +658,12 @@ class TestSupersedePreservesRecency:
         ``SQLiteDocumentStore.put`` stamps both ``created_at`` and
         ``updated_at`` from this one call, so a holder gives the test exact
         stamps instead of two wall-clock reads that merely *tend* to differ.
+
+        The patch is by module path, so it silently patches *nothing* if
+        ``temp_registry`` ever stops being SQLite-backed — and the stamp test
+        would still pass, since two real wall-clock reads also leave a
+        preserved stamp equal to itself. The ranking test below is what fails
+        loudly in that case. Keep the pair together; neither is redundant.
         """
         from datetime import UTC, datetime
 
@@ -750,11 +756,14 @@ class TestSupersedePreservesRecency:
         assert set(scores) == {"old-doc", "new-doc"}, scores
         ratio = scores["old-doc"] / scores["new-doc"]
         # A year at the 30-day half-life leaves the floor and almost nothing
-        # else: 0.3 + 0.7 * 0.5**(365/30) ≈ 0.30. Anything near 1.0 means the
+        # else — twelve halvings put the decay term near zero, so the ratio
+        # lands at about the floor itself, 0.30. Anything near 1.0 means the
         # supersession re-stamped the row.
         assert ratio < 0.5, scores
         # Demoted, not excluded — §4 keeps the losing version "retrievable on
-        # demand", and RECENCY_FLOOR is what makes that true. A superseded
-        # document that scored ~0 would satisfy the line above and still
-        # break the design.
+        # demand", and ``strategies.RECENCY_FLOOR`` (0.3) is what makes that
+        # true. A superseded document that scored ~0 would satisfy the line
+        # above and still break the design. This bound is deliberately coupled
+        # to that constant: dropping the floor below 0.25 should fail here and
+        # be argued for, not absorbed silently.
         assert ratio > 0.25, scores
