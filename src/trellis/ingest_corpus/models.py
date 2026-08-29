@@ -28,14 +28,19 @@ from typing import Any, Literal
 #: (#396). A list of call sites is a snapshot of one commit; both times it
 #: was already stale in the commit that wrote it.
 #:
-#: Both halves of the rule are enforced by
-#: ``tests/unit/test_chunk_visibility_rule.py``, not asserted here: every
-#: ``search`` / ``list_documents`` call in :mod:`trellis_api.routes` and
-#: :mod:`trellis_cli` must pass ``include_chunks`` explicitly, so a new
-#: whole-row surface cannot inherit a default nobody chose; and
-#: :class:`~trellis.retrieve.strategies.KeywordSearch` must keep returning
-#: chunk rows, so a future "cleanup" cannot quietly cost the pack its
-#: retrievable unit.
+#: ``tests/unit/test_chunk_visibility_rule.py`` holds the rule up, and it is
+#: worth being exact about how much it can hold. The pack half is enforced
+#: directly: :class:`~trellis.retrieve.strategies.KeywordSearch` must keep
+#: returning chunk rows, so a future "cleanup" cannot quietly cost the pack
+#: its retrievable unit. The whole-row half is enforced *one step short* of
+#: the rule — every ``search`` / ``list_documents`` call the scan detects in
+#: :mod:`trellis_api.routes` and :mod:`trellis_cli` must **name**
+#: ``include_chunks``, not necessarily set it to ``False``, because a walker
+#: living in those packages that needs chunk rows is a correct caller. What
+#: it buys is that a new whole-row surface cannot inherit a default nobody
+#: chose, which is how both #385 and #396 happened. "The scan detects" is
+#: also load-bearing: it matches on receiver name, so a document store
+#: reached through a receiver not named ``*store*`` slips it.
 #:
 #: The mechanism is ``include_chunks`` on ``list_documents`` / ``search`` /
 #: ``count``, always pushed into SQL. ``list_documents`` and ``count`` take

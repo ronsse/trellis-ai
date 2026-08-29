@@ -58,7 +58,10 @@ def _build_pack_builder(registry: Any) -> PackBuilder:
 # eight representative queries at ``limit=20`` returned 155 rows of which 39
 # (25.2%) were chunks; re-running them with ``include_chunks=False`` surfaced
 # **34 whole documents the unfiltered view never showed** — one per
-# displaced fragment.
+# displaced fragment. The eight, so the figure is re-derivable rather than
+# quoted: "how does retrieval work", "hunting", "memory system", "backup",
+# "kids school", "postgres", "pack budget", "vector store" — a spread of
+# technical and personal intents, since the corpus is majority personal.
 #
 # That refill is the point, and it is why the exclusion is pushed into the
 # store rather than applied to the response — see

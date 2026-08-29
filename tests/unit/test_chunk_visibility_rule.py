@@ -17,13 +17,16 @@ So the comment states a rule and this module enforces it:
     there the chunk is the retrievable unit and the excerpt is what the
     budget prices.
 
-Both halves are tested. The first is structural — scanning the two
-packages whose job is handing document rows to a caller
-(:mod:`trellis_api.routes`, :mod:`trellis_cli`) and requiring every
-``search`` / ``list_documents`` call in them to name ``include_chunks``,
-so a new surface cannot inherit a default nobody chose. The second is
-behavioural — :class:`~trellis.retrieve.strategies.KeywordSearch` must
-still return chunk rows.
+Both halves are tested, but not equally tightly, and the asymmetry is
+deliberate. The pack half is enforced as stated — behaviourally,
+:class:`~trellis.retrieve.strategies.KeywordSearch` must still return chunk
+rows. The whole-row half is enforced one step short of the rule: the scan
+requires every ``search`` / ``list_documents`` call it detects in
+:mod:`trellis_api.routes` and :mod:`trellis_cli` to **name**
+``include_chunks``, not to set it ``False``, because a walker living in
+those packages that needs chunk rows is a correct caller. Requiring the
+decision to be visible is the enforceable part; which way it goes is a
+judgement a reviewer makes at the call site.
 
 ``trellis.mcp`` is out of scope on purpose and not by exception: it hands
 back *packs*, not rows. Its single ``DocumentStore.search`` call is the
@@ -38,6 +41,7 @@ from pathlib import Path
 
 import pytest
 
+from trellis.retrieve.pack_builder import PackBuilder
 from trellis.retrieve.strategies import KeywordSearch
 from trellis.stores.sqlite.document import SQLiteDocumentStore
 
@@ -46,9 +50,18 @@ from trellis.stores.sqlite.document import SQLiteDocumentStore
 #: judgement call is what rotted the roster.
 _ROW_SURFACE_PACKAGES = ("trellis_api/routes", "trellis_cli")
 
-#: The two ``DocumentStore`` reads that can serve a chunk row. ``count``
-#: is excluded: it returns a number, not rows, and the ABC already binds
-#: it to whichever ``list_documents`` call it is reported beside.
+#: The two ``DocumentStore`` reads that can serve a chunk row. ``count`` is
+#: excluded because it returns a number rather than rows, so a page of
+#: fragments is not the failure mode — but the exclusion is narrower than
+#: it looks. The ABC binds ``count`` to whichever ``list_documents`` call it
+#: is *reported beside*, and two of the four ``count`` sites in these
+#: packages are not beside a listing at all: ``trellis admin stats`` and
+#: ``GET /api/v1/admin/stats`` report the corpus total unfiltered. On the
+#: reference deployment that is 1,319 against ``GET /api/v1/documents``'s
+#: 579 — two operator surfaces disagreeing about how many documents exist,
+#: which is #385's defect class in a different shape. Filed as #412 rather
+#: than folded in: a store total arguably *should* be the store total, and
+#: deciding that is not a chunk-filter change.
 _ROW_READS = frozenset({"search", "list_documents"})
 
 
@@ -172,4 +185,30 @@ def test_keyword_retrieval_axis_still_returns_chunk_rows(
     assert "corpus:notes:doc0#chunk-0" in ids, (
         "KeywordSearch must keep serving chunk rows to the pack builder; "
         f"got {sorted(ids)}"
+    )
+
+
+def test_a_chunk_row_survives_pack_assembly(
+    chunked_store: SQLiteDocumentStore,
+) -> None:
+    """The same guarantee one layer out, where it is likelier to be lost.
+
+    The strategy-level test above cannot see the *collect seam* —
+    ``exclude_noise(exclude_archived(strip_non_servable(strategy.search(...))))``
+    in :meth:`~trellis.retrieve.pack_builder.PackBuilder.build`. That seam is
+    the house pattern for cross-cutting exclusions precisely because the
+    strategy set is injected and open (#338 moved the noise rule there for
+    that reason), so an ``exclude_chunks(...)`` added beside
+    ``exclude_archived`` would look like it was following convention, would
+    cost the pack its retrievable unit, and would leave the strategy test
+    green. Assert the property where a reader would actually break it.
+    """
+    pack = PackBuilder(strategies=[KeywordSearch(chunked_store)]).build(
+        intent="retrieval budget"
+    )
+
+    ids = {item.item_id for item in pack.items}
+    assert "corpus:notes:doc0#chunk-0" in ids, (
+        "a chunk row must survive the PackBuilder collect seam; "
+        f"pack served {sorted(ids)}"
     )

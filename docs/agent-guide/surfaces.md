@@ -42,7 +42,7 @@ $ trellis admin version --format json | jq '{api_version, mcp_tools_version}'
 | Ingest a trace | `POST /api/v1/traces` | `save_experience` | `client.ingest_trace` |
 | Ingest evidence | `POST /api/v1/evidence` | `save_knowledge` | `client.ingest_evidence` |
 | Save a memory / note | `POST /api/v1/documents` | `save_memory` (adds dedup + optional extraction) | — |
-| Full-text + semantic search | `GET /api/v1/search` | `search` | `client.search` |[^chunks]
+| Full-text + semantic search | `GET /api/v1/search`[^chunks] | `search` | `client.search` |
 | Assemble context pack | `POST /api/v1/packs` | `get_context` | `client.assemble_pack` |
 | Sectioned context pack | `POST /api/v1/packs/sectioned` | `get_sectioned_context` | `client.assemble_sectioned_pack` |
 | Objective context (markdown) | — | `get_objective_context` | `client.get_objective_context` |

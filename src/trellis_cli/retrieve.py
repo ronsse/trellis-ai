@@ -60,10 +60,12 @@ def pack(
 ) -> None:
     """Assemble a retrieval pack for a given intent."""
     # ``pack`` is treated as a row surface (#396) on the strength of what it
-    # does, not what it is called: despite the name and the "#262 — one
-    # retrieval path" claim, it reaches past ``PackBuilder`` straight to
-    # ``DocumentStore.search`` and prints doc ids to a human. Under the rule
-    # that makes it a whole-row surface, and the operator previewing a
+    # does, not what it is called: despite the name, and despite being
+    # documented as "assemble a retrieval pack", it reaches past
+    # ``PackBuilder`` straight to ``DocumentStore.search`` and prints doc ids
+    # to a human. (Not a #262 regression — that ADR's "one retrieval path"
+    # covers the MCP macro tools and never included this command.) Under the
+    # rule that makes it a whole-row surface, and the operator previewing a
     # 56%-chunk corpus should not be shown fragments.
     #
     # This is the one classification in #396 that a later change can

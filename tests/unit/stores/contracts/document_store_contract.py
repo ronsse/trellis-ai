@@ -371,6 +371,40 @@ class DocumentStoreContractTests:
         assert len(page) == 20
         assert not [d for d in page if "#chunk-" in d["doc_id"]]
 
+    def test_chunk_exclusion_composes_with_metadata_filters(
+        self, store: DocumentStore
+    ) -> None:
+        """Both predicates land in one parameter list, in the right order.
+
+        Each backend appends the chunk predicate and then the metadata
+        filter conditions to the same positional-parameter list. Swap the
+        two appends and SQLite does not raise — the ``LIKE`` pattern lands
+        in a ``json_extract(...) = ?`` comparison and the query quietly
+        returns the wrong rows. Nothing exercised the combination, so this
+        pins the composition rather than either half.
+        """
+        for domain in ("infra", "product"):
+            parent = f"corpus:notes:{domain}"
+            store.put(parent, f"{domain} searchable body", {"domain": domain})
+            for c in range(2):
+                store.put(
+                    f"{parent}#chunk-{c}",
+                    f"{domain} searchable body slice {c}",
+                    {"domain": domain, "parent_doc_id": parent, "chunk_index": c},
+                )
+
+        both = store.search("searchable", limit=50, filters={"domain": "infra"})
+        assert {d["doc_id"] for d in both} == {
+            "corpus:notes:infra",
+            "corpus:notes:infra#chunk-0",
+            "corpus:notes:infra#chunk-1",
+        }
+
+        filtered = store.search(
+            "searchable", limit=50, filters={"domain": "infra"}, include_chunks=False
+        )
+        assert {d["doc_id"] for d in filtered} == {"corpus:notes:infra"}
+
     def test_chunk_documents_remain_addressable_when_excluded(
         self, store: DocumentStore
     ) -> None:

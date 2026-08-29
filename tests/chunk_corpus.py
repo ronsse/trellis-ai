@@ -32,10 +32,15 @@ def seed_chunked(
     parents and chunks together. Returns the parent ids.
 
     ``id_prefix`` mirrors the production id shape
-    ``corpus:<source_system>:<id>``. The default source system is
-    deliberately not one Rich renders as an emoji — CLI callers print
-    ``--format json`` through ``console.print``, which rewrites ``:notes:``
-    mid-payload (#403). Pass ``id_prefix="corpus:obsidian"`` there.
+    ``corpus:<source_system>:<id>``.
+
+    **CLI callers must pass ``id_prefix="corpus:obsidian"``.** The default
+    ``corpus:notes`` is fine over HTTP and in-process, but CLI commands print
+    ``--format json`` through ``console.print``, and Rich rewrites the
+    ``:notes:`` in the middle of a doc id to an emoji (#403). The default is
+    kept as ``notes`` rather than sidestepped because that is the id shape
+    the REST and store tests already assert on, and a fixture that quietly
+    avoids a live defect teaches the next reader nothing.
     """
     parent_ids = []
     for p in range(parents):
@@ -65,12 +70,16 @@ def seed_chunk_favouring(
     ``LIMIT`` after ordering by relevance, so a post-hoc filter over the
     result set is only distinguishable from a pushdown into the query when
     the top-N *contains chunks*. Under :func:`seed_chunked` the chunks are
-    strictly longer than their parents and carry the term once, so BM25
-    ranks every parent above every chunk: a 20-row page over 25 parents is
-    all parents, a page filter has nothing to remove, and a test written on
-    that fixture passes against the very implementation it is meant to
-    reject. That is not hypothetical — it is what the first version of
-    ``test_excluding_chunks_still_fills_the_search_limit`` did.
+    strictly longer than their parents and carry the term once, so SQLite's
+    ``bm25`` (which penalises length) ranks every parent above every chunk:
+    a 20-row page over 25 parents is all parents, a page filter has nothing
+    to remove, and a test written on that fixture passes against the very
+    implementation it is meant to reject. That is not hypothetical — it is
+    what the first version of
+    ``test_excluding_chunks_still_fills_the_search_limit`` did. On Postgres
+    the same fixture merely *ties* rather than ordering (``ts_rank`` at the
+    default normalization ignores length), which is worse: the outcome is
+    then whatever order the planner happens to return.
 
     Here the term appears three times in a short chunk and once in a long
     parent, which puts chunks first on term frequency (Postgres

@@ -92,6 +92,31 @@ class TestIngestAndRetrieve:
         parents = _seed_chunked_via_registry()
         assert {d["doc_id"] for d in client.search("distinctive")} == set(parents)
 
+    def test_search_omits_include_chunks_when_unset(self, client, monkeypatch):
+        """The tri-state's whole justification, pinned.
+
+        ``include_chunks: bool | None = None`` exists so the route owns the
+        default and the SDK does not carry a second copy that could drift.
+        A regression from ``is not None`` to plain truthiness would send
+        ``include_chunks=false`` — identical behaviour today, and a live bug
+        the moment the route's default flips. The only way to see the
+        difference is on the wire.
+        """
+        sent: list[dict] = []
+        original = client._request
+
+        def _record(method, path, **kwargs):
+            sent.append(dict(kwargs.get("params") or {}))
+            return original(method, path, **kwargs)
+
+        monkeypatch.setattr(client, "_request", _record)
+
+        client.search("anything")
+        client.search("anything", include_chunks=False)
+
+        assert "include_chunks" not in sent[0]
+        assert sent[1]["include_chunks"] is False
+
     def test_search_include_chunks_opt_in_reaches_the_route(self, client):
         """``include_chunks=True`` is forwarded; omitting it sends nothing.
 

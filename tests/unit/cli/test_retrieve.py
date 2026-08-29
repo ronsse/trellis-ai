@@ -157,6 +157,21 @@ class TestRetrieveChunkVisibility:
         assert data["count"] == 20
         assert not [r for r in data["results"] if "#chunk-" in r["doc_id"]]
 
+    def test_search_text_output_omits_chunk_ids(self) -> None:
+        """The operator's actual invocation: no flags at all.
+
+        Every other assertion here reads ``--format json --quiet``, which is
+        the machine path. The default text path renders one id per line and
+        is unaffected by #403, but nothing covered it with results in the
+        store — the pre-existing ``test_search`` runs against an empty one
+        and so proves only an exit code.
+        """
+        self._seed()
+        result = runner.invoke(app, ["retrieve", "search", "distinctive"])
+        assert result.exit_code == 0, result.output
+        assert "#chunk-" not in result.stdout
+        assert "corpus:obsidian:doc0" in result.stdout
+
     def test_pack_excludes_chunks_by_default(self) -> None:
         parent_ids = self._seed()
         data = self._json("retrieve", "pack", "--intent", "distinctive")

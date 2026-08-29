@@ -564,11 +564,17 @@ def _get_minhash_index(registry: StoreRegistry) -> Any:
             _minhash_index.add(doc["doc_id"], doc.get("content", ""))
         logger.debug("minhash_index_initialized", size=_minhash_index.size)
         # A knowingly-inert safety feature has to say so somewhere an
-        # operator looks. The line above is DEBUG and has reported size=0
-        # on every process since the seed was written; nobody watches DEBUG,
-        # which is how this went unnoticed. Warn only when the store has
-        # rows the seed failed to pick up — an empty store legitimately
-        # seeds nothing, and that is every unit test.
+        # operator looks. The line above is DEBUG, and since ``search("")``
+        # has always returned nothing it must have been reporting ``size=0``
+        # for as long as the seed has existed — an inference from the store
+        # contract rather than an observation, since nobody watches DEBUG,
+        # which is how this went unnoticed in the first place.
+        #
+        # Warn only when the store holds rows the seed failed to pick up. An
+        # empty store legitimately seeds nothing, which is most unit tests
+        # and every fresh install; a test that stores a document before its
+        # first ``save_memory`` will trip this deliberately (see
+        # ``test_minhash_seed_warns_when_it_reads_nothing_from_a_stocked_store``).
         if _minhash_index.size == 0 and registry.knowledge.document_store.count() > 0:
             logger.warning(
                 "minhash_index_seed_empty",

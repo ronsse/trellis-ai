@@ -2167,7 +2167,9 @@ class TestStructuredErrorContract:
         index = server_mod._get_minhash_index(temp_registry)
 
         assert index.size == 0
-        (fields,) = [kw for event, kw in recorded if event == "minhash_index_seed_empty"]
+        (fields,) = [
+            kw for event, kw in recorded if event == "minhash_index_seed_empty"
+        ]
         assert fields["issue"] == 402
 
     def test_minhash_seed_is_silent_on_an_empty_store(
