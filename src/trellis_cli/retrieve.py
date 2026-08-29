@@ -31,8 +31,11 @@ _QUIET_HELP = "Suppress Rich formatting"
 #: Both commands below hand back whole document rows, so they exclude
 #: ``<parent>#chunk-N`` fragments by default — see
 #: :data:`trellis.ingest_corpus.models.CHUNK_ID_SEPARATOR` for the rule.
-#: The exclusion is pushed into the store, so ``--limit N`` still returns N
-#: rows; it swaps fragments for the documents they were sliced from.
+#: The exclusion is pushed into the store rather than applied to the printed
+#: list, so the row cap (``--limit`` / ``--max-items``) refills with the
+#: documents the fragments were sliced from instead of the list simply
+#: getting shorter. A short list therefore still means "that is all there
+#: is", which is exactly what a post-hoc filter would have destroyed.
 _CHUNKS_HELP = (
     "Include <parent>#chunk-N fragment rows. Excluded by default: they are"
     " slices of documents the same search already ranks."
