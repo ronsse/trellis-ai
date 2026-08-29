@@ -358,7 +358,8 @@ class AdvisoryStore:
         """
         try:
             self._load_rows()
-        except Exception as exc:  # noqa: BLE001 - degrades, never swallows
+        # Degrades, never swallows: the record below is what refuses the write.
+        except Exception as exc:
             self._degrade("load_failed", f"{type(exc).__name__}: {exc}")
 
     def _load_rows(self) -> None:
@@ -389,7 +390,8 @@ class AdvisoryStore:
         for index, entry in enumerate(raw.get("advisories", [])):
             try:
                 advisory = Advisory.model_validate(entry)
-            except Exception as exc:  # noqa: BLE001 - one bad row costs one row
+            # Broad on purpose: one bad row costs one row, not the file.
+            except Exception as exc:
                 skipped.append(f"row {index}: {type(exc).__name__}")
                 continue
             self._advisories[advisory.advisory_id] = advisory
@@ -437,13 +439,16 @@ class AdvisoryStore:
         degradation = self._degradation
         if degradation is None:
             return
-        raise DegradedStoreWriteError(
+        msg = (
             f"Refusing to write the Trellis advisory file at {degradation.path}: "
             f"it loaded degraded ({degradation.reason}: {degradation.detail}). "
             f"{degradation.rows_loaded} row(s) parsed and are being served; "
             f"{degradation.rows_skipped} could not be read. Writing would "
             "replace the file with only what parsed, discarding the rest and "
-            "reviving any advisory the fitness loop had suppressed. To reset:",
+            "reviving any advisory the fitness loop had suppressed. To reset:"
+        )
+        raise DegradedStoreWriteError(
+            msg,
             store="advisory",
             path=degradation.path,
             recovery=degradation.recovery,
@@ -480,15 +485,16 @@ def _atomic_write_text(path: Path, text: str) -> None:
     fd, tmp_name = tempfile.mkstemp(
         dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp"
     )
+    tmp_path = Path(tmp_name)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
         mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else _NEW_FILE_MODE
-        os.chmod(tmp_name, mode)
-        os.replace(tmp_name, path)
+        tmp_path.chmod(mode)
+        tmp_path.replace(path)
     finally:
-        # A successful ``os.replace`` consumed the temp name, so this is a
+        # A successful ``replace`` consumed the temp name, so this is a
         # no-op on the happy path and cleanup on every other.
-        Path(tmp_name).unlink(missing_ok=True)
+        tmp_path.unlink(missing_ok=True)

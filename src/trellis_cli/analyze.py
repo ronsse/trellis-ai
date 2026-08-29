@@ -1149,6 +1149,48 @@ def cost(
         )
 
 
+def _render_advisory_degradation(degraded: dict[str, Any] | None) -> None:
+    """Print the advisory store's degraded state, or nothing at all.
+
+    One renderer for both advisory commands so the text and JSON branches
+    cannot drift — a warning that exists only in ``--format json`` is a
+    warning no operator reading a terminal ever sees.
+    """
+    if not degraded:
+        return
+    console.print(
+        f"  [bold red]ADVISORY STORE DEGRADED[/bold red] — "
+        f"{degraded['reason']}: {degraded['detail']}"
+    )
+    console.print(
+        f"    file: [cyan]{degraded['path']}[/cyan] "
+        f"({degraded['rows_loaded']} row(s) readable, "
+        f"{degraded['rows_skipped']} not)"
+    )
+    console.print(
+        "    Writes are refused so the file is intact. Advisories that "
+        "parsed are still served in packs."
+    )
+    console.print(f"    To reset: [bold]{degraded['recovery']}[/bold]")
+
+
+def _exit_if_advisory_store_degraded(store: AdvisoryStore, output_format: str) -> None:
+    """Stop a command that cannot act on a store which loaded degraded.
+
+    Exit code 2 rather than 0-with-a-warning: the caller asked for the
+    fitness loop to run and it did not, and a cron wrapper that only checks
+    the status code has to be able to see that.
+    """
+    if not store.is_degraded:
+        return
+    degraded = store.degradation.to_dict() if store.degradation else None
+    if output_format == "json":
+        emit_json({"status": "error", "store_degradation": degraded})
+    else:
+        _render_advisory_degradation(degraded)
+    raise typer.Exit(code=2)
+
+
 @analyze_app.command("generate-advisories")
 def generate_advisories(
     days: int = typer.Option(30, help="Days of history to analyze"),
@@ -1200,6 +1242,12 @@ def generate_advisories(
         print(json.dumps(report.model_dump(), indent=2, default=str))
     else:
         console.print(f"[bold]Advisory Generation Report[/bold] (last {days} days)")
+        # Before the counts, not after: every number below is zero because
+        # the run refused, and a reader who meets the zeros first has
+        # already drawn the wrong conclusion. Rendering it here also keeps
+        # the two formats honest with each other — the JSON branch carries
+        # ``store_degradation`` whether or not this branch prints it (#393).
+        _render_advisory_degradation(report.store_degradation)
         console.print(f"  Packs analyzed: {report.total_packs}")
         console.print(f"  Feedback events: {report.total_feedback}")
         console.print(f"  Advisories generated: {report.advisories_generated}")
@@ -1284,6 +1332,13 @@ def advisory_effectiveness(
     # #373: same seam as ``generate-advisories`` — the fitness loop must
     # score the advisories that were actually served.
     store = AdvisoryStore(resolve_advisory_path(get_data_dir() / "stores"))
+
+    # The fitness loop writes (put / suppress / restore), and every one of
+    # those raises on a store that could not read its file. Exiting here
+    # turns a traceback into the recovery command (#393). ``--dry-run`` is
+    # read-only and would not raise, but it would score a set that is
+    # missing whatever failed to parse, so it stops too.
+    _exit_if_advisory_store_degraded(store, output_format)
 
     with wrap_cli_meta_analysis(
         agent_suffix="analyze",

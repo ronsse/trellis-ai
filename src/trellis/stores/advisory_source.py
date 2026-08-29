@@ -205,7 +205,8 @@ def load_advisory_store(
         return AdvisoryStore(path)
 
     store = AdvisoryStore(path)
-    if store.is_degraded:
+    degradation = store.degradation
+    if degradation is not None:
         # The store has already logged the failure in detail. This line
         # exists to attach the *surface* to it: "advisories are degraded"
         # and "the MCP pack builder is serving degraded advisories" are
@@ -217,7 +218,7 @@ def load_advisory_store(
         logger.warning(
             "advisory_store_degraded",
             surface=surface,
-            **store.degradation.to_dict(),  # type: ignore[union-attr]
+            **degradation.to_dict(),
             servable_count=len(store.list()),
         )
         return store
