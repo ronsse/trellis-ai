@@ -926,6 +926,12 @@ class TestDemotionRemainsReachable:
         assert final.evidence.evidence_confidence > final.confidence
 
 
+#: Appended to a valid advisory file to make it unparseable while leaving
+#: every row still present in the bytes — the shape of a torn write, and
+#: the only shape that lets a test tell "preserved" from "rewritten".
+_TORN_MARKER = "\n<<< torn write >>>"
+
+
 class TestDegradedStoreCannotUnsuppress:
     """#393's second symptom — the one stable ids (#394) introduced.
 
@@ -957,7 +963,7 @@ class TestDegradedStoreCannotUnsuppress:
         store.suppress(target, reason="fitness loop said so")
 
         good_bytes = path.read_text(encoding="utf-8")
-        path.write_text(good_bytes + "\n<<< torn write >>>", encoding="utf-8")
+        path.write_text(good_bytes + _TORN_MARKER, encoding="utf-8")
         return path, target, good_bytes
 
     def test_the_file_holding_the_suppression_is_not_overwritten(
@@ -996,14 +1002,20 @@ class TestDegradedStoreCannotUnsuppress:
         this row comes back ``ACTIVE`` with no suppression metadata, and
         nothing anywhere says a curation decision was reversed.
         """
-        path, target, good_bytes = self._suppressed_then_corrupted(tmp_path)
+        path, target, _good_bytes = self._suppressed_then_corrupted(tmp_path)
 
         packs, feedback = _two_arm_corpus()
         event_log = MagicMock(spec=EventLog)
         event_log.get_events.side_effect = [packs, feedback]
         AdvisoryGenerator(event_log, AdvisoryStore(path)).generate(days=30)
 
-        path.write_text(good_bytes, encoding="utf-8")
+        # Recover from what is *on disk*, not from a copy this test kept.
+        # The corruption is trailing junk, so the rows are still there — but
+        # only if nothing overwrote them. Restoring a saved copy instead
+        # would repair the damage the test exists to detect, and would pass
+        # against the very code the fix removes.
+        on_disk = path.read_text(encoding="utf-8")
+        path.write_text(on_disk.split(_TORN_MARKER)[0], encoding="utf-8")
         recovered = AdvisoryStore(path)
 
         assert recovered.is_degraded is False

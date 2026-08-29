@@ -503,6 +503,34 @@ class TestSaveIsAtomic:
         store.put(_advisory())
         assert [p.name for p in tmp_path.iterdir()] == ["a.json"]
 
+    def test_a_failed_write_leaves_the_destination_intact(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The property atomicity buys, stated as behaviour.
+
+        ``write_text`` truncates and *then* writes, so a failure between
+        the two is how ``advisories.json`` becomes the corrupt file the
+        rest of this module has to survive. Here the failure is injected at
+        ``fsync``; the destination must be byte-identical and no temp file
+        may be left behind.
+        """
+        path = tmp_path / "a.json"
+        store = AdvisoryStore(path)
+        store.put(_advisory(scope="original"))
+        before = path.read_text(encoding="utf-8")
+
+        def _boom(_fd: int) -> None:
+            msg = "No space left on device"
+            raise OSError(msg)
+
+        monkeypatch.setattr("trellis.stores.advisory_store.os.fsync", _boom)
+
+        with pytest.raises(OSError, match="No space left"):
+            store.put(_advisory(scope="doomed"))
+
+        assert path.read_text(encoding="utf-8") == before
+        assert [p.name for p in tmp_path.iterdir()] == ["a.json"]
+
     def test_an_existing_file_keeps_its_mode(self, tmp_path: Path) -> None:
         """``mkstemp`` creates 0600; inheriting it would narrow a live file.
 
