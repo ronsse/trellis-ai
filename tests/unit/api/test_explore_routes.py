@@ -102,6 +102,92 @@ def test_documents_search(client, registry):
     assert "rank" in data["documents"][0]
 
 
+def _seed_chunked(store, parents=3, per_parent=3):
+    """Parents plus their ``#chunk-N`` slices, the shape corpus ingest writes."""
+    parent_ids = []
+    for p in range(parents):
+        parent_id = f"corpus:notes:doc{p}"
+        store.put(parent_id, f"parent {p} distinctive body text")
+        parent_ids.append(parent_id)
+        for c in range(per_parent):
+            store.put(
+                f"{parent_id}#chunk-{c}",
+                f"parent {p} distinctive body text slice {c}",
+                {"parent_doc_id": parent_id, "chunk_index": c},
+            )
+    return parent_ids
+
+
+def test_documents_excludes_chunks_by_default(client, registry):
+    """#385 — the list view served 740 of 1,317 rows as chunk fragments."""
+    parent_ids = _seed_chunked(registry.knowledge.document_store)
+
+    data = client.get("/api/v1/documents").json()
+
+    assert data["include_chunks"] is False
+    assert {d["doc_id"] for d in data["documents"]} == set(parent_ids)
+    # total is counted under the same filter as the rows it describes.
+    assert data["total"] == len(parent_ids)
+    assert data["count"] == len(parent_ids)
+
+
+def test_documents_include_chunks_opt_in(client, registry):
+    _seed_chunked(registry.knowledge.document_store)
+
+    data = client.get("/api/v1/documents", params={"include_chunks": "true"}).json()
+
+    assert data["include_chunks"] is True
+    assert data["total"] == 12
+    assert any("#chunk-" in d["doc_id"] for d in data["documents"])
+
+
+def test_documents_search_excludes_chunks_without_losing_the_parent(client, registry):
+    """The parent carries the text its chunks were sliced from, so recall holds."""
+    parent_ids = _seed_chunked(registry.knowledge.document_store)
+
+    unfiltered = client.get(
+        "/api/v1/documents",
+        params={"q": "distinctive", "include_chunks": "true"},
+    ).json()
+    assert any("#chunk-" in d["doc_id"] for d in unfiltered["documents"])
+
+    filtered = client.get("/api/v1/documents", params={"q": "distinctive"}).json()
+    assert {d["doc_id"] for d in filtered["documents"]} == set(parent_ids)
+
+
+def test_documents_page_is_not_shortened_by_the_chunk_filter(client, registry):
+    """A ``limit`` of N returns N non-chunk rows, not N minus the chunks.
+
+    Pins the store-level pushdown: filtering the page after the read would
+    return 5 rows here and give the caller no way to tell that from the end
+    of the data.
+    """
+    _seed_chunked(registry.knowledge.document_store, parents=20, per_parent=3)
+
+    data = client.get("/api/v1/documents", params={"limit": 20}).json()
+
+    assert data["count"] == 20
+    assert not [d for d in data["documents"] if "#chunk-" in d["doc_id"]]
+
+
+def test_excluded_chunk_is_still_addressable(client, registry):
+    """Excluded from the listing, never removed from the store.
+
+    The id must be percent-encoded — ``#`` is a URL fragment delimiter, so
+    an unencoded chunk id never leaves the client. That is ordinary URL
+    handling, not a chunk-specific quirk (the Memory Explorer already calls
+    ``encodeURIComponent``), but it is asserted here because "chunks stay
+    addressable" is the claim that makes excluding them from the listing a
+    demotion rather than a disappearance.
+    """
+    _seed_chunked(registry.knowledge.document_store, parents=1, per_parent=1)
+
+    resp = client.get("/api/v1/documents/corpus:notes:doc0%23chunk-0")
+
+    assert resp.status_code == 200
+    assert resp.json()["document"]["doc_id"] == "corpus:notes:doc0#chunk-0"
+
+
 def test_document_get(client, registry):
     registry.knowledge.document_store.put("doc-1", "full content here", {"k": "v"})
     resp = client.get("/api/v1/documents/doc-1")

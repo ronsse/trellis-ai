@@ -275,6 +275,84 @@ class DocumentStoreContractTests:
         assert first_ids.isdisjoint(second_ids)
 
     # ------------------------------------------------------------------
+    # include_chunks — chunk documents are excluded on request (#385)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _seed_chunked_corpus(store: DocumentStore, parents: int, per_parent: int):
+        """``parents`` parent docs, each followed by ``per_parent`` chunks."""
+        parent_ids = []
+        for p in range(parents):
+            parent_id = f"corpus:notes:doc{p}"
+            store.put(parent_id, f"parent {p} searchable body")
+            parent_ids.append(parent_id)
+            for c in range(per_parent):
+                store.put(
+                    f"{parent_id}#chunk-{c}",
+                    f"parent {p} searchable body slice {c}",
+                    {"parent_doc_id": parent_id, "chunk_index": c},
+                )
+        return parent_ids
+
+    def test_list_documents_includes_chunks_by_default(
+        self, store: DocumentStore
+    ) -> None:
+        self._seed_chunked_corpus(store, parents=2, per_parent=2)
+        ids = {d["doc_id"] for d in store.list_documents(limit=50)}
+        assert any("#chunk-" in i for i in ids)
+        assert len(ids) == 6
+
+    def test_list_documents_can_exclude_chunks(self, store: DocumentStore) -> None:
+        parent_ids = self._seed_chunked_corpus(store, parents=2, per_parent=2)
+        ids = {
+            d["doc_id"] for d in store.list_documents(limit=50, include_chunks=False)
+        }
+        assert ids == set(parent_ids)
+
+    def test_excluding_chunks_still_fills_the_page(self, store: DocumentStore) -> None:
+        """A ``limit=N`` read returns N *non-chunk* rows, not N-minus-chunks.
+
+        The regression this pins is filtering after the read instead of
+        during it: with 3 chunks per parent, a post-hoc filter over a
+        20-row page yields 5 rows, and the caller cannot distinguish that
+        from the end of the data.
+        """
+        self._seed_chunked_corpus(store, parents=20, per_parent=3)
+        page = store.list_documents(limit=20, offset=0, include_chunks=False)
+        assert len(page) == 20
+        assert not [d for d in page if "#chunk-" in d["doc_id"]]
+
+    def test_excluding_chunks_keeps_offset_pages_disjoint(
+        self, store: DocumentStore
+    ) -> None:
+        self._seed_chunked_corpus(store, parents=10, per_parent=3)
+        first = store.list_documents(limit=5, offset=0, include_chunks=False)
+        second = store.list_documents(limit=5, offset=5, include_chunks=False)
+        assert len(first) == len(second) == 5
+        assert {d["doc_id"] for d in first}.isdisjoint({d["doc_id"] for d in second})
+
+    def test_count_can_exclude_chunks(self, store: DocumentStore) -> None:
+        self._seed_chunked_corpus(store, parents=3, per_parent=4)
+        assert store.count() == 15
+        assert store.count(include_chunks=False) == 3
+
+    def test_search_can_exclude_chunks(self, store: DocumentStore) -> None:
+        """Chunks drop out; the parent they were sliced from still matches."""
+        parent_ids = self._seed_chunked_corpus(store, parents=2, per_parent=3)
+        unfiltered = store.search("searchable", limit=50)
+        assert any("#chunk-" in d["doc_id"] for d in unfiltered)
+
+        filtered = store.search("searchable", limit=50, include_chunks=False)
+        assert {d["doc_id"] for d in filtered} == set(parent_ids)
+
+    def test_chunk_documents_remain_addressable_when_excluded(
+        self, store: DocumentStore
+    ) -> None:
+        """Exclusion is a listing choice, never a deletion."""
+        self._seed_chunked_corpus(store, parents=1, per_parent=1)
+        assert store.get("corpus:notes:doc0#chunk-0") is not None
+
+    # ------------------------------------------------------------------
     # count
     # ------------------------------------------------------------------
 

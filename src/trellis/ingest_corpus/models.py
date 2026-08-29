@@ -6,9 +6,33 @@ import hashlib
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-#: Separator between a parent document id and its chunk suffix. Chunk
-#: doc ids are ``f"{parent_doc_id}{CHUNK_ID_SEPARATOR}{index}"``; the
-#: explore/documents views filter chunk rows by this marker.
+#: Separator between a parent document id and its chunk suffix. Chunk doc
+#: ids are ``f"{parent_doc_id}{CHUNK_ID_SEPARATOR}{index}"``.
+#:
+#: This marker is the repo's chunk discriminator, and the surfaces that use
+#: it are named here rather than described in the aggregate: the sentence
+#: this replaces said "the explore/documents views filter chunk rows by this
+#: marker", which was **false** — ``GET /api/v1/documents`` applied no chunk
+#: filter at all and served 740 of 1,317 rows as fragments (#385). A reader
+#: consulting the code to find out whether chunks were filtered got a
+#: confident yes.
+#:
+#: Filters by this marker:
+#:
+#: * :meth:`~trellis.stores.base.document.DocumentStore.list_documents`,
+#:   ``count`` and ``search`` when passed ``include_chunks=False`` — via
+#:   :func:`~trellis.stores.base.document.chunk_id_like_pattern`. That is
+#:   what ``GET /api/v1/documents`` now calls, and it is the only filtering
+#:   path the REST view has.
+#: * :func:`trellis.ingest_corpus.sync.sync_records` (dedup lookup, prune).
+#: * :mod:`trellis.retrieve.file_context` and
+#:   :mod:`trellis_workers.session_capture.reconcile_pass`, both via
+#:   :func:`is_chunk_doc_id`.
+#:
+#: Does **not** filter: :mod:`trellis.retrieve.concentration`, which rolls a
+#: chunk id up to its parent rather than dropping it, and every other
+#: ``list_documents`` caller (reindex, resync, retention, classify passes),
+#: which need chunk rows because chunks are what carry the embeddings.
 CHUNK_ID_SEPARATOR = "#chunk-"
 
 #: Actions the sync plan can assign to a walked file.
