@@ -1118,3 +1118,39 @@ class TestTruncationReachesTheOperator:
         result = runner.invoke(app, ["analyze", "extractor-fallbacks", "--days", "30"])
         assert result.exit_code == 0
         assert "TRUNCATED" not in result.stdout
+
+    def test_cost_prints_the_truncation_note_before_the_dollar_figure(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        """The one surface that prices a capped read.
+
+        `analyze cost` reads `TOKEN_TRACKED` through `analyze_token_usage`
+        and renders a dollar total. A silently shortened window understates
+        spend — the direction nobody investigates.
+        """
+        event_log = temp_stores.operational.event_log
+        for index in range(5001):
+            event_log.emit(
+                EventType.TOKEN_TRACKED,
+                source="test",
+                entity_id=f"t_{index}",
+                payload={
+                    "layer": "mcp",
+                    "operation": "get_context",
+                    "response_tokens": 10,
+                },
+            )
+        result = runner.invoke(app, ["analyze", "cost", "--days", "30"])
+        assert result.exit_code == 0
+        assert "TRUNCATED" in result.stdout
+
+    def test_limit_option_raises_the_cap(self, temp_stores: StoreRegistry) -> None:
+        """The lever the note now tells the operator to reach for."""
+        self._flood(temp_stores, EventType.PACK_ASSEMBLED, 5001)
+        capped = runner.invoke(app, ["analyze", "pack-telemetry", "--days", "30"])
+        raised = runner.invoke(
+            app, ["analyze", "pack-telemetry", "--days", "30", "--limit", "6000"]
+        )
+        assert "TRUNCATED" in capped.stdout
+        assert "TRUNCATED" not in raised.stdout
+        assert "Packs assembled: 5001" in raised.stdout

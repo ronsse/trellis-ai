@@ -54,6 +54,7 @@ from trellis.retrieve.trellis_cost import summarize_trellis_cost
 from trellis.schemas.parameters import ParameterScope, ParameterSet
 from trellis.stores.advisory_source import resolve_advisory_path
 from trellis.stores.advisory_store import AdvisoryStore
+from trellis.stores.base.event_log import DEFAULT_SCAN_LIMIT
 from trellis.stores.base.parameter import ParameterStore
 from trellis_cli._meta_wiring import wrap_cli_meta_analysis
 from trellis_cli.config import get_config_dir
@@ -426,6 +427,14 @@ def apply_noise_tags(
 def token_usage(
     days: int = typer.Option(7, help="Days of history to analyze"),
     output_format: str = typer.Option("text", "--format", help="Output format"),
+    limit: int = typer.Option(
+        DEFAULT_SCAN_LIMIT,
+        "--limit",
+        help=(
+            "Max events to scan. Raise it when the report says TRUNCATED; "
+            "the newest events are kept, so the note names what was cut."
+        ),
+    ),
     no_meta_trace: bool = typer.Option(
         False,
         "--no-meta-trace",
@@ -439,7 +448,7 @@ def token_usage(
         analyzer_name="cli.analyze.token-usage",
         disabled=no_meta_trace,
     ) as _meta_record:
-        report = analyze_token_usage(event_log, days=days)
+        report = analyze_token_usage(event_log, days=days, limit=limit)
         if _meta_record.enabled and report.total_responses > 0:
             _meta_record.produced_finding(
                 f"token-usage-report-d{days}",
@@ -1051,6 +1060,14 @@ def cost(
         None, "--price-per-mtok", help="Override input price, USD per 1M tokens"
     ),
     output_format: str = typer.Option("text", "--format", help="Output format"),
+    limit: int = typer.Option(
+        DEFAULT_SCAN_LIMIT,
+        "--limit",
+        help=(
+            "Max events to scan. Raise it when the report says TRUNCATED; "
+            "the newest events are kept, so the note names what was cut."
+        ),
+    ),
     no_meta_trace: bool = typer.Option(
         False,
         "--no-meta-trace",
@@ -1065,7 +1082,11 @@ def cost(
         disabled=no_meta_trace,
     ) as _meta_record:
         report = summarize_trellis_cost(
-            event_log, days=days, model=model, price_per_mtok=price_per_mtok
+            event_log,
+            days=days,
+            model=model,
+            price_per_mtok=price_per_mtok,
+            limit=limit,
         )
         if _meta_record.enabled and report.overhead_events > 0:
             _meta_record.produced_finding(
@@ -1078,6 +1099,11 @@ def cost(
         return
 
     console.print(f"[bold]Trellis Cost Overhead[/bold] (last {days} days)")
+    if report.scan.truncated:
+        # #374, and it matters most here: this is the only surface that turns
+        # a capped read into a dollar figure. A silently shortened window
+        # understates spend, which is the direction nobody investigates.
+        console.print(f"  [yellow]window[/yellow] {report.scan.note}")
     console.print(
         f"  Injected {report.overhead_tokens:,} tokens "
         f"across {report.overhead_events} retrievals"
@@ -1342,6 +1368,14 @@ def pack_sections(
         help="Flag sections whose empty rate meets or exceeds this value",
     ),
     output_format: str = typer.Option("text", "--format", help="Output format"),
+    limit: int = typer.Option(
+        DEFAULT_SCAN_LIMIT,
+        "--limit",
+        help=(
+            "Max events to scan. Raise it when the report says TRUNCATED; "
+            "the newest events are kept, so the note names what was cut."
+        ),
+    ),
     no_meta_trace: bool = typer.Option(
         False,
         "--no-meta-trace",
@@ -1365,6 +1399,7 @@ def pack_sections(
             event_log,
             days=days,
             empty_rate_threshold=empty_rate_threshold,
+            limit=limit,
         )
         if _meta_record.enabled and report.section_stats:
             _meta_record.produced_finding(
@@ -1693,6 +1728,14 @@ def dimension_predictiveness(
         0.5, help="Rating threshold to consider a pack successful"
     ),
     output_format: str = typer.Option("text", "--format", help="Output format"),
+    limit: int = typer.Option(
+        DEFAULT_SCAN_LIMIT,
+        "--limit",
+        help=(
+            "Max events to scan. Raise it when the report says TRUNCATED; "
+            "the newest events are kept, so the note names what was cut."
+        ),
+    ),
     no_meta_trace: bool = typer.Option(
         False,
         "--no-meta-trace",
@@ -1719,6 +1762,7 @@ def dimension_predictiveness(
             event_log,
             days=days,
             success_threshold=success_threshold,
+            limit=limit,
         )
         if _meta_record.enabled and report.dimensions:
             _meta_record.produced_finding(
@@ -1786,6 +1830,14 @@ def dimension_predictiveness(
 def pack_telemetry(
     days: int = typer.Option(7, help="Days of history to analyze"),
     output_format: str = typer.Option("text", "--format", help="Output format"),
+    limit: int = typer.Option(
+        DEFAULT_SCAN_LIMIT,
+        "--limit",
+        help=(
+            "Max events to scan. Raise it when the report says TRUNCATED; "
+            "the newest events are kept, so the note names what was cut."
+        ),
+    ),
     no_meta_trace: bool = typer.Option(
         False,
         "--no-meta-trace",
@@ -1805,7 +1857,7 @@ def pack_telemetry(
         analyzer_name="cli.analyze.pack-telemetry",
         disabled=no_meta_trace,
     ) as _meta_record:
-        report = analyze_pack_telemetry(event_log, days=days)
+        report = analyze_pack_telemetry(event_log, days=days, limit=limit)
         if _meta_record.enabled and report.total_packs > 0:
             _meta_record.produced_finding(
                 f"pack-telemetry-report-d{days}",
@@ -1912,6 +1964,14 @@ def pack_telemetry(
 def extractor_fallbacks(
     days: int = typer.Option(30, help="Days of history to analyze"),
     output_format: str = typer.Option("text", "--format", help="Output format"),
+    limit: int = typer.Option(
+        DEFAULT_SCAN_LIMIT,
+        "--limit",
+        help=(
+            "Max events to scan. Raise it when the report says TRUNCATED; "
+            "the newest events are kept, so the note names what was cut."
+        ),
+    ),
     no_meta_trace: bool = typer.Option(
         False,
         "--no-meta-trace",
@@ -1932,7 +1992,7 @@ def extractor_fallbacks(
         analyzer_name="cli.analyze.extractor-fallbacks",
         disabled=no_meta_trace,
     ) as _meta_record:
-        report = analyze_extractor_fallbacks(event_log, days=days)
+        report = analyze_extractor_fallbacks(event_log, days=days, limit=limit)
         if _meta_record.enabled and report.total_dispatches > 0:
             _meta_record.produced_finding(
                 f"extractor-fallbacks-report-d{days}",

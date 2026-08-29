@@ -21,9 +21,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from pydantic import Field
+
 from trellis.core.base import TrellisModel
 from trellis.retrieve.token_pricing import estimate_dollars, resolve_pricing
 from trellis.retrieve.token_usage import analyze_token_usage
+from trellis.stores.base.event_log import DEFAULT_SCAN_LIMIT, ScanCoverage
 
 if TYPE_CHECKING:
     from trellis.stores.base.event_log import EventLog
@@ -50,6 +53,11 @@ class TrellisCostReport(TrellisModel):
     by_operation: list[dict[str, Any]]
     #: Token-estimator identity behind the count, for auditability.
     estimator: str = "estimate_4_chars_per_token"
+    #: Coverage of the ``TOKEN_TRACKED`` read behind these numbers (#374).
+    #: Carried because this report's headline is a **dollar figure**: a
+    #: silently truncated window understates spend, and understating spend
+    #: is the direction nobody investigates.
+    scan: ScanCoverage = Field(default_factory=ScanCoverage)
 
 
 def summarize_trellis_cost(
@@ -58,6 +66,7 @@ def summarize_trellis_cost(
     days: int = 7,
     model: str | None = None,
     price_per_mtok: float | None = None,
+    limit: int = DEFAULT_SCAN_LIMIT,
 ) -> TrellisCostReport:
     """Price Trellis's injected-context overhead over the last *days*.
 
@@ -67,11 +76,16 @@ def summarize_trellis_cost(
         model: Consuming model for pricing (else ``TRELLIS_COST_MODEL`` /
             the default).
         price_per_mtok: Explicit input price override, USD/Mtok.
+        limit: Max ``TOKEN_TRACKED`` events to read. Forwarded to
+            :func:`~trellis.retrieve.token_usage.analyze_token_usage`, whose
+            coverage is carried through to ``report.scan`` — a priced report
+            over a silently shortened window is the one number here nobody
+            would think to doubt.
 
     Returns:
         A :class:`TrellisCostReport`.
     """
-    usage = analyze_token_usage(event_log, days=days)
+    usage = analyze_token_usage(event_log, days=days, limit=limit)
     resolved_model, price, source = resolve_pricing(model, price_per_mtok)
 
     by_operation = [
@@ -92,6 +106,7 @@ def summarize_trellis_cost(
         model=resolved_model,
         price_per_mtok=price,
         price_source=source,
+        scan=usage.scan,
         overhead_dollars=round(estimate_dollars(usage.total_tokens, price), 6),
         by_operation=by_operation,
     )
