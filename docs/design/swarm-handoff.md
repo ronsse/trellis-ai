@@ -8,32 +8,38 @@
 > [`implementation-roadmap.md`](./implementation-roadmap.md) (**authoritative** — when it
 > and the backlog disagree, the roadmap wins).
 >
-> Last updated 2026-08-28 at `99f63da`.
+> Last updated 2026-08-29 at `9ed98f7`.
 
 ## 1. State
 
-`main` = `99f63da`. **The prod containers on skynet do _not_ run current `main`** — §1.2.
+`main` = `9ed98f7`. **The prod containers on skynet do _not_ run current `main`** — §1.2.
 
 Landed 2026-08-26: #340, #341, #304, **noise exclusion actually holding** (#343), #328,
 **attribution decomposed + join key restored** (#344), #346.
 
-Landed 2026-08-27 — ten PRs closing Waves 1 and 1b: #347, **#352 (the first outside
-contribution)**, **#353 (F1 — value density measured)**, #354, #355,
-**#357 (A1 — traces reachable by semantic search at all)**,
-**#358 (#345 — the pgvector contract suite actually executes)**,
-**#359 (F2 — graduated disclosure)**, #361.
+Landed 2026-08-27 — ten PRs closing Waves 1 and 1b: #347, **#352 (first outside
+contribution)**, **#353 (F1)**, #354, #355, **#357 (A1)**, **#358 (#345)**, **#359 (F2)**, #361.
 
-Landed 2026-08-28 — six PRs, and **four of the six refuted the premise they were sent to
-implement**:
+Landed 2026-08-28/29 — thirteen PRs. **Six of the ten agents came back having refuted the
+item they were sent to implement**, which is the wave's most reusable outcome:
 
 | PR | Item | Outcome |
 |---|---|---|
-| [#367](https://github.com/ronsse/trellis-ai/pull/367) | B3 alias indexing | **Already done in #289.** Built no index; fixed a real cost it found instead (40% of resolver calls were exact within-document repeats) and corrected the module's false claim that all four backends enforce a unique-current alias index |
-| [#366](https://github.com/ronsse/trellis-ai/pull/366) | orchestrator docs | the deployment lag (§1.2) |
-| [#368](https://github.com/ronsse/trellis-ai/pull/368) | B1 / #298 | **All three proposed directions refuted by data.** Shipped `by_item_namespace`, the axis that could show it |
+| [#367](https://github.com/ronsse/trellis-ai/pull/367) | B3 alias indexing | **already done in #289** — fixed a real cost it found instead (40% of resolver calls were exact repeats) |
+| [#368](https://github.com/ronsse/trellis-ai/pull/368) | B1 / #298 | **all three proposed directions refuted**; shipped `by_item_namespace`, the axis that could show it |
+| [#370](https://github.com/ronsse/trellis-ai/pull/370) | C1 policy gate | **stage 2 now runs**; a full policy CRUD surface already existed wired to nothing |
 | [#372](https://github.com/ronsse/trellis-ai/pull/372) | E2 capture coverage | denominator taken from the *deployed* gate, not a new eligibility rule |
-| [#370](https://github.com/ronsse/trellis-ai/pull/370) | C1 policy gate | **Stage 2 now runs.** A full policy CRUD surface already existed and was wired to nothing |
-| [#376](https://github.com/ronsse/trellis-ai/pull/376) | #371 graph axis | **The obvious fix measured as a literal no-op** — 0 seeds on 37/37 intents |
+| [#376](https://github.com/ronsse/trellis-ai/pull/376) | #371 graph axis | **the obvious fix measured as a literal no-op** — 0 seeds on 37/37 intents |
+| [#380](https://github.com/ronsse/trellis-ai/pull/380) | A3 / #336 | gate was **miscalibrated 10x**, not unfalsifiable; 64 → 24 demotions, all 8 named memories spared |
+| [#382](https://github.com/ronsse/trellis-ai/pull/382) | #373 advisories | one resolver; **and the 37 advisories are degenerate** (#383) |
+| [#384](https://github.com/ronsse/trellis-ai/pull/384) | B2 chunk rollup | **refused** — every cap loses cited-helpful bodies faster than it saves tokens |
+| [#386](https://github.com/ronsse/trellis-ai/pull/386) | #381 | nightly curate now syncs vector metadata, **proven on scratch stores** not asserted |
+| [#387](https://github.com/ronsse/trellis-ai/pull/387) | #378 | one ruff version, **enforced by a check instead of a comment** |
+| [#389](https://github.com/ronsse/trellis-ai/pull/389) | #374 / #364 | `scan_events`; `useful_token_fraction` keeps its denominator and gains a bound |
+| #366, #379 | orchestrator docs | the deployment lag, and a trap propagated to six agents |
+
+**Four of the orchestrator's own claims were wrong and agents caught all four** — see §5 and
+the corrections on #373 and #374. That is the gate working, not a failure of it.
 
 ### 1.1 In flight
 
@@ -180,6 +186,48 @@ not pedantry — a dependabot bump of ruff/mypy landed mid-session and could leg
 have failed the next PR's lint. `main` has **no required status checks**, so nothing but
 this discipline stands between an agent and an unverified merge (ledger D-3).
 
+### 4.1 The review gate — every PR, before merge
+
+Operator instruction, 2026-08-29: **every PR goes through a simplify pass and a review pass.**
+
+The relevant agent definitions ship with the official plugin marketplace and are on disk at:
+
+```
+~/.claude/plugins/marketplaces/claude-plugins-official/plugins/pr-review-toolkit/agents/
+  code-simplifier.md        · clarity/consistency, functionality preserved exactly
+  code-reviewer.md          · CLAUDE.md compliance + bugs; reports only confidence >= 80
+  silent-failure-hunter.md  · error handling, fallbacks, swallowed exceptions
+  comment-analyzer.md       · comments that lie or restate the code
+  pr-test-analyzer.md       · does the test actually exercise the change
+  type-design-analyzer.md
+```
+
+**The plugins are not installed** (`ListPlugins` returns empty, no `enabledPlugins` key in
+`~/.claude.json` or `~/.claude/settings.json`), so there is no `/review-pr` slash command in
+a non-interactive session. Installing needs `/plugin`, which is interactive. **Until then,
+read the definitions and dispatch them as ordinary subagents against the PR diff** — the
+files are plain markdown with a system prompt in the body, and that is all the plugin adds.
+
+Run order that has proven useful:
+
+1. **`silent-failure-hunter` first.** This repo's defining defect is *a mechanism that
+   reports success while doing nothing* — five instances in one week. It is the lens most
+   likely to find something here, and it is cheap to run.
+2. **`code-simplifier`** — but hold it to its own rule: *preserve functionality exactly*.
+   A simplification that changes behaviour is a bug wearing a tidy diff.
+3. **`code-reviewer`** — reports only confidence >= 80, which is the right filter for a
+   swarm that already produces long reports.
+
+Two rules for using them:
+
+- **Subagents self-review before opening the PR; the orchestrator reviews again before
+  merging.** The second pass is the one that matters — an agent reviewing its own diff
+  shares the blind spot that produced it.
+- **A review finding is a claim, not a verdict.** Verify it the same way you verify a
+  panel's assertions (§3) or an agent's report. Several agent claims this week were
+  materially wrong in *both* directions, including two of the orchestrator's own filed
+  issues.
+
 **One merge authority.** Subagents open PRs; the orchestrator merges. Never let a subagent
 merge its own work.
 
@@ -276,6 +324,18 @@ stopped holding while everything reported green.**
   production backend.
 - Earlier instances: filters hiding stored memory (#282), silent capture outages (#297),
   feedback that never joined (pre-#287), a reference rate that could only read 1.00.
+
+**A corollary learned the hard way (#336):** *a rule of the form `rate < threshold` is
+not a measurement until someone has measured the base rate the rate is drawn from.* The
+noise-demotion gate demoted below `helpful/appearances < 0.3` against a distribution whose
+mean was **0.103** — a threshold 3x its own base rate, so demotion was the default outcome
+rather than an inference, and 81% of scored items were flagged. It read as unfalsifiability
+for weeks. Apply this to any future "served often, rarely used" heuristic.
+
+**And a second (#374, #373):** when a metric reads zero, **enumerate every path that could
+produce the zero before naming one.** "0 advisories served" turned out to have at least four
+sufficient causes; the first correction replaced one single-cause story with another, which
+is the same error in a new position.
 
 **The panel never caught any of these. Measurement did, every time.** Before implementing
 against a number, verify the number can move — query it, and check it can return more than
