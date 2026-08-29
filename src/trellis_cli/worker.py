@@ -1095,8 +1095,9 @@ def _select_enrichment_candidates(
     documents (a generous multiple of ``limit`` so the filter has headroom)
     and returns at most ``limit`` matches.
     """
-    # ``include_chunks`` is named rather than defaulted (#396): enrichment
-    # tags every stored row, chunk rows included.
+    # ``include_chunks`` is named rather than defaulted (#396): this walker
+    # scans for un-enriched documents, and a chunk row is as enrichable as
+    # its parent.
     scanned = document_store.list_documents(
         limit=max(limit * 5, limit), include_chunks=True
     )
