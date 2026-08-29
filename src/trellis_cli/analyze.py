@@ -1170,6 +1170,13 @@ def generate_advisories(
         console.print(f"  Feedback events: {report.total_feedback}")
         console.print(f"  Advisories generated: {report.advisories_generated}")
         console.print(f"  Advisories stored: {report.advisories_stored}")
+        if report.findings_refused_no_comparison_arm:
+            console.print(
+                "  Findings refused (no comparison arm):"
+                f" {report.findings_refused_no_comparison_arm}"
+            )
+        if report.coverage.note:
+            console.print(f"  [yellow]{report.coverage.note}[/yellow]")
 
         if report.advisories_generated > 0:
             console.print()

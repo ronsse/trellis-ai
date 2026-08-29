@@ -504,6 +504,51 @@ class TestComparisonArmRequired:
         assert [results[k][2] for k in (0, 2, 4)] == [0.833, 0.5, 0.167]
 
 
+class TestRefusalIsReported:
+    """A refusal nobody can see is the quiet half of the #383 defect."""
+
+    def test_refused_findings_are_counted_on_the_report(self, tmp_path: Path) -> None:
+        """Refusals are counted, not just silently dropped.
+
+        Seven: the ``ubiquitous`` and ``narrow`` strategies, plus the five
+        words of the shared intent, every one of which is on all 20 packs.
+        It is the number that distinguishes "the analysis found nothing"
+        from "the analysis found things it could not attribute" — and on
+        this corpus almost everything is the latter.
+        """
+        packs, feedback = _two_arm_corpus()
+        event_log = MagicMock(spec=EventLog)
+        event_log.get_events.side_effect = [packs, feedback]
+        gen = AdvisoryGenerator(event_log, AdvisoryStore(tmp_path / "adv.json"))
+
+        report = gen.generate(days=30)
+
+        assert report.advisories_generated == 1
+        assert report.findings_refused_no_comparison_arm == 7
+
+    def test_no_refusals_when_every_finding_has_an_arm(self, tmp_path: Path) -> None:
+        packs: list[MagicMock] = []
+        feedback: list[MagicMock] = []
+        for i in range(20):
+            packs.append(
+                _strategy_pack(
+                    f"p{i}",
+                    ["alpha"] if i < 10 else ["beta"],
+                    item_ids=[f"solo{i}"],
+                    intent="",
+                )
+            )
+            feedback.append(_feedback_event(f"p{i}", success=i < 8 or i >= 18))
+
+        event_log = MagicMock(spec=EventLog)
+        event_log.get_events.side_effect = [packs, feedback]
+        gen = AdvisoryGenerator(event_log, AdvisoryStore(tmp_path / "adv.json"))
+
+        report = gen.generate(days=30)
+
+        assert report.findings_refused_no_comparison_arm == 0
+
+
 class TestEvidencePointers:
     """#383 — advisories name the packs behind the claim."""
 

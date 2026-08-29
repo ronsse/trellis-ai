@@ -62,7 +62,7 @@ call site's comment always claimed it did.
 from __future__ import annotations
 
 import hashlib
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -144,6 +144,15 @@ class AdvisoryReport(TrellisModel):
     total_packs: int
     total_feedback: int
     analysis_window_days: int
+    #: Candidate findings that cleared the sample floor on the arm that
+    #: *carried* them but had fewer than ``min_sample_size`` packs to be
+    #: compared against, and were therefore not emitted. Counted per
+    #: ``(method, key)`` candidate, so one ubiquitous strategy inspected
+    #: by two methods contributes two. A high number against a low
+    #: ``advisories_generated`` is the deployment saying its packs are too
+    #: alike to attribute anything to — which is what the reference
+    #: deployment was saying, in silence, while emitting the claim anyway.
+    findings_refused_no_comparison_arm: int = 0
     #: Coverage of the two capped event reads. A run whose window held
     #: more than ``DEFAULT_SCAN_LIMIT`` events of either type analysed
     #: only the newest of them, and says so here rather than reporting a
@@ -172,6 +181,14 @@ class AdvisoryGenerator:
         self._advisory_store = advisory_store
         self._min_sample_size = min_sample_size
         self._min_effect_size = min_effect_size
+        #: Per-run refusal tally, reset at the top of :meth:`generate`. A
+        #: refusal nobody can see is the quiet half of the defect this fix
+        #: is about: an operator whose advisory count drops needs to be
+        #: told the findings were declined for want of evidence, not left
+        #: to guess that the analysis found nothing. Per-instance mutable
+        #: state, so a generator is single-run and not thread-safe — which
+        #: is how all three call sites already use it.
+        self._refusals: Counter[str] = Counter()
 
     def generate(self, *, days: int = 30) -> AdvisoryReport:
         """Run all analysis methods and store resulting advisories.
@@ -179,6 +196,7 @@ class AdvisoryGenerator:
         Returns an :class:`AdvisoryReport` summarising what was generated.
         """
         since = datetime.now(tz=UTC) - timedelta(days=days)
+        self._refusals = Counter()
 
         # Capped reads go through scan_events so a window with more than
         # DEFAULT_SCAN_LIMIT matches keeps the *newest* events. The
@@ -236,6 +254,8 @@ class AdvisoryGenerator:
             count=len(advisories),
             stored=stored,
             packs_analyzed=len(packs),
+            refused_no_comparison_arm=self._refusals["no_comparison_arm"],
+            refused_too_few_observations=self._refusals["too_few_observations"],
             truncated=coverage.truncated,
         )
 
@@ -245,6 +265,7 @@ class AdvisoryGenerator:
             total_packs=len(pack_scan.events),
             total_feedback=len(feedback_scan.events),
             analysis_window_days=days,
+            findings_refused_no_comparison_arm=self._refusals["no_comparison_arm"],
             coverage=coverage,
         )
 
@@ -608,8 +629,10 @@ class AdvisoryGenerator:
         """
         presentations = outcomes.presentations
         if presentations < self._min_sample_size:
+            self._refusals["too_few_observations"] += 1
             return None
         if total_packs - presentations < self._min_sample_size:
+            self._refusals["no_comparison_arm"] += 1
             return None
         return lift_vs_baseline(
             outcomes.successes, presentations, total_successes, total_packs
