@@ -1198,9 +1198,10 @@ def _exit_if_advisory_store_degraded(store: AdvisoryStore, output_format: str) -
     code has to be able to see that. Both ``analyze`` advisory commands
     use it, so the two agree.
     """
-    if not store.is_degraded:
+    degradation = store.degradation
+    if degradation is None:
         return
-    degraded = store.degradation.to_dict() if store.degradation else None
+    degraded = degradation.to_dict()
     if output_format == "json":
         emit_json({"status": "degraded", "store_degradation": degraded})
     else:
@@ -1308,7 +1309,11 @@ def generate_advisories(
                 )
             console.print(table)
 
-        if report.total_feedback == 0:
+        # Gated on the degradation: a refused run reports ``total_feedback=0``
+        # because it never read the event log, so this hint would fire and
+        # tell the operator to go record feedback — the exact misdiagnosis
+        # the banner above it exists to prevent.
+        if report.total_feedback == 0 and not report.store_degradation:
             console.print()
             console.print(
                 "[dim]No feedback recorded yet. Record outcomes via"

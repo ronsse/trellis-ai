@@ -321,6 +321,11 @@ class TestCorruptFileIsPreservedNotOverwritten:
             ("", "malformed_json"),
             ('["a", "list"]', "malformed_envelope"),
             ('{"advisories": "not a list"}', "malformed_envelope"),
+            # A JSON object with no ``advisories`` key at all. ``_save``
+            # always emits it, so these are not files this store wrote.
+            ("{}", "malformed_envelope"),
+            ('{"advisorees": [{"advisory_id": "a"}]}', "malformed_envelope"),
+            ('{"version": 2, "items": []}', "malformed_envelope"),
         ],
     )
     def test_every_unreadable_shape_degrades(
@@ -331,6 +336,177 @@ class TestCorruptFileIsPreservedNotOverwritten:
         store = AdvisoryStore(path)
         assert store.degradation is not None
         assert store.degradation.reason == reason
+
+    @pytest.mark.parametrize(
+        "content",
+        ["{}", '{"advisorees": [{"advisory_id": "a"}]}', '{"version": 2}'],
+    )
+    def test_a_missing_advisories_key_is_not_an_empty_store(
+        self, tmp_path: Path, content: str
+    ) -> None:
+        """The hole that left #393 intact for a whole class of file.
+
+        Reading the key with a ``[]`` default made "no ``advisories`` key"
+        and "an empty ``advisories`` list" the same state, so a hand-edit, a
+        renamed field or the wrong file at this path loaded as a *clean*
+        empty store — and the next nightly write replaced it. Nothing about
+        that path was degraded, so nothing refused it.
+        """
+        path = tmp_path / "a.json"
+        path.write_text(content, encoding="utf-8")
+        before = path.read_text(encoding="utf-8")
+
+        store = AdvisoryStore(path)
+
+        assert store.is_degraded is True
+        with pytest.raises(DegradedStoreWriteError):
+            store.put(_advisory())
+        assert path.read_text(encoding="utf-8") == before
+
+    def test_an_empty_advisories_list_is_a_clean_empty_store(
+        self, tmp_path: Path
+    ) -> None:
+        """The negative control: what ``_save`` writes must still load clean."""
+        path = tmp_path / "a.json"
+        path.write_text('{"advisories": []}', encoding="utf-8")
+        store = AdvisoryStore(path)
+        assert store.is_degraded is False
+        store.put(_advisory())
+        assert len(store.list()) == 1
+
+    def test_an_unexpected_load_failure_degrades_rather_than_raising(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The outer catch is the unconditional half of #382's promise.
+
+        Every *known* corruption shape is handled by a narrow branch inside
+        ``_load_rows``, so nothing else exercises the broad outer handler —
+        and narrowing it would pass CI while breaking the guarantee that
+        constructing a store never raises, whatever shape the corruption
+        takes. Retrieval depends on that.
+        """
+        path = tmp_path / "a.json"
+        AdvisoryStore(path).put(_advisory())
+
+        def _boom(_self: AdvisoryStore) -> None:
+            msg = "something nobody enumerated"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(AdvisoryStore, "_load_rows", _boom)
+
+        store = AdvisoryStore(path)  # must not raise
+
+        assert store.degradation is not None
+        assert store.degradation.reason == "load_failed"
+        assert "RuntimeError" in store.degradation.detail
+        with pytest.raises(DegradedStoreWriteError):
+            store.put(_advisory())
+
+    def test_a_whole_file_failure_reports_an_unknown_row_count(
+        self, tmp_path: Path
+    ) -> None:
+        """ "0 could not be read" reads as "nothing was lost".
+
+        On a whole-file failure the count is unknowable — 51 rows may be
+        sitting in the file unread. Rendering that as ``0`` tells an
+        operator at 03:00 the opposite of the truth.
+        """
+        path = tmp_path / "a.json"
+        path.write_text("{ broken", encoding="utf-8")
+        store = AdvisoryStore(path)
+
+        assert store.degradation is not None
+        assert store.degradation.rows_skipped is None
+        assert store.degradation.rows_skipped_display == "unknown"
+        assert store.degradation.to_dict()["rows_skipped_display"] == "unknown"
+
+        with pytest.raises(DegradedStoreWriteError) as excinfo:
+            store.put(_advisory())
+        assert "unknown could not be read" in str(excinfo.value)
+        assert "0 could not be read" not in str(excinfo.value)
+
+    def test_a_per_row_failure_reports_the_count_it_knows(self, tmp_path: Path) -> None:
+        """The other half: a countable loss must not read as "unknown"."""
+        path = tmp_path / "a.json"
+        AdvisoryStore(path).put_many([_advisory(scope=f"s{i}") for i in range(3)])
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw["advisories"][1] = {"advisory_id": "x", "renamed": 1}
+        path.write_text(json.dumps(raw), encoding="utf-8")
+
+        store = AdvisoryStore(path)
+        assert store.degradation is not None
+        assert store.degradation.rows_skipped == 1
+        assert store.degradation.rows_skipped_display == "1"
+
+    def test_many_bad_rows_are_summarised_not_dumped(self, tmp_path: Path) -> None:
+        """A cron line has to stay readable — but say how much it elided."""
+        path = tmp_path / "a.json"
+        rows = [{"advisory_id": f"bad{i}", "renamed": i} for i in range(7)]
+        path.write_text(json.dumps({"advisories": rows}), encoding="utf-8")
+
+        store = AdvisoryStore(path)
+
+        assert store.degradation is not None
+        assert store.degradation.rows_skipped == 7
+        assert "(+4 more)" in store.degradation.detail
+
+    def test_the_error_carries_a_stable_machine_readable_code(
+        self, tmp_path: Path
+    ) -> None:
+        """A new public contract, set after ``super().__init__`` — easy to drop."""
+        path = tmp_path / "a.json"
+        path.write_text("{ broken", encoding="utf-8")
+        store = AdvisoryStore(path)
+
+        with pytest.raises(DegradedStoreWriteError) as excinfo:
+            store.put(_advisory())
+
+        assert excinfo.value.code == "DEGRADED_STORE_WRITE"
+        assert excinfo.value.path == str(path)
+        assert excinfo.value.recovery == f"mv {path} {path}.corrupt"
+
+    def test_a_refused_write_does_not_mutate_the_store_either(
+        self, tmp_path: Path
+    ) -> None:
+        """Refusing after mutating is #393's own symptom, surviving in-process.
+
+        The file being intact is only half the promise — a caller that
+        catches the error and keeps serving packs from the same store must
+        not have silently lost rows, and ``restore()`` must not have
+        un-suppressed one in memory. Both were true before the refusal
+        moved ahead of the mutation.
+        """
+        path = tmp_path / "a.json"
+        seed = AdvisoryStore(path)
+        keeper = seed.put(_advisory(scope="keeper"))
+        dropped = seed.put(_advisory(scope="dropped"))
+        seed.suppress(dropped.advisory_id, reason="fitness")
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw["advisories"].append({"advisory_id": "broken", "renamed": 1})
+        path.write_text(json.dumps(raw), encoding="utf-8")
+
+        store = AdvisoryStore(path)
+        assert store.is_degraded is True
+        before_ids = {a.advisory_id for a in store.list(include_suppressed=True)}
+        assert len(before_ids) == 2
+
+        for call in (
+            lambda: store.put(_advisory()),
+            lambda: store.put_many([_advisory()]),
+            lambda: store.suppress(keeper.advisory_id),
+            lambda: store.restore(dropped.advisory_id),
+            lambda: store.remove(keeper.advisory_id),
+            store.clear,
+        ):
+            with pytest.raises(DegradedStoreWriteError):
+                call()
+
+        after = store.list(include_suppressed=True)
+        assert {a.advisory_id for a in after} == before_ids
+        still_suppressed = store.get(dropped.advisory_id)
+        assert still_suppressed is not None
+        assert still_suppressed.status == AdvisoryStatus.SUPPRESSED
+        assert store.get(keeper.advisory_id) is not None
 
     def test_binary_garbage_degrades_rather_than_raising(self, tmp_path: Path) -> None:
         """#382's promise is unconditional: constructing a store never raises.
@@ -351,11 +527,15 @@ class TestCorruptFileIsPreservedNotOverwritten:
 
         A partial exemption is a hole: ``clear`` in particular reads like
         the recovery path and would happily write ``{"advisories": []}``
-        over the file nobody has read yet.
+        over the file nobody has read yet. Covered black-box — the file is
+        seeded with a suppressed row so ``restore`` has a real target,
+        rather than reaching into ``store._advisories``.
         """
         path = tmp_path / "a.json"
-        keeper = _advisory(scope="keeper")
-        AdvisoryStore(path).put_many([keeper])
+        seed = AdvisoryStore(path)
+        keeper = seed.put(_advisory(scope="keeper"))
+        suppressed = seed.put(_advisory(scope="suppressed"))
+        seed.suppress(suppressed.advisory_id, reason="fitness")
         raw = json.loads(path.read_text(encoding="utf-8"))
         raw["advisories"].append({"advisory_id": "broken", "category": "nonsense"})
         path.write_text(json.dumps(raw), encoding="utf-8")
@@ -363,24 +543,19 @@ class TestCorruptFileIsPreservedNotOverwritten:
 
         store = AdvisoryStore(path)
         assert store.is_degraded is True
-        # The good row loaded, so suppress/restore/remove have a real target.
         assert store.get(keeper.advisory_id) is not None
+        assert store.get(suppressed.advisory_id) is not None
 
         for call in (
             lambda: store.put(_advisory()),
             lambda: store.put_many([_advisory()]),
             lambda: store.suppress(keeper.advisory_id),
+            lambda: store.restore(suppressed.advisory_id),
             lambda: store.remove(keeper.advisory_id),
             store.clear,
         ):
             with pytest.raises(DegradedStoreWriteError):
                 call()
-
-        # restore() needs a suppressed row, which suppress() could not make.
-        suppressed = keeper.model_copy(update={"status": AdvisoryStatus.SUPPRESSED})
-        store._advisories[suppressed.advisory_id] = suppressed
-        with pytest.raises(DegradedStoreWriteError):
-            store.restore(suppressed.advisory_id)
 
         assert path.read_text(encoding="utf-8") == before
 

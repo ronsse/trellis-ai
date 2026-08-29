@@ -92,6 +92,14 @@ _MAX_REPORTED_ROWS = 3
 #: ``mkstemp`` creates ``0600``, and silently narrowing the live file would
 #: break a container reader bind-mounting it under a different uid. When the
 #: destination already exists its own mode is preserved instead.
+#:
+#: It is a constant, not ``0o666 & ~umask``: reading the umask means
+#: setting it, which is not safe in the threaded API process. The trade is
+#: that under a restrictive umask (``077``) this *widens* a new file, where
+#: ``write_text`` would have produced ``0600``. Accepted — the file holds
+#: generated advisory text, the same content the read-scoped REST route
+#: already serves — but it is a change of behaviour in both directions, not
+#: only the narrowing one.
 _NEW_FILE_MODE = 0o644
 
 
@@ -155,9 +163,12 @@ class AdvisoryLoadDegradation:
 class AdvisoryStore:
     """Load and save advisories from a JSON file.
 
-    Follows the same lightweight pattern as :class:`PolicyStore`.
-    Advisories are small, infrequently updated, and loaded in full —
-    a JSON file is the right weight class.
+    Advisories are small, infrequently updated, and loaded in full — a
+    JSON file is the right weight class. The *storage* shape is the one
+    :class:`~trellis.stores.policy_store.PolicyStore` uses; the **failure
+    posture is not**, and the two should not be read as a pair any more.
+    ``PolicyStore`` still degrades a corrupt load to empty and then
+    whole-file-rewrites, which is this store's pre-#393 behaviour.
 
     File format::
 
@@ -177,11 +188,6 @@ class AdvisoryStore:
             self._load()
 
     # -- Public API --
-
-    @property
-    def path(self) -> Path:
-        """The file this store reads and writes."""
-        return self._path
 
     @property
     def degradation(self) -> AdvisoryLoadDegradation | None:
@@ -487,11 +493,12 @@ class AdvisoryStore:
     ) -> None:
         """Mark the store degraded and say so at a level operators see.
 
-        ``error``, not ``info``. The CLI's root callback pins
-        ``TRELLIS_LOG_LEVEL=WARNING`` unless ``--verbose`` is passed, so an
-        ``info`` line here would be filtered out of the one surface that
-        runs this nightly — the same class of no-op as a ``logger.debug``
-        under an INFO filter.
+        ``error``, not ``info``. The CLI's root callback *defaults*
+        ``TRELLIS_LOG_LEVEL`` to ``WARNING`` when the env var is absent
+        (``trellis_cli.main._root``; an explicit env var always wins), so on
+        a default invocation an ``info`` line here is filtered out of the
+        one surface that runs this nightly — the same class of no-op as a
+        ``logger.debug`` under an INFO filter.
         """
         self._degradation = AdvisoryLoadDegradation(
             path=str(self._path),
