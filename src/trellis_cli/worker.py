@@ -1308,7 +1308,7 @@ def _run_batch_enrichment(
         # re-stamps every document it touches to one instant, after which
         # ``KeywordSearch``'s recency decay is measuring the enrichment run
         # rather than the documents. Widest of the five for the *second*
-        # reader too: ``_select_enrichment_candidates`` applies no lifecycle
+        # reader: ``_select_enrichment_candidates`` applies no lifecycle
         # filter, so a ``superseded`` row is an ordinary candidate here and
         # bumping its stamp resets the age ``mutate.retention`` prunes on
         # (#406).
