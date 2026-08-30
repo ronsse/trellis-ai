@@ -158,8 +158,11 @@ def get_policy(policy_id: str) -> dict[str, Any]:
 def create_policy(body: CreatePolicyRequest) -> dict[str, Any]:
     """Create a governance policy."""
     store = _get_policy_store()
-    if store.is_degraded:
-        raise _refusal_http_error(store)
+    # No ``is_degraded`` pre-check: the ``except`` below already answers
+    # both refusals with the same 409, so a pre-check was pure duplication —
+    # and worse than that, the two masked each other, leaving *neither*
+    # individually detectable by the suite. The store's refusal is
+    # unconditional, so one handler is enough.
     policy = Policy(
         policy_type=body.policy_type,
         scope=body.scope,
@@ -189,8 +192,6 @@ def create_policy(body: CreatePolicyRequest) -> dict[str, Any]:
 def delete_policy(policy_id: str) -> dict[str, Any]:
     """Delete a governance policy."""
     store = _get_policy_store()
-    if store.is_degraded:
-        raise _refusal_http_error(store)
     try:
         removed = store.remove(policy_id)
     except StoreWriteRefusedError as exc:

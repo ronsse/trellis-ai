@@ -353,13 +353,25 @@ class TestPolicyListSurvivesADamagedFile:
         The recovery command is the entire justification for refusing the
         write — an operator meets this needing the fix, not a diagnosis —
         so it is the one string that must survive rendering byte-for-byte.
-        Two ways to break it, both asserted. Unescaped, a data dir under
-        ``/tmp/my [staging] dir/`` renders as ``mv /tmp/my  dir/...``.
-        Hard-wrapped, the same command splits across two lines — and a
-        pasted newline is two shell commands, neither of them the fix.
-        Either way it is an unrunnable command printed to the operator *as*
-        the fix, silently.
+        **Three** ways to break it, and the earlier version of this test
+        certified the third while proving the first two were fixed.
+
+        1. *Markup.* Unescaped, a data dir under ``/tmp/my [staging] dir/``
+           renders as ``mv /tmp/my  dir/...`` — Rich eats the brackets.
+        2. *Wrapping.* Rich hard-wraps at the console width, so a deep path
+           splits the command across lines; a pasted newline is two shell
+           commands, neither of them the fix.
+        3. *Word-splitting.* The path contains spaces, so an unquoted
+           ``mv A B`` is an ``mv`` with **four** operands. Asserting the
+           string appears contiguously does not catch this — the old
+           assertion passed against a command that could not run.
+
+        So this asserts the property that actually matters: the printed
+        command **parses as a shell command** with exactly the two operands
+        it should have. That fails on all three.
         """
+        import shlex
+
         data_dir = tmp_path / "my [staging] dir" / "data"
         (data_dir / "stores").mkdir(parents=True)
         monkeypatch.setenv("TRELLIS_DATA_DIR", str(data_dir))
@@ -369,10 +381,17 @@ class TestPolicyListSurvivesADamagedFile:
         result = runner.invoke(app, ["policy", "list"])
 
         assert result.exit_code == 5
-        # The exact command, contiguous — brackets intact and no newline in
-        # the middle of it. The path here is comfortably past 80 columns, so
-        # this fails on either defect.
-        assert f"mv {policy_file} {policy_file}.corrupt" in result.stdout
+        line = next(
+            ln
+            for ln in result.stdout.splitlines()
+            if ln.strip().startswith("To reset:")
+        )
+        command = line.split("To reset:", 1)[1].strip()
+        assert shlex.split(command) == [
+            "mv",
+            str(policy_file),
+            f"{policy_file}.corrupt",
+        ]
 
     def test_json_output_is_parseable_with_a_long_path(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

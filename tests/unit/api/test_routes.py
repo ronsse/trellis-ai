@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from contextlib import asynccontextmanager
 
 import pytest
@@ -1016,16 +1017,28 @@ class TestPolicyRoutesOnADegradedStore:
         assert resp.status_code == 409
 
     def test_a_repaired_file_is_picked_up_without_a_restart(self, client, tmp_path):
-        """The store is cached for the life of the process.
+        """A fix must not need a restart to take effect.
 
-        Without invalidating the cache on the degraded flag, an operator who
-        took the recovery advice would keep getting 409s until someone
-        restarted the API — turning a fix into an outage of its own.
+        The store used to be cached for the life of the process, so an
+        operator who repaired ``policies.json`` would keep getting 409s
+        until someone bounced the API — turning the fix into an outage of
+        its own. Repaired here by writing **valid content**, not by deleting
+        the file: deleting exercises the absent-file path, which is a
+        different branch and the easier one.
         """
         path = self._damage(tmp_path, "{ broken")
         assert client.get("/api/v1/policies").json()["store_degradation"]
 
-        path.unlink()
+        surviving = Policy(
+            policy_type=PolicyType.MUTATION,
+            scope=PolicyScope(level="global"),
+            rules=[PolicyRule(operation="entity.delete", action="deny")],
+        )
+        path.write_text(
+            json.dumps({"policies": [surviving.model_dump(mode="json")]}),
+            encoding="utf-8",
+        )
+        assert client.get("/api/v1/policies").json()["store_degradation"] is None
 
         resp = client.post(
             "/api/v1/policies",
@@ -1036,10 +1049,13 @@ class TestPolicyRoutesOnADegradedStore:
             },
         )
         assert resp.status_code == 200
+        listed = client.get("/api/v1/policies").json()
         # The key is always present, ``None`` when clean — an optional key
         # makes every client handle its absence, and absence is the case
         # they would guess wrong about.
-        assert client.get("/api/v1/policies").json()["store_degradation"] is None
+        assert listed["store_degradation"] is None
+        # And the repaired file's own policy survived the write.
+        assert surviving.policy_id in {p["policy_id"] for p in listed["policies"]}
 
     def test_a_healthy_cached_store_cannot_overwrite_another_writer(
         self, client, tmp_path

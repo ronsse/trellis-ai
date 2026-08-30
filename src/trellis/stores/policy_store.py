@@ -93,6 +93,7 @@ never write back the partial view it is showing.
 from __future__ import annotations
 
 import json
+import shlex
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -148,6 +149,12 @@ class PolicyLoadDegradation:
         which for an access-control file are the only record of what the
         deployment was enforcing — no machine can rebuild them.
 
+        Both operands are ``shlex.quote``d. A data dir containing a space —
+        ``/tmp/my staging dir/`` — otherwise word-splits into an ``mv`` with
+        three operands that does not run, which is the same failure as the
+        Rich-markup and hard-wrap cases the CLI renderer guards: an
+        unrunnable command printed to the operator *as* the fix.
+
         Note what taking this advice means. Usually the canonical path is
         then *absent*, which is a legitimate, transparent, zero-policy
         deployment — right only if the operator re-declares the policies
@@ -157,7 +164,8 @@ class PolicyLoadDegradation:
         ruleset instead. Check ``trellis policy list`` after the move; it
         names the file actually in force.
         """
-        return f"mv {self.path} {self.path}.corrupt"
+        quoted = shlex.quote(self.path)
+        return f"mv {quoted} {shlex.quote(self.path + '.corrupt')}"
 
     @property
     def rows_skipped_display(self) -> str:

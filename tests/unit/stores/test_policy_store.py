@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
 from pathlib import Path
 
 import pytest
 from structlog.testing import capture_logs
 
+from tests.policy_shapes import DEGENERATE_POLICY_FILES, DEGENERATE_POLICY_IDS
 from trellis.errors import DegradedStoreWriteError, StaleStoreWriteError
 from trellis.schemas.enums import Enforcement, PolicyType
 from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
@@ -95,23 +97,6 @@ class TestPolicyStore:
 # #413 — read leniently, refuse to write
 # ---------------------------------------------------------------------------
 
-#: Every shape a damaged ``policies.json`` has actually been seen to take,
-#: paired with the ``reason`` the store must record. The two that matter
-#: most are ``{}`` and the typo'd key: they are *valid JSON* and the old
-#: ``raw.get("policies", [])`` loaded them as a **clean empty store**, so
-#: the defect survived for exactly the shapes that look healthiest. #414
-#: shipped that bug inside its own fix before it was caught; this table is
-#: why it cannot happen here silently.
-_DEGENERATE_SHAPES: list[tuple[str, str, str]] = [
-    ("empty_json_object", "{}", "malformed_envelope"),
-    ("null_policies_key", '{"policies": null}', "malformed_envelope"),
-    ("typoed_key", '{"policys": [{"policy_id": "x"}]}', "malformed_envelope"),
-    ("bare_list", "[]", "malformed_envelope"),
-    ("scalar", '"not a policy file"', "malformed_envelope"),
-    ("empty_file", "", "malformed_json"),
-    ("truncated_json", '{"policies": [{"policy_i', "malformed_json"),
-]
-
 
 def _damaged(tmp_path: Path, text: str) -> Path:
     path = tmp_path / "policies.json"
@@ -129,8 +114,8 @@ class TestDegenerateShapesDegradeAndRefuse:
 
     @pytest.mark.parametrize(
         ("name", "text", "reason"),
-        _DEGENERATE_SHAPES,
-        ids=[s[0] for s in _DEGENERATE_SHAPES],
+        DEGENERATE_POLICY_FILES,
+        ids=DEGENERATE_POLICY_IDS,
     )
     def test_shape_degrades(
         self, tmp_path: Path, name: str, text: str, reason: str
@@ -150,8 +135,8 @@ class TestDegenerateShapesDegradeAndRefuse:
 
     @pytest.mark.parametrize(
         ("name", "text", "reason"),
-        _DEGENERATE_SHAPES,
-        ids=[s[0] for s in _DEGENERATE_SHAPES],
+        DEGENERATE_POLICY_FILES,
+        ids=DEGENERATE_POLICY_IDS,
     )
     def test_shape_refuses_every_write_and_leaves_the_bytes_alone(
         self, tmp_path: Path, name: str, text: str, reason: str
@@ -160,18 +145,21 @@ class TestDegenerateShapesDegradeAndRefuse:
         store = PolicyStore(path)
         before = path.read_bytes()
 
-        with pytest.raises(DegradedStoreWriteError):
+        with pytest.raises(DegradedStoreWriteError) as exc_info:
             store.add(_policy())
+        # The label routes the message to the right operator instruction;
+        # "advisory" here would send them to the wrong file.
+        assert exc_info.value.store == "policy"
         with pytest.raises(DegradedStoreWriteError):
             store.remove("anything")
 
         assert path.read_bytes() == before, f"{name}: the damaged file was written"
-        assert [p.name for p in tmp_path.iterdir()] == ["policies.json"]
+        assert not [p for p in tmp_path.iterdir() if p.name != "policies.json"]
 
     @pytest.mark.parametrize(
         ("name", "text", "reason"),
-        _DEGENERATE_SHAPES,
-        ids=[s[0] for s in _DEGENERATE_SHAPES],
+        DEGENERATE_POLICY_FILES,
+        ids=DEGENERATE_POLICY_IDS,
     )
     def test_a_refused_write_does_not_mutate_memory(
         self, tmp_path: Path, name: str, text: str, reason: str
@@ -228,6 +216,20 @@ class TestDegenerateShapesDegradeAndRefuse:
             attempt()
 
         assert entered == [], "the write path was entered on a degraded store"
+
+    def test_save_refuses_on_its_own(self, tmp_path: Path) -> None:
+        """The unconditional backstop, pinned separately from its callers.
+
+        ``add`` and ``remove`` refuse first, which masks this: remove the
+        guard from ``_save`` alone and the suite stayed green. The docstring
+        claims "not calling ``refuse_if_degraded`` is never a way to avoid
+        one", and that claim is about ``_save``, so it needs its own test —
+        it is what protects a future write path added without the leading
+        guard.
+        """
+        store = PolicyStore(_damaged(tmp_path, "{ broken"))
+        with pytest.raises(DegradedStoreWriteError):
+            store._save()
 
 
 class TestDegradationIsPerRow:
@@ -316,7 +318,23 @@ class TestUnreadableFile:
         assert store.degradation is not None
         assert store.degradation.reason == "unreadable_file"
 
+    @pytest.mark.skipif(
+        os.geteuid() == 0, reason="root reads any file regardless of mode"
+    )
     def test_an_unreadable_file_degrades(self, tmp_path: Path) -> None:
+        """Permission-denied is the *most likely* real cause, so assert hard.
+
+        This test used to wrap its assertions in ``if store.is_degraded:``,
+        which made it structurally unable to fail: swallow the ``OSError``
+        without degrading and the ``if`` is simply skipped. That is the
+        complete #413 fail-open — an empty store, writes permitted, the
+        ruleset replaced — guarded by a test that passes either way.
+
+        And it is not a hypothetical cause. The reference deployment
+        bind-mounts its data directory into containers running under a
+        different uid, which is exactly how a policy file becomes readable
+        by one writer and not the other.
+        """
         path = _damaged(tmp_path, '{"policies": []}')
         path.chmod(0o000)
         try:
@@ -324,11 +342,42 @@ class TestUnreadableFile:
         finally:
             path.chmod(0o644)
 
-        # Running as root makes the file readable regardless of mode, so
-        # this asserts the reachable outcome rather than skipping.
-        if store.is_degraded:
-            assert store.degradation is not None
-            assert store.degradation.reason == "unreadable_file"
+        assert store.is_degraded is True
+        assert store.degradation is not None
+        assert store.degradation.reason == "unreadable_file"
+        with pytest.raises(DegradedStoreWriteError):
+            store.add(_policy())
+
+
+class TestConstructionNeverRaises:
+    """``_load``'s outer catch, which nothing else reaches.
+
+    "Constructing this store never raises" is what keeps ``trellis policy
+    list`` working whatever shape the corruption takes — the entire
+    justification for the lenient read. Nothing exercised it, so any future
+    change letting an exception escape ``_load_rows`` would turn that
+    command into a traceback on exactly the file it exists to show.
+    """
+
+    def test_an_unexpected_load_failure_degrades_instead_of_raising(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _boom(_self: PolicyStore) -> None:
+            msg = "something nobody anticipated"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(PolicyStore, "_load_rows", _boom)
+        path = _damaged(tmp_path, '{"policies": []}')
+
+        store = PolicyStore(path)
+
+        assert store.is_degraded is True
+        assert store.degradation is not None
+        assert store.degradation.reason == "load_failed"
+        assert "RuntimeError" in store.degradation.detail
+        assert store.list() == []
+        with pytest.raises(DegradedStoreWriteError):
+            store.add(_policy())
 
 
 class TestCleanLoadIsUnchanged:
@@ -410,7 +459,7 @@ class TestSaveIsAtomic:
         store = PolicyStore(tmp_path / "policies.json")
         store.add(_policy())
         store.add(_policy(scope=PolicyScope(level="domain", value="payments")))
-        assert [p.name for p in tmp_path.iterdir()] == ["policies.json"]
+        assert not [p for p in tmp_path.iterdir() if p.name != "policies.json"]
 
     def test_a_failed_write_leaves_the_destination_intact(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -432,7 +481,7 @@ class TestSaveIsAtomic:
             store.add(_policy(scope=PolicyScope(level="domain", value="payments")))
 
         assert path.read_text(encoding="utf-8") == before
-        assert [p.name for p in tmp_path.iterdir()] == ["policies.json"]
+        assert not [p for p in tmp_path.iterdir() if p.name != "policies.json"]
 
         # And memory rolled back with it. This is the case the degraded-path
         # refusal cannot cover — the store loaded cleanly, so nothing refuses
@@ -551,6 +600,32 @@ class TestDegradationIsNotTheOnlyStaleView:
         assert len(store.list()) == 3
         assert len(PolicyStore(tmp_path / "policies.json").list()) == 3
 
+    def test_damage_arriving_after_a_clean_load_is_not_overwritten(
+        self, tmp_path: Path
+    ) -> None:
+        """The refusal must not be keyed on load-time state alone.
+
+        A store that read a healthy file is not degraded, and nothing about
+        the *load* will ever say otherwise — so before the stale guard it
+        would cheerfully whole-file-rewrite a file an operator had since
+        broken (or edited), destroying the edit and resuming from its own
+        stale snapshot. The module docstring's promise that "the damaged
+        bytes stay on disk, where an operator can look at them" was false on
+        exactly this path.
+        """
+        path = tmp_path / "policies.json"
+        store = PolicyStore(path)
+        store.add(_policy())
+        assert store.is_degraded is False
+
+        path.write_text('{"policys": [{"policy_id": "x"}]}', encoding="utf-8")
+        damaged = path.read_bytes()
+
+        with pytest.raises(StaleStoreWriteError):
+            store.add(_policy(scope=PolicyScope(level="team", value="core")))
+
+        assert path.read_bytes() == damaged
+
     def test_a_duplicate_policy_id_degrades_rather_than_collapsing(
         self, tmp_path: Path
     ) -> None:
@@ -592,6 +667,9 @@ class TestDegradationIsNotTheOnlyStaleView:
             store.add(_policy(scope=PolicyScope(level="team", value="core")))
         assert path.read_bytes() == before
 
+    @pytest.mark.skipif(
+        os.geteuid() == 0, reason="root traverses any directory regardless of mode"
+    )
     def test_an_unsearchable_parent_degrades_rather_than_reading_as_absent(
         self, tmp_path: Path
     ) -> None:
@@ -611,8 +689,6 @@ class TestDegradationIsNotTheOnlyStaleView:
         finally:
             parent.chmod(0o755)
 
-        # Root can traverse regardless of mode, so assert the reachable
-        # outcome rather than skipping the test entirely.
-        if store.is_degraded:
-            assert store.degradation is not None
-            assert store.degradation.reason == "unreadable_file"
+        assert store.is_degraded is True
+        assert store.degradation is not None
+        assert store.degradation.reason == "unreadable_file"

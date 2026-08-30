@@ -14,6 +14,7 @@ from typing import Any
 
 import pytest
 
+from tests.policy_shapes import DEGENERATE_POLICY_FILES, DEGENERATE_POLICY_IDS
 from tests.structlog_isolation import IsolatedCliRunner
 from trellis.errors import ConfigError
 from trellis.mutate import build_curate_executor
@@ -575,20 +576,6 @@ class TestWarningsReachTheCaller:
 # #413 — the write that laundered a damaged file past the strict reader
 # ---------------------------------------------------------------------------
 
-#: The same table as ``tests/unit/stores/test_policy_store.py``. Every shape
-#: the CRUD store *degrades* on, the enforcement reader must *raise* on —
-#: the two postures are deliberately opposite, and this is the pairing that
-#: makes the asymmetry a property rather than a coincidence.
-_DEGENERATE_SHAPES: list[tuple[str, str]] = [
-    ("empty_json_object", "{}"),
-    ("null_policies_key", '{"policies": null}'),
-    ("typoed_key", '{"policys": [{"policy_id": "x"}]}'),
-    ("bare_list", "[]"),
-    ("scalar", '"not a policy file"'),
-    ("empty_file", ""),
-    ("truncated_json", '{"policies": [{"policy_i'),
-]
-
 
 class TestEnforcementRaisesOnEveryDegenerateShape:
     """Strict means strict — including for files it *can* parse.
@@ -602,10 +589,12 @@ class TestEnforcementRaisesOnEveryDegenerateShape:
     """
 
     @pytest.mark.parametrize(
-        ("name", "text"), _DEGENERATE_SHAPES, ids=[s[0] for s in _DEGENERATE_SHAPES]
+        ("name", "text", "_reason"),
+        DEGENERATE_POLICY_FILES,
+        ids=DEGENERATE_POLICY_IDS,
     )
     def test_shape_raises_rather_than_returning_no_policies(
-        self, tmp_path: Path, name: str, text: str
+        self, tmp_path: Path, name: str, text: str, _reason: str
     ) -> None:
         stores_dir = tmp_path / "stores"
         stores_dir.mkdir(parents=True)
@@ -616,10 +605,12 @@ class TestEnforcementRaisesOnEveryDegenerateShape:
         assert exc_info.value.setting == POLICY_FILENAME
 
     @pytest.mark.parametrize(
-        ("name", "text"), _DEGENERATE_SHAPES, ids=[s[0] for s in _DEGENERATE_SHAPES]
+        ("name", "text", "_reason"),
+        DEGENERATE_POLICY_FILES,
+        ids=DEGENERATE_POLICY_IDS,
     )
     def test_the_gate_cannot_be_built_from_a_damaged_file(
-        self, tmp_path: Path, name: str, text: str
+        self, tmp_path: Path, name: str, text: str, _reason: str
     ) -> None:
         """Failing closed means the pipeline stops, not that it allows.
 
