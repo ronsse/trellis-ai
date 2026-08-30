@@ -218,12 +218,14 @@ class TestDegenerateShapesDegradeAndRefuse:
             "_save",
             lambda: entered.append("save"),  # type: ignore[method-assign]
         )
+        attempt = (
+            (lambda: store.add(_policy()))
+            if write == "add"
+            else (lambda: store.remove("anything"))
+        )
 
         with pytest.raises(DegradedStoreWriteError):
-            if write == "add":
-                store.add(_policy())
-            else:
-                store.remove("anything")
+            attempt()
 
         assert entered == [], "the write path was entered on a degraded store"
 
