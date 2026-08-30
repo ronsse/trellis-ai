@@ -1427,19 +1427,15 @@ class TestEnrichedContentTags:
 class TestEnrichPreservesRecency:
     """A whole-corpus tagging pass must not re-date the corpus (#406).
 
-    ``_run_batch_enrichment`` writes ``content_tags`` / ``auto_importance`` /
-    ``document_form`` and hands the row's own ``content`` straight back —
-    metadata-only, the same operation as ``classify.refresh``, which passes
-    ``preserve_updated_at`` and carries a comment saying why. This path did
-    not, and it runs at the same scale: a full pass re-stamps every document
-    it touches to one instant, after which ``KeywordSearch``'s recency decay
-    is measuring the enrichment run rather than the documents.
+    Why the write is metadata-only, and why the enrichment pass is the widest
+    exposure of the five, are argued once at the call site in
+    ``_run_batch_enrichment`` — not restated here.
 
-    It is also the widest of #406's five sites for ``updated_at``'s *second*
-    reader. ``_select_enrichment_candidates`` applies no lifecycle filter at
-    all, so a ``superseded`` row is an ordinary candidate here — and
-    ``superseded`` is the one state that reaches
-    ``mutate.retention._classify_document``'s age gate.
+    Two tests rather than one because ``_select_enrichment_candidates``
+    filters on nothing but ``content_tags``: a ``superseded`` row is an
+    ordinary candidate, and ``superseded`` is the one lifecycle state that
+    reaches ``mutate.retention._classify_document``'s age gate. The stamp
+    assertion alone would not catch a regression that only that gate sees.
     """
 
     _CANNED = json.dumps(

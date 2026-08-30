@@ -766,22 +766,17 @@ class TestVectorResyncBackfill:
 class TestArchiveAndRestorePreserveRecency:
     """Neither lifecycle stamp may re-date the row it stamps (#406).
 
-    ``_archive`` and ``_restore`` write the row's *own* content back with a
-    new :class:`~trellis.schemas.classification.Lifecycle` — metadata-only
-    writes by definition — and both omitted ``preserve_updated_at``, so each
-    silently re-stamped ``updated_at``.
+    Why is argued once at each call site — ``RetentionPruneHandler._archive``
+    and ``RetentionRestoreHandler._restore`` — and not restated here, so the
+    two cannot drift apart.
 
-    Two consumers read that column, and only one of them is reachable from
-    here. ``KeywordSearch`` decays relevance off it, and restore's entire
-    purpose is to make the item servable again, so unlike the archive it
-    undoes there is no downstream filter left to blunt the damage:
-    un-archiving a two-year-old note handed it back as the freshest document
-    in the corpus, which is the opposite of what an operator correcting a bad
-    prune asked for. :func:`~trellis.mutate.retention._classify_document`
-    reads it too, for the ``lifecycle_states`` age gate — but ``archived``
-    and ``current`` both return before that line, so the two states written
-    *here* cannot reach it. That is a property of the resolver rather than of
-    these writes, so it is pinned below instead of assumed.
+    What is *not* argued there, because it is a property of another module:
+    those comments scope the damage away from ``mutate.retention``'s
+    ``lifecycle_states`` age gate, and that scoping rests entirely on
+    ``_classify_document`` returning for ``archived`` and ``current`` before
+    reaching it — the *order* of three branches. Nothing else in the suite
+    goes red if someone moves the gate above them, so it is pinned below
+    rather than assumed.
     """
 
     @staticmethod
@@ -808,7 +803,15 @@ class TestArchiveAndRestorePreserveRecency:
     def test_archive_keeps_the_prior_updated_at(
         self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Fails against the un-fixed ``_archive``, which re-stamps the row."""
+        """Fails against the un-fixed ``_archive``, which re-stamps the row.
+
+        This is the only site whose coverage rests on a single test, so the
+        clock binding is asserted rather than trusted: if ``_fake_clock``'s
+        module-path patch ever stopped reaching the store under test, a
+        preserved stamp would still equal itself and this test would pass
+        while covering nothing. The sibling ranking test is the suite-level
+        alarm for that, but it is insensitive to the ``_archive`` write.
+        """
         docs = registry.knowledge.document_store
         clock = self._fake_clock(monkeypatch)
         now = clock["now"]
@@ -816,6 +819,9 @@ class TestArchiveAndRestorePreserveRecency:
         clock["now"] = now - timedelta(days=365)
         _put_doc(registry, "noisy", signal_quality="noise")
         before = docs.get("noisy")["updated_at"]
+        assert before == (now - timedelta(days=365)).isoformat(), (
+            "the fake clock is not reaching the store; this test would pass vacuously"
+        )
 
         clock["now"] = now
         build_curate_executor(registry).execute(
@@ -880,9 +886,13 @@ class TestArchiveAndRestorePreserveRecency:
         fussiness. ``_apply_recency_decay`` resolves its reference time with
         its own ``datetime.now(UTC)`` call **per item**, so two rows carrying
         identical stamps still separate by a few hundred nanoseconds in
-        whatever order the store returned them. A plain ``old < new`` passes
-        against the un-fixed code whenever the fresh document happens to be
-        scored first — measured, not supposed: #411 shipped one that did.
+        whatever order the store returned them — and in this configuration
+        the fresh document is scored first, consistently. A review pass ran
+        the un-fixed code 200 times and a plain ``old < new`` held **200/200**
+        (ratios 0.999999999983-0.999999999997). So an ordering assertion here
+        would not be flaky; it would be **always** vacuous. #397's draft had
+        one and it was caught pre-merge, before #411 shipped — the lesson is
+        from the draft, not from merged history.
         """
         from trellis.retrieve.strategies import KeywordSearch
 
@@ -928,6 +938,11 @@ class TestArchiveAndRestorePreserveRecency:
         # above and still defeat the operation. Deliberately coupled to that
         # constant: dropping the floor below 0.25 should fail here and be
         # argued for, not absorbed silently.
+        #
+        # Note the coupling runs *both* ways, which pinning the half-life does
+        # not fix: at a floor of 0.55 the ratio is 0.55 and the regression
+        # assertion above fails. Raising the floor past 0.5 therefore also
+        # reads as "#406 is back" and needs this pair retuned with it.
         assert ratio > 0.25, scores
 
     def test_only_superseded_reaches_the_lifecycle_age_gate(

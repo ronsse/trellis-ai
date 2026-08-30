@@ -100,26 +100,16 @@ class TestApplyNoiseTags:
 class TestNoiseTaggingPreservesRecency:
     """A demotion is a verdict about the row, not an edit to it (#406).
 
-    ``apply_noise_tags`` writes ``signal_quality`` and two stamps derived
-    from effectiveness analysis and hands the row's own content straight
-    back — metadata-only — but omitted ``preserve_updated_at``, so every
-    demotion re-dated the document it demoted.
+    Why is argued once at the call site, in
+    :func:`trellis.classify.feedback.apply_noise_tags`, and not restated here.
 
-    ``updated_at`` has two readers and this writer reaches **both**, which
-    is what makes it worth more than the one stamp assertion its sibling
-    sites get:
-
-    * ``KeywordSearch`` decays relevance off the column. Latent *today* only
-      because ``retrieve.noise.exclude_noise`` drops the item at the collect
-      seam — but that boundary is deliberately default-pass and invertible
-      (``tag_filters={"signal_quality": {"in": ["noise"]}}`` for curation
-      tooling), and a later ``classify refresh`` revising the facet returns
-      the row to service still carrying the falsified stamp.
-    * ``mutate.retention._classify_document``'s ``lifecycle_states`` age gate
-      reads it too, and *nothing* masks that one. ``apply_noise_tags``
-      applies no lifecycle filter, so a ``superseded`` row is an ordinary
-      candidate for demotion — and a demotion that re-dates it shields it
-      from the very prune whose whole criterion is age.
+    Two consequences are pinned rather than one because they **fail
+    differently**: the keyword axis only once a caller inverts the noise
+    boundary, and ``mutate.retention``'s age gate unconditionally. A third
+    consumer this write reaches — ``retrieve.file_context``'s
+    ``newest_item_at`` staleness gate, which applies no noise predicate at
+    all — is pinned in ``tests/unit/retrieve/test_file_context.py`` instead,
+    beside the function that computes it.
     """
 
     @staticmethod
@@ -177,9 +167,10 @@ class TestNoiseTaggingPreservesRecency:
 
         A *margin* is asserted, not a bare ordering: ``_apply_recency_decay``
         re-reads ``datetime.now(UTC)`` **per item**, so identical stamps still
-        separate by nanoseconds in result order and a plain ``old < new``
-        passes against the bug whenever the fresh row is scored first (#411
-        shipped one that did).
+        separate by nanoseconds in result order — and in this configuration
+        the fresh row is scored first every time, so a plain ``old < new``
+        would be vacuous rather than flaky. Measured and argued once, in
+        ``tests/unit/mutate/test_retention_handler.py``'s sibling test.
         """
         clock = self._fake_clock(monkeypatch)
         now = clock["now"]

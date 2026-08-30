@@ -1261,18 +1261,20 @@ class TestChunkRefreshPreservesRecency:
     wrong as omitting the flag and is the obvious way to get this wrong while
     the first test stays green.
 
-    This is the widest of #406's five sites: chunks are the retrievable unit,
-    and the trigger fires for **every** chunk of any document whose parent
-    gained tags or whose chunk count moved. ``KeywordSearch`` decays relevance
-    off ``updated_at``, so an unconditional bump re-dates most of the corpus
-    to the sync's own clock.
+    Widest of the five by row count — chunks are 56% of the corpus and the
+    trigger fires for **every** chunk of any document whose parent gained tags
+    or whose chunk count moved — but narrowest by *consumer*, and only the
+    keyword axis is pinned here. ``mutate.retention``'s age gate is not
+    reachable: no in-tree writer puts a ``superseded`` / ``deprecated`` /
+    ``draft`` lifecycle on a chunk row, and the states that do occur return
+    before the gate. ``retrieve.file_context`` skips chunk rows outright
+    (``is_chunk_doc_id``), so ``newest_item_at`` never sees one.
 
-    ``updated_at``'s second reader — ``mutate.retention``'s ``lifecycle_states``
-    age gate — is not reached here in practice: no in-tree writer puts a
-    ``superseded`` / ``deprecated`` / ``draft`` lifecycle on a chunk row, and
-    the states that do occur (``archived``, ``current``) return before that
-    gate. The exposure is real but currently unreachable, unlike
-    ``worker enrich`` and ``apply_noise_tags``, whose own tests pin it.
+    Both of those are universal negatives over *writers*, which is the shape
+    of claim this issue keeps getting wrong — so they are stated, not
+    asserted. Unlike the branch-order premise in
+    ``tests/unit/mutate/test_retention_handler.py`` there is nothing local to
+    pin them against short of inventing the writer they deny.
     """
 
     @staticmethod

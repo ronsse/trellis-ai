@@ -1208,11 +1208,17 @@ class RetentionPruneHandler:
             metadata = dict(doc.get("metadata") or {})
             metadata[LIFECYCLE_KEY] = lifecycle
             # Metadata-only: the content written back is the row's own, and
-            # only the lifecycle stamp changes. Latent for the keyword axis
-            # while ``retrieve.lifecycle.exclude_archived`` drops the row at
-            # the collect seam — but the falsified stamp persists on the row,
-            # and ``RetentionRestoreHandler._restore`` is the operation that
-            # hands it back to retrieval carrying it (#406).
+            # only the lifecycle stamp changes.
+            #
+            # Masked on the *pack* surfaces — ``retrieve.lifecycle``'s
+            # ``exclude_archived`` drops the row at the collect seam — and
+            # ``_restore`` is the operation that hands it back to retrieval
+            # still carrying whatever stamp this write left. But that is not
+            # the same as latent (#406): ``retrieve.file_context`` reads the
+            # column straight off ``list_documents``, with no lifecycle
+            # predicate, so an archived document's bump moves the
+            # ``newest_item_at`` its path reports to the read hook's staleness
+            # gate immediately.
             store.put(
                 candidate.item_id, doc["content"], metadata, preserve_updated_at=True
             )
@@ -1344,6 +1350,14 @@ class RetentionRestoreHandler:
             # corpus. An operator walking back a bad prune from the
             # ``RETENTION_PRUNED`` payload would thereby *promote* exactly
             # the items they meant only to restore.
+            #
+            # Scoped to the document branch. The entity branch below re-opens
+            # an SCD-2 version whose ``updated_at`` is now, and ``GraphSearch``
+            # decays off exactly that — so the same argument applies to nodes,
+            # with no ``preserve_updated_at`` equivalent on ``upsert_node`` to
+            # apply it with. Whether a new version *is* a new node for recency
+            # purposes is a real question rather than a missing keyword, so it
+            # is filed (#420) rather than answered here.
             doc_store.put(item_id, doc["content"], metadata, preserve_updated_at=True)
             _sync_vector_lifecycle(self._registry, item_id, current)
             return True

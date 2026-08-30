@@ -68,12 +68,23 @@ def apply_noise_tags(
 
         # Metadata-only: ``signal_quality`` and the two stamps are derived
         # from the effectiveness analysis, not from the document, and the
-        # content written back is the row's own. Its direct sibling
-        # ``classify.refresh`` passes the flag for the same reason. Latent
-        # while ``retrieve.noise.exclude_noise`` drops the item — but that
+        # content written back is the row's own — the same case its direct
+        # sibling ``classify.refresh`` passes the flag for.
+        #
+        # **Not latent** (#406), though it was filed that way. Only the
+        # keyword axis is masked, and only there: ``retrieve.noise``'s
+        # ``exclude_noise`` keeps a demoted row out of packs, but that
         # boundary is deliberately default-pass and invertible, and a later
-        # refresh revising the facet returns the row to service still
-        # carrying the falsified stamp (#406).
+        # refresh revising the facet returns the row to service carrying the
+        # falsified stamp. Nothing masks the other two consumers this write
+        # reaches. ``mutate.retention``'s ``lifecycle_states`` age gate reads
+        # the column directly, and this function screens nothing on
+        # lifecycle, so demoting a ``superseded`` row shields it from the
+        # prune whose whole criterion is age. And ``retrieve.file_context``
+        # builds ``newest_item_at`` — the read hook's mtime staleness gate —
+        # from ``list_documents`` with no noise or lifecycle predicate at
+        # all, so a bump there makes memory look newer than the file and the
+        # hook injects context it exists to suppress.
         document_store.put(item_id, doc["content"], metadata, preserve_updated_at=True)
         updated += 1
         # After the authoritative write, never before: the document row is

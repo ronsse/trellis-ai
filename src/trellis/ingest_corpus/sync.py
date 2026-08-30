@@ -625,8 +625,8 @@ def _write_chunks(
         # the metadata-only refresh — entered on ``count_stale`` or
         # ``tags_missing`` alone — must not, or every byte-identical chunk of
         # any document whose parent gained tags is re-stamped to the sync's
-        # own clock. Chunks are the retrievable unit, so that is precisely
-        # what ``KeywordSearch``'s recency decay would then be ranking on.
+        # own clock — precisely what ``KeywordSearch``'s recency decay would
+        # then be ranking on.
         doc_store.put(
             cid,
             chunk_content,
