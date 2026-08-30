@@ -37,6 +37,17 @@ def _current_stderr() -> TextIO | None:
     CLI; a log line on either corrupts the exact channel this module
     exists to protect. Dropping a log line is recoverable, corrupting a
     protocol stream is not.
+
+    Nor is the drop announced, and that is not an oversight: the channel one
+    would announce on is the channel that is missing. CPython makes the same
+    call — ``warnings._showwarnmsg_impl`` reads ``sys.stderr`` and returns
+    silently when it is ``None``, commenting that warnings are simply lost
+    under ``pythonw``. Counting the drops was considered and rejected for
+    the same reason: a counter needs a reader, the only reader would have to
+    surface it on stdout, and read-side logging state has no home in
+    ``write_config`` (which is write-behaviour only, by design). An explicit
+    ``TRELLIS_LOG_FILE`` sink is the real answer if this host ever matters —
+    that is a feature, not part of closing #377.
     """
     stream = sys.stderr
     if stream is None:
@@ -68,7 +79,12 @@ class _LazyStderr:
     load-bearing.
 
     Only ``write`` and ``flush`` are implemented, which is the whole surface
-    structlog's ``WriteLogger`` uses.
+    structlog's ``WriteLogger`` uses. One consequence, latent today: its
+    ``__getstate__`` / ``__deepcopy__`` special-case ``sys.stdout`` and
+    ``sys.stderr`` and raise for anything else, so a bound logger built from
+    this factory can no longer be pickled across a ``multiprocessing``
+    boundary. Nothing in ``src/`` does that; ``trellis_workers`` is where it
+    would surface, and the error would not point here.
     A closed *real* stderr still raises, exactly as it did before — that is a
     genuine error, and swallowing it would trade a loud failure for a silent
     one.
