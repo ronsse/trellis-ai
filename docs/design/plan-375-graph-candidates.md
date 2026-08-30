@@ -2,9 +2,13 @@
 
 **Status: design, for review. No code in this phase.**
 All numbers below are from the reference deployment (Postgres graph + pgvector),
-measured read-only on **2026-08-30** over the **46** `PACK_ASSEMBLED` events on
-record (2026-07-07 → 2026-08-27) and the 60 `FEEDBACK_RECORDED` events that
-attribute 33 distinct item ids. Reproduce with §8.
+measured read-only on **2026-08-30** over **all 46** `PACK_ASSEMBLED` events on
+record (2026-07-07 → 2026-08-27) and the 60 `FEEDBACK_RECORDED` events, which
+cite 33 distinct item ids as helpful. Note the window: #371/#376 quote a rolling
+30-day slice (n=37 packs, n=16 attributed), this plan uses the full history, so
+figures shift slightly — graph `useful_token_fraction` is 0.171 here against
+#376's 0.1744. Nothing below contradicts those issues; it extends them.
+Reproduce with §8.
 
 ## 1. The problem
 
@@ -97,7 +101,7 @@ Each is stated with what it costs and what it needs that does not exist.
 
 1. **Do nothing; document the axis as a recency feed.** Free, already shipped,
    measures best today (`useful_token_fraction` 0.171 vs semantic 0.154, keyword
-   0.038). *Cost:* the three nodes carrying 71% of the axis's citations are
+   0.038, full history). *Cost:* the three nodes carrying 71% of the axis's citations are
    13–23 rows from eviction and nothing reports it when they go. The axis will
    keep returning `File` and `SoftwareApplication` rows at a 0.000 citation rate.
 2. **Entity-summary documents on the ingest path** (#375 option 1). Makes
