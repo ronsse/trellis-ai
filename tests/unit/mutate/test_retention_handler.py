@@ -21,6 +21,7 @@ wrong about the live corpus:
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -760,3 +761,208 @@ class TestVectorResyncBackfill:
         row = registry.knowledge.vector_store.get("old")
         assert row is not None
         assert LIFECYCLE_KEY not in row["metadata"]
+
+
+class TestArchiveAndRestorePreserveRecency:
+    """Neither lifecycle stamp may re-date the row it stamps (#406).
+
+    ``_archive`` and ``_restore`` write the row's *own* content back with a
+    new :class:`~trellis.schemas.classification.Lifecycle` — metadata-only
+    writes by definition — and both omitted ``preserve_updated_at``, so each
+    silently re-stamped ``updated_at``.
+
+    Two consumers read that column, and only one of them is reachable from
+    here. ``KeywordSearch`` decays relevance off it, and restore's entire
+    purpose is to make the item servable again, so unlike the archive it
+    undoes there is no downstream filter left to blunt the damage:
+    un-archiving a two-year-old note handed it back as the freshest document
+    in the corpus, which is the opposite of what an operator correcting a bad
+    prune asked for. :func:`~trellis.mutate.retention._classify_document`
+    reads it too, for the ``lifecycle_states`` age gate — but ``archived``
+    and ``current`` both return before that line, so the two states written
+    *here* cannot reach it. That is a property of the resolver rather than of
+    these writes, so it is pinned below instead of assumed.
+    """
+
+    @staticmethod
+    def _fake_clock(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+        """Bind the SQLite document store's clock to a mutable holder.
+
+        ``SQLiteDocumentStore.put`` stamps ``created_at`` and ``updated_at``
+        from this one call, so these tests get exact stamps instead of two
+        wall-clock reads that merely *tend* to differ.
+
+        The patch is by module path, so it would still succeed but have no
+        effect on the store under test if ``registry`` ever stopped being
+        SQLite-backed — and both stamp assertions would keep passing
+        vacuously, since two real wall-clock reads also leave a preserved
+        stamp equal to itself. The ranking test is what fails loudly in that
+        case. Keep the set together; none of them is redundant.
+        """
+        holder: dict[str, Any] = {"now": datetime.now(UTC)}
+        monkeypatch.setattr(
+            "trellis.stores.sqlite.document.utc_now", lambda: holder["now"]
+        )
+        return holder
+
+    def test_archive_keeps_the_prior_updated_at(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Fails against the un-fixed ``_archive``, which re-stamps the row."""
+        docs = registry.knowledge.document_store
+        clock = self._fake_clock(monkeypatch)
+        now = clock["now"]
+
+        clock["now"] = now - timedelta(days=365)
+        _put_doc(registry, "noisy", signal_quality="noise")
+        before = docs.get("noisy")["updated_at"]
+
+        clock["now"] = now
+        build_curate_executor(registry).execute(
+            _prune({"noise_documents": True}, dry_run=False)
+        )
+
+        doc = docs.get("noisy")
+        assert doc is not None
+        # The archival landed...
+        assert doc["metadata"][LIFECYCLE_KEY]["state"] == ARCHIVED_STATE
+        # ...and the row does not claim to have been modified by it.
+        assert doc["updated_at"] == before
+
+    def test_restore_keeps_the_prior_updated_at(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Fails against the un-fixed ``_restore``.
+
+        The archived state is seeded directly rather than by running a prune
+        first, which isolates the assertion to the restore write: reverting
+        ``_archive`` alone cannot turn this test red, and reverting
+        ``_restore`` alone cannot leave it green.
+        """
+        docs = registry.knowledge.document_store
+        clock = self._fake_clock(monkeypatch)
+        now = clock["now"]
+
+        clock["now"] = now - timedelta(days=365)
+        docs.put(
+            "stale",
+            "a year-old note about widget calibration",
+            {"title": "t", LIFECYCLE_KEY: {"state": ARCHIVED_STATE}},
+        )
+        before = docs.get("stale")["updated_at"]
+
+        clock["now"] = now
+        result = build_curate_executor(registry).execute(
+            Command(
+                operation=Operation.RETENTION_RESTORE,
+                args={"item_ids": ["stale"], "reason": "prune over-selected"},
+            )
+        )
+
+        assert result.status == CommandStatus.SUCCESS
+        doc = docs.get("stale")
+        assert doc is not None
+        assert doc["metadata"][LIFECYCLE_KEY]["state"] == "current"
+        assert doc["updated_at"] == before
+
+    def test_restored_document_does_not_outrank_a_fresh_one(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The consequence the stamp assertions stand for.
+
+        Both documents carry byte-identical content, so their FTS base ranks
+        are equal by construction and **recency is the only variable left**.
+        Un-fixed, the restore stamps the year-old note with its own clock and
+        the two come back level — the restore having promoted an item the
+        operator meant only to make visible again.
+
+        A *margin* is asserted, not a bare ordering, and that is not
+        fussiness. ``_apply_recency_decay`` resolves its reference time with
+        its own ``datetime.now(UTC)`` call **per item**, so two rows carrying
+        identical stamps still separate by a few hundred nanoseconds in
+        whatever order the store returned them. A plain ``old < new`` passes
+        against the un-fixed code whenever the fresh document happens to be
+        scored first — measured, not supposed: #411 shipped one that did.
+        """
+        from trellis.retrieve.strategies import KeywordSearch
+
+        docs = registry.knowledge.document_store
+        clock = self._fake_clock(monkeypatch)
+        now = clock["now"]
+        body = "Widget calibration runs at sixty hertz."
+
+        clock["now"] = now - timedelta(days=365)
+        docs.put("old-doc", body, {LIFECYCLE_KEY: {"state": ARCHIVED_STATE}})
+
+        clock["now"] = now
+        docs.put("new-doc", body, {})
+        build_curate_executor(registry).execute(
+            Command(
+                operation=Operation.RETENTION_RESTORE,
+                args={"item_ids": ["old-doc"], "reason": "prune over-selected"},
+            )
+        )
+
+        # Half-life pinned at the call site rather than inherited from
+        # ``DEFAULT_RECENCY_HALF_LIFE_DAYS``. Retuning that global is an
+        # ordinary retrieval change with nothing to do with retention, but at
+        # 365.0 the ratio rises past 0.5 and *this* assertion — the regression
+        # assertion — would fail, which reads as "#406 is back". Pinning costs
+        # no fix-sensitivity: under the bug both stamps are identical, so the
+        # ratio is 1.0 at every half-life.
+        scores = {
+            item.item_id: item.relevance_score
+            for item in KeywordSearch(docs, recency_half_life_days=30.0).search(
+                "calibration", limit=10
+            )
+        }
+        assert set(scores) == {"old-doc", "new-doc"}, scores
+        ratio = scores["old-doc"] / scores["new-doc"]
+        # Twelve halvings put the decay term near zero, so a correctly-dated
+        # year-old row lands at about the floor, 0.30. Anything near 1.0 means
+        # the restore re-stamped it.
+        assert ratio < 0.5, scores
+        # Demoted, not excluded. ``strategies.RECENCY_FLOOR`` (0.3) is what
+        # keeps a restored document servable at all, which is the whole point
+        # of restoring it — a restored row scoring ~0 would satisfy the line
+        # above and still defeat the operation. Deliberately coupled to that
+        # constant: dropping the floor below 0.25 should fail here and be
+        # argued for, not absorbed silently.
+        assert ratio > 0.25, scores
+
+    def test_only_superseded_reaches_the_lifecycle_age_gate(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The premise behind "the second reader is unreachable from here".
+
+        ``updated_at``'s other consumer is ``_classify_document``'s
+        ``lifecycle_states`` age gate, and the two states these handlers write
+        return before it — ``archived`` at the already-archived guard,
+        ``current`` at the restored guard. So a bumped stamp from either could
+        not have changed a prune's selection, which is why the source comments
+        above scope the blast radius to the keyword axis.
+
+        That reasoning lives in another function as the *order* of three
+        branches. Nothing else in the suite would fail if someone moved the
+        age gate above them, and the scoping claim would quietly become false
+        — hence this test rather than a comment.
+
+        Not a fix test: it passes against the un-fixed code, by design.
+        """
+        clock = self._fake_clock(monkeypatch)
+        clock["now"] = clock["now"] - timedelta(days=365)
+        _put_doc(registry, "arch", lifecycle_state=ARCHIVED_STATE)
+        _put_doc(registry, "curr", lifecycle_state="current")
+        _put_doc(registry, "supr", lifecycle_state="superseded")
+
+        report = resolve_candidates(
+            RetentionCriteria(
+                lifecycle_states=["archived", "current", "superseded"],
+                older_than_days=30,
+            ),
+            registry,
+        )
+
+        assert [c.item_id for c in report.candidates] == ["supr"]
+        assert report.skipped_already_archived == 1
+        assert report.skipped_restored == 1
