@@ -63,15 +63,13 @@ def test_an_oversized_backlog_raises_instead_of_reading_less(
     assert not watermark_path.exists(), "a refused pass must not move the cursor"
 
 
-def test_the_cli_surfaces_a_refused_pass(registry, tmp_path) -> None:
+def test_the_cli_surfaces_a_refused_pass(registry, tmp_path, cli_runner) -> None:
     import json
-
-    from typer.testing import CliRunner
 
     from trellis_cli.worker import worker_app
 
     seed_traces(registry, 25)
-    result = CliRunner().invoke(
+    result = cli_runner.invoke(
         worker_app,
         [
             "embed-traces",

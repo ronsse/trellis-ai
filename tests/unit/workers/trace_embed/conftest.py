@@ -17,7 +17,6 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from typer.testing import CliRunner
 
 from trellis.schemas.enums import OutcomeStatus, TraceSource
 from trellis.schemas.trace import Outcome, Trace, TraceContext, TraceStep
@@ -25,8 +24,6 @@ from trellis_cli.admin import admin_app
 from trellis_cli.stores import _get_registry, _reset_registry
 
 EMBED_FN_PATH = "tests.unit.workers.trace_embed.conftest.embed"
-
-runner = CliRunner()
 
 
 @dataclass
@@ -75,12 +72,19 @@ def recorder() -> EmbedRecorder:
 
 
 @pytest.fixture
-def registry(tmp_path, monkeypatch, recorder):
-    """Initialised SQLite stores with the scriptable embedder wired in."""
+def registry(tmp_path, monkeypatch, recorder, cli_runner):
+    """Initialised SQLite stores with the scriptable embedder wired in.
+
+    Takes the root ``cli_runner`` fixture rather than constructing a bare
+    ``CliRunner``. A bare runner leaves structlog's global config pinned to
+    the temporary stderr click closes on return (#377); this package only
+    escaped the resulting 109-test cascade because ``workers`` sorts last,
+    leaving almost nothing after it to poison.
+    """
     monkeypatch.setenv("TRELLIS_CONFIG_DIR", str(tmp_path / "config"))
     monkeypatch.setenv("TRELLIS_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("TRELLIS_EMBEDDING_FN", EMBED_FN_PATH)
-    init = runner.invoke(admin_app, ["init"])
+    init = cli_runner.invoke(admin_app, ["init"])
     assert init.exit_code == 0, init.output
     _reset_registry()
     yield _get_registry()
