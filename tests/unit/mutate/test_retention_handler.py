@@ -21,12 +21,13 @@ wrong about the live corpus:
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from tests.document_recency import fake_document_clock, keyword_recency_ratio
 from trellis.errors import ValidationError
 from trellis.mutate import build_curate_executor
 from trellis.mutate.commands import Command, CommandStatus, Operation
@@ -779,41 +780,21 @@ class TestArchiveAndRestorePreserveRecency:
     rather than assumed.
     """
 
-    @staticmethod
-    def _fake_clock(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-        """Bind the SQLite document store's clock to a mutable holder.
-
-        ``SQLiteDocumentStore.put`` stamps ``created_at`` and ``updated_at``
-        from this one call, so these tests get exact stamps instead of two
-        wall-clock reads that merely *tend* to differ.
-
-        The patch is by module path, so it would still succeed but have no
-        effect on the store under test if ``registry`` ever stopped being
-        SQLite-backed — and both stamp assertions would keep passing
-        vacuously, since two real wall-clock reads also leave a preserved
-        stamp equal to itself. The ranking test is what fails loudly in that
-        case. Keep the set together; none of them is redundant.
-        """
-        holder: dict[str, Any] = {"now": datetime.now(UTC)}
-        monkeypatch.setattr(
-            "trellis.stores.sqlite.document.utc_now", lambda: holder["now"]
-        )
-        return holder
-
     def test_archive_keeps_the_prior_updated_at(
         self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Fails against the un-fixed ``_archive``, which re-stamps the row.
 
         This is the only site whose coverage rests on a single test, so the
-        clock binding is asserted rather than trusted: if ``_fake_clock``'s
+        clock binding is asserted rather than trusted: if
+        ``fake_document_clock``'s
         module-path patch ever stopped reaching the store under test, a
         preserved stamp would still equal itself and this test would pass
         while covering nothing. The sibling ranking test is the suite-level
         alarm for that, but it is insensitive to the ``_archive`` write.
         """
         docs = registry.knowledge.document_store
-        clock = self._fake_clock(monkeypatch)
+        clock = fake_document_clock(monkeypatch)
         now = clock["now"]
 
         clock["now"] = now - timedelta(days=365)
@@ -846,7 +827,7 @@ class TestArchiveAndRestorePreserveRecency:
         ``_restore`` alone cannot leave it green.
         """
         docs = registry.knowledge.document_store
-        clock = self._fake_clock(monkeypatch)
+        clock = fake_document_clock(monkeypatch)
         now = clock["now"]
 
         clock["now"] = now - timedelta(days=365)
@@ -876,28 +857,16 @@ class TestArchiveAndRestorePreserveRecency:
     ) -> None:
         """The consequence the stamp assertions stand for.
 
-        Both documents carry byte-identical content, so their FTS base ranks
-        are equal by construction and **recency is the only variable left**.
         Un-fixed, the restore stamps the year-old note with its own clock and
         the two come back level — the restore having promoted an item the
         operator meant only to make visible again.
 
-        A *margin* is asserted, not a bare ordering, and that is not
-        fussiness. ``_apply_recency_decay`` resolves its reference time with
-        its own ``datetime.now(UTC)`` call **per item**, so two rows carrying
-        identical stamps still separate by a few hundred nanoseconds in
-        whatever order the store returned them — and in this configuration
-        the fresh document is scored first, consistently. A review pass ran
-        the un-fixed code 200 times and a plain ``old < new`` held **200/200**
-        (ratios 0.999999999983-0.999999999997). So an ordering assertion here
-        would not be flaky; it would be **always** vacuous. #397's draft had
-        one and it was caught pre-merge, before #411 shipped — the lesson is
-        from the draft, not from merged history.
+        Why a *margin* rather than an ordering, and why the half-life is
+        pinned, are argued once at
+        :func:`tests.document_recency.keyword_recency_ratio`.
         """
-        from trellis.retrieve.strategies import KeywordSearch
-
         docs = registry.knowledge.document_store
-        clock = self._fake_clock(monkeypatch)
+        clock = fake_document_clock(monkeypatch)
         now = clock["now"]
         body = "Widget calibration runs at sixty hertz."
 
@@ -913,42 +882,26 @@ class TestArchiveAndRestorePreserveRecency:
             )
         )
 
-        # Half-life pinned at the call site rather than inherited from
-        # ``DEFAULT_RECENCY_HALF_LIFE_DAYS``. Retuning that global is an
-        # ordinary retrieval change with nothing to do with retention, but at
-        # 365.0 the ratio rises past 0.5 and *this* assertion — the regression
-        # assertion — would fail, which reads as "#406 is back". Pinning costs
-        # no fix-sensitivity: under the bug both stamps are identical, so the
-        # ratio is 1.0 at every half-life.
-        scores = {
-            item.item_id: item.relevance_score
-            for item in KeywordSearch(docs, recency_half_life_days=30.0).search(
-                "calibration", limit=10
-            )
-        }
-        assert set(scores) == {"old-doc", "new-doc"}, scores
-        ratio = scores["old-doc"] / scores["new-doc"]
+        ratio = keyword_recency_ratio(
+            docs, "calibration", older="old-doc", fresher="new-doc"
+        )
         # Twelve halvings put the decay term near zero, so a correctly-dated
         # year-old row lands at about the floor, 0.30. Anything near 1.0 means
         # the restore re-stamped it.
-        assert ratio < 0.5, scores
+        assert ratio < 0.5, ratio
         # Demoted, not excluded. ``strategies.RECENCY_FLOOR`` (0.3) is what
         # keeps a restored document servable at all, which is the whole point
         # of restoring it — a restored row scoring ~0 would satisfy the line
         # above and still defeat the operation. Deliberately coupled to that
-        # constant: dropping the floor below 0.25 should fail here and be
-        # argued for, not absorbed silently.
-        #
-        # Note the coupling runs *both* ways, which pinning the half-life does
-        # not fix: at a floor of 0.55 the ratio is 0.55 and the regression
-        # assertion above fails. Raising the floor past 0.5 therefore also
-        # reads as "#406 is back" and needs this pair retuned with it.
-        assert ratio > 0.25, scores
+        # constant in both directions: dropping the floor below 0.25 fails
+        # here, and raising it above 0.5 fails the line above. Either should
+        # be argued for, not absorbed silently.
+        assert ratio > 0.25, ratio
 
     def test_only_superseded_reaches_the_lifecycle_age_gate(
         self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The premise behind "the second reader is unreachable from here".
+        """The premise behind "the retention gate is unreachable from here".
 
         ``updated_at``'s other consumer is ``_classify_document``'s
         ``lifecycle_states`` age gate, and the two states these handlers write
@@ -964,7 +917,7 @@ class TestArchiveAndRestorePreserveRecency:
 
         Not a fix test: it passes against the un-fixed code, by design.
         """
-        clock = self._fake_clock(monkeypatch)
+        clock = fake_document_clock(monkeypatch)
         clock["now"] = clock["now"] - timedelta(days=365)
         _put_doc(registry, "arch", lifecycle_state=ARCHIVED_STATE)
         _put_doc(registry, "curr", lifecycle_state="current")

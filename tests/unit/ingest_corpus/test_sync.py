@@ -15,6 +15,7 @@ from unittest.mock import MagicMock
 import pytest
 from structlog.testing import capture_logs
 
+from tests.document_recency import fake_document_clock
 from trellis.classify.feedback import apply_noise_tags
 from trellis.classify.ingest import (
     CLASSIFY_METADATA_KEYS,
@@ -1277,17 +1278,6 @@ class TestChunkRefreshPreservesRecency:
     pin them against short of inventing the writer they deny.
     """
 
-    @staticmethod
-    def _fake_clock(monkeypatch):
-        """Bind the SQLite document store's clock to a mutable holder."""
-        from datetime import UTC, datetime
-
-        holder = {"now": datetime.now(UTC)}
-        monkeypatch.setattr(
-            "trellis.stores.sqlite.document.utc_now", lambda: holder["now"]
-        )
-        return holder
-
     @classmethod
     def _sync_then_tag_parent_and_edit_the_tail(cls, registry, vault, monkeypatch):
         """The production shape, with an exact clock on each of the two syncs.
@@ -1304,7 +1294,7 @@ class TestChunkRefreshPreservesRecency:
         """
         from datetime import timedelta
 
-        clock = cls._fake_clock(monkeypatch)
+        clock = fake_document_clock(monkeypatch)
         t1 = clock["now"]
         t0 = t1 - timedelta(days=365)
 

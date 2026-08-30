@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
-from typing import Any
 
 import pytest
 
+from tests.document_recency import fake_document_clock, keyword_recency_ratio
 from trellis.classify.feedback import apply_noise_tags
 from trellis.mutate.retention import RetentionCriteria, resolve_candidates
-from trellis.retrieve.strategies import KeywordSearch
 from trellis.schemas.classification import LIFECYCLE_KEY
 from trellis.stores.registry import StoreRegistry
 from trellis.stores.sqlite.document import SQLiteDocumentStore
@@ -112,27 +111,11 @@ class TestNoiseTaggingPreservesRecency:
     beside the function that computes it.
     """
 
-    @staticmethod
-    def _fake_clock(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-        """Bind the SQLite document store's clock to a mutable holder.
-
-        Exact stamps, rather than two wall-clock reads that merely *tend* to
-        differ. Patched by module path, so on a non-SQLite store it would
-        succeed and do nothing — and the stamp assertion would pass
-        vacuously, since a preserved stamp equals itself either way. The two
-        consequence tests are what fail loudly in that case.
-        """
-        holder: dict[str, Any] = {"now": datetime.now(UTC)}
-        monkeypatch.setattr(
-            "trellis.stores.sqlite.document.utc_now", lambda: holder["now"]
-        )
-        return holder
-
     def test_demotion_keeps_the_prior_updated_at(
         self, doc_store: SQLiteDocumentStore, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Fails against the un-fixed call site, which re-stamps the row."""
-        clock = self._fake_clock(monkeypatch)
+        clock = fake_document_clock(monkeypatch)
         now = clock["now"]
 
         clock["now"] = now - timedelta(days=365)
@@ -165,14 +148,11 @@ class TestNoiseTaggingPreservesRecency:
         for noise items on purpose is handed a year-old row presented as the
         freshest thing it has.
 
-        A *margin* is asserted, not a bare ordering: ``_apply_recency_decay``
-        re-reads ``datetime.now(UTC)`` **per item**, so identical stamps still
-        separate by nanoseconds in result order — and in this configuration
-        the fresh row is scored first every time, so a plain ``old < new``
-        would be vacuous rather than flaky. Measured and argued once, in
-        ``tests/unit/mutate/test_retention_handler.py``'s sibling test.
+        Why a *margin* rather than an ordering, and why the half-life is
+        pinned, are argued once at
+        :func:`tests.document_recency.keyword_recency_ratio`.
         """
-        clock = self._fake_clock(monkeypatch)
+        clock = fake_document_clock(monkeypatch)
         now = clock["now"]
         body = "Widget calibration runs at sixty hertz."
 
@@ -183,30 +163,20 @@ class TestNoiseTaggingPreservesRecency:
 
         apply_noise_tags(["old-doc"], doc_store)
 
-        # Half-life pinned at the call site rather than inherited from
-        # ``DEFAULT_RECENCY_HALF_LIFE_DAYS``: retuning that global has nothing
-        # to do with demotion, but at 365.0 the ratio rises past 0.5 and this
-        # regression assertion would read as "#406 is back". Costs no
-        # fix-sensitivity — under the bug both stamps are identical and the
-        # ratio is 1.0 at every half-life.
-        scores = {
-            item.item_id: item.relevance_score
-            for item in KeywordSearch(doc_store, recency_half_life_days=30.0).search(
-                "calibration", limit=10
-            )
-        }
-        assert set(scores) == {"old-doc", "new-doc"}, scores
-        ratio = scores["old-doc"] / scores["new-doc"]
-        assert ratio < 0.5, scores
+        ratio = keyword_recency_ratio(
+            doc_store, "calibration", older="old-doc", fresher="new-doc"
+        )
+        assert ratio < 0.5, ratio
         # Demoted by age, not annihilated: ``strategies.RECENCY_FLOOR`` (0.3)
-        # is the floor a year-old row lands on. Coupled to that constant on
-        # purpose — dropping it below 0.25 should fail here and be argued for.
-        assert ratio > 0.25, scores
+        # is the floor a year-old row lands on. Coupled to that constant in
+        # both directions — below 0.25 fails here, above 0.5 fails the line
+        # above — so either move should be argued for, not absorbed silently.
+        assert ratio > 0.25, ratio
 
     def test_a_demoted_superseded_row_still_ages_out_of_retention(
         self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The **second** reader, which nothing masks.
+        """The consumer nothing masks.
 
         ``retention.prune`` with ``lifecycle_states=["superseded"]`` means
         "archive superseded rows older than N days", and
@@ -227,7 +197,7 @@ class TestNoiseTaggingPreservesRecency:
         is asserted and not just the id.
         """
         docs = registry.knowledge.document_store
-        clock = self._fake_clock(monkeypatch)
+        clock = fake_document_clock(monkeypatch)
         now = clock["now"]
 
         clock["now"] = now - timedelta(days=365)

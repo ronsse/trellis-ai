@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from tests.document_recency import fake_document_clock
 from trellis.ingest_corpus.models import chunk_doc_id
 from trellis.retrieve.file_context import (
     _DOC_PAGE_SIZE,
@@ -393,16 +394,6 @@ class TestNewestItemAtIsAStalenessGate:
     on it.
     """
 
-    @staticmethod
-    def _fake_clock(monkeypatch: pytest.MonkeyPatch) -> dict:
-        from datetime import UTC, datetime
-
-        holder = {"now": datetime.now(UTC)}
-        monkeypatch.setattr(
-            "trellis.stores.sqlite.document.utc_now", lambda: holder["now"]
-        )
-        return holder
-
     def test_archived_and_noise_documents_are_not_filtered_out(
         self, registry: StoreRegistry
     ) -> None:
@@ -454,7 +445,7 @@ class TestNewestItemAtIsAStalenessGate:
         from trellis.classify.feedback import apply_noise_tags
 
         docs = registry.knowledge.document_store
-        clock = self._fake_clock(monkeypatch)
+        clock = fake_document_clock(monkeypatch)
         now = clock["now"]
 
         clock["now"] = now - timedelta(days=365)

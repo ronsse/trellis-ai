@@ -18,6 +18,7 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
+from tests.document_recency import fake_document_clock
 from trellis.core.vector_metadata import vector_metadata_diverges
 from trellis.llm import LLMResponse, Message
 from trellis.schemas.enums import OutcomeStatus, TraceSource
@@ -1449,23 +1450,6 @@ class TestEnrichPreservesRecency:
         }
     )
 
-    @staticmethod
-    def _fake_clock(monkeypatch: pytest.MonkeyPatch) -> dict:
-        """Bind the SQLite document store's clock to a mutable holder.
-
-        Patched by module path, so it would succeed and do nothing if
-        ``temp_stores`` ever stopped being SQLite-backed — and the stamp
-        assertion would pass vacuously, a preserved stamp being equal to
-        itself either way. The retention test below is what fails loudly.
-        """
-        from datetime import UTC, datetime
-
-        holder = {"now": datetime.now(UTC)}
-        monkeypatch.setattr(
-            "trellis.stores.sqlite.document.utc_now", lambda: holder["now"]
-        )
-        return holder
-
     def test_enrich_keeps_the_prior_updated_at(
         self, temp_stores: StoreRegistry, monkeypatch
     ) -> None:
@@ -1473,7 +1457,7 @@ class TestEnrichPreservesRecency:
         from datetime import timedelta
 
         doc_store = temp_stores.knowledge.document_store
-        clock = self._fake_clock(monkeypatch)
+        clock = fake_document_clock(monkeypatch)
         now = clock["now"]
 
         clock["now"] = now - timedelta(days=365)
@@ -1519,7 +1503,7 @@ class TestEnrichPreservesRecency:
         from trellis.schemas.classification import LIFECYCLE_KEY
 
         doc_store = temp_stores.knowledge.document_store
-        clock = self._fake_clock(monkeypatch)
+        clock = fake_document_clock(monkeypatch)
         now = clock["now"]
 
         clock["now"] = now - timedelta(days=365)
