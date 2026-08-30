@@ -103,6 +103,12 @@ def _fsync_directory(directory: Path) -> None:
     directory closes that. Best effort, because some filesystems refuse to
     open a directory for fsync and a durability improvement must not become
     a new way for a write to fail.
+
+    **Deliberately not unit-tested for its actual effect.** The property is
+    "the rename survives a machine losing power", which a test cannot
+    observe — replacing this body with ``pass`` leaves every suite green,
+    and that is a limit rather than a gap. What *is* tested is the part a
+    test can see: that an ``OSError`` here does not fail the write.
     """
     with suppress(OSError):
         dir_fd = os.open(str(directory), os.O_RDONLY)
