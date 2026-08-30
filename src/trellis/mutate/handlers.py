@@ -1344,9 +1344,7 @@ class RetentionRestoreHandler:
             # corpus. An operator walking back a bad prune from the
             # ``RETENTION_PRUNED`` payload would thereby *promote* exactly
             # the items they meant only to restore.
-            doc_store.put(
-                item_id, doc["content"], metadata, preserve_updated_at=True
-            )
+            doc_store.put(item_id, doc["content"], metadata, preserve_updated_at=True)
             _sync_vector_lifecycle(self._registry, item_id, current)
             return True
 

@@ -1316,9 +1316,7 @@ class TestChunkRefreshPreservesRecency:
         parent = store.get(parent_id)
         chunk_count = parent["metadata"]["chunk_count"]
         assert chunk_count >= 3
-        before = {
-            i: store.get(chunk_doc_id(parent_id, i)) for i in range(chunk_count)
-        }
+        before = {i: store.get(chunk_doc_id(parent_id, i)) for i in range(chunk_count)}
         assert all(d["updated_at"] == t0.isoformat() for d in before.values())
 
         store.put(

@@ -200,9 +200,9 @@ class TestNoiseTaggingPreservesRecency:
         # ratio is 1.0 at every half-life.
         scores = {
             item.item_id: item.relevance_score
-            for item in KeywordSearch(
-                doc_store, recency_half_life_days=30.0
-            ).search("calibration", limit=10)
+            for item in KeywordSearch(doc_store, recency_half_life_days=30.0).search(
+                "calibration", limit=10
+            )
         }
         assert set(scores) == {"old-doc", "new-doc"}, scores
         ratio = scores["old-doc"] / scores["new-doc"]

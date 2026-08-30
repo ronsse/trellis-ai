@@ -74,9 +74,7 @@ def apply_noise_tags(
         # boundary is deliberately default-pass and invertible, and a later
         # refresh revising the facet returns the row to service still
         # carrying the falsified stamp (#406).
-        document_store.put(
-            item_id, doc["content"], metadata, preserve_updated_at=True
-        )
+        document_store.put(item_id, doc["content"], metadata, preserve_updated_at=True)
         updated += 1
         # After the authoritative write, never before: the document row is
         # what a re-run repairs from, so it has to land first.
