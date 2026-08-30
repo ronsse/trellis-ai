@@ -262,6 +262,27 @@ def _classify_document(
     if criteria.noise_documents and _signal_quality(metadata) == "noise":
         return "noise_document"
     if wanted_states and state in wanted_states:
+        # One of the consumers ``DocumentStore.put(preserve_updated_at=...)``
+        # protects, and the one most easily missed (#406). The age meant here
+        # is the *document's* age, per this module's docstring; a
+        # metadata-only write that omits the flag makes the criterion measure
+        # time since that write instead, shielding a genuinely stale row for
+        # a further ``older_than_days``.
+        #
+        # Deliberately not phrased as "the second reader". That column is
+        # public on every ``DocumentStore`` row and its readers are an open
+        # set — #397 scoped it to one, #406 to two, and a review pass found a
+        # third (``retrieve.file_context._newest_timestamp``). An ordinal here
+        # would be the fourth restatement of a closed enumeration that has
+        # been wrong every time it was written down.
+        #
+        # This module's own handlers cannot reach here: ``archived`` and
+        # ``current`` both return above. The writers that can are the ones
+        # leaving ``state`` alone while rewriting derived metadata — neither
+        # ``worker enrich`` nor ``classify.feedback.apply_noise_tags`` filters
+        # on lifecycle, so a ``superseded`` row is an ordinary target for
+        # either. (``apply_noise_tags`` takes an explicit id list rather than
+        # running a query; the point is that nothing upstream screens it.)
         if not _is_older_than(doc.get("updated_at") or doc.get("created_at"), cutoff):
             return None
         return "lifecycle_stale"

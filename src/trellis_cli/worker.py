@@ -1302,7 +1302,27 @@ def _run_batch_enrichment(
         # the flat key. See `classify.classifiers.llm` for the full argument.
         if result.auto_class:
             metadata["document_form"] = result.auto_class
-        document_store.put(doc["doc_id"], doc["content"], metadata)
+        # Metadata-only: ``content`` is the row's own and only derived tags
+        # change. Same operation as ``classify.refresh``, which passes the
+        # flag for the same reason, and at the same scale — a full pass
+        # re-stamps every document it touches to one instant, after which
+        # ``KeywordSearch``'s recency decay is measuring the enrichment run
+        # rather than the documents. Widest exposure of the five to the
+        # other consumers too: ``_select_enrichment_candidates`` filters on
+        # neither lifecycle nor ``source_path``, so a ``superseded`` row is an
+        # ordinary candidate here (resetting the age ``mutate.retention``
+        # prunes on), and one full pass re-dates the ``newest_item_at`` that
+        # ``retrieve.file_context`` reports for every corpus path at once
+        # (#406).
+        #
+        # A note on what the flag now hides: the write-back lands
+        # ``doc["content"]`` from a snapshot taken before N LLM calls, so a
+        # concurrent write in that window is silently reverted. That race
+        # predates this flag — but the bumped stamp was the only incidental
+        # trace it left, and preserving the stamp removes it (#421).
+        document_store.put(
+            doc["doc_id"], doc["content"], metadata, preserve_updated_at=True
+        )
         enriched += 1
         # After the authoritative write, never before — the document row is
         # what a re-run repairs from, so it has to land first. Fail-soft: a

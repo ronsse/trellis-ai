@@ -15,6 +15,7 @@ from unittest.mock import MagicMock
 import pytest
 from structlog.testing import capture_logs
 
+from tests.document_recency import fake_document_clock
 from trellis.classify.feedback import apply_noise_tags
 from trellis.classify.ingest import (
     CLASSIFY_METADATA_KEYS,
@@ -1247,3 +1248,129 @@ class TestDemoteSurvivesAChunkCountChange:
         for index in range(store.get(parent_id)["metadata"]["chunk_count"]):
             meta = store.get(chunk_doc_id(parent_id, index))["metadata"]
             assert meta["content_tags"] == parent_tags
+
+
+class TestChunkRefreshPreservesRecency:
+    """``_write_chunks``' one ``put`` serves two branches, so the flag is
+    conditional (#406).
+
+    A chunk re-put on ``count_stale`` or ``tags_missing`` alone is
+    metadata-only by the code's own label — the bytes are identical and it
+    deliberately does not re-embed — so it must not re-date the row. A chunk
+    whose content genuinely changed *is* modified and must bump. Both halves
+    are pinned, because an unconditional ``preserve_updated_at=True`` is as
+    wrong as omitting the flag and is the obvious way to get this wrong while
+    the first test stays green.
+
+    Widest of the five by row count — chunks are 56% of the corpus and the
+    trigger fires for **every** chunk of any document whose parent gained tags
+    or whose chunk count moved — but narrowest by *consumer*, and only the
+    keyword axis is pinned here. ``mutate.retention``'s age gate is not
+    reachable: no in-tree writer puts a ``superseded`` / ``deprecated`` /
+    ``draft`` lifecycle on a chunk row, and the states that do occur return
+    before the gate. ``retrieve.file_context`` skips chunk rows outright
+    (``is_chunk_doc_id``), so ``newest_item_at`` never sees one.
+
+    Both of those are universal negatives over *writers*, which is the shape
+    of claim this issue keeps getting wrong — so they are stated, not
+    asserted. Unlike the branch-order premise in
+    ``tests/unit/mutate/test_retention_handler.py`` there is nothing local to
+    pin them against short of inventing the writer they deny.
+    """
+
+    @classmethod
+    def _sync_then_tag_parent_and_edit_the_tail(cls, registry, vault, monkeypatch):
+        """The production shape, with an exact clock on each of the two syncs.
+
+        1. Sync a long document a year ago — six chunks, no ``content_tags``.
+        2. The enrichment pass tags the parent (a document-store write; the
+           parent of a chunked document has no vector row of its own).
+        3. Today, append a few bytes. Only the *last* chunk's content moves —
+           offsets before the edit point cannot — and the chunk count is
+           unchanged, so every earlier chunk takes the ``tags_missing``
+           metadata-only re-put and the last takes the content-changed one.
+
+        Returns ``(parent_id, chunk_count, before_stamps, t0, t1)``.
+        """
+        from datetime import timedelta
+
+        clock = fake_document_clock(monkeypatch)
+        t1 = clock["now"]
+        t0 = t1 - timedelta(days=365)
+
+        clock["now"] = t0
+        note = vault / "long.md"
+        note.write_text(_long_markdown())
+        sync_corpus(registry, vault, source_system="obsidian")
+
+        store = registry.knowledge.document_store
+        parent_id = corpus_doc_id("obsidian", "long.md")
+        parent = store.get(parent_id)
+        chunk_count = parent["metadata"]["chunk_count"]
+        assert chunk_count >= 3
+        before = {i: store.get(chunk_doc_id(parent_id, i)) for i in range(chunk_count)}
+        assert all(d["updated_at"] == t0.isoformat() for d in before.values())
+
+        store.put(
+            parent_id,
+            parent["content"],
+            metadata={
+                **parent["metadata"],
+                "content_tags": {"signal_quality": "standard"},
+                "auto_importance": 0.91,
+            },
+        )
+
+        clock["now"] = t1
+        note.write_text(_long_markdown() + " tail.")
+        report = sync_corpus(registry, vault, source_system="obsidian")
+
+        outcome = next(o for o in report.files if o.relpath == "long.md")
+        # Every chunk took the put — none hit the `continue`. Without this the
+        # tests below could pass by nothing having happened at all.
+        assert outcome.chunks_written == chunk_count
+        # And the count did not move, so the last chunk is an *update*. On an
+        # insert `preserve_updated_at` is documented as ignored, which would
+        # make the bump half of this class vacuous.
+        assert store.get(parent_id)["metadata"]["chunk_count"] == chunk_count
+        return parent_id, chunk_count, before, t0, t1
+
+    def test_metadata_only_chunk_refresh_keeps_the_prior_updated_at(
+        self, registry, vault, monkeypatch
+    ):
+        """Fails against a call site that omits the flag entirely."""
+        parent_id, chunk_count, before, t0, _t1 = (
+            self._sync_then_tag_parent_and_edit_the_tail(registry, vault, monkeypatch)
+        )
+        store = registry.knowledge.document_store
+
+        for index in range(chunk_count - 1):
+            cid = chunk_doc_id(parent_id, index)
+            after = store.get(cid)
+            # The refresh landed — the parent's tags reached the chunk...
+            assert after["metadata"]["content_tags"]["signal_quality"] == "standard"
+            # ...on bytes that did not change...
+            assert after["content_hash"] == before[index]["content_hash"]
+            # ...so the row must not claim to have been modified.
+            assert after["updated_at"] == t0.isoformat(), cid
+
+    def test_a_content_changed_chunk_still_bumps_updated_at(
+        self, registry, vault, monkeypatch
+    ):
+        """Fails against an *unconditional* ``preserve_updated_at=True``.
+
+        The complement of the test above, and the reason the fix is
+        ``preserve_updated_at=not content_changed`` rather than a constant. A
+        rewritten chunk is a genuinely newer document and the recency decay
+        should say so; freezing its stamp would make an edited note age from
+        the day it was first ingested.
+        """
+        parent_id, chunk_count, before, _t0, t1 = (
+            self._sync_then_tag_parent_and_edit_the_tail(registry, vault, monkeypatch)
+        )
+        store = registry.knowledge.document_store
+
+        last = chunk_doc_id(parent_id, chunk_count - 1)
+        after = store.get(last)
+        assert after["content_hash"] != before[chunk_count - 1]["content_hash"]
+        assert after["updated_at"] == t1.isoformat()
