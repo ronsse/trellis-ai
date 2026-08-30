@@ -215,6 +215,31 @@ class TestEmitterFidelity:
         emit_machine_text(text)
         assert capsys.readouterr().out == text + "\n"
 
+    def test_emit_machine_text_preserves_what_typer_echo_would_strip(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The reason ``emit_machine_text`` is not ``typer.echo``.
+
+        ``click.echo`` strips ANSI escape sequences when the destination is
+        not a tty. JSON never carries a raw escape byte — ``json.dumps``
+        renders it ``\\u001b`` — but ``format_output``'s ``tsv`` branch
+        stringifies cells unescaped, so on that path the stripping is a
+        silent edit to the operator's data. Asserting both halves keeps the
+        docstring's claim checkable rather than folklore.
+        """
+        import typer
+
+        text = "c1\tc2\nval\x1b[31mred\x1b[0m\tv2"
+
+        emit_machine_text(text)
+        assert capsys.readouterr().out == text + "\n"
+
+        typer.echo(text)
+        assert capsys.readouterr().out != text + "\n", (
+            "click.echo no longer strips ANSI; emit_machine_text could "
+            "revert to typer.echo"
+        )
+
     def test_format_output_results_survive_the_emitter(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:

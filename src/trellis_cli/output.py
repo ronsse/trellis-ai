@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import json
+import sys
 from typing import TYPE_CHECKING, Any
-
-import typer
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -120,12 +119,23 @@ def emit_machine_text(text: str) -> None:
       same command succeeds in one terminal and fails in another — and in
       CI, where the width is neither.
 
-    ``typer.echo`` does neither. It is the only sanctioned door for
-    ``--format json`` / ``jsonl`` / ``tsv`` output;
+    Writing straight to ``sys.stdout`` does neither. This is the only
+    sanctioned door for ``--format json`` / ``jsonl`` / ``tsv`` output;
     ``tests/unit/test_machine_output_rule.py`` enforces that no
     ``console.print`` call in ``trellis_cli`` carries a serialized payload.
+
+    ``typer.echo`` is deliberately *not* used, though it is safe against
+    both Rich behaviours above. ``click.echo`` strips ANSI escape sequences
+    when the destination is not a tty. That is invisible for JSON, which
+    escapes every control byte as ``\\uXXXX`` by construction — but
+    :func:`format_output`'s ``tsv`` branch stringifies cells unescaped, so
+    a value carrying a real escape byte would come out altered. "Unmodified"
+    should mean unmodified. The explicit ``flush`` restores the one thing
+    ``click.echo`` did that bare ``write`` does not, so a payload cannot sit
+    in a block-buffered pipe.
     """
-    typer.echo(text)
+    sys.stdout.write(text + "\n")
+    sys.stdout.flush()
 
 
 def emit_json(
