@@ -193,11 +193,14 @@ class TestDegenerateShapesDegradeAndRefuse:
         ``refuse_if_degraded()`` from ``add`` left the whole suite green
         when this file was first written; this assertion is what noticed.
 
-        It is not a distinction without a difference. FastAPI runs sync
-        routes in a threadpool over one cached ``PolicyStore``, so between
-        the mutation and the rollback a concurrent ``GET /policies`` can
-        observe a policy that is not on disk and never will be — a partial
-        view of an access-control file, served as the ruleset.
+        It is not a distinction without a difference. A store outlives the
+        refused call in every caller that catches the error and keeps
+        serving, and any reader reaching it between the mutation and the
+        rollback sees a policy that is not on disk and never will be — a
+        partial view of an access-control file, served as the ruleset.
+        Rolling back afterwards is a narrower promise than never having
+        mutated: it is the difference between "no lasting damage" and "no
+        window".
         """
         store = PolicyStore(_damaged(tmp_path, "{ broken"))
         entered: list[str] = []
