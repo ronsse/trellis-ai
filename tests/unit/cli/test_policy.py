@@ -266,6 +266,53 @@ class TestPolicyListSurvivesADamagedFile:
             "No policies configured"
         )
 
+    def test_the_banner_precedes_the_table_when_policies_do_parse(
+        self, tmp_path: Path
+    ) -> None:
+        """Banner above the listing, not below it.
+
+        The case that actually matters: some policies parsed, so the table
+        renders and looks entirely normal. An operator who reads top-down
+        must meet the warning before the reassuring content, not after it.
+        """
+        _add_policy()
+        path = tmp_path / "data" / "stores" / "policies.json"
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw["policies"].append({"policy_type": "bogus"})
+        path.write_text(json.dumps(raw), encoding="utf-8")
+
+        result = runner.invoke(app, ["policy", "list"])
+
+        assert result.exit_code == 5
+        assert result.stdout.index("POLICY STORE DEGRADED") < result.stdout.index(
+            "Governance Policies"
+        )
+        # ...and the readable policy is still shown. Refusing to render it
+        # would trade a silent failure for an outage on the one command an
+        # operator reaches for when the file breaks.
+        assert "mutation" in result.stdout
+
+    def test_show_still_exits_nonzero_when_the_policy_was_found(
+        self, tmp_path: Path
+    ) -> None:
+        """The answer is right; the store is still broken.
+
+        Every ``policy`` command exits 5 on a degraded store — one rule, so
+        a wrapper needs no per-command knowledge to notice that the file
+        behind its governance answers is unreadable.
+        """
+        policy_id = _add_policy()
+        path = tmp_path / "data" / "stores" / "policies.json"
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw["policies"].append({"policy_type": "bogus"})
+        path.write_text(json.dumps(raw), encoding="utf-8")
+
+        result = runner.invoke(app, ["policy", "show", policy_id])
+
+        assert result.exit_code == 5
+        assert policy_id in result.stdout
+        assert "POLICY STORE DEGRADED" in result.stdout
+
     def test_the_recovery_command_survives_rich_markup(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
