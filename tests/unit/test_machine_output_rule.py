@@ -20,8 +20,8 @@ does two things to a printed string:
   fails in another, and neither result is reproducible from the other.
 
 The fix is one door — :func:`trellis_cli.output.emit_json` /
-:func:`~trellis_cli.output.emit_machine_text`, both of which go through
-``typer.echo``. ``emit_json`` already existed and was used on two paths of
+:func:`~trellis_cli.output.emit_machine_text`, both of which write straight
+to ``sys.stdout``. ``emit_json`` already existed and was used on two paths of
 ``retrieve.py`` while three ``console.print`` calls sat beside them, which
 is the tell that a narrow fix does not hold: the rule needs an enforcer,
 not a convention. Same reasoning as ``test_chunk_visibility_rule.py``.
@@ -249,6 +249,88 @@ class TestEmitterFidelity:
         )
         payload = json.loads(capsys.readouterr().out)
         assert payload["items"] == [_EMOJI_TRAP_PAYLOAD]
+
+
+class TestErrorPathsAreAlsoMachineReadable:
+    """``--format json`` must hold on the failure branch too.
+
+    Found by sweeping every ``--format json`` surface against a real store
+    rather than by reading code: four commands answered a missing input
+    with Rich prose on **stdout**, so a consumer that did the documented
+    thing — parse stdout — got a ``JSONDecodeError`` instead of a
+    structured error it could act on. Each had a correct sibling a few
+    lines away (``policy remove`` does it right, and ``ingest trace``
+    already emitted JSON for a *parse* failure but not a *missing file*),
+    which is the same "narrow fix, unenforced rule" shape as #403 itself.
+
+    Exit codes are asserted alongside, because the fix must not turn a
+    failure into a silent success.
+    """
+
+    @staticmethod
+    def _json_stdout(result: object) -> dict:
+        stdout = result.stdout  # type: ignore[attr-defined]
+        assert stdout.strip(), "command produced no stdout at all"
+        return json.loads(stdout)
+
+    def test_ingest_trace_missing_file(self, cli_runner, tmp_path: Path) -> None:
+        from trellis_cli.main import app
+
+        result = cli_runner.invoke(
+            app,
+            ["ingest", "trace", str(tmp_path / "nope.json"), "--format", "json"],
+        )
+        assert result.exit_code != 0
+        assert self._json_stdout(result)["status"] == "error"
+
+    def test_ingest_evidence_missing_file(self, cli_runner, tmp_path: Path) -> None:
+        from trellis_cli.main import app
+
+        result = cli_runner.invoke(
+            app,
+            ["ingest", "evidence", str(tmp_path / "nope.json"), "--format", "json"],
+        )
+        assert result.exit_code != 0
+        assert self._json_stdout(result)["status"] == "error"
+
+    def test_ingest_dbt_manifest_missing_path(self, cli_runner, tmp_path: Path) -> None:
+        from trellis_cli.main import app
+
+        result = cli_runner.invoke(
+            app,
+            ["ingest", "dbt-manifest", str(tmp_path / "nope"), "--format", "json"],
+        )
+        assert result.exit_code != 0
+        assert self._json_stdout(result)["status"] == "error"
+
+    def test_ingest_openlineage_missing_file(self, cli_runner, tmp_path: Path) -> None:
+        from trellis_cli.main import app
+
+        result = cli_runner.invoke(
+            app,
+            ["ingest", "openlineage", str(tmp_path / "nope.json"), "--format", "json"],
+        )
+        assert result.exit_code != 0
+        assert self._json_stdout(result)["status"] == "error"
+
+    def test_policy_show_missing_policy(
+        self, cli_runner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from trellis_cli.main import app
+
+        monkeypatch.setenv("TRELLIS_CONFIG_DIR", str(tmp_path / "config"))
+        monkeypatch.setenv("TRELLIS_DATA_DIR", str(tmp_path / "data"))
+        (tmp_path / "data" / "stores").mkdir(parents=True)
+
+        result = cli_runner.invoke(
+            app, ["policy", "show", "no-such-policy", "--format", "json"]
+        )
+        assert result.exit_code != 0
+        assert self._json_stdout(result)["status"] == "error"
+
+
+class TestRichCorruptionIsReal:
+    """Pins the behaviour the whole rule is a response to."""
 
     @pytest.mark.parametrize("width", [40, 80, 100, 200])
     def test_rich_would_have_corrupted_the_same_payload(self, width: int) -> None:

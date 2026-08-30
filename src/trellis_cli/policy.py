@@ -92,7 +92,12 @@ def show_policy(
     # Support prefix matching
     match = _find_policy(store, policy_id)
     if match is None:
-        console.print(f"[red]Policy not found: {policy_id}[/red]")
+        if output_format == "json":
+            _print_json(
+                {"status": "error", "message": f"Policy not found: {policy_id}"}
+            )
+        else:
+            console.print(f"[red]Policy not found: {policy_id}[/red]")
         raise typer.Exit(code=EXIT_INTERNAL)
 
     if output_format == "json":

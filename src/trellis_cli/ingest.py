@@ -6,6 +6,7 @@ import asyncio
 import json
 import sys
 from pathlib import Path
+from typing import NoReturn
 
 import typer
 from rich.console import Console
@@ -38,6 +39,28 @@ from trellis_cli.stores import _get_registry, get_document_store
 ingest_app = typer.Typer(no_args_is_help=True)
 console = Console()
 
+
+def _fail(message: str, output_format: str) -> NoReturn:
+    """Report *message* on the caller's chosen surface, then exit non-zero.
+
+    The JSON branch is not optional. ``--format json`` is documented as
+    *the* machine surface, so an error delivered as Rich prose on stdout is
+    a payload the consumer cannot parse — it gets a ``JSONDecodeError``
+    where it expected a structured error it could act on (#403). Four
+    commands in this module reported a missing input exactly that way while
+    already emitting JSON for a *parse* failure a few lines below.
+
+    One helper rather than the same four-line branch at each site: the
+    duplicated form had pushed two commands past the branch limit, which is
+    the linter noticing the same thing.
+    """
+    if output_format == "json":
+        emit_json({"status": "error", "message": message})
+    else:
+        console.print(f"[red]{message}[/red]")
+    raise typer.Exit(code=EXIT_INTERNAL)
+
+
 ingest_app.command("corpus")(ingest_corpus)
 ingest_app.command("conversations")(ingest_conversations)
 
@@ -56,8 +79,7 @@ def ingest_trace(  # noqa: PLR0912 - CLI dispatch with explicit format branching
     else:
         path = Path(file)
         if not path.exists():
-            console.print(f"[red]File not found: {file}[/red]")
-            raise typer.Exit(code=EXIT_INTERNAL)
+            _fail(f"File not found: {file}", output_format)
         raw = path.read_text()
 
     # Parse and validate
@@ -131,8 +153,7 @@ def ingest_evidence(
     """Ingest evidence from a JSON file."""
     path = Path(file)
     if not path.exists():
-        console.print(f"[red]File not found: {file}[/red]")
-        raise typer.Exit(code=EXIT_INTERNAL)
+        _fail(f"File not found: {file}", output_format)
 
     try:
         data = json.loads(path.read_text())
@@ -222,8 +243,7 @@ def ingest_dbt_manifest(
     """Ingest a dbt manifest through the governed extraction pipeline."""
     path = Path(manifest_path)
     if not path.exists():
-        console.print(f"[red]Path not found: {manifest_path}[/red]")
-        raise typer.Exit(code=EXIT_INTERNAL)
+        _fail(f"Path not found: {manifest_path}", output_format)
 
     manifest_file = path / "target" / "manifest.json" if path.is_dir() else path
 
@@ -296,8 +316,7 @@ def ingest_openlineage(
     """Ingest OpenLineage events through the governed extraction pipeline."""
     path = Path(events_path)
     if not path.exists():
-        console.print(f"[red]File not found: {events_path}[/red]")
-        raise typer.Exit(code=EXIT_INTERNAL)
+        _fail(f"File not found: {events_path}", output_format)
 
     # Support JSON array and NDJSON — CLI owns file I/O.
     try:
