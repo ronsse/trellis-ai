@@ -285,6 +285,7 @@ class PolicyStore:
     def add(self, policy: Policy) -> Policy:
         """Add or replace a policy. Persists immediately."""
         self.refuse_if_degraded()
+        self.refuse_if_stale()
         restore = self._snapshot()
         self._policies[policy.policy_id] = policy
         self._save_or_roll_back(restore)
@@ -294,12 +295,17 @@ class PolicyStore:
     def remove(self, policy_id: str) -> bool:
         """Remove a policy by ID. Returns ``True`` if found.
 
-        Refuses on a degraded store *before* the membership check, not
-        after. The check would otherwise answer from a partial view and
-        report ``False`` — "no such policy" — for a policy that exists in
-        the file and merely failed to parse.
+        Refuses *before* the membership check, not after — for both
+        reasons. On a degraded store the check would answer from a partial
+        view and report ``False`` ("no such policy") for a policy that
+        exists in the file and merely failed to parse. On a **stale** store
+        it would do the same for a policy another process added since this
+        one loaded. Both are wrong answers rather than unhelpful ones, and
+        ``_save``'s guards are too late to prevent them: this path returns
+        before reaching a write at all.
         """
         self.refuse_if_degraded()
+        self.refuse_if_stale()
         if policy_id not in self._policies:
             return False
         restore = self._snapshot()

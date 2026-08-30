@@ -566,6 +566,27 @@ class TestDegradationIsNotTheOnlyStaleView:
         assert exc_info.value.code == "STALE_STORE_WRITE"
         assert mine.is_degraded is False
 
+    def test_remove_does_not_report_not_found_from_a_stale_view(
+        self, tmp_path: Path
+    ) -> None:
+        """``remove`` returns before it ever reaches a write.
+
+        So ``_save``'s guards cannot help: a store that loaded ``[A]`` would
+        answer ``False`` — "no such policy" — for a policy another process
+        added since, and the caller (``trellis policy remove``, ``DELETE
+        /policies/{id}``) would report a 404 for a policy that is right
+        there in the file. A wrong answer, not merely an unhelpful one.
+        """
+        path = tmp_path / "policies.json"
+        mine = PolicyStore(path)
+        mine.add(_policy())
+
+        theirs = _policy(scope=PolicyScope(level="domain", value="payments"))
+        PolicyStore(path).add(theirs)
+
+        with pytest.raises(StaleStoreWriteError):
+            mine.remove(theirs.policy_id)
+
     def test_a_file_created_after_construction_is_not_wiped(
         self, tmp_path: Path
     ) -> None:
