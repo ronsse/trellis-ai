@@ -56,35 +56,48 @@ def _render_degradation(degraded: dict[str, Any] | None) -> None:
     One renderer for every text surface here, so a warning cannot exist in
     ``--format json`` alone and the four commands cannot drift apart.
 
-    **Every interpolated value is escaped.** ``detail`` is arbitrary
-    exception text and ``path`` is an arbitrary filesystem path, and Rich
-    reads ``[...]`` as markup: an unescaped detail of ``'no "policies" key
-    (keys: [...])'`` loses the keys it exists to name, and a path under
-    ``/tmp/my [staging] dir/`` turns the recovery line into a command that
-    does not run. The recovery command is the entire justification for the
-    refusal, so it is the one string that must survive rendering
-    byte-for-byte.
+    The recovery command is the entire justification for the refusal — an
+    operator meets this needing the fix, not a diagnosis — so it is the one
+    string that must survive rendering byte-for-byte. Two things eat it,
+    and both are guarded here:
+
+    * **Markup.** ``detail`` is arbitrary exception text and ``path`` is an
+      arbitrary filesystem path, and Rich reads ``[...]`` as markup: an
+      unescaped detail of ``'no "policies" key (keys: [...])'`` loses the
+      keys it exists to name. Hence ``escape`` on every interpolated value.
+    * **Wrapping.** Rich hard-wraps at the console width, so a data dir
+      deeper than ~80 columns splits the ``mv`` across two lines — and a
+      pasted hard newline is two shell commands, neither of them the fix.
+      Hence ``soft_wrap``: the terminal still wraps it visually, but the
+      string handed to the operator stays one line.
     """
     if not degraded:
         return
     console.print(
         f"  [bold red]POLICY STORE DEGRADED[/bold red] — "
-        f"{escape(str(degraded['reason']))}: {escape(str(degraded['detail']))}"
+        f"{escape(str(degraded['reason']))}: {escape(str(degraded['detail']))}",
+        soft_wrap=True,
     )
     console.print(
         f"    file: [cyan]{escape(str(degraded['path']))}[/cyan] "
         f"({degraded['rows_loaded']} policy/policies readable, "
-        f"{escape(str(degraded['rows_skipped_display']))} not)"
+        f"{escape(str(degraded['rows_skipped_display']))} not)",
+        soft_wrap=True,
     )
     console.print(
         "    Writes are refused so the file is intact. This listing is a "
-        "partial view, not the ruleset."
+        "partial view, not the ruleset.",
+        soft_wrap=True,
     )
     console.print(
         "    Enforcement reads this file separately and strictly: the "
-        "mutation pipeline is failing closed on it."
+        "mutation pipeline is failing closed on it.",
+        soft_wrap=True,
     )
-    console.print(f"    To reset: [bold]{escape(str(degraded['recovery']))}[/bold]")
+    console.print(
+        f"    To reset: [bold]{escape(str(degraded['recovery']))}[/bold]",
+        soft_wrap=True,
+    )
 
 
 def _exit_if_degraded(store: PolicyStore, output_format: str) -> None:
@@ -155,7 +168,8 @@ def list_policies(
         if not degraded and file_present:
             console.print(
                 f"[dim]  {escape(str(store.path))} declares an empty policy "
-                "list. Stage 2 is transparent: every mutation is permitted.[/dim]"
+                "list. Stage 2 is transparent: every mutation is permitted.[/dim]",
+                soft_wrap=True,
             )
         if degraded:
             raise typer.Exit(code=EXIT_STORE)
@@ -219,7 +233,8 @@ def show_policy(
                 console.print(
                     f"[red]Policy not found: {escape(policy_id)}[/red] "
                     "[yellow](the store is degraded — this may mean unreadable, "
-                    "not absent)[/yellow]"
+                    "not absent)[/yellow]",
+                    soft_wrap=True,
                 )
             raise typer.Exit(code=EXIT_STORE)
         console.print(f"[red]Policy not found: {escape(policy_id)}[/red]")

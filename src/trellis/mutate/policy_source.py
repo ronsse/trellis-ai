@@ -228,7 +228,7 @@ def _load_from_path(path: Path | None) -> list[Policy]:
 
     if not isinstance(data["policies"], list):
         msg = (
-            f"Malformed Trellis policy file at {path}: expected \"policies\" to "
+            f'Malformed Trellis policy file at {path}: expected "policies" to '
             f"be a list, got {type(data['policies']).__name__}. Fix the file, "
             "or remove it to run with no policies."
         )

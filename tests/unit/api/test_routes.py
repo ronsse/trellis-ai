@@ -941,6 +941,99 @@ def test_delete_policy_not_found(client):
     assert resp.status_code == 404
 
 
+class TestPolicyRoutesOnADegradedStore:
+    """#413 — the REST CRUD surface is one of the two writers that laundered
+    a damaged access-control file into an empty, *enforced* one.
+
+    ``POST /policies`` on a store that could not read its file rewrote the
+    file with what survived (nothing), after which the strict enforcement
+    reader parsed a perfectly valid zero-policy file and the gate allowed
+    everything. Nothing in that sequence returned an error.
+    """
+
+    @staticmethod
+    def _damage(tmp_path, text: str):
+        path = tmp_path / "stores" / "policies.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def test_get_carries_the_degradation(self, client, tmp_path):
+        """``count`` alone under-reports, so a caller reading it as the size
+        of the ruleset would be wrong."""
+        self._damage(tmp_path, '{"policys": [{"policy_id": "x"}]}')
+
+        resp = client.get("/api/v1/policies")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["count"] == 0
+        assert body["store_degradation"]["reason"] == "malformed_envelope"
+        assert body["store_degradation"]["recovery"].startswith("mv ")
+
+    def test_create_is_refused_and_the_bytes_survive(self, client, tmp_path):
+        path = self._damage(tmp_path, '{"policys": [{"policy_id": "x"}]}')
+        before = path.read_bytes()
+
+        resp = client.post(
+            "/api/v1/policies",
+            json={
+                "policy_type": "mutation",
+                "scope": {"level": "global"},
+                "rules": [{"operation": "*", "action": "deny"}],
+            },
+        )
+
+        # 409, not 503: the file will not repair itself, so "retry later"
+        # is the wrong instruction. And not 500 — that body says only
+        # "internal server error" and drops the recovery command.
+        assert resp.status_code == 409
+        detail = resp.json()["detail"]
+        assert detail["code"] == "degraded_store_write"
+        assert detail["store_degradation"]["recovery"].startswith("mv ")
+        assert path.read_bytes() == before
+
+    def test_delete_is_refused_rather_than_reporting_not_found(self, client, tmp_path):
+        """A 404 from a degraded store is a claim it cannot support."""
+        path = self._damage(tmp_path, "{ broken")
+        before = path.read_bytes()
+
+        resp = client.delete("/api/v1/policies/whatever")
+
+        assert resp.status_code == 409
+        assert path.read_bytes() == before
+
+    def test_get_one_does_not_claim_absence(self, client, tmp_path):
+        self._damage(tmp_path, "{ broken")
+
+        resp = client.get("/api/v1/policies/whatever")
+
+        assert resp.status_code == 409
+
+    def test_a_repaired_file_is_picked_up_without_a_restart(self, client, tmp_path):
+        """The store is cached for the life of the process.
+
+        Without invalidating the cache on the degraded flag, an operator who
+        took the recovery advice would keep getting 409s until someone
+        restarted the API — turning a fix into an outage of its own.
+        """
+        path = self._damage(tmp_path, "{ broken")
+        assert client.get("/api/v1/policies").json()["store_degradation"]
+
+        path.unlink()
+
+        resp = client.post(
+            "/api/v1/policies",
+            json={
+                "policy_type": "mutation",
+                "scope": {"level": "global"},
+                "rules": [{"operation": "*", "action": "deny"}],
+            },
+        )
+        assert resp.status_code == 200
+        assert "store_degradation" not in client.get("/api/v1/policies").json()
+
+
 class TestAdvisoryGenerateOnADegradedStore:
     """#393 — the REST admin surface must not headline ``ok`` over a refusal.
 

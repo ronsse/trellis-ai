@@ -85,7 +85,6 @@ logger = structlog.get_logger(__name__)
 _MAX_REPORTED_ROWS = 3
 
 
-
 @dataclass(frozen=True, slots=True)
 class AdvisoryLoadDegradation:
     """What a load could not read, and what an operator should do about it.
