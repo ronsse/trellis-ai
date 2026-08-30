@@ -92,20 +92,19 @@ class StoreError(TrellisError):
         super().__init__(message, code="STORE_ERROR")
 
 
-class DegradedStoreWriteError(StoreError):
-    """Raised when a write is refused because the store loaded degraded.
+class StoreWriteRefusedError(StoreError):
+    """A file-backed store refused to rewrite a file it cannot safely replace.
 
-    A file-backed store that whole-file-rewrites on every write cannot
-    honour a partial load: serialising what it managed to read and calling
-    that the file destroys whatever it could not read. Degrading the *read*
-    is often right — a corrupt hints file must not take retrieval down —
-    but the same leniency applied to the *write* silently deletes the
-    operator's data, and (for advisories) silently reverses every
-    suppression the fitness loop had made.
-
-    So the read degrades and the write refuses. ``recovery`` carries the
+    The shared parent of the two refusals a whole-file-rewriting store can
+    make. Both mean the same thing to a caller — *this write did not
+    happen, and the file on disk is unharmed* — so surfaces catch this base
+    rather than enumerating subclasses, and both carry ``recovery``: the
     concrete shell command that clears the state, because an operator who
-    hits this at 03:00 in a cron log needs the fix, not a diagnosis.
+    hits this in a cron log needs the fix, not a diagnosis.
+
+    The distinction between the subclasses is whether the *load* or the
+    *file* is the problem, which is what tells an operator whether to
+    inspect their file or simply retry.
     """
 
     def __init__(
@@ -120,7 +119,64 @@ class DegradedStoreWriteError(StoreError):
         self.recovery = recovery
         full = f"{message} {recovery}" if recovery else message
         super().__init__(full, store=store)
+        self.code = "STORE_WRITE_REFUSED"
+
+
+class DegradedStoreWriteError(StoreWriteRefusedError):
+    """Raised when a write is refused because the store loaded degraded.
+
+    A file-backed store that whole-file-rewrites on every write cannot
+    honour a partial load: serialising what it managed to read and calling
+    that the file destroys whatever it could not read. Degrading the *read*
+    is often right — a corrupt hints file must not take retrieval down —
+    but the same leniency applied to the *write* silently deletes the
+    operator's data, and (for advisories) silently reverses every
+    suppression the fitness loop had made.
+
+    So the read degrades and the write refuses. Retrying will not help:
+    the file has to be looked at.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        store: str | None = None,
+        path: str | None = None,
+        recovery: str | None = None,
+    ) -> None:
+        super().__init__(message, store=store, path=path, recovery=recovery)
         self.code = "DEGRADED_STORE_WRITE"
+
+
+class StaleStoreWriteError(StoreWriteRefusedError):
+    """Raised when the file changed after the store read it.
+
+    The other half of the laundering primitive #413 describes. A degraded
+    load is one way an in-memory view stops matching the file; **another
+    process writing the file** is a second, and it produces the identical
+    end state — a whole-file rewrite from a stale view, silently deleting
+    whatever landed in between, with no error anywhere and every surface
+    reporting normal.
+
+    That is not hypothetical for the reference deployment: a host CLI and a
+    containerised API write the same bind-mounted ``policies.json``, so
+    "this store is the file's only writer" was never true. Unlike a
+    degraded load this is **transient** — the fix is to re-read and redo
+    the operation, so ``recovery`` names the command that shows current
+    state rather than one that moves the file aside.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        store: str | None = None,
+        path: str | None = None,
+        recovery: str | None = None,
+    ) -> None:
+        super().__init__(message, store=store, path=path, recovery=recovery)
+        self.code = "STALE_STORE_WRITE"
 
 
 class NotFoundError(StoreError):

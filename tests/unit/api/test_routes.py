@@ -9,6 +9,9 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import trellis_api.app as app_module
+from trellis.errors import StaleStoreWriteError
+from trellis.schemas.enums import PolicyType
+from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
 from trellis.stores.registry import StoreRegistry
 from trellis_api.routes import admin, curate, ingest, mutations, policies, retrieve
 
@@ -989,7 +992,9 @@ class TestPolicyRoutesOnADegradedStore:
         # "internal server error" and drops the recovery command.
         assert resp.status_code == 409
         detail = resp.json()["detail"]
-        assert detail["code"] == "degraded_store_write"
+        # Not ``degraded_store_write``: the same helper answers a read route,
+        # where nothing was being written.
+        assert detail["code"] == "degraded_store"
         assert detail["store_degradation"]["recovery"].startswith("mv ")
         assert path.read_bytes() == before
 
@@ -1031,7 +1036,115 @@ class TestPolicyRoutesOnADegradedStore:
             },
         )
         assert resp.status_code == 200
-        assert "store_degradation" not in client.get("/api/v1/policies").json()
+        # The key is always present, ``None`` when clean — an optional key
+        # makes every client handle its absence, and absence is the case
+        # they would guess wrong about.
+        assert client.get("/api/v1/policies").json()["store_degradation"] is None
+
+    def test_a_healthy_cached_store_cannot_overwrite_another_writer(
+        self, client, tmp_path
+    ):
+        """The defect that arrives with no corruption at all.
+
+        The store used to be cached for the life of the process and
+        invalidated only on *degradation*, so a healthy cached view outlived
+        the file. The reference deployment writes this file from two
+        processes — a host ``trellis policy add`` and this containerised API
+        against one bind-mounted data dir — so:
+
+            GET  /policies        -> caches a store holding [A]
+            trellis policy add B  -> file is [A, B]
+            POST /policies (C)    -> file becomes [A, C]; B is gone
+            GET  /policies        -> 200, no degradation, reports normal
+
+        A declared ``deny`` deleted from disk *and* from Stage 2 by an
+        unrelated successful request. Not caching is what fixes it; the
+        assertion here is that a second writer's row survives.
+        """
+        path = tmp_path / "stores" / "policies.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        first = client.post(
+            "/api/v1/policies",
+            json={
+                "policy_type": "mutation",
+                "scope": {"level": "global"},
+                "rules": [{"operation": "entity.create", "action": "deny"}],
+            },
+        )
+        assert first.status_code == 200
+        a_id = first.json()["policy_id"]
+
+        # Another process appends B, exactly as ``trellis policy add`` does.
+        from trellis.stores.policy_store import PolicyStore
+
+        other = PolicyStore(path)
+        b = Policy(
+            policy_type=PolicyType.MUTATION,
+            scope=PolicyScope(level="domain", value="payments"),
+            rules=[PolicyRule(operation="*", action="deny")],
+        )
+        other.add(b)
+
+        second = client.post(
+            "/api/v1/policies",
+            json={
+                "policy_type": "mutation",
+                "scope": {"level": "team", "value": "core"},
+                "rules": [{"operation": "*", "action": "warn"}],
+            },
+        )
+        assert second.status_code == 200
+
+        listed = {
+            p["policy_id"] for p in client.get("/api/v1/policies").json()["policies"]
+        }
+        assert a_id in listed
+        assert b.policy_id in listed, "the other writer's policy was deleted"
+        assert second.json()["policy_id"] in listed
+
+    def test_a_stale_write_is_refused_rather_than_silently_winning(
+        self, client, tmp_path
+    ):
+        """The window not-caching cannot close, closed by compare-and-swap.
+
+        ``refuse_if_stale`` is a different failure from a degraded load —
+        transient, and retryable — so it carries its own code rather than
+        claiming the file is damaged.
+        """
+        from trellis.stores.policy_store import PolicyStore
+
+        path = tmp_path / "stores" / "policies.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        store = PolicyStore(path)
+        store.add(
+            Policy(
+                policy_type=PolicyType.MUTATION,
+                scope=PolicyScope(level="global"),
+                rules=[PolicyRule(operation="*", action="deny")],
+            )
+        )
+
+        # A second process writes between this store's load and its save.
+        PolicyStore(path).add(
+            Policy(
+                policy_type=PolicyType.MUTATION,
+                scope=PolicyScope(level="team", value="core"),
+                rules=[PolicyRule(operation="*", action="warn")],
+            )
+        )
+        before = path.read_bytes()
+
+        with pytest.raises(StaleStoreWriteError):
+            store.add(
+                Policy(
+                    policy_type=PolicyType.MUTATION,
+                    scope=PolicyScope(level="domain", value="payments"),
+                    rules=[PolicyRule(operation="*", action="deny")],
+                )
+            )
+
+        assert path.read_bytes() == before
 
 
 class TestAdvisoryGenerateOnADegradedStore:

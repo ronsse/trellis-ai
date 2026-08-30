@@ -33,8 +33,8 @@ file just broke is exactly who needs it — and raises
 damaged bytes stay on disk, where an operator can look at them and where
 the strict enforcement reader keeps failing closed on them.
 
-This is #414's resolution for :class:`~trellis.stores.advisory_store.AdvisoryStore`
-applied here, and the generalisation is worth stating: **the axis is
+This is #393's resolution for :class:`~trellis.stores.advisory_store.AdvisoryStore`
+(landed in #414) applied here, and the generalisation is worth stating: **the axis is
 read-vs-write, not policy-vs-advisory.** ``policy_source`` has no write
 path, so it never had to answer the write question; this store, which
 does, was never held to the same standard.
@@ -43,15 +43,42 @@ Per-row, not per-file
 ---------------------
 Validation is per row. One unparseable entry — a hand-edit, a renamed
 field — costs that entry rather than the ruleset, so ``policy list`` still
-shows the policies that *are* readable. That matters more here than for
-advisories, where the pre-fix blast radius was the same: the old handler
-wrapped the whole loop, so a single bad row discarded every policy from
-the operator's view of their own governance.
+shows the policies that *are* readable. The pre-fix blast radius was
+identical in both stores — the old handler wrapped the whole loop, so a
+single bad row discarded the lot — but it costs more here: for advisories
+the operator loses hints, for policies they lose their only view of what
+the deployment is enforcing.
 
 Per-row leniency is only safe *because* the write refuses — a partial load
 followed by a permitted write rewrites the file without the skipped rows,
 which is the same laundering at a narrower granularity. The two halves are
 a pair; neither is safe alone.
+
+Degradation is not the only stale view
+--------------------------------------
+The laundering primitive is *a whole-file rewrite from an in-memory view
+that is no longer the file*, and a degraded load is only one way to get
+one. Two others reach the identical end state with nothing degraded:
+
+* **Another process wrote the file.** The reference deployment runs a host
+  CLI (``trellis policy add``) and a containerised API (``POST
+  /api/policies``) against the same bind-mounted ``policies.json``, so
+  "this store is the file's only writer" was never true. A store that
+  loaded ``[A]`` and then rewrites the file after the CLI has made it
+  ``[A, B]`` deletes ``B`` — from disk and from Stage 2 — with no error
+  anywhere.
+* **The file appeared after construction.** A store built while the path
+  was absent is not degraded, and its first write replaces a file it never
+  read.
+
+Both are closed by one guard: :meth:`PolicyStore.refuse_if_stale` records a
+fingerprint of the file as loaded and refuses
+(:class:`~trellis.errors.StaleStoreWriteError`) if it no longer matches.
+Unlike a degraded load this one is **transient** — re-read and redo, rather
+than go and look at the file. It is a compare-and-swap, not a lock: two
+writers can still interleave between the check and the ``os.replace``, so
+it closes the wide window and narrows the tiny one. Last-writer-wins
+remains the model.
 
 The two readers disagree on purpose
 -----------------------------------
@@ -73,7 +100,7 @@ from typing import Any
 import structlog
 
 from trellis.core.atomic_write import atomic_write_text
-from trellis.errors import DegradedStoreWriteError
+from trellis.errors import DegradedStoreWriteError, StaleStoreWriteError
 from trellis.schemas.policy import Policy
 
 logger = structlog.get_logger(__name__)
@@ -121,10 +148,14 @@ class PolicyLoadDegradation:
         which for an access-control file are the only record of what the
         deployment was enforcing — no machine can rebuild them.
 
-        Note what taking this advice means: the canonical path is then
-        *absent*, which is a legitimate, transparent, zero-policy
-        deployment. That is the right end state only if the operator
-        re-declares the policies afterwards.
+        Note what taking this advice means. Usually the canonical path is
+        then *absent*, which is a legitimate, transparent, zero-policy
+        deployment — right only if the operator re-declares the policies
+        afterwards. But if a file also sits at the **legacy** path
+        (``<data_dir>/policies.json``), ``resolve_policy_path`` falls back
+        to it, and the deployment silently starts enforcing that stale
+        ruleset instead. Check ``trellis policy list`` after the move; it
+        names the file actually in force.
         """
         return f"mv {self.path} {self.path}.corrupt"
 
@@ -173,8 +204,20 @@ class PolicyStore:
         self._path = Path(path)
         self._policies: dict[str, Policy] = {}
         self._degradation: PolicyLoadDegradation | None = None
-        if self._path.exists():
+        # ``stat`` rather than ``exists()``: ``Path.exists`` swallows every
+        # ``OSError`` internally, so a file under an unsearchable directory
+        # presents as *absent* — the documented default posture, transparent
+        # and writable — rather than as unreadable. That was the one broad
+        # catch left in this module with no structural consequence.
+        try:
+            self._path.stat()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            self._degrade("unreadable_file", f"{type(exc).__name__}: {exc}")
+        else:
             self._load()
+        self._loaded_fingerprint = self._fingerprint()
 
     # -- Public API --
 
@@ -209,7 +252,7 @@ class PolicyStore:
         return self._degradation is not None
 
     def list(self) -> list[Policy]:
-        """Return all policies, ordered by creation time.
+        """Return all policies, in file order.
 
         Works on a degraded store, serving whatever parsed. That is the
         lenient half of the posture and the whole reason this reader
@@ -384,6 +427,16 @@ class PolicyStore:
             except Exception as exc:
                 skipped.append(f"row {index}: {type(exc).__name__}")
                 continue
+            # A duplicate id is degradation, not a last-one-wins overwrite.
+            # This store keys by ``policy_id`` while the enforcement reader
+            # builds a *list* and evaluates every duplicate (deny wins), so
+            # collapsing them silently makes the two readers disagree about
+            # what the file says — and the next permitted write would rewrite
+            # the file with the collapsed view, deleting a rule the gate was
+            # enforcing. Same laundering, different route in.
+            if policy.policy_id in self._policies:
+                skipped.append(f"row {index}: duplicate policy_id")
+                continue
             self._policies[policy.policy_id] = policy
 
         if skipped:
@@ -429,6 +482,42 @@ class PolicyStore:
             ),
         )
 
+    def _fingerprint(self) -> tuple[int, int, int] | None:
+        """Identity of the file as this store last saw it, ``None`` if absent.
+
+        ``st_ino`` is the load-bearing part: every write here lands through
+        ``os.replace`` from a fresh temp file, so a completed write by any
+        process changes the inode even if size and mtime happen to collide.
+        """
+        try:
+            st = self._path.stat()
+        except OSError:
+            return None
+        return (st.st_ino, st.st_mtime_ns, st.st_size)
+
+    def refuse_if_stale(self) -> None:
+        """Raise rather than rewrite a file that changed after we read it.
+
+        See the module docstring: a degraded load is one way an in-memory
+        view stops matching the file, another process writing it is a
+        second, and a file appearing after construction is a third. All
+        three end the same way, and only the first of them degrades.
+        """
+        if self._fingerprint() == self._loaded_fingerprint:
+            return
+        msg = (
+            f"Refusing to write the Trellis policy file at {self._path}: it "
+            "changed after this process read it, so writing would replace "
+            "whatever landed in between — silently un-governing every "
+            "mutation those policies covered. Re-read and retry:"
+        )
+        raise StaleStoreWriteError(
+            msg,
+            store="policy",
+            path=str(self._path),
+            recovery="trellis policy list",
+        )
+
     def _save(self) -> None:
         """Persist current policies to the JSON file.
 
@@ -436,12 +525,23 @@ class PolicyStore:
         A direct ``write_text`` truncates the destination and *then* writes,
         so a crash, a full disk or a killed process between the two produces
         exactly the half-written file the rest of this module has to
-        survive. This store is the file's only writer, so closing that
-        window closes the main way the state gets created.
+        survive. No other *code* writes this file, so closing that window
+        closes the main way the degraded state gets created.
+
+        Atomicity is not a concurrency guarantee, and this file has two
+        writer **processes** — ``trellis policy add`` on the host and
+        ``POST /api/policies`` in a container, against the same
+        bind-mounted data dir. ``os.replace`` makes their writes atomic,
+        not ordered; :meth:`refuse_if_stale` is what stops one of them
+        rewriting the other's work from a stale view.
         """
         self.refuse_if_degraded()
+        self.refuse_if_stale()
         self._path.parent.mkdir(parents=True, exist_ok=True)
         data: dict[str, Any] = {
             "policies": [p.model_dump(mode="json") for p in self._policies.values()]
         }
         atomic_write_text(self._path, json.dumps(data, indent=2, default=str))
+        # What we just wrote is now what we "loaded": a second write from the
+        # same store instance must not trip its own guard.
+        self._loaded_fingerprint = self._fingerprint()
