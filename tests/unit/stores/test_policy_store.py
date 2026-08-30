@@ -191,6 +191,42 @@ class TestDegenerateShapesDegradeAndRefuse:
 
         assert store.list() == before
 
+    @pytest.mark.parametrize("write", ["add", "remove"])
+    def test_a_degraded_write_never_enters_the_write_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, write: str
+    ) -> None:
+        """Fail before doing the work, not after undoing it.
+
+        The rollback in ``_save_or_roll_back`` makes a *post*-mutation
+        refusal look identical from outside — same exception, same
+        ``list()`` — so the two mechanisms mask each other, which is the
+        precise trap #414 recorded after two of its tests turned out unable
+        to detect removal of the fix they protected. Deleting
+        ``refuse_if_degraded()`` from ``add`` left the whole suite green
+        when this file was first written; this assertion is what noticed.
+
+        It is not a distinction without a difference. FastAPI runs sync
+        routes in a threadpool over one cached ``PolicyStore``, so between
+        the mutation and the rollback a concurrent ``GET /policies`` can
+        observe a policy that is not on disk and never will be — a partial
+        view of an access-control file, served as the ruleset.
+        """
+        store = PolicyStore(_damaged(tmp_path, "{ broken"))
+        entered: list[str] = []
+        monkeypatch.setattr(
+            store,
+            "_save",
+            lambda: entered.append("save"),  # type: ignore[method-assign]
+        )
+
+        with pytest.raises(DegradedStoreWriteError):
+            if write == "add":
+                store.add(_policy())
+            else:
+                store.remove("anything")
+
+        assert entered == [], "the write path was entered on a degraded store"
+
 
 class TestDegradationIsPerRow:
     """One unparseable entry costs one entry, not the ruleset.
