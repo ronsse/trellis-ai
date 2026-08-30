@@ -847,6 +847,32 @@ treat a damaged file differently, on purpose:
   `mv` the path is absent, which is a legitimate transparent zero-policy
   deployment, so **re-declare your policies**.
 
+### If another process wrote the file first
+
+Two processes write `policies.json` on a typical deployment — `trellis
+policy add` on the host and `POST /api/policies` in a container, against
+the same data dir. Both stores whole-file-rewrite, so a write from a view
+that predates the other's write would silently delete it.
+
+A write is therefore refused when the file changed after the store read it:
+exit **5** on the CLI, HTTP **409** with `"code": "stale_store_write"` over
+REST. Unlike the damaged case this one is **transient** — re-read and redo
+the operation. It is a compare-and-swap rather than a lock, so it closes
+the wide window and narrows the tiny one; last-writer-wins is still the
+model for two writes that genuinely race.
+
+### `--format json` shapes
+
+`trellis policy list` and `show` carry the house `status` key (`"ok"` /
+`"degraded"`), plus `store_degradation` when degraded. `list` also reports
+`policy_file` and `policy_file_present`.
+
+**`show` returns an envelope** — `{"status", "policy"}` — not a bare
+`Policy` dump. Every Trellis schema is `extra="forbid"`, so a dump with a
+`store_degradation` key alongside it is a payload `Policy.model_validate`
+rejects; the envelope is what lets the degradation ride along. Read the
+policy from `.policy`.
+
 `trellis policy list` also distinguishes the two ways of getting an empty
 answer: an absent file (the shipped default) says nothing extra, while a file
 containing `{"policies": []}` says so and notes that Stage 2 is transparent.
