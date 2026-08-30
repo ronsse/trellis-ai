@@ -437,7 +437,13 @@ class TestEmptyIsNotAlwaysTheSameEmpty:
 
     def test_json_reports_which_case_it_is(self, tmp_path: Path) -> None:
         absent = runner.invoke(app, ["policy", "list", "--format", "json"])
-        assert json.loads(absent.stdout.strip())["policy_file_present"] is False
+        payload = json.loads(absent.stdout.strip())
+        assert payload["policy_file_present"] is False
+        # Present-and-null, not absent: the same shape the REST route uses,
+        # so a client never has to distinguish "clean" from "old version of
+        # this command".
+        assert payload["status"] == "ok"
+        assert payload["store_degradation"] is None
 
         _damage(tmp_path, '{"policies": []}')
         present = runner.invoke(app, ["policy", "list", "--format", "json"])

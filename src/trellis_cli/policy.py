@@ -184,9 +184,11 @@ def list_policies(
             "policies": [p.model_dump(mode="json") for p in policies],
             "policy_file": str(store.path),
             "policy_file_present": file_present,
+            # Always present, ``None`` when clean — the same shape ``GET
+            # /api/v1/policies`` uses. An optional key makes every client
+            # handle its absence, and absence is the case they guess wrong.
+            "store_degradation": degraded,
         }
-        if degraded:
-            payload["store_degradation"] = degraded
         _print_json(payload)
         if degraded:
             raise typer.Exit(code=EXIT_STORE)
@@ -284,9 +286,8 @@ def show_policy(
         payload: dict[str, Any] = {
             "status": "degraded" if degraded else "ok",
             "policy": match.model_dump(mode="json"),
+            "store_degradation": degraded,
         }
-        if degraded:
-            payload["store_degradation"] = degraded
         _print_json(payload)
         if degraded:
             raise typer.Exit(code=EXIT_STORE)
