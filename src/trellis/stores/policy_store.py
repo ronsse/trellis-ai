@@ -179,6 +179,19 @@ class PolicyStore:
     # -- Public API --
 
     @property
+    def path(self) -> Path:
+        """The file this store reads and writes.
+
+        Public because the CRUD surfaces have to tell an operator *which*
+        file produced an empty answer: an absent file is the shipped
+        default posture, a file declaring ``{"policies": []}`` is a
+        deliberate declaration, and the two are worth distinguishing where
+        a human asks — see :mod:`trellis.mutate.policy_source` on why
+        enforcement deliberately does not distinguish them.
+        """
+        return self._path
+
+    @property
     def degradation(self) -> PolicyLoadDegradation | None:
         """What the load could not read, or ``None`` when it read cleanly.
 

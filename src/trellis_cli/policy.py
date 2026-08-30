@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 from trellis.mutate import resolve_policy_path
@@ -13,7 +15,7 @@ from trellis.schemas.enums import Enforcement, PolicyType
 from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
 from trellis.stores.policy_store import PolicyStore
 from trellis_cli.config import get_data_dir
-from trellis_cli.exit_codes import EXIT_INTERNAL
+from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_STORE
 
 policy_app = typer.Typer(no_args_is_help=True)
 console = Console()
@@ -34,8 +36,76 @@ def _get_policy_store() -> PolicyStore:
 
 
 def _print_json(obj: object) -> None:
-    """Print a JSON-serialisable object without Rich highlighting."""
-    console.print(json.dumps(obj, indent=2, default=str), highlight=False)
+    """Print a JSON-serialisable object as *parseable* JSON.
+
+    ``typer.echo``, not ``console.print``. Rich soft-wraps at the terminal
+    width, and a wrap lands inside a long string value — which makes the
+    output something ``json.loads`` rejects, breaking the documented
+    ``--format json`` contract. It was latent here only because every
+    payload happened to be short; adding the policy file's path to
+    ``policy list`` was enough to trip it at the default 80 columns. Same
+    reasoning as :func:`trellis_cli.output.emit_json`, keeping this
+    command group's ``indent=2`` / ``default=str`` rendering.
+    """
+    typer.echo(json.dumps(obj, indent=2, default=str))
+
+
+def _render_degradation(degraded: dict[str, Any] | None) -> None:
+    """Print the policy store's degraded state, or nothing at all.
+
+    One renderer for every text surface here, so a warning cannot exist in
+    ``--format json`` alone and the four commands cannot drift apart.
+
+    **Every interpolated value is escaped.** ``detail`` is arbitrary
+    exception text and ``path`` is an arbitrary filesystem path, and Rich
+    reads ``[...]`` as markup: an unescaped detail of ``'no "policies" key
+    (keys: [...])'`` loses the keys it exists to name, and a path under
+    ``/tmp/my [staging] dir/`` turns the recovery line into a command that
+    does not run. The recovery command is the entire justification for the
+    refusal, so it is the one string that must survive rendering
+    byte-for-byte.
+    """
+    if not degraded:
+        return
+    console.print(
+        f"  [bold red]POLICY STORE DEGRADED[/bold red] — "
+        f"{escape(str(degraded['reason']))}: {escape(str(degraded['detail']))}"
+    )
+    console.print(
+        f"    file: [cyan]{escape(str(degraded['path']))}[/cyan] "
+        f"({degraded['rows_loaded']} policy/policies readable, "
+        f"{escape(str(degraded['rows_skipped_display']))} not)"
+    )
+    console.print(
+        "    Writes are refused so the file is intact. This listing is a "
+        "partial view, not the ruleset."
+    )
+    console.print(
+        "    Enforcement reads this file separately and strictly: the "
+        "mutation pipeline is failing closed on it."
+    )
+    console.print(f"    To reset: [bold]{escape(str(degraded['recovery']))}[/bold]")
+
+
+def _exit_if_degraded(store: PolicyStore, output_format: str) -> None:
+    """Stop a *write* command that must not act on a degraded store.
+
+    The store refuses these writes unconditionally — this guard is not what
+    makes them safe. It is what turns an unhandled
+    ``DegradedStoreWriteError`` traceback (exit 1, "unexpected; file a
+    bug") into a rendered refusal carrying the recovery command, at the
+    canonical :data:`~trellis_cli.exit_codes.EXIT_STORE` a wrapper can
+    branch on.
+    """
+    degradation = store.degradation
+    if degradation is None:
+        return
+    degraded = degradation.to_dict()
+    if output_format == "json":
+        _print_json({"status": "degraded", "store_degradation": degraded})
+    else:
+        _render_degradation(degraded)
+    raise typer.Exit(code=EXIT_STORE)
 
 
 @policy_app.command("list")
@@ -44,21 +114,51 @@ def list_policies(
         "text", "--format", help="Output format: text or json"
     ),
 ) -> None:
-    """List all governance policies."""
+    """List all governance policies.
+
+    Works on a damaged file — that is the whole reason the CRUD reader is
+    lenient — but says so, and exits
+    :data:`~trellis_cli.exit_codes.EXIT_STORE` rather than 0. For an
+    access-control question a partial answer presented as a complete one is
+    the failure mode; a script verifying governance must not read a
+    truncated list as the truth.
+    """
     store = _get_policy_store()
     policies = store.list()
+    degradation = store.degradation
+    degraded = degradation.to_dict() if degradation else None
+    # Distinguish the two ways of getting an empty answer. Enforcement
+    # deliberately does not (see trellis.mutate.policy_source); here, where
+    # a human is asking once, it is cheap and it is the question they mean.
+    file_present = store.path.exists()
 
     if output_format == "json":
-        _print_json(
-            {
-                "count": len(policies),
-                "policies": [p.model_dump(mode="json") for p in policies],
-            },
-        )
+        payload: dict[str, Any] = {
+            "count": len(policies),
+            "policies": [p.model_dump(mode="json") for p in policies],
+            "policy_file": str(store.path),
+            "policy_file_present": file_present,
+        }
+        if degraded:
+            payload["store_degradation"] = degraded
+        _print_json(payload)
+        if degraded:
+            raise typer.Exit(code=EXIT_STORE)
         return
+
+    # Banner above the listing: an operator who reads the first line and
+    # stops must not stop on a reassuring one.
+    _render_degradation(degraded)
 
     if not policies:
         console.print("[dim]No policies configured.[/dim]")
+        if not degraded and file_present:
+            console.print(
+                f"[dim]  {escape(str(store.path))} declares an empty policy "
+                "list. Stage 2 is transparent: every mutation is permitted.[/dim]"
+            )
+        if degraded:
+            raise typer.Exit(code=EXIT_STORE)
         return
 
     table = Table(title="Governance Policies")
@@ -81,6 +181,8 @@ def list_policies(
         )
 
     console.print(table)
+    if degraded:
+        raise typer.Exit(code=EXIT_STORE)
 
 
 @policy_app.command("show")
@@ -90,15 +192,49 @@ def show_policy(
 ) -> None:
     """Show details of a specific policy."""
     store = _get_policy_store()
+    degradation = store.degradation
+    degraded = degradation.to_dict() if degradation else None
     # Support prefix matching
     match = _find_policy(store, policy_id)
     if match is None:
-        console.print(f"[red]Policy not found: {policy_id}[/red]")
+        # On a degraded store "not found" is not an answer: the row may
+        # simply have failed to parse. Saying so — and exiting EXIT_STORE
+        # rather than EXIT_INTERNAL — is the difference between "no such
+        # policy" and "I could not read your policy file".
+        if degraded:
+            if output_format == "json":
+                _print_json(
+                    {
+                        "status": "degraded",
+                        "message": (
+                            f"Policy not found: {policy_id} — but the store "
+                            "loaded degraded, so this may mean the entry was "
+                            "unreadable rather than absent."
+                        ),
+                        "store_degradation": degraded,
+                    }
+                )
+            else:
+                _render_degradation(degraded)
+                console.print(
+                    f"[red]Policy not found: {escape(policy_id)}[/red] "
+                    "[yellow](the store is degraded — this may mean unreadable, "
+                    "not absent)[/yellow]"
+                )
+            raise typer.Exit(code=EXIT_STORE)
+        console.print(f"[red]Policy not found: {escape(policy_id)}[/red]")
         raise typer.Exit(code=EXIT_INTERNAL)
 
     if output_format == "json":
-        _print_json(match.model_dump(mode="json"))
+        payload: dict[str, Any] = match.model_dump(mode="json")
+        if degraded:
+            payload["store_degradation"] = degraded
+        _print_json(payload)
+        if degraded:
+            raise typer.Exit(code=EXIT_STORE)
         return
+
+    _render_degradation(degraded)
 
     console.print(f"[bold]Policy:[/bold] {match.policy_id}")
     console.print(f"  Type: {match.policy_type.value}")
@@ -110,6 +246,8 @@ def show_policy(
     console.print(f"  Rules ({len(match.rules)}):")
     for i, rule in enumerate(match.rules, 1):
         console.print(f"    {i}. [{rule.action}] {rule.operation} — {rule.condition}")
+    if degraded:
+        raise typer.Exit(code=EXIT_STORE)
 
 
 @policy_app.command("add")
@@ -139,6 +277,7 @@ def add_policy(
 ) -> None:
     """Add a governance policy with a single rule."""
     store = _get_policy_store()
+    _exit_if_degraded(store, output_format)
 
     policy = Policy(
         policy_type=PolicyType(policy_type),
@@ -175,6 +314,7 @@ def remove_policy(
 ) -> None:
     """Remove a governance policy."""
     store = _get_policy_store()
+    _exit_if_degraded(store, output_format)
     match = _find_policy(store, policy_id)
     if match is None:
         if output_format == "json":
