@@ -939,3 +939,46 @@ def test_delete_policy(client):
 def test_delete_policy_not_found(client):
     resp = client.delete("/api/v1/policies/nonexistent")
     assert resp.status_code == 404
+
+
+class TestAdvisoryGenerateOnADegradedStore:
+    """#393 — the REST admin surface must not headline ``ok`` over a refusal.
+
+    The payload carries ``store_degradation`` either way; a caller that
+    reads only ``status`` would otherwise record a clean nightly generation
+    against a file it could not read.
+    """
+
+    def test_status_is_degraded_and_the_file_is_untouched(self, client, tmp_path):
+        path = tmp_path / "stores" / "advisories.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{"advisories": [ torn', encoding="utf-8")
+        before = path.read_text(encoding="utf-8")
+
+        resp = client.post("/api/v1/advisories/generate")
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["status"] == "degraded", body
+        assert body["store_degradation"]["reason"] == "malformed_json"
+        assert body["advisories_stored"] == 0
+        assert path.read_text(encoding="utf-8") == before
+
+    def test_a_clean_store_still_reports_ok(self, client):
+        resp = client.post("/api/v1/advisories/generate")
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["status"] == "ok", body
+        assert body["store_degradation"] is None
+
+    def test_listing_still_works_on_a_degraded_store(self, client, tmp_path):
+        """Reads stay lenient — a corrupt file must not 500 the read path."""
+        path = tmp_path / "stores" / "advisories.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{"advisories": [ torn', encoding="utf-8")
+
+        resp = client.get("/api/v1/advisories")
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["count"] == 0

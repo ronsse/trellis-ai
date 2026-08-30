@@ -2,9 +2,20 @@
 
 from __future__ import annotations
 
+import json
+import stat
 from pathlib import Path
 
-from trellis.schemas.advisory import Advisory, AdvisoryCategory, AdvisoryEvidence
+import pytest
+from structlog.testing import capture_logs
+
+from trellis.errors import DegradedStoreWriteError
+from trellis.schemas.advisory import (
+    Advisory,
+    AdvisoryCategory,
+    AdvisoryEvidence,
+    AdvisoryStatus,
+)
 from trellis.stores.advisory_store import AdvisoryStore
 
 
@@ -249,3 +260,547 @@ class TestAdvisorySuppressionLifecycle:
         adv = store.put(_advisory())
         assert store.remove(adv.advisory_id) is True
         assert store.get(adv.advisory_id) is None
+
+
+class TestCorruptFileIsPreservedNotOverwritten:
+    """#393 — a file this store could not read is not a file it may replace.
+
+    ``_save`` serialises ``self._advisories.values()`` over the whole file.
+    Degrading an unreadable load to an empty set therefore armed the *next*
+    write to delete it, and since stable ids (#394) to silently un-suppress
+    everything with it. The read stays lenient — that is #382's call and it
+    is right — and the write refuses.
+
+    Every assertion here fails against the pre-#393 store: it degraded to
+    an empty dict with no record, so ``is_degraded`` did not exist, ``put``
+    returned happily, and the file on disk was gone.
+    """
+
+    def test_absent_file_is_not_degradation(self, tmp_path: Path) -> None:
+        """ "No file" and "unreadable file" are different states.
+
+        A greenfield deployment must keep writing normally; conflating the
+        two would refuse every write on every fresh install.
+        """
+        store = AdvisoryStore(tmp_path / "never-written.json")
+        assert store.is_degraded is False
+        assert store.degradation is None
+        store.put(_advisory())  # must not raise
+        assert len(store.list()) == 1
+
+    def test_clean_file_is_not_degradation(self, tmp_path: Path) -> None:
+        path = tmp_path / "a.json"
+        AdvisoryStore(path).put(_advisory())
+        reloaded = AdvisoryStore(path)
+        assert reloaded.is_degraded is False
+        assert reloaded.degradation is None
+
+    def test_malformed_json_leaves_the_file_untouched(self, tmp_path: Path) -> None:
+        """The load-bearing acceptance test: the bytes survive the next write."""
+        path = tmp_path / "a.json"
+        AdvisoryStore(path).put_many([_advisory() for _ in range(3)])
+        original = path.read_text(encoding="utf-8")
+        # The shape a killed or disk-full write leaves behind.
+        path.write_text(original[: len(original) // 2], encoding="utf-8")
+        corrupted = path.read_text(encoding="utf-8")
+
+        store = AdvisoryStore(path)
+        assert store.is_degraded is True
+        assert store.degradation is not None
+        assert store.degradation.reason == "malformed_json"
+
+        with pytest.raises(DegradedStoreWriteError):
+            store.put(_advisory())
+
+        assert path.read_text(encoding="utf-8") == corrupted
+
+    @pytest.mark.parametrize(
+        ("content", "reason"),
+        [
+            ("not json at all", "malformed_json"),
+            ("", "malformed_json"),
+            ('["a", "list"]', "malformed_envelope"),
+            ('{"advisories": "not a list"}', "malformed_envelope"),
+            # A JSON object with no ``advisories`` key at all. ``_save``
+            # always emits it, so these are not files this store wrote.
+            ("{}", "malformed_envelope"),
+            ('{"advisorees": [{"advisory_id": "a"}]}', "malformed_envelope"),
+            ('{"version": 2, "items": []}', "malformed_envelope"),
+        ],
+    )
+    def test_every_unreadable_shape_degrades(
+        self, tmp_path: Path, content: str, reason: str
+    ) -> None:
+        path = tmp_path / "a.json"
+        path.write_text(content, encoding="utf-8")
+        store = AdvisoryStore(path)
+        assert store.degradation is not None
+        assert store.degradation.reason == reason
+
+    @pytest.mark.parametrize(
+        "content",
+        ["{}", '{"advisorees": [{"advisory_id": "a"}]}', '{"version": 2}'],
+    )
+    def test_a_missing_advisories_key_is_not_an_empty_store(
+        self, tmp_path: Path, content: str
+    ) -> None:
+        """The hole that left #393 intact for a whole class of file.
+
+        Reading the key with a ``[]`` default made "no ``advisories`` key"
+        and "an empty ``advisories`` list" the same state, so a hand-edit, a
+        renamed field or the wrong file at this path loaded as a *clean*
+        empty store — and the next nightly write replaced it. Nothing about
+        that path was degraded, so nothing refused it.
+        """
+        path = tmp_path / "a.json"
+        path.write_text(content, encoding="utf-8")
+        before = path.read_text(encoding="utf-8")
+
+        store = AdvisoryStore(path)
+
+        assert store.is_degraded is True
+        with pytest.raises(DegradedStoreWriteError):
+            store.put(_advisory())
+        assert path.read_text(encoding="utf-8") == before
+
+    def test_an_empty_advisories_list_is_a_clean_empty_store(
+        self, tmp_path: Path
+    ) -> None:
+        """The negative control: what ``_save`` writes must still load clean."""
+        path = tmp_path / "a.json"
+        path.write_text('{"advisories": []}', encoding="utf-8")
+        store = AdvisoryStore(path)
+        assert store.is_degraded is False
+        store.put(_advisory())
+        assert len(store.list()) == 1
+
+    def test_an_unexpected_load_failure_degrades_rather_than_raising(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The outer catch is the unconditional half of #382's promise.
+
+        Every *known* corruption shape is handled by a narrow branch inside
+        ``_load_rows``, so nothing else exercises the broad outer handler —
+        and narrowing it would pass CI while breaking the guarantee that
+        constructing a store never raises, whatever shape the corruption
+        takes. Retrieval depends on that.
+        """
+        path = tmp_path / "a.json"
+        AdvisoryStore(path).put(_advisory())
+
+        def _boom(_self: AdvisoryStore) -> None:
+            msg = "something nobody enumerated"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(AdvisoryStore, "_load_rows", _boom)
+
+        store = AdvisoryStore(path)  # must not raise
+
+        assert store.degradation is not None
+        assert store.degradation.reason == "load_failed"
+        assert "RuntimeError" in store.degradation.detail
+        with pytest.raises(DegradedStoreWriteError):
+            store.put(_advisory())
+
+    def test_a_whole_file_failure_reports_an_unknown_row_count(
+        self, tmp_path: Path
+    ) -> None:
+        """ "0 could not be read" reads as "nothing was lost".
+
+        On a whole-file failure the count is unknowable — 51 rows may be
+        sitting in the file unread. Rendering that as ``0`` tells an
+        operator at 03:00 the opposite of the truth.
+        """
+        path = tmp_path / "a.json"
+        path.write_text("{ broken", encoding="utf-8")
+        store = AdvisoryStore(path)
+
+        assert store.degradation is not None
+        assert store.degradation.rows_skipped is None
+        assert store.degradation.rows_skipped_display == "unknown"
+        assert store.degradation.to_dict()["rows_skipped_display"] == "unknown"
+
+        with pytest.raises(DegradedStoreWriteError) as excinfo:
+            store.put(_advisory())
+        assert "unknown could not be read" in str(excinfo.value)
+        assert "0 could not be read" not in str(excinfo.value)
+
+    def test_a_per_row_failure_reports_the_count_it_knows(self, tmp_path: Path) -> None:
+        """The other half: a countable loss must not read as "unknown"."""
+        path = tmp_path / "a.json"
+        AdvisoryStore(path).put_many([_advisory(scope=f"s{i}") for i in range(3)])
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw["advisories"][1] = {"advisory_id": "x", "renamed": 1}
+        path.write_text(json.dumps(raw), encoding="utf-8")
+
+        store = AdvisoryStore(path)
+        assert store.degradation is not None
+        assert store.degradation.rows_skipped == 1
+        assert store.degradation.rows_skipped_display == "1"
+
+    def test_many_bad_rows_are_summarised_not_dumped(self, tmp_path: Path) -> None:
+        """A cron line has to stay readable — but say how much it elided."""
+        path = tmp_path / "a.json"
+        rows = [{"advisory_id": f"bad{i}", "renamed": i} for i in range(7)]
+        path.write_text(json.dumps({"advisories": rows}), encoding="utf-8")
+
+        store = AdvisoryStore(path)
+
+        assert store.degradation is not None
+        assert store.degradation.rows_skipped == 7
+        assert "(+4 more)" in store.degradation.detail
+
+    def test_the_error_carries_a_stable_machine_readable_code(
+        self, tmp_path: Path
+    ) -> None:
+        """A new public contract, set after ``super().__init__`` — easy to drop."""
+        path = tmp_path / "a.json"
+        path.write_text("{ broken", encoding="utf-8")
+        store = AdvisoryStore(path)
+
+        with pytest.raises(DegradedStoreWriteError) as excinfo:
+            store.put(_advisory())
+
+        assert excinfo.value.code == "DEGRADED_STORE_WRITE"
+        assert excinfo.value.path == str(path)
+        assert excinfo.value.recovery == f"mv {path} {path}.corrupt"
+
+    def test_a_refused_write_does_not_mutate_the_store_either(
+        self, tmp_path: Path
+    ) -> None:
+        """Refusing after mutating is #393's own symptom, surviving in-process.
+
+        The file being intact is only half the promise — a caller that
+        catches the error and keeps serving packs from the same store must
+        not have silently lost rows, and ``restore()`` must not have
+        un-suppressed one in memory. Both were true before the refusal
+        moved ahead of the mutation.
+        """
+        path = tmp_path / "a.json"
+        seed = AdvisoryStore(path)
+        keeper = seed.put(_advisory(scope="keeper"))
+        dropped = seed.put(_advisory(scope="dropped"))
+        seed.suppress(dropped.advisory_id, reason="fitness")
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw["advisories"].append({"advisory_id": "broken", "renamed": 1})
+        path.write_text(json.dumps(raw), encoding="utf-8")
+
+        store = AdvisoryStore(path)
+        assert store.is_degraded is True
+        before_ids = {a.advisory_id for a in store.list(include_suppressed=True)}
+        assert len(before_ids) == 2
+
+        for call in (
+            lambda: store.put(_advisory()),
+            lambda: store.put_many([_advisory()]),
+            lambda: store.suppress(keeper.advisory_id),
+            lambda: store.restore(dropped.advisory_id),
+            lambda: store.remove(keeper.advisory_id),
+            store.clear,
+        ):
+            with pytest.raises(DegradedStoreWriteError):
+                call()
+
+        after = store.list(include_suppressed=True)
+        assert {a.advisory_id for a in after} == before_ids
+        still_suppressed = store.get(dropped.advisory_id)
+        assert still_suppressed is not None
+        assert still_suppressed.status == AdvisoryStatus.SUPPRESSED
+        assert store.get(keeper.advisory_id) is not None
+
+    def test_binary_garbage_degrades_rather_than_raising(self, tmp_path: Path) -> None:
+        """#382's promise is unconditional: constructing a store never raises.
+
+        ``read_text`` raises ``UnicodeDecodeError`` — a ``ValueError``, not
+        an ``OSError`` — on a partially-binary file, which is precisely
+        what a torn write produces.
+        """
+        path = tmp_path / "a.json"
+        path.write_bytes(b'{"advisories": [\xff\xfe\x00binary')
+        store = AdvisoryStore(path)
+        assert store.degradation is not None
+        assert store.degradation.reason == "unreadable_file"
+        assert store.list() == []
+
+    def test_every_write_path_refuses(self, tmp_path: Path) -> None:
+        """put / put_many / suppress / restore / remove / clear, all of them.
+
+        A partial exemption is a hole: ``clear`` in particular reads like
+        the recovery path and would happily write ``{"advisories": []}``
+        over the file nobody has read yet. Covered black-box — the file is
+        seeded with a suppressed row so ``restore`` has a real target,
+        rather than reaching into ``store._advisories``.
+        """
+        path = tmp_path / "a.json"
+        seed = AdvisoryStore(path)
+        keeper = seed.put(_advisory(scope="keeper"))
+        suppressed = seed.put(_advisory(scope="suppressed"))
+        seed.suppress(suppressed.advisory_id, reason="fitness")
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw["advisories"].append({"advisory_id": "broken", "category": "nonsense"})
+        path.write_text(json.dumps(raw), encoding="utf-8")
+        before = path.read_text(encoding="utf-8")
+
+        store = AdvisoryStore(path)
+        assert store.is_degraded is True
+        assert store.get(keeper.advisory_id) is not None
+        assert store.get(suppressed.advisory_id) is not None
+
+        for call in (
+            lambda: store.put(_advisory()),
+            lambda: store.put_many([_advisory()]),
+            lambda: store.suppress(keeper.advisory_id),
+            lambda: store.restore(suppressed.advisory_id),
+            lambda: store.remove(keeper.advisory_id),
+            store.clear,
+        ):
+            with pytest.raises(DegradedStoreWriteError):
+                call()
+
+        assert path.read_text(encoding="utf-8") == before
+
+    def test_one_bad_row_costs_one_row_not_the_file(self, tmp_path: Path) -> None:
+        """Per-row validation — a renamed field must not blank the corpus.
+
+        The blast radius the issue names: the pre-#393 ``except`` wrapped
+        the whole loop, so one unparseable entry discarded every valid row
+        and the next write then overwrote them.
+        """
+        path = tmp_path / "a.json"
+        AdvisoryStore(path).put_many([_advisory(scope=f"s{i}") for i in range(3)])
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw["advisories"][1] = {"advisory_id": "x", "renamed_field": 1}
+        path.write_text(json.dumps(raw), encoding="utf-8")
+
+        store = AdvisoryStore(path)
+        assert len(store.list()) == 2
+        assert store.degradation is not None
+        assert store.degradation.reason == "invalid_rows"
+        assert store.degradation.rows_loaded == 2
+        assert store.degradation.rows_skipped == 1
+
+    def test_a_partial_load_still_refuses_to_write(self, tmp_path: Path) -> None:
+        """The two halves are a pair.
+
+        Per-row leniency is only safe because the write refuses. Allowing a
+        write here would rewrite the file with the two rows that parsed and
+        drop the third — the same data loss at a narrower granularity.
+        """
+        path = tmp_path / "a.json"
+        AdvisoryStore(path).put_many([_advisory(scope=f"s{i}") for i in range(3)])
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw["advisories"][1] = {"advisory_id": "x", "renamed_field": 1}
+        path.write_text(json.dumps(raw), encoding="utf-8")
+        before = path.read_text(encoding="utf-8")
+
+        store = AdvisoryStore(path)
+        with pytest.raises(DegradedStoreWriteError):
+            store.put(_advisory())
+        assert path.read_text(encoding="utf-8") == before
+
+    def test_reads_still_serve_what_parsed(self, tmp_path: Path) -> None:
+        """#382 survives: a corrupt file must not take retrieval down."""
+        path = tmp_path / "a.json"
+        AdvisoryStore(path).put_many([_advisory(scope=f"s{i}") for i in range(3)])
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw["advisories"][0] = {"advisory_id": "x", "renamed_field": 1}
+        path.write_text(json.dumps(raw), encoding="utf-8")
+
+        store = AdvisoryStore(path)
+        assert {a.scope for a in store.list()} == {"s1", "s2"}
+        assert store.list(scope="s1")
+        assert store.get(next(iter(store.list())).advisory_id) is not None
+
+    def test_the_refusal_names_the_recovery_command(self, tmp_path: Path) -> None:
+        """An operator meets this in a cron log; a diagnosis is not enough."""
+        path = tmp_path / "a.json"
+        path.write_text("{ broken", encoding="utf-8")
+        store = AdvisoryStore(path)
+
+        with pytest.raises(DegradedStoreWriteError) as excinfo:
+            store.put(_advisory())
+
+        assert excinfo.value.recovery == f"mv {path} {path}.corrupt"
+        assert str(path) in str(excinfo.value)
+        assert f"mv {path}" in str(excinfo.value)
+        assert store.degradation is not None
+        assert store.degradation.to_dict()["recovery"] == excinfo.value.recovery
+
+    def test_degradation_is_logged_where_the_cli_can_see_it(
+        self, tmp_path: Path
+    ) -> None:
+        """``error``, not ``info``.
+
+        ``trellis_cli.main._root`` pins ``TRELLIS_LOG_LEVEL=WARNING`` unless
+        ``--verbose`` is passed, so an ``info`` line here is filtered out of
+        the surface that runs this nightly — the same no-op as a
+        ``logger.debug`` under an INFO filter.
+
+        The level is pinned because ``capture_logs`` swaps the processor
+        chain but leaves ``wrapper_class`` alone: under pytest the bound
+        logger records ``debug`` too, so every other assertion in this test
+        would pass just as well against an invisible line.
+        """
+        path = tmp_path / "a.json"
+        path.write_text("{ broken", encoding="utf-8")
+
+        with capture_logs() as logs:
+            AdvisoryStore(path)
+
+        lines = [e for e in logs if e["event"] == "advisory_load_degraded"]
+        assert len(lines) == 1
+        assert lines[0]["log_level"] == "error"
+        assert lines[0]["path"] == str(path)
+        assert lines[0]["reason"] == "malformed_json"
+        assert lines[0]["recovery"] == f"mv {path} {path}.corrupt"
+
+    def test_a_clean_load_says_nothing_alarming(self, tmp_path: Path) -> None:
+        """A warning on every load would train the reader to skip it."""
+        path = tmp_path / "a.json"
+        AdvisoryStore(path).put(_advisory())
+        with capture_logs() as logs:
+            AdvisoryStore(path)
+        assert not [e for e in logs if e["event"] == "advisory_load_degraded"]
+
+
+class TestSaveIsAtomic:
+    """The half-written file the rest of this module survives has one author.
+
+    ``write_text`` truncates the destination and *then* writes, so a crash,
+    a full disk or a killed cron between the two produces it. This store is
+    the file's only writer.
+    """
+
+    def test_no_temp_files_are_left_behind(self, tmp_path: Path) -> None:
+        path = tmp_path / "a.json"
+        store = AdvisoryStore(path)
+        store.put_many([_advisory() for _ in range(3)])
+        store.put(_advisory())
+        assert [p.name for p in tmp_path.iterdir()] == ["a.json"]
+
+    def test_a_failed_write_leaves_the_destination_intact(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The property atomicity buys, stated as behaviour.
+
+        ``write_text`` truncates and *then* writes, so a failure between
+        the two is how ``advisories.json`` becomes the corrupt file the
+        rest of this module has to survive. Here the failure is injected at
+        ``fsync``; the destination must be byte-identical and no temp file
+        may be left behind.
+        """
+        path = tmp_path / "a.json"
+        store = AdvisoryStore(path)
+        store.put(_advisory(scope="original"))
+        before = path.read_text(encoding="utf-8")
+
+        def _boom(_fd: int) -> None:
+            msg = "No space left on device"
+            raise OSError(msg)
+
+        monkeypatch.setattr("trellis.stores.advisory_store.os.fsync", _boom)
+
+        with pytest.raises(OSError, match="No space left"):
+            store.put(_advisory(scope="doomed"))
+
+        assert path.read_text(encoding="utf-8") == before
+        assert [p.name for p in tmp_path.iterdir()] == ["a.json"]
+
+        # And memory rolled back with it. This is the case the degraded-path
+        # refusal cannot cover — the store loaded cleanly, so nothing refuses
+        # ahead of the mutation, and without the rollback the object would go
+        # on serving an advisory that is not on disk and never will be.
+        assert {a.scope for a in store.list()} == {"original"}
+        assert store.get(_advisory(scope="doomed").advisory_id) is None
+
+    def test_an_existing_file_keeps_its_mode(self, tmp_path: Path) -> None:
+        """``mkstemp`` creates 0600; inheriting it would narrow a live file.
+
+        The reference deployment bind-mounts the data directory into
+        containers, so a silently-narrowed advisories.json is a reader that
+        stops reading.
+        """
+        path = tmp_path / "a.json"
+        store = AdvisoryStore(path)
+        store.put(_advisory())
+        path.chmod(0o640)
+
+        store.put(_advisory())
+
+        assert stat.S_IMODE(path.stat().st_mode) == 0o640
+
+    def test_a_fresh_file_is_group_and_world_readable(self, tmp_path: Path) -> None:
+        path = tmp_path / "a.json"
+        AdvisoryStore(path).put(_advisory())
+        assert stat.S_IMODE(path.stat().st_mode) == 0o644
+
+
+class TestLiveFileShapeRoundTrips:
+    """Rows written before #383/#394 must not read as invalid rows.
+
+    This is the failure mode per-row validation could plausibly introduce
+    on the reference deployment, whose 51 live rows carry neither
+    ``fitness_scored_at`` nor ``evidence.evidence_confidence`` — both added
+    after those rows were written. Reading them as invalid would degrade the
+    live store and refuse every write, turning a fix into an outage.
+
+    The fixture reproduces the live file's exact key set (verified against a
+    copy of ``~/.trellis/data/advisories.json``, 51 rows, 29 distinct
+    messages, confidence 0.231-0.600) rather than shipping its content.
+    """
+
+    @staticmethod
+    def _pre_394_row(index: int) -> dict[str, object]:
+        return {
+            "schema_version": "0.1.0",
+            "created_at": "2026-08-08T03:30:04.134918Z",
+            "updated_at": "2026-08-08T03:30:04.134920Z",
+            "advisory_id": f"01KZFPQBQ6TR1VJW5CNXGCEBV{index:02d}",
+            "category": "approach",
+            "confidence": 0.231 + (index % 10) * 0.04,
+            "message": f"Packs using strategy {index % 29} succeeded 60% ...",
+            "evidence": {
+                "schema_version": "0.1.0",
+                "sample_size": 5,
+                "success_rate_with": 0.6,
+                "success_rate_without": 0.0,
+                "effect_size": 0.6,
+                "representative_trace_ids": [],
+            },
+            "scope": "global",
+            "entity_id": None,
+            "metadata": {"strategy": "semantic"},
+            "status": "active",
+            "suppressed_at": None,
+            "suppression_reason": None,
+        }
+
+    def test_fifty_one_pre_394_rows_load_clean(self, tmp_path: Path) -> None:
+        path = tmp_path / "advisories.json"
+        rows = [self._pre_394_row(i) for i in range(51)]
+        path.write_text(json.dumps({"advisories": rows}), encoding="utf-8")
+
+        store = AdvisoryStore(path)
+
+        assert store.is_degraded is False, (
+            "pre-#394 rows must not read as invalid rows — that would "
+            "degrade the live store and refuse every write"
+        )
+        assert len(store.list(include_suppressed=True)) == 51
+        assert all(a.fitness_scored_at is None for a in store.list())
+        assert all(a.evidence.evidence_confidence is None for a in store.list())
+
+    def test_the_round_trip_is_lossless(self, tmp_path: Path) -> None:
+        """Load, write, reload: the same rows, and writes are permitted."""
+        path = tmp_path / "advisories.json"
+        rows = [self._pre_394_row(i) for i in range(51)]
+        path.write_text(json.dumps({"advisories": rows}), encoding="utf-8")
+
+        store = AdvisoryStore(path)
+        store.put_many(store.list())  # a real write against a real load
+
+        reloaded = AdvisoryStore(path)
+        assert reloaded.is_degraded is False
+        assert {a.advisory_id for a in reloaded.list()} == {
+            str(r["advisory_id"]) for r in rows
+        }
