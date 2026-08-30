@@ -76,8 +76,10 @@ def apply_noise_tags(
         # ``exclude_noise`` keeps a demoted row out of packs, but that
         # boundary is deliberately default-pass and invertible, and a later
         # refresh revising the facet returns the row to service carrying the
-        # falsified stamp. Nothing masks the other two consumers this write
-        # reaches. ``mutate.retention``'s ``lifecycle_states`` age gate reads
+        # falsified stamp. Nothing masks the readers below, and the set is
+        # open — see ``mutate.retention`` on why this is stated as an
+        # invariant rather than a roster.
+        # ``mutate.retention``'s ``lifecycle_states`` age gate reads
         # the column directly, and this function screens nothing on
         # lifecycle, so demoting a ``superseded`` row shields it from the
         # prune whose whole criterion is age. And ``retrieve.file_context``
