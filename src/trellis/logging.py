@@ -68,7 +68,7 @@ class _LazyStderr:
     load-bearing.
 
     Only ``write`` and ``flush`` are implemented, which is the whole surface
-    ``PrintLogger`` uses (it calls ``print(msg, file=self._file, flush=True)``).
+    structlog's ``WriteLogger`` uses.
     A closed *real* stderr still raises, exactly as it did before — that is a
     genuine error, and swallowing it would trade a loud failure for a silent
     one.
@@ -107,10 +107,20 @@ def configure_stderr_logging() -> None:
             structlog.dev.ConsoleRenderer(),
         ],
         wrapper_class=structlog.make_filtering_bound_logger(level),
+        # ``WriteLogger`` rather than ``PrintLogger``: its ``msg`` is one
+        # ``write(message + "\n")`` under the lock, where ``PrintLogger``
+        # goes through ``print()`` and issues ``write(message)`` and
+        # ``write("\n")`` separately. With a lazily-resolved stream those are
+        # two lookups, so a ``sys.stderr`` swap landing between them (another
+        # thread's ``redirect_stderr``) would tear one line across two
+        # streams — structlog's per-file lock cannot help, being keyed on the
+        # proxy while the swap is external. Same bytes out, one resolution
+        # fewer, and structlog documents it as the faster of the two.
+        #
         # ``cast`` because structlog types this as ``TextIO`` while only
         # exercising ``write`` / ``flush``; a full ``io.TextIOBase`` subclass
         # would add a dozen unreachable methods to satisfy a nominal type.
-        logger_factory=structlog.PrintLoggerFactory(file=cast("TextIO", _STDERR_PROXY)),
+        logger_factory=structlog.WriteLoggerFactory(file=cast("TextIO", _STDERR_PROXY)),
         # Kept, and now free of the hazard it used to compound: the cached
         # logger holds the proxy, not a stream, so caching can no longer pin
         # a dead handle. It still caches the *level* filter, which is what

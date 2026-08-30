@@ -46,6 +46,26 @@ def _isolate_structlog(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     reset_structlog_global_state()
 
 
+class _RecordingStream:
+    """A minimal write-only stream that remembers how it was called.
+
+    ``StringIO`` cannot answer either question below: it concatenates
+    writes, and it has no observable flush. Both were unpinned — deleting
+    ``_LazyStderr.flush``'s body left the whole suite green.
+    """
+
+    def __init__(self) -> None:
+        self.writes: list[str] = []
+        self.flushes = 0
+
+    def write(self, data: str) -> int:
+        self.writes.append(data)
+        return len(data)
+
+    def flush(self) -> None:
+        self.flushes += 1
+
+
 def _log(event: str) -> None:
     """Emit *event* through a freshly bound logger.
 
@@ -123,6 +143,35 @@ class TestStreamResolution:
 
         assert "after_all_cycles" in live.getvalue()
         assert len(closed_buffers) == 3
+
+    def test_a_log_line_is_one_write_and_a_flush(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """One resolution per line, and the flush actually reaches the stream.
+
+        ``PrintLogger`` renders through ``print()``, which issues
+        ``write(message)`` and ``write("\n")`` as separate calls. Against a
+        *lazily* resolved stream those are two independent lookups, so a
+        ``sys.stderr`` swap landing between them tears one line across two
+        streams — a hazard the pinned handle did not have, introduced by the
+        fix itself. ``WriteLogger`` emits the line in a single write.
+
+        The flush half is asserted because nothing else can see it: with
+        ``StringIO`` or ``capsys``, removing the flush changes no observable
+        behaviour at all.
+        """
+        stream = _RecordingStream()
+        monkeypatch.setattr(sys, "stderr", stream)
+        configure_stderr_logging()
+
+        _log("atomic_line")
+
+        assert len(stream.writes) == 1, (
+            f"expected the whole line in one write; got {stream.writes!r}"
+        )
+        assert stream.writes[0].endswith("\n")
+        assert "atomic_line" in stream.writes[0]
+        assert stream.flushes >= 1, "flush never reached the stream"
 
 
 class TestNoStdoutFallback:

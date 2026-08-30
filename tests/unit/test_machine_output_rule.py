@@ -66,16 +66,52 @@ _SERIALIZERS = frozenset(
 #: reader reaches for, and it still routes through Rich's renderer.
 _RICH_RENDER_METHODS = frozenset({"print", "print_json", "out", "log"})
 
-#: Values that survive JSON but not Rich. ``:notes:`` is the one that
-#: actually bit — it is a real corpus ``--source-system`` and a real emoji
-#: name at the same time. ``:100:`` and ``:x:`` are included so the test
-#: does not pass merely because one shortcode left Rich's table.
-_EMOJI_TRAP_PAYLOAD = {
+#: Values that survive JSON but not Rich, one per corruption mode.
+#:
+#: ``:notes:`` is the one that actually bit — a real corpus
+#: ``--source-system`` and a real emoji name at once. ``:100:`` and ``:x:``
+#: are here so the test does not pass merely because one shortcode left
+#: Rich's table.
+#:
+#: ``markup`` covers the mode the issue did not name and this branch nearly
+#: shipped without: Rich reads ``[...]`` as a style tag and **deletes** it.
+#: ``SELECT [col] FROM t`` renders as ``SELECT  FROM t``. That is the worst
+#: of the three — it needs no shortcode collision, fires on any bracketed
+#: token (SQL identifiers, markdown links, glob patterns), and the result
+#: parses cleanly, so nothing anywhere raises. The knowledge was already in
+#: this repo: ``analyze._render_advisory_degradation`` escapes every
+#: interpolation for exactly this reason. It just had not reached here.
+#:
+#: ``long`` forces wrapping at any realistic console width.
+_TRAP_PAYLOAD = {
     "doc_id": "corpus:notes:b8b2ecbef8b88feb0a4a74092fd6fd30dedf1768",
     "trace_id": "trace:book:0001",
     "note": "a :100: b :x: c",
+    "markup": "SELECT [col] FROM t -- see [docs](http://x)",
     "long": "x" * 400,
 }
+
+
+class _RecordingStream:
+    """Write-only stream that remembers its calls; ``capsys`` cannot see flushes."""
+
+    def __init__(self) -> None:
+        self.writes: list[str] = []
+        self.flushes = 0
+
+    def write(self, data: str) -> int:
+        self.writes.append(data)
+        return len(data)
+
+    def flush(self) -> None:
+        self.flushes += 1
+
+
+def _render_through_rich(payload: dict, *, width: int) -> str:
+    """What ``console.print(json.dumps(payload))`` would have emitted."""
+    buf = io.StringIO()
+    Console(file=buf, force_terminal=False, width=width).print(json.dumps(payload))
+    return buf.getvalue()
 
 
 def _cli_root() -> Path:
@@ -293,13 +329,13 @@ class TestEmitterFidelity:
     def test_emit_json_round_trips_emoji_shortcodes(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        emit_json(_EMOJI_TRAP_PAYLOAD)
-        assert json.loads(capsys.readouterr().out) == _EMOJI_TRAP_PAYLOAD
+        emit_json(_TRAP_PAYLOAD)
+        assert json.loads(capsys.readouterr().out) == _TRAP_PAYLOAD
 
     def test_emit_machine_text_is_byte_identical(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        text = json.dumps(_EMOJI_TRAP_PAYLOAD)
+        text = json.dumps(_TRAP_PAYLOAD)
         emit_machine_text(text)
         assert capsys.readouterr().out == text + "\n"
 
@@ -328,15 +364,35 @@ class TestEmitterFidelity:
             "revert to typer.echo"
         )
 
+    def test_emit_machine_text_flushes_what_it_wrote(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The flush is load-bearing and was previously unobservable.
+
+        ``sys.stdout.write`` does not flush, so on a block-buffered pipe a
+        payload could sit unwritten until process exit. ``capsys`` cannot
+        see the difference — it does not buffer — so removing the flush
+        changed no test. A recording stream can.
+        """
+        import sys as _sys
+
+        stream = _RecordingStream()
+        monkeypatch.setattr(_sys, "stdout", stream)
+
+        emit_machine_text("payload")
+
+        assert stream.writes == ["payload\n"]
+        assert stream.flushes == 1, "emit_machine_text did not flush"
+
     def test_format_output_results_survive_the_emitter(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """``format_output`` feeds ``emit_machine_text`` on three commands."""
         emit_machine_text(
-            format_output([_EMOJI_TRAP_PAYLOAD], "json", wrapper={"status": "ok"})
+            format_output([_TRAP_PAYLOAD], "json", wrapper={"status": "ok"})
         )
         payload = json.loads(capsys.readouterr().out)
-        assert payload["items"] == [_EMOJI_TRAP_PAYLOAD]
+        assert payload["items"] == [_TRAP_PAYLOAD]
 
 
 class TestErrorPathsAreAlsoMachineReadable:
@@ -420,30 +476,44 @@ class TestErrorPathsAreAlsoMachineReadable:
 class TestRichCorruptionIsReal:
     """Pins the behaviour the whole rule is a response to."""
 
-    @pytest.mark.parametrize("width", [40, 80, 100, 200])
-    def test_rich_would_have_corrupted_the_same_payload(self, width: int) -> None:
-        """Pins the defect, so the tests above are not asserting a tautology.
+    #: Wide enough that nothing wraps, so the *silent* mode is reachable.
+    #: A realistic terminal cannot be this wide; that is the point — every
+    #: plausible width takes the loud branch, which is why the two have to
+    #: be separate tests rather than one parametrized over widths.
+    _UNWRAPPED_WIDTH = 100_000
 
-        If Rich ever stops substituting emoji and wrapping, this fails and
-        the rule can be revisited on evidence rather than assumed. Both
-        failure modes are asserted because they are independent: at some
-        widths the payload parses with wrong values, at others it does not
-        parse at all.
+    def test_rich_wrapping_makes_the_payload_unparseable(self) -> None:
+        """The loud mode: a newline folded into a JSON string literal.
+
+        Asserted at 80 columns, the width the defect was reported at.
         """
-        buf = io.StringIO()
-        Console(file=buf, force_terminal=False, width=width).print(
-            json.dumps(_EMOJI_TRAP_PAYLOAD)
-        )
-        rendered = buf.getvalue()
+        rendered = _render_through_rich(_TRAP_PAYLOAD, width=80)
+        with pytest.raises(json.JSONDecodeError):
+            json.loads(rendered)
 
-        assert "corpus:notes:" not in rendered, (
+    def test_rich_corrupts_values_even_when_the_payload_still_parses(
+        self,
+    ) -> None:
+        """The silent mode, and the reason this is two tests and not one.
+
+        An earlier version parametrized one test over widths 40/80/100/200
+        and returned early on ``JSONDecodeError``. Every one of those widths
+        raises — the 400-char field guarantees wrapping — so the second
+        assertion never ran on any parameter, and four cases measured one
+        branch. That is the failure this repo keeps producing: a measurement
+        path that can only read one value. Splitting them is what makes the
+        silent mode reachable at all.
+        """
+        rendered = _render_through_rich(_TRAP_PAYLOAD, width=self._UNWRAPPED_WIDTH)
+        decoded = json.loads(rendered)  # parses — that is the danger
+
+        assert decoded != _TRAP_PAYLOAD, (
+            "Rich output parsed AND matched the payload; the corruption this "
+            "rule exists for did not occur"
+        )
+        assert decoded["doc_id"] != _TRAP_PAYLOAD["doc_id"], (
             "Rich no longer substitutes :notes:; re-evaluate the rule"
         )
-        try:
-            decoded = json.loads(rendered)
-        except json.JSONDecodeError:
-            return  # wrapped into unparseable JSON — the loud failure mode
-        assert decoded != _EMOJI_TRAP_PAYLOAD, (
-            "Rich output parsed AND matched the payload; the corruption this "
-            "rule exists for did not occur at this width"
+        assert "[col]" not in decoded["markup"], (
+            "Rich no longer strips [...] markup; re-evaluate the rule"
         )
