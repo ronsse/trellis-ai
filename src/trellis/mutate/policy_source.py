@@ -79,8 +79,13 @@ the second class rather than labelling it.** Enumerate what can now reach
   last policy goes, i.e. an operator *declaring* zero policies;
 * anything else — unreadable file, bad JSON, wrong envelope, missing key,
   one invalid row — **raises**, and the pipeline fails closed;
-* a file rewritten from a degraded load — **no longer reachable**, because
-  the CRUD store refuses that write.
+* a file rewritten from a degraded load, or from any other **stale** view
+  of it — another process's write landing in between, a file appearing
+  after the store was constructed, a duplicate id collapsing the view —
+  **no longer reachable**, because the CRUD store refuses those writes
+  too. Note the quantity: the hazard is *fewer* policies, not only zero,
+  and an enumeration of the ways to reach zero missed all three of those
+  until a review pass caught it (#413's review round).
 
 Nothing is left in which zero policies is a surprise, so a distinction here
 would do no safety work — and it would cost real signal:
