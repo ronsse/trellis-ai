@@ -191,7 +191,13 @@ def trace(
         raise typer.Exit(code=EXIT_INTERNAL)
 
     if output_format == "json":
-        console.print(result.model_dump_json())
+        # ``model_dump_json`` is a serializer like any other, so this goes
+        # through the emitter too. It sat six lines below the not_found arm
+        # that #403 fixed and was missed twice -- by the issue's grep (which
+        # looked for ``json.dumps``) and by the first pass of the AST rule
+        # (whose serializer set had no Pydantic sibling). The rule now names
+        # it, which is what stops the third miss.
+        emit_machine_text(result.model_dump_json())
     else:
         console.print(f"[green]Trace[/green]: {result.trace_id}")
         console.print(f"  Source: {result.source}")

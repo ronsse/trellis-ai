@@ -48,10 +48,23 @@ from rich.console import Console
 
 from trellis_cli.output import emit_json, emit_machine_text, format_output
 
-#: Names whose return value is a serialized machine payload. A bare
-#: ``console.print(payload)`` where ``payload`` came from one of these is
-#: the exact shape of the reported defect (``retrieve.py`` had three).
-_SERIALIZERS = frozenset({"dumps", "format_output"})
+#: Callables whose return value is a serialized machine payload. Matched on
+#: the bare name, so ``json.dumps`` and ``from json import dumps`` both land.
+#:
+#: ``model_dump_json`` is here because leaving it out cost a real miss: in a
+#: Pydantic codebase it is the obvious sibling of ``json.dumps``, and
+#: ``retrieve trace --format json`` shipped a live #403 defect through it —
+#: six lines below a call the same commit had fixed — because the first
+#: version of this set named only ``dumps``. The rule's value is entirely in
+#: how wide this set is, so add to it on sight rather than on evidence.
+_SERIALIZERS = frozenset(
+    {"dumps", "format_output", "model_dump_json", "json", "to_json"}
+)
+
+#: Rich methods that render markup. ``print_json`` is included even though no
+#: call site uses it today: it is the single most plausible "fix" a future
+#: reader reaches for, and it still routes through Rich's renderer.
+_RICH_RENDER_METHODS = frozenset({"print", "print_json", "out", "log"})
 
 #: Values that survive JSON but not Rich. ``:notes:`` is the one that
 #: actually bit — it is a real corpus ``--source-system`` and a real emoji
@@ -71,8 +84,8 @@ def _cli_root() -> Path:
     return root
 
 
-def _is_rich_print(node: ast.Call) -> bool:
-    """Does *node* look like ``<something>.print(...)``?
+def _is_rich_render(node: ast.Call) -> bool:
+    """Does *node* look like ``<something>.print(...)`` or a Rich sibling?
 
     Attribute name only, and deliberately broad: the CLI reaches Rich
     through ``console``, ``err_console``, ``out`` (the injected target in
@@ -80,52 +93,108 @@ def _is_rich_print(node: ast.Call) -> bool:
     Matching on the receiver's name would miss the injected ones, which is
     where a machine payload is most likely to end up by accident.
     """
-    return isinstance(node.func, ast.Attribute) and node.func.attr == "print"
+    return (
+        isinstance(node.func, ast.Attribute) and node.func.attr in _RICH_RENDER_METHODS
+    )
+
+
+def _is_serializer_call(node: ast.AST) -> bool:
+    """Is *node* a call to something that returns a serialized payload?
+
+    Reads the bare name off either an attribute (``json.dumps``,
+    ``result.model_dump_json``) or a plain call (``dumps`` imported
+    directly, ``format_output``). Both forms matter — the attribute-only
+    version of this predicate is what let ``model_dump_json`` through.
+    """
+    if not isinstance(node, ast.Call):
+        return False
+    return (
+        getattr(node.func, "attr", None) in _SERIALIZERS
+        or getattr(node.func, "id", None) in _SERIALIZERS
+    )
 
 
 def _serialized_names(tree: ast.Module) -> set[str]:
-    """Names bound anywhere in the module from a serializer call."""
+    """Names bound anywhere in the module from a serializer call.
+
+    Covers plain assignment, annotated assignment (``payload: str = ...``)
+    and the walrus, because all three produce the ``console.print(payload)``
+    shape the rule exists to reject.
+    """
     names: set[str] = set()
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Assign):
-            continue
-        value = node.value
-        if not (
-            isinstance(value, ast.Call)
-            and isinstance(value.func, (ast.Attribute, ast.Name))
-            and (
-                getattr(value.func, "attr", None) in _SERIALIZERS
-                or getattr(value.func, "id", None) in _SERIALIZERS
-            )
+        if isinstance(node, ast.Assign) and _is_serializer_call(node.value):
+            names.update(t.id for t in node.targets if isinstance(t, ast.Name))
+        elif (
+            isinstance(node, (ast.AnnAssign, ast.NamedExpr))
+            and node.value is not None
+            and _is_serializer_call(node.value)
+            and isinstance(node.target, ast.Name)
         ):
-            continue
-        for target in node.targets:
-            if isinstance(target, ast.Name):
-                names.add(target.id)
+            names.add(node.target.id)
     return names
 
 
-def _violations() -> list[str]:
-    """Rich ``print`` calls whose argument is a serialized payload."""
+def _carries_payload(arg: ast.expr, serialized: set[str]) -> bool:
+    """Is *arg* a serialized payload, directly or by name?
+
+    Unwraps two shapes that would otherwise walk straight past the rule:
+
+    * ``print(*[payload])`` — the star and a literal list/tuple around it.
+    * ``print(f"{payload}")`` — an f-string whose *entire* content is one
+      interpolation is the payload wearing a costume. One with any literal
+      text around it is prose (``metrics.py`` interpolates ``json.dumps``
+      into a human line in the text branch) and stays allowed, which is the
+      distinction that keeps the rule from forbidding something harmless.
+    """
+    # ``print(name := json.dumps(x))`` — the binding is registered by
+    # ``_serialized_names``, but the argument node here is the NamedExpr
+    # itself, so it has to be unwrapped to be seen at all.
+    if isinstance(arg, ast.NamedExpr):
+        return _carries_payload(arg.value, serialized)
+
+    if isinstance(arg, ast.Starred):
+        inner = arg.value
+        if isinstance(inner, (ast.List, ast.Tuple)):
+            return any(_carries_payload(e, serialized) for e in inner.elts)
+        return _carries_payload(inner, serialized)
+
+    if isinstance(arg, ast.JoinedStr):
+        parts = [
+            v for v in arg.values if not (isinstance(v, ast.Constant) and v.value == "")
+        ]
+        if len(parts) == 1 and isinstance(parts[0], ast.FormattedValue):
+            return _carries_payload(parts[0].value, serialized)
+        return False
+
+    return _is_serializer_call(arg) or (
+        isinstance(arg, ast.Name) and arg.id in serialized
+    )
+
+
+def _violations(root: Path | None = None) -> list[str]:
+    """Rich render calls whose argument is a serialized payload.
+
+    *root* is injectable so :func:`test_the_scan_catches_every_known_evasion`
+    can run **this** function over a synthetic tree. An earlier version of
+    that guard re-implemented the predicate inline, which meant the scan
+    could be stubbed out entirely and the suite stayed green — the guard was
+    guarding a copy of itself.
+    """
+    cli_root = root if root is not None else _cli_root()
     found: list[str] = []
-    for py_file in sorted(_cli_root().rglob("*.py")):
+    for py_file in sorted(cli_root.rglob("*.py")):
         tree = ast.parse(py_file.read_text(encoding="utf-8"))
         serialized = _serialized_names(tree)
         for node in ast.walk(tree):
-            if not (isinstance(node, ast.Call) and _is_rich_print(node)):
+            if not (isinstance(node, ast.Call) and _is_rich_render(node)):
                 continue
             for arg in node.args:
-                direct = (
-                    isinstance(arg, ast.Call)
-                    and isinstance(arg.func, ast.Attribute)
-                    and arg.func.attr == "dumps"
-                )
-                indirect = isinstance(arg, ast.Name) and arg.id in serialized
-                if direct or indirect:
+                if _carries_payload(arg, serialized):
                     found.append(
-                        f"{py_file.relative_to(_cli_root().parent.parent)}"
-                        f":{node.lineno}: {ast.unparse(node)[:90]}"
+                        f"{py_file.name}:{node.lineno}: {ast.unparse(node)[:90]}"
                     )
+                    break
     return found
 
 
@@ -155,7 +224,7 @@ def test_the_scan_finds_the_print_calls_it_is_meant_to_police() -> None:
         total += sum(
             1
             for node in ast.walk(tree)
-            if isinstance(node, ast.Call) and _is_rich_print(node)
+            if isinstance(node, ast.Call) and _is_rich_render(node)
         )
     assert total > 100, (
         f"only {total} Rich print calls found in trellis_cli; the scan has "
@@ -163,40 +232,59 @@ def test_the_scan_finds_the_print_calls_it_is_meant_to_police() -> None:
     )
 
 
-def test_the_scan_would_catch_the_defect_it_was_written_for() -> None:
-    """Mutation guard: the reported code shape must be reported.
+#: Every shape a reviewer found that walked past the first version of this
+#: rule, plus the control. The comment on each line is what made it invisible.
+_EVASIONS = """
+import json
+from json import dumps
+from trellis_cli.output import format_output
 
-    Without this, a scan that silently matched nothing would pass both
-    tests above — ``test_no_rich_print...`` vacuously, and the population
-    guard on unrelated calls.
+console.print(json.dumps(a))                  # 5  the control
+payload = json.dumps(b)
+console.print(payload)                        # 7  bound name
+console.print(result.model_dump_json())       # 8  pydantic sibling -> was LIVE
+console.print(format_output(items, "json"))   # 9  serializer, called directly
+console.print(dumps(c))                       # 10 imported bare, no attribute
+console.print_json(json.dumps(d))             # 11 rich's own json printer
+annotated: str = json.dumps(e)
+console.print(annotated)                      # 13 annotated assignment
+console.print(walrus := json.dumps(f))        # 14 walrus
+console.print(*[payload])                     # 15 starred literal
+console.print(f"{payload}")                   # 16 f-string that IS the payload
+console.print(f"proposed: {json.dumps(g)}")   # 17 ALLOWED: prose, text branch
+console.print("plain text")                   # 18 ALLOWED
+"""
+
+#: Line numbers in :data:`_EVASIONS` the rule must report. 17 and 18 are
+#: deliberately absent — ``metrics.py`` interpolates a payload into a human
+#: line in its text branch, and forbidding that would buy nothing.
+_EXPECTED_EVASION_LINES = [5, 7, 8, 9, 10, 11, 13, 14, 15, 16]
+
+
+def test_the_scan_catches_every_known_evasion(tmp_path: Path) -> None:
+    """Mutation guard, run through the shipped scanner rather than a copy.
+
+    The first version of this test re-implemented the predicate inline. That
+    made it worthless in the exact scenario it named: stubbing ``_violations``
+    to return ``[]`` left the whole file green, so the rule could stop
+    enforcing anything without turning the suite red. It now calls
+    :func:`_violations` against a synthetic package, so the guard fails if
+    the shipped scanner regresses.
+
+    Every listed shape was verified to walk past the first version, and one
+    of them — ``model_dump_json`` — was not hypothetical: it was a live #403
+    defect in ``retrieve trace --format json``, six lines below a call the
+    same commit had fixed.
     """
-    tree = ast.parse(
-        "import json\n"
-        "console.print(json.dumps({'a': 1}))\n"
-        "payload = json.dumps({'b': 2})\n"
-        "console.print(payload)\n"
-        "console.print(f'prose {json.dumps(x)}')\n"
-    )
-    serialized = _serialized_names(tree)
-    assert serialized == {"payload"}
+    # ``lstrip`` so the line numbers in _EVASIONS' comments are the real ones.
+    (tmp_path / "evasions.py").write_text(_EVASIONS.lstrip("\n"))
 
-    flagged = [
-        node.lineno
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and _is_rich_print(node)
-        and any(
-            (
-                isinstance(a, ast.Call)
-                and isinstance(a.func, ast.Attribute)
-                and a.func.attr == "dumps"
-            )
-            or (isinstance(a, ast.Name) and a.id in serialized)
-            for a in node.args
-        )
-    ]
-    # Lines 2 and 4 are violations; line 5 (prose f-string) is allowed.
-    assert flagged == [2, 4]
+    reported = sorted(int(v.split(":")[1]) for v in _violations(root=tmp_path))
+    assert reported == _EXPECTED_EVASION_LINES, (
+        f"scanner reported {reported}, expected {_EXPECTED_EVASION_LINES}; "
+        f"missing={sorted(set(_EXPECTED_EVASION_LINES) - set(reported))} "
+        f"spurious={sorted(set(reported) - set(_EXPECTED_EVASION_LINES))}"
+    )
 
 
 class TestEmitterFidelity:
