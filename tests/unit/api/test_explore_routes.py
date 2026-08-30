@@ -4,6 +4,11 @@ Covers document browsing (list previews, FTS search, single get),
 event-log tailing (filters, ordering, payload stripping), pack
 telemetry inspection (summary list, full detail, feedback join), graph
 node history, and the sectioned-pack route the SDK targets.
+
+Also home to the chunk-visibility assertions for ``GET /api/v1/search``,
+which is a *retrieve* route rather than an explore one. It sits here
+because it makes the same promise as ``GET /api/v1/documents`` and #396
+exists precisely because one was fixed without the other.
 """
 
 from __future__ import annotations
@@ -15,6 +20,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import trellis_api.app as app_module
+from tests.chunk_corpus import seed_chunk_favouring, seed_chunked
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 from trellis_api.routes import explore, retrieve
@@ -102,25 +108,9 @@ def test_documents_search(client, registry):
     assert "rank" in data["documents"][0]
 
 
-def _seed_chunked(store, parents=3, per_parent=3):
-    """Parents plus their ``#chunk-N`` slices, the shape corpus ingest writes."""
-    parent_ids = []
-    for p in range(parents):
-        parent_id = f"corpus:notes:doc{p}"
-        store.put(parent_id, f"parent {p} distinctive body text")
-        parent_ids.append(parent_id)
-        for c in range(per_parent):
-            store.put(
-                f"{parent_id}#chunk-{c}",
-                f"parent {p} distinctive body text slice {c}",
-                {"parent_doc_id": parent_id, "chunk_index": c},
-            )
-    return parent_ids
-
-
 def test_documents_excludes_chunks_by_default(client, registry):
     """#385 — the list view served 740 of 1,317 rows as chunk fragments."""
-    parent_ids = _seed_chunked(registry.knowledge.document_store)
+    parent_ids = seed_chunked(registry.knowledge.document_store)
 
     data = client.get("/api/v1/documents").json()
 
@@ -132,7 +122,7 @@ def test_documents_excludes_chunks_by_default(client, registry):
 
 
 def test_documents_include_chunks_opt_in(client, registry):
-    _seed_chunked(registry.knowledge.document_store)
+    seed_chunked(registry.knowledge.document_store)
 
     data = client.get("/api/v1/documents", params={"include_chunks": "true"}).json()
 
@@ -143,7 +133,7 @@ def test_documents_include_chunks_opt_in(client, registry):
 
 def test_documents_search_excludes_chunks_without_losing_the_parent(client, registry):
     """The parent carries the text its chunks were sliced from, so recall holds."""
-    parent_ids = _seed_chunked(registry.knowledge.document_store)
+    parent_ids = seed_chunked(registry.knowledge.document_store)
 
     unfiltered = client.get(
         "/api/v1/documents",
@@ -162,7 +152,7 @@ def test_documents_page_is_not_shortened_by_the_chunk_filter(client, registry):
     return 5 rows here and give the caller no way to tell that from the end
     of the data.
     """
-    _seed_chunked(registry.knowledge.document_store, parents=20, per_parent=3)
+    seed_chunked(registry.knowledge.document_store, parents=20, per_parent=3)
 
     data = client.get("/api/v1/documents", params={"limit": 20}).json()
 
@@ -180,7 +170,88 @@ def test_excluded_chunk_is_still_addressable(client, registry):
     addressable" is the claim that makes excluding them from the listing a
     demotion rather than a disappearance.
     """
-    _seed_chunked(registry.knowledge.document_store, parents=1, per_parent=1)
+    seed_chunked(registry.knowledge.document_store, parents=1, per_parent=1)
+
+    resp = client.get("/api/v1/documents/corpus:notes:doc0%23chunk-0")
+
+    assert resp.status_code == 200
+    assert resp.json()["document"]["doc_id"] == "corpus:notes:doc0#chunk-0"
+
+
+# ---------------------------------------------------------------------------
+# GET /api/v1/search — the other REST surface that hands back document rows
+# ---------------------------------------------------------------------------
+#
+# Lives beside the ``/documents`` chunk tests rather than in
+# ``test_routes.py`` on purpose: the two surfaces make the same promise and
+# #396 exists because one of them was fixed without the other. A reviewer
+# who changes one should be reading the other's assertions in the same
+# screenful.
+
+
+def test_search_excludes_chunks_by_default(client, registry):
+    """#396 — the sibling surface #391 left behind."""
+    parent_ids = seed_chunked(registry.knowledge.document_store)
+
+    data = client.get("/api/v1/search", params={"q": "distinctive"}).json()
+
+    assert data["include_chunks"] is False
+    assert {d["doc_id"] for d in data["results"]} == set(parent_ids)
+    assert data["count"] == len(parent_ids)
+
+
+def test_search_include_chunks_opt_in(client, registry):
+    """The escape hatch, so exclusion is a default rather than a removal."""
+    seed_chunked(registry.knowledge.document_store)
+
+    data = client.get(
+        "/api/v1/search", params={"q": "distinctive", "include_chunks": "true"}
+    ).json()
+
+    assert data["include_chunks"] is True
+    assert data["count"] == 12
+    assert any("#chunk-" in d["doc_id"] for d in data["results"])
+
+
+def test_search_result_set_is_not_shortened_by_the_chunk_filter(client, registry):
+    """A ``limit`` of N returns N non-chunk rows, not N minus the chunks.
+
+    Pins the store-level pushdown for the search path specifically: with
+    chunks ranking above parents, filtering the result set after the read
+    would return *zero* rows for ``limit=20`` and the caller would read that
+    as "nothing matched" — the same defect the ``/documents`` sibling pins,
+    reached through a different store method.
+    """
+    seed_chunk_favouring(registry.knowledge.document_store)
+
+    unfiltered = client.get(
+        "/api/v1/search",
+        params={"q": "distinctive", "limit": 20, "include_chunks": "true"},
+    ).json()
+    # Precondition: the fixture really does rank chunks first, so the
+    # assertion below tests the pushdown rather than the seed data.
+    assert all("#chunk-" in d["doc_id"] for d in unfiltered["results"])
+
+    data = client.get("/api/v1/search", params={"q": "distinctive", "limit": 20}).json()
+
+    assert data["count"] == 20
+    assert not [d for d in data["results"] if "#chunk-" in d["doc_id"]]
+
+
+def test_search_excluded_chunk_is_still_addressable(client, registry):
+    """A chunk `/search` withheld is still fetchable — demotion, not removal.
+
+    Both halves are asserted in one test on purpose: "still addressable" is
+    only interesting about a row this surface *did* withhold. Asserting the
+    fetch alone would duplicate ``test_excluded_chunk_is_still_addressable``
+    (the ``/documents`` sibling) and the contract suite's
+    ``test_chunk_documents_remain_addressable_when_excluded``, without
+    saying anything about search.
+    """
+    seed_chunked(registry.knowledge.document_store, parents=1, per_parent=1)
+
+    served = client.get("/api/v1/search", params={"q": "distinctive"}).json()
+    assert "corpus:notes:doc0#chunk-0" not in {d["doc_id"] for d in served["results"]}
 
     resp = client.get("/api/v1/documents/corpus:notes:doc0%23chunk-0")
 

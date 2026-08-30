@@ -8,6 +8,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+from tests.chunk_corpus import seed_chunked
 from trellis.testing import in_memory_client
 from trellis_sdk.client import TrellisClient
 from trellis_sdk.exceptions import TrellisClientError
@@ -18,6 +19,18 @@ def client(tmp_path: Path):
     """An in-memory client backed by a tmp_path StoreRegistry."""
     with in_memory_client(tmp_path / "stores") as c:
         yield c
+
+
+def _seed_chunked_via_registry() -> list[str]:
+    """Seed parents plus their chunk slices into the live registry.
+
+    ``in_memory_client`` builds the registry itself and binds it to the API
+    app module, so that module is the only handle a client-side test has on
+    the store behind the route.
+    """
+    import trellis_api.app as app_module
+
+    return seed_chunked(app_module._registry.knowledge.document_store)
 
 
 class TestConstruction:
@@ -66,6 +79,55 @@ class TestIngestAndRetrieve:
     def test_search_empty(self, client):
         results = client.search("nothing here")
         assert results == []
+
+    def test_search_excludes_chunk_rows_by_default(self, client):
+        """The SDK inherits the route's default (#396), it does not set one.
+
+        ``client.search`` targets ``GET /api/v1/search``, so the chunk
+        exclusion applies to SDK agents too. Asserted here rather than
+        only on the route because the SDK's docstring claims it does not
+        pin a second copy of the default — a claim nothing enforced until
+        this test and its opt-in sibling below.
+        """
+        parents = _seed_chunked_via_registry()
+        assert {d["doc_id"] for d in client.search("distinctive")} == set(parents)
+
+    def test_search_omits_include_chunks_when_unset(self, client, monkeypatch):
+        """The tri-state's whole justification, pinned.
+
+        ``include_chunks: bool | None = None`` exists so the route owns the
+        default and the SDK does not carry a second copy that could drift.
+        A regression from ``is not None`` to plain truthiness would send
+        ``include_chunks=false`` — identical behaviour today, and a live bug
+        the moment the route's default flips. The only way to see the
+        difference is on the wire.
+        """
+        sent: list[dict] = []
+        original = client._request
+
+        def _record(method, path, **kwargs):
+            sent.append(dict(kwargs.get("params") or {}))
+            return original(method, path, **kwargs)
+
+        monkeypatch.setattr(client, "_request", _record)
+
+        client.search("anything")
+        client.search("anything", include_chunks=False)
+
+        assert "include_chunks" not in sent[0]
+        assert sent[1]["include_chunks"] is False
+
+    def test_search_include_chunks_opt_in_reaches_the_route(self, client):
+        """``include_chunks=True`` is forwarded; omitting it sends nothing.
+
+        The tri-state (``bool | None``) is the whole mechanism: were the
+        SDK to default the parameter to ``False`` it would be a second
+        copy of the route's default, free to drift from it.
+        """
+        _seed_chunked_via_registry()
+        results = client.search("distinctive", include_chunks=True)
+        assert len(results) == 12
+        assert any("#chunk-" in d["doc_id"] for d in results)
 
 
 class TestCurate:

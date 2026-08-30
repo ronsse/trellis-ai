@@ -3702,7 +3702,14 @@ paths:
       - admin
   /api/v1/search:
     get:
-      description: Full-text search across documents.
+      description: 'Full-text search across documents.
+
+
+        ``<parent>#chunk-N`` fragment rows are excluded by default; pass
+
+        ``include_chunks=true`` for the unfiltered result set. The applied
+
+        setting is echoed back on the response.'
       operationId: search_api_v1_search_get
       parameters:
       - description: Search query
@@ -3732,6 +3739,17 @@ paths:
           description: Max results
           title: Limit
           type: integer
+      - description: 'Include <parent>#chunk-N fragment rows. Excluded by default: they are slices of documents the same search
+          already ranks.'
+        in: query
+        name: include_chunks
+        required: false
+        schema:
+          default: false
+          description: 'Include <parent>#chunk-N fragment rows. Excluded by default: they are slices of documents the same
+            search already ranks.'
+          title: Include Chunks
+          type: boolean
       responses:
         '200':
           content:

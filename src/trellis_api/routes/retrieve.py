@@ -48,19 +48,74 @@ def _build_pack_builder(registry: Any) -> PackBuilder:
     )
 
 
+# Chunk rows are excluded from this route by default (#396) — the sibling
+# of the same change on ``GET /api/v1/documents`` (#385/#391), which left
+# this one behind.
+#
+# ``search`` hands back whole document rows, and a ``<parent>#chunk-N`` row
+# is a slice of a parent the *same result set* already ranks. On the
+# reference deployment (2026-08-29, 1,319 documents, 740 of them chunks)
+# eight representative queries at ``limit=20`` returned 155 rows of which 39
+# (25.2%) were chunks; re-running them with ``include_chunks=False`` surfaced
+# **34 whole documents the unfiltered view never showed** — one per
+# displaced fragment. The eight, so the figure is re-derivable rather than
+# quoted: "how does retrieval work", "hunting", "memory system", "backup",
+# "kids school", "postgres", "pack budget", "vector store" — a spread of
+# technical and personal intents, since the corpus is majority personal.
+#
+# That refill is the point, and it is why the exclusion is pushed into the
+# store rather than applied to the response — see
+# :meth:`~trellis.stores.base.document.DocumentStore.list_documents` for the
+# argument, which this route does not restate.
+#
+# What is worth saying here: the result set can still come back shorter than
+# ``limit``, and that is not the defect the pushdown avoids. One of the eight
+# queries (``postgres``) went 15 → 10 because the corpus genuinely holds
+# fewer than 20 non-chunk matches for it. A pushdown short page means "that
+# is all there is"; a post-hoc filter's short page means "there was more, off
+# the end of the window you asked for".
+#
+# Deliberately *not* scoped to browser operators. ``TrellisClient.search``
+# targets this route, so the default changes for SDK agents too — correctly:
+# an agent reading whole rows gets strictly more content per row from the
+# parent. The surface that must keep seeing chunks is the pack's keyword
+# axis (``retrieve/strategies.py``), where the excerpt is what the token
+# budget prices and the chunk is the retrievable unit. See
+# :data:`trellis.ingest_corpus.models.CHUNK_ID_SEPARATOR` for the rule and
+# ``tests/unit/test_chunk_visibility_rule.py`` for its enforcement.
 @router.get("/search")
 def search(
     q: str = Query(..., description="Search query"),
     domain: str | None = Query(None, description="Domain filter"),
     limit: int = Query(20, description="Max results"),
+    include_chunks: bool = Query(
+        False,
+        description=(
+            "Include <parent>#chunk-N fragment rows. Excluded by default:"
+            " they are slices of documents the same search already ranks."
+        ),
+    ),
 ) -> dict[str, Any]:
-    """Full-text search across documents."""
+    """Full-text search across documents.
+
+    ``<parent>#chunk-N`` fragment rows are excluded by default; pass
+    ``include_chunks=true`` for the unfiltered result set. The applied
+    setting is echoed back on the response.
+    """
     registry = get_registry()
     filters: dict[str, Any] = {}
     if domain:
         filters["domain"] = domain
-    results = registry.knowledge.document_store.search(q, limit=limit, filters=filters)
-    return {"status": "ok", "query": q, "count": len(results), "results": results}
+    results = registry.knowledge.document_store.search(
+        q, limit=limit, filters=filters, include_chunks=include_chunks
+    )
+    return {
+        "status": "ok",
+        "query": q,
+        "count": len(results),
+        "include_chunks": include_chunks,
+        "results": results,
+    }
 
 
 @router.post("/packs", response_model=PackResponse)

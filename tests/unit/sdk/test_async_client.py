@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 
+from tests.unit.sdk.test_client import _seed_chunked_via_registry
 from trellis.testing import in_memory_async_client
 from trellis_sdk.async_client import AsyncTrellisClient
 from trellis_sdk.exceptions import TrellisClientError
@@ -64,6 +65,22 @@ class TestAsyncRetrieve:
     async def test_search_empty(self, client: AsyncTrellisClient):
         results = await client.search("nothing here")
         assert results == []
+
+    async def test_search_excludes_chunk_rows_by_default(
+        self, client: AsyncTrellisClient
+    ):
+        """Mirror of the sync client's assertion (#396) — the two must agree."""
+        parents = _seed_chunked_via_registry()
+        results = await client.search("distinctive")
+        assert {d["doc_id"] for d in results} == set(parents)
+
+    async def test_search_include_chunks_opt_in_reaches_the_route(
+        self, client: AsyncTrellisClient
+    ):
+        _seed_chunked_via_registry()
+        results = await client.search("distinctive", include_chunks=True)
+        assert len(results) == 12
+        assert any("#chunk-" in d["doc_id"] for d in results)
 
     async def test_assemble_pack(self, client: AsyncTrellisClient):
         pack = await client.assemble_pack("async test intent")

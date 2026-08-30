@@ -28,6 +28,18 @@ _FMT_HELP = "Output format: text, json, jsonl, tsv"
 _FIELDS_HELP = "Comma-separated fields to include"
 _TRUNC_HELP = "Max characters for text fields"
 _QUIET_HELP = "Suppress Rich formatting"
+#: Both commands below hand back whole document rows, so they exclude
+#: ``<parent>#chunk-N`` fragments by default — see
+#: :data:`trellis.ingest_corpus.models.CHUNK_ID_SEPARATOR` for the rule.
+#: The exclusion is pushed into the store rather than applied to the printed
+#: list, so the row cap (``--limit`` / ``--max-items``) refills with the
+#: documents the fragments were sliced from instead of the list simply
+#: getting shorter. A short list therefore still means "that is all there
+#: is", which is exactly what a post-hoc filter would have destroyed.
+_CHUNKS_HELP = (
+    "Include <parent>#chunk-N fragment rows. Excluded by default: they are"
+    " slices of documents the same search already ranks."
+)
 
 
 def _doc_preview(doc: dict[str, Any], width: int) -> str:
@@ -43,14 +55,31 @@ def pack(
     agent: str = typer.Option(None, "--agent", help="Agent ID scope"),
     max_items: int = typer.Option(50, help="Maximum items in pack"),
     output_format: str = typer.Option("text", "--format", help="Output format"),
+    include_chunks: bool = typer.Option(False, "--include-chunks", help=_CHUNKS_HELP),
     quiet: bool = typer.Option(False, "--quiet", "-q", help=_QUIET_HELP),
 ) -> None:
     """Assemble a retrieval pack for a given intent."""
+    # ``pack`` is treated as a row surface (#396) on the strength of what it
+    # does, not what it is called: despite the name, and despite being
+    # documented as "assemble a retrieval pack", it reaches past
+    # ``PackBuilder`` straight to ``DocumentStore.search`` and prints doc ids
+    # to a human. (Not a #262 regression — that ADR's "one retrieval path"
+    # covers the MCP macro tools and never included this command.) Under the
+    # rule that makes it a whole-row surface, and the operator previewing a
+    # 56%-chunk corpus should not be shown fragments.
+    #
+    # This is the one classification in #396 that a later change can
+    # invalidate rather than extend: routing this through ``PackBuilder``
+    # (#410) would make it a *pack* surface, where chunks are the
+    # retrievable unit — and ``--include-chunks`` should then be removed,
+    # not inverted.
     store = get_document_store()
     filters = {}
     if domain:
         filters["domain"] = domain
-    results = store.search(query=intent, limit=max_items, filters=filters)
+    results = store.search(
+        query=intent, limit=max_items, filters=filters, include_chunks=include_chunks
+    )
 
     if output_format == "json":
         payload = json.dumps(
@@ -60,6 +89,10 @@ def pack(
                 "domain": domain,
                 "agent_id": agent,
                 "count": len(results),
+                # Echoed for the same reason the REST route echoes it: a
+                # machine consumer of ``--format json`` must be able to tell
+                # which of the two result sets it is holding.
+                "include_chunks": include_chunks,
                 "items": [r["doc_id"] for r in results],
             }
         )
@@ -90,6 +123,7 @@ def search(
     output_format: str = typer.Option("text", "--format", help=_FMT_HELP),
     fields: str = typer.Option(None, "--fields", help=_FIELDS_HELP),
     truncate: int = typer.Option(None, "--truncate", help=_TRUNC_HELP),
+    include_chunks: bool = typer.Option(False, "--include-chunks", help=_CHUNKS_HELP),
     quiet: bool = typer.Option(False, "--quiet", "-q", help=_QUIET_HELP),
 ) -> None:
     """Search the experience graph."""
@@ -97,7 +131,9 @@ def search(
     filters = {}
     if domain:
         filters["domain"] = domain
-    results = store.search(query=query, limit=limit, filters=filters)
+    results = store.search(
+        query=query, limit=limit, filters=filters, include_chunks=include_chunks
+    )
 
     if output_format in ("json", "jsonl", "tsv"):
         if output_format == "json" and not fields:
@@ -108,6 +144,7 @@ def search(
                     "status": "ok",
                     "query": query,
                     "count": len(out_items),
+                    "include_chunks": include_chunks,
                     "results": out_items,
                 }
             )

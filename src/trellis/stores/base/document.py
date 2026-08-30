@@ -21,6 +21,16 @@ def chunk_id_like_pattern() -> str:
     rows, so the cheap portable predicate and the metadata one select the
     same set. The id is preferred because it is immutable — a metadata
     rewrite cannot make a chunk stop looking like one.
+
+    The converse is not guarded, and the guarantee should be read narrowly.
+    ``%#chunk-%`` matches the substring anywhere in the id, and no writer
+    validates that a caller-supplied ``doc_id`` avoids it, so a memory
+    stored with ``#chunk-`` in its id is invisible to every surface that
+    excludes chunks by default (#396 widened that from one REST route to
+    four). Every ``#chunk-`` id written by production code is minted by
+    :func:`trellis.ingest_corpus.sync.sync_records` (tests mint their own),
+    so this is reachable only by a caller naming its own id — but it is
+    reachable, silently.
     """
     from trellis.ingest_corpus.models import CHUNK_ID_SEPARATOR  # noqa: PLC0415
 

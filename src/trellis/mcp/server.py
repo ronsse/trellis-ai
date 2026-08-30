@@ -526,10 +526,17 @@ def _run_memory_extraction(
 def _get_minhash_index(registry: StoreRegistry) -> Any:
     """Get or create a cached MinHash index for fuzzy dedup.
 
-    Lazily populates the index from the document store on first access.
-    Raises ``McpError(INTERNAL_ERROR)`` if the dedup module is broken —
-    silent disable used to mean memories were stored without fuzzy
-    dedup, producing invisible duplicates.
+    **The seed below reads zero rows on every backend (#402), so today this
+    index only ever holds documents written by the same process** — a fresh
+    server cannot detect a fuzzy duplicate of anything already stored. This
+    docstring used to say it "lazily populates the index from the document
+    store", and that a broken dedup module is raised rather than silently
+    disabled *because* silent disable "used to mean memories were stored
+    without fuzzy dedup, producing invisible duplicates". The raise is still
+    real and still worth having; the guarantee it protects is not currently
+    being delivered. Saying so here rather than only at the call site,
+    because a reader checking whether fuzzy dedup covers a live deployment
+    reads the docstring.
     """
     global _minhash_index  # noqa: PLW0603
     if _minhash_index is not None:
@@ -539,10 +546,42 @@ def _get_minhash_index(registry: StoreRegistry) -> Any:
 
         _minhash_index = MinHashIndex()
         # Seed the index from existing documents (up to a reasonable limit).
+        #
+        # Reads nothing. ``search("")`` returns ``[]`` on every backend — a
+        # store-contract property (``test_search_empty_query_returns_empty_list``)
+        # both implementations honour with an explicit early return, and 0
+        # rows against the 1,319-document reference deployment. So the index
+        # only ever holds documents written by the *same process*, and #396's
+        # "should this exclude chunk rows?" has no answer here: it would
+        # decorate a call that returns no rows of either kind.
+        #
+        # Left alone deliberately: repairing the seed turns on fuzzy dedup
+        # that has never been on, changing what ``save_memory`` rejects on a
+        # live deployment. That is its own review — #402, which also carries
+        # the chunk decision for whoever does it.
         docs = registry.knowledge.document_store.search("", limit=500)
         for doc in docs:
             _minhash_index.add(doc["doc_id"], doc.get("content", ""))
         logger.debug("minhash_index_initialized", size=_minhash_index.size)
+        # A knowingly-inert safety feature has to say so somewhere an
+        # operator looks. The line above is DEBUG, and since ``search("")``
+        # has always returned nothing it must have been reporting ``size=0``
+        # for as long as the seed has existed — an inference from the store
+        # contract rather than an observation, since nobody watches DEBUG,
+        # which is how this went unnoticed in the first place.
+        #
+        # Warn only when the store holds rows the seed failed to pick up. An
+        # empty store legitimately seeds nothing, which is most unit tests
+        # and every fresh install; a test that stores a document before its
+        # first ``save_memory`` will trip this deliberately (see
+        # ``test_minhash_seed_warns_when_it_reads_nothing_from_a_stocked_store``).
+        if _minhash_index.size == 0 and registry.knowledge.document_store.count() > 0:
+            logger.warning(
+                "minhash_index_seed_empty",
+                reason="search('') returns no rows on any backend",
+                effect="fuzzy dedup only sees memories written by this process",
+                issue=402,
+            )
     except Exception as exc:
         logger.exception("minhash_index_init_failed")
         _raise_internal(
