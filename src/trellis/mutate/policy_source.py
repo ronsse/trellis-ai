@@ -99,7 +99,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, overload
 
 import structlog
-from pydantic import ValidationError as PydanticValidationError
 
 from trellis.errors import ConfigError
 from trellis.mutate.policy_gate import DefaultPolicyGate
@@ -112,6 +111,13 @@ logger = structlog.get_logger(__name__)
 
 #: Filename holding a deployment's governance policies, under ``stores_dir``.
 POLICY_FILENAME = "policies.json"
+
+#: How many of a malformed envelope's keys to name in the error. Enough to
+#: recognise the file (and the typo), short enough to stay one line.
+#: :mod:`trellis.stores.policy_store` bounds the same list with its own
+#: ``_MAX_REPORTED_ROWS``; they are different quantities that happen to be
+#: small, not one constant split in two.
+_MAX_REPORTED_KEYS = 5
 
 
 @overload
@@ -219,8 +225,9 @@ def _load_from_path(path: Path | None) -> list[Policy]:
     if "policies" not in data:
         msg = (
             f"Malformed Trellis policy file at {path}: JSON object has no "
-            f'"policies" key (keys: {sorted(data)[:5]}). This is not a file '
-            "Trellis wrote. Fix the key, or remove the file to run with no "
+            f'"policies" key (keys: {sorted(data)[:_MAX_REPORTED_KEYS]}). '
+            "This is not a file Trellis wrote. Fix the key, or remove the "
+            "file to run with no "
             "policies — but note that running with no policies means every "
             "mutation is permitted at Stage 2."
         )
@@ -238,7 +245,12 @@ def _load_from_path(path: Path | None) -> list[Policy]:
     for index, entry in enumerate(data["policies"]):
         try:
             policies.append(Policy.model_validate(entry))
-        except PydanticValidationError as exc:
+        # Broad, not just ``PydanticValidationError``. Nothing JSON-decoded
+        # should raise anything else today, but a future custom validator or
+        # a ``Policy`` bug would escape as a bare traceback carrying none of
+        # the recovery advice every other malformed shape here provides —
+        # the same complaint this module makes about ``UnicodeDecodeError``.
+        except Exception as exc:
             msg = (
                 f"Invalid policy at index {index} in {path}: {exc}. "
                 "Fix the entry, or remove it to run without that policy."

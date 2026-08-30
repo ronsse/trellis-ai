@@ -10,6 +10,7 @@ from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
 
+from trellis.errors import StoreWriteRefusedError
 from trellis.mutate import resolve_policy_path
 from trellis.schemas.enums import Enforcement, PolicyType
 from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
@@ -64,7 +65,8 @@ def _render_degradation(degraded: dict[str, Any] | None) -> None:
     * **Markup.** ``detail`` is arbitrary exception text and ``path`` is an
       arbitrary filesystem path, and Rich reads ``[...]`` as markup: an
       unescaped detail of ``'no "policies" key (keys: [...])'`` loses the
-      keys it exists to name. Hence ``escape`` on every interpolated value.
+      keys it exists to name. Hence ``escape`` on every interpolated
+      *string* (the counts are ``int``s from ``to_dict``).
     * **Wrapping.** Rich hard-wraps at the console width, so a data dir
       deeper than ~80 columns splits the ``mv`` across two lines — and a
       pasted hard newline is two shell commands, neither of them the fix.
@@ -98,6 +100,33 @@ def _render_degradation(degraded: dict[str, Any] | None) -> None:
         f"    To reset: [bold]{escape(str(degraded['recovery']))}[/bold]",
         soft_wrap=True,
     )
+
+
+def _exit_on_refused_write(exc: StoreWriteRefusedError, output_format: str) -> None:
+    """Render a refused write and exit, instead of a traceback.
+
+    Covers the refusal the pre-check cannot: ``refuse_if_stale`` fires when
+    another process wrote the file between this command's load and its
+    save, and the store was perfectly healthy at the pre-check. There is no
+    ``PolicyLoadDegradation`` to render in that case, so this reads the
+    exception rather than the store.
+    """
+    if output_format == "json":
+        _print_json(
+            {
+                "status": "refused",
+                "code": exc.code,
+                "message": exc.message,
+                "path": exc.path,
+                "recovery": exc.recovery,
+            }
+        )
+    else:
+        console.print(
+            f"  [bold red]POLICY WRITE REFUSED[/bold red] — {escape(str(exc.message))}",
+            soft_wrap=True,
+        )
+    raise typer.Exit(code=EXIT_STORE)
 
 
 def _exit_if_degraded(store: PolicyStore, output_format: str) -> None:
@@ -147,6 +176,10 @@ def list_policies(
 
     if output_format == "json":
         payload: dict[str, Any] = {
+            # ``status`` is the house contract for --format json callers
+            # (docs/design/adr-cli-exit-codes.md): the exit code is the
+            # cheap branch for shells, ``status`` for anything parsing JSON.
+            "status": "degraded" if degraded else "ok",
             "count": len(policies),
             "policies": [p.model_dump(mode="json") for p in policies],
             "policy_file": str(store.path),
@@ -241,7 +274,17 @@ def show_policy(
         raise typer.Exit(code=EXIT_INTERNAL)
 
     if output_format == "json":
-        payload: dict[str, Any] = match.model_dump(mode="json")
+        # An envelope, not the bare model dump this used to emit. Every
+        # Trellis schema is ``extra="forbid"`` (``TrellisModel``), so adding
+        # ``store_degradation`` to a ``Policy`` dump produced a payload that
+        # ``Policy.model_validate`` *rejects* — breaking round-tripping
+        # callers precisely when the store is degraded. The REST equivalent
+        # already nests under ``policy``; this now matches it, and carries
+        # the house ``status`` key the other commands emit.
+        payload: dict[str, Any] = {
+            "status": "degraded" if degraded else "ok",
+            "policy": match.model_dump(mode="json"),
+        }
         if degraded:
             payload["store_degradation"] = degraded
         _print_json(payload)
@@ -307,7 +350,10 @@ def add_policy(
         enforcement=Enforcement(enforcement),
     )
 
-    store.add(policy)
+    try:
+        store.add(policy)
+    except StoreWriteRefusedError as exc:
+        _exit_on_refused_write(exc, output_format)
 
     if output_format == "json":
         _print_json(
@@ -340,7 +386,10 @@ def remove_policy(
             console.print(f"[red]Policy not found: {policy_id}[/red]")
         raise typer.Exit(code=EXIT_INTERNAL)
 
-    store.remove(match.policy_id)
+    try:
+        store.remove(match.policy_id)
+    except StoreWriteRefusedError as exc:
+        _exit_on_refused_write(exc, output_format)
 
     if output_format == "json":
         _print_json(

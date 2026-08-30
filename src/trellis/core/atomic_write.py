@@ -33,8 +33,12 @@ from pathlib import Path
 #: It is a constant, not ``0o666 & ~umask``: reading the umask means
 #: setting it, which is not safe in the threaded API process. The trade is
 #: that under a restrictive umask (``077``) this *widens* a new file, where
-#: ``write_text`` would have produced ``0600``. Accepted, but it is a
-#: change of behaviour in both directions, not only the narrowing one.
+#: ``write_text`` would have produced ``0600``. Accepted: neither caller's
+#: file is a secret — advisories are generated hint text, policies are
+#: declarations, and the read-scoped REST routes already serve both — but it
+#: is a change of behaviour in both directions, not only the narrowing one,
+#: and one of the two is an access-control file. Weigh it again before
+#: adding a caller whose file *is* sensitive.
 NEW_FILE_MODE = 0o644
 
 
@@ -88,10 +92,10 @@ def atomic_write_text(path: Path, text: str) -> None:
             with suppress(OSError):
                 tmp_path.unlink(missing_ok=True)
 
-    fsync_directory(target.parent)
+    _fsync_directory(target.parent)
 
 
-def fsync_directory(directory: Path) -> None:
+def _fsync_directory(directory: Path) -> None:
     """Commit a rename to disk, best effort.
 
     ``os.replace`` is atomic but not durable: on a crash the rename can be

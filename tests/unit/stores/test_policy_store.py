@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from structlog.testing import capture_logs
 
-from trellis.errors import DegradedStoreWriteError
+from trellis.errors import DegradedStoreWriteError, StaleStoreWriteError
 from trellis.schemas.enums import Enforcement, PolicyType
 from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
 from trellis.stores.policy_store import PolicyStore
@@ -474,3 +474,145 @@ class TestSaveIsAtomic:
 
         assert link.is_symlink()
         assert json.loads(real.read_text(encoding="utf-8"))["policies"]
+
+
+class TestDegradationIsNotTheOnlyStaleView:
+    """The laundering primitive is wider than a degraded load.
+
+    A whole-file rewrite from *any* in-memory view that is no longer the
+    file produces #413's end state. These are the two routes that reach it
+    with nothing degraded — found by the review pass, not by the issue.
+    """
+
+    def test_a_second_writer_is_not_silently_overwritten(self, tmp_path: Path) -> None:
+        """The API's cached-store defect, at the store level.
+
+        Two processes write this file — a host ``trellis policy add`` and a
+        containerised ``POST /api/policies`` against one bind-mounted data
+        dir — so a store that loaded ``[A]`` must not rewrite the file as
+        ``[A, C]`` after the other made it ``[A, B]``. Doing so deletes a
+        policy from disk *and* from Stage 2 enforcement, on a call that
+        succeeds, with every surface reporting normal.
+        """
+        path = tmp_path / "policies.json"
+        mine = PolicyStore(path)
+        a = _policy()
+        mine.add(a)
+
+        # Another process appends B between my load and my next write.
+        theirs = PolicyStore(path)
+        b = _policy(scope=PolicyScope(level="domain", value="payments"))
+        theirs.add(b)
+        after_theirs = path.read_bytes()
+
+        with pytest.raises(StaleStoreWriteError) as exc_info:
+            mine.add(_policy(scope=PolicyScope(level="team", value="core")))
+
+        assert path.read_bytes() == after_theirs
+        assert exc_info.value.recovery == "trellis policy list"
+        # Transient and retryable, so it must not claim the file is damaged.
+        assert exc_info.value.code == "STALE_STORE_WRITE"
+        assert mine.is_degraded is False
+
+    def test_a_file_created_after_construction_is_not_wiped(
+        self, tmp_path: Path
+    ) -> None:
+        """A store built against an absent path never read the file.
+
+        In the API this was the common startup ordering: the first request
+        builds a store while no policy file exists, an operator declares
+        policies through the CLI, and a later write replaces them with the
+        one row the server knew about.
+        """
+        path = tmp_path / "policies.json"
+        store = PolicyStore(path)  # absent: not degraded, writes permitted
+
+        declared = _policy()
+        PolicyStore(path).add(declared)
+        landed = path.read_bytes()
+
+        with pytest.raises(StaleStoreWriteError):
+            store.add(_policy(scope=PolicyScope(level="team", value="core")))
+
+        assert path.read_bytes() == landed
+
+    def test_the_same_store_may_write_repeatedly(self, tmp_path: Path) -> None:
+        """The guard must not fire on a store's own previous write.
+
+        ``os.replace`` changes the inode every time, so without refreshing
+        the fingerprint after a successful save the second ``add`` on any
+        store would refuse — which would break every ordinary use.
+        """
+        store = PolicyStore(tmp_path / "policies.json")
+        store.add(_policy())
+        store.add(_policy(scope=PolicyScope(level="domain", value="payments")))
+        store.add(_policy(scope=PolicyScope(level="team", value="core")))
+
+        assert len(store.list()) == 3
+        assert len(PolicyStore(tmp_path / "policies.json").list()) == 3
+
+    def test_a_duplicate_policy_id_degrades_rather_than_collapsing(
+        self, tmp_path: Path
+    ) -> None:
+        """The two readers must not disagree about what the file says.
+
+        This store keys by ``policy_id``; ``policy_source`` builds a *list*
+        and evaluates every duplicate (deny wins). Collapsing silently made
+        the CRUD view smaller than the enforced ruleset — and the next
+        permitted write would have made the file match the smaller view,
+        deleting a rule the gate was enforcing.
+        """
+        first = _policy(rules=[PolicyRule(operation="entity.delete", action="deny")])
+        second = first.model_copy(
+            update={"rules": [PolicyRule(operation="entity.create", action="deny")]}
+        )
+        path = tmp_path / "policies.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "policies": [
+                        first.model_dump(mode="json"),
+                        second.model_dump(mode="json"),
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        before = path.read_bytes()
+
+        store = PolicyStore(path)
+
+        assert store.is_degraded is True
+        assert store.degradation is not None
+        assert store.degradation.reason == "invalid_rows"
+        assert "duplicate policy_id" in store.degradation.detail
+        # The first occurrence is kept and served; the write is refused.
+        assert [p.policy_id for p in store.list()] == [first.policy_id]
+        with pytest.raises(DegradedStoreWriteError):
+            store.add(_policy(scope=PolicyScope(level="team", value="core")))
+        assert path.read_bytes() == before
+
+    def test_an_unsearchable_parent_degrades_rather_than_reading_as_absent(
+        self, tmp_path: Path
+    ) -> None:
+        """``Path.exists()`` swallows ``OSError``, which was the hazard.
+
+        An unreadable file presenting as *absent* is the worst of the
+        available answers: absent means "the shipped transparent default",
+        which is both not-degraded and writable.
+        """
+        parent = tmp_path / "locked"
+        parent.mkdir()
+        path = parent / "policies.json"
+        path.write_text('{"policies": []}', encoding="utf-8")
+        parent.chmod(0o000)
+        try:
+            store = PolicyStore(path)
+        finally:
+            parent.chmod(0o755)
+
+        # Root can traverse regardless of mode, so assert the reachable
+        # outcome rather than skipping the test entirely.
+        if store.is_degraded:
+            assert store.degradation is not None
+            assert store.degradation.reason == "unreadable_file"

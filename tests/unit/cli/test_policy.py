@@ -161,11 +161,43 @@ class TestPolicyShow:
         assert policy_id in result.stdout
 
     def test_show_json(self) -> None:
+        """**Breaking change (#413):** the payload is now an envelope.
+
+        It used to be a bare ``Policy`` dump. That could not carry
+        ``store_degradation`` — every Trellis schema is ``extra="forbid"``,
+        so a dump plus a foreign key is a payload ``Policy.model_validate``
+        rejects, and it would have broken round-tripping callers exactly
+        when the store was degraded. Nesting under ``policy`` matches
+        ``GET /api/v1/policies/{id}`` and ``policy list``.
+        """
         policy_id = _add_policy()
         result = runner.invoke(app, ["policy", "show", policy_id, "--format", "json"])
         assert result.exit_code == 0
         data = json.loads(result.stdout.strip())
-        assert data["policy_id"] == policy_id
+        assert data["status"] == "ok"
+        assert data["policy"]["policy_id"] == policy_id
+
+    def test_show_json_round_trips_as_a_policy_even_when_degraded(
+        self, tmp_path: Path
+    ) -> None:
+        """The property the envelope exists to protect."""
+        from trellis.schemas.policy import Policy
+
+        policy_id = _add_policy()
+        path = tmp_path / "data" / "stores" / "policies.json"
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw["policies"].append({"policy_type": "bogus"})
+        path.write_text(json.dumps(raw), encoding="utf-8")
+
+        result = runner.invoke(app, ["policy", "show", policy_id, "--format", "json"])
+
+        assert result.exit_code == 5
+        data = json.loads(result.stdout.strip())
+        assert data["status"] == "degraded"
+        assert data["store_degradation"]["reason"] == "invalid_rows"
+        # The nested payload is still a valid Policy. Before the envelope
+        # this raised ``extra_forbidden``.
+        assert Policy.model_validate(data["policy"]).policy_id == policy_id
 
     def test_show_not_found(self) -> None:
         result = runner.invoke(app, ["policy", "show", "nonexistent"])
