@@ -71,8 +71,16 @@ one. Two others reach the identical end state with nothing degraded:
   was absent is not degraded, and its first write replaces a file it never
   read.
 
-Both are closed by one guard: :meth:`PolicyStore.refuse_if_stale` records a
-fingerprint of the file as loaded and refuses
+A third takes a different route to the same place, and is handled in the
+load instead: a **duplicate ``policy_id``**. This store keys by id while
+``policy_source`` builds a *list* and evaluates every duplicate (deny
+wins), so collapsing them silently made the two readers disagree about what
+the file says — and the next permitted write would have made the file match
+the smaller view. It is treated as an invalid row, so the read degrades and
+the write refuses like any other partial load.
+
+The first two are closed by one guard: :meth:`PolicyStore.refuse_if_stale`
+records a fingerprint of the file as loaded and refuses
 (:class:`~trellis.errors.StaleStoreWriteError`) if it no longer matches.
 Unlike a degraded load this one is **transient** — re-read and redo, rather
 than go and look at the file. It is a compare-and-swap, not a lock: two
