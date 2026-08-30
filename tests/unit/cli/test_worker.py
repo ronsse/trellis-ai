@@ -1422,3 +1422,129 @@ class TestEnrichedContentTags:
 
         out = _enriched_content_tags(None, self._result(), stamp=datetime.now(UTC))
         assert ContentTags.model_validate(out).classified_at is not None
+
+
+class TestEnrichPreservesRecency:
+    """A whole-corpus tagging pass must not re-date the corpus (#406).
+
+    ``_run_batch_enrichment`` writes ``content_tags`` / ``auto_importance`` /
+    ``document_form`` and hands the row's own ``content`` straight back —
+    metadata-only, the same operation as ``classify.refresh``, which passes
+    ``preserve_updated_at`` and carries a comment saying why. This path did
+    not, and it runs at the same scale: a full pass re-stamps every document
+    it touches to one instant, after which ``KeywordSearch``'s recency decay
+    is measuring the enrichment run rather than the documents.
+
+    It is also the widest of #406's five sites for ``updated_at``'s *second*
+    reader. ``_select_enrichment_candidates`` applies no lifecycle filter at
+    all, so a ``superseded`` row is an ordinary candidate here — and
+    ``superseded`` is the one state that reaches
+    ``mutate.retention._classify_document``'s age gate.
+    """
+
+    _CANNED = json.dumps(
+        {
+            "tags": ["alpha"],
+            "class": "reference",
+            "summary": "A summary.",
+            "importance": 0.6,
+            "tag_confidence": 0.9,
+            "class_confidence": 0.9,
+        }
+    )
+
+    @staticmethod
+    def _fake_clock(monkeypatch: pytest.MonkeyPatch) -> dict:
+        """Bind the SQLite document store's clock to a mutable holder.
+
+        Patched by module path, so it would succeed and do nothing if
+        ``temp_stores`` ever stopped being SQLite-backed — and the stamp
+        assertion would pass vacuously, a preserved stamp being equal to
+        itself either way. The retention test below is what fails loudly.
+        """
+        from datetime import UTC, datetime
+
+        holder = {"now": datetime.now(UTC)}
+        monkeypatch.setattr(
+            "trellis.stores.sqlite.document.utc_now", lambda: holder["now"]
+        )
+        return holder
+
+    def test_enrich_keeps_the_prior_updated_at(
+        self, temp_stores: StoreRegistry, monkeypatch
+    ) -> None:
+        """Fails against the un-fixed call site, which re-stamps every row."""
+        from datetime import timedelta
+
+        doc_store = temp_stores.knowledge.document_store
+        clock = self._fake_clock(monkeypatch)
+        now = clock["now"]
+
+        clock["now"] = now - timedelta(days=365)
+        doc_store.put("doc-x", "enrich me", {"title": "X"})
+        before = doc_store.get("doc-x")["updated_at"]
+
+        clock["now"] = now
+        monkeypatch.setattr(
+            worker, "_require_llm_client_or_exit", lambda: _StubLLM(self._CANNED)
+        )
+        result = runner.invoke(app, ["worker", "enrich", "--format", "json"])
+
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.stdout.strip())["enriched"] == 1
+        doc = doc_store.get("doc-x")
+        # The enrichment landed...
+        assert doc["metadata"]["content_tags"]["classified_mode"] == "enrichment"
+        # ...and the row does not claim to have been modified by it.
+        assert doc["updated_at"] == before
+
+    def test_an_enriched_superseded_row_still_ages_out_of_retention(
+        self, temp_stores: StoreRegistry, monkeypatch
+    ) -> None:
+        """The **second** reader of ``updated_at``, which nothing masks.
+
+        ``retention.prune`` with ``lifecycle_states=["superseded"]`` means
+        "archive superseded rows older than N days", and
+        ``_classify_document`` implements *older* as
+        ``updated_at or created_at``. Un-fixed, enriching a year-old
+        superseded note reset its age to zero and shielded it from the prune
+        for a further 30 days — the criterion measuring time since the
+        enrichment run rather than the age it claims to.
+
+        The ``enriched == 1`` assertion is load-bearing beyond a smoke check:
+        it is what pins "``_select_enrichment_candidates`` applies no
+        lifecycle filter", the premise the whole paragraph above rests on. Add
+        such a filter and this line fails rather than the argument silently
+        becoming false.
+        """
+        from datetime import timedelta
+
+        from trellis.mutate.retention import RetentionCriteria, resolve_candidates
+        from trellis.schemas.classification import LIFECYCLE_KEY
+
+        doc_store = temp_stores.knowledge.document_store
+        clock = self._fake_clock(monkeypatch)
+        now = clock["now"]
+
+        clock["now"] = now - timedelta(days=365)
+        doc_store.put(
+            "doc-stale",
+            "a year-old note that has since been replaced",
+            {"title": "Stale", LIFECYCLE_KEY: {"state": "superseded"}},
+        )
+
+        clock["now"] = now
+        monkeypatch.setattr(
+            worker, "_require_llm_client_or_exit", lambda: _StubLLM(self._CANNED)
+        )
+        result = runner.invoke(app, ["worker", "enrich", "--format", "json"])
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.stdout.strip())["enriched"] == 1
+
+        report = resolve_candidates(
+            RetentionCriteria(lifecycle_states=["superseded"], older_than_days=30),
+            temp_stores,
+        )
+        assert [(c.item_id, c.reason_code) for c in report.candidates] == [
+            ("doc-stale", "lifecycle_stale")
+        ]
