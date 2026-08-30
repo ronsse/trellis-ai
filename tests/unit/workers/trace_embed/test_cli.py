@@ -32,7 +32,9 @@ class TestEmbedTracesCLI:
 
     def test_embeds_and_reports(self, registry, tmp_path, cli_runner) -> None:
         traces = seed_traces(registry, 3)
-        payload, result = _run_json(cli_runner, "--watermark", str(tmp_path / "wm.json"))
+        payload, result = _run_json(
+            cli_runner, "--watermark", str(tmp_path / "wm.json")
+        )
         assert result.exit_code == 0, result.output
         assert payload["status"] == "ok"
         assert payload["embedded"] == 3
@@ -68,7 +70,9 @@ class TestEmbedTracesCLI:
     ) -> None:
         seed_traces(registry, 4)
         recorder.fail_after = 1
-        payload, result = _run_json(cli_runner, "--watermark", str(tmp_path / "wm.json"))
+        payload, result = _run_json(
+            cli_runner, "--watermark", str(tmp_path / "wm.json")
+        )
         assert result.exit_code == 1, result.output
         assert payload["status"] == "partial"
         assert payload["failed"] == 3

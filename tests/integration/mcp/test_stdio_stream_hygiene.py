@@ -103,8 +103,7 @@ def test_stdio_stdout_carries_only_jsonrpc_frames(
             frame = json.loads(line)
         except json.JSONDecodeError as exc:  # pragma: no cover - failure path
             pytest_msg = (
-                f"non-JSON line on the stdio protocol channel: {line[:400]!r} "
-                f"({exc})"
+                f"non-JSON line on the stdio protocol channel: {line[:400]!r} ({exc})"
             )
             raise AssertionError(pytest_msg) from exc
         assert frame.get("jsonrpc") == "2.0", (
@@ -131,8 +130,10 @@ def test_stdio_stdout_stays_clean_when_the_process_has_no_stderr(
         [
             sys.executable,
             "-c",
-            "import sys; sys.stderr = None; sys.__stderr__ = None; "
-            "from trellis.mcp.server import main; main()",
+            (
+                "import sys; sys.stderr = None; sys.__stderr__ = None; "
+                "from trellis.mcp.server import main; main()"
+            ),
         ],
         input=_INITIALIZE_REQUEST.encode(),
         capture_output=True,

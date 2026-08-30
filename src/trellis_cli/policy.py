@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-
 import typer
 from rich.console import Console
 from rich.table import Table

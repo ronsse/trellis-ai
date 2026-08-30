@@ -110,9 +110,7 @@ def configure_stderr_logging() -> None:
         # ``cast`` because structlog types this as ``TextIO`` while only
         # exercising ``write`` / ``flush``; a full ``io.TextIOBase`` subclass
         # would add a dozen unreachable methods to satisfy a nominal type.
-        logger_factory=structlog.PrintLoggerFactory(
-            file=cast("TextIO", _STDERR_PROXY)
-        ),
+        logger_factory=structlog.PrintLoggerFactory(file=cast("TextIO", _STDERR_PROXY)),
         # Kept, and now free of the hazard it used to compound: the cached
         # logger holds the proxy, not a stream, so caching can no longer pin
         # a dead handle. It still caches the *level* filter, which is what

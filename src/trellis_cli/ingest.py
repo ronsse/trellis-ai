@@ -156,14 +156,12 @@ def ingest_evidence(
     )
 
     if output_format == "json":
-        console.print(
-            json.dumps(
-                {
-                    "status": "ingested",
-                    "evidence_id": evidence.evidence_id,
-                    "evidence_type": evidence.evidence_type,
-                }
-            )
+        emit_json(
+            {
+                "status": "ingested",
+                "evidence_id": evidence.evidence_id,
+                "evidence_type": evidence.evidence_type,
+            }
         )
     else:
         console.print(f"[green]Evidence ingested[/green]: {evidence.evidence_id}")

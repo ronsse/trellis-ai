@@ -50,7 +50,6 @@ both signal "the data is in a state operators need to look at").
 
 from __future__ import annotations
 
-import json
 import time
 from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -367,14 +366,12 @@ def migrate_provenance_command(
     except Exception as exc:
         logger.exception("migrate_provenance_failed")
         if output_format == "json":
-            console.print(
-                json.dumps(
-                    {
-                        "error": "store_error",
-                        "message": f"{type(exc).__name__}: {exc}",
-                    },
-                    indent=2,
-                )
+            emit_json(
+                {
+                    "error": "store_error",
+                    "message": f"{type(exc).__name__}: {exc}",
+                },
+                indent=2,
             )
         else:
             console.print(f"[red]store error: {type(exc).__name__}: {exc}[/red]")

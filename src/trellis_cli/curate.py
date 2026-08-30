@@ -31,16 +31,14 @@ def _execute_command(cmd: Command, output_format: str) -> None:
     result = build_curate_executor(_get_registry()).execute(cmd)
 
     if output_format == "json":
-        console.print(
-            json.dumps(
-                {
-                    "status": result.status.value,
-                    "command_id": result.command_id,
-                    "operation": result.operation,
-                    "message": result.message,
-                    "created_id": result.created_id,
-                }
-            )
+        emit_json(
+            {
+                "status": result.status.value,
+                "command_id": result.command_id,
+                "operation": result.operation,
+                "message": result.message,
+                "created_id": result.created_id,
+            }
         )
     else:
         if result.status == CommandStatus.SUCCESS:
@@ -106,16 +104,14 @@ def link(
         raise typer.Exit(code=EXIT_INTERNAL)
 
     if output_format == "json":
-        console.print(
-            json.dumps(
-                {
-                    "status": "ok",
-                    "edge_id": result.created_id,
-                    "source_id": source_id,
-                    "target_id": target_id,
-                    "edge_kind": edge_kind,
-                }
-            )
+        emit_json(
+            {
+                "status": "ok",
+                "edge_id": result.created_id,
+                "source_id": source_id,
+                "target_id": target_id,
+                "edge_kind": edge_kind,
+            }
         )
     else:
         console.print(f"[green]\u2713 Link created[/green]: {result.created_id}")
@@ -423,13 +419,11 @@ def entity(
             props = json.loads(properties)
         except json.JSONDecodeError as exc:
             if output_format == "json":
-                console.print(
-                    json.dumps(
-                        {
-                            "status": "error",
-                            "message": f"Invalid JSON for --properties: {exc}",
-                        }
-                    )
+                emit_json(
+                    {
+                        "status": "error",
+                        "message": f"Invalid JSON for --properties: {exc}",
+                    }
                 )
             else:
                 console.print(f"[red]Invalid JSON for --properties[/red]: {exc}")
@@ -448,16 +442,14 @@ def entity(
     result = build_curate_executor(_get_registry()).execute(cmd)
 
     if output_format == "json":
-        console.print(
-            json.dumps(
-                {
-                    "status": "ok",
-                    "node_id": result.created_id,
-                    "entity_type": entity_type,
-                    "name": name,
-                    "properties": {**props, "name": name},
-                }
-            )
+        emit_json(
+            {
+                "status": "ok",
+                "node_id": result.created_id,
+                "entity_type": entity_type,
+                "name": name,
+                "properties": {**props, "name": name},
+            }
         )
     else:
         console.print(f"[green]\u2713 Entity created[/green]: {result.created_id}")

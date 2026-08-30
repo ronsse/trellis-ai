@@ -309,10 +309,7 @@ def precedents(
             truncate=truncate,
             wrapper=wrapper,
         )
-        if quiet:
-            sys.stdout.write(output + "\n")
-        else:
-            console.print(output)
+        emit_machine_text(output)
     else:
         if not quiet:
             console.print(f"[green]Precedents[/green] ({len(items)} found)")
