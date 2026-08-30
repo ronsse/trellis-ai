@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock
+
+from structlog.testing import capture_logs
 
 from trellis.retrieve.advisory_generator import AdvisoryGenerator
 from trellis.retrieve.effectiveness import run_advisory_fitness_loop
@@ -921,3 +924,153 @@ class TestDemotionRemainsReachable:
         # The generator's statistic is still current beside the blended gate.
         assert final.evidence.evidence_confidence is not None
         assert final.evidence.evidence_confidence > final.confidence
+
+
+#: Appended to a valid advisory file to make it unparseable while leaving
+#: every row still present in the bytes — the shape of a torn write, and
+#: the only shape that lets a test tell "preserved" from "rewritten".
+_TORN_MARKER = "\n<<< torn write >>>"
+
+
+class TestDegradedStoreCannotUnsuppress:
+    """#393's second symptom — the one stable ids (#394) introduced.
+
+    ``_carry_forward_status`` preserves the fitness loop's decisions by
+    reading each finding's prior row. Against a store that could not read
+    its file every ``get`` returns ``None``, so every regenerated advisory
+    is written fresh — ``status=ACTIVE``, ``suppressed_at=None`` — over the
+    rows that recorded the suppression. Suppression is the only mechanism
+    that takes a bad advisory out of circulation, and this reverses it
+    while reporting an ordinary ``advisories_generated: N``.
+
+    Losing the data shows up on the next read. Reversing the decision looks
+    like normal operation, which is why this is the worse half.
+    """
+
+    @staticmethod
+    def _suppressed_then_corrupted(tmp_path: Path) -> tuple[Path, str, str]:
+        """Generate, suppress one row, then corrupt the file it lives in.
+
+        Returns ``(path, target_id, good_bytes)``. The corruption appends
+        trailing junk rather than truncating, so the suppressed row is
+        provably still *in* the file — the question under test is whether
+        anything overwrites it, not whether it survived the corruption.
+        """
+        path = tmp_path / "adv.json"
+        packs, feedback = _two_arm_corpus()
+        store, _ = _run(tmp_path, packs, feedback)
+        target = store.list()[0].advisory_id
+        store.suppress(target, reason="fitness loop said so")
+
+        good_bytes = path.read_text(encoding="utf-8")
+        path.write_text(good_bytes + _TORN_MARKER, encoding="utf-8")
+        return path, target, good_bytes
+
+    def test_the_file_holding_the_suppression_is_not_overwritten(
+        self, tmp_path: Path
+    ) -> None:
+        path, target, good_bytes = self._suppressed_then_corrupted(tmp_path)
+        corrupted = path.read_text(encoding="utf-8")
+
+        store = AdvisoryStore(path)
+        assert store.is_degraded is True
+
+        packs, feedback = _two_arm_corpus()
+        event_log = MagicMock(spec=EventLog)
+        event_log.get_events.side_effect = [packs, feedback]
+        report = AdvisoryGenerator(event_log, store).generate(days=30)
+
+        assert report.store_degradation is not None
+        assert report.advisories_generated == 0
+        assert report.advisories_stored == 0
+        assert path.read_text(encoding="utf-8") == corrupted
+
+        # The suppression is still there, in the bytes, recoverable.
+        rows = json.loads(good_bytes)["advisories"]
+        row = next(r for r in rows if r["advisory_id"] == target)
+        assert row["status"] == AdvisoryStatus.SUPPRESSED.value
+        assert row["suppression_reason"] == "fitness loop said so"
+
+    def test_a_suppressed_advisory_stays_suppressed_after_recovery(
+        self, tmp_path: Path
+    ) -> None:
+        """The symptom, stated end to end.
+
+        A nightly run happens against the corrupt file; the operator then
+        clears the corruption. Because nothing was written in between, the
+        suppression is still the store's state. Against the pre-#393 store
+        this row comes back ``ACTIVE`` with no suppression metadata, and
+        nothing anywhere says a curation decision was reversed.
+        """
+        path, target, _good_bytes = self._suppressed_then_corrupted(tmp_path)
+
+        packs, feedback = _two_arm_corpus()
+        event_log = MagicMock(spec=EventLog)
+        event_log.get_events.side_effect = [packs, feedback]
+        AdvisoryGenerator(event_log, AdvisoryStore(path)).generate(days=30)
+
+        # Recover from what is *on disk*, not from a copy this test kept.
+        # The corruption is trailing junk, so the rows are still there — but
+        # only if nothing overwrote them. Restoring a saved copy instead
+        # would repair the damage the test exists to detect, and would pass
+        # against the very code the fix removes.
+        on_disk = path.read_text(encoding="utf-8")
+        path.write_text(on_disk.split(_TORN_MARKER)[0], encoding="utf-8")
+        recovered = AdvisoryStore(path)
+
+        assert recovered.is_degraded is False
+        after = recovered.get(target)
+        assert after is not None
+        assert after.status == AdvisoryStatus.SUPPRESSED
+        assert after.suppression_reason == "fitness loop said so"
+        assert target not in {a.advisory_id for a in recovered.list()}
+
+    def test_the_refusal_is_reported_and_logged(self, tmp_path: Path) -> None:
+        """Zeros with no explanation are the failure this issue is about.
+
+        The counts on a refused run are indistinguishable from a quiet
+        night unless the report says which it was, and the log level has to
+        be one the nightly surface prints — ``trellis_cli.main._root`` pins
+        WARNING, so ``info`` would be a no-op there.
+        """
+        path, _target, _good = self._suppressed_then_corrupted(tmp_path)
+        packs, feedback = _two_arm_corpus()
+        event_log = MagicMock(spec=EventLog)
+        event_log.get_events.side_effect = [packs, feedback]
+
+        with capture_logs() as logs:
+            report = AdvisoryGenerator(event_log, AdvisoryStore(path)).generate(days=30)
+
+        assert report.store_degradation is not None
+        assert report.store_degradation["reason"] == "malformed_json"
+        assert report.store_degradation["recovery"] == f"mv {path} {path}.corrupt"
+
+        lines = [
+            e
+            for e in logs
+            if e["event"] == "advisory_generation_refused_degraded_store"
+        ]
+        assert len(lines) == 1
+        assert lines[0]["log_level"] == "error"
+        assert lines[0]["recovery"] == f"mv {path} {path}.corrupt"
+
+    def test_the_event_log_is_never_read(self, tmp_path: Path) -> None:
+        """Refuse before analysing, not after.
+
+        Analysing and then discarding would report ``generated: N,
+        stored: 0`` — a store problem worth shrugging at rather than the
+        curation decision that just failed to apply.
+        """
+        path, _target, _good = self._suppressed_then_corrupted(tmp_path)
+        event_log = MagicMock(spec=EventLog)
+
+        AdvisoryGenerator(event_log, AdvisoryStore(path)).generate(days=30)
+
+        event_log.get_events.assert_not_called()
+
+    def test_a_clean_store_still_generates(self, tmp_path: Path) -> None:
+        """The refusal must not be over-broad — the normal path is untouched."""
+        packs, feedback = _two_arm_corpus()
+        store, _ = _run(tmp_path, packs, feedback)
+        assert store.list()
+        assert store.is_degraded is False

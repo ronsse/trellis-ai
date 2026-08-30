@@ -22,6 +22,7 @@ from trellis.core.vector_metadata import vector_metadata_diverges
 from trellis.llm import LLMResponse, Message
 from trellis.schemas.enums import OutcomeStatus, TraceSource
 from trellis.schemas.trace import Outcome, Trace, TraceContext
+from trellis.stores.advisory_source import ADVISORY_FILENAME
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 from trellis_cli import worker
@@ -573,6 +574,174 @@ class TestWorkerCurate:
 # ===========================================================================
 # worker curate --interval — loop mode (WP3)
 # ===========================================================================
+
+
+class TestCurateSurvivesADegradedAdvisoryStore:
+    """#393 — the nightly surface is where a corrupt file goes unnoticed.
+
+    Two failures live here. The fitness loop's ``put`` / ``suppress`` /
+    ``restore`` all raise on a degraded store, so an unguarded cycle dies
+    mid-stage and takes the learning stage with it. And a cycle that simply
+    reported zeros for the advisory counts would be indistinguishable from
+    a quiet night — which is how a corrupt file survives for weeks.
+    """
+
+    @staticmethod
+    def _corrupt_advisory_file(tmp_path: Path) -> Path:
+        """Write an unreadable advisories.json where the CLI will resolve it."""
+        path = tmp_path / "data" / "stores" / ADVISORY_FILENAME
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{"advisories": [ torn write', encoding="utf-8")
+        return path
+
+    def test_the_cycle_completes_and_the_file_is_untouched(
+        self, tmp_path: Path, temp_stores: StoreRegistry
+    ) -> None:
+        _seed_promote_signal(temp_stores)
+        path = self._corrupt_advisory_file(tmp_path)
+        before = path.read_text(encoding="utf-8")
+
+        result = runner.invoke(
+            app,
+            [
+                "worker",
+                "curate",
+                "--output-dir",
+                str(tmp_path / "review"),
+                "--format",
+                "json",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout.strip())
+        # The headline, not just the body: a wrapper reading only ``status``
+        # would otherwise record a clean nightly run (#393).
+        assert data["status"] == "degraded"
+        assert data["advisory_store_degraded"] is not None
+        assert data["advisory_store_degraded"]["reason"] == "malformed_json"
+        assert (
+            data["advisory_store_degraded"]["recovery"] == f"mv {path} {path}.corrupt"
+        )
+        assert "advisories" in data["skipped_stages"]
+        # The rest of the cycle still ran — this is a skip, not a crash.
+        assert data["learning_observations"] >= 3
+        assert path.read_text(encoding="utf-8") == before
+
+    def test_the_text_surface_says_so_too(
+        self, tmp_path: Path, temp_stores: StoreRegistry
+    ) -> None:
+        """A warning honest only in ``--format json`` is a warning nobody reads."""
+        _seed_promote_signal(temp_stores)
+        path = self._corrupt_advisory_file(tmp_path)
+
+        result = runner.invoke(
+            app,
+            ["worker", "curate", "--output-dir", str(tmp_path / "review")],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "ADVISORY STORE DEGRADED" in result.output
+        assert f"mv {path}" in result.output.replace("\n", "")
+
+    def test_a_clean_cycle_carries_no_degradation(
+        self, tmp_path: Path, temp_stores: StoreRegistry
+    ) -> None:
+        """The field must stay ``None`` on the happy path, or it means nothing."""
+        _seed_promote_signal(temp_stores)
+
+        result = runner.invoke(
+            app,
+            [
+                "worker",
+                "curate",
+                "--output-dir",
+                str(tmp_path / "review"),
+                "--format",
+                "json",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout.strip())
+        assert data["advisory_store_degraded"] is None
+        assert data["status"] == "ok"
+
+    def test_a_clean_text_cycle_prints_no_banner(
+        self, tmp_path: Path, temp_stores: StoreRegistry
+    ) -> None:
+        """The negative control for the *text* renderer.
+
+        Asserting the banner's absence from a ``--format json`` run is
+        vacuous — that renderer never runs there.
+        """
+        _seed_promote_signal(temp_stores)
+
+        result = runner.invoke(
+            app, ["worker", "curate", "--output-dir", str(tmp_path / "review")]
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "ADVISORY STORE DEGRADED" not in result.output
+
+    def test_a_dry_run_still_reports_the_degradation(
+        self, tmp_path: Path, temp_stores: StoreRegistry
+    ) -> None:
+        """A dry run is the natural "is my nightly healthy?" probe.
+
+        The advisory stages are skipped on a dry run anyway, so a guard
+        keyed on "were we going to write?" reported a perfectly clean
+        cycle — silent in exactly the command an operator runs to look for
+        this.
+        """
+        _seed_promote_signal(temp_stores)
+        self._corrupt_advisory_file(tmp_path)
+
+        result = runner.invoke(
+            app,
+            [
+                "worker",
+                "curate",
+                "--output-dir",
+                str(tmp_path / "review"),
+                "--dry-run",
+                "--format",
+                "json",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout.strip())
+        assert data["status"] == "degraded"
+        assert data["advisory_store_degraded"]["reason"] == "malformed_json"
+
+    def test_a_bracketed_path_survives_the_banner(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Rich eats ``[...]``, and the recovery command is the whole point.
+
+        An unescaped path under ``/tmp/d [staging]/`` renders the fix as
+        ``mv /tmp/d /data/...`` — a command that does not run, printed to
+        an operator as the thing to type. Silently: nothing errors.
+        """
+        data_dir = tmp_path / "d [staging]" / "data"
+        (data_dir / "stores").mkdir(parents=True)
+        (data_dir / "stores" / ADVISORY_FILENAME).write_text(
+            '{"advisories": [ torn', encoding="utf-8"
+        )
+        monkeypatch.setenv("TRELLIS_CONFIG_DIR", str(tmp_path / "config"))
+        monkeypatch.setenv("TRELLIS_DATA_DIR", str(data_dir))
+        _reset_registry()
+
+        result = runner.invoke(
+            app, ["worker", "curate", "--output-dir", str(tmp_path / "review")]
+        )
+
+        assert "ADVISORY STORE DEGRADED" in result.output
+        assert "[staging]" in result.output, (
+            "Rich ate the bracketed path segment, so the recovery command "
+            "printed to the operator does not run"
+        )
 
 
 class TestWorkerCurateLoop:

@@ -58,14 +58,29 @@ naming every path that was searched.
 
 Failure posture
 ---------------
-Deliberately **lenient**, and deliberately unlike
-:mod:`trellis.mutate.policy_source`, which raises on a malformed policy
-file. A policy file governs access control, so degrading it to "no
-policies" silently disables a guarantee the caller believes it has.
-Advisories are hint-only guidance attached to a pack; a corrupt advisory
-file must not take retrieval down with it. :class:`AdvisoryStore` already
-logs-and-degrades on a parse failure, and that posture is inherited here
-rather than overridden.
+**Reading is lenient; writing is not.** Those are two questions, and #393
+is what happens when one answer is given to both.
+
+The read is deliberately unlike :mod:`trellis.mutate.policy_source`, which
+raises on a malformed policy file. A policy file governs access control, so
+degrading it to "no policies" silently disables a guarantee the caller
+believes it has. Advisories are hint-only guidance attached to a pack; a
+corrupt advisory file must not take retrieval down with it. So
+:func:`load_advisory_store` still always returns a store, constructing one
+never raises, and a partially-readable file yields the rows that parsed.
+
+But :class:`AdvisoryStore` whole-file-rewrites on every write, so the same
+leniency applied to the write *deletes* the file it could not read — and
+since stable advisory ids (#394), silently revives every advisory the
+fitness loop had suppressed. A store that loaded degraded therefore
+refuses every write (:class:`~trellis.errors.DegradedStoreWriteError`)
+while continuing to serve. See :mod:`trellis.stores.advisory_store` for the
+full argument and for why recovery is left to the operator.
+
+This module's job in that is to make the degradation *visible at the read
+surfaces* — MCP pack assembly, the REST retrieve route, the admin routes —
+which is where a corrupt file otherwise looks exactly like a deployment
+that has never generated an advisory.
 """
 
 from __future__ import annotations
@@ -157,6 +172,12 @@ def load_advisory_store(
     diagnosable is not the level but the content — the line names every
     path that was searched, so "no advisories here" and "looking in the
     wrong directory" no longer present identically.
+
+    A *degraded* file is the opposite case and gets ``error``: it is not
+    normal, it is not self-correcting, and the store it returns will refuse
+    every write until an operator acts. The returned store is still usable
+    for reads, so callers need not branch on it — pack assembly carries on
+    with whatever parsed.
     """
     if stores_dir is None:
         logger.info("advisory_store_unconfigured", surface=surface)
@@ -184,6 +205,25 @@ def load_advisory_store(
         return AdvisoryStore(path)
 
     store = AdvisoryStore(path)
+    degradation = store.degradation
+    if degradation is not None:
+        # The store has already logged the failure in detail. This line
+        # exists to attach the *surface* to it: "advisories are degraded"
+        # and "the MCP pack builder is serving degraded advisories" are
+        # different facts, and only the second tells an operator what their
+        # agents are actually getting. ``error``, matching the store's own
+        # line rather than sitting a level below it: this is the *more*
+        # informative of the two, and the quieter half of a pair is the half
+        # that gets filtered. Both clear the CLI's pinned WARNING — see
+        # ``trellis_cli.main._root`` — but an ``info`` line would not.
+        logger.error(
+            "advisory_store_degraded",
+            surface=surface,
+            **degradation.to_dict(),
+            servable_count=len(store.list()),
+        )
+        return store
+
     logger.info(
         "advisory_store_loaded",
         surface=surface,

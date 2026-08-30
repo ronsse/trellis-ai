@@ -630,3 +630,161 @@ class TestDeterministicTierUnderFlag:
         assert client.calls == 0
         assert _judged_events(temp_registry) == []
         assert temp_registry.knowledge.document_store.count() == 1
+
+
+# ---------------------------------------------------------------------------
+# Supersession must not reset the recency clock (#397)
+# ---------------------------------------------------------------------------
+
+
+class TestSupersedePreservesRecency:
+    """Two things: the stamp survives the write, and the ranking follows.
+
+    Why either matters is argued once, at
+    :func:`trellis.mcp.reconcile.mark_document_superseded` — not restated here,
+    so the two cannot drift apart.
+    """
+
+    @staticmethod
+    def _fake_clock(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+        """Bind the document store's clock to a mutable holder.
+
+        ``SQLiteDocumentStore.put`` stamps both ``created_at`` and
+        ``updated_at`` from this one call, so a holder gives the test exact
+        stamps instead of two wall-clock reads that merely *tend* to differ.
+
+        The patch is by module path, so it would still succeed but have **no
+        effect on the store under test** if ``temp_registry`` ever stopped
+        being SQLite-backed — and the stamp test would still pass, since two
+        real wall-clock reads also leave a preserved stamp equal to itself.
+        The ranking test below is what fails loudly in that case. Keep the
+        pair together; neither is redundant.
+        """
+        from datetime import UTC, datetime
+
+        holder: dict[str, Any] = {"now": datetime.now(UTC)}
+        monkeypatch.setattr(
+            "trellis.stores.sqlite.document.utc_now",
+            lambda: holder["now"],
+        )
+        return holder
+
+    def test_supersede_keeps_the_prior_updated_at(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The stamp survives the supersession verbatim.
+
+        Fails against the un-fixed call site, which omits
+        ``preserve_updated_at`` and therefore re-stamps the row with the
+        supersession's own wall-clock time.
+        """
+        from datetime import timedelta
+
+        from trellis.mcp.reconcile import mark_document_superseded
+
+        docs = temp_registry.knowledge.document_store
+        clock = self._fake_clock(monkeypatch)
+
+        now = clock["now"]
+        clock["now"] = now - timedelta(days=365)
+        docs.put("old-doc", "A year-old note about widget calibration.", {})
+        stamp_before = docs.get("old-doc")["updated_at"]
+
+        # A year passes; the successor lands and supersedes the old note.
+        clock["now"] = now
+        docs.put("new-doc", "The current note about widget calibration.", {})
+        assert mark_document_superseded(
+            docs, old_doc_id="old-doc", new_doc_id="new-doc"
+        )
+
+        superseded = docs.get("old-doc")
+        # The supersession landed...
+        assert superseded["metadata"]["lifecycle"]["state"] == "superseded"
+        assert superseded["metadata"]["lifecycle"]["superseded_by"] == "new-doc"
+        # ...and the row does not claim to have been modified by it.
+        assert superseded["updated_at"] == stamp_before
+        # created_at was never in question; pinned so a future "just rewrite
+        # the whole row" refactor cannot quietly move it either.
+        assert superseded["created_at"] == stamp_before
+
+    def test_superseded_doc_does_not_outrank_its_successor(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The consequence the stamp assertion stands for.
+
+        The two documents carry byte-identical content, so their FTS base
+        ranks are equal by construction and **recency is the only variable
+        left** — which is exactly the comparison §4 says decides a
+        contradiction. Un-fixed, both stamps are the same instant and the
+        year-old loser is served level with the note that replaced it.
+
+        The margin is asserted, not the bare ordering, and that is not
+        fussiness. ``_apply_recency_decay`` resolves its reference time with
+        its own ``datetime.now(UTC)`` call **per item**, so two items with
+        identical stamps still come out a few hundred nanoseconds apart in
+        whatever order the store returned them. A plain
+        ``old < new`` therefore passes against the un-fixed code roughly
+        whenever the successor happens to be scored first — measured, not
+        supposed: it did, on the first run of this test.
+        """
+        from datetime import timedelta
+
+        from trellis.mcp.reconcile import mark_document_superseded
+        from trellis.retrieve.strategies import KeywordSearch
+
+        docs = temp_registry.knowledge.document_store
+        clock = self._fake_clock(monkeypatch)
+        body = "Widget calibration runs at sixty hertz."
+
+        now = clock["now"]
+        clock["now"] = now - timedelta(days=365)
+        docs.put("old-doc", body, {})
+
+        clock["now"] = now
+        docs.put("new-doc", body, {})
+        assert mark_document_superseded(
+            docs, old_doc_id="old-doc", new_doc_id="new-doc"
+        )
+
+        # Half-life pinned at the call site rather than inherited from
+        # ``DEFAULT_RECENCY_HALF_LIFE_DAYS``. Retuning that global is an
+        # ordinary retrieval change with nothing to do with supersession, but
+        # at 365.0 the ratio rises to 0.65 and *this* assertion — the
+        # regression assertion — fails, which reads as "#397 is back". Pinning
+        # costs no fix-sensitivity: under the bug both stamps are identical, so
+        # the ratio is 1.0 at every half-life.
+        scores = {
+            item.item_id: item.relevance_score
+            for item in KeywordSearch(docs, recency_half_life_days=30.0).search(
+                "calibration", limit=10
+            )
+        }
+        assert set(scores) == {"old-doc", "new-doc"}, scores
+        ratio = scores["old-doc"] / scores["new-doc"]
+        # A year at the 30-day half-life leaves the floor and almost nothing
+        # else — twelve halvings put the decay term near zero, so the ratio
+        # lands at about the floor itself, 0.30. Anything near 1.0 means the
+        # supersession re-stamped the row.
+        assert ratio < 0.5, scores
+        # Demoted, not excluded — §4 keeps the losing version "retrievable on
+        # demand", and ``strategies.RECENCY_FLOOR`` (0.3) is what makes that
+        # true. A superseded document that scored ~0 would satisfy the line
+        # above and still break the design. This bound is deliberately coupled
+        # to that constant: dropping the floor below 0.25 should fail here and
+        # be argued for, not absorbed silently.
+        assert ratio > 0.25, scores
+
+    def test_superseded_is_not_excluded_from_retrieval(self) -> None:
+        """The premise the ranking test rests on, pinned separately.
+
+        Everything above is only *interesting* while a superseded document is
+        still servable — a filtered document's rank would not matter. That is
+        the §4 commitment, but it lives in another module as the absence of a
+        branch, so nothing would fail if someone added ``exclude_superseded``
+        beside ``exclude_archived``: the rationale would die and both tests
+        above would keep passing.
+        """
+        from trellis.retrieve.lifecycle import is_archived
+
+        assert is_archived({"lifecycle": {"state": "archived"}}) is True
+        assert is_archived({"lifecycle": {"state": "superseded"}}) is False

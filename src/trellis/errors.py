@@ -92,6 +92,37 @@ class StoreError(TrellisError):
         super().__init__(message, code="STORE_ERROR")
 
 
+class DegradedStoreWriteError(StoreError):
+    """Raised when a write is refused because the store loaded degraded.
+
+    A file-backed store that whole-file-rewrites on every write cannot
+    honour a partial load: serialising what it managed to read and calling
+    that the file destroys whatever it could not read. Degrading the *read*
+    is often right — a corrupt hints file must not take retrieval down —
+    but the same leniency applied to the *write* silently deletes the
+    operator's data, and (for advisories) silently reverses every
+    suppression the fitness loop had made.
+
+    So the read degrades and the write refuses. ``recovery`` carries the
+    concrete shell command that clears the state, because an operator who
+    hits this at 03:00 in a cron log needs the fix, not a diagnosis.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        store: str | None = None,
+        path: str | None = None,
+        recovery: str | None = None,
+    ) -> None:
+        self.path = path
+        self.recovery = recovery
+        full = f"{message} {recovery}" if recovery else message
+        super().__init__(full, store=store)
+        self.code = "DEGRADED_STORE_WRITE"
+
+
 class NotFoundError(StoreError):
     """Raised when an entity is not found."""
 

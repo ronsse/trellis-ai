@@ -158,6 +158,16 @@ class AdvisoryReport(TrellisModel):
     #: only the newest of them, and says so here rather than reporting a
     #: partial window as a whole one (#374).
     coverage: ScanCoverage = Field(default_factory=ScanCoverage)
+    #: Set when the advisory store could not read its file in full, in
+    #: which case **nothing was analysed and nothing was written** and every
+    #: count above is zero for that reason rather than for want of
+    #: evidence. Carries
+    #: :meth:`~trellis.stores.advisory_store.AdvisoryLoadDegradation.to_dict`,
+    #: including the ``recovery`` command. A run that reported an ordinary
+    #: ``advisories_generated: N`` over a corrupt file is the thing #393 is
+    #: about; a report that cannot say "degraded" leaves the operator with
+    #: nothing but a log line to notice it by.
+    store_degradation: dict[str, Any] | None = None
 
 
 class AdvisoryGenerator:
@@ -194,7 +204,45 @@ class AdvisoryGenerator:
         """Run all analysis methods and store resulting advisories.
 
         Returns an :class:`AdvisoryReport` summarising what was generated.
+
+        **Refuses to run at all against a degraded advisory store.** Not
+        merely because the write would be refused anyway
+        (:class:`~trellis.errors.DegradedStoreWriteError` is the backstop,
+        and it holds for callers that never look at this method), but
+        because the analysis would be *wrong* to trust if it did land:
+        :meth:`_carry_forward_status` decides what survives a replacing
+        write by reading each finding's prior row, and against a store that
+        could not read its file every ``get`` returns ``None``. Every
+        regenerated advisory would be written fresh — ``status=ACTIVE``,
+        ``suppressed_at=None`` — silently reversing every suppression the
+        fitness loop had made (#393).
+
+        Returning early also keeps the *report* honest. Running the
+        analysis and then discarding it would report
+        ``advisories_generated: N, advisories_stored: 0``, which reads as a
+        store problem worth shrugging at rather than as the curation
+        decision that just failed to apply.
         """
+        degradation = self._advisory_store.degradation
+        if degradation is not None:
+            logger.error(
+                "advisory_generation_refused_degraded_store",
+                **degradation.to_dict(),
+                impact=(
+                    "No advisories were generated or written. Regenerating "
+                    "against a store that could not read its file would write "
+                    "fresh ACTIVE rows over suppressed ones."
+                ),
+            )
+            return AdvisoryReport(
+                advisories_generated=0,
+                advisories_stored=0,
+                total_packs=0,
+                total_feedback=0,
+                analysis_window_days=days,
+                store_degradation=degradation.to_dict(),
+            )
+
         since = datetime.now(tz=UTC) - timedelta(days=days)
         self._refusals = Counter()
 
@@ -724,6 +772,14 @@ class AdvisoryGenerator:
         ``confidence`` that drives them. Stable ids make the generator's
         nightly write land on the loop's row, so the loop's fields have to
         survive it.
+
+        **Precondition: the store loaded cleanly.** Everything below reads
+        ``prior``, and a degraded store answers ``None`` for rows it could
+        not parse rather than for rows that do not exist — which would turn
+        this method from "preserve the loop's decisions" into "discard
+        them". :meth:`generate` refuses before reaching here, and
+        :meth:`AdvisoryStore._save` refuses after, so the mistake cannot
+        reach disk from either direction (#393).
 
         Always carried: ``created_at`` (a regenerated row is the same
         finding, not a new one), ``status`` / ``suppressed_at`` /

@@ -447,6 +447,132 @@ class TestAdvisoryEffectiveness:
         assert result.exit_code == 0
 
 
+class TestAdvisoryCommandsOnADegradedStore:
+    """#393 — the two operator-facing advisory commands must not lie or crash.
+
+    ``generate-advisories`` refuses, and its zeros need an explanation
+    beside them or they read as "nothing found". ``advisory-effectiveness``
+    calls the fitness loop, whose writes raise on a degraded store — the
+    guard turns a traceback into the recovery command.
+    """
+
+    @staticmethod
+    def _corrupt(tmp_path: Path) -> Path:
+        path = tmp_path / "data" / "stores" / "advisories.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{"advisories": [ torn', encoding="utf-8")
+        return path
+
+    def test_generate_reports_the_degradation_in_text(self, tmp_path: Path) -> None:
+        path = self._corrupt(tmp_path)
+        before = path.read_text(encoding="utf-8")
+
+        result = runner.invoke(app, ["analyze", "generate-advisories"])
+
+        assert result.exit_code == 2, result.output
+        assert "ADVISORY STORE DEGRADED" in result.stdout
+        assert path.read_text(encoding="utf-8") == before
+
+    def test_generate_does_not_also_blame_missing_feedback(
+        self, tmp_path: Path
+    ) -> None:
+        """A refused run reports ``total_feedback=0`` because it never looked.
+
+        Left ungated, the trailing hint fires and tells the operator to go
+        record feedback — the exact misdiagnosis the banner exists to
+        prevent, printed directly underneath it.
+        """
+        self._corrupt(tmp_path)
+
+        result = runner.invoke(app, ["analyze", "generate-advisories"])
+
+        assert "ADVISORY STORE DEGRADED" in result.stdout
+        assert "No feedback recorded yet" not in result.stdout
+
+    def test_generate_reports_the_degradation_in_json(self, tmp_path: Path) -> None:
+        """Both formats or neither — a JSON-only warning is invisible."""
+        path = self._corrupt(tmp_path)
+
+        result = runner.invoke(
+            app, ["analyze", "generate-advisories", "--format", "json"]
+        )
+
+        assert result.exit_code == 2, result.output
+        data = json.loads(result.stdout.strip())
+        assert data["store_degradation"]["reason"] == "malformed_json"
+        assert data["store_degradation"]["recovery"] == f"mv {path} {path}.corrupt"
+        assert data["advisories_stored"] == 0
+
+    def test_effectiveness_exits_two_rather_than_traceback(
+        self, tmp_path: Path
+    ) -> None:
+        """A cron wrapper that only reads the status code has to see this."""
+        path = self._corrupt(tmp_path)
+
+        result = runner.invoke(app, ["analyze", "advisory-effectiveness"])
+
+        assert result.exit_code == 2, result.output
+        assert "ADVISORY STORE DEGRADED" in result.stdout
+        assert path.read_text(encoding="utf-8") == '{"advisories": [ torn'
+
+    def test_effectiveness_json_stays_parseable(self, tmp_path: Path) -> None:
+        self._corrupt(tmp_path)
+
+        result = runner.invoke(
+            app, ["analyze", "advisory-effectiveness", "--format", "json"]
+        )
+
+        assert result.exit_code == 2
+        assert json.loads(result.stdout.strip())["status"] == "degraded"
+
+    def test_effectiveness_dry_run_stops_too(self, tmp_path: Path) -> None:
+        """``--dry-run`` is read-only, so it would not raise — and must stop.
+
+        It would score a set missing whatever failed to parse and report
+        that as the deployment's advisory fitness. The guard sits before the
+        ``dry_run`` branch deliberately; a refactor that moved it inside
+        would silently reintroduce that, which is what this pins.
+        """
+        result = runner.invoke(app, ["analyze", "advisory-effectiveness", "--dry-run"])
+        assert result.exit_code == 0, result.output  # clean store: unaffected
+
+        self._corrupt(tmp_path)
+        degraded = runner.invoke(
+            app, ["analyze", "advisory-effectiveness", "--dry-run"]
+        )
+        assert degraded.exit_code == 2, degraded.output
+        assert "ADVISORY STORE DEGRADED" in degraded.stdout
+
+    def test_a_bracketed_path_still_yields_a_runnable_command(
+        self, tmp_path: Path
+    ) -> None:
+        """Rich reads ``[...]`` as markup, and the recovery line is the point.
+
+        An unescaped path under ``/tmp/my [staging] dir/`` renders as
+        ``mv /tmp/my  dir/advisories.json`` — a command that does not run,
+        printed as the fix. Silently: nothing errors, the text is just wrong.
+        """
+        data_dir = tmp_path / "d [staging]" / "data"
+        (data_dir / "stores").mkdir(parents=True)
+        (data_dir / "stores" / "advisories.json").write_text(
+            '{"advisories": [ torn', encoding="utf-8"
+        )
+        import os
+
+        os.environ["TRELLIS_DATA_DIR"] = str(data_dir)
+        _reset_registry()
+        try:
+            result = runner.invoke(app, ["analyze", "generate-advisories"])
+        finally:
+            os.environ.pop("TRELLIS_DATA_DIR", None)
+            _reset_registry()
+
+        assert "[staging]" in result.stdout, (
+            "the bracketed path segment was eaten by Rich markup, so the "
+            "recovery command printed to the operator does not run"
+        )
+
+
 class TestPackSections:
     def test_empty_events(self) -> None:
         result = runner.invoke(app, ["analyze", "pack-sections"])

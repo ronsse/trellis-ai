@@ -356,3 +356,106 @@ class TestSurfacesAgreeOnOneFile:
             f"{surface} names {ADVISORY_FILENAME!r} directly; resolve through "
             "trellis.stores.advisory_source instead"
         )
+
+
+class TestDegradedFileIsVisibleAtTheReadSurfaces:
+    """#393 — a corrupt file must not present as a greenfield deployment.
+
+    ``load_advisory_store``'s whole reason for existing is that "no
+    advisories here" and "something is wrong" used to look identical. A
+    file that exists but cannot be read is the third state, and it is the
+    one that silently un-suppresses everything on the next write.
+    """
+
+    def test_a_degraded_store_is_still_returned(self, dirs: tuple[Path, Path]) -> None:
+        """#382's lenient read survives: pack assembly keeps working."""
+        _data_dir, stores_dir = dirs
+        (stores_dir / ADVISORY_FILENAME).write_text("{ not json", encoding="utf-8")
+
+        store = load_advisory_store(stores_dir, surface="mcp")
+
+        assert store is not None
+        assert store.is_degraded is True
+        assert store.list() == []
+
+    def test_partial_rows_are_still_served(self, dirs: tuple[Path, Path]) -> None:
+        _data_dir, stores_dir = dirs
+        path = stores_dir / ADVISORY_FILENAME
+        _write_advisories(path, [_advisory("adv_good")])
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw["advisories"].append({"advisory_id": "adv_bad", "category": "nope"})
+        path.write_text(json.dumps(raw), encoding="utf-8")
+
+        store = load_advisory_store(stores_dir, surface="api.retrieve")
+
+        assert store is not None
+        assert [a.advisory_id for a in store.list()] == ["adv_good"]
+
+    def test_degradation_is_logged_at_error_with_the_surface(
+        self, dirs: tuple[Path, Path]
+    ) -> None:
+        """The level is the assertion.
+
+        ``trellis_cli.main._root`` pins ``TRELLIS_LOG_LEVEL=WARNING``, so an
+        ``info`` line is invisible on the CLI. And ``capture_logs`` leaves
+        ``wrapper_class`` alone, so every other assertion below would pass
+        against a ``debug`` line that no surface ever prints.
+        """
+        _data_dir, stores_dir = dirs
+        path = stores_dir / ADVISORY_FILENAME
+        path.write_text("{ not json", encoding="utf-8")
+
+        with capture_logs() as logs:
+            load_advisory_store(stores_dir, surface="mcp")
+
+        lines = [e for e in logs if e["event"] == "advisory_store_degraded"]
+        assert len(lines) == 1
+        assert lines[0]["log_level"] == "error"
+        assert lines[0]["surface"] == "mcp"
+        assert lines[0]["path"] == str(path)
+        assert lines[0]["recovery"] == f"mv {path} {path}.corrupt"
+
+    def test_the_reassuring_line_is_not_also_emitted(
+        self, dirs: tuple[Path, Path]
+    ) -> None:
+        """``advisory_store_loaded`` reads as an all-clear. It must not fire.
+
+        Two lines about the same load, one of them calm, is how a warning
+        gets skipped.
+        """
+        _data_dir, stores_dir = dirs
+        (stores_dir / ADVISORY_FILENAME).write_text("{ not json", encoding="utf-8")
+
+        with capture_logs() as logs:
+            load_advisory_store(stores_dir, surface="mcp")
+
+        events = [e["event"] for e in logs]
+        assert "advisory_store_loaded" not in events
+
+    def test_a_clean_file_still_logs_the_calm_line(
+        self, dirs: tuple[Path, Path]
+    ) -> None:
+        _data_dir, stores_dir = dirs
+        _write_advisories(stores_dir / ADVISORY_FILENAME, [_advisory("adv_ok")])
+
+        with capture_logs() as logs:
+            load_advisory_store(stores_dir, surface="mcp")
+
+        events = [e["event"] for e in logs]
+        assert "advisory_store_loaded" in events
+        assert "advisory_store_degraded" not in events
+
+    def test_an_absent_file_is_not_reported_as_degraded(
+        self, dirs: tuple[Path, Path]
+    ) -> None:
+        """A greenfield deployment must stay quiet — and keep writing."""
+        _data_dir, stores_dir = dirs
+
+        with capture_logs() as logs:
+            store = load_advisory_store(stores_dir, surface="mcp")
+
+        assert store is not None
+        assert store.is_degraded is False
+        events = [e["event"] for e in logs]
+        assert "advisory_file_absent" in events
+        assert "advisory_store_degraded" not in events
