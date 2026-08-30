@@ -620,7 +620,19 @@ def _write_chunks(
         }
         # Same seam as the parent — chunks are the retrievable unit.
         metadata = DocumentMetadata.from_mapping(metadata).to_metadata()
-        doc_store.put(cid, chunk_content, metadata=metadata)
+        # Conditional, not unconditional (#406): this one put serves both
+        # branches. A genuinely rewritten chunk *is* modified and must bump;
+        # the metadata-only refresh — entered on ``count_stale`` or
+        # ``tags_missing`` alone — must not, or every byte-identical chunk of
+        # any document whose parent gained tags is re-stamped to the sync's
+        # own clock. Chunks are the retrievable unit, so that is precisely
+        # what ``KeywordSearch``'s recency decay would then be ranking on.
+        doc_store.put(
+            cid,
+            chunk_content,
+            metadata=metadata,
+            preserve_updated_at=not content_changed,
+        )
         if content_changed:
             # Metadata-only refreshes deliberately don't re-embed —
             # same convention as the document ingest paths.

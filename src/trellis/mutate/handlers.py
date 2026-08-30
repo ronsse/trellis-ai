@@ -1207,7 +1207,15 @@ class RetentionPruneHandler:
                 return False
             metadata = dict(doc.get("metadata") or {})
             metadata[LIFECYCLE_KEY] = lifecycle
-            store.put(candidate.item_id, doc["content"], metadata)
+            # Metadata-only: the content written back is the row's own, and
+            # only the lifecycle stamp changes. Latent for the keyword axis
+            # while ``retrieve.lifecycle.exclude_archived`` drops the row at
+            # the collect seam — but the falsified stamp persists on the row,
+            # and ``RetentionRestoreHandler._restore`` is the operation that
+            # hands it back to retrieval carrying it (#406).
+            store.put(
+                candidate.item_id, doc["content"], metadata, preserve_updated_at=True
+            )
             _sync_vector_lifecycle(self._registry, candidate.item_id, lifecycle)
             return True
 
@@ -1328,7 +1336,17 @@ class RetentionRestoreHandler:
             if not isinstance(record, dict) or record.get("state") != ARCHIVED_STATE:
                 return False
             metadata[LIFECYCLE_KEY] = current
-            doc_store.put(item_id, doc["content"], metadata)
+            # Metadata-only, and unmasked (#406). Restore exists to make the
+            # item servable again, so unlike the archive it undoes there is
+            # no downstream filter left to render a bumped ``updated_at``
+            # moot: without the flag, un-archiving a two-year-old note hands
+            # it back to ``KeywordSearch`` as the freshest document in the
+            # corpus. An operator walking back a bad prune from the
+            # ``RETENTION_PRUNED`` payload would thereby *promote* exactly
+            # the items they meant only to restore.
+            doc_store.put(
+                item_id, doc["content"], metadata, preserve_updated_at=True
+            )
             _sync_vector_lifecycle(self._registry, item_id, current)
             return True
 

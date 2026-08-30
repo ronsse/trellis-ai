@@ -262,6 +262,21 @@ def _classify_document(
     if criteria.noise_documents and _signal_quality(metadata) == "noise":
         return "noise_document"
     if wanted_states and state in wanted_states:
+        # This is the **second** reader of the column
+        # ``DocumentStore.put(preserve_updated_at=...)`` protects, and the
+        # one that gets forgotten — the flag's own docstring names only
+        # ``KeywordSearch`` (#406). The age meant here is the *document's*
+        # age, per this module's docstring; a metadata-only write that omits
+        # the flag makes the criterion measure time since that write instead,
+        # shielding a genuinely stale row for a further ``older_than_days``.
+        #
+        # The lifecycle writes issued by this module's own handlers cannot
+        # reach here — ``archived`` and ``current`` both return above — so
+        # the writers that do are the ones that leave ``state`` alone while
+        # rewriting derived metadata. ``worker enrich`` and
+        # ``classify.feedback.apply_noise_tags`` both select rows with no
+        # lifecycle filter at all, which makes a ``superseded`` row an
+        # ordinary candidate for either.
         if not _is_older_than(doc.get("updated_at") or doc.get("created_at"), cutoff):
             return None
         return "lifecycle_stale"

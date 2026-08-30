@@ -66,7 +66,17 @@ def apply_noise_tags(
         content_tags["classified_at"] = stamp
         content_tags["importance_scored_at"] = stamp
 
-        document_store.put(item_id, doc["content"], metadata)
+        # Metadata-only: ``signal_quality`` and the two stamps are derived
+        # from the effectiveness analysis, not from the document, and the
+        # content written back is the row's own. Its direct sibling
+        # ``classify.refresh`` passes the flag for the same reason. Latent
+        # while ``retrieve.noise.exclude_noise`` drops the item — but that
+        # boundary is deliberately default-pass and invertible, and a later
+        # refresh revising the facet returns the row to service still
+        # carrying the falsified stamp (#406).
+        document_store.put(
+            item_id, doc["content"], metadata, preserve_updated_at=True
+        )
         updated += 1
         # After the authoritative write, never before: the document row is
         # what a re-run repairs from, so it has to land first.

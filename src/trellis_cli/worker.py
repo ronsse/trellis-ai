@@ -1302,7 +1302,19 @@ def _run_batch_enrichment(
         # the flat key. See `classify.classifiers.llm` for the full argument.
         if result.auto_class:
             metadata["document_form"] = result.auto_class
-        document_store.put(doc["doc_id"], doc["content"], metadata)
+        # Metadata-only: ``content`` is the row's own and only derived tags
+        # change. Same operation as ``classify.refresh``, which passes the
+        # flag for the same reason, and at the same scale — a full pass
+        # re-stamps every document it touches to one instant, after which
+        # ``KeywordSearch``'s recency decay is measuring the enrichment run
+        # rather than the documents. Widest of the five for the *second*
+        # reader too: ``_select_enrichment_candidates`` applies no lifecycle
+        # filter, so a ``superseded`` row is an ordinary candidate here and
+        # bumping its stamp resets the age ``mutate.retention`` prunes on
+        # (#406).
+        document_store.put(
+            doc["doc_id"], doc["content"], metadata, preserve_updated_at=True
+        )
         enriched += 1
         # After the authoritative write, never before — the document row is
         # what a re-run repairs from, so it has to land first. Fail-soft: a
