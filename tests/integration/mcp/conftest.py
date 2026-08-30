@@ -26,6 +26,7 @@ from fastmcp.client.transports import StdioTransport
 from tests.integration._live_server import (
     find_console_script,
     initialize_trellis_stores,
+    repo_src_pythonpath,
 )
 
 
@@ -66,6 +67,9 @@ def mcp_subprocess_env(tmp_path: Path) -> dict[str, str]:
             "TRELLIS_DATA_DIR": str(data_dir),
             "TRELLIS_KNOWLEDGE_PG_DSN": "",
             "TRELLIS_OPERATIONAL_PG_DSN": "",
+            # Same reason as ``cli_env``: a spawned server otherwise runs
+            # the editable install's checkout, not this one.
+            "PYTHONPATH": repo_src_pythonpath(),
         }
     )
     return env

@@ -40,7 +40,9 @@ ingest_app = typer.Typer(no_args_is_help=True)
 console = Console()
 
 
-def _fail(message: str, output_format: str) -> NoReturn:
+def _fail(
+    message: str, output_format: str, *, error_type: str = "FileNotFoundError"
+) -> NoReturn:
     """Report *message* on the caller's chosen surface, then exit non-zero.
 
     The JSON branch is not optional. ``--format json`` is documented as
@@ -53,9 +55,23 @@ def _fail(message: str, output_format: str) -> NoReturn:
     One helper rather than the same four-line branch at each site: the
     duplicated form had pushed two commands past the branch limit, which is
     the linter noticing the same thing.
+
+    ``error_type`` is carried so this envelope matches
+    :func:`~trellis.core.error_sanitize.sanitized_error_payload`, which every
+    *other* JSON error in these commands uses. Without it a consumer that
+    branches on ``error_type`` gets a ``KeyError`` on exactly the paths this
+    change added — two error shapes out of one command. ``FileNotFoundError``
+    is the name the condition would have raised under, so the value is the
+    one a caller would already be matching on.
     """
     if output_format == "json":
-        emit_json({"status": "error", "message": message})
+        emit_json(
+            {
+                "status": "error",
+                "error_type": error_type,
+                "message": message,
+            }
+        )
     else:
         console.print(f"[red]{message}[/red]")
     raise typer.Exit(code=EXIT_INTERNAL)

@@ -28,6 +28,7 @@ from tests.integration._live_server import (
     CLI_SUBCMD_TIMEOUT_SECONDS,
     find_console_script,
     initialize_trellis_stores,
+    repo_src_pythonpath,
     run_cli,
 )
 
@@ -68,6 +69,12 @@ def cli_env(tmp_path: Path) -> dict[str, str]:
             # see the routing contract (stderr vs stdout) at INFO+ level.
             # Individual tests can override this further if needed.
             "TRELLIS_LOG_LEVEL": "INFO",
+            # Without this the spawned `trellis` resolves the venv's
+            # editable install, which in a git worktree is a DIFFERENT
+            # checkout — so this suite, the only place a real process's
+            # stdout is parsed, would validate another branch and report it
+            # as this one's result. See ``repo_src_pythonpath``.
+            "PYTHONPATH": repo_src_pythonpath(),
         }
     )
     return env

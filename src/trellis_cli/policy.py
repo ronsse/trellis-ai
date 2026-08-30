@@ -32,8 +32,29 @@ def _get_policy_store() -> PolicyStore:
     return PolicyStore(resolve_policy_path(get_data_dir() / "stores"))
 
 
+def _policy_not_found(policy_id: str) -> dict[str, str]:
+    """The not-found error envelope, shaped like ``sanitized_error_payload``.
+
+    ``error_type`` is present so a consumer can branch on it the same way it
+    does for every other JSON error surface in the CLI; ``show`` and
+    ``remove`` share the helper so the two cannot drift apart again — they
+    already had, with ``show`` emitting Rich prose on stdout under
+    ``--format json`` while ``remove`` emitted JSON (#403).
+    """
+    return {
+        "status": "error",
+        "error_type": "PolicyNotFound",
+        "message": f"Policy not found: {policy_id}",
+    }
+
+
 def _print_json(obj: object) -> None:
-    """Print a JSON-serialisable object without Rich highlighting."""
+    """Emit a pretty-printed, ``str``-coerced JSON object to stdout.
+
+    Goes through ``emit_json``, so it never reaches Rich — the
+    ``highlight=False`` this used to pass became meaningless when the
+    Rich path was removed (#403).
+    """
     emit_json(obj, indent=2, default=str)
 
 
@@ -93,9 +114,7 @@ def show_policy(
     match = _find_policy(store, policy_id)
     if match is None:
         if output_format == "json":
-            _print_json(
-                {"status": "error", "message": f"Policy not found: {policy_id}"}
-            )
+            _print_json(_policy_not_found(policy_id))
         else:
             console.print(f"[red]Policy not found: {policy_id}[/red]")
         raise typer.Exit(code=EXIT_INTERNAL)
@@ -182,9 +201,7 @@ def remove_policy(
     match = _find_policy(store, policy_id)
     if match is None:
         if output_format == "json":
-            _print_json(
-                {"status": "error", "message": f"Policy not found: {policy_id}"}
-            )
+            _print_json(_policy_not_found(policy_id))
         else:
             console.print(f"[red]Policy not found: {policy_id}[/red]")
         raise typer.Exit(code=EXIT_INTERNAL)

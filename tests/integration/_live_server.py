@@ -350,6 +350,31 @@ def initialize_trellis_stores(
     )
 
 
+def repo_src_pythonpath() -> str:
+    """``PYTHONPATH`` exposing *this* checkout's ``src/`` to a subprocess.
+
+    pytest's ``pythonpath = ["src", "."]`` only affects the test-driver
+    process. A subprocess resolves ``trellis`` through the venv's editable
+    install instead, and that install points at whichever checkout was
+    installed — in a git worktree, a *different branch*. Verified: from a
+    worktree, an in-process ``import trellis`` resolves to the worktree
+    while ``python -c "import trellis"`` resolves to the primary checkout.
+    So without this a subprocess suite silently validates code the branch
+    under test does not contain, and reports it as that branch's result.
+
+    Every subprocess fixture in ``tests/integration`` must use this. The
+    reasoning lived only in :func:`build_subprocess_env` while ``cli_env``
+    and ``mcp_subprocess_env`` hand-rolled ``os.environ.copy()`` without it,
+    which is how the CLI smoke suite came to assert against another branch.
+    """
+    repo_root = Path(__file__).resolve().parents[2]
+    entries = [str(repo_root / "src"), str(repo_root)]
+    existing = os.environ.get("PYTHONPATH", "")
+    if existing:
+        entries.append(existing)
+    return os.pathsep.join(entries)
+
+
 def build_subprocess_env(config_dir: Path, data_dir: Path) -> dict[str, str]:
     """Build the env dict used for any subprocess that imports trellis.
 
@@ -362,13 +387,6 @@ def build_subprocess_env(config_dir: Path, data_dir: Path) -> dict[str, str]:
     process — subprocesses inherit the parent shell's env, not
     pytest's path manipulation.
     """
-    repo_root = Path(__file__).resolve().parents[2]
-    src_dir = repo_root / "src"
-    existing_pythonpath = os.environ.get("PYTHONPATH", "")
-    pythonpath_entries = [str(src_dir), str(repo_root)]
-    if existing_pythonpath:
-        pythonpath_entries.append(existing_pythonpath)
-
     env = os.environ.copy()
     env.update(
         {
@@ -376,7 +394,7 @@ def build_subprocess_env(config_dir: Path, data_dir: Path) -> dict[str, str]:
             "TRELLIS_DATA_DIR": str(data_dir),
             "TRELLIS_KNOWLEDGE_PG_DSN": PG_DSN,
             "TRELLIS_OPERATIONAL_PG_DSN": PG_DSN,
-            "PYTHONPATH": os.pathsep.join(pythonpath_entries),
+            "PYTHONPATH": repo_src_pythonpath(),
         }
     )
     return env

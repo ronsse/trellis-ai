@@ -411,66 +411,68 @@ class TestErrorPathsAreAlsoMachineReadable:
     failure into a silent success.
     """
 
+    @pytest.fixture
+    def isolated_cli(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        """Point the CLI at a private config/data dir and pin the log level.
+
+        Both matter and neither is decoration. Without the dir overrides
+        these tests would resolve the *operator's* real ``~/.trellis`` —
+        harmless only because ``_fail`` happens to fire before any store is
+        constructed, which is a property of today's code rather than
+        something the test states. And ``trellis_cli.main._root`` writes
+        ``os.environ["TRELLIS_LOG_LEVEL"]`` with no restore, so an
+        un-monkeypatched invocation leaks that level into every later test
+        in the session.
+        """
+        monkeypatch.setenv("TRELLIS_CONFIG_DIR", str(tmp_path / "config"))
+        monkeypatch.setenv("TRELLIS_DATA_DIR", str(tmp_path / "data"))
+        monkeypatch.setenv("TRELLIS_LOG_LEVEL", "CRITICAL")
+        (tmp_path / "data" / "stores").mkdir(parents=True)
+        return tmp_path
+
     @staticmethod
-    def _json_stdout(result: object) -> dict:
+    def _assert_json_error(result: object, *, expected_type: str) -> None:
+        """stdout parses, names the failure, and the exit code still says so."""
+        assert result.exit_code != 0, "a missing input must not exit 0"  # type: ignore[attr-defined]
         stdout = result.stdout  # type: ignore[attr-defined]
         assert stdout.strip(), "command produced no stdout at all"
-        return json.loads(stdout)
-
-    def test_ingest_trace_missing_file(self, cli_runner, tmp_path: Path) -> None:
-        from trellis_cli.main import app
-
-        result = cli_runner.invoke(
-            app,
-            ["ingest", "trace", str(tmp_path / "nope.json"), "--format", "json"],
+        payload = json.loads(stdout)
+        assert payload["status"] == "error"
+        assert payload["error_type"] == expected_type, (
+            "the envelope must match sanitized_error_payload, which every "
+            "other JSON error in these commands emits"
         )
-        assert result.exit_code != 0
-        assert self._json_stdout(result)["status"] == "error"
 
-    def test_ingest_evidence_missing_file(self, cli_runner, tmp_path: Path) -> None:
-        from trellis_cli.main import app
-
-        result = cli_runner.invoke(
-            app,
-            ["ingest", "evidence", str(tmp_path / "nope.json"), "--format", "json"],
-        )
-        assert result.exit_code != 0
-        assert self._json_stdout(result)["status"] == "error"
-
-    def test_ingest_dbt_manifest_missing_path(self, cli_runner, tmp_path: Path) -> None:
-        from trellis_cli.main import app
-
-        result = cli_runner.invoke(
-            app,
-            ["ingest", "dbt-manifest", str(tmp_path / "nope"), "--format", "json"],
-        )
-        assert result.exit_code != 0
-        assert self._json_stdout(result)["status"] == "error"
-
-    def test_ingest_openlineage_missing_file(self, cli_runner, tmp_path: Path) -> None:
-        from trellis_cli.main import app
-
-        result = cli_runner.invoke(
-            app,
-            ["ingest", "openlineage", str(tmp_path / "nope.json"), "--format", "json"],
-        )
-        assert result.exit_code != 0
-        assert self._json_stdout(result)["status"] == "error"
-
-    def test_policy_show_missing_policy(
-        self, cli_runner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ["ingest", "trace", "{missing}.json"],
+            ["ingest", "evidence", "{missing}.json"],
+            ["ingest", "dbt-manifest", "{missing}"],
+            ["ingest", "openlineage", "{missing}.json"],
+        ],
+        ids=["trace", "evidence", "dbt-manifest", "openlineage"],
+    )
+    def test_ingest_reports_a_missing_input_as_json(
+        self, cli_runner, isolated_cli: Path, argv: list[str]
     ) -> None:
         from trellis_cli.main import app
 
-        monkeypatch.setenv("TRELLIS_CONFIG_DIR", str(tmp_path / "config"))
-        monkeypatch.setenv("TRELLIS_DATA_DIR", str(tmp_path / "data"))
-        (tmp_path / "data" / "stores").mkdir(parents=True)
+        missing = str(isolated_cli / "nope")
+        result = cli_runner.invoke(
+            app, [a.format(missing=missing) for a in argv] + ["--format", "json"]
+        )
+        self._assert_json_error(result, expected_type="FileNotFoundError")
+
+    def test_policy_show_reports_a_missing_policy_as_json(
+        self, cli_runner, isolated_cli: Path
+    ) -> None:
+        from trellis_cli.main import app
 
         result = cli_runner.invoke(
             app, ["policy", "show", "no-such-policy", "--format", "json"]
         )
-        assert result.exit_code != 0
-        assert self._json_stdout(result)["status"] == "error"
+        self._assert_json_error(result, expected_type="PolicyNotFound")
 
 
 class TestRichCorruptionIsReal:

@@ -287,3 +287,80 @@ def test_structlog_routes_to_stderr_not_stdout(
     # holds even if a future test changes the parsing path.
     stdout = completed.stdout.decode(errors="replace")
     assert "[info" not in stdout, f"structlog leaked onto stdout: {stdout!r}"
+
+
+# ── machine-output fidelity (#403) ────────────────────────────────────
+
+
+#: A ``--source-system`` that is also a Rich emoji shortcode. Not contrived:
+#: ``trellis ingest corpus ~/notes --source-system notes`` is the documented
+#: invocation, and corpus ids are ``corpus:<source_system>:<sha1>`` by
+#: construction — so the emoji name sits inside the id with colons on both
+#: sides, which is exactly what Rich substitutes.
+_TRAP_SOURCE_SYSTEM = "notes"
+
+#: Narrow enough to force wrapping. The width is the point: Rich folds at
+#: the console width, so before the fix whether ``--format json`` parsed at
+#: all depended on the terminal it ran in — and in CI, on neither.
+_NARROW_COLUMNS = "40"
+
+
+def test_format_json_survives_a_narrow_terminal_and_emoji_ids(
+    cli_runner: Callable[..., Any],
+    initialized_cli_env: dict[str, str],
+    tmp_path: Path,
+) -> None:
+    """End-to-end guard for #403, in the one place a real process is parsed.
+
+    ``tests/unit/test_machine_output_rule.py`` enforces the rule
+    *structurally* — no Rich ``print`` may carry a serialized payload — and
+    that is the enforceable half. This is the behavioural half, and it is
+    here rather than in a unit test for two reasons: ``CliRunner`` does not
+    reproduce a real terminal width, and a subprocess is where the console
+    script, the entry point and the actual stdout all exist.
+
+    It is also the test that would have caught the one site this branch
+    initially missed. ``retrieve trace --format json`` emitted through
+    ``console.print(result.model_dump_json())`` — six lines below a call the
+    same commit had fixed — and shipped a trace id with the ``:notes:``
+    replaced by an emoji, at exit code 0.
+    """
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    (corpus / "widget.md").write_text(
+        "Widget retention policy. The pruner removes stale rows nightly.\n"
+    )
+
+    env = {**initialized_cli_env, "COLUMNS": _NARROW_COLUMNS}
+
+    _, ingested = cli_runner(
+        [
+            "ingest",
+            "corpus",
+            str(corpus),
+            "--source-system",
+            _TRAP_SOURCE_SYSTEM,
+            "--format",
+            "json",
+        ],
+        env,
+    )
+    doc_id = ingested["files"][0]["doc_id"]
+    assert doc_id.startswith(f"corpus:{_TRAP_SOURCE_SYSTEM}:"), (
+        f"fixture no longer produces a colon-delimited id: {doc_id!r}"
+    )
+
+    # ``run_cli`` already fails the test if stdout is not parseable JSON,
+    # which covers the wrapping mode. The value check covers the two silent
+    # modes — emoji substitution and markup stripping — which parse fine.
+    for argv in (
+        ["retrieve", "search", "widget", "--format", "json"],
+        ["retrieve", "pack", "--intent", "widget", "--format", "json"],
+    ):
+        completed, payload = cli_runner(argv, env)
+        raw = completed.stdout.decode()
+        assert doc_id in raw, (
+            f"{argv[1]} corrupted the document id under COLUMNS="
+            f"{_NARROW_COLUMNS}: expected {doc_id!r} in {raw[:400]!r}"
+        )
+        assert json.dumps(payload).count(doc_id) >= 1
