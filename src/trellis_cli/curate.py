@@ -100,7 +100,7 @@ def link(
         # of adr-extraction-validation.md §5.5); both error states should
         # exit non-zero so shell pipelines fail loud.
         if output_format == "json":
-            console.print(json.dumps({"status": "error", "message": result.message}))
+            emit_json({"status": "error", "message": result.message})
         else:
             console.print(f"[red]{result.message}[/red]")
         raise typer.Exit(code=EXIT_INTERNAL)

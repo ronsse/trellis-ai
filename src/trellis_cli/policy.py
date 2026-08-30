@@ -14,6 +14,7 @@ from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
 from trellis.stores.policy_store import PolicyStore
 from trellis_cli.config import get_data_dir
 from trellis_cli.exit_codes import EXIT_INTERNAL
+from trellis_cli.output import emit_json
 
 policy_app = typer.Typer(no_args_is_help=True)
 console = Console()
@@ -35,7 +36,7 @@ def _get_policy_store() -> PolicyStore:
 
 def _print_json(obj: object) -> None:
     """Print a JSON-serialisable object without Rich highlighting."""
-    console.print(json.dumps(obj, indent=2, default=str), highlight=False)
+    emit_json(obj, indent=2, default=str)
 
 
 @policy_app.command("list")

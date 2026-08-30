@@ -35,6 +35,7 @@ from trellis_cli.claude_integration import (
 )
 from trellis_cli.config import TrellisConfig, get_config_dir, get_data_dir
 from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_OK, EXIT_STORE, EXIT_VALIDATION
+from trellis_cli.output import emit_json
 from trellis_cli.stores import (
     _get_registry,
     get_document_store,
@@ -1564,7 +1565,7 @@ def migrate_graph(
             {"target": target, "message": msg} for target, msg in payload["errors"]
         ]
         # step_failures already serialize cleanly via asdict (dataclass).
-        console.print(json.dumps(payload, indent=2))
+        emit_json(payload, indent=2)
     else:
         if report.dry_run:
             console.print(f"[yellow]{report.summary()}[/yellow]")

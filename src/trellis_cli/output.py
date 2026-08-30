@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import typer
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 def filter_fields(
@@ -95,6 +98,48 @@ def format_output(
     return json.dumps(items)
 
 
-def emit_json(payload: Any) -> None:
-    """Write JSON via ``typer.echo`` so Rich doesn't line-wrap long values."""
-    typer.echo(json.dumps(payload))
+def emit_machine_text(text: str) -> None:
+    """Write an already-serialized machine payload to stdout, unmodified.
+
+    ``rich.console.Console.print`` is not a transport for machine output.
+    It does two things to a plain string that the consumer cannot undo,
+    and neither announces itself (#403):
+
+    * **Emoji substitution.** Rich replaces ``:name:`` shortcodes, so
+      ``corpus:notes:doc0`` prints with the ``:notes:`` collapsed to a
+      musical-notes emoji. The JSON still parses — the *value* is now a
+      document id that does not exist in any store, which is worse than a
+      parse error because nothing raises. Trellis ids are
+      colon-delimited by construction
+      (``corpus:<source_system>:<sha1>``, trace ids, entity ids, event
+      types), and ``notes``, ``book``, ``art``, ``key``, ``link``,
+      ``memo``, ``zap``, ``warning`` and ``x`` are all live emoji names.
+    * **Line wrapping at the console width.** A newline folded into a JSON
+      string literal is an invalid control character, so the payload stops
+      parsing outright. The width comes from ``COLUMNS`` or the tty, so the
+      same command succeeds in one terminal and fails in another — and in
+      CI, where the width is neither.
+
+    ``typer.echo`` does neither. It is the only sanctioned door for
+    ``--format json`` / ``jsonl`` / ``tsv`` output;
+    ``tests/unit/test_machine_output_rule.py`` enforces that no
+    ``console.print`` call in ``trellis_cli`` carries a serialized payload.
+    """
+    typer.echo(text)
+
+
+def emit_json(
+    payload: Any,
+    *,
+    indent: int | None = None,
+    default: Callable[[Any], Any] | None = None,
+) -> None:
+    """Serialize *payload* as JSON and write it to stdout, bypassing Rich.
+
+    ``indent`` and ``default`` are pass-throughs to :func:`json.dumps` for
+    the surfaces that pretty-print or carry non-JSON-native values; they
+    exist so those callers do not have to reach around this function to
+    ``json.dumps`` and reintroduce the Rich path. See
+    :func:`emit_machine_text` for what that path does to a payload.
+    """
+    emit_machine_text(json.dumps(payload, indent=indent, default=default))
