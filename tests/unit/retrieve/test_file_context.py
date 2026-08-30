@@ -367,16 +367,17 @@ class TestScanBoundaries:
 
 
 class TestNewestItemAtIsAStalenessGate:
-    """``newest_item_at`` is the third reader of ``updated_at`` (#406).
+    """``newest_item_at`` reads ``updated_at``, and two sweeps missed it (#406).
 
     #397 scoped the ``preserve_updated_at`` argument to ``KeywordSearch``'s
     recency decay; #406 found ``mutate.retention``'s ``lifecycle_states`` age
     gate reading the same column; three independent review passes on #418
-    then found *this* one. Each time the enumeration was written down as
-    closed and each time it was wrong, so these tests live beside the
-    function rather than beside any one writer.
+    then found this one. Every one of those enumerations was written down as
+    closed and every one was wrong, which is why this docstring gives no
+    count either — and why these tests live beside the *reader* rather than
+    beside any one writer.
 
-    What makes this reader different from the other two is that it is a
+    What makes this reader unlike the two before it is that it is a
     **gate, not a score**. The module docstring pins what the value is for:
     the client "compares that against the file's mtime and skips injection
     when the file changed after everything known about it was written." A

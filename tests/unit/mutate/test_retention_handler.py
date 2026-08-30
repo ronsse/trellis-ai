@@ -903,17 +903,27 @@ class TestArchiveAndRestorePreserveRecency:
     ) -> None:
         """The premise behind "the retention gate is unreachable from here".
 
-        ``updated_at``'s other consumer is ``_classify_document``'s
+        One consumer of ``updated_at`` is ``_classify_document``'s
         ``lifecycle_states`` age gate, and the two states these handlers write
         return before it — ``archived`` at the already-archived guard,
         ``current`` at the restored guard. So a bumped stamp from either could
-        not have changed a prune's selection, which is why the source comments
-        above scope the blast radius to the keyword axis.
+        never have changed a prune's selection.
 
-        That reasoning lives in another function as the *order* of three
-        branches. Nothing else in the suite would fail if someone moved the
-        age gate above them, and the scoping claim would quietly become false
-        — hence this test rather than a comment.
+        **That is the only exemption the call-site comments claim**, and the
+        precision matters: an earlier draft of this docstring finished the
+        sentence "…which is why the source comments above scope the blast
+        radius to the keyword axis", and that was false when written.
+        ``retrieve.file_context`` reads the same column off
+        ``list_documents`` with no lifecycle predicate, so ``_archive`` moves
+        ``newest_item_at`` immediately. One consumer being unreachable
+        exempts nothing else — and this paragraph drifted out of step with
+        the comments it points at inside a single PR, which is the practical
+        case for keeping the argument at the call site.
+
+        The exemption itself lives in another function as the *order* of
+        three branches. Nothing else in the suite fails if someone moves the
+        age gate above them, so the claim would quietly become false — hence
+        a test rather than a comment.
 
         Not a fix test: it passes against the un-fixed code, by design.
         """

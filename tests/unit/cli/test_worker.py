@@ -1481,7 +1481,7 @@ class TestEnrichPreservesRecency:
     def test_an_enriched_superseded_row_still_ages_out_of_retention(
         self, temp_stores: StoreRegistry, monkeypatch
     ) -> None:
-        """The **second** reader of ``updated_at``, which nothing masks.
+        """The retention age gate, which nothing masks.
 
         ``retention.prune`` with ``lifecycle_states=["superseded"]`` means
         "archive superseded rows older than N days", and
