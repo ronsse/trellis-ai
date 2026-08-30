@@ -950,7 +950,7 @@ trellis retrieve traces [--domain DOMAIN] [--limit N] [--fields FIELDS] [--trunc
 | `--limit` | `20` | Maximum results |
 | `--fields` | all | Comma-separated field list |
 | `--truncate` | `null` | Max chars per text field |
-| `--quiet` | `false` | Suppress Rich formatting |
+| `--quiet` | `false` | Suppress Rich formatting on the **text** branch. A no-op under `--format json` / `jsonl` / `tsv`, which never reach Rich (#403) |
 | `--format` | `text` | Output format |
 
 ### `trellis retrieve search`
