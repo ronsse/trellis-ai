@@ -168,6 +168,30 @@ class TestWithheldMeansAbsent:
         assert summary.groups == (WithheldGroup(reason="archived", count=1),)
         assert summary.total == 1
 
+    def test_a_dedup_loser_whose_winner_is_dropped_downstream_names_the_real_gate(
+        self,
+    ) -> None:
+        """Why ``dedup`` is excluded *before* the subtraction, not by it.
+
+        The set difference alone does not reach this case: the winning copy
+        was itself dropped by ``max_items``, so no copy of the id is served
+        and the subtraction keeps the row. First-gate attribution would then
+        name ``dedup`` — telling the caller a *duplicate* was withheld about
+        an item that was withheld for running out of room, which is the one
+        reason it certainly was not. :data:`NON_ABSENCE_REASONS` is what
+        makes the honest gate win; empty it and this reads ``dedup 1``.
+        """
+        summary = summarize_withheld(
+            [
+                RejectedItem(item_id="d1", item_type="document", reason="dedup"),
+                RejectedItem(item_id="d1", item_type="document", reason="max_items"),
+            ],
+            served_item_ids=[],
+        )
+        assert summary.groups == (WithheldGroup(reason="max_items", count=1),)
+        assert summary.total == 1
+        assert summary.non_absence_reasons == ("dedup",)
+
     def test_groups_are_ordered_by_count_then_name(self) -> None:
         """Stable ordering, so two packs' notes are diffable."""
         summary = summarize_withheld(
@@ -485,7 +509,7 @@ class TestTheNoteIsRenderedInTheHeader:
                 served_item_ids=[],
             )
         )
-        assert "1 item matched" in note
+        assert "1 item matched this intent but was not served" in note
 
 
 class TestWithheldContentIsNotCopiedIntoAServedSurface:

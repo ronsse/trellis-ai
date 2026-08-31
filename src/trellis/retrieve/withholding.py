@@ -260,9 +260,11 @@ def format_withholding_note(summary: WithholdingSummary | None) -> str:
     if summary is None or not summary.groups:
         return ""
     detail = ", ".join(f"{g.reason} {g.count}" for g in summary.groups)
-    noun = "item" if summary.total == 1 else "items"
+    singular = summary.total == 1
+    noun = "item" if singular else "items"
+    verb = "was" if singular else "were"
     return (
-        f"**Withheld:** {summary.total} {noun} matched this intent but were "
+        f"**Withheld:** {summary.total} {noun} matched this intent but {verb} "
         f"not served ({detail}). Counts only — no ids or content."
     )
 
