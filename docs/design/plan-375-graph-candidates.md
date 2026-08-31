@@ -79,8 +79,35 @@ unchanged but the state is worse than approaching — it has already happened.
 **200 of 987 current nodes (20%) are Trellis cron output** —
 `cli.worker.curate.learning@<timestamp>`, `cli.analyze.value@<timestamp>` and 11
 other job names, one node minted per invocation, three dailies at 52 rows each.
-All are `node_type='Activity'` and `node_role='semantic'`, so nothing filters
-them. They have appeared in **0 of 190 graded servings**.
+All are `node_type='Activity'` and `node_role='semantic'`. They have appeared in
+**0 of 190 graded servings**.
+
+> **Correction (2026-08-31, after implementation).** This section originally read
+> "so nothing filters them". **That is false**, and it also explains why the
+> `Activity` row and seven other types show **0 servings** in §2.1 rather than
+> a large number: `PackBuilder._is_meta_activity` has dropped them from every
+> pack since [#133](https://github.com/ronsse/trellis-ai/issues/133), on by
+> default. They were filtered *downstream*, not never served.
+>
+> **The correction makes option 2 stronger, by a mechanism this plan did not
+> have.** `_is_meta_activity` runs **after** `GraphSearch` slices
+> `nodes[:limit]`, so these rows spend candidate slots and are *then* discarded
+> — production's own `rejected_items[]` carries 11–14 `meta_activity_filter`
+> rejections on each of the eight most recent 50-item packs. The
+> `node_role == "structural"` filter runs **before** the slice, so the stamp
+> **frees** slots where the existing filter only hides rows that have already
+> cost the budget.
+>
+> Measured end to end on a real store during implementation (4 memories, 6
+> meta-Activities newest, `limit_per_strategy=3`): **unstamped the pack served
+> 0 items** — all five candidates were meta and every one was rejected —
+> **stamped it served 5**. `_is_meta_activity` was not merely wasting slots; at
+> a small `limit` it empties the pack. The table below therefore *understates*
+> the effect.
+>
+> Recorded rather than silently edited: the claim was reasoned from a code
+> comment naming the filter as future work, without checking whether the future
+> had arrived. Shipped as ledger **T-4** and PR #436.
 
 They now occupy **26 of the 50 served slots**, and the trend is what matters:
 median **6.5** slots at pack time across the 46 recorded packs, **11–14** across
