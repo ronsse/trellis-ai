@@ -142,10 +142,11 @@ def _reset_write_provenance() -> Iterator[None]:
 def cli_runner() -> Iterator[IsolatedCliRunner]:
     """A ``CliRunner`` that is safe to use from any test directory.
 
-    Invoking a Trellis CLI command reconfigures structlog's *global* logger
-    factory and pins it to ``CliRunner``'s temporary stderr, which is closed
-    when ``invoke`` returns. Without isolation that poisons every later test
-    that logs, anywhere in the session.
+    Invoking a Trellis CLI command reconfigures structlog's *global* config.
+    Since #377 that no longer pins a dead stream — the stream is resolved
+    per write — but it does leave the command's **log level** memoised into
+    every live lazy proxy, which makes a later ``capture_logs`` or
+    log-asserting test silently see nothing.
 
     ``tests/unit/cli/`` has a package-scoped fixture covering its own tests.
     **Use this fixture for CLI invocations anywhere else** — see

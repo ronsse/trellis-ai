@@ -12,7 +12,12 @@ from rich.console import Console
 from trellis.retrieve.file_context import build_file_context
 from trellis.retrieve.precedents import list_precedents as _list_precedents
 from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_VALIDATION
-from trellis_cli.output import emit_json, format_output, truncate_values
+from trellis_cli.output import (
+    emit_json,
+    emit_machine_text,
+    format_output,
+    truncate_values,
+)
 from trellis_cli.stores import (
     LOCAL_SOURCE_SYSTEM,
     get_document_store,
@@ -96,10 +101,7 @@ def pack(
                 "items": [r["doc_id"] for r in results],
             }
         )
-        if quiet:
-            sys.stdout.write(payload + "\n")
-        else:
-            console.print(payload)
+        emit_machine_text(payload)
     elif quiet:
         for r in results:
             sys.stdout.write(r["doc_id"] + "\n")
@@ -159,10 +161,7 @@ def search(
                 truncate=truncate,
                 wrapper=wrapper,
             )
-        if quiet:
-            sys.stdout.write(payload + "\n")
-        else:
-            console.print(payload)
+        emit_machine_text(payload)
     else:
         trunc = truncate or 80
         if not quiet:
@@ -186,13 +185,19 @@ def trace(
 
     if result is None:
         if output_format == "json":
-            console.print(json.dumps({"status": "not_found", "trace_id": trace_id}))
+            emit_json({"status": "not_found", "trace_id": trace_id})
         else:
             console.print(f"[yellow]Trace not found[/yellow]: {trace_id}")
         raise typer.Exit(code=EXIT_INTERNAL)
 
     if output_format == "json":
-        console.print(result.model_dump_json())
+        # ``model_dump_json`` is a serializer like any other, so this goes
+        # through the emitter too. It sat six lines below the not_found arm
+        # that #403 fixed and was missed twice -- by the issue's grep (which
+        # looked for ``json.dumps``) and by the first pass of the AST rule
+        # (whose serializer set had no Pydantic sibling). The rule now names
+        # it, which is what stops the third miss.
+        emit_machine_text(result.model_dump_json())
     else:
         console.print(f"[green]Trace[/green]: {result.trace_id}")
         console.print(f"  Source: {result.source}")
@@ -218,13 +223,13 @@ def entity(
 
     if result is None:
         if output_format == "json":
-            console.print(json.dumps({"status": "not_found", "entity_id": entity_id}))
+            emit_json({"status": "not_found", "entity_id": entity_id})
         else:
             console.print(f"[yellow]Entity not found[/yellow]: {entity_id}")
         raise typer.Exit(code=EXIT_INTERNAL)
 
     if output_format == "json":
-        console.print(json.dumps(result))
+        emit_json(result)
     else:
         console.print(f"[green]Entity[/green]: {entity_id}")
         console.print(f"  Type: {result.get('node_type', 'unknown')}")
@@ -273,10 +278,7 @@ def traces(
                 truncate=truncate,
                 wrapper=wrapper,
             )
-        if quiet:
-            sys.stdout.write(payload + "\n")
-        else:
-            console.print(payload)
+        emit_machine_text(payload)
     else:
         trunc = truncate or 60
         if not quiet:
@@ -313,10 +315,7 @@ def precedents(
             truncate=truncate,
             wrapper=wrapper,
         )
-        if quiet:
-            sys.stdout.write(output + "\n")
-        else:
-            console.print(output)
+        emit_machine_text(output)
     else:
         if not quiet:
             console.print(f"[green]Precedents[/green] ({len(items)} found)")

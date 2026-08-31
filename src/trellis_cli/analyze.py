@@ -1187,7 +1187,19 @@ def _render_advisory_degradation(
         f"{escape(str(degraded['rows_skipped_display']))} not)"
     )
     out.print(f"    {aftermath}")
-    out.print(f"    To reset: [bold]{escape(str(degraded['recovery']))}[/bold]")
+    # ``soft_wrap`` for the same reason everything above is escaped, one
+    # step further: Rich also *folds* a line at the console width, and the
+    # default advisory path makes this command 100 characters — so on an
+    # 80-column terminal it arrives split across two lines, and a copied
+    # ``mv <source>`` with the destination on the next line is not a
+    # command that runs. The width comes from the terminal, so the same
+    # incident is paste-able for one operator and not for the next.
+    # ``soft_wrap`` disables wrapping and cropping while keeping the
+    # markup; ``no_wrap`` alone would *truncate* the path instead.
+    out.print(
+        f"    To reset: [bold]{escape(str(degraded['recovery']))}[/bold]",
+        soft_wrap=True,
+    )
 
 
 def _exit_if_advisory_store_degraded(store: AdvisoryStore, output_format: str) -> None:

@@ -50,7 +50,6 @@ both signal "the data is in a state operators need to look at").
 
 from __future__ import annotations
 
-import json
 import time
 from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -67,6 +66,7 @@ from trellis.stores.base.edge_provenance import (
     validate_edge_provenance,
 )
 from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_OK, EXIT_STORE
+from trellis_cli.output import emit_json
 from trellis_cli.stores import get_event_log, get_graph_store
 
 if TYPE_CHECKING:
@@ -357,7 +357,7 @@ def migrate_provenance_command(
                 "threshold": exc.threshold,
                 "rate": exc.rate,
             }
-            console.print(json.dumps(payload, indent=2))
+            emit_json(payload, indent=2)
         else:
             console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=EXIT_INTERNAL) from exc
@@ -366,21 +366,19 @@ def migrate_provenance_command(
     except Exception as exc:
         logger.exception("migrate_provenance_failed")
         if output_format == "json":
-            console.print(
-                json.dumps(
-                    {
-                        "error": "store_error",
-                        "message": f"{type(exc).__name__}: {exc}",
-                    },
-                    indent=2,
-                )
+            emit_json(
+                {
+                    "error": "store_error",
+                    "message": f"{type(exc).__name__}: {exc}",
+                },
+                indent=2,
             )
         else:
             console.print(f"[red]store error: {type(exc).__name__}: {exc}[/red]")
         raise typer.Exit(code=EXIT_STORE) from exc
 
     if output_format == "json":
-        console.print(json.dumps(report.to_payload(), indent=2, default=str))
+        emit_json(report.to_payload(), indent=2, default=str)
     else:
         _print_text_report(report)
 

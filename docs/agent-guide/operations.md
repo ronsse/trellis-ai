@@ -950,7 +950,7 @@ trellis retrieve traces [--domain DOMAIN] [--limit N] [--fields FIELDS] [--trunc
 | `--limit` | `20` | Maximum results |
 | `--fields` | all | Comma-separated field list |
 | `--truncate` | `null` | Max chars per text field |
-| `--quiet` | `false` | Suppress Rich formatting |
+| `--quiet` | `false` | Suppress Rich formatting on the **text** branch. A no-op under `--format json` / `jsonl` / `tsv`, which never reach Rich (#403) |
 | `--format` | `text` | Output format |
 
 ### `trellis retrieve search`
@@ -969,18 +969,21 @@ trellis retrieve search <query> [--limit N] [--domain DOMAIN] [--include-chunks]
 | `--include-chunks` | No | `false` | Include `<parent>#chunk-N` fragment rows. Excluded by default (#396): they are slices of documents the same search already ranks. Pushed into the store, so the row cap refills with whole documents rather than the list simply getting shorter |
 | `--format` | No | `text` | Output format |
 
-> **Add `--quiet` when parsing the output.** Without it the payload prints
-> through Rich, which rewrites `:name:` emoji shortcodes inside string values
-> and line-wraps at the console width — putting literal newlines inside JSON
-> strings, so a wide payload does not parse at all. Whether `--format json` is
-> parseable therefore depends on the terminal it ran in
-> ([#403](https://github.com/ronsse/trellis-ai/issues/403)). `--quiet` writes
-> straight to stdout and bypasses Rich entirely.
+> **`--format json` is safe on its own; `--quiet` is no longer needed for it.**
+> It used to be. The payload printed through Rich, which rewrites `:name:` emoji
+> shortcodes inside string values — `corpus:notes:<sha>` came back naming a
+> document that exists in no store — and line-wraps at the console width, folding
+> literal newlines into JSON strings so a wide payload did not parse at all.
+> Whether `--format json` parsed depended on the terminal it ran in
+> ([#403](https://github.com/ronsse/trellis-ai/issues/403)). Every machine-output
+> path now writes straight to stdout, and `tests/unit/test_machine_output_rule.py`
+> fails the build if a serialized payload is handed back to Rich. `--quiet` still
+> does what it says for the **text** branch.
 
 **Example:**
 
 ```bash
-trellis retrieve search "connection pool configuration" --limit 5 --format json --quiet
+trellis retrieve search "connection pool configuration" --limit 5 --format json
 ```
 
 **JSON output:**
@@ -1128,13 +1131,14 @@ trellis retrieve pack --intent <text> [--domain DOMAIN] [--agent AGENT_ID] [--ma
 | `--include-chunks` | No | `false` | Include `<parent>#chunk-N` fragment rows (#396). Excluded by default, same rule as `retrieve search` |
 | `--format` | No | `text` | Output format |
 
-> **Add `--quiet` when parsing the output** — same Rich mangling as
-> `retrieve search` above ([#403](https://github.com/ronsse/trellis-ai/issues/403)).
+> **`--format json` is safe on its own** — the Rich mangling described under
+> `retrieve search` above is fixed ([#403](https://github.com/ronsse/trellis-ai/issues/403)),
+> so `--quiet` is no longer required to parse the output.
 
 **Example:**
 
 ```bash
-trellis retrieve pack --intent "deploy checklist for staging" --domain platform --max-items 10 --format json --quiet
+trellis retrieve pack --intent "deploy checklist for staging" --domain platform --max-items 10 --format json
 ```
 
 **JSON output:**

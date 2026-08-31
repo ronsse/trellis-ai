@@ -52,21 +52,25 @@ def clear_cached_logger_proxies() -> None:
 def reset_structlog_global_state() -> None:
     """Restore structlog to a stream-agnostic default configuration.
 
-    ``clear_cached_logger_proxies`` alone is not enough after code that
-    calls :func:`trellis.logging.configure_stderr_logging`. That function
-    pins the *current* ``sys.stderr`` into the logger factory::
+    The still-current reason: ``configure_stderr_logging`` also installs a
+    ``wrapper_class`` carrying a **level**, and ``cache_logger_on_first_use``
+    pins that into every live proxy. A suite that ran under
+    ``TRELLIS_LOG_LEVEL=CRITICAL`` leaves later tests unable to see their own
+    log events, and ``structlog.testing.capture_logs`` blind. Only clearing
+    the caches *and* resetting the global config restores both.
+
+    **Historical, and no longer true:** this function was written because
+    ``configure_stderr_logging`` pinned the *current* ``sys.stderr`` into the
+    logger factory::
 
         logger_factory=structlog.PrintLoggerFactory(file=sys.stderr)
 
-    so the stream is captured at configure time and lives in structlog's
-    global ``_CONFIG`` afterwards. If ``sys.stderr`` was a temporary buffer
-    at that moment, every later log call in the process writes to it — and
-    once the buffer is closed, raises ``ValueError: I/O operation on closed
-    file``.
-
-    ``reset_defaults`` restores structlog's own default factory, which
-    resolves ``sys.stdout`` per logger construction rather than baking one
-    in, so a subsequent re-bind picks up whatever stream is current.
+    so a stream captured at configure time lived on in structlog's global
+    ``_CONFIG``, and once click closed that buffer every later log call in
+    the process raised ``ValueError: I/O operation on closed file``. #377
+    replaced it with a proxy that resolves ``sys.stderr`` per write, so the
+    global config no longer holds a stream at all. The stream half of this
+    function is now belt-and-braces; the level half is not.
     """
     clear_cached_logger_proxies()
     structlog.reset_defaults()
@@ -80,23 +84,25 @@ class IsolatedCliRunner(CliRunner):
     site in this suite.
 
     ``CliRunner.invoke`` redirects ``sys.stdout`` / ``sys.stderr`` to
-    temporary buffers and closes them on return. Any Trellis CLI command
-    calls ``configure_stderr_logging()`` on the way in, which pins the
-    then-current (temporary) stderr into structlog's global config — so the
-    poisoned config outlives the ``invoke`` call that created it, and the
-    next log statement *anywhere in the process* raises.
+    temporary buffers and closes them on return, and any Trellis CLI command
+    calls ``configure_stderr_logging()`` on the way in.
 
-    ``tests/unit/cli/`` handles this with a package-scoped fixture, which
-    protects that package only. Any test invoking the CLI from elsewhere
-    poisons every test that runs after it and logs. That is not
-    hypothetical: it took out 109 tests across 23 directories in CI when a
-    single ``CliRunner`` call was added under ``tests/unit/mutate/``, while
+    **That used to poison the process.** The configure call pinned the
+    then-current (temporary) stderr into structlog's global config, so the
+    dead handle outlived the ``invoke`` that created it and the next log
+    statement *anywhere* raised — 109 tests across 23 directories in CI when
+    one ``CliRunner`` call was added under ``tests/unit/mutate/``, while
     passing locally against older ``click`` / ``structlog`` that did not
-    close the buffer.
+    close the buffer. #377 fixed that at the root: the stream is now
+    resolved per write, so a bare ``CliRunner`` is survivable and this class
+    is no longer load-bearing for it.
 
-    Resetting inside ``invoke`` — rather than at fixture teardown — matters:
-    the test body typically asserts *after* the invocation, and those
-    assertions may themselves log.
+    **What it still does**, and why it is kept: ``invoke`` leaves the global
+    config carrying whatever *level* the command resolved, memoised into
+    every live lazy proxy. A later test using ``capture_logs``, or asserting
+    on its own log output, sees nothing. Resetting inside ``invoke`` rather
+    than at fixture teardown still matters — the test body asserts *after*
+    the invocation, and those assertions may themselves log.
     """
 
     def invoke(self, *args: Any, **kwargs: Any) -> Any:
