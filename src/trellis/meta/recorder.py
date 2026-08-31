@@ -9,8 +9,43 @@ or observation IDs) and ``wasGeneratedBy`` edges from the produced
 findings (Observation / Advisory / WellKnownCandidate node IDs).
 
 The primitive is intentionally minimal: it owns the lifecycle of the
-Activity node and the edge writes. CLI wiring, PackBuilder filtering,
-and the eval scenario all land in a follow-up PR (cohort F2).
+Activity node and the edge writes.
+
+### Node role
+
+Meta-Activities are minted :data:`~trellis.schemas.enums.NodeRole.STRUCTURAL`
+(#375). One node per analyzer invocation is a *rate*, not a corpus: on the
+reference deployment 200 of 1000 current nodes — a fifth of the whole graph
+— were ``cli.worker.curate.learning@<ts>``-shaped rows from three nightly
+crons, and across 190 graded graph servings they earned **zero** citations.
+
+They were already filtered out of the *pack*: ``PackBuilder._is_meta_activity``
+drops any ``Activity`` whose ``agent_id`` carries the ``trellis_meta_``
+prefix, and did so on every recent production pack. But that filter runs
+**after** ``GraphSearch`` has already sliced its candidate window to
+``nodes[:limit]``, so the rows were spending real candidate slots and being
+discarded downstream — measured at 11-14 ``meta_activity_filter`` rejections
+per pack against a 50-slot window. ``node_role`` is read *before* that slice,
+so the stamp frees the slots rather than merely hiding the rows.
+
+The suppression belongs here, at the write, and not as a name or ``agent_id``
+pattern inside ``retrieve/``: what these rows are is a property of the row,
+decided by whoever writes it, and a retrieval-side pattern would have to be
+re-taught to every axis added later.
+
+Two caveats. ``node_role`` is **immutable across SCD-2 versions**
+(``check_node_role_immutable``), so rows written before this change keep
+``semantic`` and cannot be re-stamped by an update; they age out of the
+recency window on their own, or an operator prunes them. And the
+``PackBuilder`` filter above stays — it is what covers those legacy rows,
+and it is the only thing covering a meta-Activity reached by a *non*-graph
+axis.
+
+One consequence for the escape hatch: ``PackBuilder.build(include_meta=True)``
+no longer surfaces a *newly written* meta-Activity on its own, because the
+graph axis drops the structural row before the meta filter is ever reached.
+Pass ``include_structural=True`` alongside it. The pre-#375 rows are still
+``semantic``, so ``include_meta=True`` alone reaches those.
 
 ### Merge-within-window dedup
 
@@ -48,6 +83,7 @@ from trellis.core.base import utc_now
 from trellis.core.ids import generate_ulid
 from trellis.meta.agents import ensure_meta_agent
 from trellis.schemas import well_known as wk
+from trellis.schemas.enums import NodeRole
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -517,6 +553,28 @@ def _create_activity(
     0 leaves them off rather than stamping zero values that get
     mistaken for "no work happened".
 
+    The node is minted :data:`~trellis.schemas.enums.NodeRole.STRUCTURAL`
+    — see the module docstring's "Node role" section for why, and for what
+    the alternatives cost.
+
+    .. warning::
+
+       **The counter wrap-up above is a node re-upsert, and it must pass
+       ``node_role`` explicitly.** ``upsert_node`` defaults the role to
+       ``semantic`` and ``check_node_role_immutable`` raises on any change
+       across SCD-2 versions, so the naive
+       ``upsert_node(node_id=activity_id, node_type=..., properties=...)``
+       raises ``ValueError`` for *every* meta-Activity, in every nightly
+       cron, the moment that wrap-up ships — and
+       ``adr-dogfooding-meta-traces.md`` §2.4 describes exactly that write
+       ("extends ``ended_at``, increments ``events_consumed``"). Nothing
+       re-upserts the Activity today (the merge-within-window path appends
+       edges only), which is why this is a trap for the next change rather
+       than a live defect. Carry the stored role forward the way
+       :class:`~trellis.mutate.handlers.EntityUpdateHandler` does. Pinned by
+       ``TestCounterWrapUpTrap`` in
+       ``tests/unit/meta/test_recorder_node_role.py``.
+
     Args:
         registry: Store registry.
         analyzer_name: Stable analyzer name.
@@ -539,10 +597,19 @@ def _create_activity(
             "agent_id": agent_id,
             "started_at": started_at,
         },
+        # ``.value``, not the enum: the ABC types this ``str``, and the
+        # value is handed straight to a backend driver.
+        node_role=NodeRole.STRUCTURAL.value,
     )
-    # Stamp the wasAssociatedWith edge so PackBuilder's eventual filter
-    # ("Activities whose wasAssociatedWith target starts with
-    # trellis_meta_") matches without scanning Activity properties.
+    # The edge carries ``analyzer_name`` for PROV provenance. It used to be
+    # stamped in anticipation of a PackBuilder filter that would match
+    # "Activities whose wasAssociatedWith target starts with trellis_meta_",
+    # so the filter would not have to scan Activity properties. That filter
+    # landed as ``_is_meta_activity``, which reads the Activity's own
+    # ``agent_id`` property and never traverses this edge — and the #375
+    # suppression above is a column on the node, cheaper than either. The
+    # edge is provenance now, not an index.
+    #
     # ``**`` spread keeps mypy happy until the ABC widens to declare
     # the provenance kwargs (see Item 2 follow-up).
     graph_store.upsert_edge(

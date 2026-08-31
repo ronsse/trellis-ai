@@ -22,14 +22,60 @@ class OutcomeStatus(StrEnum):
 class NodeRole(StrEnum):
     """Graph-invariant role distinguishing the three kinds of nodes.
 
-    - STRUCTURAL: fine-grained, machine-generated plumbing that is regenerated
-      from source (e.g., columns, function parameters). Excluded from
-      retrieval by default — surfaced only as part of their parent's context.
+    - STRUCTURAL: machine-generated plumbing that is not standalone memory
+      and is reproducible from something outside this graph. Two shapes
+      qualify: rows *regenerated from source* (columns, function parameters,
+      the ``tool:<slug>`` nodes trace extraction mints), and rows that
+      *restate an Operational-Plane fact* (the per-invocation ``Activity``
+      the meta-recorder writes, which the event log and trace store already
+      hold). Excluded from retrieval by default — surfaced only as part of
+      their parent's context, or via ``include_structural=True``.
     - SEMANTIC (default): represents a real thing in the world, ingested with
       a source-of-truth. Standard retrieval and standalone-discoverable.
     - CURATED: synthesized/derived from the graph itself (e.g., precedents,
       community clusters, domain rollups). Carries a ``generation_spec``
       describing how it was produced and can be regenerated.
+
+    **On the STRUCTURAL wording** (#375). It used to read "regenerated from
+    source (e.g., columns, function parameters)", which named one *example*
+    of a non-standalone machine-generated row and read as the definition.
+    The meta-recorder's per-invocation ``Activity`` is the same kind of thing
+    — never standalone memory, reconstructible from the operational plane —
+    but is not regenerated from a source system, so the old wording excluded
+    it by accident. The behavioural contract is a single bit ("is this row
+    standalone-discoverable?"); both cases want that bit; and a fourth role
+    would oblige every backend, filter, doc and consumer to learn a value
+    whose retrieval semantics are identical to this one. So the definition is
+    restated at the altitude the behaviour already sits at, rather than a
+    role being added or a case being wedged in.
+
+    The widening **relocates a judgment rather than making a new one**.
+    ``PackBuilder._is_meta_activity`` has dropped meta-Activities from every
+    pack since #133 (Item 6 Phase 2): the claim "this row is not
+    standalone-discoverable" was already shipped, already on by default,
+    and uncontested. All that
+    changes is *where* it is applied — at the write, before ``GraphSearch``
+    slices its candidate window, instead of after, where the row had already
+    spent a slot. If the taxonomy forbade calling a meta-Activity
+    non-standalone, the filter was already violating it.
+    ``adr-dogfooding-meta-traces.md`` §3.3 says the same thing in the
+    ADR's own words: the meta-trace "is an index into operational data, not
+    a duplicate of it".
+
+    **Scope: this is the meta-recorder's Activity, not ``Activity`` the
+    type.** A *trace-extraction* Activity stays SEMANTIC, deliberately —
+    ``extract/trace.py`` mints it that way because "the Activity *is* the
+    trace", and demoting it would hide trace memory from packs entirely.
+    Read the qualifier before reaching for this role: what earns STRUCTURAL
+    here is being written once per *invocation of Trellis's own machinery*,
+    not being typed ``Activity``.
+
+    The risk taken is the #325 / #326 one — a key widened to fit a new case
+    until two writers mean different things by it. What bounds it here:
+    ``node_role`` is a closed three-value enum with one write path
+    (``upsert_node``), it is **immutable across SCD-2 versions**, and every
+    consumer branches on the same predicate (``!= "structural"``). There is
+    no second vocabulary for the two readings to drift apart into.
 
     See ``docs/agent-guide/modeling-guide.md`` for the full three-role
     taxonomy and guidance on when to use each role.
