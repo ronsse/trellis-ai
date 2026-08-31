@@ -336,9 +336,30 @@ class TestSameSweepSupersession:
 
 
 class TestApplySupersessions:
-    def test_vanished_target_is_counted_and_warned(self, tmp_path: Path) -> None:
+    def test_vanished_target_is_counted_and_warned(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The counter, the warning, the withdrawn claim — and the stamp.
+
+        The withdrawal is a metadata-only correction, so it must not move
+        ``updated_at`` (#397): a public column whose readers include
+        ``KeywordSearch``'s recency decay, ``mutate.retention``'s age gate and
+        ``file_context._newest_timestamp``, which is a *gate*. Pinned against
+        an advancing clock rather than wall time — the two puts are
+        microseconds apart, so a frozen or real clock gives them the same
+        stamp and the assertion would hold with the flag removed.
+        """
+        import itertools
+        from datetime import UTC, datetime, timedelta
+
         from trellis.stores.sqlite.document import SQLiteDocumentStore
 
+        ticks = itertools.count()
+        base = datetime.now(UTC) - timedelta(days=30)
+        monkeypatch.setattr(
+            "trellis.stores.sqlite.document.utc_now",
+            lambda: base + timedelta(minutes=next(ticks)),
+        )
         docs = SQLiteDocumentStore(tmp_path / "docs.db")
         docs.put("new-doc", "successor", {"supersedes_doc_id": "gone-doc"})
         report = CaptureReport(transcripts_root="/nowhere")
@@ -358,9 +379,10 @@ class TestApplySupersessions:
         # The successor stops claiming it — the counter records the failure,
         # it does not excuse leaving a pointer to a document that is not
         # there, which is #407's title.
-        meta = docs.get("new-doc")["metadata"]
-        assert "supersedes_doc_id" not in meta
-        assert meta["reconciliation"] == "stale_recheck"
+        row = docs.get("new-doc")
+        assert "supersedes_doc_id" not in row["metadata"]
+        assert row["metadata"]["reconciliation"] == "stale_recheck"
+        assert row["updated_at"] == row["created_at"]
 
     def test_missing_successor_does_not_stale_mark_anything(
         self, tmp_path: Path

@@ -853,26 +853,39 @@ class TestSupersedeTargetVanished:
         """Stripping the claim is a metadata-only correction (#397).
 
         The correcting ``put`` rewrites the row that was written moments
-        earlier; without ``preserve_updated_at`` it would move a stamp that
-        ``KeywordSearch`` reads as recency. The margin here is nil in wall
-        time, which is the point: pin it against the clock, not against the
-        hope that two reads differ.
+        earlier; without ``preserve_updated_at`` it would move a stamp read by
+        ``KeywordSearch``'s recency decay, ``mutate.retention``'s age gate,
+        and ``file_context._newest_timestamp`` — the last of which is a gate,
+        not a score.
+
+        **The clock has to advance between the two writes or this cannot
+        fail.** Both puts happen inside one ``save_memory`` call, microseconds
+        apart: freeze the clock and they share a stamp whether or not the flag
+        is passed, so the assertion holds against the defect it is guarding.
+        Each ``put`` gets its own tick instead, and the row is pinned against
+        its own ``created_at`` — which the insert set and only a re-stamp can
+        move away from.
         """
+        import itertools
         from datetime import UTC, datetime, timedelta
 
-        holder = {"now": datetime.now(UTC) - timedelta(days=30)}
+        ticks = itertools.count()
+        base = datetime.now(UTC) - timedelta(days=30)
         monkeypatch.setattr(
-            "trellis.stores.sqlite.document.utc_now", lambda: holder["now"]
+            "trellis.stores.sqlite.document.utc_now",
+            lambda: base + timedelta(minutes=next(ticks)),
         )
         save_memory(_BASE)
         _enable(monkeypatch, FakeLLMClient(content=_verdict_json("supersede")))
         self._fail_supersede(monkeypatch)
 
         new_id = _doc_id(save_memory(_NEAR))
-        stamp = temp_registry.knowledge.document_store.get(new_id)["updated_at"]
 
-        holder["now"] = datetime.now(UTC)
-        assert temp_registry.knowledge.document_store.get(new_id)["updated_at"] == stamp
+        row = temp_registry.knowledge.document_store.get(new_id)
+        # The correcting write happened at all — without this the stamp
+        # assertion below would pass by there being nothing to re-stamp.
+        assert "supersedes_doc_id" not in row["metadata"]
+        assert row["updated_at"] == row["created_at"]
 
     def test_missing_target_is_logged_at_warning(
         self, temp_registry: StoreRegistry
