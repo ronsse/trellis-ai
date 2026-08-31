@@ -335,12 +335,9 @@ Three facts found while grounding the dispatch, none of which were in the plan d
   `include_structural=True` as the escape hatch, and production already carries **279
   `SoftwareApplication` nodes stamped `structural`**. The mechanism is proven on live
   data, not theoretical.
-- **Filtering these was always the design.** `meta/recorder.py:543-545` reads *"Stamp the
-  wasAssociatedWith edge so PackBuilder's eventual filter ... matches without scanning
-  Activity properties."* That filter was scheduled for cohort F2 and never landed, while
-  `node_role="structural"` shipped independently and does the same job with less
-  machinery than the edge traversal that comment anticipates. The gap was recorded in a
-  code comment nobody re-read — the same shape as a closed issue hiding an open gate.
+- **Filtering these was always the design — and, corrected below, the filter *did* land.**
+  `meta/recorder.py:543-545` reads *"Stamp the wasAssociatedWith edge so PackBuilder's
+  eventual filter ... matches without scanning Activity properties."*
 - **`_create_activity` passes no `node_role`**, so it takes the `"semantic"` default from
   `GraphStore.upsert_node`. The whole fix is one kwarg at `meta/recorder.py:533`.
 
@@ -349,6 +346,31 @@ rows named `cli.*`, **80 `Activity`/`semantic` rows that are not** — real trac
 records that must stay semantic, which is why the stamp goes at the meta-recorder's mint
 site and not on `Activity` as a type. Also checked `_materialise_node_if_absent`, which I
 suspected of being a second churn source: it is not — ~10 nodes total.
+
+**Correction, same day, found by the implementing agent.** This entry first claimed the
+cohort-F2 filter "never landed", and both this ledger and PR #432 said so. **That is
+false.** `PackBuilder._is_meta_activity` (`retrieve/pack_builder.py:1621`) exists on
+`main`, is on by default (`include_meta=False`), requires *both* `node_type == ACTIVITY`
+and an `agent_id` prefixed `trellis_meta_` so a user-authored Activity is not caught, and
+emits `reason="meta_activity_filter"`. It fires on every recent production pack.
+
+The plan doc's §2.3 is wrong in the same direction — "nothing filters them" — and that is
+also why those node types read **0 servings** in §2.1 rather than 54: they were filtered
+*downstream*, not never served.
+
+**The correction strengthens the decision rather than undermining it, and by a mechanism
+neither the plan nor this entry had.** `_is_meta_activity` runs *after* `GraphSearch`
+slices `nodes[:limit]`, so the 200 rows were **spending candidate slots and then being
+discarded** — production's own `rejected_items[]` shows 11–14 `meta_activity_filter`
+rejections on each of the eight most recent 50-item packs. The `node_role == "structural"`
+filter runs *before* the slice. So the stamp **frees slots**, where the existing filter
+merely hides rows after they have already cost the budget. That is the §2.3 effect by a
+shorter path than the edge-traversal filter `recorder.py`'s comment planned.
+
+Recorded rather than quietly edited because the original claim was reasoned from a code
+comment describing future work, without checking whether the future had arrived — the
+"a closed issue hiding an open gate" failure run in reverse, and the second time this
+week a confident claim of mine about what "never landed" was wrong.
 
 **Left open for review, not resolved silently:** `NodeRole.STRUCTURAL`'s *definition*
 (`schemas/enums.py:24-25`, "regenerated from source (e.g., columns, function parameters)")
