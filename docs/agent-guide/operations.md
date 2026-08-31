@@ -816,14 +816,68 @@ A file at the pre-unification CLI path `<data_dir>/policies.json` is still
 honoured, with a warning naming both paths; the canonical path wins if both
 exist. Move it when you see the warning.
 
-The file is **loaded strictly**: if it exists but is corrupt, unparseable, or
-contains an invalid policy, mutation surfaces raise `ConfigError` rather than
-degrading to zero policies. Silently falling back would mean a damaged
-access-control file disables access control while the caller believes it is
-governed. A deployment with *no* policy file is unaffected — strictness only
-begins once you have declared something.
+The file is **loaded strictly**: if it exists but is corrupt, unparseable, has
+no `"policies"` key, or contains an invalid policy, mutation surfaces raise
+`ConfigError` rather than degrading to zero policies. Silently falling back
+would mean a damaged access-control file disables access control while the
+caller believes it is governed. A deployment with *no* policy file is
+unaffected — strictness only begins once you have declared something.
 
 Policies are read per call, so an edit takes effect without a restart.
+
+### If the file is damaged
+
+The CRUD store (`trellis policy`, `/api/policies`) and the enforcement reader
+treat a damaged file differently, on purpose:
+
+* **Enforcement fails closed.** Every mutation surface raises `ConfigError`
+  naming the file. The pipeline stops; it does not run ungoverned.
+* **`trellis policy list` still works**, showing whatever parsed — that is the
+  point of a separate CRUD reader — but it prints a `POLICY STORE DEGRADED`
+  banner above the listing and **exits 5**, because a partial view of an
+  access-control file must not be scriptable as the whole ruleset. `--format
+  json` carries a `store_degradation` object with the same detail.
+* **Every write is refused**, on the CLI (exit 5) and over REST (HTTP 409),
+  including `remove`. A store that could not read its own file has no business
+  rewriting it: the rewrite would produce a *valid* file containing only what
+  parsed, which enforcement would then accept as the truth (#413).
+* Recovery is yours to run, and every surface prints it:
+  `mv <path> <path>.corrupt`. Nothing moves the file for you — the readers here
+  include pack assembly, and a read must not mutate your filesystem. After the
+  `mv` the path is absent, which is a legitimate transparent zero-policy
+  deployment, so **re-declare your policies**.
+
+### If another process wrote the file first
+
+Two processes write `policies.json` on a typical deployment — `trellis
+policy add` on the host and `POST /api/policies` in a container, against
+the same data dir. Both stores whole-file-rewrite, so a write from a view
+that predates the other's write would silently delete it.
+
+A write is therefore refused when the file changed after the store read it:
+exit **5** on the CLI, HTTP **409** with `"code": "stale_store_write"` over
+REST. Unlike the damaged case this one is **transient** — re-read and redo
+the operation. It is a compare-and-swap rather than a lock, so it closes
+the wide window and narrows the tiny one; last-writer-wins is still the
+model for two writes that genuinely race.
+
+### `--format json` shapes
+
+`trellis policy list` and `show` carry the house `status` key (`"ok"` /
+`"degraded"`), plus `store_degradation` when degraded. `list` also reports
+`policy_file` and `policy_file_present`.
+
+**`show` returns an envelope** — `{"status", "policy"}` — not a bare
+`Policy` dump. Every Trellis schema is `extra="forbid"`, so a dump with a
+`store_degradation` key alongside it is a payload `Policy.model_validate`
+rejects; the envelope is what lets the degradation ride along. Read the
+policy from `.policy`.
+
+`trellis policy list` also distinguishes the two ways of getting an empty
+answer: an absent file (the shipped default) says nothing extra, while a file
+containing `{"policies": []}` says so and notes that Stage 2 is transparent.
+Enforcement deliberately does not make that distinction — every *dangerous*
+route to zero policies raises, so what is left is you having declared zero.
 
 ### Scope levels — which commands a policy matches
 

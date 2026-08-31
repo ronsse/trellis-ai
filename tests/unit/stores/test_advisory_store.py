@@ -698,7 +698,10 @@ class TestSaveIsAtomic:
             msg = "No space left on device"
             raise OSError(msg)
 
-        monkeypatch.setattr("trellis.stores.advisory_store.os.fsync", _boom)
+        # Patched on the shared helper (#413 lifted it into
+        # ``trellis.core.atomic_write``), which is where the write now
+        # happens. The injected failure and the property are unchanged.
+        monkeypatch.setattr("trellis.core.atomic_write.os.fsync", _boom)
 
         with pytest.raises(OSError, match="No space left"):
             store.put(_advisory(scope="doomed"))

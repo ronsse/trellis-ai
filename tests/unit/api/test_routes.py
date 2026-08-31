@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from contextlib import asynccontextmanager
 
 import pytest
@@ -9,6 +10,9 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import trellis_api.app as app_module
+from trellis.errors import StaleStoreWriteError
+from trellis.schemas.enums import PolicyType
+from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
 from trellis.stores.registry import StoreRegistry
 from trellis_api.routes import admin, curate, ingest, mutations, policies, retrieve
 
@@ -939,6 +943,277 @@ def test_delete_policy(client):
 def test_delete_policy_not_found(client):
     resp = client.delete("/api/v1/policies/nonexistent")
     assert resp.status_code == 404
+
+
+class TestPolicyRoutesOnADegradedStore:
+    """#413 — the REST CRUD surface is one of the two writers that laundered
+    a damaged access-control file into an empty, *enforced* one.
+
+    ``POST /policies`` on a store that could not read its file rewrote the
+    file with what survived (nothing), after which the strict enforcement
+    reader parsed a perfectly valid zero-policy file and the gate allowed
+    everything. Nothing in that sequence returned an error.
+    """
+
+    @staticmethod
+    def _damage(tmp_path, text: str):
+        path = tmp_path / "stores" / "policies.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def test_get_carries_the_degradation(self, client, tmp_path):
+        """``count`` alone under-reports, so a caller reading it as the size
+        of the ruleset would be wrong."""
+        self._damage(tmp_path, '{"policys": [{"policy_id": "x"}]}')
+
+        resp = client.get("/api/v1/policies")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["count"] == 0
+        assert body["store_degradation"]["reason"] == "malformed_envelope"
+        assert body["store_degradation"]["recovery"].startswith("mv ")
+
+    def test_create_is_refused_and_the_bytes_survive(self, client, tmp_path):
+        path = self._damage(tmp_path, '{"policys": [{"policy_id": "x"}]}')
+        before = path.read_bytes()
+
+        resp = client.post(
+            "/api/v1/policies",
+            json={
+                "policy_type": "mutation",
+                "scope": {"level": "global"},
+                "rules": [{"operation": "*", "action": "deny"}],
+            },
+        )
+
+        # 409, not 503: the file will not repair itself, so "retry later"
+        # is the wrong instruction. And not 500 — that body says only
+        # "internal server error" and drops the recovery command.
+        assert resp.status_code == 409
+        detail = resp.json()["detail"]
+        # Not ``degraded_store_write``: the same helper answers a read route,
+        # where nothing was being written.
+        assert detail["code"] == "degraded_store"
+        assert detail["store_degradation"]["recovery"].startswith("mv ")
+        assert path.read_bytes() == before
+
+    def test_delete_is_refused_rather_than_reporting_not_found(self, client, tmp_path):
+        """A 404 from a degraded store is a claim it cannot support."""
+        path = self._damage(tmp_path, "{ broken")
+        before = path.read_bytes()
+
+        resp = client.delete("/api/v1/policies/whatever")
+
+        assert resp.status_code == 409
+        assert path.read_bytes() == before
+
+    def test_get_one_does_not_claim_absence(self, client, tmp_path):
+        self._damage(tmp_path, "{ broken")
+
+        resp = client.get("/api/v1/policies/whatever")
+
+        assert resp.status_code == 409
+
+    def test_a_repaired_file_is_picked_up_without_a_restart(self, client, tmp_path):
+        """A fix must not need a restart to take effect.
+
+        The store used to be cached for the life of the process, so an
+        operator who repaired ``policies.json`` would keep getting 409s
+        until someone bounced the API — turning the fix into an outage of
+        its own. Repaired here by writing **valid content**, not by deleting
+        the file: deleting exercises the absent-file path, which is a
+        different branch and the easier one.
+        """
+        path = self._damage(tmp_path, "{ broken")
+        assert client.get("/api/v1/policies").json()["store_degradation"]
+
+        surviving = Policy(
+            policy_type=PolicyType.MUTATION,
+            scope=PolicyScope(level="global"),
+            rules=[PolicyRule(operation="entity.delete", action="deny")],
+        )
+        path.write_text(
+            json.dumps({"policies": [surviving.model_dump(mode="json")]}),
+            encoding="utf-8",
+        )
+        assert client.get("/api/v1/policies").json()["store_degradation"] is None
+
+        resp = client.post(
+            "/api/v1/policies",
+            json={
+                "policy_type": "mutation",
+                "scope": {"level": "global"},
+                "rules": [{"operation": "*", "action": "deny"}],
+            },
+        )
+        assert resp.status_code == 200
+        listed = client.get("/api/v1/policies").json()
+        # The key is always present, ``None`` when clean — an optional key
+        # makes every client handle its absence, and absence is the case
+        # they would guess wrong about.
+        assert listed["store_degradation"] is None
+        # And the repaired file's own policy survived the write.
+        assert surviving.policy_id in {p["policy_id"] for p in listed["policies"]}
+
+    def test_a_healthy_cached_store_cannot_overwrite_another_writer(
+        self, client, tmp_path
+    ):
+        """The defect that arrives with no corruption at all.
+
+        The store used to be cached for the life of the process and
+        invalidated only on *degradation*, so a healthy cached view outlived
+        the file. The reference deployment writes this file from two
+        processes — a host ``trellis policy add`` and this containerised API
+        against one bind-mounted data dir — so:
+
+            GET  /policies        -> caches a store holding [A]
+            trellis policy add B  -> file is [A, B]
+            POST /policies (C)    -> file becomes [A, C]; B is gone
+            GET  /policies        -> 200, no degradation, reports normal
+
+        A declared ``deny`` deleted from disk *and* from Stage 2 by an
+        unrelated successful request. Not caching is what fixes it; the
+        assertion here is that a second writer's row survives.
+        """
+        path = tmp_path / "stores" / "policies.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        first = client.post(
+            "/api/v1/policies",
+            json={
+                "policy_type": "mutation",
+                "scope": {"level": "global"},
+                "rules": [{"operation": "entity.create", "action": "deny"}],
+            },
+        )
+        assert first.status_code == 200
+        a_id = first.json()["policy_id"]
+
+        # Another process appends B, exactly as ``trellis policy add`` does.
+        from trellis.stores.policy_store import PolicyStore
+
+        other = PolicyStore(path)
+        b = Policy(
+            policy_type=PolicyType.MUTATION,
+            scope=PolicyScope(level="domain", value="payments"),
+            rules=[PolicyRule(operation="*", action="deny")],
+        )
+        other.add(b)
+
+        second = client.post(
+            "/api/v1/policies",
+            json={
+                "policy_type": "mutation",
+                "scope": {"level": "team", "value": "core"},
+                "rules": [{"operation": "*", "action": "warn"}],
+            },
+        )
+        assert second.status_code == 200
+
+        listed = {
+            p["policy_id"] for p in client.get("/api/v1/policies").json()["policies"]
+        }
+        assert a_id in listed
+        assert b.policy_id in listed, "the other writer's policy was deleted"
+        assert second.json()["policy_id"] in listed
+
+    def test_a_stale_write_is_refused_rather_than_silently_winning(
+        self, client, tmp_path
+    ):
+        """The window not-caching cannot close, closed by compare-and-swap.
+
+        ``refuse_if_stale`` is a different failure from a degraded load —
+        transient, and retryable — so it carries its own code rather than
+        claiming the file is damaged.
+        """
+        from trellis.stores.policy_store import PolicyStore
+
+        path = tmp_path / "stores" / "policies.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        store = PolicyStore(path)
+        store.add(
+            Policy(
+                policy_type=PolicyType.MUTATION,
+                scope=PolicyScope(level="global"),
+                rules=[PolicyRule(operation="*", action="deny")],
+            )
+        )
+
+        # A second process writes between this store's load and its save.
+        PolicyStore(path).add(
+            Policy(
+                policy_type=PolicyType.MUTATION,
+                scope=PolicyScope(level="team", value="core"),
+                rules=[PolicyRule(operation="*", action="warn")],
+            )
+        )
+        before = path.read_bytes()
+
+        with pytest.raises(StaleStoreWriteError):
+            store.add(
+                Policy(
+                    policy_type=PolicyType.MUTATION,
+                    scope=PolicyScope(level="domain", value="payments"),
+                    rules=[PolicyRule(operation="*", action="deny")],
+                )
+            )
+
+        assert path.read_bytes() == before
+
+    def test_the_stale_refusal_reaches_the_client_as_a_409(
+        self, client, tmp_path, monkeypatch
+    ) -> None:
+        """The route's stale branch, over HTTP rather than at the store.
+
+        ``test_a_stale_write_is_refused_rather_than_silently_winning``
+        drives ``PolicyStore`` directly, so nothing exercised
+        ``_refusal_http_error``'s stale arm through a request: deleting
+        ``recovery`` from that response body left all 266 targeted tests
+        green. ``recovery`` is the entire stated justification for
+        answering 409 rather than 500 ("that body says only 'internal
+        server error' and drops the recovery command"), so it has to be
+        asserted on the response a client actually receives.
+
+        The store is injected already-behind. Now that the route builds one
+        per request the real window is microseconds wide, which is the
+        point of the compare-and-swap — it is not reproducible by racing.
+        """
+        from trellis.stores.policy_store import PolicyStore
+
+        path = tmp_path / "stores" / "policies.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        behind = PolicyStore(path)
+        PolicyStore(path).add(
+            Policy(
+                policy_type=PolicyType.MUTATION,
+                scope=PolicyScope(level="global"),
+                rules=[PolicyRule(operation="*", action="deny")],
+            )
+        )
+        landed = path.read_bytes()
+        monkeypatch.setattr(
+            "trellis_api.routes.policies._get_policy_store", lambda: behind
+        )
+
+        resp = client.post(
+            "/api/v1/policies",
+            json={
+                "policy_type": "mutation",
+                "scope": {"level": "team", "value": "core"},
+                "rules": [{"operation": "*", "action": "warn"}],
+            },
+        )
+
+        assert resp.status_code == 409
+        detail = resp.json()["detail"]
+        # Its own code: retry, rather than go and look at the file.
+        assert detail["code"] == "stale_store_write"
+        assert detail["recovery"] == "trellis policy list"
+        # Nothing was damaged, so there is no degradation to report.
+        assert detail["store_degradation"] is None
+        assert path.read_bytes() == landed
 
 
 class TestAdvisoryGenerateOnADegradedStore:

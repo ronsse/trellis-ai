@@ -47,6 +47,54 @@ to zero policies. Degrading would mean a corrupt access-control file
 silently disables access control — the caller believes it is governed and it
 is not. A deployment with *no* policy file is untouched by this: strictness
 only applies once an operator has declared something.
+
+**Strictness is necessary and was not sufficient** (#413). It reasons about
+the read, and the exposure came from the write: until #413
+:class:`~trellis.stores.policy_store.PolicyStore` degraded an unreadable
+file to an empty set and then whole-file-rewrote the path, so the next CRUD
+write replaced the ruleset with what survived — nothing. This reader then
+parsed a perfectly valid file containing zero policies, without complaint,
+and the gate allowed everything. Strictness only ever protected against a
+file it *could not parse*. That store now refuses to write while degraded,
+which is what makes the guarantee here hold; see its module docstring.
+
+The same reader also had an envelope hole of its own, and it did not need a
+write to fire. ``data.get("policies", [])`` meant a JSON object with **no**
+``policies`` key — ``{}``, a typo'd key, the wrong file at this path, a
+future schema — loaded as zero policies *silently*, so a one-character
+hand-edit disabled every policy while every surface reported normal. A
+missing key is now a ``ConfigError``, alongside the other malformed shapes:
+``PolicyStore._save`` always emits ``policies``, so a dict without it is by
+construction not a file Trellis produced.
+
+"No file" vs "a file declaring zero policies"
+---------------------------------------------
+#413 asks whether enforcement should distinguish them. **It deliberately
+does not, and the reason is that the fix removed the dangerous member of
+the second class rather than labelling it.** Enumerate what can now reach
+"zero policies at Stage 2":
+
+* no file — the shipped default, transparent by design (above);
+* ``{"policies": []}`` — what ``trellis policy remove`` writes when the
+  last policy goes, i.e. an operator *declaring* zero policies;
+* anything else — unreadable file, bad JSON, wrong envelope, missing key,
+  one invalid row — **raises**, and the pipeline fails closed;
+* a file rewritten from a degraded load, or from any other **stale** view
+  of it — another process's write landing in between, a file appearing
+  after the store was constructed, a duplicate id collapsing the view —
+  **no longer reachable**, because the CRUD store refuses those writes
+  too. Note the quantity: the hazard is *fewer* policies, not only zero,
+  and an enumeration of the ways to reach zero missed all three of those
+  until a review pass caught it (#413's review round).
+
+Nothing is left in which zero policies is a surprise, so a distinction here
+would do no safety work — and it would cost real signal:
+:func:`build_policy_gate` is rebuilt per mutation, so a warning on a benign
+declared-empty file would fire on every write on the busiest path in the
+system, which is how operators learn to ignore warnings. The distinction
+belongs where the question is actually asked, once, by a human:
+``trellis policy list`` says whether the empty answer comes from an absent
+file or from a file that declares an empty list.
 """
 
 from __future__ import annotations
@@ -56,7 +104,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, overload
 
 import structlog
-from pydantic import ValidationError as PydanticValidationError
 
 from trellis.errors import ConfigError
 from trellis.mutate.policy_gate import DefaultPolicyGate
@@ -69,6 +116,13 @@ logger = structlog.get_logger(__name__)
 
 #: Filename holding a deployment's governance policies, under ``stores_dir``.
 POLICY_FILENAME = "policies.json"
+
+#: How many of a malformed envelope's keys to name in the error. Enough to
+#: recognise the file (and the typo), short enough to stay one line.
+#: :mod:`trellis.stores.policy_store` bounds the same list with its own
+#: ``_MAX_REPORTED_ROWS``; they are different quantities that happen to be
+#: small, not one constant split in two.
+_MAX_REPORTED_KEYS = 5
 
 
 @overload
@@ -140,10 +194,15 @@ def _load_from_path(path: Path | None) -> list[Policy]:
 
     try:
         raw_text = path.read_text(encoding="utf-8")
-    except OSError as exc:
+    # UnicodeDecodeError is a ValueError, not an OSError, and is the shape a
+    # truncated or partially-binary write actually takes. Uncaught it still
+    # failed closed, but as a bare traceback with none of the recovery advice
+    # every other malformed shape here carries.
+    except (OSError, UnicodeDecodeError) as exc:
         msg = (
-            f"Could not read the Trellis policy file at {path}: {exc}. "
-            "Fix permissions, or remove the file to run with no policies."
+            f"Could not read the Trellis policy file at {path}: "
+            f"{type(exc).__name__}: {exc}. Fix permissions or the file's "
+            "contents, or remove the file to run with no policies."
         )
         raise ConfigError(msg, setting=POLICY_FILENAME) from exc
 
@@ -156,19 +215,47 @@ def _load_from_path(path: Path | None) -> list[Policy]:
         )
         raise ConfigError(msg, setting=POLICY_FILENAME) from exc
 
-    if not isinstance(data, dict) or not isinstance(data.get("policies", []), list):
+    if not isinstance(data, dict):
         msg = (
             f"Malformed Trellis policy file at {path}: expected a JSON object "
-            'with a "policies" list. Fix the file, or remove it to run with '
-            "no policies."
+            f'with a "policies" list, got {type(data).__name__}. Fix the file, '
+            "or remove it to run with no policies."
+        )
+        raise ConfigError(msg, setting=POLICY_FILENAME)
+
+    # A *missing* key is not an empty ruleset. ``PolicyStore._save`` always
+    # emits ``policies``, so a dict without it is by construction not a file
+    # Trellis wrote — and reading it as ``[]`` was a silent fail-open that
+    # needed no corrupt write to reach it (#413; see the module docstring).
+    if "policies" not in data:
+        msg = (
+            f"Malformed Trellis policy file at {path}: JSON object has no "
+            f'"policies" key (keys: {sorted(data)[:_MAX_REPORTED_KEYS]}). '
+            "This is not a file Trellis wrote. Fix the key, or remove the "
+            "file to run with no "
+            "policies — but note that running with no policies means every "
+            "mutation is permitted at Stage 2."
+        )
+        raise ConfigError(msg, setting=POLICY_FILENAME)
+
+    if not isinstance(data["policies"], list):
+        msg = (
+            f'Malformed Trellis policy file at {path}: expected "policies" to '
+            f"be a list, got {type(data['policies']).__name__}. Fix the file, "
+            "or remove it to run with no policies."
         )
         raise ConfigError(msg, setting=POLICY_FILENAME)
 
     policies: list[Policy] = []
-    for index, entry in enumerate(data.get("policies", [])):
+    for index, entry in enumerate(data["policies"]):
         try:
             policies.append(Policy.model_validate(entry))
-        except PydanticValidationError as exc:
+        # Broad, not just ``PydanticValidationError``. Nothing JSON-decoded
+        # should raise anything else today, but a future custom validator or
+        # a ``Policy`` bug would escape as a bare traceback carrying none of
+        # the recovery advice every other malformed shape here provides —
+        # the same complaint this module makes about ``UnicodeDecodeError``.
+        except Exception as exc:
             msg = (
                 f"Invalid policy at index {index} in {path}: {exc}. "
                 "Fix the entry, or remove it to run without that policy."

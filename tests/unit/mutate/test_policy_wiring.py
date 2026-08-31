@@ -14,6 +14,7 @@ from typing import Any
 
 import pytest
 
+from tests.policy_shapes import DEGENERATE_POLICY_FILES, DEGENERATE_POLICY_IDS
 from tests.structlog_isolation import IsolatedCliRunner
 from trellis.errors import ConfigError
 from trellis.mutate import build_curate_executor
@@ -569,3 +570,233 @@ class TestWarningsReachTheCaller:
         assert result.status == CommandStatus.SUCCESS
         assert result.warnings == []
         assert "policy_warnings" not in event_log.events[0]["payload"]
+
+
+# ---------------------------------------------------------------------------
+# #413 — the write that laundered a damaged file past the strict reader
+# ---------------------------------------------------------------------------
+
+
+class TestEnforcementRaisesOnEveryDegenerateShape:
+    """Strict means strict — including for files it *can* parse.
+
+    Two of these shapes are the point. ``{}`` and a typo'd key are valid
+    JSON, and ``data.get("policies", [])`` loaded them as **zero policies,
+    silently**: a one-character hand-edit disabled every policy in the
+    deployment while every surface reported normal. That fail-open needed
+    no corrupt write at all, so it sat *underneath* the chain #413
+    describes.
+    """
+
+    @pytest.mark.parametrize(
+        ("name", "text", "_reason"),
+        DEGENERATE_POLICY_FILES,
+        ids=DEGENERATE_POLICY_IDS,
+    )
+    def test_shape_raises_rather_than_returning_no_policies(
+        self, tmp_path: Path, name: str, text: str, _reason: str
+    ) -> None:
+        stores_dir = tmp_path / "stores"
+        stores_dir.mkdir(parents=True)
+        (stores_dir / POLICY_FILENAME).write_text(text, encoding="utf-8")
+
+        with pytest.raises(ConfigError) as exc_info:
+            load_policies(stores_dir)
+        assert exc_info.value.setting == POLICY_FILENAME
+
+    @pytest.mark.parametrize(
+        ("name", "text", "_reason"),
+        DEGENERATE_POLICY_FILES,
+        ids=DEGENERATE_POLICY_IDS,
+    )
+    def test_the_gate_cannot_be_built_from_a_damaged_file(
+        self, tmp_path: Path, name: str, text: str, _reason: str
+    ) -> None:
+        """Failing closed means the pipeline stops, not that it allows.
+
+        ``build_policy_gate`` is what ``build_curate_executor`` calls, so a
+        gate that could be built from a damaged file *is* the fail-open.
+        """
+        from trellis.stores.registry import StoreRegistry
+
+        stores_dir = tmp_path / "stores"
+        stores_dir.mkdir(parents=True)
+        (stores_dir / POLICY_FILENAME).write_text(text, encoding="utf-8")
+
+        with pytest.raises(ConfigError):
+            build_policy_gate(StoreRegistry(config={}, stores_dir=stores_dir))
+
+    def test_undecodable_bytes_raise_a_config_error_not_a_traceback(
+        self, tmp_path: Path
+    ) -> None:
+        """``UnicodeDecodeError`` is a ``ValueError``, not an ``OSError``.
+
+        Uncaught it still failed closed, but as a bare traceback with none
+        of the recovery advice every other malformed shape here carries —
+        and through the API's unhandled-exception handler that is a 500
+        whose body says only "internal server error".
+        """
+        stores_dir = tmp_path / "stores"
+        stores_dir.mkdir(parents=True)
+        (stores_dir / POLICY_FILENAME).write_bytes(b'{"policies": [\xff\xfe]}')
+
+        with pytest.raises(ConfigError):
+            load_policies(stores_dir)
+
+    def test_the_missing_key_message_names_the_keys_it_found(
+        self, tmp_path: Path
+    ) -> None:
+        """An operator's next move is to fix the key, so name it."""
+        stores_dir = tmp_path / "stores"
+        stores_dir.mkdir(parents=True)
+        (stores_dir / POLICY_FILENAME).write_text(
+            '{"policys": [], "version": 1}', encoding="utf-8"
+        )
+
+        with pytest.raises(ConfigError, match="policys"):
+            load_policies(stores_dir)
+
+
+class TestTheWriteCannotLaunderTheDamage:
+    """#413's chain, end to end, as behaviour rather than as prose."""
+
+    def test_a_crud_write_cannot_replace_a_damaged_ruleset(
+        self, tmp_path: Path
+    ) -> None:
+        """The whole defect in one test.
+
+        Before the fix every assertion below was the opposite: the store
+        loaded empty *without* recording anything, ``add`` succeeded and
+        rewrote the file as ``{"policies": []}``, ``load_policies`` then
+        parsed that perfectly valid file, and the gate allowed the very
+        command the lost policy denied. Nothing in that sequence errored.
+        """
+        from trellis.errors import DegradedStoreWriteError
+        from trellis.stores.policy_store import PolicyStore
+
+        stores_dir = tmp_path / "stores"
+        stores_dir.mkdir(parents=True)
+        path = stores_dir / POLICY_FILENAME
+
+        # A real, enforcing policy — then one character of damage to the
+        # envelope, the cheapest way to reach the bug.
+        denier = _policy(rules=[PolicyRule(operation="entity.create", action="deny")])
+        path.write_text(
+            json.dumps({"policys": [denier.model_dump(mode="json")]}),
+            encoding="utf-8",
+        )
+        damaged_bytes = path.read_bytes()
+
+        # 1. The CRUD reader degrades — by design, so ``policy list`` works.
+        store = PolicyStore(path)
+        assert store.list() == []
+        assert store.is_degraded is True
+
+        # 2. The write that used to launder it is refused...
+        with pytest.raises(DegradedStoreWriteError) as exc_info:
+            store.add(_policy(rules=[PolicyRule(operation="*", action="warn")]))
+        assert exc_info.value.recovery == f"mv {path} {path}.corrupt"
+
+        # 3. ...so the damaged bytes are still on disk...
+        assert path.read_bytes() == damaged_bytes
+
+        # 4. ...and enforcement is still failing closed on them. This is the
+        #    assertion that would have caught the original defect: before the
+        #    fix this returned ``[]`` and the pipeline ran ungoverned.
+        with pytest.raises(ConfigError):
+            load_policies(stores_dir)
+
+    def test_a_partial_ruleset_is_never_written_back(self, tmp_path: Path) -> None:
+        """The narrower, quieter version of the same laundering.
+
+        A file with one bad row still lists policies, so nothing looks
+        wrong — and a permitted write would rewrite it *without* the bad
+        row, producing a valid file that enforcement then accepts as the
+        whole ruleset.
+        """
+        from trellis.errors import DegradedStoreWriteError
+        from trellis.stores.policy_store import PolicyStore
+
+        stores_dir = tmp_path / "stores"
+        stores_dir.mkdir(parents=True)
+        path = stores_dir / POLICY_FILENAME
+        good = _policy(rules=[PolicyRule(operation="entity.create", action="deny")])
+        path.write_text(
+            json.dumps(
+                {"policies": [good.model_dump(mode="json"), {"policy_type": "bogus"}]}
+            ),
+            encoding="utf-8",
+        )
+        before = path.read_bytes()
+
+        store = PolicyStore(path)
+        assert [p.policy_id for p in store.list()] == [good.policy_id]
+
+        with pytest.raises(DegradedStoreWriteError):
+            store.add(_policy(rules=[PolicyRule(operation="*", action="warn")]))
+
+        assert path.read_bytes() == before
+        # And enforcement still refuses the file outright, rather than
+        # quietly enforcing the one row that happened to parse.
+        with pytest.raises(ConfigError):
+            load_policies(stores_dir)
+
+
+class TestZeroPoliciesStaysTransparent:
+    """#370's property, restated against the two ways of reaching zero.
+
+    #413 asks whether enforcement should distinguish "no file" from "a file
+    that parsed to zero policies". It deliberately does not — every
+    *dangerous* way of reaching zero now raises, so what is left in that
+    class is an operator declaring zero, and the two must behave
+    identically. If this test ever starts failing, the fix has changed the
+    behaviour of every deployment that never asked for governance.
+    """
+
+    def test_absent_file_and_declared_empty_list_are_indistinguishable(
+        self, tmp_path: Path
+    ) -> None:
+        absent_dir = tmp_path / "absent" / "stores"
+        absent_dir.mkdir(parents=True)
+
+        declared_dir = tmp_path / "declared" / "stores"
+        declared_dir.mkdir(parents=True)
+        (declared_dir / POLICY_FILENAME).write_text(
+            '{"policies": []}', encoding="utf-8"
+        )
+
+        assert load_policies(absent_dir) == load_policies(declared_dir) == []
+
+        from trellis.stores.registry import StoreRegistry
+
+        absent_gate = build_policy_gate(StoreRegistry(config={}, stores_dir=absent_dir))
+        declared_gate = build_policy_gate(
+            StoreRegistry(config={}, stores_dir=declared_dir)
+        )
+        assert (
+            absent_gate.check(_cmd()) == declared_gate.check(_cmd()) == (True, "", [])
+        )
+
+    def test_removing_the_last_policy_leaves_an_enforceable_file(
+        self, tmp_path: Path
+    ) -> None:
+        """``{"policies": []}`` is reachable through a sanctioned surface.
+
+        That is the reason it must not raise: it is what ``trellis policy
+        remove`` writes when the last policy goes, so treating it as
+        suspicious would make an ordinary operator action break the
+        mutation pipeline.
+        """
+        from trellis.stores.policy_store import PolicyStore
+
+        stores_dir = tmp_path / "stores"
+        stores_dir.mkdir(parents=True)
+        store = PolicyStore(resolve_policy_path(stores_dir))
+        policy = _policy(rules=[PolicyRule(operation="*", action="deny")])
+        store.add(policy)
+        store.remove(policy.policy_id)
+
+        assert json.loads(
+            (stores_dir / POLICY_FILENAME).read_text(encoding="utf-8")
+        ) == {"policies": []}
+        assert load_policies(stores_dir) == []

@@ -3279,7 +3279,14 @@ paths:
       - curate
   /api/v1/policies:
     get:
-      description: List all governance policies.
+      description: 'List all governance policies.
+
+
+        Serves what parsed even on a damaged file, and says so: ``count``
+
+        alone under-reports a degraded store, so a caller reading it as the
+
+        size of the ruleset would be wrong.'
       operationId: list_policies_api_v1_policies_get
       responses:
         '200':
