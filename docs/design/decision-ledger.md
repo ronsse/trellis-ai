@@ -313,6 +313,81 @@ promote→review→serve chain. **The test refined the scope rather than flippin
 **Reopen if:** an integration audit shows eval fixtures cannot execute the same promote
 pipeline code production uses.
 
+### T-4 · #375 option 2 is a one-kwarg stamp, not a write-path redesign
+
+**No panel — the alternative is refuted by the code, and the mechanism already ships.**
+Taken 2026-08-31 by the orchestrator while dispatching the #375 implementation.
+
+The [#375 plan](./plan-375-graph-candidates.md) §3 option 2 left one fork open: the 200
+`cli.*` `Activity` rows crowding out half the graph axis's served slots "need a write-path
+decision about what these rows are", between stamping `node_role="structural"` (retrieval
+semantics fit exactly, definition fits loosely) and the "stronger reading" that a cron
+invocation is an **Operational-Plane fact** the Knowledge Plane should not hold at all.
+
+**Take the stamp. The plane-violation reading is wrong on the evidence**: the Activity is
+the anchor for this graph's `wasGeneratedBy` / `wasInformedBy` provenance edges, so not
+minting it deletes real structure — 973 of the graph's 977 edges are PROV.
+
+Three facts found while grounding the dispatch, none of which were in the plan doc:
+
+- **The filter already exists and is in live use.** `GraphSearch` excludes
+  `node_role == "structural"` client-side (`retrieve/strategies.py:875-876`) with
+  `include_structural=True` as the escape hatch, and production already carries **279
+  `SoftwareApplication` nodes stamped `structural`**. The mechanism is proven on live
+  data, not theoretical.
+- **Filtering these was always the design — and, corrected below, the filter *did* land.**
+  `meta/recorder.py:543-545` reads *"Stamp the wasAssociatedWith edge so PackBuilder's
+  eventual filter ... matches without scanning Activity properties."*
+- **`_create_activity` passes no `node_role`**, so it takes the `"semantic"` default from
+  `GraphStore.upsert_node`. The whole fix is one kwarg at `meta/recorder.py:533`.
+
+**Verified against production before dispatch** (read-only): 200 `Activity`/`semantic`
+rows named `cli.*`, **80 `Activity`/`semantic` rows that are not** — real trace-extraction
+records that must stay semantic, which is why the stamp goes at the meta-recorder's mint
+site and not on `Activity` as a type. Also checked `_materialise_node_if_absent`, which I
+suspected of being a second churn source: it is not — ~10 nodes total.
+
+**Correction, same day, found by the implementing agent.** This entry first claimed the
+cohort-F2 filter "never landed", and both this ledger and PR #432 said so. **That is
+false.** `PackBuilder._is_meta_activity` (`retrieve/pack_builder.py:1621`) exists on
+`main`, is on by default (`include_meta=False`), requires *both* `node_type == ACTIVITY`
+and an `agent_id` prefixed `trellis_meta_` so a user-authored Activity is not caught, and
+emits `reason="meta_activity_filter"`. It fires on every recent production pack.
+
+The plan doc's §2.3 is wrong in the same direction — "nothing filters them" — and that is
+also why those node types read **0 servings** in §2.1 rather than 54: they were filtered
+*downstream*, not never served.
+
+**The correction strengthens the decision rather than undermining it, and by a mechanism
+neither the plan nor this entry had.** `_is_meta_activity` runs *after* `GraphSearch`
+slices `nodes[:limit]`, so the 200 rows were **spending candidate slots and then being
+discarded** — production's own `rejected_items[]` shows 11–14 `meta_activity_filter`
+rejections on each of the eight most recent 50-item packs. The `node_role == "structural"`
+filter runs *before* the slice. So the stamp **frees slots**, where the existing filter
+merely hides rows after they have already cost the budget. That is the §2.3 effect by a
+shorter path than the edge-traversal filter `recorder.py`'s comment planned.
+
+Recorded rather than quietly edited because the original claim was reasoned from a code
+comment describing future work, without checking whether the future had arrived — the
+"a closed issue hiding an open gate" failure run in reverse, and the second time this
+week a confident claim of mine about what "never landed" was wrong.
+
+**Left open for review, not resolved silently:** `NodeRole.STRUCTURAL`'s *definition*
+(`schemas/enums.py:24-25`, "regenerated from source (e.g., columns, function parameters)")
+does not describe a meta-Activity, even though its retrieval semantics do. Widening a
+definition to fit a new case is how `content_type` and `document_form` drifted apart in
+#325/#326, so the implementing agent must argue the widening explicitly in the enum
+docstring and surface it at the top of its PR.
+
+**Operator half, not the swarm's:** `node_role` is immutable across SCD-2 versions
+(`stores/base/graph.py:157`), so the 200 existing rows cannot be re-stamped. They need
+`retention.prune` — or simply time, since only ~5/day are minted and they fall past rank
+50 within days once minting stops. That is production data; it comes to Nate.
+
+**Reopen if:** the stamp turns out to raise on the merge-within-window dedup path (it
+should not — that path appends edges rather than re-upserting the node), or if suppressing
+`cli.*` fails to move the three cited gotchas into the served window within a week.
+
 ### T-3 · Govern the document and vector planes (issue #360)
 
 **Panel: unanimous** (2026-08-27, $0.0243) — `openai/gpt-5.5` → B (0.74),
