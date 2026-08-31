@@ -8,9 +8,17 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from trellis.errors import StaleStoreWriteError
 from trellis.learning import PROMOTE_RECOMMENDATIONS
+from trellis.schemas.advisory import (
+    Advisory,
+    AdvisoryCategory,
+    AdvisoryEvidence,
+)
+from trellis.stores.advisory_store import AdvisoryStore
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
+from trellis_cli import analyze
 from trellis_cli.main import app
 from trellis_cli.stores import _reset_registry
 
@@ -1280,3 +1288,180 @@ class TestTruncationReachesTheOperator:
         assert "TRUNCATED" in capped.stdout
         assert "TRUNCATED" not in raised.stdout
         assert "Packs assembled: 5001" in raised.stdout
+
+
+_REFUSAL_MESSAGE = "Refusing to write the Trellis advisory file: it changed."
+
+
+class TestAdvisoryCommandsOnAStaleStore:
+    """#438 — the refusal no pre-check can see.
+
+    ``_exit_if_advisory_store_degraded`` runs once, at load time, against a
+    file that was healthy. Another process writing it afterwards is a
+    second, transient way the in-memory view stops being the file, and
+    before this the command would have replaced that process's rows. It
+    must arrive as a rendered refusal at the same exit code as its degraded
+    sibling, not as a traceback.
+    """
+
+    @staticmethod
+    def _advisory(message: str) -> object:
+        return Advisory(
+            category=AdvisoryCategory.ENTITY,
+            confidence=0.7,
+            message=message,
+            evidence=AdvisoryEvidence(
+                sample_size=10,
+                success_rate_with=0.8,
+                success_rate_without=0.4,
+                effect_size=0.4,
+            ),
+            scope="global",
+        )
+
+    def _seed_scored_advisory(self, registry: StoreRegistry, path: Path) -> str:
+        """One advisory in the file, plus enough graded packs to score it.
+
+        The fitness loop writes once per scored advisory, so this is what
+        makes the command reach a write at all — without it the refusal
+        would never fire and the test would pass vacuously.
+        """
+        advisory = self._advisory("seeded advisory")
+        AdvisoryStore(path).put(advisory)  # type: ignore[arg-type]
+
+        event_log = registry.operational.event_log
+        for i in range(4):  # > _ADVISORY_MIN_PRESENTATIONS
+            pack_id = f"an-adv-pack-{i}"
+            event_log.emit(
+                EventType.PACK_ASSEMBLED,
+                source="test",
+                entity_id=pack_id,
+                entity_type="pack",
+                payload={
+                    "intent": "advisory probe",
+                    "advisory_ids": [advisory.advisory_id],  # type: ignore[attr-defined]
+                },
+            )
+            event_log.emit(
+                EventType.FEEDBACK_RECORDED,
+                source="test",
+                entity_id=pack_id,
+                entity_type="pack",
+                payload={"pack_id": pack_id, "success": True, "rating": 1.0},
+            )
+        return advisory.advisory_id  # type: ignore[attr-defined,no-any-return]
+
+    def _second_writer_after_load(
+        self, monkeypatch: pytest.MonkeyPatch, path: Path
+    ) -> str:
+        """Another process appends a row between the command's load and save.
+
+        Patched at the store constructor the command calls, not at any
+        guard: the command gets a real store that really loaded the file,
+        and the file really moves on underneath it.
+        """
+        theirs = self._advisory("written by the other process")
+
+        def _racing_store(store_path: Path) -> AdvisoryStore:
+            store = AdvisoryStore(store_path)
+            AdvisoryStore(path).put(theirs)  # type: ignore[arg-type]
+            return store
+
+        monkeypatch.setattr(analyze, "AdvisoryStore", _racing_store)
+        return theirs.advisory_id  # type: ignore[attr-defined,no-any-return]
+
+    def test_effectiveness_exits_two_rather_than_traceback(
+        self,
+        tmp_path: Path,
+        temp_stores: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Same exit code as the degraded refusal: a cron wrapper branches on it."""
+        path = tmp_path / "data" / "stores" / "advisories.json"
+        self._seed_scored_advisory(temp_stores, path)
+        theirs = self._second_writer_after_load(monkeypatch, path)
+
+        result = runner.invoke(app, ["analyze", "advisory-effectiveness"])
+
+        assert result.exit_code == 2, result.output
+        assert "ADVISORY WRITE REFUSED" in result.stdout
+        # The refusal names the retry, not just the fact of refusing.
+        flat = result.stdout.replace("\n", "")
+        assert "trellis analyze advisory-effectiveness --dry-run" in flat
+        # The other process's advisory is still there.
+        assert AdvisoryStore(path).get(theirs) is not None
+
+    def test_effectiveness_json_stays_parseable(
+        self,
+        tmp_path: Path,
+        temp_stores: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``--format json`` is a machine contract; a traceback is not one."""
+        path = tmp_path / "data" / "stores" / "advisories.json"
+        self._seed_scored_advisory(temp_stores, path)
+        self._second_writer_after_load(monkeypatch, path)
+
+        result = runner.invoke(
+            app, ["analyze", "advisory-effectiveness", "--format", "json"]
+        )
+
+        assert result.exit_code == 2, result.output
+        payload = json.loads(result.stdout.strip())
+        assert payload["status"] == "refused"
+        assert payload["code"] == "STALE_STORE_WRITE"
+        assert payload["path"] == str(path)
+
+    def test_a_clean_run_is_not_reported_as_refused(
+        self, tmp_path: Path, temp_stores: StoreRegistry
+    ) -> None:
+        """The negative control — no second writer, no refusal."""
+        path = tmp_path / "data" / "stores" / "advisories.json"
+        self._seed_scored_advisory(temp_stores, path)
+
+        result = runner.invoke(app, ["analyze", "advisory-effectiveness"])
+
+        assert result.exit_code == 0, result.output
+        assert "ADVISORY WRITE REFUSED" not in result.stdout
+
+    def test_generate_advisories_renders_the_refusal_too(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``generate-advisories`` writes through ``put_many`` and can refuse.
+
+        Driven by making the generator raise rather than by racing a real
+        one: generation only writes when the window actually yields
+        advisories, and a seed engineered to clear the effect-size and
+        sample floors would pin the generator's statistics rather than this
+        command's handling of a refusal from below. The claim under test is
+        the surface's — a refusal arrives rendered, at exit 2, in both
+        formats — and the store's own guard is pinned in
+        ``tests/unit/stores/test_advisory_store.py``.
+        """
+        path = tmp_path / "data" / "stores" / "advisories.json"
+
+        class _RefusingGenerator:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                pass
+
+            def generate(self, *, days: int = 30) -> None:
+                raise StaleStoreWriteError(
+                    _REFUSAL_MESSAGE,
+                    store="advisory",
+                    path=str(path),
+                    recovery="trellis analyze advisory-effectiveness --dry-run",
+                )
+
+        monkeypatch.setattr(analyze, "AdvisoryGenerator", _RefusingGenerator)
+
+        text = runner.invoke(app, ["analyze", "generate-advisories"])
+        assert text.exit_code == 2, text.output
+        assert "ADVISORY WRITE REFUSED" in text.stdout
+
+        json_run = runner.invoke(
+            app, ["analyze", "generate-advisories", "--format", "json"]
+        )
+        assert json_run.exit_code == 2, json_run.output
+        payload = json.loads(json_run.stdout.strip())
+        assert payload["status"] == "refused"
+        assert payload["code"] == "STALE_STORE_WRITE"

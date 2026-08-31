@@ -24,6 +24,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from trellis.core.error_sanitize import sanitize_error_message
 from trellis.core.vector_metadata import resolve_vector_store
+from trellis.errors import StaleStoreWriteError
 from trellis.learning.scoring import (
     prepare_learning_promotions,
     submit_learning_promotion,
@@ -227,7 +228,25 @@ def generate_advisories(
         min_sample_size=min_sample,
         min_effect_size=min_effect,
     )
-    report = generator.generate(days=days)
+    try:
+        report = generator.generate(days=days)
+    except StaleStoreWriteError as exc:
+        # 409, not the 500 the unhandled-exception handler would produce:
+        # that handler's body says only "internal server error", and this
+        # refusal is both retryable and the caller's to retry. The host CLI
+        # and this container write the same bind-mounted file (#438).
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "stale_store_write",
+                "message": (
+                    "The advisory file changed after this request read it. "
+                    "Generation was refused rather than replace whatever "
+                    "landed in between. Retry."
+                ),
+                "path": exc.path,
+            },
+        ) from exc
     # ``ok`` over a refused run is the same lie as an unexplained zero: the
     # payload carries ``store_degradation``, but a caller that reads only the
     # headline would record a clean nightly generation (#393).

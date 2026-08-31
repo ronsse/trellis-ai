@@ -846,6 +846,12 @@ def run_advisory_fitness_loop(
             surface the message never reaches the operator at all
             (``unhandled_exception_handler`` deliberately hides it), taking
             the ``mv`` recovery command with it (#393).
+        StaleStoreWriteError: another process wrote the advisory file after
+            this store read it. There is no pre-check for this one — the
+            store was healthy when the loop started — so it surfaces from
+            whichever ``put`` / ``suppress`` / ``restore`` first reaches a
+            write, and any adjustment made before that point has landed.
+            Transient, unlike the above: re-read and re-run (#438).
     """
     advisory_store.refuse_if_degraded()
 

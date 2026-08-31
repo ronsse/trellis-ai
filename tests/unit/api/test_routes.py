@@ -1257,3 +1257,46 @@ class TestAdvisoryGenerateOnADegradedStore:
 
         assert resp.status_code == 200, resp.text
         assert resp.json()["count"] == 0
+
+    def test_a_stale_write_is_409_rather_than_a_hidden_500(
+        self, client, tmp_path, monkeypatch
+    ):
+        """#438 — this container and the host CLI write the same file.
+
+        409 rather than the 500 ``unhandled_exception_handler`` would
+        produce: that handler's body says only "internal server error", so
+        the caller would learn nothing about a refusal that is entirely
+        theirs to retry. Driven by making the generator raise, because
+        generation only writes when the window yields advisories — the
+        claim under test is the route's, and the store's own guard is
+        pinned in ``tests/unit/stores/test_advisory_store.py``.
+        """
+        from trellis.errors import StaleStoreWriteError
+        from trellis_api.routes import admin as admin_routes
+
+        message = "Refusing to write the Trellis advisory file: it changed."
+
+        path = tmp_path / "stores" / "advisories.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{"advisories": []}', encoding="utf-8")
+
+        class _RefusingGenerator:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def generate(self, *, days=30):
+                raise StaleStoreWriteError(
+                    message,
+                    store="advisory",
+                    path=str(path),
+                    recovery="trellis analyze advisory-effectiveness --dry-run",
+                )
+
+        monkeypatch.setattr(admin_routes, "AdvisoryGenerator", _RefusingGenerator)
+
+        resp = client.post("/api/v1/advisories/generate")
+
+        assert resp.status_code == 409, resp.text
+        detail = resp.json()["detail"]
+        assert detail["code"] == "stale_store_write"
+        assert detail["path"] == str(path)

@@ -51,7 +51,7 @@ from trellis.core.vector_metadata import (
     resolve_vector_store,
     sync_vector_metadata,
 )
-from trellis.errors import BackendNotInstalledError
+from trellis.errors import BackendNotInstalledError, StaleStoreWriteError
 from trellis.learning import (
     analyze_learning_observations,
     build_learning_observations_from_event_log,
@@ -405,6 +405,17 @@ class CurateCycleResult:
     #: cycle: zeros for the advisory counts are indistinguishable from a
     #: quiet night unless something says which it was.
     advisory_store_degraded: dict[str, Any] | None = None
+    #: Set when another process wrote the advisory file while this cycle
+    #: held a view of it, so the remaining advisory writes were refused
+    #: rather than replacing that process's rows (#438). Distinct from
+    #: :attr:`advisory_store_degraded` because the *fix* differs: a
+    #: degraded store needs an operator to look at the file, a stale one
+    #: needs nothing at all — the next cycle re-reads and re-derives. It is
+    #: carried anyway rather than swallowed, because a cycle that wrote
+    #: fewer advisories than it computed is not a quiet night, and a
+    #: refusal that recurs every night is a second writer nobody knows
+    #: about.
+    advisory_store_stale: dict[str, Any] | None = None
 
     @property
     def status(self) -> str:
@@ -423,8 +434,19 @@ class CurateCycleResult:
         cron job would misreport those. The degradation is carried in
         ``status``, in ``advisory_store_degraded``, in a red banner on the
         text surface, and in an ``error``-level log line.
+
+        ``"stale"`` is the third value and reports the other refusal
+        (#438): the file was healthy, another process wrote it mid-cycle,
+        and this cycle declined to overwrite that. Not folded into
+        ``"degraded"`` — a wrapper that pages on ``degraded`` should not
+        page on a transient race — and not folded into ``"ok"``, because
+        the advisory counts are then lower than the cycle computed and
+        nothing else says why. ``degraded`` wins if both somehow apply: it
+        is the one that needs a human.
         """
-        return "degraded" if self.advisory_store_degraded else "ok"
+        if self.advisory_store_degraded:
+            return "degraded"
+        return "stale" if self.advisory_store_stale else "ok"
 
     def to_dict(self) -> dict[str, Any]:
         """Flat JSON-friendly view for ``--format json`` and structured logs."""
@@ -435,6 +457,7 @@ class CurateCycleResult:
             "advisories_suppressed": self.advisories_suppressed,
             "advisories_boosted": self.advisories_boosted,
             "advisory_store_degraded": self.advisory_store_degraded,
+            "advisory_store_stale": self.advisory_store_stale,
             "learning_observations": self.learning_observations,
             "learning_candidates": self.learning_candidates,
             "candidates_path": self.candidates_path,
@@ -530,6 +553,7 @@ def run_curation_cycle(
         advisories_suppressed=advisory["advisories_suppressed"],
         advisories_boosted=advisory["advisories_boosted"],
         advisory_store_degraded=advisory["store_degradation"],
+        advisory_store_stale=advisory["store_stale"],
         learning_observations=learning["learning_observations"],
         learning_candidates=learning["learning_candidates"],
         candidates_path=learning["candidates_path"],
@@ -646,29 +670,71 @@ def _curate_stage_advisories(
             "advisories_suppressed": 0,
             "advisories_boosted": 0,
             "store_degradation": degradation.to_dict() if degradation else None,
+            "store_stale": None,
         }
 
-    with wrap_cli_meta_analysis(
-        agent_suffix="worker",
-        analyzer_name="cli.worker.curate.advisories",
-        disabled=no_meta_trace,
-    ) as record:
-        gen = AdvisoryGenerator(event_log, advisory_store).generate(days=days)
-        fitness = run_advisory_fitness_loop(event_log, advisory_store, days=days)
-        generated = gen.advisories_generated
-        refused = gen.findings_refused_no_comparison_arm
-        suppressed = len(fitness.advisories_suppressed)
-        if record.enabled and (generated or suppressed):
-            record.produced_finding(
-                f"curate-advisories-d{days}",
-                finding_type="AdvisoryCycleReport",
-            )
+    generated = refused = suppressed = boosted = 0
+    stale: dict[str, Any] | None = None
+    try:
+        with wrap_cli_meta_analysis(
+            agent_suffix="worker",
+            analyzer_name="cli.worker.curate.advisories",
+            disabled=no_meta_trace,
+        ) as record:
+            gen = AdvisoryGenerator(event_log, advisory_store).generate(days=days)
+            generated = gen.advisories_generated
+            refused = gen.findings_refused_no_comparison_arm
+            fitness = run_advisory_fitness_loop(event_log, advisory_store, days=days)
+            suppressed = len(fitness.advisories_suppressed)
+            boosted = len(fitness.advisories_boosted)
+            if record.enabled and (generated or suppressed):
+                record.produced_finding(
+                    f"curate-advisories-d{days}",
+                    finding_type="AdvisoryCycleReport",
+                )
+    except StaleStoreWriteError as exc:
+        # Another process wrote the advisory file while this cycle held a
+        # view of it (#438). Caught here and nowhere deeper for the same
+        # reason the degraded pre-check is here: an escaping raise would
+        # take the *learning* stage down with it, and that stage neither
+        # reads nor writes this file.
+        #
+        # Deliberately **not** added to ``skipped_stages``. Unlike the
+        # degraded case the stage really ran, and the fitness loop writes
+        # per advisory, so some adjustments may already have landed — the
+        # counts below are what did. Calling that a skip would be a second
+        # wrong report on top of the first. ``status`` goes to ``"stale"``
+        # and :attr:`CurateCycleResult.advisory_store_stale` carries the
+        # refusal.
+        stale = {
+            "path": exc.path,
+            "code": exc.code,
+            "message": exc.message,
+            "recovery": exc.recovery,
+        }
+        # ``error``, not ``exception``: this is an expected, transient race
+        # between two writers, and a traceback in the nightly log would
+        # read as a crash. ``message`` already carries the recovery.
+        logger.error(  # noqa: TRY400 — no traceback on purpose; see above
+            "worker_curate.advisories_refused_stale_store",
+            **stale,
+            advisories_generated=generated,
+            advisories_suppressed=suppressed,
+            impact=(
+                "Another process wrote the advisory file mid-cycle; this "
+                "cycle's remaining advisory writes were refused rather than "
+                "replacing it. The counts above are what landed before the "
+                "refusal. No operator action is needed: the next cycle "
+                "re-reads the file and re-derives."
+            ),
+        )
     return {
         "advisories_generated": generated,
         "advisories_refused": refused,
         "advisories_suppressed": suppressed,
-        "advisories_boosted": len(fitness.advisories_boosted),
+        "advisories_boosted": boosted,
         "store_degradation": None,
+        "store_stale": stale,
     }
 
 
@@ -769,6 +835,22 @@ def _render_cycle_text(result: CurateCycleResult) -> None:
                 "Advisory generation and the fitness loop were skipped; "
                 "writes are refused so the file is intact."
             ),
+        )
+    if result.advisory_store_stale:
+        # Yellow, not red: nothing is broken and nothing needs an operator.
+        # Printed all the same, because the advisory counts above are lower
+        # than this cycle computed and this is the only line that says so
+        # (#438).
+        stale = result.advisory_store_stale
+        console.print(
+            "  [bold yellow]ADVISORY WRITE REFUSED (stale)[/bold yellow] — "
+            f"{escape(str(stale['message']))}",
+            soft_wrap=True,
+        )
+        console.print(
+            "    Another process wrote the file mid-cycle; its rows are "
+            "intact. The next cycle re-reads and re-derives.",
+            soft_wrap=True,
         )
     if result.skipped_stages:
         console.print(f"  [dim]skipped: {', '.join(result.skipped_stages)}[/dim]")
