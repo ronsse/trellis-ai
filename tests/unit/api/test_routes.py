@@ -1162,6 +1162,59 @@ class TestPolicyRoutesOnADegradedStore:
 
         assert path.read_bytes() == before
 
+    def test_the_stale_refusal_reaches_the_client_as_a_409(
+        self, client, tmp_path, monkeypatch
+    ) -> None:
+        """The route's stale branch, over HTTP rather than at the store.
+
+        ``test_a_stale_write_is_refused_rather_than_silently_winning``
+        drives ``PolicyStore`` directly, so nothing exercised
+        ``_refusal_http_error``'s stale arm through a request: deleting
+        ``recovery`` from that response body left all 266 targeted tests
+        green. ``recovery`` is the entire stated justification for
+        answering 409 rather than 500 ("that body says only 'internal
+        server error' and drops the recovery command"), so it has to be
+        asserted on the response a client actually receives.
+
+        The store is injected already-behind. Now that the route builds one
+        per request the real window is microseconds wide, which is the
+        point of the compare-and-swap — it is not reproducible by racing.
+        """
+        from trellis.stores.policy_store import PolicyStore
+
+        path = tmp_path / "stores" / "policies.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        behind = PolicyStore(path)
+        PolicyStore(path).add(
+            Policy(
+                policy_type=PolicyType.MUTATION,
+                scope=PolicyScope(level="global"),
+                rules=[PolicyRule(operation="*", action="deny")],
+            )
+        )
+        landed = path.read_bytes()
+        monkeypatch.setattr(
+            "trellis_api.routes.policies._get_policy_store", lambda: behind
+        )
+
+        resp = client.post(
+            "/api/v1/policies",
+            json={
+                "policy_type": "mutation",
+                "scope": {"level": "team", "value": "core"},
+                "rules": [{"operation": "*", "action": "warn"}],
+            },
+        )
+
+        assert resp.status_code == 409
+        detail = resp.json()["detail"]
+        # Its own code: retry, rather than go and look at the file.
+        assert detail["code"] == "stale_store_write"
+        assert detail["recovery"] == "trellis policy list"
+        # Nothing was damaged, so there is no degradation to report.
+        assert detail["store_degradation"] is None
+        assert path.read_bytes() == landed
+
 
 class TestAdvisoryGenerateOnADegradedStore:
     """#393 — the REST admin surface must not headline ``ok`` over a refusal.

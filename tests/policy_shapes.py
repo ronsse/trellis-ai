@@ -31,6 +31,18 @@ DEGENERATE_POLICY_FILES: list[tuple[str, str, str]] = [
     ("typoed_key", '{"policys": [{"policy_id": "x"}]}', "malformed_envelope"),
     ("bare_list", "[]", "malformed_envelope"),
     ("scalar", '"not a policy file"', "malformed_envelope"),
+    # A *non-string* scalar, deliberately alongside the string one. Both
+    # readers guard the envelope with an ``isinstance(data, dict)`` check,
+    # and deleting that check leaves a JSON *string* still raising — ``in``
+    # on a string is a substring test, so ``"policies" not in "not a policy
+    # file"`` is True and the missing-key branch catches it by accident. A
+    # number or a null has no ``in`` at all, so the same deletion turns a
+    # ConfigError carrying the recovery advice into a bare ``TypeError``
+    # traceback: still failing closed, but as the unhandled shape this
+    # module's whole point is to not produce. Measured: with only the
+    # string scalar present, removing the check left all 266 targeted
+    # tests green.
+    ("numeric_scalar", "3", "malformed_envelope"),
     ("empty_file", "", "malformed_json"),
     ("truncated_json", '{"policies": [{"policy_i', "malformed_json"),
 ]

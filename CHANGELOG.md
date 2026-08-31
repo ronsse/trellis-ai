@@ -103,6 +103,18 @@ All notable changes to Trellis will be documented in this file.
 
 ### Changed
 
+- **BREAKING: `trellis policy show --format json` now emits an envelope**
+  — `{"status", "policy"[, "store_degradation"]}` — where it emitted a bare
+  `Policy` dump. Forced by `extra="forbid"`: a dump plus a `store_degradation`
+  key is a payload `Policy.model_validate` *rejects*, so round-tripping callers
+  would have broken precisely when the store is degraded. Read the policy from
+  `.policy`. This matches the nesting `GET /api/v1/policies/{id}` already used.
+  `policy list` and `policy show` also gain the house `status` key
+  (`docs/design/adr-cli-exit-codes.md`), and every `trellis policy` command
+  exits 5 (`EXIT_STORE`) rather than 0 when the policy file loaded degraded —
+  including the read-only ones, because a partial view of an access-control
+  file must not be scriptable as the whole ruleset (#413).
+
 - **`get_version()` now returns a real version.** It read `trellis._version`,
   a module no configured build hook ever writes, so it always fell through to
   `0.0.0-dev`. It now resolves from the installed distribution metadata that

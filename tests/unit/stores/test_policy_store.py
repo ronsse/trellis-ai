@@ -691,6 +691,107 @@ class TestDegradationIsNotTheOnlyStaleView:
             store.add(_policy(scope=PolicyScope(level="team", value="core")))
         assert path.read_bytes() == before
 
+    @pytest.mark.parametrize("write", ["add", "remove"])
+    def test_a_stale_write_never_enters_the_write_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, write: str
+    ) -> None:
+        """The stale half of ``test_a_degraded_write_never_enters_the_write_path``.
+
+        ``_save`` calls ``refuse_if_stale`` too, and ``_save_or_roll_back``
+        undoes the mutation, so deleting the guard from ``add`` leaves the
+        exception and the final ``list()`` identical — the same masking that
+        made the *degraded* guard undetectable when this file was first
+        written, and that #414 had already been bitten by once. Measured:
+        removing ``refuse_if_stale()`` from ``add`` left all 266 targeted
+        tests green before this assertion existed.
+
+        The difference it protects is the same one, for the same reason: a
+        store outlives the refused call in every caller that catches and
+        keeps serving, and FastAPI runs sync routes in a threadpool, so a
+        concurrent reader between the mutation and the rollback sees a
+        policy that is not on disk and never will be.
+        """
+        path = tmp_path / "policies.json"
+        mine = PolicyStore(path)
+        mine.add(_policy())
+
+        theirs = _policy(scope=PolicyScope(level="domain", value="payments"))
+        PolicyStore(path).add(theirs)  # another process moves the file on
+
+        entered: list[str] = []
+        monkeypatch.setattr(
+            mine,
+            "_save",
+            lambda: entered.append("save"),  # type: ignore[method-assign]
+        )
+        attempt = (
+            (lambda: mine.add(_policy(scope=PolicyScope(level="team", value="core"))))
+            if write == "add"
+            else (lambda: mine.remove(theirs.policy_id))
+        )
+
+        with pytest.raises(StaleStoreWriteError):
+            attempt()
+
+        assert entered == [], "the write path was entered on a stale store"
+
+    def test_save_refuses_a_stale_write_on_its_own(self, tmp_path: Path) -> None:
+        """The unconditional backstop, pinned separately from its callers.
+
+        The stale half of ``test_save_refuses_on_its_own``. ``add`` and
+        ``remove`` refuse first, which masks this completely: removing
+        ``refuse_if_stale()`` from ``_save`` alone left all 266 targeted
+        tests green. It is what protects a future write path added without
+        the leading guard — the same claim the degraded guard's docstring
+        makes ("not calling it is never a way to avoid one"), which is a
+        claim about ``_save`` and so needs its own test.
+        """
+        path = tmp_path / "policies.json"
+        store = PolicyStore(path)
+        store.add(_policy())
+        PolicyStore(path).add(_policy(scope=PolicyScope(level="domain", value="x")))
+
+        with pytest.raises(StaleStoreWriteError):
+            store._save()
+
+    def test_the_fingerprint_catches_a_same_size_same_mtime_replacement(
+        self, tmp_path: Path
+    ) -> None:
+        """``st_ino`` is the load-bearing field, and only it catches this.
+
+        ``_fingerprint``'s docstring says so — "every write here lands
+        through ``os.replace`` from a fresh temp file, so a completed write
+        by any process changes the inode even if size and mtime happen to
+        collide" — but nothing tested the collision, and dropping
+        ``st_ino`` from the tuple left all 266 targeted tests green. The
+        collision is not exotic: a filesystem with coarse mtime granularity
+        reaches it for any two same-size writes inside one tick, and this
+        file is a small JSON document that two processes rewrite.
+        """
+        path = tmp_path / "policies.json"
+        path.write_text('{"policies": []}', encoding="utf-8")
+        before = path.stat()
+        store = PolicyStore(path)
+
+        # Another process replaces the file with same-size content, and the
+        # filesystem hands back the same mtime — so size and mtime agree and
+        # only the inode has moved.
+        replacement = tmp_path / "other.json"
+        replacement.write_text('{"policies":[] }', encoding="utf-8")
+        assert replacement.stat().st_size == before.st_size
+        replacement.replace(path)
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+
+        after = path.stat()
+        assert (after.st_mtime_ns, after.st_size) == (
+            before.st_mtime_ns,
+            before.st_size,
+        ), "the collision this test exists for was not constructed"
+        assert after.st_ino != before.st_ino
+
+        with pytest.raises(StaleStoreWriteError):
+            store.add(_policy())
+
     @pytest.mark.skipif(
         os.geteuid() == 0, reason="root traverses any directory regardless of mode"
     )

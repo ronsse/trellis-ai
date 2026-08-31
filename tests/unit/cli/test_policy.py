@@ -8,6 +8,10 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from trellis.errors import StaleStoreWriteError
+from trellis.schemas.enums import Enforcement, PolicyType
+from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
+from trellis.stores.policy_store import PolicyStore
 from trellis_cli.main import app
 
 runner = CliRunner()
@@ -515,3 +519,160 @@ class TestWritesAreRefusedOnADamagedFile:
         assert result.exit_code == 5
         payload = json.loads(result.stdout.strip())
         assert payload["store_degradation"]["reason"] == "malformed_json"
+
+
+class TestWritesAreRefusedWhenAnotherProcessWroteFirst:
+    """The *stale* refusal, at the surface that renders it.
+
+    Every existing test here covers the **degraded** refusal. The stale one
+    is a different exception, a different code, a different recovery
+    command and a different renderer (``_exit_on_refused_write`` reads the
+    exception, because there is no ``PolicyLoadDegradation`` to read), and
+    nothing exercised it: deleting the ``except StoreWriteRefusedError``
+    handler from ``policy add`` **or** from ``policy remove`` left all 266
+    targeted tests green. The PR body's "exit 5 on the CLI" for a stale
+    store was an unverified claim about dead-as-far-as-the-suite code.
+
+    A stale store is injected rather than raced for. The CLI builds its
+    store per command, so the real window is the microseconds between
+    ``_get_policy_store()`` and the write — deterministic only by handing
+    the command a view that is already behind.
+    """
+
+    @staticmethod
+    def _policy(**kwargs) -> Policy:
+        defaults = {
+            "policy_type": PolicyType.MUTATION,
+            "scope": PolicyScope(level="global"),
+            "rules": [PolicyRule(operation="entity.create", action="deny")],
+            "enforcement": Enforcement.ENFORCE,
+        }
+        defaults.update(kwargs)
+        return Policy(**defaults)
+
+    @classmethod
+    def _stale_store(
+        cls, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> tuple[Path, Policy]:
+        """Hand the CLI a store loaded before another process wrote."""
+        path = tmp_path / "data" / "stores" / "policies.json"
+        PolicyStore(path).add(cls._policy())
+
+        behind = PolicyStore(path)  # loads [A]
+        theirs = cls._policy(scope=PolicyScope(level="domain", value="payments"))
+        PolicyStore(path).add(theirs)  # file becomes [A, B]
+
+        monkeypatch.setattr("trellis_cli.policy._get_policy_store", lambda: behind)
+        return path, theirs
+
+    @pytest.mark.parametrize("output_format", ["text", "json"])
+    def test_add_renders_the_refusal_instead_of_a_traceback(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, output_format: str
+    ) -> None:
+        path, _ = self._stale_store(tmp_path, monkeypatch)
+        before = path.read_bytes()
+
+        result = runner.invoke(
+            app,
+            [
+                "policy",
+                "add",
+                "--operation",
+                "entity.delete",
+                "--format",
+                output_format,
+            ],
+        )
+
+        # 5, not 1: an unhandled StoreWriteRefusedError is exit 1 with a
+        # traceback and none of the recovery advice.
+        assert result.exit_code == 5, result.stdout
+        assert path.read_bytes() == before
+        if output_format == "json":
+            payload = json.loads(result.stdout.strip())
+            assert payload["status"] == "refused"
+            # Its own code: the operator's next move is to retry, not to go
+            # and look at the file.
+            assert payload["code"] == "STALE_STORE_WRITE"
+            assert payload["recovery"] == "trellis policy list"
+        else:
+            assert "POLICY WRITE REFUSED" in result.stdout
+
+    def test_remove_of_a_policy_this_view_holds_is_refused(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        path = tmp_path / "data" / "stores" / "policies.json"
+        mine = self._policy()
+        PolicyStore(path).add(mine)
+        behind = PolicyStore(path)
+        PolicyStore(path).add(
+            self._policy(scope=PolicyScope(level="domain", value="payments"))
+        )
+        monkeypatch.setattr("trellis_cli.policy._get_policy_store", lambda: behind)
+        before = path.read_bytes()
+
+        result = runner.invoke(app, ["policy", "remove", mine.policy_id])
+
+        assert result.exit_code == 5, result.stdout
+        assert "POLICY WRITE REFUSED" in result.stdout
+        assert path.read_bytes() == before
+
+    def test_remove_renders_a_refusal_raised_by_the_store_itself(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The backstop the pre-check masks, pinned on its own.
+
+        ``_refuse_stale`` now runs before ``_find_policy``, so it answers
+        first and the ``except StoreWriteRefusedError`` around
+        ``store.remove`` became undetectable — deleting it left the whole
+        suite green. The window it covers is real (another process can
+        write between the pre-check and the save) and only reachable by
+        injection, which is the same position ``_save``'s own unconditional
+        guard is in, and it gets the same treatment: assert it directly
+        rather than leave a mechanism nothing can tell is there.
+        """
+        path = tmp_path / "data" / "stores" / "policies.json"
+        mine = self._policy()
+        store = PolicyStore(path)
+        store.add(mine)
+        monkeypatch.setattr("trellis_cli.policy._get_policy_store", lambda: store)
+
+        refusal = StaleStoreWriteError(
+            "the file moved under us",
+            store="policy",
+            path=str(path),
+            recovery="trellis policy list",
+        )
+
+        def _raise(_policy_id: str) -> bool:
+            raise refusal
+
+        monkeypatch.setattr(store, "remove", _raise)
+
+        result = runner.invoke(app, ["policy", "remove", mine.policy_id])
+
+        # 5 with the refusal rendered, not 1 with a traceback.
+        assert result.exit_code == 5, result.stdout
+        assert "POLICY WRITE REFUSED" in result.stdout
+
+    def test_remove_does_not_report_not_found_for_a_policy_in_the_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The wrong answer ``PolicyStore.remove``'s guard does not reach.
+
+        ``PolicyStore.remove`` refuses ahead of its own membership check so
+        that a stale store cannot answer "no such policy" for a policy
+        another process added. This command never gets there: it runs its
+        *own* ``_find_policy`` first, for prefix matching, and returned
+        ``Policy not found`` at exit 1 for a policy sitting in the file —
+        the exact wrong answer the store-level fix is written against,
+        surviving one layer up. ``DELETE /policies/{id}`` was unaffected; it
+        calls ``store.remove`` directly.
+        """
+        path, theirs = self._stale_store(tmp_path, monkeypatch)
+
+        result = runner.invoke(app, ["policy", "remove", theirs.policy_id])
+
+        assert theirs.policy_id in path.read_text(), "precondition: it is in the file"
+        assert result.exit_code == 5, result.stdout
+        assert "not found" not in result.stdout.lower()

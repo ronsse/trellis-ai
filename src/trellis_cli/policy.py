@@ -129,6 +129,19 @@ def _exit_on_refused_write(exc: StoreWriteRefusedError, output_format: str) -> N
     raise typer.Exit(code=EXIT_STORE)
 
 
+def _refuse_stale(store: PolicyStore, output_format: str) -> None:
+    """Stop a command whose in-memory view is no longer the file.
+
+    Only the *write* commands call this, and only ``remove`` needs it
+    before its own work: ``add`` reaches ``store.add`` directly, so the
+    store's guard is the first thing that runs there.
+    """
+    try:
+        store.refuse_if_stale()
+    except StoreWriteRefusedError as exc:
+        _exit_on_refused_write(exc, output_format)
+
+
 def _exit_if_degraded(store: PolicyStore, output_format: str) -> None:
     """Stop a *write* command that must not act on a degraded store.
 
@@ -377,6 +390,15 @@ def remove_policy(
     """Remove a governance policy."""
     store = _get_policy_store()
     _exit_if_degraded(store, output_format)
+    # Before the lookup, not after. ``PolicyStore.remove`` refuses a stale
+    # write ahead of its own membership check for exactly this reason — a
+    # store that loaded ``[A]`` must not answer "no such policy" for a
+    # policy another process has since added — but this command does its
+    # *own* lookup first (for prefix matching) and returns "Policy not
+    # found" without ever reaching the store's guard. The store fix does
+    # not reach this surface on its own, so the same wrong answer survived
+    # here.
+    _refuse_stale(store, output_format)
     match = _find_policy(store, policy_id)
     if match is None:
         if output_format == "json":
