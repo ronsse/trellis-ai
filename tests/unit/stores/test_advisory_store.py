@@ -977,6 +977,47 @@ class TestDegradationIsNotTheOnlyStaleView:
         with pytest.raises(StaleStoreWriteError):
             store.put(_advisory())
 
+    def test_the_fingerprint_catches_an_in_place_edit_of_the_same_length(
+        self, tmp_path: Path
+    ) -> None:
+        """``st_mtime_ns`` is load-bearing too, and only it catches this.
+
+        The sibling test above pins ``st_ino`` against the shape every
+        *process* produces (``os.replace`` from a fresh temp file). This is
+        the other shape ``_fingerprint``'s docstring claims to cover, and
+        the reason the tuple is three fields rather than one: an
+        **in-place** rewrite that keeps the inode — an editor configured to
+        write through, ``dd conv=notrunc``, an ``open(path, "r+b")`` patch
+        of a confidence value — and that happens to keep the length.
+        ``st_ino`` cannot see that and neither can ``st_size``, so dropping
+        ``st_mtime_ns`` from the tuple must fail here.
+
+        Found by mutation: before this test, ``return (st.st_ino,
+        st.st_size)`` passed the entire suite. The docstring asserted a
+        guarantee nothing measured.
+        """
+        path = tmp_path / "advisories.json"
+        store = AdvisoryStore(path)
+        store.put(_advisory(advisory_id="theirs"))
+        before = path.stat()
+
+        raw = path.read_bytes()
+        with path.open("r+b") as handle:
+            handle.write(b" " + raw[1:])
+        # Forced rather than trusted: a filesystem with coarse mtime
+        # granularity can stamp the in-place write with the tick the store
+        # already recorded, and then this test would be measuring the clock.
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000))
+
+        after = path.stat()
+        assert (after.st_ino, after.st_size) == (before.st_ino, before.st_size), (
+            "the collision this test exists for was not constructed"
+        )
+        assert after.st_mtime_ns != before.st_mtime_ns
+
+        with pytest.raises(StaleStoreWriteError):
+            store.put(_advisory(advisory_id="mine"))
+
     def test_a_degraded_load_still_refuses_with_its_own_error(
         self, tmp_path: Path
     ) -> None:
@@ -1124,15 +1165,46 @@ class TestDegradationIsNotTheOnlyStaleView:
     @pytest.mark.skipif(
         os.geteuid() == 0, reason="root traverses any directory regardless of mode"
     )
-    def test_an_unsearchable_parent_degrades_rather_than_reading_as_absent(
+    def test_a_symlink_loop_degrades_rather_than_reading_as_absent(
         self, tmp_path: Path
     ) -> None:
-        """``Path.exists()`` swallows ``OSError``, which was the hazard.
+        """The errnos ``Path.exists()`` swallows were the hazard.
 
-        An unreadable file presenting as *absent* is the worst of the
-        available answers here: absent means "a deployment that has never
-        generated an advisory", which is neither degraded nor stale, and so
-        is the one state this store will freely write over.
+        ``pathlib._ignore_error`` swallows ``ENOENT``, ``ENOTDIR``,
+        ``EBADF`` and ``ELOOP``, so an advisory file behind a symlink loop
+        — or under a path component that is a regular file — presented as
+        *absent*, which is the worst of the available answers: absent means
+        "a deployment that has never generated an advisory", which is
+        neither degraded nor stale, and so is the one state this store will
+        freely write over.
+
+        This is the route the ``stat`` change exists for. The unsearchable
+        parent below is the other half and behaved differently.
+        """
+        path = tmp_path / "advisories.json"
+        other = tmp_path / "other.json"
+        path.symlink_to(other)
+        other.symlink_to(path)
+
+        store = AdvisoryStore(path)
+
+        assert store.is_degraded is True
+        assert store.degradation is not None
+        assert store.degradation.reason == "unreadable_file"
+        with pytest.raises(DegradedStoreWriteError):
+            store.put(_advisory())
+
+    def test_an_unsearchable_parent_degrades_rather_than_raising(
+        self, tmp_path: Path
+    ) -> None:
+        """``EACCES`` is *not* in the ignored set, and that was the other bug.
+
+        ``Path.exists()`` re-raised it, so this constructor propagated
+        ``PermissionError`` — breaking the promise
+        :mod:`trellis.stores.advisory_source` makes unconditionally, that
+        constructing a store never raises and therefore a bad advisory file
+        never takes retrieval down. Both halves land in one record now: the
+        store degrades, serves nothing, and refuses every write.
         """
         parent = tmp_path / "locked"
         parent.mkdir()

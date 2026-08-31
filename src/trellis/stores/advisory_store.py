@@ -159,9 +159,11 @@ class AdvisoryLoadDegradation:
         decisions the file held are not recoverable from it by machine.
 
         Both operands are ``shlex.quote``d (#427). A data dir containing a
-        space — ``/tmp/my staging dir/``, ``~/Library/Application
-        Support/…`` — otherwise word-splits into an ``mv`` with **four**
-        operands, which does not run. That is the same failure as the
+        space — ``~/Library/Application Support/…`` — otherwise word-splits
+        into an ``mv`` with **four** operands rather than two, and one more
+        pair per extra space (``/tmp/my staging dir/`` reaches six), so what
+        the operator pastes is at best a refusal and at worst a move of
+        three real paths into a fourth. That is the same failure as the
         Rich-markup and hard-wrap cases the CLI renderer already guards:
         an unrunnable command printed to the operator *as* the fix. It is
         the one string in this module that must survive every layer
@@ -213,12 +215,21 @@ class AdvisoryStore:
         self._path = Path(path)
         self._advisories: dict[str, Advisory] = {}
         self._degradation: AdvisoryLoadDegradation | None = None
-        # ``stat`` rather than ``exists()``: ``Path.exists`` swallows every
-        # ``OSError`` internally, so a file under an unsearchable directory
-        # presents as *absent* — which here means "a deployment that has
-        # never generated an advisory", the one state that is neither
-        # degraded nor stale and so is freely writable. That is the same
-        # laundering by a different door.
+        # ``stat`` rather than ``exists()``, which splits an unreadable file
+        # two ways and gets both wrong. ``Path.exists`` swallows the errnos
+        # in ``pathlib._ignore_error`` — ``ENOENT``, ``ENOTDIR``, ``EBADF``,
+        # ``ELOOP`` — and re-raises the rest. So an advisory file behind a
+        # symlink loop, or under a path component that is a regular file,
+        # presented as *absent*: "a deployment that has never generated an
+        # advisory", the one state that is neither degraded nor stale and so
+        # is freely writable. That is the laundering primitive again, by a
+        # different door. And the errnos it does *not* ignore — ``EACCES``
+        # from an unsearchable parent is the one that happens — escaped the
+        # constructor, breaking the promise
+        # :mod:`trellis.stores.advisory_source` makes unconditionally, that
+        # constructing a store never raises and so retrieval never falls
+        # over on this file. Every failure to stat now degrades: writes
+        # refused, reads still served, one record either way.
         try:
             self._path.stat()
         except FileNotFoundError:
