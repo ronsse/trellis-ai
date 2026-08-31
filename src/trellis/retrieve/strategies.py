@@ -22,6 +22,8 @@ from trellis.schemas.well_known import (
 from trellis.stores.base.graph_query import FilterClause, NodeQuery
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from trellis.ops.registry import ParameterRegistry
     from trellis.stores.registry import StoreRegistry
 
@@ -93,6 +95,71 @@ GRAPH_SELECTION_RECENCY_WINDOW = "recency_window"
 #: expanded a seed set — the only mode in which the axis is a function of
 #: the caller's query.
 GRAPH_SELECTION_SEEDED = "seeded"
+
+#: Filter keys that are **retrieval controls addressed to the graph axis**,
+#: not metadata predicates about a stored row.
+#:
+#: ``PackBuilder.build`` injects ``include_structural`` into the single
+#: ``filters`` mapping it hands to *every* strategy, and a caller may pass
+#: any of these through ``filters=`` directly. :class:`GraphSearch` ``pop``\ s
+#: them; the document and vector stores do not know them, and both compile an
+#: unknown filter key to **hard metadata equality**, which matches no row.
+#: So a caller that asked for one extra category of graph node was silently
+#: getting the keyword and semantic axes emptied: measured on a three-axis
+#: pack, ``include_structural=True`` took it from 3 items to 1, with no
+#: warning, no ``strategy_failures`` entry and no ``RejectedItem`` — the
+#: strategies returned ``[]``, which is indistinguishable from "nothing
+#: matched" (the #404 failure shape, one layer up).
+#:
+#: A closed allow-list of *controls* rather than a deny-list of metadata: the
+#: opposite of :mod:`trellis.retrieve.servable`'s posture, and deliberately —
+#: stored metadata keys are an open set that must stay servable by default,
+#: while these three are owned by :class:`GraphSearch` and are added only
+#: when it grows a new ``pop``.
+#:
+#: Latent since the initial commit, and it stayed latent because nothing in
+#: the repository passed one. #375/#436 changed that: surfacing a
+#: newly-written meta-Activity now *requires* ``include_structural=True``
+#: alongside ``include_meta=True``, so the documented escape hatch walked
+#: straight onto it.
+GRAPH_CONTROL_FILTER_KEYS = frozenset(
+    {"seed_ids", "include_structural", "include_unconfirmed"}
+)
+
+
+def _exclude_and_log(
+    nodes: list[dict[str, Any]],
+    keep: Callable[[dict[str, Any]], bool],
+    event: str,
+) -> list[dict[str, Any]]:
+    """Apply one of ``GraphSearch``'s client-side node filters, counting it.
+
+    These drops happen before a ``PackItem`` exists, so they produce no
+    ``RejectedItem`` and never reach
+    :func:`~trellis.retrieve.withholding.summarize_withheld`. The debug line
+    is the only observable they have — which is not enough on its own (#404
+    said so about exactly this shape) but is strictly more than nothing.
+    Silent when the filter removed nothing, so an ``excluded=0`` line never
+    dilutes the one that matters.
+    """
+    kept = [n for n in nodes if keep(n)]
+    if len(kept) != len(nodes):
+        logger.debug(event, excluded=len(nodes) - len(kept))
+    return kept
+
+
+def strip_graph_controls(filters: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Drop :data:`GRAPH_CONTROL_FILTER_KEYS` before a store-side filter call.
+
+    Returns ``None`` for an empty result, matching what the stores expect
+    for "no filters" — a ``{}`` is a filter that some backends read as a
+    predicate over nothing.
+    """
+    if not filters:
+        return filters
+    return {
+        k: v for k, v in filters.items() if k not in GRAPH_CONTROL_FILTER_KEYS
+    } or None
 
 
 @runtime_checkable
@@ -440,9 +507,14 @@ class KeywordSearch(SearchStrategy):
         # The scalar key is consumed here for per-(component, domain) param
         # resolution; forwarding it to the document store would re-introduce
         # the #254 scalar hard-equality that hard-excludes untagged rows.
+        # ``domain`` is dropped for the #254 reason above; the graph-axis
+        # control keys are dropped because the document store would read
+        # them as metadata equality and return nothing (see
+        # :data:`GRAPH_CONTROL_FILTER_KEYS`).
         store_filters = filters
         if filters and "domain" in filters:
             store_filters = {k: v for k, v in filters.items() if k != "domain"}
+        store_filters = strip_graph_controls(store_filters)
         results = self._store.search(query, limit=limit, filters=store_filters)
         items = []
         for doc in results:
@@ -525,11 +597,15 @@ class SemanticSearch(SearchStrategy):
         # domain scoping as a Python-side default-pass post-filter over the
         # materialized hits (which carry full document metadata). Over-fetch
         # so a heavily-mismatched domain doesn't thin recall (#262).
+        # The graph-axis control keys go too — the vector store compiles an
+        # unknown filter key to hard metadata equality and returns nothing
+        # (see :data:`GRAPH_CONTROL_FILTER_KEYS`).
         store_filters = None
         if filters:
             store_filters = {
                 k: v for k, v in filters.items() if k not in ("domain", "content_tags")
             } or None
+        store_filters = strip_graph_controls(store_filters)
         fetch_k = limit * _SEMANTIC_DOMAIN_OVERFETCH if domain else limit
         query_vector = self._embedding_fn(query)
         results = self._store.query(query_vector, top_k=fetch_k, filters=store_filters)
@@ -872,26 +948,36 @@ class GraphSearch(SearchStrategy):
             nodes = self._recency_window_nodes(filters=filters, limit=limit)
 
         # Filter structural nodes client-side unless explicitly requested.
+        #
+        # This drop happens *before* a ``PackItem`` exists, so it produces no
+        # ``RejectedItem`` and is invisible to
+        # :func:`~trellis.retrieve.withholding.summarize_withheld` — see that
+        # module's "What this cannot see" section. Since #375/#436 the
+        # population it removes includes every newly-written meta-Activity,
+        # which used to be counted by ``PACK_ASSEMBLED.meta_filtered_count``
+        # and no longer is. The debug line is the only observable the drop
+        # has; it exists for parity with the ``include_unconfirmed`` filter
+        # below, which has had one since #301.
         if not include_structural:
-            nodes = [n for n in nodes if n.get("node_role") != "structural"]
+            nodes = _exclude_and_log(
+                nodes,
+                lambda n: n.get("node_role") != "structural",
+                "graph_search_structural_excluded",
+            )
 
         # Filter unconfirmed extraction mints unless explicitly requested
         # — client-side like the structural filter, so both the query and
         # subgraph branches are covered and a store-side property filter
         # can't hard-exclude the (status-less) majority of nodes.
         if not include_unconfirmed:
-            before_unconfirmed = len(nodes)
-            nodes = [
-                n
-                for n in nodes
-                if (n.get("properties") or {}).get(EXTRACTION_STATUS_PROPERTY)
-                != EXTRACTION_STATUS_UNCONFIRMED
-            ]
-            if len(nodes) != before_unconfirmed:
-                logger.debug(
-                    "graph_search_unconfirmed_excluded",
-                    excluded=before_unconfirmed - len(nodes),
-                )
+            nodes = _exclude_and_log(
+                nodes,
+                lambda n: (
+                    (n.get("properties") or {}).get(EXTRACTION_STATUS_PROPERTY)
+                    != EXTRACTION_STATUS_UNCONFIRMED
+                ),
+                "graph_search_unconfirmed_excluded",
+            )
 
         # Domain scoping — the same default-pass contract as the keyword
         # facet and the semantic post-filter (#254): a node carrying an

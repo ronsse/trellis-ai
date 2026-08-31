@@ -2056,11 +2056,21 @@ class TestPackBuilderTokenBudget:
 def _meta_activity_item(
     item_id: str, *, agent_id: str = "trellis_meta_analyzer"
 ) -> PackItem:
-    """Build a PackItem matching what GraphSearch emits for a meta-Activity.
+    """A PackItem matching a **legacy (pre-#375/#436) meta-Activity**.
 
     Two metadata signals matter for ``PackBuilder._is_meta_activity``:
     ``node_type == "Activity"`` and ``agent_id`` starts with
     ``trellis_meta_``. The rest is unobserved.
+
+    Note what this fixture no longer models. Since #375/#436 the recorder
+    mints ``node_role="structural"``, and ``GraphSearch`` drops structural
+    rows *inside the strategy* — so a newly-written meta-Activity never
+    reaches ``PackBuilder`` and never becomes a ``PackItem`` at all. This
+    fixture stamps no ``node_role``, which is exactly the pre-#436 shape
+    that still exists in stores and is still what this gate covers. The
+    post-#436 shape is pinned in
+    ``tests/unit/retrieve/test_withholding_strategy_boundary.py`` and
+    ``tests/unit/meta/test_recorder_node_role.py``, against a real store.
     """
     return PackItem(
         item_id=item_id,
@@ -2105,7 +2115,11 @@ class TestMetaActivityFilter:
         assert "d1" in item_ids
 
     def test_opt_in_includes_meta_activity(self) -> None:
-        """include_meta=True surfaces meta-Activity items."""
+        """include_meta=True surfaces a *legacy* meta-Activity item.
+
+        For a row written after #375/#436, ``include_structural=True`` is
+        required as well — the graph axis drops it before this gate runs.
+        """
         s = _make_strategy(
             "graph",
             [_meta_activity_item("meta-1"), _item("d1", 0.9)],
