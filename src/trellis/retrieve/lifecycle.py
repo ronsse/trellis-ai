@@ -47,6 +47,13 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
+#: ``RejectedItem.reason`` recorded when this gate removes an item, so the
+#: withholding report (:mod:`trellis.retrieve.withholding`) can name it.
+#: The ``Lifecycle.state`` value the retention pass already writes, reused
+#: verbatim rather than re-labelled — see
+#: :data:`trellis.retrieve.noise.NOISE_REJECTION_REASON`.
+ARCHIVED_REJECTION_REASON = ARCHIVED_STATE
+
 
 def is_archived(metadata: dict[str, Any] | None) -> bool:
     """Whether a metadata bag carries ``Lifecycle.state == "archived"``.
@@ -63,18 +70,43 @@ def is_archived(metadata: dict[str, Any] | None) -> bool:
     return record.get("state") == ARCHIVED_STATE
 
 
-def exclude_archived(items: Iterable[PackItem]) -> list[PackItem]:
-    """Drop every item stamped archived, passing the rest through unchanged."""
+def partition_archived(
+    items: Iterable[PackItem],
+) -> tuple[list[PackItem], list[PackItem]]:
+    """Split ``items`` into ``(kept, withheld)`` on the archived stamp.
+
+    The same decision :func:`exclude_archived` makes, with the losing side
+    returned instead of counted — for the reason given in
+    :func:`trellis.retrieve.noise.partition_by_signal_quality`: this gate's
+    only observable was a ``logger.debug`` line, so an archived item left no
+    trace anywhere a caller or an analyzer could read.
+    """
     kept: list[PackItem] = []
-    dropped = 0
+    withheld: list[PackItem] = []
     for item in items:
         if is_archived(item.metadata):
-            dropped += 1
-            continue
-        kept.append(item)
-    if dropped:
-        logger.debug("archived_items_excluded", dropped=dropped)
+            withheld.append(item)
+        else:
+            kept.append(item)
+    return kept, withheld
+
+
+def exclude_archived(items: Iterable[PackItem]) -> list[PackItem]:
+    """Drop every item stamped archived, passing the rest through unchanged.
+
+    The survivors-only form of :func:`partition_archived` — see
+    :func:`trellis.retrieve.noise.exclude_noise` for why ``PackBuilder`` no
+    longer calls it.
+    """
+    kept, withheld = partition_archived(items)
+    if withheld:
+        logger.debug("archived_items_excluded", dropped=len(withheld))
     return kept
 
 
-__all__ = ["exclude_archived", "is_archived"]
+__all__ = [
+    "ARCHIVED_REJECTION_REASON",
+    "exclude_archived",
+    "is_archived",
+    "partition_archived",
+]

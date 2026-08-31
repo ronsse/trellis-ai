@@ -194,12 +194,12 @@ def test_a_chunk_row_survives_pack_assembly(
     """The same guarantee one layer out, where it is likelier to be lost.
 
     The strategy-level test above cannot see the *collect seam* —
-    ``exclude_noise(exclude_archived(strip_non_servable(strategy.search(...))))``
-    in :meth:`~trellis.retrieve.pack_builder.PackBuilder.build`. That seam is
+    ``_apply_collect_gates(strip_non_servable(strategy.search(...)))`` in
+    :meth:`~trellis.retrieve.pack_builder.PackBuilder.build`. That seam is
     the house pattern for cross-cutting exclusions precisely because the
     strategy set is injected and open (#338 moved the noise rule there for
-    that reason), so an ``exclude_chunks(...)`` added beside
-    ``exclude_archived`` would look like it was following convention, would
+    that reason), so an ``exclude_chunks(...)`` added beside the archived
+    and noise partitions would look like it was following convention, would
     cost the pack its retrievable unit, and would leave the strategy test
     green. Assert the property where a reader would actually break it.
     """

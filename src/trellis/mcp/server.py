@@ -105,6 +105,10 @@ from trellis.retrieve.pack_builder import PackBuilder, SemanticDedupConfig
 from trellis.retrieve.rerankers import build_reranker
 from trellis.retrieve.strategies import build_strategies
 from trellis.retrieve.token_tracker import estimate_tokens, track_token_usage
+from trellis.retrieve.withholding import (
+    format_withholding_note,
+    withholding_from_payload,
+)
 from trellis.schemas.memory_op import REF_TYPE_DOCUMENT
 from trellis.schemas.pack import PackBudget, SectionRequest
 from trellis.schemas.trace import Trace
@@ -765,9 +769,19 @@ def _flat_context(
         )
 
     banner = _capture_warning_banner(registry)
+    # #404: read the summary the builder stamped, do not re-derive one.
+    withholding = withholding_from_payload(pack.metadata.get("withholding"))
 
     if not pack.items:
+        # The case #404 was filed about. An empty pack whose candidates
+        # were *all* removed by a gate reads as greenfield — identical
+        # text to a corpus that genuinely held nothing — and that is the
+        # single most misleading pack this server can return. The note
+        # goes here first, before it goes anywhere else.
         empty = empty_message or f"No context found for: {intent}"
+        note = format_withholding_note(withholding)
+        if note:
+            empty = f"{empty}\n\n{note}"
         return f"{banner}\n\n{empty}" if banner else empty
 
     item_dicts = [
@@ -789,6 +803,7 @@ def _flat_context(
         title or intent,
         max_tokens=max_tokens,
         pack_id=pack.pack_id,
+        withholding=withholding,
     )
     if banner:
         result = f"{banner}\n\n{result}"
@@ -857,6 +872,9 @@ def _sectioned_context(
             intent,
             max_tokens=resolved_tokens,
             pack_id=sectioned_pack.pack_id,
+            withholding=withholding_from_payload(
+                sectioned_pack.metadata.get("withholding")
+            ),
         )
         adv_md = format_advisories_as_markdown(sectioned_pack.advisories)
         if adv_md:

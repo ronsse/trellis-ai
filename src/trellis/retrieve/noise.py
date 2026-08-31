@@ -67,6 +67,13 @@ logger = structlog.get_logger(__name__)
 #: The demoted value itself.
 NOISE_SIGNAL_QUALITY = "noise"
 
+#: ``RejectedItem.reason`` recorded when this gate removes an item, so the
+#: withholding report (:mod:`trellis.retrieve.withholding`) can name it.
+#: Deliberately the facet *value* the pipeline already writes rather than a
+#: freshly-coined ``noise_filter``: a second word for the same fact is how
+#: ``content_type`` and ``document_form`` drifted apart in #325/#326.
+NOISE_REJECTION_REASON = NOISE_SIGNAL_QUALITY
+
 #: The facet the boundary acts on.
 SIGNAL_QUALITY_FACET = "signal_quality"
 
@@ -134,29 +141,62 @@ def passes_signal_quality(
     return True
 
 
-def exclude_noise(
+def partition_by_signal_quality(
     items: Iterable[PackItem],
     spec: dict[str, Any] | None = None,
-) -> list[PackItem]:
-    """Drop every item failing ``spec``, passing the rest through unchanged."""
+) -> tuple[list[PackItem], list[PackItem]]:
+    """Split ``items`` into ``(kept, withheld)`` under ``spec``.
+
+    The same decision :func:`exclude_noise` makes, with the losing side
+    returned instead of counted. ``PackBuilder`` needs the withheld items
+    themselves, not a tally: this boundary is the one gate whose only
+    observable was a ``logger.debug`` line — a no-op under the CLI's
+    ``WARNING`` default — so a noise-demoted item left no trace in the pack,
+    the ``PACK_ASSEMBLED`` payload or the log. Handing the items back lets
+    the builder record them like every other gate (see
+    :mod:`trellis.retrieve.withholding`).
+    """
     effective = DEFAULT_SIGNAL_QUALITY_SPEC if spec is None else spec
     kept: list[PackItem] = []
-    dropped = 0
+    withheld: list[PackItem] = []
     for item in items:
         if passes_signal_quality(item.metadata, effective):
             kept.append(item)
         else:
-            dropped += 1
-    if dropped:
-        logger.debug("noise_items_excluded", dropped=dropped, spec=sorted(effective))
+            withheld.append(item)
+    return kept, withheld
+
+
+def exclude_noise(
+    items: Iterable[PackItem],
+    spec: dict[str, Any] | None = None,
+) -> list[PackItem]:
+    """Drop every item failing ``spec``, passing the rest through unchanged.
+
+    The survivors-only form of :func:`partition_by_signal_quality`, and the
+    name the docs and the retention ADR use for this boundary. **Not** the
+    pack path any more: ``PackBuilder`` calls the partition directly,
+    because a drop it cannot see is a drop it cannot report (#404). Kept
+    for callers that only need "what would survive" — and note that the
+    ``logger.debug`` below is exactly the observability #404 found
+    insufficient, so do not reach for this on a serving path.
+    """
+    effective = DEFAULT_SIGNAL_QUALITY_SPEC if spec is None else spec
+    kept, withheld = partition_by_signal_quality(items, effective)
+    if withheld:
+        logger.debug(
+            "noise_items_excluded", dropped=len(withheld), spec=sorted(effective)
+        )
     return kept
 
 
 __all__ = [
     "DEFAULT_SIGNAL_QUALITY_SPEC",
+    "NOISE_REJECTION_REASON",
     "NOISE_SIGNAL_QUALITY",
     "SIGNAL_QUALITY_FACET",
     "exclude_noise",
+    "partition_by_signal_quality",
     "passes_signal_quality",
     "resolve_signal_quality_spec",
 ]
