@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from tests.document_recency import fake_document_clock
 from trellis.ingest_corpus.models import chunk_doc_id
 from trellis.retrieve.file_context import (
     _DOC_PAGE_SIZE,
@@ -363,3 +364,100 @@ class TestScanBoundaries:
         graph.execute_node_query = _no_compiler  # type: ignore[method-assign]
         (entry,) = _build(registry, ["notes/foo.md"])["paths"]
         assert [e["entity_id"] for e in entry["entities"]] == ["ent-1"]
+
+
+class TestNewestItemAtIsAStalenessGate:
+    """``newest_item_at`` reads ``updated_at``, and two sweeps missed it (#406).
+
+    #397 scoped the ``preserve_updated_at`` argument to ``KeywordSearch``'s
+    recency decay; #406 found ``mutate.retention``'s ``lifecycle_states`` age
+    gate reading the same column; three independent review passes on #418
+    then found this one. Every one of those enumerations was written down as
+    closed and every one was wrong, which is why this docstring gives no
+    count either — and why these tests live beside the *reader* rather than
+    beside any one writer.
+
+    What makes this reader unlike the two before it is that it is a
+    **gate, not a score**. The module docstring pins what the value is for:
+    the client "compares that against the file's mtime and skips injection
+    when the file changed after everything known about it was written." A
+    metadata-only write that bumps ``updated_at`` makes memory look newer
+    than the file, so the gate stops firing and the read hook injects the
+    stale context it exists to suppress. There is no floor to soften that;
+    it flips.
+
+    And this surface has **no collect seam**. ``_matching_documents`` walks
+    ``list_documents`` directly, so neither ``retrieve.lifecycle``'s
+    ``exclude_archived`` nor ``retrieve.noise``'s ``exclude_noise`` applies —
+    which is why #406's "latent" classification for
+    ``RetentionPruneHandler._archive`` and ``classify.feedback`` does not
+    hold here. That is pinned first, because the rest of the argument rests
+    on it.
+    """
+
+    def test_archived_and_noise_documents_are_not_filtered_out(
+        self, registry: StoreRegistry
+    ) -> None:
+        """The premise: this surface is not on ``PackBuilder``'s collect seam.
+
+        Not a fix test — it passes against the un-fixed code, by design. It
+        exists because the two "latent" arguments in ``mutate/handlers.py``
+        and ``classify/feedback.py`` are scoped to the pack surfaces, and
+        nothing else would fail if someone read them as unqualified.
+        """
+        from trellis.schemas.classification import LIFECYCLE_KEY
+
+        docs = registry.knowledge.document_store
+        docs.put("plain", "notes on widgets", {"source_path": "widget.py"})
+        docs.put(
+            "arch",
+            "archived notes on widgets",
+            {"source_path": "widget.py", LIFECYCLE_KEY: {"state": "archived"}},
+        )
+        docs.put(
+            "noisy",
+            "demoted notes on widgets",
+            {
+                "source_path": "widget.py",
+                "content_tags": {"signal_quality": "noise"},
+            },
+        )
+
+        (entry,) = _build(registry, ["widget.py"])["paths"]
+        assert sorted(d["doc_id"] for d in entry["documents"]) == [
+            "arch",
+            "noisy",
+            "plain",
+        ]
+
+    def test_a_metadata_only_demotion_does_not_move_the_gate(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Fails against an ``apply_noise_tags`` that omits the flag.
+
+        Demoting a year-old note moved ``newest_item_at`` forward a full year
+        — measured, not supposed — which is the whole staleness budget the
+        read hook has. One assertion covers the shape for all four writers
+        that reach this surface; the sibling writers' own suites pin that
+        each of them passes the flag.
+        """
+        from datetime import timedelta
+
+        from trellis.classify.feedback import apply_noise_tags
+
+        docs = registry.knowledge.document_store
+        clock = fake_document_clock(monkeypatch)
+        now = clock["now"]
+
+        clock["now"] = now - timedelta(days=365)
+        docs.put("stale", "year-old notes on widgets", {"source_path": "widget.py"})
+        before = _build(registry, ["widget.py"])["paths"][0]["newest_item_at"]
+        assert before == (now - timedelta(days=365)).isoformat(), (
+            "the fake clock is not reaching the store; this test would pass vacuously"
+        )
+
+        clock["now"] = now
+        assert apply_noise_tags(["stale"], docs) == 1
+
+        after = _build(registry, ["widget.py"])["paths"][0]["newest_item_at"]
+        assert after == before
