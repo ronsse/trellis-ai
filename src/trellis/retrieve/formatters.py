@@ -8,6 +8,7 @@ import structlog
 
 from trellis.core.hashing import estimate_tokens as _estimate_tokens
 from trellis.retrieve.excerpts import truncate_excerpt
+from trellis.retrieve.withholding import WithholdingSummary, format_withholding_note
 from trellis.schemas.advisory import Advisory
 
 logger = structlog.get_logger(__name__)
@@ -60,8 +61,28 @@ def format_pack_as_markdown(
     max_tokens: int = 2000,
     *,
     pack_id: str | None = None,
+    withholding: WithholdingSummary | None = None,
 ) -> str:
     """Format pack items as concise markdown for LLM consumption.
+
+    ``withholding`` (#404) is rendered as one line **in the header**, above
+    the item blocks. Never appended after them: the item loop below
+    ``break``\\ s the moment the token budget runs out, so a note appended
+    after it would print only for packs that happen to fit — "honest in
+    JSON alone", which is the failure this reports on.
+
+    The note is **not** charged against the item budget. Charging it looks
+    tidier and is wrong: the builder sized its walk before any of these
+    rejections were summarized, so every token the note takes from the item
+    budget drops an item the ``PACK_ASSEMBLED`` payload already records as
+    *served* — suppressed by session dedup for the rest of the session and
+    graded by the learning join, while the agent never saw its id. #305
+    made that a pinned invariant on the index path
+    (``test_every_id_charged_as_served_is_an_id_the_agent_is_shown``), and
+    it was this function that broke it when the note was charged. One line
+    of response-level overhead is the caller's to reserve — the same
+    doctrine :func:`index_render_overhead_tokens` states — and the
+    alternative is a report about withheld items that withholds one.
 
     Args:
         items: List of pack item dicts with item_id, item_type, excerpt,
@@ -69,6 +90,8 @@ def format_pack_as_markdown(
         intent: The original query intent.
         max_tokens: Maximum token budget for the response.
         pack_id: Optional pack identifier to surface for citation.
+        withholding: What the builder removed and did not serve. Counts and
+            reasons only — see :mod:`trellis.retrieve.withholding`.
 
     Returns:
         Markdown-formatted string within token budget.
@@ -76,6 +99,9 @@ def format_pack_as_markdown(
     lines = [f"# Context for: {intent}"]
     if pack_id:
         lines.append(f"**pack_id:** `{pack_id}`")
+    note = format_withholding_note(withholding)
+    if note:
+        lines.append(note)
     lines.append("")
     token_budget = max_tokens - _estimate_tokens(lines[0]) - 10  # reserve overhead
     used = 0
@@ -207,6 +233,7 @@ def format_pack_as_index_markdown(
     max_tokens: int = 2000,
     *,
     pack_id: str | None = None,
+    withholding: WithholdingSummary | None = None,
 ) -> str:
     """Format pack items as an id index — one line per item, no bodies.
 
@@ -227,6 +254,9 @@ def format_pack_as_index_markdown(
         intent: The original query intent.
         max_tokens: Maximum token budget for the response.
         pack_id: Optional pack identifier to surface for citation.
+        withholding: What the builder removed and did not serve. An index
+            pack is all pointers, so the distinction it draws — served but
+            demoted vs. withheld entirely — matters here most.
 
     Returns:
         Markdown-formatted index within token budget.
@@ -234,6 +264,9 @@ def format_pack_as_index_markdown(
     lines = [f"# Context index for: {intent}"]
     if pack_id:
         lines.append(f"**pack_id:** `{pack_id}`")
+    note = format_withholding_note(withholding)
+    if note:
+        lines.append(note)
     lines.append("")
     token_budget = max_tokens - index_render_overhead_tokens(intent)
     used = 0
@@ -653,6 +686,7 @@ def format_sectioned_pack_as_markdown(
     max_tokens: int = 8000,
     *,
     pack_id: str | None = None,
+    withholding: WithholdingSummary | None = None,
 ) -> str:
     """Format a sectioned pack as markdown with section headings.
 
@@ -670,6 +704,10 @@ def format_sectioned_pack_as_markdown(
         intent: The original query intent.
         max_tokens: Total token budget across all sections.
         pack_id: Optional pack identifier to surface for citation.
+        withholding: What the builder removed and did not serve, across the
+            whole candidate pool — rendered in the header, above the first
+            section, for the reason given in
+            :func:`format_pack_as_markdown`.
 
     Returns:
         Markdown-formatted string within token budget.
@@ -677,6 +715,9 @@ def format_sectioned_pack_as_markdown(
     lines = [f"# Context for: {intent}"]
     if pack_id:
         lines.append(f"**pack_id:** `{pack_id}`")
+    note = format_withholding_note(withholding)
+    if note:
+        lines.append(note)
     lines.append("")
     used = _estimate_tokens(lines[0]) + 10  # overhead
 

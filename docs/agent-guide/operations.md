@@ -1194,6 +1194,24 @@ The **content floor** handles substance-free items — the name-only graph stubs
 
 Why the default demotes rather than excludes: the shortest genuinely useful memory this system serves — a one-line gotcha, a two-clause procedure — is exactly the shape a hard length filter would silently delete. A multiplicative penalty pushes a stub behind anything substantive while leaving it eligible when the candidate pool is thin. Either way the decision is observable — `PACK_ASSEMBLED.payload["content_floor"]` above, plus `content_floor_penalty` / `content_floor_substance_words` on the item's `score_breakdown`; `mode="exclude"` additionally emits a `rejected_items` row with reason `content_floor`.
 
+#### Withholding is stated, not implied (#404)
+
+A pack that withheld candidates now says so, in one line **in its header**:
+
+```
+**Withheld:** 3 items matched this intent but were not served (noise 2, archived 1). Counts only — no ids or content.
+```
+
+It renders on every pack surface a caller reads — `get_context` (full and `index=True`), `search`, `get_task_context` / `get_objective_context` / `get_sectioned_context` — and, most importantly, on the **empty** pack, where `No context found for: …` is otherwise identical whether the corpus was empty or every match was demoted.
+
+Three properties worth knowing:
+
+- **Withheld means absent, computed as `{rejected ids} − {served ids}`.** A rejection is not an absence: the losing copy of a dedup, or a row one axis gated and another served, is *on screen* and is never reported as withheld. Reasons seen only on such rejections are recorded under `non_absence_reasons` in telemetry, so a `total` of zero reads as "nothing was withheld", not "nothing was rejected". An id removed by more than one gate is attributed to the **first** one.
+- **Counts and reasons only — never ids, never excerpts.** Naming the ids would invite a re-fetch of exactly what a gate decided not to serve. The ids stay in `PACK_ASSEMBLED.payload["withholding"]["withheld_item_ids"]`, which is an operator surface with a different access path.
+- **Graduated disclosure (#359) contributes nothing here.** A pointer is a *served* item — ranked, cited, fetchable via `get_items` — and calling it withheld would blur the distinction that change was careful to make.
+
+`PACK_ASSEMBLED.payload["withholding"]` is emitted on both pack kinds **even when nothing was withheld** (`{"total": 0, "by_reason": {}, ...}`), so an analyzer can tell "the summary ran and found nothing" from "the summary never ran". The two collect-seam gates — `signal_quality="noise"` and `Lifecycle.state="archived"` — now write `rejected_items` rows (reasons `noise` and `archived`) where previously their only observable was a `logger.debug` line that fires under no shipped log configuration.
+
 ---
 
 ## Python-Only Mutation API

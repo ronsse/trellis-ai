@@ -19,7 +19,7 @@ Failure semantics (C2 Phase 4):
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -45,13 +45,18 @@ from trellis.retrieve.excerpts import (
     apply_content_floor,
 )
 from trellis.retrieve.formatters import format_index_line
-from trellis.retrieve.lifecycle import exclude_archived
-from trellis.retrieve.noise import exclude_noise, resolve_signal_quality_spec
+from trellis.retrieve.lifecycle import ARCHIVED_REJECTION_REASON, partition_archived
+from trellis.retrieve.noise import (
+    NOISE_REJECTION_REASON,
+    partition_by_signal_quality,
+    resolve_signal_quality_spec,
+)
 from trellis.retrieve.rerankers.base import Reranker
 from trellis.retrieve.servable import strip_non_servable
 from trellis.retrieve.strategies import SearchStrategy
 from trellis.retrieve.tier_mapping import TierMapper
 from trellis.retrieve.token_counting import DEFAULT_TOKEN_COUNTER, TokenCounter
+from trellis.retrieve.withholding import summarize_withheld
 from trellis.schemas.advisory import Advisory
 from trellis.schemas.classification import facet_values
 from trellis.schemas.pack import (
@@ -561,20 +566,18 @@ class PackBuilder:
 
         for strategy in self._strategies:
             try:
-                items = exclude_noise(
-                    exclude_archived(
-                        strip_non_servable(
-                            strategy.search(
-                                intent,
-                                limit=limit_per_strategy,
-                                filters=(
-                                    dict(merged_filters) if merged_filters else None
-                                ),
-                            )
+                items, gate_rejected = self._apply_collect_gates(
+                    strip_non_servable(
+                        strategy.search(
+                            intent,
+                            limit=limit_per_strategy,
+                            filters=(dict(merged_filters) if merged_filters else None),
                         )
                     ),
-                    signal_quality_spec,
+                    signal_quality_spec=signal_quality_spec,
+                    strategy_name=strategy.name,
                 )
+                rejected.extend(gate_rejected)
                 candidates_found += len(items)
                 all_items.extend(items)
                 strategies_used.append(strategy.name)
@@ -779,6 +782,13 @@ class PackBuilder:
         advisories = self._get_matching_advisories(domain)
         selected = self._attach_advisory_provenance(selected, advisories)
 
+        # What this build removed and did not serve (#404). Computed from
+        # ``rejected`` against the *served* ids, so a rejection whose item
+        # is on screen anyway (the losing copy of a dedup, or a row one
+        # axis gated and another served) is not reported as withheld. See
+        # :mod:`trellis.retrieve.withholding`.
+        withholding = summarize_withheld(rejected, [item.item_id for item in selected])
+
         pack = Pack(
             intent=intent,
             items=selected,
@@ -791,6 +801,10 @@ class PackBuilder:
             intent_family=intent_family or normalize_intent_family(intent=intent),
             advisories=advisories,
             assembled_at=utc_now(),
+            # One home, on both pack kinds: ``SectionedPack`` has no
+            # top-level ``RetrievalReport`` to hold this, and the renderer
+            # must read it the same way for both.
+            metadata={"withholding": withholding.as_telemetry()},
         )
 
         # Optional assembly-time quality evaluation (fail-soft).
@@ -805,6 +819,7 @@ class PackBuilder:
                 content_floor=floor_result.as_telemetry(),
                 disclosure=disclosure_result.as_telemetry(),
                 parent_concentration=concentration.as_telemetry(),
+                withholding=withholding.as_telemetry(),
                 index_mode=index_mode,
             )
 
@@ -853,6 +868,12 @@ class PackBuilder:
         strategies_used: list[str] = []
         candidates_found = 0
         strategy_failures: list[StrategyFailure] = []
+        # Pool-level rejections, for the withholding summary (#404). Kept
+        # separate from the per-section ``RetrievalReport.rejected_items``,
+        # which stays the content-floor attribution it already was: a
+        # pool-level gate has no single section to be blamed on, and
+        # copying it into every section would double-count.
+        rejected: list[RejectedItem] = []
 
         scoped_filters, scoped_tag_filters = self._apply_domain_scope(
             domain, filters, tag_filters
@@ -865,20 +886,18 @@ class PackBuilder:
 
         for strategy in self._strategies:
             try:
-                items = exclude_noise(
-                    exclude_archived(
-                        strip_non_servable(
-                            strategy.search(
-                                intent,
-                                limit=limit_per_strategy,
-                                filters=(
-                                    dict(merged_filters) if merged_filters else None
-                                ),
-                            )
+                items, gate_rejected = self._apply_collect_gates(
+                    strip_non_servable(
+                        strategy.search(
+                            intent,
+                            limit=limit_per_strategy,
+                            filters=(dict(merged_filters) if merged_filters else None),
                         )
                     ),
-                    signal_quality_spec,
+                    signal_quality_spec=signal_quality_spec,
+                    strategy_name=strategy.name,
                 )
+                rejected.extend(gate_rejected)
                 candidates_found += len(items)
                 all_items.extend(items)
                 strategies_used.append(strategy.name)
@@ -918,24 +937,32 @@ class PackBuilder:
                 deduped, self._semantic_dedup
             )
             semantic_dedup_rejected_count = len(semantic_rejected)
+            rejected.extend(semantic_rejected)
 
         # 3. Defense-in-depth structural filter.
         if not include_structural:
-            deduped = [
-                item
-                for item in deduped
-                if (item.metadata or {}).get("node_role") != "structural"
-            ]
+            kept_structural: list[PackItem] = []
+            structural_dropped: list[PackItem] = []
+            for item in deduped:
+                if (item.metadata or {}).get("node_role") == "structural":
+                    structural_dropped.append(item)
+                else:
+                    kept_structural.append(item)
+            rejected.extend(self._reject(structural_dropped, "structural_filter"))
+            deduped = kept_structural
 
         # 3a-meta. Meta-Activity filter (Item 6 Phase 2).
         meta_filtered_count = 0
         if not include_meta:
             kept_meta: list[PackItem] = []
+            meta_dropped: list[PackItem] = []
             for item in deduped:
                 if self._is_meta_activity(item):
-                    meta_filtered_count += 1
+                    meta_dropped.append(item)
                 else:
                     kept_meta.append(item)
+            meta_filtered_count = len(meta_dropped)
+            rejected.extend(self._reject(meta_dropped, "meta_activity_filter"))
             deduped = kept_meta
 
         # 3a. Session dedup: drop items recently served in this session.
@@ -945,7 +972,15 @@ class PackBuilder:
                 session_id, window_minutes=session_dedup_window_minutes
             )
             if served.ids:
-                deduped = [i for i in deduped if not self._is_suppressed(i, served)]
+                kept_session: list[PackItem] = []
+                session_dropped: list[PackItem] = []
+                for item in deduped:
+                    if self._is_suppressed(item, served):
+                        session_dropped.append(item)
+                    else:
+                        kept_session.append(item)
+                rejected.extend(self._reject(session_dropped, "session_dedup"))
+                deduped = kept_session
 
         # 3b. Rerank the shared candidate pool before section filling.
         # Loud-by-default (C2 Phase 4) — see build().
@@ -972,6 +1007,7 @@ class PackBuilder:
         floor_rejections = {r.item_id: r for r in floor_result.rejected}
         floor_dropped = [i for i in deduped if i.item_id in floor_rejections]
         deduped = floor_result.items
+        rejected.extend(floor_result.rejected)
 
         # 4. Fill each section independently
         #    Track which section each item lands in (for cross-section dedup)
@@ -992,9 +1028,16 @@ class PackBuilder:
             ]
             matched.sort(key=lambda x: x.relevance_score, reverse=True)
 
-            # Apply per-section budget
-            selected = matched[: section_budget.max_items]
-            selected = self._apply_token_budget(selected, section_budget.max_tokens)
+            # Apply per-section budget. Both cuts are recorded: an item
+            # a section could not afford is absent for a reason the caller
+            # can act on, and the withholding summary drops it again if
+            # another section served it (rejected minus served).
+            within_items = matched[: section_budget.max_items]
+            rejected.extend(
+                self._reject(matched[section_budget.max_items :], "max_items")
+            )
+            selected = self._apply_token_budget(within_items, section_budget.max_tokens)
+            rejected.extend(self._reject(within_items[len(selected) :], "token_budget"))
 
             raw_sections[section_req.name] = selected
 
@@ -1060,6 +1103,11 @@ class PackBuilder:
                     section.items, advisories
                 )
 
+        withholding = summarize_withheld(
+            rejected,
+            [item.item_id for section in pack_sections for item in section.items],
+        )
+
         sectioned_pack = SectionedPack(
             intent=intent,
             sections=pack_sections,
@@ -1070,6 +1118,7 @@ class PackBuilder:
             intent_family=intent_family or normalize_intent_family(intent=intent),
             advisories=advisories,
             assembled_at=utc_now(),
+            metadata={"withholding": withholding.as_telemetry()},
         )
 
         # 5. Emit telemetry
@@ -1080,6 +1129,7 @@ class PackBuilder:
                 meta_filtered_count=meta_filtered_count,
                 semantic_dedup_rejected_count=semantic_dedup_rejected_count,
                 content_floor=floor_result.as_telemetry(),
+                withholding=withholding.as_telemetry(),
             )
 
         return sectioned_pack
@@ -1092,6 +1142,7 @@ class PackBuilder:
         meta_filtered_count: int = 0,
         semantic_dedup_rejected_count: int = 0,
         content_floor: dict[str, Any] | None = None,
+        withholding: dict[str, Any] | None = None,
     ) -> None:
         """Emit telemetry event for a sectioned pack.
 
@@ -1099,7 +1150,9 @@ class PackBuilder:
         ``semantic_dedup_rejected`` payload field so near-duplicate
         suppression is observable on both pack kinds. Additive field —
         consumers ``payload.get(...)`` with a default. ``content_floor``
-        mirrors the flat path's field of the same name.
+        mirrors the flat path's field of the same name, and so does
+        ``withholding`` (#404) — emitted even when nothing was withheld, so
+        a consumer can tell an empty summary from a missing one.
         """
         per_item_estimates = [
             item.estimated_tokens or self._token_counter.count(item.excerpt)
@@ -1158,6 +1211,7 @@ class PackBuilder:
                 "semantic_dedup_enabled": self._semantic_dedup is not None,
                 "semantic_dedup_rejected": semantic_dedup_rejected_count,
                 "content_floor": content_floor or {},
+                "withholding": withholding or {},
                 "strategy_failures": [
                     sf.to_event_payload() for sf in (strategy_failures or [])
                 ],
@@ -1237,6 +1291,7 @@ class PackBuilder:
         content_floor: dict[str, Any] | None = None,
         disclosure: dict[str, Any] | None = None,
         parent_concentration: dict[str, Any] | None = None,
+        withholding: dict[str, Any] | None = None,
         index_mode: bool = False,
     ) -> None:
         """Emit a ContextRetrievalEvent for observability.
@@ -1274,6 +1329,14 @@ class PackBuilder:
         :mod:`trellis.retrieve.concentration`), and this field is what
         lets that refusal be re-checked at a larger ``n`` instead of being
         re-derived by string-matching ``item_id``.
+
+        ``withholding`` (#404) records what this build removed and did not
+        serve, grouped by reason, with the withheld ids. Emitted **even
+        when nothing was withheld**, so a consumer can tell "the summary
+        ran and found nothing" from "the summary never ran" — the same
+        posture ``content_floor`` takes. Unlike the rendered pack note it
+        carries the ids: the event log is a different access path with a
+        different audience.
 
         ``index_mode`` (#305) marks a pack assembled for the one-line-per-
         item index rendering. Additive — consumers ``payload.get(...)``
@@ -1355,6 +1418,7 @@ class PackBuilder:
                 "content_floor": content_floor or {},
                 "disclosure": disclosure or {},
                 "parent_concentration": parent_concentration or {},
+                "withholding": withholding or {},
                 "budget_trace": [
                     {
                         "item_id": b.item_id,
@@ -1660,6 +1724,72 @@ class PackBuilder:
             else:
                 result.append(item)
         return result
+
+    @staticmethod
+    def _reject(
+        items: Iterable[PackItem],
+        reason: str,
+        *,
+        strategy_source: str | None = None,
+    ) -> list[RejectedItem]:
+        """Record ``items`` as rejected under ``reason``.
+
+        Every gate in this class already builds ``RejectedItem`` rows by
+        hand; this exists for the gates that build several at once, so a
+        new gate cannot ship a *partial* row (the interesting fields here
+        are ``item_id`` and ``reason`` — a row missing either is invisible
+        to :func:`~trellis.retrieve.withholding.summarize_withheld`).
+        """
+        return [
+            RejectedItem(
+                item_id=item.item_id,
+                item_type=item.item_type,
+                relevance_score=item.relevance_score,
+                reason=reason,
+                strategy_source=strategy_source or item.strategy_source,
+            )
+            for item in items
+        ]
+
+    @classmethod
+    def _apply_collect_gates(
+        cls,
+        items: list[PackItem],
+        *,
+        signal_quality_spec: dict[str, Any],
+        strategy_name: str,
+    ) -> tuple[list[PackItem], list[RejectedItem]]:
+        """The two collect-seam gates, with what they removed handed back.
+
+        Replaces ``exclude_noise(exclude_archived(...))``. Behaviour is
+        unchanged — the same items are dropped, in the same order — but the
+        drops are now *recorded*. Before #404 these two gates' only
+        observable was a ``logger.debug`` line, a no-op under the CLI's
+        ``WARNING`` default and under the MCP server's own configuration,
+        so an archived or noise-demoted item vanished from the pack, from
+        the ``PACK_ASSEMBLED`` payload and from the log at once.
+
+        Order is load-bearing: archived is evaluated first, matching the
+        call nesting it replaces, because
+        :func:`~trellis.retrieve.withholding.summarize_withheld` attributes
+        an item to the *first* gate that rejected it.
+
+        ``strategy_source`` is stamped from the running strategy rather
+        than read off the item: ``_promote_strategy_source`` has not run
+        yet at this seam, so the field would otherwise be ``None`` on every
+        collect-gate rejection and
+        :func:`~trellis.retrieve.telemetry.analyze_pack_telemetry` would
+        bucket all of them under ``"unknown"``.
+        """
+        kept, archived = partition_archived(items)
+        kept, noisy = partition_by_signal_quality(kept, signal_quality_spec)
+        rejected = cls._reject(
+            archived, ARCHIVED_REJECTION_REASON, strategy_source=strategy_name
+        )
+        rejected.extend(
+            cls._reject(noisy, NOISE_REJECTION_REASON, strategy_source=strategy_name)
+        )
+        return kept, rejected
 
     def _deduplicate(self, items: list[PackItem]) -> list[PackItem]:
         """Deduplicate by item_id, keeping the entry with highest relevance_score."""
