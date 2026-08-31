@@ -1003,19 +1003,29 @@ class GraphSearch(SearchStrategy):
                     relevance_score=score,
                     metadata={
                         "source_strategy": "graph",
-                        "node_type": node_type_val,
-                        "node_type_canonical": canonical_type,
-                        "node_role": node_role_val,
                         **{
                             k: v
                             for k, v in props.items()
                             if k not in ("name", "description", "comment")
                         },
-                        # After the property spread, deliberately: entity
-                        # types are open strings, so a node is free to carry
-                        # a property of this name. How the candidate was
-                        # selected is a fact about *this* search, and a
-                        # stored property must not be able to misreport it.
+                        # All four sit after the property spread,
+                        # deliberately: ``properties`` is an open bag, so a
+                        # node is free to carry a key of any of these names,
+                        # and each is a fact about the *row* or about *this*
+                        # search that a stored property must not get a vote on.
+                        #
+                        # ``node_role`` is the load-bearing one — PackBuilder
+                        # reads it back as a *decision*, dropping items whose
+                        # ``metadata["node_role"] == "structural"``. Spread
+                        # last, a stored property could hide a structural row
+                        # from that filter, or forge a structural verdict for
+                        # a semantic one. ``node_type`` gates the
+                        # meta-Activity filter the same way, and since #375
+                        # gate 4 both also land in
+                        # ``PACK_ASSEMBLED.injected_items[]``.
+                        "node_type": node_type_val,
+                        "node_type_canonical": canonical_type,
+                        "node_role": node_role_val,
                         "graph_selection": selection,
                     },
                 )
