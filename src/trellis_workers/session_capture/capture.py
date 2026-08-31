@@ -222,6 +222,7 @@ def run_capture(
             source_system=source_system,
             id_prefix=id_prefix,
             reconcile_enabled=reconcile_enabled,
+            dry_run=dry_run,
         )
         if survivors is None:
             # Judge unavailable — leave un-watermarked so a later run retries.
@@ -243,6 +244,13 @@ def run_capture(
     report.sessions_with_memory = len({c.session_id for c in written})
     _write_records(registry, records, report, source_system, id_prefix, dry_run)
     if not dry_run:
+        # After the write seam, never before it: a SUPERSEDE verdict is a
+        # claim about two documents, and until _write_records has run the
+        # successor does not exist — nor, for a candidate superseded by a
+        # later candidate of the same sweep, does the target (#407).
+        reconcile_pass.apply_supersessions(
+            registry.knowledge.document_store, written, report
+        )
         _emit_training_pairs(registry, written, distill_model_id)
         watermark.save()
 
@@ -301,8 +309,16 @@ def _capture_session(
     source_system: str,
     id_prefix: str,
     reconcile_enabled: bool,
+    dry_run: bool,
 ) -> list[CandidateMemory] | None:
-    """Distil, gate, and reconcile one session; ``None`` if the judge is down."""
+    """Distil, gate, and reconcile one session; ``None`` if the judge is down.
+
+    ``dry_run`` reaches ``adjudicate`` so the verdict events are withheld too
+    (#408). It is a required keyword the whole way down: the parameter was
+    simply absent here, which is how a dry run came to write. The verdicts are
+    still computed and reported — the plan a dry run prints has to be the plan
+    the live sweep would execute.
+    """
     candidates = distill.distill_session(llm_client, digest)
     if candidates is None:
         report.sessions_judge_unavailable += 1
@@ -333,6 +349,7 @@ def _capture_session(
             client=llm_client,
             id_prefix=id_prefix,
             report=report,
+            dry_run=dry_run,
         )
     for candidate in survivors:
         candidate.reconciliation = MARKER_PENDING

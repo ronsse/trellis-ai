@@ -1540,6 +1540,19 @@ def _render_capture_text(payload: dict[str, Any]) -> None:
         f"  memories written: {payload['memories_written']}  "
         f"unchanged: {payload['memories_skipped_unchanged']}"
     )
+    if payload["reconcile_enabled"]:
+        console.print(
+            f"  reconcile: {payload['candidates_reconciled_noop']} noop  "
+            f"{payload['candidates_reconciled_supersede']} supersede"
+        )
+    if payload["supersessions_failed"]:
+        # Never folded into the reconcile line above: a supersession the
+        # judge decided and the store could not apply is a defect, not a
+        # tally (#407).
+        console.print(
+            f"[red]  {payload['supersessions_failed']} supersession(s) could "
+            f"not be applied — see warnings.[/red]"
+        )
     if payload["sessions_judge_unavailable"]:
         console.print(
             f"[red]  {payload['sessions_judge_unavailable']} session(s) left "

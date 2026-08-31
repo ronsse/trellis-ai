@@ -1634,12 +1634,18 @@ def _commit_reconcile_verdict(
     metadata: dict[str, Any],
     candidate: ReconcileCandidate,
     outcome: ReconcileOutcome,
-) -> tuple[str | None, dict[str, Any] | None]:
+) -> tuple[str | None, dict[str, Any] | None, ReconcileOutcome]:
     """Apply the verdict under ``_save_memory_lock``.
 
-    Returns ``(stored_id, stored_metadata)`` — ``(None, None)`` for NOOP, which
-    stores nothing. SUPERSEDE rides SCD-2: a new doc plus Lifecycle
-    stale-marking of the old, never a delete.
+    Returns ``(stored_id, stored_metadata, applied_outcome)`` —
+    ``(None, None, outcome)`` for NOOP, which stores nothing. SUPERSEDE rides
+    SCD-2: a new doc plus Lifecycle stale-marking of the old, never a delete.
+
+    The outcome comes back because it can be *downgraded* here: a SUPERSEDE
+    whose target vanished did not supersede anything, and the caller renders
+    the tool result and decides whether to emit ``MEMORY_OP_JUDGED`` from it.
+    Returning the input outcome unchanged would put the caller back in the
+    position #407 describes — asserting an effect it never checked.
     """
     if outcome.fallback:
         marker = (
@@ -1648,18 +1654,20 @@ def _commit_reconcile_verdict(
             else MARKER_SKIPPED
         )
         meta = {**metadata, RECONCILIATION_KEY: marker}
-        return _store_new_memory(registry, document_store, doc_id, content, meta)
+        stored = _store_new_memory(registry, document_store, doc_id, content, meta)
+        return stored[0], stored[1], outcome
 
     decision = outcome.decision
     if decision == ReconcileDecision.NOOP:
-        return None, None
+        return None, None, outcome
     if decision == ReconcileDecision.UPDATE:
         meta = {
             **metadata,
             RECONCILIATION_KEY: ReconcileDecision.UPDATE.value,
             UPDATES_DOC_KEY: candidate.doc_id,
         }
-        return _store_new_memory(registry, document_store, doc_id, content, meta)
+        stored = _store_new_memory(registry, document_store, doc_id, content, meta)
+        return stored[0], stored[1], outcome
     if decision == ReconcileDecision.SUPERSEDE:
         meta = {
             **metadata,
@@ -1669,13 +1677,41 @@ def _commit_reconcile_verdict(
         stored_id, stored_meta = _store_new_memory(
             registry, document_store, doc_id, content, meta
         )
-        mark_document_superseded(
+        if mark_document_superseded(
             document_store, old_doc_id=candidate.doc_id, new_doc_id=stored_id
-        )
-        return stored_id, stored_meta
+        ):
+            return stored_id, stored_meta, outcome
+        # The target vanished between the under-lock re-verify and this write
+        # (``_save_memory_lock`` is process-local, so another process can
+        # delete it). The memory is stored; the supersession is not — so strip
+        # the claim from what was just written and hand the caller a
+        # stale-downgraded outcome. The write is metadata-only, hence
+        # ``preserve_updated_at`` (#397).
+        meta = {k: v for k, v in stored_meta.items() if k != SUPERSEDES_DOC_KEY}
+        meta[RECONCILIATION_KEY] = MARKER_STALE
+        document_store.put(stored_id, content, metadata=meta, preserve_updated_at=True)
+        return stored_id, meta, _downgraded_to_stale(outcome)
     # ADD
     meta = {**metadata, RECONCILIATION_KEY: ReconcileDecision.ADD.value}
-    return _store_new_memory(registry, document_store, doc_id, content, meta)
+    stored = _store_new_memory(registry, document_store, doc_id, content, meta)
+    return stored[0], stored[1], outcome
+
+
+def _downgraded_to_stale(outcome: ReconcileOutcome) -> ReconcileOutcome:
+    """Mark a verdict as not applied: a fallback ADD, ``stale_recheck``.
+
+    ``fallback=True`` is what suppresses the ``MEMORY_OP_JUDGED`` emit and
+    makes :func:`_reconcile_result_message` render a plain save, which is the
+    whole point — the model judged, but nothing was superseded, so the join
+    key would point at a document that no longer exists.
+    """
+    return ReconcileOutcome(
+        decision=ReconcileDecision.ADD,
+        confidence=outcome.confidence,
+        model_id=outcome.model_id,
+        fallback=True,
+        fallback_reason="stale_recheck",
+    )
 
 
 def _reconcile_subject(
@@ -1769,7 +1805,7 @@ def _save_memory_reconciled(
             # the deterministic dedup wins; drop our now-duplicate write.
             return f"Memory already exists: {raced['doc_id']}"
         outcome = _reverify_candidate(document_store, candidate, outcome)
-        stored_id, stored_meta = _commit_reconcile_verdict(
+        stored_id, stored_meta, outcome = _commit_reconcile_verdict(
             registry, document_store, doc_id, content, metadata, candidate, outcome
         )
 

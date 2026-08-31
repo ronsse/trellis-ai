@@ -320,17 +320,26 @@ def mark_document_superseded(
     Sets the old document's :class:`Lifecycle` to ``state="superseded"`` with
     ``superseded_by`` pointing at the successor, preserving content and audit.
 
-    Returns ``False`` if the old doc has vanished. Neither caller reads it, but
-    only one of them needs to. ``mcp.server._commit_reconcile_verdict`` is
-    preceded, inside the same ``_save_memory_lock`` hold, by
-    ``_reverify_candidate`` → ``_candidate_is_stale``, which treats a missing
-    row as stale — so a vanished candidate is downgraded to a *logged*
-    ``stale_recheck`` ADD and never reaches this function at all. That guard is
-    process-local, so a cross-process delete still slips past it.
-    ``session_capture.reconcile_pass._apply_verdict`` has no equivalent: it
-    judges against an ``existing`` snapshot loaded once per sweep, discards the
-    bool, and stamps ``supersedes_doc_id`` regardless, so there the ``False``
-    really does become a dangling pointer with no log line (#407).
+    Returns ``True`` when the stale-mark was applied and ``False`` when the old
+    doc has vanished. **Both callers read it, and the ``False`` path is logged
+    here** so no caller can drop it silently (#407):
+
+    * ``mcp.server._commit_reconcile_verdict`` downgrades the just-stored
+      memory to a ``stale_recheck`` ADD, so neither the tool result nor the
+      ``MEMORY_OP_JUDGED`` event asserts a supersession that did not happen.
+      It is additionally preceded, inside the same ``_save_memory_lock`` hold,
+      by ``_reverify_candidate`` → ``_candidate_is_stale``, which treats a
+      missing row as stale; that guard is process-local, so a cross-process
+      delete is precisely what reaches the ``False`` here.
+    * ``session_capture.capture.run_capture`` calls this **after**
+      ``_write_records``, never during adjudication, and counts a ``False`` on
+      ``CaptureReport.supersessions_failed``. The ordering is the fix and the
+      counter is only the residue: a sweep's own candidates reach the store
+      when the write seam runs, so stale-marking from inside ``adjudicate``
+      asked this function for a row that structurally could not exist yet
+      whenever one candidate of a session superseded an earlier one — and
+      pointed ``superseded_by`` at a successor that had not been written
+      either.
 
     ``preserve_updated_at`` is load-bearing, not hygiene (#397). A supersession
     stamp is a metadata-only write by definition — the content passed back in is
@@ -362,6 +371,11 @@ def mark_document_superseded(
     """
     doc = document_store.get(old_doc_id)
     if doc is None:
+        logger.warning(
+            "supersede_target_missing",
+            old_doc_id=old_doc_id,
+            new_doc_id=new_doc_id,
+        )
         return False
     metadata = dict(doc.get("metadata") or {})
     metadata[LIFECYCLE_KEY] = Lifecycle(

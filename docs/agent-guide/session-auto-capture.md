@@ -181,10 +181,23 @@ are stored and the watermark is not advanced. Confirm `candidates_blocked_scan`
 *plan* count on a dry run) is sane before enabling the timer.
 
 > **Precise scope of "writes nothing":** a dry run stores no documents, emits
-> no training-pair events, and never advances the watermark — but it does
-> emit the seam's `CORPUS_SYNCED` telemetry event (flagged `dry_run: true`,
-> run **counts** only, no content), the same convention as
-> `ingest corpus --dry-run`.
+> no training-pair or reconcile-verdict events, and never advances the
+> watermark — but it does emit the seam's `CORPUS_SYNCED` telemetry event
+> (flagged `dry_run: true`, run **counts** only, no content), the same
+> convention as `ingest corpus --dry-run`, plus the unconditional
+> `CAPTURE_SWEEP_COMPLETED` funnel described below (also flagged).
+>
+> "No documents" now includes the SCD-2 stale-mark a SUPERSEDE verdict
+> implies. Until [#408](https://github.com/ronsse/trellis-ai/issues/408) a dry
+> run with `TRELLIS_ENABLE_RECONCILE_ON_WRITE=1` stale-marked **pre-existing**
+> documents and appended `MEMORY_OP_JUDGED` rows while reporting a plan. The
+> judge still runs and its verdicts are still counted
+> (`candidates_reconciled_noop`, `candidates_reconciled_supersede`) — a dry
+> run that stopped adjudicating would preview a different sweep from the one
+> it is previewing — but the stale-mark is applied only after the live write
+> seam has run, so the two documents a supersession is a claim about both
+> exist before it is made. `supersessions_failed` counts any that could not
+> be applied.
 
 ## Nightly sweep — systemd user timer
 
