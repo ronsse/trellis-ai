@@ -313,25 +313,22 @@ dependency order:
    as 2 of 5 stages missing emitters).
 3. **D1–D4** query-history curation, then **E1** ([#306](https://github.com/ronsse/trellis-ai/issues/306)) / **E2**.
 
-**The four lanes dispatched 2026-08-30/31 all merged.** Recorded as outcomes, because each
-carried an instruction ("do not merge until…") that is now spent:
+**There is deliberately no in-flight table here.** One existed for a day and was **4/4
+wrong** within 24 hours — every lane it listed as blocked had merged, and one row still
+instructed an agent not to merge a PR that was already on `main`. An agent reading a stale
+in-flight row does the *opposite* of the right thing, which is strictly worse than reading
+nothing.
 
-| lane | outcome |
-|---|---|
-| **#413** policy fail-open (PR #423) | ✅ merged `fb2e168`. The "nine survivors" mutation-testing block was resolved before merge. `PolicyStore` / `AdvisoryStore` now **refuse to write over a file that loaded degraded**, and the enforcement reader (`mutate/policy_source.py`) is strict. Carried a breaking change: `policy show --format json` returns an envelope. |
-| **#377/#403** stderr + Rich (PR #428) | ✅ merged `75b892e`. The stderr stream is resolved lazily, which is the root-cause fix for the bare-`CliRunner` trap in §5 — see that row. Rich is kept off machine output. |
-| **#404** visible redaction | ✅ merged `d635fcc` (PR #434). **Shipped for MCP only**; the SDK/REST family is genuinely unreachable over the wire (`PackResponse` returns no `metadata`). Its unfinished half is filed as [#439](https://github.com/ronsse/trellis-ai/issues/439) and [#440](https://github.com/ronsse/trellis-ai/issues/440) — both open, both *not* new work. Recorded as a ledger entry. |
-| **#375** graph axis | ✅ merged in three parts: `c5fdc89` (gate 4 — `node_type`/`node_role` into `injected_items[]`), `841afcf` (option 2 — stamp the meta-recorder's Activities `structural`, ledger **T-4**), `9ea5d72` (the design doc, PR #416). Note the operator half T-4 names: `node_role` is immutable across SCD-2 versions, so the 200 existing `cli.*` rows cannot be re-stamped. |
+**Ask `gh pr list --state open` and `git log origin/main` instead.** Those cannot go stale.
+This section carries only what a merge leaves behind that *is* durable — the ledger entry,
+the filed follow-up, the §5 trap. That is the general rule this document now follows:
+**mechanism does not rot; status does.** Write down why something is true, and link to the
+live source for whether it currently holds.
 
-> **Proposal, for the operator — this table should probably not exist.** It is a permanent
-> staleness generator: it was **4/4 wrong** within 24 hours of being written, and one row
-> still said "do not merge until it is resolved" about a PR that had already merged. An
-> agent reading a stale in-flight row does the *opposite* of the right thing, which is worse
-> than reading nothing. Live lane state is already authoritative in `gh pr list` and
-> `git log`, which cannot go stale. **Suggested replacement:** delete the table; keep only
-> the durable residue a merge leaves behind — the ledger entry, the filed follow-up, the §5
-> trap — which is what the rows above have now been reduced to. Not done unilaterally
-> because a reader may be relying on this section's shape.
+The four lanes dispatched 2026-08-30/31 are all merged; their durable residue is ledger
+**T-4** and **T-5**, issues [#438](https://github.com/ronsse/trellis-ai/issues/438) /
+[#439](https://github.com/ronsse/trellis-ai/issues/439) /
+[#440](https://github.com/ronsse/trellis-ai/issues/440), and the §5 trap rows.
 
 **Measurement-integrity issues filed 2026-08-27, all unstarted.** These are cheap and they
 protect every number above, so they are worth interleaving rather than queueing behind
