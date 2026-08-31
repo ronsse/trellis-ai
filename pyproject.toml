@@ -59,7 +59,7 @@ dev = [
     # derive them; `scripts/check_tool_pins.py` fails CI on any divergence.
     # Do not write "matches X" here — three such comments were carried
     # verbatim across Dependabot bumps that broke what they asserted (#378).
-    "ruff==0.16.4",
+    "ruff==0.16.5",
     "mypy==2.3.1",
     "types-PyYAML>=6.0",
     "pre-commit>=4.0",
