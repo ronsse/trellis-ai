@@ -299,12 +299,22 @@ dependency order:
    vector planes.** Panel-decided (unanimous, option B) and recorded as ledger **T-3**;
    implementation not started. #357's worker-local handler is the natural seed. Gains most
    of its point *after* C1, since stage 2 is a no-op until a gate is wired.
-4. **C2 → C3 → C4** — [#256](https://github.com/ronsse/trellis-ai/issues/256) Bolt plugin
+2. **C2 → C3 → C4** — [#256](https://github.com/ronsse/trellis-ai/issues/256) Bolt plugin
    extraction (halves #194's enforcement surface, so it precedes it),
    [#194](https://github.com/ronsse/trellis-ai/issues/194) classification enforcement,
    [#264](https://github.com/ronsse/trellis-ai/issues/264) judged-memory logging (measured
    as 2 of 5 stages missing emitters).
-5. **D1–D4** query-history curation, then **E1** ([#306](https://github.com/ronsse/trellis-ai/issues/306)) / **E2**.
+3. **D1–D4** query-history curation, then **E1** ([#306](https://github.com/ronsse/trellis-ai/issues/306)) / **E2**.
+
+**In flight as of 2026-08-31** — four lanes dispatched after the overnight session was cut
+short by a shared limit. None of them is a queue item above; three are recovery.
+
+| lane | state |
+|---|---|
+| **#413** policy fail-open (PR #423) | green, **re-gating**. The first gate died mid-mutation-testing having reported *"nine survivors"* and never triaged them. Nine surviving mutants on an access-control PR is the signal the gate exists to produce — **do not merge until it is resolved.** Carries a breaking change (`policy show --format json` now returns an envelope). |
+| **#377/#403** stderr + Rich (PR #428) | green, **gating**. Its first gate was killed at startup, so this PR has had no review at all. |
+| **#404** visible redaction | **resuming** on `swarm/night-n404`. The seam (`partition_archived` / `partition_by_signal_quality`, each returning `(kept, withheld)`) and `retrieve/withholding.py` are done and good; all downstream plumbing, every renderer and every test are absent. A version that partitions and then discards is *strictly worse* than the status quo, which is the opposite of what the panel accepted — that WIP state must not ship. |
+| **#375** graph axis | **implementing** gate 4 (forward `node_type`/`node_role` into `injected_items[]`) then option 2 (stamp the meta-recorder's Activities `structural`). Decided as ledger **T-4**; the design doc is PR #416. |
 
 **Measurement-integrity issues filed 2026-08-27, all unstarted.** These are cheap and they
 protect every number above, so they are worth interleaving rather than queueing behind
