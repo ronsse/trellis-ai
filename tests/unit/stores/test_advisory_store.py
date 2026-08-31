@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import json
+import os
+import shlex
 import stat
 from pathlib import Path
 
 import pytest
 from structlog.testing import capture_logs
 
-from trellis.errors import DegradedStoreWriteError
+from trellis.errors import DegradedStoreWriteError, StaleStoreWriteError
 from trellis.schemas.advisory import (
     Advisory,
     AdvisoryCategory,
@@ -807,3 +809,408 @@ class TestLiveFileShapeRoundTrips:
         assert {a.advisory_id for a in reloaded.list()} == {
             str(r["advisory_id"]) for r in rows
         }
+
+
+class TestDegradationIsNotTheOnlyStaleView:
+    """The laundering primitive is wider than a degraded load (#438).
+
+    A whole-file rewrite from *any* in-memory view that is no longer the
+    file produces #393's end state. These are the routes that reach it with
+    nothing degraded — closed on ``PolicyStore`` by #423 and ported here,
+    to the store that actually has a file on the reference deployment.
+    """
+
+    def test_a_second_writer_is_not_silently_overwritten(self, tmp_path: Path) -> None:
+        """Three processes write this file, and none of them held a lock.
+
+        The nightly ``trellis worker curate`` cron, the host ``trellis
+        analyze`` advisory commands, and the containerised ``POST
+        /api/v1/advisories/generate`` all write one bind-mounted
+        ``advisories.json``. A store that loaded ``[A]`` must not rewrite
+        the file as ``[A, C]`` after another made it ``[A, B]``: since
+        advisory ids are stable (#394) that deletes ``B`` from disk, from
+        every future pack, and — the half no read notices — takes ``B``'s
+        suppression with it, on a call that succeeds.
+        """
+        path = tmp_path / "advisories.json"
+        mine = AdvisoryStore(path)
+        mine.put(_advisory(scope="a"))
+
+        # Another process appends B between my load and my next write.
+        theirs = AdvisoryStore(path)
+        b = theirs.put(_advisory(scope="b"))
+        theirs.suppress(b.advisory_id, reason="fitness")
+        after_theirs = path.read_bytes()
+
+        with pytest.raises(StaleStoreWriteError) as excinfo:
+            mine.put(_advisory(scope="c"))
+
+        assert path.read_bytes() == after_theirs
+        # Transient and retryable, so it must not claim the file is damaged.
+        assert excinfo.value.code == "STALE_STORE_WRITE"
+        assert excinfo.value.path == str(path)
+        assert mine.is_degraded is False
+        # B's suppression survived, which is what the refusal is protecting.
+        survivor = AdvisoryStore(path).get(b.advisory_id)
+        assert survivor is not None
+        assert survivor.status == AdvisoryStatus.SUPPRESSED
+
+    def test_a_file_created_after_construction_is_not_wiped(
+        self, tmp_path: Path
+    ) -> None:
+        """A store built against an absent path never read the file.
+
+        Not degradation — an absent advisory file is the normal state of a
+        deployment that has never run generate-advisories (#393) — so
+        nothing about the *load* would ever refuse this write.
+        """
+        path = tmp_path / "advisories.json"
+        store = AdvisoryStore(path)  # absent: not degraded, writes permitted
+
+        AdvisoryStore(path).put(_advisory(scope="declared"))
+        landed = path.read_bytes()
+
+        with pytest.raises(StaleStoreWriteError):
+            store.put(_advisory(scope="mine"))
+
+        assert path.read_bytes() == landed
+
+    def test_damage_arriving_after_a_clean_load_is_not_overwritten(
+        self, tmp_path: Path
+    ) -> None:
+        """The refusal must not be keyed on load-time state alone.
+
+        A store that read a healthy file is not degraded and never will be,
+        so before this guard it would whole-file-rewrite a file an operator
+        had since broken (or hand-edited), destroying the evidence and
+        resuming from its own stale snapshot. The module docstring's
+        promise that "the corrupt bytes stay on disk, where an operator can
+        look at them" was false on exactly this path.
+        """
+        path = tmp_path / "advisories.json"
+        store = AdvisoryStore(path)
+        store.put(_advisory(scope="a"))
+        assert store.is_degraded is False
+
+        path.write_text('{"advisorees": [{"advisory_id": "x"}]}', encoding="utf-8")
+        damaged = path.read_bytes()
+
+        with pytest.raises(StaleStoreWriteError):
+            store.put(_advisory(scope="b"))
+
+        assert path.read_bytes() == damaged
+
+    def test_the_same_store_may_write_repeatedly(self, tmp_path: Path) -> None:
+        """The guard must not fire on a store's own previous write.
+
+        ``os.replace`` changes the inode every time, so without refreshing
+        the fingerprint after a successful save the second write on any
+        store would refuse — which would break the nightly cycle, which
+        writes once per generated advisory and once per fitness adjustment.
+        """
+        path = tmp_path / "advisories.json"
+        store = AdvisoryStore(path)
+        first = store.put(_advisory(scope="a"))
+        store.put_many([_advisory(scope="b"), _advisory(scope="c")])
+        store.suppress(first.advisory_id, reason="fitness")
+        store.restore(first.advisory_id)
+        store.remove(first.advisory_id)
+
+        assert len(store.list()) == 2
+        assert len(AdvisoryStore(path).list()) == 2
+
+    def test_a_symlinked_path_writes_repeatedly(self, tmp_path: Path) -> None:
+        """The fingerprint reads through the link, as the write does.
+
+        ``atomic_write_text`` deliberately follows a symlink and replaces
+        the *target*, and ``Path.stat`` follows it too — so the two agree
+        and a store may write through a link more than once. A fingerprint
+        taken on the link itself (``lstat``) would never change and the
+        guard would never fire; one that disagreed with the write would
+        fire on every second write. A symlink is a plausible answer to
+        ``resolve_advisory_path``'s canonical-path advice, so the shape is
+        reachable.
+        """
+        real = tmp_path / "real.json"
+        real.write_text('{"advisories": []}', encoding="utf-8")
+        link = tmp_path / "advisories.json"
+        link.symlink_to(real)
+
+        store = AdvisoryStore(link)
+        store.put(_advisory(scope="a"))
+        store.put(_advisory(scope="b"))
+
+        assert link.is_symlink()
+        assert len(json.loads(real.read_text(encoding="utf-8"))["advisories"]) == 2
+
+    def test_the_fingerprint_catches_a_same_size_same_mtime_replacement(
+        self, tmp_path: Path
+    ) -> None:
+        """``st_ino`` is the load-bearing field, and only it catches this.
+
+        Every write lands through ``os.replace`` from a fresh temp file, so
+        a completed write by any process changes the inode even when size
+        and mtime collide. The collision is not exotic: a filesystem with
+        coarse mtime granularity reaches it for any two same-size writes
+        inside one tick, and this is a small JSON document that three
+        processes rewrite. Dropping ``st_ino`` from the tuple must fail
+        here and nowhere else.
+        """
+        path = tmp_path / "advisories.json"
+        path.write_text('{"advisories": []}', encoding="utf-8")
+        before = path.stat()
+        store = AdvisoryStore(path)
+
+        replacement = tmp_path / "other.json"
+        replacement.write_text('{"advisories":[] }', encoding="utf-8")
+        assert replacement.stat().st_size == before.st_size
+        replacement.replace(path)
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+
+        after = path.stat()
+        assert (after.st_mtime_ns, after.st_size) == (
+            before.st_mtime_ns,
+            before.st_size,
+        ), "the collision this test exists for was not constructed"
+        assert after.st_ino != before.st_ino
+
+        with pytest.raises(StaleStoreWriteError):
+            store.put(_advisory())
+
+    def test_a_degraded_load_still_refuses_with_its_own_error(
+        self, tmp_path: Path
+    ) -> None:
+        """#414's guard is not weakened by the new one.
+
+        The two are ordered ``degraded`` then ``stale`` on every write
+        path, and they are not interchangeable: a degraded store needs an
+        operator to look at the file (``DEGRADED_STORE_WRITE``, carrying
+        the ``mv``), a stale one needs nothing but a retry. A store whose
+        file broke *after* construction is both — its load degraded and its
+        fingerprint moved — and it must report the one that needs a human.
+        """
+        path = tmp_path / "advisories.json"
+        AdvisoryStore(path).put(_advisory())
+        path.write_text("{ broken", encoding="utf-8")
+
+        store = AdvisoryStore(path)
+        assert store.is_degraded is True
+
+        with pytest.raises(DegradedStoreWriteError) as excinfo:
+            store.put(_advisory())
+        assert excinfo.value.code == "DEGRADED_STORE_WRITE"
+        assert excinfo.value.recovery.startswith("mv ")
+
+    @pytest.mark.parametrize(
+        "write", ["put", "put_many", "suppress", "restore", "remove", "clear"]
+    )
+    def test_a_stale_write_never_enters_the_write_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, write: str
+    ) -> None:
+        """Every write path's own guard, pinned against ``_save``'s masking.
+
+        ``_save`` calls ``refuse_if_stale`` too and ``_save_or_roll_back``
+        undoes the mutation, so deleting the guard from any one of these
+        methods leaves the exception and the final ``list()`` identical —
+        the same masking #423 measured on ``PolicyStore``, where dropping
+        the guard from ``_save`` killed **zero** tests. Stubbing ``_save``
+        is what makes each call site's own guard observable: with the guard
+        removed the stub records a call and the assertion fires.
+
+        The difference it protects is real. ``suppress``, ``restore`` and
+        ``remove`` all return *before* reaching a write when the id is
+        unknown to the in-memory view, so ``_save``'s guard cannot cover
+        them at all — see the wrong-answer test below. And a store outlives
+        the refused call in every caller that catches and keeps serving.
+        """
+        path = tmp_path / "advisories.json"
+        mine = AdvisoryStore(path)
+        seeded = mine.put(_advisory(scope="seeded"))
+
+        AdvisoryStore(path).put(_advisory(scope="theirs"))  # another process
+
+        entered: list[str] = []
+        monkeypatch.setattr(
+            mine,
+            "_save",
+            lambda: entered.append("save"),  # type: ignore[method-assign]
+        )
+        attempts = {
+            "put": lambda: mine.put(_advisory(scope="mine")),
+            "put_many": lambda: mine.put_many([_advisory(scope="mine")]),
+            "suppress": lambda: mine.suppress(seeded.advisory_id, reason="x"),
+            "restore": lambda: mine.restore(seeded.advisory_id),
+            "remove": lambda: mine.remove(seeded.advisory_id),
+            "clear": mine.clear,
+        }
+
+        with pytest.raises(StaleStoreWriteError):
+            attempts[write]()
+
+        assert entered == [], "the write path was entered on a stale store"
+
+    def test_save_refuses_a_stale_write_on_its_own(self, tmp_path: Path) -> None:
+        """The unconditional backstop, pinned separately from its callers.
+
+        Every public write refuses first, which masks this completely:
+        removing ``refuse_if_stale()`` from ``_save`` alone leaves every
+        other test in this class green. It is what protects a future write
+        path added without the leading guard — the claim
+        ``refuse_if_degraded``'s docstring already makes ("not calling it
+        is never a way to avoid one") is a claim about ``_save``, and so
+        needs its own test.
+        """
+        path = tmp_path / "advisories.json"
+        store = AdvisoryStore(path)
+        store.put(_advisory(scope="a"))
+        AdvisoryStore(path).put(_advisory(scope="b"))
+
+        with pytest.raises(StaleStoreWriteError):
+            store._save()
+
+    @pytest.mark.parametrize("write", ["suppress", "restore", "remove"])
+    def test_a_stale_lookup_does_not_report_not_found(
+        self, tmp_path: Path, write: str
+    ) -> None:
+        """These three answer from the in-memory view and never reach a write.
+
+        ``remove`` returns ``False`` and ``suppress`` / ``restore`` return
+        ``None`` for an id this store has not loaded — which for a row
+        another process added since is "no such advisory" about a row that
+        is right there in the file. A wrong answer, not merely an unhelpful
+        one, and ``_save``'s guards are structurally too late to prevent
+        it: the call returns before reaching a write at all.
+        """
+        path = tmp_path / "advisories.json"
+        mine = AdvisoryStore(path)
+        mine.put(_advisory(scope="mine"))
+
+        theirs = AdvisoryStore(path).put(_advisory(scope="theirs"))
+
+        calls = {
+            "suppress": lambda: mine.suppress(theirs.advisory_id, reason="x"),
+            "restore": lambda: mine.restore(theirs.advisory_id),
+            "remove": lambda: mine.remove(theirs.advisory_id),
+        }
+        with pytest.raises(StaleStoreWriteError):
+            calls[write]()
+
+    def test_a_stale_idempotent_suppress_is_not_reported_as_applied(
+        self, tmp_path: Path
+    ) -> None:
+        """The other wrong answer ``suppress`` can give from a stale view.
+
+        Suppressing an already-suppressed advisory is a documented no-op
+        that returns the existing row. From a stale view that row is read
+        from a superseded file: another process may have restored it, so
+        the call would report the suppression as already applied against a
+        file whose row is ACTIVE — and write nothing.
+        """
+        path = tmp_path / "advisories.json"
+        mine = AdvisoryStore(path)
+        adv = mine.put(_advisory(scope="a"))
+        mine.suppress(adv.advisory_id, reason="fitness")
+
+        theirs = AdvisoryStore(path)
+        theirs.restore(adv.advisory_id)
+
+        with pytest.raises(StaleStoreWriteError):
+            mine.suppress(adv.advisory_id, reason="fitness")
+
+        current = AdvisoryStore(path).get(adv.advisory_id)
+        assert current is not None
+        assert current.status == AdvisoryStatus.ACTIVE
+
+    @pytest.mark.skipif(
+        os.geteuid() == 0, reason="root traverses any directory regardless of mode"
+    )
+    def test_an_unsearchable_parent_degrades_rather_than_reading_as_absent(
+        self, tmp_path: Path
+    ) -> None:
+        """``Path.exists()`` swallows ``OSError``, which was the hazard.
+
+        An unreadable file presenting as *absent* is the worst of the
+        available answers here: absent means "a deployment that has never
+        generated an advisory", which is neither degraded nor stale, and so
+        is the one state this store will freely write over.
+        """
+        parent = tmp_path / "locked"
+        parent.mkdir()
+        path = parent / "advisories.json"
+        path.write_text('{"advisories": []}', encoding="utf-8")
+        parent.chmod(0o000)
+        try:
+            store = AdvisoryStore(path)
+        finally:
+            parent.chmod(0o755)
+
+        assert store.is_degraded is True
+        assert store.degradation is not None
+        assert store.degradation.reason == "unreadable_file"
+
+
+class TestTheRecoveryCommandRuns:
+    """#427: the ``mv`` is the entire justification for refusing the write.
+
+    #414 argued it — "an operator at 03:00 needs the fix, not a diagnosis",
+    "the one string that must survive rendering byte-for-byte" — and then
+    built it with bare interpolation, so it survives Rich markup and does
+    not survive the shell.
+    """
+
+    def test_the_recovery_command_survives_a_path_with_a_space(
+        self, tmp_path: Path
+    ) -> None:
+        """A data dir containing a space word-splits into four operands.
+
+        ``/tmp/my staging dir/`` , ``~/Library/Application Support/…``, any
+        Windows-ish mount. The assertion goes at the real property — that
+        the string *parses as a shell command with the two operands it
+        should have* — rather than at the symptom, because the obvious
+        ``f"mv {path} {path}.corrupt" in command`` check passes happily
+        against a command that cannot run.
+        """
+        data_dir = tmp_path / "my staging dir"
+        data_dir.mkdir()
+        path = data_dir / "advisories.json"
+        path.write_text("{ broken", encoding="utf-8")
+        store = AdvisoryStore(path)
+
+        assert store.degradation is not None
+        command = store.degradation.recovery
+
+        assert shlex.split(command) == ["mv", str(path), f"{path}.corrupt"]
+
+    def test_the_refused_write_carries_the_runnable_command(
+        self, tmp_path: Path
+    ) -> None:
+        """Through the exception too, which is where an operator meets it."""
+        data_dir = tmp_path / "my [staging] dir"
+        data_dir.mkdir()
+        path = data_dir / "advisories.json"
+        path.write_text("{ broken", encoding="utf-8")
+        store = AdvisoryStore(path)
+
+        with pytest.raises(DegradedStoreWriteError) as excinfo:
+            store.put(_advisory())
+
+        assert excinfo.value.recovery is not None
+        assert shlex.split(excinfo.value.recovery) == [
+            "mv",
+            str(path),
+            f"{path}.corrupt",
+        ]
+
+    def test_an_ordinary_path_is_left_alone(self, tmp_path: Path) -> None:
+        """``shlex.quote`` must not start quoting every ordinary path.
+
+        The command is pasted by hand and read by humans; gratuitous quotes
+        on the common case would be a regression in the thing this string
+        exists for.
+        """
+        path = tmp_path / "advisories.json"
+        path.write_text("{ broken", encoding="utf-8")
+        store = AdvisoryStore(path)
+
+        assert store.degradation is not None
+        assert store.degradation.recovery == f"mv {path} {path}.corrupt"

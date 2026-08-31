@@ -21,9 +21,15 @@ from typer.testing import CliRunner
 from tests.document_recency import fake_document_clock
 from trellis.core.vector_metadata import vector_metadata_diverges
 from trellis.llm import LLMResponse, Message
+from trellis.schemas.advisory import (
+    Advisory,
+    AdvisoryCategory,
+    AdvisoryEvidence,
+)
 from trellis.schemas.enums import OutcomeStatus, TraceSource
 from trellis.schemas.trace import Outcome, Trace, TraceContext
 from trellis.stores.advisory_source import ADVISORY_FILENAME
+from trellis.stores.advisory_store import AdvisoryStore
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 from trellis_cli import worker
@@ -1569,3 +1575,198 @@ class TestEnrichPreservesRecency:
         assert [(c.item_id, c.reason_code) for c in report.candidates] == [
             ("doc-stale", "lifecycle_stale")
         ]
+
+
+class TestCurateSurvivesASecondWriter:
+    """#438 — the nightly cron is not the advisory file's only writer.
+
+    ``advisories.json`` is written by this cron, by the host ``trellis
+    analyze`` advisory commands, and by the containerised ``POST
+    /api/v1/advisories/generate``, all against one bind-mounted data dir.
+    Before the store's stale guard the cycle silently deleted whatever
+    another process had landed; after it, the refusal must not take the
+    *learning* stage down instead — that stage neither reads nor writes
+    this file, and a traceback here would lose it.
+    """
+
+    @staticmethod
+    def _seed_scored_advisory(registry: StoreRegistry, path: Path) -> str:
+        """Put one advisory in the file and enough graded packs to score it.
+
+        The fitness loop writes ``put`` for every advisory it scores, so
+        this is what makes the stage actually reach a write — without it a
+        cycle with nothing to say would refuse nothing and the test would
+        pass vacuously.
+        """
+        advisory = Advisory(
+            category=AdvisoryCategory.ENTITY,
+            confidence=0.7,
+            message="seeded advisory",
+            evidence=AdvisoryEvidence(
+                sample_size=10,
+                success_rate_with=0.8,
+                success_rate_without=0.4,
+                effect_size=0.4,
+            ),
+            scope="global",
+        )
+        AdvisoryStore(path).put(advisory)
+
+        event_log = registry.operational.event_log
+        for i in range(4):  # > _ADVISORY_MIN_PRESENTATIONS
+            pack_id = f"wc-adv-pack-{i}"
+            event_log.emit(
+                EventType.PACK_ASSEMBLED,
+                source="test",
+                entity_id=pack_id,
+                entity_type="pack",
+                payload={
+                    "intent": "advisory probe",
+                    "domain": "wc-test",
+                    "advisory_ids": [advisory.advisory_id],
+                    "injected_items": [],
+                    "injected_item_ids": [],
+                },
+            )
+            event_log.emit(
+                EventType.FEEDBACK_RECORDED,
+                source="test",
+                entity_id=pack_id,
+                entity_type="pack",
+                payload={
+                    "pack_id": pack_id,
+                    "outcome": "success",
+                    "success": True,
+                    "followed_advisory_ids": [advisory.advisory_id],
+                },
+            )
+        return advisory.advisory_id
+
+    @staticmethod
+    def _second_writer_after_load(
+        monkeypatch: pytest.MonkeyPatch, path: Path
+    ) -> list[str]:
+        """Make another process append a row between this store's load and save.
+
+        Patched at the store *factory*, not at any guard: the cycle gets a
+        real ``AdvisoryStore`` that really loaded the file, and the file
+        really moves on underneath it. That is the race, reproduced rather
+        than simulated.
+        """
+        landed: list[str] = []
+        original = worker._advisory_store_from_data_dir
+
+        def _racing_factory() -> object:
+            store = original()
+            theirs = Advisory(
+                category=AdvisoryCategory.SCOPE,
+                confidence=0.6,
+                message="written by the other process",
+                evidence=AdvisoryEvidence(
+                    sample_size=10,
+                    success_rate_with=0.8,
+                    success_rate_without=0.4,
+                    effect_size=0.4,
+                ),
+                scope="global",
+            )
+            AdvisoryStore(path).put(theirs)
+            landed.append(theirs.advisory_id)
+            return store
+
+        monkeypatch.setattr(worker, "_advisory_store_from_data_dir", _racing_factory)
+        return landed
+
+    def test_the_cycle_completes_and_the_other_writer_survives(
+        self,
+        tmp_path: Path,
+        temp_stores: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        path = tmp_path / "data" / "stores" / ADVISORY_FILENAME
+        self._seed_scored_advisory(temp_stores, path)
+        _seed_promote_signal(temp_stores)
+        landed = self._second_writer_after_load(monkeypatch, path)
+
+        result = runner.invoke(
+            app,
+            [
+                "worker",
+                "curate",
+                "--output-dir",
+                str(tmp_path / "review"),
+                "--format",
+                "json",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout.strip())
+        # The refusal is reported, not swallowed — and not as ``degraded``,
+        # because nothing is broken and no operator action is required.
+        assert data["status"] == "stale"
+        assert data["advisory_store_stale"] is not None
+        assert data["advisory_store_stale"]["code"] == "STALE_STORE_WRITE"
+        assert data["advisory_store_degraded"] is None
+        # NOT reported as a skipped stage: the stage really ran, and the
+        # fitness loop writes per advisory, so some adjustments may already
+        # have landed. ``status`` and ``advisory_store_stale`` carry it.
+        assert "advisories" not in data["skipped_stages"]
+        # The rest of the cycle still ran: this is a contained refusal, not
+        # a crash that takes the learning stage with it.
+        assert data["learning_observations"] >= 3
+        # And the other process's advisory is still in the file.
+        assert AdvisoryStore(path).get(landed[0]) is not None
+
+    def test_the_text_surface_says_so_too(
+        self,
+        tmp_path: Path,
+        temp_stores: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A refusal honest only in ``--format json`` is one nobody reads."""
+        path = tmp_path / "data" / "stores" / ADVISORY_FILENAME
+        self._seed_scored_advisory(temp_stores, path)
+        _seed_promote_signal(temp_stores)
+        self._second_writer_after_load(monkeypatch, path)
+
+        result = runner.invoke(
+            app, ["worker", "curate", "--output-dir", str(tmp_path / "review")]
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "ADVISORY WRITE REFUSED" in result.output
+        # The refusal's own message rides through, so the operator is told
+        # what happened rather than only that something did.
+        assert "changed after this process read it" in result.output.replace("\n", "")
+
+    def test_a_clean_cycle_carries_no_stale_marker(
+        self, tmp_path: Path, temp_stores: StoreRegistry
+    ) -> None:
+        """The negative control: the field must stay ``None`` on the happy path.
+
+        Without it the cycle could report ``stale`` unconditionally and
+        every assertion above would still pass.
+        """
+        path = tmp_path / "data" / "stores" / ADVISORY_FILENAME
+        self._seed_scored_advisory(temp_stores, path)
+        _seed_promote_signal(temp_stores)
+
+        result = runner.invoke(
+            app,
+            [
+                "worker",
+                "curate",
+                "--output-dir",
+                str(tmp_path / "review"),
+                "--format",
+                "json",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout.strip())
+        assert data["advisory_store_stale"] is None
+        assert data["status"] == "ok"
+        assert "advisories" not in data["skipped_stages"]
+        assert "ADVISORY WRITE REFUSED" not in result.output

@@ -48,6 +48,41 @@ write refuses: a partial load followed by a permitted write would rewrite
 the file without the skipped rows, which is the same data loss at a
 narrower granularity. The two halves are a pair; neither is safe alone.
 
+Degradation is not the only stale view
+--------------------------------------
+The primitive above is *a whole-file rewrite from an in-memory view that is
+no longer the file*, and a degraded load is only one way to get one. Two
+others reach the identical end state with nothing degraded (#438):
+
+* **Another process wrote the file.** ``advisories.json`` has three writer
+  processes on the reference deployment — the nightly ``trellis worker
+  curate`` cron, the host's ``trellis analyze generate-advisories`` /
+  ``advisory-effectiveness``, and the containerised ``POST
+  /api/v1/advisories/generate`` against the same bind-mounted data dir. A
+  store that loaded ``[A]`` and then rewrites the file after another made
+  it ``[A, B]`` deletes ``B`` — from disk and from every future pack — with
+  no error anywhere. Since stable advisory ids (#394) it deletes ``B``'s
+  *suppression* too, which is the half no read ever notices.
+* **The file appeared after construction.** A store built while the path
+  was absent is not degraded, and its first write replaces a file it never
+  read.
+
+Both are closed by one guard: :meth:`AdvisoryStore.refuse_if_stale` records
+a fingerprint of the file as loaded and refuses
+(:class:`~trellis.errors.StaleStoreWriteError`) if it no longer matches.
+Unlike a degraded load this one is **transient** — re-read and redo, rather
+than go and look at the file. It is a compare-and-swap, not a lock: two
+writers can still interleave between the check and the ``os.replace``, so
+it closes the wide window and narrows the tiny one. Last-writer-wins
+remains the model.
+
+This is the guard #423 landed on
+:class:`~trellis.stores.policy_store.PolicyStore`, ported here because that
+change generalised its *analysis* one store further than its *fix*:
+``policies.json`` does not exist on the reference deployment, while
+``advisories.json`` is 51 KB of live rows rewritten by the nightly cron
+(#438).
+
 Recovery is the operator's, not this module's
 ---------------------------------------------
 #393 suggested moving the unreadable file aside automatically before
@@ -65,6 +100,7 @@ the file; the refusal carries the ``mv`` an operator would run.
 from __future__ import annotations
 
 import json
+import shlex
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -74,7 +110,7 @@ from typing import Any
 import structlog
 
 from trellis.core.atomic_write import atomic_write_text
-from trellis.errors import DegradedStoreWriteError
+from trellis.errors import DegradedStoreWriteError, StaleStoreWriteError
 from trellis.schemas.advisory import Advisory, AdvisoryStatus
 
 logger = structlog.get_logger(__name__)
@@ -121,8 +157,18 @@ class AdvisoryLoadDegradation:
         aside rather than deleting it keeps the bytes for inspection; the
         next generation run rebuilds the findings, though suppression
         decisions the file held are not recoverable from it by machine.
+
+        Both operands are ``shlex.quote``d (#427). A data dir containing a
+        space — ``/tmp/my staging dir/``, ``~/Library/Application
+        Support/…`` — otherwise word-splits into an ``mv`` with **four**
+        operands, which does not run. That is the same failure as the
+        Rich-markup and hard-wrap cases the CLI renderer already guards:
+        an unrunnable command printed to the operator *as* the fix. It is
+        the one string in this module that must survive every layer
+        byte-for-byte, and the shell is the last of them.
         """
-        return f"mv {self.path} {self.path}.corrupt"
+        quoted = shlex.quote(self.path)
+        return f"mv {quoted} {shlex.quote(self.path + '.corrupt')}"
 
     @property
     def rows_skipped_display(self) -> str:
@@ -167,8 +213,21 @@ class AdvisoryStore:
         self._path = Path(path)
         self._advisories: dict[str, Advisory] = {}
         self._degradation: AdvisoryLoadDegradation | None = None
-        if self._path.exists():
+        # ``stat`` rather than ``exists()``: ``Path.exists`` swallows every
+        # ``OSError`` internally, so a file under an unsearchable directory
+        # presents as *absent* — which here means "a deployment that has
+        # never generated an advisory", the one state that is neither
+        # degraded nor stale and so is freely writable. That is the same
+        # laundering by a different door.
+        try:
+            self._path.stat()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            self._degrade("unreadable_file", f"{type(exc).__name__}: {exc}")
+        else:
             self._load()
+        self._loaded_fingerprint = self._fingerprint()
 
     # -- Public API --
 
@@ -237,6 +296,7 @@ class AdvisoryStore:
     def put(self, advisory: Advisory) -> Advisory:
         """Add or replace an advisory.  Persists immediately."""
         self.refuse_if_degraded()
+        self.refuse_if_stale()
         restore = self._snapshot()
         self._advisories[advisory.advisory_id] = advisory
         self._save_or_roll_back(restore)
@@ -246,6 +306,7 @@ class AdvisoryStore:
     def put_many(self, advisories: Sequence[Advisory]) -> int:
         """Add or replace multiple advisories.  Single write."""
         self.refuse_if_degraded()
+        self.refuse_if_stale()
         restore = self._snapshot()
         for advisory in advisories:
             self._advisories[advisory.advisory_id] = advisory
@@ -268,8 +329,20 @@ class AdvisoryStore:
 
         Unlike :meth:`remove`, the advisory is preserved so it can be
         restored via :meth:`restore` if later evidence warrants.
+
+        Both guards run *before* the lookup, not after. This method has two
+        early returns that answer from the in-memory view and never reach a
+        write, so ``_save``'s guards are too late to prevent either: on a
+        degraded store the ``None`` reads as "no such advisory" for a row
+        that is in the file and merely failed to parse, and on a **stale**
+        store it says the same for a row another process added since this
+        one loaded. The idempotent branch is worse — it returns a row read
+        from a superseded file and reports the suppression as already
+        applied, when the file's current row may be ACTIVE. Wrong answers,
+        not merely unhelpful ones.
         """
         self.refuse_if_degraded()
+        self.refuse_if_stale()
         advisory = self._advisories.get(advisory_id)
         if advisory is None:
             return None
@@ -299,8 +372,13 @@ class AdvisoryStore:
         Returns the updated advisory, or ``None`` if the id is unknown.
         Idempotent — restoring an already-active advisory is a no-op.
         Clears ``suppressed_at`` and ``suppression_reason``.
+
+        Guarded before the lookup for the reasons :meth:`suppress` gives:
+        both early returns answer from a view that may no longer be the
+        file, and neither reaches a write.
         """
         self.refuse_if_degraded()
+        self.refuse_if_stale()
         advisory = self._advisories.get(advisory_id)
         if advisory is None:
             return None
@@ -327,8 +405,16 @@ class AdvisoryStore:
         cleanup (admin commands, broken-state recovery). The fitness
         loop should use :meth:`suppress` instead so the record remains
         available for later restoration.
+
+        Refuses *before* the membership check, for both reasons. A degraded
+        store would answer ``False`` — "no such advisory" — for a row that
+        is in the file and merely failed to parse; a stale one would answer
+        ``False`` for a row another process added since. This path returns
+        before reaching a write at all, so ``_save``'s guards cannot cover
+        it.
         """
         self.refuse_if_degraded()
+        self.refuse_if_stale()
         if advisory_id not in self._advisories:
             return False
         restore = self._snapshot()
@@ -344,8 +430,13 @@ class AdvisoryStore:
         file this store could not read is an operator decision taken at
         the shell (see :attr:`AdvisoryLoadDegradation.recovery`), not one
         an admin surface should be able to take by accident.
+
+        Refuses on a stale store too, and the returned count is the second
+        reason: it is the size of the in-memory view, so on a store another
+        process has written it would under-report what the file lost.
         """
         self.refuse_if_degraded()
+        self.refuse_if_stale()
         restore = self._snapshot()
         count = len(self._advisories)
         self._advisories.clear()
@@ -499,6 +590,60 @@ class AdvisoryStore:
             ),
         )
 
+    def _fingerprint(self) -> tuple[int, int, int] | None:
+        """Identity of the file as this store last saw it, ``None`` if absent.
+
+        ``st_ino`` is the load-bearing part: every write here lands through
+        ``os.replace`` from a fresh temp file, so a completed write by any
+        process changes the inode even if size and mtime happen to collide.
+        Size and mtime are kept because they catch the other shape — an
+        in-place edit that keeps the inode, which is what ``sed -i`` and
+        an editor configured to write through produce.
+
+        Inode *reuse* — a replacement landing on the number this store
+        recorded, with mtime and size colliding too — is unreachable by
+        construction rather than defended against: ``atomic_write_text``
+        creates its temp file while the target still exists, so the
+        target's inode is never free to be handed back.
+        """
+        try:
+            st = self._path.stat()
+        except OSError:
+            return None
+        return (st.st_ino, st.st_mtime_ns, st.st_size)
+
+    def refuse_if_stale(self) -> None:
+        """Raise rather than rewrite a file that changed after we read it.
+
+        See the module docstring: a degraded load is one way an in-memory
+        view stops matching the file, another process writing it is a
+        second, and a file appearing after construction is a third. All
+        three end the same way, and only the first of them degrades.
+
+        Public for the same reason :meth:`refuse_if_degraded` is — a caller
+        about to make a *batch* of writes should fail before it starts
+        rather than part-way through — and it is a **compare-and-swap, not
+        a lock**: two writers can still interleave between this check and
+        the ``os.replace`` inside :meth:`_save`. It closes the wide window
+        (a store that loaded minutes ago, which is every nightly run) and
+        narrows the tiny one; it does not make the write exclusive.
+        """
+        if self._fingerprint() == self._loaded_fingerprint:
+            return
+        msg = (
+            f"Refusing to write the Trellis advisory file at {self._path}: it "
+            "changed after this process read it, so writing would replace "
+            "whatever landed in between — deleting those advisories and, "
+            "because advisory ids are stable (#394), reviving any "
+            "suppression they carried. Re-read and retry:"
+        )
+        raise StaleStoreWriteError(
+            msg,
+            store="advisory",
+            path=str(self._path),
+            recovery="trellis analyze advisory-effectiveness --dry-run",
+        )
+
     def refuse_if_degraded(self) -> None:
         """Raise rather than rewrite a file this store could not read.
 
@@ -535,12 +680,24 @@ class AdvisoryStore:
         A direct ``write_text`` truncates the destination and *then*
         writes, so a crash, a full disk or a killed cron between the two
         produces exactly the half-written file the rest of this module now
-        has to survive. This store is the file's only writer, so closing
-        that window closes the main way the state gets created.
+        has to survive. No other *code* writes this file, so closing that
+        window closes the main way the state gets created.
+
+        Atomicity is not a concurrency guarantee, and this file has three
+        writer **processes** — the nightly ``trellis worker curate`` cron,
+        the host ``trellis analyze`` advisory commands, and ``POST
+        /api/v1/advisories/generate`` in a container, against the same
+        bind-mounted data dir. ``os.replace`` makes their writes atomic,
+        not ordered; :meth:`refuse_if_stale` is what stops one of them
+        rewriting another's work from a stale view (#438).
         """
         self.refuse_if_degraded()
+        self.refuse_if_stale()
         self._path.parent.mkdir(parents=True, exist_ok=True)
         data: dict[str, Any] = {
             "advisories": [a.model_dump(mode="json") for a in self._advisories.values()]
         }
         atomic_write_text(self._path, json.dumps(data, indent=2, default=str))
+        # What we just wrote is now what we "loaded": a second write from the
+        # same store instance must not trip its own guard.
+        self._loaded_fingerprint = self._fingerprint()

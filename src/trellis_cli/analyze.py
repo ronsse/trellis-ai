@@ -15,6 +15,7 @@ from rich.table import Table
 
 from trellis.analyze.domains import analyze_domains
 from trellis.core.vector_metadata import resolve_vector_store
+from trellis.errors import StoreWriteRefusedError
 from trellis.extract.telemetry import analyze_extractor_fallbacks
 from trellis.learning import (
     LEARNING_NOISE_RETRY_KEY,
@@ -1202,6 +1203,46 @@ def _render_advisory_degradation(
     )
 
 
+def _exit_on_refused_advisory_write(
+    exc: StoreWriteRefusedError, output_format: str
+) -> None:
+    """Render a refused advisory write and exit, instead of a traceback.
+
+    Covers the refusal no pre-check can: :meth:`AdvisoryStore.refuse_if_stale`
+    fires when another process wrote the file between this command's load
+    and its save, and the store was perfectly healthy when the pre-check
+    ran (#438). There is no ``AdvisoryLoadDegradation`` to render in that
+    case, so this reads the exception rather than the store.
+
+    Exit code 2, matching :func:`_exit_if_advisory_store_degraded` rather
+    than the ``EXIT_STORE`` the policy surface uses: the two advisory
+    refusals must agree with each other, since a cron wrapper branches on
+    the code without knowing which of them it hit.
+    """
+    if output_format == "json":
+        emit_json(
+            {
+                "status": "refused",
+                "code": exc.code,
+                "message": exc.message,
+                "path": exc.path,
+                "recovery": exc.recovery,
+            }
+        )
+    else:
+        console.print(
+            f"  [bold yellow]ADVISORY WRITE REFUSED[/bold yellow] — "
+            f"{escape(str(exc.message))}",
+            soft_wrap=True,
+        )
+        console.print(
+            "    Another process wrote the file after this command read it; "
+            "its rows are intact. Re-run to pick them up.",
+            soft_wrap=True,
+        )
+    raise typer.Exit(code=2)
+
+
 def _exit_if_advisory_store_degraded(store: AdvisoryStore, output_format: str) -> None:
     """Stop a command that cannot act on a store which loaded degraded.
 
@@ -1250,23 +1291,31 @@ def generate_advisories(
     # every pack-assembling reader opens.
     store = AdvisoryStore(resolve_advisory_path(get_data_dir() / "stores"))
 
-    with wrap_cli_meta_analysis(
-        agent_suffix="analyze",
-        analyzer_name="cli.analyze.generate-advisories",
-        disabled=no_meta_trace,
-    ) as _meta_record:
-        generator = AdvisoryGenerator(
-            event_log,
-            store,
-            min_sample_size=min_sample,
-            min_effect_size=min_effect,
-        )
-        report = generator.generate(days=days)
-        if _meta_record.enabled and report.advisories_generated > 0:
-            _meta_record.produced_finding(
-                f"advisories-generated-d{days}",
-                finding_type="AdvisoryGenerationReport",
+    try:
+        with wrap_cli_meta_analysis(
+            agent_suffix="analyze",
+            analyzer_name="cli.analyze.generate-advisories",
+            disabled=no_meta_trace,
+        ) as _meta_record:
+            generator = AdvisoryGenerator(
+                event_log,
+                store,
+                min_sample_size=min_sample,
+                min_effect_size=min_effect,
             )
+            report = generator.generate(days=days)
+            if _meta_record.enabled and report.advisories_generated > 0:
+                _meta_record.produced_finding(
+                    f"advisories-generated-d{days}",
+                    finding_type="AdvisoryGenerationReport",
+                )
+    except StoreWriteRefusedError as exc:
+        # The store's own guards, surfaced as a refusal rather than as a
+        # traceback. ``generate`` returns early on a *degraded* store, so in
+        # practice this is the stale one (#438): another process regenerated
+        # advisories while this command was analysing, and the analysis it
+        # was about to write is the same analysis, one round later.
+        _exit_on_refused_advisory_write(exc, output_format)
 
     if output_format == "json":
         print(json.dumps(report.model_dump(), indent=2, default=str))
@@ -1338,7 +1387,7 @@ def generate_advisories(
 
 
 @analyze_app.command("advisory-effectiveness")
-def advisory_effectiveness(
+def advisory_effectiveness(  # noqa: PLR0912 - CLI rendering branches per report section
     days: int = typer.Option(30, help="Days of history to analyze"),
     min_presentations: int = typer.Option(
         3, "--min-presentations", help="Min advisory presentations to score"
@@ -1383,32 +1432,40 @@ def advisory_effectiveness(
     # missing whatever failed to parse, so it stops too.
     _exit_if_advisory_store_degraded(store, output_format)
 
-    with wrap_cli_meta_analysis(
-        agent_suffix="analyze",
-        analyzer_name="cli.analyze.advisory-effectiveness",
-        disabled=no_meta_trace,
-    ) as _meta_record:
-        if dry_run:
-            report = analyze_advisory_effectiveness(
-                event_log,
-                store,
-                days=days,
-                min_presentations=min_presentations,
-            )
-        else:
-            report = run_advisory_fitness_loop(
-                event_log,
-                store,
-                days=days,
-                min_presentations=min_presentations,
-                suppress_below=suppress_below,
-                blend_weight=blend_weight,
-            )
-        if _meta_record.enabled and report.advisory_scores:
-            _meta_record.produced_finding(
-                f"advisory-fitness-d{days}{'-dryrun' if dry_run else ''}",
-                finding_type="AdvisoryFitnessReport",
-            )
+    try:
+        with wrap_cli_meta_analysis(
+            agent_suffix="analyze",
+            analyzer_name="cli.analyze.advisory-effectiveness",
+            disabled=no_meta_trace,
+        ) as _meta_record:
+            if dry_run:
+                report = analyze_advisory_effectiveness(
+                    event_log,
+                    store,
+                    days=days,
+                    min_presentations=min_presentations,
+                )
+            else:
+                report = run_advisory_fitness_loop(
+                    event_log,
+                    store,
+                    days=days,
+                    min_presentations=min_presentations,
+                    suppress_below=suppress_below,
+                    blend_weight=blend_weight,
+                )
+            if _meta_record.enabled and report.advisory_scores:
+                _meta_record.produced_finding(
+                    f"advisory-fitness-d{days}{'-dryrun' if dry_run else ''}",
+                    finding_type="AdvisoryFitnessReport",
+                )
+    except StoreWriteRefusedError as exc:
+        # The pre-check above cannot see this one: the store loaded clean
+        # and another process wrote the file while the loop was scoring
+        # (#438). The loop writes per advisory, so some adjustments may
+        # already have landed — the refusal stops the rest rather than
+        # letting them replace the other process's rows.
+        _exit_on_refused_advisory_write(exc, output_format)
 
     if output_format == "json":
         print(json.dumps(report.model_dump(), indent=2, default=str))
