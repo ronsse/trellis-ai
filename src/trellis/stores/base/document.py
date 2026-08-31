@@ -85,13 +85,34 @@ class DocumentStore(ABC):
             metadata: Free-form metadata mapping.
             preserve_updated_at: When ``True`` and the row already exists,
                 its ``updated_at`` is left untouched instead of being set to
-                now. For writers that attach *derived* metadata without
-                changing what the document says — the row is not modified in
-                any sense a reader cares about, and bumping the stamp would
-                silently re-rank it, because ``updated_at`` drives the recency
-                decay in
-                :class:`~trellis.retrieve.strategies.KeywordSearch`. Ignored on
-                insert (a new row's ``updated_at`` is its creation time).
+                now. **Pass it whenever the write does not change what the
+                document says** — attaching derived metadata, stamping a
+                lifecycle state, applying a tag. Ignored on insert (a new
+                row's ``updated_at`` is its creation time).
+
+                ``updated_at`` is a **public column with an open set of
+                readers**, and that is why the rule is stated as an invariant
+                rather than a list. Three successive enumerations of "who
+                reads this" have each been wrong, and each time a metadata-only
+                write shipped without the flag because its author checked the
+                list and concluded the site was unaffected:
+
+                * the keyword axis decays relevance off it
+                  (:class:`~trellis.retrieve.strategies.KeywordSearch`), which
+                  softens a bump via ``RECENCY_FLOOR``;
+                * :mod:`trellis.mutate.retention` gates ``older_than_days`` on
+                  it, so a bump shields a row from pruning;
+                * :func:`trellis.retrieve.file_context._newest_timestamp`
+                  builds ``newest_item_at``, which the #307 read hook compares
+                  against a file's mtime — **a gate, not a score**. A bump
+                  makes memory look newer than the file, so the hook injects
+                  the stale context it exists to suppress, with no floor to
+                  soften it. That surface reads ``list_documents`` directly, so
+                  neither ``exclude_archived`` nor ``exclude_noise`` masks it.
+
+                Do not extend that list in place of thinking. **The question
+                is never "which reader would notice?" — it is "did the content
+                change?"** If it did not, pass the flag.
 
         Returns:
             The document ID.
