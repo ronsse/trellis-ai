@@ -271,7 +271,7 @@ merge its own work.
 | Retargeting a stacked PR with `gh pr edit --base main` and waiting for CI | **it never runs.** GitHub's default `pull_request` activity types are `opened` / `synchronize` / `reopened` — **not `edited`** — so a retargeted PR sits at "no checks reported" forever and reads as *pending* rather than *never triggered*. Observed on #436, where the orchestrator retargeted and then read an empty `statusCheckRollup` as CI still working | push something (even an empty commit) after retargeting, or close/reopen. Distinguish the two states before waiting: an empty rollup means nothing was triggered; a rollup with blank conclusions means jobs are genuinely in flight. |
 | Telling an agent to run the suite `-p no:randomly` | **`pytest-randomly` is not installed and is not declared anywhere in this repo**, so the flag is silently accepted and both runs are byte-identical. Verified 2026-08-31 (`find_spec('pytest_randomly')` is `None`; no mention in `pyproject.toml`) | drop it. Test *ordering* dependence is real in this repo — it is what the bare `CliRunner` incident was — but it has to be provoked some other way (`-p no:cacheprovider`, running a single file in isolation, reordering by hand). **This instruction was invented by the orchestrator and propagated to five briefs before anyone checked**, which is the repo's own signature defect — a mechanism that reports success while doing nothing — committed in the act of hunting it. |
 | Trusting a green local `pytest` run | **the shared `.venv` is not CI's dependency set.** click 8.3.2 / structlog 25.5.0 locally vs **8.5.0 / 26.1.0** in CI. This produced **109 CI failures across 23 directories** on a PR whose author had a fully green local run of CI's exact command | check against **`/mnt/ssd/trellis-worktrees/.ci-venv`** (fresh 3.12, CI-resolved versions) before opening a PR. It reproduced that failure from a single test file in ~1s. **Do not modify the shared `.venv`** — it is production's editable install. Caveat: `.ci-venv` is authoritative for the click/structlog problem it was built for, **not** for lint or typecheck — see [#378](https://github.com/ronsse/trellis-ai/issues/378) |
-| A bare `CliRunner()` in a test | `configure_stderr_logging()` bakes `sys.stderr` into structlog's **global** factory at call time; `CliRunner.invoke()` pins it to a buffer Click then closes, so **every later log call in the process** dies on `I/O operation on closed file` — surfacing at whatever logs next, arbitrarily far from the cause | use the `cli_runner` fixture in the root `tests/conftest.py` (#370). Root cause filed as [#377](https://github.com/ronsse/trellis-ai/issues/377); a dormant instance survives in `tests/unit/workers/trace_embed/conftest.py`, harmless only because `workers` sorts last |
+| A bare `CliRunner()` in a test — **root cause FIXED `75b892e`, mechanism kept** | `configure_stderr_logging()` baked `sys.stderr` into structlog's **global** factory at call time; `CliRunner.invoke()` pins it to a buffer Click then closes, so **every later log call in the process** died on `I/O operation on closed file` — surfacing at whatever logs next, arbitrarily far from the cause. That is the shape to recognise: a process-global bound eagerly to a stream someone else owns. | [#377](https://github.com/ronsse/trellis-ai/issues/377) merged as `75b892e` — **the stream is now resolved lazily**, so a bare runner no longer poisons the process. The dormant instance this row used to name in `tests/unit/workers/trace_embed/conftest.py` is **gone** (verified 2026-08-31: that fixture takes the root `cli_runner` and says why in its docstring). Still prefer the `cli_runner` fixture in the root `tests/conftest.py`, which exports `IsolatedCliRunner` — it isolates deliberately rather than relying on the lazy resolve |
 | Comparing two code paths by `relevance_score` | reports 100% divergence at 12 decimal places | `_apply_recency_decay` reads `datetime.now()`, so a 2-second gap between runs moves every score ~1e-7. **Diff on `item_id` order and excerpt, never on float scores** |
 | GitHub Actions outage | runs sit `queued`, then `CANCELLED` | watch `githubstatus.com` components, not `gh pr checks` (which errors); re-trigger cancelled runs with `update-branch` |
 
@@ -300,9 +300,12 @@ dependency order:
 >   The live remainder is #385, the documents *list view*, which is a display defect.
 
 1. **[#360](https://github.com/ronsse/trellis-ai/issues/360) — govern the document and
-   vector planes.** Panel-decided (unanimous, option B) and recorded as ledger **T-3**;
-   implementation not started. #357's worker-local handler is the natural seed. Gains most
-   of its point *after* C1, since stage 2 is a no-op until a gate is wired.
+   vector planes. ← the top unblocked feature item.** Panel-decided (unanimous, option B)
+   and recorded as ledger **T-3**; implementation not started. #357's worker-local handler
+   is the natural seed. ~~Gains most of its point *after* C1, since stage 2 is a no-op until
+   a gate is wired.~~ **That caveat is satisfied:** C1 merged `1e6c66e`, so Stage 2 now runs
+   on every surface and a governed document/vector write would actually be policy-checked.
+   Nothing else in this queue blocks it.
 2. **C2 → C3 → C4** — [#256](https://github.com/ronsse/trellis-ai/issues/256) Bolt plugin
    extraction (halves #194's enforcement surface, so it precedes it),
    [#194](https://github.com/ronsse/trellis-ai/issues/194) classification enforcement,
@@ -310,15 +313,25 @@ dependency order:
    as 2 of 5 stages missing emitters).
 3. **D1–D4** query-history curation, then **E1** ([#306](https://github.com/ronsse/trellis-ai/issues/306)) / **E2**.
 
-**In flight as of 2026-08-31** — four lanes dispatched after the overnight session was cut
-short by a shared limit. None of them is a queue item above; three are recovery.
+**The four lanes dispatched 2026-08-30/31 all merged.** Recorded as outcomes, because each
+carried an instruction ("do not merge until…") that is now spent:
 
-| lane | state |
+| lane | outcome |
 |---|---|
-| **#413** policy fail-open (PR #423) | green, **re-gating**. The first gate died mid-mutation-testing having reported *"nine survivors"* and never triaged them. Nine surviving mutants on an access-control PR is the signal the gate exists to produce — **do not merge until it is resolved.** Carries a breaking change (`policy show --format json` now returns an envelope). |
-| **#377/#403** stderr + Rich (PR #428) | green, **gating**. Its first gate was killed at startup, so this PR has had no review at all. |
-| **#404** visible redaction | **resuming** on `swarm/night-n404`. The seam (`partition_archived` / `partition_by_signal_quality`, each returning `(kept, withheld)`) and `retrieve/withholding.py` are done and good; all downstream plumbing, every renderer and every test are absent. A version that partitions and then discards is *strictly worse* than the status quo, which is the opposite of what the panel accepted — that WIP state must not ship. |
-| **#375** graph axis | **implementing** gate 4 (forward `node_type`/`node_role` into `injected_items[]`) then option 2 (stamp the meta-recorder's Activities `structural`). Decided as ledger **T-4**; the design doc is PR #416. |
+| **#413** policy fail-open (PR #423) | ✅ merged `fb2e168`. The "nine survivors" mutation-testing block was resolved before merge. `PolicyStore` / `AdvisoryStore` now **refuse to write over a file that loaded degraded**, and the enforcement reader (`mutate/policy_source.py`) is strict. Carried a breaking change: `policy show --format json` returns an envelope. |
+| **#377/#403** stderr + Rich (PR #428) | ✅ merged `75b892e`. The stderr stream is resolved lazily, which is the root-cause fix for the bare-`CliRunner` trap in §5 — see that row. Rich is kept off machine output. |
+| **#404** visible redaction | ✅ merged `d635fcc` (PR #434). **Shipped for MCP only**; the SDK/REST family is genuinely unreachable over the wire (`PackResponse` returns no `metadata`). Its unfinished half is filed as [#439](https://github.com/ronsse/trellis-ai/issues/439) and [#440](https://github.com/ronsse/trellis-ai/issues/440) — both open, both *not* new work. Recorded as a ledger entry. |
+| **#375** graph axis | ✅ merged in three parts: `c5fdc89` (gate 4 — `node_type`/`node_role` into `injected_items[]`), `841afcf` (option 2 — stamp the meta-recorder's Activities `structural`, ledger **T-4**), `9ea5d72` (the design doc, PR #416). Note the operator half T-4 names: `node_role` is immutable across SCD-2 versions, so the 200 existing `cli.*` rows cannot be re-stamped. |
+
+> **Proposal, for the operator — this table should probably not exist.** It is a permanent
+> staleness generator: it was **4/4 wrong** within 24 hours of being written, and one row
+> still said "do not merge until it is resolved" about a PR that had already merged. An
+> agent reading a stale in-flight row does the *opposite* of the right thing, which is worse
+> than reading nothing. Live lane state is already authoritative in `gh pr list` and
+> `git log`, which cannot go stale. **Suggested replacement:** delete the table; keep only
+> the durable residue a merge leaves behind — the ledger entry, the filed follow-up, the §5
+> trap — which is what the rows above have now been reduced to. Not done unilaterally
+> because a reader may be relying on this section's shape.
 
 **Measurement-integrity issues filed 2026-08-27, all unstarted.** These are cheap and they
 protect every number above, so they are worth interleaving rather than queueing behind
