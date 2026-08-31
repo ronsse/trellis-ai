@@ -642,3 +642,58 @@ class TestExistingConsumersStillHold:
             "deploy checklist", budget=PackBudget(max_items=10, max_tokens=5000)
         )
         assert [b.item_id for b in pack.retrieval_report.budget_trace] == ["keep"]
+
+
+class TestPartitionOrdering:
+    """``PackBuilder._partition`` must preserve order in both halves.
+
+    The refactor that introduced ``_partition`` replaced three hand-rolled
+    loops in :meth:`PackBuilder.build` and three more in
+    :meth:`build_sectioned`. A reversed-``dropped`` mutant passed all 937
+    retrieval tests, so the property the helper's docstring asserts was
+    unpinned — this class is the pin.
+    """
+
+    @staticmethod
+    def _item(item_id: str, *, structural: bool = False) -> PackItem:
+        return PackItem(
+            item_id=item_id,
+            item_type="entity",
+            excerpt=f"excerpt for {item_id}",
+            relevance_score=1.0,
+            metadata={"node_role": "structural" if structural else "semantic"},
+        )
+
+    def test_partition_preserves_order_in_both_halves(self) -> None:
+        """Both halves come back in input order, not merely with the right members."""
+        items = [
+            self._item("a"),
+            self._item("b", structural=True),
+            self._item("c"),
+            self._item("d", structural=True),
+            self._item("e", structural=True),
+        ]
+
+        kept, dropped = PackBuilder._partition(items, PackBuilder._is_structural)
+
+        assert [i.item_id for i in kept] == ["a", "c"]
+        # Order, not just membership: ``sorted()`` here would pass under the
+        # reversed-dropped mutant that motivated this test.
+        assert [i.item_id for i in dropped] == ["b", "d", "e"]
+
+    def test_withheld_item_ids_follow_rejection_order(self) -> None:
+        """The served telemetry record is stable, which is what the order buys.
+
+        ``withheld_item_ids`` is emitted into
+        ``PACK_ASSEMBLED.payload["withholding"]`` and should be diffable
+        across packs — the same commitment ``groups`` makes by sorting.
+        """
+        rejected = [
+            RejectedItem(item_id="b", item_type="entity", reason="structural_filter"),
+            RejectedItem(item_id="d", item_type="entity", reason="structural_filter"),
+            RejectedItem(item_id="e", item_type="entity", reason="structural_filter"),
+        ]
+
+        summary = summarize_withheld(rejected, served_item_ids=["a", "c"])
+
+        assert summary.withheld_item_ids == ("b", "d", "e")

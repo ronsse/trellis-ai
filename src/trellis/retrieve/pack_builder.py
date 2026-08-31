@@ -475,7 +475,7 @@ class PackBuilder:
         """Add a search strategy."""
         self._strategies.append(strategy)
 
-    def build(  # noqa: PLR0912, PLR0915
+    def build(  # noqa: PLR0915
         self,
         intent: str,
         *,
@@ -664,21 +664,8 @@ class PackBuilder:
         # even if it slipped past a strategy-level filter (e.g., a keyword
         # hit against a document whose parent entity is structural).
         if not include_structural:
-            kept: list[PackItem] = []
-            for item in deduped:
-                if (item.metadata or {}).get("node_role") == "structural":
-                    rejected.append(
-                        RejectedItem(
-                            item_id=item.item_id,
-                            item_type=item.item_type,
-                            relevance_score=item.relevance_score,
-                            reason="structural_filter",
-                            strategy_source=item.strategy_source,
-                        )
-                    )
-                else:
-                    kept.append(item)
-            deduped = kept
+            deduped, structural_dropped = self._partition(deduped, self._is_structural)
+            rejected.extend(self._reject(structural_dropped, "structural_filter"))
 
         # Meta-Activity filter (Item 6 Phase 2): drop graph nodes that
         # represent Trellis's own analyzer runs. Without this default,
@@ -686,22 +673,9 @@ class PackBuilder:
         # ``Activity`` nodes emitted by ``record_meta_analysis``. Opt-in
         # via ``include_meta=True``.
         if not include_meta:
-            kept_meta: list[PackItem] = []
-            for item in deduped:
-                if self._is_meta_activity(item):
-                    meta_filtered_count += 1
-                    rejected.append(
-                        RejectedItem(
-                            item_id=item.item_id,
-                            item_type=item.item_type,
-                            relevance_score=item.relevance_score,
-                            reason="meta_activity_filter",
-                            strategy_source=item.strategy_source,
-                        )
-                    )
-                else:
-                    kept_meta.append(item)
-            deduped = kept_meta
+            deduped, meta_dropped = self._partition(deduped, self._is_meta_activity)
+            meta_filtered_count = len(meta_dropped)
+            rejected.extend(self._reject(meta_dropped, "meta_activity_filter"))
 
         # Session dedup: drop items recently served in this session.
         # ``refresh`` bypasses the subtraction entirely (client-compaction
@@ -711,21 +685,10 @@ class PackBuilder:
                 session_id, window_minutes=session_dedup_window_minutes
             )
             if served.ids:
-                kept = []
-                for item in deduped:
-                    if self._is_suppressed(item, served):
-                        rejected.append(
-                            RejectedItem(
-                                item_id=item.item_id,
-                                item_type=item.item_type,
-                                relevance_score=item.relevance_score,
-                                reason="session_dedup",
-                                strategy_source=item.strategy_source,
-                            )
-                        )
-                    else:
-                        kept.append(item)
-                deduped = kept
+                deduped, session_dropped = self._partition(
+                    deduped, lambda item: self._is_suppressed(item, served)
+                )
+                rejected.extend(self._reject(session_dropped, "session_dedup"))
 
         # Rerank if a reranker is configured (after dedup + filters, before budget).
         # Loud-by-default (C2 Phase 4): a configured reranker that fails
@@ -975,29 +938,15 @@ class PackBuilder:
 
         # 3. Defense-in-depth structural filter.
         if not include_structural:
-            kept_structural: list[PackItem] = []
-            structural_dropped: list[PackItem] = []
-            for item in deduped:
-                if (item.metadata or {}).get("node_role") == "structural":
-                    structural_dropped.append(item)
-                else:
-                    kept_structural.append(item)
+            deduped, structural_dropped = self._partition(deduped, self._is_structural)
             rejected.extend(self._reject(structural_dropped, "structural_filter"))
-            deduped = kept_structural
 
         # 3a-meta. Meta-Activity filter (Item 6 Phase 2).
         meta_filtered_count = 0
         if not include_meta:
-            kept_meta: list[PackItem] = []
-            meta_dropped: list[PackItem] = []
-            for item in deduped:
-                if self._is_meta_activity(item):
-                    meta_dropped.append(item)
-                else:
-                    kept_meta.append(item)
+            deduped, meta_dropped = self._partition(deduped, self._is_meta_activity)
             meta_filtered_count = len(meta_dropped)
             rejected.extend(self._reject(meta_dropped, "meta_activity_filter"))
-            deduped = kept_meta
 
         # 3a. Session dedup: drop items recently served in this session.
         # ``refresh`` bypasses it (client-compaction signal) — see build().
@@ -1006,15 +955,10 @@ class PackBuilder:
                 session_id, window_minutes=session_dedup_window_minutes
             )
             if served.ids:
-                kept_session: list[PackItem] = []
-                session_dropped: list[PackItem] = []
-                for item in deduped:
-                    if self._is_suppressed(item, served):
-                        session_dropped.append(item)
-                    else:
-                        kept_session.append(item)
+                deduped, session_dropped = self._partition(
+                    deduped, lambda item: self._is_suppressed(item, served)
+                )
                 rejected.extend(self._reject(session_dropped, "session_dedup"))
-                deduped = kept_session
 
         # 3b. Rerank the shared candidate pool before section filling.
         # Loud-by-default (C2 Phase 4) — see build().
@@ -1716,6 +1660,18 @@ class PackBuilder:
         return annotated
 
     @staticmethod
+    def _is_structural(item: PackItem) -> bool:
+        """Whether the item's metadata marks its graph row structural.
+
+        Read off ``metadata["node_role"]``, which
+        :class:`~trellis.retrieve.strategies.GraphSearch` stamps *after* the
+        property spread precisely so a stored property cannot forge it
+        (#433). Non-graph items carry no ``node_role`` and are never
+        structural.
+        """
+        return (item.metadata or {}).get("node_role") == "structural"
+
+    @staticmethod
     def _is_meta_activity(item: PackItem) -> bool:
         """Return ``True`` when this item is a Trellis-internal meta-Activity.
 
@@ -1758,6 +1714,38 @@ class PackBuilder:
             else:
                 result.append(item)
         return result
+
+    @staticmethod
+    def _partition(
+        items: Iterable[PackItem],
+        drop_if: Callable[[PackItem], bool],
+    ) -> tuple[list[PackItem], list[PackItem]]:
+        """Split ``items`` into ``(kept, dropped)`` on ``drop_if``.
+
+        The shape every removal gate in this class had written out by hand,
+        twice over — once in :meth:`build` and once in
+        :meth:`build_sectioned`, under six different accumulator names.
+
+        Item order is preserved in **both** halves. ``kept`` is obvious — it
+        is the ranked candidate list. ``dropped`` is subtler and the reason
+        is *not* first-reason attribution: these gates run in sequence and a
+        dropped item leaves ``deduped``, so an item reaches at most one of
+        them and ``summarize_withheld``'s first-wins ``setdefault`` never
+        sees a within-gate ordering question. What ``dropped`` order actually
+        decides is the order of ``rejected_items`` and hence of
+        ``PACK_ASSEMBLED.payload["withholding"]["withheld_item_ids"]`` — a
+        served record that should be stable across builds and diffable across
+        packs, the same commitment ``WithholdingSummary.groups`` makes by
+        sorting. Pinned by ``test_partition_preserves_order_in_both_halves``;
+        an earlier draft of this docstring claimed the attribution rationale
+        and a reversed-``dropped`` mutant passed all 937 retrieval tests,
+        which is how the wrong justification was caught.
+        """
+        kept: list[PackItem] = []
+        dropped: list[PackItem] = []
+        for item in items:
+            (dropped if drop_if(item) else kept).append(item)
+        return kept, dropped
 
     @staticmethod
     def _reject(
