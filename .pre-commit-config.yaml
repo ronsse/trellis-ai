@@ -21,7 +21,7 @@
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
     # mirror of pyproject.toml [dev] ruff pin — enforced by scripts/check_tool_pins.py
-    rev: v0.16.4
+    rev: v0.16.5
     hooks:
       - id: ruff-format
       - id: ruff
