@@ -788,3 +788,130 @@ class TestSupersedePreservesRecency:
 
         assert is_archived({"lifecycle": {"state": "archived"}}) is True
         assert is_archived({"lifecycle": {"state": "superseded"}}) is False
+
+
+# ---------------------------------------------------------------------------
+# The supersession target vanished — the bool is read, not discarded (#407)
+# ---------------------------------------------------------------------------
+
+
+class TestSupersedeTargetVanished:
+    """``mark_document_superseded`` returning ``False`` is a real outcome.
+
+    ``_reverify_candidate`` treats a missing candidate row as stale and
+    downgrades before the commit, so within one process this branch is
+    unreachable; ``_save_memory_lock`` is process-local, so an API container
+    or a worker deleting the row between the re-verify and the write is not.
+    The tests patch the boundary rather than staging a cross-process delete:
+    what is under test is the *caller*, which used to discard the bool and
+    then assert the supersession in three places at once (#407).
+    """
+
+    @staticmethod
+    def _fail_supersede(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, str]]:
+        calls: list[dict[str, str]] = []
+
+        def _fake(_store: Any, *, old_doc_id: str, new_doc_id: str) -> bool:
+            calls.append({"old_doc_id": old_doc_id, "new_doc_id": new_doc_id})
+            return False
+
+        monkeypatch.setattr(server_mod, "mark_document_superseded", _fake)
+        return calls
+
+    def test_no_supersession_is_claimed_anywhere(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Message, metadata, and judged event must all tell the truth.
+
+        Un-fixed, all three lie in the same direction: the tool result says
+        "supersedes", the stored doc carries ``supersedes_doc_id``, and a
+        ``MEMORY_OP_JUDGED`` row points its ``subject_ref`` — the training-pair
+        join key — at a document that no longer exists.
+        """
+        base_id = _doc_id(save_memory(_BASE))
+        _enable(monkeypatch, FakeLLMClient(content=_verdict_json("supersede")))
+        calls = self._fail_supersede(monkeypatch)
+
+        result = save_memory(_NEAR)
+        new_id = _doc_id(result)
+
+        # It was attempted, and it failed.
+        assert calls == [{"old_doc_id": base_id, "new_doc_id": new_id}]
+        # 1. The tool result does not assert the supersession.
+        assert result == f"Memory saved: {new_id}"
+        # 2. The memory is still stored — a failed supersession never costs
+        #    data — but its marker records what actually happened.
+        new_meta = temp_registry.knowledge.document_store.get(new_id)["metadata"]
+        assert new_meta["reconciliation"] == "stale_recheck"
+        assert "supersedes_doc_id" not in new_meta
+        # 3. No judged event about a subject that is not there.
+        assert _judged_events(temp_registry) == []
+
+    def test_the_successor_write_is_not_re_stamped(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Stripping the claim is a metadata-only correction (#397).
+
+        The correcting ``put`` rewrites the row that was written moments
+        earlier; without ``preserve_updated_at`` it would move a stamp that
+        ``KeywordSearch`` reads as recency. The margin here is nil in wall
+        time, which is the point: pin it against the clock, not against the
+        hope that two reads differ.
+        """
+        from datetime import UTC, datetime, timedelta
+
+        holder = {"now": datetime.now(UTC) - timedelta(days=30)}
+        monkeypatch.setattr(
+            "trellis.stores.sqlite.document.utc_now", lambda: holder["now"]
+        )
+        save_memory(_BASE)
+        _enable(monkeypatch, FakeLLMClient(content=_verdict_json("supersede")))
+        self._fail_supersede(monkeypatch)
+
+        new_id = _doc_id(save_memory(_NEAR))
+        stamp = temp_registry.knowledge.document_store.get(new_id)["updated_at"]
+
+        holder["now"] = datetime.now(UTC)
+        assert temp_registry.knowledge.document_store.get(new_id)["updated_at"] == stamp
+
+    def test_missing_target_is_logged_at_warning(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        """The branch that had no log line at all now has exactly one.
+
+        The level is asserted, not just the event name.
+        ``structlog.testing.capture_logs`` replaces the *processors* and
+        leaves ``wrapper_class`` alone, which cuts both ways here. This
+        package's autouse ``_suppress_structlog`` filters below CRITICAL, so
+        the fixture has to be lifted or nothing is captured at all; and once
+        it is lifted, a regression of this call to ``debug`` would still be
+        captured, so an event-name-only assertion would pass it — how a level
+        regression slipped past its own guard test in #395.
+        """
+        import logging
+
+        import structlog
+
+        from trellis.mcp.reconcile import mark_document_superseded
+
+        docs = temp_registry.knowledge.document_store
+        prior = structlog.get_config()
+        structlog.configure(
+            wrapper_class=structlog.make_filtering_bound_logger(logging.NOTSET)
+        )
+        try:
+            with structlog.testing.capture_logs() as logs:
+                assert (
+                    mark_document_superseded(
+                        docs, old_doc_id="gone-doc", new_doc_id="new-doc"
+                    )
+                    is False
+                )
+        finally:
+            structlog.configure(**prior)
+
+        entries = [e for e in logs if e["event"] == "supersede_target_missing"]
+        assert len(entries) == 1
+        assert entries[0]["log_level"] == "warning"
+        assert entries[0]["old_doc_id"] == "gone-doc"
+        assert entries[0]["new_doc_id"] == "new-doc"

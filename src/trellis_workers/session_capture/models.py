@@ -224,6 +224,23 @@ class CaptureReport:
     #: count only — the gate never surfaces matched content anywhere.
     candidates_blocked_scan: int = 0
     candidates_reconciled_noop: int = 0
+    #: SUPERSEDE *verdicts* — what the judge decided, counted whether or not
+    #: the sweep went on to apply them (a ``--dry-run`` reports these and
+    #: applies none). Paired with ``supersessions_failed`` deliberately: a
+    #: lone failure count cannot distinguish "none failed" from "none were
+    #: attempted", which is the same ambiguity ``sessions_skipped_empty``
+    #: exists to remove.
+    candidates_reconciled_supersede: int = 0
+    #: SUPERSEDE verdicts whose SCD-2 stale-mark could not be applied after
+    #: the write seam ran — the target doc had vanished, or the successor
+    #: never landed. The bool
+    #: :func:`~trellis.mcp.reconcile.mark_document_superseded` returns used to
+    #: be discarded here, so a supersession that did not happen was recorded
+    #: as one that did (#407). Applied count is
+    #: ``candidates_reconciled_supersede - supersessions_failed`` on a live
+    #: sweep; every verdict is attempted, since a superseding candidate is
+    #: always a survivor.
+    supersessions_failed: int = 0
     memories_written: int = 0
     memories_skipped_unchanged: int = 0
     #: Per-class hit counters from the secret-scan gate: class *label* → int.
@@ -253,6 +270,8 @@ class CaptureReport:
             "candidates_rejected_injection": self.candidates_rejected_injection,
             "candidates_blocked_scan": self.candidates_blocked_scan,
             "candidates_reconciled_noop": self.candidates_reconciled_noop,
+            "candidates_reconciled_supersede": self.candidates_reconciled_supersede,
+            "supersessions_failed": self.supersessions_failed,
             "memories_written": self.memories_written,
             "memories_skipped_unchanged": self.memories_skipped_unchanged,
             "scan_hits_by_class": dict(self.scan_hits_by_class),

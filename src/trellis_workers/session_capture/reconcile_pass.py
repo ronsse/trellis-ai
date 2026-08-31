@@ -14,14 +14,31 @@ set (off by default — the same flag #263 gates ``save_memory`` with):
 * **Exact duplicate** already stored under this source's prefix → dropped
   (deterministic NOOP; no model call, no event).
 * **Near duplicate** → the local model judges ADD / UPDATE / SUPERSEDE / NOOP
-  exactly as ``save_memory`` does; NOOP drops the candidate, SUPERSEDE
-  stale-marks the prior doc (SCD-2, never a delete) and stamps a successor
-  marker, UPDATE stamps an addendum marker. Each non-fallback verdict emits
-  the leak-safe ``MEMORY_OP_JUDGED`` event.
+  exactly as ``save_memory`` does; NOOP drops the candidate, SUPERSEDE stamps
+  a successor marker, UPDATE stamps an addendum marker. Each non-fallback
+  verdict emits the leak-safe ``MEMORY_OP_JUDGED`` event.
 * **No near duplicate** → plain ADD.
 
 Fallback (model down) resolves to ADD marked ``skipped`` — reconcile is
 fail-open, so a judge outage never loses an already-distilled memory.
+
+**Adjudication decides; it does not write** (#407, #408). :func:`adjudicate`
+stamps markers on candidates and emits verdict events; the one store side
+effect a SUPERSEDE verdict has — SCD-2 stale-marking the prior doc, never a
+delete — is applied by :func:`apply_supersessions` *after* the sweep's write
+seam has run. Two things forced that ordering, and neither is a race:
+
+* ``adjudicate`` adds each surviving candidate to its own ``index`` and
+  ``existing`` snapshot inside the candidate loop, but nothing is persisted
+  until ``capture._write_records`` runs afterwards. So a second candidate of
+  one session superseding the first asked ``mark_document_superseded`` for a
+  row that did not exist yet — ordinary operation of a multi-candidate
+  session, silently discarded, leaving the earlier doc written with no
+  lifecycle marker while the later one claimed to have superseded it (#407).
+* Even against an already-stored target, stale-marking during adjudication
+  set ``superseded_by`` to a successor that had not been written — and under
+  ``--dry-run`` never would be, which is how a sweep that promised to write
+  nothing mutated the lifecycle state of pre-existing documents (#408).
 """
 
 from __future__ import annotations
@@ -35,6 +52,9 @@ from trellis.core.hashing import content_hash
 from trellis.ingest_corpus.models import is_chunk_doc_id
 from trellis.mcp.reconcile import (
     MARKER_SKIPPED,
+    MARKER_STALE,
+    RECONCILIATION_KEY,
+    SUPERSEDES_DOC_KEY,
     ReconcileCandidate,
     ReconcileDecision,
     configured_model_id,
@@ -85,12 +105,19 @@ def adjudicate(
     client: LLMClient | None,
     id_prefix: str,
     report: CaptureReport,
+    dry_run: bool,
 ) -> list[CandidateMemory]:
     """Reconcile candidates against stored captures; return the survivors.
 
     Mutates each surviving candidate's ``reconciliation`` marker (and
     ``updates_doc_id`` / ``supersedes_doc_id`` where applicable) so the writer
-    can stamp it into document metadata.
+    can stamp it into document metadata. Reads the document store; never
+    writes to it.
+
+    ``dry_run`` withholds the one remaining side effect — the
+    ``MEMORY_OP_JUDGED`` emit. The model is still called and the verdicts are
+    still computed, reported and returned: a dry run that stopped adjudicating
+    would preview a *different* sweep from the one it is previewing.
     """
     doc_store = registry.knowledge.document_store
     event_log = registry.operational.event_log
@@ -129,7 +156,7 @@ def adjudicate(
                 timeout=timeout,
                 model_id=model_id,
             )
-            if not outcome.fallback:
+            if not outcome.fallback and not dry_run:
                 emit_reconcile_verdict(
                     event_log,
                     outcome=outcome,
@@ -147,7 +174,6 @@ def adjudicate(
                 outcome_decision=outcome.decision,
                 is_fallback=outcome.fallback,
                 match_id=match_id,
-                doc_store=doc_store,
                 report=report,
             )
             if candidate.reconciliation == ReconcileDecision.NOOP.value:
@@ -167,10 +193,9 @@ def _apply_verdict(
     outcome_decision: ReconcileDecision,
     is_fallback: bool,
     match_id: str,
-    doc_store: Any,
     report: CaptureReport,
 ) -> None:
-    """Translate a verdict into candidate markers / store side effects."""
+    """Translate a verdict into candidate markers. No store side effects."""
     if is_fallback:
         candidate.reconciliation = MARKER_SKIPPED
         return
@@ -179,15 +204,87 @@ def _apply_verdict(
         report.candidates_reconciled_noop += 1
         return
     if outcome_decision == ReconcileDecision.SUPERSEDE:
-        # Successor doc_id is content-derived and known before the write.
-        mark_document_superseded(
-            doc_store, old_doc_id=match_id, new_doc_id=candidate.doc_id
-        )
+        # The marker only; the SCD-2 stale-mark it implies is applied by
+        # apply_supersessions once both documents exist.
         candidate.reconciliation = ReconcileDecision.SUPERSEDE.value
         candidate.supersedes_doc_id = match_id
+        report.candidates_reconciled_supersede += 1
         return
     if outcome_decision == ReconcileDecision.UPDATE:
         candidate.reconciliation = ReconcileDecision.UPDATE.value
         candidate.updates_doc_id = match_id
         return
     candidate.reconciliation = ReconcileDecision.ADD.value
+
+
+def apply_supersessions(
+    doc_store: Any,
+    written: list[CandidateMemory],
+    report: CaptureReport,
+) -> None:
+    """Stale-mark every superseded doc, after the successors are persisted.
+
+    Call this only from the live write path, once ``_write_records`` has run.
+    A supersession is a claim about two documents, so both have to exist for
+    it to be true: the successor is checked here (a candidate the write seam
+    dropped supersedes nothing) and the target's existence is
+    ``mark_document_superseded``'s return, which is *read*, counted on
+    ``CaptureReport.supersessions_failed`` and warned about rather than
+    discarded (#407).
+    """
+    for candidate in written:
+        match_id = candidate.supersedes_doc_id
+        if not match_id:
+            continue
+        successor = doc_store.get(candidate.doc_id)
+        if successor is None:
+            # The successor never landed. Stale-marking now would point
+            # ``superseded_by`` at nothing — the same defect aimed the other
+            # way. There is no stored claim to withdraw either.
+            _record_supersede_failure(
+                report, "supersede_successor_missing", match_id, candidate.doc_id
+            )
+            continue
+        if mark_document_superseded(
+            doc_store, old_doc_id=match_id, new_doc_id=candidate.doc_id
+        ):
+            continue
+        # mark_document_superseded logs the miss; the report is what an
+        # operator reading the sweep sees, and the successor must stop
+        # claiming a supersession that did not happen.
+        _record_supersede_failure(
+            report, "supersede_target_missing", match_id, candidate.doc_id
+        )
+        _withdraw_supersede_claim(doc_store, candidate.doc_id, successor)
+
+
+def _record_supersede_failure(
+    report: CaptureReport, kind: str, old_doc_id: str, new_doc_id: str
+) -> None:
+    """Count and describe one supersession that could not be applied."""
+    report.supersessions_failed += 1
+    report.warnings.append(
+        {"kind": kind, "old_doc_id": old_doc_id, "new_doc_id": new_doc_id}
+    )
+
+
+def _withdraw_supersede_claim(
+    doc_store: Any, doc_id: str, stored: dict[str, Any]
+) -> None:
+    """Strip an unapplied ``supersedes_doc_id`` off a written successor.
+
+    The marker is rewritten to ``stale_recheck`` — the same marker
+    ``mcp.server`` uses for a verdict it declined to apply, and the same
+    queue a later reconciliation sweep reads. Metadata-only, so
+    ``preserve_updated_at`` (#397): withdrawing a claim is not a modification
+    of the memory and must not reset its recency clock.
+    """
+    metadata = {
+        k: v
+        for k, v in (stored.get("metadata") or {}).items()
+        if k != SUPERSEDES_DOC_KEY
+    }
+    metadata[RECONCILIATION_KEY] = MARKER_STALE
+    doc_store.put(
+        doc_id, stored["content"], metadata=metadata, preserve_updated_at=True
+    )

@@ -1352,6 +1352,47 @@ class TestWorkerCaptureSessions:
         assert "worker capture-sessions" in result.output
         assert "memories written: 1" in result.output
 
+    def test_unapplied_supersessions_are_surfaced_not_just_counted(
+        self, temp_stores: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A counter nobody prints is half a fix (#407).
+
+        The reconcile tally rides ``reconcile_enabled``, since a deployment
+        with the flag off has nothing to say; the failure line does not, since
+        a non-zero count is a defect the operator has to see either way.
+        """
+        monkeypatch.setattr(
+            capture_sweep,
+            "run_sweep",
+            MagicMock(
+                return_value=self._report(
+                    reconcile_enabled=True,
+                    candidates_reconciled_supersede=3,
+                    supersessions_failed=1,
+                )
+            ),
+        )
+
+        result = runner.invoke(worker_app, ["capture-sessions"])
+
+        assert result.exit_code == 0, result.output
+        assert "3 supersede" in result.output
+        assert "1 supersession(s) could not be applied" in result.output
+
+    def test_reconcile_tally_is_hidden_when_the_flag_is_off(
+        self, temp_stores: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            capture_sweep,
+            "run_sweep",
+            MagicMock(return_value=self._report(sessions_seen=1)),
+        )
+
+        result = runner.invoke(worker_app, ["capture-sessions"])
+
+        assert result.exit_code == 0, result.output
+        assert "supersede" not in result.output
+
 
 class TestEnrichedContentTags:
     """``worker enrich``'s write-back must produce a parseable ``ContentTags``.
