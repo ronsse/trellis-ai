@@ -32,6 +32,8 @@ from trellis.meta import (
     META_TRACES_ENV_VAR,
     record_meta_analysis,
 )
+from trellis.meta.agents import META_AGENT_PREFIX
+from trellis.retrieve.pack_builder import PackBuilder
 from trellis.retrieve.strategies import GraphSearch
 from trellis.schemas import well_known as wk
 from trellis.schemas.enums import NodeRole
@@ -226,3 +228,169 @@ class TestGraphSearchSuppression:
         served = {i.item_id for i in GraphSearch(graph).search("anything", limit=2)}
         assert "gotcha-1" in served
         assert activity_id not in served
+
+
+class TestCounterWrapUpTrap:
+    """The next planned change to this module re-upserts the Activity.
+
+    ``adr-dogfooding-meta-traces.md`` §2.4 describes a merge that "extends
+    ``ended_at``, increments ``events_consumed``", and ``_create_activity``'s
+    docstring says Phase 1 populates the counters "at exit time once the
+    wrap-up phase exists". That write is a node re-upsert — and
+    ``upsert_node`` defaults ``node_role`` to ``semantic`` while
+    ``check_node_role_immutable`` raises on any change across versions. So
+    the naive wrap-up raises for *every* meta-Activity in every nightly
+    cron. Nothing re-upserts the Activity today, which is why this is a trap
+    for the next change rather than a live defect — and why it is pinned
+    here rather than left to be rediscovered from a cron backtrace.
+    """
+
+    def test_naive_wrap_up_raises(self, registry: StoreRegistry) -> None:
+        graph = registry.knowledge.graph_store
+        activity_id = _record(registry)
+        node = graph.get_node(activity_id)
+        assert node is not None
+        props = dict(node["properties"])
+        props["events_consumed"] = 12
+
+        with pytest.raises(ValueError, match="node_role is immutable"):
+            graph.upsert_node(
+                node_id=activity_id,
+                node_type=node["node_type"],
+                properties=props,
+            )
+
+    def test_wrap_up_carrying_the_role_forward_succeeds(
+        self, registry: StoreRegistry
+    ) -> None:
+        """The shape a wrap-up implementation has to use."""
+        graph = registry.knowledge.graph_store
+        activity_id = _record(registry)
+        node = graph.get_node(activity_id)
+        assert node is not None
+        props = dict(node["properties"])
+        props["events_consumed"] = 12
+
+        graph.upsert_node(
+            node_id=activity_id,
+            node_type=node["node_type"],
+            properties=props,
+            node_role=node["node_role"],
+        )
+        updated = graph.get_node(activity_id)
+        assert updated is not None
+        assert updated["node_role"] == NodeRole.STRUCTURAL.value
+        assert updated["properties"]["events_consumed"] == 12
+        assert len(graph.get_node_history(activity_id)) == 2
+
+
+class TestTheStampIsWhatFreesTheSlot:
+    """End-to-end: ``_is_meta_activity`` alone empties the pack.
+
+    The distinction the whole change rests on. Both worlds keep the
+    meta-Activity out of the served pack — so "absent from the pack" proves
+    nothing. What separates them is whether a *real memory* got a candidate
+    slot: pre-stamp the meta rows fill ``nodes[:limit]``, are rejected
+    downstream as ``meta_activity_filter``, and the pack comes back empty.
+    """
+
+    @staticmethod
+    def _seed(registry: StoreRegistry, *, structural: bool) -> tuple[str, list[str]]:
+        graph = registry.knowledge.graph_store
+        graph.upsert_node(
+            node_id="memory-1",
+            node_type="gotcha",
+            properties={
+                "name": "deploy gotcha",
+                "description": "the build produces differently-named images",
+            },
+        )
+        agent_id = f"{META_AGENT_PREFIX}cli_worker"
+        graph.upsert_node(
+            node_id=agent_id,
+            node_type=wk.AGENT,
+            properties={"name": agent_id, "synthetic": True},
+        )
+        role = {"node_role": NodeRole.STRUCTURAL.value} if structural else {}
+        metas = []
+        for i in range(6):
+            node_id = f"meta-activity-{i}"
+            graph.upsert_node(
+                node_id=node_id,
+                node_type=wk.ACTIVITY,
+                properties={
+                    "name": f"cli.worker.curate.learning@{i}",
+                    "analyzer_name": "cli.worker.curate.learning",
+                    "agent_id": agent_id,
+                },
+                **role,
+            )
+            metas.append(node_id)
+        return agent_id, metas
+
+    def test_unstamped_meta_rows_starve_the_pack(self, registry: StoreRegistry) -> None:
+        self._seed(registry, structural=False)
+        builder = PackBuilder(
+            strategies=[GraphSearch(registry.knowledge.graph_store)],
+            event_log=registry.operational.event_log,
+        )
+        pack = builder.build("deploy gotcha", limit_per_strategy=3)
+        # All three candidate slots went to meta rows, which the pack-side
+        # filter then dropped. The memory never became a candidate.
+        assert [item.item_id for item in pack.items] == []
+
+    def test_stamped_meta_rows_leave_the_slot_for_the_memory(
+        self, registry: StoreRegistry
+    ) -> None:
+        self._seed(registry, structural=True)
+        builder = PackBuilder(
+            strategies=[GraphSearch(registry.knowledge.graph_store)],
+            event_log=registry.operational.event_log,
+        )
+        pack = builder.build("deploy gotcha", limit_per_strategy=3)
+        served = {item.item_id for item in pack.items}
+        assert "memory-1" in served
+        assert not served & {f"meta-activity-{i}" for i in range(6)}
+
+
+class TestIncludeMetaEscapeHatch:
+    """``include_meta=True`` alone no longer reaches a *new* meta-Activity.
+
+    The stamp moves the drop one step earlier, to the graph axis, where
+    ``include_structural`` is the gate. Documented on ``PackBuilder.build``
+    and in the recorder module docstring; pinned here so the two do not
+    drift.
+    """
+
+    def test_include_meta_alone_is_not_enough(self, registry: StoreRegistry) -> None:
+        activity_id = _record(registry)
+        builder = PackBuilder(strategies=[GraphSearch(registry.knowledge.graph_store)])
+        pack = builder.build("anything", include_meta=True)
+        assert activity_id not in {item.item_id for item in pack.items}
+
+    def test_both_flags_surface_it(self, registry: StoreRegistry) -> None:
+        activity_id = _record(registry)
+        builder = PackBuilder(strategies=[GraphSearch(registry.knowledge.graph_store)])
+        pack = builder.build("anything", include_meta=True, include_structural=True)
+        assert activity_id in {item.item_id for item in pack.items}
+
+    def test_a_legacy_semantic_row_still_needs_only_include_meta(
+        self, registry: StoreRegistry
+    ) -> None:
+        """Rows written before #375 kept ``semantic`` and are unaffected."""
+        registry.knowledge.graph_store.upsert_node(
+            node_id="legacy-meta-activity",
+            node_type=wk.ACTIVITY,
+            properties={
+                "name": "cli.worker.curate.learning@old",
+                "analyzer_name": "cli.worker.curate.learning",
+                "agent_id": f"{META_AGENT_PREFIX}cli_worker",
+            },
+        )
+        builder = PackBuilder(strategies=[GraphSearch(registry.knowledge.graph_store)])
+        assert "legacy-meta-activity" not in {
+            item.item_id for item in builder.build("anything").items
+        }
+        assert "legacy-meta-activity" in {
+            item.item_id for item in builder.build("anything", include_meta=True).items
+        }

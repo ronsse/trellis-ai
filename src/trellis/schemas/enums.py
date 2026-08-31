@@ -49,6 +49,27 @@ class NodeRole(StrEnum):
     restated at the altitude the behaviour already sits at, rather than a
     role being added or a case being wedged in.
 
+    The widening **relocates a judgment rather than making a new one**.
+    ``PackBuilder._is_meta_activity`` has dropped meta-Activities from every
+    pack since #133 (Item 6 Phase 2): the claim "this row is not
+    standalone-discoverable" was already shipped, already on by default,
+    and uncontested. All that
+    changes is *where* it is applied — at the write, before ``GraphSearch``
+    slices its candidate window, instead of after, where the row had already
+    spent a slot. If the taxonomy forbade calling a meta-Activity
+    non-standalone, the filter was already violating it.
+    ``adr-dogfooding-meta-traces.md`` §3.3 says the same thing in the
+    ADR's own words: the meta-trace "is an index into operational data, not
+    a duplicate of it".
+
+    **Scope: this is the meta-recorder's Activity, not ``Activity`` the
+    type.** A *trace-extraction* Activity stays SEMANTIC, deliberately —
+    ``extract/trace.py`` mints it that way because "the Activity *is* the
+    trace", and demoting it would hide trace memory from packs entirely.
+    Read the qualifier before reaching for this role: what earns STRUCTURAL
+    here is being written once per *invocation of Trellis's own machinery*,
+    not being typed ``Activity``.
+
     The risk taken is the #325 / #326 one — a key widened to fit a new case
     until two writers mean different things by it. What bounds it here:
     ``node_role`` is a closed three-value enum with one write path

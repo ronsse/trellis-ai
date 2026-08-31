@@ -100,6 +100,8 @@ The definition now reads at the altitude the behaviour already sits at: *machine
 
 Two things keep this from becoming the `content_type` / `document_form` drift (#325 / #326), where a widened key ended up meaning different things to different writers: `node_role` is a **closed three-value enum with one write path** (`upsert_node`) and is **immutable across SCD-2 versions**, and every consumer branches on the same predicate (`!= "structural"`). There is no second vocabulary for two readings to drift apart into.
 
+**It is the meta-recorder's `Activity`, not `Activity` the type.** A *trace-extraction* `Activity` stays `semantic`, deliberately: `extract/trace.py` mints it that way because "the Activity *is* the trace", and demoting it would hide trace memory from packs entirely. What earns `structural` here is being written once per invocation of Trellis's own machinery — not the node type. The change also relocates a judgment rather than making a new one: `PackBuilder._is_meta_activity` had already dropped these rows from every pack since #133, so the only thing that moved is *where* the judgment is applied — at the write, before `GraphSearch` slices its candidate window, instead of after it, where the row had already spent a slot.
+
 **The four-question test still governs.** Widening the wording does not make `structural` a place to put anything inconvenient. It is for rows that would be in the graph anyway — for traversal, provenance, or lineage — and that nobody should ever retrieve on their own merits. A row you would *like* to be quieter in packs, but that is genuinely memory, is a `signal_quality` / importance problem, not a role problem: the role is immutable, so getting it wrong is not something an update can walk back.
 
 ---

@@ -41,6 +41,12 @@ recency window on their own, or an operator prunes them. And the
 and it is the only thing covering a meta-Activity reached by a *non*-graph
 axis.
 
+One consequence for the escape hatch: ``PackBuilder.build(include_meta=True)``
+no longer surfaces a *newly written* meta-Activity on its own, because the
+graph axis drops the structural row before the meta filter is ever reached.
+Pass ``include_structural=True`` alongside it. The pre-#375 rows are still
+``semantic``, so ``include_meta=True`` alone reaches those.
+
 ### Merge-within-window dedup
 
 Two invocations of the same ``(agent_id, analyzer_name)`` within the
@@ -550,6 +556,24 @@ def _create_activity(
     The node is minted :data:`~trellis.schemas.enums.NodeRole.STRUCTURAL`
     — see the module docstring's "Node role" section for why, and for what
     the alternatives cost.
+
+    .. warning::
+
+       **The counter wrap-up above is a node re-upsert, and it must pass
+       ``node_role`` explicitly.** ``upsert_node`` defaults the role to
+       ``semantic`` and ``check_node_role_immutable`` raises on any change
+       across SCD-2 versions, so the naive
+       ``upsert_node(node_id=activity_id, node_type=..., properties=...)``
+       raises ``ValueError`` for *every* meta-Activity, in every nightly
+       cron, the moment that wrap-up ships — and
+       ``adr-dogfooding-meta-traces.md`` §2.4 describes exactly that write
+       ("extends ``ended_at``, increments ``events_consumed``"). Nothing
+       re-upserts the Activity today (the merge-within-window path appends
+       edges only), which is why this is a trap for the next change rather
+       than a live defect. Carry the stored role forward the way
+       :class:`~trellis.mutate.handlers.EntityUpdateHandler` does. Pinned by
+       ``TestCounterWrapUpTrap`` in
+       ``tests/unit/meta/test_recorder_node_role.py``.
 
     Args:
         registry: Store registry.

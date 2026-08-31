@@ -104,6 +104,8 @@ If two invocations of the same analyzer happen within a 5-minute window and cons
 
 Logs are not queryable, not subject to retention guarantees, and not retrievable via PackBuilder. The graph is. The whole point: an agent asking "what does Trellis know about this entity?" should get back not just structural facts but also "this entity was the subject of 3 noise demotions in the last week."
 
+**Amended (#375): the retrievability this section claims is entity-anchored traversal, not standalone pack retrieval.** The Activity is not served in a context pack and has not been since the `PackBuilder._is_meta_activity` filter (#133); #375 moved the same suppression to the write, minting the Activity `node_role=STRUCTURAL` so it stops spending a `GraphSearch` candidate slot before being discarded. Neither filter touches `get_subgraph`, so the traversal that answers "what happened to *this entity*" — `GET /entities/{id}`, MCP `get_graph`, the `wasGeneratedBy` / `wasInformedBy` edges — is unchanged, and that was always the query this section is about. §3.3 already stated the reason the row is not standalone memory: the meta-trace "is an index into operational data, not a duplicate of it".
+
 ### 3.2 Why `Activity` (PROV-O) and not a Trellis-specific node type
 
 The graph-ontology ADR ([`adr-graph-ontology.md`](./adr-graph-ontology.md)) ships `Activity` precisely for this. A meta-analysis is exactly the PROV-O concept of an Activity: a unit of work, with inputs (`used`/`wasInformedBy`), outputs (`wasGeneratedBy`), and an associated Agent (`wasAssociatedWith`). The canonical type already exists; using it is correct.

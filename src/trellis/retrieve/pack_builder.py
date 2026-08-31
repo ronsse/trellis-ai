@@ -497,7 +497,12 @@ class PackBuilder:
             3. Deduplicate by item_id (keep highest score).
             4. Drop structural items unless ``include_structural=True``.
             5. Drop Trellis-internal meta-Activities unless
-               ``include_meta=True``.
+               ``include_meta=True``. Since #375 a *newly written*
+               meta-Activity is also ``node_role="structural"``, so the
+               graph axis drops it one step earlier and ``include_meta=True``
+               alone will not surface it — pass ``include_structural=True``
+               as well. Rows written before #375 are still ``semantic`` and
+               ``include_meta=True`` alone reaches them.
             6. Drop items already served in this session (session dedup).
             7. Apply the content floor (demote, or drop, substance-free
                excerpts — see :mod:`trellis.retrieve.excerpts`), then sort
