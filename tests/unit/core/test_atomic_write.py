@@ -58,15 +58,32 @@ class TestReplacementIsAtomic:
     def test_cleanup_does_not_mask_the_real_error(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The caller must see the ENOSPC, not a temp-file complaint."""
+        """The caller must see the ENOSPC, not a temp-file complaint.
+
+        The cleanup has to *fail* for this to mean anything. Without the
+        second monkeypatch the temp file always exists in a writable
+        directory, so ``suppress(OSError)`` and ``missing_ok=True`` can
+        never fire and the assertion below just duplicates
+        ``test_a_failed_write_leaves_the_destination_untouched``: measured,
+        deleting the ``suppress`` left the entire suite green. Which is
+        the shape this module exists to catch — a guard nothing can tell
+        is there.
+        """
         path = tmp_path / "f.json"
 
         def _boom(_fd: int) -> None:
             msg = "No space left on device"
             raise OSError(msg)
 
-        monkeypatch.setattr("trellis.core.atomic_write.os.fsync", _boom)
+        def _cleanup_also_fails(*_args: object, **_kwargs: object) -> None:
+            msg = "temp file complaint nobody asked about"
+            raise OSError(msg)
 
+        monkeypatch.setattr("trellis.core.atomic_write.os.fsync", _boom)
+        monkeypatch.setattr(Path, "unlink", _cleanup_also_fails)
+
+        # The ENOSPC the caller has to act on, not the cleanup's complaint
+        # — a raise from a ``finally`` replaces the exception in flight.
         with pytest.raises(OSError, match="No space left"):
             atomic_write_text(path, "doomed")
 
@@ -83,7 +100,20 @@ class TestMode:
         """
         path = tmp_path / "f.json"
         atomic_write_text(path, "x")
-        assert stat.S_IMODE(path.stat().st_mode) == NEW_FILE_MODE
+
+        mode = stat.S_IMODE(path.stat().st_mode)
+        # The literal, not ``NEW_FILE_MODE``. Asserting that a fresh file
+        # gets the constant is a tautology over the constant: setting
+        # ``NEW_FILE_MODE = 0o600`` — precisely the regression this
+        # docstring is written against — left this test green, and the only
+        # thing that caught it was ``test_advisory_store.py``. That is the
+        # contract still being pinned *through a caller*, which is the
+        # situation this module's extraction was supposed to end.
+        assert NEW_FILE_MODE == 0o644
+        assert mode == 0o644
+        # And the property the number is chosen for, stated directly.
+        assert mode & stat.S_IRGRP, "a bind-mounted container reader cannot read it"
+        assert mode & stat.S_IROTH, "a bind-mounted container reader cannot read it"
 
     def test_an_existing_file_keeps_its_own_mode(self, tmp_path: Path) -> None:
         path = tmp_path / "f.json"
