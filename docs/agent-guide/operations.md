@@ -1004,7 +1004,7 @@ trellis retrieve traces [--domain DOMAIN] [--limit N] [--fields FIELDS] [--trunc
 | `--limit` | `20` | Maximum results |
 | `--fields` | all | Comma-separated field list |
 | `--truncate` | `null` | Max chars per text field |
-| `--quiet` | `false` | Suppress Rich formatting |
+| `--quiet` | `false` | Suppress Rich formatting on the **text** branch. A no-op under `--format json` / `jsonl` / `tsv`, which never reach Rich (#403) |
 | `--format` | `text` | Output format |
 
 ### `trellis retrieve search`
@@ -1023,18 +1023,21 @@ trellis retrieve search <query> [--limit N] [--domain DOMAIN] [--include-chunks]
 | `--include-chunks` | No | `false` | Include `<parent>#chunk-N` fragment rows. Excluded by default (#396): they are slices of documents the same search already ranks. Pushed into the store, so the row cap refills with whole documents rather than the list simply getting shorter |
 | `--format` | No | `text` | Output format |
 
-> **Add `--quiet` when parsing the output.** Without it the payload prints
-> through Rich, which rewrites `:name:` emoji shortcodes inside string values
-> and line-wraps at the console width — putting literal newlines inside JSON
-> strings, so a wide payload does not parse at all. Whether `--format json` is
-> parseable therefore depends on the terminal it ran in
-> ([#403](https://github.com/ronsse/trellis-ai/issues/403)). `--quiet` writes
-> straight to stdout and bypasses Rich entirely.
+> **`--format json` is safe on its own; `--quiet` is no longer needed for it.**
+> It used to be. The payload printed through Rich, which rewrites `:name:` emoji
+> shortcodes inside string values — `corpus:notes:<sha>` came back naming a
+> document that exists in no store — and line-wraps at the console width, folding
+> literal newlines into JSON strings so a wide payload did not parse at all.
+> Whether `--format json` parsed depended on the terminal it ran in
+> ([#403](https://github.com/ronsse/trellis-ai/issues/403)). Every machine-output
+> path now writes straight to stdout, and `tests/unit/test_machine_output_rule.py`
+> fails the build if a serialized payload is handed back to Rich. `--quiet` still
+> does what it says for the **text** branch.
 
 **Example:**
 
 ```bash
-trellis retrieve search "connection pool configuration" --limit 5 --format json --quiet
+trellis retrieve search "connection pool configuration" --limit 5 --format json
 ```
 
 **JSON output:**
@@ -1182,13 +1185,14 @@ trellis retrieve pack --intent <text> [--domain DOMAIN] [--agent AGENT_ID] [--ma
 | `--include-chunks` | No | `false` | Include `<parent>#chunk-N` fragment rows (#396). Excluded by default, same rule as `retrieve search` |
 | `--format` | No | `text` | Output format |
 
-> **Add `--quiet` when parsing the output** — same Rich mangling as
-> `retrieve search` above ([#403](https://github.com/ronsse/trellis-ai/issues/403)).
+> **`--format json` is safe on its own** — the Rich mangling described under
+> `retrieve search` above is fixed ([#403](https://github.com/ronsse/trellis-ai/issues/403)),
+> so `--quiet` is no longer required to parse the output.
 
 **Example:**
 
 ```bash
-trellis retrieve pack --intent "deploy checklist for staging" --domain platform --max-items 10 --format json --quiet
+trellis retrieve pack --intent "deploy checklist for staging" --domain platform --max-items 10 --format json
 ```
 
 **JSON output:**
@@ -1230,6 +1234,8 @@ Plus the scope keys `intent` / `domain` / `agent_id` / `session_id`, the roll-up
 **The sectioned payload is not a superset.** It carries `section_count`, `total_items` and `sections[]` (`{name, items_count, item_ids, injected_advisory_ids}`) *instead of* `items_count`, `injected_item_ids`, `injected_items[]`, `strategies_used`, `candidates_found`, `budget_max_items`, `budget_max_tokens`, `budget_trace[]` and `rejected_items[]` — none of which it emits. Everything else above is shared. Two consequences to know before reading the numbers: `trellis analyze pack-telemetry` counts a sectioned pack as a **0-item pack**, because it reads `injected_item_ids`; and since the learning join reads `injected_items[]`, a sectioned pack yields **zero per-item rows** — `run_id` and `intent_family` are emitted there for symmetry but stay inert until that gap is closed.
 
 **Attribution fields (`title` / `category` / `domain_system`).** Added in #285 because the promotion candidates written to `intent_learning_candidates.json` previously carried only opaque `item_id`s. All three are derived from metadata the strategies already attach — nothing new is computed. `title` reads `title`, then `capture_title` (what the session-capture ingest writes), then `name`. `category` is the `ContentTags.content_type` facet and **only** that: a flat `metadata["content_type"]` is deliberately not read as a fallback, because ingest handlers stamp their own vocabulary there (`"conversation"`, `"entity_summary"`), and mixing the taxonomies would make the column ambiguous. An empty value is omitted rather than emitted as `null`, so thin items keep the pre-existing payload shape.
+
+**Graph-row fields (`node_type` / `node_role`).** Added in #375 (gate 4). Items sourced from a graph node — the `graph` and `observation` axes — also carry the row's stored `node_type` and its `node_role` (`structural` / `semantic` / `curated`). **Only graph-sourced items carry them, and absence is recorded by omitting the key**, the same convention the fields above use: a document has no `node_role`, and filling one in as `"semantic"` would make a per-role split a statement about the default rather than about the corpus. Before this, splitting the graph axis's citations by type or role required joining every served `item_id` back to `nodes WHERE valid_to IS NULL` — a mutable table being asked to describe a past serving, which answers for a different row once a node is deleted, re-typed or re-minted. The graph axis's value is sharply concentrated by type (see `docs/design/plan-375-graph-candidates.md` §2.1), so that split is a standing question, not a one-off. `graph_selection` (`seeded` / `recency_window`, #371) sits alongside them and answers how the candidate was chosen. Read the pair beside `strategy_source` rather than instead of it: a vector row written from a graph node (the Neo4j shape-#2 layout, where the vector `item_id` *is* the `node_id`) carries them onto a `semantic` item legitimately.
 
 #### Pack excerpts and the content floor
 

@@ -6,6 +6,7 @@ import asyncio
 import json
 import sys
 from pathlib import Path
+from typing import NoReturn
 
 import typer
 from rich.console import Console
@@ -32,10 +33,49 @@ from trellis.stores.registry import StoreRegistry
 from trellis_cli.exit_codes import EXIT_INTERNAL
 from trellis_cli.ingest_conversations import ingest_conversations
 from trellis_cli.ingest_corpus import ingest_corpus
+from trellis_cli.output import emit_json
 from trellis_cli.stores import _get_registry, get_document_store
 
 ingest_app = typer.Typer(no_args_is_help=True)
 console = Console()
+
+
+def _fail(
+    message: str, output_format: str, *, error_type: str = "FileNotFoundError"
+) -> NoReturn:
+    """Report *message* on the caller's chosen surface, then exit non-zero.
+
+    The JSON branch is not optional. ``--format json`` is documented as
+    *the* machine surface, so an error delivered as Rich prose on stdout is
+    a payload the consumer cannot parse — it gets a ``JSONDecodeError``
+    where it expected a structured error it could act on (#403). Four
+    commands in this module reported a missing input exactly that way while
+    already emitting JSON for a *parse* failure a few lines below.
+
+    One helper rather than the same four-line branch at each site: the
+    duplicated form had pushed two commands past the branch limit, which is
+    the linter noticing the same thing.
+
+    ``error_type`` is carried so this envelope matches
+    :func:`~trellis.core.error_sanitize.sanitized_error_payload`, which every
+    *other* JSON error in these commands uses. Without it a consumer that
+    branches on ``error_type`` gets a ``KeyError`` on exactly the paths this
+    change added — two error shapes out of one command. ``FileNotFoundError``
+    is the name the condition would have raised under, so the value is the
+    one a caller would already be matching on.
+    """
+    if output_format == "json":
+        emit_json(
+            {
+                "status": "error",
+                "error_type": error_type,
+                "message": message,
+            }
+        )
+    else:
+        console.print(f"[red]{message}[/red]")
+    raise typer.Exit(code=EXIT_INTERNAL)
+
 
 ingest_app.command("corpus")(ingest_corpus)
 ingest_app.command("conversations")(ingest_conversations)
@@ -55,8 +95,7 @@ def ingest_trace(  # noqa: PLR0912 - CLI dispatch with explicit format branching
     else:
         path = Path(file)
         if not path.exists():
-            console.print(f"[red]File not found: {file}[/red]")
-            raise typer.Exit(code=EXIT_INTERNAL)
+            _fail(f"File not found: {file}", output_format)
         raw = path.read_text()
 
     # Parse and validate
@@ -65,7 +104,7 @@ def ingest_trace(  # noqa: PLR0912 - CLI dispatch with explicit format branching
         trace = Trace.model_validate(data)
     except Exception as exc:
         if output_format == "json":
-            console.print(json.dumps(sanitized_error_payload(exc)))
+            emit_json(sanitized_error_payload(exc))
         else:
             console.print(f"[red]Invalid trace: {exc}[/red]")
         raise typer.Exit(code=EXIT_INTERNAL) from None
@@ -88,7 +127,7 @@ def ingest_trace(  # noqa: PLR0912 - CLI dispatch with explicit format branching
                 "status": "error",
                 "message": sanitize_error_message(result.message),
             }
-            console.print(json.dumps(error_payload))
+            emit_json(error_payload)
         else:
             console.print(f"[red]Failed to ingest trace: {result.message}[/red]")
         raise typer.Exit(code=EXIT_INTERNAL)
@@ -108,7 +147,7 @@ def ingest_trace(  # noqa: PLR0912 - CLI dispatch with explicit format branching
         }
         if extraction is not None:
             payload["extraction"] = extraction
-        console.print(json.dumps(payload))
+        emit_json(payload)
     else:
         console.print(f"[green]Trace ingested[/green]: {trace.trace_id}")
         console.print(f"  Source: {trace.source}")
@@ -130,15 +169,14 @@ def ingest_evidence(
     """Ingest evidence from a JSON file."""
     path = Path(file)
     if not path.exists():
-        console.print(f"[red]File not found: {file}[/red]")
-        raise typer.Exit(code=EXIT_INTERNAL)
+        _fail(f"File not found: {file}", output_format)
 
     try:
         data = json.loads(path.read_text())
         evidence = Evidence.model_validate(data)
     except Exception as exc:
         if output_format == "json":
-            console.print(json.dumps(sanitized_error_payload(exc)))
+            emit_json(sanitized_error_payload(exc))
         else:
             console.print(f"[red]Invalid evidence: {exc}[/red]")
         raise typer.Exit(code=EXIT_INTERNAL) from None
@@ -155,14 +193,12 @@ def ingest_evidence(
     )
 
     if output_format == "json":
-        console.print(
-            json.dumps(
-                {
-                    "status": "ingested",
-                    "evidence_id": evidence.evidence_id,
-                    "evidence_type": evidence.evidence_type,
-                }
-            )
+        emit_json(
+            {
+                "status": "ingested",
+                "evidence_id": evidence.evidence_id,
+                "evidence_type": evidence.evidence_type,
+            }
         )
     else:
         console.print(f"[green]Evidence ingested[/green]: {evidence.evidence_id}")
@@ -223,8 +259,7 @@ def ingest_dbt_manifest(
     """Ingest a dbt manifest through the governed extraction pipeline."""
     path = Path(manifest_path)
     if not path.exists():
-        console.print(f"[red]Path not found: {manifest_path}[/red]")
-        raise typer.Exit(code=EXIT_INTERNAL)
+        _fail(f"Path not found: {manifest_path}", output_format)
 
     manifest_file = path / "target" / "manifest.json" if path.is_dir() else path
 
@@ -232,7 +267,7 @@ def ingest_dbt_manifest(
         manifest = json.loads(manifest_file.read_text())
     except Exception as exc:
         if output_format == "json":
-            console.print(json.dumps(sanitized_error_payload(exc)))
+            emit_json(sanitized_error_payload(exc))
         else:
             console.print(f"[red]Could not read manifest: {exc}[/red]")
         raise typer.Exit(code=EXIT_INTERNAL) from None
@@ -253,7 +288,7 @@ def ingest_dbt_manifest(
         )
     except Exception as exc:
         if output_format == "json":
-            console.print(json.dumps(sanitized_error_payload(exc)))
+            emit_json(sanitized_error_payload(exc))
         else:
             console.print(f"[red]dbt ingest failed: {exc}[/red]")
         raise typer.Exit(code=EXIT_INTERNAL) from None
@@ -279,7 +314,7 @@ def ingest_dbt_manifest(
 
     counts = {"nodes": nodes, "edges": edges, "documents": doc_count}
     if output_format == "json":
-        console.print(json.dumps({"status": "ingested", **counts}))
+        emit_json({"status": "ingested", **counts})
     else:
         console.print("[green]dbt manifest ingested[/green]")
         console.print(f"  Nodes: {counts['nodes']}")
@@ -297,8 +332,7 @@ def ingest_openlineage(
     """Ingest OpenLineage events through the governed extraction pipeline."""
     path = Path(events_path)
     if not path.exists():
-        console.print(f"[red]File not found: {events_path}[/red]")
-        raise typer.Exit(code=EXIT_INTERNAL)
+        _fail(f"File not found: {events_path}", output_format)
 
     # Support JSON array and NDJSON — CLI owns file I/O.
     try:
@@ -310,7 +344,7 @@ def ingest_openlineage(
             events = [json.loads(line) for line in raw.splitlines() if line.strip()]
     except Exception as exc:
         if output_format == "json":
-            console.print(json.dumps(sanitized_error_payload(exc)))
+            emit_json(sanitized_error_payload(exc))
         else:
             console.print(f"[red]Could not read events file: {exc}[/red]")
         raise typer.Exit(code=EXIT_INTERNAL) from None
@@ -331,14 +365,14 @@ def ingest_openlineage(
         )
     except Exception as exc:
         if output_format == "json":
-            console.print(json.dumps(sanitized_error_payload(exc)))
+            emit_json(sanitized_error_payload(exc))
         else:
             console.print(f"[red]OpenLineage ingest failed: {exc}[/red]")
         raise typer.Exit(code=EXIT_INTERNAL) from None
 
     counts = {"nodes": nodes, "edges": edges}
     if output_format == "json":
-        console.print(json.dumps({"status": "ingested", **counts}))
+        emit_json({"status": "ingested", **counts})
     else:
         console.print("[green]OpenLineage events ingested[/green]")
         console.print(f"  Nodes: {counts['nodes']}")

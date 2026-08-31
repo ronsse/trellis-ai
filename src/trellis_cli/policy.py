@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 import typer
@@ -17,6 +16,7 @@ from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
 from trellis.stores.policy_store import PolicyStore
 from trellis_cli.config import get_data_dir
 from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_STORE
+from trellis_cli.output import emit_json
 
 policy_app = typer.Typer(no_args_is_help=True)
 console = Console()
@@ -36,19 +36,37 @@ def _get_policy_store() -> PolicyStore:
     return PolicyStore(resolve_policy_path(get_data_dir() / "stores"))
 
 
+def _policy_not_found(policy_id: str) -> dict[str, str]:
+    """The not-found error envelope, shaped like ``sanitized_error_payload``.
+
+    ``error_type`` is present so a consumer can branch on it the same way it
+    does for every other JSON error surface in the CLI; ``show`` and
+    ``remove`` share the helper so the two cannot drift apart again — they
+    already had, with ``show`` emitting Rich prose on stdout under
+    ``--format json`` while ``remove`` emitted JSON (#403).
+    """
+    return {
+        "status": "error",
+        "error_type": "PolicyNotFound",
+        "message": f"Policy not found: {policy_id}",
+    }
+
+
 def _print_json(obj: object) -> None:
     """Print a JSON-serialisable object as *parseable* JSON.
 
-    ``typer.echo``, not ``console.print``. Rich soft-wraps at the terminal
-    width, and a wrap lands inside a long string value — which makes the
-    output something ``json.loads`` rejects, breaking the documented
-    ``--format json`` contract. It was latent here only because every
-    payload happened to be short; adding the policy file's path to
-    ``policy list`` was enough to trip it at the default 80 columns. Same
-    reasoning as :func:`trellis_cli.output.emit_json`, keeping this
-    command group's ``indent=2`` / ``default=str`` rendering.
+    Through :func:`~trellis_cli.output.emit_json`, so it never reaches
+    Rich. Rich soft-wraps at the terminal width and a wrap lands inside a
+    long string value, which makes the output something ``json.loads``
+    rejects — breaking the documented ``--format json`` contract. It was
+    latent here only because every payload happened to be short; adding the
+    policy file's path to ``policy list`` was enough to trip it at the
+    default 80 columns. #413 fixed that locally with ``typer.echo``; #403
+    then made the house helper the one way to do it, and this defers to it
+    so the rule is enforceable rather than re-derived per command group.
+    ``indent=2`` / ``default=str`` keep this group's rendering.
     """
-    typer.echo(json.dumps(obj, indent=2, default=str))
+    emit_json(obj, indent=2, default=str)
 
 
 def _render_degradation(degraded: dict[str, Any] | None) -> None:
@@ -285,7 +303,13 @@ def show_policy(
                     soft_wrap=True,
                 )
             raise typer.Exit(code=EXIT_STORE)
-        console.print(f"[red]Policy not found: {escape(policy_id)}[/red]")
+        # Clean store: the shared not-found envelope, so ``show`` and
+        # ``remove`` cannot drift apart again (#403 — ``show`` used to print
+        # Rich prose to stdout even under ``--format json``).
+        if output_format == "json":
+            _print_json(_policy_not_found(policy_id))
+        else:
+            console.print(f"[red]Policy not found: {escape(policy_id)}[/red]")
         raise typer.Exit(code=EXIT_INTERNAL)
 
     if output_format == "json":
@@ -402,9 +426,7 @@ def remove_policy(
     match = _find_policy(store, policy_id)
     if match is None:
         if output_format == "json":
-            _print_json(
-                {"status": "error", "message": f"Policy not found: {policy_id}"}
-            )
+            _print_json(_policy_not_found(policy_id))
         else:
             console.print(f"[red]Policy not found: {policy_id}[/red]")
         raise typer.Exit(code=EXIT_INTERNAL)

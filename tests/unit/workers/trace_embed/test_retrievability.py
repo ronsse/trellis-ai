@@ -51,9 +51,7 @@ def hashing_embed(text: str) -> list[float]:
 
 
 @pytest.fixture
-def semantic_registry(tmp_path, monkeypatch):
-    from typer.testing import CliRunner
-
+def semantic_registry(tmp_path, monkeypatch, cli_runner):
     from trellis_cli.admin import admin_app
     from trellis_cli.stores import _get_registry, _reset_registry
 
@@ -63,7 +61,7 @@ def semantic_registry(tmp_path, monkeypatch):
         "TRELLIS_EMBEDDING_FN",
         "tests.unit.workers.trace_embed.test_retrievability.hashing_embed",
     )
-    init = CliRunner().invoke(admin_app, ["init"])
+    init = cli_runner.invoke(admin_app, ["init"])
     assert init.exit_code == 0, init.output
     _reset_registry()
     yield _get_registry()

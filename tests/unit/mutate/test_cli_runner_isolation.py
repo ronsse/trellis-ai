@@ -15,7 +15,6 @@ particular directory is safe.
 from __future__ import annotations
 
 import pytest
-from typer.testing import CliRunner as BareCliRunner
 
 from tests.structlog_isolation import IsolatedCliRunner, reset_structlog_global_state
 from trellis.mutate.commands import Command, Operation
@@ -70,30 +69,47 @@ class TestIsolatedCliRunner:
         assert allowed is False
 
     @pytest.mark.usefixtures("_restore_structlog")
-    def test_bare_runner_leak_is_contained_to_itself(
-        self, tmp_path, monkeypatch
+    def test_the_runner_resets_the_global_config_it_was_built_to_reset(
+        self, tmp_path, monkeypatch, cli_runner: IsolatedCliRunner
     ) -> None:
-        """Documents the hazard, and proves the cleanup contains it.
+        """Pins the containment itself, which nothing else did.
 
-        Whether the bare runner actually raises depends on the installed
-        ``click`` / ``structlog`` — 8.5.0 / 26.1.0 close the buffer and do,
-        8.3.2 / 25.5.0 do not, which is exactly why this passed locally and
-        failed in CI. The assertion accepts either, because what must never
-        regress is the isolated path above. The ``_restore_structlog``
-        fixture is what stops this test poisoning the ones after it.
+        This replaces an assertion that had become unfalsifiable::
+
+            assert error is None or "closed file" in error
+
+        It accepted either outcome by design, because pre-#377 the bare
+        runner raised under click 8.5.0 and did not under 8.3.2. Once #377
+        removed the raise entirely, *both* disjuncts were satisfied by the
+        same value and the test could no longer fail — a detector wired to a
+        constant, which is the defect class this repo keeps producing.
+
+        The containment was left genuinely unenforced by that: deleting the
+        ``finally: reset_structlog_global_state()`` from
+        :meth:`IsolatedCliRunner.invoke` kept the whole suite green. What is
+        asserted instead is the contract that survives #377 — after an
+        isolated invocation, structlog's *global* config no longer carries
+        Trellis's configured factory, so the level it memoised cannot leak
+        into the next test's ``capture_logs``.
+
+        The bare-runner hazard itself is covered behaviourally by
+        ``tests/unit/test_logging.py::TestBareCliRunner``, which asserts the
+        stronger property (the line reaches the stream the process actually
+        has) rather than merely that nothing raised.
         """
+        import structlog
+
+        from trellis.logging import _STDERR_PROXY
         from trellis_cli.main import app
 
         monkeypatch.setenv("TRELLIS_CONFIG_DIR", str(tmp_path / "config"))
         monkeypatch.setenv("TRELLIS_DATA_DIR", str(tmp_path / "data"))
         (tmp_path / "data" / "stores").mkdir(parents=True)
 
-        BareCliRunner().invoke(app, ["policy", "list", "--format", "json"])
+        cli_runner.invoke(app, ["policy", "list", "--format", "json"])
 
-        error: str | None = None
-        try:
-            _denying_gate().check(_cmd())
-        except ValueError as exc:
-            error = str(exc)
-
-        assert error is None or "closed file" in error
+        factory = structlog.get_config()["logger_factory"]
+        assert getattr(factory, "_file", None) is not _STDERR_PROXY, (
+            "IsolatedCliRunner left Trellis's logger factory installed in "
+            "structlog's global config — the invoke-time reset is not running"
+        )

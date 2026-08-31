@@ -241,6 +241,33 @@ def _item_attribution(item: PackItem) -> dict[str, Any]:
       goes wrong. It reveals nothing about content: two enum values
       describing the *mechanism*, next to a ``title`` that already names
       the thing.
+    * ``node_type`` / ``node_role`` — the graph row's own type and role, as
+      stamped by :class:`~trellis.retrieve.strategies.GraphSearch` and
+      :class:`~trellis.retrieve.observation_strategy.ObservationSearch`
+      (#375 gate 4). Only items sourced from a graph node carry either;
+      **absence means "this item is not a graph node", and is recorded by
+      omitting the key** — the same convention the five fields above use.
+      Neither is ever defaulted: a ``node_role`` filled in as ``"semantic"``
+      for a document would make the per-role split a statement about the
+      filler rather than about the corpus, which is the failure mode #363 /
+      #385 / #388 each shipped a version of.
+
+      They are here because the per-type split is the axis's whole
+      effectiveness story — `docs/design/plan-375-graph-candidates.md` §2.1
+      shows the graph axis's citations concentrated in one ``node_type``
+      and zero in eight others — and deriving it required joining every
+      served id back to ``nodes WHERE valid_to IS NULL``. That join happens
+      to have held (all 78 served ids resolved), but it reads a *mutable*
+      table to describe a *past* serving: a node deleted, re-typed or
+      re-minted since is either absent or answers for a different row.
+      A standing measurement must not depend on it.
+
+      Read them **beside** ``strategy_source``, not instead of it. A vector
+      row whose metadata was written from a graph node — the Neo4j shape-#2
+      layout, where the vector ``item_id`` *is* the ``node_id`` — carries
+      them onto a ``semantic`` item legitimately. On the reference
+      deployment no vector row carries either key today, so in practice
+      they mark the ``graph`` and ``observation`` axes.
 
     **On disclosure.** ``domain`` is open-vocabulary and reveals subject
     matter, which is why :mod:`trellis.classify.shadow` deliberately keeps it
@@ -264,6 +291,8 @@ def _item_attribution(item: PackItem) -> dict[str, Any]:
         "domain_system": meta.get("source_system"),
         "signal_quality": tags.get("signal_quality"),
         "graph_selection": meta.get("graph_selection"),
+        "node_type": meta.get("node_type"),
+        "node_role": meta.get("node_role"),
     }
     attribution: dict[str, Any] = {
         key: value.strip()
