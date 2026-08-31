@@ -271,7 +271,7 @@ merge its own work.
 | Retargeting a stacked PR with `gh pr edit --base main` and waiting for CI | **it never runs.** GitHub's default `pull_request` activity types are `opened` / `synchronize` / `reopened` — **not `edited`** — so a retargeted PR sits at "no checks reported" forever and reads as *pending* rather than *never triggered*. Observed on #436, where the orchestrator retargeted and then read an empty `statusCheckRollup` as CI still working | push something (even an empty commit) after retargeting, or close/reopen. Distinguish the two states before waiting: an empty rollup means nothing was triggered; a rollup with blank conclusions means jobs are genuinely in flight. |
 | Telling an agent to run the suite `-p no:randomly` | **`pytest-randomly` is not installed and is not declared anywhere in this repo**, so the flag is silently accepted and both runs are byte-identical. Verified 2026-08-31 (`find_spec('pytest_randomly')` is `None`; no mention in `pyproject.toml`) | drop it. Test *ordering* dependence is real in this repo — it is what the bare `CliRunner` incident was — but it has to be provoked some other way (`-p no:cacheprovider`, running a single file in isolation, reordering by hand). **This instruction was invented by the orchestrator and propagated to five briefs before anyone checked**, which is the repo's own signature defect — a mechanism that reports success while doing nothing — committed in the act of hunting it. |
 | Trusting a green local `pytest` run | **the shared `.venv` is not CI's dependency set.** click 8.3.2 / structlog 25.5.0 locally vs **8.5.0 / 26.1.0** in CI. This produced **109 CI failures across 23 directories** on a PR whose author had a fully green local run of CI's exact command | check against **`/mnt/ssd/trellis-worktrees/.ci-venv`** (fresh 3.12, CI-resolved versions) before opening a PR. It reproduced that failure from a single test file in ~1s. **Do not modify the shared `.venv`** — it is production's editable install. Caveat: `.ci-venv` is authoritative for the click/structlog problem it was built for, **not** for lint or typecheck — see [#378](https://github.com/ronsse/trellis-ai/issues/378) |
-| A bare `CliRunner()` in a test | `configure_stderr_logging()` bakes `sys.stderr` into structlog's **global** factory at call time; `CliRunner.invoke()` pins it to a buffer Click then closes, so **every later log call in the process** dies on `I/O operation on closed file` — surfacing at whatever logs next, arbitrarily far from the cause | use the `cli_runner` fixture in the root `tests/conftest.py` (#370). Root cause filed as [#377](https://github.com/ronsse/trellis-ai/issues/377); a dormant instance survives in `tests/unit/workers/trace_embed/conftest.py`, harmless only because `workers` sorts last |
+| A bare `CliRunner()` in a test — **root cause FIXED `75b892e`, mechanism kept** | `configure_stderr_logging()` baked `sys.stderr` into structlog's **global** factory at call time; `CliRunner.invoke()` pins it to a buffer Click then closes, so **every later log call in the process** died on `I/O operation on closed file` — surfacing at whatever logs next, arbitrarily far from the cause. That is the shape to recognise: a process-global bound eagerly to a stream someone else owns. | [#377](https://github.com/ronsse/trellis-ai/issues/377) merged as `75b892e` — **the stream is now resolved lazily**, so a bare runner no longer poisons the process. The dormant instance this row used to name in `tests/unit/workers/trace_embed/conftest.py` is **gone** (verified 2026-08-31: that fixture takes the root `cli_runner` and says why in its docstring). Still prefer the `cli_runner` fixture in the root `tests/conftest.py`, which exports `IsolatedCliRunner` — it isolates deliberately rather than relying on the lazy resolve |
 | Comparing two code paths by `relevance_score` | reports 100% divergence at 12 decimal places | `_apply_recency_decay` reads `datetime.now()`, so a 2-second gap between runs moves every score ~1e-7. **Diff on `item_id` order and excerpt, never on float scores** |
 | GitHub Actions outage | runs sit `queued`, then `CANCELLED` | watch `githubstatus.com` components, not `gh pr checks` (which errors); re-trigger cancelled runs with `update-branch` |
 
@@ -300,9 +300,12 @@ dependency order:
 >   The live remainder is #385, the documents *list view*, which is a display defect.
 
 1. **[#360](https://github.com/ronsse/trellis-ai/issues/360) — govern the document and
-   vector planes.** Panel-decided (unanimous, option B) and recorded as ledger **T-3**;
-   implementation not started. #357's worker-local handler is the natural seed. Gains most
-   of its point *after* C1, since stage 2 is a no-op until a gate is wired.
+   vector planes. ← the top unblocked feature item.** Panel-decided (unanimous, option B)
+   and recorded as ledger **T-3**; implementation not started. #357's worker-local handler
+   is the natural seed. ~~Gains most of its point *after* C1, since stage 2 is a no-op until
+   a gate is wired.~~ **That caveat is satisfied:** C1 merged `1e6c66e`, so Stage 2 now runs
+   on every surface and a governed document/vector write would actually be policy-checked.
+   Nothing else in this queue blocks it.
 2. **C2 → C3 → C4** — [#256](https://github.com/ronsse/trellis-ai/issues/256) Bolt plugin
    extraction (halves #194's enforcement surface, so it precedes it),
    [#194](https://github.com/ronsse/trellis-ai/issues/194) classification enforcement,
@@ -310,15 +313,22 @@ dependency order:
    as 2 of 5 stages missing emitters).
 3. **D1–D4** query-history curation, then **E1** ([#306](https://github.com/ronsse/trellis-ai/issues/306)) / **E2**.
 
-**In flight as of 2026-08-31** — four lanes dispatched after the overnight session was cut
-short by a shared limit. None of them is a queue item above; three are recovery.
+**There is deliberately no in-flight table here.** One existed for a day and was **4/4
+wrong** within 24 hours — every lane it listed as blocked had merged, and one row still
+instructed an agent not to merge a PR that was already on `main`. An agent reading a stale
+in-flight row does the *opposite* of the right thing, which is strictly worse than reading
+nothing.
 
-| lane | state |
-|---|---|
-| **#413** policy fail-open (PR #423) | green, **re-gating**. The first gate died mid-mutation-testing having reported *"nine survivors"* and never triaged them. Nine surviving mutants on an access-control PR is the signal the gate exists to produce — **do not merge until it is resolved.** Carries a breaking change (`policy show --format json` now returns an envelope). |
-| **#377/#403** stderr + Rich (PR #428) | green, **gating**. Its first gate was killed at startup, so this PR has had no review at all. |
-| **#404** visible redaction | **resuming** on `swarm/night-n404`. The seam (`partition_archived` / `partition_by_signal_quality`, each returning `(kept, withheld)`) and `retrieve/withholding.py` are done and good; all downstream plumbing, every renderer and every test are absent. A version that partitions and then discards is *strictly worse* than the status quo, which is the opposite of what the panel accepted — that WIP state must not ship. |
-| **#375** graph axis | **implementing** gate 4 (forward `node_type`/`node_role` into `injected_items[]`) then option 2 (stamp the meta-recorder's Activities `structural`). Decided as ledger **T-4**; the design doc is PR #416. |
+**Ask `gh pr list --state open` and `git log origin/main` instead.** Those cannot go stale.
+This section carries only what a merge leaves behind that *is* durable — the ledger entry,
+the filed follow-up, the §5 trap. That is the general rule this document now follows:
+**mechanism does not rot; status does.** Write down why something is true, and link to the
+live source for whether it currently holds.
+
+The four lanes dispatched 2026-08-30/31 are all merged; their durable residue is ledger
+**T-4** and **T-5**, issues [#438](https://github.com/ronsse/trellis-ai/issues/438) /
+[#439](https://github.com/ronsse/trellis-ai/issues/439) /
+[#440](https://github.com/ronsse/trellis-ai/issues/440), and the §5 trap rows.
 
 **Measurement-integrity issues filed 2026-08-27, all unstarted.** These are cheap and they
 protect every number above, so they are worth interleaving rather than queueing behind

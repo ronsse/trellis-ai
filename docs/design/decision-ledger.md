@@ -156,27 +156,65 @@ Pilot-infra blockage (ArcadeDB secret + expired AWS SSO), not a trellis-ai code 
 that still carries an unresolved gate is how [#312](https://github.com/ronsse/trellis-ai/issues/312)
 hid an owner decision for three days — gate labels are only read on *open* issues.
 
-### A-3 · Rebuild the production containers (16 commits behind `main`)
+### A-3 · Rebuild the production containers (they run a build `main` has moved well past)
 
-Measured 2026-08-27. `trellis-api` and `trellis-mcp` are both "Up 2 days" reporting
-`write_provenance.commit = 5f5a1d779`; `main` is `738cb74`. **The entire 2026-08-27 wave is
-undeployed** — ten PRs, including #343 (noise exclusion actually holding on the semantic
-axis), #344 (attribution join key), #353 (F1), #357 (A1 trace embedding), #359 (F2
-graduated disclosure).
+> **Do not quote the gap from this entry — re-derive it.** Every number below is a
+> *snapshot*, and this entry has already gone stale once. The method, which does not:
+>
+> ```bash
+> # 1. what the containers actually run  →  write_provenance.commit
+> curl -s localhost:8420/api/version                 # API (gated on the /readyz ops-detail posture)
+> trellis-skynet admin write-config --format json    # host CLI
+> # 2. the gap, and how much of it is code the container runs
+> git -C ~/projects/trellis-ai fetch origin
+> git rev-list --count <container_commit>..origin/main
+> for c in $(git rev-list <container_commit>..origin/main); do
+>   git show --stat --format='' "$c" | grep -q 'src/' && echo "$c"
+> done | wc -l
+> ```
+>
+> Read the **`src/` count**, not the raw commit count: a docs-only merge changes nothing a
+> container runs, and quoting the raw number overstates the deployment gap.
+
+**Snapshot 2026-08-31** — supersedes the 2026-08-27 reading ("16 commits behind;
+`write_provenance.commit = 5f5a1d779`; `main` is `738cb74`"). Containers now stamp
+`281224b51` against `main` = `9ea5d72`: **15 commits behind, of which 12 touch `src/`.**
+Undeployed code is `d635fcc` (#404 visible withholding), `841afcf` (#375 option 2),
+`c6db795` (supersessions applied after the write seam), `fb2e168` / `0d9f2a6` (the
+degraded-load write refusals for the policy and advisory files), `75b892e` (#377 stderr),
+`c5fdc89` (node telemetry), `fe843fc` / `31eff6c` (`updated_at` preservation), `0e5ed75`
+(chunk rows excluded from whole-document surfaces), `8c4dac5`, `b843f5d`. **The host CLI is
+a separate and closer target:** an editable install running its working tree at `fe843fc`,
+**9 commits** behind `main`.
+
+**Check ancestry, not dates.** `git merge-base --is-ancestor <commit> <container_commit>`
+answers "is this deployed?"; comparing merge dates does not, and reading a stale copy of
+this entry's own cost list would have said C1 was undeployed when it has in fact shipped.
+
+**The magnitude moved; the decision did not.** The gap narrowed slightly between the two
+readings — note that this is *not* evidence of self-correction. It narrowed because the
+merge rate slowed, not because anything was deployed.
 
 Container rebuild + restart is a **production mutation**, so it is not panel-eligible and
 not the swarm's call at any confidence.
 
-**Recommendation: rebuild.** Three concrete costs of the current state:
+**Recommendation: rebuild** (unchanged since 2026-08-27).
 
-1. **Packs served through MCP do not have the noise fix.** `CLAUDE.md` describes #343 as
-   landed and the noise boundary as holding. On the container path it does not hold, and
-   has not for two days.
-2. **[#363](https://github.com/ronsse/trellis-ai/issues/363) is pinned at 0.0 by
-   construction** — `TOKEN_TRACKED.pack_id` cannot be populated by code that lacks the
-   field, so response-cost attribution stays unmeasurable until this happens.
-3. **F2's graduated disclosure is measured but not live.** The −30.3% token saving exists
-   only in counterfactual replay.
+**The three costs this entry originally listed have all since deployed** — #343's noise
+fix, #353's `TOKEN_TRACKED.pack_id`, and #359's graduated disclosure are all ancestors of
+`281224b51`. They are struck rather than deleted because *the pattern* is the point: a cost
+list written against a moving container tag decays into a false one, and this one was
+already being quoted after it stopped being true. The current costs, as of 2026-08-31:
+
+1. **#404's visible withholding is not live** (`d635fcc`). Production still silently drops
+   withheld items on every MCP pack surface — the exact defect #404 was filed to end.
+2. **Two degraded-load write refusals are not live** (`fb2e168`, `0d9f2a6`). A policy or
+   advisory file that loads degraded can still be written over in production, which is the
+   fail-open #413 and #393 closed.
+3. **`updated_at` is still clobbered by metadata-only writes** (`fe843fc`, `31eff6c`), so
+   any production reasoning that reads document recency is reading a corrupted field.
+
+Re-derive this list the same way as the gap — it will be wrong again by construction.
 
 Cost of being wrong: low and reversible — the previous image can be re-pinned. The real
 risk is the opposite one, that the gap keeps widening while docs describe the fixed state.
@@ -193,11 +231,15 @@ place the path runs is `trellis-skynet` with an explicit `--extract`. This is a 
 not a defect* — and it is worth stating plainly because the zero has previously been read
 as a code failure. A rebuild that does not also set the flag changes nothing here.
 
-Related and separable: **the host CLI's own stamp is 43 commits stale and reports
-`dirty: false`** — see [#348](https://github.com/ronsse/trellis-ai/issues/348), where the
-measurement is written up. Re-running `pip install -e` on the production editable install
-would repair the stamp without changing which code runs. Also operator-only, also low risk,
-but worth doing in the same pass.
+Related and separable — **and note these are two different numbers, which is what makes
+#348 confusing.** The host CLI is an editable install, so the code it *runs* is whatever is
+in the working tree: `fe843fc` as of 2026-08-31, **9 commits** behind `main`. Its version
+*stamp* is something else — it comes from installed distribution metadata frozen at install
+time, so it reports a confidently **wrong** commit and `dirty: false` regardless (measured
+at 43 commits stale when [#348](https://github.com/ronsse/trellis-ai/issues/348) was
+written). Re-running `pip install -e` repairs the stamp without changing which code runs.
+Operator-only, low risk, worth doing in the same pass. **Do not build a liveness signal on
+the host stamp** — `ops/capture_coverage.py` deliberately does not, for this reason.
 
 ### A-4 · Restore 22 memories demoted by the unsound noise gate
 
@@ -312,6 +354,52 @@ promote→review→serve chain. **The test refined the scope rather than flippin
 
 **Reopen if:** an integration audit shows eval fixtures cannot execute the same promote
 pipeline code production uses.
+
+### T-5 · Close [#404](https://github.com/ronsse/trellis-ai/issues/404) with a known gap, rather than hold it for the wire contract
+
+**No panel — reversible, and the alternative was to keep a shipped improvement unmerged.**
+Taken 2026-08-30/31 by the implementing agent and its gate; recorded here 2026-08-31
+because it was not recorded anywhere at the time, and it is exactly the
+*shipped-the-safe-subset-and-filed-the-rest* call this ledger exists to hold.
+
+#404 ("do not silent-drop withheld items") carried **four** acceptance criteria. `d635fcc`
+(PR #434) met three outright: a withheld item is absent *and* counted with a reason; no
+path copies withheld content into another served document; and a test pins the marker's
+emission with the log level fixed. **The third criterion — "the marker is observable on the
+surface a caller actually reads, not only in the event payload" — holds for MCP only.**
+
+**Why it stopped there, and why that is defensible.** The summary rides
+`Pack.metadata["withholding"]`, and `PackResponse` returns no `metadata`, so the SDK/REST
+family is *structurally* unreachable — closing it is a wire-contract change and an
+`openapi-check` change, which is a different review with a different blast radius. Folding
+it in would have made an observability fix into a breaking API change. Splitting was right.
+
+**What the split costs, stated plainly rather than left implied.** The residue is worse
+than "MCP is done and REST is pending": `hooks.for_intent` **returns `""` on an empty
+pack**, so a REST-backed agent hook reproduces the #404 defect *verbatim* — an agent whose
+every candidate was demoted receives an empty string, indistinguishable from greenfield.
+That is worse than the MCP case #404 was originally filed about, where at least
+`No context found for: …` named the intent. And section routing is an unreported eleventh
+gate: a sectioned pack can serve zero items and report `total: 0` withheld.
+
+**[#439](https://github.com/ronsse/trellis-ai/issues/439) and
+[#440](https://github.com/ronsse/trellis-ai/issues/440) are #404's unfinished half, not new
+work.** Both open. Treat them as the remainder of an accepted panel proposal that has been
+partially delivered — not as fresh enhancements competing on merit with the rest of the
+queue. #439 also names a decision the taker must make: whether `PackResponse` grows a
+`withholding` field or the note is rendered server-side, and whether
+`trellis_sdk/_format.py`'s duplicate formatters should exist at all (they are a second
+renderer of the same object — the shape that let `content_type` and `document_form` drift
+apart in #325/#326).
+
+**One correction #434's body needs and did not get:** it claimed "no withheld id gains a
+new exposure". Strictly the ids *are* new — `POST /packs` `retrieval_report.rejected_items`
+now carries `{'item_id': …, 'reason': 'archived'}` and the `noise` equivalent. No excerpts
+leak and it is the same field and auth scope that already exposed eight other gates' ids,
+so it is not a new exposure *class* — but the claim as written was false.
+
+**Reopen if:** #439 lands and the SDK formatters are unified, at which point this entry's
+"MCP only" scoping is spent and #404 can be read as fully delivered.
 
 ### T-4 · #375 option 2 is a one-kwarg stamp, not a write-path redesign
 

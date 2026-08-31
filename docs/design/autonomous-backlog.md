@@ -38,12 +38,12 @@ Every item is tagged with who decides when a fork appears mid-item.
 
 ## Wave 0 — housekeeping (do first; hours, not days)
 
-| id | item | class | notes |
-|---|---|---|---|
-| H1 | Merge [#328](https://github.com/ronsse/trellis-ai/issues/328) — dependabot ruff 0.15.22→0.16.4, mypy bump | `panel` | CI-green and mergeable today. Expect new ruff findings on the bump; fixing them is in scope for this item. |
-| H2 | Land the 2026-08-26 doc reconciliation (`TODO.md` + roadmap) | `panel` | Seven stale checkboxes ticked, one rescoped, two false claims corrected. |
-| H3 | Dispose of [#304](https://github.com/ronsse/trellis-ai/issues/304) — honest DoD-3 loop metric + reframe | `panel` | Open 8 days, CI-green. A metric *reframe* is reversible, so the panel may decide it. |
-| H4 | Dispose of [#208](https://github.com/ronsse/trellis-ai/issues/208) — re-home to consumer-kg or close | `human` | Closing an issue can hide an open gate (the #312 failure). Operator call. |
+| id | item | class | status | notes |
+|---|---|---|---|---|
+| H1 | Merge [#328](https://github.com/ronsse/trellis-ai/issues/328) — dependabot ruff 0.15.22→0.16.4, mypy bump | `panel` | **done** — merged as `2f8db2c` | CI-green and mergeable today. Expect new ruff findings on the bump; fixing them is in scope for this item. |
+| H2 | Land the 2026-08-26 doc reconciliation (`TODO.md` + roadmap) | `panel` | **done** — [#340](https://github.com/ronsse/trellis-ai/pull/340), `31058fc` | Seven stale checkboxes ticked, one rescoped, two false claims corrected. That pass is itself now stale; this file is its successor. |
+| H3 | Dispose of [#304](https://github.com/ronsse/trellis-ai/issues/304) — honest DoD-3 loop metric + reframe | `panel` | **done** — merged | Open 8 days, CI-green. A metric *reframe* is reversible, so the panel may decide it. |
+| H4 | Dispose of [#208](https://github.com/ronsse/trellis-ai/issues/208) — re-home to consumer-kg or close | `human` | **open** — the only Wave 0 item left (verified 2026-08-31) | Closing an issue can hide an open gate (the #312 failure). Operator call. |
 
 ## Wave 1 — make measurement trustworthy
 
@@ -70,6 +70,25 @@ criteria:
 Acceptance: a trace written today is retrievable by semantic search after one worker
 pass; a deliberately-interrupted pass resumes without skipping or double-embedding.
 
+✅ **The trace half LANDED** 2026-08-28 via [#357](https://github.com/ronsse/trellis-ai/pull/357)
+(`e2529fb`), in the decided shape and against every acceptance criterion:
+[`src/trellis_workers/trace_embed/`](../../src/trellis_workers/trace_embed/) — `worker.py`
+(collect → render → embed → advance), `watermark.py` (the explicit external cursor), and
+`handler.py`, which registers the long-declared-but-never-handled
+`Operation.EVIDENCE_INGEST` **on the worker's own executor** rather than in
+`create_curate_handlers`, so `evidence.ingest` does not silently acquire semantics on every
+mutation surface as a side effect. Driven by `trellis worker embed-traces`. Two details
+worth carrying forward: the cursor is an *optimisation*, not a record of work —
+`trace_is_embedded` asks the vector store, so a cursor that ran ahead can only cause a
+re-check, never a skip — and the embed is deliberately **not** fail-soft here (unlike
+`run_embed_on_ingest`), because the vector row is the entire point and a fail-soft embed
+would reproduce the green-looking no-op the item exists to fix.
+
+⚠️ **The observation half did not land, and the item's title over-promises.**
+`record_observation` ([`mcp/server.py`](../../src/trellis/mcp/server.py)) still has no embed
+call on any path and the worker walks the **trace store only** — verified 2026-08-31. If
+observations matter, that is a separate item; do not read `trace_embed/` as covering them.
+
 **A2 — [#338](https://github.com/ronsse/trellis-ai/issues/338) vector row metadata is a stale embed-time snapshot.** ✅ **LANDED** 2026-08-26 via [#343](https://github.com/ronsse/trellis-ai/pull/343)
 The write-through alone would have fixed nothing observable. Two further defects sat behind
 it, both verified on `main` first: `SemanticSearch` strips `content_tags` from the filters it
@@ -85,14 +104,33 @@ divergent rows. Worth watching the next packs served.
 pgvector contract suite has never executed anywhere and its fixture is broken — see
 [#345](https://github.com/ronsse/trellis-ai/issues/345). pgvector is the production backend.
 
-**A3 — [#336](https://github.com/ronsse/trellis-ai/issues/336) effectiveness-based noise demotion is unsound without item attribution.** `class: panel` — **unblocked 2026-08-26**
-Either gate the demotion behind sufficient attribution, or fix the attribution that feeds
-it. **Read `pack_attribution_rate` (0.933), not the headline `attribution_rate` (0.359)** —
-correcting an error in this file's first draft. The headline is dragged down by feedback on
-work where no pack was served, which says nothing about whether a *served* pack's items were
-cited. Demotion soundness depends on the latter, and by that measure the signal is much
-healthier than the headline implied. The real weakness is **sample size** — 15 pack-targeted
-events over 30 days — not citation rate.
+**A3 — [#336](https://github.com/ronsse/trellis-ai/issues/336) effectiveness-based noise demotion is unsound without item attribution.** ~~`class: panel`~~ — ✅ **CLOSED** 2026-08-28 via [#380](https://github.com/ronsse/trellis-ai/pull/380) (`69986ac`)
+**The spec this entry used to carry was wrong in both halves, and is deleted rather than
+amended.** It said "read `pack_attribution_rate` (0.933), not the headline
+`attribution_rate`" and "the real weakness is sample size". Neither survived measurement:
+
+- **Wrong denominator.** `pack_attribution_rate` counts `helpful ∪ unhelpful`. The noise
+  proposal reads **`helpful_item_ids` only**, and on *that* denominator coverage was
+  **0.778** (14/18), not 0.933. Two metrics that sound like the same thing were not.
+- **Wrong diagnosis.** The weakness was neither sample size nor threshold calibration.
+  `usage_rate = helpful_citations / appearances` is **degenerate** at this base rate:
+  `P(cited helpful | served) = 0.1029`, so an ordinary item served twice goes uncited with
+  probability 0.805 and the rule flags good items *by construction*. On the live corpus
+  every threshold in (0, 0.333] flagged the **same 64 of 79** items. Raising
+  `min_appearances` cannot rescue it. #336's own premise ("no item attribution at all") was
+  also stale — 93.2% of servings sit in a pack whose feedback named at least one item.
+
+**What shipped** is [`classify/demotion_gate.py`](../../src/trellis/classify/demotion_gate.py):
+demotion requires *evidence of unhelpfulness*, never absence of evidence of helpfulness. The
+negative signal is four times denser (`P(cited unhelpful | served) = 0.4118`) and the old
+rule never read `unhelpful_item_ids` at all. `EffectivenessReport` reports proposal
+(`noise_candidates`) and verdict (`demotion_screen.admitted`) **separately**, because a
+proposal that shrinks 62% at the gate is a fact about the proposal rule. Full reasoning:
+`CLAUDE.md` § "The demotion evidence gate". **Do not re-derive the numbers from this file** —
+the window rolls; re-run `trellis analyze value`.
+
+Residual, tracked elsewhere: ledger **A-4** (restore the 22 memories the unsound gate
+demoted) is production data and operator-only.
 
 **A4 — Raise feedback attribution from 32%.** `class: panel`
 *(measured 2026-08-26; the framing below was wrong and the correction is the finding)*
@@ -228,10 +266,30 @@ Open 18 days; the oldest untouched retrieval defect. Partially mitigated by the 
 floor and by #311's skip-discipline prompts — **re-measure before implementing**, the
 remaining gap may be smaller than the issue describes.
 
-**B2 — PackBuilder chunk rollup (roadmap §G.4).** `class: panel`
-`PackBuilder` dedups by `item_id`, so two chunks of one document can both enter a pack
-and spend the budget twice. Group by `parent_doc_id` at assembly. Also default-filter
-`chunk_index` rows out of the documents list view.
+**B2 — PackBuilder chunk rollup (roadmap §G.4).** ~~`class: panel`~~ — ⛔ **REFUSED ON MEASUREMENT** 2026-08-28 via [#384](https://github.com/ronsse/trellis-ai/pull/384) (`d821094`). **Do not re-propose without new evidence.**
+The old spec — "two chunks of one document both enter a pack and spend the budget twice;
+group by `parent_doc_id` at assembly" — is deleted rather than amended, because an agent
+following it would build something already rejected. The *phenomenon* is real (16 of 37
+packs, 51 extra servings, 11.7% of injected tokens over the 30 days to 2026-08-28); the
+*fix* is not. Four reasons, each measured, none of which the spec anticipated: the extras
+are **top-ranked, not tail** (every cited-helpful extra sat at rank 3–5, so `K=1` demotes
+5 of 5); chunk excerpts are **not duplicate text** (200-char overlap on a 3000-char target,
+each excerpt cut from its own chunk's head); on-topic chunks are **jointly** useful, so
+"keep the best chunk" is not a lossless summary; and the saving would not materialise
+because `max_tokens` is a quota — 20 of 37 packs hit `max_items` and a freed slot largely
+refills with another chunk of the same parent. #359 already banks the tail half.
+
+What shipped instead is the **instrument, not a fix**:
+[`retrieve/concentration.py`](../../src/trellis/retrieve/concentration.py) records
+`PACK_ASSEMBLED.payload["parent_concentration"]` so the question is re-askable at larger `n`
+instead of re-derived by string-matching `item_id`. The cited-helpful evidence rests on two
+attributed groups, which is thin — **that** is the reopen condition, not taste. Full
+reasoning: `CLAUDE.md` § "Repeat-source concentration — measured, and the rollup refused".
+
+The item's *second* half was a separate, live defect and shipped: the documents list view
+now default-filters chunk rows — [#385](https://github.com/ronsse/trellis-ai/issues/385) via
+`bf113be`, extended to the other whole-document surfaces by
+[#396](https://github.com/ronsse/trellis-ai/issues/396) (`0e5ed75`).
 
 **B3 — Index the alias resolver (roadmap §G.4).** ~~`class: panel`~~ — **DONE 2026-08-02, verified 2026-08-27.**
 The premise is stale. [#289](https://github.com/ronsse/trellis-ai/issues/289) (`a889c85`)
@@ -275,14 +333,27 @@ Three findings from the verification, none of which the original item anticipate
 
 ## Wave 3 — security floor (Productionization §3.H.1)
 
-**C1 — Wire the policy gate.** `class: panel` — **do this first; it is an undeclared prerequisite**
-`MutationExecutor` skips Stage 2 entirely when `policy_gate is None`
-([`executor.py:135`](../../src/trellis/mutate/executor.py)), and `build_curate_executor`
-— the single factory every surface uses — passes only `event_log` and `handlers`
-([`mutate/__init__.py:43`](../../src/trellis/mutate/__init__.py)). `DefaultPolicyGate`
-is exported but never constructed outside tests. The documented five-stage governed
-pipeline is a four-stage pipeline in production. Not a defect in itself (gates are
-injected by design) but #194 cannot be satisfied until something wires one.
+**C1 — Wire the policy gate.** ~~`class: panel`~~ — ✅ **LANDED** 2026-08-28 via [#370](https://github.com/ronsse/trellis-ai/pull/370) (`1e6c66e`)
+`build_curate_executor` now passes `policy_gate=build_policy_gate(registry)`
+**unconditionally** ([`mutate/__init__.py`](../../src/trellis/mutate/__init__.py); the
+reasoning is in the function's own docstring). Stage 2 runs on every surface, so "is the
+gate wired?" has an observable answer instead of depending on file state. The default
+posture is an *empty* gate that is behaviourally and byte-for-byte indistinguishable from
+the old no-gate world — pinned by
+`tests/unit/mutate/test_policy_wiring.py::TestDefaultPostureIsTransparent`.
+
+The same PR made the policy file **one** file
+([`policy_source.py`](../../src/trellis/mutate/policy_source.py),
+`resolve_policy_path`) — CLI and API had been writing two different paths — and fixed two
+live defects the wiring exposed: gate `warnings` were dropped on the allow path, and
+`action="warn"` was dead code. Resolution is **deny-wins**, not most-specific-wins.
+Hardened again by [#413](https://github.com/ronsse/trellis-ai/issues/413) (`fb2e168`): a
+policy file that loaded degraded now refuses to be written over, and the strict reader is
+actually strict.
+
+**Consequence for the rest of this wave:** C3/#194's acceptance criterion (b) is now
+reachable, and [#360](https://github.com/ronsse/trellis-ai/issues/360) — which "gains most
+of its point after C1" — is unblocked.
 
 **C2 — [#256](https://github.com/ronsse/trellis-ai/issues/256) extract Bolt backends to a `trellis-stores-bolt` plugin.** `class: panel`
 Keystone, labelled `ready`. Halves #194's enforcement surface, so it precedes C3.
@@ -319,7 +390,7 @@ not actually run until August because of blocked turn ordering and a context-win
 coupling where Ollama ignores `num_ctx` and hermes fabricates. Verify the observer
 produces non-fabricated output on a held-out transcript *before* wiring it to writes.
 
-**E2 — Capture-coverage measurement.** `class: panel` — **DONE, PR #372 (unmerged).**
+**E2 — Capture-coverage measurement.** ~~`class: panel`~~ — ✅ **DONE and MERGED** as `627536f` ([PR #372](https://github.com/ronsse/trellis-ai/pull/372), 2026-08-28).
 [#332](https://github.com/ronsse/trellis-ai/issues/332) fixed the sidechain rule that
 discarded 61% of transcripts. Nothing measured what fraction of sessions produce a
 memory, so the next silent coverage regression was invisible. Built before E1 adds
