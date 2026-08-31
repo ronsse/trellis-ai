@@ -137,7 +137,7 @@ Sampling is reservoir-with-edges sample (first 10 + last 10 + reservoir 30 of mi
 - `events_consumed` matches the EventLog event count.
 - `wasInformedBy` edges count ≤ 50.
 - Observations produced are linked back via `wasGeneratedBy`.
-- PackBuilder query for the analyzed entity returns the meta-Activity *only* when `include_meta=True`.
+- PackBuilder query for the analyzed entity returns the meta-Activity *only* when `include_meta=True`. **Superseded by #375/#436:** the recorder now mints `node_role="structural"`, so a newly-written row needs `include_structural=True` as well; pre-#436 `semantic` rows still match this criterion as written.
 
 **Estimated size:** ~400 LOC.
 
@@ -163,7 +163,7 @@ Sized for **two swarm units**: Phase 0 alone (primitive + tests, single PR), the
 - Running `trellis analyze context-effectiveness` against a populated graph produces exactly one meta-Activity (or zero, if nothing was found).
 - `trellis analyze context-effectiveness --no-meta-trace` produces zero Activities.
 - `TRELLIS_META_TRACES=garbage trellis analyze ...` raises with a clear error.
-- PackBuilder for any seed entity excludes meta-Activities by default; surfaces them with `include_meta=True`.
+- PackBuilder for any seed entity excludes meta-Activities by default; surfaces them with `include_meta=True` (**since #375/#436, paired with `include_structural=True`** — see above).
 - Eval scenario green.
 - mypy clean.
 
