@@ -122,7 +122,7 @@ Scheduled-task setups will run analyzers every minute. Without merging, every mi
 
 ### 4.1 No agent context contamination
 
-When a non-meta agent calls `get_context(seed_entity_id=...)`, the retrieved pack **filters out** Activities whose `properties.agent_id startswith "trellis_meta_"` by default. The opt-in `include_meta=True` flag exists for operators specifically asking. This prevents a user agent's pack from being polluted with the system's own analyses unless requested.
+When a non-meta agent calls `get_context(seed_entity_id=...)`, the retrieved pack **filters out** Activities whose `properties.agent_id startswith "trellis_meta_"` by default. The opt-in `include_meta=True` flag exists for operators specifically asking — since #375/#436 it must be paired with `include_structural=True` for rows written after that change, because the recorder now mints its `Activity` `node_role="structural"` and the graph axis drops it a layer earlier (see §3.1). This prevents a user agent's pack from being polluted with the system's own analyses unless requested.
 
 ### 4.2 Privacy
 

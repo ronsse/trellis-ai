@@ -950,7 +950,7 @@ Role an entity plays in the graph. Used by retrieval to decide which nodes parti
 
 | Value | Description |
 |-------|-------------|
-| `structural` | Schema-level metadata (e.g., columns, enum values, nested field paths). Excluded from `PackBuilder` and `GraphSearch` results by default — pass `include_structural=True` to opt in. Must have `generation_spec=None`. |
+| `structural` | Machine-generated plumbing that is not standalone memory. Two shapes: rows *regenerated from source* (columns, enum values, nested field paths, `tool:<slug>` nodes) and rows that *restate an Operational-Plane fact* — the per-invocation `Activity` the meta-recorder writes (#375/#436), which the event log and trace store already hold. A **trace-extraction** `Activity` is deliberately `semantic`: the Activity *is* the trace. Excluded from `PackBuilder` and `GraphSearch` results by default — pass `include_structural=True` to opt in. Must have `generation_spec=None`. |
 | `semantic` | The default. Entities that represent real-world things (services, people, tables, domains) ingested from external sources. Participate in retrieval. Must have `generation_spec=None`. |
 | `curated` | Derived nodes produced by a named generator (community detection, precedent promotion, etc.). Carry a full [`GenerationSpec`](#generationspec) provenance record and receive a 1.3x relevance boost in graph retrieval. |
 
@@ -1069,11 +1069,29 @@ node but carry a reserved provenance shape:
 PackBuilder filters these out by default. `PackBuilder.build()` and
 `PackBuilder.build_sectioned()` both accept `include_meta: bool = False`
 — the default drops Activities matching the namespace, so agent-facing
-packs are not polluted with Trellis's own analysis traces. Operators
-debugging the self-improvement loop can opt in via `include_meta=True`,
-which surfaces meta-Activities alongside user-authored nodes. The
-`PACK_ASSEMBLED` event payload exposes `meta_filtered_count` so
-telemetry consumers can see how many rows the filter dropped.
+packs are not polluted with Trellis's own analysis traces.
+
+**Since #375/#436, `include_meta=True` is not sufficient on its own.**
+The recorder mints its Activity `node_role="structural"`, and
+`GraphSearch` drops structural rows *inside the strategy*, before the
+candidate slice and long before the meta filter is reached. An operator
+debugging the self-improvement loop needs **both**
+`include_meta=True` and `include_structural=True`. Rows written before
+#436 are still `semantic`, so `include_meta=True` alone reaches those —
+which is why the escape hatch appears to work on an older corpus and
+stops working as it ages over.
+
+**`meta_filtered_count` counts the meta filter, and the meta filter is
+no longer where these rows die.** The field is still emitted on both
+pack kinds, but on a post-#436 corpus it reads `0` while every
+meta-Activity is being suppressed one axis earlier. Read it as *"rows
+that reached `PackBuilder` and were dropped there"* — legacy `semantic`
+rows, and any meta-Activity reached by a non-graph axis — never as
+"meta-Activities suppressed". The same caveat applies to
+`rejected_items[].reason == "meta_activity_filter"` and to the
+`withholding` summary, which are computed from the same gate. The
+strategy-level drop has no observable at all; see
+`trellis.retrieve.withholding` for what that report can and cannot see.
 
 **Reserved namespace.** The `trellis_meta_` prefix is reserved by the
 schema-evolution analyzer and the PackBuilder filter — do **not** emit

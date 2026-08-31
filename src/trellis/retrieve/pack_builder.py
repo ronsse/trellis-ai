@@ -548,6 +548,14 @@ class PackBuilder:
         ``meta_trace_round_trip`` eval scenario and for operators
         debugging the self-improvement loop.
 
+        **Since #375/#436 that flag is not sufficient on its own.** The
+        recorder mints its ``Activity`` ``node_role="structural"``, which
+        ``GraphSearch`` drops inside the strategy, before the candidate
+        slice and long before this gate. Pass ``include_structural=True``
+        alongside it. Rows written before #436 are still ``semantic`` and
+        respond to ``include_meta`` alone — so the hatch appears to work on
+        an older corpus and stops working as it ages over.
+
         ``run_id`` and ``intent_family`` are request-scoped attribution
         the item layer cannot know. Both land in the ``PACK_ASSEMBLED``
         payload so :mod:`trellis.learning.pack_observations` can bucket
@@ -1283,8 +1291,18 @@ class PackBuilder:
 
         ``meta_filtered_count`` (Item 6 Phase 2) records how many graph
         nodes were dropped by the default meta-Activity filter. ``0``
-        when the build either had no candidates of that shape or was
-        called with ``include_meta=True``.
+        when the build had no candidates of that shape, or was called with
+        ``include_meta=True`` — **or, since #375/#436, when the candidates
+        never arrived.** The recorder now mints its ``Activity``
+        ``node_role="structural"`` and ``GraphSearch`` drops structural
+        rows inside the strategy, before the candidate slice, so a
+        post-#436 meta-Activity is suppressed without ever reaching this
+        gate. Read the field as "rows that reached ``PackBuilder`` and were
+        dropped here", never as "meta-Activities suppressed"; the same
+        caveat applies to ``rejected_items[].reason == "meta_activity_filter"``
+        and to the ``withholding`` summary computed from it. See
+        :mod:`trellis.retrieve.withholding` for the boundary and why it was
+        left where it is.
 
         ``content_floor`` carries the substance-floor decision summary
         (mode, threshold, and the item ids penalised or excluded) so a

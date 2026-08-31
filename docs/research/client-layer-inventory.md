@@ -415,7 +415,7 @@ _seen_idempotency_keys.add(idempotency_key)
 
 **`PackBuilder`** (`pack_builder.py`) orchestration:
 
-1. Run all strategies with merged filters (`include_structural` flag propagated)
+1. Run all strategies with merged filters (`include_structural` flag propagated). **The propagation is real and deliberate, but only `GraphSearch` consumes the key** — it `pop`s `seed_ids` / `include_structural` / `include_unconfirmed`. `KeywordSearch` and `SemanticSearch` used to forward whatever was left straight to their stores, which read an unknown key as hard metadata equality and returned nothing, so `include_structural=True` silently emptied both axes. They now strip `GRAPH_CONTROL_FILTER_KEYS` first.
 2. Collect `PackItem`s from each strategy
 3. Deduplicate by `item_id` (keep highest `relevance_score`)
 4. Filter structural nodes unless `include_structural=True` (defense-in-depth via `metadata.node_role` check)

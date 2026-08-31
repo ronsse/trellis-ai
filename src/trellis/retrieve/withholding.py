@@ -60,6 +60,55 @@ An id withheld under more than one gate is attributed to the **first** gate
 that rejected it, because ``rejected`` is appended in pipeline order and the
 first removal is the one that actually happened.
 
+What this cannot see, and why that boundary moved
+--------------------------------------------------
+
+The summary is computed from ``RejectedItem`` rows, and a ``RejectedItem``
+requires a ``PackItem``. **A row a strategy discards before constructing a
+PackItem is invisible here** — there is no candidate to withhold and no
+channel back to the builder. That covers all three of
+:class:`~trellis.retrieve.strategies.GraphSearch`'s client-side filters:
+structural, unconfirmed (#301) and domain scope. The boundary is as old as
+the initial commit.
+
+What changed is the *population* on the far side of it. #375/#436 mints the
+meta-recorder's per-invocation ``Activity`` ``node_role="structural"``, so
+the graph axis now drops it **before** the candidate slice, rather than
+``PackBuilder._is_meta_activity`` dropping it after. Measured end to end on
+one store with one graph strategy, 6 meta-Activities and 4 memories: under
+the pre-#436 ``semantic`` role the summary reports
+``{meta_activity_filter: 6}`` and renders a note; under the ``structural``
+role it reports nothing at all. The same six rows are removed either way.
+
+**That is the right answer for the caller and the wrong one for the
+operator**, which is why it is documented here rather than fixed:
+
+* For the caller, the old note was the lie. "6 items matched this intent but
+  were not served" was false twice over — the graph axis is a recency feed,
+  not a matcher, and the rows were Trellis's own per-cron plumbing, never
+  memory. Silence is honest. Restoring the count would put a permanent,
+  content-free line on every pack.
+* For the operator, ``PACK_ASSEMBLED``'s ``meta_filtered_count`` now reads
+  ``0`` on a post-#436 corpus while suppression happens on every pack, and
+  the structural filter has **no** observable at all — not even the
+  ``logger.debug`` its ``include_unconfirmed`` sibling three lines below it
+  emits.
+
+Note the tension this leaves, because :mod:`trellis.retrieve.lifecycle` and
+:mod:`trellis.retrieve.noise` state the opposite rule — "enforced where
+``PackBuilder`` collects, not per strategy", on the grounds that a rule
+applied inside a built-in strategy would not hold for a fourth strategy
+added later. The *rule* still holds: ``_is_structural`` and
+``_is_meta_activity`` remain as collect-seam backstops covering every axis.
+Only its **earliness**, and therefore its observability, is strategy-local,
+and #436 bought that earliness deliberately — the point was to stop the rows
+spending candidate slots. The asymmetry with ``exclude_noise`` /
+``exclude_archived`` is real, and it is *not* explained by "a strategy-level
+filter never produces a candidate": ``candidates_found`` is incremented
+**after** the collect gates too, so an archived item is not a candidate
+either, and it is still recorded. What separates them is where the code
+happens to live.
+
 Counts and reasons, never content
 ----------------------------------
 
