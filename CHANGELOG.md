@@ -256,8 +256,9 @@ Net DEFECT delta in `src/`: 113 literal-only → 85 literal-only / 67 helper-awa
   more than one of either — both mutants (a hard-coded `item_type`, a
   hard-coded score) survived. That second fix is scoped to the shared
   `_reject` helper; the six sites that build a `RejectedItem` by hand still
-  take a hard-coded `item_type` or score with the suite green (11 of 12 such
-  mutants survive). Latent rather than live — `summarize_withheld` reads only
+  take a hard-coded `item_type` or score against the green 992-test retrieval
+  suite (11 of 12 such mutants survive it; the full suite was not run against
+  them). Latent rather than live — `summarize_withheld` reads only
   `item_id` and `reason`, and both are pinned. (#447)
 
 - **Tag refresh rewrote every stale document, even when nothing changed.** The
