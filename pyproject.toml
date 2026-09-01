@@ -35,7 +35,28 @@ dependencies = [
     "rich>=13.0",
     "httpx>=0.27",
     "fastmcp>=2.0",
+    # Declared because `trellis.mcp.server` imports `mcp.shared.exceptions`
+    # and `mcp.types` **directly**. It arrived only through fastmcp's
+    # transitive graph, and `fastmcp-slim` constrains `mcp<2.0` only under
+    # extras this project does not request — so the version was in practice
+    # unconstrained, and CI resolved `mcp` 2.1.1, which renamed `McpError`
+    # to `MCPError` and broke every test job while every local venv (on
+    # 1.29.1) stayed green.
+    #
+    # The upper bound is the 2.x rename, not a general aversion to it:
+    # lifting it is a real migration of `mcp/server.py`'s error contract and
+    # wants its own PR. The floor matches what fastmcp-slim itself requires.
+    "mcp>=1.24,<2.0",
     "fastapi>=0.115",
+    # Both are imported directly (`starlette` in `trellis_api/app.py`,
+    # `middleware.py` and `trellis/testing/inmemory.py`; `anyio.to_thread` in
+    # `trellis/mcp/auth.py`) and were relying on fastapi / fastmcp to supply
+    # them. Unlike `mcp` above these have not broken — fastapi and fastmcp
+    # both pin them tightly — but the exposure is identical, so they are
+    # declared rather than left to a transitive graph that can change under
+    # us. No upper bound: neither has a known incompatible release.
+    "starlette>=0.37",
+    "anyio>=4.0",
     "uvicorn>=0.30",
     # Required by the default SQLiteVectorStore — registry.validate()
     # raises at server startup if missing.
