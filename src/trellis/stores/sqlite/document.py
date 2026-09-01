@@ -154,20 +154,32 @@ def _metadata_matches(metadata_json: str, key: str, expected_json: str) -> bool:
 
 
 def _bindable_json_path(key: str) -> str | None:
-    """``$."key"`` for *key*, or ``None`` if SQLite cannot address it.
+    r"""``$."key"`` for *key*, or ``None`` if SQLite cannot address it.
 
     Quoted so a key holding a ``.`` or a ``[`` is read as a literal member
     name rather than as path syntax, and returned to be **bound** rather
     than spliced: the key arrives from wire input, and the
     ``content_tags`` branch already binds its paths for that reason.
 
-    A key containing a double quote has no SQLite JSON-path spelling at
-    all — a backslash-escaped quote inside the component parses as a
-    *miss*, not an error, so it would silently match nothing (measured
-    against SQLite 3.45). Such a key is handed to
-    :func:`_metadata_matches` instead, which needs no path.
+    Two character classes have no SQLite JSON-path spelling at all, and both
+    parse as a *miss* rather than an error — so a key containing either would
+    silently match nothing. Measured against SQLite 3.45:
+
+    * a double quote, because a backslash-escaped quote inside the component
+      is not read as a literal quote;
+    * a backslash, because inside a quoted component SQLite reads it as the
+      start of an escape sequence. For a key spelled ``a\b`` in Python,
+      ``json_extract`` under the path ``$."a\b"`` returns ``NULL`` while the
+      doubled ``$."a\\b"`` returns the value.
+
+    The backslash case was a live backend divergence, found by the #455
+    review gate: Postgres binds the key directly (``metadata -> %s``) and
+    matched the same document, inside the change (#409) whose whole point is
+    that the two backends cannot disagree about what a filter means. Both
+    classes are handed to :func:`_metadata_matches` instead, which compares
+    the parsed object in Python and needs no path.
     """
-    return None if '"' in key else f'$."{key}"'
+    return None if '"' in key or "\\" in key else f'$."{key}"'
 
 
 class SQLiteDocumentStore(SQLiteStoreBase, DocumentStore):
@@ -335,8 +347,26 @@ class SQLiteDocumentStore(SQLiteStoreBase, DocumentStore):
                     # term matches every row, routing ``?domain=`` through
                     # the callback took a search from 6.6ms to 22.3ms, and
                     # the gap grows with the corpus.
-                    filter_conditions.append("json_extract(d.metadata_json, ?) = ?")
-                    filter_params.extend([path, value])
+                    #
+                    # The ``json_type`` guard is the price of the native
+                    # branch. ``json_extract`` returns an object or array as
+                    # its *minified text*, so without it a string filter
+                    # whose characters happen to equal that text matches the
+                    # container — SQLite said yes to
+                    # ``{"obj": '{"x":1}'}`` against a stored
+                    # ``{"obj": {"x": 1}}`` where Python ``==`` and Postgres
+                    # ``jsonb`` both say no. A *false match* is worse than
+                    # the silent misses this branch already guards against,
+                    # because the caller gets a document back and cannot
+                    # tell. ``json_type`` is NULL for an absent key, and
+                    # ``NULL NOT IN (...)`` is NULL, so an absent key stays
+                    # excluded exactly as the equality already left it.
+                    filter_conditions.append(
+                        "(json_extract(d.metadata_json, ?) = ?"
+                        " AND json_type(d.metadata_json, ?)"
+                        " NOT IN ('object', 'array'))"
+                    )
+                    filter_params.extend([path, value, path])
                 else:
                     # Lists, dicts, ``None``, and keys SQLite cannot spell
                     # a path for. SQLite has no structural JSON equality

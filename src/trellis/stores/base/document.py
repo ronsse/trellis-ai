@@ -195,6 +195,16 @@ class DocumentStore(ABC):
           that key is **equal to** the filter value under Python ``==``
           over the parsed JSON — order-insensitive for objects,
           order-sensitive for arrays, numeric-normalising for numbers.
+          One documented exception, because it is measured rather than
+          assumed: a **bool filter against a stored number, or a number
+          filter against a stored bool**, matches on SQLite (whose callback
+          is literally Python ``==``, and ``True == 1``) and does not match
+          on Postgres (``'true'::jsonb = '1'::jsonb`` is false). The
+          contract suite pins same-typed comparisons only, so nothing
+          catches a caller who relies on the cross-type case; do not.
+          Found by the #455 review gate and left unresolved deliberately —
+          picking a side changes behaviour on one backend, and no in-repo
+          caller issues a cross-type filter.
         * A filter value of ``None`` matches a document whose metadata
           omits the key as well as one storing an explicit JSON null.
         * A filter value that is not JSON-serialisable raises. It used to

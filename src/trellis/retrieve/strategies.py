@@ -114,16 +114,42 @@ GRAPH_SELECTION_SEEDED = "seeded"
 #: A closed allow-list of *controls* rather than a deny-list of metadata: the
 #: opposite of :mod:`trellis.retrieve.servable`'s posture, and deliberately —
 #: stored metadata keys are an open set that must stay servable by default,
-#: while these three are owned by :class:`GraphSearch` and are added only
-#: when it grows a new ``pop``.
+#: while these are consumed by the graph axis and are added whenever it grows
+#: a new ``pop``. That rule is enforced rather than asserted:
+#: ``TestTheAllowListCoversEveryPop`` derives the popped keys from
+#: ``GraphSearch``'s own AST, because the hand-written set this replaced
+#: compared one literal against another and could not notice the three keys
+#: it was already missing.
+#:
+#: ``seed_ids`` is *not* owned by :class:`GraphSearch` alone —
+#: :class:`~trellis.retrieve.observation_strategy.ObservationSearch` reads it
+#: as its subject set. That is why the stripping happens inside the two
+#: strategies that forward filters to a store rather than at the collect
+#: seam: a seam-level strip would take ``seed_ids`` away from a strategy that
+#: needs it.
 #:
 #: Latent since the initial commit, and it stayed latent because nothing in
 #: the repository passed one. #375/#436 changed that: surfacing a
 #: newly-written meta-Activity now *requires* ``include_structural=True``
 #: alongside ``include_meta=True``, so the documented escape hatch walked
-#: straight onto it.
+#: straight onto it. The same escape hatch was still half-open after #443:
+#: ``depth``, ``edge_types`` and ``node_type`` are advertised by
+#: ``GraphSearch``'s own docstrings ("Consumes ``depth`` / ``edge_types``
+#: from *filters*") and were omitted from this set, so ``filters={"depth": 3}``
+#: emptied a measured three-axis pack to **zero** items — worse than the
+#: original, because ``depth`` and ``edge_types`` are popped only in the
+#: *seeded* branch and production always takes the unseeded one (#371), where
+#: they fell through into ``query_props`` and hard-equality-filtered the graph
+#: axis as well.
 GRAPH_CONTROL_FILTER_KEYS = frozenset(
-    {"seed_ids", "include_structural", "include_unconfirmed"}
+    {
+        "seed_ids",
+        "include_structural",
+        "include_unconfirmed",
+        "depth",
+        "edge_types",
+        "node_type",
+    }
 )
 
 
@@ -151,9 +177,12 @@ def _exclude_and_log(
 def strip_graph_controls(filters: dict[str, Any] | None) -> dict[str, Any] | None:
     """Drop :data:`GRAPH_CONTROL_FILTER_KEYS` before a store-side filter call.
 
-    Returns ``None`` for an empty result, matching what the stores expect
-    for "no filters" — a ``{}`` is a filter that some backends read as a
-    predicate over nothing.
+    A mapping that held nothing *but* controls returns ``None``, matching
+    what the stores expect for "no filters" — a ``{}`` is a filter that some
+    backends read as a predicate over nothing. An input that was *already*
+    empty is passed through unchanged (``None`` stays ``None``, ``{}`` stays
+    ``{}``), which is what ``test_empty_input_passes_through`` pins; the
+    caller had nothing to strip, so there is nothing to normalise.
     """
     if not filters:
         return filters
@@ -892,8 +921,18 @@ class GraphSearch(SearchStrategy):
         # interpret. Neither is forwarded as a property filter — a
         # store-side property filter compiles to hard equality and would
         # hard-exclude every domain-less node (#254).
+        # Graph-axis controls are excluded too. ``node_type`` is popped just
+        # above, and ``seed_ids`` / ``include_*`` are popped in ``search``
+        # before either branch — but ``depth`` and ``edge_types`` are popped
+        # only in the *seeded* branch, so on the unseeded branch (the one
+        # production always takes, #371) they would otherwise arrive here and
+        # become hard-equality node-property filters, emptying the graph axis
+        # for a caller who was configuring a traversal.
         query_props = {
-            k: v for k, v in filters.items() if k not in ("domain", "content_tags")
+            k: v
+            for k, v in filters.items()
+            if k not in ("domain", "content_tags")
+            and k not in GRAPH_CONTROL_FILTER_KEYS
         }
         # The multiplier is the whole candidate window (see the class
         # docstring), not headroom over a relevance-ordered result — it

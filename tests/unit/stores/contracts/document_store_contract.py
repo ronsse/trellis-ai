@@ -852,24 +852,57 @@ class DocumentStoreContractTests:
         with pytest.raises(TypeError, match="tags"):
             store.search("filterable", filters={"tags": {"target"}})
 
+    def test_search_scalar_filter_does_not_match_a_containers_json_text(
+        self, store: DocumentStore
+    ) -> None:
+        """A string filter is not a way to spell an object or an array.
+
+        SQLite's ``json_extract`` returns a container as its *minified
+        text*, so a scalar comparison matched ``{"obj": "{\"x\":1}"}``
+        against a document storing ``{"obj": {"x": 1}}`` — while Python
+        ``==`` and Postgres ``jsonb`` equality both say no. A false *match*
+        is worse than the silent misses the same branch already guards
+        against: the caller is handed a document and has nothing to notice.
+        Found by the #455 review gate; the two backends disagreed silently.
+        """
+        store.put("container", "filterable body", {"obj": {"x": 1}})
+        store.put("sequence", "filterable body", {"arr": [1, 2]})
+
+        assert store.search("filterable", filters={"obj": '{"x":1}'}) == []
+        assert store.search("filterable", filters={"arr": "[1,2]"}) == []
+
+        # The real thing still matches, so the guard is not a blanket block.
+        matched = store.search("filterable", filters={"obj": {"x": 1}})
+        assert {d["doc_id"] for d in matched} == {"container"}
+
     def test_search_filter_on_a_key_with_path_syntax(
         self, store: DocumentStore
     ) -> None:
-        """A metadata key is a literal name, not a path expression.
+        r"""A metadata key is a literal name, not a path expression.
 
         SQLite addresses a scalar filter through a JSON path, so a key
         holding a ``.`` reads as ``$.a.b`` — a nested lookup — unless the
-        component is quoted, and a key holding a ``"`` has no path
-        spelling at all and would silently match nothing. Postgres binds
-        the key directly and was never exposed to either. The contract is
-        that the key means itself on both.
+        component is quoted, and a key holding a ``"`` or a ``\`` has no
+        path spelling at all and would silently match nothing. Postgres
+        binds the key directly and was never exposed to any of them. The
+        contract is that the key means itself on both.
+
+        The backslash case is here because it was **not** covered when the
+        other two were, and the omission was a live divergence: SQLite
+        returned nothing while Postgres returned the document, silently, in
+        the change (#409) whose stated purpose is that the two backends
+        agree about what a filter means. Found by the #455 review gate.
         """
         store.put("dotted", "filterable body", {"a.b": "x"})
         store.put("nested", "filterable body", {"a": {"b": "x"}})
         store.put("quoted", "filterable body", {'q"k': "x"})
+        store.put("escaped", "filterable body", {"a\\b": "x"})
 
         dotted = store.search("filterable", filters={"a.b": "x"})
         assert {d["doc_id"] for d in dotted} == {"dotted"}
 
         quoted = store.search("filterable", filters={'q"k': "x"})
         assert {d["doc_id"] for d in quoted} == {"quoted"}
+
+        escaped = store.search("filterable", filters={"a\\b": "x"})
+        assert {d["doc_id"] for d in escaped} == {"escaped"}

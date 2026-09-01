@@ -564,10 +564,15 @@ def _seed_minhash_index(
 
     Pagination is by ``offset`` over ``created_at DESC``, which both shipped
     backends leave without a tiebreak, so rows sharing a timestamp can
-    repeat or be skipped across page boundaries. Repeats are harmless
-    (:meth:`MinHashIndex.add` is keyed by ``doc_id``) and are not counted
-    twice; a skip costs one unseeded document, which degrades recall rather
-    than corrupting the index. Stated rather than relied on silently: a
+    repeat or be skipped across page boundaries. A repeat cannot corrupt the
+    index (:meth:`MinHashIndex.add` is keyed by ``doc_id``) and is not
+    indexed twice — but it *does* count toward ``rows_read``, which is both
+    the offset and the bound, so repeats spend the operator's budget and the
+    index can hold fewer documents than ``max_docs`` names. That is the
+    intended reading — the bound is a ceiling on cost, and a re-read row was
+    paid for — but the earlier "repeats are harmless" wording said the
+    opposite (#455). A skip costs one unseeded document, which degrades
+    recall rather than corrupting the index. Stated rather than relied on silently: a
     page that is entirely repeats ends the walk, so an unstable window
     cannot spin.
     """
@@ -633,7 +638,10 @@ def _warn_index_holds_nothing(*, stored: int, rows_read: int, max_docs: int) -> 
     if max_docs <= 0:
         logger.warning(
             "minhash_index_seed_disabled",
-            reason=f"{MINHASH_SEED_MAX_DOCS_ENV} is unset or 0",
+            reason=(
+                f"{MINHASH_SEED_MAX_DOCS_ENV} resolved to 0 — unset, 0, "
+                "negative, or unparseable; the line naming which is above"
+            ),
             **common,
         )
     else:
@@ -670,10 +678,13 @@ def _get_minhash_index(registry: StoreRegistry) -> Any:
     :func:`_prewarm_registry` pays the cost once at boot rather than on a
     caller's first write.
 
-    A broken dedup module is raised rather than silently disabled: silent
-    disable means memories are stored without fuzzy dedup, producing
-    invisible duplicates. That posture predates the seed repair and is
-    unchanged.
+    A broken dedup module — or a failed seed — is raised rather than silently
+    disabled: silent disable means memories are stored without fuzzy dedup,
+    producing invisible duplicates. That posture predates the seed repair, and
+    holding it *across calls* is why the index is published to the module
+    global only after a successful build (see the comment below). The repair
+    is what made the failure reachable at all: the old ``search("")`` seed
+    could not fail, so nothing had to survive one.
     """
     global _minhash_index  # noqa: PLW0603
     if _minhash_index is not None:
@@ -681,12 +692,24 @@ def _get_minhash_index(registry: StoreRegistry) -> Any:
     try:
         from trellis.classify.dedup.minhash import MinHashIndex  # noqa: PLC0415
 
-        _minhash_index = MinHashIndex()
+        # Built into a local and published to the module global only after
+        # the seed completes. Assigning the global first would cache a
+        # *partially* seeded index on the way out of a failure: the raise
+        # below is loud exactly once, and every subsequent call takes the
+        # early return above and gets an index holding an arbitrary prefix
+        # of the corpus. That is the silent disable this function's docstring
+        # says it refuses to do — memories stored without the fuzzy dedup the
+        # operator asked for, producing invisible duplicates — and #402's
+        # repair is what made it reachable, by turning a seed that could not
+        # fail (``search("")`` returned ``[]``) into an O(corpus) read.
+        # Republishing nothing means a later call retries the seed and, if it
+        # fails again, fails loudly again.
+        index = MinHashIndex()
         document_store = registry.knowledge.document_store
         max_docs = WriteBehaviourConfig.from_env().minhash_seed_max_docs
         started = time.perf_counter()
         rows_read = (
-            _seed_minhash_index(_minhash_index, document_store, max_docs=max_docs)
+            _seed_minhash_index(index, document_store, max_docs=max_docs)
             if max_docs > 0
             else 0
         )
@@ -697,12 +720,12 @@ def _get_minhash_index(registry: StoreRegistry) -> Any:
         # one number that changes as the corpus grows.
         logger.info(
             "minhash_index_initialized",
-            size=_minhash_index.size,
+            size=index.size,
             rows_read=rows_read,
             max_docs=max_docs,
             seconds=round(time.perf_counter() - started, 2),
         )
-        if _minhash_index.size == 0:
+        if index.size == 0:
             # An empty store legitimately seeds nothing — that is a fresh
             # install and most of the test suite, and a warning that fires
             # there is noise nobody reads.
@@ -718,6 +741,7 @@ def _get_minhash_index(registry: StoreRegistry) -> Any:
             cause=exc,
             data={"stage": "minhash_index_init"},
         )
+    _minhash_index = index
     return _minhash_index
 
 
