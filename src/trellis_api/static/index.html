@@ -3384,7 +3384,15 @@
 
                 const cardsEl = document.getElementById('stats-cards');
                 cardsEl.appendChild(renderCard('Traces', stats.traces, 'agent work records'));
-                cardsEl.appendChild(renderCard('Documents', stats.documents, 'searchable items'));
+                // Chunk rows are slices of the documents already counted, so
+                // the headline is the whole-document count and the row total
+                // rides in the subtitle (#412). Before the split this card
+                // showed 1,319 against the Documents view's 579.
+                const docRows = stats.document_rows || 0;
+                const docSub = docRows > stats.documents
+                    ? `${docRows.toLocaleString()} rows incl. chunks`
+                    : 'searchable items';
+                cardsEl.appendChild(renderCard('Documents', stats.documents, docSub));
                 cardsEl.appendChild(renderCard('Graph Nodes', stats.nodes, 'entities'));
                 cardsEl.appendChild(renderCard('Graph Edges', stats.edges, 'relationships'));
                 cardsEl.appendChild(renderCard('Events', stats.events, 'audit log entries'));

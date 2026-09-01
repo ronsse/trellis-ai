@@ -33,7 +33,9 @@ Subclass shape::
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+
+import pytest
 
 from tests.chunk_corpus import seed_chunk_favouring
 from trellis.schemas.classification import LIST_FACETS
@@ -636,3 +638,238 @@ class DocumentStoreContractTests:
         found = {r["doc_id"] for r in results}
         assert "scalar" in found
         assert "scalar_other" not in found
+
+    # ------------------------------------------------------------------
+    # Metadata filters — predicates on the query, not on the page (#409)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _seed_filter_favouring(
+        store: DocumentStore,
+        *,
+        matching: int = 25,
+        decoys: int = 40,
+        term: str = "filterable",
+        metadata: dict[str, Any] | None = None,
+    ) -> set[str]:
+        """Seed a corpus whose *non-matching* documents outrank the matching ones.
+
+        The ranking is the point, for the reason
+        :func:`tests.chunk_corpus.seed_chunk_favouring` spells out: a
+        post-``LIMIT`` filter is only distinguishable from a pushdown when
+        the top-N is dominated by rows the filter removes. Decoys carry
+        *term* three times in a short body; matches carry it once in a long
+        one, which puts decoys first on term frequency (Postgres
+        ``ts_rank``) and on frequency *and* brevity (SQLite ``bm25``).
+
+        Returns the ids that should survive the filter.
+        """
+        wanted = metadata if metadata is not None else {"tags": ["target"]}
+        for d in range(decoys):
+            store.put(f"decoy{d}", f"{term} {term} {term}", {"tags": ["other"]})
+        matched = set()
+        for m in range(matching):
+            doc_id = f"match{m}"
+            filler = " ".join(f"filler{m}x{i}" for i in range(40))
+            store.put(doc_id, f"{term} body {m} {filler}", dict(wanted))
+            matched.add(doc_id)
+        return matched
+
+    def test_search_list_filter_fills_the_limit(self, store: DocumentStore) -> None:
+        """A ``limit=N`` filtered search returns N *matching* rows.
+
+        This is #409. SQLite pushed scalars and ``content_tags`` into
+        ``WHERE`` and applied every other shape — a list here — to the
+        rows ``LIMIT`` had already returned. With decoys outranking
+        matches the post-hoc filter yields **zero** rows, and the caller
+        cannot tell that from "nothing matched" while 25 matching
+        documents sit just past the window.
+
+        The assertion is on the count, not on non-emptiness: against the
+        unfixed source this returns *some* rows for other fixtures, so a
+        truthiness check passes against the bug.
+        """
+        matched = self._seed_filter_favouring(store)
+
+        # Precondition: decoys really do outrank matches, so the assertion
+        # below tests the pushdown and not the fixture.
+        unfiltered = store.search("filterable", limit=20)
+        assert all(d["doc_id"].startswith("decoy") for d in unfiltered)
+
+        page = store.search("filterable", limit=20, filters={"tags": ["target"]})
+        assert len(page) == 20
+        assert {d["doc_id"] for d in page} <= matched
+
+    def test_search_list_filter_excludes_non_matches(
+        self, store: DocumentStore
+    ) -> None:
+        """A list filter filters. Postgres used to ignore the shape entirely.
+
+        ``isinstance(value, str | int | float | bool)`` guarded the only
+        non-tag branch there, so a list-valued filter added no condition
+        and every row came back — the mirror image of SQLite's short page.
+        """
+        store.put("a", "filterable body", {"tags": ["target"]})
+        store.put("b", "filterable body", {"tags": ["other"]})
+        results = store.search("filterable", filters={"tags": ["target"]})
+        assert {d["doc_id"] for d in results} == {"a"}
+
+    def test_search_list_filter_is_order_sensitive(self, store: DocumentStore) -> None:
+        """Arrays compare element-wise: ``["a", "b"] != ["b", "a"]``.
+
+        Python's ``==`` over the parsed JSON is the specified semantics,
+        and for arrays that is order-sensitive.
+        """
+        store.put("ab", "filterable body", {"tags": ["a", "b"]})
+        store.put("ba", "filterable body", {"tags": ["b", "a"]})
+        results = store.search("filterable", filters={"tags": ["a", "b"]})
+        assert {d["doc_id"] for d in results} == {"ab"}
+
+    def test_search_dict_filter_ignores_key_order(self, store: DocumentStore) -> None:
+        """Objects compare structurally: key order is not part of the value.
+
+        This is the shape that rules out the obvious SQLite pushdown.
+        ``json_extract`` hands an object back as *text* in its stored key
+        order, so a text comparison would call these two unequal — while
+        Python and Postgres ``jsonb`` both call them equal.
+        """
+        store.put("doc", "filterable body", {"span": {"start": 1, "end": 9}})
+        store.put("other", "filterable body", {"span": {"start": 2, "end": 9}})
+        results = store.search("filterable", filters={"span": {"end": 9, "start": 1}})
+        assert {d["doc_id"] for d in results} == {"doc"}
+
+    def test_search_none_filter_matches_absent_and_null(
+        self, store: DocumentStore
+    ) -> None:
+        """``None`` matches a missing key as well as a stored JSON null.
+
+        ``metadata.get(key) == None`` was the post-hoc semantics on SQLite
+        and it is what the pushdown has to reproduce — on Postgres a bare
+        ``metadata -> key = 'null'`` misses the absent case, because the
+        left side is SQL NULL and the comparison is neither true nor false.
+        """
+        store.put("absent", "filterable body", {"other": 1})
+        store.put("null", "filterable body", {"parent_doc_id": None})
+        store.put("present", "filterable body", {"parent_doc_id": "p"})
+        results = store.search("filterable", filters={"parent_doc_id": None})
+        assert {d["doc_id"] for d in results} == {"absent", "null"}
+
+    def test_search_bool_filter_matches(self, store: DocumentStore) -> None:
+        """A bool filter selects the documents storing that bool.
+
+        Postgres compared ``metadata->>key`` (the text ``'true'``) against
+        ``str(value)`` (the Python repr ``'True'``), so a bool filter
+        matched nothing there while SQLite matched correctly — a
+        divergence no test covered.
+        """
+        store.put("yes", "filterable body", {"archived": True})
+        store.put("no", "filterable body", {"archived": False})
+        assert {
+            d["doc_id"] for d in store.search("filterable", filters={"archived": True})
+        } == {"yes"}
+        assert {
+            d["doc_id"] for d in store.search("filterable", filters={"archived": False})
+        } == {"no"}
+
+    def test_search_scalar_filter_fills_the_limit(self, store: DocumentStore) -> None:
+        """The pushed-down shapes keep their guarantee too.
+
+        Scalars already became ``WHERE`` conditions on both backends; this
+        pins that they stay there, so a later refactor cannot quietly move
+        them into a page filter alongside the shapes #409 moved out of one.
+        """
+        matched = self._seed_filter_favouring(store, metadata={"domain": "infra"})
+        page = store.search("filterable", limit=20, filters={"domain": "infra"})
+        assert len(page) == 20
+        assert {d["doc_id"] for d in page} <= matched
+
+    def test_search_filters_compose_with_each_other(self, store: DocumentStore) -> None:
+        """Two filters of different shapes AND together in one parameter list.
+
+        Each condition appends its own placeholders to the same positional
+        list, and the two backends order them differently (SQLite binds a
+        key then a JSON value, Postgres a key then a jsonb cast). A
+        mis-ordered append does not raise on either — it silently compares
+        the wrong operands.
+        """
+        store.put("both", "filterable body", {"tags": ["target"], "kind": "note"})
+        store.put("tag_only", "filterable body", {"tags": ["target"], "kind": "log"})
+        store.put("kind_only", "filterable body", {"tags": ["other"], "kind": "note"})
+        results = store.search(
+            "filterable", filters={"tags": ["target"], "kind": "note"}
+        )
+        assert {d["doc_id"] for d in results} == {"both"}
+
+    def test_search_filter_composes_with_chunk_exclusion_at_the_limit(
+        self, store: DocumentStore
+    ) -> None:
+        """Both predicates run before ``LIMIT``, not one before and one after.
+
+        ``test_chunk_exclusion_composes_with_metadata_filters`` pins that
+        the two compose at all; this pins that they compose *in the
+        query*, which is the half #409 broke.
+
+        Two populations of decoy outrank the matches, one removed by each
+        predicate: chunk rows that pass the filter, and whole rows that
+        fail it. Run the chunk predicate in SQL and the filter over the
+        page and the second population fills the window and is then
+        stripped, leaving a short page.
+        """
+        for d in range(40):
+            store.put(
+                f"parent{d}#chunk-0",
+                "filterable filterable filterable",
+                {"tags": ["target"]},
+            )
+            store.put(
+                f"decoy{d}", "filterable filterable filterable", {"tags": ["other"]}
+            )
+        wanted = set()
+        for m in range(25):
+            doc_id = f"match{m}"
+            filler = " ".join(f"filler{m}x{i}" for i in range(40))
+            store.put(doc_id, f"filterable body {m} {filler}", {"tags": ["target"]})
+            wanted.add(doc_id)
+
+        page = store.search(
+            "filterable", limit=20, filters={"tags": ["target"]}, include_chunks=False
+        )
+        assert len(page) == 20
+        assert {d["doc_id"] for d in page} <= wanted
+
+    def test_search_filter_value_that_is_not_json_raises(
+        self, store: DocumentStore
+    ) -> None:
+        """A filter value document metadata could never hold is an error.
+
+        Both backends used to fail silently and in opposite directions —
+        SQLite compared the value in Python and matched nothing, Postgres
+        had no branch for the shape and matched everything (#409). The
+        message names the offending key, because the raw
+        ``json.dumps`` failure names only the type.
+        """
+        store.put("doc", "filterable body", {"tags": ["target"]})
+        with pytest.raises(TypeError, match="tags"):
+            store.search("filterable", filters={"tags": {"target"}})
+
+    def test_search_filter_on_a_key_with_path_syntax(
+        self, store: DocumentStore
+    ) -> None:
+        """A metadata key is a literal name, not a path expression.
+
+        SQLite addresses a scalar filter through a JSON path, so a key
+        holding a ``.`` reads as ``$.a.b`` — a nested lookup — unless the
+        component is quoted, and a key holding a ``"`` has no path
+        spelling at all and would silently match nothing. Postgres binds
+        the key directly and was never exposed to either. The contract is
+        that the key means itself on both.
+        """
+        store.put("dotted", "filterable body", {"a.b": "x"})
+        store.put("nested", "filterable body", {"a": {"b": "x"}})
+        store.put("quoted", "filterable body", {'q"k': "x"})
+
+        dotted = store.search("filterable", filters={"a.b": "x"})
+        assert {d["doc_id"] for d in dotted} == {"dotted"}
+
+        quoted = store.search("filterable", filters={'q"k': "x"})
+        assert {d["doc_id"] for d in quoted} == {"quoted"}

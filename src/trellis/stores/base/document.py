@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from abc import ABC, abstractmethod
 from typing import Any
 
@@ -57,6 +58,31 @@ def chunk_exclusion_clause(
     if include_chunks:
         return "", []
     return f" WHERE doc_id NOT LIKE {placeholder}", [chunk_id_like_pattern()]
+
+
+def encode_filter_value(key: str, value: Any) -> str:
+    """JSON-encode one metadata filter value, naming the key on failure.
+
+    Both backends compare a filter against stored JSON, so both need the
+    filter value encoded the same way, and both would otherwise raise
+    ``TypeError: Object of type set is not JSON serializable`` from inside
+    a query builder with no indication of *which* filter caused it.
+
+    A non-serialisable filter value used to fail silently and
+    differently on each backend — SQLite compared it in Python and
+    matched nothing, Postgres skipped the branch and matched everything
+    (#409). Raising is the point; naming the key is what makes it
+    actionable.
+    """
+    try:
+        return json.dumps(value)
+    except TypeError as exc:
+        message = (
+            f"metadata filter {key!r} has a value that is not JSON-"
+            f"serialisable ({type(value).__name__}); document metadata is "
+            f"JSON, so a filter over it must be too"
+        )
+        raise TypeError(message) from exc
 
 
 class DocumentStore(ABC):
@@ -147,6 +173,32 @@ class DocumentStore(ABC):
         ``include_chunks=False`` excludes chunk documents. See
         :meth:`list_documents` for why the exclusion is pushed down here
         rather than applied to the result.
+
+        **Every filter is a query predicate, never a pass over the
+        returned page** — the same rule, for the same reason (#409). A
+        ``limit=N`` search whose filter matches at least N documents
+        returns N rows; a caller who gets fewer has reached the end of
+        the matches, not the end of the ``LIMIT`` window. SQLite used to
+        push scalars and ``content_tags`` into ``WHERE`` and apply
+        everything else (lists, dicts, ``None``) to the rows ``LIMIT``
+        had already returned, so such a search returned a short page —
+        possibly empty — with matching documents sitting just past the
+        window. Postgres did not filter those shapes *at all*, so the two
+        backends silently disagreed about what a non-scalar filter meant.
+
+        Filter semantics, pinned by
+        ``DocumentStoreContractTests`` and identical on every backend:
+
+        * ``filters["content_tags"]`` is the facet bag, with its own
+          per-facet operator grammar and default-pass rules.
+        * Every other key matches when the document's metadata value for
+          that key is **equal to** the filter value under Python ``==``
+          over the parsed JSON — order-insensitive for objects,
+          order-sensitive for arrays, numeric-normalising for numbers.
+        * A filter value of ``None`` matches a document whose metadata
+          omits the key as well as one storing an explicit JSON null.
+        * A filter value that is not JSON-serialisable raises. It used to
+          match nothing on SQLite and everything on Postgres.
         """
 
     @abstractmethod

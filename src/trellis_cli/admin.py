@@ -424,11 +424,20 @@ def stats(
         "text", "--format", help="Output format: text or json"
     ),
 ) -> None:
-    """Show store statistics."""
+    """Show store statistics.
+
+    ``documents`` counts whole documents; ``document_rows`` counts every
+    stored row, including the ``<parent>#chunk-N`` fragments corpus
+    ingestion writes. Both are reported, and the two keys match
+    ``GET /api/v1/stats`` field for field, because the two stats surfaces
+    contradicting each other is the defect (#412).
+    """
     counts: dict[str, int] = {}
 
+    document_store = get_document_store()
     counts["traces"] = get_trace_store().count()
-    counts["documents"] = get_document_store().count()
+    counts["documents"] = document_store.count(include_chunks=False)
+    counts["document_rows"] = document_store.count(include_chunks=True)
     gstore = get_graph_store()
     counts["nodes"] = gstore.count_nodes()
     counts["edges"] = gstore.count_edges()

@@ -15,6 +15,7 @@ from trellis.stores.base.document import (
     DocumentStore,
     chunk_exclusion_clause,
     chunk_id_like_pattern,
+    encode_filter_value,
 )
 from trellis.stores.base.tag_filters import normalize_facet_filter
 from trellis.stores.postgres.base import PostgresStoreBase
@@ -299,9 +300,37 @@ class PostgresDocumentStore(PostgresStoreBase, DocumentStore):
                                 f"{membership} ({placeholders}))"
                             )
                             params.extend([facet, facet, facet, *values_list])
-                elif isinstance(value, str | int | float | bool):
-                    conditions.append("metadata->>%s = %s")
-                    params.extend([key, str(value)])
+                elif value is None:
+                    # ``metadata.get(key) == None`` is true for an absent
+                    # key as well as a stored JSON null, and ``metadata ->
+                    # key`` is SQL NULL for the former — a comparison that
+                    # is neither true nor false. Both branches are needed
+                    # for the two backends to agree (#409).
+                    conditions.append(
+                        "(metadata -> %s IS NULL OR metadata -> %s = %s::jsonb)"
+                    )
+                    params.extend([key, key, json.dumps(None)])
+                else:
+                    # Structural ``jsonb`` equality, which is exactly
+                    # Python's ``==`` over the parsed value: order-
+                    # insensitive for objects, order-sensitive for arrays,
+                    # numeric-normalising for numbers. That matches what
+                    # the SQLite backend's ``trellis_metadata_matches``
+                    # callback computes (#409).
+                    #
+                    # What this replaces was wrong in two ways. Casting to
+                    # text with ``metadata->>%s = %s`` and ``str(value)``
+                    # compared a JSON ``true`` against the Python repr
+                    # ``'True'``, so **no bool filter could ever match** —
+                    # while SQLite matched it. And the branch was guarded
+                    # on ``isinstance(value, str | int | float | bool)``,
+                    # so a list- or dict-valued filter added *no condition
+                    # at all* and was silently ignored: Postgres returned
+                    # every row, SQLite returned a short page. The issue
+                    # (#409) reads this as "Postgres pushes every filter
+                    # down"; it did not push them down, it dropped them.
+                    conditions.append("metadata -> %s = %s::jsonb")
+                    params.extend([key, encode_filter_value(key, value)])
 
         where_clause = " AND ".join(conditions)
         params.append(limit)

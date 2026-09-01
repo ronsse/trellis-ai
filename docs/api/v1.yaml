@@ -1594,10 +1594,26 @@ components:
       type: object
     StatsResponse:
       additionalProperties: false
-      description: Store statistics response.
+      description: 'Store statistics response.
+
+
+        ``documents`` and ``document_rows`` describe two populations, and both
+
+        are reported because each answers a question the other cannot (#412).
+
+
+        **Breaking:** ``documents`` used to be the raw row count. A consumer
+
+        that wants that number now reads ``document_rows``.'
       properties:
+        document_rows:
+          default: 0
+          description: Every stored document row, fragments included. Reconciles with GET /api/v1/documents?include_chunks=true.
+          title: Document Rows
+          type: integer
         documents:
           default: 0
+          description: Whole documents, excluding <parent>#chunk-N fragment rows. Reconciles with GET /api/v1/documents' total.
           title: Documents
           type: integer
         edges:
@@ -3779,7 +3795,16 @@ paths:
       - retrieve
   /api/v1/stats:
     get:
-      description: Get store statistics.
+      description: 'Get store statistics.
+
+
+        ``documents`` counts whole documents and reconciles with
+
+        ``GET /api/v1/documents``'' ``total``; ``document_rows`` counts every
+
+        stored row, fragments included, and reconciles with
+
+        ``GET /api/v1/documents?include_chunks=true`` (#412).'
       operationId: stats_api_v1_stats_get
       responses:
         '200':

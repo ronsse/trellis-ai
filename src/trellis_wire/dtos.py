@@ -418,11 +418,31 @@ class HealthResponse(WireModel):
 
 
 class StatsResponse(WireModel):
-    """Store statistics response."""
+    """Store statistics response.
+
+    ``documents`` and ``document_rows`` describe two populations, and both
+    are reported because each answers a question the other cannot (#412).
+
+    **Breaking:** ``documents`` used to be the raw row count. A consumer
+    that wants that number now reads ``document_rows``.
+    """
 
     status: str = "ok"
     traces: int = 0
-    documents: int = 0
+    documents: int = Field(
+        default=0,
+        description=(
+            "Whole documents, excluding <parent>#chunk-N fragment rows."
+            " Reconciles with GET /api/v1/documents' total."
+        ),
+    )
+    document_rows: int = Field(
+        default=0,
+        description=(
+            "Every stored document row, fragments included. Reconciles with"
+            " GET /api/v1/documents?include_chunks=true."
+        ),
+    )
     nodes: int = 0
     edges: int = 0
     events: int = 0

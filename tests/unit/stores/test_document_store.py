@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -489,3 +490,27 @@ def test_search_with_invalid_operator_raises(doc_store: SQLiteDocumentStore) -> 
             "reference",
             filters={"content_tags": {"signal_quality": {"contains": ["x"]}}},
         )
+
+
+def test_search_filter_on_malformed_metadata_names_the_json(
+    doc_store: SQLiteDocumentStore,
+) -> None:
+    """A malformed metadata row fails with SQLite's message, not an opaque one.
+
+    The metadata filter predicate is a registered SQL callback (#409), and
+    an exception raised *inside* one reaches the caller as
+    ``sqlite3.OperationalError: user-defined function raised exception``
+    with the original message discarded. The callback is therefore fed
+    ``json_extract(metadata_json, '$')`` rather than the raw column, so
+    SQLite rejects the row first and says what is wrong with it. Pinning
+    the message is the only way that choice survives a refactor — both
+    forms raise ``OperationalError``.
+    """
+    doc_store.put("ok", "filterable body", {"tags": ["target"]})
+    doc_store._conn.execute(
+        "UPDATE documents SET metadata_json = '{bad' WHERE doc_id = ?", ("ok",)
+    )
+    doc_store._conn.commit()
+
+    with pytest.raises(sqlite3.OperationalError, match="malformed JSON"):
+        doc_store.search("filterable", filters={"tags": ["target"]})

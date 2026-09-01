@@ -78,13 +78,39 @@ def health() -> HealthResponse:
     return HealthResponse(status="ok", checks={"api": True, "stores": True})
 
 
+# Two document counts, not one, and not the other one (#412).
+#
+# ``GET /api/v1/documents`` has counted its ``total`` under the caller's
+# ``include_chunks`` since #385/#391 — whole documents by default. This
+# endpoint reported ``count()`` with no argument, which defaults to
+# ``include_chunks=True``. On the reference deployment those read 579 and
+# 1,319: two operator surfaces, both labelled "documents", disagreeing by
+# 2.3x, with nothing on either saying which population it described.
+#
+# Neither is wrong in isolation, which is why the fix reports both rather
+# than picking. Making stats exclude chunks would have destroyed the
+# storage number an operator sizing a corpus or sanity-checking a prune
+# legitimately wants; leaving it alone keeps two fields called
+# "documents" meaning different things on two surfaces a reader compares.
+# The ABC already binds ``count``'s ``include_chunks`` to the
+# ``list_documents`` call it is *reported beside* — neither stats site is
+# beside a listing, so the rule could not reach them. Naming both
+# populations is how it reaches them.
 @router.get("/stats", response_model=StatsResponse)
 def stats() -> StatsResponse:
-    """Get store statistics."""
+    """Get store statistics.
+
+    ``documents`` counts whole documents and reconciles with
+    ``GET /api/v1/documents``' ``total``; ``document_rows`` counts every
+    stored row, fragments included, and reconciles with
+    ``GET /api/v1/documents?include_chunks=true`` (#412).
+    """
     registry = get_registry()
+    document_store = registry.knowledge.document_store
     return StatsResponse(
         traces=registry.operational.trace_store.count(),
-        documents=registry.knowledge.document_store.count(),
+        documents=document_store.count(include_chunks=False),
+        document_rows=document_store.count(include_chunks=True),
         nodes=registry.knowledge.graph_store.count_nodes(),
         edges=registry.knowledge.graph_store.count_edges(),
         events=registry.operational.event_log.count(),
