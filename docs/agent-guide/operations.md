@@ -342,8 +342,10 @@ This is a batch pass only, never an ingest hook. Classify-on-write is determinis
 **JSON output:**
 
 ```json
-{"status": "ok", "scanned": 999, "written": 964, "skipped_fresh": 0, "skipped_no_signal": 31, "skipped_missing_content": 4, "errors": 0, "dry_run": false, "item_ids_written": ["doc-1", "doc-2"]}
+{"status": "ok", "scanned": 999, "written": 964, "skipped_fresh": 0, "skipped_no_signal": 31, "skipped_missing_content": 4, "errors": 0, "stale_snapshot": 0, "dry_run": false, "item_ids_written": ["doc-1", "doc-2"]}
 ```
+
+`stale_snapshot` ([#421](https://github.com/ronsse/trellis-ai/issues/421)) counts documents another writer changed while the model was judging them. The model call sits between the row's read and its write, so the write re-reads and overlays only the shadow key — the record still lands, on the current content, and every live tag written in the meantime survives. It is a **subset of `written`**, not a failure bucket, so it does not move `status`. A row deleted inside that window is not re-inserted and is counted in `errors`.
 
 ### `trellis classify shadow-report`
 
@@ -1626,18 +1628,20 @@ Batch-enrich under-tagged documents via the LLM `EnrichmentService`, writing the
 
 ```bash
 trellis worker enrich [--concurrency N] [--limit N] \
-  [--confidence-threshold F] [--dry-run] [--format text|json]
+  [--reenrich] [--dry-run] [--format text|json]
 ```
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--concurrency` | `3` | Parallel enrichment requests. |
 | `--limit` | `50` | Max documents to enrich this run. |
-| `--confidence-threshold` | `0.5` | Re-enrich documents whose `content_tags.tag_confidence` is below this value. |
+| `--reenrich` | off | Also take documents that have already been through this path. |
 | `--dry-run` | off | Select + report candidates without calling the LLM. |
 | `--format` | `text` | `text` or `json`. |
 
-**Selection predicate.** A document is a candidate when its `metadata.content_tags` is missing/empty, **or** it carries no `tag_confidence` stamp, **or** that stamp is strictly below `--confidence-threshold`. Documents already tagged at/above the threshold are skipped.
+**Selection predicate.** A document is a candidate when its `metadata.content_tags` is missing/empty, **or** when `content_tags.classified_mode != "enrichment"` — i.e. it has never been through this path. `--reenrich` takes the already-enriched too. (This used to select on `content_tags.tag_confidence`, a key `ContentTags` does not define and nothing ever wrote, so the threshold could never skip anything.)
+
+**Concurrency counters in `--format json` (#421).** The candidate page is a snapshot taken before *N* model calls, so the write-back re-reads each row and merges only the keys this path owns. `stale_snapshot` counts rows another writer changed inside that window — those are still enriched, onto their current content, so it is a concurrency signal rather than a failure count. `vanished` counts rows deleted inside the window, which are **skipped** (writing them back would resurrect a deleted document). A standing non-zero `stale_snapshot` means the batch is racing another writer and wants a smaller `--limit`.
 
 **Requires an LLM extra.** Enrichment needs a configured `llm:` block plus the matching `[llm-openai]` / `[llm-anthropic]` extra. With no buildable client the command **exits non-zero with an actionable message** naming the missing config/extra — it never silently no-ops.
 
