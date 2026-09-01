@@ -1,6 +1,6 @@
 """A pack must state what it did not serve (trellis-ai#404).
 
-Ten gates remove candidates before a pack is returned. Two of them —
+Eleven gates remove candidates before a pack is returned. Two of them —
 ``exclude_archived`` and ``exclude_noise`` at the collect seam — recorded
 their decision *nowhere*: their only observable was a ``logger.debug``
 line, which is a no-op under the CLI's ``WARNING`` default and under the
@@ -16,7 +16,11 @@ The tests here are grouped by the claim each one would falsify:
 * the note reaching the **header** of the rendered surface, including
   when the renderer's item loop breaks on budget,
 * the note never carrying ids or content,
-* the reporter itself failing loudly rather than silently.
+* the reporter itself failing loudly rather than silently,
+* the eleventh gate — section routing — being recorded at all, and being
+  reported as the narrower claim it makes (#440),
+* the **sectioned** path's rejection telemetry, every call of which could be
+  deleted with the whole suite green (#447).
 """
 
 from __future__ import annotations
@@ -48,6 +52,7 @@ from trellis.retrieve.withholding import (
 )
 from trellis.schemas.classification import LIFECYCLE_KEY
 from trellis.schemas.pack import PackBudget, PackItem, RejectedItem, SectionRequest
+from trellis.schemas.well_known import ACTIVITY
 from trellis.stores.base.event_log import EventType
 from trellis.stores.sqlite.event_log import SQLiteEventLog
 
@@ -329,6 +334,8 @@ class TestTheSummaryReachesThePackAndTheEvent:
             "by_reason": {},
             "withheld_item_ids": [],
             "non_absence_reasons": [],
+            "section_filtered": 0,
+            "served_count": 1,
         }
 
     def test_a_sectioned_pack_carries_the_summary_too(self, tmp_path: Path) -> None:
@@ -697,3 +704,481 @@ class TestPartitionOrdering:
         summary = summarize_withheld(rejected, served_item_ids=["a", "c"])
 
         assert summary.withheld_item_ids == ("b", "d", "e")
+
+
+#: A section that matches everything — no affinities, content types, scopes
+#: or entity ids. Used wherever the gate under test is *not* section routing,
+#: so the two cannot be confused for one another.
+def _wildcard(name: str = "tactical", **kw: Any) -> SectionRequest:
+    kw.setdefault("max_items", 10)
+    kw.setdefault("max_tokens", 5000)
+    return SectionRequest(name=name, **kw)
+
+
+def _patterns(name: str = "Technical Patterns", **kw: Any) -> SectionRequest:
+    """``get_task_context``'s real first section, verbatim in shape."""
+    kw.setdefault("max_items", 10)
+    kw.setdefault("max_tokens", 5000)
+    return SectionRequest(name=name, retrieval_affinities=["technical_pattern"], **kw)
+
+
+def _pattern_item(item_id: str, **kw: Any) -> PackItem:
+    """An item ``TierMapper`` infers into the ``technical_pattern`` tier."""
+    return _item(item_id, metadata={"content_tags": {"content_type": "pattern"}}, **kw)
+
+
+def _structural(item_id: str, **kw: Any) -> PackItem:
+    return _item(item_id, metadata={"node_role": "structural"}, **kw)
+
+
+def _meta_activity(item_id: str, **kw: Any) -> PackItem:
+    return _item(
+        item_id,
+        metadata={"node_type": ACTIVITY, "agent_id": "trellis_meta_analyzer"},
+        **kw,
+    )
+
+
+class TestSectionRoutingIsAGate:
+    """#440. ``matches_section`` removes candidates and recorded nothing.
+
+    A sectioned pack could route every candidate away, serve zero items and
+    report ``total: 0`` — an affirmative *"nothing was withheld"*, which is
+    a stronger and more misleading signal than the silence #404 replaced.
+    """
+
+    def test_an_all_routed_away_pack_reports_the_count_not_silence(self) -> None:
+        """The case #440 was filed on: zero served, and it says why."""
+        builder = PackBuilder(
+            strategies=[_strategy("keyword", [_item("d0"), _item("d1"), _item("d2")])]
+        )
+        pack = builder.build_sectioned("deploy checklist", sections=[_patterns()])
+
+        assert pack.total_items == 0
+        summary = _summary(pack)
+        assert summary["section_filtered"] == 3
+        assert summary["served_count"] == 0
+
+        note = format_withholding_note(withholding_from_payload(summary))
+        assert "Section routing" in note
+        assert "3 items" in note
+        # The whole point: an empty pack must not read as an empty corpus.
+        assert "not because nothing was found" in note
+
+    def test_the_rendered_sectioned_surface_carries_the_sentence(self) -> None:
+        """Through the renderer the MCP path actually calls, not just
+        through :func:`format_withholding_note` — "honest in JSON alone"
+        is the failure #404 was filed about."""
+        builder = PackBuilder(
+            strategies=[_strategy("keyword", [_item("d0"), _item("d1")])]
+        )
+        pack = builder.build_sectioned("deploy checklist", sections=[_patterns()])
+
+        rendered = format_sectioned_pack_as_markdown(
+            [{"name": s.name, "items": []} for s in pack.sections],
+            "deploy checklist",
+            max_tokens=2000,
+            pack_id=pack.pack_id,
+            withholding=withholding_from_payload(_summary(pack)),
+        )
+        assert "**Section routing:** this pack is empty because 2 items" in rendered
+        # In the header, above everything the caller reads past.
+        assert rendered.index("Section routing") < rendered.index("Cite feedback")
+        assert _WITHHELD_BODY not in rendered
+
+    def test_the_count_is_kept_out_of_the_headline_and_out_of_by_reason(self) -> None:
+        """It is a narrower claim than the other ten gates make, so it does
+        not join them — measured rationale in the module docstring."""
+        builder = PackBuilder(
+            strategies=[_strategy("keyword", [_item("d0"), _item("d1")])]
+        )
+        pack = builder.build_sectioned("deploy checklist", sections=[_patterns()])
+
+        summary = _summary(pack)
+        assert summary["by_reason"] == {}
+        assert summary["total"] == 0
+        assert summary["withheld_item_ids"] == []
+        assert summary["section_filtered"] == 2
+
+    def test_a_routed_away_item_served_by_another_section_is_not_reported(
+        self,
+    ) -> None:
+        """Checked by execution, not assumed from the set difference.
+
+        Because the routed set is "matched no section at all", an item some
+        other section served is never rejected here — the ``{rejected} -
+        {served}`` subtraction is a backstop, not the mechanism.
+        """
+        builder = PackBuilder(
+            strategies=[
+                _strategy("keyword", [_pattern_item("p0"), _pattern_item("p1")])
+            ]
+        )
+        pack = builder.build_sectioned(
+            "deploy checklist",
+            # Both items are routed away from the wildcard-free "Reference
+            # Data" shape and served by "Technical Patterns".
+            sections=[
+                SectionRequest(
+                    name="Reference Data",
+                    retrieval_affinities=["reference"],
+                    max_items=10,
+                    max_tokens=5000,
+                ),
+                _patterns(),
+            ],
+        )
+
+        assert pack.total_items == 2
+        assert _summary(pack)["section_filtered"] == 0
+        assert _summary(pack)["total"] == 0
+
+    def test_an_item_its_own_section_could_not_afford_is_a_budget_cut(self) -> None:
+        """Attribution, not just counting.
+
+        Per-section rejection rows — the obvious implementation — would let
+        the section that *didn't* match an item claim it, moving a genuinely
+        budget-withheld item out of ``by_reason`` (which renders) and into
+        the section count (which renders only on an empty pack).
+        """
+        builder = PackBuilder(
+            strategies=[
+                _strategy(
+                    "keyword",
+                    [
+                        _pattern_item("p0", score=0.9),
+                        _pattern_item("p1", score=0.8),
+                        _pattern_item("p2", score=0.7),
+                    ],
+                )
+            ]
+        )
+        pack = builder.build_sectioned(
+            "deploy checklist",
+            sections=[
+                SectionRequest(
+                    name="Reference Data",
+                    retrieval_affinities=["reference"],
+                    max_items=10,
+                    max_tokens=5000,
+                ),
+                _patterns(max_items=1),
+            ],
+        )
+
+        assert pack.total_items == 1
+        summary = _summary(pack)
+        assert summary["by_reason"] == {"max_items": 2}
+        assert summary["section_filtered"] == 0
+
+    def test_no_row_is_recorded_for_an_item_some_section_matched(self) -> None:
+        """The routed set is the union across sections, not the last one.
+
+        Accumulating per-section instead still reports the right *count* —
+        every extra row is either served (subtracted) or already attributed
+        to a budget gate — but it books a rejection against an item that was
+        served, which surfaces as a spurious ``non_absence_reasons`` entry.
+        The matching section runs **first** here, which is the arrangement
+        that separates the two.
+        """
+        builder = PackBuilder(
+            strategies=[
+                _strategy(
+                    "keyword",
+                    [
+                        _pattern_item("p0", score=0.9),
+                        _pattern_item("p1", score=0.8),
+                    ],
+                )
+            ]
+        )
+        pack = builder.build_sectioned(
+            "deploy checklist",
+            sections=[
+                _patterns(max_items=1),
+                SectionRequest(
+                    name="Reference Data",
+                    retrieval_affinities=["reference"],
+                    max_items=10,
+                    max_tokens=5000,
+                ),
+            ],
+        )
+
+        summary = _summary(pack)
+        assert summary["by_reason"] == {"max_items": 1}
+        assert summary["section_filtered"] == 0
+        assert summary["non_absence_reasons"] == []
+
+    def test_a_served_pack_counts_the_routing_but_renders_no_note(self) -> None:
+        """The judgement #440 asked for, pinned as behaviour.
+
+        Replayed over the reference deployment's 47 flat packs, both shipped
+        section presets route at least one served item away on 46 and 47 of
+        them — so a ``by_reason`` entry would print on essentially every
+        sectioned pack. The operator still gets the count.
+        """
+        builder = PackBuilder(
+            strategies=[
+                _strategy(
+                    "keyword",
+                    [_pattern_item("p0"), _item("d0"), _item("d1"), _item("d2")],
+                )
+            ]
+        )
+        pack = builder.build_sectioned("deploy checklist", sections=[_patterns()])
+
+        summary = _summary(pack)
+        assert pack.total_items == 1
+        assert summary["section_filtered"] == 3
+        assert summary["served_count"] == 1
+        assert format_withholding_note(withholding_from_payload(summary)) == ""
+
+    def test_both_sentences_render_when_a_gate_also_fired(self) -> None:
+        """An empty pack whose candidates were split between gates must
+        report both halves, not whichever one is checked first."""
+        builder = PackBuilder(
+            strategies=[
+                _strategy(
+                    "keyword",
+                    [_item("d0"), _item("d1"), _archived("a0"), _archived("a1")],
+                )
+            ]
+        )
+        pack = builder.build_sectioned("deploy checklist", sections=[_patterns()])
+
+        note = format_withholding_note(withholding_from_payload(_summary(pack)))
+        assert "**Withheld:** 2 items" in note
+        assert f"({ARCHIVED_REJECTION_REASON} 2)" in note
+        assert "**Section routing:** this pack is empty because 2 items" in note
+
+    def test_one_routed_item_reads_as_singular(self) -> None:
+        summary = WithholdingSummary(section_filtered=1, served_count=0)
+        assert "because 1 item matched" in format_withholding_note(summary)
+
+    def test_the_counts_survive_the_trip_through_telemetry(self) -> None:
+        """The renderers read a *serialized* summary, so the rendering rule
+        has to round-trip — not just the count it gates."""
+        summary = WithholdingSummary(section_filtered=4, served_count=0)
+        restored = withholding_from_payload(summary.as_telemetry())
+        assert restored is not None
+        assert restored.section_filtered == 4
+        assert restored.served_count == 0
+        assert restored.section_note_applies is True
+        assert format_withholding_note(restored) == format_withholding_note(summary)
+
+    def test_a_payload_written_before_the_field_existed_reads_as_zero(self) -> None:
+        """Production holds four sectioned packs, all pre-#404. A payload
+        without the key must not raise and must not invent a note."""
+        restored = withholding_from_payload(
+            {"total": 0, "by_reason": {}, "withheld_item_ids": []}
+        )
+        assert restored is not None
+        assert restored.section_filtered == 0
+        assert restored.section_note_applies is False
+        assert format_withholding_note(restored) == ""
+
+    def test_a_junk_count_reads_as_absent_and_says_so_at_warning(self) -> None:
+        """``isinstance(True, int)`` is ``True`` in Python, so an unguarded
+        coercion would read a shape change as "one item was routed away" —
+        and then render a note claiming it.
+
+        Absence is silent (every pre-#440 payload is in that state); a key
+        that is *present and unusable* warns, because a reporter built to
+        stop a pack under-reporting must not under-report quietly.
+        """
+        with capture_logs() as logs:
+            restored = withholding_from_payload(
+                {"by_reason": {}, "section_filtered": True, "served_count": "12"}
+            )
+        assert restored is not None
+        assert restored.section_filtered == 0
+        assert restored.served_count == 0
+        assert format_withholding_note(restored) == ""
+
+        warned = [
+            log
+            for log in logs
+            if log["event"] == "withholding_payload_unreadable"
+            and log["log_level"] == "warning"
+        ]
+        assert {log["field"] for log in warned} == {"section_filtered", "served_count"}
+
+    def test_an_absent_count_is_not_a_warning(self) -> None:
+        """A payload from before the field existed is not a defect."""
+        with capture_logs() as logs:
+            restored = withholding_from_payload({"by_reason": {}})
+        assert restored is not None
+        assert restored.section_filtered == 0
+        assert [log for log in logs if log["log_level"] == "warning"] == []
+
+    def test_the_flat_path_never_reports_section_routing(self) -> None:
+        """``build`` has no sections; the field must stay 0 rather than
+        acquire a meaning it does not have."""
+        builder = PackBuilder(strategies=[_strategy("keyword", [_item("d0")])])
+        pack = builder.build("deploy checklist")
+        assert pack.metadata["withholding"]["section_filtered"] == 0
+
+
+class TestTheSectionedPathRecordsWhatItRemoved:
+    """#447. Every ``_reject`` call in ``build_sectioned`` could be deleted
+    with the whole suite green: the *filtering* half of each gate was
+    covered, the *telemetry* half was not.
+
+    Each test here fails when its gate's ``_reject`` call is a no-op, and
+    each uses at least two kept and two dropped items — a population of one
+    makes many different wrong answers agree, which is how this hid.
+    """
+
+    def test_a_sectioned_structural_drop_is_recorded(self) -> None:
+        builder = PackBuilder(
+            strategies=[
+                _strategy(
+                    "graph",
+                    [
+                        _item("keep0"),
+                        _item("keep1"),
+                        _structural("col0"),
+                        _structural("col1"),
+                    ],
+                )
+            ]
+        )
+        pack = builder.build_sectioned("deploy checklist", sections=[_wildcard()])
+
+        assert pack.total_items == 2
+        assert _summary(pack)["by_reason"] == {"structural_filter": 2}
+        assert sorted(_summary(pack)["withheld_item_ids"]) == ["col0", "col1"]
+
+    def test_a_sectioned_meta_activity_drop_is_recorded(self) -> None:
+        builder = PackBuilder(
+            strategies=[
+                _strategy(
+                    "graph",
+                    [
+                        _item("keep0"),
+                        _item("keep1"),
+                        _meta_activity("meta0"),
+                        _meta_activity("meta1"),
+                    ],
+                )
+            ]
+        )
+        pack = builder.build_sectioned("deploy checklist", sections=[_wildcard()])
+
+        assert pack.total_items == 2
+        assert _summary(pack)["by_reason"] == {"meta_activity_filter": 2}
+
+    def test_a_sectioned_session_dedup_drop_is_recorded(self, tmp_path: Path) -> None:
+        log = SQLiteEventLog(tmp_path / "events.db")
+        try:
+            items = [_item(f"d{i}", score=1.0 - i / 10) for i in range(4)]
+            builder = PackBuilder(
+                strategies=[_strategy("keyword", items)], event_log=log
+            )
+            # First call serves d0/d1 only, so the second call has two
+            # suppressed candidates *and* two fresh ones.
+            first = builder.build_sectioned(
+                "deploy checklist",
+                sections=[_wildcard(max_items=2)],
+                session_id="sess-A",
+            )
+            assert first.total_items == 2
+
+            second = builder.build_sectioned(
+                "deploy checklist",
+                sections=[_wildcard()],
+                session_id="sess-A",
+            )
+            assert second.total_items == 2
+            assert _summary(second)["by_reason"] == {"session_dedup": 2}
+            assert sorted(_summary(second)["withheld_item_ids"]) == ["d0", "d1"]
+        finally:
+            log.close()
+
+    def test_a_sectioned_max_items_cut_is_recorded(self) -> None:
+        """The sectioned path's own budget is a gate like any other."""
+        builder = PackBuilder(
+            strategies=[
+                _strategy(
+                    "keyword", [_item(f"d{i}", score=1.0 - i / 10) for i in range(5)]
+                )
+            ]
+        )
+        pack = builder.build_sectioned(
+            "deploy checklist",
+            sections=[_wildcard(max_items=2)],
+        )
+        assert pack.total_items == 2
+        assert _summary(pack)["by_reason"] == {"max_items": 3}
+        assert sorted(_summary(pack)["withheld_item_ids"]) == ["d2", "d3", "d4"]
+
+    def test_a_sectioned_token_budget_cut_is_recorded(self) -> None:
+        """The second of the two budget cuts, and the one the original
+        fixture could not see: it pinned ``max_items`` only."""
+        # ~25 tokens each at the 4-chars-per-token default; a 55-token
+        # section affords exactly two, leaving two cut by tokens and none
+        # by ``max_items``.
+        excerpt = (
+            "the deploy checklist requires draining the write queue before "
+            "the failover promotes a replica xx"
+        )
+        assert len(excerpt) == 96
+        builder = PackBuilder(
+            strategies=[
+                _strategy(
+                    "keyword",
+                    [
+                        _item(f"d{i}", score=1.0 - i / 10, excerpt=excerpt)
+                        for i in range(4)
+                    ],
+                )
+            ]
+        )
+        pack = builder.build_sectioned(
+            "deploy checklist",
+            sections=[_wildcard(max_items=10, max_tokens=55)],
+        )
+        assert pack.total_items == 2
+        assert _summary(pack)["by_reason"] == {"token_budget": 2}
+        assert sorted(_summary(pack)["withheld_item_ids"]) == ["d2", "d3"]
+
+    def test_a_rejection_row_carries_the_items_own_type_and_score(self) -> None:
+        """A pool where every item shares one ``item_type`` cannot tell a
+        row that copies the field from one that hard-codes it — the same
+        uniformity flaw as a fixture sized 1, one field down."""
+        builder = PackBuilder(
+            strategies=[
+                _strategy(
+                    "graph",
+                    [
+                        _item("keep"),
+                        PackItem(
+                            item_id="ent",
+                            item_type="entity",
+                            excerpt=_BODY,
+                            relevance_score=0.81,
+                            metadata={"node_role": "structural"},
+                        ),
+                        PackItem(
+                            item_id="doc",
+                            item_type="document",
+                            excerpt=_BODY,
+                            relevance_score=0.42,
+                            metadata={"node_role": "structural"},
+                        ),
+                    ],
+                )
+            ]
+        )
+        pack = builder.build("deploy checklist")
+
+        rows = {
+            r.item_id: r
+            for r in pack.retrieval_report.rejected_items
+            if r.reason == "structural_filter"
+        }
+        assert rows["ent"].item_type == "entity"
+        assert rows["doc"].item_type == "document"
+        assert rows["ent"].relevance_score == pytest.approx(0.81)
+        assert rows["doc"].relevance_score == pytest.approx(0.42)

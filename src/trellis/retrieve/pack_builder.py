@@ -56,7 +56,7 @@ from trellis.retrieve.servable import strip_non_servable
 from trellis.retrieve.strategies import SearchStrategy
 from trellis.retrieve.tier_mapping import TierMapper
 from trellis.retrieve.token_counting import DEFAULT_TOKEN_COUNTER, TokenCounter
-from trellis.retrieve.withholding import summarize_withheld
+from trellis.retrieve.withholding import SECTION_FILTER_REASON, summarize_withheld
 from trellis.schemas.advisory import Advisory
 from trellis.schemas.classification import facet_values
 from trellis.schemas.pack import (
@@ -1001,6 +1001,10 @@ class PackBuilder:
             str, tuple[str, float]
         ] = {}  # item_id -> (section, score)
         raw_sections: dict[str, list[PackItem]] = {}
+        # Ids some requested section matched, accumulated across the fill
+        # loop so the eleventh gate below can be defined as "matched *no*
+        # section" rather than per-section leftovers (#440).
+        matched_any: set[str] = set()
 
         for section_req in sections:
             section_budget = PackBudget(
@@ -1012,6 +1016,7 @@ class PackBuilder:
             matched = [
                 item for item in deduped if mapper.matches_section(item, section_req)
             ]
+            matched_any.update(item.item_id for item in matched)
             matched.sort(key=lambda x: x.relevance_score, reverse=True)
 
             # Apply per-section budget. Both cuts are recorded: an item
@@ -1034,6 +1039,27 @@ class PackBuilder:
                         section_req.name,
                         item.relevance_score,
                     )
+
+        # 4a. Section routing is a removal gate like any other, and until
+        # #440 it was the only one that recorded nothing — so a sectioned
+        # pack could route every candidate away, serve zero items and
+        # report ``total: 0 withheld``, a stronger and more misleading
+        # signal than the silence #404 replaced. ``summarize_withheld``
+        # reports the count apart from ``by_reason``; the measured reason
+        # is in :mod:`trellis.retrieve.withholding`.
+        #
+        # "Matched no section at all", not per-section leftovers: an item
+        # that matched section B and lost B's ``max_items`` cut must stay
+        # attributed to ``max_items``, and a per-section row from section A
+        # could win that attribution on ordering alone. The two sets are
+        # disjoint by construction, so appending after the loop leaves
+        # first-reason attribution intact for every other gate.
+        rejected.extend(
+            self._reject(
+                [item for item in deduped if item.item_id not in matched_any],
+                SECTION_FILTER_REASON,
+            )
+        )
 
         # 4. Cross-section dedup — keep item only in its best section
         pack_sections: list[PackSection] = []

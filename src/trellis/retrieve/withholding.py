@@ -1,7 +1,7 @@
 """Withholding as a stated fact — a pack must say what it did not serve.
 
-``PackBuilder`` removes candidates for ten distinct reasons before a pack is
-returned, and until now a caller could not tell **"this layer was empty"**
+``PackBuilder`` removes candidates for eleven distinct reasons before a pack
+is returned, and until now a caller could not tell **"this layer was empty"**
 from **"this layer was redacted."** Both render as fewer items, or as *"No
 context found for: …"*, which reads as greenfield.
 
@@ -13,8 +13,8 @@ What already existed, and what did not
 --------------------------------------
 
 Most of the *data* was there. ``PACK_ASSEMBLED.payload["rejected_items"]``
-carries a per-item row for eight of the ten gates, ``budget_trace[]`` prices
-every candidate the walk saw including the rejected ones (#359 replays on
+carries a per-item row for eight of the first ten gates, ``budget_trace[]``
+prices every candidate the walk saw including the rejected ones (#359 replays on
 exactly that), and ``payload["content_floor"]`` records the floor's
 decisions. Two things were missing, and they are the whole of this change:
 
@@ -135,6 +135,79 @@ code for a gate that does not exist is the defect this module was filed to
 remove, not to reproduce. Sensitivity *enforcement* is #194; when it lands it
 adds a gate here, and this report will count it because it counts whatever
 the pipeline rejects.
+
+Section routing is the eleventh gate, and it is reported differently
+--------------------------------------------------------------------
+
+:meth:`~trellis.retrieve.pack_builder.PackBuilder.build_sectioned` routes
+the shared candidate pool through
+:meth:`~trellis.retrieve.tier_mapping.TierMapper.matches_section` and keeps
+only what a requested section matched. The losing side was discarded
+without a ``RejectedItem``, so a sectioned pack could serve **zero** items
+and report ``total: 0`` — an affirmative *"nothing was withheld"*, which is
+a stronger and more misleading signal than the silence #404 replaced
+(#440).
+
+It is recorded now, but it is **not** a group in ``by_reason`` and it does
+not enter ``total``, because it does not make the claim the other ten gates
+make. Measured on the reference deployment: replaying the two shipped
+section presets over the 47 flat packs assembled since 2026-07-07, the
+routing removes at least one *served* item on **46/47** packs under
+``get_task_context``'s spec and **47/47** under ``get_objective_context``'s
+— median 10 and 16 items respectively. Joining ``by_reason`` would
+therefore put a ``section_filter 10`` line on essentially every sectioned
+pack, which is exactly the failure :func:`format_withholding_note` names:
+a marker that always fires is one the reader learns to skip.
+
+That replay has **two biases running in opposite directions**, and only
+one of the two quantities it is asked for survives them. It reads
+``injected_items[]``, so it sees only the subset a flat budget already
+cut, which *under*-counts routing against the whole deduped pool — but
+that payload carries neither ``retrieval_affinity`` nor ``scope``, while
+``matches_section`` consults the first of those **before** any heuristic
+and 968 of this deployment's 1533 documents carry one, which *over*-counts
+it. For the **per-pack count** the net direction is safe: re-derived with
+the documents' real tags and with the candidates the flat budget cut added
+back to the pool, the medians rise to 28 and 53 and every one of the 47
+packs loses at least one item under both presets. The ``by_reason``
+conclusion holds a fortiori.
+
+So the count is split from the claim:
+
+* ``section_filtered`` rides the ``PACK_ASSEMBLED`` payload on **every**
+  build, because the operator is a different audience from the caller (the
+  same split this module already makes for ``withheld_item_ids``), and
+  because the interesting quantity — how often routing empties a pack —
+  should be re-askable at larger *n* from the served record rather than
+  re-derived by simulation, as it had to be here.
+* The **note** renders only when the pack served nothing, which is the one
+  case where the count is both small and load-bearing. **How often that
+  happens is the quantity the replay cannot answer**, and it is the second
+  of the two above: "no candidate matched any section" needs the whole
+  pool and the real tags, and the two biases stop cancelling — 10 of 47
+  packs from ``injected_items`` alone, 7 once the served items' real tags
+  are read, 0 once the flat budget's own cuts are added back. Treat the
+  simulated rate as an upper bound of unknown tightness. What is *not* a
+  simulation is that **one of the four** sectioned packs this deployment
+  has ever assembled served zero items — which is why
+  ``section_filtered`` is emitted on every build: so this becomes a
+  property of the served record instead of a replay. The note gets its own
+  sentence rather than a ``by_reason`` entry, because "matched no section
+  you asked for" is a narrower statement than "a gate removed this."
+
+An item routed away from section A and served in section B is never
+reported, and it is worth being exact about *which* mechanism does that.
+The builder defines the routed set as **matched no section at all**, so
+such an item is never rejected in the first place; the ``{rejected} -
+{served}`` subtraction is a backstop here, not the mechanism. Defining the
+set per-section instead would lean entirely on the subtraction — and the
+subtraction is not enough. An item that section B matched and then cut on
+``max_items`` would collect a ``section_filter`` row from section A too,
+and first-reason-wins would hand it to whichever row happened to land
+first, moving a genuinely budget-withheld item out of ``by_reason`` (which
+renders) into a sentence that renders on empty packs only. Both halves are
+pinned by test: the per-section variant fails the attribution test, and
+the cross-section survivor is checked by execution rather than assumed.
 """
 
 from __future__ import annotations
@@ -159,6 +232,13 @@ logger = structlog.get_logger(__name__)
 #: build, but not when the winner is later dropped by a downstream gate — in
 #: which case the honest reason is that downstream gate, not "duplicate".
 NON_ABSENCE_REASONS: frozenset[str] = frozenset({"dedup"})
+
+#: Reason recorded for a candidate that matched the intent but none of the
+#: sections the caller requested (#440). A real absence — it is subtracted
+#: against the served set like every other rejection — but reported as its
+#: own field rather than as a ``by_reason`` group, for the measured reason
+#: in the module docstring.
+SECTION_FILTER_REASON: str = "section_filter"
 
 
 @dataclass(frozen=True)
@@ -186,11 +266,35 @@ class WithholdingSummary:
     #: served anyway). Recorded so a zero total is legibly "nothing was
     #: withheld" rather than "nothing was rejected".
     non_absence_reasons: tuple[str, ...] = ()
+    #: Distinct items that matched the intent but no requested section
+    #: (#440). Counted on every build for the operator; rendered to the
+    #: caller only when the pack served nothing. Deliberately outside
+    #: ``groups`` — see the module docstring for the measurement.
+    section_filtered: int = 0
+    #: Distinct ids the pack served. Carried so the rendering rule for
+    #: ``section_filtered`` ("only on an empty pack") survives the trip
+    #: through :meth:`as_telemetry` — the formatters read a *serialized*
+    #: summary and have no other view of the pack.
+    served_count: int = 0
 
     @property
     def total(self) -> int:
-        """Distinct items absent from the pack that a gate removed."""
+        """Distinct items absent from the pack that a gate removed.
+
+        Excludes ``section_filtered``: those items are absent, but the
+        headline is the ten-gate claim and inflating it on every sectioned
+        pack is the noise this design was measured to avoid.
+        """
         return sum(g.count for g in self.groups)
+
+    @property
+    def section_note_applies(self) -> bool:
+        """Whether the caller-facing section-routing sentence should render.
+
+        The empty pack is the case #404 was filed about and the only case
+        where this count is both small and load-bearing.
+        """
+        return self.section_filtered > 0 and self.served_count == 0
 
     def as_telemetry(self) -> dict[str, Any]:
         """Payload fragment for the ``PACK_ASSEMBLED`` event.
@@ -205,6 +309,8 @@ class WithholdingSummary:
             "by_reason": {g.reason: g.count for g in self.groups},
             "withheld_item_ids": list(self.withheld_item_ids),
             "non_absence_reasons": list(self.non_absence_reasons),
+            "section_filtered": self.section_filtered,
+            "served_count": self.served_count,
         }
 
 
@@ -218,6 +324,13 @@ def summarize_withheld(
     when it is missing from ``served_item_ids``. See the module docstring
     for why the set difference is the definition rather than a filter
     applied to it.
+
+    :data:`SECTION_FILTER_REASON` takes the same trip — subtracted against
+    the served set, attributed first-reason-wins — and is then peeled off
+    into ``section_filtered`` instead of a ``groups`` entry, so it stays out
+    of ``total``, out of ``by_reason`` and out of ``withheld_item_ids``
+    (which would otherwise carry a median of ten ids on every sectioned
+    pack, for a count the caller is not shown).
     """
     served = set(served_item_ids)
     first_reason: dict[str, str] = {}
@@ -230,7 +343,11 @@ def summarize_withheld(
         first_reason.setdefault(item.item_id, item.reason)
 
     counts: dict[str, int] = {}
+    section_filtered = 0
     for reason in first_reason.values():
+        if reason == SECTION_FILTER_REASON:
+            section_filtered += 1
+            continue
         counts[reason] = counts.get(reason, 0) + 1
 
     groups = tuple(
@@ -239,8 +356,14 @@ def summarize_withheld(
     )
     return WithholdingSummary(
         groups=groups,
-        withheld_item_ids=tuple(first_reason),
+        withheld_item_ids=tuple(
+            item_id
+            for item_id, reason in first_reason.items()
+            if reason != SECTION_FILTER_REASON
+        ),
         non_absence_reasons=tuple(sorted(non_absence)),
+        section_filtered=section_filtered,
+        served_count=len(served),
     )
 
 
@@ -252,6 +375,32 @@ def _keys(payload: Any) -> list[str]:
 def _str_list(value: Any) -> list[str]:
     """Coerce a telemetry list field, tolerating absence."""
     return [str(v) for v in value] if isinstance(value, list) else []
+
+
+def _count(payload: dict[str, Any], key: str) -> int:
+    """Read a telemetry counter, distinguishing absence from junk.
+
+    An **absent** key reads ``0`` silently: every payload written before
+    the field existed is in that state, and ``0`` is the honest answer for
+    it — no sectioned build of that vintage recorded a routed-away item.
+
+    A key that is **present and unusable** warns, for the same reason
+    :func:`withholding_from_payload` warns on an unreadable ``by_reason``:
+    a reporter whose job is to stop a pack under-reporting must not itself
+    under-report quietly. ``bool`` counts as unusable because ``True`` is
+    an ``int`` in Python — a boolean here means the writer changed shape,
+    not that one item was filtered, and coercing it would render a note
+    claiming exactly that.
+    """
+    value = payload.get(key)
+    if value is None:
+        return 0
+    if isinstance(value, bool) or not isinstance(value, int):
+        logger.warning(
+            "withholding_payload_unreadable", payload_keys=_keys(payload), field=key
+        )
+        return 0
+    return value
 
 
 def withholding_from_payload(
@@ -290,15 +439,24 @@ def withholding_from_payload(
         groups=groups,
         withheld_item_ids=tuple(_str_list(payload.get("withheld_item_ids"))),
         non_absence_reasons=tuple(_str_list(payload.get("non_absence_reasons"))),
+        section_filtered=_count(payload, "section_filtered"),
+        served_count=_count(payload, "served_count"),
     )
 
 
 def format_withholding_note(summary: WithholdingSummary | None) -> str:
-    """One markdown line naming the count and reasons, or ``""``.
+    """Markdown lines naming the counts and reasons, or ``""``.
 
     Empty string when nothing was withheld — a pack that served everything
     it found must not carry a line saying so, or the marker becomes noise
     the reader learns to skip and stops being a signal at all.
+
+    A second line is added for section routing (#440), and only on an empty
+    pack: that gate fires on all but one of the reference deployment's packs
+    when its two shipped presets are replayed, so an unconditional line
+    would *be* the noise this docstring warns about. It is a separate
+    sentence rather than a ``by_reason`` entry because it makes a narrower
+    claim than the other ten gates — see the module docstring.
 
     Rendered by the pack formatters into the **header**, above the item
     blocks, never appended after them. The formatters' item loop ``break``\\ s
@@ -306,20 +464,32 @@ def format_withholding_note(summary: WithholdingSummary | None) -> str:
     only for packs that fit — which is the "honest in JSON alone" failure
     this issue was filed about, one layer down.
     """
-    if summary is None or not summary.groups:
+    if summary is None:
         return ""
-    detail = ", ".join(f"{g.reason} {g.count}" for g in summary.groups)
-    singular = summary.total == 1
-    noun = "item" if singular else "items"
-    verb = "was" if singular else "were"
-    return (
-        f"**Withheld:** {summary.total} {noun} matched this intent but {verb} "
-        f"not served ({detail}). Counts only — no ids or content."
-    )
+    sentences: list[str] = []
+    if summary.groups:
+        detail = ", ".join(f"{g.reason} {g.count}" for g in summary.groups)
+        singular = summary.total == 1
+        noun = "item" if singular else "items"
+        verb = "was" if singular else "were"
+        sentences.append(
+            f"**Withheld:** {summary.total} {noun} matched this intent but {verb} "
+            f"not served ({detail}). Counts only — no ids or content."
+        )
+    if summary.section_note_applies:
+        n = summary.section_filtered
+        section_noun = "item" if n == 1 else "items"
+        sentences.append(
+            f"**Section routing:** this pack is empty because {n} {section_noun} "
+            "matched this intent but none of the sections you requested — "
+            "not because nothing was found. Counts only — no ids or content."
+        )
+    return "\n".join(sentences)
 
 
 __all__ = [
     "NON_ABSENCE_REASONS",
+    "SECTION_FILTER_REASON",
     "WithheldGroup",
     "WithholdingSummary",
     "format_withholding_note",
