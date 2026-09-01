@@ -95,21 +95,34 @@ def _is_call_to(node: ast.AST, name: str) -> bool:
 def _gate_is_wired(node: ast.Call) -> bool:
     """Does this construction pass a gate that could actually gate anything?
 
-    Three shapes are rejected and each was reachable:
+    Four shapes are rejected and each was reachable:
 
     * no ``policy_gate=`` at all — the #424 defect verbatim;
     * ``policy_gate=None`` — satisfies a keyword-presence check while
       leaving ``execute``'s ``is not None`` guard false, which is the
       obvious way a future edit "fixes" the rule without fixing anything;
+    * **any** literal ``None`` inside the value —
+      ``policy_gate=build_policy_gate(r) if flag else None`` is the equally
+      obvious *next* edit, and it is exactly as statically visible as the
+      bare constant. Matching on the top-level node alone let it through;
+      the whole subtree is walked instead;
     * ``**kwargs`` — opaque to a static scan. Rejecting it is conservative
       by design: an executor whose wiring cannot be read is exactly the
       state this rule exists to prevent, and no call site in ``src/`` needs
-      the splat.
+      the splat. It only ever *decides* the
+      ``policy_gate=gate, **kwargs`` shape (a splat alone already falls
+      through to ``return False``), so that shape is in the corpus below —
+      otherwise the clause is unpinned and deleting it changes nothing.
 
     What it cannot decide is whether a *bound name* is ``None`` at runtime
-    — ``policy_gate=gate`` passes the scan whatever ``gate`` holds. That is
-    why the behavioural assertions live beside it: the worker suite proves
-    a declared ``deny`` actually stops the write, and
+    — ``policy_gate=gate`` passes the scan whatever ``gate`` holds, so
+    hoisting the conditional above (``gate = ... if flag else None``)
+    escapes it. Neither can it follow an alias (``Executor =
+    MutationExecutor``), a ``functools.partial``, or a ``getattr``
+    construction; a *subclass* is reachable and is closed separately by
+    :meth:`TestTheRulePremiseStillHolds.test_nothing_in_src_subclasses_the_executor`.
+    That is why the behavioural assertions live beside it: the worker suite
+    proves a declared ``deny`` actually stops the write, and
     :class:`TestTheRulePremiseStillHolds` proves omission is still what
     disables Stage 2. A static rule bounds the shape; a test bounds the
     behaviour.
@@ -119,7 +132,10 @@ def _gate_is_wired(node: ast.Call) -> bool:
     for kw in node.keywords:
         if kw.arg != _GATE_KWARG:
             continue
-        return not (isinstance(kw.value, ast.Constant) and kw.value.value is None)
+        return not any(
+            isinstance(sub, ast.Constant) and sub.value is None
+            for sub in ast.walk(kw.value)
+        )
     return False
 
 
@@ -170,6 +186,30 @@ def stray_gate_builds(root: Path | None = None) -> list[str]:
             f"{py_file.name}:{call.lineno}: {_snippet(call)}"
             for call in _gate_builder_calls(tree)
             if id(call) not in owned
+        )
+    return found
+
+
+def executor_subclasses(root: Path | None = None) -> list[str]:
+    """Classes inheriting ``MutationExecutor``, which the scan cannot see.
+
+    ``ungated_executors`` matches the *bare name* of a call target, so a
+    subclass is constructed under its own name and never lands. It also
+    reaches ``__init__`` through ``super().__init__(...)``, whose call
+    target is ``__init__``. Both invariants would stay green while Stage 2
+    was skipped on every write the subclass made.
+
+    There are none, so this is a floor to keep rather than a hole to
+    close: adding one means the two rules above have to be re-derived, not
+    that a scanner needs another special case.
+    """
+    found: list[str] = []
+    for py_file, tree in _iter_modules(root if root is not None else _src_root()):
+        found.extend(
+            f"{py_file.name}:{node.lineno}: class {node.name}"
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ClassDef)
+            and any(_name_of(base) == _EXECUTOR for base in node.bases)
         )
     return found
 
@@ -258,19 +298,34 @@ def splatted(registry, **kwargs):
 def gate_without_executor(registry):
     return build_policy_gate(registry)         # 19 stray: no executor here
 
+def conditional_none(registry, flag):
+    return MutationExecutor(                   # 22 literal None on a branch
+        policy_gate=build_policy_gate(registry) if flag else None,
+    )
+
+def splat_beside_a_real_gate(registry, **kwargs):
+    gate = build_policy_gate(registry)
+    return MutationExecutor(policy_gate=gate, **kwargs)  # 28 unreadable wiring
+
+class Sneaky(MutationExecutor):                # 30 constructed under its own name
+    pass
+
 def ok_inline(registry):
-    return MutationExecutor(policy_gate=build_policy_gate(registry))  # 22 OK
+    return MutationExecutor(policy_gate=build_policy_gate(registry))  # 34 OK
 
 def ok_hoisted(registry):
-    gate = build_policy_gate(registry)         # 25 OK: same function
-    return MutationExecutor(handlers={}, policy_gate=gate)  # 26 OK
+    gate = build_policy_gate(registry)         # 37 OK: same function
+    return MutationExecutor(handlers={}, policy_gate=gate)  # 38 OK
 """
 
 #: ``ungated_executors`` must report exactly these lines of ``_EVASIONS``.
-_EXPECTED_UNGATED = [7, 10, 13, 16]
+_EXPECTED_UNGATED = [7, 10, 13, 16, 22, 28]
 
 #: ``stray_gate_builds`` must report exactly these.
 _EXPECTED_STRAY = [4, 19]
+
+#: ``executor_subclasses`` must report exactly these.
+_EXPECTED_SUBCLASSES = [30]
 
 
 def test_the_scan_catches_every_known_evasion(tmp_path: Path) -> None:
@@ -299,6 +354,13 @@ def test_the_scan_catches_every_known_evasion(tmp_path: Path) -> None:
         f"spurious={sorted(set(stray) - set(_EXPECTED_STRAY))}"
     )
 
+    subclasses = sorted(
+        int(v.split(":")[1]) for v in executor_subclasses(root=tmp_path)
+    )
+    assert subclasses == _EXPECTED_SUBCLASSES, (
+        f"executor_subclasses reported {subclasses}, expected {_EXPECTED_SUBCLASSES}"
+    )
+
 
 class TestTheRulePremiseStillHolds:
     """The rule is only worth enforcing while omission is dangerous.
@@ -323,6 +385,26 @@ class TestTheRulePremiseStillHolds:
             "MutationExecutor now defaults to a gate. If that default is a "
             "real gate rather than None, omission is no longer dangerous and "
             "this rule should be re-argued rather than kept out of habit."
+        )
+
+    def test_nothing_in_src_subclasses_the_executor(self) -> None:
+        """The construction scan matches one bare name, so a subclass hides.
+
+        ``ungated_executors`` looks for ``MutationExecutor(...)``. A
+        subclass is constructed as ``MySubclass(...)`` and forwards through
+        ``super().__init__(...)``, so both invariants stay green while
+        Stage 2 is skipped on every write it makes — the #424 shape, one
+        indirection further out. There are none today; if one is added, the
+        two rules above have to be re-derived rather than the scanner given
+        another special case.
+        """
+        subclasses = executor_subclasses()
+        assert not subclasses, (
+            "A MutationExecutor subclass is invisible to the AST rules "
+            "above: it is constructed under its own name and reaches "
+            "__init__ through super(). Either drop the subclass, or widen "
+            "ungated_executors to follow the inheritance and re-argue the "
+            "rule.\n  " + "\n  ".join(subclasses)
         )
 
     def test_omitting_the_gate_really_does_skip_stage_two(self) -> None:
