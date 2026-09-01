@@ -29,9 +29,10 @@ decision to be visible is the enforceable part; which way it goes is a
 judgement a reviewer makes at the call site.
 
 ``trellis.mcp`` is out of scope on purpose and not by exception: it hands
-back *packs*, not rows. Its single ``DocumentStore.search`` call is the
-MinHash index seed, which reads zero rows on every backend (#402) and is
-decided in a comment at the call site.
+back *packs*, not rows. Its one whole-row read is the fuzzy-dedup index
+seed, which named ``include_chunks=False`` when #402 repaired it — that
+call used to be a ``DocumentStore.search("")`` returning zero rows on
+every backend, so the question the rule asks had no answer there.
 """
 
 from __future__ import annotations

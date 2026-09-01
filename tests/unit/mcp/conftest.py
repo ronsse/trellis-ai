@@ -24,6 +24,7 @@ import structlog
 import trellis.mcp.auth as auth_mod
 import trellis.mcp.server as server_mod
 from trellis.auth import generate_api_key
+from trellis.core.write_config import ENV_VAR_BY_FIELD
 from trellis.stores.registry import StoreRegistry
 
 #: Every env var ``trellis.mcp.auth`` reads. Cleared before each test so a
@@ -36,6 +37,21 @@ _MCP_ENV_VARS = (
     "TRELLIS_MCP_AUTH_MODE",
     "TRELLIS_MCP_ALLOW_INSECURE_BIND",
 )
+
+
+#: Every write-behaviour knob (:mod:`trellis.core.write_config`). Cleared
+#: for the same reason the auth vars above are: a developer's shell must
+#: not decide whether ``save_memory`` classifies, extracts, or rejects a
+#: fuzzy duplicate. Derived from the registry rather than listed, so a knob
+#: added later is isolated without anyone remembering to come back here.
+_WRITE_BEHAVIOUR_ENV_VARS = tuple(ENV_VAR_BY_FIELD.values())
+
+
+@pytest.fixture(autouse=True)
+def _clean_write_behaviour_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Start every MCP test from the shipped write-behaviour defaults."""
+    for var in _WRITE_BEHAVIOUR_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
 
 
 def unwrap_tool(tool_or_fn: Any) -> Any:

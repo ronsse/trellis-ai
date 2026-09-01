@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from typing import Any, NoReturn
 
 import structlog
@@ -40,7 +41,10 @@ from mcp.types import INTERNAL_ERROR, INVALID_PARAMS, ErrorData
 
 from trellis.auth import SCOPE_INGEST, SCOPE_MUTATE, SCOPE_READ
 from trellis.classify.ingest import classify_metadata_on_write
-from trellis.core.write_config import WriteBehaviourConfig
+from trellis.core.write_config import (
+    MINHASH_SEED_MAX_DOCS_ENV,
+    WriteBehaviourConfig,
+)
 from trellis.core.write_provenance import get_write_provenance
 from trellis.extract.entity_resolution import build_name_alias_resolver
 from trellis.extract.trace_ingest_hook import run_trace_extraction
@@ -113,6 +117,7 @@ from trellis.schemas.memory_op import REF_TYPE_DOCUMENT
 from trellis.schemas.pack import PackBudget, SectionRequest
 from trellis.schemas.trace import Trace
 from trellis.stores.advisory_source import load_advisory_store
+from trellis.stores.base.document import DocumentStore
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 
@@ -527,20 +532,148 @@ def _run_memory_extraction(
         )
 
 
+#: Rows per ``list_documents`` page while seeding the fuzzy-dedup index.
+#: Matches the capture sweep's reconcile walker, which reads the same rows
+#: for the same index (``trellis_workers.session_capture.reconcile_pass``).
+_MINHASH_SEED_PAGE_SIZE = 500
+
+
+def _seed_minhash_index(
+    index: Any,
+    document_store: DocumentStore,
+    *,
+    max_docs: int,
+) -> int:
+    """Load up to *max_docs* stored documents into *index*; return rows read.
+
+    **Chunk rows are excluded**, and the reason is measured rather than
+    assumed. The obvious worry — a chunk is a near-duplicate of its parent
+    by construction, so seeding both would have the parent reject itself —
+    does not hold: Jaccard is taken over the *union* of character
+    trigrams, and a ~3,000-character slice of a much longer parent cannot
+    reach 0.85 against it. Over the reference deployment's 740 chunk rows
+    the parent-to-chunk similarity is median 0.294, max **0.641**, and
+    **zero** pairs clear the threshold; sibling chunks likewise, zero.
+
+    So chunks are excluded for the two reasons #396 recorded instead, both
+    of which survive the measurement. They double the seed's cost (1,475
+    rows and ~59 s against 735 rows and ~24 s) for one extra match on the
+    whole corpus. And that one match is a `Fuzzy duplicate: <parent>#chunk-1`
+    verdict — a fragment id handed back to an agent that should be reading
+    the document, when the parent it was sliced from is in the index too.
+
+    Pagination is by ``offset`` over ``created_at DESC``, which both shipped
+    backends leave without a tiebreak, so rows sharing a timestamp can
+    repeat or be skipped across page boundaries. Repeats are harmless
+    (:meth:`MinHashIndex.add` is keyed by ``doc_id``) and are not counted
+    twice; a skip costs one unseeded document, which degrades recall rather
+    than corrupting the index. Stated rather than relied on silently: a
+    page that is entirely repeats ends the walk, so an unstable window
+    cannot spin.
+    """
+    seen: set[str] = set()
+    rows_read = 0
+    while rows_read < max_docs:
+        requested = min(_MINHASH_SEED_PAGE_SIZE, max_docs - rows_read)
+        page = document_store.list_documents(
+            limit=requested,
+            offset=rows_read,
+            include_chunks=False,
+        )
+        if not page:
+            break
+        fresh = 0
+        for doc in page:
+            # Subscripted, not ``.get``: ``doc_id`` and ``content`` are the
+            # DocumentStore contract. A backend that omits one is broken,
+            # and the outer handler turns that into a loud init failure —
+            # better than seeding a row under the empty-string key.
+            doc_id = doc["doc_id"]
+            if doc_id in seen:
+                continue
+            seen.add(doc_id)
+            fresh += 1
+            index.add(doc_id, doc["content"])
+        rows_read += len(page)
+        if len(page) < requested:
+            break
+        if fresh == 0:
+            # A full page that contributed nothing new means the listing
+            # window moved under the walk. Stopping is the safe choice —
+            # the alternative re-reads the same rows forever — but it
+            # under-seeds, and an under-seeded index rejects less than the
+            # operator asked for, invisibly. So it is said out loud.
+            logger.warning(
+                "minhash_seed_walk_stalled",
+                reason="a full page of rows had all been seen already",
+                effect="the index holds fewer documents than the bound allows",
+                rows_read=rows_read,
+                indexed=len(seen),
+            )
+            break
+    return rows_read
+
+
+def _warn_index_holds_nothing(*, stored: int, rows_read: int, max_docs: int) -> None:
+    """Warn that fuzzy dedup is covering nothing, saying which kind it is.
+
+    Two different situations, two different events, because they want
+    completely different fixes. A store with rows and no seeding is a
+    *posture* — correct and deliberate, but an operator who believes fuzzy
+    dedup covers their corpus is wrong, so it is still said out loud. A
+    seed that ran and indexed nothing is a *defect* — the shape #402 was,
+    where the read could not return rows at all. One shared warning would
+    have let the defect hide behind the posture.
+    """
+    common = {
+        "effect": "fuzzy dedup only sees memories written by this process",
+        "stored_documents": stored,
+        "issue": 402,
+    }
+    if max_docs <= 0:
+        logger.warning(
+            "minhash_index_seed_disabled",
+            reason=f"{MINHASH_SEED_MAX_DOCS_ENV} is unset or 0",
+            **common,
+        )
+    else:
+        logger.warning(
+            "minhash_index_seed_empty",
+            reason="seeding ran and the index is still empty",
+            rows_read=rows_read,
+            **common,
+        )
+
+
 def _get_minhash_index(registry: StoreRegistry) -> Any:
     """Get or create a cached MinHash index for fuzzy dedup.
 
-    **The seed below reads zero rows on every backend (#402), so today this
-    index only ever holds documents written by the same process** — a fresh
-    server cannot detect a fuzzy duplicate of anything already stored. This
-    docstring used to say it "lazily populates the index from the document
-    store", and that a broken dedup module is raised rather than silently
-    disabled *because* silent disable "used to mean memories were stored
-    without fuzzy dedup, producing invisible duplicates". The raise is still
-    real and still worth having; the guarantee it protects is not currently
-    being delivered. Saying so here rather than only at the call site,
-    because a reader checking whether fuzzy dedup covers a live deployment
-    reads the docstring.
+    **Seeding from the store is opt-in and off by default**
+    (``TRELLIS_MINHASH_SEED_MAX_DOCS``, see
+    :mod:`trellis.core.write_config`). Unseeded — the shipped default —
+    this index holds only documents written by the same process, so a
+    fresh server cannot detect a fuzzy duplicate of anything already
+    stored, and ``save_memory``'s stage-2 rejection is limited to
+    within-process repeats. That is the same coverage the broken
+    ``search("")`` seed delivered (#402); what changed is that it is now a
+    stated posture with a switch, and that the switch works.
+
+    Why it is not simply turned on, given the seed was always meant to
+    work: the rejection set it would produce is small and correct on the
+    reference deployment (13 of 735, all verified near-duplicates), but a
+    complete seed costs ~24 s of blocking CPU on the first ``save_memory``
+    of a process and grows with the corpus, and under ``stdio`` that is
+    every session in every repository. Catching ~1.6 duplicates a week is
+    not worth a 24-second stall imposed on operators who never asked for
+    it. It *is* worth it to an operator who reads the number and chooses
+    it — including any ``http`` deployment, where
+    :func:`_prewarm_registry` pays the cost once at boot rather than on a
+    caller's first write.
+
+    A broken dedup module is raised rather than silently disabled: silent
+    disable means memories are stored without fuzzy dedup, producing
+    invisible duplicates. That posture predates the seed repair and is
+    unchanged.
     """
     global _minhash_index  # noqa: PLW0603
     if _minhash_index is not None:
@@ -549,43 +682,35 @@ def _get_minhash_index(registry: StoreRegistry) -> Any:
         from trellis.classify.dedup.minhash import MinHashIndex  # noqa: PLC0415
 
         _minhash_index = MinHashIndex()
-        # Seed the index from existing documents (up to a reasonable limit).
-        #
-        # Reads nothing. ``search("")`` returns ``[]`` on every backend — a
-        # store-contract property (``test_search_empty_query_returns_empty_list``)
-        # both implementations honour with an explicit early return, and 0
-        # rows against the 1,319-document reference deployment. So the index
-        # only ever holds documents written by the *same process*, and #396's
-        # "should this exclude chunk rows?" has no answer here: it would
-        # decorate a call that returns no rows of either kind.
-        #
-        # Left alone deliberately: repairing the seed turns on fuzzy dedup
-        # that has never been on, changing what ``save_memory`` rejects on a
-        # live deployment. That is its own review — #402, which also carries
-        # the chunk decision for whoever does it.
-        docs = registry.knowledge.document_store.search("", limit=500)
-        for doc in docs:
-            _minhash_index.add(doc["doc_id"], doc.get("content", ""))
-        logger.debug("minhash_index_initialized", size=_minhash_index.size)
-        # A knowingly-inert safety feature has to say so somewhere an
-        # operator looks. The line above is DEBUG, and since ``search("")``
-        # has always returned nothing it must have been reporting ``size=0``
-        # for as long as the seed has existed — an inference from the store
-        # contract rather than an observation, since nobody watches DEBUG,
-        # which is how this went unnoticed in the first place.
-        #
-        # Warn only when the store holds rows the seed failed to pick up. An
-        # empty store legitimately seeds nothing, which is most unit tests
-        # and every fresh install; a test that stores a document before its
-        # first ``save_memory`` will trip this deliberately (see
-        # ``test_minhash_seed_warns_when_it_reads_nothing_from_a_stocked_store``).
-        if _minhash_index.size == 0 and registry.knowledge.document_store.count() > 0:
-            logger.warning(
-                "minhash_index_seed_empty",
-                reason="search('') returns no rows on any backend",
-                effect="fuzzy dedup only sees memories written by this process",
-                issue=402,
-            )
+        document_store = registry.knowledge.document_store
+        max_docs = WriteBehaviourConfig.from_env().minhash_seed_max_docs
+        started = time.perf_counter()
+        rows_read = (
+            _seed_minhash_index(_minhash_index, document_store, max_docs=max_docs)
+            if max_docs > 0
+            else 0
+        )
+        # INFO, not DEBUG. The predecessor logged the seed size at DEBUG,
+        # which is how a seed that had always read zero rows went unnoticed
+        # — nobody watches DEBUG. The duration rides along because it is the
+        # cost the operator agreed to when setting the bound, and it is the
+        # one number that changes as the corpus grows.
+        logger.info(
+            "minhash_index_initialized",
+            size=_minhash_index.size,
+            rows_read=rows_read,
+            max_docs=max_docs,
+            seconds=round(time.perf_counter() - started, 2),
+        )
+        if _minhash_index.size == 0:
+            # An empty store legitimately seeds nothing — that is a fresh
+            # install and most of the test suite, and a warning that fires
+            # there is noise nobody reads.
+            stored = document_store.count(include_chunks=False)
+            if stored > 0:
+                _warn_index_holds_nothing(
+                    stored=stored, rows_read=rows_read, max_docs=max_docs
+                )
     except Exception as exc:
         logger.exception("minhash_index_init_failed")
         _raise_internal(
@@ -3051,6 +3176,11 @@ def _prewarm_registry(registry: StoreRegistry) -> None:
     for name in _REQUIRED_OPERATIONAL_STORES:
         getattr(registry.operational, name)
     _ = registry.budget_config
+    # Seeding the fuzzy-dedup index is O(corpus) and blocking (~24 s for
+    # 735 documents on the reference deployment). Building it here means
+    # an http deployment pays that at boot instead of inside the first
+    # caller's save_memory. It is off unless the operator set a bound —
+    # see _get_minhash_index.
     _get_minhash_index(registry)
 
     for label, build in (

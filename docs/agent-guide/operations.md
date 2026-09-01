@@ -203,6 +203,50 @@ That stored excerpt is produced by `truncate_excerpt` **at embed time**, not at 
 
 On the retrieval side, embedded documents are visible to every `SemanticSearch`/`PackBuilder` consumer. Since #262 the MCP `get_context` and `search` macro tools route through `PackBuilder`, which fuses the keyword, graph and **semantic** axes with Reciprocal Rank Fusion (deduplicated by `item_id`): when the embedder + vector store pair is configured, the query is embedded and vector hits join the fusion. The semantic axis is additive and degrades gracefully — a down embedder means keyword + graph results only, never a failed tool call.
 
+#### `save_memory` fuzzy dedup — seeding the MinHash index (opt-in)
+
+`save_memory` dedups in two stages: an exact content-hash match, then a
+MinHash/LSH near-duplicate check that catches typos, casing and punctuation
+variants. **Stage 2 only sees documents the index holds**, and by default the
+index is seeded with nothing — so it holds only the memories written by that
+same server process. A fresh MCP server cannot detect a fuzzy duplicate of
+anything already in your store. Before #402 that was a defect (the seed read
+`search("")`, which returns zero rows on every backend); it is now the
+documented default, with a switch.
+
+`TRELLIS_MINHASH_SEED_MAX_DOCS=<n>` loads the newest `n` whole documents into
+the index the first time it is built. Chunk rows are excluded — a chunk is not
+in fact a near-duplicate of its parent (measured over the reference
+deployment's 740 chunk rows: median Jaccard 0.294, max 0.641, zero pairs over
+the 0.85 threshold), but a `Fuzzy duplicate: <parent>#chunk-3` verdict names a
+fragment when the whole document is in the index too.
+
+The number is both the switch and the bound, because the cost is the point:
+
+- Seeding is O(corpus). A MinHash signature costs roughly **32 ms per
+  document**, so a 735-document corpus takes about **24 seconds of blocking
+  CPU** on the first `save_memory` of a process, growing linearly. Under the
+  `stdio` transport that is once per session, in every repository the server
+  is wired into. Under `http` the prewarm pays it once at boot.
+- What it buys, measured on the same deployment over eight weeks: a complete
+  seed would have rejected **13 of 735** whole-document writes (1.8%), every
+  one verified a genuine near-duplicate. Roughly 1.6 rejections a week.
+- Newest-first ordering means a bound below your corpus size misses *old*
+  duplicates. On that corpus a bound of 500 covers 68% of it and misses 8 of
+  its 17 near-duplicate pairs.
+
+Unset, `0`, negative and unparseable all mean **seed nothing** — a typo must
+not switch on a rejection path, nor an unbounded walk. `trellis admin
+write-config --format json` reports the effective value; the server logs
+`minhash_index_initialized` at INFO with `size`, `rows_read` and `seconds`,
+warns `minhash_index_seed_disabled` when a stocked store is running unseeded,
+and warns `minhash_index_seed_empty` when a seed read rows but indexed none.
+
+The same index backs the reconcile-on-write verdict tier
+(`TRELLIS_ENABLE_RECONCILE_ON_WRITE`), which adjudicates near — not exact —
+matches with a model. That tier is equally blind across process boundaries
+without a seed.
+
 ### `trellis admin reindex-vectors` (backfill)
 
 Backfill embeddings for documents that were ingested before the flag was enabled (or that need re-embedding). Pages through the DocumentStore and builds the same vector rows the live hook writes.

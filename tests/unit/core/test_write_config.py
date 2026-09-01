@@ -156,6 +156,69 @@ class TestReconcileKnobs:
         assert WriteBehaviourConfig.from_env(env).reconcile_model == "qwen2.5:7b"
 
 
+class TestMinHashSeedBound:
+    """``TRELLIS_MINHASH_SEED_MAX_DOCS`` — the one knob that is both a
+    switch and a bound (#402).
+
+    Seeding the MCP fuzzy-dedup index is O(corpus) and gates a *rejection*
+    path, so the number an operator sets is the cost they are agreeing to.
+    Splitting it into an enable flag plus a bound would admit a state that
+    means nothing (enabled, seed zero rows) and would let the cost hide
+    behind a word.
+    """
+
+    def test_default_is_seed_nothing(self) -> None:
+        """The shipped posture: ``save_memory`` keeps comparing only
+        against memories written by the same process, exactly as it does
+        today with the broken ``search("")`` seed."""
+        assert WriteBehaviourConfig.from_env().minhash_seed_max_docs == 0
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"), [("1", 1), ("500", 500), (" 20 ", 20)]
+    )
+    def test_positive_values_parse(self, raw: str, expected: int) -> None:
+        env = {ENV_VAR_BY_FIELD["minhash_seed_max_docs"]: raw}
+        assert WriteBehaviourConfig.from_env(env).minhash_seed_max_docs == expected
+
+    @pytest.mark.parametrize("raw", ["lots", "5.5", "", "  ", "-1", "0"])
+    def test_unusable_values_degrade_to_seed_nothing(self, raw: str) -> None:
+        """Never to "unbounded". A typo must not silently switch on a
+        rejection path, and must not silently switch on an unbounded walk
+        over an arbitrarily large corpus either."""
+        env = {ENV_VAR_BY_FIELD["minhash_seed_max_docs"]: raw}
+        assert WriteBehaviourConfig.from_env(env).minhash_seed_max_docs == 0
+
+    def test_a_malformed_value_warns_once_not_once_per_read(self) -> None:
+        """Same reason as the confidence floor: every flag reader builds
+        the whole config, so an uncached warning would fire on reads that
+        have nothing to do with this knob."""
+        write_config._parse_seed_max_docs.cache_clear()
+        env = {ENV_VAR_BY_FIELD["minhash_seed_max_docs"]: "five hundred"}
+        with structlog.testing.capture_logs() as logs:
+            for _ in range(5):
+                WriteBehaviourConfig.from_env(env)
+        assert [entry["event"] for entry in logs] == [
+            "minhash_seed_max_docs_unparseable"
+        ]
+
+    def test_a_negative_value_warns_about_being_negative(self) -> None:
+        write_config._parse_seed_max_docs.cache_clear()
+        env = {ENV_VAR_BY_FIELD["minhash_seed_max_docs"]: "-7"}
+        with structlog.testing.capture_logs() as logs:
+            WriteBehaviourConfig.from_env(env)
+        assert [entry["event"] for entry in logs] == ["minhash_seed_max_docs_negative"]
+
+    def test_it_moves_only_its_own_field(self) -> None:
+        config = WriteBehaviourConfig.from_env(
+            {ENV_VAR_BY_FIELD["minhash_seed_max_docs"]: "100"}
+        )
+        defaults = WriteBehaviourConfig().as_dict()
+        changed = {
+            name for name, value in config.as_dict().items() if value != defaults[name]
+        }
+        assert changed == {"minhash_seed_max_docs"}
+
+
 class TestDescribe:
     def test_reports_every_knob_with_its_env_var(self) -> None:
         rows = WriteBehaviourConfig.from_env().describe()
