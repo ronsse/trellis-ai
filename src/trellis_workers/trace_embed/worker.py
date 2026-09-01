@@ -41,6 +41,7 @@ import structlog
 
 from trellis.mutate.commands import CommandStatus
 from trellis.mutate.executor import MutationExecutor
+from trellis.mutate.policy_source import build_policy_gate
 from trellis_workers.trace_embed.handler import (
     TraceSummaryIngestHandler,
     build_trace_summary_command,
@@ -285,6 +286,9 @@ def run_trace_embed_pass(
 
     Raises:
         TraceEmbedUnavailableError: no embedder, or no vector store.
+        ConfigError: the deployment's policy file exists and cannot be
+            loaded. Raised before anything is read or written — see the
+            gate build below.
     """
     try:
         embedding_fn = registry.embedding_fn
@@ -305,6 +309,28 @@ def run_trace_embed_pass(
             "would report a clean run having made no trace retrievable."
         )
         raise TraceEmbedUnavailableError(msg)
+
+    # Stage 2, on this path too (#424). This worker built its executor
+    # directly, without a gate, so ``evidence.ingest`` ran ungoverned
+    # *regardless of what policies.json declared* — the one write path that
+    # did not route through ``build_curate_executor``. A policy that fires
+    # almost everywhere is worse than none: it is indistinguishable from one
+    # that fires everywhere until the moment it matters.
+    #
+    # Built **here**, above the trace scan, not beside the executor below.
+    # ``build_policy_gate`` raises ``ConfigError`` on a damaged policy file,
+    # and ``collect_candidates`` reads up to ``max_scan *
+    # SCAN_CEILING_FACTOR`` rows before the executor is constructed — so
+    # inline, the pass would walk the whole backlog and only then discover
+    # it could not have written any of it. Refuse before the work: the same
+    # shape ``run_advisory_fitness_loop`` uses for ``refuse_if_degraded``.
+    #
+    # The watermark is *not* part of that argument. ``reset()`` is in-memory
+    # and only ``save()`` touches the file, so the cursor on disk survives
+    # either ordering. Recorded because the first version of this comment
+    # claimed otherwise, and the test written to defend the claim passed
+    # against both orderings — coverage-shaped, and measuring nothing.
+    policy_gate = build_policy_gate(registry)
 
     path = watermark_path or default_watermark_path()
     watermark = TraceEmbedWatermark(path)
@@ -334,6 +360,7 @@ def run_trace_embed_pass(
         handlers={
             "evidence.ingest": TraceSummaryIngestHandler(registry, embedding_fn),
         },
+        policy_gate=policy_gate,
     )
 
     frontier: TraceCursor | None = before

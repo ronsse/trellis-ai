@@ -72,6 +72,14 @@ RejectionKind = Literal[
     "value",
     "empty_required",
     "dangling_reference",
+    # Not a payload problem and not the caller's to fix: the deployment's
+    # own config would not load, so the write could never be attempted
+    # (#425, ``trellis.mutate.policy_source``). Named rather than pooled
+    # under ``other`` because the operator's response is different — fix a
+    # file, not a payload — and because recurrence of *this* kind in
+    # ``repeated_collisions`` reads correctly: the same unfixed file, over
+    # and over.
+    "config_unreadable",
     "other",
 ]
 

@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from structlog.testing import capture_logs
 
 from tests.policy_shapes import DEGENERATE_POLICY_FILES, DEGENERATE_POLICY_IDS
 from tests.structlog_isolation import IsolatedCliRunner
@@ -23,6 +25,7 @@ from trellis.mutate.executor import MutationExecutor
 from trellis.mutate.policy_gate import DefaultPolicyGate
 from trellis.mutate.policy_source import (
     POLICY_FILENAME,
+    POLICY_GATE_SURFACE,
     build_policy_gate,
     load_policies,
     resolve_policy_path,
@@ -800,3 +803,269 @@ class TestZeroPoliciesStaysTransparent:
             (stores_dir / POLICY_FILENAME).read_text(encoding="utf-8")
         ) == {"policies": []}
         assert load_policies(stores_dir) == []
+
+
+# ---------------------------------------------------------------------------
+# Failing closed is right; failing closed invisibly is #425
+# ---------------------------------------------------------------------------
+
+
+class TestGateLoadFailureIsObservable:
+    """A damaged policy file fails every write. Something must say so.
+
+    The availability mirror of #413's fail-open: there the file was damaged
+    and everything looked normal while nothing was *governed*; here the file
+    is damaged and everything looks normal while nothing can be *written*.
+
+    Three channels were structurally unable to see it. ``build_policy_gate``
+    raises **before** a ``MutationExecutor`` exists, so no
+    ``MUTATION_REJECTED``. Every surface builds its executor outside its
+    ``WRITE_REJECTED`` boundary try/except, so no boundary rejection.
+    ``capture_health`` counts exactly those two, so the banner built to
+    notice a write surface going dark was blind to the one failure that
+    darkens all of them at once.
+
+    The fix emits into the channel that already exists rather than adding a
+    probe — the same resolution #448 reached for the nightly advisory
+    writer. These tests assert the signal reaches the two *readers*, not
+    merely that an event was emitted: an event nothing aggregates is the
+    ``status: "stale"`` field #448 is about.
+
+    Latent, and worth saying plainly: a deployment that has declared zero
+    policies has no file to damage. It goes live with the first policy.
+    """
+
+    @staticmethod
+    def _registry(stores_dir: Path, event_log: Any) -> Any:
+        """Minimal stand-in: ``build_policy_gate`` reads exactly two things."""
+        return SimpleNamespace(
+            stores_dir=stores_dir,
+            operational=SimpleNamespace(event_log=event_log),
+        )
+
+    @staticmethod
+    def _damage(tmp_path: Path, contents: str = "{ broken") -> Path:
+        stores_dir = tmp_path / "stores"
+        stores_dir.mkdir(parents=True, exist_ok=True)
+        (stores_dir / POLICY_FILENAME).write_text(contents, encoding="utf-8")
+        return stores_dir
+
+    @pytest.mark.parametrize(
+        ("contents", "_reason"),
+        [(shape[1], shape[2]) for shape in DEGENERATE_POLICY_FILES],
+        ids=DEGENERATE_POLICY_IDS,
+    )
+    def test_every_damaged_shape_emits_the_signal(
+        self, tmp_path: Path, contents: str, _reason: str
+    ) -> None:
+        """Over the shared table, not over one hand-picked typo.
+
+        #423 widened the strict reader by three shapes, so the number of
+        routes into "every write fails" grew. Parametrising over
+        ``DEGENERATE_POLICY_FILES`` means the next widening cannot add a
+        route that raises without also being observed.
+        """
+        stores_dir = self._damage(tmp_path, contents)
+        event_log = _RecordingEventLog()
+
+        with pytest.raises(ConfigError):
+            build_policy_gate(self._registry(stores_dir, event_log))
+
+        assert len(event_log.events) == 1
+        event = event_log.events[0]
+        assert event["event_type"] == EventType.WRITE_REJECTED
+        assert event["actor"] == POLICY_GATE_SURFACE
+        assert event["payload"]["tool"] == POLICY_GATE_SURFACE
+        assert event["payload"]["error_class"] == "ConfigError"
+        assert [r["kind"] for r in event["payload"]["rejections"]] == [
+            "config_unreadable"
+        ]
+        # The recovery advice the ConfigError carries survives into the
+        # event, so an operator reading it gets the fix without re-running
+        # the command that failed.
+        assert (
+            str(stores_dir / POLICY_FILENAME)
+            in (event["payload"]["rejections"][0]["msg"])
+        )
+
+    def test_the_label_stays_inside_the_global_recovery_class(self) -> None:
+        """The two constants must not drift apart, silently.
+
+        ``capture_health`` gives a ``config:``-prefixed surface its own
+        recovery rule *because* no accepted write can ever carry this
+        ``requested_by`` — without it the banner could fire and never clear.
+        Rename this label out of the prefix and the banner silently reverts
+        to the never-clearing behaviour, with every test here still green.
+        """
+        from trellis.ops.capture_health import _GLOBAL_SURFACE_PREFIX
+
+        assert POLICY_GATE_SURFACE.startswith(_GLOBAL_SURFACE_PREFIX)
+
+    def test_a_healthy_load_says_nothing(self, tmp_path: Path) -> None:
+        """No file, and a declared-empty file, are both normal.
+
+        Trellis ships zero policies, so a signal on the default posture
+        would fire on every write on every deployment — which is how
+        operators learn to ignore a signal.
+        """
+        event_log = _RecordingEventLog()
+
+        absent = tmp_path / "absent"
+        build_policy_gate(self._registry(absent, event_log))
+
+        declared_empty = tmp_path / "empty" / "stores"
+        declared_empty.mkdir(parents=True)
+        (declared_empty / POLICY_FILENAME).write_text(
+            '{"policies": []}', encoding="utf-8"
+        )
+        build_policy_gate(self._registry(declared_empty, event_log))
+
+        populated = tmp_path / "full" / "stores"
+        _write_policy_file(
+            populated, [_policy(rules=[PolicyRule(operation="*", action="deny")])]
+        )
+        build_policy_gate(self._registry(populated, event_log))
+
+        assert event_log.events == []
+
+    def test_the_line_is_error_not_info(self, tmp_path: Path) -> None:
+        """``trellis_cli.main._root`` *defaults* ``TRELLIS_LOG_LEVEL`` to
+        ``WARNING``, so an ``info`` line here is filtered out of the CLI —
+        the surface an operator most often meets this on, and the one where
+        the raw ``ConfigError`` currently surfaces worst.
+
+        The level is pinned because ``capture_logs`` swaps the processor
+        chain but leaves ``wrapper_class`` alone: under pytest the bound
+        logger records ``debug`` too, so every other assertion here would
+        pass just as well against an invisible line (#395).
+        """
+        stores_dir = self._damage(tmp_path)
+
+        with capture_logs() as logs, pytest.raises(ConfigError):
+            build_policy_gate(self._registry(stores_dir, _RecordingEventLog()))
+
+        lines = [e for e in logs if e["event"] == "policy_gate_load_failed"]
+        assert len(lines) == 1
+        assert lines[0]["log_level"] == "error"
+        assert lines[0]["path"] == str(stores_dir / POLICY_FILENAME)
+        assert lines[0]["surface"] == POLICY_GATE_SURFACE
+
+    def test_analyze_health_sees_it(self, tmp_path: Path) -> None:
+        """The reader, not the emit. An event nothing aggregates is #448."""
+        from trellis.ops.write_health import summarize_write_health
+        from trellis.stores.sqlite.event_log import SQLiteEventLog
+
+        stores_dir = self._damage(tmp_path)
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        registry = self._registry(stores_dir, event_log)
+
+        for _ in range(3):
+            with pytest.raises(ConfigError):
+                build_policy_gate(registry)
+
+        report = summarize_write_health(event_log, days=1)
+
+        assert report.by_tool[POLICY_GATE_SURFACE].boundary_rejected == 3
+        # Not folded into ``mcp:``-anything: this is not a tool surface.
+        assert not any(k.startswith("mcp:") for k in report.by_tool)
+        assert report.boundary_kinds[f"config_unreadable@{POLICY_FILENAME}"] == 3
+        assert report.status == "warn"
+        assert any("zero accepted writes" in r for r in report.reasons)
+        # Recurrence reads correctly: the same unfixed file, over and over.
+        assert report.repeated_collisions[0]["kind"] == "config_unreadable"
+
+    def test_the_capture_banner_fires(self, tmp_path: Path) -> None:
+        """#309's banner is the surface an agent actually sees.
+
+        It needs ``threshold`` rejections *and* zero accepts for the same
+        surface. The dedicated label has no accepts by construction, and a
+        gate that will not load fails every governed write anyway — so this
+        can reach the threshold but cannot cry wolf.
+        """
+        from trellis.ops.capture_health import (
+            check_capture_health,
+            format_capture_warning,
+        )
+        from trellis.stores.sqlite.event_log import SQLiteEventLog
+
+        stores_dir = self._damage(tmp_path)
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        registry = self._registry(stores_dir, event_log)
+
+        for _ in range(2):
+            with pytest.raises(ConfigError):
+                build_policy_gate(registry)
+        assert check_capture_health(event_log, threshold=3) is None
+
+        with pytest.raises(ConfigError):
+            build_policy_gate(registry)
+
+        warning = check_capture_health(event_log, threshold=3)
+        assert warning is not None
+        assert warning.failing_surfaces == [POLICY_GATE_SURFACE]
+        assert POLICY_GATE_SURFACE in format_capture_warning(warning)
+
+    def test_telemetry_failure_never_replaces_the_config_error(
+        self, tmp_path: Path
+    ) -> None:
+        """Fail-soft, both halves.
+
+        The ``ConfigError`` names the file and the fix. A broken event log
+        must not swap it for a ``RuntimeError`` from the telemetry path —
+        that would take an operator further from the one-character edit that
+        resolves this, which is what the whole issue is about.
+        """
+        stores_dir = self._damage(tmp_path)
+
+        class _BrokenEventLog(_RecordingEventLog):
+            def emit(self, *args: Any, **kwargs: Any) -> None:
+                msg = "event log is down"
+                raise RuntimeError(msg)
+
+        with pytest.raises(ConfigError):
+            build_policy_gate(self._registry(stores_dir, _BrokenEventLog()))
+
+        class _NoOperationalPlane:
+            stores_dir = None
+
+            @property
+            def operational(self) -> Any:
+                msg = "operational plane unavailable"
+                raise RuntimeError(msg)
+
+        broken = _NoOperationalPlane()
+        broken.stores_dir = stores_dir  # type: ignore[assignment]
+        with pytest.raises(ConfigError):
+            build_policy_gate(broken)  # type: ignore[arg-type]
+
+    def test_the_signal_reaches_the_surfaces_that_build_executors(
+        self, tmp_path: Path
+    ) -> None:
+        """Through ``build_curate_executor``, i.e. the way every surface
+        (CLI, REST, MCP) actually reaches the gate — not only through the
+        function under test.
+
+        This is why the emit lives in ``build_policy_gate`` rather than
+        inside one surface's ``WRITE_REJECTED`` boundary: one edit covers
+        every caller, including ``trellis_workers``.
+        """
+        from trellis.stores.registry import StoreRegistry
+
+        stores_dir = self._damage(tmp_path)
+        registry = StoreRegistry(
+            config={
+                "event_log": {
+                    "backend": "sqlite",
+                    "db_path": str(tmp_path / "events.db"),
+                }
+            },
+            stores_dir=stores_dir,
+        )
+
+        with pytest.raises(ConfigError):
+            build_curate_executor(registry)
+
+        events = registry.operational.event_log.get_events(
+            event_type=EventType.WRITE_REJECTED, limit=10
+        )
+        assert [e.payload["tool"] for e in events] == [POLICY_GATE_SURFACE]

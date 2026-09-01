@@ -18,6 +18,7 @@ from trellis.mutate.executor import MutationExecutor
 from trellis.mutate.policy_gate import DefaultPolicyGate
 from trellis.mutate.policy_source import (
     POLICY_FILENAME,
+    POLICY_GATE_SURFACE,
     build_policy_gate,
     load_policies,
     resolve_policy_path,
@@ -74,6 +75,7 @@ def build_curate_executor(registry: StoreRegistry) -> MutationExecutor:
 
 __all__ = [
     "POLICY_FILENAME",
+    "POLICY_GATE_SURFACE",
     "BatchStrategy",
     "Command",
     "CommandBatch",

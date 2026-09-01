@@ -25,6 +25,15 @@ test to the surface that is failing keeps the false-positive discipline
 (a banner on *every* retrieval call must not cry wolf) without blinding
 the check to the motivating case.
 
+One label is deliberately **not** per-surface. A policy file that will
+not load raises at gate-build time, before a Command exists, so it fails
+every governed write on every surface at once and belongs to none of them
+(#425). It is recorded under ``config:policy_file``, and because no
+accepted write can ever carry that ``requested_by``, it gets its own
+recovery rule: an accepted write from *any* surface, newer than its last
+rejection. See :data:`_GLOBAL_SURFACE_PREFIX` — without that rule the
+banner would be unable to clear, which is a worse failure than not firing.
+
 Idempotency replays are excluded: the executor emits
 ``MUTATION_REJECTED`` with ``reason="idempotency_replay"`` for a command
 whose write already landed, which is a duplicate submission, not dark
@@ -91,6 +100,27 @@ _UNKNOWN_SURFACE = "(unknown)"
 #: landed — not a capture failure.
 _REPLAY_REASON = "idempotency_replay"
 
+#: Prefix marking a surface whose failure is **global** rather than
+#: per-surface: the deployment's own configuration would not load, so no
+#: write on any surface could have been attempted. Today that is
+#: ``config:policy_file`` (#425) — a policy file that raises at gate-build
+#: time, before a Command exists.
+#:
+#: It needs its own recovery rule. The per-surface rule asks whether *this*
+#: label landed an accepted write, and no ``MUTATION_EXECUTED`` is ever
+#: attributed to a config label, so under that rule the banner could never
+#: clear: a one-character fix would leave it crying wolf for a full window
+#: on a deployment that was writing normally again. The evidence that a
+#: global condition is over is an accepted write **newer than the last
+#: rejection**, anywhere — which is exactly what a loaded gate produces and
+#: a broken one cannot.
+#:
+#: "Newer than the last rejection", not "anywhere in the window": on a
+#: deployment with steady traffic there is nearly always an accept
+#: somewhere in a 24h window, so the looser test would silence the banner
+#: through the outage instead of after it.
+_GLOBAL_SURFACE_PREFIX = "config:"
+
 
 class CaptureHealthWarning(TrellisModel):
     """Capture-failure state for the surfaces that are failing outright.
@@ -154,10 +184,25 @@ def _surface_label(name: str, payload_key: str) -> str:
 
 def _rejections_by_surface(
     event_log: EventLog, since: datetime
-) -> tuple[dict[str, int], dict[str, datetime], bool]:
-    """Count rejections per surface, date each surface's earliest, flag caps."""
+) -> tuple[dict[str, int], dict[str, datetime], dict[str, datetime], bool]:
+    """Count rejections per surface, date each surface's first and last, flag caps.
+
+    The *latest* is only read for a global surface, where recovery is "an
+    accepted write after the last rejection" (see
+    :data:`_GLOBAL_SURFACE_PREFIX`); it is collected for every label anyway
+    because it costs nothing over a slice already being walked, and a
+    per-label special case in the scan is one more thing to keep in sync.
+
+    Unlike ``earliest``, ``latest`` is **exact under truncation**: the
+    detail fetch is newest-first (#374), so a capped slice keeps the newest
+    rejections and drops the oldest. That is what makes the global recovery
+    rule safe — an understated ``latest`` would compare accepts against a
+    rejection older than the real last one and could clear the banner
+    early.
+    """
     counts: dict[str, int] = {}
     earliest: dict[str, datetime] = {}
+    latest: dict[str, datetime] = {}
     truncated = False
     for event_type, payload_key in (
         (EventType.WRITE_REJECTED, "tool"),
@@ -176,19 +221,42 @@ def _rejections_by_surface(
             occurred = _as_utc(event.occurred_at)
             if label not in earliest or occurred < earliest[label]:
                 earliest[label] = occurred
-    return counts, earliest, truncated
+            if label not in latest or occurred > latest[label]:
+                latest[label] = occurred
+    return counts, earliest, latest, truncated
 
 
-def _surface_has_accepts(event_log: EventLog, label: str, since: datetime) -> bool:
-    """Has this surface landed any write in the window?
+def _surface_has_accepts(
+    event_log: EventLog,
+    label: str,
+    since: datetime,
+    *,
+    last_rejection: datetime | None = None,
+) -> bool:
+    """Has this surface landed any write that clears its rejections?
 
-    Pushed into the backend as a payload filter with ``limit=1``: the
-    question is existence, and the accept volume of a healthy surface is
-    exactly what must not be pulled into a retrieval call.
+    Pushed into the backend with ``limit=1``: the question is existence,
+    and the accept volume of a healthy surface is exactly what must not be
+    pulled into a retrieval call.
+
+    Two rules, because there are two kinds of surface. A normal one is
+    cleared by an accepted write **of its own** anywhere in the window. A
+    global one (:data:`_GLOBAL_SURFACE_PREFIX`) is cleared by an accepted
+    write from **any** surface after its last rejection — it can never have
+    an accept of its own, and its failure mode blocks every surface at
+    once, so any write landing after it proves the condition is over.
     """
     if label == _UNKNOWN_SURFACE:
         # No surface to attribute an accept to; the rejections stand.
         return False
+    if label.startswith(_GLOBAL_SURFACE_PREFIX):
+        return bool(
+            event_log.get_events(
+                event_type=EventType.MUTATION_EXECUTED,
+                since=last_rejection or since,
+                limit=1,
+            )
+        )
     return bool(
         event_log.get_events(
             event_type=EventType.MUTATION_EXECUTED,
@@ -244,12 +312,14 @@ def check_capture_health(
     if total_rejected < resolved_threshold:
         return None
 
-    counts, earliest, truncated = _rejections_by_surface(event_log, since)
+    counts, earliest, latest, truncated = _rejections_by_surface(event_log, since)
     failing = [
         (label, count)
         for label, count in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
         if count >= resolved_threshold
-        and not _surface_has_accepts(event_log, label, since)
+        and not _surface_has_accepts(
+            event_log, label, since, last_rejection=latest.get(label)
+        )
     ]
     if not failing:
         return None

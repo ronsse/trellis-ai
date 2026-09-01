@@ -8,9 +8,13 @@ Three things are asserted here that no summary count can show:
   with, because this worker's success contract *is* the vector row;
 * a pass with no embedder or no vector store raises instead of reporting a
   clean run over zero traces.
+* Stage 2 runs here too (#424) — asserted against a *denying* gate, so a
+  gate that is constructed and never consulted cannot pass.
 """
 
 from __future__ import annotations
+
+import json
 
 import pytest
 
@@ -236,3 +240,130 @@ class TestDocumentRowStamps:
             trace_summary_doc_id(traces[0].trace_id)
         )
         assert row["metadata"]["created_at"] == traces[0].created_at.isoformat()
+
+
+class TestStageTwoRunsOnThisPath:
+    """#424: this worker built its executor without a policy gate.
+
+    ``build_curate_executor`` passes ``policy_gate=`` unconditionally so
+    that "is Stage 2 running?" has an observable answer instead of one that
+    depends on file state. This was the one write path that did not route
+    through the factory, so ``evidence.ingest`` ran ungoverned *regardless
+    of what policies.json declared* — silently, on every deployment.
+
+    Asserted against a **denying** gate and the write it must stop, not
+    against ``executor._policy_gate is not None``. An identity assertion
+    passes just as well against a gate that is constructed and never
+    consulted, which is the exact defect C1 fixed once already.
+    """
+
+    @staticmethod
+    def _deny(stores_dir, operation: str) -> None:
+        from trellis.mutate.policy_source import POLICY_FILENAME
+        from trellis.schemas.enums import Enforcement, PolicyType
+        from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
+
+        policy = Policy(
+            policy_type=PolicyType.MUTATION,
+            scope=PolicyScope(level="global", value=None),
+            rules=[PolicyRule(operation=operation, action="deny")],
+            enforcement=Enforcement.ENFORCE,
+        )
+        stores_dir.mkdir(parents=True, exist_ok=True)
+        (stores_dir / POLICY_FILENAME).write_text(
+            json.dumps({"policies": [policy.model_dump(mode="json")]}),
+            encoding="utf-8",
+        )
+
+    def test_a_declared_deny_actually_stops_the_write(
+        self, registry, watermark_path, recorder
+    ) -> None:
+        """The end-to-end property an operator is entitled to assume."""
+        self._deny(registry.stores_dir, "evidence.ingest")
+        traces = seed_traces(registry, 3)
+
+        report = run_trace_embed_pass(registry, watermark_path=watermark_path)
+
+        assert report.embedded == 0
+        assert report.failed == 3
+        assert recorder.texts == [], "the embedder ran despite a deny policy"
+        assert all(
+            registry.knowledge.vector_store.get(trace_summary_doc_id(t.trace_id))
+            is None
+            for t in traces
+        )
+        assert not _executed_events(registry)
+
+        rejected = registry.operational.event_log.get_events(
+            event_type=EventType.MUTATION_REJECTED, limit=50
+        )
+        assert [e.payload.get("reason") for e in rejected] == ["policy_violation"] * 3
+
+    def test_the_cursor_does_not_advance_past_a_denied_trace(
+        self, registry, watermark_path
+    ) -> None:
+        """A refused write must not look like a done one.
+
+        Without a gate the pass embedded and advanced. With one, a denied
+        trace is a failure like any other: the watermark stays behind it, so
+        lifting the policy re-reaches every trace it blocked.
+        """
+        self._deny(registry.stores_dir, "*")
+        seed_traces(registry, 3)
+
+        run_trace_embed_pass(registry, watermark_path=watermark_path)
+        assert not watermark_path.exists()
+
+    def test_an_unrelated_deny_leaves_the_pass_alone(
+        self, registry, watermark_path
+    ) -> None:
+        """Scoping, not a blanket refusal — the gate is really being read."""
+        self._deny(registry.stores_dir, "entity.create")
+        seed_traces(registry, 2)
+
+        report = run_trace_embed_pass(registry, watermark_path=watermark_path)
+
+        assert (report.embedded, report.failed) == (2, 0)
+        assert len(_executed_events(registry)) == 2
+
+    def test_a_damaged_policy_file_aborts_before_the_scan(
+        self, registry, watermark_path, recorder
+    ) -> None:
+        """The gate is built above the trace scan, on purpose.
+
+        ``build_policy_gate`` raises on a damaged file, and
+        ``collect_candidates`` walks the whole backlog — up to ``max_scan *
+        SCAN_CEILING_FACTOR`` rows — before the executor is constructed.
+        Built inline at the executor, the pass would read all of that and
+        only then discover it could not have written any of it.
+
+        Asserted on the trace store being untouched, which is what actually
+        separates the two orderings. The first version of this test asserted
+        the *watermark file* was unchanged; ``reset()`` is in-memory and only
+        ``save()`` writes, so it passed against both orderings and measured
+        nothing.
+        """
+        from trellis.errors import ConfigError
+        from trellis.mutate.policy_source import POLICY_FILENAME
+
+        seed_traces(registry, 2)
+        registry.stores_dir.mkdir(parents=True, exist_ok=True)
+        (registry.stores_dir / POLICY_FILENAME).write_text("{ broken", encoding="utf-8")
+
+        trace_store = registry.operational.trace_store
+        queries: list[dict] = []
+        real_query = trace_store.query
+
+        def counting_query(**kwargs):
+            queries.append(kwargs)
+            return real_query(**kwargs)
+
+        trace_store.query = counting_query
+
+        with pytest.raises(ConfigError):
+            run_trace_embed_pass(
+                registry, watermark_path=watermark_path, reset_watermark=True
+            )
+
+        assert queries == [], "the backlog was scanned before the gate was built"
+        assert recorder.texts == []
