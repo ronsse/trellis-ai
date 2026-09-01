@@ -326,3 +326,71 @@ class TestFormatCaptureWarning:
     def test_no_surfaces_renders_unknown(self) -> None:
         text = format_capture_warning(self._warning([]))
         assert "(unknown)" in text
+
+
+class TestGlobalSurfaceRecovery:
+    """A config failure fails every surface, so it clears differently (#425).
+
+    ``config:policy_file`` marks a write that died at gate-build time — the
+    deployment's own ``policies.json`` would not load, before a Command
+    existed. No ``MUTATION_EXECUTED`` can ever carry that ``requested_by``,
+    so under the per-surface accept rule the banner could **never** clear: a
+    one-character fix would leave it firing for a full window on a
+    deployment that was writing normally again, which is precisely how an
+    operator learns to ignore a banner.
+
+    The recovery evidence is an accepted write from any surface *after* the
+    last rejection — the thing a loaded gate produces and a broken one
+    cannot. "After the last rejection" rather than "anywhere in the window"
+    is what keeps it from silencing a live outage on a busy deployment.
+    """
+
+    def test_it_fires_while_the_gate_is_broken(self, tmp_path: Path) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        _reject_boundary(event_log, tool="config:policy_file", n=3)
+
+        warning = check_capture_health(event_log, threshold=3)
+        assert warning is not None
+        assert warning.failing_surfaces == ["config:policy_file"]
+
+    def test_earlier_accepts_do_not_silence_a_live_outage(self, tmp_path: Path) -> None:
+        """The case that breaks a naive "any accept in the window" rule.
+
+        A deployment writing normally all day, then a policy file edited an
+        hour ago. Every accept in the window predates every rejection, and
+        the banner must still fire.
+        """
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        _accept(event_log, requested_by="mcp:save_experience")
+        _accept(event_log, requested_by="mcp:save_memory")
+        _reject_boundary(event_log, tool="config:policy_file", n=3)
+
+        warning = check_capture_health(event_log, threshold=3)
+        assert warning is not None
+        assert warning.failing_surfaces == ["config:policy_file"]
+
+    def test_one_write_landing_after_the_fix_clears_it(self, tmp_path: Path) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        _reject_boundary(event_log, tool="config:policy_file", n=3)
+        assert check_capture_health(event_log, threshold=3) is not None
+
+        _accept(event_log, requested_by="mcp:save_experience")
+
+        assert check_capture_health(event_log, threshold=3) is None
+
+    def test_the_global_rule_does_not_leak_to_ordinary_surfaces(
+        self, tmp_path: Path
+    ) -> None:
+        """An accept elsewhere must not clear a per-surface outage.
+
+        This is #309's motivating incident: a nightly ingest landing rows
+        while every ``save_*`` call is rejected. The prefix rule must not
+        widen into the global check that incident was built to defeat.
+        """
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        _reject_boundary(event_log, tool="save_experience", n=3)
+        _accept(event_log, requested_by="cli:ingest_corpus")
+
+        warning = check_capture_health(event_log, threshold=3)
+        assert warning is not None
+        assert warning.failing_surfaces == ["mcp:save_experience"]

@@ -48,6 +48,20 @@ silently disables access control — the caller believes it is governed and it
 is not. A deployment with *no* policy file is untouched by this: strictness
 only applies once an operator has declared something.
 
+**Failing closed has an availability cost, and it is now observed** (#425).
+A policy file that will not load fails *every* governed write on *every*
+surface, and until this change nothing anywhere said so: the raise happens
+before a :class:`~trellis.mutate.executor.MutationExecutor` exists, so there
+is no ``MUTATION_REJECTED``; every surface builds its executor outside its
+``WRITE_REJECTED`` boundary, so there is no boundary rejection; and
+:mod:`trellis.ops.capture_health` counts exactly those two channels. The
+banner built to notice a write surface going dark was structurally blind to
+the one failure that darkens all of them. :func:`_record_gate_load_failure`
+emits a ``WRITE_REJECTED`` under :data:`POLICY_GATE_SURFACE` before the
+error propagates, which is the channel ``trellis analyze health`` already
+reads. Latent on a deployment that has declared zero policies — there is no
+file to damage — and live from the first declared policy onward.
+
 **Strictness is necessary and was not sufficient** (#413). It reasons about
 the read, and the exposure came from the write: until #413
 :class:`~trellis.stores.policy_store.PolicyStore` degraded an unreadable
@@ -123,6 +137,23 @@ POLICY_FILENAME = "policies.json"
 #: ``_MAX_REPORTED_ROWS``; they are different quantities that happen to be
 #: small, not one constant split in two.
 _MAX_REPORTED_KEYS = 5
+
+#: Surface label for a gate that would not load, used as the
+#: ``WRITE_REJECTED`` payload's ``tool`` and as the event ``source``.
+#:
+#: The colon is load-bearing: both ``capture_health._surface_label`` and
+#: ``summarize_write_health`` prefix a bare name with ``mcp:``, and this is
+#: not an MCP tool — it is every surface at once. See
+#: :func:`_record_gate_load_failure`.
+POLICY_GATE_SURFACE = "config:policy_file"
+
+#: Cap on the ``ConfigError`` text carried into the event payload. Larger
+#: than ``write_health._MAX_MSG`` (240) on purpose: that bounds a pydantic
+#: error string, while every message here ends in the recovery advice that
+#: is the whole reason for carrying it, and the longest — the missing-key
+#: one — is a little over 300 characters. The cap is a bloat guard for a
+#: future message, not a display width.
+_MAX_REJECTION_MSG = 500
 
 
 @overload
@@ -265,6 +296,108 @@ def _load_from_path(path: Path | None) -> list[Policy]:
     return policies
 
 
+def _record_gate_load_failure(
+    registry: StoreRegistry, *, path: Path | None, error: ConfigError
+) -> None:
+    """Make an unloadable policy file visible to ``trellis analyze health``.
+
+    Failing closed is right (see the module docstring). Failing closed
+    *invisibly* is #425: :func:`build_policy_gate` raises **before** a
+    :class:`~trellis.mutate.executor.MutationExecutor` exists, so there is
+    no ``MUTATION_REJECTED``; every surface calls it outside its
+    ``WRITE_REJECTED`` boundary, so there is no boundary rejection either;
+    and :mod:`trellis.ops.capture_health` counts exactly those two channels.
+    Net: one typo in ``policies.json`` fails every governed write on every
+    surface and every health surface reports normal.
+
+    The signal is a ``WRITE_REJECTED`` event — the repo's existing channel
+    for "a write died before it became a Command", already read by
+    ``trellis analyze health``
+    (:func:`~trellis.ops.write_health.summarize_write_health`) and by the
+    capture-health banner. #448 resolved the same question the same way for
+    the nightly advisory writer: emit an event rather than build a second
+    reader for a signal the system already has a canonical channel for.
+
+    It is recorded **here**, at the one place the failure happens, rather
+    than by moving each surface's executor construction inside its own
+    boundary try/except. That covers CLI, REST, MCP *and*
+    :mod:`trellis_workers` in one edit, and it attributes the rejection to
+    the file rather than to whichever tool happened to be called — the
+    failure is not a property of any one surface, it is every surface at
+    once.
+
+    :data:`POLICY_GATE_SURFACE` carries a colon deliberately.
+    ``capture_health._surface_label`` prefixes a bare ``tool`` name with
+    ``mcp:``, and this is not an MCP tool. The ``config:`` prefix is also
+    what puts it in ``capture_health``'s *global* recovery class, and that
+    is load-bearing rather than cosmetic: no ``MUTATION_EXECUTED`` can ever
+    carry this ``requested_by``, so under the ordinary per-surface accept
+    rule the banner would fire and then never clear — it would keep crying
+    wolf for a full window after a one-character fix, on a deployment that
+    was writing normally again. Being global, it clears on the first
+    accepted write from *any* surface after the last rejection, which is
+    exactly what a loaded gate produces. The pairing is pinned by test; see
+    ``capture_health._GLOBAL_SURFACE_PREFIX``.
+
+    Fail-soft in both halves — a broken event log must never escalate a
+    refused write into a different crash. The ``ConfigError`` is re-raised
+    by the caller either way.
+    """
+    # ``error``, not ``warning`` or ``info``: ``trellis_cli.main._root``
+    # defaults ``TRELLIS_LOG_LEVEL`` to ``WARNING``, and this is the line an
+    # operator meets the failure on before they think to run a health
+    # command. Pinned by test, for the same reason ``PolicyStore``'s is.
+    logger.error(
+        "policy_gate_load_failed",
+        path=str(path) if path is not None else None,
+        surface=POLICY_GATE_SURFACE,
+        error=str(error),
+        impact=(
+            "every governed write on every surface fails until this file "
+            "loads or is removed"
+        ),
+    )
+
+    try:
+        event_log = registry.operational.event_log
+    # GRACEFUL-DEGRADATION: telemetry only. An operational plane that cannot
+    # be resolved is a real problem, but not *this* one, and the ConfigError
+    # the caller is about to re-raise is the better error to surface.
+    except Exception:
+        logger.warning(
+            "policy_gate_load_failed.event_log_unavailable",
+            path=str(path) if path is not None else None,
+            exc_info=True,
+        )
+        return
+
+    from trellis.ops.write_health import record_write_rejection  # noqa: PLC0415
+
+    record_write_rejection(
+        event_log,
+        tool=POLICY_GATE_SURFACE,
+        error=error,
+        # An explicit row rather than ``classify_rejection``'s fallback:
+        # this is not a payload the caller can fix, and ``other@`` would
+        # pool it with every unclassified boundary failure in
+        # ``boundary_kinds``. Named, it also reaches
+        # ``repeated_collisions`` once it recurs, which is exactly the
+        # right reading — the same unfixed file, every night. The ``msg``
+        # is the ConfigError verbatim, so the recovery advice it carries
+        # reaches an operator reading the event without re-running the
+        # command that failed. No ``hints=``: it would be the same string a
+        # second time, and nothing reads that field on this payload.
+        rejections=[
+            {
+                "kind": "config_unreadable",
+                "loc": POLICY_FILENAME,
+                "msg": str(error)[:_MAX_REJECTION_MSG],
+            }
+        ],
+        source=POLICY_GATE_SURFACE,
+    )
+
+
 def build_policy_gate(registry: StoreRegistry) -> DefaultPolicyGate:
     """Build the Stage 2 gate for a registry's deployment.
 
@@ -273,12 +406,27 @@ def build_policy_gate(registry: StoreRegistry) -> DefaultPolicyGate:
     no-gate configuration that preceded this wiring but leaves Stage 2
     genuinely present and inspectable rather than skipped. See
     :func:`load_policies` for the failure posture.
+
+    A load failure is recorded as a ``WRITE_REJECTED`` event before the
+    :class:`~trellis.errors.ConfigError` propagates
+    (:func:`_record_gate_load_failure`). Calling that a *write* rejection is
+    honest because this function is only ever reached while building a
+    ``MutationExecutor`` — an invariant enforced by AST scan in
+    ``tests/unit/test_policy_gate_rule.py`` rather than by convention — so
+    "the gate would not load" and "a write was refused" are the same event.
+
+    Raises:
+        ConfigError: the policy file exists and cannot be loaded.
     """
     # Resolve once: ``resolve_policy_path`` warns on a legacy-path hit, and
     # calling it again just to build the log line would double that warning
     # on every mutation.
     path = resolve_policy_path(registry.stores_dir)
-    policies = _load_from_path(path)
+    try:
+        policies = _load_from_path(path)
+    except ConfigError as exc:
+        _record_gate_load_failure(registry, path=path, error=exc)
+        raise
     if policies:
         logger.info(
             "policy_gate_loaded",

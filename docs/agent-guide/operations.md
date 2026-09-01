@@ -903,6 +903,38 @@ treat a damaged file differently, on purpose:
   `mv` the path is absent, which is a legitimate transparent zero-policy
   deployment, so **re-declare your policies**.
 
+### How you find out that the file is damaged
+
+Failing closed is right; failing closed *invisibly* was the gap (#425). The
+raise happens at gate-build time, **before** a `MutationExecutor` exists, so
+there is no `MUTATION_REJECTED`; every surface builds its executor outside its
+`WRITE_REJECTED` boundary, so there was no boundary rejection either. Both are
+what `trellis analyze health` and the capture-health banner count, so the one
+failure that darkens *every* write surface at once was the one they could not
+see.
+
+A gate that will not load now emits a `WRITE_REJECTED` event under the surface
+label **`config:policy_file`** before the `ConfigError` propagates, and an
+`error`-level `policy_gate_load_failed` log line naming the path. So:
+
+* `trellis analyze health` reports it under `by_tool["config:policy_file"]`,
+  with `boundary_kinds` showing `config_unreadable@policies.json` and the
+  `ConfigError` text — including its recovery command — in the event's
+  `rejections[0].msg`.
+* The **capture-health banner** fires on the pack-serving surfaces once the
+  threshold is crossed, so an agent is told memory capture is down rather than
+  inferring greenfield from an empty pack.
+
+The label is not an MCP tool and does not get an `mcp:` prefix, because the
+failure is not a property of any one surface — it is every surface at once.
+For the same reason it clears differently: no accepted write can ever carry
+that `requested_by`, so the banner clears on the first accepted write from
+*any* surface after the last rejection, which is exactly what a loaded gate
+produces.
+
+Note this is **latent on a deployment that has declared no policies** — there
+is no file to damage. It becomes live the moment you declare your first policy.
+
 ### If another process wrote the file first
 
 Two processes write `policies.json` on a typical deployment — `trellis
