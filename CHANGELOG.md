@@ -226,9 +226,18 @@ Net DEFECT delta in `src/`: 113 literal-only → 85 literal-only / 67 helper-awa
   essentially every sectioned pack and become the noise `format_withholding_note`
   exists to avoid. The caller-facing sentence therefore renders **only when the
   pack served nothing** — the case the ambiguity actually bites, and the case
-  where the count is small and load-bearing (10 of those 47 would have served
-  zero items under the objective preset, as did one of the four sectioned packs
-  this deployment has ever assembled). Cross-section survivors are subtracted by
+  where the count is small and load-bearing (one of the four sectioned packs
+  this deployment has ever assembled served zero items). The replay is a
+  *sound* basis for the first of those numbers and not for the second: it
+  reads `injected_items[]`, which sees only what a flat budget already kept
+  (under-counts routing) and carries neither `retrieval_affinity` nor `scope`
+  though `matches_section` reads the first before any heuristic (over-counts
+  it). The per-pack medians rise to 28 and 53 once the real tags and the
+  budget-cut candidates are restored, so the `by_reason` conclusion holds a
+  fortiori; the simulated *empty-pack* rate does not survive the same
+  correction (10 of 47 → 7 → 0) and is an upper bound only, which is why
+  `section_filtered` is emitted on every build rather than left to
+  simulation. Cross-section survivors are subtracted by
   the existing `{rejected} − {served}` definition; the routed set is computed as
   "matched no section at all" rather than per-section, so an item a section
   matched and then cut on `max_items` keeps that attribution instead of losing
@@ -245,7 +254,11 @@ Net DEFECT delta in `src/`: 113 literal-only → 85 literal-only / 67 helper-awa
   and the assertion could not separate the two quantities, and no test asserted
   a rejection row's `item_type` or `relevance_score` against a pool carrying
   more than one of either — both mutants (a hard-coded `item_type`, a
-  hard-coded score) survived. (#447)
+  hard-coded score) survived. That second fix is scoped to the shared
+  `_reject` helper; the six sites that build a `RejectedItem` by hand still
+  take a hard-coded `item_type` or score with the suite green (11 of 12 such
+  mutants survive). Latent rather than live — `summarize_withheld` reads only
+  `item_id` and `reason`, and both are pinned. (#447)
 
 - **Tag refresh rewrote every stale document, even when nothing changed.** The
   tags-unchanged early-out in `classify/refresh.py` dropped only

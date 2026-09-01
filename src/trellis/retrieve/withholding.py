@@ -154,12 +154,23 @@ make. Measured on the reference deployment: replaying the two shipped
 section presets over the 47 flat packs assembled since 2026-07-07, the
 routing removes at least one *served* item on **46/47** packs under
 ``get_task_context``'s spec and **47/47** under ``get_objective_context``'s
-— median 10 and 16 items respectively, and both are lower bounds, since the
-sectioned path routes the whole deduped pool rather than the subset a flat
-budget had already cut. Joining ``by_reason`` would therefore put a
-``section_filter 10`` line on essentially every sectioned pack, which is
-exactly the failure :func:`format_withholding_note` names: a marker that
-always fires is one the reader learns to skip.
+— median 10 and 16 items respectively. Joining ``by_reason`` would
+therefore put a ``section_filter 10`` line on essentially every sectioned
+pack, which is exactly the failure :func:`format_withholding_note` names:
+a marker that always fires is one the reader learns to skip.
+
+That replay has **two biases running in opposite directions**, and only
+one of the two quantities it is asked for survives them. It reads
+``injected_items[]``, so it sees only the subset a flat budget already
+cut, which *under*-counts routing against the whole deduped pool — but
+that payload carries neither ``retrieval_affinity`` nor ``scope``, while
+``matches_section`` consults the first of those **before** any heuristic
+and 968 of this deployment's 1533 documents carry one, which *over*-counts
+it. For the **per-pack count** the net direction is safe: re-derived with
+the documents' real tags and with the candidates the flat budget cut added
+back to the pool, the medians rise to 28 and 53 and every one of the 47
+packs loses at least one item under both presets. The ``by_reason``
+conclusion holds a fortiori.
 
 So the count is split from the claim:
 
@@ -170,11 +181,19 @@ So the count is split from the claim:
   should be re-askable at larger *n* from the served record rather than
   re-derived by simulation, as it had to be here.
 * The **note** renders only when the pack served nothing, which is the one
-  case where the count is both small and load-bearing: 10 of those same 47
-  packs would have served zero items under the objective preset, and one of
-  the four sectioned packs this deployment has ever assembled did. It gets
-  its own sentence rather than a ``by_reason`` entry, because "matched no
-  section you asked for" is a narrower statement than "a gate removed this."
+  case where the count is both small and load-bearing. **How often that
+  happens is the quantity the replay cannot answer**, and it is the second
+  of the two above: "no candidate matched any section" needs the whole
+  pool and the real tags, and the two biases stop cancelling — 10 of 47
+  packs from ``injected_items`` alone, 7 once the served items' real tags
+  are read, 0 once the flat budget's own cuts are added back. Treat the
+  simulated rate as an upper bound of unknown tightness. What is *not* a
+  simulation is that **one of the four** sectioned packs this deployment
+  has ever assembled served zero items — which is why
+  ``section_filtered`` is emitted on every build: so this becomes a
+  property of the served record instead of a replay. The note gets its own
+  sentence rather than a ``by_reason`` entry, because "matched no section
+  you asked for" is a narrower statement than "a gate removed this."
 
 An item routed away from section A and served in section B is never
 reported, and it is worth being exact about *which* mechanism does that.
