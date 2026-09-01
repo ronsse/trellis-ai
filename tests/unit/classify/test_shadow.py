@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 
@@ -970,3 +970,194 @@ class TestVocabularySeam:
     def test_shadow_verdict_survives_a_scalar_facet_value(self) -> None:
         """A bare string, not a list — the #282 shape that shreds under set()."""
         assert shadow_verdict({"custom": {DOCUMENT_FORM_KEY: "notes"}}) == "notes"
+
+
+# ---------------------------------------------------------------------------
+# #421 — the model call sits between the read and the write
+# ---------------------------------------------------------------------------
+
+
+class RacingClassifier(FakeClassifier):
+    """A classifier that performs a store write from inside ``classify``.
+
+    That is where the race actually lives: ``shadow_classify_item`` reads the
+    row, spends ~1.6 s in the model, then writes. Driving the concurrent write
+    from the classifier puts it in exactly that window rather than
+    approximating it with an out-of-band ``put``.
+    """
+
+    def __init__(self, side_effect, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._side_effect = side_effect
+        self._fired = False
+
+    def classify(
+        self,
+        content: str,
+        *,
+        context: ClassificationContext | None = None,
+    ) -> ClassificationResult:
+        if not self._fired:
+            self._fired = True
+            self._side_effect()
+        return super().classify(content, context=context)
+
+
+class TestShadowSurvivesAConcurrentWrite:
+    """A whole-corpus shadow pass opens the #421 window once per document.
+
+    The module's stated guarantee is that shadowing "does not perturb the
+    row". Writing back a pre-model snapshot perturbs it in the strongest way
+    available — it reverts content *and* the live tags
+    :data:`PROTECTED_LIVE_KEYS` exists to protect — and, because the write
+    correctly preserves ``updated_at``, leaves no trace at all.
+    """
+
+    _TAGS: ClassVar[dict[str, list[str]]] = {
+        "domain": ["postgres"],
+        "content_type": ["reference"],
+    }
+
+    def test_the_concurrent_content_survives_and_the_record_still_lands(
+        self, document_store: SQLiteDocumentStore
+    ) -> None:
+        _seed(document_store, "d1", "the original body", metadata={"title": "T"})
+
+        def concurrent_write() -> None:
+            document_store.put(
+                "d1", "the concurrent body", {"title": "T", "written_by": "other"}
+            )
+
+        outcome = shadow_classify_item(
+            "d1",
+            classifier=RacingClassifier(concurrent_write, tags=self._TAGS),
+            document_store=document_store,
+        )
+
+        assert outcome.written is True
+        stored = document_store.get("d1")
+        assert stored["content"] == "the concurrent body"
+        assert stored["metadata"]["written_by"] == "other"
+        assert stored["metadata"][SHADOW_TAGS_KEY]["domain"] == ["postgres"]
+
+    def test_live_tags_written_during_the_model_call_are_not_reverted(
+        self, document_store: SQLiteDocumentStore
+    ) -> None:
+        """The guarantee this module makes, against the writer that breaks it.
+
+        A concurrent classify refresh is the likeliest second writer on a
+        shadowed store, and it touches precisely the keys
+        :data:`PROTECTED_LIVE_KEYS` names. Splatting the pre-model snapshot
+        put them back to their pre-refresh values — the shadow pass silently
+        undoing the live tagging path.
+        """
+        _seed(document_store, "d1", "body", metadata={"content_tags": _live_tags()})
+        fresh = _live_tags(signal_quality="noise")
+
+        def concurrent_tag_write() -> None:
+            doc = document_store.get("d1")
+            document_store.put(
+                "d1", doc["content"], {**doc["metadata"], "content_tags": fresh}
+            )
+
+        shadow_classify_item(
+            "d1",
+            classifier=RacingClassifier(concurrent_tag_write, tags=self._TAGS),
+            document_store=document_store,
+        )
+
+        live = document_store.get("d1")["metadata"]["content_tags"]
+        assert live["signal_quality"] == "noise"
+
+    def test_the_race_is_counted_on_the_outcome_and_the_batch(
+        self, document_store: SQLiteDocumentStore
+    ) -> None:
+        _seed(document_store, "d1", "the original body")
+        outcome = shadow_classify_item(
+            "d1",
+            classifier=RacingClassifier(
+                lambda: document_store.put("d1", "rewritten", {}), tags=self._TAGS
+            ),
+            document_store=document_store,
+        )
+        assert outcome.stale_snapshot is True
+
+        _seed(document_store, "d2", "the original body")
+        result = shadow_classify_stale(
+            classifier=RacingClassifier(
+                lambda: document_store.put("d2", "rewritten", {}), tags=self._TAGS
+            ),
+            document_store=document_store,
+        )
+        assert result.stale_snapshot == 1
+        assert result.written == 1
+
+    def test_the_counter_reads_zero_when_nothing_raced(
+        self, document_store: SQLiteDocumentStore
+    ) -> None:
+        """Both arms asserted so neither can drift to a constant."""
+        _seed(document_store, "d1", "body")
+        outcome = shadow_classify_item(
+            "d1",
+            classifier=FakeClassifier(self._TAGS),
+            document_store=document_store,
+        )
+        assert outcome.written is True
+        assert outcome.stale_snapshot is False
+
+        _seed(document_store, "d2", "body")
+        result = shadow_classify_stale(
+            classifier=FakeClassifier(self._TAGS), document_store=document_store
+        )
+        assert result.stale_snapshot == 0
+
+    def test_a_document_deleted_during_the_model_call_is_not_resurrected(
+        self, document_store: SQLiteDocumentStore, event_log: SQLiteEventLog
+    ) -> None:
+        """A ``put`` would re-insert it with pre-model content.
+
+        Counted as an error, beside the identical concurrent-delete case the
+        function already handles one branch up — a document we were asked to
+        judge and did not is not a skip. No ``MEMORY_OP_JUDGED`` is emitted:
+        the event's subject pointer would name a row that no longer exists.
+        """
+        _seed(document_store, "d1", "body")
+        outcome = shadow_classify_item(
+            "d1",
+            classifier=RacingClassifier(
+                lambda: document_store.delete("d1"), tags=self._TAGS
+            ),
+            document_store=document_store,
+            event_log=event_log,
+        )
+
+        assert outcome.written is False
+        assert document_store.get("d1") is None
+        assert event_log.get_events(event_type=EventType.MEMORY_OP_JUDGED) == []
+
+    def test_the_write_still_preserves_updated_at(
+        self,
+        document_store: SQLiteDocumentStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Re-reading must not have quietly turned this into a normal write.
+
+        Asserted against the seeded stamp as well as against itself, so the
+        ``fake_document_clock`` vacuity caveat cannot make it pass silently.
+        """
+        from tests.document_recency import fake_document_clock
+
+        clock = fake_document_clock(monkeypatch)
+        now = clock["now"]
+        clock["now"] = now - timedelta(days=365)
+        _seed(document_store, "d1", "body")
+        before = document_store.get("d1")["updated_at"]
+        assert before == (now - timedelta(days=365)).isoformat()
+
+        clock["now"] = now
+        shadow_classify_item(
+            "d1",
+            classifier=FakeClassifier(self._TAGS),
+            document_store=document_store,
+        )
+        assert document_store.get("d1")["updated_at"] == before

@@ -363,6 +363,10 @@ def shadow(
         "skipped_no_signal": result.skipped_no_signal,
         "skipped_missing_content": result.skipped_missing_content,
         "errors": result.errors,
+        # #421: documents whose content changed while the model was judging
+        # them. A subset of ``written`` — the record landed on the *current*
+        # content — so it is a concurrency signal, not a failure count.
+        "stale_snapshot": result.stale_snapshot,
         "dry_run": dry_run,
         "item_ids_written": list(result.item_ids_written),
     }
@@ -383,6 +387,12 @@ def shadow(
             console.print(
                 f"[red]  {result.errors} document(s) failed and were skipped — "
                 f"see the log for the item IDs.[/red]"
+            )
+        if result.stale_snapshot:
+            console.print(
+                f"[yellow]  {result.stale_snapshot} document(s) were written "
+                f"concurrently while being judged — the shadow record was "
+                f"merged onto the current content.[/yellow]"
             )
         if dry_run:
             console.print("  [yellow]dry-run — nothing written, no events[/yellow]")

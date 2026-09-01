@@ -1577,6 +1577,264 @@ class TestEnrichPreservesRecency:
         ]
 
 
+class TestEnrichSurvivesAConcurrentWrite:
+    """#421 — the write-back must not revert a write made inside the LLM window.
+
+    ``_select_enrichment_candidates`` hands back snapshots; ``batch_enrich``
+    then runs *all N* model calls to completion before the first write. On a
+    corpus-scale batch that window is minutes, and the un-fixed write-back
+    landed ``doc["content"]`` and ``doc["metadata"]`` from before it — so a
+    concurrent write was reverted with no error and no log line.
+
+    Post-#406/#418 the revert is worse than a lost update: the write correctly
+    passes ``preserve_updated_at=True``, so the row keeps the *losing* writer's
+    stamp while holding pre-LLM content, and
+    ``retrieve.file_context``'s ``newest_item_at`` — the #307 hook's staleness
+    gate — reads a timestamp the content does not correspond to.
+
+    The race is simulated where it actually happens: the stub model performs
+    the concurrent write from inside ``generate``, so it lands between
+    selection and the write-back exactly as a second process would. The writer
+    is a *second* store instance on the same file, which is the real
+    deployment shape (host CLI + container, one bind-mounted data dir).
+    """
+
+    _CANNED = json.dumps(
+        {
+            "tags": ["alpha"],
+            "class": "reference",
+            "summary": "A summary.",
+            "importance": 0.6,
+            "tag_confidence": 0.9,
+            "class_confidence": 0.9,
+        }
+    )
+
+    @staticmethod
+    def _llm_that_writes(canned: str, side_effect) -> _StubLLM:
+        """A stub model that performs ``side_effect`` on its first call."""
+
+        class _Racing(_StubLLM):
+            def __init__(self) -> None:
+                super().__init__(canned)
+                self._fired = False
+
+            async def generate(self, **kwargs):
+                if not self._fired:
+                    self._fired = True
+                    side_effect()
+                return await super().generate(**kwargs)
+
+        return _Racing()
+
+    def test_the_concurrent_content_survives_and_the_tags_still_land(
+        self, temp_stores: StoreRegistry, monkeypatch
+    ) -> None:
+        """The core of #421. Fails against the un-fixed write-back.
+
+        Both halves are asserted together on purpose: a fix that protected the
+        content by skipping the write would pass the first assertion and lose
+        the enrichment, which is the other way this can silently fail.
+        """
+        doc_store = temp_stores.knowledge.document_store
+        doc_store.put("doc-x", "the original body", {"title": "X"})
+
+        def concurrent_write() -> None:
+            doc_store.put(
+                "doc-x",
+                "the body a second writer stored mid-batch",
+                {"title": "X", "written_by": "the other process"},
+            )
+
+        monkeypatch.setattr(
+            worker,
+            "_require_llm_client_or_exit",
+            lambda: self._llm_that_writes(self._CANNED, concurrent_write),
+        )
+        result = runner.invoke(app, ["worker", "enrich", "--format", "json"])
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout.strip())
+        assert data["enriched"] == 1
+
+        doc = doc_store.get("doc-x")
+        assert doc["content"] == "the body a second writer stored mid-batch"
+        # The metadata half of the same lost update, which a content-hash
+        # check cannot see: the concurrent writer's own key survives too.
+        assert doc["metadata"]["written_by"] == "the other process"
+        assert doc["metadata"]["content_tags"]["classified_mode"] == "enrichment"
+        assert doc["metadata"]["auto_importance"] == pytest.approx(0.6)
+
+    def test_the_race_is_counted(self, temp_stores: StoreRegistry, monkeypatch) -> None:
+        """A silent merge would hide a real signal about deployment concurrency."""
+        doc_store = temp_stores.knowledge.document_store
+        doc_store.put("doc-x", "the original body", {"title": "X"})
+        monkeypatch.setattr(
+            worker,
+            "_require_llm_client_or_exit",
+            lambda: self._llm_that_writes(
+                self._CANNED, lambda: doc_store.put("doc-x", "rewritten", {})
+            ),
+        )
+        result = runner.invoke(app, ["worker", "enrich", "--format", "json"])
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.stdout.strip())["stale_snapshot"] == 1
+
+    def test_the_counter_reads_zero_when_nothing_raced(
+        self, temp_stores: StoreRegistry, monkeypatch
+    ) -> None:
+        """Paired with the test above so neither arm can drift to a constant."""
+        doc_store = temp_stores.knowledge.document_store
+        doc_store.put("doc-x", "the original body", {"title": "X"})
+        monkeypatch.setattr(
+            worker, "_require_llm_client_or_exit", lambda: _StubLLM(self._CANNED)
+        )
+        result = runner.invoke(app, ["worker", "enrich", "--format", "json"])
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout.strip())
+        assert data["enriched"] == 1
+        assert data["stale_snapshot"] == 0
+        assert data["vanished"] == 0
+
+    def test_the_losing_writers_stamp_is_left_alone(
+        self, temp_stores: StoreRegistry, monkeypatch
+    ) -> None:
+        """The "row actively lies" half of #421, now honest.
+
+        The concurrent writer stamps T. The enrichment preserves ``updated_at``
+        — correctly, #418 — so before this fix the row reported "current as of
+        T" while holding the *pre-LLM* content. Now the content at T is the
+        content the row holds, so the same preserved stamp is true.
+
+        Asserted against the seeded stamp, not merely against itself: the
+        ``fake_document_clock`` caveat is that a stamp comparison passes
+        vacuously if the patch missed.
+        """
+        from datetime import timedelta
+
+        doc_store = temp_stores.knowledge.document_store
+        clock = fake_document_clock(monkeypatch)
+        now = clock["now"]
+
+        clock["now"] = now - timedelta(days=365)
+        doc_store.put("doc-x", "the original body", {"title": "X"})
+
+        concurrent_stamp = now - timedelta(days=1)
+
+        def concurrent_write() -> None:
+            clock["now"] = concurrent_stamp
+            doc_store.put("doc-x", "the concurrent body", {"title": "X"})
+            clock["now"] = now
+
+        monkeypatch.setattr(
+            worker,
+            "_require_llm_client_or_exit",
+            lambda: self._llm_that_writes(self._CANNED, concurrent_write),
+        )
+        result = runner.invoke(app, ["worker", "enrich", "--format", "json"])
+        assert result.exit_code == 0, result.output
+
+        doc = doc_store.get("doc-x")
+        assert doc["updated_at"] == concurrent_stamp.isoformat()
+        assert doc["content"] == "the concurrent body"
+
+    def test_the_enrichment_merges_onto_the_current_tag_bag(
+        self, temp_stores: StoreRegistry, monkeypatch
+    ) -> None:
+        """The prior tags come from the re-read, not from the snapshot.
+
+        ``_enriched_content_tags`` derives ``custom`` and ``classified_by``
+        from the prior value, so taking that prior from the pre-LLM snapshot
+        would revert a concurrent tag write while the content survived — the
+        same defect, one key deeper.
+        """
+        doc_store = temp_stores.knowledge.document_store
+        doc_store.put("doc-x", "the original body", {"title": "X"})
+
+        def concurrent_tag_write() -> None:
+            doc = doc_store.get("doc-x")
+            doc_store.put(
+                "doc-x",
+                doc["content"],
+                {**doc["metadata"], "content_tags": {"custom": {"k": ["v"]}}},
+            )
+
+        monkeypatch.setattr(
+            worker,
+            "_require_llm_client_or_exit",
+            lambda: self._llm_that_writes(self._CANNED, concurrent_tag_write),
+        )
+        result = runner.invoke(app, ["worker", "enrich", "--format", "json"])
+        assert result.exit_code == 0, result.output
+
+        custom = doc_store.get("doc-x")["metadata"]["content_tags"]["custom"]
+        assert custom["k"] == ["v"]
+        assert custom["llm_tags"] == ["alpha"]
+
+    def test_a_document_deleted_mid_batch_is_not_resurrected(
+        self, temp_stores: StoreRegistry, monkeypatch
+    ) -> None:
+        """``put`` on a missing id inserts, which would undo the delete.
+
+        Un-guarded the row comes back carrying pre-LLM content and a fresh
+        ``created_at``, with nothing recording that it had been removed.
+        """
+        doc_store = temp_stores.knowledge.document_store
+        doc_store.put("doc-x", "the original body", {"title": "X"})
+        monkeypatch.setattr(
+            worker,
+            "_require_llm_client_or_exit",
+            lambda: self._llm_that_writes(
+                self._CANNED, lambda: doc_store.delete("doc-x")
+            ),
+        )
+        result = runner.invoke(app, ["worker", "enrich", "--format", "json"])
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout.strip())
+        assert data["enriched"] == 0
+        assert data["vanished"] == 1
+        assert doc_store.get("doc-x") is None
+
+    def test_the_vector_mirror_carries_the_merged_metadata(
+        self, temp_stores: StoreRegistry, monkeypatch
+    ) -> None:
+        """#338's mirror must forward what landed, not the snapshot bag.
+
+        Mirroring ``doc["metadata"]`` would push the pre-LLM ``content_tags``
+        onto the vector row — reintroducing on the semantic axis exactly the
+        revert the re-read removed from the document store.
+        """
+        doc_store = temp_stores.knowledge.document_store
+        vector_store = temp_stores.knowledge.vector_store
+        doc_store.put("doc-x", "the original body", {"title": "X"})
+        vector_store.upsert(
+            "doc-x",
+            [0.4, 0.5, 0.6],
+            {"doc_id": "doc-x", "content_tags": {"classified_mode": "ingestion"}},
+        )
+
+        def concurrent_tag_write() -> None:
+            doc = doc_store.get("doc-x")
+            doc_store.put(
+                "doc-x",
+                doc["content"],
+                {**doc["metadata"], "content_tags": {"custom": {"k": ["v"]}}},
+            )
+
+        monkeypatch.setattr(
+            worker,
+            "_require_llm_client_or_exit",
+            lambda: self._llm_that_writes(self._CANNED, concurrent_tag_write),
+        )
+        result = runner.invoke(app, ["worker", "enrich", "--format", "json"])
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.stdout.strip())["vector_rows_synced"] == 1
+
+        doc = doc_store.get("doc-x")
+        row = vector_store.get("doc-x")
+        assert not vector_metadata_diverges(doc["metadata"], row["metadata"])
+        assert row["metadata"]["content_tags"]["custom"]["k"] == ["v"]
+
+
 class TestCurateSurvivesASecondWriter:
     """#438 — the nightly cron is not the advisory file's only writer.
 

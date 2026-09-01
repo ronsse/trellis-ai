@@ -70,6 +70,7 @@ from trellis.classify.refresh import (
     default_context_builder,
     parse_classified_at,
 )
+from trellis.core.derived_metadata import apply_derived_metadata
 from trellis.core.hashing import content_hash
 from trellis.schemas.classification import (
     CONTENT_TYPE_VALUES,
@@ -92,6 +93,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from trellis.classify.protocol import Classifier
+    from trellis.core.derived_metadata import DerivedMetadataWrite
     from trellis.stores.base.document import DocumentStore
     from trellis.stores.base.event_log import EventLog
 
@@ -147,6 +149,11 @@ class ShadowOutcome:
     #: The item's *live* ``content_tags``, unchanged — carried so a caller can
     #: diff without a second read.
     live: dict[str, Any] | None = None
+    #: ``True`` when the document's content changed while the model was
+    #: judging it (#421). The record is still written, onto the current
+    #: content; the verdict describes the content the ``MEMORY_OP_JUDGED``
+    #: digest names, which is the older one.
+    stale_snapshot: bool = False
 
 
 @dataclass
@@ -162,6 +169,11 @@ class BatchShadowResult:
     skipped_fresh: int = 0
     skipped_no_signal: int = 0
     errors: int = 0
+    #: Documents whose content changed while the model was judging them
+    #: (#421). A subset of ``written`` — the record landed on the current
+    #: content — so it does not participate in the one-bucket-each rule above.
+    #: A standing non-zero here means the pass is racing another writer.
+    stale_snapshot: int = 0
     item_ids_written: list[str] = field(default_factory=list)
 
 
@@ -268,18 +280,28 @@ def shadow_classify_item(
             live=live,
         )
 
-    _write_shadow(
+    write = _write_shadow(
         document_store,
         item_id=item_id,
         content=content,
-        metadata=metadata,
         shadow_json=shadow_json,
     )
+    if not write.written:
+        # Deleted between the read and the write. Reusing REASON_NOT_FOUND
+        # keeps this in `errors` beside the identical case one branch up: a
+        # document we were asked to judge and did not.
+        return ShadowOutcome(
+            item_id=item_id,
+            written=False,
+            reason=REASON_NOT_FOUND,
+            live=live,
+        )
     logger.info(
         "shadow_tags_written",
         item_id=item_id,
         classified_by=shadow.classified_by,
         model_id=shadow.model_id,
+        stale_snapshot=write.content_changed,
     )
 
     if event_log is not None:
@@ -298,6 +320,7 @@ def shadow_classify_item(
         reason=REASON_WRITTEN,
         shadow=shadow_json,
         live=live,
+        stale_snapshot=write.content_changed,
     )
 
 
@@ -397,6 +420,7 @@ def shadow_classify_stale(
         skipped_fresh=result.skipped_fresh,
         skipped_no_signal=result.skipped_no_signal,
         errors=result.errors,
+        stale_snapshot=result.stale_snapshot,
         dry_run=dry_run,
     )
     return result
@@ -662,17 +686,17 @@ def _write_shadow(
     *,
     item_id: str,
     content: str,
-    metadata: dict[str, Any],
     shadow_json: dict[str, Any],
-) -> None:
+) -> DerivedMetadataWrite:
     """Persist the shadow record without disturbing anything retrieval reads.
 
-    Two distinct things have to hold, and only the first is obvious.
+    Three distinct things have to hold, and only the first is obvious.
 
     **The live tag keys must not change.** The write is a whole-metadata
-    ``put`` (the store API offers no partial update), so the live values are
-    captured before the shadow key is set and restored after — even a caller
-    that handed us a mutated mapping cannot move them.
+    ``put`` (the store API offers no partial update), so only
+    :data:`SHADOW_TAGS_KEY` is overlaid and every other key — the live ones in
+    :data:`PROTECTED_LIVE_KEYS` included — is carried through verbatim. The
+    guarantee is structural, not a restore step.
 
     **The row must not look modified.** ``put`` normally stamps
     ``updated_at`` with the current time, and ``updated_at`` is what
@@ -683,15 +707,22 @@ def _write_shadow(
     only checks the shadow *values* stay out of a pack. ``preserve_updated_at``
     is why the guarantee actually holds; see
     ``DocumentStoreContractTests.test_put_preserve_updated_at_keeps_prior_stamp``.
+
+    **The row must be re-read (#421).** A model call is ~1.6 s and sits
+    between the ``get`` in :func:`shadow_classify_item` and this write, so a
+    snapshot write-back would silently revert anything that landed in
+    between — content *and* the live tags this module goes to such lengths not
+    to disturb. Over a whole-corpus pass that window is open once per
+    document. So the write goes through
+    :func:`~trellis.core.derived_metadata.apply_derived_metadata`, which
+    re-reads and overlays; ``content`` is passed only so a concurrent write
+    can be *detected* and counted, never so it can be written back.
     """
-    # `metadata` is this function's own copy and ``SHADOW_TAGS_KEY`` is not in
-    # :data:`PROTECTED_LIVE_KEYS`, so the splat cannot move a live key — the
-    # guarantee is structural, not a restore step.
-    document_store.put(
+    return apply_derived_metadata(
+        document_store,
         item_id,
-        content,
-        {**metadata, SHADOW_TAGS_KEY: shadow_json},
-        preserve_updated_at=True,
+        lambda _current: {SHADOW_TAGS_KEY: shadow_json},
+        snapshot_content=content,
     )
 
 
@@ -716,6 +747,8 @@ def _tally(result: BatchShadowResult, item_id: str, outcome: ShadowOutcome) -> N
     if outcome.written:
         result.written += 1
         result.item_ids_written.append(item_id)
+        if outcome.stale_snapshot:
+            result.stale_snapshot += 1
     elif outcome.reason == REASON_NO_SIGNAL:
         result.skipped_no_signal += 1
     else:

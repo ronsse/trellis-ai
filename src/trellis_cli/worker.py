@@ -38,6 +38,7 @@ import signal
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -47,6 +48,7 @@ import yaml
 from rich.console import Console
 from rich.markup import escape
 
+from trellis.core.derived_metadata import apply_derived_metadata
 from trellis.core.vector_metadata import (
     resolve_vector_store,
     sync_vector_metadata,
@@ -1179,7 +1181,7 @@ def enrich_cmd(
                 console.print(f"  - {cand['doc_id']}")
         return
 
-    enriched = _run_batch_enrichment(
+    summary = _run_batch_enrichment(
         llm,
         document_store,
         candidates,
@@ -1194,14 +1196,28 @@ def enrich_cmd(
                 "status": "ok",
                 "dry_run": False,
                 "selected": len(candidates),
-                "enriched": enriched,
+                "enriched": summary.enriched,
+                "failed": summary.failed,
+                # #421: concurrent writes seen inside the LLM window. Not a
+                # failure count — those rows were enriched onto their current
+                # content — but a standing rate here means candidate pages are
+                # racing another writer and the batch wants a smaller --limit.
+                "stale_snapshot": summary.stale_snapshot,
+                "vanished": summary.vanished,
+                "vector_rows_synced": summary.vector_rows_synced,
             }
         )
         return
     console.print(
-        f"[bold]worker enrich[/bold] — {enriched}/{len(candidates)} "
+        f"[bold]worker enrich[/bold] — {summary.enriched}/{len(candidates)} "
         f"document(s) enriched"
     )
+    if summary.stale_snapshot or summary.vanished:
+        console.print(
+            f"  [yellow]concurrent writes during the LLM window:[/yellow] "
+            f"{summary.stale_snapshot} document(s) changed (enriched onto "
+            f"current content), {summary.vanished} deleted (skipped)"
+        )
 
 
 def _require_llm_client_or_exit() -> Any:
@@ -1318,6 +1334,63 @@ def _enriched_content_tags(
     return merged.model_dump(mode="json")
 
 
+def _enrichment_updates(
+    current_metadata: dict[str, Any],
+    result: Any,
+    *,
+    stamp: datetime,
+) -> dict[str, Any]:
+    """The metadata keys ``worker enrich`` owns, derived against *current*.
+
+    The three keys below are the entire footprint of an enrichment write.
+    Expressing it as an overlay rather than as a whole-bag rewrite is what
+    lets :func:`~trellis.core.derived_metadata.apply_derived_metadata` carry
+    every other key through untouched — including keys a concurrent writer
+    added while the LLM was running (#421).
+
+    ``auto_importance`` and ``document_form`` are omitted rather than written
+    as falsy when the model supplied neither, so a prior value survives; that
+    was the pre-#421 behaviour too, and it is now the row's *current* prior
+    rather than the snapshot's.
+    """
+    updates: dict[str, Any] = {
+        "content_tags": _enriched_content_tags(
+            current_metadata.get("content_tags"), result, stamp=stamp
+        )
+    }
+    # `auto_importance` is read from *flat* metadata by
+    # `retrieve.strategies._apply_importance`; writing it inside
+    # `content_tags` (as this path used to) put it where no reader looks.
+    if result.auto_importance:
+        updates["auto_importance"] = result.auto_importance
+    # The enrichment vocabulary is a document *form*, not a content-type
+    # facet — same reconciliation `schemas/document_metadata.py` made for
+    # the flat key. See `classify.classifiers.llm` for the full argument.
+    if result.auto_class:
+        updates["document_form"] = result.auto_class
+    return updates
+
+
+@dataclass
+class BatchEnrichmentResult:
+    """Counts from one ``worker enrich`` write pass.
+
+    ``stale_snapshot`` is the #421 race made countable. It fires when the
+    stored content changed between candidate selection and the write-back —
+    i.e. a concurrent write landed inside the LLM window. The enrichment is
+    still applied (onto the current content), so this is a concurrency signal
+    for the operator, not a failure count; ``enriched`` includes these rows.
+    ``vanished`` counts rows deleted inside the same window, which are *not*
+    written — a ``put`` would resurrect them.
+    """
+
+    enriched: int = 0
+    failed: int = 0
+    stale_snapshot: int = 0
+    vanished: int = 0
+    vector_rows_synced: int = 0
+
+
 def _run_batch_enrichment(
     llm: Any,
     document_store: DocumentStore,
@@ -1326,10 +1399,10 @@ def _run_batch_enrichment(
     concurrency: int,
     event_log: EventLog,
     vector_store: VectorStore | None,
-) -> int:
+) -> BatchEnrichmentResult:
     """Enrich candidates and write successful results back via the tag path.
 
-    Returns the number of documents whose tags were updated **in the
+    ``enriched`` counts the documents whose tags were updated **in the
     document store** — the authoritative count, unchanged by whether a
     vector row existed to mirror onto.
 
@@ -1342,6 +1415,16 @@ def _run_batch_enrichment(
     document on its pre-enrichment ``auto_importance`` and serving its
     pre-enrichment ``content_tags`` — #338 again, on a second path (found
     while fixing #381).
+
+    **The write-back re-reads (#421).** ``candidates`` are snapshots taken
+    before *N* LLM calls — minutes on a corpus-scale batch — so writing
+    ``doc["content"]`` and ``doc["metadata"]`` back would silently revert any
+    write that landed inside that window. Every write therefore goes through
+    :func:`~trellis.core.derived_metadata.apply_derived_metadata`, which
+    re-reads the row and merges only the three keys this path owns onto
+    whatever it says now. One ``get`` per written row against *N* completed
+    model calls is not a cost worth reasoning about, and it is what makes
+    ``preserve_updated_at=True`` true by construction rather than in intent.
     """
     from trellis_workers.enrichment.service import EnrichmentService  # noqa: PLC0415
 
@@ -1359,10 +1442,10 @@ def _run_batch_enrichment(
     results = asyncio.run(service.batch_enrich(items, concurrency=concurrency))
 
     stamp = datetime.now(UTC)
-    enriched = 0
-    vector_rows_synced = 0
+    summary = BatchEnrichmentResult()
     for doc, result in zip(candidates, results, strict=True):
         if not result.success:
+            summary.failed += 1
             logger.warning(
                 "worker_enrich.item_failed",
                 doc_id=doc.get("doc_id"),
@@ -1370,20 +1453,6 @@ def _run_batch_enrichment(
                 failure_kind=getattr(result.failure_kind, "value", None),
             )
             continue
-        metadata = dict(doc.get("metadata") or {})
-        metadata["content_tags"] = _enriched_content_tags(
-            metadata.get("content_tags"), result, stamp=stamp
-        )
-        # `auto_importance` is read from *flat* metadata by
-        # `retrieve.strategies._apply_importance`; writing it inside
-        # `content_tags` (as this path used to) put it where no reader looks.
-        if result.auto_importance:
-            metadata["auto_importance"] = result.auto_importance
-        # The enrichment vocabulary is a document *form*, not a content-type
-        # facet — same reconciliation `schemas/document_metadata.py` made for
-        # the flat key. See `classify.classifiers.llm` for the full argument.
-        if result.auto_class:
-            metadata["document_form"] = result.auto_class
         # Metadata-only: ``content`` is the row's own and only derived tags
         # change. Same operation as ``classify.refresh``, which passes the
         # flag for the same reason, and at the same scale — a full pass
@@ -1397,28 +1466,46 @@ def _run_batch_enrichment(
         # ``retrieve.file_context`` reports for every corpus path at once
         # (#406).
         #
-        # A note on what the flag now hides: the write-back lands
-        # ``doc["content"]`` from a snapshot taken before N LLM calls, so a
-        # concurrent write in that window is silently reverted. That race
-        # predates this flag — but the bumped stamp was the only incidental
-        # trace it left, and preserving the stamp removes it (#421).
-        document_store.put(
-            doc["doc_id"], doc["content"], metadata, preserve_updated_at=True
+        # ``apply_derived_metadata`` is what makes that flag honest: the row
+        # is re-read here, so the content written is the current one and the
+        # prior tag bag these updates merge onto is the current one too
+        # (#421). ``doc`` is a pre-LLM snapshot and is deliberately *not* the
+        # source of either.
+        write = apply_derived_metadata(
+            document_store,
+            doc["doc_id"],
+            partial(_enrichment_updates, result=result, stamp=stamp),
+            snapshot_content=doc.get("content"),
         )
-        enriched += 1
+        if write.content_changed:
+            summary.stale_snapshot += 1
+        if not write.written:
+            # The row was deleted inside the LLM window. Not resurrected: a
+            # ``put`` on a missing id inserts, which would undo the delete and
+            # re-file pre-LLM content under a fresh ``created_at``.
+            summary.vanished += 1
+            continue
+        assert write.metadata is not None  # `written` implies the merged bag
+        summary.enriched += 1
         # After the authoritative write, never before — the document row is
         # what a re-run repairs from, so it has to land first. Fail-soft: a
         # mirror failure must not lose the tag that was already written.
-        if sync_vector_metadata(vector_store, doc["doc_id"], metadata):
-            vector_rows_synced += 1
+        # Mirrors ``write.metadata`` (what actually landed), never the
+        # snapshot bag — mirroring the snapshot would push the very keys the
+        # re-read exists to preserve onto the vector row.
+        if sync_vector_metadata(vector_store, doc["doc_id"], write.metadata):
+            summary.vector_rows_synced += 1
         logger.info("worker_enrich.item_enriched", doc_id=doc.get("doc_id"))
     logger.info(
         "worker_enrich.batch_written",
-        enriched=enriched,
-        vector_rows_synced=vector_rows_synced,
+        enriched=summary.enriched,
+        failed=summary.failed,
+        stale_snapshot=summary.stale_snapshot,
+        vanished=summary.vanished,
+        vector_rows_synced=summary.vector_rows_synced,
         vector_store_supplied=vector_store is not None,
     )
-    return enriched
+    return summary
 
 
 # ---------------------------------------------------------------------------

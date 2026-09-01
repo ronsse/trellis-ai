@@ -77,6 +77,30 @@ class TestShadowCommand:
         assert result.exit_code != 0
         assert "llm" in result.output.lower()
 
+    def test_the_race_counter_reaches_the_operator(self, cli_env, monkeypatch) -> None:
+        """#421 — a counter nobody can read is not a counter.
+
+        The library-side tally is pinned in ``tests/unit/classify/test_shadow.py``;
+        what this pins is that the CLI actually forwards it, on both surfaces.
+        A concurrent write during a shadow pass is a fact about deployment
+        concurrency the operator has to be able to see.
+        """
+        from trellis.classify.shadow import BatchShadowResult
+        from trellis_cli import classify as classify_cli
+
+        monkeypatch.setattr(classify_cli, "_require_llm_facet_classifier", object)
+        monkeypatch.setattr(
+            classify_cli,
+            "shadow_classify_stale",
+            lambda **_kwargs: BatchShadowResult(scanned=3, written=3, stale_snapshot=2),
+        )
+
+        assert _run_json("shadow")["stale_snapshot"] == 2
+
+        result = runner.invoke(classify_app, ["shadow"])
+        assert result.exit_code == 0, result.output
+        assert "2 document(s) were written" in result.output
+
 
 class TestShadowReportCommand:
     def test_reports_nothing_shadowed(self, cli_env) -> None:
