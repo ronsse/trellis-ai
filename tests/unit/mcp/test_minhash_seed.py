@@ -31,6 +31,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from mcp.shared.exceptions import McpError
 
 import trellis.mcp.server as server_mod
 from tests.unit.mcp.conftest import unwrap_tool
@@ -355,3 +356,103 @@ class TestSeedFailureIsVisible:
             kw for event, kw in recorded if event == "minhash_seed_walk_stalled"
         ]
         assert fields["indexed"] == 1
+
+
+@pytest.mark.usefixtures("_fresh_index")
+class TestAFailedSeedIsNotCached:
+    """A seed that dies mid-walk must not leave a partial index behind.
+
+    ``_get_minhash_index``'s docstring promises that a broken dedup path is
+    *raised* rather than silently disabled, because silent disable means
+    memories are stored without the fuzzy dedup the operator asked for and the
+    duplicates it would have caught are invisible.
+
+    Publishing the index to the module global before seeding it kept that
+    promise for exactly one call: the raise fired once, and every call after it
+    took the ``if _minhash_index is not None`` early return and got an index
+    holding whatever prefix of the corpus the walk had reached. #402's repair
+    is what made this reachable — the old ``search("")`` seed could not fail,
+    so nothing had to survive a failure.
+    """
+
+    @staticmethod
+    def _fail_after_the_first_page(
+        store: Any,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """First page reads, every later page raises — on every attempt.
+
+        Keyed on ``offset`` rather than on a call counter so a *retry* fails
+        the same way the first attempt did; a counter would let the second
+        call succeed for the wrong reason and hide what these tests assert.
+        """
+        real = store.list_documents
+
+        def flaky(**kwargs: Any) -> list[dict[str, Any]]:
+            if kwargs.get("offset", 0) > 0:
+                msg = "transient store failure"
+                raise RuntimeError(msg)
+            return list(real(**kwargs))
+
+        monkeypatch.setattr(store, "list_documents", flaky)
+
+    def test_a_seed_failure_leaves_no_index_behind(
+        self,
+        temp_registry: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        store = temp_registry.knowledge.document_store
+        for i in range(3):
+            store.put(f"doc-{i}", f"{STORED} Variation number {i} of the note.")
+        monkeypatch.setattr(server_mod, "_MINHASH_SEED_PAGE_SIZE", 2)
+        _enable(monkeypatch, max_docs=10)
+        self._fail_after_the_first_page(store, monkeypatch)
+
+        with pytest.raises(McpError):
+            server_mod._get_minhash_index(temp_registry)
+
+        assert server_mod._minhash_index is None
+
+    def test_the_call_after_a_seed_failure_raises_too(
+        self,
+        temp_registry: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The second call is the one the old code got wrong.
+
+        It returned a silently under-seeded index instead of re-raising, so a
+        deployment that hit one transient store error at boot ran the rest of
+        the process with fuzzy dedup covering an arbitrary prefix of the
+        corpus and said nothing.
+        """
+        store = temp_registry.knowledge.document_store
+        for i in range(3):
+            store.put(f"doc-{i}", f"{STORED} Variation number {i} of the note.")
+        monkeypatch.setattr(server_mod, "_MINHASH_SEED_PAGE_SIZE", 2)
+        _enable(monkeypatch, max_docs=10)
+        self._fail_after_the_first_page(store, monkeypatch)
+
+        with pytest.raises(McpError):
+            server_mod._get_minhash_index(temp_registry)
+        with pytest.raises(McpError):
+            server_mod._get_minhash_index(temp_registry)
+
+    def test_a_later_call_seeds_completely_once_the_store_recovers(
+        self,
+        temp_registry: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Nothing cached means the retry is a real retry, not a repeat."""
+        store = temp_registry.knowledge.document_store
+        for i in range(3):
+            store.put(f"doc-{i}", f"{STORED} Variation number {i} of the note.")
+        monkeypatch.setattr(server_mod, "_MINHASH_SEED_PAGE_SIZE", 2)
+        _enable(monkeypatch, max_docs=10)
+        real = store.list_documents
+        self._fail_after_the_first_page(store, monkeypatch)
+
+        with pytest.raises(McpError):
+            server_mod._get_minhash_index(temp_registry)
+        monkeypatch.setattr(store, "list_documents", real)
+
+        assert server_mod._get_minhash_index(temp_registry).size == 3

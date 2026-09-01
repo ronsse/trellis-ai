@@ -210,3 +210,23 @@ class TestFailuresPropagate:
         store.put.side_effect = RuntimeError("disk full")
         with pytest.raises(RuntimeError, match="disk full"):
             apply_derived_metadata(store, "d1", _tag)
+
+    def test_a_row_without_content_raises_rather_than_blanking_it(self) -> None:
+        """``content`` is the store contract, so a missing key is a defect.
+
+        ``content = current.get("content", "")`` would write the empty string
+        over the document body and return ``written=True`` — the row is
+        destroyed and the counters say the enrichment succeeded. Both shipped
+        backends always return ``content``, but ``StoreRegistry`` late-binds
+        backends by config through ``importlib``, so "no shipped backend does
+        this" is not the same as "no backend does this". Found by the #455
+        review gate; ``_seed_minhash_index`` already takes this posture for a
+        *read*, and a write path has more to lose.
+        """
+        store = MagicMock(spec=DocumentStore)
+        store.get.return_value = {"doc_id": "d1", "metadata": {"keep": "me"}}
+
+        with pytest.raises(KeyError):
+            apply_derived_metadata(store, "d1", _tag)
+
+        store.put.assert_not_called()

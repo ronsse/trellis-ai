@@ -70,8 +70,18 @@ trellis admin stats [--format text|json]
 **JSON output:**
 
 ```json
-{"traces": 42, "documents": 15, "nodes": 23, "edges": 31, "events": 127}
+{"status": "ok", "traces": 42, "documents": 15, "document_rows": 37, "nodes": 23, "edges": 31, "events": 127}
 ```
+
+`documents` counts **whole documents** and reconciles with
+`GET /api/v1/documents`' `total`; `document_rows` counts **every stored row**,
+including the `<parent>#chunk-N` fragments corpus ingestion writes, and
+reconciles with `GET /api/v1/documents?include_chunks=true` (#412). The same
+two keys are returned by `GET /api/v1/stats`, field for field.
+
+> **Breaking, since #451:** `documents` used to be the row count. A consumer
+> that wants that number reads `document_rows`. Nothing errors on the change —
+> a reader that is not updated silently reports a different population.
 
 ### `trellis admin serve`
 

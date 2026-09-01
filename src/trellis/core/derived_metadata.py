@@ -26,14 +26,30 @@ The invariant this module exists to make cheap:
 
 Two things follow from doing it here rather than at each call site.
 
-**The content lost update disappears by construction**, because the content
-written is the one just read rather than the snapshot's. The cost is one
-``get`` per *written* row, which is nothing against the LLM or embedder call
-that opened the window — the ratio is the whole argument, and it is why this
-is not applied to sites whose read and write happen in the same breath (see
-the per-site notes in the #421 PR). Applying it to a fast path is pure cost.
+**The wide window closes; the narrow one does not.** The content written is
+the one just read rather than the snapshot's, so the minutes-long batch
+window is gone. But the ``get`` and the ``put`` are two statements with no
+transaction around them — a SQLite ``SELECT`` starts none, and ``put``'s
+``INSERT … ON CONFLICT`` opens and commits its own — so a write landing
+between them is still reverted, silently, with ``preserve_updated_at=True``
+asserted over it exactly as before. This is a compare-and-nothing, not a
+compare-and-swap: same shape as the #438 advisory write, which closes its
+wide window and narrows its tiny one, and says so. Last-writer-wins survives
+here at microsecond scale instead of minute scale, which is the whole value
+and is worth having — but it is a quantitative win, not the qualitative one
+an earlier draft of this docstring claimed (found by the #455 review gate).
+Closing it needs ``BEGIN IMMEDIATE`` around the pair on SQLite and a
+``SET metadata = metadata || …`` on Postgres; neither is warranted by any
+measured collision yet, and :attr:`DerivedMetadataWrite.content_changed` is
+the counter that would show one.
 
-**The metadata lost update disappears too**, and that half is easy to miss: a
+The cost is one ``get`` per *written* row, which is nothing against the LLM
+or embedder call that opened the window — the ratio is the whole argument,
+and it is why this is not applied to sites whose read and write happen in
+the same breath (see the per-site notes in the #421 PR). Applying it to a
+fast path is pure cost.
+
+**The metadata lost update narrows with it**, and that half is easy to miss: a
 concurrent *metadata* writer (a classify refresh, a lifecycle stamp) leaves
 ``content`` byte-identical, so a content-hash check sees nothing, yet the
 snapshot write-back clobbers its keys just the same. That is why the update
@@ -132,7 +148,14 @@ def apply_derived_metadata(
         logger.warning("derived_metadata.row_vanished", doc_id=doc_id)
         return DerivedMetadataWrite(doc_id=doc_id, written=False, vanished=True)
 
-    content = current.get("content", "")
+    # Subscripted, not ``.get``: ``content`` is the ``DocumentStore``
+    # contract and both shipped backends always return it. A backend that
+    # omits it is broken, and a ``KeyError`` propagating out of the batch
+    # says so — where a ``.get(..., "")`` default would write the empty
+    # string over the document body and report ``written=True``. Same
+    # reasoning as ``_seed_minhash_index``'s subscripted read, applied to a
+    # write path where it matters more (#455).
+    content = current["content"]
     metadata: dict[str, Any] = dict(current.get("metadata") or {})
     content_changed = snapshot_content is not None and snapshot_content != content
     if content_changed:

@@ -103,6 +103,18 @@ All notable changes to Trellis will be documented in this file.
 
 ### Changed
 
+- **BREAKING: `StatsResponse.documents` changed meaning in place** — it was
+  the physical document *row* count and is now the *whole-document* count,
+  with the old number moved to a new `document_rows` field. Affects
+  `GET /api/v1/stats` and `trellis admin stats --format json`. Nothing errors
+  on the change, which is what makes it worth calling out: a reader that is
+  not updated silently reports a different population. On the reference
+  deployment the two numbers are 579 and 1,319 — the same 2.3x disagreement
+  `GET /api/v1/documents`' `total` already had with the old stats field, which
+  is why both are now named rather than one being picked (#412, #451). A
+  consumer that wants the storage number reads `document_rows`; one that wants
+  the number reconciling with the documents listing keeps reading `documents`.
+
 - **BREAKING: `trellis policy show --format json` now emits an envelope**
   — `{"status", "policy"[, "store_degradation"]}` — where it emitted a bare
   `Policy` dump. Forced by `extra="forbid"`: a dump plus a `store_degradation`
