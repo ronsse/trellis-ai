@@ -224,10 +224,17 @@ a green local run says nothing about any cloud backend. What CI actually covers:
 
 - **On pull requests** (`tests.yml`): SQLite backends only. Every `postgres` / `pgvector` /
   `neo` / `arcadedb` test is deselected — for the *graph* and *vector* contracts alike.
-- **On push to `main`** (`live-infra.yml`): the Postgres + Neo4j graph contracts, the
-  Postgres document / trace / event-log contracts, and — since
+- **On pull requests *and* push to `main`** (`live-infra.yml`): the Postgres + Neo4j graph
+  contracts, the Postgres document / trace / event-log contracts, and — since
   [#345](https://github.com/ronsse/trellis-ai/issues/345) — the **pgvector vector
   contract**, against `pgvector/pgvector:pg16` and `neo4j:2025.12` service containers.
+  **This line said "on push to `main`" until 2026-09-01 and that was stale**: #401 widened
+  the trigger to `pull_request` so a cloud-backend regression is caught *before* merge
+  rather than after, and this paragraph was not updated with it. The claim was then
+  repeated in agent briefs, where it caused an agent to under-state its own evidence —
+  it had a green 56-case Postgres contract run on its PR and reported it as unverified.
+  Re-read `.github/workflows/live-infra.yml`'s `on:` block rather than trusting this
+  sentence.
 - **Nowhere at all:** the ArcadeDB graph contract (`test_arcadedb_graph_contract.py`).
   ArcadeDB is the *blessed* graph + vector substrate and its contract has no service
   container in any workflow ([#351](https://github.com/ronsse/trellis-ai/issues/351)).
