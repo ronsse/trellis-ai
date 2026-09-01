@@ -17,6 +17,7 @@ from trellis.stores.base.document import (
     DocumentStore,
     chunk_exclusion_clause,
     chunk_id_like_pattern,
+    encode_filter_value,
 )
 from trellis.stores.base.tag_filters import normalize_facet_filter
 from trellis.stores.sqlite.base import SQLiteStoreBase
@@ -108,6 +109,67 @@ def _build_tag_conditions(
     return conditions, params
 
 
+#: Name of the SQL function :func:`_metadata_matches` is registered under.
+#: Referenced from the generated SQL rather than typed twice.
+_METADATA_MATCH_FN = "trellis_metadata_matches"
+
+
+def _metadata_matches(metadata_json: str, key: str, expected_json: str) -> bool:
+    """SQL callback: does ``metadata[key]`` equal the filter value? (#409)
+
+    Registered on every connection this store opens so that a metadata
+    filter of **any** shape is a ``WHERE`` predicate rather than a pass
+    over the rows ``LIMIT`` already returned.
+
+    ``search`` used to split filters into SQL-pushable (scalars, bools,
+    ``content_tags``) and "complex" (lists, dicts, ``None``), and applied
+    the complex half in Python *after* the query. So a filtered search
+    returned fewer than ``limit`` rows — possibly zero — while matching
+    documents sat just past the ``LIMIT`` window, and the caller could not
+    tell "only three matched" from "three of the top twenty matched, and
+    there were more further down". That is the defect
+    :meth:`DocumentStore.list_documents` names: a predicate has to run
+    before ``LIMIT`` for the page to mean anything.
+
+    Comparison is Python's ``==`` over the parsed JSON, which is what the
+    post-hoc loop did — so this is a pushdown, not a change to *which*
+    documents match. It is also the reason a SQL callback is preferable
+    to a hand-written ``json_extract`` comparison per shape: SQLite has no
+    structural JSON equality, and ``json_extract`` returns an object as
+    *text*, so ``{"a": 1, "b": 2}`` would not match a filter spelling the
+    same object as ``{"b": 2, "a": 1}`` — while Postgres' ``jsonb``
+    equality (and Python's) says it does. One callback keeps the two
+    backends on one semantics instead of a per-shape table that has to be
+    kept in sync by hand.
+
+    The caller passes ``json_extract(metadata_json, '$')`` rather than the
+    raw column, so *SQLite* rejects a malformed row — with its own
+    ``malformed JSON`` message — before this runs. That matters because an
+    exception raised inside a SQL callback reaches the caller as the
+    opaque ``sqlite3.OperationalError: user-defined function raised
+    exception``, with the original message discarded. Parsing in SQL keeps
+    the one failure this can realistically hit legible.
+    """
+    return bool(json.loads(metadata_json).get(key) == json.loads(expected_json))
+
+
+def _bindable_json_path(key: str) -> str | None:
+    """``$."key"`` for *key*, or ``None`` if SQLite cannot address it.
+
+    Quoted so a key holding a ``.`` or a ``[`` is read as a literal member
+    name rather than as path syntax, and returned to be **bound** rather
+    than spliced: the key arrives from wire input, and the
+    ``content_tags`` branch already binds its paths for that reason.
+
+    A key containing a double quote has no SQLite JSON-path spelling at
+    all — a backslash-escaped quote inside the component parses as a
+    *miss*, not an error, so it would silently match nothing (measured
+    against SQLite 3.45). Such a key is handed to
+    :func:`_metadata_matches` instead, which needs no path.
+    """
+    return None if '"' in key else f'$."{key}"'
+
+
 class SQLiteDocumentStore(SQLiteStoreBase, DocumentStore):
     """SQLite-backed document store with FTS5 full-text search.
 
@@ -115,6 +177,29 @@ class SQLiteDocumentStore(SQLiteStoreBase, DocumentStore):
     frameworks but provides no internal locking. Callers must synchronise
     access when sharing a single instance across threads.
     """
+
+    # ------------------------------------------------------------------
+    # Connection
+    # ------------------------------------------------------------------
+
+    def _get_conn(self) -> sqlite3.Connection:
+        """The calling thread's connection, with the filter callback bound.
+
+        ``create_function`` is per-connection and the base class opens one
+        connection per thread (and reopens after :meth:`close`), so the
+        registration is keyed on *this call having opened a new
+        connection* rather than on a flag. A flag would survive
+        ``close()``, which drops the thread-local connection but cannot
+        drop a flag, and the next ``search`` would fail with "no such
+        function" on a store that had merely been reopened.
+        """
+        existing = getattr(self._local, "conn", None)
+        conn = super()._get_conn()
+        if conn is not existing:
+            conn.create_function(
+                _METADATA_MATCH_FN, 3, _metadata_matches, deterministic=True
+            )
+        return conn
 
     # ------------------------------------------------------------------
     # Schema
@@ -226,10 +311,10 @@ class SQLiteDocumentStore(SQLiteStoreBase, DocumentStore):
         if not sanitized:
             return []
 
-        # Split filters into SQL-pushable vs complex
+        # Every filter shape becomes a WHERE predicate. Nothing is applied
+        # to the returned page — see :func:`_metadata_matches` (#409).
         filter_conditions: list[str] = []
         filter_params: list[Any] = []
-        complex_filters: dict[str, Any] = {}
 
         if filters:
             for key, value in filters.items():
@@ -237,18 +322,36 @@ class SQLiteDocumentStore(SQLiteStoreBase, DocumentStore):
                     tag_conds, tag_params = _build_tag_conditions(value)
                     filter_conditions.extend(tag_conds)
                     filter_params.extend(tag_params)
-                elif isinstance(value, bool):
-                    filter_conditions.append(
-                        f"json_extract(d.metadata_json, '$.{key}') = ?"
-                    )
-                    filter_params.append(1 if value else 0)
-                elif isinstance(value, str | int | float):
-                    filter_conditions.append(
-                        f"json_extract(d.metadata_json, '$.{key}') = ?"
-                    )
-                    filter_params.append(value)
+                elif isinstance(value, str | int | float) and (
+                    path := _bindable_json_path(key)
+                ):
+                    # Scalars (``bool`` included — it is an ``int``, and
+                    # ``json_extract`` yields 1/0 for a JSON boolean, as
+                    # sqlite3 does for a bound one) compare natively, with
+                    # SQLite's comparison agreeing with Python's on every
+                    # scalar pair the contract pins. Kept out of the
+                    # callback because it is the shape the search surfaces
+                    # actually pass: on a 5,000-document corpus whose FTS
+                    # term matches every row, routing ``?domain=`` through
+                    # the callback took a search from 6.6ms to 22.3ms, and
+                    # the gap grows with the corpus.
+                    filter_conditions.append("json_extract(d.metadata_json, ?) = ?")
+                    filter_params.extend([path, value])
                 else:
-                    complex_filters[key] = value
+                    # Lists, dicts, ``None``, and keys SQLite cannot spell
+                    # a path for. SQLite has no structural JSON equality
+                    # and ``json_extract`` returns a container as *text*,
+                    # so a SQL comparison would call ``{"a": 1, "b": 2}``
+                    # and ``{"b": 2, "a": 1}`` unequal — while Python and
+                    # Postgres ``jsonb`` call them equal. The callback
+                    # computes the equality the contract specifies rather
+                    # than an approximation of it, and it takes the whole
+                    # object (path ``'$'``), so no key needs escaping.
+                    filter_conditions.append(
+                        f"{_METADATA_MATCH_FN}"
+                        "(json_extract(d.metadata_json, '$'), ?, ?)"
+                    )
+                    filter_params.extend([key, encode_filter_value(key, value)])
 
         where_parts = ["documents_fts MATCH ?"]
         sql_params: list[Any] = [sanitized]
@@ -274,15 +377,7 @@ class SQLiteDocumentStore(SQLiteStoreBase, DocumentStore):
         )
         cursor = self._conn.execute(sql, sql_params)
 
-        results: list[dict[str, Any]] = []
-        for row in cursor.fetchall():
-            doc = self._row_to_dict(row, include_rank=True)
-            if complex_filters:
-                metadata = doc["metadata"]
-                if not all(metadata.get(k) == v for k, v in complex_filters.items()):
-                    continue
-            results.append(doc)
-        return results
+        return [self._row_to_dict(row, include_rank=True) for row in cursor.fetchall()]
 
     @staticmethod
     def _sanitize_fts_query(query: str) -> str:

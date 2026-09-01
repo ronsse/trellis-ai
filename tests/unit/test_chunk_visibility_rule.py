@@ -53,15 +53,20 @@ _ROW_SURFACE_PACKAGES = ("trellis_api/routes", "trellis_cli")
 #: The two ``DocumentStore`` reads that can serve a chunk row. ``count`` is
 #: excluded because it returns a number rather than rows, so a page of
 #: fragments is not the failure mode — but the exclusion is narrower than
-#: it looks. The ABC binds ``count`` to whichever ``list_documents`` call it
-#: is *reported beside*, and two of the four ``count`` sites in these
-#: packages are not beside a listing at all: ``trellis admin stats`` and
-#: ``GET /api/v1/admin/stats`` report the corpus total unfiltered. On the
-#: reference deployment that is 1,319 against ``GET /api/v1/documents``'s
-#: 579 — two operator surfaces disagreeing about how many documents exist,
-#: which is #385's defect class in a different shape. Filed as #412 rather
-#: than folded in: a store total arguably *should* be the store total, and
-#: deciding that is not a chunk-filter change.
+#: it looks, and the gap it left is closed elsewhere rather than here. The
+#: ABC binds ``count`` to whichever ``list_documents`` call it is *reported
+#: beside*, and the two stats sites — ``trellis admin stats`` and
+#: ``GET /api/v1/stats`` — are not beside a listing at all, so the ABC's
+#: rule never reached them. They reported the raw store total, 1,319
+#: against ``GET /api/v1/documents``' 579 on the reference deployment: two
+#: operator surfaces disagreeing about how many documents exist. #412
+#: resolved that by reporting *both* populations under names that say which
+#: is which (``documents`` / ``document_rows``) rather than by picking one,
+#: because a store total is a number an operator legitimately wants. The
+#: property that keeps them honest is a reconciliation test against the
+#: listing surface (``tests/unit/api/test_stats_reconciliation.py``), not a
+#: scan for a keyword argument — "does this number agree with the other
+#: number?" is not something an AST walk can see.
 _ROW_READS = frozenset({"search", "list_documents"})
 
 
