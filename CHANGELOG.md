@@ -211,6 +211,42 @@ Net DEFECT delta in `src/`: 113 literal-only → 85 literal-only / 67 helper-awa
 
 ### Fixed
 
+- **Section routing was an unreported eleventh gate, so a sectioned pack could
+  serve zero items and state that nothing was withheld.**
+  `PackBuilder.build_sectioned` filtered the shared candidate pool through
+  `TierMapper.matches_section` and discarded the losing side without a
+  `RejectedItem`, so `withholding` reported `total: 0` on a pack whose every
+  candidate had been routed away — an affirmative wrong signal, and a stronger
+  one than the silence #404 replaced. It is recorded now, as
+  `withholding.section_filtered` on the `PACK_ASSEMBLED` payload of every
+  sectioned build. It is deliberately **not** a `by_reason` group and does not
+  enter `total`: replaying the two shipped section presets over the reference
+  deployment's 47 flat packs, the routing removes at least one served item on
+  46 and 47 of them (median 10 and 16), so an unconditional line would print on
+  essentially every sectioned pack and become the noise `format_withholding_note`
+  exists to avoid. The caller-facing sentence therefore renders **only when the
+  pack served nothing** — the case the ambiguity actually bites, and the case
+  where the count is small and load-bearing (10 of those 47 would have served
+  zero items under the objective preset, as did one of the four sectioned packs
+  this deployment has ever assembled). Cross-section survivors are subtracted by
+  the existing `{rejected} − {served}` definition; the routed set is computed as
+  "matched no section at all" rather than per-section, so an item a section
+  matched and then cut on `max_items` keeps that attribution instead of losing
+  it to whichever row landed first. (#440)
+- **`build_sectioned`'s rejection telemetry was unpinned: every `_reject` call
+  in it could be deleted with the full suite green.** The *filtering* half of
+  each gate was covered; the *emission* half was not, on the sectioned path
+  only — four of five calls survived deletion against 972 retrieval tests, and
+  a missing one silently under-reports what a sectioned pack withheld. Missing
+  tests added for the structural, meta-Activity, session-dedup and
+  per-section token-budget gates, each verified to fail against the un-emitted
+  source. Two fixtures that hid it are fixed: the sectioned meta-Activity count
+  test used one dropped and one kept item, so `len(dropped) == len(deduped)`
+  and the assertion could not separate the two quantities, and no test asserted
+  a rejection row's `item_type` or `relevance_score` against a pool carrying
+  more than one of either — both mutants (a hard-coded `item_type`, a
+  hard-coded score) survived. (#447)
+
 - **Tag refresh rewrote every stale document, even when nothing changed.** The
   tags-unchanged early-out in `classify/refresh.py` dropped only
   `importance_scored_at` from its before/after comparison, but

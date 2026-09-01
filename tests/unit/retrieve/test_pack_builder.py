@@ -2157,13 +2157,18 @@ class TestMetaActivityFilter:
                     _meta_activity_item("meta-1"),
                     _meta_activity_item("meta-2"),
                     _item("d1", 0.9),
+                    _item("d2", 0.8),
                 ],
             )
             builder = PackBuilder(strategies=[s], event_log=event_log)
-            builder.build("q")
+            pack = builder.build("q")
             events = event_log.get_events(event_type=EventType.PACK_ASSEMBLED, limit=10)
             assert len(events) == 1
+            # Two of each population: a count that happened to equal the
+            # whole candidate pool could not tell "filtered the meta rows"
+            # from "filtered everything".
             assert events[0].payload["meta_filtered_count"] == 2
+            assert len(pack.items) == 2
         finally:
             event_log.close()
 
@@ -2175,12 +2180,18 @@ class TestMetaActivityFilter:
         try:
             s = _make_strategy(
                 "graph",
-                [_meta_activity_item("meta-1"), _item("d1", 0.9)],
+                [
+                    _meta_activity_item("meta-1"),
+                    _meta_activity_item("meta-2"),
+                    _item("d1", 0.9),
+                    _item("d2", 0.8),
+                ],
             )
             builder = PackBuilder(strategies=[s], event_log=event_log)
-            builder.build("q", include_meta=True)
+            pack = builder.build("q", include_meta=True)
             events = event_log.get_events(event_type=EventType.PACK_ASSEMBLED, limit=10)
             assert events[0].payload["meta_filtered_count"] == 0
+            assert len(pack.items) == 4
         finally:
             event_log.close()
 
@@ -2192,16 +2203,25 @@ class TestMetaActivityFilter:
         try:
             s = _make_strategy(
                 "graph",
-                [_meta_activity_item("meta-1"), _item("d1", 0.9)],
+                [
+                    _meta_activity_item("meta-1"),
+                    _meta_activity_item("meta-2"),
+                    _item("d1", 0.9),
+                    _item("d2", 0.8),
+                ],
             )
             builder = PackBuilder(strategies=[s], event_log=event_log)
-            builder.build_sectioned(
+            pack = builder.build_sectioned(
                 "q",
                 sections=[SectionRequest(name="default", max_items=5, max_tokens=200)],
             )
             events = event_log.get_events(event_type=EventType.PACK_ASSEMBLED, limit=10)
             assert len(events) == 1
-            assert events[0].payload["meta_filtered_count"] == 1
+            # #447: the original fixture used one meta row and one kept
+            # item, so ``len(dropped) == len(deduped)`` and the assertion
+            # could not separate the two quantities.
+            assert events[0].payload["meta_filtered_count"] == 2
+            assert pack.total_items == 2
         finally:
             event_log.close()
 
