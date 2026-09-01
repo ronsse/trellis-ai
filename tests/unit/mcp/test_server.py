@@ -16,6 +16,7 @@ from mcp.types import INTERNAL_ERROR, INVALID_PARAMS
 import trellis.mcp.server as server_mod
 from tests.unit.mcp.conftest import unwrap_tool
 from trellis.core.hashing import content_hash
+from trellis.core.write_config import MINHASH_SEED_MAX_DOCS_ENV
 from trellis.errors import StoreError
 from trellis.mcp.server import RESOURCE_NOT_FOUND
 from trellis.mcp.server import (
@@ -2123,6 +2124,10 @@ class TestStructuredErrorContract:
         than silently disabling fuzzy dedup."""
         # Reset module-level cache so _get_minhash_index will try to build.
         monkeypatch.setattr(server_mod, "_minhash_index", None)
+        # Seeding is off by default (#402), so the read the seed makes only
+        # happens when an operator has asked for it — enable it, or this
+        # test pins error chaining on a code path that never runs.
+        monkeypatch.setenv(MINHASH_SEED_MAX_DOCS_ENV, "500")
         boom = RuntimeError("fake minhash init failure")
 
         def _boom(*args: object, **kwargs: object) -> list[dict[str, object]]:
@@ -2130,7 +2135,9 @@ class TestStructuredErrorContract:
 
         # Force the seed-from-docs path to blow up — the constructor
         # itself is happy; the seed loop is where the error appears.
-        monkeypatch.setattr(temp_registry.knowledge.document_store, "search", _boom)
+        monkeypatch.setattr(
+            temp_registry.knowledge.document_store, "list_documents", _boom
+        )
 
         with pytest.raises(McpError) as excinfo:
             save_memory("content that triggers minhash seed")
@@ -2140,20 +2147,20 @@ class TestStructuredErrorContract:
         assert err.error.data == {"stage": "minhash_index_init"}
         assert excinfo.value.__cause__ is boom
 
-    def test_minhash_seed_warns_when_it_reads_nothing_from_a_stocked_store(
+    def test_minhash_seed_warns_when_seeding_is_disabled_on_a_stocked_store(
         self,
         temp_registry: StoreRegistry,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A knowingly-inert safety feature has to say so at WARNING.
 
-        ``_get_minhash_index`` seeds from ``search("")``, which returns
-        ``[]`` on every backend (#402), so fuzzy dedup only ever sees
-        memories written by the same process. The pre-existing
-        ``minhash_index_initialized`` line reports ``size=0`` at DEBUG,
-        which is how this went unnoticed — nobody watches DEBUG. The warning
-        this pins is the runtime signal that the repair is outstanding, and
-        it must survive until the seed is fixed.
+        Seeding the fuzzy-dedup index from the store is opt-in and off by
+        default (#402), so on a stocked store ``save_memory`` compares only
+        against memories written by the same process. That is a deliberate
+        posture, not a defect — but an operator who believes fuzzy dedup
+        covers their corpus is wrong, and the pre-existing
+        ``minhash_index_initialized`` line reports it at DEBUG, which is how
+        the broken ``search("")`` seed went unnoticed in the first place.
         """
         monkeypatch.setattr(server_mod, "_minhash_index", None)
         temp_registry.knowledge.document_store.put("seeded", "prior memory content")
@@ -2168,9 +2175,11 @@ class TestStructuredErrorContract:
 
         assert index.size == 0
         (fields,) = [
-            kw for event, kw in recorded if event == "minhash_index_seed_empty"
+            kw for event, kw in recorded if event == "minhash_index_seed_disabled"
         ]
         assert fields["issue"] == 402
+        assert fields["stored_documents"] == 1
+        assert MINHASH_SEED_MAX_DOCS_ENV in fields["reason"]
 
     def test_minhash_seed_is_silent_on_an_empty_store(
         self,

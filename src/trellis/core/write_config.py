@@ -95,6 +95,33 @@ RECONCILE_TIMEOUT_ENV = "TRELLIS_RECONCILE_TIMEOUT_S"
 #: because changing production posture is the operator's call.
 REQUIRE_PACK_ATTRIBUTION_FLAG = "TRELLIS_REQUIRE_PACK_ATTRIBUTION"
 
+#: How many stored documents to load into the MCP fuzzy-dedup index at
+#: first use (``trellis.mcp.server._get_minhash_index``).  **Default 0,
+#: which seeds nothing** — so ``save_memory``'s MinHash stage keeps
+#: comparing only against memories written by the same process.
+#:
+#: One number is deliberately both the switch and the bound, because on
+#: this knob they cannot honestly be separated.  Seeding is O(corpus): a
+#: MinHash signature costs ~32 ms per document at the shipped 128
+#: permutations, so the reference deployment's 735 whole documents take
+#: **~24 s of blocking CPU** on the first ``save_memory`` of a process,
+#: growing linearly with the corpus.  Under the ``stdio`` transport that
+#: is one process per session, in every repository the server is wired
+#: into.  A bare on/off flag would hide that cost behind a word; a bound
+#: with a separate enable flag would admit a meaningless state (enabled,
+#: seed nothing).  The operator therefore names the number, and the
+#: number is the bill.
+#:
+#: What the number buys, measured on the reference deployment (1,475
+#: rows, 735 whole documents, 8 weeks): a complete seed would have
+#: rejected **13** of those 735 writes as fuzzy duplicates (1.8%), every
+#: one of them verified a genuine near-duplicate (exact Jaccard 0.80-1.00
+#: over character trigrams, length ratios within 5%).  Newest-first
+#: ordering means a bound below the corpus size misses old duplicates:
+#: 500 covers 68% of that corpus and misses 8 of the 17 near-duplicate
+#: pairs in it.  See #402.
+MINHASH_SEED_MAX_DOCS_ENV = "TRELLIS_MINHASH_SEED_MAX_DOCS"
+
 # ---------------------------------------------------------------------------
 # Defaults.  Unchanged from the per-module values they were lifted from.
 # ---------------------------------------------------------------------------
@@ -157,6 +184,44 @@ def _min_confidence(env: Mapping[str, str]) -> float | None:
     return _parse_min_confidence(raw) if raw else None
 
 
+@functools.lru_cache(maxsize=8)
+def _parse_seed_max_docs(raw: str) -> int:
+    """Parse one seed-bound spelling, warning at most once for it.
+
+    Cached on the raw string for the same reason
+    :func:`_parse_min_confidence` is: every write-behaviour reader goes
+    through :meth:`WriteBehaviourConfig.from_env`, so an uncached warning
+    would fire on flag reads that have nothing to do with this knob.
+
+    Unparseable and negative both degrade to ``0`` — *seed nothing*, which
+    is the shipped behaviour.  A typo must not silently enable a rejection
+    path, and it must not silently enable an unbounded one either.
+    """
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning(
+            "minhash_seed_max_docs_unparseable",
+            flag=MINHASH_SEED_MAX_DOCS_ENV,
+            value=raw,
+        )
+        return 0
+    if value < 0:
+        logger.warning(
+            "minhash_seed_max_docs_negative",
+            flag=MINHASH_SEED_MAX_DOCS_ENV,
+            value=value,
+        )
+        return 0
+    return value
+
+
+def _seed_max_docs(env: Mapping[str, str]) -> int:
+    """Fuzzy-dedup seed bound from the environment; ``0`` means seed none."""
+    raw = env.get(MINHASH_SEED_MAX_DOCS_ENV, "").strip()
+    return _parse_seed_max_docs(raw) if raw else 0
+
+
 def _reconcile_timeout(env: Mapping[str, str]) -> float:
     """Per-verdict timeout, defaulting on absent / invalid / non-positive."""
     raw = env.get(RECONCILE_TIMEOUT_ENV, "").strip()
@@ -185,6 +250,7 @@ class WriteBehaviourConfig:
     trace_extraction: bool = False
     trace_extraction_min_confidence: float | None = None
     require_pack_attribution: bool = False
+    minhash_seed_max_docs: int = 0
     reconcile_model: str = DEFAULT_RECONCILE_MODEL
     reconcile_timeout_s: float = DEFAULT_RECONCILE_TIMEOUT_S
 
@@ -200,6 +266,7 @@ class WriteBehaviourConfig:
             trace_extraction=_truthy(src, TRACE_EXTRACTION_FLAG),
             trace_extraction_min_confidence=_min_confidence(src),
             require_pack_attribution=_truthy(src, REQUIRE_PACK_ATTRIBUTION_FLAG),
+            minhash_seed_max_docs=_seed_max_docs(src),
             reconcile_model=src.get(RECONCILE_MODEL_ENV, "").strip()
             or DEFAULT_RECONCILE_MODEL,
             reconcile_timeout_s=_reconcile_timeout(src),
@@ -244,6 +311,7 @@ ENV_VAR_BY_FIELD: dict[str, str] = {
     "trace_extraction": TRACE_EXTRACTION_FLAG,
     "trace_extraction_min_confidence": TRACE_EXTRACTION_MIN_CONFIDENCE_FLAG,
     "require_pack_attribution": REQUIRE_PACK_ATTRIBUTION_FLAG,
+    "minhash_seed_max_docs": MINHASH_SEED_MAX_DOCS_ENV,
     "reconcile_model": RECONCILE_MODEL_ENV,
     "reconcile_timeout_s": RECONCILE_TIMEOUT_ENV,
 }
@@ -256,6 +324,7 @@ __all__ = [
     "EMBED_ON_INGEST_FLAG",
     "ENV_VAR_BY_FIELD",
     "MEMORY_EXTRACTION_FLAG",
+    "MINHASH_SEED_MAX_DOCS_ENV",
     "RECONCILE_FLAG_ENV",
     "RECONCILE_MODEL_ENV",
     "RECONCILE_TIMEOUT_ENV",
