@@ -23,7 +23,7 @@ See [`docs/design/adr-terminology.md`](docs/design/adr-terminology.md) for the c
 
 - **Traces are immutable.** Once ingested, a trace cannot be modified or deleted through normal operations.
 - **All mutations go through the governed pipeline.** Validate, policy check, idempotency check, execute, emit event. No direct store writes.
-- **Use `--format json` for machine output.** All CLI commands support it. Parse JSON output, not human-readable text.
+- **Use `--format json` for machine output.** All CLI commands support it. Parse JSON output, not human-readable text. **A command's exit code must not depend on `--format`** — `migrate-graph` exited `EXIT_STORE` on text and `0` on json for the same failed migration (#437), so the machine surface was the one reporting success. Put the exit *below* the format branch and derive the payload's `status` from the same flag; `tests/unit/test_format_exit_parity_rule.py` fails when a non-zero exit is reachable from one format arm only.
 - **Extra fields are forbidden.** All schemas use `extra="forbid"` (via `TrellisModel` base). Unrecognized fields cause validation errors.
 - **Use `structlog` for logging.** Never use `print()` in library code.
 - **Type hints on all public APIs.**

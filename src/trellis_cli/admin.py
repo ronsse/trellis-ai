@@ -1565,6 +1565,15 @@ def migrate_graph(
                 finding_type="GraphMigrationReport",
             )
 
+    # Whether the migration failed is a property of the run, not of how it
+    # gets rendered (#437). The exit therefore sits *below* the format
+    # branch, where both surfaces reach it. While it lived inside the
+    # ``else`` only, ``--format json`` — the surface built for the caller
+    # that actually checks the exit code — reported success for a failed
+    # store migration, so a script doing the documented thing was strictly
+    # worse off than one scraping human text.
+    failed = bool(report.errors)
+
     if output_format == "json":
         from dataclasses import asdict  # noqa: PLC0415
 
@@ -1574,18 +1583,26 @@ def migrate_graph(
             {"target": target, "message": msg} for target, msg in payload["errors"]
         ]
         # step_failures already serialize cleanly via asdict (dataclass).
+        # ``status`` is the house contract for --format json callers
+        # (docs/design/adr-cli-exit-codes.md), and it is derived from the
+        # same ``failed`` flag as the exit code so the two cannot
+        # disagree. A ``status`` of "error" beside an exit code of 0 would
+        # have been a third signal, not a fix.
+        payload["status"] = "error" if failed else "ok"
         emit_json(payload, indent=2)
     else:
         if report.dry_run:
             console.print(f"[yellow]{report.summary()}[/yellow]")
         else:
             console.print(f"[green]{report.summary()}[/green]")
-        if report.errors:
+        if failed:
             console.print()
             console.print("[red]Errors:[/red]")
             for target, msg in report.errors:
                 console.print(f"  [red]{target}[/red]: {msg}")
-            raise typer.Exit(code=EXIT_STORE)
+
+    if failed:
+        raise typer.Exit(code=EXIT_STORE)
 
 
 # ---------------------------------------------------------------------------
