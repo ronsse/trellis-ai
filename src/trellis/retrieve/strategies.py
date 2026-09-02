@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Protocol, TypedDict, runtime_checkable
 
 import structlog
@@ -38,6 +38,12 @@ DEFAULT_RECENCY_HALF_LIFE_DAYS = 30.0
 #: fraction of its original relevance. Prevents high-importance archival
 #: content from being suppressed entirely.
 RECENCY_FLOOR = 0.3
+
+#: Slack allowed before a recency stamp counts as being in the future and
+#: is skipped by :func:`resolve_recency_stamp`. A source clock is naive
+#: often enough that one timezone's offset must not read as hostile; a day
+#: is generous against a 30-day half-life (0.977 of the multiplier).
+_FUTURE_STAMP_TOLERANCE = timedelta(days=1)
 
 #: Grace period before importance-score staleness decay starts. Below this
 #: age (measured from ``importance_scored_at``) the legacy multiplier is
@@ -464,7 +470,9 @@ def _decay_importance_if_stale(
     return importance * (floor + (1.0 - floor) * decay)
 
 
-def resolve_recency_stamp(metadata: Any, *row_stamps: Any) -> Any:
+def resolve_recency_stamp(
+    metadata: Any, *row_stamps: Any, now: datetime | None = None
+) -> Any:
     """Resolve the one timestamp recency decay should read for an item.
 
     **The metadata bag wins over the store row's own columns**, and that
@@ -486,11 +494,14 @@ def resolve_recency_stamp(metadata: Any, *row_stamps: Any) -> Any:
     Recency decay asks *how old is this information*, and for an imported
     corpus only the source's clock can answer it. Measured on the reference
     deployment (2026-09-02): all **148** conversation documents were written
-    by one import batch, so every one of them shares a single column
-    ``created_at`` and 132 share a single column ``updated_at`` — the column
-    ranks a 2024 conversation exactly as fresh as one from last week, across a
-    corpus whose source stamps span 28 months. Reading the column there is not
-    a conservative default; it is reading a stamp with no information in it.
+    by one import batch inside a **72-second** window on 2026-08-07 (the 148
+    column values are distinct, and distinct by microseconds), across a corpus
+    whose source stamps span **28 months**. The column therefore ranks a 2024
+    conversation exactly as fresh as one from last week. Reading it there is
+    not a conservative default; it is reading a stamp with no information in
+    it. The 16 rows since re-written by a metadata-only pass are the sharpest
+    case rather than an exception — their column now says 2026-08-27/30, so
+    the keyword axis was scoring 2024 content as three days old.
 
     Before this function the two document-backed axes disagreed about which of
     the two they meant: ``KeywordSearch`` read the column, ``SemanticSearch``
@@ -513,26 +524,66 @@ def resolve_recency_stamp(metadata: Any, *row_stamps: Any) -> Any:
     one of those 148 documents retroactively prunable. Recency decay is a
     score with a floor; retention is destructive. They do not have to agree.
 
-    Candidates are tried in order and the first one that *parses* wins — not
-    the first one merely present. A malformed source stamp has to fall through
-    to the row's clock rather than reach :func:`_apply_recency_decay`, whose
-    fail-open on an unparseable value returns the score undecayed, i.e. makes
-    the item maximally fresh. That is the wrong direction to fail for a value
-    that came from outside.
+    Chunk rows are the third exclusion, and unlike the other two this one is
+    an *asymmetry this function creates*. ``_write_chunks`` propagates only
+    :data:`~trellis.classify.ingest.CLASSIFY_METADATA_KEYS` from parent to
+    chunk, so a chunk of a 2024 conversation carries no source clock and
+    decays off the import column. Before #417 the keyword axis read the
+    column for parent and chunk alike and they agreed; now they do not
+    (production: 735 chunk rows under 74 stamped parents, 147 servings). The
+    split already existed on the semantic axis, which has always read the bag
+    — this makes it symmetric across the two axes rather than inventing it.
+    Inheriting the stamp is not obviously right either: the parent is the
+    worse-cited half of that corpus (1 helpful / 58 unhelpful against the
+    chunks' 7 / 38), so propagating it would demote the better half. Left as
+    measured, not as taste.
+
+    Candidates are tried in order and the first one that is *usable* wins —
+    not the first one merely present. Two ways a candidate is unusable, and
+    both fall through to the next one rather than reaching
+    :func:`_apply_recency_decay`:
+
+    * **It does not parse.** The decay fails *open* on an unparseable value:
+      it returns the score undecayed, which is not neutral — it is the
+      maximum multiplier, strictly above what the freshest real timestamp
+      earns. That is the wrong direction to fail for a value from outside.
+    * **It is in the future.** Parsing is not enough, because the decay
+      clamps age at zero, so a stamp dated 2099 buys exactly the same maximum
+      multiplier a malformed one would — up to ``1 / floor`` (3.3x) more than
+      the row's own clock would have given the same item. Rejecting only the
+      malformed half would leave the guarantee open on its easier route:
+      both live producers of these keys copy them verbatim out of a file
+      (a claude.ai export's JSON, a note's YAML frontmatter), so the value
+      is caller-supplied either way. :data:`_FUTURE_STAMP_TOLERANCE` of slack
+      is allowed first — a source clock is naive often enough that one
+      timezone's offset must not read as hostile.
 
     Args:
         metadata: The item's metadata bag (document or vector row).
         *row_stamps: The store row's own stamps, most-preferred first
             (typically ``updated_at`` then ``created_at``). A vector row has
             no columns of its own, so the semantic axis passes none.
+        now: Reference clock for the future check. Defaults to wall time.
 
     Returns:
-        The first usable stamp, or ``None`` when nothing parses.
+        The first usable stamp, or ``None`` when none is. ``None`` decays
+        nothing, which is the same maximum multiplier a future stamp would
+        have produced — so rejecting every candidate costs nothing; the
+        guard only ever *prefers* a non-future candidate that exists.
     """
     bag = metadata if isinstance(metadata, dict) else {}
+    horizon = (now or datetime.now(UTC)) + _FUTURE_STAMP_TOLERANCE
+    if horizon.tzinfo is None:
+        horizon = horizon.replace(tzinfo=UTC)
     for candidate in (bag.get("updated_at"), bag.get("created_at"), *row_stamps):
-        if _parse_stamp(candidate) is not None:
-            return candidate
+        parsed = _parse_stamp(candidate)
+        if parsed is None:
+            continue
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        if parsed > horizon:
+            continue
+        return candidate
     return None
 
 

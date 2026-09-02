@@ -210,6 +210,65 @@ class TestSourceClockIsHonouredWhereverItAppears:
         assert _keyword_score(garbage) < 0.8
 
 
+class TestAFutureSourceStampCannotBuyFreshness:
+    """The other half of the fail-open guard, and the easier route in.
+
+    ``_apply_recency_decay`` clamps age at zero, so a stamp dated 2099 earns
+    exactly the maximum multiplier an unparseable one does — while parsing
+    cleanly. Both live producers copy these keys verbatim out of a file, so
+    the value is caller-supplied.
+    """
+
+    def _row(self, meta_stamp: str) -> dict[str, Any]:
+        return {
+            "doc_id": "d1",
+            "content": "x",
+            "metadata": {"updated_at": meta_stamp},
+            "updated_at": (datetime.now(UTC) - timedelta(days=3650)).isoformat(),
+        }
+
+    def test_future_stamp_falls_through_to_the_column(self) -> None:
+        future = self._row("2099-01-01T00:00:00+00:00")
+        column_only = {**future, "metadata": {}}
+        assert _keyword_score(future) == pytest.approx(_keyword_score(column_only))
+
+    def test_and_the_column_really_was_decayed(self) -> None:
+        # Without the guard this is 0.8 (undecayed) rather than 0.8 * floor.
+        assert _keyword_score(self._row("2099-01-01T00:00:00+00:00")) < 0.8 * 0.5
+
+    def test_a_past_stamp_is_still_preferred(self) -> None:
+        # The guard must not reject ordinary source clocks.
+        recent = (datetime.now(UTC) - timedelta(days=1)).isoformat()
+        assert _keyword_score(self._row(recent)) > _keyword_score(
+            {**self._row(recent), "metadata": {}}
+        )
+
+    def test_naive_stamp_inside_tolerance_is_not_rejected(self) -> None:
+        # A naive source clock written "now" in a +13 zone reads as hours in
+        # the future once coerced to UTC; that must not count as hostile.
+        skewed = (datetime.now(UTC) + timedelta(hours=13)).replace(tzinfo=None)
+        assert self._resolved({"updated_at": skewed.isoformat()}) is not None
+
+    def _resolved(self, bag: dict[str, Any]) -> Any:
+        from trellis.retrieve.strategies import resolve_recency_stamp
+
+        return resolve_recency_stamp(bag)
+
+    def test_semantic_axis_gets_the_same_guard(self, ingested: dict[str, Any]) -> None:
+        poisoned = {
+            **ingested["vector_row"],
+            "metadata": {
+                **ingested["vector_row"]["metadata"],
+                "updated_at": "2099-01-01T00:00:00+00:00",
+            },
+        }
+        # Falls through to the bag's own ``created_at`` (the 2024 source
+        # clock), not to an undecayed 0.8.
+        assert _semantic_score(poisoned) == pytest.approx(
+            _semantic_score(ingested["vector_row"]), rel=1e-3
+        )
+
+
 class TestResolveRecencyStamp:
     """Unit-level ordering contract of the shared resolver."""
 
@@ -243,3 +302,17 @@ class TestResolveRecencyStamp:
     def test_datetime_values_are_accepted(self) -> None:
         stamp = datetime(2024, 1, 1, tzinfo=UTC)
         assert self._resolve({"updated_at": stamp}) is stamp
+
+    def test_future_candidates_are_skipped_in_order(self) -> None:
+        assert (
+            self._resolve(
+                {"updated_at": "2099-01-01", "created_at": "2023-01-01"},
+                "2026-01-01",
+            )
+            == "2023-01-01"
+        )
+
+    def test_none_when_every_candidate_is_future(self) -> None:
+        # Same multiplier a future stamp would have produced, so this costs
+        # nothing; the guard only ever prefers a non-future candidate.
+        assert self._resolve({"updated_at": "2099-01-01"}, "2098-01-01") is None
