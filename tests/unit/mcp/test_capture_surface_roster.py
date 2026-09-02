@@ -94,9 +94,12 @@ def _scan_sites(source: str) -> list[_Site]:
             continue
         tool: str | None = None
         for kw in node.keywords:
-            if kw.arg == "tool" and isinstance(kw.value, ast.Constant):
-                if isinstance(kw.value.value, str):
-                    tool = kw.value.value
+            if (
+                kw.arg == "tool"
+                and isinstance(kw.value, ast.Constant)
+                and isinstance(kw.value.value, str)
+            ):
+                tool = kw.value.value
         sites.append(_Site(lineno=node.lineno, tool=tool))
     return sites
 

@@ -2090,9 +2090,23 @@ Every pack-returning tool — `get_context` (flat and sectioned), `search`, and 
 > **WARNING: memory capture is failing.** 5 write attempt(s) rejected and 0 accepted in the last 24h from: mcp:save_experience (since 2026-08-21 04:12 UTC). New experience from this session is NOT being saved. Diagnose with `trellis analyze health`.
 ```
 
-The rule is **per surface**, evaluated over a trailing window: a surface warns when it has at least `TRELLIS_CAPTURE_WARN_THRESHOLD` rejected writes — boundary `WRITE_REJECTED` (#297) plus executor `MUTATION_REJECTED`, aggregated under one `mcp:<tool>` label — and **no** accepted write (`MUTATION_EXECUTED`) of its own. Per-surface, not global, because the incident this exists to catch has successful writes in the same window by construction: every MCP `save_*` call rejected while a nightly `trellis ingest corpus` keeps landing rows. A global "zero accepted anywhere" rule would stay silent through exactly that outage.
+The rule is **per surface**, evaluated over a trailing window: a surface warns when it has at least `TRELLIS_CAPTURE_WARN_THRESHOLD` rejected writes — boundary `WRITE_REJECTED` (#297) plus executor `MUTATION_REJECTED`, aggregated under one `mcp:<tool>` label — and **no** accepted write of its own. Per-surface, not global, because the incident this exists to catch has successful writes in the same window by construction: every MCP `save_*` call rejected while a nightly `trellis ingest corpus` keeps landing rows. A global "zero accepted anywhere" rule would stay silent through exactly that outage.
 
 Executor rejections with `reason="idempotency_replay"` are excluded — a replayed command is a duplicate submission of a write that already landed, not a write that went dark.
+
+**Which surfaces warn, and what counts as an accept** (#461):
+
+| Surface | Raises the banner? | Accept event that clears it |
+|---|---|---|
+| `mcp:save_experience`, `mcp:save_knowledge` | yes | `MUTATION_EXECUTED` with that `requested_by` |
+| `mcp:save_memory` | yes | `MUTATION_EXECUTED` **or** `MEMORY_STORED`, either carrying that `requested_by` |
+| `mcp:record_feedback` | **no** — grading, not capture | n/a; rejections still counted by `trellis analyze health` |
+| `config:policy_file` | yes | any accepted write, newer than the last rejection (see [Policy Commands](#policy-commands)) |
+| `(unknown)` | yes | nothing — deliberately unclearable |
+
+Two labels used to be structurally unclearable. `mcp:save_memory`'s only `MUTATION_EXECUTED` comes from memory extraction, which is gated on `TRELLIS_ENABLE_MEMORY_EXTRACTION` (**off** by default) and emits nothing when extraction yields no drafts — so on a default deployment a perfectly healthy `save_memory` cleared nothing and three rejections pinned the banner for a full window. `MEMORY_STORED` is its unconditional success signal and now clears it. And `mcp:record_feedback` captures no experience at all: its success path is `FEEDBACK_RECORDED`, which no `MUTATION_EXECUTED` accompanies, so the headline *"New experience from this session is NOT being saved"* was false in both halves. It is out of the banner and unchanged in `trellis analyze health`. Exclusion is a deny-list — a surface is watched unless explicitly named — and `tests/unit/mcp/test_capture_surface_roster.py` enumerates every boundary-rejection site and fails if its tool cannot demonstrate an accept.
+
+One residue, named rather than hidden: `save_memory` emits nothing on a *dedup* hit, so a surface whose every successful call is a duplicate has no accept to clear with. It also produces no rejections, so it cannot raise the banner on its own.
 
 | Knob | Default | Notes |
 |------|---------|-------|
