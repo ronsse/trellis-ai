@@ -1541,7 +1541,7 @@ def _emit_memory_stored_and_enrich(
     # SemanticSearch can retrieve the memory. Fail-soft inside the hook —
     # a broken embedder never fails save_memory.
     run_embed_on_ingest(
-        registry, stored_id, content, metadata, source="mcp:save_memory"
+        registry, stored_id, content, metadata, source=SAVE_MEMORY_SURFACE
     )
 
 

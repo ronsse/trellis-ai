@@ -286,6 +286,28 @@ def _unclassified(source: str) -> set[str]:
     }
 
 
+def _calls_named(node: ast.AST, name: str) -> bool:
+    """Is ``node`` a call to ``name``, written bare *or* through a module?
+
+    Both spellings, because both reach the same function and only one of
+    them used to be seen. ``from ... import record_write_rejection`` is what
+    the two producers in the tree happen to use today, but
+    ``write_health.record_write_rejection(...)`` is at least as idiomatic —
+    and it escaped the sweep completely: a new module calling it that way
+    left all 22 tests green while raising a banner under a label no roster
+    had ever classified. Matching on the trailing name over-collects at
+    worst (a same-named method on an unrelated object), and over-collecting
+    costs a spurious classification while under-collecting costs an
+    unwatched write surface.
+    """
+    if not isinstance(node, ast.Call):
+        return False
+    func = node.func
+    if isinstance(func, ast.Name):
+        return func.id == name
+    return isinstance(func, ast.Attribute) and func.attr == name
+
+
 def _modules_calling(name: str, root: Path) -> set[str]:
     """Every module under ``root`` containing a call to ``name``.
 
@@ -298,14 +320,39 @@ def _modules_calling(name: str, root: Path) -> set[str]:
         if name not in source:  # cheap pre-filter; the AST decides
             continue
         for node in ast.walk(ast.parse(source)):
-            if (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Name)
-                and node.func.id == name
-            ):
+            if _calls_named(node, name):
                 found.add(path.relative_to(root).as_posix())
                 break
     return found
+
+
+def _emitter_calls_outside_the_wrapper(source: str) -> list[int]:
+    """``record_write_rejection`` calls in ``server.py`` that skip the wrapper.
+
+    The producer sweep exempts :data:`MCP_WRAPPER_MODULE` wholesale, on the
+    assumption that everything in it routes through :data:`RECORDER`. Nothing
+    checked that assumption, and a direct call here raises a banner under a
+    label the tool roster never scans for — ``_scan_sites`` looks only for
+    :data:`RECORDER`, and the module-level sweep has already waved this file
+    through. Verified by injection: adding one such call left all 18 tests
+    green.
+    """
+    tree = ast.parse(source)
+    wrapper_span: tuple[int, int] | None = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == RECORDER:
+            wrapper_span = (node.lineno, node.end_lineno or node.lineno)
+            break
+    assert wrapper_span is not None, (
+        f"{RECORDER} is not defined in {MCP_WRAPPER_MODULE}; the sweep's "
+        "exemption for that module rests on this wrapper existing"
+    )
+    start, end = wrapper_span
+    return [
+        node.lineno
+        for node in ast.walk(tree)
+        if _calls_named(node, EMITTER) and not (start <= node.lineno <= end)
+    ]
 
 
 def _unclassified_producers(root: Path) -> set[str]:
@@ -385,6 +432,30 @@ class TestTheRoster:
         in both directions.
         """
         assert set(NON_CAPTURE_SURFACES).issubset({f"mcp:{tool}" for tool in TOOLS})
+
+    def test_every_hand_written_recipe_still_matches_a_scanned_site(self) -> None:
+        """The one floor a scan cannot compute — a hand count, asserted.
+
+        Every other guard in this module divides by the scan's own output, so
+        a scan that *shrinks* satisfies all of them: the two cross-checked
+        scans agree (they share ``SERVER_SOURCE`` and :data:`RECORDER`), the
+        non-vacuity floor is ``> 0``, and the parametrised clear-test simply
+        runs fewer cases. Verified by injection — aliasing ``save_knowledge``'s
+        one call site out of the scanned population dropped it from the roster
+        with all 17 remaining tests green, and the collected count fell 18 → 17
+        without a word.
+
+        :data:`SUCCESS_CALL` is the hand count. Its keys were written by a
+        human who knew these tools raise the banner, so the scan losing one is
+        a fact about the scan, not about the tool.
+        """
+        missing = sorted(set(SUCCESS_CALL) - set(TOOLS))
+        assert missing == [], (
+            f"{missing} have a success recipe but no scanned rejection site. "
+            "Either the tool genuinely stopped raising boundary rejections "
+            "(delete its SUCCESS_CALL entry in the same commit) or the scan "
+            "is under-collecting and these surfaces are no longer watched."
+        )
 
 
 class TestAcceptIsDemonstratedByExecution:
@@ -491,6 +562,62 @@ class TestNoUnwatchedRejectionProducer:
 
     def test_no_unclassified_producer(self) -> None:
         assert _unclassified_producers(SRC_ROOT) == set()
+
+    def test_the_exempted_module_routes_every_rejection_through_the_wrapper(
+        self,
+    ) -> None:
+        """``server.py``'s blanket exemption, checked instead of assumed.
+
+        The sweep waves this one module through because the tool roster
+        covers it — but the tool roster scans for :data:`RECORDER`, so a
+        direct :data:`EMITTER` call here is covered by *neither*. It would
+        raise a banner under an unclassified label with no accept declared,
+        which is the silent false negative this class exists to prevent.
+        """
+        stray = _emitter_calls_outside_the_wrapper(SERVER_SOURCE)
+        assert stray == [], (
+            f"{MCP_WRAPPER_MODULE} calls {EMITTER} directly at lines {stray}, "
+            f"bypassing {RECORDER}. The tool roster scans for {RECORDER} and "
+            "the producer sweep exempts this module, so such a call is in no "
+            f"roster at all — route it through {RECORDER}."
+        )
+
+    def test_a_direct_emitter_call_in_the_exempted_module_is_caught(self) -> None:
+        """Proved by adding one, on a synthetic tree (#443's standard)."""
+        synthetic = SERVER_SOURCE + (
+            "\n\ndef _roster_guard_direct_probe() -> None:\n"
+            f'    {EMITTER}(None, tool="brand_new_capture_tool")\n'
+        )
+        assert _emitter_calls_outside_the_wrapper(synthetic) != []
+
+    def test_the_wrapper_actually_contains_an_emitter_call(self) -> None:
+        """Non-vacuity: an empty ``stray`` must mean routed, not absent."""
+        inside = [
+            node.lineno
+            for node in ast.walk(ast.parse(SERVER_SOURCE))
+            if _calls_named(node, EMITTER)
+        ]
+        assert inside, (
+            f"{MCP_WRAPPER_MODULE} calls {EMITTER} nowhere at all; the "
+            "wrapper-routing check above would pass vacuously"
+        )
+
+    def test_an_attribute_style_call_is_a_producer_too(self, tmp_path: Path) -> None:
+        """``write_health.record_write_rejection(...)`` counts, not just the bare name.
+
+        Verified by injection: before :func:`_calls_named` matched the
+        attribute spelling, a new module calling the emitter through its
+        module object left every test in this file green.
+        """
+        root = tmp_path / "src"
+        (root / "pkg").mkdir(parents=True)
+        (root / "pkg" / "rogue.py").write_text(
+            "from trellis.ops import write_health\n\n\n"
+            f"def go():\n    write_health.{EMITTER}(None, tool='rogue_surface')\n",
+            encoding="utf-8",
+        )
+
+        assert _unclassified_producers(root) == {"pkg/rogue.py"}
 
     def test_an_undeclared_producer_in_a_new_module_fails(self, tmp_path: Path) -> None:
         """Proved by adding one, not by asserting today's list (#443)."""
