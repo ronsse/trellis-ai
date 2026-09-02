@@ -245,6 +245,19 @@ def _conversation_record(
         "document_form": CONVERSATION_DOCUMENT_FORM,
         "message_count": len(turns),
     }
+    # The export's own clock, and it is **read by retrieval**, not decoration
+    # (#417). ``created_at`` / ``updated_at`` in a metadata bag mean the
+    # *source's* clock, as distinct from the store columns of the same name,
+    # which mean when Trellis last wrote the row. An import writes every
+    # document in one batch, so the columns rank a 2024 conversation exactly
+    # as fresh as one from last week; these stamps are the only thing that
+    # can answer how old the content is.
+    # ``trellis.retrieve.strategies.resolve_recency_stamp`` prefers them over
+    # the columns on both document-backed axes, and ``build_vector_row``
+    # splats them onto the vector row (its own ``created_at`` is a
+    # ``setdefault``, so these survive). Changing or dropping either key
+    # changes ranking; tests/unit/retrieve/test_recency_clock.py pins that
+    # they are produced and that both axes honour them.
     for key in ("created_at", "updated_at"):
         value = conversation.get(key)
         if isinstance(value, str) and value:
