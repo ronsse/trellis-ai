@@ -198,7 +198,7 @@ class TestTheRoster:
         )
         synthetic_sites = _scan_sites(synthetic)
         assert len(synthetic_sites) == len(SITES) + 1
-        assert "brand_new_capture_tool" in {s.tool for s in synthetic_sites}
+        assert "brand_new_capture_tool" in {site.tool for site in synthetic_sites}
         assert _unclassified(synthetic) == {"brand_new_capture_tool"}
 
     def test_a_non_capture_surface_declares_no_accept_events(self) -> None:
@@ -212,7 +212,7 @@ class TestTheRoster:
         direction that costs most — so the deny-list is pinned to the scan
         in both directions.
         """
-        assert {f"mcp:{tool}" for tool in TOOLS} >= set(NON_CAPTURE_SURFACES)
+        assert set(NON_CAPTURE_SURFACES).issubset({f"mcp:{tool}" for tool in TOOLS})
 
 
 class TestAcceptIsDemonstratedByExecution:

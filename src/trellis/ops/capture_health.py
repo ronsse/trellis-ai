@@ -308,6 +308,11 @@ def accept_events_for(label: str) -> tuple[EventType, ...]:
     Public because the roster guard reads it. A declared event type that
     :func:`_surface_has_accepts` would not honour is caught there, by
     executing the clear rather than trusting the declaration.
+
+    The empty return for a non-capture surface is safe only because
+    :func:`check_capture_health` filters those labels out before any accept
+    lookup — read literally through :func:`_surface_has_accepts` it would
+    say "no accepts", i.e. dark. Keep that filter upstream of the lookup.
     """
     if not is_capture_surface(label):
         return ()
@@ -369,10 +374,11 @@ def check_capture_health(
 ) -> CaptureHealthWarning | None:
     """Return the capture warning iff some surface has gone dark.
 
-    A surface warns when the trailing ``window_hours`` hold at least
-    ``threshold`` of its rejected writes (``WRITE_REJECTED`` +
-    ``MUTATION_REJECTED``, idempotency replays excluded) and *no*
-    accepted write (``MUTATION_EXECUTED``) attributed to it; returns
+    A surface warns when it is a **capture** surface
+    (:func:`is_capture_surface`), the trailing ``window_hours`` hold at
+    least ``threshold`` of its rejected writes (``WRITE_REJECTED`` +
+    ``MUTATION_REJECTED``, idempotency replays excluded), and *none* of its
+    accept events (:func:`accept_events_for`) is attributed to it; returns
     ``None`` when no surface qualifies. Explicit kwargs win over the env
     knobs, which win over the defaults.
 
@@ -407,11 +413,18 @@ def check_capture_health(
         return None
 
     counts, earliest, latest, truncated = _rejections_by_surface(event_log, since)
+    # Drop non-capture surfaces here rather than in the comprehension below,
+    # so the rule lives in exactly one place: everything downstream — the
+    # accept lookup, ``rejected``, ``since`` — then sees only labels whose
+    # failure means lost experience, and no later edit can reach the accept
+    # test without passing this filter first (#461).
+    counts = {
+        label: count for label, count in counts.items() if is_capture_surface(label)
+    }
     failing = [
         (label, count)
         for label, count in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
         if count >= resolved_threshold
-        and is_capture_surface(label)
         and not _surface_has_accepts(
             event_log, label, since, last_rejection=latest.get(label)
         )
