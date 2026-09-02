@@ -25,21 +25,35 @@ than choices:
   the structlog path, stdlib ``logging`` swallows the resulting
   ``ValueError`` in ``Handler.handleError``, so a configure call made under
   a redirection that later ends costs **silently lost log lines**.
-* structlog went to *stdout* through ``PrintLoggerFactory()``, which is the
-  same baked-handle defect one level further out: ``PrintLogger`` resolves
-  ``file or stdout`` against ``from sys import stdout`` bound when
-  **structlog itself was imported**, so it is neither the current stdout nor
-  even the process's original one under a test harness.
+* structlog went to *stdout* through ``PrintLoggerFactory()``. That half was
+  the wrong **fd**, not a baked handle — and the distinction is written down
+  because #430's text and the first draft of this docstring got it wrong in
+  opposite directions. ``PrintLogger.__init__`` really does bind
+  ``file or stdout`` against the ``from sys import stdout`` captured when
+  structlog was imported; but ``msg`` then does
+  ``f = self._file if self._file is not stdout else None`` and hands ``f`` to
+  ``print``, and ``print(file=None)`` resolves ``sys.stdout`` at call time.
+  So the *no-argument* factory is lazy (structlog 22.1.0, "switched to use
+  ``print`` for better monkeypatchability"), and only
+  ``PrintLoggerFactory(file=...)`` bakes — the #377 shape ``trellis.logging``
+  already closed. Measured against the pre-#430 code: redirect ``sys.stdout``
+  after ``configure_logging()`` and the structlog half follows it; redirect
+  ``sys.stderr`` and the stdlib half does not.
 
-Splitting the two halves across two fds was never load-bearing — the API
-writes no payload on stdout, so there is no protocol channel here of the
-kind ``trellis.logging`` protects for the CLI and the MCP stdio server. What
-the split cost was real, though: a collector reading one fd sees half the
-stream, no collector preserves interleaving between two of them, and under
+So exactly one half carried the silent-loss defect, and the split across two
+fds was a separate fault. The split was never load-bearing: the API writes no
+payload on stdout — no ``print`` and no ``sys.stdout`` write anywhere in
+``trellis_api`` — so there is no protocol channel here of the kind
+``trellis.logging`` protects for the CLI and the MCP stdio server. What the
+split cost was real, though: a collector reading one fd sees half the stream,
+no collector preserves interleaving between two of them, and under
 ``trellis serve`` the CLI callback configures structlog to stderr and this
 function then re-pointed it at stdout partway through boot, so one process's
-log moved fds at startup. Unifying on stderr also matches uvicorn's own
-default for its non-access loggers.
+log moved fds at startup. That last one is the strongest of the three and it
+reproduces directly — ``configure_stderr_logging()`` followed by the pre-#430
+``configure_logging()`` puts one logger on stderr and then on stdout.
+Unifying on stderr also matches uvicorn's own default for its non-access
+loggers.
 """
 
 from __future__ import annotations

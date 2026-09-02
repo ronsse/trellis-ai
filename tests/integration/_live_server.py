@@ -158,11 +158,14 @@ def spawn_uvicorn(
     **Critical**: stdout + stderr go to ``log_path``, not
     ``subprocess.PIPE``. Using PIPE without a draining thread causes a
     Windows OS-pipe-buffer deadlock — once trellis's structlog writes
-    fill ~8KB of buffer (about three /packs calls), the next
-    write inside structlog's ``WriteLogger`` blocks forever waiting for
-    the parent to read. Writing to a file
-    keeps the diagnostic available (``wait_for_healthz`` reads it on
-    failure) without ever blocking the writer.
+    fill ~8KB of buffer (about three /packs calls), the child's next log
+    write blocks forever waiting for the parent to read. (That write goes
+    through structlog's *default* ``PrintLogger``, not the ``WriteLogger``
+    :func:`trellis_api.logging.configure_logging` installs — this child is
+    ``python -m uvicorn ... --factory``, which never calls that function.
+    The buffering hazard is identical either way.) Writing to a file keeps
+    the diagnostic available (``wait_for_healthz`` reads it on failure)
+    without ever blocking the writer.
     """
     assert_env_pins_this_checkout(env, what="spawn_uvicorn")
     log_path.parent.mkdir(parents=True, exist_ok=True)

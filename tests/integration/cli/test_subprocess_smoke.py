@@ -43,12 +43,16 @@ def test_the_subprocess_under_test_is_this_checkout(
 ) -> None:
     """Every other test in this module is meaningless without this one.
 
-    This module is the only place in the suite where a real process's stdout
-    is parsed, and a real process resolves ``trellis`` through the venv's
-    editable install — which points at whichever checkout was
-    ``pip install -e``'d, *not* at the worktree pytest is collecting from.
-    pytest's ``pythonpath = ["src", "."]`` reaches the test-driver process
-    and nothing it spawns.
+    This module parses a real process's stdout for behavioural assertions —
+    the CLI's ``--format json`` payloads — and a real process resolves
+    ``trellis`` through the venv's editable install, which points at whichever
+    checkout was ``pip install -e``'d, *not* at the worktree pytest is
+    collecting from. pytest's ``pythonpath = ["src", "."]`` reaches the
+    test-driver process and nothing it spawns; that holds whether the child is
+    ``sys.executable`` or a console script, since neither inherits a pytest
+    ini setting. (``tests/integration/mcp/test_stdio_stream_hygiene.py``
+    parses a child's stdout too — this module is not unique, it is the one
+    #431 caught reporting green about another branch.)
 
     So without the ``PYTHONPATH`` pin in ``cli_env`` every test below
     reports green about another branch's code, with no error, no skip and

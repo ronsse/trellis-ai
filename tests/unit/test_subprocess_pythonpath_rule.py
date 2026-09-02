@@ -55,6 +55,35 @@ a different mechanism**: :func:`_launch_sites` parses, while
 :func:`_token_launch_sites` tokenizes, and
 :func:`test_the_two_scans_agree_on_the_population` fails if they disagree by
 one site. A parser bug and a tokenizer bug do not coincide.
+
+What the cross-check does **not** cover, stated rather than implied, because
+overclaiming it is how #457 happened. The two scans are independent only in
+their *traversal*; they share :func:`_python_files` and the launcher name
+sets above, and a narrowing of either shrinks both counts equally. Measured
+by mutation on this branch:
+
+* dropping the ``ast.Attribute`` branch from :func:`_is_launch` — a genuinely
+  divergent traversal bug — fails the cross-check and names the missed lines;
+* dropping ``"Popen"`` from the shared name set leaves the cross-check green
+  (caught only by :data:`_EXPECTED_EVASION_LINES`, which happens to exercise
+  every launcher name the real tree uses — ``run``, ``Popen``,
+  ``StdioTransport``);
+* narrowing :func:`_python_files` to skip two files took the real population
+  from 8 launch sites to 6 with **every test in this module still passing**.
+
+That last one is #457 reproduced exactly, so the population gets the one
+witness a self-comparison cannot be: :data:`_KNOWN_LAUNCH_SITES`, a number a
+human read off a scan and wrote down here. It is the only input to this
+module that the scan does not compute, and it re-reddens all three mutations
+above.
+
+One residual is left standing, deliberately and on the record: replacing
+:func:`_token_launch_sites`'s body with ``return _launch_sites(root)`` — one
+counter wearing the other's name — is not detected by anything here, because
+every assertion the second scan carries is one the first satisfies too. It is
+a sabotage shape rather than a bug shape (no traversal defect produces it),
+and the honest options are a written-down floor, which is now present, or
+nothing. Saying so beats a test that appears to cover it.
 """
 
 from __future__ import annotations
@@ -67,8 +96,10 @@ from pathlib import Path
 import pytest
 
 from tests.integration._live_server import (
+    assert_env_pins_this_checkout,
     assert_subprocess_imports_this_checkout,
     build_subprocess_env,
+    repo_root,
     repo_src_pythonpath,
 )
 
@@ -148,6 +179,15 @@ _PIN_SOURCE = "repo_src_pythonpath"
 
 #: The boundary check a pass-through helper must call before launching.
 _BOUNDARY_GUARD = "assert_env_pins_this_checkout"
+
+#: Process-launching call sites under ``tests/`` when #431 shipped, read off
+#: a scan by hand. See the module docstring: this is the population's only
+#: witness that the scan does not itself produce, and without it a narrowing
+#: of the shared traversal or the shared name sets shrinks the policed set
+#: without shrinking any assertion. Deleting a launch site legitimately is
+#: expected to fail :func:`test_the_scanned_population_is_not_truncated` —
+#: lower this number deliberately, never to make a red test green.
+_KNOWN_LAUNCH_SITES = 8
 
 
 def _tests_root() -> Path:
@@ -447,6 +487,84 @@ def test_the_two_scans_agree_on_the_population() -> None:
         f"  only in AST scan:   {sorted(set(by_ast) - set(by_tokens))}\n"
         f"  only in token scan: {sorted(set(by_tokens) - set(by_ast))}"
     )
+
+
+def test_the_scanned_population_is_not_truncated() -> None:
+    """A floor on the real tree that neither scan can move.
+
+    ``test_the_two_scans_agree_on_the_population`` compares two counts that
+    share :func:`_python_files` and the launcher name sets, so it is blind to
+    any narrowing of those — both counts shrink together and the comparison
+    stays green. Measured on this branch: a :func:`_python_files` that skips
+    ``test_subprocess_serve.py`` and ``tests/integration/loops/`` takes the
+    population from 8 sites to 6 with all of this module's tests passing.
+    That is #457's failure shape in the module that claims to have closed it.
+
+    Both scans are floored, not just the AST one, so a token scan that has
+    quietly become an alias for the parser is still required to clear the bar
+    on its own terms.
+    """
+    root = _tests_root()
+    for label, sites in (
+        ("AST scan", _launch_sites(root)),
+        ("token scan", _token_launch_sites(root)),
+    ):
+        assert len(sites) >= _KNOWN_LAUNCH_SITES, (
+            f"the {label} found {len(sites)} process launches under {root}, "
+            f"below the {_KNOWN_LAUNCH_SITES} recorded when #431 shipped. "
+            f"Either a launch site was deleted — lower _KNOWN_LAUNCH_SITES "
+            f"deliberately — or the scan has silently stopped reaching part "
+            f"of the tree, in which case the rule above is policing a subset."
+        )
+
+
+class TestTheBoundaryGuardActuallyRejects:
+    """``assert_env_pins_this_checkout`` is the only check at four sites.
+
+    The static rule cannot follow an env through a parameter, so for
+    ``run_cli``, ``initialize_trellis_stores``, ``spawn_uvicorn`` and
+    ``_run_stdio_server`` this function *is* the enforcement — and the rule
+    above is satisfied by the mere presence of a call to it. Measured: making
+    the guard ``return`` immediately leaves 42 tests across
+    ``tests/integration/cli``, ``tests/integration/mcp`` and this module
+    green. So the guard needs its own test, or the four sites it covers are
+    guarded by a name.
+    """
+
+    def test_it_rejects_an_env_with_no_pythonpath(self) -> None:
+        with pytest.raises(AssertionError, match="does not contain"):
+            assert_env_pins_this_checkout({}, what="probe")
+
+    def test_it_rejects_a_pythonpath_pointing_at_another_checkout(self) -> None:
+        with pytest.raises(AssertionError, match="does not contain"):
+            assert_env_pins_this_checkout(
+                {"PYTHONPATH": "/home/other/trellis-ai/src"}, what="probe"
+            )
+
+    def test_it_rejects_a_prefix_near_miss(self) -> None:
+        """``<repo>/src-scratch`` is not ``<repo>/src``.
+
+        Pinned because the obvious simplification — a substring test on the
+        joined ``PYTHONPATH`` — passes every other test in this class while
+        accepting a sibling directory. The entry split is load-bearing.
+        """
+        with pytest.raises(AssertionError, match="does not contain"):
+            assert_env_pins_this_checkout(
+                {"PYTHONPATH": f"{repo_root() / 'src'}-scratch"}, what="probe"
+            )
+
+    def test_it_accepts_the_real_builder_output(self) -> None:
+        assert_env_pins_this_checkout(
+            {"PYTHONPATH": repo_src_pythonpath()}, what="probe"
+        )
+
+    def test_the_failure_message_names_the_path_it_wanted(self) -> None:
+        """An assertion that does not say what was missing costs a debug loop."""
+        with pytest.raises(AssertionError) as excinfo:
+            assert_env_pins_this_checkout({"PYTHONPATH": "/nope"}, what="run_cli")
+        message = str(excinfo.value)
+        assert str(repo_root() / "src") in message
+        assert "run_cli" in message
 
 
 def test_the_scan_reaches_every_test_module() -> None:

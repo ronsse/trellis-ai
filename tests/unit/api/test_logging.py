@@ -221,12 +221,16 @@ def _emit_native(message: str) -> None:
 
 
 #: The two halves of ``configure_logging``: the stdlib ``ProcessorFormatter``
-#: bridge that carries uvicorn, and structlog's own logger factory. #430 was a
-#: baked stream on the first; the second had the same defect via
-#: ``PrintLoggerFactory()``, whose ``PrintLogger`` resolves ``file or stdout``
-#: against a ``from sys import stdout`` bound when structlog was imported. Both
-#: are parametrized here because fixing one and leaving the other is exactly
-#: the half-fix that made the split look deliberate.
+#: bridge that carries uvicorn, and structlog's own logger factory. Only the
+#: first carried #430's baked stream. The second was on the wrong *fd* but
+#: already lazy — ``PrintLogger.msg`` hands ``file=None`` to ``print`` when
+#: its file is the import-time ``sys.stdout``, which is what the no-argument
+#: ``PrintLoggerFactory()`` produces (see ``trellis_api.logging``'s docstring;
+#: #430's own write-up had this backwards). Both halves are parametrized
+#: anyway: the invariant being pinned is a property of the *configuration*,
+#: and a future factory swap on either side can reintroduce a handle. The
+#: native-structlog case is a live regression test in its own right — before
+#: #430 it wrote to stdout, so these assertions on stderr fail against it.
 _EMITTERS = {"bridged-uvicorn": _emit_bridged, "native-structlog": _emit_native}
 
 
