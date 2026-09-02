@@ -1211,7 +1211,7 @@ def _exit_on_refused_advisory_write(
     Covers the refusal no pre-check can: :meth:`AdvisoryStore.refuse_if_stale`
     fires when another process wrote the file between this command's load
     and its save, and the store was perfectly healthy when the pre-check
-    ran (#438). There is no ``AdvisoryLoadDegradation`` to render in that
+    ran (#438). There is no ``LoadDegradation`` to render in that
     case, so this reads the exception rather than the store.
 
     Exit code 2, matching :func:`_exit_if_advisory_store_degraded` rather

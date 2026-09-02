@@ -162,7 +162,7 @@ class AdvisoryReport(TrellisModel):
     #: which case **nothing was analysed and nothing was written** and every
     #: count above is zero for that reason rather than for want of
     #: evidence. Carries
-    #: :meth:`~trellis.stores.advisory_store.AdvisoryLoadDegradation.to_dict`,
+    #: :meth:`~trellis.stores.degradable_json_store.LoadDegradation.to_dict`,
     #: including the ``recovery`` command. A run that reported an ordinary
     #: ``advisories_generated: N`` over a corrupt file is the thing #393 is
     #: about; a report that cannot say "degraded" leaves the operator with

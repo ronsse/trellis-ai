@@ -133,9 +133,10 @@ POLICY_FILENAME = "policies.json"
 
 #: How many of a malformed envelope's keys to name in the error. Enough to
 #: recognise the file (and the typo), short enough to stay one line.
-#: :mod:`trellis.stores.policy_store` bounds the same list with its own
-#: ``_MAX_REPORTED_ROWS``; they are different quantities that happen to be
-#: small, not one constant split in two.
+#: :mod:`trellis.stores.degradable_json_store` bounds the same list with its
+#: own ``_MAX_REPORTED_ROWS`` (it moved there with the load ladder in #426);
+#: they are different quantities that happen to be small, not one constant
+#: split in two.
 _MAX_REPORTED_KEYS = 5
 
 #: Surface label for a gate that would not load, used as the
