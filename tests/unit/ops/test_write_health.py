@@ -27,6 +27,7 @@ from trellis.ops.write_health import (
     summarize_write_health,
 )
 from trellis.schemas import trace as trace_schemas
+from trellis.schemas.enums import OutcomeStatus
 from trellis.schemas.trace import EvidenceRef, Outcome, Trace, TraceStep
 from trellis.stores.base.event_log import EventLog, EventType
 from trellis.stores.sqlite.event_log import SQLiteEventLog
@@ -147,6 +148,43 @@ class TestHints:
             {"kind": "other", "loc": "", "msg": ""},
         ]
         assert len(hints_for_trace_rejections(rows)) == 1
+
+    def test_enum_hint_is_derived_for_any_enum_field(self) -> None:
+        """``_enum_hint`` runs on every enum, not only the hand-written ``source``.
+
+        ``enum@source`` short-circuits to a hand-written hint, so it is
+        the one enum shape in the production corpus and the generated
+        enum path had no coverage at all. ``outcome.status`` is the other
+        enum reachable from ``Trace``: the values come from
+        ``OutcomeStatus`` at call time, and the hint names the model that
+        owns the field and no other.
+        """
+        rows = [{"kind": "enum", "loc": "outcome.status", "msg": ""}]
+        (hint,) = hints_for_trace_rejections(rows)
+        assert "outcome.status must be one of" in hint
+        for member in OutcomeStatus:
+            assert member.value in hint
+        assert _models_named(hint) <= {"Outcome"}
+
+    def test_type_hint_on_a_list_field_describes_the_element_model(self) -> None:
+        """A caller who sent ``steps`` as a scalar needs the element shape.
+
+        Naming ``Trace`` alone is true and useless — the fix is to send an
+        array of ``TraceStep`` objects, so the hint has to say what one
+        looks like.
+        """
+        rows = [{"kind": "type", "loc": "steps", "msg": ""}]
+        (hint,) = hints_for_trace_rejections(rows)
+        assert "array of TraceStep objects" in hint
+        assert "step_type" in hint
+        assert "name" in hint
+        assert _models_named(hint) == {"Trace", "TraceStep"}
+
+    def test_type_hint_on_a_scalar_names_the_scalar(self) -> None:
+        rows = [{"kind": "type", "loc": "intent", "msg": ""}]
+        (hint,) = hints_for_trace_rejections(rows)
+        assert "str" in hint
+        assert _models_named(hint) == {"Trace"}
 
     def test_list_indices_collapse_to_one_hint(self) -> None:
         """One mistake made in eight steps is one problem, not eight."""
