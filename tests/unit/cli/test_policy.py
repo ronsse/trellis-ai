@@ -527,7 +527,7 @@ class TestWritesAreRefusedWhenAnotherProcessWroteFirst:
     Every existing test here covers the **degraded** refusal. The stale one
     is a different exception, a different code, a different recovery
     command and a different renderer (``_exit_on_refused_write`` reads the
-    exception, because there is no ``PolicyLoadDegradation`` to read), and
+    exception, because there is no ``LoadDegradation`` to read), and
     nothing exercised it: deleting the ``except StoreWriteRefusedError``
     handler from ``policy add`` **or** from ``policy remove`` left all 266
     targeted tests green. The PR body's "exit 5 on the CLI" for a stale

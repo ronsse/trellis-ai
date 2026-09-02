@@ -2,11 +2,10 @@
 
 Failure posture — read leniently, refuse to write
 -------------------------------------------------
-This store whole-file-rewrites on every write: :meth:`AdvisoryStore._save`
-serialises ``self._advisories.values()`` over the path it loaded from. That
-makes a *lenient read* and a *lenient write* two very different promises,
-and until #393 the module made the first while accidentally making the
-second.
+This store whole-file-rewrites on every write: ``_save`` serialises the
+in-memory rows over the path it loaded from. That makes a *lenient read*
+and a *lenient write* two very different promises, and until #393 the
+module made the first while accidentally making the second.
 
 The read stays lenient, and deliberately so. :mod:`trellis.stores.advisory_source`
 argues it and is right: advisories are hint-only guidance attached to a
@@ -19,7 +18,7 @@ What does not survive is applying that leniency to the write. Degrading an
 unreadable file to an empty set and then rewriting the path deletes it, and
 the deletion is the *quiet* half of the failure:
 
-1. ``_load`` fails, logs, leaves ``self._advisories == {}``.
+1. ``_load`` fails, logs, leaves the store empty.
 2. The nightly ``AdvisoryGenerator.generate`` calls ``put_many(...)``.
 3. ``_save`` writes a file containing only the new rows.
 
@@ -38,6 +37,10 @@ So: **the read degrades and the write refuses.** A store that could not
 read its file in full serves what it did read (retrieval keeps working) and
 raises :class:`~trellis.errors.DegradedStoreWriteError` from every write
 path. The corrupt bytes stay on disk, where an operator can look at them.
+Since #426 the machinery that implements all of this lives in
+:class:`~trellis.stores.degradable_json_store.DegradableJsonStore`, shared
+with :class:`~trellis.stores.policy_store.PolicyStore`; what stays here is
+what only makes sense about *advisories*.
 
 Per-row, not per-file
 ---------------------
@@ -47,6 +50,13 @@ advisories that *are* readable. That leniency is only safe because the
 write refuses: a partial load followed by a permitted write would rewrite
 the file without the skipped rows, which is the same data loss at a
 narrower granularity. The two halves are a pair; neither is safe alone.
+
+Unlike ``policies.json``, a **duplicate id here is last-one-wins** rather
+than degradation. Nothing else reads this file as a list, so there is no
+second reader for a collapsed view to disagree with — the divergence is
+deliberate and lives in
+:meth:`~trellis.stores.policy_store.PolicyStore._reject_row`, which this
+store does not override.
 
 Degradation is not the only stale view
 --------------------------------------
@@ -67,8 +77,8 @@ others reach the identical end state with nothing degraded (#438):
   was absent is not degraded, and its first write replaces a file it never
   read.
 
-Both are closed by one guard: :meth:`AdvisoryStore.refuse_if_stale` records
-a fingerprint of the file as loaded and refuses
+Both are closed by one guard: ``refuse_if_stale`` records a fingerprint of
+the file as loaded and refuses
 (:class:`~trellis.errors.StaleStoreWriteError`) if it no longer matches.
 Unlike a degraded load this one is **transient** — re-read and redo, rather
 than go and look at the file. It is a compare-and-swap, not a lock: two
@@ -81,7 +91,9 @@ This is the guard #423 landed on
 change generalised its *analysis* one store further than its *fix*:
 ``policies.json`` does not exist on the reference deployment, while
 ``advisories.json`` is 51 KB of live rows rewritten by the nightly cron
-(#438).
+(#438). Both guards being present in both stores is what made #426's
+extraction safe to take: a base pulled out a release earlier would have
+frozen a half-guarded one.
 
 Recovery is the operator's, not this module's
 ---------------------------------------------
@@ -99,98 +111,19 @@ the file; the refusal carries the ``mv`` an operator would run.
 
 from __future__ import annotations
 
-import json
-import shlex
 from collections.abc import Sequence
-from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import structlog
 
-from trellis.core.atomic_write import atomic_write_text
-from trellis.errors import DegradedStoreWriteError, StaleStoreWriteError
 from trellis.schemas.advisory import Advisory, AdvisoryStatus
+from trellis.stores.degradable_json_store import DegradableJsonStore, LoadDegradation
 
 logger = structlog.get_logger(__name__)
 
-#: How many per-row failures to name in the degradation detail. Enough to
-#: recognise a pattern (one renamed field shows up identically on every
-#: row), short enough that a cron log line stays readable.
-_MAX_REPORTED_ROWS = 3
 
-
-@dataclass(frozen=True, slots=True)
-class AdvisoryLoadDegradation:
-    """What a load could not read, and what an operator should do about it.
-
-    Constructed only when something was unreadable — a store whose file
-    parsed in full (or was simply absent) has ``degradation is None``, so
-    the presence of this record is itself the signal.
-    """
-
-    #: The file that could not be read in full.
-    path: str
-    #: Machine-readable cause: ``unreadable_file``, ``malformed_json``,
-    #: ``malformed_envelope``, ``invalid_rows`` or ``load_failed``.
-    reason: str
-    #: Human-readable specifics — the exception text, or the first few
-    #: per-row validation failures.
-    detail: str
-    #: Rows that *did* parse and are being served.
-    rows_loaded: int = 0
-    #: Rows that did not — or ``None`` when the count is *unknowable*, which
-    #: is every whole-file failure: nothing got as far as counting rows.
-    #: Deliberately not ``0``. "0 could not be read" tells an operator at
-    #: 03:00 that nothing was lost, when the whole file may be sitting
-    #: unread; :attr:`rows_skipped_display` is what the surfaces render so
-    #: the two cases cannot present identically.
-    rows_skipped: int | None = None
-
-    @property
-    def recovery(self) -> str:
-        """The shell command that clears the degraded state.
-
-        Deliberately concrete. An operator meets this in a 03:00 cron log,
-        where a diagnosis is worth much less than the fix. Moving the file
-        aside rather than deleting it keeps the bytes for inspection; the
-        next generation run rebuilds the findings, though suppression
-        decisions the file held are not recoverable from it by machine.
-
-        Both operands are ``shlex.quote``d (#427). A data dir containing a
-        space — ``~/Library/Application Support/…`` — otherwise word-splits
-        into an ``mv`` with **four** operands rather than two, and one more
-        pair per extra space (``/tmp/my staging dir/`` reaches six), so what
-        the operator pastes is at best a refusal and at worst a move of
-        three real paths into a fourth. That is the same failure as the
-        Rich-markup and hard-wrap cases the CLI renderer already guards:
-        an unrunnable command printed to the operator *as* the fix. It is
-        the one string in this module that must survive every layer
-        byte-for-byte, and the shell is the last of them.
-        """
-        quoted = shlex.quote(self.path)
-        return f"mv {quoted} {shlex.quote(self.path + '.corrupt')}"
-
-    @property
-    def rows_skipped_display(self) -> str:
-        """``rows_skipped`` for humans — ``"unknown"`` rather than ``0``."""
-        return "unknown" if self.rows_skipped is None else str(self.rows_skipped)
-
-    def to_dict(self) -> dict[str, Any]:
-        """Flat view for ``--format json`` payloads and structured logs."""
-        return {
-            "path": self.path,
-            "reason": self.reason,
-            "detail": self.detail,
-            "rows_loaded": self.rows_loaded,
-            "rows_skipped": self.rows_skipped,
-            "rows_skipped_display": self.rows_skipped_display,
-            "recovery": self.recovery,
-        }
-
-
-class AdvisoryStore:
+class AdvisoryStore(DegradableJsonStore[Advisory]):
     """Load and save advisories from a JSON file.
 
     Advisories are small, infrequently updated, and loaded in full — a
@@ -199,7 +132,9 @@ class AdvisoryStore:
     so is the failure posture: that store had this store's pre-#393
     behaviour on a higher-stakes file, where a rewrite after a degraded
     load laundered the corruption past the strict enforcement reader in
-    :mod:`trellis.mutate.policy_source`.
+    :mod:`trellis.mutate.policy_source`. Since #426 they share the
+    implementation as well as the posture
+    (:class:`~trellis.stores.degradable_json_store.DegradableJsonStore`).
 
     File format::
 
@@ -211,52 +146,28 @@ class AdvisoryStore:
     docstring for why those two are not the same decision.
     """
 
-    def __init__(self, path: Path) -> None:
-        self._path = Path(path)
-        self._advisories: dict[str, Advisory] = {}
-        self._degradation: AdvisoryLoadDegradation | None = None
-        # ``stat`` rather than ``exists()``, which splits an unreadable file
-        # two ways and gets both wrong. ``Path.exists`` swallows the errnos
-        # in ``pathlib._ignore_error`` — ``ENOENT``, ``ENOTDIR``, ``EBADF``,
-        # ``ELOOP`` — and re-raises the rest. So an advisory file behind a
-        # symlink loop, or under a path component that is a regular file,
-        # presented as *absent*: "a deployment that has never generated an
-        # advisory", the one state that is neither degraded nor stale and so
-        # is freely writable. That is the laundering primitive again, by a
-        # different door. And the errnos it does *not* ignore — ``EACCES``
-        # from an unsearchable parent is the one that happens — escaped the
-        # constructor, breaking the promise
-        # :mod:`trellis.stores.advisory_source` makes unconditionally, that
-        # constructing a store never raises and so retrieval never falls
-        # over on this file. Every failure to stat now degrades: writes
-        # refused, reads still served, one record either way.
-        try:
-            self._path.stat()
-        except FileNotFoundError:
-            pass
-        except OSError as exc:
-            self._degrade("unreadable_file", f"{type(exc).__name__}: {exc}")
-        else:
-            self._load()
-        self._loaded_fingerprint = self._fingerprint()
+    _envelope_key: ClassVar[str] = "advisories"
+    _envelope_article: ClassVar[str] = "an"
+    _store_label: ClassVar[str] = "advisory"
+    _loaded_event: ClassVar[str] = "advisories_loaded"
+    _degraded_event: ClassVar[str] = "advisory_load_degraded"
+    _degraded_impact: ClassVar[str] = (
+        "Advisories that parsed are still served; every write is "
+        "refused so the unreadable file cannot be overwritten."
+    )
+    _stale_recovery: ClassVar[str] = "trellis analyze advisory-effectiveness --dry-run"
+
+    # -- Row handling --
+
+    @staticmethod
+    def _parse_row(entry: Any) -> Advisory:
+        return Advisory.model_validate(entry)
+
+    @staticmethod
+    def _row_id(row: Advisory) -> str:
+        return row.advisory_id
 
     # -- Public API --
-
-    @property
-    def degradation(self) -> AdvisoryLoadDegradation | None:
-        """What the load could not read, or ``None`` when it read cleanly.
-
-        An *absent* file is not degradation — a deployment that has never
-        generated an advisory is a normal empty store, and conflating the
-        two is the distinction #393 asks for ("no file" vs "unreadable
-        file").
-        """
-        return self._degradation
-
-    @property
-    def is_degraded(self) -> bool:
-        """Whether this store refuses writes because its load was partial."""
-        return self._degradation is not None
 
     def list(
         self,
@@ -279,7 +190,7 @@ class AdvisoryStore:
         lenient half of the posture and the reason retrieval survives a
         corrupt file.
         """
-        result = list(self._advisories.values())
+        result = list(self._rows.values())
         if not include_suppressed:
             result = [a for a in result if a.status == AdvisoryStatus.ACTIVE]
         if scope is not None:
@@ -302,14 +213,14 @@ class AdvisoryStore:
         is the one that matters) must check :attr:`is_degraded` first; the
         write refusal is what stops that mistake from reaching disk.
         """
-        return self._advisories.get(advisory_id)
+        return self._rows.get(advisory_id)
 
     def put(self, advisory: Advisory) -> Advisory:
         """Add or replace an advisory.  Persists immediately."""
         self.refuse_if_degraded()
         self.refuse_if_stale()
         restore = self._snapshot()
-        self._advisories[advisory.advisory_id] = advisory
+        self._rows[advisory.advisory_id] = advisory
         self._save_or_roll_back(restore)
         logger.info("advisory_stored", advisory_id=advisory.advisory_id)
         return advisory
@@ -320,7 +231,7 @@ class AdvisoryStore:
         self.refuse_if_stale()
         restore = self._snapshot()
         for advisory in advisories:
-            self._advisories[advisory.advisory_id] = advisory
+            self._rows[advisory.advisory_id] = advisory
         self._save_or_roll_back(restore)
         logger.info("advisories_stored", count=len(advisories))
         return len(advisories)
@@ -354,7 +265,7 @@ class AdvisoryStore:
         """
         self.refuse_if_degraded()
         self.refuse_if_stale()
-        advisory = self._advisories.get(advisory_id)
+        advisory = self._rows.get(advisory_id)
         if advisory is None:
             return None
         if advisory.status == AdvisoryStatus.SUPPRESSED:
@@ -368,7 +279,7 @@ class AdvisoryStore:
                 "updated_at": datetime.now(UTC),
             }
         )
-        self._advisories[advisory_id] = updated
+        self._rows[advisory_id] = updated
         self._save_or_roll_back(restore)
         logger.info(
             "advisory_suppressed",
@@ -390,7 +301,7 @@ class AdvisoryStore:
         """
         self.refuse_if_degraded()
         self.refuse_if_stale()
-        advisory = self._advisories.get(advisory_id)
+        advisory = self._rows.get(advisory_id)
         if advisory is None:
             return None
         if advisory.status == AdvisoryStatus.ACTIVE:
@@ -404,7 +315,7 @@ class AdvisoryStore:
                 "updated_at": datetime.now(UTC),
             }
         )
-        self._advisories[advisory_id] = updated
+        self._rows[advisory_id] = updated
         self._save_or_roll_back(restore)
         logger.info("advisory_restored", advisory_id=advisory_id)
         return updated
@@ -426,10 +337,10 @@ class AdvisoryStore:
         """
         self.refuse_if_degraded()
         self.refuse_if_stale()
-        if advisory_id not in self._advisories:
+        if advisory_id not in self._rows:
             return False
         restore = self._snapshot()
-        del self._advisories[advisory_id]
+        del self._rows[advisory_id]
         self._save_or_roll_back(restore)
         logger.info("advisory_removed", advisory_id=advisory_id)
         return True
@@ -439,8 +350,9 @@ class AdvisoryStore:
 
         Refuses on a degraded store like every other write. Resetting a
         file this store could not read is an operator decision taken at
-        the shell (see :attr:`AdvisoryLoadDegradation.recovery`), not one
-        an admin surface should be able to take by accident.
+        the shell (see
+        :attr:`~trellis.stores.degradable_json_store.LoadDegradation.recovery`),
+        not one an admin surface should be able to take by accident.
 
         Refuses on a stale store too, and the returned count is the second
         reason: it is the size of the in-memory view, so on a store another
@@ -449,266 +361,39 @@ class AdvisoryStore:
         self.refuse_if_degraded()
         self.refuse_if_stale()
         restore = self._snapshot()
-        count = len(self._advisories)
-        self._advisories.clear()
+        count = len(self._rows)
+        self._rows.clear()
         self._save_or_roll_back(restore)
         logger.info("advisories_cleared", count=count)
         return count
 
-    # -- Persistence --
+    # -- Refusal messages --
 
-    def _snapshot(self) -> dict[str, Advisory]:
-        """Shallow copy of the in-memory rows, for rollback on a failed save.
+    def _degraded_write_message(self, degradation: LoadDegradation) -> str:
+        """What rewriting a partially-read ``advisories.json`` would cost.
 
-        :class:`Advisory` is only ever replaced wholesale (``model_copy``),
-        never mutated in place, so a shallow copy is a complete undo. The
-        corpus is tens of rows; this is not a cost worth avoiding.
+        The ``mv`` the refusal carries keeps the bytes for inspection; the
+        next generation run rebuilds the *findings*, but the suppression
+        decisions the file held are not recoverable from it by machine.
+        That is the asymmetry worth stating to an operator at 03:00: they
+        are being offered a fix that restores the pipeline and not the
+        curation.
         """
-        return dict(self._advisories)
-
-    def _save_or_roll_back(self, restore: dict[str, Advisory]) -> None:
-        """Persist, and put memory back the way it was if the write fails.
-
-        Without this a refused write still mutated the object: a ``clear()``
-        that raised had already emptied ``list()``, and a ``restore()`` that
-        raised had already un-suppressed the row in memory — #393's own
-        symptom, surviving in-process, landing on exactly the caller the
-        store-level refusal exists for (one that catches the error and keeps
-        serving packs from the same store). The same applies off the
-        degraded path: a full disk must not leave an advisory in memory that
-        is not on disk.
-        """
-        try:
-            self._save()
-        except Exception:
-            self._advisories = restore
-            raise
-
-    def _load(self) -> None:
-        """Load advisories, recording anything that could not be read.
-
-        The outer catch is broad on purpose, and that breadth was never
-        the defect #393 describes. The defect was that the handler left a
-        state indistinguishable from an empty deployment and then let the
-        next write act on it. Breadth is what keeps
-        :mod:`trellis.stores.advisory_source`'s promise unconditional —
-        constructing a store never raises, so retrieval never falls over
-        on this file, whatever shape the corruption takes. What changed is
-        that every failure path now *records* itself, and the record is
-        what refuses the write.
-        """
-        try:
-            self._load_rows()
-        # Degrades, never swallows: the record below is what refuses the write.
-        except Exception as exc:
-            self._degrade("load_failed", f"{type(exc).__name__}: {exc}")
-
-    def _load_rows(self) -> None:
-        """Parse the file into ``self._advisories``, degrading per failure."""
-        try:
-            raw_text = self._path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError) as exc:
-            # UnicodeDecodeError is a ValueError, not an OSError, and is the
-            # shape a truncated or partially-binary write actually takes.
-            self._degrade("unreadable_file", f"{type(exc).__name__}: {exc}")
-            return
-
-        try:
-            raw = json.loads(raw_text)
-        except json.JSONDecodeError as exc:
-            self._degrade("malformed_json", str(exc))
-            return
-
-        if not isinstance(raw, dict):
-            self._degrade(
-                "malformed_envelope",
-                'expected a JSON object with an "advisories" list, got '
-                f"{type(raw).__name__}",
-            )
-            return
-
-        # A *missing* key is degradation, not an empty store. ``_save`` always
-        # emits ``advisories``, so a dict without it is by construction not a
-        # file this store produced: a hand-edit, a renamed field, the wrong
-        # file at this path, or a future schema. Defaulting it to ``[]`` made
-        # ``{}`` and ``{"advisorees": [...]}`` load as a *clean* empty store
-        # and left the whole of #393 intact for those shapes — degrade to
-        # empty in silence, then let the next nightly write replace the file.
-        if "advisories" not in raw:
-            self._degrade(
-                "malformed_envelope",
-                'JSON object has no "advisories" key (keys: '
-                f"{sorted(raw)[:_MAX_REPORTED_ROWS]})",
-            )
-            return
-
-        if not isinstance(raw["advisories"], list):
-            self._degrade(
-                "malformed_envelope",
-                'expected "advisories" to be a list, got '
-                f"{type(raw['advisories']).__name__}",
-            )
-            return
-
-        skipped: list[str] = []
-        for index, entry in enumerate(raw["advisories"]):
-            try:
-                advisory = Advisory.model_validate(entry)
-            # Broad on purpose: one bad row costs one row, not the file.
-            except Exception as exc:
-                skipped.append(f"row {index}: {type(exc).__name__}")
-                continue
-            self._advisories[advisory.advisory_id] = advisory
-
-        if skipped:
-            detail = "; ".join(skipped[:_MAX_REPORTED_ROWS])
-            if len(skipped) > _MAX_REPORTED_ROWS:
-                detail += f"; (+{len(skipped) - _MAX_REPORTED_ROWS} more)"
-            self._degrade("invalid_rows", detail, rows_skipped=len(skipped))
-            return
-
-        logger.info(
-            "advisories_loaded",
-            count=len(self._advisories),
-            path=str(self._path),
+        return (
+            f"Refusing to write the Trellis advisory file at {degradation.path}: "
+            f"it loaded degraded ({degradation.reason}: {degradation.detail}). "
+            f"{degradation.rows_loaded} row(s) parsed and are being served; "
+            f"{degradation.rows_skipped_display} could not be read. Writing "
+            "would replace the file with only what parsed, discarding the rest "
+            "and reviving any advisory the fitness loop had suppressed. To reset:"
         )
 
-    def _degrade(
-        self, reason: str, detail: str, *, rows_skipped: int | None = None
-    ) -> None:
-        """Mark the store degraded and say so at a level operators see.
-
-        ``error``, not ``info``. The CLI's root callback *defaults*
-        ``TRELLIS_LOG_LEVEL`` to ``WARNING`` when the env var is absent
-        (``trellis_cli.main._root``; an explicit env var always wins), so on
-        a default invocation an ``info`` line here is filtered out of the
-        one surface that runs this nightly — the same class of no-op as a
-        ``logger.debug`` under an INFO filter.
-        """
-        self._degradation = AdvisoryLoadDegradation(
-            path=str(self._path),
-            reason=reason,
-            detail=detail,
-            rows_loaded=len(self._advisories),
-            rows_skipped=rows_skipped,
-        )
-        logger.error(
-            "advisory_load_degraded",
-            **self._degradation.to_dict(),
-            impact=(
-                "Advisories that parsed are still served; every write is "
-                "refused so the unreadable file cannot be overwritten."
-            ),
-        )
-
-    def _fingerprint(self) -> tuple[int, int, int] | None:
-        """Identity of the file as this store last saw it, ``None`` if absent.
-
-        ``st_ino`` is the load-bearing part: every write here lands through
-        ``os.replace`` from a fresh temp file, so a completed write by any
-        process changes the inode even if size and mtime happen to collide.
-        Size and mtime are kept because they catch the other shape — an
-        in-place edit that keeps the inode, which is what ``sed -i`` and
-        an editor configured to write through produce.
-
-        Inode *reuse* — a replacement landing on the number this store
-        recorded, with mtime and size colliding too — is unreachable by
-        construction rather than defended against: ``atomic_write_text``
-        creates its temp file while the target still exists, so the
-        target's inode is never free to be handed back.
-        """
-        try:
-            st = self._path.stat()
-        except OSError:
-            return None
-        return (st.st_ino, st.st_mtime_ns, st.st_size)
-
-    def refuse_if_stale(self) -> None:
-        """Raise rather than rewrite a file that changed after we read it.
-
-        See the module docstring: a degraded load is one way an in-memory
-        view stops matching the file, another process writing it is a
-        second, and a file appearing after construction is a third. All
-        three end the same way, and only the first of them degrades.
-
-        Public for the same reason :meth:`refuse_if_degraded` is — a caller
-        about to make a *batch* of writes should fail before it starts
-        rather than part-way through — and it is a **compare-and-swap, not
-        a lock**: two writers can still interleave between this check and
-        the ``os.replace`` inside :meth:`_save`. It closes the wide window
-        (a store that loaded minutes ago, which is every nightly run) and
-        narrows the tiny one; it does not make the write exclusive.
-        """
-        if self._fingerprint() == self._loaded_fingerprint:
-            return
-        msg = (
+    def _stale_write_message(self) -> str:
+        """What rewriting an ``advisories.json`` that moved under us would cost."""
+        return (
             f"Refusing to write the Trellis advisory file at {self._path}: it "
             "changed after this process read it, so writing would replace "
             "whatever landed in between — deleting those advisories and, "
             "because advisory ids are stable (#394), reviving any "
             "suppression they carried. Re-read and retry:"
         )
-        raise StaleStoreWriteError(
-            msg,
-            store="advisory",
-            path=str(self._path),
-            recovery="trellis analyze advisory-effectiveness --dry-run",
-        )
-
-    def refuse_if_degraded(self) -> None:
-        """Raise rather than rewrite a file this store could not read.
-
-        Public because a caller about to make a *batch* of writes should
-        fail before it starts rather than part-way through — see
-        :func:`~trellis.retrieve.effectiveness.run_advisory_fitness_loop`.
-        Every write path calls it too, so calling it is never a way to get
-        a write past the refusal, and not calling it is never a way to
-        avoid one.
-        """
-        degradation = self._degradation
-        if degradation is None:
-            return
-        msg = (
-            f"Refusing to write the Trellis advisory file at {degradation.path}: "
-            f"it loaded degraded ({degradation.reason}: {degradation.detail}). "
-            f"{degradation.rows_loaded} row(s) parsed and are being served; "
-            f"{degradation.rows_skipped_display} could not be read. Writing "
-            "would "
-            "replace the file with only what parsed, discarding the rest and "
-            "reviving any advisory the fitness loop had suppressed. To reset:"
-        )
-        raise DegradedStoreWriteError(
-            msg,
-            store="advisory",
-            path=degradation.path,
-            recovery=degradation.recovery,
-        )
-
-    def _save(self) -> None:
-        """Persist current advisories to the JSON file.
-
-        Atomic, via :func:`~trellis.core.atomic_write.atomic_write_text`.
-        A direct ``write_text`` truncates the destination and *then*
-        writes, so a crash, a full disk or a killed cron between the two
-        produces exactly the half-written file the rest of this module now
-        has to survive. No other *code* writes this file, so closing that
-        window closes the main way the state gets created.
-
-        Atomicity is not a concurrency guarantee, and this file has three
-        writer **processes** — the nightly ``trellis worker curate`` cron,
-        the host ``trellis analyze`` advisory commands, and ``POST
-        /api/v1/advisories/generate`` in a container, against the same
-        bind-mounted data dir. ``os.replace`` makes their writes atomic,
-        not ordered; :meth:`refuse_if_stale` is what stops one of them
-        rewriting another's work from a stale view (#438).
-        """
-        self.refuse_if_degraded()
-        self.refuse_if_stale()
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        data: dict[str, Any] = {
-            "advisories": [a.model_dump(mode="json") for a in self._advisories.values()]
-        }
-        atomic_write_text(self._path, json.dumps(data, indent=2, default=str))
-        # What we just wrote is now what we "loaded": a second write from the
-        # same store instance must not trip its own guard.
-        self._loaded_fingerprint = self._fingerprint()

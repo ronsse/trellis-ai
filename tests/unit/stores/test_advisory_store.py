@@ -267,7 +267,7 @@ class TestAdvisorySuppressionLifecycle:
 class TestCorruptFileIsPreservedNotOverwritten:
     """#393 — a file this store could not read is not a file it may replace.
 
-    ``_save`` serialises ``self._advisories.values()`` over the whole file.
+    ``_save`` serialises ``self._rows.values()`` over the whole file.
     Degrading an unreadable load to an empty set therefore armed the *next*
     write to delete it, and since stable ids (#394) to silently un-suppress
     everything with it. The read stays lenient — that is #382's call and it
@@ -531,7 +531,7 @@ class TestCorruptFileIsPreservedNotOverwritten:
         the recovery path and would happily write ``{"advisories": []}``
         over the file nobody has read yet. Covered black-box — the file is
         seeded with a suppressed row so ``restore`` has a real target,
-        rather than reaching into ``store._advisories``.
+        rather than reaching into ``store._rows``.
         """
         path = tmp_path / "a.json"
         seed = AdvisoryStore(path)

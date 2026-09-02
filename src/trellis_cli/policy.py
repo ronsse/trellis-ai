@@ -126,7 +126,7 @@ def _exit_on_refused_write(exc: StoreWriteRefusedError, output_format: str) -> N
     Covers the refusal the pre-check cannot: ``refuse_if_stale`` fires when
     another process wrote the file between this command's load and its
     save, and the store was perfectly healthy at the pre-check. There is no
-    ``PolicyLoadDegradation`` to render in that case, so this reads the
+    ``LoadDegradation`` to render in that case, so this reads the
     exception rather than the store.
     """
     if output_format == "json":
