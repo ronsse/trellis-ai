@@ -13,8 +13,18 @@ served pack — until capture recovers.
 ``threshold`` rejected writes in the trailing window and *zero* accepted
 ones. Rejections count boundary ``WRITE_REJECTED`` plus executor
 ``MUTATION_REJECTED``, because a write dying at the policy gate leaves
-capture exactly as dark as one dying at the boundary; accepts are
-``MUTATION_EXECUTED``.
+capture exactly as dark as one dying at the boundary.
+
+**A warning must be able to clear, and only a capture surface should
+raise one** (#461). Both halves of that were broken. Accepts were read as
+``MUTATION_EXECUTED`` alone, which is emitted from exactly one place, so
+any surface whose success path is not a governed mutation was
+*structurally unclearable* — ``mcp:save_memory``, the flagship capture
+tool, clears now via ``MEMORY_STORED`` (:data:`_EXTRA_ACCEPT_EVENTS`,
+:func:`accept_events_for`). And ``mcp:record_feedback`` is a *grading*
+surface: it captures nothing, so its rejections are counted by ``trellis
+analyze health`` but never headlined as lost experience
+(:data:`NON_CAPTURE_SURFACES`, :func:`is_capture_surface`).
 
 Per-surface is load-bearing. The incident this exists to catch — every
 MCP ``save_*`` call rejected while a nightly ``trellis ingest corpus``
@@ -99,6 +109,57 @@ _UNKNOWN_SURFACE = "(unknown)"
 #: Executor reason for a duplicate submission of a write that already
 #: landed — not a capture failure.
 _REPLAY_REASON = "idempotency_replay"
+
+#: Surfaces that record write-boundary rejections but do **not** capture
+#: experience, and so are excluded from the banner (#461).
+#:
+#: The banner's headline is *"New experience from this session is NOT being
+#: saved"*. For ``mcp:record_feedback`` that sentence is false in both
+#: halves: grading a pack stores no new experience, and its success path is
+#: :func:`trellis.feedback.recording.record_feedback` →
+#: ``FEEDBACK_RECORDED``, which no ``MUTATION_EXECUTED`` ever accompanies.
+#: The label was therefore **structurally unclearable** — three malformed
+#: ratings pinned a false alarm on every retrieval call for a full window,
+#: on a deployment whose capture was healthy. A banner that cries wolf is
+#: one the reader learns to skip, which destroys the signal at exactly the
+#: moment it is telling the truth.
+#:
+#: Excluded from the *banner*, not from measurement: ``trellis analyze
+#: health`` (:mod:`trellis.ops.write_health`) counts these rejections
+#: exactly as before, and a grading surface that is failing is still worth
+#: fixing — just not under a capture headline.
+#:
+#: The list is a **deny-list, deliberately**. Presuming a surface non-capture
+#: is a silent false negative — a write surface that goes unwatched — which
+#: is the failure direction this check exists to prevent; presuming it
+#: capture is merely noisy, and noisy is visible. So a surface is watched
+#: unless it is named here. ``tests/unit/mcp/test_capture_surface_roster.py``
+#: enumerates every ``_record_boundary_rejection`` call site and fails if its
+#: tool is neither named here nor able to demonstrate an accept event, so the
+#: roster is checkable rather than declared (#443's failure shape).
+NON_CAPTURE_SURFACES: frozenset[str] = frozenset({"mcp:record_feedback"})
+
+#: Accept events that clear a capture surface **in addition to** the
+#: executor's ``MUTATION_EXECUTED``, keyed by surface label (#461).
+#:
+#: ``MUTATION_EXECUTED`` is emitted from exactly one place
+#: (``mutate/executor.py``), so a surface whose success path is not a
+#: governed mutation cannot clear under that rule alone. ``mcp:save_memory``
+#: is the case in point: its only ``MUTATION_EXECUTED`` comes from
+#: ``_run_memory_extraction``, gated on ``TRELLIS_ENABLE_MEMORY_EXTRACTION``
+#: which defaults to ``False``, and which returns early emitting nothing when
+#: extraction yields no drafts. Its unconditional success signal is
+#: ``MEMORY_STORED`` — emitted by every ``save_memory`` path that persists a
+#: doc, and described in that emitter as "a hard requirement".
+#:
+#: The event must carry a ``requested_by`` naming the surface, because
+#: ``Event.source`` is too coarse to attribute one: ``MEMORY_STORED`` has
+#: three emitters and matching them by ``source`` is the looseness #458
+#: refused. Adding the key to the MCP emitter is what made this entry
+#: possible.
+_EXTRA_ACCEPT_EVENTS: dict[str, tuple[EventType, ...]] = {
+    "mcp:save_memory": (EventType.MEMORY_STORED,),
+}
 
 #: Prefix marking a surface whose failure is **global** rather than
 #: per-surface: the deployment's own configuration would not load, so no
@@ -226,6 +287,33 @@ def _rejections_by_surface(
     return counts, earliest, latest, truncated
 
 
+def is_capture_surface(label: str) -> bool:
+    """Does a rejection on ``label`` mean new experience is being lost?
+
+    True unless the label is named in :data:`NON_CAPTURE_SURFACES` — see
+    that constant for why the default is *watched*.
+    """
+    return label not in NON_CAPTURE_SURFACES
+
+
+def accept_events_for(label: str) -> tuple[EventType, ...]:
+    """Event types whose presence clears ``label``'s rejections.
+
+    ``MUTATION_EXECUTED`` always counts — it is what the governed pipeline
+    emits for a write attributed to this surface — plus whatever
+    :data:`_EXTRA_ACCEPT_EVENTS` adds for a surface whose success path is
+    not a governed mutation. Empty for a non-capture surface: nothing needs
+    to clear a banner it can never raise.
+
+    Public because the roster guard reads it. A declared event type that
+    :func:`_surface_has_accepts` would not honour is caught there, by
+    executing the clear rather than trusting the declaration.
+    """
+    if not is_capture_surface(label):
+        return ()
+    return (EventType.MUTATION_EXECUTED, *_EXTRA_ACCEPT_EVENTS.get(label, ()))
+
+
 def _surface_has_accepts(
     event_log: EventLog,
     label: str,
@@ -245,6 +333,11 @@ def _surface_has_accepts(
     write from **any** surface after its last rejection — it can never have
     an accept of its own, and its failure mode blocks every surface at
     once, so any write landing after it proves the condition is over.
+
+    "An accepted write of its own" is not one event type but
+    :func:`accept_events_for`: a surface that does not write through the
+    governed pipeline has no ``MUTATION_EXECUTED`` to find, and reading only
+    that one is what made ``mcp:save_memory`` unclearable (#461).
     """
     if label == _UNKNOWN_SURFACE:
         # No surface to attribute an accept to; the rejections stand.
@@ -257,13 +350,14 @@ def _surface_has_accepts(
                 limit=1,
             )
         )
-    return bool(
+    return any(
         event_log.get_events(
-            event_type=EventType.MUTATION_EXECUTED,
+            event_type=event_type,
             since=since,
             limit=1,
             payload_filters={"requested_by": label},
         )
+        for event_type in accept_events_for(label)
     )
 
 
@@ -317,6 +411,7 @@ def check_capture_health(
         (label, count)
         for label, count in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
         if count >= resolved_threshold
+        and is_capture_surface(label)
         and not _surface_has_accepts(
             event_log, label, since, last_rejection=latest.get(label)
         )
