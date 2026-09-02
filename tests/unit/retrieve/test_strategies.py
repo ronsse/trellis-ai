@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from structlog.testing import capture_logs
 
+from trellis.retrieve import strategies as strategies_module
 from trellis.retrieve.strategies import (
     DEFAULT_IMPORTANCE_DECAY_FLOOR,
     DEFAULT_IMPORTANCE_DECAY_THRESHOLD,
     DEFAULT_IMPORTANCE_FRESH_HORIZON_DAYS,
     DEFAULT_RECENCY_HALF_LIFE_DAYS,
+    GRAPH_RECENCY_CLOCK_FIELD,
     RECENCY_FLOOR,
     GraphSearch,
     KeywordSearch,
@@ -20,6 +24,7 @@ from trellis.retrieve.strategies import (
     _apply_importance,
     _apply_recency_decay,
 )
+from trellis.stores.sqlite.graph import SQLiteGraphStore
 
 
 def _fresh_meta(importance: float) -> dict[str, Any]:
@@ -749,3 +754,212 @@ class TestGraphSearchCanonicalBucketing:
         )
         GraphSearch(store).search("", filters={})
         store.query.assert_called_once()
+
+
+class TestGraphRecencyClock:
+    """#420 — the graph axis selects and ranks on **one** clock.
+
+    ``GraphStore.query`` is ``ORDER BY created_at DESC LIMIT n`` on every
+    shipped backend, and that query *is* the unseeded branch's entire
+    candidate window. Ranking those same rows by ``updated_at`` meant the
+    axis selected on one column and ordered on another, so an SCD-2
+    re-version — a ``retention.prune`` / ``retention.restore`` lifecycle
+    stamp, an ``entity.update`` property merge, an extraction upsert —
+    read as freshness on an axis whose window it cannot widen.
+
+    Note what #420's own framing got wrong, since the tests are shaped by
+    it: the issue claimed a re-versioned old entity could float back into
+    retrieval. It cannot — SCD-2 carries ``created_at`` forward, so the
+    node never re-enters the window at all. The defect is entirely
+    *in-window rank*, which is why the fix is reader-side and one line and
+    why no ``preserve_updated_at`` equivalent was added to ``upsert_node``.
+    """
+
+    @staticmethod
+    def _node(node_id: str, *, age_days: float, updated_age_days: float) -> Any:
+        now = datetime.now(UTC)
+        return {
+            "node_id": node_id,
+            "node_type": "concept",
+            "properties": {"name": node_id},
+            "created_at": (now - timedelta(days=age_days)).isoformat(),
+            "updated_at": (now - timedelta(days=updated_age_days)).isoformat(),
+        }
+
+    def test_a_lifecycle_reversion_changes_no_score(self) -> None:
+        """Same rows, one re-versioned: every score identical.
+
+        Asserts the **scores**, elementwise, not merely that the item is
+        still present — recency decay is a multiplier, so a re-version that
+        changed nothing about selection could still silently reprice the
+        whole axis.
+        """
+        untouched = [
+            self._node("fresh", age_days=1, updated_age_days=1),
+            self._node("stale", age_days=300, updated_age_days=300),
+        ]
+        # ``retention.restore`` re-opens an SCD-2 version: ``updated_at``
+        # becomes now, ``created_at`` is carried forward untouched.
+        reversioned = [
+            self._node("fresh", age_days=1, updated_age_days=1),
+            self._node("stale", age_days=300, updated_age_days=0),
+        ]
+
+        def _scores(rows: list[dict[str, Any]]) -> dict[str, float]:
+            store = MagicMock()
+            store.query.return_value = rows
+            return {
+                item.item_id: item.relevance_score
+                for item in GraphSearch(store).search("")
+            }
+
+        before = _scores(untouched)
+        after = _scores(reversioned)
+
+        assert set(before) == {"fresh", "stale"}
+        # Not vacuous in either direction: the stale row must actually be
+        # carrying decay, or "unchanged" would be trivially true.
+        assert before["stale"] < 0.5 * before["fresh"], before
+        for node_id, score in before.items():
+            assert after[node_id] == pytest.approx(score), (node_id, before, after)
+
+    def test_ranking_never_contradicts_the_selection_order(self) -> None:
+        """The axis may not reorder its own recency window by a second clock.
+
+        The store hands back rows in ``created_at DESC`` order — that is the
+        selection. If ranking reads ``updated_at``, a re-versioned old node
+        outranks rows the store placed above it, and the axis reports an
+        order its own window contradicts. Ranking off the selection column
+        makes the two agree by construction.
+        """
+        rows = [
+            self._node("fresh", age_days=0, updated_age_days=0),
+            self._node("mid", age_days=200, updated_age_days=200),
+            # Oldest by the selection clock, newest by the other one.
+            self._node("stale", age_days=400, updated_age_days=0),
+        ]
+        store = MagicMock()
+        store.query.return_value = rows
+
+        items = GraphSearch(store).search("")
+
+        assert [i.item_id for i in items] == ["fresh", "mid", "stale"]
+        # Spell out the failure this excludes: under ``updated_at`` ranking
+        # the re-versioned row takes no decay at all and lands second.
+        assert items[2].item_id == "stale"
+        assert items[2].relevance_score < items[1].relevance_score
+
+    def test_decay_reads_the_column_the_store_ordered_by(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Against a real backend: one column, both jobs.
+
+        The mock-store tests above pin the consequence; this pins the
+        premise on ``SQLiteGraphStore`` itself — that ``query`` orders by
+        ``created_at``, that SCD-2 carries ``created_at`` forward across a
+        re-version while moving ``updated_at``, and that the timestamp
+        ``GraphSearch`` hands to the decay is that same carried-forward
+        value rather than the bumped one.
+        """
+        store = SQLiteGraphStore(tmp_path / "graph.db")
+        older = store.upsert_node(
+            node_id="older", node_type="concept", properties={"name": "older"}
+        )
+        newer = store.upsert_node(
+            node_id="newer", node_type="concept", properties={"name": "newer"}
+        )
+        before = store.get_node(older)
+        # Re-version the *older* node — the retention.restore shape.
+        store.upsert_node(
+            node_id=older,
+            node_type="concept",
+            properties={"name": "older", "lifecycle": {"state": "current"}},
+        )
+        after = store.get_node(older)
+        assert before is not None
+        assert after is not None
+        assert after["created_at"] == before["created_at"]
+        assert after["updated_at"] > after["created_at"]
+
+        rows = store.query(limit=10)
+        # Selection: newest ``created_at`` first, and the re-version did not
+        # move the older node up.
+        assert [r["node_id"] for r in rows] == [newer, older]
+
+        seen: list[str | None] = []
+        real_decay = strategies_module._apply_recency_decay
+
+        def _record(base: float, timestamp: Any, **kwargs: Any) -> float:
+            seen.append(timestamp)
+            return real_decay(base, timestamp, **kwargs)
+
+        monkeypatch.setattr(strategies_module, "_apply_recency_decay", _record)
+        items = GraphSearch(store).search("")
+
+        assert [i.item_id for i in items] == [newer, older]
+        # Ranking consumed exactly the column selection ordered on.
+        assert seen == [r[GRAPH_RECENCY_CLOCK_FIELD] for r in rows]
+        assert after["updated_at"] not in seen
+
+    @pytest.mark.parametrize(
+        ("clock", "label"),
+        [(None, "absent"), ("", "empty"), ("not-a-date", "unparseable")],
+    )
+    def test_an_unusable_clock_is_served_but_not_served_silently(
+        self, clock: str | None, label: str
+    ) -> None:
+        """Fail-open on an unusable clock, and say so once per search.
+
+        ``_apply_recency_decay`` leaves the score alone when the timestamp
+        does not parse, which is right per item and wrong to leave invisible
+        in bulk: the bolt adapter reads ``created_at`` off the property bag
+        (``props.get("created_at")``), so a backend holding nodes written
+        outside Trellis could rank an entire axis undecayed with nothing in
+        the result saying the clock was gone. Dropping the ``updated_at``
+        fallback is what makes that reachable, so the warning ships with it.
+
+        Parametrized across all three unusable shapes because the warning's
+        predicate has to be the decay's own (``_parse_stamp(...) is None``),
+        not a truthiness check: ``"not-a-date"`` is truthy, decays nothing,
+        and under a truthiness check would have been counted as fine.
+        """
+        row: dict[str, Any] = {
+            "node_id": "clockless",
+            "node_type": "concept",
+            "properties": {"name": "x"},
+        }
+        if clock is not None:
+            row[GRAPH_RECENCY_CLOCK_FIELD] = clock
+        store = MagicMock()
+        store.query.return_value = [
+            row,
+            self._node("dated", age_days=10, updated_age_days=10),
+        ]
+
+        with capture_logs() as logs:
+            items = GraphSearch(store).search("")
+
+        # Served, not dropped — an undated node is not a broken one.
+        assert {i.item_id for i in items} == {"clockless", "dated"}, label
+        warned = [
+            entry
+            for entry in logs
+            if entry["event"] == "graph_search_recency_clock_unusable"
+        ]
+        assert len(warned) == 1, label
+        assert warned[0]["log_level"] == "warning"
+        assert warned[0]["rows_without_usable_clock"] == 1
+        assert warned[0]["rows_scored"] == 2
+        assert warned[0]["field"] == GRAPH_RECENCY_CLOCK_FIELD
+
+    def test_a_fully_dated_window_logs_nothing(self) -> None:
+        """The warning must not fire on the ordinary case."""
+        store = MagicMock()
+        store.query.return_value = [self._node("dated", age_days=1, updated_age_days=1)]
+
+        with capture_logs() as logs:
+            GraphSearch(store).search("")
+
+        assert not [
+            e for e in logs if e["event"] == "graph_search_recency_clock_unusable"
+        ]

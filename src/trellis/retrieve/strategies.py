@@ -90,6 +90,50 @@ _SEMANTIC_DOMAIN_OVERFETCH = 4
 #: :data:`GRAPH_SELECTION_RECENCY_WINDOW`.
 _GRAPH_RECENCY_OVERFETCH = 4
 
+#: The node timestamp the graph axis runs on — for **selection and ranking
+#: alike** (#420).
+#:
+#: The unseeded branch's entire candidate window is ``GraphStore.query``,
+#: which is ``ORDER BY created_at DESC LIMIT n`` on every shipped backend
+#: (``stores/sqlite/graph.py``, ``stores/postgres/graph.py``,
+#: ``stores/bolt_opencypher/graph.py``). Ranking those same rows by
+#: ``updated_at`` meant the axis *selected* on one clock and *ordered* on
+#: another, so a re-versioned node could outrank a strictly newer neighbour
+#: it could never have displaced from the window.
+#:
+#: SCD-2 carries ``created_at`` forward across versions, so a re-version —
+#: a lifecycle stamp from ``retention.prune`` / ``retention.restore``, a
+#: property merge from ``entity.update``, an extraction upsert — moves
+#: ``updated_at`` and leaves this alone. That is the property #420 wanted
+#: and the reason no writer-side ``preserve_updated_at`` equivalent is
+#: needed on ``upsert_node``.
+#:
+#: Read as a single field, deliberately: falling back to a second column
+#: when this one is absent is exactly how the two clocks drift apart again.
+#: :func:`_apply_recency_decay` fails open on an unusable timestamp, and
+#: ``GraphSearch.search`` logs once per search when that happens, so the
+#: no-fallback rule does not buy silence.
+#:
+#: **This is not** :func:`resolve_recency_stamp`, and the difference is the
+#: point of both. That function answers *how old is this information* for the
+#: two document-backed axes, and answers it by preferring the **metadata
+#: bag's** source clock over the store row's write clock (#417/#462). Its own
+#: docstring excludes the graph axis explicitly: a node's ``properties`` is an
+#: extractor-written bag with no source-clock convention and no writer
+#: producing one. Routing this axis through it would resolve to the same
+#: column via a longer path today, and would silently start reading an
+#: unvalidated node property the moment any extractor wrote ``created_at``
+#: into a bag. The two are consistent rather than duplicated — one clock per
+#: axis, chosen for what that axis's rows actually carry — and neither is a
+#: fallback chain. A graph-side source-clock convention would be a new
+#: measurement, not a call to this resolver.
+#:
+#: The cost, stated because it was argued: "this entity was materially
+#: updated yesterday" no longer boosts score on this axis. Reverting is one
+#: line. Reopen #420 if the recency window widens *and* in-window nodes
+#: routinely carry ``updated_at > created_at``.
+GRAPH_RECENCY_CLOCK_FIELD = "created_at"
+
 #: Value of ``PackItem.metadata["graph_selection"]`` when the graph axis
 #: picked its candidates by recency because nothing supplied seeds. Stamped
 #: on every item so the two selection modes are distinguishable in
@@ -900,6 +944,12 @@ class GraphSearch(SearchStrategy):
     so which branch ran is legible in ``PACK_ASSEMBLED.injected_items[]``
     rather than inferred from the wiring.
 
+    **Selection and ranking share one clock**
+    (:data:`GRAPH_RECENCY_CLOCK_FIELD`, ``created_at``). Ranking by
+    ``updated_at`` while selecting by ``created_at`` let an SCD-2
+    re-version — a lifecycle stamp, a property merge — read as freshness on
+    an axis whose window that re-version cannot widen (#420).
+
     Structural nodes (``node_role == "structural"``) are excluded by default
     — they represent fine-grained plumbing (columns, parameters, file
     lines) that is retrieved only as part of its parent's context. Pass
@@ -935,8 +985,10 @@ class GraphSearch(SearchStrategy):
             graph_store: Any :class:`~trellis.stores.base.graph.GraphStore`.
             curated_boost: Score multiplier for ``node_role == "curated"``.
             recency_half_life_days: Half-life for the recency decay applied
-                to *scores* — unrelated to the recency *selection* the
-                unseeded branch performs.
+                to *scores*. Distinct from the recency *selection* the
+                unseeded branch performs, but measured off the same column
+                (:data:`GRAPH_RECENCY_CLOCK_FIELD`) so the two cannot order
+                the same rows differently.
             registry: Optional :class:`ParameterRegistry` for per-domain
                 scoring overrides.
             seed_extractor: Optional :class:`GraphSeedExtractor`. **Default
@@ -1257,8 +1309,36 @@ class GraphSearch(SearchStrategy):
             request_domain,
         )
 
+        scored = nodes[:limit]
+        # ``_apply_recency_decay`` fails open on an unusable timestamp, which
+        # is the right per-item behaviour and the wrong thing to leave silent
+        # in bulk: a backend that stores no ``created_at`` (the bolt adapter
+        # reads it off the property bag, so a node written outside Trellis can
+        # lack it) would rank purely on position with every item undecayed,
+        # and nothing in the result would say the clock was gone.
+        #
+        # The predicate is ``_parse_stamp(...) is None`` — the *exact*
+        # condition the decay fails open on — rather than a truthiness check.
+        # A present-but-unparseable stamp earns the identical undecayed score,
+        # so counting absences alone would report zero on the case an operator
+        # most needs to see. Aggregated per search, not per item: one line to
+        # find, not one per row.
+        unusable_clock = sum(
+            1
+            for node in scored
+            if _parse_stamp(node.get(GRAPH_RECENCY_CLOCK_FIELD)) is None
+        )
+        if unusable_clock:
+            logger.warning(
+                "graph_search_recency_clock_unusable",
+                field=GRAPH_RECENCY_CLOCK_FIELD,
+                rows_without_usable_clock=unusable_clock,
+                rows_scored=len(scored),
+                selection=selection,
+            )
+
         items = []
-        for i, node in enumerate(nodes[:limit]):
+        for i, node in enumerate(scored):
             props = node.get("properties", {})
             node_type_val = node.get("node_type", "")
             node_role_val = node.get("node_role") or "semantic"
@@ -1281,10 +1361,13 @@ class GraphSearch(SearchStrategy):
             if props.get("description") or props.get("comment"):
                 score *= description_boost
 
-            # Recency decay — older nodes score progressively lower
+            # Recency decay — older nodes score progressively lower.
+            # Same clock the window was selected on; see
+            # :data:`GRAPH_RECENCY_CLOCK_FIELD` for why it is not
+            # ``updated_at`` and not a fallback chain.
             score = _apply_recency_decay(
                 score,
-                node.get("updated_at") or node.get("created_at"),
+                node.get(GRAPH_RECENCY_CLOCK_FIELD),
                 half_life_days=half_life,
                 floor=floor,
             )
