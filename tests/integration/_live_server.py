@@ -35,6 +35,8 @@ from typing import Any
 import httpx
 import pytest
 
+import trellis
+
 NEO4J_URI = os.environ.get("TRELLIS_TEST_NEO4J_URI", "")
 NEO4J_USER = os.environ.get("TRELLIS_TEST_NEO4J_USER", "neo4j")
 NEO4J_PASSWORD = os.environ.get("TRELLIS_TEST_NEO4J_PASSWORD", "")
@@ -157,11 +159,12 @@ def spawn_uvicorn(
     ``subprocess.PIPE``. Using PIPE without a draining thread causes a
     Windows OS-pipe-buffer deadlock — once trellis's structlog writes
     fill ~8KB of buffer (about three /packs calls), the next
-    ``print(..., flush=True)`` inside :class:`structlog.PrintLogger`
-    blocks forever waiting for the parent to read. Writing to a file
+    write inside structlog's ``WriteLogger`` blocks forever waiting for
+    the parent to read. Writing to a file
     keeps the diagnostic available (``wait_for_healthz`` reads it on
     failure) without ever blocking the writer.
     """
+    assert_env_pins_this_checkout(env, what="spawn_uvicorn")
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_handle = log_path.open("wb")
     try:
@@ -299,6 +302,7 @@ def run_cli(
 
     Asserts exit 0 and JSON-decodes stdout. Failures dump both streams.
     """
+    assert_env_pins_this_checkout(env, what="run_cli")
     completed = subprocess.run(  # noqa: S603 — argv is a resolved console-script + caller args
         [bin_path, *args],
         env=env,
@@ -336,6 +340,7 @@ def initialize_trellis_stores(
     exit 0 with both streams in the failure message so a broken init
     surfaces immediately rather than as a downstream NoneType error.
     """
+    assert_env_pins_this_checkout(env, what="initialize_trellis_stores")
     result = subprocess.run(  # noqa: S603 — argv is a known console-script + literals
         [trellis_bin, "admin", "init", "--format", "json"],
         env=env,
@@ -348,6 +353,11 @@ def initialize_trellis_stores(
         f"stdout: {result.stdout.decode(errors='replace')}\n"
         f"stderr: {result.stderr.decode(errors='replace')}"
     )
+
+
+def repo_root() -> Path:
+    """The checkout this test session was collected from."""
+    return Path(__file__).resolve().parents[2]
 
 
 def repo_src_pythonpath() -> str:
@@ -367,12 +377,77 @@ def repo_src_pythonpath() -> str:
     and ``mcp_subprocess_env`` hand-rolled ``os.environ.copy()`` without it,
     which is how the CLI smoke suite came to assert against another branch.
     """
-    repo_root = Path(__file__).resolve().parents[2]
-    entries = [str(repo_root / "src"), str(repo_root)]
+    root = repo_root()
+    entries = [str(root / "src"), str(root)]
     existing = os.environ.get("PYTHONPATH", "")
     if existing:
         entries.append(existing)
     return os.pathsep.join(entries)
+
+
+def assert_env_pins_this_checkout(env: dict[str, str], *, what: str) -> None:
+    """Refuse to launch a subprocess whose ``PYTHONPATH`` omits this ``src/``.
+
+    The pass-through guard. :func:`run_cli`, :func:`initialize_trellis_stores`
+    and :func:`spawn_uvicorn` all take their env as a *parameter*, so whether
+    the pin is present is the caller's business and no static rule scoped to
+    this module can see it. A string check at the launch boundary can, costs
+    nothing, and turns "the caller probably used a pinned fixture" into an
+    assertion.
+
+    Only the presence of the path is checked here — that this implies the
+    child actually imports this checkout is proven end to end, once per env
+    fixture, by ``assert_subprocess_imports_this_checkout``. Splitting it
+    that way keeps the boundary check free enough to run on every launch.
+    """
+    src = str(repo_root() / "src")
+    entries = env.get("PYTHONPATH", "").split(os.pathsep)
+    assert src in entries, (
+        f"{what} was handed an env whose PYTHONPATH does not contain {src!r} "
+        f"(PYTHONPATH={env.get('PYTHONPATH', '')!r}). The subprocess would "
+        f"resolve `trellis` through the venv's editable install — a different "
+        f"checkout when this session runs from a git worktree — and report the "
+        f"result as this branch's. Build the env with `repo_src_pythonpath()`."
+    )
+
+
+def assert_subprocess_imports_this_checkout(env: dict[str, str]) -> None:
+    """Spawn a child with *env* and assert it imports **this** ``trellis``.
+
+    The end-to-end half of the guarantee, and the only form of it that cannot
+    be satisfied by a plausible-looking env dict: it runs a real interpreter
+    and compares the package directory it resolved against the one this
+    session is running. Every env-producing fixture wants one of these — see
+    #431 for the 13 CLI smoke tests that were green about ``main`` while a
+    branch was being fixed.
+    """
+    # Cheap precondition first, so a *missing* pin is reported as a missing
+    # pin. What survives to the comparison below is the case a string check
+    # cannot see: a PYTHONPATH that is present and does not resolve.
+    assert_env_pins_this_checkout(env, what="assert_subprocess_imports_this_checkout")
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import trellis, os; print(os.path.dirname(trellis.__file__))",
+        ],
+        capture_output=True,
+        env=env,
+        timeout=CLI_SUBCMD_TIMEOUT_SECONDS,
+        check=False,
+    )
+    stderr = completed.stderr.decode(errors="replace")
+    assert completed.returncode == 0, (
+        f"the probe subprocess could not import trellis at all "
+        f"(exit {completed.returncode}); stderr: {stderr}"
+    )
+    child_pkg = Path(completed.stdout.decode().strip()).resolve()
+    session_pkg = Path(trellis.__file__).resolve().parent
+    assert child_pkg == session_pkg, (
+        f"subprocess imported {child_pkg}, but this session is running "
+        f"{session_pkg}. The env's PYTHONPATH pin is missing or ineffective, "
+        f"so every subprocess test using it validates another checkout."
+    )
 
 
 def build_subprocess_env(config_dir: Path, data_dir: Path) -> dict[str, str]:

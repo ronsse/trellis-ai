@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import io
 import json
 import logging
@@ -116,26 +117,28 @@ class TestJsonRendering:
         assert "timestamp" in record  # injected by shared_processors
 
     def test_structlog_message_renders_as_json(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        buffer = _capture(monkeypatch, fmt="json")
-        log = structlog.get_logger("trellis.test")
-        log.info("ingest_complete", trace_id="t-1", count=3)
-        # Structlog uses its own PrintLoggerFactory, not the stdlib
-        # bridge — but the renderer is the same JSON renderer
-        # instance, so the on-disk shape matches the uvicorn lines.
-        # We assert the contract here by reading from the structlog
-        # output captured via a redirect.
-        # PrintLoggerFactory writes to stdout/stderr by default; the
-        # important guarantee is the JSON shape is identical, which
-        # ``_renders_same_shape`` covers below.
-        del buffer  # unused — structlog output is on stdout
+        """The native structlog half renders through the same JSON renderer.
+
+        This used to be a no-op that ``del``'d its own buffer, with a comment
+        saying structlog's output was unreachable "on stdout". Since #430 both
+        halves resolve ``sys.stderr`` at write time, so ``capsys`` sees it.
+        """
+        _capture(monkeypatch, fmt="json")
+        structlog.get_logger("trellis.test").info(
+            "ingest_complete", trace_id="t-1", count=3
+        )
+        record = json.loads(capsys.readouterr().err.strip().splitlines()[-1])
+        assert record["event"] == "ingest_complete"
+        assert record["trace_id"] == "t-1"
+        assert record["count"] == 3
 
     def test_renders_same_shape_for_both_sources(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         # Bridged uvicorn line lands in our buffered stream handler;
-        # native structlog line lands on stdout via PrintLoggerFactory.
+        # native structlog line lands on stderr via the lazy proxy.
         # Both should be valid JSON with the same key set so a single
         # log-shipping config can parse the combined stream.
         buffer = _capture(monkeypatch, fmt="json")
@@ -145,7 +148,7 @@ class TestJsonRendering:
         bridged = json.loads(bridged_line)
 
         structlog.get_logger("api").info("request_received", method="GET")
-        native_line = capsys.readouterr().out.strip().splitlines()[-1]
+        native_line = capsys.readouterr().err.strip().splitlines()[-1]
         native = json.loads(native_line)
 
         # Both records must carry the enrichment keys added by the
@@ -200,3 +203,108 @@ class TestLogLevel:
         # Root level must default to INFO; an unparseable env var must
         # not blow up startup or silently default to DEBUG.
         assert logging.getLogger().level == logging.INFO
+
+
+def _events(stream: io.StringIO) -> list[str]:
+    """The ``event`` field of every JSON line written to *stream*."""
+    return [
+        json.loads(line)["event"] for line in stream.getvalue().splitlines() if line
+    ]
+
+
+def _emit_bridged(message: str) -> None:
+    logging.getLogger("uvicorn.error").warning(message)
+
+
+def _emit_native(message: str) -> None:
+    structlog.get_logger("trellis.api.test").warning(message)
+
+
+#: The two halves of ``configure_logging``: the stdlib ``ProcessorFormatter``
+#: bridge that carries uvicorn, and structlog's own logger factory. #430 was a
+#: baked stream on the first; the second had the same defect via
+#: ``PrintLoggerFactory()``, whose ``PrintLogger`` resolves ``file or stdout``
+#: against a ``from sys import stdout`` bound when structlog was imported. Both
+#: are parametrized here because fixing one and leaving the other is exactly
+#: the half-fix that made the split look deliberate.
+_EMITTERS = {"bridged-uvicorn": _emit_bridged, "native-structlog": _emit_native}
+
+
+@pytest.mark.parametrize("half", sorted(_EMITTERS))
+class TestStreamIsResolvedAtWriteTime:
+    """#430 — neither half may capture ``sys.stderr`` at configure time.
+
+    Asserted on **the streams**, never on "it did not raise". Stdlib logging
+    routes a write failure into ``Handler.handleError``, which prints
+    ``--- Logging error ---`` to the real stderr and returns, so a handler
+    pinned to a dead stream drops every line without a single exception
+    reaching the caller. A test phrased as ``does not raise`` passes against
+    the unfixed code.
+    """
+
+    @staticmethod
+    def _configured(monkeypatch: pytest.MonkeyPatch, stream: io.StringIO) -> None:
+        monkeypatch.setenv("TRELLIS_LOG_FORMAT", "json")
+        monkeypatch.setenv("TRELLIS_LOG_LEVEL", "DEBUG")
+        with contextlib.redirect_stderr(stream):
+            configure_logging()
+
+    def test_lines_follow_the_current_stream(
+        self, monkeypatch: pytest.MonkeyPatch, half: str
+    ) -> None:
+        """A line goes wherever ``sys.stderr`` points *now*, not at setup."""
+        emit = _EMITTERS[half]
+        at_configure_time = io.StringIO()
+        self._configured(monkeypatch, at_configure_time)
+
+        later = io.StringIO()
+        with contextlib.redirect_stderr(later):
+            emit("after_the_redirect_moved")
+
+        assert _events(later) == ["after_the_redirect_moved"]
+        assert _events(at_configure_time) == [], (
+            "the line went to the stream captured at configure time; the "
+            "handler is holding a stream handle rather than resolving one"
+        )
+
+    def test_no_lines_are_lost_once_the_configure_time_stream_closes(
+        self, monkeypatch: pytest.MonkeyPatch, half: str
+    ) -> None:
+        """The live failure mode: configure under a buffer that is then closed.
+
+        ``CliRunner.invoke`` and ``redirect_stderr`` both do this. A baked
+        handler keeps writing into the closed object, the ``ValueError`` is
+        swallowed, and the operator sees a log that simply stops.
+        """
+        emit = _EMITTERS[half]
+        ephemeral = io.StringIO()
+        self._configured(monkeypatch, ephemeral)
+        ephemeral.close()
+
+        live = io.StringIO()
+        with contextlib.redirect_stderr(live):
+            emit("survived_the_close")
+
+        assert _events(live) == ["survived_the_close"], (
+            "log line lost after the configure-time stream was closed — the "
+            "write failed silently inside Handler.handleError"
+        )
+
+    def test_both_halves_land_on_the_same_stream(
+        self, monkeypatch: pytest.MonkeyPatch, half: str
+    ) -> None:
+        """The fd decision, pinned so a revert to stdout turns the suite red.
+
+        Before #430 the bridge wrote to stderr while structlog wrote to
+        stdout, which is not something anyone chose — see the module
+        docstring of ``trellis_api.logging``. One collector, one fd, one
+        interleaving.
+        """
+        emit = _EMITTERS[half]
+        stream = io.StringIO()
+        self._configured(monkeypatch, stream)
+
+        with contextlib.redirect_stderr(stream):
+            emit("on_stderr")
+
+        assert _events(stream) == ["on_stderr"]

@@ -25,12 +25,46 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from tests.integration._live_server import assert_subprocess_imports_this_checkout
+
 if TYPE_CHECKING:
     from collections.abc import Callable
     from typing import Any
 
 
 CliRunner = "Callable[[list[str], dict[str, str]], tuple[Any, dict[str, Any]]]"
+
+
+# ── the checkout under test (#431) ────────────────────────────────────
+
+
+def test_the_subprocess_under_test_is_this_checkout(
+    cli_env: dict[str, str],
+) -> None:
+    """Every other test in this module is meaningless without this one.
+
+    This module is the only place in the suite where a real process's stdout
+    is parsed, and a real process resolves ``trellis`` through the venv's
+    editable install — which points at whichever checkout was
+    ``pip install -e``'d, *not* at the worktree pytest is collecting from.
+    pytest's ``pythonpath = ["src", "."]`` reaches the test-driver process
+    and nothing it spawns.
+
+    So without the ``PYTHONPATH`` pin in ``cli_env`` every test below
+    reports green about another branch's code, with no error, no skip and
+    no warning. Measured during #403: the 13 tests then in this module
+    passed against ``main`` while the branch under test was being fixed,
+    and would have kept passing had the branch broken every one of them
+    (#431). Verified again here — dropping the pin turns the whole
+    directory red rather than only this test.
+
+    ``tests/integration/mcp/`` has carried this assertion since #428; this
+    directory — the one the issue is actually about — did not. Asserting the
+    *outcome* (which package the child imported) rather than the presence of
+    the env var is the point: an env var can be set to something that does
+    not resolve.
+    """
+    assert_subprocess_imports_this_checkout(cli_env)
 
 
 # ── admin ─────────────────────────────────────────────────────────────

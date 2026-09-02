@@ -19,9 +19,11 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-from pathlib import Path
 
-import trellis
+from tests.integration._live_server import (
+    assert_env_pins_this_checkout,
+    assert_subprocess_imports_this_checkout,
+)
 
 # One initialize request, the smallest exchange that makes a stdio server
 # write a real frame to stdout. Stdin reaches EOF immediately afterwards,
@@ -64,6 +66,7 @@ def _server_env(base: dict[str, str]) -> dict[str, str]:
 
 def _run_stdio_server(preamble: str, env: dict[str, str]) -> tuple[str, str]:
     """Spawn the stdio server with *preamble*, feed one frame, return streams."""
+    assert_env_pins_this_checkout(env, what="_run_stdio_server")
     completed = subprocess.run(  # noqa: S603 — argv is this interpreter + a literal
         [sys.executable, "-c", preamble],
         input=_INITIALIZE_REQUEST.encode(),
@@ -143,19 +146,4 @@ def test_the_subprocess_under_test_is_this_checkout(
     code this branch does not contain, silently. This asserts the child
     imports the same ``trellis`` the test session did.
     """
-    completed = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            "import trellis, os; print(os.path.dirname(trellis.__file__))",
-        ],
-        capture_output=True,
-        env=_server_env(mcp_subprocess_env),
-        timeout=_SPAWN_TIMEOUT_SECONDS,
-        check=True,
-    )
-    child_pkg = Path(completed.stdout.decode().strip()).resolve()
-    assert child_pkg == Path(trellis.__file__).resolve().parent, (
-        f"subprocess imported {child_pkg}, but this session is running "
-        f"{Path(trellis.__file__).resolve().parent}"
-    )
+    assert_subprocess_imports_this_checkout(_server_env(mcp_subprocess_env))
