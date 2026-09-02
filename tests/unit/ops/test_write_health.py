@@ -7,24 +7,59 @@ from real payload mistakes, not synthetic error dicts.
 
 from __future__ import annotations
 
+import json
+import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from trellis.ops.write_health import (
     classify_rejection,
     hints_for_trace_rejections,
+    normalize_loc,
     record_write_rejection,
+    resolve_trace_loc,
     summarize_backend_health,
     summarize_serve_attribution,
     summarize_write_health,
 )
-from trellis.schemas.trace import Trace
+from trellis.schemas import trace as trace_schemas
+from trellis.schemas.enums import OutcomeStatus
+from trellis.schemas.trace import EvidenceRef, Outcome, Trace, TraceStep
 from trellis.stores.base.event_log import EventLog, EventType
 from trellis.stores.sqlite.event_log import SQLiteEventLog
+
+#: Every model name in the trace schema. A hint may name only the model
+#: that actually rejected, so the production-shape tests assert an exact
+#: set — naming an extra one is the misdirection #472 is about. Read off
+#: the module rather than listed, so a model added later is policed too.
+_MODEL_NAMES = frozenset(
+    name
+    for name, obj in vars(trace_schemas).items()
+    if isinstance(obj, type)
+    and issubclass(obj, BaseModel)
+    and obj.__module__ == trace_schemas.__name__
+)
+
+_FIXTURE = json.loads(
+    (
+        Path(__file__).parent / "fixtures" / "production_trace_rejections.json"
+    ).read_text()
+)
+_SHAPES: list[dict] = _FIXTURE["shapes"]
+
+
+def _models_named(text: str) -> set[str]:
+    """Model names appearing in a hint, matched on word boundaries.
+
+    Substring matching would be wrong in the one direction that matters:
+    ``TraceStep`` contains ``Trace``, so a correct hint would read as
+    also naming the model #472 says it must stop naming.
+    """
+    return {n for n in _MODEL_NAMES if re.search(rf"\b{n}\b", text)}
 
 
 def _validation_error(payload: dict) -> ValidationError:
@@ -109,9 +144,161 @@ class TestHints:
         rows = [
             {"kind": "enum", "loc": "source", "msg": ""},
             {"kind": "enum", "loc": "source", "msg": ""},
-            {"kind": "missing", "loc": "intent", "msg": ""},
+            {"kind": "value", "loc": "intent", "msg": ""},
+            {"kind": "other", "loc": "", "msg": ""},
         ]
         assert len(hints_for_trace_rejections(rows)) == 1
+
+    def test_enum_hint_is_derived_for_any_enum_field(self) -> None:
+        """``_enum_hint`` runs on every enum, not only the hand-written ``source``.
+
+        ``enum@source`` short-circuits to a hand-written hint, so it is
+        the one enum shape in the production corpus and the generated
+        enum path had no coverage at all. ``outcome.status`` is the other
+        enum reachable from ``Trace``: the values come from
+        ``OutcomeStatus`` at call time, and the hint names the model that
+        owns the field and no other.
+        """
+        rows = [{"kind": "enum", "loc": "outcome.status", "msg": ""}]
+        (hint,) = hints_for_trace_rejections(rows)
+        assert "outcome.status must be one of" in hint
+        for member in OutcomeStatus:
+            assert member.value in hint
+        assert _models_named(hint) <= {"Outcome"}
+
+    def test_type_hint_on_a_list_field_describes_the_element_model(self) -> None:
+        """A caller who sent ``steps`` as a scalar needs the element shape.
+
+        Naming ``Trace`` alone is true and useless — the fix is to send an
+        array of ``TraceStep`` objects, so the hint has to say what one
+        looks like.
+        """
+        rows = [{"kind": "type", "loc": "steps", "msg": ""}]
+        (hint,) = hints_for_trace_rejections(rows)
+        assert "array of TraceStep objects" in hint
+        assert "step_type" in hint
+        assert "name" in hint
+        assert _models_named(hint) == {"Trace", "TraceStep"}
+
+    def test_type_hint_on_a_scalar_names_the_scalar(self) -> None:
+        rows = [{"kind": "type", "loc": "intent", "msg": ""}]
+        (hint,) = hints_for_trace_rejections(rows)
+        assert "str" in hint
+        assert _models_named(hint) == {"Trace"}
+
+    def test_list_indices_collapse_to_one_hint(self) -> None:
+        """One mistake made in eight steps is one problem, not eight."""
+        rows = [
+            {"kind": "extra_forbidden", "loc": f"steps.{i}.action", "msg": ""}
+            for i in range(8)
+        ]
+        (hint,) = hints_for_trace_rejections(rows)
+        assert "steps[].action" in hint
+
+
+class TestResolveTraceLoc:
+    """The walk that replaced the ``loc``-prefix roster (#472).
+
+    A roster over prefixes cannot describe a model nobody added a branch
+    for; a walk describes every model reachable from ``Trace``. These
+    pin both halves — that it resolves, and that when it *cannot* it
+    resolves to nothing rather than to something plausible.
+    """
+
+    def test_walks_through_a_list_into_the_element_model(self) -> None:
+        target = resolve_trace_loc("steps.3.result")
+        assert target is not None
+        assert target.model is TraceStep
+        assert target.field == "result"
+        assert target.path == "steps[].result"
+
+    def test_stops_on_the_list_element_when_the_loc_does(self) -> None:
+        target = resolve_trace_loc("evidence_used.0")
+        assert target is not None
+        assert target.model is EvidenceRef
+        assert target.field is None
+        assert target.path == "evidence_used[]"
+
+    def test_unwraps_optional_before_descending(self) -> None:
+        target = resolve_trace_loc("outcome.summary")
+        assert target is not None
+        assert target.model is Outcome
+
+    def test_undeclared_terminal_segment_still_names_its_owner(self) -> None:
+        target = resolve_trace_loc("steps.0.action")
+        assert target is not None
+        assert target.model is TraceStep
+        assert target.annotation is None
+
+    @pytest.mark.parametrize(
+        "loc",
+        [
+            "",
+            "nope.deeper",  # undeclared segment that is not the last
+            "metadata.anything",  # descends into a free-form dict
+            "steps.result",  # a list indexed by a name
+            "intent.0",  # an index into a scalar
+        ],
+    )
+    def test_unresolvable_paths_resolve_to_nothing(self, loc: str) -> None:
+        assert resolve_trace_loc(loc) is None
+
+    def test_unresolvable_loc_names_no_model(self) -> None:
+        """The acute risk is a confident hint for the wrong model.
+
+        Silence was the old bug, but a plausible-looking wrong answer is
+        worse than silence. An unresolvable path says so and names
+        nothing.
+        """
+        rows = [{"kind": "extra_forbidden", "loc": "metadata.a.b", "msg": ""}]
+        (hint,) = hints_for_trace_rejections(rows)
+        assert "does not resolve to a field" in hint
+        assert not _models_named(hint)
+
+
+class TestHintsAgainstProductionRejections:
+    """The falsifiable criterion from #472, run over the real corpus.
+
+    ``fixtures/production_trace_rejections.json`` holds every distinct
+    ``(kind, loc)`` shape from the 318 ``save_experience`` rejections in
+    the reference deployment's event log — shapes only, no payload
+    content. Synthetic fixtures are exactly what let the roster version
+    look covered while it was silent on 184 of those 318 and named
+    ``Trace`` for the 97 that rejected inside ``TraceStep``.
+    """
+
+    def test_fixture_accounts_for_every_recorded_rejection(self) -> None:
+        assert sum(s["count"] for s in _SHAPES) == _FIXTURE["total_rejections"]
+
+    @pytest.mark.parametrize("shape", _SHAPES, ids=lambda s: f"{s['kind']}@{s['loc']}")
+    def test_every_production_shape_yields_a_hint(self, shape: dict) -> None:
+        row = {"kind": shape["kind"], "loc": shape["loc"], "msg": ""}
+        assert hints_for_trace_rejections([row]), (
+            f"no hint for {shape['kind']}@{shape['loc']} "
+            f"({shape['count']} production rejections)"
+        )
+
+    @pytest.mark.parametrize("shape", _SHAPES, ids=lambda s: f"{s['kind']}@{s['loc']}")
+    def test_every_production_shape_names_the_right_model(self, shape: dict) -> None:
+        row = {"kind": shape["kind"], "loc": shape["loc"], "msg": ""}
+        joined = " ".join(hints_for_trace_rejections([row]))
+        expected = set(shape["expect_models"])
+        named = _models_named(joined)
+        assert named == expected, (
+            f"{shape['kind']}@{shape['loc']} named {sorted(named)}, "
+            f"expected {sorted(expected)}"
+        )
+
+    def test_full_corpus_coverage_is_total(self) -> None:
+        """Reported in the PR as a number, so a regression is visible."""
+        hinted = sum(
+            s["count"]
+            for s in _SHAPES
+            if hints_for_trace_rejections(
+                [{"kind": s["kind"], "loc": s["loc"], "msg": ""}]
+            )
+        )
+        assert hinted == _FIXTURE["total_rejections"]
 
 
 class TestRecordWriteRejection:
@@ -196,6 +383,33 @@ class TestSummarizeWriteHealth:
         assert report.status == "warn"
         assert any("collision" in reason for reason in report.reasons)
         assert any("rejection rate" in reason for reason in report.reasons)
+
+    def test_one_mistake_across_steps_is_one_collision(self, tmp_path: Path) -> None:
+        """Indices are collapsed, so the operator sees the true count.
+
+        Un-normalized, one payload that used ``action`` in four steps
+        reported four ``steps.N.action`` collisions of one each — each
+        below the repeat threshold, so it warned about nothing at all.
+        """
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        event_log.emit(
+            EventType.WRITE_REJECTED,
+            "mcp:save_experience",
+            payload={
+                "tool": "save_experience",
+                "stage": "boundary",
+                "rejections": [
+                    {"kind": "extra_forbidden", "loc": f"steps.{i}.action", "msg": ""}
+                    for i in range(4)
+                ],
+                "hints": [],
+            },
+        )
+        report = summarize_write_health(event_log, days=1)
+        assert report.boundary_kinds == {"extra_forbidden@steps[].action": 4}
+        assert report.repeated_collisions == [
+            {"kind": "extra_forbidden", "loc": "steps[].action", "count": 4}
+        ]
 
     def test_empty_window_is_ok(self, tmp_path: Path) -> None:
         event_log = SQLiteEventLog(tmp_path / "events.db")
@@ -514,3 +728,20 @@ class TestCaptureCoverageIsComposedIn:
         report = summarize_backend_health(event_log, days=1)
         assert report.capture.capture_rate == pytest.approx(0.6)
         assert report.status == "ok"
+
+
+class TestNormalizeLoc:
+    @pytest.mark.parametrize(
+        ("loc", "expected"),
+        [
+            ("steps.0.result", "steps[].result"),
+            ("steps.12.args.0", "steps[].args[]"),
+            ("evidence_used.7", "evidence_used[]"),
+            ("outcome.artifacts", "outcome.artifacts"),
+            ("policies.json", "policies.json"),
+            ("", ""),
+            ("0", "0"),
+        ],
+    )
+    def test_indices_collapse(self, loc: str, expected: str) -> None:
+        assert normalize_loc(loc) == expected

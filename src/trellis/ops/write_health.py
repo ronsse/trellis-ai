@@ -35,11 +35,15 @@ could drift would recreate exactly that failure.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal
+from enum import Enum
+from types import UnionType
+from typing import Any, Literal, Union, get_args, get_origin
 
 import structlog
-from pydantic import Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from trellis.core.base import TrellisModel
 from trellis.feedback.attribution import payload_is_attributed, payload_pack_id
@@ -48,7 +52,7 @@ from trellis.ops.capture_coverage import (
     summarize_capture_coverage,
 )
 from trellis.schemas.enums import TraceSource
-from trellis.schemas.trace import Outcome, Trace, TraceContext
+from trellis.schemas.trace import Outcome, Trace
 from trellis.stores.base.event_log import (
     DEFAULT_SCAN_LIMIT,
     EventLog,
@@ -160,6 +164,16 @@ RETRIEVAL_AVAILABILITY_ASSUMPTION = (
 )
 
 
+#: What an unresolvable ``loc`` emits. It names **no model**, on purpose:
+#: the failure this replaces was a confident hint pointing at the wrong
+#: one. Saying the machinery ran and had nothing is a different, and
+#: honest, signal from an empty ``hints`` list.
+_UNRESOLVED_HINT = (
+    "'{loc}' does not resolve to a field of the live trace schema — "
+    "no field-level hint available; check the shape of the enclosing object"
+)
+
+
 def _kind_for(pydantic_type: str) -> str:
     for prefix, kind in _PYDANTIC_KIND_PREFIXES:
         if pydantic_type.startswith(prefix):
@@ -191,8 +205,244 @@ def classify_rejection(error: Exception) -> list[dict[str, str]]:
     return [{"kind": "other", "loc": "", "msg": str(error)[:_MAX_MSG]}]
 
 
-def _fields(model: type[TrellisModel]) -> str:
+def _fields(model: type[BaseModel]) -> str:
     return ", ".join(sorted(model.model_fields))
+
+
+def _required(model: type[BaseModel]) -> str:
+    return ", ".join(
+        sorted(name for name, f in model.model_fields.items() if f.is_required())
+    )
+
+
+def _dict_fields(model: type[BaseModel]) -> list[str]:
+    """Names of the model's free-form ``dict`` fields, sorted."""
+    names = []
+    for name, field in model.model_fields.items():
+        annotation = _unwrap_optional(field.annotation)
+        if annotation is dict or get_origin(annotation) is dict:
+            names.append(name)
+    return sorted(names)
+
+
+def _unwrap_optional(annotation: Any) -> Any:
+    """Strip ``None`` from ``X | None``, leaving ``X``; otherwise identity."""
+    if get_origin(annotation) in (Union, UnionType):
+        args = [arg for arg in get_args(annotation) if arg is not type(None)]
+        if len(args) == 1:
+            return args[0]
+    return annotation
+
+
+def _is_model(annotation: Any) -> bool:
+    return isinstance(annotation, type) and issubclass(annotation, BaseModel)
+
+
+def _list_element(annotation: Any) -> type[BaseModel] | None:
+    """The model a ``list[Model]`` annotation holds, or ``None``."""
+    if get_origin(annotation) is not list:
+        return None
+    args = get_args(annotation)
+    element = _unwrap_optional(args[0]) if args else None
+    return element if _is_model(element) else None
+
+
+def normalize_loc(loc: str) -> str:
+    """Collapse list indices in a dotted ``loc``.
+
+    ``steps.0.result`` becomes ``steps[].result``. Two rejections that
+    differ only by which list element failed are the same schema
+    collision, so hints and the repeat-collision counter treat them as
+    one.
+    """
+    parts: list[str] = []
+    for segment in loc.split("."):
+        if segment.isdigit() and parts:
+            parts[-1] = f"{parts[-1]}[]"
+        else:
+            parts.append(segment)
+    return ".".join(parts)
+
+
+@dataclass(frozen=True)
+class _LocTarget:
+    """Where a rejection's ``loc`` lands in the live ``Trace`` model tree.
+
+    ``model`` is the model that actually rejected — the whole point of
+    resolving rather than prefix-matching. ``field`` is the segment it
+    names, or ``None`` when the ``loc`` stops on a list element (a
+    ``type`` error on ``evidence_used.0`` names no field). ``annotation``
+    is that field's live annotation, or ``None`` when the field is not
+    declared at all, which is exactly the ``extra_forbidden`` case.
+    """
+
+    model: type[BaseModel]
+    field: str | None
+    annotation: Any | None
+    path: str
+
+    @property
+    def container(self) -> str:
+        """The dotted path of ``model`` itself — ``steps[]`` for ``steps[].result``."""
+        if self.field is None:
+            return self.path
+        return self.path.rsplit(".", 1)[0] if "." in self.path else ""
+
+
+def resolve_trace_loc(loc: str) -> _LocTarget | None:
+    """Walk a rejection ``loc`` down the live ``Trace`` model tree.
+
+    Returns ``None`` when the walk cannot proceed — an index into a
+    non-list, a segment under a free-form ``dict``, an unknown segment
+    that is not the last one. Callers must treat ``None`` as *no model
+    may be named*: a hint that names the wrong model is worse than no
+    hint (#472), which is precisely how the previous prefix-matching
+    version misdirected 97 ``steps.*`` rejections onto ``Trace``.
+    """
+    if not loc:
+        return None
+    segments = loc.split(".")
+    # ``current`` is the annotation the walk is standing on; ``owner`` and
+    # ``field`` remember the last model/field pair it passed through, which
+    # is what a hint needs to name. The optional unwrap happens on entry to
+    # each segment, so ``current`` still holds the *declared* annotation
+    # (``Outcome | None``, not ``Outcome``) when the loop exits.
+    current: Any = Trace
+    owner: type[BaseModel] = Trace
+    field: str | None = None
+    for index, segment in enumerate(segments):
+        current = _unwrap_optional(current)
+        if segment.isdigit():
+            element = _list_element(current)
+            if element is None:
+                return None
+            owner, field, current = element, None, element
+            continue
+        if not _is_model(current):
+            return None
+        model = current
+        declared = model.model_fields.get(segment)
+        if declared is None:
+            if index != len(segments) - 1:
+                return None
+            return _LocTarget(
+                model=model,
+                field=segment,
+                annotation=None,
+                path=normalize_loc(loc),
+            )
+        owner, field, current = model, segment, declared.annotation
+    return _LocTarget(
+        model=owner, field=field, annotation=current, path=normalize_loc(loc)
+    )
+
+
+def _describe(annotation: Any) -> str:
+    """Name the shape an annotation accepts, in caller-facing terms."""
+    resolved = _unwrap_optional(annotation)
+    if _is_model(resolved):
+        return (
+            f"an object of type {resolved.__name__} with fields [{_fields(resolved)}]"
+        )
+    origin = get_origin(resolved)
+    if origin is list:
+        element = _list_element(resolved)
+        if element is not None:
+            return (
+                f"an array of {element.__name__} objects "
+                f"with fields [{_fields(element)}]"
+            )
+        args = get_args(resolved)
+        inner = _unwrap_optional(args[0]) if args else Any
+        return f"an array of {getattr(inner, '__name__', inner)}"
+    if resolved is dict or origin is dict:
+        return "a JSON object, not a string or other scalar"
+    return f"a value of type {getattr(resolved, '__name__', resolved)}"
+
+
+def _freeform_clause(target: _LocTarget) -> str:
+    """Where stray keys belong, derived from the live model's dict fields."""
+    container = target.container
+    own = _dict_fields(target.model)
+    if own:
+        prefix = f"{container}." if container else ""
+        return "; put free-form values in " + " or ".join(prefix + n for n in own)
+    root = _dict_fields(Trace)
+    if root:
+        return "; put free-form values in top-level " + " or ".join(root)
+    return ""
+
+
+def _extra_forbidden_hint(target: _LocTarget) -> str:
+    if target.model is Outcome and (target.field or "").startswith("artifact"):
+        # Hand-written on purpose: the generated form would list Outcome's
+        # fields, which is true and useless — the caller needs to be told
+        # where artifacts actually go, not where they do not.
+        return (
+            "artifacts belong at top level: "
+            '"artifacts_produced": [{"artifact_id": ..., '
+            '"artifact_type": ...}] — not inside outcome'
+        )
+    return (
+        f"{target.path} is not accepted: {target.model.__name__} accepts only "
+        f"[{_fields(target.model)}]{_freeform_clause(target)}"
+    )
+
+
+def _type_hint(target: _LocTarget) -> str:
+    if target.annotation is None:
+        return _UNRESOLVED_HINT.format(loc=target.path)
+    if target.field is None:
+        # The loc stops on a list element; ``_describe`` already names the
+        # element model, so do not name the owner twice.
+        return f"{target.path} entries must be {_describe(target.annotation)}"
+    return (
+        f"{target.path} must be {_describe(target.annotation)} "
+        f"({target.model.__name__}.{target.field})"
+    )
+
+
+def _enum_hint(target: _LocTarget) -> str:
+    resolved = _unwrap_optional(target.annotation)
+    if isinstance(resolved, type) and issubclass(resolved, Enum):
+        allowed = ", ".join(str(member.value) for member in resolved)
+        return f"{target.path} must be one of: {allowed}"
+    return _UNRESOLVED_HINT.format(loc=target.path)
+
+
+def _missing_hint(target: _LocTarget) -> str:
+    return (
+        f"{target.path} is required: {target.model.__name__} "
+        f"requires [{_required(target.model)}]"
+    )
+
+
+#: Rejection kinds whose fix is a *field* change, so a resolved ``loc``
+#: can describe it. Everything not listed (``value``,
+#: ``dangling_reference``, ``config_unreadable``, ``other``…) is not a
+#: schema-shape problem and gets no invented guidance.
+_HINT_BUILDERS: dict[str, Callable[[_LocTarget], str]] = {
+    "extra_forbidden": _extra_forbidden_hint,
+    "missing": _missing_hint,
+    "type": _type_hint,
+    "enum": _enum_hint,
+}
+
+
+def _hint_for_rejection(kind: str, loc: str) -> str | None:
+    """One hint for one taxonomy row, or ``None`` when nothing is derivable."""
+    if kind == "json_invalid":
+        return "trace_json must be strict JSON — no trailing commas or comments"
+    if kind == "enum" and loc == "source":
+        # Hand-written on purpose: ``source`` is the field the recall-gap
+        # study found agents guessing at, and naming it plainly beats the
+        # generated form wrapped in path syntax.
+        return f"source must be one of: {', '.join(s.value for s in TraceSource)}"
+    builder = _HINT_BUILDERS.get(kind)
+    if builder is None:
+        return None
+    target = resolve_trace_loc(loc)
+    return _UNRESOLVED_HINT.format(loc=loc) if target is None else builder(target)
 
 
 def hints_for_trace_rejections(rows: list[dict[str, str]]) -> list[str]:
@@ -201,40 +451,26 @@ def hints_for_trace_rejections(rows: list[dict[str, str]]) -> list[str]:
     Every hint is computed from the live models at call time, so this can
     never describe a schema the code does not have. Returns at most one
     hint per distinct problem, deduplicated, order-stable.
+
+    The model a hint names is **resolved** by walking the rejection's
+    ``loc`` down the model tree (:func:`resolve_trace_loc`), not matched
+    against a roster of ``loc`` prefixes. The roster version handled two
+    prefixes (``outcome.``, ``context.``) and two kinds, so on the
+    production corpus it was silent on 184 of 318 rejections and named
+    ``Trace`` — a model with no ``result`` field — for the 97 that
+    rejected inside ``TraceStep``. A walk covers every model reachable
+    from ``Trace``, including ones added later, for free.
+
+    Two hand-written hints are kept deliberately, because each encodes a
+    specific recurring confusion a generated hint would state worse: the
+    ``artifacts``-under-``outcome`` relocation, and the ``source`` enum
+    listing. Everything else is derived.
     """
     hints: list[str] = []
-
-    def add(hint: str) -> None:
-        if hint not in hints:
-            hints.append(hint)
-
     for row in rows:
-        kind, loc = row["kind"], row["loc"]
-        if kind == "extra_forbidden" and loc.startswith("outcome."):
-            field = loc.split(".", 1)[1]
-            if field.startswith("artifact"):
-                add(
-                    "artifacts belong at top level: "
-                    '"artifacts_produced": [{"artifact_id": ..., '
-                    '"artifact_type": ...}] — not inside outcome'
-                )
-            else:
-                add(
-                    f"Outcome accepts only [{_fields(Outcome)}]; put stray "
-                    "values in outcome.metrics or top-level metadata"
-                )
-        elif kind == "extra_forbidden" and loc.startswith("context."):
-            add(
-                f"TraceContext accepts only [{_fields(TraceContext)}]; "
-                "other keys go in top-level metadata"
-            )
-        elif kind == "extra_forbidden":
-            add(f"Trace accepts only [{_fields(Trace)}]; unknown keys go in metadata")
-        elif kind == "enum" and loc == "source":
-            allowed = ", ".join(s.value for s in TraceSource)
-            add(f"source must be one of: {allowed}")
-        elif kind == "json_invalid":
-            add("trace_json must be strict JSON — no trailing commas or comments")
+        hint = _hint_for_rejection(row["kind"], row["loc"])
+        if hint and hint not in hints:
+            hints.append(hint)
     return hints
 
 
@@ -456,7 +692,12 @@ def summarize_write_health(
         ).boundary_rejected += 1
         for row in event.payload.get("rejections") or []:
             kind = str(row.get("kind", "other"))
-            loc = str(row.get("loc", ""))
+            # List indices are collapsed (``steps.0.action`` and
+            # ``steps.1.action`` → ``steps[].action``) because they are the
+            # same schema disagreement. Un-normalized, one mistake made in
+            # eight steps of one payload presented as eight separate
+            # "repeated schema collision" reasons, each undercounting it.
+            loc = normalize_loc(str(row.get("loc", "")))
             label = f"{kind}@{loc}" if loc else kind
             boundary_kinds[label] = boundary_kinds.get(label, 0) + 1
             collision_counts[(kind, loc)] = collision_counts.get((kind, loc), 0) + 1
