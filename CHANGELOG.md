@@ -258,8 +258,49 @@ Net DEFECT delta in `src/`: 113 literal-only → 85 literal-only / 67 helper-awa
   `_reject` helper; the six sites that build a `RejectedItem` by hand still
   take a hard-coded `item_type` or score against the green 992-test retrieval
   suite (11 of 12 such mutants survive it; the full suite was not run against
-  them). Latent rather than live — `summarize_withheld` reads only
-  `item_id` and `reason`, and both are pinned. (#447)
+  them). Latent in the narrow sense that nothing *branches* on either field —
+  `summarize_withheld` reads only `item_id` and `reason`, and both are pinned.
+  **The wider reading of that sentence — that nothing reads the two fields at
+  all — is wrong, and #456 below corrects it**: both are returned by
+  `POST /packs` as `retrieval_report.rejected_items[]` and rendered by the
+  Memory Explorer. (#447)
+- **The same uniformity flaw at the six sites `_reject` did not reach.**
+  `max_items` and `token_budget` on the flat path, both `dedup` branches,
+  `semantic_dedup`, and the content floor in `excerpts.py` each hand-wrote the
+  identical four-field copy off a `PackItem`, and **eleven of the twelve `item_type` / `relevance_score` mutants across them survived the full default selection (6,468 passing on `a40b027`)** — the identical count #456 measured over the 992-test retrieval subset, so widening the selection caught nothing extra; the one that dies is `dedup`'s `existing.relevance_score`, held by a single pre-existing assertion in `test_pack_builder.py::TestRejectionTracking::test_dedup_rejection_tracked`. So all six
+  could have been constant-folded, mistyped, or copied off the wrong object
+  and stayed green — the #447 flaw again, six times over. **#456 called it
+  purely latent on the grounds that nothing reads either field, and that is
+  not quite right**: `summarize_withheld` does key only on `item_id` and
+  `reason`, but both fields are serialised into
+  `PACK_ASSEMBLED.payload["rejected_items"]`, returned to every REST/SDK caller
+  by `POST /packs` (`trellis_api/routes/retrieve.py` hands back
+  `pack.retrieval_report.model_dump()` whole), and rendered by the Memory
+  Explorer's pack view as the *Type* and *Relevance* columns of its "Rejected
+  items" table. The REST surface is the load-bearing half of that — it is a
+  programmatic contract, not a screen someone has to open. Nothing *branches* on
+  them — which is why every mutant stayed green — but a wrong value was being
+  handed to a caller and shown to an operator as fact, not left unread. The six
+  are now one constructor, `RejectedItem.from_pack_item`. It sits on the
+  **schema** rather than on `PackBuilder` because the content floor is a gate
+  too and `trellis.retrieve.excerpts` is imported *by* `pack_builder` — a
+  builder-side helper is unreachable from there without an import cycle;
+  `PackBuilder._reject` stays as its plural form, for the gates that reject a
+  whole slice at once. Consolidation alone would not have made the fields
+  observable, only reduced the number of places they can go wrong, so the
+  tests are written **per gate** and assert through a real `build` against
+  pools carrying two distinct `item_type`s and two distinct scores: reapplied
+  to the pre-consolidation source, all twelve mutants now die — each to the
+  test for its own gate — as do all four mutants on the single constructor
+  (both copied fields, plus dropping the `strategy_source` override and
+  dropping its fall-back). Behaviour is unchanged, and the equivalence proof is
+  the new tests **reapplied to the old six-copy source**: every test that can
+  run there passes (6,474; the only three failures are the direct unit tests of
+  `from_pack_item` itself, which cannot exist against a source that does not
+  define it), *and* all twelve mutants die against that same old source with
+  those same tests. The second half is what makes the first half mean anything
+  — a suite green on both sources proves equivalence only if it can tell the
+  two apart, and this one demonstrably can. (#456)
 
 - **Tag refresh rewrote every stale document, even when nothing changed.** The
   tags-unchanged early-out in `classify/refresh.py` dropped only

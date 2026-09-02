@@ -728,16 +728,7 @@ class PackBuilder:
 
         # Apply budget: max_items first
         if len(deduped) > budget.max_items:
-            rejected.extend(
-                RejectedItem(
-                    item_id=item.item_id,
-                    item_type=item.item_type,
-                    relevance_score=item.relevance_score,
-                    reason="max_items",
-                    strategy_source=item.strategy_source,
-                )
-                for item in deduped[budget.max_items :]
-            )
+            rejected.extend(self._reject(deduped[budget.max_items :], "max_items"))
         selected = deduped[: budget.max_items]
 
         # Apply budget: max_tokens (estimate ~4 chars per token). In index
@@ -1800,20 +1791,16 @@ class PackBuilder:
     ) -> list[RejectedItem]:
         """Record ``items`` as rejected under ``reason``.
 
-        Every gate in this class already builds ``RejectedItem`` rows by
-        hand; this exists for the gates that build several at once, so a
-        new gate cannot ship a *partial* row (the interesting fields here
-        are ``item_id`` and ``reason`` — a row missing either is invisible
-        to :func:`~trellis.retrieve.withholding.summarize_withheld`).
+        The plural form of :meth:`RejectedItem.from_pack_item`, which is
+        where the field copying actually lives — see its docstring for why
+        the one constructor sits on the schema rather than here. This
+        wrapper stays because most gates reject a whole slice at once and
+        ``self._reject(deduped[budget.max_items :], "max_items")`` *is* the
+        gate; the gates that reject one item at a time inside a loop call
+        ``from_pack_item`` directly instead of wrapping it in a list.
         """
         return [
-            RejectedItem(
-                item_id=item.item_id,
-                item_type=item.item_type,
-                relevance_score=item.relevance_score,
-                reason=reason,
-                strategy_source=strategy_source or item.strategy_source,
-            )
+            RejectedItem.from_pack_item(item, reason, strategy_source=strategy_source)
             for item in items
         ]
 
@@ -1910,15 +1897,7 @@ class PackBuilder:
             match = index.find_duplicate(excerpt)
             if match is not None:
                 matched_id, similarity = match
-                rejected.append(
-                    RejectedItem(
-                        item_id=item.item_id,
-                        item_type=item.item_type,
-                        relevance_score=item.relevance_score,
-                        reason="semantic_dedup",
-                        strategy_source=item.strategy_source,
-                    )
-                )
+                rejected.append(RejectedItem.from_pack_item(item, "semantic_dedup"))
                 logger.debug(
                     "semantic_dedup_match",
                     rejected_id=item.item_id,
@@ -1944,28 +1923,15 @@ class PackBuilder:
             if existing is None:
                 seen[item.item_id] = item
             elif item.relevance_score > existing.relevance_score:
-                # The existing one is the loser
-                rejected.append(
-                    RejectedItem(
-                        item_id=existing.item_id,
-                        item_type=existing.item_type,
-                        relevance_score=existing.relevance_score,
-                        reason="dedup",
-                        strategy_source=existing.strategy_source,
-                    )
-                )
+                # The existing one is the loser. The row describes the copy
+                # that lost, not the id — the two copies can differ in type,
+                # score and axis, and it is the loser's fields that say what
+                # was dropped.
+                rejected.append(RejectedItem.from_pack_item(existing, "dedup"))
                 seen[item.item_id] = item
             else:
                 # The new one is the loser
-                rejected.append(
-                    RejectedItem(
-                        item_id=item.item_id,
-                        item_type=item.item_type,
-                        relevance_score=item.relevance_score,
-                        reason="dedup",
-                        strategy_source=item.strategy_source,
-                    )
-                )
+                rejected.append(RejectedItem.from_pack_item(item, "dedup"))
         return list(seen.values()), rejected
 
     def _effective_token_budget(self, max_tokens: int) -> int:
@@ -2077,15 +2043,7 @@ class PackBuilder:
                         included=False,
                     )
                 )
-                rejected.append(
-                    RejectedItem(
-                        item_id=item.item_id,
-                        item_type=item.item_type,
-                        relevance_score=item.relevance_score,
-                        reason="token_budget",
-                        strategy_source=item.strategy_source,
-                    )
-                )
+                rejected.append(RejectedItem.from_pack_item(item, "token_budget"))
 
         return result, rejected, budget_trace
 

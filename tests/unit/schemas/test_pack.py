@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from trellis.schemas import (
     Advisory,
     AdvisoryCategory,
@@ -236,6 +238,44 @@ class TestRejectedItem:
         r = RejectedItem(item_id="d1", item_type="doc", reason="max_items")
         assert r.relevance_score == 0.0
         assert r.strategy_source is None
+
+    def test_from_pack_item_copies_the_items_own_fields(self) -> None:
+        """The single constructor every gate rejects through (#456).
+
+        Six gates used to hand-write this copy and eleven of the twelve
+        ``item_type`` / ``relevance_score`` mutants across them survived
+        the retrieval suite, because nothing reads either field yet.
+        """
+        item = PackItem(
+            item_id="d1",
+            item_type="entity",
+            excerpt="body",
+            relevance_score=0.42,
+            strategy_source="graph",
+        )
+        r = RejectedItem.from_pack_item(item, "max_items")
+        assert r.item_id == "d1"
+        assert r.item_type == "entity"
+        assert r.relevance_score == pytest.approx(0.42)
+        assert r.reason == "max_items"
+        assert r.strategy_source == "graph"
+
+    def test_from_pack_item_takes_an_explicit_strategy_source_over_the_items(
+        self,
+    ) -> None:
+        """The collect-seam gates run before ``_promote_strategy_source``,
+        so the caller knows the axis and the item does not."""
+        item = PackItem(item_id="d1", item_type="document", excerpt="body")
+        assert item.strategy_source is None
+        r = RejectedItem.from_pack_item(item, "noise", strategy_source="semantic")
+        assert r.strategy_source == "semantic"
+
+    def test_from_pack_item_keeps_the_items_source_when_none_is_supplied(self) -> None:
+        item = PackItem(
+            item_id="d1", item_type="document", excerpt="b", strategy_source="keyword"
+        )
+        r = RejectedItem.from_pack_item(item, "dedup", strategy_source=None)
+        assert r.strategy_source == "keyword"
 
 
 class TestBudgetStep:

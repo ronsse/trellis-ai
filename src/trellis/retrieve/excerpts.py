@@ -426,13 +426,7 @@ def apply_content_floor(
             continue
         if config.mode == "exclude":
             rejected.append(
-                RejectedItem(
-                    item_id=item.item_id,
-                    item_type=item.item_type,
-                    relevance_score=item.relevance_score,
-                    reason=CONTENT_FLOOR_REJECTION_REASON,
-                    strategy_source=item.strategy_source,
-                )
+                RejectedItem.from_pack_item(item, CONTENT_FLOOR_REJECTION_REASON)
             )
             continue
         penalized_ids.append(item.item_id)

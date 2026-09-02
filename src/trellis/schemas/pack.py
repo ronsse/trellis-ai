@@ -55,6 +55,53 @@ class RejectedItem(VersionedModel):
     reason: str  # dedup, structural_filter, max_items, token_budget, content_floor
     strategy_source: str | None = None
 
+    @classmethod
+    def from_pack_item(
+        cls,
+        item: PackItem,
+        reason: str,
+        *,
+        strategy_source: str | None = None,
+    ) -> RejectedItem:
+        """Build the row for ``item`` being rejected under ``reason``.
+
+        **The single constructor.** Every gate in the pipeline rejects a
+        :class:`PackItem`, and every one of them wants the same four fields
+        copied off it — so this is the only place that copying is written.
+        It lives on the schema rather than on
+        :class:`~trellis.retrieve.pack_builder.PackBuilder` because the
+        content floor (:mod:`trellis.retrieve.excerpts`) is a gate too, and
+        ``excerpts`` is imported *by* ``pack_builder``; a helper on the
+        builder would be unreachable from there without a cycle.
+
+        Eleven of the twelve ``item_type`` / ``relevance_score`` mutants
+        across the six hand-built copies this replaces survived the
+        **full** suite — the same count measured over the retrieval subset
+        alone, so widening the selection caught nothing extra. Only
+        ``dedup``'s ``existing.relevance_score`` died. Nothing *branches*
+        on either field, which is why six independent chances to swap,
+        constant-fold or mistype them were each invisible; but both are
+        read. They are serialised into
+        ``PACK_ASSEMBLED.payload["rejected_items"]``, returned to every
+        REST/SDK caller by ``POST /packs`` (which hands back
+        ``pack.retrieval_report.model_dump()`` whole), and rendered as the
+        *Type* and *Relevance* columns of the Memory Explorer's "Rejected
+        items" table. A wrong value was a programmatic contract broken and
+        a fact shown to an operator, not something going unread. One
+        constructor is one thing to pin.
+
+        ``strategy_source`` defaults to the item's own. Pass it only for a
+        gate that runs before ``_promote_strategy_source`` has stamped the
+        item, where the caller knows the axis and the item does not.
+        """
+        return cls(
+            item_id=item.item_id,
+            item_type=item.item_type,
+            relevance_score=item.relevance_score,
+            reason=reason,
+            strategy_source=strategy_source or item.strategy_source,
+        )
+
 
 class BudgetStep(VersionedModel):
     """One step in the budget consumption trace."""
