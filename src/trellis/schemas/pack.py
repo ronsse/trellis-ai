@@ -76,16 +76,19 @@ class RejectedItem(VersionedModel):
 
         Eleven of the twelve ``item_type`` / ``relevance_score`` mutants
         across the six hand-built copies this replaces survived the
-        **full** suite — the same count #456 measured over the retrieval
-        subset alone, so widening the selection caught nothing extra. Only
+        **full** suite — the same count measured over the retrieval subset
+        alone, so widening the selection caught nothing extra. Only
         ``dedup``'s ``existing.relevance_score`` died. Nothing *branches*
         on either field, which is why six independent chances to swap,
         constant-fold or mistype them were each invisible; but both are
-        serialised into ``PACK_ASSEMBLED.payload["rejected_items"]`` and
-        rendered as the *Type* and *Relevance* columns of the Memory
-        Explorer's "Rejected items" table, so a wrong value reached an
-        operator as fact rather than going unread. One constructor is one
-        thing to pin.
+        read. They are serialised into
+        ``PACK_ASSEMBLED.payload["rejected_items"]``, returned to every
+        REST/SDK caller by ``POST /packs`` (which hands back
+        ``pack.retrieval_report.model_dump()`` whole), and rendered as the
+        *Type* and *Relevance* columns of the Memory Explorer's "Rejected
+        items" table. A wrong value was a programmatic contract broken and
+        a fact shown to an operator, not something going unread. One
+        constructor is one thing to pin.
 
         ``strategy_source`` defaults to the item's own. Pass it only for a
         gate that runs before ``_promote_strategy_source`` has stamped the

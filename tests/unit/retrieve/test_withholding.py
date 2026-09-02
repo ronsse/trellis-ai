@@ -1221,7 +1221,8 @@ class TestEveryRejectionRowCarriesTheRejectedItemsOwnFields:
     ``RejectedItem.item_type`` and ``RejectedItem.relevance_score`` had
     **six** independent hand-written copies of the same four-line field
     copy, and **eleven of the twelve ``item_type`` / ``relevance_score``
-    mutants across them survived the full 6,429-test selection** — not
+    mutants across them survived the full default selection (6,468
+    passing on ``a40b027``)** — not
     merely the 992-test retrieval subset #456 measured, so widening the
     selection caught nothing extra. Only ``dedup``'s
     ``existing.relevance_score`` died. Nothing *branches* on either field,
