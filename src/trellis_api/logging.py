@@ -14,6 +14,46 @@ loggers (``uvicorn``, ``uvicorn.error``, ``uvicorn.access``) flow through
 the same processor chain via :class:`structlog.stdlib.ProcessorFormatter`.
 That guarantees container log drivers see one shape per line — no half
 of the stream in JSON and the other half in Uvicorn's default text.
+
+**One shape and one fd.** Both halves go to **stderr**, via the shared
+write-time-resolved proxy from :func:`trellis.logging.lazy_stderr_stream`.
+Neither part of that was true before #430, and both were accidents rather
+than choices:
+
+* The stdlib bridge used a bare ``logging.StreamHandler()``, which captures
+  ``sys.stderr`` at construction and keeps writing to it afterwards. Unlike
+  the structlog path, stdlib ``logging`` swallows the resulting
+  ``ValueError`` in ``Handler.handleError``, so a configure call made under
+  a redirection that later ends costs **silently lost log lines**.
+* structlog went to *stdout* through ``PrintLoggerFactory()``. That half was
+  the wrong **fd**, not a baked handle — and the distinction is written down
+  because #430's text and the first draft of this docstring got it wrong in
+  opposite directions. ``PrintLogger.__init__`` really does bind
+  ``file or stdout`` against the ``from sys import stdout`` captured when
+  structlog was imported; but ``msg`` then does
+  ``f = self._file if self._file is not stdout else None`` and hands ``f`` to
+  ``print``, and ``print(file=None)`` resolves ``sys.stdout`` at call time.
+  So the *no-argument* factory is lazy (structlog 22.1.0, "switched to use
+  ``print`` for better monkeypatchability"), and only
+  ``PrintLoggerFactory(file=...)`` bakes — the #377 shape ``trellis.logging``
+  already closed. Measured against the pre-#430 code: redirect ``sys.stdout``
+  after ``configure_logging()`` and the structlog half follows it; redirect
+  ``sys.stderr`` and the stdlib half does not.
+
+So exactly one half carried the silent-loss defect, and the split across two
+fds was a separate fault. The split was never load-bearing: the API writes no
+payload on stdout — no ``print`` and no ``sys.stdout`` write anywhere in
+``trellis_api`` — so there is no protocol channel here of the kind
+``trellis.logging`` protects for the CLI and the MCP stdio server. What the
+split cost was real, though: a collector reading one fd sees half the stream,
+no collector preserves interleaving between two of them, and under
+``trellis serve`` the CLI callback configures structlog to stderr and this
+function then re-pointed it at stdout partway through boot, so one process's
+log moved fds at startup. That last one is the strongest of the three and it
+reproduces directly — ``configure_stderr_logging()`` followed by the pre-#430
+``configure_logging()`` puts one logger on stderr and then on stdout.
+Unifying on stderr also matches uvicorn's own default for its non-access
+loggers.
 """
 
 from __future__ import annotations
@@ -23,6 +63,8 @@ import os
 from typing import Any
 
 import structlog
+
+from trellis.logging import lazy_stderr_stream
 
 #: Uvicorn loggers we route through structlog. ``uvicorn`` is the
 #: lifecycle/startup logger, ``uvicorn.error`` is general output, and
@@ -62,7 +104,14 @@ def configure_logging() -> None:
     structlog.configure(
         processors=[*shared_processors, renderer],
         wrapper_class=structlog.make_filtering_bound_logger(level),
-        logger_factory=structlog.PrintLoggerFactory(),
+        # ``WriteLoggerFactory`` over the shared lazy proxy, for the two
+        # reasons the module docstring gives: stderr rather than stdout, and
+        # a rule ("whatever stderr is now") rather than a handle. ``Write``
+        # rather than ``Print`` additionally keeps a rendered line to a
+        # single ``write`` call — see the sibling comment in
+        # ``trellis.logging`` for why two writes against a lazily-resolved
+        # stream can tear a line across two fds.
+        logger_factory=structlog.WriteLoggerFactory(file=lazy_stderr_stream()),
         cache_logger_on_first_use=True,
     )
 
@@ -86,7 +135,14 @@ def configure_logging() -> None:
         ],
     )
 
-    handler = logging.StreamHandler()
+    # NOT a bare ``StreamHandler()`` (#430): that resolves ``sys.stderr``
+    # once, here, and the root handler then holds that object for the life
+    # of the process. Passing the proxy makes every ``emit`` resolve the
+    # stream afresh. The failure it closes is silent — ``Handler.emit``
+    # routes the write error into ``Handler.handleError``, which prints
+    # ``--- Logging error ---`` and returns, so the API and every bridged
+    # uvicorn logger simply stop producing lines.
+    handler = logging.StreamHandler(lazy_stderr_stream())
     handler.setFormatter(formatter)
 
     # Replace the root handler installed by the previous

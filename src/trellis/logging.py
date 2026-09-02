@@ -108,6 +108,36 @@ class _LazyStderr:
 _STDERR_PROXY = _LazyStderr()
 
 
+def lazy_stderr_stream() -> TextIO:
+    """The shared write-time-resolved stderr proxy.
+
+    Any logging setup that would otherwise capture a stream *handle* should
+    take this instead. ``logging.StreamHandler()``,
+    ``structlog.PrintLoggerFactory(file=...)`` and
+    ``structlog.WriteLoggerFactory(file=sys.stderr)`` all bake whatever object
+    the stream named at construction time and keep writing to it after a
+    redirection ends — the defect this module exists to close (#377), and the
+    one :mod:`trellis_api.logging`'s stdlib bridge had (#430).
+
+    Note which form is listed: ``PrintLoggerFactory()`` with **no** argument
+    is the one member of that family that does *not* bake, because
+    ``PrintLogger.msg`` passes ``file=None`` to ``print`` whenever its file is
+    the import-time ``sys.stdout``. #430 was written up as though it did, and
+    the correction is recorded in :mod:`trellis_api.logging`'s docstring
+    rather than left to be re-derived.
+
+    Deliberately the singleton rather than a fresh instance per caller:
+    structlog keys its per-file write lock off the file object, and
+    ``logging`` installs the handler process-wide, so a second instance would
+    buy a second lock and nothing else.
+
+    ``cast`` for the reason given at the ``WriteLoggerFactory`` call below —
+    both structlog and ``logging.StreamHandler`` are typed against ``TextIO``
+    while exercising only ``write`` and ``flush``.
+    """
+    return cast("TextIO", _STDERR_PROXY)
+
+
 def configure_stderr_logging() -> None:
     """Route structlog output to stderr; honour ``TRELLIS_LOG_LEVEL``."""
     level_name = os.environ.get("TRELLIS_LOG_LEVEL", "INFO").strip().upper()
@@ -136,7 +166,7 @@ def configure_stderr_logging() -> None:
         # ``cast`` because structlog types this as ``TextIO`` while only
         # exercising ``write`` / ``flush``; a full ``io.TextIOBase`` subclass
         # would add a dozen unreachable methods to satisfy a nominal type.
-        logger_factory=structlog.WriteLoggerFactory(file=cast("TextIO", _STDERR_PROXY)),
+        logger_factory=structlog.WriteLoggerFactory(file=lazy_stderr_stream()),
         # Kept, and now free of the hazard it used to compound: the cached
         # logger holds the proxy, not a stream, so caching can no longer pin
         # a dead handle. It still caches the *level* filter, which is what
@@ -145,4 +175,4 @@ def configure_stderr_logging() -> None:
     )
 
 
-__all__ = ["configure_stderr_logging"]
+__all__ = ["configure_stderr_logging", "lazy_stderr_stream"]
