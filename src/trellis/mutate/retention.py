@@ -35,6 +35,52 @@ is not: it is a quality verdict recorded by the feedback loop. So noise
 *documents* are candidates here and noise-tagged nodes are not, because the
 latter do not exist.
 
+**Two lifecycle states can never select anything, and the resolver says
+so (#419).** :attr:`RetentionCriteria.lifecycle_states` is typed against the
+whole :data:`~trellis.schemas.classification.LifecycleState` vocabulary, but
+phase one short-circuits ``archived`` (already archived — re-archiving is a
+second version bump) and ``current`` (an assertion that the item belongs in
+service, whoever wrote it) *before* the age gate. Both early returns are
+correct; the problem is that they made those two values **unfalsifiable
+criteria** — an operator who ran
+``--lifecycle-state archived --older-than-days 90``, got zero, and concluded
+"nothing is that stale" was told something true by accident. The pair is
+named once (:data:`UNSELECTABLE_STATES`), subtracted once, reported on
+:attr:`ResolutionReport.unselectable_lifecycle_states`, and carried into the
+``RETENTION_PRUNED`` payload and the operator message — the same "no silent
+caps" posture :attr:`ResolutionReport.scan_truncated` already takes. When a
+pass requests *nothing but* unselectable states the corpus scan is skipped
+outright rather than run to produce a guaranteed zero.
+
+**The remaining three are reachable, and narrowing the type would have been
+wrong.** ``draft`` and ``deprecated`` have no ``Lifecycle(...)`` construction
+anywhere in ``src/`` — which is a fact about this package's own writers, not
+about the criterion. ``lifecycle`` is an ordinary key in an open metadata /
+property bag: MCP ``save_memory(metadata=...)`` and
+``save_knowledge(properties=...)`` forward a caller's bag verbatim to the
+store, and the governed ``entity.update`` verb *merges* caller properties
+onto a node. Any of them can write any state, and this resolver reads the
+stored string rather than a validated enum. So all three of ``draft`` /
+``deprecated`` / ``superseded`` can produce a candidate; whether they do is a
+question about the corpus, which is the operator's to ask. They are also
+where the vocabulary is *going* — ``adr-tag-vocabulary-split.md`` §4.4 Phase 2
+plans a ``LifecycleKeywordClassifier`` to populate exactly these, and
+``Lifecycle`` defines the shape ahead of its consumers precisely so that
+landing it is not a semantic migration. Rejecting them today would break that
+on arrival. The CLI already documents the criterion this way
+(``trellis curate prune --lifecycle-state`` lists "draft, deprecated,
+superseded"), so what #419 found was the API and schema accepting two more
+without saying they are inert — not a surface claiming five it never had.
+
+The general rule, because this area keeps re-learning it: **state the rule,
+not the writers.** Successive comments here enumerated ``updated_at``'s
+readers and were wrong every time (#397 scoped it to one, #406 to two, a
+review pass found a third); #419 enumerated ``Lifecycle``'s writers and
+missed every open-bag surface. What a criterion can select is a property of
+*this resolver's control flow*, which is checkable here — and
+``TestLifecycleStateReachability`` checks it exhaustively over the enum, so a
+sixth state cannot be added without landing on one side or the other.
+
 **Grace periods apply to the age-based criteria only.** A noise tag is a
 verdict, and waiting 30 days does not make it more true; requiring a grace
 period there would have made the population that motivated this build
@@ -79,6 +125,27 @@ logger = structlog.get_logger(__name__)
 #: check cannot drift apart.
 ARCHIVED_STATE: LifecycleState = "archived"
 
+#: The state :func:`~trellis.mutate.handlers.RetentionRestoreHandler._restore`
+#: re-stamps, and the value both resolvers read as "a caller asserted this
+#: item belongs in service".
+CURRENT_STATE: LifecycleState = "current"
+
+#: Lifecycle states a phase-one prune **can never select**, whatever the
+#: corpus holds. Both resolvers short-circuit these before the age gate —
+#: :data:`ARCHIVED_STATE` because re-archiving is a second version bump, and
+#: :data:`CURRENT_STATE` because it is an explicit assertion retention does
+#: not override by inference.
+#:
+#: Named so that the subtraction, the early returns and the operator-facing
+#: report cannot drift apart, and so a criterion that can only ever return
+#: zero is *reported* rather than silently indistinguishable from an
+#: exhaustive scan that found nothing (#419). Membership is pinned by
+#: behaviour, exhaustively over ``LifecycleState``, in
+#: ``tests/unit/mutate/test_retention_handler.py``.
+UNSELECTABLE_STATES: frozenset[LifecycleState] = frozenset(
+    {ARCHIVED_STATE, CURRENT_STATE}
+)
+
 #: Hard ceiling on documents scanned per resolution pass, independent of
 #: ``max_items``. ``DocumentStore`` exposes no metadata-predicate listing
 #: (``search`` needs a non-empty FTS query, ``list_documents`` takes only
@@ -120,9 +187,16 @@ class RetentionCriteria(TrellisModel):
 
     lifecycle_states: list[LifecycleState] = Field(default_factory=list)
     """Items already carrying one of these lifecycle states, older than
-    ``older_than_days``. ``archived`` is accepted (it is how a phase-two
-    purge would select its input) but archiving an archived item is a
-    no-op, so phase one drops those."""
+    ``older_than_days``.
+
+    Accepts the full vocabulary. :data:`UNSELECTABLE_STATES` — ``archived``
+    (it is how a phase-two purge would select its input, but archiving an
+    archived item is a no-op) and ``current`` (an assertion that the item
+    belongs in service) — are short-circuited by phase one and reported on
+    :attr:`ResolutionReport.unselectable_lifecycle_states` rather than
+    silently returning zero. The rest are selectable; see the module
+    docstring for why ``draft`` / ``deprecated`` are kept despite having no
+    in-package writer."""
 
     older_than_days: int = Field(default=30, ge=0)
     """Grace period for the age-based criteria above."""
@@ -147,6 +221,9 @@ class ResolutionReport(TrellisModel):
     ``scan_truncated`` exists so a capped scan is never mistaken for an
     exhaustive one — the "no silent caps" rule. When it is ``True`` the
     candidate set is a prefix of the real population, not the whole of it.
+    ``unselectable_lifecycle_states`` is the same rule one level up: a zero
+    that was *guaranteed by the criteria* must not read as a zero the corpus
+    produced.
     """
 
     candidates: list[RetentionCandidate] = Field(default_factory=list)
@@ -156,6 +233,17 @@ class ResolutionReport(TrellisModel):
     skipped_already_archived: int = 0
     skipped_confirmed: int = 0
     skipped_restored: int = 0
+
+    unselectable_lifecycle_states: list[LifecycleState] = Field(default_factory=list)
+    """Requested ``lifecycle_states`` this phase can never select (#419).
+
+    The intersection of the caller's request with
+    :data:`UNSELECTABLE_STATES`, sorted. Non-empty means part of the
+    criteria was inert: those states contributed no scan and no candidate,
+    so a zero result says nothing about how many such items exist. Empty is
+    the ordinary case and asserts the converse — every requested state
+    reached the age gate.
+    """
 
     already_archived_ids: list[str] = Field(default_factory=list)
     """Ids skipped because they are already archived.
@@ -245,17 +333,29 @@ def _classify_document(
 
     # Explicitly restored: never re-select.
     #
-    # ``Lifecycle`` has exactly one writer — retention — so an explicit
-    # ``state="current"`` can only have come from ``retention.restore``,
-    # i.e. a human looked at this item and said it does not belong in the
-    # archive. The tag that selected it is still on the document (restore
-    # un-archives; it does not re-classify, which is the classify layer's
-    # business), so without this branch the next prune re-archives
-    # everything a human just rescued — which is precisely what the first
-    # production restore set up. A restored item can still be archived
-    # deliberately by naming it: it is protected from the *criteria*, not
-    # from the operator.
-    if state == "current":
+    # The rule is about the *value*, not its provenance. ``state="current"``
+    # is an assertion that this item belongs in service, and retention never
+    # overrides an explicit assertion by inference. ``retention.restore`` is
+    # the writer that motivated the guard: the tag that selected the item is
+    # still on the document (restore un-archives; it does not re-classify,
+    # which is the classify layer's business), so without this branch the
+    # next prune re-archives everything a human just rescued — precisely
+    # what the first production restore set up.
+    #
+    # Nothing here depends on that being the *only* writer, and it is not.
+    # An earlier draft of this comment asserted "``Lifecycle`` has exactly
+    # one writer — retention", which was already false:
+    # ``mcp.reconcile.mark_document_superseded`` writes one, and more to the
+    # point ``lifecycle`` is an ordinary key in an open metadata / property
+    # bag, so every surface that forwards a caller's bag verbatim (MCP
+    # ``save_memory`` / ``save_knowledge``, the governed ``entity.update``
+    # property merge) can write any state at all. State the rule, not the
+    # writers — the same lesson the ``updated_at`` comment below records,
+    # and the one #419 itself tripped on.
+    #
+    # A restored item can still be archived deliberately by naming it: it is
+    # protected from the *criteria*, not from the operator.
+    if state == CURRENT_STATE:
         report.skipped_restored += 1
         return None
 
@@ -302,14 +402,39 @@ def resolve_candidates(
     cutoff = datetime.now(UTC) - timedelta(days=criteria.older_than_days)
     seen: set[str] = set()
 
+    # Split the requested states once, here, rather than re-deriving the
+    # subtraction inside each resolver — two copies of "which states count"
+    # is how a report stops matching what the scan did.
+    requested = set(criteria.lifecycle_states)
+    wanted_states = requested - UNSELECTABLE_STATES
+    report.unselectable_lifecycle_states = sorted(requested & UNSELECTABLE_STATES)
+    if report.unselectable_lifecycle_states:
+        # Not a failure: ``archived`` is a documented phase-two input and an
+        # operator may legitimately pass it. But it selected nothing and
+        # scanned nothing, so the zero it contributes is a property of the
+        # criteria and has to be visible as one.
+        logger.warning(
+            "retention_unselectable_lifecycle_states",
+            requested=sorted(requested),
+            unselectable=report.unselectable_lifecycle_states,
+            selectable=sorted(wanted_states),
+        )
+
     def _remaining() -> int:
         return criteria.max_items - len(report.candidates)
 
-    if criteria.noise_documents or criteria.lifecycle_states:
-        _resolve_documents(criteria, registry, report, cutoff, seen, _remaining)
+    # Gated on ``wanted_states``, not on the raw request: a pass asking only
+    # for unselectable states would otherwise page the whole corpus to
+    # produce a guaranteed zero.
+    if criteria.noise_documents or wanted_states:
+        _resolve_documents(
+            criteria, registry, report, cutoff, seen, _remaining, wanted_states
+        )
 
-    if criteria.unconfirmed_mints or criteria.lifecycle_states:
-        _resolve_entities(criteria, registry, report, cutoff, seen, _remaining)
+    if criteria.unconfirmed_mints or wanted_states:
+        _resolve_entities(
+            criteria, registry, report, cutoff, seen, _remaining, wanted_states
+        )
 
     logger.info(
         "retention_candidates_resolved",
@@ -317,6 +442,7 @@ def resolve_candidates(
         documents_scanned=report.documents_scanned,
         entities_scanned=report.entities_scanned,
         scan_truncated=report.scan_truncated,
+        unselectable_lifecycle_states=report.unselectable_lifecycle_states,
     )
     return report
 
@@ -328,11 +454,15 @@ def _resolve_documents(
     cutoff: datetime,
     seen: set[str],
     remaining: Any,
+    wanted_states: set[LifecycleState],
 ) -> None:
-    """Page the document corpus and select noise / lifecycle-stale rows."""
+    """Page the document corpus and select noise / lifecycle-stale rows.
+
+    ``wanted_states`` arrives already stripped of :data:`UNSELECTABLE_STATES`
+    by :func:`resolve_candidates` — the one place that subtraction happens.
+    """
     store = registry.knowledge.document_store
     offset = 0
-    wanted_states = set(criteria.lifecycle_states) - {ARCHIVED_STATE}
 
     while remaining() > 0 and report.documents_scanned < MAX_DOCUMENTS_SCANNED:
         page = store.list_documents(limit=_SCAN_PAGE, offset=offset)
@@ -385,10 +515,14 @@ def _resolve_entities(
     cutoff: datetime,
     seen: set[str],
     remaining: Any,
+    wanted_states: set[LifecycleState],
 ) -> None:
-    """Select unconfirmed mints / lifecycle-stale graph entities."""
+    """Select unconfirmed mints / lifecycle-stale graph entities.
+
+    ``wanted_states`` arrives already stripped of :data:`UNSELECTABLE_STATES`
+    by :func:`resolve_candidates` — the one place that subtraction happens.
+    """
     graph = registry.knowledge.graph_store
-    wanted_states = set(criteria.lifecycle_states) - {ARCHIVED_STATE}
 
     rows: list[dict[str, Any]] = []
     if criteria.unconfirmed_mints:
@@ -419,7 +553,7 @@ def _resolve_entities(
         if node_state == ARCHIVED_STATE:
             report.skipped_already_archived += 1
             continue
-        if node_state == "current":
+        if node_state == CURRENT_STATE:
             report.skipped_restored += 1
             continue
 
@@ -432,7 +566,10 @@ def _resolve_entities(
             reason = "unconfirmed_mint"
         elif (
             wanted_states
-            and _lifecycle_state(props) in wanted_states
+            # ``node_state``, not a second ``_lifecycle_state(props)`` call:
+            # the guards above already read the state, and two reads of one
+            # bag is how a guard and its criterion start disagreeing.
+            and node_state in wanted_states
             and _is_older_than(node.get("valid_from") or node.get("created_at"), cutoff)
         ):
             reason = "lifecycle_stale"
@@ -455,7 +592,9 @@ def _resolve_entities(
 
 __all__ = [
     "ARCHIVED_STATE",
+    "CURRENT_STATE",
     "MAX_DOCUMENTS_SCANNED",
+    "UNSELECTABLE_STATES",
     "CandidateKind",
     "ReasonCode",
     "ResolutionReport",

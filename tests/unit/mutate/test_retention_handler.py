@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 
 import pytest
 
@@ -38,11 +38,13 @@ from trellis.mutate.handlers import (
 )
 from trellis.mutate.retention import (
     ARCHIVED_STATE,
+    CURRENT_STATE,
+    UNSELECTABLE_STATES,
     RetentionCriteria,
     resolve_candidates,
 )
 from trellis.retrieve.lifecycle import exclude_archived, is_archived
-from trellis.schemas.classification import LIFECYCLE_KEY
+from trellis.schemas.classification import LIFECYCLE_KEY, LifecycleState
 from trellis.schemas.extraction import (
     EXTRACTION_STATUS_CONFIRMED,
     EXTRACTION_STATUS_PROPERTY,
@@ -944,3 +946,280 @@ class TestArchiveAndRestorePreserveRecency:
         assert [c.item_id for c in report.candidates] == ["supr"]
         assert report.skipped_already_archived == 1
         assert report.skipped_restored == 1
+
+
+class TestLifecycleStateReachability:
+    """#419 — every ``LifecycleState`` lands on one side of the age gate.
+
+    ``lifecycle_states`` accepts the whole vocabulary, and phase one
+    short-circuits two of its members *before* the age gate. That made
+    ``--lifecycle-state archived --older-than-days 90`` an unfalsifiable
+    criterion: it returns zero whatever the corpus holds, and nothing in the
+    result distinguishes "no rows match" from "no row can ever match".
+
+    The split is now named once (``UNSELECTABLE_STATES``) and pinned here by
+    behaviour, exhaustively over ``LifecycleState`` — the two parametrize
+    lists partition ``get_args(LifecycleState)`` by construction, so a sixth
+    state cannot be added without landing on one side and being asserted
+    against it.
+
+    **The issue's other half is wrong, and these tests say so.** #419 argued
+    ``draft`` and ``deprecated`` have "zero writers" and should therefore be
+    narrowed out. That enumerated ``Lifecycle(...)`` constructions inside
+    ``src/`` — but ``lifecycle`` is an ordinary key in an open metadata /
+    property bag, and MCP ``save_memory(metadata=...)`` /
+    ``save_knowledge(properties=...)`` and the governed ``entity.update``
+    property merge all forward a caller's bag verbatim to the store. Both
+    states are reachable through surfaces that ship today, and Phase 2 of
+    ``adr-tag-vocabulary-split.md`` plans a classifier that writes them from
+    inside. Narrowing would have rejected criteria that can genuinely match.
+    """
+
+    SELECTABLE = sorted(set(get_args(LifecycleState)) - UNSELECTABLE_STATES)
+
+    def test_the_partition_is_exhaustive_and_disjoint(self) -> None:
+        """Guard on the parametrize lists below, not a restatement of them.
+
+        Both lists derive from ``LifecycleState``, so this fails only if
+        ``UNSELECTABLE_STATES`` grows a member the enum does not have — at
+        which point the "selectable" parametrization would silently stop
+        covering it.
+        """
+        assert set(get_args(LifecycleState)) >= UNSELECTABLE_STATES
+        assert set(self.SELECTABLE) | UNSELECTABLE_STATES == set(
+            get_args(LifecycleState)
+        )
+
+    @pytest.mark.parametrize("state", SELECTABLE)
+    def test_a_selectable_state_selects_a_matching_row(
+        self,
+        state: str,
+        registry: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Reachability, for the three states #419 proposed narrowing away.
+
+        Not a fix test: it passes against the un-fixed code, by design. It is
+        the evidence for the decision *not* to narrow — the criterion selects
+        a real row whose state was written through an ordinary metadata bag,
+        so rejecting the value would reject a working query.
+        """
+        clock = fake_document_clock(monkeypatch)
+        clock["now"] = clock["now"] - timedelta(days=365)
+        _put_doc(registry, "d", lifecycle_state=state)
+
+        report = resolve_candidates(
+            RetentionCriteria(lifecycle_states=[state], older_than_days=30),
+            registry,
+        )
+
+        assert [c.item_id for c in report.candidates] == ["d"]
+        assert [c.reason_code for c in report.candidates] == ["lifecycle_stale"]
+        assert report.unselectable_lifecycle_states == []
+
+    @pytest.mark.parametrize("state", sorted(UNSELECTABLE_STATES))
+    def test_an_unselectable_state_reports_itself_instead_of_scanning(
+        self,
+        state: str,
+        registry: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Zero, and the report says the zero came from the criteria.
+
+        Also asserts the scan was skipped: before #419 a request naming only
+        unselectable states paged the whole corpus (and every graph node) to
+        arrive at a guaranteed empty answer.
+        """
+        clock = fake_document_clock(monkeypatch)
+        clock["now"] = clock["now"] - timedelta(days=365)
+        _put_doc(registry, "d", lifecycle_state=state)
+        registry.knowledge.graph_store.upsert_node(
+            node_id="n", node_type="concept", properties={"name": "n"}
+        )
+
+        report = resolve_candidates(
+            RetentionCriteria(lifecycle_states=[state], older_than_days=30),
+            registry,
+        )
+
+        assert report.candidates == []
+        assert report.unselectable_lifecycle_states == [state]
+        assert report.documents_scanned == 0
+        assert report.entities_scanned == 0
+
+    def test_a_mixed_request_still_scans_for_the_selectable_half(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Reporting an inert state must not disarm the rest of the criteria."""
+        clock = fake_document_clock(monkeypatch)
+        clock["now"] = clock["now"] - timedelta(days=365)
+        _put_doc(registry, "arch", lifecycle_state=ARCHIVED_STATE)
+        _put_doc(registry, "supr", lifecycle_state="superseded")
+
+        report = resolve_candidates(
+            RetentionCriteria(
+                lifecycle_states=[ARCHIVED_STATE, "superseded"], older_than_days=30
+            ),
+            registry,
+        )
+
+        assert [c.item_id for c in report.candidates] == ["supr"]
+        assert report.unselectable_lifecycle_states == [ARCHIVED_STATE]
+        assert report.documents_scanned == 2
+        assert report.skipped_already_archived == 1
+
+    def test_an_unselectable_state_reaches_the_audit_event_and_the_operator(
+        self, registry: StoreRegistry
+    ) -> None:
+        """A report nobody can read is the silence it was meant to replace."""
+        result = build_curate_executor(registry).execute(
+            _prune({"lifecycle_states": [ARCHIVED_STATE]})
+        )
+
+        assert result.status == CommandStatus.SUCCESS
+        assert "cannot be selected by phase one" in (result.message or "")
+        assert ARCHIVED_STATE in (result.message or "")
+
+        events = registry.operational.event_log.get_events(
+            event_type=EventType.RETENTION_PRUNED
+        )
+        assert len(events) == 1
+        assert events[0].payload["unselectable_lifecycle_states"] == [ARCHIVED_STATE]
+
+    def test_an_ordinary_run_asserts_the_converse(
+        self, registry: StoreRegistry
+    ) -> None:
+        """Empty is a claim, not an absence: every state reached the gate."""
+        _put_doc(registry, "noisy", signal_quality="noise")
+        result = build_curate_executor(registry).execute(
+            _prune({"noise_documents": True, "lifecycle_states": ["deprecated"]})
+        )
+
+        assert result.status == CommandStatus.SUCCESS
+        assert "cannot be selected" not in (result.message or "")
+        events = registry.operational.event_log.get_events(
+            event_type=EventType.RETENTION_PRUNED
+        )
+        assert events[0].payload["unselectable_lifecycle_states"] == []
+
+
+class TestTheRestoredGuardIsProvenanceIndependent:
+    """#419's dangerous half: a docstring asserting an invariant that is false.
+
+    ``_classify_document``'s ``current`` guard used to justify itself with
+    "``Lifecycle`` has exactly one writer — retention — so an explicit
+    ``state="current"`` can only have come from ``retention.restore``". That
+    was false when written: ``mcp.reconcile.mark_document_superseded`` writes
+    one, and every surface that forwards a caller's metadata / property bag
+    verbatim can write any state at all.
+
+    A false invariant in a comment is what the next call-site author trusts,
+    and the repair is not a more careful list of writers — three successive
+    enumerations of ``updated_at``'s readers were each wrong (#397, #406, and
+    the review pass that found a third). The rule is about the **value**:
+    ``current`` is an assertion that the item belongs in service, and
+    retention does not override an explicit assertion by inference,
+    *whoever* wrote it. These tests pin the rule by behaviour, using writers
+    that are not retention, so the guard cannot silently acquire a
+    provenance dependency the comment no longer claims.
+    """
+
+    def test_a_document_bag_written_outside_retention_is_still_protected(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The ``save_memory(metadata=...)`` shape — a raw store put.
+
+        Not a fix test: the guard already behaved this way. What changed is
+        the *justification*, and behaviour is the only durable place to keep
+        it — a comment claiming the guard is safe because retention is the
+        only writer cannot be falsified by a test suite, which is how it
+        survived being false.
+        """
+        clock = fake_document_clock(monkeypatch)
+        clock["now"] = clock["now"] - timedelta(days=365)
+        # Deliberately not via retention.restore: no RETENTION_RESTORED event
+        # exists for this row, so provenance cannot be what protects it.
+        _put_doc(registry, "d", lifecycle_state="current")
+        assert not registry.operational.event_log.get_events(
+            event_type=EventType.RETENTION_RESTORED
+        )
+
+        report = resolve_candidates(
+            RetentionCriteria(
+                lifecycle_states=["current", "superseded"], older_than_days=30
+            ),
+            registry,
+        )
+
+        assert report.candidates == []
+        assert report.skipped_restored == 1
+
+    def test_an_entity_update_can_write_any_lifecycle_state(
+        self, registry: StoreRegistry
+    ) -> None:
+        """The falsification, end to end through a governed in-repo verb.
+
+        ``entity.update`` *merges* caller properties onto the node, so a
+        state with no ``Lifecycle(...)`` construction anywhere in ``src/``
+        reaches the store and is selected by the criterion #419 proposed
+        deleting.
+
+        Not a fix test: it passes against the un-fixed code, because the
+        thing it refutes is a sentence, not a behaviour.
+        """
+        executor = build_curate_executor(registry)
+        node_id = registry.knowledge.graph_store.upsert_node(
+            node_id="e1", node_type="concept", properties={"name": "thing"}
+        )
+        result = executor.execute(
+            Command(
+                operation=Operation.ENTITY_UPDATE,
+                args={
+                    "entity_id": node_id,
+                    "properties": {LIFECYCLE_KEY: {"state": "deprecated"}},
+                },
+            )
+        )
+        assert result.status == CommandStatus.SUCCESS
+
+        report = resolve_candidates(
+            RetentionCriteria(lifecycle_states=["deprecated"], older_than_days=0),
+            registry,
+        )
+
+        assert [c.item_id for c in report.candidates] == [node_id]
+        assert [c.kind for c in report.candidates] == ["entity"]
+
+    def test_the_same_merge_can_write_the_protected_state(
+        self, registry: StoreRegistry
+    ) -> None:
+        """And the guard holds for it — the rule is symmetric.
+
+        The writer that proves ``deprecated`` is reachable proves ``current``
+        is writable by something other than retention, which is exactly what
+        the old comment denied.
+        """
+        executor = build_curate_executor(registry)
+        node_id = registry.knowledge.graph_store.upsert_node(
+            node_id="e2", node_type="concept", properties={"name": "thing"}
+        )
+        executor.execute(
+            Command(
+                operation=Operation.ENTITY_UPDATE,
+                args={
+                    "entity_id": node_id,
+                    "properties": {LIFECYCLE_KEY: {"state": CURRENT_STATE}},
+                },
+            )
+        )
+
+        report = resolve_candidates(
+            RetentionCriteria(
+                lifecycle_states=[CURRENT_STATE, "deprecated"], older_than_days=0
+            ),
+            registry,
+        )
+
+        assert report.candidates == []
+        assert report.skipped_restored == 1
+        assert report.unselectable_lifecycle_states == [CURRENT_STATE]

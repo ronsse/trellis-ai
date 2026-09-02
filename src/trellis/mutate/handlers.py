@@ -976,9 +976,9 @@ def _prune_message(
     """Render the operator-facing summary for one prune run.
 
     Every qualifier here reports something that would otherwise be silent:
-    a capped scan (the candidate set is a prefix), items that vanished
-    mid-run, vector rows repaired, and items protected because a human
-    restored them.
+    a capped scan (the candidate set is a prefix), a requested lifecycle
+    state this phase cannot select at all, items that vanished mid-run,
+    vector rows repaired, and items protected because a human restored them.
     """
     verb = "would archive" if dry_run else "archived"
     counts = ", ".join(f"{k}={v}" for k, v in sorted(by_reason.items())) or "none"
@@ -987,6 +987,20 @@ def _prune_message(
         f"{verb} {len(report.candidates) if dry_run else archived} item(s) "
         f"[{counts}]"
     )
+    if report.unselectable_lifecycle_states:
+        # #419: without this the operator cannot tell "no rows are in that
+        # state" from "this phase can never select that state".
+        inert = ", ".join(report.unselectable_lifecycle_states)
+        # Phrased as the rule, not the writer: "current items were explicitly
+        # restored" would be the same provenance claim #419's dangerous half
+        # was about. ``current`` is protected for what the value asserts,
+        # whoever wrote it.
+        message += (
+            f"; WARNING lifecycle state(s) [{inert}] cannot be selected by "
+            "phase one (archived is already archived; current asserts the "
+            "item belongs in service) — they scanned nothing and their zero "
+            "says nothing about the corpus"
+        )
     if report.scan_truncated:
         message += (
             f"; WARNING scan capped at {MAX_DOCUMENTS_SCANNED} documents — "
@@ -997,7 +1011,14 @@ def _prune_message(
     if resynced:
         message += f"; {resynced} stale vector row(s) re-synced"
     if report.skipped_restored:
-        message += f"; {report.skipped_restored} protected (explicitly restored)"
+        # Not "(explicitly restored)": ``retention.restore`` is the writer
+        # that motivated the guard, not the only one that can trip it — an
+        # ``entity.update`` property merge or any bag-forwarding save writes
+        # ``current`` too, and lands in this same counter (#419).
+        message += (
+            f"; {report.skipped_restored} protected (state=current — "
+            "asserted in service)"
+        )
     return message
 
 
@@ -1123,6 +1144,11 @@ class RetentionPruneHandler:
             "skipped_already_archived": report.skipped_already_archived,
             "skipped_confirmed": report.skipped_confirmed,
             "skipped_restored": report.skipped_restored,
+            # #419: which requested lifecycle states contributed a
+            # guaranteed zero. Audited alongside the criteria that named
+            # them so a reviewer reading this event later can tell an inert
+            # criterion from an empty corpus.
+            "unselectable_lifecycle_states": report.unselectable_lifecycle_states,
             "vector_rows_resynced": resynced,
             # Capped pointer, not an index — see _LINKED_SIGNAL_LIMIT.
             "item_ids": [c.item_id for c in report.candidates[:_LINKED_SIGNAL_LIMIT]],
@@ -1351,13 +1377,19 @@ class RetentionRestoreHandler:
             # ``RETENTION_PRUNED`` payload would thereby *promote* exactly
             # the items they meant only to restore.
             #
-            # Scoped to the document branch. The entity branch below re-opens
-            # an SCD-2 version whose ``updated_at`` is now, and ``GraphSearch``
-            # decays off exactly that — so the same argument applies to nodes,
-            # with no ``preserve_updated_at`` equivalent on ``upsert_node`` to
-            # apply it with. Whether a new version *is* a new node for recency
-            # purposes is a real question rather than a missing keyword, so it
-            # is filed (#420) rather than answered here.
+            # Scoped to the document branch, and that scoping is now
+            # *correct* rather than merely pending. The entity branch below
+            # re-opens an SCD-2 version whose ``updated_at`` is now — but
+            # SCD-2 carries ``created_at`` forward, ``GraphStore.query`` is
+            # ``ORDER BY created_at DESC LIMIT n`` on every shipped backend,
+            # and since #420 ``GraphSearch`` decays off that same column
+            # (``retrieve.strategies.GRAPH_RECENCY_CLOCK_FIELD``). So a
+            # restored node neither re-enters the graph axis's candidate
+            # window nor gains rank inside it, and ``upsert_node`` needs no
+            # ``preserve_updated_at`` equivalent. Fixed reader-side because
+            # the writers that actually move a node's ``updated_at`` are the
+            # ordinary ones (``entity.update``, extraction upserts), which no
+            # kwarg here would ever have been passed on.
             doc_store.put(item_id, doc["content"], metadata, preserve_updated_at=True)
             _sync_vector_lifecycle(self._registry, item_id, current)
             return True
