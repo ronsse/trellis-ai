@@ -137,6 +137,20 @@ POLICY_DENIED = -32002
 MUTATION_FAILED = -32003
 
 
+# ---------------------------------------------------------------------------
+# Surface labels
+# ---------------------------------------------------------------------------
+
+#: The ``save_memory`` write-surface label, shared by everything that has to
+#: agree on it: the executor's ``requested_by`` on ``MUTATION_EXECUTED``, the
+#: ``requested_by`` on the tool's unconditional ``MEMORY_STORED`` accept
+#: signal, and the ``mcp:<tool>`` label ``record_write_rejection`` derives for
+#: the rejection side. Named once because the capture-health check joins
+#: accepts to rejections on exactly this string, and a drift between the two
+#: sides is invisible until a banner will not clear (#461).
+SAVE_MEMORY_SURFACE = "mcp:save_memory"
+
+
 def _raise_invalid_params(
     message: str, *, data: dict[str, Any] | None = None
 ) -> NoReturn:
@@ -518,7 +532,7 @@ def _run_memory_extraction(
         if not result.entities and not result.edges:
             return
 
-        batch = result_to_batch(result, requested_by="mcp:save_memory")
+        batch = result_to_batch(result, requested_by=SAVE_MEMORY_SURFACE)
         build_curate_executor(registry).execute_batch(batch)
     except Exception:
         # GRACEFUL-DEGRADATION: the save_memory contract is "the document
@@ -1480,6 +1494,18 @@ def _emit_memory_stored_and_enrich(
     then runs the two feature-flagged, best-effort enrichment stages (tiered
     extraction, embed-on-ingest). Runs *outside* ``_save_memory_lock``; never
     for the NOOP verdict, which stores nothing.
+
+    The payload carries ``requested_by="mcp:save_memory"`` — the same surface
+    label the executor stamps on ``MUTATION_EXECUTED`` and
+    ``record_write_rejection`` on ``WRITE_REJECTED`` — because this is the
+    only *unconditional* success signal this tool has, and the capture-health
+    banner needs one to clear against (#461). The tool's ``MUTATION_EXECUTED``
+    comes solely from ``_run_memory_extraction``, which is gated on
+    ``TRELLIS_ENABLE_MEMORY_EXTRACTION`` (default off) and returns early
+    emitting nothing when extraction yields no drafts, so under the shipped
+    defaults a perfectly healthy ``save_memory`` accepted nothing the banner
+    could see. ``Event.source`` cannot stand in: ``MEMORY_STORED`` has three
+    emitters and matching a coarse source is the looseness #458 refused.
     """
     # Emit MEMORY_STORED so enrichment / promotion workers can react.
     try:
@@ -1493,6 +1519,7 @@ def _emit_memory_stored_and_enrich(
                 "content_hash": chash,
                 "content_length": len(content),
                 "metadata": metadata,
+                "requested_by": SAVE_MEMORY_SURFACE,
             },
         )
     except Exception as exc:
@@ -1514,7 +1541,7 @@ def _emit_memory_stored_and_enrich(
     # SemanticSearch can retrieve the memory. Fail-soft inside the hook —
     # a broken embedder never fails save_memory.
     run_embed_on_ingest(
-        registry, stored_id, content, metadata, source="mcp:save_memory"
+        registry, stored_id, content, metadata, source=SAVE_MEMORY_SURFACE
     )
 
 

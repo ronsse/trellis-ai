@@ -67,6 +67,15 @@ def _accept(event_log: EventLog, requested_by: str = "mcp:save_experience") -> N
     )
 
 
+def _memory_stored(event_log: EventLog, requested_by: str = "mcp:save_memory") -> None:
+    """A ``MEMORY_STORED`` shaped like the MCP ``save_memory`` emitter's."""
+    event_log.emit(
+        EventType.MEMORY_STORED,
+        "save_memory",
+        payload={"doc_id": "d1", "requested_by": requested_by},
+    )
+
+
 class TestCheckCaptureHealth:
     def test_empty_log_is_healthy(self, tmp_path: Path) -> None:
         event_log = SQLiteEventLog(tmp_path / "events.db")
@@ -394,3 +403,133 @@ class TestGlobalSurfaceRecovery:
         warning = check_capture_health(event_log, threshold=3)
         assert warning is not None
         assert warning.failing_surfaces == ["mcp:save_experience"]
+
+
+class TestNonCaptureSurfacesAreNotHeadlined:
+    """#461 — ``mcp:record_feedback`` must not raise a *capture* banner.
+
+    Grading a pack stores no new experience, and the surface's success path
+    is ``FEEDBACK_RECORDED``, which no ``MUTATION_EXECUTED`` accompanies. So
+    the label was structurally unclearable *and* the headline it raised —
+    "New experience from this session is NOT being saved" — was false in
+    both halves.
+    """
+
+    def test_record_feedback_rejections_do_not_raise_the_banner(
+        self, tmp_path: Path
+    ) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        _reject_boundary(event_log, tool="record_feedback", n=DEFAULT_THRESHOLD + 2)
+
+        assert check_capture_health(event_log, threshold=DEFAULT_THRESHOLD) is None
+
+    def test_record_feedback_rejections_are_still_counted_by_analyze_health(
+        self, tmp_path: Path
+    ) -> None:
+        """Excluded from the banner, not from measurement.
+
+        The whole decision rests on the failures still being visible where
+        an operator looks for them; a silent drop would trade a false alarm
+        for an unwatched surface.
+        """
+        from trellis.ops.write_health import summarize_write_health
+
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        _reject_boundary(event_log, tool="record_feedback", n=DEFAULT_THRESHOLD + 2)
+
+        report = summarize_write_health(event_log, days=1)
+        stats = report.by_tool["mcp:record_feedback"]
+        assert stats.boundary_rejected == DEFAULT_THRESHOLD + 2
+        assert report.boundary_rejected == DEFAULT_THRESHOLD + 2
+
+    def test_a_real_capture_outage_alongside_it_still_fires(
+        self, tmp_path: Path
+    ) -> None:
+        """The exclusion is per label, not a mute button on the check."""
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        _reject_boundary(event_log, tool="record_feedback", n=DEFAULT_THRESHOLD)
+        _reject_boundary(event_log, tool="save_experience", n=DEFAULT_THRESHOLD)
+
+        warning = check_capture_health(event_log, threshold=DEFAULT_THRESHOLD)
+        assert warning is not None
+        assert warning.failing_surfaces == ["mcp:save_experience"]
+        # ``rejected`` counts the failing surfaces only — a number an
+        # operator reads as "writes lost" must not include a surface the
+        # banner just declined to blame.
+        assert warning.rejected == DEFAULT_THRESHOLD
+
+
+class TestSaveMemoryClearsOnMemoryStored:
+    """#461 — the flagship capture surface can clear under shipped defaults.
+
+    ``mcp:save_memory``'s only ``MUTATION_EXECUTED`` comes from
+    ``_run_memory_extraction``, gated on ``TRELLIS_ENABLE_MEMORY_EXTRACTION``
+    (default ``False``) and returning early when extraction yields no
+    drafts. Its unconditional success signal is ``MEMORY_STORED``.
+    """
+
+    def test_rejections_raise_the_banner(self, tmp_path: Path) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        _reject_boundary(event_log, tool="save_memory", n=DEFAULT_THRESHOLD)
+
+        warning = check_capture_health(event_log, threshold=DEFAULT_THRESHOLD)
+        assert warning is not None
+        assert warning.failing_surfaces == ["mcp:save_memory"]
+
+    def test_memory_stored_clears_them(self, tmp_path: Path) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        _reject_boundary(event_log, tool="save_memory", n=DEFAULT_THRESHOLD)
+        assert check_capture_health(event_log, threshold=DEFAULT_THRESHOLD) is not None
+
+        _memory_stored(event_log, requested_by="mcp:save_memory")
+
+        assert check_capture_health(event_log, threshold=DEFAULT_THRESHOLD) is None
+
+    def test_memory_stored_from_another_surface_does_not_clear(
+        self, tmp_path: Path
+    ) -> None:
+        """The new accept event inherits the per-surface rule, not a hole in it.
+
+        A nightly ``ingest corpus`` run emits ``MEMORY_STORED`` all night;
+        if that cleared ``mcp:save_memory`` the widened accept set would
+        have re-created the global rule #309 was built to defeat.
+        """
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        _reject_boundary(event_log, tool="save_memory", n=DEFAULT_THRESHOLD)
+        _memory_stored(event_log, requested_by="cli:ingest-corpus")
+        # And an unattributed one, which is what the two non-MCP emitters
+        # actually write today.
+        event_log.emit(
+            EventType.MEMORY_STORED,
+            "worker:session-capture",
+            payload={"doc_id": "d9"},
+        )
+
+        warning = check_capture_health(event_log, threshold=DEFAULT_THRESHOLD)
+        assert warning is not None
+        assert warning.failing_surfaces == ["mcp:save_memory"]
+
+    def test_memory_stored_does_not_clear_an_unrelated_surface(
+        self, tmp_path: Path
+    ) -> None:
+        """``MEMORY_STORED`` is an accept for ``save_memory`` only.
+
+        ``save_experience`` writes through the governed pipeline; letting a
+        stored *document* clear it would answer "is the trace path alive?"
+        with evidence about a different path.
+        """
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        _reject_boundary(event_log, tool="save_experience", n=DEFAULT_THRESHOLD)
+        _memory_stored(event_log, requested_by="mcp:save_experience")
+
+        warning = check_capture_health(event_log, threshold=DEFAULT_THRESHOLD)
+        assert warning is not None
+        assert warning.failing_surfaces == ["mcp:save_experience"]
+
+    def test_mutation_executed_still_clears_it(self, tmp_path: Path) -> None:
+        """The extra accept event is additive — the governed signal stands."""
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        _reject_boundary(event_log, tool="save_memory", n=DEFAULT_THRESHOLD)
+        _accept(event_log, requested_by="mcp:save_memory")
+
+        assert check_capture_health(event_log, threshold=DEFAULT_THRESHOLD) is None

@@ -580,9 +580,32 @@ bound on non-retrieval rather than a count of it.
 
 ### F-3 · Should capture-health warn on a surface that has gone *quiet*, not just one being rejected?
 
+> **Correction 2026-09-02, made while fixing [#461](https://github.com/ronsse/trellis-ai/issues/461).**
+> The reading below — *"the grading half of the loop has produced nothing for a week"* —
+> is **false**, and it is false *because of the defect #461 fixes*. `mcp:record_feedback`
+> can **never** register an "accepted" write in the channel that number came from:
+> `analyze health` counts accepts as `MUTATION_EXECUTED` keyed on `requested_by`, the
+> surface's success path is `FEEDBACK_RECORDED`, and all-time `MUTATION_EXECUTED` with
+> `requested_by='mcp:record_feedback'` is **0**. Its "0 accepted" is a property of the
+> instrument, not of the deployment.
+>
+> What was actually happening, measured on the reference deployment **2026-09-02**
+> (read-only, `trellis_operational`): **47 `feedback.recorded` events in the trailing 30
+> days, 17 in the trailing 7**, out of 71 all time. Grading was not silent — it was one of
+> the busier things on the deployment. (Rolling window; re-derive rather than trusting the
+> figure. All-time `mutation.executed` with `requested_by='mcp:record_feedback'` is the
+> number that does not roll: **0**.)
+>
+> The entry's *question* survives intact, and so does its recommendation: nothing today
+> detects a surface that stops being called. But it must be re-motivated from a surface
+> that really did go quiet, because this one had not. The generalisable lesson is the one
+> this ledger keeps relearning — **a zero read off a channel the subject cannot write to
+> is not a measurement** (cf. the `advisories-were-never-starved` correction, and #443).
+> Before reading a surface's counter as behaviour, check the surface can move it.
+
 **Measured 2026-08-27**, 7-day window on the reference deployment: `mcp:record_feedback`
-shows **0 accepted, 1 rejected**. The grading half of the loop has produced nothing for a
-week, and **nothing warned**.
+shows **0 accepted, 1 rejected**. ~~The grading half of the loop has produced nothing for a
+week~~, and **nothing warned**.
 
 The banner ([`ops/capture_health.py`](../../src/trellis/ops/capture_health.py), #309)
 fires on ≥3 rejections **and** zero accepted for a surface. Here rejections were 1, so
@@ -590,9 +613,11 @@ the condition was not met — working as specified. But the specified condition 
 detect a surface that simply stops being called, which for `record_feedback` is the more
 likely failure: an agent that never grades produces no rejections at all.
 
-This interacts with everything downstream. `pack_attribution_rate` is 0.875 over 8
+~~This interacts with everything downstream. `pack_attribution_rate` is 0.875 over 8
 pack-targeted events, and no amount of surface ergonomics can move it while nothing is
-being graded — the same conclusion A4 reached about retrieve-adoption, one layer over.
+being graded~~ — the "nothing is being graded" premise is withdrawn above; the
+`pack_attribution_rate` figure stands as measured, and the parallel with A4's conclusion
+about retrieve-adoption is unaffected.
 
 **Recommendation: yes, but as a distinct signal — "was active, now silent" rather than
 "silent".** Bare silence is not evidence: most surfaces are unused most of the time, and a
@@ -604,7 +629,10 @@ motivating incident. Keep it advisory, keep it failing soft, and keep it out of
 **Cost of being wrong:** a noisier banner. Reversible in a threshold.
 
 **Trigger:** anyone touching `capture_health.py`, or the next time a write surface goes
-dark unnoticed.
+dark unnoticed. *(Fired 2026-09-02 — #461. `mcp:record_feedback` is now excluded from the
+capture banner outright, which removes it as a candidate for a "went quiet" signal too: it
+captures nothing, so its silence is not a capture question. The open half of this entry is
+now about `save_memory`, `save_experience` and `save_knowledge` only.)*
 
 ### F-2 · `trellis-evals` has no CI at all
 
