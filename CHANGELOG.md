@@ -278,9 +278,9 @@ Net DEFECT delta in `src/`: 113 literal-only → 85 literal-only / 67 helper-awa
   `pack.retrieval_report.model_dump()` whole), and rendered by the Memory
   Explorer's pack view as the *Type* and *Relevance* columns of its "Rejected
   items" table. The REST surface is the load-bearing half of that — it is a
-  programmatic contract, not a screen someone has to open. Nothing *branches* on them — which is why every mutant stayed
-  green — but a wrong value was being shown to an operator as fact, not left
-  unread. The six
+  programmatic contract, not a screen someone has to open. Nothing *branches* on
+  them — which is why every mutant stayed green — but a wrong value was being
+  handed to a caller and shown to an operator as fact, not left unread. The six
   are now one constructor, `RejectedItem.from_pack_item`. It sits on the
   **schema** rather than on `PackBuilder` because the content floor is a gate
   too and `trellis.retrieve.excerpts` is imported *by* `pack_builder` — a
