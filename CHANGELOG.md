@@ -260,6 +260,35 @@ Net DEFECT delta in `src/`: 113 literal-only → 85 literal-only / 67 helper-awa
   suite (11 of 12 such mutants survive it; the full suite was not run against
   them). Latent rather than live — `summarize_withheld` reads only
   `item_id` and `reason`, and both are pinned. (#447)
+- **The same uniformity flaw at the six sites `_reject` did not reach.**
+  `max_items` and `token_budget` on the flat path, both `dedup` branches,
+  `semantic_dedup`, and the content floor in `excerpts.py` each hand-wrote the
+  identical four-field copy off a `PackItem`, and **eleven of the twelve `item_type` / `relevance_score` mutants across them survived the full default selection of 6,429 tests** — the identical count #456 measured over the 992-test retrieval subset, so widening the selection caught nothing extra; the one that dies is `dedup`'s `existing.relevance_score`, held by a single pre-existing assertion in `test_pack_builder.py::TestRejectionTracking::test_dedup_rejection_tracked`. So all six
+  could have been constant-folded, mistyped, or copied off the wrong object
+  and stayed green — the #447 flaw again, six times over. **#456 called it
+  purely latent on the grounds that nothing reads either field, and that is
+  not quite right**: `summarize_withheld` does key only on `item_id` and
+  `reason`, but both fields are serialised into
+  `PACK_ASSEMBLED.payload["rejected_items"]` and the Memory Explorer's pack
+  view renders them as the *Type* and *Relevance* columns of its "Rejected
+  items" table. Nothing *branches* on them — which is why every mutant stayed
+  green — but a wrong value was being shown to an operator as fact, not left
+  unread. The six
+  are now one constructor, `RejectedItem.from_pack_item`. It sits on the
+  **schema** rather than on `PackBuilder` because the content floor is a gate
+  too and `trellis.retrieve.excerpts` is imported *by* `pack_builder` — a
+  builder-side helper is unreachable from there without an import cycle;
+  `PackBuilder._reject` stays as its plural form, for the gates that reject a
+  whole slice at once. Consolidation alone would not have made the fields
+  observable, only reduced the number of places they can go wrong, so the
+  tests are written **per gate** and assert through a real `build` against
+  pools carrying two distinct `item_type`s and two distinct scores: reapplied
+  to the pre-consolidation source, all twelve mutants now die — each to the
+  test for its own gate — as do all four mutants on the single constructor
+  (both copied fields, plus dropping the `strategy_source` override and
+  dropping its fall-back). Behaviour is unchanged — the full suite
+  passes against the old six-copy source with the new tests in place, which is
+  the equivalence proof for the consolidation. (#456)
 
 - **Tag refresh rewrote every stale document, even when nothing changed.** The
   tags-unchanged early-out in `classify/refresh.py` dropped only

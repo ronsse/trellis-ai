@@ -34,6 +34,10 @@ import structlog
 from structlog.testing import capture_logs
 
 from trellis.mutate.retention import ARCHIVED_STATE
+from trellis.retrieve.excerpts import (
+    CONTENT_FLOOR_REJECTION_REASON,
+    ContentFloorConfig,
+)
 from trellis.retrieve.formatters import (
     format_pack_as_index_markdown,
     format_pack_as_markdown,
@@ -41,7 +45,7 @@ from trellis.retrieve.formatters import (
 )
 from trellis.retrieve.lifecycle import ARCHIVED_REJECTION_REASON
 from trellis.retrieve.noise import NOISE_REJECTION_REASON
-from trellis.retrieve.pack_builder import PackBuilder
+from trellis.retrieve.pack_builder import PackBuilder, SemanticDedupConfig
 from trellis.retrieve.strategies import SearchStrategy
 from trellis.retrieve.withholding import (
     WithheldGroup,
@@ -51,7 +55,13 @@ from trellis.retrieve.withholding import (
     withholding_from_payload,
 )
 from trellis.schemas.classification import LIFECYCLE_KEY
-from trellis.schemas.pack import PackBudget, PackItem, RejectedItem, SectionRequest
+from trellis.schemas.pack import (
+    Pack,
+    PackBudget,
+    PackItem,
+    RejectedItem,
+    SectionRequest,
+)
 from trellis.schemas.well_known import ACTIVITY
 from trellis.stores.base.event_log import EventType
 from trellis.stores.sqlite.event_log import SQLiteEventLog
@@ -87,6 +97,27 @@ def _item(
         excerpt=excerpt,
         relevance_score=score,
         metadata=metadata or {},
+    )
+
+
+def _typed(
+    item_id: str,
+    item_type: str,
+    score: float,
+    *,
+    excerpt: str = _BODY,
+) -> PackItem:
+    """An item whose ``item_type`` and ``relevance_score`` are both its own.
+
+    ``_item`` fixes ``item_type="document"``; a pool built only from it
+    cannot distinguish a rejection row that copies the field from one that
+    hard-codes it (#456).
+    """
+    return PackItem(
+        item_id=item_id,
+        item_type=item_type,
+        excerpt=excerpt,
+        relevance_score=score,
     )
 
 
@@ -1182,3 +1213,201 @@ class TestTheSectionedPathRecordsWhatItRemoved:
         assert rows["doc"].item_type == "document"
         assert rows["ent"].relevance_score == pytest.approx(0.81)
         assert rows["doc"].relevance_score == pytest.approx(0.42)
+
+
+class TestEveryRejectionRowCarriesTheRejectedItemsOwnFields:
+    """One roster, six gates, two fields each (#456).
+
+    ``RejectedItem.item_type`` and ``RejectedItem.relevance_score`` had
+    **six** independent hand-written copies of the same four-line field
+    copy, and **eleven of the twelve ``item_type`` / ``relevance_score``
+    mutants across them survived the full 6,429-test selection** — not
+    merely the 992-test retrieval subset #456 measured, so widening the
+    selection caught nothing extra. Only ``dedup``'s
+    ``existing.relevance_score`` died. Nothing *branches* on either field,
+    which is why every one of the six could have been constant-folded,
+    mistyped or copied off the wrong object with no test anywhere
+    noticing — the exact fixture-uniformity flaw #455 closed one layer up,
+    six times over. They
+    are not unread, though: both ride
+    ``PACK_ASSEMBLED.payload["rejected_items"]`` and the Memory Explorer
+    renders them as the *Type* and *Relevance* columns of its "Rejected
+    items" table, so a wrong value reached an operator as fact.
+
+    The source fix is a single constructor
+    (:meth:`~trellis.schemas.pack.RejectedItem.from_pack_item`), but that
+    only removes today's six copies; it does not stop a seventh gate
+    landing next month with its own. These tests are what makes the fields
+    observable, so they are written **per gate** and asserted through a
+    real ``build`` — the seam where the row reaches
+    ``retrieval_report.rejected_items`` and a consumer could read it.
+
+    Every pool below carries at least two distinct ``item_type`` values
+    and two distinct ``relevance_score`` values. A pool where every item
+    shares one type cannot tell a row that copies the field from one that
+    hard-codes it, which is how this hid from two reviewers.
+    """
+
+    @staticmethod
+    def _rows(pack: Pack, reason: str) -> dict[str, RejectedItem]:
+        return {
+            r.item_id: r
+            for r in pack.retrieval_report.rejected_items
+            if r.reason == reason
+        }
+
+    def test_a_max_items_cut_carries_the_items_own_type_and_score(self) -> None:
+        builder = PackBuilder(
+            strategies=[
+                _strategy(
+                    "keyword",
+                    [
+                        _typed("keep", "document", 0.91),
+                        _typed("ent", "entity", 0.62),
+                        _typed("pre", "precedent", 0.33),
+                    ],
+                )
+            ]
+        )
+        pack = builder.build("deploy checklist", budget=PackBudget(max_items=1))
+
+        rows = self._rows(pack, "max_items")
+        assert sorted(rows) == ["ent", "pre"], (
+            "the fixture must actually reach the max_items gate, or this "
+            "test passes vacuously"
+        )
+        assert rows["ent"].item_type == "entity"
+        assert rows["pre"].item_type == "precedent"
+        assert rows["ent"].relevance_score == pytest.approx(0.62)
+        assert rows["pre"].relevance_score == pytest.approx(0.33)
+
+    def test_a_token_budget_cut_carries_the_items_own_type_and_score(self) -> None:
+        builder = PackBuilder(
+            strategies=[
+                _strategy(
+                    "keyword",
+                    [
+                        _typed("keep", "document", 0.91),
+                        _typed("ent", "entity", 0.62),
+                        _typed("pre", "precedent", 0.33),
+                    ],
+                )
+            ]
+        )
+        pack = builder.build(
+            "deploy checklist", budget=PackBudget(max_items=10, max_tokens=20)
+        )
+
+        rows = self._rows(pack, "token_budget")
+        assert sorted(rows) == ["ent", "pre"]
+        assert rows["ent"].item_type == "entity"
+        assert rows["pre"].item_type == "precedent"
+        assert rows["ent"].relevance_score == pytest.approx(0.62)
+        assert rows["pre"].relevance_score == pytest.approx(0.33)
+
+    def test_a_dedup_row_describes_the_loser_when_the_incoming_copy_wins(
+        self,
+    ) -> None:
+        """The asymmetric branch — the row is built off ``existing``.
+
+        ``_deduplicate_tracked`` keeps the higher-scoring copy of an id and
+        rejects the other, and *which object the row is built from* differs
+        between its two branches. Two copies of one id routinely disagree
+        about type and score — the keyword axis serves a document and the
+        graph axis an entity summary under the same id — so a row built off
+        the winner would describe a candidate that is *in* the pack. Only
+        the loser's score dies on ``main``; its type does not.
+        """
+        builder = PackBuilder(
+            strategies=[
+                _strategy("keyword", [_typed("d1", "entity", 0.40)]),
+                _strategy("semantic", [_typed("d1", "document", 0.90)]),
+            ]
+        )
+        pack = builder.build("deploy checklist")
+
+        rows = self._rows(pack, "dedup")
+        assert list(rows) == ["d1"]
+        assert rows["d1"].item_type == "entity"
+        assert rows["d1"].relevance_score == pytest.approx(0.40)
+        # The served copy carries the other type and the other score, so a
+        # row copied off the winner reads differently from this.
+        assert [(i.item_type, i.relevance_score) for i in pack.items] == [
+            ("document", pytest.approx(0.90))
+        ]
+
+    def test_a_dedup_row_describes_the_loser_when_the_incoming_copy_loses(
+        self,
+    ) -> None:
+        """The other branch — the row is built off ``item``. Same pool, the
+        two copies swapped between the axes, so a constant or a
+        wrong-object mutant that survives one branch cannot survive both."""
+        builder = PackBuilder(
+            strategies=[
+                _strategy("keyword", [_typed("d1", "document", 0.90)]),
+                _strategy("semantic", [_typed("d1", "entity", 0.40)]),
+            ]
+        )
+        pack = builder.build("deploy checklist")
+
+        rows = self._rows(pack, "dedup")
+        assert list(rows) == ["d1"]
+        assert rows["d1"].item_type == "entity"
+        assert rows["d1"].relevance_score == pytest.approx(0.40)
+        assert [(i.item_type, i.relevance_score) for i in pack.items] == [
+            ("document", pytest.approx(0.90))
+        ]
+
+    def test_a_semantic_dedup_row_carries_the_items_own_type_and_score(self) -> None:
+        base = (
+            "Deploying to production requires running the full migration "
+            "suite, validating the schema against the staging database, and "
+            "confirming that all downstream consumers updated their clients. "
+        )
+        near = base.replace(". ", ".  ").replace(",", " ,")
+        builder = PackBuilder(
+            strategies=[
+                _strategy(
+                    "keyword",
+                    [
+                        _typed("winner", "document", 0.95, excerpt=base),
+                        _typed("loser", "entity", 0.44, excerpt=near),
+                    ],
+                )
+            ],
+            semantic_dedup=SemanticDedupConfig(),
+        )
+        pack = builder.build("deploy checklist")
+
+        rows = self._rows(pack, "semantic_dedup")
+        assert list(rows) == ["loser"]
+        assert rows["loser"].item_type == "entity"
+        assert rows["loser"].relevance_score == pytest.approx(0.44)
+        # The winner is a *document* at 0.95 — a row copying the surviving
+        # neighbour's fields, or a constant, reads differently from this.
+        assert [i.item_id for i in pack.items] == ["winner"]
+
+    def test_a_content_floor_drop_carries_the_items_own_type_and_score(self) -> None:
+        """``exclude`` mode is opt-in, so this is the one gate whose fixture
+        has to configure it — the default demotes rather than drops."""
+        builder = PackBuilder(
+            strategies=[
+                _strategy(
+                    "keyword",
+                    [
+                        _typed("keep", "document", 0.91),
+                        _typed("thin", "entity", 0.62, excerpt="Postgres"),
+                        _typed("bare", "precedent", 0.33, excerpt=""),
+                    ],
+                )
+            ],
+            content_floor=ContentFloorConfig(mode="exclude"),
+        )
+        pack = builder.build("deploy checklist")
+
+        rows = self._rows(pack, CONTENT_FLOOR_REJECTION_REASON)
+        assert sorted(rows) == ["bare", "thin"]
+        assert rows["thin"].item_type == "entity"
+        assert rows["bare"].item_type == "precedent"
+        assert rows["thin"].relevance_score == pytest.approx(0.62)
+        assert rows["bare"].relevance_score == pytest.approx(0.33)
