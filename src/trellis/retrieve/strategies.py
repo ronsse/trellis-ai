@@ -413,6 +413,22 @@ def _resolve_importance_params(
     )
 
 
+def _parse_stamp(value: Any) -> datetime | None:
+    """Parse one recency stamp, or ``None`` when it is absent/unusable.
+
+    Heterogeneous by necessity: SQLite hands back ISO strings and Postgres
+    hands back ``datetime`` objects for the very same column.
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return value
+    try:
+        return datetime.fromisoformat(str(value))
+    except (ValueError, TypeError):
+        return None
+
+
 def _decay_importance_if_stale(
     importance: float,
     raw_stamp: str | datetime,
@@ -430,13 +446,9 @@ def _decay_importance_if_stale(
     ``floor``. Unparseable stamps return the score unchanged (the caller
     enforces non-None at a higher level).
     """
-    if isinstance(raw_stamp, datetime):
-        ts = raw_stamp
-    else:
-        try:
-            ts = datetime.fromisoformat(str(raw_stamp))
-        except (ValueError, TypeError):
-            return importance
+    ts = _parse_stamp(raw_stamp)
+    if ts is None:
+        return importance
     reference = now or datetime.now(UTC)
     if ts.tzinfo is None:
         ts = ts.replace(tzinfo=UTC)
@@ -452,9 +464,83 @@ def _decay_importance_if_stale(
     return importance * (floor + (1.0 - floor) * decay)
 
 
+def resolve_recency_stamp(metadata: Any, *row_stamps: Any) -> Any:
+    """Resolve the one timestamp recency decay should read for an item.
+
+    **The metadata bag wins over the store row's own columns**, and that
+    ordering is the point of the function (#417).
+
+    ``updated_at`` / ``created_at`` exist in two places with two different
+    meanings. As *store columns* they are the row's write clock — when
+    Trellis last touched this row. As *metadata keys* they are **the
+    source's** clock, put there by an ingest path that knows the content
+    predates its own write. That is the rule, not a roster of writers: any
+    reader whose source carries a timestamp may propagate one, and two
+    already do — :mod:`trellis.ingest_corpus.conversations` copies a
+    claude.ai conversation's stamps, and the markdown handler passes YAML
+    frontmatter through flat (neither key is reserved). Both then reach the
+    vector row, because
+    :func:`~trellis.retrieve.embed_ingest_hook.build_vector_row` splats
+    document metadata and only ``setdefault``s its own ``created_at``.
+
+    Recency decay asks *how old is this information*, and for an imported
+    corpus only the source's clock can answer it. Measured on the reference
+    deployment (2026-09-02): all **148** conversation documents were written
+    by one import batch, so every one of them shares a single column
+    ``created_at`` and 132 share a single column ``updated_at`` — the column
+    ranks a 2024 conversation exactly as fresh as one from last week, across a
+    corpus whose source stamps span 28 months. Reading the column there is not
+    a conservative default; it is reading a stamp with no information in it.
+
+    Before this function the two document-backed axes disagreed about which of
+    the two they meant: ``KeywordSearch`` read the column, ``SemanticSearch``
+    read the bag. Same document, two ages, decided by which strategy retrieved
+    it — a median **2.20x** (max 3.17x) difference in the resulting recency
+    multiplier across those 148 rows, which supplied 152 of 917 injected
+    servings over 29 of 56 assembled packs. Both axes now call this, so a
+    third document-backed axis cannot re-open the split by picking a side.
+
+    Two neighbours deliberately keep the column, and neither is an oversight.
+    ``GraphSearch`` is not routed through here: a graph node's ``properties``
+    is an extractor-written bag with no source-clock convention and no writer
+    producing one (0 of 1093 live production nodes carry either key), so
+    extending a document-corpus rule to it would be an unmeasured change to a
+    different store rather than consistency. And
+    :mod:`trellis.mutate.retention` keeps reading the column for its
+    ``older_than_days`` gate, because that gate asks a *different* question —
+    how long Trellis has held this row, not how old the content is — and it
+    answers it by deleting. Switching it to the source clock would make every
+    one of those 148 documents retroactively prunable. Recency decay is a
+    score with a floor; retention is destructive. They do not have to agree.
+
+    Candidates are tried in order and the first one that *parses* wins — not
+    the first one merely present. A malformed source stamp has to fall through
+    to the row's clock rather than reach :func:`_apply_recency_decay`, whose
+    fail-open on an unparseable value returns the score undecayed, i.e. makes
+    the item maximally fresh. That is the wrong direction to fail for a value
+    that came from outside.
+
+    Args:
+        metadata: The item's metadata bag (document or vector row).
+        *row_stamps: The store row's own stamps, most-preferred first
+            (typically ``updated_at`` then ``created_at``). A vector row has
+            no columns of its own, so the semantic axis passes none.
+
+    Returns:
+        The first usable stamp, or ``None`` when nothing parses.
+    """
+    bag = metadata if isinstance(metadata, dict) else {}
+    for candidate in (bag.get("updated_at"), bag.get("created_at"), *row_stamps):
+        if _parse_stamp(candidate) is not None:
+            return candidate
+    return None
+
+
 def _apply_recency_decay(
     base_score: float,
-    timestamp: str | None,
+    # Not ``str | None``: the document store's columns come back as ``str``
+    # from SQLite and ``datetime`` from Postgres, and always have.
+    timestamp: Any,
     *,
     now: datetime | None = None,
     half_life_days: float = DEFAULT_RECENCY_HALF_LIFE_DAYS,
@@ -470,11 +556,8 @@ def _apply_recency_decay(
         decay = 0.5 ** (age_days / half_life_days)
         score = base_score * (floor + (1 - floor) * decay)
     """
-    if not timestamp:
-        return base_score
-    try:
-        ts = datetime.fromisoformat(str(timestamp))
-    except (ValueError, TypeError):
+    ts = _parse_stamp(timestamp)
+    if ts is None:
         return base_score
     reference = now or datetime.now(UTC)
     if ts.tzinfo is None:
@@ -550,9 +633,16 @@ class KeywordSearch(SearchStrategy):
             metadata = doc.get("metadata", {})
             base_score = abs(doc.get("rank", 0.0))
             score = _apply_importance(base_score, metadata, **importance_params)
+            # Source clock first, row clock second — see
+            # :func:`resolve_recency_stamp`. The document store's columns are
+            # this row's *write* clock; a conversation import's metadata
+            # stamps are the content's own, and are what the semantic axis
+            # has always read.
             score = _apply_recency_decay(
                 score,
-                doc.get("updated_at") or doc.get("created_at"),
+                resolve_recency_stamp(
+                    metadata, doc.get("updated_at"), doc.get("created_at")
+                ),
                 half_life_days=half_life,
                 floor=floor,
             )
@@ -649,9 +739,14 @@ class SemanticSearch(SearchStrategy):
             metadata = result.get("metadata", {})
             base_score = result.get("score", 0.0)
             score = _apply_importance(base_score, metadata, **importance_params)
+            # A vector row has no columns of its own — its recency stamp is
+            # inside the metadata snapshot, either the source's (splatted
+            # from the document) or ``build_vector_row``'s embed-time
+            # ``setdefault``. Same resolver as the keyword axis so the two
+            # cannot decay off different clocks for one document (#417).
             score = _apply_recency_decay(
                 score,
-                metadata.get("updated_at") or metadata.get("created_at"),
+                resolve_recency_stamp(metadata),
                 half_life_days=half_life,
                 floor=floor,
             )

@@ -359,15 +359,28 @@ def mark_document_superseded(
     losing version retrievable on demand", which makes the loser's recency rank
     the whole mechanism rather than an incidental score.
 
-    **Scoped to the keyword axis, and only that.** ``SemanticSearch`` decays off
-    the *vector row's* metadata, and would honour an ``updated_at`` key there —
-    but no writer produces one, because ``updated_at`` is a store *column*, not
-    a metadata key, and ``build_vector_row`` sets only ``created_at``. So the
-    semantic axis was never exposed to this. Nor does this write reach the
-    vector row at all: ``SYNCED_METADATA_KEYS`` is ``content_tags`` /
-    ``auto_importance``, so the row never learns of the supersession — the #337
-    shape, inert only for as long as the state goes unfiltered. Add such a
-    filter and the mirror becomes required.
+    **Scoped to the keyword axis, and only that — but not for the reason #411
+    gave.** That docstring said no writer produces an ``updated_at`` *metadata*
+    key, so the semantic axis could never see one. **The universal negative was
+    false**: :mod:`trellis.ingest_corpus.conversations` writes both
+    ``created_at`` and ``updated_at`` into a conversation document's metadata,
+    ``build_vector_row`` splats document metadata into the vector row, and 148
+    live production rows carry the key (#417). What actually scopes this write
+    to the keyword axis is narrower and holds regardless: the flag protects a
+    store **column**, and no writer copies that column into a metadata bag —
+    ``SYNCED_METADATA_KEYS`` is ``content_tags`` / ``auto_importance``, so this
+    write never reaches the vector row at all. The row never learns of the
+    supersession either — the #337 shape, inert only for as long as the state
+    goes unfiltered. Add such a filter and the mirror becomes required.
+
+    One consequence of #417 worth knowing before reasoning about ranking here:
+    :func:`~trellis.retrieve.strategies.resolve_recency_stamp` now makes *both*
+    document-backed axes prefer a source-supplied stamp in the metadata bag
+    over the row's column. So for a document whose source carried its own
+    clock, this flag no longer affects recency at all — the column it protects
+    is not the stamp being read. It stays load-bearing for every document
+    without one, which is the overwhelming majority, and for the other
+    column readers named on ``DocumentStore.put``.
     """
     doc = document_store.get(old_doc_id)
     if doc is None:

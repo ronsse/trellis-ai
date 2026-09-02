@@ -119,7 +119,15 @@ def build_vector_row(
         created_at: Recency stamp for retrieval decay. The live hook
             omits it (embed time == ingest time); the backfill passes
             the document row's stored ``created_at`` so old documents
-            don't masquerade as fresh.
+            don't masquerade as fresh. **A ``created_at`` (or
+            ``updated_at``) already in *metadata* outranks this argument**
+            — it is written into ``setdefault`` position deliberately,
+            because a stamp in the bag is the *source's* clock and this
+            argument is only ever the row's write clock. That precedence
+            is now the explicit rule both document-backed retrieval axes
+            follow; see
+            :func:`~trellis.retrieve.strategies.resolve_recency_stamp`
+            (#417).
 
     Returns:
         ``{"item_id": ..., "vector": ..., "metadata": ...}`` — the shape
