@@ -514,15 +514,22 @@ def resolve_recency_stamp(
     Two neighbours deliberately keep the column, and neither is an oversight.
     ``GraphSearch`` is not routed through here: a graph node's ``properties``
     is an extractor-written bag with no source-clock convention and no writer
-    producing one (0 of 1093 live production nodes carry either key), so
-    extending a document-corpus rule to it would be an unmeasured change to a
-    different store rather than consistency. And
-    :mod:`trellis.mutate.retention` keeps reading the column for its
-    ``older_than_days`` gate, because that gate asks a *different* question —
-    how long Trellis has held this row, not how old the content is — and it
-    answers it by deleting. Switching it to the source clock would make every
-    one of those 148 documents retroactively prunable. Recency decay is a
-    score with a floor; retention is destructive. They do not have to agree.
+    producing one (0 of 1111 live production nodes carry either key on
+    2026-09-02 — the count moves daily, the zero has not), so extending a
+    document-corpus rule to it would be an unmeasured change to a different
+    store rather than consistency. And :mod:`trellis.mutate.retention` keeps
+    reading the column for its ``older_than_days`` gate, because that gate
+    asks a *different* question — how long Trellis has held this row, not how
+    old the content is — and it answers it by deleting. Switching it would
+    take that gate's 30-day age criterion on these documents from **0/148 to
+    146/148**. Stated as the criterion and not as the gate, because it is one
+    conjunct of two: ``_classify_document`` consults it only on the
+    ``lifecycle_states`` branch, and none of the 148 carries a lifecycle state
+    today, so nothing would be deleted the instant it was switched. What the
+    switch removes is the only thing standing between an imported corpus and
+    a destructive sweep the moment any of it acquires a targeted state.
+    Recency decay is a score with a floor; retention is destructive. They do
+    not have to agree.
 
     Chunk rows are the third exclusion, and unlike the other two this one is
     an *asymmetry this function creates*. ``_write_chunks`` propagates only
@@ -530,13 +537,20 @@ def resolve_recency_stamp(
     chunk, so a chunk of a 2024 conversation carries no source clock and
     decays off the import column. Before #417 the keyword axis read the
     column for parent and chunk alike and they agreed; now they do not
-    (production: 735 chunk rows under 74 stamped parents, 147 servings). The
-    split already existed on the semantic axis, which has always read the bag
-    — this makes it symmetric across the two axes rather than inventing it.
-    Inheriting the stamp is not obviously right either: the parent is the
-    worse-cited half of that corpus (1 helpful / 58 unhelpful against the
-    chunks' 7 / 38), so propagating it would demote the better half. Left as
-    measured, not as taste.
+    (production: 735 chunk rows under 74 stamped parents, 147 servings, and
+    6 of 56 assembled packs already served a stamped parent together with one
+    of its own chunks). **On the keyword axis that disagreement is new here**
+    — the pre-existing half is narrower than it first looks: the semantic axis
+    has always read the bag, so it already scored stamped parents off the
+    source clock and everything else off a write clock, but a stamped parent
+    and its own chunks are never *both* servable there (a conversation is
+    either chunked or embedded whole — the intersection is 0 of 148), so that
+    axis never exercised the parent-versus-chunk case. Inheriting the stamp is
+    not obviously right either: the parent is the worse-cited half of that
+    corpus (1 helpful / 64 unhelpful against the chunks' 7 / 38; P(cited
+    helpful | served) 0.015 vs 0.081, against 0.123 for the rest of the
+    corpus), so propagating it would demote the better half. Left as measured,
+    not as taste, and tracked in #463.
 
     Candidates are tried in order and the first one that is *usable* wins —
     not the first one merely present. Two ways a candidate is unusable, and
@@ -558,11 +572,28 @@ def resolve_recency_stamp(
       is allowed first — a source clock is naive often enough that one
       timezone's offset must not read as hostile.
 
+    **The guard is a preference, not a guarantee, and it is weaker on the
+    semantic axis** — say so rather than let the word "guard" imply more.
+    Falling through only helps if a later candidate is usable. The keyword
+    axis always has one (a store row's columns are never absent), so a
+    hostile stamp there really is decayed off the row's clock. The semantic
+    axis passes *no* row stamps, so its candidates are the bag's two keys;
+    ``build_vector_row`` normally supplies embed time via ``setdefault``, but
+    ``setdefault`` is a no-op when the key is *present and unusable*. A
+    document carrying a malformed or future ``created_at`` therefore still
+    reaches the semantic axis with nothing to fall through to, resolves to
+    ``None``, and scores undecayed — exactly what it would have done with no
+    guard at all. Closing that would mean returning the vector row's own
+    ``created_at`` column from ``VectorStore.query``, which today returns
+    ``item_id`` / ``score`` / ``metadata`` on every backend; a contract
+    change across four backends is not this function's business.
+    ``TestSemanticAxisResidual`` pins the limit so it stays a known one.
+
     Args:
         metadata: The item's metadata bag (document or vector row).
         *row_stamps: The store row's own stamps, most-preferred first
-            (typically ``updated_at`` then ``created_at``). A vector row has
-            no columns of its own, so the semantic axis passes none.
+            (typically ``updated_at`` then ``created_at``). ``VectorStore.query``
+            returns no columns, so the semantic axis passes none.
         now: Reference clock for the future check. Defaults to wall time.
 
     Returns:

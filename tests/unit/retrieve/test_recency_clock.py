@@ -316,3 +316,70 @@ class TestResolveRecencyStamp:
         # Same multiplier a future stamp would have produced, so this costs
         # nothing; the guard only ever prefers a non-future candidate.
         assert self._resolve({"updated_at": "2099-01-01"}, "2098-01-01") is None
+
+
+class TestSemanticAxisResidual:
+    """What the guard does *not* buy, pinned so it stays a known limit.
+
+    ``resolve_recency_stamp`` falls through an unusable candidate, which only
+    helps when a later one is usable. ``KeywordSearch`` always has one — a
+    store row has columns. ``SemanticSearch`` passes none, because
+    ``VectorStore.query`` returns ``item_id`` / ``score`` / ``metadata`` and
+    no columns on every backend; its only candidates are the bag's two keys.
+    ``build_vector_row`` normally supplies embed time via ``setdefault``, but
+    ``setdefault`` does nothing when the key is *present and unusable*. So a
+    document whose own ``created_at`` is malformed or future still reaches
+    the semantic axis with nothing to fall through to and scores undecayed —
+    the maximum multiplier, exactly as it would have before the guard.
+
+    Not a regression, and not silently accepted: the fix is to return the
+    vector row's ``created_at`` column from ``VectorStore.query``, which is a
+    contract change across four backends. These tests fail the day someone
+    makes it, which is the point.
+    """
+
+    _FLOOR = 0.3
+
+    def test_keyword_axis_the_guard_bites(self) -> None:
+        stale = (datetime.now(UTC) - timedelta(days=3650)).isoformat()
+        hostile = {
+            "doc_id": "d1",
+            "content": "x",
+            "metadata": {"updated_at": "2099-01-01T00:00:00+00:00"},
+            "updated_at": stale,
+        }
+        # Decayed all the way to the floor off the row's own clock.
+        assert _keyword_score(hostile) == pytest.approx(0.8 * self._FLOOR, rel=1e-3)
+
+    @pytest.mark.parametrize(
+        "stamp",
+        ["2099-01-01T00:00:00+00:00", "last tuesday"],
+        ids=["future", "garbage"],
+    )
+    def test_semantic_axis_has_nothing_to_fall_through_to(self, stamp: str) -> None:
+        # Both keys unusable and no row stamp: undecayed, i.e. maximally
+        # fresh. The honest baseline is what a real old stamp earns.
+        row = {"item_id": "v1", "metadata": {"updated_at": stamp, "created_at": stamp}}
+        honest = {
+            "item_id": "v1",
+            "metadata": {
+                "created_at": (datetime.now(UTC) - timedelta(days=3650)).isoformat()
+            },
+        }
+        assert _semantic_score(row) == pytest.approx(0.8)
+        assert _semantic_score(honest) == pytest.approx(0.8 * self._FLOOR, rel=1e-3)
+
+    def test_setdefault_cannot_rescue_a_present_but_unusable_key(self) -> None:
+        # Why the residual is reachable rather than theoretical: the embed
+        # hook's own stamp is a ``setdefault``, so a document carrying a
+        # garbage ``created_at`` keeps it.
+        from trellis.retrieve.embed_ingest_hook import build_vector_row
+
+        row = build_vector_row(
+            "d1",
+            "x",
+            {"created_at": "last tuesday"},
+            _embed,
+            created_at=datetime.now(UTC).isoformat(),
+        )
+        assert row["metadata"]["created_at"] == "last tuesday"
