@@ -590,9 +590,11 @@ bound on non-retrieval rather than a count of it.
 > instrument, not of the deployment.
 >
 > What was actually happening, measured on the reference deployment **2026-09-02**
-> (read-only, `trellis_operational`): **46 `feedback.recorded` events in the trailing 30
-> days, 17 in the trailing 7.** Grading was not silent — it was one of the busier things
-> on the deployment.
+> (read-only, `trellis_operational`): **47 `feedback.recorded` events in the trailing 30
+> days, 17 in the trailing 7**, out of 71 all time. Grading was not silent — it was one of
+> the busier things on the deployment. (Rolling window; re-derive rather than trusting the
+> figure. All-time `mutation.executed` with `requested_by='mcp:record_feedback'` is the
+> number that does not roll: **0**.)
 >
 > The entry's *question* survives intact, and so does its recommendation: nothing today
 > detects a surface that stops being called. But it must be re-motivated from a surface

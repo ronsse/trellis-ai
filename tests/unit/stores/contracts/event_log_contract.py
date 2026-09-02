@@ -399,6 +399,91 @@ class EventLogContractTests:
         assert rows[0].source == "ingest"
 
     # ------------------------------------------------------------------
+    # Filter by payload key
+    # ------------------------------------------------------------------
+    #
+    # ``payload_filters`` had no contract coverage until #461, only
+    # backend-local tests — and the SQLite ones are the only ones CI runs on
+    # a pull request. The capture-health banner
+    # (:mod:`trellis.ops.capture_health`) decides "has this write surface
+    # landed anything?" purely by this filter, so a backend that accepted
+    # the argument and ignored it would clear the banner on someone else's
+    # write and report a dark capture path as healthy. That is a silent
+    # false negative in a watchdog, which is worse than the watchdog not
+    # existing; it belongs in the contract every backend must pass.
+
+    def test_filter_by_payload_key_returns_only_matching(self, store: EventLog) -> None:
+        store.emit(
+            EventType.MEMORY_STORED, "mcp", payload={"requested_by": "mcp:save_memory"}
+        )
+        store.emit(
+            EventType.MEMORY_STORED, "cli", payload={"requested_by": "cli:ingest"}
+        )
+        rows = store.get_events(payload_filters={"requested_by": "mcp:save_memory"})
+        assert len(rows) == 1
+        assert rows[0].payload["requested_by"] == "mcp:save_memory"
+
+    def test_payload_filter_excludes_events_missing_the_key(
+        self, store: EventLog
+    ) -> None:
+        """An absent key must not match, however the backend stores JSON.
+
+        Two of the three ``MEMORY_STORED`` emitters write no
+        ``requested_by`` at all; a backend treating "key missing" as a match
+        would let a nightly corpus ingest clear an MCP surface's banner.
+        """
+        store.emit(EventType.MEMORY_STORED, "worker", payload={"doc_id": "d1"})
+        rows = store.get_events(payload_filters={"requested_by": "mcp:save_memory"})
+        assert rows == []
+
+    def test_payload_filter_is_anded_with_event_type(self, store: EventLog) -> None:
+        """The banner asks both questions at once; neither may be dropped."""
+        store.emit(
+            EventType.MEMORY_STORED, "mcp", payload={"requested_by": "mcp:save_memory"}
+        )
+        store.emit(
+            EventType.MUTATION_EXECUTED,
+            "exec",
+            payload={"requested_by": "mcp:save_memory"},
+        )
+        rows = store.get_events(
+            event_type=EventType.MEMORY_STORED,
+            payload_filters={"requested_by": "mcp:save_memory"},
+        )
+        assert len(rows) == 1
+        assert rows[0].event_type == EventType.MEMORY_STORED
+
+    def test_payload_filters_are_anded_with_each_other(self, store: EventLog) -> None:
+        store.emit(
+            EventType.MEMORY_STORED,
+            "mcp",
+            payload={"requested_by": "mcp:save_memory", "status": "ok"},
+        )
+        store.emit(
+            EventType.MEMORY_STORED,
+            "mcp",
+            payload={"requested_by": "mcp:save_memory", "status": "degraded"},
+        )
+        rows = store.get_events(
+            payload_filters={"requested_by": "mcp:save_memory", "status": "ok"}
+        )
+        assert len(rows) == 1
+        assert rows[0].payload["status"] == "ok"
+
+    def test_payload_filter_honours_limit_of_one(self, store: EventLog) -> None:
+        """``limit=1`` is how the banner asks; existence must not need a scan."""
+        for _ in range(3):
+            store.emit(
+                EventType.MEMORY_STORED,
+                "mcp",
+                payload={"requested_by": "mcp:save_memory"},
+            )
+        rows = store.get_events(
+            payload_filters={"requested_by": "mcp:save_memory"}, limit=1
+        )
+        assert len(rows) == 1
+
+    # ------------------------------------------------------------------
     # Error shape on invalid queries
     # ------------------------------------------------------------------
 

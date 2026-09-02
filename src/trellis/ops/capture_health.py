@@ -157,6 +157,15 @@ NON_CAPTURE_SURFACES: frozenset[str] = frozenset({"mcp:record_feedback"})
 #: three emitters and matching them by ``source`` is the looseness #458
 #: refused. Adding the key to the MCP emitter is what made this entry
 #: possible.
+#:
+#: The label is spelled out here rather than imported from
+#: ``trellis.mcp.server.SAVE_MEMORY_SURFACE``: ``ops`` must not depend on
+#: the MCP layer, and an ops module importing a tool server to learn a
+#: string is a worse coupling than a duplicated literal. The duplication is
+#: pinned by *execution* rather than by eye —
+#: ``tests/unit/mcp/test_capture_surface_roster.py`` calls the real
+#: ``save_memory`` and requires the banner to clear, so the two spellings
+#: drifting apart fails a test instead of silently unclearing a surface.
 _EXTRA_ACCEPT_EVENTS: dict[str, tuple[EventType, ...]] = {
     "mcp:save_memory": (EventType.MEMORY_STORED,),
 }
