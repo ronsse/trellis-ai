@@ -1374,6 +1374,20 @@
                                   : 'This API requires a key — enter one to continue.');
                 throw new Error('401 Unauthorized (API key required)');
             }
+            // A 403 means the key is VALID but under-scoped. Without this branch
+            // it fell through to the generic `!res.ok` throw, so a read-scoped
+            // key rendered an opaque error and never surfaced the key prompt —
+            // the one control that can fix it. Most of this UI is served by the
+            // admin router (/stats, /health, /metrics, /effectiveness,
+            // /learning, /proposals), so an under-scoped key is a normal
+            // mistake, not an exotic one.
+            if (res.status === 403) {
+                let detail = '';
+                try { const j = await res.json(); if (j && j.detail) detail = j.detail; } catch { /* non-JSON */ }
+                showKeyBanner('Key accepted but not permitted: ' + (detail || 'insufficient scope')
+                              + '. This UI needs an admin-scoped key.');
+                throw new Error('403 Forbidden (' + (detail || 'insufficient scope') + ')');
+            }
             if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
             return res.json();
         }
@@ -1391,6 +1405,20 @@
                 showKeyBanner(key ? 'Stored API key was rejected — enter a valid key.'
                                   : 'This API requires a key — enter one to continue.');
                 throw new Error('401 Unauthorized (API key required)');
+            }
+            // A 403 means the key is VALID but under-scoped. Without this branch
+            // it fell through to the generic `!res.ok` throw, so a read-scoped
+            // key rendered an opaque error and never surfaced the key prompt —
+            // the one control that can fix it. Most of this UI is served by the
+            // admin router (/stats, /health, /metrics, /effectiveness,
+            // /learning, /proposals), so an under-scoped key is a normal
+            // mistake, not an exotic one.
+            if (res.status === 403) {
+                let detail = '';
+                try { const j = await res.json(); if (j && j.detail) detail = j.detail; } catch { /* non-JSON */ }
+                showKeyBanner('Key accepted but not permitted: ' + (detail || 'insufficient scope')
+                              + '. This UI needs an admin-scoped key.');
+                throw new Error('403 Forbidden (' + (detail || 'insufficient scope') + ')');
             }
             if (!res.ok) {
                 let detail = `${res.status} ${res.statusText}`;
@@ -3436,7 +3464,20 @@
             } catch (err) {
                 loading.style.display = 'none';
                 error.style.display = 'block';
-                error.textContent = 'Could not connect to API at ' + API + ' \u2014 ' + err.message;
+                // Do not call an auth refusal a connectivity problem. On a 401/403
+                // the API answered, correctly and promptly; "could not connect"
+                // sends the reader off to debug DNS, ports and firewalls while
+                // the actual fix — the key banner fetchJSON has already opened —
+                // sits a few pixels above this message.
+                if (/^40[13]\b/.test(err.message)) {
+                    error.textContent = /^403/.test(err.message)
+                        ? 'Signed in, but this key lacks the scope this dashboard needs. '
+                          + 'Enter an admin-scoped key in the banner above.'
+                        : 'This Trellis API requires an API key. Enter one in the banner above '
+                          + '(or click the key icon in the header) to load the dashboard.';
+                } else {
+                    error.textContent = 'Could not connect to API at ' + API + ' \u2014 ' + err.message;
+                }
                 document.getElementById('view-dashboard').style.display = 'block';
                 viewLoaded['dashboard'] = true;
             }
