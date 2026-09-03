@@ -33,16 +33,19 @@ from trellis.ingest_corpus.conversations import (
     sync_conversations,
 )
 from trellis.retrieve.embed_ingest_hook import EMBED_ON_INGEST_FLAG
+from trellis.retrieve.observation_strategy import ObservationSearch
 from trellis.retrieve.pack_builder import PackBuilder, _item_attribution
 from trellis.retrieve.strategies import (
     RECENCY_CLOCK_METADATA_KEY,
     RECENCY_CLOCK_NONE,
     RECENCY_CLOCK_ROW,
     RECENCY_CLOCK_SOURCE,
+    GraphSearch,
     KeywordSearch,
     SemanticSearch,
 )
 from trellis.schemas.pack import PackItem
+from trellis.schemas.well_known import OBSERVATION
 from trellis.stores.base.event_log import EventType
 from trellis.stores.sqlite.document import SQLiteDocumentStore
 from trellis.stores.sqlite.event_log import SQLiteEventLog
@@ -634,3 +637,86 @@ class TestRecencyClockReachesTheServedRecord:
             metadata={"source_strategy": "graph"},
         )
         assert RECENCY_CLOCK_METADATA_KEY not in _item_attribution(item)
+
+
+class TestOnlyTheTwoResolverAxesStampAClock:
+    """Absence at the *source*, not only in the forwarder (gate on #465).
+
+    ``TestRecencyClockReachesTheServedRecord`` pins that ``_item_attribution``
+    omits the key for an item that does not carry it — the *omission
+    mechanism*. That is not the same claim as **no other axis stamps one**,
+    and it cannot be: it hand-builds a ``PackItem``, so adding a
+    ``recency_clock`` to ``GraphSearch`` or ``ObservationSearch`` leaves it
+    green (verified: both mutants survive the full suite).
+
+    The rule the docstrings state is the stronger one — only the two axes
+    that route through ``resolve_recency_stamp`` have a branch to report, and
+    a graph or observation item labelled ``"row"`` would describe the filler
+    rather than the corpus (#363/#385/#388). Pin it where it is decided, by
+    running the real strategies.
+    """
+
+    def test_graph_axis_stamps_no_clock(self) -> None:
+        store = MagicMock()
+        del store.execute_node_query
+        store.query.return_value = [
+            {
+                "node_id": f"n{i}",
+                "node_type": "concept",
+                "properties": {"name": f"node {i} with a real substantive excerpt"},
+            }
+            for i in range(3)
+        ]
+        items = GraphSearch(store).search("anything")
+        assert items
+        for item in items:
+            assert RECENCY_CLOCK_METADATA_KEY not in item.metadata
+
+    def test_observation_axis_stamps_no_clock(self) -> None:
+        store = MagicMock()
+        del store.get_nodes_bulk
+        store.get_edges.side_effect = lambda node_id, **_kw: (
+            [{"target_id": "obs1"}] if node_id == "dataset:x" else []
+        )
+        store.get_node.side_effect = lambda node_id: (
+            {
+                "node_id": "obs1",
+                "node_type": OBSERVATION,
+                "node_role": "semantic",
+                "properties": {
+                    "subject_entity_id": "dataset:x",
+                    "subject_entity_type": "Dataset",
+                    "observer_agent_id": "test-agent",
+                    "content": "row_count = 41823 on the orders table",
+                    "confidence": 0.9,
+                    "observed_at": datetime.now(UTC).isoformat(),
+                },
+            }
+            if node_id == "obs1"
+            else None
+        )
+        items = ObservationSearch(graph_store=store).search(
+            "anything", filters={"subject_entity_id": "dataset:x"}
+        )
+        assert items
+        for item in items:
+            assert RECENCY_CLOCK_METADATA_KEY not in item.metadata
+
+
+class TestTheWireContractIsPinnedByLiteral:
+    """The field is read back out of ``PACK_ASSEMBLED``, so its *spelling*
+    is the contract — not just the constants the tests import.
+
+    Every other assertion in this file goes through
+    ``RECENCY_CLOCK_METADATA_KEY`` / ``RECENCY_CLOCK_SOURCE`` and friends, so
+    renaming any of their **values** renames the emitted payload key or its
+    enum values with the whole suite green (verified: renaming the key
+    survives 1686 tests). ``graph_selection`` does not have that hole — its
+    key literal is spelled out in ``test_graph_seeding.py``.
+    """
+
+    def test_the_key_and_the_three_values_are_spelled_out(self) -> None:
+        assert RECENCY_CLOCK_METADATA_KEY == "recency_clock"
+        assert RECENCY_CLOCK_SOURCE == "source"
+        assert RECENCY_CLOCK_ROW == "row"
+        assert RECENCY_CLOCK_NONE == "none"

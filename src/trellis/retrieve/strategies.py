@@ -54,7 +54,7 @@ _FUTURE_STAMP_TOLERANCE = timedelta(days=1)
 
 #: Key on ``PackItem.metadata`` naming **which clock** recency decay actually
 #: read for this item, and forwarded into ``PACK_ASSEMBLED.injected_items[]``
-#: by :func:`~trellis.retrieve.pack_builder._build_item_attribution`.
+#: by :func:`~trellis.retrieve.pack_builder._item_attribution`.
 #:
 #: :func:`resolve_recency_stamp` picks one of three outcomes per item and the
 #: three are not close together: the source clock and the row clock differed
