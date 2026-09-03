@@ -32,7 +32,7 @@ Adopt the following exit-code map for every `trellis` CLI command. The map is sm
 | `2` | Validation error | Input failed schema or business-rule check. Fix input, retry. |
 | `3` | Policy denied | A `PolicyGate` rejected the command. Get approval, don't retry. |
 | `4` | Idempotency conflict | Command's `idempotency_key` already committed. Treat as success. |
-| `5` | Store / backend error | Backend not installed, DSN unreachable, schema mismatch. Page on-call. |
+| `5` | Store / backend / config error | Backend not installed, DSN unreachable, schema mismatch, a config file that will not load. Page on-call. |
 
 `2` aligns with the POSIX convention for "user-input error" used by `sh`, `grep`, etc. The remaining four are Trellis-specific.
 
@@ -42,6 +42,8 @@ Adopt the following exit-code map for every `trellis` CLI command. The map is sm
 - **Aligns with the typed exception hierarchy.** `trellis.errors` already separates `ValidationError`, `PolicyViolationError`, `IdempotencyError`, `StoreError`. The CLI layer maps these 1:1 to the table above.
 - **JSON output is unchanged.** `--format json` callers still parse the `status` field; the exit code is the cheap branch for shell callers who skip JSON.
 - **The exit code does not depend on `--format`.** Amended 2026-09-01 ([#437](https://github.com/ronsse/trellis-ai/issues/437)). This was assumed, never stated, and `trellis admin migrate-graph` violated it: its `raise typer.Exit(code=EXIT_STORE)` sat inside the *text* arm of `if output_format == "json"`, so a failed migration exited `5` for a human reading prose and `0` for the script parsing JSON — the surface built for machine consumption was the one reporting success for a failed store migration. `status` and the exit code must be derived from the same flag: a `status: "error"` beside an exit code of `0` is a third signal, not a fix. Enforced structurally by `tests/unit/test_format_exit_parity_rule.py`, which fails when a command's non-zero exit is reachable from one format arm only.
+- **`ConfigError` is a `5`, and the map is now executable.** Amended 2026-09-03 ([#459](https://github.com/ronsse/trellis-ai/issues/459)). The 1:1 mapping above lived only as prose, so the boundary that renders an uncaught typed error had nothing to call — and there *was* no boundary: an uncaught `TrellisError` left the CLI as a Typer traceback with exit `1`, "unexpected; file a bug", for a damaged `policies.json` an operator fixes in one edit. `trellis_cli.exit_codes.exit_code_for` is that map as a function, and `trellis_cli.main._BoundaryGroup` is the one caller. `ConfigError` is the one addition: `2` ("fix your input") is wrong because the command's own input was fine and a wrapper retrying with corrected arguments would loop forever, while `5` says what is true — the deployment's state is wrong and a human has to change it — and is already what `trellis policy list` exits when it meets the same file damaged the same way. One root cause, one code. `ApprovalRequiredError` deliberately stays `1`: it has no documented code and inventing one here would be the `6+` this ADR defers.
+
 - **No code beyond `5`.** Resist the temptation to add codes for every event. Anything we haven't pre-classified is a `1` (bug) until we earn the code.
 
 ## 4. Implementation
@@ -77,6 +79,8 @@ EXIT_STORE = 5
 ```
 
 Anything left unmapped raises `typer.Exit(code=1)` — explicit, never silent.
+
+Per-command `except` blocks stay the right shape where a command has something specific to say. What #459 added underneath them is the *fallback*: `trellis_cli.main._BoundaryGroup.invoke` catches `TrellisError` at the root group, renders `exc.message` verbatim (the raiser already worded the path, the problem and the recovery command — a second vocabulary for the same facts is how `content_type` / `document_form` drifted apart in #325/#326), and exits `exit_code_for(exc)`. Under `--format json` / `--format jsonl` it emits the house `sanitized_error_payload` envelope instead, so the machine contract survives the failure path; the exit is below the format branch, as §3 requires. It catches nothing but `TrellisError` — an untyped exception reaching there really is a `1`.
 
 ## 5. Out of scope
 

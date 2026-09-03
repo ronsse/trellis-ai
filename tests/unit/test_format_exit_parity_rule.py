@@ -460,9 +460,10 @@ def test_the_descent_reaches_every_format_branch_in_the_tree() -> None:
 def test_the_always_exiting_helper_set_is_exactly_the_must_exit_helpers() -> None:
     """Second vacuity guard, for the interprocedural half of the scan.
 
-    ``ingest._fail``, ``policy._exit_on_refused_write`` and
-    ``analyze._exit_on_refused_advisory_write`` are the shape: render on
-    the caller's surface, then exit below the branch. If this set silently
+    ``ingest._fail``, ``policy._exit_on_refused_write``,
+    ``analyze._exit_on_refused_advisory_write`` and
+    ``main._render_boundary_failure`` are the shape: render on the
+    caller's surface, then exit below the branch. If this set silently
     emptied, every command that delegates its exit to a helper would stop
     being checked, and nothing else in this file would notice.
 
@@ -473,7 +474,9 @@ def test_the_always_exiting_helper_set_is_exactly_the_must_exit_helpers() -> Non
     stand in for one that does, and nothing reports it. Naming all three
     also keeps the roster *derived*: it is recomputed from the tree here,
     so a new helper has to be admitted deliberately rather than inherited
-    from a hand-maintained list that drifts (the #443 shape).
+    from a hand-maintained list that drifts (the #443 shape). The fourth
+    entry arrived that way: #459's boundary was written, the roster went
+    red, and admitting it was a decision rather than an inheritance.
     """
     helpers_by_module = {}
     for py_file in sorted(_cli_root().rglob("*.py")):
@@ -484,6 +487,12 @@ def test_the_always_exiting_helper_set_is_exactly_the_must_exit_helpers() -> Non
     assert helpers_by_module == {
         "analyze.py": {"_exit_on_refused_advisory_write"},
         "ingest.py": {"_fail"},
+        # The fourth is the shared boundary #459 added: same shape as the
+        # other three (render on the caller's surface, then exit below the
+        # format branch), reached from ``_BoundaryGroup.invoke`` rather
+        # than from a command body. Admitted deliberately, per this
+        # docstring — it exits on every path and defines no ``return``.
+        "main.py": {"_render_boundary_failure"},
         "policy.py": {"_exit_on_refused_write"},
     }, (
         f"the must-exit helper roster changed: {helpers_by_module}. An "
