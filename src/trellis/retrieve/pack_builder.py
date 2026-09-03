@@ -815,7 +815,10 @@ class PackBuilder:
 
         # Attach matching advisories and stamp per-item provenance
         # (Unit C1, foundation for D1 axis C semantic tightening).
-        advisories = self._get_matching_advisories(domain)
+        # Capped at :attr:`_ADVISORY_MAX_COUNT` (#392); provenance is
+        # stamped from the *served* set, because an advisory the caller
+        # never saw cannot have influenced anything it did.
+        advisories, advisories_matched = self._select_advisories(domain)
         selected = self._attach_advisory_provenance(selected, advisories)
 
         # What this build removed and did not serve (#404). Computed from
@@ -857,6 +860,7 @@ class PackBuilder:
                 parent_concentration=concentration.as_telemetry(),
                 withholding=withholding.as_telemetry(),
                 index_mode=index_mode,
+                advisories_matched=advisories_matched,
             )
 
         return pack
@@ -1136,7 +1140,7 @@ class PackBuilder:
                 )
             )
 
-        advisories = self._get_matching_advisories(domain)
+        advisories, advisories_matched = self._select_advisories(domain)
 
         # Stamp per-item advisory provenance across all sections
         # (Unit C1, foundation for D1 axis C semantic tightening).
@@ -1173,6 +1177,7 @@ class PackBuilder:
                 semantic_dedup_rejected_count=semantic_dedup_rejected_count,
                 content_floor=floor_result.as_telemetry(),
                 withholding=withholding.as_telemetry(),
+                advisories_matched=advisories_matched,
             )
 
         return sectioned_pack
@@ -1186,6 +1191,7 @@ class PackBuilder:
         semantic_dedup_rejected_count: int = 0,
         content_floor: dict[str, Any] | None = None,
         withholding: dict[str, Any] | None = None,
+        advisories_matched: int | None = None,
     ) -> None:
         """Emit telemetry event for a sectioned pack.
 
@@ -1196,6 +1202,12 @@ class PackBuilder:
         mirrors the flat path's field of the same name, and so does
         ``withholding`` (#404) — emitted even when nothing was withheld, so
         a consumer can tell an empty summary from a missing one.
+
+        ``advisories_matched`` (#392) is how many advisories matched the
+        pack's scope *before* ``_ADVISORY_MAX_COUNT`` cut them, so an
+        operator can see that a cap bound without inferring it from which
+        build was deployed. Equal to ``len(advisory_ids)`` whenever the
+        cap did not bind.
         """
         per_item_estimates = [
             item.estimated_tokens or self._token_counter.count(item.excerpt)
@@ -1250,6 +1262,11 @@ class PackBuilder:
                     for s in pack.sections
                 ],
                 "advisory_ids": [a.advisory_id for a in pack.advisories],
+                "advisories_matched": (
+                    len(pack.advisories)
+                    if advisories_matched is None
+                    else advisories_matched
+                ),
                 "reranker": self._reranker.name if self._reranker else None,
                 "semantic_dedup_enabled": self._semantic_dedup is not None,
                 "semantic_dedup_rejected": semantic_dedup_rejected_count,
@@ -1336,6 +1353,7 @@ class PackBuilder:
         parent_concentration: dict[str, Any] | None = None,
         withholding: dict[str, Any] | None = None,
         index_mode: bool = False,
+        advisories_matched: int | None = None,
     ) -> None:
         """Emit a ContextRetrievalEvent for observability.
 
@@ -1397,6 +1415,12 @@ class PackBuilder:
         ``token_total_estimated`` reflect index-line charges (what was
         actually served) while ``injected_items[].estimated_tokens``
         stays the excerpt read cost.
+
+        ``advisories_matched`` (#392) is how many advisories matched the
+        pack's scope *before* ``_ADVISORY_MAX_COUNT`` cut them, so an
+        operator can see that a cap bound without inferring it from which
+        build was deployed. Equal to ``len(advisory_ids)`` whenever the
+        cap did not bind.
         """
         report = pack.retrieval_report
         token_budget_fields = self._build_token_budget_payload(
@@ -1482,6 +1506,11 @@ class PackBuilder:
                     for b in report.budget_trace
                 ],
                 "advisory_ids": [a.advisory_id for a in pack.advisories],
+                "advisories_matched": (
+                    len(pack.advisories)
+                    if advisories_matched is None
+                    else advisories_matched
+                ),
                 "reranker": self._reranker.name if self._reranker else None,
                 "semantic_dedup_enabled": self._semantic_dedup is not None,
                 "semantic_dedup_rejected": sum(
@@ -1652,12 +1681,21 @@ class PackBuilder:
     # Advisories below this confidence are suppressed from delivery
     _ADVISORY_MIN_CONFIDENCE = 0.1
 
+    #: At most this many advisories ride a pack. See
+    #: :meth:`_select_advisories` for the measurement behind the number.
+    _ADVISORY_MAX_COUNT = 5
+
     def _get_matching_advisories(self, domain: str | None) -> list[Any]:
         """Retrieve advisories matching the pack's domain scope.
 
         Only advisories with confidence >= ``_ADVISORY_MIN_CONFIDENCE``
         are surfaced.  This ensures the fitness loop can suppress weak
         advisories by lowering their confidence below threshold.
+
+        This is the *match*, not the delivery set — it is deliberately
+        uncapped, so :meth:`_select_advisories` can report how many
+        findings a pack's cap held back. Callers assembling a pack want
+        that method, not this one.
         """
         if self._advisory_store is None:
             return []
@@ -1674,6 +1712,68 @@ class PackBuilder:
             # advisories and the failure is logged for follow-up.
             logger.exception("advisory_retrieval_failed")
             return []
+
+    def _select_advisories(self, domain: str | None) -> tuple[list[Any], int]:
+        """Rank the matching advisories and cut them to the delivery cap.
+
+        Returns ``(served, matched)`` — the advisories that ride the pack
+        and how many matched before the cap, so the difference is a
+        property of the served record (``PACK_ASSEMBLED.payload
+        ["advisories_matched"]``) rather than an inference about which
+        build was deployed.
+
+        **Why a cap at all, and why five** (#392). Nothing between the
+        generator and the pack bounded this set. Three of the generator's
+        five analyses key on an unbounded subject — ``ENTITY`` and
+        ``ANTI_PATTERN`` on ``item_id``, ``QUERY`` on intent keywords — so
+        the population grows with the corpus, not with the number of
+        things worth saying. Measured on the reference deployment
+        (2026-09-03): the store held **56** rows, **44** of which matched
+        an undomained pack, and the flat path shipped all 44 through
+        ``POST /api/v1/packs`` as full objects — **31,530 bytes ≈ 7,882
+        tokens per response**. Rendered as markdown they are **7,181
+        chars ≈ 1,795 tokens** against a default ``max_tokens`` of 2,000:
+        ~90% of a default pack, for a block that is auxiliary guidance.
+
+        Five is chosen against three numbers, not taste:
+
+        * **Cost.** Post-#392 rendering, five advisories are ~191 tokens —
+          **9.6%** of a default 2,000-token pack. Eight is 14.8% and ten
+          is 18.4%; a fifth of the pack is not an affordable price for a
+          hint block.
+        * **Information.** Those 44 rows carried **3 distinct subjects**
+          (the ``semantic`` / ``graph`` / ``keyword`` strategies) and 26
+          distinct message strings that differ only in their numbers. All
+          56 rows carry **7** distinct subjects. Five sits above the
+          deliverable population of a healthy, deduplicated store and far
+          below the failure mode.
+        * **Ranking.** Confidence stops separating almost immediately:
+          rank 1 is 0.229 and ranks 2-16 are *all* 0.206. Past the top few
+          the order carries no signal, so extra rows buy tokens and no
+          information.
+
+        The cut is therefore applied **at assembly**, not at render. The
+        REST DTO is the surface actually bleeding tokens today, and
+        ``pack.advisories`` is the one field both surfaces read — capping
+        at render would leave REST uncapped and let the two disagree
+        about what the pack contains.
+
+        Ordering is made total on purpose. ``AdvisoryStore.list`` sorts by
+        confidence descending only, and 15 live rows tie at 0.206 — a cap
+        over that is a coin flip between runs. The tiebreak prefers the
+        larger ``sample_size`` (more evidence behind the same confidence)
+        and settles the remainder on ``advisory_id``, which is stable per
+        finding since #394.
+        """
+        matching = self._get_matching_advisories(domain)
+        matching.sort(
+            key=lambda a: (
+                -a.confidence,
+                -a.evidence.sample_size,
+                a.advisory_id,
+            )
+        )
+        return matching[: self._ADVISORY_MAX_COUNT], len(matching)
 
     @staticmethod
     def _attach_advisory_provenance(

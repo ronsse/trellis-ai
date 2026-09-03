@@ -707,13 +707,14 @@ def _make_advisory(
     confidence: float = 0.8,
     entity_id: str | None = None,
     advisory_id: str | None = None,
+    sample_size: int = 10,
 ) -> Advisory:
     kwargs: dict[str, object] = {
         "category": category,
         "confidence": confidence,
         "message": f"Test advisory ({category.value})",
         "evidence": AdvisoryEvidence(
-            sample_size=10,
+            sample_size=sample_size,
             success_rate_with=0.8,
             success_rate_without=0.4,
             effect_size=0.4,
@@ -789,6 +790,274 @@ class TestAdvisoryDelivery:
         # Only the 0.5 confidence advisory should be delivered
         assert len(pack.advisories) == 1
         assert pack.advisories[0].confidence == 0.5
+
+
+# ---------------------------------------------------------------------------
+# #392 — the advisory set is capped, deterministically, at assembly
+# ---------------------------------------------------------------------------
+
+
+def _graded_advisories(n: int) -> list[Advisory]:
+    """``n`` global advisories with strictly decreasing confidence.
+
+    Distinct confidences *and* distinct ids, so a test can assert **which**
+    rows survived rather than how many. A population that only differed in
+    count cannot tell ``matching[:cap]`` from ``matching[-cap:]``, from an
+    ascending sort, or from a hard-coded list.
+    """
+    return [
+        _make_advisory(
+            scope="global",
+            confidence=round(0.9 - i * 0.05, 4),
+            advisory_id=f"adv-{i:02d}",
+        )
+        for i in range(n)
+    ]
+
+
+def _served_ids(pack: object) -> list[str]:
+    return [a.advisory_id for a in pack.advisories]  # type: ignore[attr-defined]
+
+
+class TestAdvisoryCap:
+    """A pack carries at most ``_ADVISORY_MAX_COUNT`` advisories.
+
+    Nothing between the generator and the pack bounded this set. Measured
+    on the reference deployment 2026-09-03: 44 of 56 stored advisories
+    matched an undomained pack and every one of them shipped through
+    ``POST /api/v1/packs`` — ~31,530 bytes ≈ 7,882 tokens per response —
+    while the markdown rendering of the same 44 is ≈1,795 tokens against a
+    default ``max_tokens`` of 2,000.
+    """
+
+    def test_flat_pack_serves_only_the_top_slice(self, tmp_path: Path) -> None:
+        store = AdvisoryStore(tmp_path / "adv.json")
+        for advisory in _graded_advisories(12):
+            store.put(advisory)
+
+        pack = PackBuilder(advisory_store=store).build("q")
+
+        cap = PackBuilder._ADVISORY_MAX_COUNT
+        assert _served_ids(pack) == [f"adv-{i:02d}" for i in range(cap)]
+
+    def test_sectioned_pack_serves_only_the_top_slice(self, tmp_path: Path) -> None:
+        store = AdvisoryStore(tmp_path / "adv.json")
+        for advisory in _graded_advisories(12):
+            store.put(advisory)
+
+        s = _make_strategy("kw", [_item("d1", 0.9)])
+        pack = PackBuilder(strategies=[s], advisory_store=store).build_sectioned(
+            "q", sections=[SectionRequest(name="all")]
+        )
+
+        cap = PackBuilder._ADVISORY_MAX_COUNT
+        assert _served_ids(pack) == [f"adv-{i:02d}" for i in range(cap)]
+
+    def test_cap_does_not_bind_on_a_small_store(self, tmp_path: Path) -> None:
+        """Below the cap every match is still served, in confidence order."""
+        store = AdvisoryStore(tmp_path / "adv.json")
+        for advisory in _graded_advisories(3):
+            store.put(advisory)
+
+        pack = PackBuilder(advisory_store=store).build("q")
+
+        assert _served_ids(pack) == ["adv-00", "adv-01", "adv-02"]
+
+    def test_ties_are_broken_by_evidence_then_id(self, tmp_path: Path) -> None:
+        """Confidence stops separating almost immediately in production.
+
+        Live, rank 1 is 0.229 and ranks 2-16 are *all* 0.206 — a cap over
+        that group is a coin flip unless the order is total. The tiebreak
+        prefers the larger ``sample_size``, then settles on ``advisory_id``.
+        """
+        store = AdvisoryStore(tmp_path / "adv.json")
+        # One clear leader, then a four-way tie the cap must order. The
+        # sample sizes deliberately run *against* alphabetical id order —
+        # with them agreeing, an id-only tiebreak produces the same answer
+        # and the assertion cannot see the difference.
+        store.put(_make_advisory(advisory_id="lead", confidence=0.9, sample_size=1))
+        for advisory_id, sample_size in [
+            ("tie-a", 5),
+            ("tie-b", 40),
+            ("tie-c", 20),
+            ("tie-d", 40),
+        ]:
+            store.put(
+                _make_advisory(
+                    advisory_id=advisory_id,
+                    confidence=0.5,
+                    sample_size=sample_size,
+                )
+            )
+
+        pack = PackBuilder(advisory_store=store).build("q")
+
+        # sample_size descending, then advisory_id ascending inside 40/40.
+        assert _served_ids(pack) == ["lead", "tie-b", "tie-d", "tie-c", "tie-a"]
+
+    def test_order_does_not_depend_on_store_insertion_order(
+        self, tmp_path: Path
+    ) -> None:
+        """The property the tiebreak exists for, stated directly.
+
+        Two stores holding the same rows written in opposite orders must
+        serve the same advisories. Without a total order this is what
+        breaks: ``list`` sorts on confidence alone and Python's sort is
+        stable, so insertion order decides who makes the cut.
+        """
+        tied = [
+            _make_advisory(advisory_id=f"tied-{i}", confidence=0.5, sample_size=10)
+            for i in range(9)
+        ]
+
+        forward = AdvisoryStore(tmp_path / "forward.json")
+        for advisory in tied:
+            forward.put(advisory)
+        backward = AdvisoryStore(tmp_path / "backward.json")
+        for advisory in reversed(tied):
+            backward.put(advisory)
+
+        from_forward = _served_ids(PackBuilder(advisory_store=forward).build("q"))
+        from_backward = _served_ids(PackBuilder(advisory_store=backward).build("q"))
+        assert from_forward == from_backward
+
+    def test_provenance_is_stamped_only_from_served_advisories(
+        self, tmp_path: Path
+    ) -> None:
+        """An advisory the caller never saw cannot have influenced anything.
+
+        Six entity advisories, one per retrieved item, ranked so that the
+        sixth falls outside the cap. Its item must carry no stamp — a join
+        key for an advisory that was never delivered is a claim about
+        influence that could not have happened.
+        """
+        store = AdvisoryStore(tmp_path / "adv.json")
+        for i in range(6):
+            store.put(
+                _make_advisory(
+                    scope="global",
+                    category=AdvisoryCategory.ENTITY,
+                    confidence=round(0.9 - i * 0.05, 4),
+                    entity_id=f"d{i}",
+                    advisory_id=f"adv-{i}",
+                )
+            )
+        s = _make_strategy("kw", [_item(f"d{i}", 0.9 - i * 0.01) for i in range(6)])
+
+        pack = PackBuilder(strategies=[s], advisory_store=store).build("q")
+
+        stamped = {
+            item.item_id: item.injected_advisory_ids
+            for item in pack.items
+            if item.injected_advisory_ids
+        }
+        assert stamped == {f"d{i}": [f"adv-{i}"] for i in range(5)}
+        beyond_the_cap = next(i for i in pack.items if i.item_id == "d5")
+        assert beyond_the_cap.injected_advisory_ids == []
+
+    def test_sectioned_provenance_is_stamped_only_from_served_advisories(
+        self, tmp_path: Path
+    ) -> None:
+        """The same commitment on the other pack kind, asserted separately.
+
+        The two paths stamp provenance from two different local variables,
+        so the flat test above says nothing about this one: swapping the
+        sectioned call to the *uncapped* match set survives the whole suite
+        without this test. That asymmetry — a rule covered on one twin and
+        not the other — is the shape #447 found, and the sectioned stamp is
+        the one that rides ``PACK_ASSEMBLED.payload["sections"][]
+        ["injected_advisory_ids"]`` into the fitness-loop join.
+        """
+        store = AdvisoryStore(tmp_path / "adv.json")
+        for i in range(6):
+            store.put(
+                _make_advisory(
+                    scope="global",
+                    category=AdvisoryCategory.ENTITY,
+                    confidence=round(0.9 - i * 0.05, 4),
+                    entity_id=f"d{i}",
+                    advisory_id=f"adv-{i}",
+                )
+            )
+        s = _make_strategy("kw", [_item(f"d{i}", 0.9 - i * 0.01) for i in range(6)])
+
+        pack = PackBuilder(strategies=[s], advisory_store=store).build_sectioned(
+            "q", sections=[SectionRequest(name="all")]
+        )
+
+        items = [item for section in pack.sections for item in section.items]
+        assert {item.item_id for item in items} == {f"d{i}" for i in range(6)}, (
+            "fixture must route every item into the section, or the assertion"
+            " below cannot distinguish a capped stamp from a routed-away item"
+        )
+        stamped = {
+            item.item_id: list(item.injected_advisory_ids)
+            for item in items
+            if item.injected_advisory_ids
+        }
+        assert stamped == {f"d{i}": [f"adv-{i}"] for i in range(5)}
+        beyond_the_cap = next(i for i in items if i.item_id == "d5")
+        assert beyond_the_cap.injected_advisory_ids == []
+
+
+class TestAdvisoryCapTelemetry:
+    """``advisories_matched`` says whether the cap bound on this pack."""
+
+    @staticmethod
+    def _pack_payload(log: SQLiteEventLog) -> dict:
+        events = log.get_events(event_type=EventType.PACK_ASSEMBLED)
+        assert len(events) == 1
+        return events[0].payload
+
+    def test_flat_payload_reports_the_uncapped_match_count(
+        self, tmp_path: Path
+    ) -> None:
+        store = AdvisoryStore(tmp_path / "adv.json")
+        for advisory in _graded_advisories(12):
+            store.put(advisory)
+        log = SQLiteEventLog(tmp_path / "events.db")
+
+        PackBuilder(advisory_store=store, event_log=log).build("q")
+
+        payload = self._pack_payload(log)
+        assert len(payload["advisory_ids"]) == PackBuilder._ADVISORY_MAX_COUNT
+        assert payload["advisories_matched"] == 12
+
+    def test_sectioned_payload_reports_the_uncapped_match_count(
+        self, tmp_path: Path
+    ) -> None:
+        store = AdvisoryStore(tmp_path / "adv.json")
+        for advisory in _graded_advisories(12):
+            store.put(advisory)
+        log = SQLiteEventLog(tmp_path / "events.db")
+
+        s = _make_strategy("kw", [_item("d1", 0.9)])
+        PackBuilder(
+            strategies=[s], advisory_store=store, event_log=log
+        ).build_sectioned("q", sections=[SectionRequest(name="all")])
+
+        payload = self._pack_payload(log)
+        assert len(payload["advisory_ids"]) == PackBuilder._ADVISORY_MAX_COUNT
+        assert payload["advisories_matched"] == 12
+
+    def test_uncapped_pack_reports_matched_equal_to_served(
+        self, tmp_path: Path
+    ) -> None:
+        """The two numbers agree exactly when the cap did not bind.
+
+        Asserted against a *below-cap* population so a reader can tell the
+        field apart from a constant: it is 3 here and 12 above.
+        """
+        store = AdvisoryStore(tmp_path / "adv.json")
+        for advisory in _graded_advisories(3):
+            store.put(advisory)
+        log = SQLiteEventLog(tmp_path / "events.db")
+
+        PackBuilder(advisory_store=store, event_log=log).build("q")
+
+        payload = self._pack_payload(log)
+        assert payload["advisories_matched"] == 3
+        assert len(payload["advisory_ids"]) == 3
 
 
 # ---------------------------------------------------------------------------
