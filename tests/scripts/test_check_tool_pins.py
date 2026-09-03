@@ -816,6 +816,23 @@ def test_an_unset_override_is_not_an_override(pins: ModuleType) -> None:
     assert pins.env_drift_override({}) is False
 
 
+def test_a_supplied_mapping_is_authoritative_over_the_process_environment(
+    pins: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty mapping means "unset", not "fall back to `os.environ`".
+
+    `source = env or os.environ` reads identically to the shipped
+    `env if env is not None else os.environ` on every other case here, and
+    survived the suite: an empty dict is falsey, so it would silently
+    consult the ambient environment. That is the one thing the parameter
+    exists to prevent — a test asserting the hatch is off must not be able
+    to pass or fail on what the shell happened to export.
+    """
+    monkeypatch.setenv(pins.ENV_DRIFT_OVERRIDE, "1")
+    assert pins.env_drift_override({}) is False
+    assert pins.env_drift_override() is True
+
+
 def test_the_truthy_set_mirrors_the_convention_the_package_uses(
     pins: ModuleType,
 ) -> None:

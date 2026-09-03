@@ -52,6 +52,12 @@ fix: ## Auto-fix everything pre-commit can fix (ruff format + ruff --fix + white
 # 3.11/3.12/3.13 matrix, so a test run on 3.12 is a legitimate thing to do
 # and demanding the gate version there would be false.
 #
+# Which targets are gated is not maintained here by hand:
+# tests/unit/test_makefile_gate_rule.py derives it, and fails on any target
+# whose recipe invokes ruff or mypy without reaching `env-check` through its
+# prerequisites. `format` shipped ungated for six weeks under a comment that
+# said "both gates".
+#
 # TRELLIS_ALLOW_ENV_DRIFT=1 downgrades it to a warning for deliberate work in
 # a known-drifted environment. Only 1/true/yes/on turn it on; anything else
 # (0, false, no, unset) leaves the gate enforcing -- see #498, where =0 used

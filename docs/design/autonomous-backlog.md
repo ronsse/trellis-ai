@@ -31,12 +31,17 @@
    not the command** — on 3.12, pip resolves a numpy whose stub carries an unguarded
    PEP 695 `type` statement that mypy rejects under the pinned
    `python_version = "3.11"`, aborting with **zero files in `src/` checked**.
-   `make lint` and `make typecheck` now run `scripts/check_tool_pins.py --check-env`
-   first and refuse to proceed when the interpreter or a pinned tool is not CI's
-   ([#398](https://github.com/ronsse/trellis-ai/issues/398)); `make env-check` runs
-   the report on its own. `TRELLIS_ALLOW_ENV_DRIFT=1` downgrades it to a warning for
-   deliberate work in a known-drifted environment — but a gate green under that flag
-   does not predict CI.
+   `make lint`, `make typecheck` and `make format` now run
+   `scripts/check_tool_pins.py --check-env` first and refuse to proceed when the
+   interpreter or a pinned tool is not CI's
+   ([#398](https://github.com/ronsse/trellis-ai/issues/398), `format` since
+   [#498](https://github.com/ronsse/trellis-ai/issues/498) — it is the invocation that
+   *writes*); `make env-check` runs the report on its own. Do not read that list as a
+   roster: `tests/unit/test_makefile_gate_rule.py` derives it, so any target whose
+   recipe invokes ruff or mypy must reach `env-check` through its prerequisites.
+   `TRELLIS_ALLOW_ENV_DRIFT=1` downgrades it to a warning for deliberate work in a
+   known-drifted environment — but a gate green under that flag does not predict CI,
+   and only `1`/`true`/`yes`/`on` turn it on: `=0` leaves the gate enforcing (#498).
 4. Open a PR. **Merge only when all six workflows are green** — `lint`, `typecheck`,
    `tests` (3.11/3.12/3.13), `codeql`, `openapi`. `main` has no required status
    checks configured, so GitHub will *not* enforce this for you; the gate is the
@@ -138,7 +143,8 @@ the venv on 3.11 fixes that instance. The durable half is that *nothing noticed*
 same venv also sat one patch behind the ruff pin, and #378's finding was that the older
 ruff stays green on code the newer one rejects. `scripts/check_tool_pins.py
 --check-env` now compares the running interpreter and the tools on PATH against the
-pins, and `make lint` / `make typecheck` refuse to run a gate that is not CI's.
+pins, and `make lint` / `make typecheck` / `make format` refuse to run a gate that is
+not CI's.
 
 ### Lane E — keystone, design before code
 
