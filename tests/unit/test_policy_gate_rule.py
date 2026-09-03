@@ -42,21 +42,39 @@ roster is not an option:
 tests would forbid the control arm of the transparency proof.
 
 Guarding against vacuity is the other half. A structural scan that stops
-matching keeps passing forever while enforcing nothing, so three separate
-things pin it: the scan must find construction sites to reason about, it
-must report a known set of violations in a synthetic tree *through the
-shipped predicate* (not a copy of it), and the executor must still have the
-parameter — and the ``None`` default — that makes the rule necessary at all.
-Same model as ``test_machine_output_rule.py``.
+matching keeps passing forever while enforcing nothing, so four separate
+things pin it: the scan must find construction sites to reason about
+(a **hand-read** floor — see :func:`tests.ast_rules.assert_hand_read_floor`),
+it must report a known set of violations in a synthetic tree *through the
+shipped predicate* (not a copy of it), it must report every shape in
+:data:`tests.ast_rules.EVASIONS` that it has not explicitly exempted, and
+the executor must still have the parameter — and the ``None`` default —
+that makes the rule necessary at all. Same model as
+``test_machine_output_rule.py``.
+
+The third of those is new and is where this rule stopped being self-graded.
+Its own corpus below encodes *this* rule's judgement, hand-read line by
+line; the shared roster encodes every shape any rule's review has found,
+so a spelling discovered while gating some other PR reaches here without
+anyone re-deriving it. The two are complementary and neither replaces the
+other. Adopting it also forced three real blind spots — import alias,
+local rebinding, subclass — out of :func:`_gate_is_wired`'s prose and into
+executable exemptions with reasons.
 """
 
 from __future__ import annotations
 
 import ast
 import inspect
-from collections.abc import Iterator
 from pathlib import Path
 
+from tests.ast_rules import (
+    assert_hand_read_floor,
+    assert_scan_is_not_vacuous,
+    calls_named,
+    iter_modules,
+    name_of,
+)
 from trellis.mutate.commands import Command, CommandStatus, Operation
 from trellis.mutate.executor import MutationExecutor
 
@@ -77,19 +95,6 @@ def _src_root() -> Path:
     root = Path(__file__).resolve().parents[2] / "src"
     assert root.is_dir(), f"src not found at {root}"
     return root
-
-
-def _name_of(node: ast.expr) -> str | None:
-    """Bare name of a call target: ``f``, ``mod.f``, ``a.b.f`` all give ``f``."""
-    if isinstance(node, ast.Attribute):
-        return node.attr
-    if isinstance(node, ast.Name):
-        return node.id
-    return None
-
-
-def _is_call_to(node: ast.AST, name: str) -> bool:
-    return isinstance(node, ast.Call) and _name_of(node.func) == name
 
 
 def _gate_is_wired(node: ast.Call) -> bool:
@@ -139,23 +144,18 @@ def _gate_is_wired(node: ast.Call) -> bool:
     return False
 
 
-def _iter_modules(root: Path) -> Iterator[tuple[Path, ast.Module]]:
-    for py_file in sorted(root.rglob("*.py")):
-        yield py_file, ast.parse(py_file.read_text(encoding="utf-8"))
-
-
 def _executor_constructions(tree: ast.AST) -> list[ast.Call]:
-    return [n for n in ast.walk(tree) if _is_call_to(n, _EXECUTOR)]
+    return calls_named(_EXECUTOR, tree)
 
 
 def _gate_builder_calls(tree: ast.AST) -> list[ast.Call]:
-    return [n for n in ast.walk(tree) if _is_call_to(n, _GATE_BUILDER)]
+    return calls_named(_GATE_BUILDER, tree)
 
 
 def ungated_executors(root: Path | None = None) -> list[str]:
     """Invariant 1: construction sites that leave Stage 2 skipped."""
     found: list[str] = []
-    for py_file, tree in _iter_modules(root if root is not None else _src_root()):
+    for py_file, tree in iter_modules(root if root is not None else _src_root()):
         found.extend(
             f"{py_file.name}:{node.lineno}: {_snippet(node)}"
             for node in _executor_constructions(tree)
@@ -174,7 +174,7 @@ def stray_gate_builds(root: Path | None = None) -> list[str]:
     other function in the same file built an executor.
     """
     found: list[str] = []
-    for py_file, tree in _iter_modules(root if root is not None else _src_root()):
+    for py_file, tree in iter_modules(root if root is not None else _src_root()):
         owned: set[int] = set()
         for node in ast.walk(tree):
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -204,12 +204,12 @@ def executor_subclasses(root: Path | None = None) -> list[str]:
     that a scanner needs another special case.
     """
     found: list[str] = []
-    for py_file, tree in _iter_modules(root if root is not None else _src_root()):
+    for py_file, tree in iter_modules(root if root is not None else _src_root()):
         found.extend(
             f"{py_file.name}:{node.lineno}: class {node.name}"
             for node in ast.walk(tree)
             if isinstance(node, ast.ClassDef)
-            and any(_name_of(base) == _EXECUTOR for base in node.bases)
+            and any(name_of(base) == _EXECUTOR for base in node.bases)
         )
     return found
 
@@ -251,6 +251,25 @@ def test_the_gate_is_only_built_where_a_write_is_about_to_happen() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _population() -> tuple[int, int]:
+    """How many executor constructions and gate builds the scan can see."""
+    executors = 0
+    gates = 0
+    for _py_file, tree in iter_modules(_src_root()):
+        executors += len(_executor_constructions(tree))
+        gates += len(_gate_builder_calls(tree))
+    return executors, gates
+
+
+#: Hand-read off ``src/`` on 2026-09-03: ``build_curate_executor`` and the
+#: ``trace_embed`` worker construct one each, and each builds its own gate.
+#: A number a person counted is the only floor a silently-narrowing scan
+#: cannot also satisfy — #466 floored a roster at ``len(SITES) > 0`` and
+#: three blind spots passed it.
+_EXECUTOR_FLOOR = 2
+_GATE_BUILD_FLOOR = 2
+
+
 def test_the_scan_finds_the_sites_it_is_meant_to_police() -> None:
     """A scan that stops matching enforces nothing and stays green.
 
@@ -259,19 +278,62 @@ def test_the_scan_finds_the_sites_it_is_meant_to_police() -> None:
     turn it red is the scan finding nothing — the class renamed, the package
     moved, the executor replaced.
     """
-    executors = 0
-    gates = 0
-    for _py_file, tree in _iter_modules(_src_root()):
-        executors += len(_executor_constructions(tree))
-        gates += len(_gate_builder_calls(tree))
-
-    assert executors >= 2, (
-        f"only {executors} MutationExecutor construction(s) found in src/; "
-        f"the scan has drifted and is no longer policing anything"
+    executors, gates = _population()
+    assert_hand_read_floor(
+        executors,
+        _EXECUTOR_FLOOR,
+        subject="MutationExecutor construction",
+        hint="build_curate_executor and trellis_workers/trace_embed/worker.py.",
     )
-    assert gates >= 2, (
-        f"only {gates} build_policy_gate call(s) found in src/; the scan has "
-        f"drifted and is no longer policing anything"
+    assert_hand_read_floor(
+        gates,
+        _GATE_BUILD_FLOOR,
+        subject="build_policy_gate call",
+        hint="one beside each executor construction.",
+    )
+
+
+def test_the_scan_sees_every_shape_in_the_shared_evasion_roster(
+    tmp_path: Path,
+) -> None:
+    """The shared half of the guard, run through ``ungated_executors``.
+
+    The corpus below is this rule's own, and it stays: it pins the
+    *judgement* — which shapes count as ungated — against hand-read line
+    numbers. What it cannot do is know about a shape nobody thought of
+    here, which is how #488 shipped a rule whose synthetic tree carried
+    only the spellings its scan already handled. ``tests.ast_rules.EVASIONS``
+    is the cross-rule roster, so a shape found by *any* rule's review
+    reaches this one without anyone re-deriving it.
+
+    The three exemptions are the rule's real blind spots, stated. Before
+    this they were prose in :func:`_gate_is_wired`'s docstring and nothing
+    executed them.
+    """
+    assert_scan_is_not_vacuous(
+        lambda root: [int(v.split(":")[1]) for v in ungated_executors(root=root)],
+        subject=_EXECUTOR,
+        kwarg=_GATE_KWARG,
+        tmp_path=tmp_path,
+        live_population=_population()[0],
+        floor=_EXECUTOR_FLOOR,
+        exempt={
+            "aliased_import": (
+                "no single-file AST walk resolves an import alias; the "
+                "behavioural half (TestTheRulePremiseStillHolds) is what "
+                "bounds this, not the scan"
+            ),
+            "local_rebinding": (
+                "same limit as the alias — a bound name's value is not a "
+                "static property, which _gate_is_wired's docstring already "
+                "states for policy_gate= and which holds for the callee too"
+            ),
+            "subclass_then_construct": (
+                "closed separately by executor_subclasses() and "
+                "test_nothing_in_src_subclasses_the_executor, which fails "
+                "on the subclass rather than widening the scan to follow it"
+            ),
+        },
     )
 
 

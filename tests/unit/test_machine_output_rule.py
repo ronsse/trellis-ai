@@ -46,6 +46,11 @@ from pathlib import Path
 import pytest
 from rich.console import Console
 
+from tests.ast_rules import (
+    assert_hand_read_floor,
+    assert_scan_is_not_vacuous,
+    name_of,
+)
 from trellis_cli.output import emit_json, emit_machine_text, format_output
 
 #: Callables whose return value is a serialized machine payload. Matched on
@@ -141,13 +146,16 @@ def _is_serializer_call(node: ast.AST) -> bool:
     ``result.model_dump_json``) or a plain call (``dumps`` imported
     directly, ``format_output``). Both forms matter — the attribute-only
     version of this predicate is what let ``model_dump_json`` through.
+
+    The reading is :func:`tests.ast_rules.name_of`, shared with every other
+    AST rule here. It used to be a pair of ``getattr`` lookups: correct,
+    but a fourth independent spelling of the same sub-problem, and #488 was
+    the site that needed it and got it wrong.
+    ``test_ast_rules.TestNameOf.test_agrees_with_the_getattr_spelling_across_src``
+    checks the two against every call in ``src/`` rather than reasoning
+    about their equivalence.
     """
-    if not isinstance(node, ast.Call):
-        return False
-    return (
-        getattr(node.func, "attr", None) in _SERIALIZERS
-        or getattr(node.func, "id", None) in _SERIALIZERS
-    )
+    return isinstance(node, ast.Call) and name_of(node.func) in _SERIALIZERS
 
 
 def _serialized_names(tree: ast.Module) -> set[str]:
@@ -246,14 +254,7 @@ def test_no_rich_print_carries_a_serialized_payload() -> None:
     )
 
 
-def test_the_scan_finds_the_print_calls_it_is_meant_to_police() -> None:
-    """Guard against the enforcement quietly matching nothing.
-
-    A structural test that stops finding call sites — because ``console``
-    was renamed, the package moved, or Rich was swapped out — would keep
-    passing while enforcing nothing. This asserts the scan still sees a
-    substantial population of Rich ``print`` calls to reason about.
-    """
+def _rich_render_population() -> int:
     total = 0
     for py_file in sorted(_cli_root().rglob("*.py")):
         tree = ast.parse(py_file.read_text(encoding="utf-8"))
@@ -262,9 +263,30 @@ def test_the_scan_finds_the_print_calls_it_is_meant_to_police() -> None:
             for node in ast.walk(tree)
             if isinstance(node, ast.Call) and _is_rich_render(node)
         )
-    assert total > 100, (
-        f"only {total} Rich print calls found in trellis_cli; the scan has "
-        f"probably drifted and is no longer policing anything"
+    return total
+
+
+#: Hand-read off ``src/trellis_cli`` on 2026-09-03: 594 Rich render calls.
+#: Floored well below that because the CLI's prose output is edited
+#: constantly and a floor that tracks the tree is a floor nobody re-reads —
+#: what it has to catch is the scan going to near-zero, not a refactor
+#: trimming a hundred prints.
+_RICH_RENDER_FLOOR = 100
+
+
+def test_the_scan_finds_the_print_calls_it_is_meant_to_police() -> None:
+    """Guard against the enforcement quietly matching nothing.
+
+    A structural test that stops finding call sites — because ``console``
+    was renamed, the package moved, or Rich was swapped out — would keep
+    passing while enforcing nothing. This asserts the scan still sees a
+    substantial population of Rich ``print`` calls to reason about.
+    """
+    assert_hand_read_floor(
+        _rich_render_population(),
+        _RICH_RENDER_FLOOR,
+        subject="Rich render call in trellis_cli",
+        hint="console/err_console .print, .print_json, .out and .log.",
     )
 
 
@@ -320,6 +342,56 @@ def test_the_scan_catches_every_known_evasion(tmp_path: Path) -> None:
         f"scanner reported {reported}, expected {_EXPECTED_EVASION_LINES}; "
         f"missing={sorted(set(_EXPECTED_EVASION_LINES) - set(reported))} "
         f"spurious={sorted(set(reported) - set(_EXPECTED_EVASION_LINES))}"
+    )
+
+
+def test_the_scan_sees_every_shape_in_the_shared_evasion_roster(
+    tmp_path: Path,
+) -> None:
+    """The cross-rule half of the guard, run through ``_violations``.
+
+    The corpus above is this rule's own and stays: it encodes the
+    *judgement* — prose interpolation is allowed, a bare payload is not —
+    against hand-read line numbers, which no shared roster can supply.
+    What it cannot do is know about a spelling nobody thought of here, and
+    that is exactly how #488 shipped: its synthetic tree carried only the
+    shapes its scan already handled.
+
+    ``tests.ast_rules.EVASIONS`` supplies the spelling and placement axes;
+    ``wrap`` supplies this rule's subject, which is a *composite* — a Rich
+    render carrying a serializer call — rather than a bare construction.
+    The serializer call is the part the roster models, and the shapes it
+    adds here are real: two levels of attribute access, a call inside an
+    ``except`` block, one in a nested closure and one in a lambda body.
+    None of those were pinned before.
+    """
+    assert_scan_is_not_vacuous(
+        lambda root: [int(v.split(":")[1]) for v in _violations(root=root)],
+        subject="dumps",
+        kwarg="indent",
+        wrap="console.print({call})",
+        tmp_path=tmp_path,
+        live_population=_rich_render_population(),
+        floor=_RICH_RENDER_FLOOR,
+        exempt={
+            "aliased_import": (
+                "`from json import dumps as _j` rebinds the serializer under "
+                "a name no single-file walk resolves; the mitigation is the "
+                "width of _SERIALIZERS, which is why that set says to add to "
+                "it on sight rather than on evidence"
+            ),
+            "local_rebinding": (
+                "same limit as the alias, and narrower in practice: "
+                "_serialized_names already follows a name bound from a "
+                "serializer *call*, which is the shape the CLI actually "
+                "writes; rebinding the callee itself is not"
+            ),
+            "subclass_then_construct": (
+                "the subject here is a function, not a class, so the shape "
+                "has no analogue — a serializer reached as a method is an "
+                "attribute call, which is caught above"
+            ),
+        },
     )
 
 
