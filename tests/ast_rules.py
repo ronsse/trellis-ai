@@ -59,6 +59,22 @@ running them**, then demonstrates that removing any single entry lets some
 under-collecting predicate through. A shared vacuity harness that is
 itself vacuous is strictly worse than none, because it launders
 confidence.
+
+**The class is not confined to AST rules, and #495 is the proof.** Found
+the same night this module was written: 21 CLI tests fail under
+``FORCE_COLOR=1``, and **four of them are tests written specifically to
+prove Rich does not mangle operator output** — each asserting that a
+recovery command an operator must copy survives rendering, each blind to
+the coloured path, which is the path CI and a real terminal actually take.
+A guard whose blind spot is the thing it was built to watch, with no AST
+anywhere near it. So read the split here carefully when borrowing:
+:data:`EVASIONS` is AST-specific and does not transfer, but the two
+properties around it do. **A guard must be run against a deliberately
+defective subject and watched to fail**, and **the population floor must
+come from outside the measurement** — in #495's terms, from someone
+noticing that every one of those four tests renders uncoloured. Colour is
+#495's to fix and is deliberately out of scope here; the pattern is what
+transfers.
 """
 
 from __future__ import annotations
