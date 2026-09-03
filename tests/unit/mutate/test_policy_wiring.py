@@ -1267,20 +1267,78 @@ class TestAnUnreadablePathIsNotAnAbsentOne:
         assert load_policies(stores_dir) == []
         assert self._attempt_mutation(stores_dir) == CommandStatus.SUCCESS
 
-    def test_a_dangling_symlink_reads_as_absent(self, tmp_path: Path) -> None:
-        """``ENOENT`` by another route, and on the absent side of the line.
+    def test_a_dangling_symlink_refuses_rather_than_reading_as_absent(
+        self, tmp_path: Path
+    ) -> None:
+        """The commonest broken path of the three, and it must not fail open.
 
-        Deliberate, and the same answer ``DegradableJsonStore._fingerprint``
-        gives (#482): ``stat`` follows links, a missing target is
-        ``FileNotFoundError``, and one rule covers both readers. Recorded
-        because it sits next to the symlink *loop* and lands opposite it.
+        ``stat`` follows links, so a symlink whose target has gone raises
+        ``FileNotFoundError`` — the same errno as an empty directory. On a
+        ``FileNotFoundError``-only rule that lands on the *absent* side, and
+        #479 survives by its most ordinary route: an operator who symlinked
+        ``policies.json`` (which ``atomic_write_text`` supports on purpose,
+        calling it "a plausible answer" to this module's own move-the-file
+        advice) silently returns to zero policies the moment the target
+        moves. A symlink loop needs two mutually-referential links; a
+        dangling link needs one ``rm``.
+
+        The refusal is the ordinary one — the read raises
+        ``FileNotFoundError``, which the existing ``except OSError`` arm
+        turns into the same ``ConfigError`` with the same recovery advice.
         """
         stores_dir = tmp_path / "data" / "stores"
         stores_dir.mkdir(parents=True)
-        (stores_dir / POLICY_FILENAME).symlink_to(stores_dir / "gone.json")
+        canonical = stores_dir / POLICY_FILENAME
+        canonical.symlink_to(stores_dir / "gone.json")
 
-        assert load_policies(stores_dir) == []
-        assert self._attempt_mutation(stores_dir) == CommandStatus.SUCCESS
+        with pytest.raises(ConfigError) as exc_info:
+            load_policies(stores_dir)
+        assert str(exc_info.value).startswith(
+            f"Could not read the Trellis policy file at {canonical}:"
+        )
+        assert "remove the file to run with no policies" in str(exc_info.value)
+
+        with pytest.raises(ConfigError):
+            self._attempt_mutation(stores_dir)
+
+    def test_a_working_symlink_is_read_through(self, tmp_path: Path) -> None:
+        """The control for the test above: a *live* link still enforces.
+
+        Without this, "a dangling link refuses" would be satisfiable by
+        refusing on every symlink, which would break the migration shape
+        this module advises and ``atomic_write_text`` supports.
+        """
+        stores_dir = tmp_path / "data" / "stores"
+        _write_policy_file(stores_dir, [self._deny_entity_create()])
+        real = stores_dir / "policies.real.json"
+        (stores_dir / POLICY_FILENAME).rename(real)
+        (stores_dir / POLICY_FILENAME).symlink_to(real)
+
+        assert self._attempt_mutation(stores_dir) == CommandStatus.REJECTED
+
+        real.unlink()
+        with pytest.raises(ConfigError):
+            self._attempt_mutation(stores_dir)
+
+    def test_a_dangling_canonical_symlink_does_not_fall_through_to_legacy(
+        self, tmp_path: Path
+    ) -> None:
+        """The quieter half, by the same route: a *stale* ruleset, not zero.
+
+        Canonical dangling plus a legacy file present used to resolve to
+        legacy and enforce it, so the deployment ran the pre-unification
+        rules while the file the operator was editing sat broken and unread.
+        """
+        data_dir = tmp_path / "data"
+        stores_dir = data_dir / "stores"
+        stores_dir.mkdir(parents=True)
+        _write_policy_file(data_dir, [_policy(rules=[])])
+        canonical = stores_dir / POLICY_FILENAME
+        canonical.symlink_to(stores_dir / "gone.json")
+
+        assert resolve_policy_path(stores_dir) == canonical
+        with pytest.raises(ConfigError):
+            self._attempt_mutation(stores_dir)
 
     def test_a_declared_empty_file_still_gives_a_transparent_gate(
         self, tmp_path: Path

@@ -35,6 +35,12 @@ from typing import ClassVar
 import pytest
 
 from tests.degradable_shapes import degenerate_files
+from tests.unreadable_paths import (
+    UNREADABLE_PATH_IDS,
+    UNREADABLE_PATH_SHAPES,
+    UnreadablePathShape,
+    unreadable,
+)
 from trellis.errors import DegradedStoreWriteError, StaleStoreWriteError
 from trellis.schemas.advisory import Advisory, AdvisoryCategory, AdvisoryEvidence
 from trellis.schemas.enums import Enforcement, PolicyType
@@ -671,6 +677,42 @@ class TestAnUnreadableFingerprintRefusesOnEveryStore:
         assert recovery.startswith("ls -ld -- ")
         assert str(path) in recovery
         assert str(path.parent) in recovery
+
+    @pytest.mark.parametrize("shape", UNREADABLE_PATH_SHAPES, ids=UNREADABLE_PATH_IDS)
+    def test_every_unreadable_shape_is_unknown_not_absent(
+        self, tmp_path: Path, shape: UnreadablePathShape
+    ) -> None:
+        """The guard was only ever exercised on ``ELOOP`` (and ``ENOTDIR`` once).
+
+        ``EACCES`` is the shape the two modules differ most on — it is the
+        one errno ``Path.exists()`` does **not** swallow, so it was already
+        failing closed at every ``exists()`` call site and never needed
+        #479's fix, which is exactly why nothing here had reason to build
+        it. That makes it the shape most likely to be wrong: a
+        ``_fingerprint`` that special-cased ``PermissionError`` back into
+        ``None`` would restore #471's defect for the one errno no other test
+        covers.
+
+        Driven off the shared roster rather than a local helper, so a shape
+        that stops producing its errno fails in
+        ``tests/unit/test_unreadable_path_shapes.py`` instead of quietly
+        degenerating into a duplicate of ``_symlink_loop`` here.
+        """
+        path = tmp_path / "dir" / "store.json"
+        path.parent.mkdir(parents=True)
+        store = PolicyStore(path)
+        assert store._loaded_fingerprint is None
+
+        with unreadable(shape, path):
+            identity = store._fingerprint()
+            assert isinstance(identity, UnknownFileIdentity), (
+                f"{shape.errno_name} must be 'don't know', never 'no file'"
+            )
+            assert shape.message_fragment in str(identity)
+
+            with pytest.raises(StaleStoreWriteError) as excinfo:
+                store.refuse_if_stale()
+            assert "could not be read" in str(excinfo.value)
 
     def test_a_data_dir_containing_a_space_stays_one_command(
         self, tmp_path: Path

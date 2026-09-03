@@ -33,7 +33,11 @@ from tests.unreadable_paths import (
     UnreadablePathShape,
     unreadable,
 )
-from trellis.core.path_presence import path_is_present
+from trellis.core.path_presence import (
+    UnknownFileIdentity,
+    file_identity,
+    path_is_present,
+)
 
 #: A floor, not an equality: adding a shape must not require editing this,
 #: but losing one — or two collapsing onto the same errno — must fail. The
@@ -132,15 +136,115 @@ def test_path_is_present_says_absent_for_a_genuinely_absent_file(
     assert path_is_present(tmp_path / "nothing-here.json") is False
 
 
-def test_a_dangling_symlink_is_absent_not_unreadable(tmp_path: Path) -> None:
-    """``ENOENT`` by another route, and deliberately on the absent side.
+def test_a_dangling_symlink_is_present_not_absent(tmp_path: Path) -> None:
+    """``ENOENT`` by a second route, and *not* absence.
 
-    ``Path.stat()`` follows links, so a symlink to a missing file raises
-    ``FileNotFoundError`` — the same answer ``DegradableJsonStore._fingerprint``
-    gives it (#482). Recorded here because "dangling symlink" reads like a
-    broken path and lands on the other side of the line from a symlink
-    *loop*, which is a difference worth being explicit about.
+    ``Path.stat()`` follows links, so a symlink whose target is gone raises
+    ``FileNotFoundError`` exactly as an empty directory does — which would
+    put it on the absent side of a ``FileNotFoundError``-only rule and leave
+    #479 open by its commonest route. A link is something an operator placed
+    there; a target that later moved must not silently return the deployment
+    to zero policies. ``is_symlink()`` is the ``lstat`` that tells the two
+    ``ENOENT``s apart.
     """
     link = tmp_path / "link.json"
     link.symlink_to(tmp_path / "missing.json")
-    assert path_is_present(link) is False
+    assert path_is_present(link) is True
+
+
+def test_the_two_enoents_are_told_apart_and_not_by_one_of_them(
+    tmp_path: Path,
+) -> None:
+    """The anti-constant control for the test above.
+
+    Both a dangling link and an empty directory raise ``FileNotFoundError``
+    from ``stat``, so a mutant answering that arm with a constant satisfies
+    exactly one of the two. Asserted together here so the *difference* is
+    the assertion rather than either value on its own.
+    """
+    link = tmp_path / "link.json"
+    link.symlink_to(tmp_path / "missing.json")
+    nothing = tmp_path / "nothing.json"
+
+    with pytest.raises(FileNotFoundError):
+        link.stat()
+    with pytest.raises(FileNotFoundError):
+        nothing.stat()
+
+    assert path_is_present(link) != path_is_present(nothing)
+    assert path_is_present(link) is True
+
+
+def test_a_symlink_to_a_real_file_is_present(tmp_path: Path) -> None:
+    """The unbroken case, so "present" is not carried by the link alone."""
+    target = tmp_path / "target.json"
+    target.write_text("{}", encoding="utf-8")
+    link = tmp_path / "link.json"
+    link.symlink_to(target)
+    assert path_is_present(link) is True
+
+
+def test_an_absent_path_under_an_absent_parent_is_absent(tmp_path: Path) -> None:
+    """A missing parent must not be read as "something is there".
+
+    ``is_symlink()`` swallows its own ``OSError``, so the concern is that a
+    path nothing exists at could answer ``True`` through it. It cannot: the
+    ``lstat`` fails and the answer is ``False``, which keeps a fresh install
+    (no data dir yet) on the silent, zero-policy default.
+    """
+    assert path_is_present(tmp_path / "no-dir" / "nope" / "policies.json") is False
+
+
+# ---------------------------------------------------------------------------
+# One ladder, two questions
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("shape", UNREADABLE_PATH_SHAPES, ids=UNREADABLE_PATH_IDS)
+def test_the_two_readers_agree_on_every_unreadable_shape(
+    shape: UnreadablePathShape, tmp_path: Path
+) -> None:
+    """``path_is_present`` is a projection of ``file_identity``, not a copy.
+
+    They were two independent implementations of one errno ladder until this
+    change folded them together. This asserts the projection holds where it
+    is supposed to: every shape that is "don't know" for the guard is
+    "present" for the reader.
+    """
+    target = tmp_path / "dir" / "file.json"
+    with unreadable(shape, target):
+        assert isinstance(file_identity(target), UnknownFileIdentity)
+        assert path_is_present(target) is True
+
+
+def test_the_one_place_the_two_readers_part_company(tmp_path: Path) -> None:
+    """A dangling symlink, and the divergence is deliberate — so it is pinned.
+
+    The guard must answer *no file*: writing through a link is how its
+    target gets created, and answering "don't know" would refuse the first
+    write on every symlinked deployment. The reader must answer *present*: a
+    link is a declaration, and reading it as absence is #479 surviving by
+    its commonest route.
+
+    Asserted together, in one test, because a divergence recorded in two
+    files is how the two implementations drifted apart in the first place.
+    """
+    link = tmp_path / "link.json"
+    link.symlink_to(tmp_path / "missing.json")
+
+    assert file_identity(link) is None
+    assert path_is_present(link) is True
+
+
+def test_the_projection_holds_for_a_real_file_and_for_nothing_at_all(
+    tmp_path: Path,
+) -> None:
+    """The two ends, so the divergence above is the *only* one."""
+    real = tmp_path / "real.json"
+    real.write_text("{}", encoding="utf-8")
+    assert isinstance(file_identity(real), tuple)
+    assert path_is_present(real) is True
+
+    nothing = tmp_path / "nothing.json"
+    assert file_identity(nothing) is None
+    assert path_is_present(nothing) is False

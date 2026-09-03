@@ -770,7 +770,16 @@ class StoreRegistry:
         llm_config: dict[str, Any] = {}
         classify_config: dict[str, Any] = {}
         config_path = config_dir / "config.yaml"
-        if config_path.exists():
+        # ``path_is_present``, not ``Path.exists()`` (#479). The same
+        # laundering as ``_load_fingerprint_meta`` below, one benign default
+        # further out: an ``ELOOP``/``ENOTDIR`` ``config.yaml`` read as
+        # *absent*, so a deployment declaring postgres + pgvector came up
+        # silently on the default local sqlite backends — writing to an
+        # empty store while every surface reported normal. The
+        # ``except OSError`` arm six lines down already raises
+        # ``ConfigError`` with the recovery advice; it was simply
+        # unreachable for the shapes ``exists()`` swallows.
+        if path_is_present(config_path):
             import yaml  # noqa: PLC0415
 
             try:
