@@ -397,3 +397,27 @@ class AdvisoryStore(DegradableJsonStore[Advisory]):
             "because advisory ids are stable (#394), reviving any "
             "suppression they carried. Re-read and retry:"
         )
+
+    def _unreadable_write_message(self, detail: str) -> str:
+        """What rewriting an ``advisories.json`` we cannot ``stat`` would risk.
+
+        The tense is the point, and it is what separates this from the
+        stale refusal: nothing here knows the file changed, only that it
+        cannot tell. Claiming a concurrent write would send an operator
+        looking for a nightly ``trellis analyze advisory-effectiveness``
+        run that may not have happened, instead of at the path.
+
+        The cost of being wrong is asymmetric in the same direction it is
+        for a stale write, and worse in one respect: the *findings* in this
+        file are rebuilt by the next generation run, but the suppression
+        decisions the fitness loop made are not recoverable from it by
+        machine. A needless refusal costs one retry.
+        """
+        return (
+            f"Refusing to write the Trellis advisory file at {self._path}: its "
+            f"identity could not be read ({detail}), so this process cannot "
+            "tell whether the file changed after it read it. Writing anyway "
+            "would replace a file it never saw — deleting those advisories "
+            "and, because advisory ids are stable (#394), reviving any "
+            "suppression they carried. Check the path, then retry:"
+        )

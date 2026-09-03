@@ -269,3 +269,28 @@ class PolicyStore(DegradableJsonStore[Policy]):
             "whatever landed in between — silently un-governing every "
             "mutation those policies covered. Re-read and retry:"
         )
+
+    def _unreadable_write_message(self, detail: str) -> str:
+        """What rewriting a ``policies.json`` we cannot ``stat`` would risk.
+
+        Careful about the tense, because it is the whole difference between
+        this refusal and the stale one. This process does **not** know the
+        file changed — it knows it cannot tell, which is a weaker claim and
+        the only one it is entitled to make. Saying "it changed" here would
+        send an operator hunting a concurrent ``trellis policy add`` that
+        may never have happened, when what they need to look at is the path
+        itself.
+
+        The stakes are identical either way, and they are why refusing is
+        the right side to err on: a whole-file rewrite over a file this
+        process never read is #413's laundering primitive exactly, and it
+        ends with the strict enforcement reader accepting a truncated
+        ruleset as the whole one.
+        """
+        return (
+            f"Refusing to write the Trellis policy file at {self._path}: its "
+            f"identity could not be read ({detail}), so this process cannot "
+            "tell whether the file changed after it read it. Writing anyway "
+            "would replace a file it never saw — silently un-governing every "
+            "mutation the policies in it covered. Check the path, then retry:"
+        )
