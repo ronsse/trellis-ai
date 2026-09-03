@@ -84,6 +84,15 @@ RejectionKind = Literal[
     # ``repeated_collisions`` reads correctly: the same unfixed file, over
     # and over.
     "config_unreadable",
+    # The file read fine; another process wrote it between this writer's
+    # load and its save, so the whole-file rewrite was refused rather than
+    # replacing rows it never saw (#438,
+    # ``DegradableJsonStore.refuse_if_stale``). Not folded into
+    # ``config_unreadable``: that one needs a human to look at a broken
+    # file, this one needs nobody at all unless it *recurs* — at which
+    # point ``repeated_collisions`` reads exactly right, the same two
+    # writers colliding on the same file night after night (#448).
+    "stale_write",
     "other",
 ]
 

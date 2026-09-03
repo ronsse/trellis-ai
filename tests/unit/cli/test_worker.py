@@ -21,6 +21,7 @@ from typer.testing import CliRunner
 from tests.document_recency import fake_document_clock
 from trellis.core.vector_metadata import vector_metadata_diverges
 from trellis.llm import LLMResponse, Message
+from trellis.ops.write_health import WriteHealthReport, summarize_write_health
 from trellis.schemas.advisory import (
     Advisory,
     AdvisoryCategory,
@@ -28,7 +29,10 @@ from trellis.schemas.advisory import (
 )
 from trellis.schemas.enums import OutcomeStatus, TraceSource
 from trellis.schemas.trace import Outcome, Trace, TraceContext
-from trellis.stores.advisory_source import ADVISORY_FILENAME
+from trellis.stores.advisory_source import (
+    ADVISORY_FILENAME,
+    ADVISORY_WRITER_SURFACE,
+)
 from trellis.stores.advisory_store import AdvisoryStore
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
@@ -620,7 +624,10 @@ class TestCurateSurvivesADegradedAdvisoryStore:
             ],
         )
 
-        assert result.exit_code == 0, result.output
+        # Non-zero, and the same 2 the ``analyze`` advisory surfaces use
+        # (#448). The JSON headline below and this code have to agree —
+        # #437 is what happens when they do not.
+        assert result.exit_code == 2, result.output
         data = json.loads(result.stdout.strip())
         # The headline, not just the body: a wrapper reading only ``status``
         # would otherwise record a clean nightly run (#393).
@@ -647,7 +654,7 @@ class TestCurateSurvivesADegradedAdvisoryStore:
             ["worker", "curate", "--output-dir", str(tmp_path / "review")],
         )
 
-        assert result.exit_code == 0, result.output
+        assert result.exit_code == 2, result.output
         assert "ADVISORY STORE DEGRADED" in result.output
         assert f"mv {path}" in result.output.replace("\n", "")
 
@@ -717,7 +724,7 @@ class TestCurateSurvivesADegradedAdvisoryStore:
             ],
         )
 
-        assert result.exit_code == 0, result.output
+        assert result.exit_code == 2, result.output
         data = json.loads(result.stdout.strip())
         assert data["status"] == "degraded"
         assert data["advisory_store_degraded"]["reason"] == "malformed_json"
@@ -1958,7 +1965,7 @@ class TestCurateSurvivesASecondWriter:
             ],
         )
 
-        assert result.exit_code == 0, result.output
+        assert result.exit_code == 2, result.output
         data = json.loads(result.stdout.strip())
         # The refusal is reported, not swallowed — and not as ``degraded``,
         # because nothing is broken and no operator action is required.
@@ -1992,7 +1999,7 @@ class TestCurateSurvivesASecondWriter:
             app, ["worker", "curate", "--output-dir", str(tmp_path / "review")]
         )
 
-        assert result.exit_code == 0, result.output
+        assert result.exit_code == 2, result.output
         assert "ADVISORY WRITE REFUSED" in result.output
         # The refusal's own message rides through, so the operator is told
         # what happened rather than only that something did.
@@ -2028,3 +2035,217 @@ class TestCurateSurvivesASecondWriter:
         assert data["status"] == "ok"
         assert "advisories" not in data["skipped_stages"]
         assert "ADVISORY WRITE REFUSED" not in result.output
+
+
+class TestARefusedNightlyWriteEscalates:
+    """#448 — the only *unattended* advisory writer was the silent one.
+
+    ``trellis analyze``'s two advisory commands exit 2 on a refused write
+    and ``POST /advisories/generate`` answers 409. This cron emitted JSON
+    and returned 0, and emitted no event, so ``trellis analyze health``
+    could not see it either — the two paths where a human is already
+    watching shouted, and the one that runs at 03:30 unattended did not.
+
+    Verified about the reference deployment rather than assumed: its
+    ``curate-nightly.sh`` greps stdout for ``advisories_generated`` and
+    never reads the ``status`` field, so before this the refusal escalated
+    nowhere at all.
+
+    Two halves, and the event is the load-bearing one. A non-zero exit is
+    near-invisible under cron; ``WRITE_REJECTED`` is the repo's existing
+    channel for a write that died before it became a Command, is already
+    read by ``analyze health``, and counts *recurrence* — which is the only
+    thing that separates the transient race (self-heals, needs nobody) from
+    the standing two-writer conflict (needs a human).
+    """
+
+    @staticmethod
+    def _rejections(registry: StoreRegistry) -> WriteHealthReport:
+        return summarize_write_health(registry.operational.event_log, days=1)
+
+    @staticmethod
+    def _run(tmp_path: Path, *extra: str) -> Result:
+        return runner.invoke(
+            app,
+            [
+                "worker",
+                "curate",
+                "--output-dir",
+                str(tmp_path / "review"),
+                *extra,
+            ],
+        )
+
+    def test_a_stale_refusal_is_counted_by_analyze_health(
+        self,
+        tmp_path: Path,
+        temp_stores: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        path = tmp_path / "data" / "stores" / ADVISORY_FILENAME
+        TestCurateSurvivesASecondWriter._seed_scored_advisory(temp_stores, path)
+        _seed_promote_signal(temp_stores)
+        TestCurateSurvivesASecondWriter._second_writer_after_load(monkeypatch, path)
+
+        assert self._run(tmp_path, "--format", "json").exit_code == 2
+
+        report = self._rejections(temp_stores)
+        assert report.by_tool[ADVISORY_WRITER_SURFACE].boundary_rejected == 1
+        # ``stale_write``, not ``config_unreadable``: the file read fine.
+        # The distinction is the operator's response — nothing, versus go
+        # look at a broken file — so pooling them would be a wrong signal.
+        assert report.boundary_kinds[f"stale_write@{ADVISORY_FILENAME}"] == 1
+
+    def test_a_degraded_store_is_counted_by_analyze_health(
+        self, tmp_path: Path, temp_stores: StoreRegistry
+    ) -> None:
+        _seed_promote_signal(temp_stores)
+        TestCurateSurvivesADegradedAdvisoryStore._corrupt_advisory_file(tmp_path)
+
+        assert self._run(tmp_path, "--format", "json").exit_code == 2
+
+        report = self._rejections(temp_stores)
+        assert report.by_tool[ADVISORY_WRITER_SURFACE].boundary_rejected == 1
+        assert report.boundary_kinds[f"config_unreadable@{ADVISORY_FILENAME}"] == 1
+
+    def test_the_refusal_message_rides_the_event(
+        self, tmp_path: Path, temp_stores: StoreRegistry
+    ) -> None:
+        """The recovery advice reaches an operator reading the event.
+
+        Without it the count says a write was refused and nothing says
+        which file or what to type, so the reader has to re-run the job
+        that failed to find out.
+        """
+        _seed_promote_signal(temp_stores)
+        path = TestCurateSurvivesADegradedAdvisoryStore._corrupt_advisory_file(tmp_path)
+
+        self._run(tmp_path, "--format", "json")
+
+        events = temp_stores.operational.event_log.get_events(
+            event_type=EventType.WRITE_REJECTED, limit=10
+        )
+        assert len(events) == 1
+        assert events[0].source == ADVISORY_WRITER_SURFACE
+        msg = events[0].payload["rejections"][0]["msg"]
+        assert "malformed_json" in msg
+        assert f"mv {path}" in msg
+
+    def test_a_clean_cycle_emits_nothing(
+        self, tmp_path: Path, temp_stores: StoreRegistry
+    ) -> None:
+        """The negative control.
+
+        Emitting unconditionally would pass every assertion above while
+        making the count meaningless — and would put a permanent rejection
+        on a healthy deployment's write-health report.
+        """
+        _seed_promote_signal(temp_stores)
+
+        assert self._run(tmp_path, "--format", "json").exit_code == 0
+
+        report = self._rejections(temp_stores)
+        assert ADVISORY_WRITER_SURFACE not in report.by_tool
+        assert report.boundary_rejected == 0
+
+    def test_recurrence_is_what_reaches_the_operator(
+        self, tmp_path: Path, temp_stores: StoreRegistry
+    ) -> None:
+        """Three nights of the same refusal is a standing conflict, not a race.
+
+        This is the property the exit code cannot carry — a cron's exit
+        code is a fact about one night, and the whole complaint in #448 is
+        that "self-heals" and "recurs forever" are indistinguishable from
+        outside. ``repeated_collisions`` is where they separate, and it
+        only reads correctly because the row carries a named ``kind`` and
+        the file as its ``loc`` instead of falling to ``other@``.
+        """
+        _seed_promote_signal(temp_stores)
+        TestCurateSurvivesADegradedAdvisoryStore._corrupt_advisory_file(tmp_path)
+
+        for _ in range(3):
+            self._run(tmp_path, "--format", "json")
+
+        report = self._rejections(temp_stores)
+        assert report.repeated_collisions == [
+            {"kind": "config_unreadable", "loc": ADVISORY_FILENAME, "count": 3}
+        ]
+        assert report.status == "warn"
+        assert any("config_unreadable" in r for r in report.reasons)
+
+    def test_both_format_surfaces_exit_the_same_way(
+        self, tmp_path: Path, temp_stores: StoreRegistry
+    ) -> None:
+        """Executed parity, not the AST scan's structural one.
+
+        ``tests/unit/test_format_exit_parity_rule.py`` proves a non-zero
+        exit is *reachable* from both arms; it says nothing about whether
+        the same input produces it on both. #437's defect was that a
+        machine caller doing the documented thing was strictly worse off
+        than one scraping human prose, and that is the claim here.
+        """
+        _seed_promote_signal(temp_stores)
+        TestCurateSurvivesADegradedAdvisoryStore._corrupt_advisory_file(tmp_path)
+
+        text = self._run(tmp_path)
+        json_run = self._run(tmp_path, "--format", "json")
+
+        assert text.exit_code == json_run.exit_code == 2
+
+    def test_the_loop_path_exits_on_its_last_cycle(
+        self, tmp_path: Path, temp_stores: StoreRegistry
+    ) -> None:
+        """``--interval`` funnels into the same exit rule as the single shot.
+
+        A second surface inside one command is how the first divergence got
+        in, so the loop's result is fed to the same helper rather than
+        given a rule of its own.
+        """
+        _seed_promote_signal(temp_stores)
+        TestCurateSurvivesADegradedAdvisoryStore._corrupt_advisory_file(tmp_path)
+
+        result = worker._run_curate_loop(
+            interval=1,
+            output_dir=tmp_path / "review",
+            days=30,
+            dry_run=False,
+            skip_noise_tags=False,
+            skip_advisories=False,
+            skip_learning=False,
+            no_meta_trace=True,
+            output_format="json",
+            max_cycles=1,
+        )
+
+        assert result is not None
+        assert result.status == "degraded"
+        with pytest.raises(typer.Exit) as exc:
+            worker._exit_if_advisory_write_refused(result)
+        assert exc.value.exit_code == 2
+
+    def test_a_clean_loop_cycle_does_not_exit(
+        self, tmp_path: Path, temp_stores: StoreRegistry
+    ) -> None:
+        """Negative control for the loop rule, and for ``None``.
+
+        ``_exit_if_advisory_write_refused`` raising unconditionally would
+        satisfy every assertion above.
+        """
+        _seed_promote_signal(temp_stores)
+
+        result = worker._run_curate_loop(
+            interval=1,
+            output_dir=tmp_path / "review",
+            days=30,
+            dry_run=False,
+            skip_noise_tags=False,
+            skip_advisories=False,
+            skip_learning=False,
+            no_meta_trace=True,
+            output_format="json",
+            max_cycles=1,
+        )
+
+        assert result is not None
+        worker._exit_if_advisory_write_refused(result)
+        worker._exit_if_advisory_write_refused(None)

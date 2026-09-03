@@ -86,6 +86,7 @@ from trellis.ops.capture_health import (
     check_capture_health,
     is_capture_surface,
 )
+from trellis.stores.advisory_source import ADVISORY_WRITER_SURFACE
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 
@@ -117,8 +118,13 @@ MCP_WRAPPER_MODULE = "trellis/mcp/server.py"
 #: write, so it can have no accept of its own and is cleared instead by any
 #: accepted write after its last rejection
 #: (``capture_health._GLOBAL_SURFACE_PREFIX``).
+#: ``config:advisory_file`` is global for the same reason and a different
+#: one: nothing emits an *accepted* write under it at all — the advisory
+#: store is not the governed pipeline — so a per-surface label there could
+#: fire and never clear (#448, #461).
 NON_MCP_REJECTION_PRODUCERS: dict[str, str] = {
     "trellis/mutate/policy_source.py": POLICY_GATE_SURFACE,
+    "trellis_cli/worker.py": ADVISORY_WRITER_SURFACE,
 }
 
 
