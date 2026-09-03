@@ -11,6 +11,7 @@ from structlog.testing import capture_logs
 
 from trellis.retrieve.advisory_generator import AdvisoryGenerator
 from trellis.retrieve.effectiveness import run_advisory_fitness_loop
+from trellis.retrieve.formatters import format_advisories_as_markdown
 from trellis.schemas.advisory import AdvisoryCategory, AdvisoryStatus
 from trellis.stores.advisory_store import AdvisoryStore
 from trellis.stores.base.event_log import EventLog, EventType
@@ -1074,3 +1075,54 @@ class TestDegradedStoreCannotUnsuppress:
         store, _ = _run(tmp_path, packs, feedback)
         assert store.list()
         assert store.is_degraded is False
+
+
+class TestMessagesCarryTheirOwnEvidence:
+    """#392 — the premise that lets the formatter drop its evidence suffix.
+
+    ``format_advisories_as_markdown`` used to append ``(n=..., effect=...)``
+    to a message the generator had already written those figures into, so
+    every rendered line printed them twice. Removing the suffix is only
+    safe while the generator keeps embedding them — this is the test that
+    fails if that ever stops being true, and it reads the *real* generator
+    output rather than a hand-written fixture.
+    """
+
+    def test_generated_messages_embed_sample_size_and_effect(
+        self, tmp_path: Path
+    ) -> None:
+        packs, feedback = _two_arm_corpus()
+        store, _ = _run(tmp_path, packs, feedback)
+
+        emitted = store.list()
+        assert emitted, "corpus produced no advisories; the assertion below is vacuous"
+        for advisory in emitted:
+            assert f"n={advisory.evidence.sample_size}" in advisory.message
+            assert "effect=" in advisory.message
+
+    def test_rendering_real_generator_output_prints_each_figure_once(
+        self, tmp_path: Path
+    ) -> None:
+        """End to end: generate, render, and count.
+
+        The regression this pins is a *rendered* one, so it is asserted on
+        rendered text rather than on the formatter's inputs.
+        """
+        packs, feedback = _two_arm_corpus()
+        store, _ = _run(tmp_path, packs, feedback)
+        emitted = store.list()
+        assert emitted
+
+        rendered = format_advisories_as_markdown(emitted)
+        lines = {
+            advisory.advisory_id: next(
+                line for line in rendered.splitlines() if advisory.advisory_id in line
+            )
+            for advisory in emitted
+        }
+
+        for index, advisory in enumerate(emitted, start=1):
+            assert lines[advisory.advisory_id] == (
+                f"{index}. `{advisory.advisory_id}`"
+                f" **[{advisory.category.value}]** {advisory.message}"
+            )

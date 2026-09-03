@@ -778,6 +778,23 @@ def format_advisories_as_markdown(
     [...])``).  The fitness loop uses these IDs to attribute outcomes to
     specific advisories.
 
+    **The evidence is rendered once, by the message** (#392). Every
+    :class:`~trellis.retrieve.advisory_generator.AdvisoryGenerator`
+    analysis already writes its numbers into ``message`` — *"Packs using
+    the 'graph' strategy succeeded 60% of the time vs 0% without (n=5,
+    effect=+60%)."* — and this formatter appended a second
+    ``(n=…, effect=…)`` to it, so every line printed the same two figures
+    twice. The suffix is removed rather than made conditional on the
+    message text: guessing whether a sentence already carries its own
+    evidence is a string heuristic over content the generator owns.
+    Nothing structured is lost — the numbers ride ``Advisory.evidence``,
+    which ``POST /api/v1/packs`` serialises in full.
+
+    The list is expected to be pre-capped by
+    :meth:`~trellis.retrieve.pack_builder.PackBuilder._select_advisories`;
+    this function renders what it is given and imposes no bound of its
+    own, so the two surfaces cannot disagree about what the pack holds.
+
     Args:
         advisories: List of Advisory objects to render.
 
@@ -793,13 +810,10 @@ def format_advisories_as_markdown(
         "",
     ]
 
-    for i, adv in enumerate(advisories, start=1):
-        ev = adv.evidence
-        effect_str = f"{ev.effect_size:+.0%}" if ev.effect_size else ""
-        lines.append(
-            f"{i}. `{adv.advisory_id}` **[{adv.category.value}]** {adv.message}"
-            f" (n={ev.sample_size}, effect={effect_str})"
-        )
+    lines.extend(
+        f"{i}. `{adv.advisory_id}` **[{adv.category.value}]** {adv.message}"
+        for i, adv in enumerate(advisories, start=1)
+    )
 
     lines.append("")
     return "\n".join(lines)

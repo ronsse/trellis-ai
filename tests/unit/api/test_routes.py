@@ -542,6 +542,79 @@ def test_assemble_pack_threads_attribution_into_telemetry(client):
     assert events[0].payload["intent_family"] == "validation_diagnostics"
 
 
+def _seed_advisories(stores_dir, count):
+    """Write ``count`` global advisories with strictly decreasing confidence."""
+    from trellis.schemas.advisory import Advisory, AdvisoryCategory, AdvisoryEvidence
+    from trellis.stores.advisory_store import AdvisoryStore
+
+    store = AdvisoryStore(stores_dir / "advisories.json")
+    for i in range(count):
+        store.put(
+            Advisory(
+                advisory_id=f"adv-{i:02d}",
+                category=AdvisoryCategory.APPROACH,
+                confidence=round(0.9 - i * 0.05, 4),
+                message=f"Finding {i} (n=5, effect=+60%).",
+                evidence=AdvisoryEvidence(
+                    sample_size=5,
+                    success_rate_with=0.6,
+                    success_rate_without=0.0,
+                    effect_size=0.6,
+                ),
+                scope="global",
+            )
+        )
+    return store
+
+
+def test_assemble_pack_inherits_the_advisory_cap(client, tmp_path):
+    """#392 — the cap is applied at assembly, so REST inherits it.
+
+    ``POST /api/v1/packs`` dumps ``pack.advisories`` whole. Uncapped, the
+    reference deployment shipped 44 full advisory objects — ~31,530 bytes
+    per response — on a surface nobody had looked at. Capping at render
+    would have left this one untouched.
+    """
+    from trellis.retrieve.pack_builder import PackBuilder
+
+    _seed_advisories(tmp_path / "stores", 12)
+
+    resp = client.post("/api/v1/packs", json={"intent": "test pack"})
+
+    assert resp.status_code == 200
+    served = [a["advisory_id"] for a in resp.json()["advisories"]]
+    cap = PackBuilder._ADVISORY_MAX_COUNT
+    assert served == [f"adv-{i:02d}" for i in range(cap)]
+
+
+def test_assemble_sectioned_pack_inherits_the_advisory_cap(client, tmp_path):
+    """The sectioned REST route dumps the same field and takes the same cut."""
+    from trellis.retrieve.pack_builder import PackBuilder
+
+    _seed_advisories(tmp_path / "stores", 12)
+
+    resp = client.post(
+        "/api/v1/packs/sectioned",
+        json={"intent": "test pack", "sections": [{"name": "all"}]},
+    )
+
+    assert resp.status_code == 200
+    served = [a["advisory_id"] for a in resp.json()["advisories"]]
+    cap = PackBuilder._ADVISORY_MAX_COUNT
+    assert served == [f"adv-{i:02d}" for i in range(cap)]
+
+
+def test_assemble_pack_serves_every_advisory_below_the_cap(client, tmp_path):
+    """The cap is a ceiling, not a fixed size — three in, three out."""
+    _seed_advisories(tmp_path / "stores", 3)
+
+    resp = client.post("/api/v1/packs", json={"intent": "test pack"})
+
+    assert resp.status_code == 200
+    served = [a["advisory_id"] for a in resp.json()["advisories"]]
+    assert served == ["adv-00", "adv-01", "adv-02"]
+
+
 def test_api_pack_builder_wires_semantic_dedup(tmp_path):
     """The HTTP pack path mirrors the MCP server: near-duplicate suppression
     is wired at assembly (F14, #259) so cross-source clones can't re-serve."""

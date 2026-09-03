@@ -343,8 +343,7 @@ class TestFormatAdvisories:
         result = format_advisories_as_markdown([adv])
         assert "## Advisories" in result
         assert "entity" in result.lower()
-        assert "n=47" in result
-        assert "Entity X" in result
+        assert "Entity X appears in 82% of successful packs" in result
         # advisory_id is surfaced so agents can cite it in feedback
         assert adv.advisory_id in result
 
@@ -380,6 +379,92 @@ class TestFormatAdvisories:
         assert "2." in result
         assert "approach" in result.lower()
         assert "anti_pattern" in result.lower()
+
+
+class TestAdvisoryEvidenceIsRenderedOnce:
+    """#392 — the formatter must not repeat what the message already says.
+
+    Every ``AdvisoryGenerator`` analysis writes its sample size and effect
+    into ``message``; the formatter appended a second ``(n=..., effect=...)``
+    on top, so every rendered line printed the same two figures twice. The
+    defect is visible in output and was latent only because production has
+    served zero sectioned packs — the one surface that renders advisories.
+    """
+
+    @staticmethod
+    def _generator_shaped(message: str, **evidence: float) -> Advisory:
+        return Advisory(
+            category=AdvisoryCategory.APPROACH,
+            confidence=0.21,
+            message=message,
+            evidence=AdvisoryEvidence(
+                sample_size=int(evidence.get("sample_size", 5)),
+                success_rate_with=evidence.get("success_rate_with", 0.6),
+                success_rate_without=evidence.get("success_rate_without", 0.0),
+                effect_size=evidence.get("effect_size", 0.6),
+            ),
+            scope="global",
+        )
+
+    def test_embedded_evidence_appears_exactly_once(self) -> None:
+        """Verbatim production message shape (n and effect inside the text)."""
+        message = (
+            "Packs using the 'graph' strategy succeeded 60% of the time"
+            " vs 0% without (n=5, effect=+60%)."
+        )
+        result = format_advisories_as_markdown([self._generator_shaped(message)])
+
+        assert result.count("(n=5, effect=+60%)") == 1
+        assert result.count("n=5") == 1
+        assert result.count("effect=+60%") == 1
+
+    def test_no_evidence_suffix_is_appended_to_any_message(self) -> None:
+        """Even a message carrying no numbers gets no formatter-made suffix.
+
+        Pinned against a *different* evidence block from the one above, so
+        the assertion cannot be satisfied by a constant: were the suffix
+        restored it would read ``(n=31, effect=-25%)`` here.
+        """
+        advisory = self._generator_shaped(
+            "Prefer the deterministic extractor",
+            sample_size=31,
+            effect_size=-0.25,
+        )
+
+        result = format_advisories_as_markdown([advisory])
+
+        assert result.count("Prefer the deterministic extractor") == 1
+        assert "n=31" not in result
+        assert "effect=" not in result
+
+    def test_structured_evidence_is_still_reachable_on_the_object(self) -> None:
+        """What the suffix removal does *not* cost.
+
+        The numbers ride ``Advisory.evidence``, which ``POST /api/v1/packs``
+        serialises in full — the markdown surface is not the only place a
+        consumer can read them.
+        """
+        advisory = self._generator_shaped("anything", sample_size=31)
+        assert advisory.evidence.sample_size == 31
+
+    def test_every_advisory_renders_on_its_own_line(self) -> None:
+        """Two advisories, two lines, each with one message and one id."""
+        advisories = [
+            self._generator_shaped("First finding (n=5, effect=+60%)."),
+            self._generator_shaped("Second finding (n=9, effect=-30%)."),
+        ]
+
+        lines = [
+            line
+            for line in format_advisories_as_markdown(advisories).splitlines()
+            if line.startswith(("1.", "2."))
+        ]
+
+        assert len(lines) == 2
+        assert lines[0].count("(n=5, effect=+60%)") == 1
+        assert lines[1].count("(n=9, effect=-30%)") == 1
+        assert advisories[0].advisory_id in lines[0]
+        assert advisories[1].advisory_id in lines[1]
 
 
 # ---------------------------------------------------------------------------
