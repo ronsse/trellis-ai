@@ -22,6 +22,10 @@
             --error: #ef4444;
             --info: #3b82f6;
             --transition: 0.2s ease;
+            --rail: 234px;
+            --rail-collapsed: 58px;
+            --topbar-h: 52px;
+            --font-mono: 'SF Mono', 'Cascadia Code', 'Fira Code', 'JetBrains Mono', ui-monospace, 'Roboto Mono', monospace;
         }
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -31,48 +35,203 @@
             min-height: 100vh;
         }
 
-        /* Nav */
-        nav {
+        /* ============================================================
+           APP SHELL — collapsible sidebar rail + top bar
+           ============================================================ */
+        .app-shell { display: block; }
+
+        .sidebar {
+            position: fixed;
+            top: 0; left: 0; bottom: 0;
+            width: var(--rail);
+            background: var(--surface);
+            border-right: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            z-index: 300;
+            transition: width var(--transition), transform var(--transition);
+        }
+        body.nav-collapsed .sidebar { width: var(--rail-collapsed); }
+
+        .sidebar-head {
             display: flex;
             align-items: center;
-            gap: 2rem;
-            padding: 0.75rem 1.5rem;
-            background: var(--surface);
+            gap: 0.6rem;
+            height: var(--topbar-h);
+            padding: 0 0.9rem;
             border-bottom: 1px solid var(--border);
-            position: sticky;
-            top: 0;
-            z-index: 100;
+            flex: none;
+            overflow: hidden;
         }
-        nav .logo {
+        .sidebar-head svg { flex: none; }
+        .sidebar-head .wordmark {
             font-weight: 700;
-            font-size: 1.1rem;
-            color: var(--accent);
+            font-size: 1.02rem;
+            letter-spacing: -0.01em;
+            color: var(--text);
+            white-space: nowrap;
+            opacity: 1;
+            transition: opacity var(--transition);
         }
-        nav .nav-links { display: flex; gap: 0.25rem; }
-        nav a {
+        body.nav-collapsed .sidebar-head { padding: 0 0.6rem; justify-content: center; }
+        body.nav-collapsed .sidebar-head .wordmark { opacity: 0; pointer-events: none; }
+
+        .sidebar-nav {
+            flex: 1 1 auto;
+            min-height: 0;
+            overflow-y: auto;
+            overflow-x: hidden;
+            padding: 0.6rem 0.5rem;
+            display: flex;
+            flex-direction: column;
+            gap: 1px;
+        }
+        .sidebar-nav a {
+            position: relative;
+            display: flex;
+            align-items: center;
+            gap: 0.65rem;
+            padding: 0.45rem 0.55rem;
+            border-radius: 7px;
             color: var(--text-dim);
             text-decoration: none;
-            font-size: 0.875rem;
-            padding: 0.35rem 0.75rem;
-            border-radius: 6px;
-            transition: color var(--transition), background var(--transition);
+            font-size: 0.83rem;
+            font-weight: 500;
+            white-space: nowrap;
             cursor: pointer;
+            transition: color var(--transition), background var(--transition);
         }
-        nav a:hover { color: var(--text); background: var(--surface-2); }
-        nav a.active { color: var(--text); background: var(--accent-glow); border: 1px solid rgba(99, 102, 241, 0.3); }
-        nav .shortcuts-hint {
-            margin-left: auto;
-            font-size: 0.7rem;
+        .sidebar-nav a > svg { flex: none; width: 17px; height: 17px; opacity: 0.85; }
+        .sidebar-nav a .nav-label {
+            flex: 1 1 auto;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            transition: opacity var(--transition);
+        }
+        .sidebar-nav a .nav-key {
+            flex: none;
+            font-family: var(--font-mono);
+            font-size: 0.62rem;
+            color: var(--text-dim);
+            opacity: 0.45;
+            transition: opacity var(--transition);
+        }
+        .sidebar-nav a:hover { color: var(--text); background: var(--surface-2); }
+        .sidebar-nav a:hover > svg { opacity: 1; }
+        .sidebar-nav a.active { color: var(--text); background: var(--accent-glow); }
+        .sidebar-nav a.active > svg { opacity: 1; color: var(--accent); }
+        .sidebar-nav a.active::before {
+            content: '';
+            position: absolute;
+            left: -0.5rem; top: 50%;
+            transform: translateY(-50%);
+            width: 3px; height: 18px;
+            background: var(--accent);
+            border-radius: 0 3px 3px 0;
+        }
+        body.nav-collapsed .sidebar-nav { padding: 0.6rem 0.35rem; }
+        body.nav-collapsed .sidebar-nav a { justify-content: center; padding: 0.5rem 0; }
+        body.nav-collapsed .sidebar-nav a .nav-label,
+        body.nav-collapsed .sidebar-nav a .nav-key { opacity: 0; width: 0; flex: none; overflow: hidden; }
+        body.nav-collapsed .sidebar-nav a.active::before { left: -0.35rem; }
+
+        .sidebar-foot {
+            flex: none;
+            border-top: 1px solid var(--border);
+            padding: 0.6rem 0.7rem;
+            font-size: 0.68rem;
+            color: var(--text-dim);
+            font-family: var(--font-mono);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        body.nav-collapsed .sidebar-foot { text-align: center; padding: 0.6rem 0.3rem; }
+        body.nav-collapsed .sidebar-foot .foot-long { display: none; }
+
+        .app-main {
+            margin-left: var(--rail);
+            min-width: 0;
+            transition: margin-left var(--transition);
+        }
+        body.nav-collapsed .app-main { margin-left: var(--rail-collapsed); }
+
+        .topbar {
+            position: sticky;
+            top: 0;
+            z-index: 120;
+            display: flex;
+            align-items: center;
+            gap: 0.85rem;
+            height: var(--topbar-h);
+            padding: 0 1.25rem;
+            background: color-mix(in srgb, var(--surface) 88%, transparent);
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+            border-bottom: 1px solid var(--border);
+        }
+        .topbar .view-title {
+            font-size: 0.78rem;
+            font-weight: 600;
+            font-family: var(--font-mono);
+            text-transform: uppercase;
+            letter-spacing: 0.09em;
+            color: var(--text);
+        }
+        .topbar .spacer { flex: 1 1 auto; }
+        .rail-btn {
+            flex: none;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 30px; height: 30px;
+            background: transparent;
+            border: 1px solid transparent;
+            border-radius: 7px;
+            color: var(--text-dim);
+            cursor: pointer;
+            transition: color var(--transition), background var(--transition), border-color var(--transition);
+        }
+        .rail-btn:hover { color: var(--text); background: var(--surface-2); border-color: var(--border); }
+
+        .nav-scrim {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(8, 9, 14, 0.6);
+            z-index: 290;
+            opacity: 0;
+            transition: opacity var(--transition);
+        }
+
+        .shortcuts-hint {
+            font-size: 0.68rem;
             color: var(--text-dim);
             opacity: 0.6;
+            white-space: nowrap;
         }
-        nav .shortcuts-hint kbd {
+        .shortcuts-hint kbd {
             background: var(--surface-2);
             border: 1px solid var(--border);
             border-radius: 3px;
             padding: 0.1rem 0.35rem;
-            font-size: 0.65rem;
-            font-family: inherit;
+            font-size: 0.62rem;
+            font-family: var(--font-mono);
+        }
+
+        @media (max-width: 940px) {
+            .sidebar { transform: translateX(-100%); width: var(--rail); box-shadow: 0 0 40px rgba(0,0,0,0.5); }
+            body.nav-open .sidebar { transform: translateX(0); }
+            body.nav-collapsed .sidebar { width: var(--rail); }
+            .app-main, body.nav-collapsed .app-main { margin-left: 0; }
+            body.nav-open .nav-scrim { display: block; opacity: 1; }
+            body.nav-collapsed .sidebar-head { padding: 0 0.9rem; justify-content: flex-start; }
+            body.nav-collapsed .sidebar-head .wordmark { opacity: 1; }
+            body.nav-collapsed .sidebar-nav { padding: 0.6rem 0.5rem; }
+            body.nav-collapsed .sidebar-nav a { justify-content: flex-start; padding: 0.45rem 0.55rem; }
+            body.nav-collapsed .sidebar-nav a .nav-label { opacity: 1; width: auto; flex: 1 1 auto; }
+            body.nav-collapsed .sidebar-nav a .nav-key { opacity: 0.45; width: auto; }
+            .shortcuts-hint { display: none; }
         }
 
         .container {
@@ -876,8 +1035,13 @@
             color: var(--text-dim);
         }
         .empty-state .icon { font-size: 2rem; margin-bottom: 0.5rem; }
-        .mono { font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace; font-size: 0.82rem; }
+        .mono { font-family: var(--font-mono); font-size: 0.82rem; }
         .truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 280px; display: inline-block; vertical-align: bottom; }
+        /* ...but the renderers also put .truncate on the <td> itself, and a cell
+           with display:inline-block leaves table layout: columns stop lining up
+           with their headers and stack vertically once space is tight. A cell
+           clips as a cell. */
+        td.truncate, th.truncate { display: table-cell; vertical-align: middle; }
 
         /* Layout selector */
         .layout-selector {
@@ -954,12 +1118,201 @@
         ::-webkit-scrollbar-track { background: var(--bg); }
         ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
         ::-webkit-scrollbar-thumb:hover { background: var(--text-dim); }
+
+        /* ============================================================
+           TABLE INTERACTION — resizable columns, row disclosure
+           ============================================================ */
+        .tbl-tools {
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+            padding: 0.45rem 0.75rem;
+            border-bottom: 1px solid var(--border);
+            background: var(--surface-2);
+        }
+        .tbl-tools .tbl-hint {
+            flex: 1 1 auto;
+            font-size: 0.68rem;
+            color: var(--text-dim);
+            opacity: 0.7;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .tbl-btn {
+            flex: none;
+            background: transparent;
+            border: 1px solid var(--border);
+            border-radius: 5px;
+            color: var(--text-dim);
+            font-family: var(--font-mono);
+            font-size: 0.66rem;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+            padding: 0.22rem 0.5rem;
+            cursor: pointer;
+            transition: color var(--transition), background var(--transition), border-color var(--transition);
+        }
+        .tbl-btn:hover { color: var(--text); background: var(--surface); border-color: var(--text-dim); }
+        .tbl-btn.on { color: var(--text); background: var(--accent-glow); border-color: rgba(99, 102, 241, 0.45); }
+
+        .table-wrap { overflow-x: auto; overflow-y: hidden; }
+
+        /* Resize grips live on the th, so th needs a positioning context. */
+        table[data-ux] thead th { position: relative; }
+        .col-grip {
+            position: absolute;
+            top: 0; right: -4px;
+            width: 9px; height: 100%;
+            cursor: col-resize;
+            z-index: 3;
+            touch-action: none;
+        }
+        .col-grip::after {
+            content: '';
+            position: absolute;
+            left: 4px; top: 28%;
+            width: 1px; height: 44%;
+            background: var(--border);
+            transition: background var(--transition), top var(--transition), height var(--transition);
+        }
+        .col-grip:hover::after, .col-grip.dragging::after {
+            background: var(--accent);
+            top: 0; height: 100%;
+            width: 2px;
+        }
+        body.col-resizing { cursor: col-resize; user-select: none; -webkit-user-select: none; }
+
+        /* Once pinned (table-layout:fixed) cells clip to their column, not to a
+           hard-coded inline max-width. */
+        table[data-pinned="1"] td { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        table[data-pinned="1"] td.truncate { max-width: none !important; width: auto; }
+        table[data-pinned="1"] td .truncate { max-width: none !important; width: auto; display: block; }
+
+        /* Wrap mode: let every cell breathe over multiple lines. */
+        table[data-wrap="1"] td { white-space: normal !important; overflow: visible; word-break: break-word; }
+        table[data-wrap="1"] td.truncate {
+            max-width: none !important;
+            white-space: normal !important;
+            overflow: visible;
+            word-break: break-word;
+        }
+        table[data-wrap="1"] td .truncate {
+            max-width: none !important;
+            white-space: normal !important;
+            overflow: visible;
+            display: block;
+            word-break: break-word;
+        }
+
+        /* Disclosure column */
+        table[data-ux] th.ux-x, table[data-ux] td.ux-x {
+            width: 28px;
+            padding-left: 0.5rem;
+            padding-right: 0;
+            overflow: visible;
+        }
+        .row-x {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 20px; height: 20px;
+            padding: 0;
+            background: transparent;
+            border: none;
+            border-radius: 4px;
+            color: var(--text-dim);
+            opacity: 0.55;
+            cursor: pointer;
+            transition: color var(--transition), background var(--transition), opacity var(--transition);
+        }
+        tr:hover .row-x { opacity: 1; }
+        .row-x:hover { color: var(--accent); background: var(--surface); }
+        .row-x svg { transition: transform 0.18s ease; }
+        tr.is-open .row-x { opacity: 1; color: var(--accent); }
+        tr.is-open .row-x svg { transform: rotate(90deg); }
+
+        tr.detail-row > td {
+            padding: 0;
+            background: var(--bg);
+            border-bottom: 1px solid var(--border);
+            box-shadow: inset 2px 0 0 var(--accent);
+            white-space: normal !important;
+            overflow: visible !important;
+        }
+        tr.detail-row:hover > td { background: var(--bg); }
+        .detail-grid {
+            display: grid;
+            grid-template-columns: minmax(90px, max-content) minmax(0, 1fr);
+            column-gap: 1.25rem;
+            row-gap: 0.1rem;
+            padding: 0.7rem 1rem 0.85rem 2.3rem;
+            /* No fill-mode: the resting state must be the fully visible one.
+               With `both` the from-keyframe (opacity:0) holds whenever the
+               animation does not run -- reduced motion, a throttled tab, a
+               headless capture -- and the panel is silently blank. */
+            animation: detailIn 0.18s ease;
+        }
+        @media (prefers-reduced-motion: reduce) {
+            *, *::before, *::after {
+                animation-duration: 0.01ms !important;
+                animation-iteration-count: 1 !important;
+                transition-duration: 0.01ms !important;
+                scroll-behavior: auto !important;
+            }
+        }
+        @keyframes detailIn {
+            from { opacity: 0; transform: translateY(-3px); }
+            to { opacity: 1; transform: none; }
+        }
+        .dv-label {
+            font-family: var(--font-mono);
+            font-size: 0.63rem;
+            text-transform: uppercase;
+            letter-spacing: 0.09em;
+            color: var(--text-dim);
+            padding: 0.32rem 0 0.32rem 0;
+            border-top: 1px solid var(--border);
+            white-space: nowrap;
+        }
+        .dv-val {
+            display: flex;
+            align-items: flex-start;
+            gap: 0.5rem;
+            min-width: 0;
+            padding: 0.28rem 0;
+            border-top: 1px solid var(--border);
+            font-size: 0.82rem;
+        }
+        .detail-grid > .dv-label:first-child, .detail-grid > .dv-label:first-child + .dv-val { border-top: none; }
+        .dv-text, .dv-rich { min-width: 0; flex: 1 1 auto; word-break: break-word; }
+        .dv-text { font-family: var(--font-mono); font-size: 0.78rem; line-height: 1.5; color: var(--text); }
+        .dv-alt { font-size: 0.7rem; color: var(--text-dim); margin-top: 0.15rem; }
+        .dv-empty { color: var(--text-dim); opacity: 0.5; }
+        .dv-copy {
+            flex: none;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 22px; height: 22px;
+            background: transparent;
+            border: 1px solid transparent;
+            border-radius: 5px;
+            color: var(--text-dim);
+            opacity: 0;
+            cursor: pointer;
+            transition: opacity var(--transition), color var(--transition), border-color var(--transition);
+        }
+        .dv-val:hover .dv-copy { opacity: 0.7; }
+        .dv-copy:hover { opacity: 1; color: var(--accent); border-color: var(--border); }
+        .dv-copy.done { opacity: 1; color: var(--success); }
     </style>
 </head>
 <body>
-    <nav>
-        <span class="logo" style="display:flex;align-items:center;gap:0.5rem">
-            <svg width="24" height="24" viewBox="0 0 192 192" fill="none" xmlns="http://www.w3.org/2000/svg">
+<div class="app-shell">
+    <aside class="sidebar" id="sidebar">
+        <div class="sidebar-head">
+            <svg width="22" height="22" viewBox="0 0 192 192" fill="none" xmlns="http://www.w3.org/2000/svg">
                 <line x1="96" y1="152" x2="48" y2="112" stroke="#4f46e5" stroke-width="6" stroke-linecap="round" opacity="0.5"/>
                 <line x1="96" y1="152" x2="144" y2="112" stroke="#4f46e5" stroke-width="6" stroke-linecap="round" opacity="0.5"/>
                 <line x1="96" y1="152" x2="96" y2="96" stroke="#4f46e5" stroke-width="6" stroke-linecap="round" opacity="0.5"/>
@@ -981,23 +1334,37 @@
                 <circle cx="96" cy="40" r="16" fill="#6366f1" opacity="0.25"/>
                 <circle cx="96" cy="40" r="11" fill="#6366f1" opacity="0.8"/><circle cx="96" cy="40" r="6" fill="#c7d2fe"/>
             </svg>
-            Trellis
-        </span>
-        <div class="nav-links">
-            <a href="#" class="active" data-view="dashboard">Dashboard</a>
-            <a href="#" data-view="metrics">Metrics</a>
-            <a href="#" data-view="review">Review</a>
-            <a href="#" data-view="evolution">Evolution</a>
-            <a href="#" data-view="graph">Graph</a>
-            <a href="#" data-view="traces">Traces</a>
-            <a href="#" data-view="precedents">Precedents</a>
-            <a href="#" data-view="memories">Memories</a>
-            <a href="#" data-view="events">Events</a>
-            <a href="#" data-view="packs">Packs</a>
+            <span class="wordmark">Trellis</span>
         </div>
-        <span class="shortcuts-hint"><kbd>/</kbd> Search &middot; <kbd>1</kbd>-<kbd>0</kbd> Views &middot; <kbd>Esc</kbd> Close</span>
-        <button class="btn-icon" id="api-key-toggle" title="API key" onclick="toggleKeyBanner()">&#x1F511;</button>
-    </nav>
+
+        <nav class="sidebar-nav">
+            <a href="#" class="active" data-view="dashboard" data-label="Dashboard"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/></svg><span class="nav-label">Dashboard</span><span class="nav-key">1</span></a>
+            <a href="#" data-view="metrics" data-label="Metrics"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v16.5A1.5 1.5 0 0 0 4.5 21H21"/><path d="M7 14.5l4-4.5 3 3 5.5-6.5"/></svg><span class="nav-label">Metrics</span><span class="nav-key">2</span></a>
+            <a href="#" data-view="review" data-label="Review"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20.5 11.5V19a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h9"/><path d="M8.5 11.5l3 3 9-9.5"/></svg><span class="nav-label">Review</span><span class="nav-key">3</span></a>
+            <a href="#" data-view="evolution" data-label="Evolution"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="18.5" r="2.5"/><circle cx="6" cy="5.5" r="2.5"/><circle cx="18" cy="7.5" r="2.5"/><path d="M6 8v8"/><path d="M15.6 8.9c-1.6 3-4.2 4.6-7.1 5.2"/></svg><span class="nav-label">Evolution</span><span class="nav-key">4</span></a>
+            <a href="#" data-view="graph" data-label="Graph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="4.6" r="2.6"/><circle cx="4.6" cy="18" r="2.6"/><circle cx="19.4" cy="18" r="2.6"/><path d="M10.7 6.9L5.9 15.7M13.3 6.9l4.8 8.8M7.2 18h9.6"/></svg><span class="nav-label">Graph</span><span class="nav-key">5</span></a>
+            <a href="#" data-view="traces" data-label="Traces"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 12.5h4l2.8 6.5L14 4.5l2.6 8h4.9"/></svg><span class="nav-label">Traces</span><span class="nav-key">6</span></a>
+            <a href="#" data-view="precedents" data-label="Precedents"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2.5H20v19H6.5A2.5 2.5 0 0 1 4 19V5a2.5 2.5 0 0 1 2.5-2.5z"/><path d="M8.5 7h7"/></svg><span class="nav-label">Precedents</span><span class="nav-key">7</span></a>
+            <a href="#" data-view="memories" data-label="Memories"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5.2" rx="7.5" ry="2.9"/><path d="M4.5 5.2v6.4c0 1.6 3.4 2.9 7.5 2.9s7.5-1.3 7.5-2.9V5.2"/><path d="M4.5 11.6V18c0 1.6 3.4 2.9 7.5 2.9s7.5-1.3 7.5-2.9v-6.4"/></svg><span class="nav-label">Memories</span><span class="nav-key">8</span></a>
+            <a href="#" data-view="events" data-label="Events"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6h12M9 12h12M9 18h12"/><circle cx="4" cy="6" r="1.3"/><circle cx="4" cy="12" r="1.3"/><circle cx="4" cy="18" r="1.3"/></svg><span class="nav-label">Events</span><span class="nav-key">9</span></a>
+            <a href="#" data-view="packs" data-label="Packs"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20.5 16V8a1.9 1.9 0 0 0-.95-1.64l-6.6-3.8a1.9 1.9 0 0 0-1.9 0l-6.6 3.8A1.9 1.9 0 0 0 3.5 8v8a1.9 1.9 0 0 0 .95 1.64l6.6 3.8a1.9 1.9 0 0 0 1.9 0l6.6-3.8A1.9 1.9 0 0 0 20.5 16z"/><path d="M3.8 7.1L12 11.8l8.2-4.7M12 21.3V11.8"/></svg><span class="nav-label">Packs</span><span class="nav-key">0</span></a>
+        </nav>
+
+        <div class="sidebar-foot" id="sidebar-foot" title="Backend version">&mdash;</div>
+    </aside>
+
+    <div class="nav-scrim" id="nav-scrim" onclick="closeNavDrawer()"></div>
+
+    <div class="app-main">
+        <header class="topbar">
+            <button class="rail-btn" id="nav-toggle" onclick="toggleSidebar()" title="Toggle sidebar (\)" aria-label="Toggle sidebar">
+                <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9.5 4v16"/></svg>
+            </button>
+            <span class="view-title" id="view-title">Dashboard</span>
+            <span class="spacer"></span>
+            <span class="shortcuts-hint"><kbd>/</kbd> Search &middot; <kbd>1</kbd>-<kbd>0</kbd> Views &middot; <kbd>\</kbd> Sidebar &middot; <kbd>Esc</kbd> Close</span>
+            <button class="btn-icon" id="api-key-toggle" title="API key" onclick="toggleKeyBanner()">&#x1F511;</button>
+        </header>
 
     <!-- API key banner (shown on demand or after a 401) -->
     <div class="key-banner" id="key-banner" style="display:none">
@@ -1325,6 +1692,8 @@
             <div id="pack-detail-container"></div>
         </div>
     </div>
+    </div>
+    </div>
 
     <script>
         const API = '/api/v1';
@@ -1468,6 +1837,10 @@
         // -- View switching --
         const views = ['dashboard', 'metrics', 'review', 'evolution', 'graph', 'traces', 'precedents', 'memories', 'events', 'packs'];
         const viewLoaded = {};
+        // init() reveals the dashboard when its fetches resolve. Track where the
+        // user actually is, so a click made while the API is still answering is
+        // not overwritten by the dashboard landing on top of it.
+        let currentView = 'dashboard';
         document.querySelectorAll('nav a[data-view]').forEach(link => {
             link.addEventListener('click', e => {
                 e.preventDefault();
@@ -1479,6 +1852,10 @@
             document.querySelectorAll('nav a').forEach(a => a.classList.remove('active'));
             const navLink = document.querySelector(`nav a[data-view="${name}"]`);
             if (navLink) navLink.classList.add('active');
+            const titleEl = document.getElementById('view-title');
+            if (titleEl && navLink) titleEl.textContent = navLink.dataset.label || navLink.textContent.trim();
+            closeNavDrawer();
+            currentView = name;
             views.forEach(v => {
                 document.getElementById('view-' + v).style.display = v === name ? 'block' : 'none';
             });
@@ -1518,6 +1895,11 @@
                     document.getElementById('mem-search').focus();
                 }
             }
+            if (e.key === '\\') {
+                e.preventDefault();
+                toggleSidebar();
+                return;
+            }
             if (e.key >= '1' && e.key <= '9') {
                 switchView(views[parseInt(e.key) - 1]);
             }
@@ -1525,6 +1907,7 @@
                 switchView(views[9]);
             }
             if (e.key === 'Escape') {
+                closeNavDrawer();
                 closeSearchPanel();
                 document.getElementById('node-detail').style.display = 'none';
             }
@@ -3459,7 +3842,9 @@
                 }
 
                 loading.style.display = 'none';
-                document.getElementById('view-dashboard').style.display = 'block';
+                if (currentView === 'dashboard') {
+                    document.getElementById('view-dashboard').style.display = 'block';
+                }
                 viewLoaded['dashboard'] = true;
             } catch (err) {
                 loading.style.display = 'none';
@@ -3478,10 +3863,458 @@
                 } else {
                     error.textContent = 'Could not connect to API at ' + API + ' \u2014 ' + err.message;
                 }
-                document.getElementById('view-dashboard').style.display = 'block';
+                if (currentView === 'dashboard') {
+                    document.getElementById('view-dashboard').style.display = 'block';
+                }
                 viewLoaded['dashboard'] = true;
             }
         }
+
+        // ============================================================
+        //  SIDEBAR RAIL
+        //  Collapsed state persists per-browser. Below 940px the rail
+        //  becomes an off-canvas drawer and the same button opens it.
+        // ============================================================
+        const NAV_COLLAPSE_KEY = 'trellis_nav_collapsed';
+
+        const navIsNarrow = () => window.matchMedia('(max-width: 940px)').matches;
+
+        function applyNavCollapsed(collapsed) {
+            document.body.classList.toggle('nav-collapsed', collapsed);
+            // Labels are visually hidden when collapsed, so the accessible /
+            // hover name has to come from somewhere. Only add title= then --
+            // a permanent tooltip on an already-labelled link is just noise.
+            document.querySelectorAll('.sidebar-nav a[data-label]').forEach(a => {
+                if (collapsed) a.setAttribute('title', a.dataset.label);
+                else a.removeAttribute('title');
+            });
+            // Cytoscape sizes its canvas to the container; tell it the width moved.
+            setTimeout(() => { try { if (cy) cy.resize(); } catch (e) { /* graph not built yet */ } }, 260);
+        }
+
+        function toggleSidebar() {
+            if (navIsNarrow()) {
+                document.body.classList.toggle('nav-open');
+                return;
+            }
+            const next = !document.body.classList.contains('nav-collapsed');
+            applyNavCollapsed(next);
+            try { localStorage.setItem(NAV_COLLAPSE_KEY, next ? '1' : '0'); } catch { /* private mode */ }
+        }
+
+        function closeNavDrawer() { document.body.classList.remove('nav-open'); }
+
+        function initSidebar() {
+            let collapsed = false;
+            try { collapsed = localStorage.getItem(NAV_COLLAPSE_KEY) === '1'; } catch { /* private mode */ }
+            applyNavCollapsed(collapsed);
+            document.querySelectorAll('.sidebar-nav a').forEach(a => {
+                a.addEventListener('click', () => { if (navIsNarrow()) closeNavDrawer(); });
+            });
+            // Version stamp in the rail foot; nulled for anonymous callers, so fail soft.
+            fetch('/api/version', { headers: getApiKey() ? { 'X-API-Key': getApiKey() } : {} })
+                .then(r => r.ok ? r.json() : null)
+                .then(j => {
+                    const foot = document.getElementById('sidebar-foot');
+                    const wp = j && j.write_provenance;
+                    if (!foot || !wp) return;
+                    const sha = (wp.commit || '').slice(0, 7);
+                    foot.textContent = sha || (wp.version || '');
+                    foot.title = 'Backend ' + (wp.version || '?') + (sha ? ' @ ' + sha : '');
+                })
+                .catch(() => { /* version is decoration, never a blocker */ });
+        }
+
+        // ============================================================
+        //  TABLE INTERACTION
+        //  Three things every data table gets, generically:
+        //    1. draggable column edges (double-click an edge to fit)
+        //    2. a per-row disclosure listing every column with its LABEL
+        //    3. a wrap toggle, for reading long values in place
+        //  Driven off <thead> labels, so it works for any table rendered
+        //  now or later without touching the renderer.
+        // ============================================================
+        const TableUX = (() => {
+            const WIDTH_KEY = 'trellis_tbl_widths_v1';
+            const MIN_COL = 48;
+            const MAX_COL = 1200;
+
+            const CHEVRON = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5l7 7-7 7"/></svg>';
+            const COPY_ICON = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/></svg>';
+            const TICK_ICON = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12.5l5 5L20 6.5"/></svg>';
+
+            let widths = {};
+            try { widths = JSON.parse(localStorage.getItem(WIDTH_KEY) || '{}'); } catch { widths = {}; }
+            const persist = () => {
+                try { localStorage.setItem(WIDTH_KEY, JSON.stringify(widths)); } catch { /* private mode */ }
+            };
+
+            let ruler = null;
+            function measure(text, font) {
+                if (!ruler) {
+                    ruler = document.createElement('span');
+                    ruler.style.cssText = 'position:absolute;visibility:hidden;white-space:pre;top:-9999px;left:-9999px';
+                    document.body.appendChild(ruler);
+                }
+                ruler.style.font = font;
+                ruler.textContent = text;
+                return ruler.offsetWidth;
+            }
+
+            // A table is worth enhancing only if it has header labels to pair
+            // values against -- that pairing IS the feature.
+            function eligible(t) {
+                return !!(t.tHead && t.tHead.rows.length && t.tHead.rows[0].cells.length >= 3);
+            }
+
+            function keyFor(t) {
+                const tb = t.tBodies[0];
+                if (tb && tb.id) return tb.id;
+                if (t.id) return t.id;
+                return 'h:' + [...t.tHead.rows[0].cells].map(c => c.textContent.trim()).join('|').slice(0, 90);
+            }
+
+            function headerCells(t) { return [...t.tHead.rows[0].cells]; }
+
+            // Pin every column at its current rendered width and switch to a
+            // fixed layout, so a drag moves one column instead of reflowing all
+            // of them. The table then owns an explicit width and .table-wrap
+            // scrolls -- which is what makes "widen a column to read it" work.
+            function pin(t) {
+                if (t.dataset.pinned === '1') return;
+                const hs = headerCells(t);
+                let total = 0;
+                hs.forEach(h => {
+                    const w = h.classList.contains('ux-x') ? 28 : Math.round(h.getBoundingClientRect().width);
+                    h.style.width = w + 'px';
+                    total += w;
+                });
+                t.style.tableLayout = 'fixed';
+                t.style.width = total + 'px';
+                t.dataset.pinned = '1';
+            }
+
+            function unpin(t) {
+                headerCells(t).forEach(h => { h.style.width = ''; });
+                t.style.tableLayout = '';
+                t.style.width = '';
+                delete t.dataset.pinned;
+            }
+
+            function saveWidths(t) {
+                widths[keyFor(t)] = headerCells(t).map(h => parseInt(h.style.width, 10) || 0);
+                persist();
+            }
+
+            function applySaved(t) {
+                const saved = widths[keyFor(t)];
+                const hs = headerCells(t);
+                if (!Array.isArray(saved) || saved.length !== hs.length) return;
+                let total = 0;
+                hs.forEach((h, i) => {
+                    const w = Math.max(MIN_COL, Math.min(MAX_COL, saved[i] || MIN_COL));
+                    h.style.width = w + 'px';
+                    total += w;
+                });
+                t.style.tableLayout = 'fixed';
+                t.style.width = total + 'px';
+                t.dataset.pinned = '1';
+            }
+
+            function startResize(e, t, th) {
+                e.preventDefault();
+                e.stopPropagation();
+                pin(t);
+                const startX = e.clientX;
+                const startW = parseInt(th.style.width, 10) || Math.round(th.getBoundingClientRect().width);
+                const startTable = parseInt(t.style.width, 10) || Math.round(t.getBoundingClientRect().width);
+                const grip = e.currentTarget;
+                grip.classList.add('dragging');
+                document.body.classList.add('col-resizing');
+
+                const move = ev => {
+                    const w = Math.max(MIN_COL, Math.min(MAX_COL, startW + (ev.clientX - startX)));
+                    th.style.width = w + 'px';
+                    t.style.width = (startTable + (w - startW)) + 'px';
+                };
+                const up = () => {
+                    document.removeEventListener('mousemove', move);
+                    document.removeEventListener('mouseup', up);
+                    grip.classList.remove('dragging');
+                    document.body.classList.remove('col-resizing');
+                    saveWidths(t);
+                };
+                document.addEventListener('mousemove', move);
+                document.addEventListener('mouseup', up);
+            }
+
+            function autofit(t, th) {
+                pin(t);
+                const idx = headerCells(t).indexOf(th);
+                if (idx < 0) return;
+                const probe = t.tBodies[0] && t.tBodies[0].rows[0] && t.tBodies[0].rows[0].cells[idx];
+                const bodyFont = probe ? getComputedStyle(probe).font : getComputedStyle(t).font;
+                const headFont = getComputedStyle(th).font;
+                let want = measure(th.textContent.trim(), headFont) + 30;
+                [...t.tBodies].forEach(tb => [...tb.rows].forEach(r => {
+                    if (r.classList.contains('detail-row')) return;
+                    const c = r.cells[idx];
+                    if (!c || c.colSpan > 1) return;
+                    want = Math.max(want, measure((c.textContent || '').replace(/\s+/g, ' ').trim(), bodyFont) + 26);
+                }));
+                const before = parseInt(th.style.width, 10) || 0;
+                const w = Math.max(MIN_COL, Math.min(MAX_COL, Math.round(want)));
+                th.style.width = w + 'px';
+                t.style.width = ((parseInt(t.style.width, 10) || 0) + (w - before)) + 'px';
+                saveWidths(t);
+            }
+
+            // http:// on a LAN is not a secure context, so navigator.clipboard
+            // is undefined there. The execCommand path is the one that runs.
+            function copyText(text, btn) {
+                const done = ok => {
+                    if (!ok) return;
+                    btn.classList.add('done');
+                    btn.innerHTML = TICK_ICON;
+                    setTimeout(() => { btn.classList.remove('done'); btn.innerHTML = COPY_ICON; }, 1100);
+                };
+                if (navigator.clipboard && window.isSecureContext) {
+                    navigator.clipboard.writeText(text).then(() => done(true), () => done(legacyCopy(text)));
+                    return;
+                }
+                done(legacyCopy(text));
+            }
+
+            function legacyCopy(text) {
+                const ta = document.createElement('textarea');
+                ta.value = text;
+                ta.setAttribute('readonly', '');
+                ta.style.cssText = 'position:fixed;top:-1000px;opacity:0';
+                document.body.appendChild(ta);
+                ta.select();
+                let ok = false;
+                try { ok = document.execCommand('copy'); } catch { ok = false; }
+                ta.remove();
+                return ok;
+            }
+
+            function fieldRow(grid, label, cell) {
+                const dt = document.createElement('div');
+                dt.className = 'dv-label';
+                dt.textContent = label || '—';
+
+                const dd = document.createElement('div');
+                dd.className = 'dv-val';
+
+                const text = (cell.textContent || '').replace(/\s+/g, ' ').trim();
+                const val = document.createElement('div');
+                if (cell.children.length) {
+                    // Chips, badges and links keep their rendering.
+                    val.className = 'dv-rich';
+                    val.innerHTML = cell.innerHTML;
+                } else {
+                    val.className = 'dv-text';
+                    if (text) { val.textContent = text; } else { val.textContent = '—'; val.classList.add('dv-empty'); }
+                }
+                dd.appendChild(val);
+
+                // Renderers stash the un-abbreviated value in title= (full
+                // timestamp behind "3h ago", and so on). Show it when it says
+                // something the visible text doesn't.
+                const title = (cell.getAttribute('title') || '').replace(/\s+/g, ' ').trim();
+                if (title && title !== text) {
+                    const alt = document.createElement('div');
+                    alt.className = 'dv-alt';
+                    alt.textContent = title;
+                    dd.appendChild(alt);
+                }
+
+                const payload = (title && title.length > text.length) ? title : text;
+                if (payload) {
+                    const btn = document.createElement('button');
+                    btn.type = 'button';
+                    btn.className = 'dv-copy';
+                    btn.title = 'Copy value';
+                    btn.innerHTML = COPY_ICON;
+                    btn.addEventListener('click', ev => { ev.stopPropagation(); copyText(payload, btn); });
+                    dd.appendChild(btn);
+                }
+
+                grid.appendChild(dt);
+                grid.appendChild(dd);
+            }
+
+            function closeRow(row) {
+                const next = row.nextElementSibling;
+                if (next && next.classList.contains('detail-row')) next.remove();
+                row.classList.remove('is-open');
+                const b = row.querySelector('.row-x');
+                if (b) b.setAttribute('aria-expanded', 'false');
+            }
+
+            function openRow(row, t) {
+                if (row.classList.contains('is-open')) return;
+                const heads = headerCells(t).map(h => h.textContent.trim());
+                const grid = document.createElement('div');
+                grid.className = 'detail-grid';
+                for (let i = 1; i < row.cells.length; i++) {
+                    fieldRow(grid, heads[i] || ('Column ' + i), row.cells[i]);
+                }
+                const td = document.createElement('td');
+                td.colSpan = row.cells.length;
+                td.appendChild(grid);
+                const dr = document.createElement('tr');
+                dr.className = 'detail-row';
+                dr.dataset.uxRow = '1';
+                dr.appendChild(td);
+                dr.addEventListener('click', ev => ev.stopPropagation());
+                row.after(dr);
+                row.classList.add('is-open');
+                const b = row.querySelector('.row-x');
+                if (b) b.setAttribute('aria-expanded', 'true');
+            }
+
+            function toggleRow(row, t) {
+                if (row.classList.contains('is-open')) closeRow(row); else openRow(row, t);
+            }
+
+            function processRow(row, t) {
+                if (row.dataset.uxRow === '1') return;
+                row.dataset.uxRow = '1';
+                if (row.classList.contains('detail-row')) return;
+                // Empty-state / loading / error rows: one cell spanning the
+                // table. Widen the span for the new column, add no control.
+                if (row.cells.length === 1 && row.cells[0].colSpan > 1) {
+                    row.cells[0].colSpan = row.cells[0].colSpan + 1;
+                    return;
+                }
+                const td = document.createElement('td');
+                td.className = 'ux-x';
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'row-x';
+                btn.title = 'Show all fields';
+                btn.setAttribute('aria-expanded', 'false');
+                btn.innerHTML = CHEVRON;
+                // Rows are already click targets that open a detail panel;
+                // the disclosure must not also fire that.
+                btn.addEventListener('click', ev => { ev.stopPropagation(); toggleRow(row, t); });
+                td.appendChild(btn);
+                td.addEventListener('click', ev => ev.stopPropagation());
+                row.insertBefore(td, row.firstChild);
+            }
+
+            function allRows(t) {
+                const out = [];
+                [...t.tBodies].forEach(tb => [...tb.rows].forEach(r => {
+                    if (!r.classList.contains('detail-row') && r.cells.length > 1) out.push(r);
+                }));
+                return out;
+            }
+
+            function buildTools(t, wrap) {
+                const bar = document.createElement('div');
+                bar.className = 'tbl-tools';
+
+                const hint = document.createElement('span');
+                hint.className = 'tbl-hint';
+                hint.textContent = 'Drag a column edge to resize · double-click it to fit · › expands a row';
+                bar.appendChild(hint);
+
+                const mk = (label, title, fn) => {
+                    const b = document.createElement('button');
+                    b.type = 'button';
+                    b.className = 'tbl-btn';
+                    b.textContent = label;
+                    b.title = title;
+                    b.addEventListener('click', () => fn(b));
+                    bar.appendChild(b);
+                    return b;
+                };
+
+                mk('Wrap', 'Wrap long values onto multiple lines instead of clipping them', b => {
+                    const on = t.dataset.wrap === '1';
+                    if (on) delete t.dataset.wrap; else t.dataset.wrap = '1';
+                    b.classList.toggle('on', !on);
+                });
+                mk('Expand all', 'Open every row to see all fields with their labels', b => {
+                    const rows = allRows(t);
+                    const anyClosed = rows.some(r => !r.classList.contains('is-open'));
+                    rows.forEach(r => anyClosed ? openRow(r, t) : closeRow(r));
+                    b.classList.toggle('on', anyClosed);
+                });
+                mk('Reset', 'Discard saved column widths for this table', () => {
+                    unpin(t);
+                    delete widths[keyFor(t)];
+                    persist();
+                });
+
+                wrap.parentNode.insertBefore(bar, wrap);
+            }
+
+            function enhance(t) {
+                t.dataset.ux = '1';
+
+                let wrap = t.parentElement;
+                if (!wrap || !wrap.classList.contains('table-wrap')) {
+                    wrap = document.createElement('div');
+                    wrap.className = 'table-wrap';
+                    t.parentNode.insertBefore(wrap, t);
+                    wrap.appendChild(t);
+                }
+
+                const hr = t.tHead.rows[0];
+                const xth = document.createElement('th');
+                xth.className = 'ux-x';
+                xth.setAttribute('aria-label', 'Expand row');
+                hr.insertBefore(xth, hr.firstChild);
+
+                [...hr.cells].forEach(th => {
+                    if (th.classList.contains('ux-x')) return;
+                    const g = document.createElement('span');
+                    g.className = 'col-grip';
+                    g.title = 'Drag to resize · double-click to fit contents';
+                    g.addEventListener('mousedown', ev => startResize(ev, t, th));
+                    g.addEventListener('dblclick', ev => { ev.preventDefault(); ev.stopPropagation(); autofit(t, th); });
+                    th.appendChild(g);
+                });
+
+                buildTools(t, wrap);
+                applySaved(t);
+            }
+
+            function scan() {
+                document.querySelectorAll('table').forEach(t => {
+                    if (!eligible(t)) return;
+                    if (t.dataset.ux !== '1') enhance(t);
+                    [...t.tBodies].forEach(tb => [...tb.rows].forEach(r => processRow(r, t)));
+                });
+            }
+
+            function start() {
+                scan();
+                let queued = false;
+                const mo = new MutationObserver(() => {
+                    if (queued) return;
+                    queued = true;
+                    // rAF batches the re-scan against paint, but it does not
+                    // fire in a hidden tab or any non-painting context -- and
+                    // then a table that finished loading while the tab was in
+                    // the background stays unenhanced. Race it with a timer so
+                    // the scan cannot be deferred indefinitely; whichever wins
+                    // clears the flag and the other becomes a no-op.
+                    const run = () => { if (!queued) return; queued = false; scan(); };
+                    requestAnimationFrame(run);
+                    setTimeout(run, 120);
+                });
+                mo.observe(document.body, { childList: true, subtree: true });
+            }
+
+            return { start, scan };
+        })();
+
+        initSidebar();
+        TableUX.start();
 
         init();
     </script>
