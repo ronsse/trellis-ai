@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
+from click.utils import strip_ansi
 from typer.testing import CliRunner
 
 from tests.chunk_corpus import seed_chunk_favouring, seed_chunked
@@ -15,15 +16,34 @@ from trellis_cli.main import app
 runner = CliRunner()
 
 
-def _unwrap(text: str) -> str:
-    """Undo Rich's hard wrap so a sentence can be searched as one string.
+def _plain(text: str) -> str:
+    """Rich-rendered output reduced to what the operator's eye reads.
 
-    Rich wraps at the console width when stdout is a pipe, so a message
-    that is one logical line arrives with newlines inside it. Collapsing
-    whitespace keeps the assertions about *content* from becoming
-    assertions about terminal width.
+    Two decorations sit between a rendered line and the sentence it
+    represents, and an assertion has to survive both.
+
+    **Wrapping.** Rich breaks at the console width, so a message that is
+    one logical line arrives with newlines inside it. Collapsing
+    whitespace keeps assertions about *content* from becoming assertions
+    about terminal width.
+
+    **Colour.** Rich emits SGR escapes when it believes the stream is
+    colour-capable, and its highlighter styles *parts* of a token — an
+    option name renders as three separately-wrapped runs, so
+    ``"--include-chunks" in output`` is ``False`` against output that
+    plainly says ``--include-chunks``. This is the same class as the two
+    renderer defects #410 fixed (``[document]`` eaten as a style tag, an
+    ``item_id`` emojified): output that is decorated being read as if it
+    were plain. It reappeared in the test asserting the fix.
+
+    Stripping is :func:`click.utils.strip_ansi` rather than a local
+    regex — click owns ``CliRunner``, already strips these sequences in
+    ``click.echo`` (pinned by
+    ``tests/unit/test_machine_output_rule.py::test_emit_machine_text_preserves_what_typer_echo_would_strip``),
+    and a fourth in-repo spelling of a solved problem is the thing this
+    PR's own review was about.
     """
-    return " ".join(text.split())
+    return " ".join(strip_ansi(text).split())
 
 
 @pytest.fixture(autouse=True)
@@ -249,7 +269,7 @@ class TestRetrievePack:
 
         text = runner.invoke(app, ["retrieve", "pack", "--intent", "canary rollout"])
         assert text.exit_code == 0
-        assert "Semantic axis unavailable" in _unwrap(text.stdout)
+        assert "Semantic axis unavailable" in _plain(text.stdout)
 
     def test_pack_runs_the_semantic_axis_when_an_embedder_resolves(
         self, monkeypatch: pytest.MonkeyPatch
@@ -274,7 +294,7 @@ class TestRetrievePack:
 
         text = runner.invoke(app, ["retrieve", "pack", "--intent", "canary rollout"])
         assert text.exit_code == 0
-        assert "Semantic axis unavailable" not in _unwrap(text.stdout)
+        assert "Semantic axis unavailable" not in _plain(text.stdout)
 
     def test_pack_enforces_a_token_budget(self) -> None:
         """``--max-tokens`` is a real ceiling, and the cut is reported.
@@ -327,7 +347,7 @@ class TestRetrievePack:
             ["retrieve", "pack", "--intent", "canary rollout", "--max-items", "2"],
         )
         assert result.exit_code == 0
-        out = _unwrap(result.stdout)
+        out = _plain(result.stdout)
         assert "Withheld:" in out
         assert out.index("Withheld:") < out.index("corpus:obsidian:doc")
 
@@ -343,7 +363,7 @@ class TestRetrievePack:
         self._seed_two_axes()
         result = runner.invoke(app, ["retrieve", "pack", "--intent", "canary rollout"])
         assert result.exit_code == 0
-        out = _unwrap(result.stdout)
+        out = _plain(result.stdout)
         assert "[document]" in out
         assert "[entity]" in out
         assert "(keyword)" in out
@@ -419,7 +439,7 @@ class TestRetrievePack:
 
         text = runner.invoke(app, ["retrieve", "pack", "--intent", "canary rollout"])
         assert text.exit_code == 0
-        out = _unwrap(text.stdout)
+        out = _plain(text.stdout)
         assert "did not initialise" in out
         # The wrong advice for this state, and the one a merged
         # "is semantic missing?" boolean would have printed.
@@ -445,7 +465,7 @@ class TestRetrievePack:
         )
         result = runner.invoke(app, ["retrieve", "pack", "--intent", "canary rollout"])
         assert result.exit_code == 0
-        out = _unwrap(result.stdout)
+        out = _plain(result.stdout)
         assert item_id in out, out
         assert "\N{SNOWFLAKE}" not in out
 
@@ -702,7 +722,46 @@ class TestRetrieveChunkVisibility:
             ["retrieve", "pack", "--intent", "distinctive", "--include-chunks"],
         )
         assert rejected.exit_code != 0
-        assert "--include-chunks" in rejected.output
+        # Through ``_plain``: Typer renders this error with Rich, whose
+        # highlighter styles the option name in three separate runs, so
+        # the raw output does not contain the literal flag even though it
+        # displays it. Naming the flag is the property under test — an
+        # operator with the old flag in a script has to learn *which*
+        # flag went away — so the assertion is kept and the decoration
+        # removed, never the reverse.
+        assert "--include-chunks" in _plain(rejected.output)
+
+    def test_the_removed_flag_is_named_even_when_rich_colourises(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The same property under the rendering CI actually produces.
+
+        This suite runs against a pipe, where Rich emits no colour, so
+        the assertion above passed locally and failed on all three CI
+        Pythons: GitHub's runners are detected as colour-capable and the
+        option name arrives as
+        ``\x1b[1;36m-\x1b[0m\x1b[1;36m-include\x1b[0m\x1b[1;36m-chunks\x1b[0m``.
+        A local suite could not have caught that, so the fix is not only
+        to strip the escapes but to *exercise* the branch that emits
+        them — otherwise the next such assertion is brittle again and
+        discovers it in CI too.
+
+        ``FORCE_COLOR`` is Rich's own opt-in and is read when the console
+        is constructed, which for a Typer usage error is at render time.
+        """
+        monkeypatch.setenv("FORCE_COLOR", "1")
+        self._seed()
+        rejected = runner.invoke(
+            app,
+            ["retrieve", "pack", "--intent", "distinctive", "--include-chunks"],
+        )
+        assert rejected.exit_code != 0
+        # The escapes really are present — without this the test would
+        # pass by accident on a build where Rich decided not to colour,
+        # and would then be pinning nothing.
+        assert "\x1b[" in rejected.output
+        assert "--include-chunks" not in rejected.output
+        assert "--include-chunks" in _plain(rejected.output)
 
 
 class TestRetrieveTrace:
