@@ -34,7 +34,10 @@ from rich.console import Console
 from rich.markup import escape
 from typer.core import TyperGroup
 
-from trellis.core.error_sanitize import sanitized_error_payload
+from trellis.core.error_sanitize import (
+    sanitize_error_message,
+    sanitized_error_payload,
+)
 from trellis.errors import TrellisError
 from trellis.logging import configure_stderr_logging
 from trellis_cli.admin import admin_app
@@ -68,8 +71,13 @@ MACHINE_FORMATS = ("json", "jsonl")
 #: roster: ``ConfigError`` has ``setting``, the ``StoreWriteRefusedError``
 #: family has ``path`` / ``recovery``, ``StoreError`` has ``store``, and a
 #: subclass added later that carries one of these names is picked up
-#: without an edit here — rosters of this shape are what rot (#443). The
-#: values are caller-authored identifiers, not exception content.
+#: without an edit here — rosters of this shape are what rot (#443).
+#:
+#: The *names* are Trellis-authored; the *values* are exception content —
+#: ``path`` and ``recovery`` are built from a resolved filesystem path —
+#: so they go through the same #206 guard as the message. Sanitizing the
+#: message and shipping the identical text in a sibling key of the same
+#: envelope is a defeated guard, not a guard.
 _CONTEXT_ATTRS = ("setting", "path", "recovery", "store", "policy_id")
 
 
@@ -122,8 +130,11 @@ def _error_context(exc: TrellisError) -> dict[str, Any]:
     context: dict[str, Any] = {"error_code": exc.code}
     for attr in _CONTEXT_ATTRS:
         value = getattr(exc, attr, None)
-        if value is not None:
-            context[attr] = value
+        if value is None:
+            continue
+        context[attr] = (
+            sanitize_error_message(value) if isinstance(value, str) else value
+        )
     return context
 
 

@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from trellis.core.error_sanitize import SUPPRESSED_MARKER
 from trellis.errors import (
     ApprovalRequiredError,
     BackendNotInstalledError,
@@ -170,6 +171,161 @@ def tmp_trace_file() -> Path:
         encoding="utf-8",
     )
     return path
+
+
+class TestTheBoundaryCoversTheWholeTypedFamily:
+    """The CLI half of the design claim, which nothing else here pinned.
+
+    The fix registers on ``TrellisError`` rather than ``ConfigError``
+    precisely so a subclass added later is covered without a roster edit.
+    ``TestHandlerRegistration`` pins that for REST. On the CLI every case
+    above raises a ``ConfigError``, so narrowing ``except TrellisError`` to
+    ``except ConfigError`` left the whole file green — a mutation that
+    deletes the design claim and passes. These are that mutant's tests.
+    """
+
+    @pytest.fixture
+    def store_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> pytest.MonkeyPatch:
+        """A ``StoreError`` — not a ``ConfigError`` — from a real command."""
+        data_dir = tmp_path / "data"
+        (data_dir / "stores").mkdir(parents=True)
+        monkeypatch.setenv("TRELLIS_CONFIG_DIR", str(tmp_path / "config"))
+        monkeypatch.setenv("TRELLIS_DATA_DIR", str(data_dir))
+
+        def _boom(*_args: object, **_kwargs: object) -> None:
+            msg = "sqlite database is locked"
+            raise StoreError(msg, store="document")
+
+        monkeypatch.setattr("trellis_cli.curate._get_registry", _boom)
+        return monkeypatch
+
+    def test_a_non_config_trellis_error_renders_and_exits(
+        self, store_error: pytest.MonkeyPatch
+    ) -> None:
+        result = runner.invoke(app, ["curate", "feedback", "trace_1", "0.9"])
+
+        assert result.exit_code == EXIT_STORE
+        assert "STORE_ERROR" in result.output
+        assert "sqlite database is locked" in result.output
+
+    def test_its_json_envelope_carries_the_subclass_context(
+        self, store_error: pytest.MonkeyPatch
+    ) -> None:
+        result = runner.invoke(
+            app, ["curate", "feedback", "trace_1", "0.9", "--format", "json"]
+        )
+        payload = json.loads(result.stdout)
+
+        assert payload["error_type"] == "StoreError"
+        assert payload["error_code"] == "STORE_ERROR"
+        assert payload["store"] == "document"
+
+
+class TestEveryMachineFormatGetsTheEnvelope:
+    """``jsonl`` is in ``MACHINE_FORMATS`` and nothing exercised it.
+
+    ``_requested_format`` was unit-tested with ``jsonl``, which proves the
+    *reader* returns the string — not that ``_render_boundary_failure``
+    treats it as machine output. Dropping ``"jsonl"`` from
+    ``MACHINE_FORMATS`` left the file green while handing a ``jsonl``
+    caller Rich prose on stdout, which is the #403 defect this boundary
+    exists to prevent.
+    """
+
+    def test_jsonl_is_parseable_too(self, damaged_policy_file: Path) -> None:
+        result = runner.invoke(
+            app, ["curate", "feedback", "trace_1", "0.9", "--format", "jsonl"]
+        )
+
+        assert result.exit_code == EXIT_STORE
+        payload = json.loads(result.stdout)
+        assert payload["error_code"] == "CONFIG_ERROR"
+
+
+class TestTheMachineEnvelopeIsLeakGuarded:
+    """#206's guard, on the surface the PR claimed it covered.
+
+    The API test pins the message. The CLI had no leak test at all, so
+    replacing ``sanitized_error_payload`` with a hand-built dict shipping
+    ``exc.message`` raw kept every assertion green — on the one surface
+    whose output is routinely captured into CI logs and review bundles.
+    """
+
+    @pytest.fixture
+    def clean_deployment(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> pytest.MonkeyPatch:
+        data_dir = tmp_path / "data"
+        (data_dir / "stores").mkdir(parents=True)
+        monkeypatch.setenv("TRELLIS_CONFIG_DIR", str(tmp_path / "config"))
+        monkeypatch.setenv("TRELLIS_DATA_DIR", str(data_dir))
+        return monkeypatch
+
+    def test_a_dsn_in_the_message_does_not_ship(
+        self, clean_deployment: pytest.MonkeyPatch
+    ) -> None:
+        def _boom(*_args: object, **_kwargs: object) -> None:
+            msg = "could not connect to postgresql://trellis:hunter2@db:5432/trellis"
+            raise StoreError(msg)
+
+        clean_deployment.setattr("trellis_cli.curate._get_registry", _boom)
+        result = runner.invoke(
+            app, ["curate", "feedback", "trace_1", "0.9", "--format", "json"]
+        )
+        payload = json.loads(result.stdout)
+
+        assert result.exit_code == EXIT_STORE
+        assert "hunter2" not in result.stdout
+        assert "suppressed" in payload["message"]
+
+    def test_the_context_fields_are_guarded_too(
+        self, clean_deployment: pytest.MonkeyPatch
+    ) -> None:
+        """A guard the message passes and a sibling key defeats is not a guard.
+
+        ``path`` and ``recovery`` are built from a resolved filesystem
+        path, so they are exception content, not caller-authored context —
+        which is what ``sanitized_error_payload``'s own contract requires
+        of the fields handed to it. Shipping them raw beside a suppressed
+        message put the identical text back into the same envelope.
+        """
+        leaky = "/srv/deploy/token=s3cr3tvalue/policies.json"
+
+        def _boom(*_args: object, **_kwargs: object) -> None:
+            msg = "refused"
+            raise DegradedStoreWriteError(
+                msg,
+                store="policy",
+                path=leaky,
+                recovery=f"mv {leaky} {leaky}.bak",
+            )
+
+        clean_deployment.setattr("trellis_cli.curate._get_registry", _boom)
+        result = runner.invoke(
+            app, ["curate", "feedback", "trace_1", "0.9", "--format", "json"]
+        )
+
+        assert "s3cr3tvalue" not in result.stdout
+        assert json.loads(result.stdout)["path"] == SUPPRESSED_MARKER
+
+    def test_a_clean_path_still_reaches_the_operator(
+        self, damaged_policy_file: Path
+    ) -> None:
+        """The guard must not cost the legibility this whole change buys.
+
+        A resolved path is exactly the shape the sanitizer was written to
+        pass — ``/`` and ``.`` break its token heuristic — so the ordinary
+        case is unchanged and the file is still named.
+        """
+        result = runner.invoke(
+            app, ["curate", "feedback", "trace_1", "0.9", "--format", "json"]
+        )
+        payload = json.loads(result.stdout)
+
+        assert payload["setting"] == "policies.json"
+        assert str(damaged_policy_file) in payload["message"]
 
 
 class TestUntypedFailuresAreNotSwallowed:

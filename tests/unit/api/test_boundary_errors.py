@@ -26,9 +26,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 import trellis_api.app as app_module
+from trellis.core.error_sanitize import SUPPRESSED_MARKER
 from trellis.errors import (
     BackendNotInstalledError,
     ConfigError,
+    DegradedStoreWriteError,
     StoreError,
     TrellisError,
 )
@@ -84,8 +86,15 @@ class TestDamagedPolicyFileIsLegibleOverRest:
         """500 says Trellis broke. The operator's file is damaged.
 
         409 rather than 503 because a damaged config file does not repair
-        itself, and rather than 500 because ``GET /api/v1/policies``
-        already answers 409 for this very file — one fault, one status.
+        itself, and rather than 500 because
+        ``GET /api/v1/policies/{policy_id}`` already answers 409 for this
+        very file — one fault, one status across the governed writes.
+
+        The precedent is that single-item read, not the collection route:
+        ``GET /api/v1/policies`` answers **200** with a
+        ``store_degradation`` block, deliberately, because display
+        degrades where enforcement fails closed. Pinned below so the
+        precedent this rests on cannot drift unnoticed.
         """
         resp = client.post("/api/v1/traces", json=TRACE_BODY)
 
@@ -144,6 +153,19 @@ class TestDamagedPolicyFileIsLegibleOverRest:
         for resp in responses:
             assert resp.status_code == CONFIG_ERROR_STATUS, resp.request.url
             assert resp.json()["code"] == "config_error", resp.request.url
+
+    def test_the_precedent_this_status_rests_on_is_the_single_item_read(
+        self, client: TestClient, damaged_policy_file: Path
+    ) -> None:
+        """Naming the wrong route would make the 409 argument unfalsifiable.
+
+        The collection route reads through the *lenient* ``PolicyStore``
+        and serves 200; the single-item route escalates a miss it cannot
+        vouch for to 409. Only the second is the precedent, and this is
+        what fails if either moves.
+        """
+        assert client.get("/api/v1/policies").status_code == 200
+        assert client.get("/api/v1/policies/nope").status_code == 409
 
     def test_a_healthy_deployment_is_untouched(self, client: TestClient) -> None:
         """No policy file means no policies means an empty, transparent gate.
@@ -236,6 +258,41 @@ class TestTheCatchAllKeepsWhatItShouldHave:
         assert body["code"] == "store_error"
         assert body["message"] == "sqlite database is locked"
         assert body["store"] == "document"
+
+    def test_the_context_fields_are_leak_guarded_as_well(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The guard has to cover every key built from exception content.
+
+        ``path`` and ``recovery`` are derived from a resolved filesystem
+        path, so sanitizing only ``message`` put the suppressed text back
+        into the same response body under a sibling key.
+        """
+        leaky = "/srv/deploy/token=s3cr3tvalue/policies.json"
+
+        def _boom(*_args: object, **_kwargs: object) -> None:
+            msg = "refused"
+            raise DegradedStoreWriteError(
+                msg,
+                store="policy",
+                path=leaky,
+                recovery=f"mv {leaky} {leaky}.bak",
+            )
+
+        monkeypatch.setattr("trellis_api.routes.ingest.build_curate_executor", _boom)
+        resp = client.post("/api/v1/traces", json=TRACE_BODY)
+
+        assert "s3cr3tvalue" not in resp.text
+        assert resp.json()["path"] == SUPPRESSED_MARKER
+
+    def test_a_clean_context_field_still_reaches_the_caller(
+        self, client: TestClient, damaged_policy_file: Path
+    ) -> None:
+        """The guard must not cost the legibility the change buys."""
+        body = client.post("/api/v1/traces", json=TRACE_BODY).json()
+
+        assert body["setting"] == "policies.json"
+        assert str(damaged_policy_file) in body["message"]
 
     def test_the_message_is_leak_guarded(
         self, client: TestClient, monkeypatch: pytest.MonkeyPatch

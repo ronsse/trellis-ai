@@ -112,10 +112,21 @@ async def unhandled_exception_handler(
 #: this and 503 — ``routes/policies.py::_refusal_http_error`` already ruled
 #: 503 out for the same file: a damaged config file does not repair itself,
 #: so "retry later" is the wrong instruction. What settles it for 409 is
-#: that ``GET /api/v1/policies`` **already answers 409** when that very file
-#: is damaged, from a *read* route where nothing was being written. One
-#: deployment fault answering 409 on one route and 500 on every other is a
-#: distinction no client can act on.
+#: that ``GET /api/v1/policies/{policy_id}`` **already answers 409** when
+#: that very file is damaged, from a *read* route where nothing was being
+#: written. One deployment fault answering 409 on the one route that
+#: escalates it and 500 on every governed write is a distinction no client
+#: can act on.
+#:
+#: The precedent is that single-item read and **not** the collection route:
+#: ``GET /api/v1/policies`` answers **200** on a damaged file, serving what
+#: parsed with a ``store_degradation`` block beside it. That is deliberate
+#: and stays — display degrades, enforcement fails closed, and the two
+#: routes read the file through different loaders (``PolicyStore`` is
+#: lenient, ``mutate/policy_source`` is strict). So this handler does not
+#: make one status universal for the fault; it makes every *governed
+#: mutation* answer the same way, which is the population a client
+#: retries.
 #:
 #: The obvious objection — a 4xx will not trip a monitor watching 5xx, and
 #: this fault darkens every governed write — is answered by #458 rather
@@ -123,14 +134,28 @@ async def unhandled_exception_handler(
 #: event under ``config:policy_file``, which ``trellis analyze health`` and
 #: the capture-health banner both read. Visibility rides the event log;
 #: this handler is only the legibility half.
+#:
+#: It is also not the only channel, and the second one is stronger than
+#: the argument above: this handler calls ``logger.exception`` on **every**
+#: typed failure including the 409s, so an operator alerting on
+#: ``error``-level log lines sees ``api_trellis_error`` once per affected
+#: request with the traceback attached. If a deployment would rather have
+#: the 5xx rate move, the whole decision is one line — ``CONFIG_ERROR_STATUS
+#: = 500`` — and nothing else changes: the body stays legible, because the
+#: legibility lives in this handler and not in the catch-all.
 CONFIG_ERROR_STATUS = 409
 
 #: Fields the typed hierarchy carries that a caller can act on. Read off
 #: the exception, so a subclass that adds one is carried without an edit
 #: here. ``setting`` names the config key or file, ``path`` the file,
 #: ``recovery`` the shell command that clears the state, ``store`` the
-#: backend. All are Trellis-authored identifiers rather than exception
-#: content — the message is the part that gets sanitized.
+#: backend.
+#:
+#: They are Trellis-authored *names*, but their values are not: ``path``
+#: and ``recovery`` are built from a resolved filesystem path, so they are
+#: exception content and go through the same #206 guard the message does.
+#: Sanitizing the message and shipping the identical text in a sibling key
+#: is not a leak guard — it is one, defeated, in the same response body.
 _CONTEXT_ATTRS = ("setting", "path", "recovery", "store")
 
 
@@ -196,8 +221,14 @@ async def trellis_error_handler(
     }
     for attr in _CONTEXT_ATTRS:
         value = getattr(trellis_exc, attr, None)
-        if value is not None:
-            content[attr] = value
+        if value is None:
+            continue
+        # Same guard as the message: these carry a resolved filesystem
+        # path, and a clean one passes through untouched (the sanitizer's
+        # token heuristic is broken by ``/`` and ``.`` on purpose).
+        content[attr] = (
+            sanitize_error_message(value) if isinstance(value, str) else value
+        )
     return JSONResponse(
         status_code=status_code,
         content=content,
