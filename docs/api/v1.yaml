@@ -3981,7 +3981,31 @@ paths:
       - ingest
   /api/v1/vectors/reset:
     post:
-      description: Drop and recreate the vectors table with current configured dimensions.
+      description: 'Drop and recreate the vectors table with current configured dimensions.
+
+
+        Neither failure arm answers 200, and they answer differently on
+
+        purpose. A deployment with **no vector store configured** answers
+
+        **409**: nothing was dropped, nothing was recreated, and what has to
+
+        change is the deployment. A reset that was **attempted and failed**
+
+        answers **500**: the server fell over mid-operation, the vectors
+
+        table may be gone, and no reshaped request fixes that.
+
+
+        Both refusals name themselves in a `code` at the **top level** of the
+
+        body, beside `status` — `vector_store_unconfigured` and
+
+        `vector_reset_failed`. This route raises no `HTTPException`, so there
+
+        is no `detail` envelope on any arm and `body["code"]` is always where
+
+        the code is.'
       operationId: reset_vectors_api_v1_vectors_reset_post
       responses:
         '200':
@@ -3992,6 +4016,13 @@ paths:
                 title: Response Reset Vectors Api V1 Vectors Reset Post
                 type: object
           description: Successful Response
+        '409':
+          description: 'Nothing was dropped and nothing was recreated: the deployment has no vector store configured. `code`
+            is `vector_store_unconfigured`, at the top level beside `status`.'
+        '500':
+          description: The reset was attempted and failed. The vectors table may have been dropped and not recreated, so this
+            is not a no-op the way the 409 is. `code` is `vector_reset_failed`, at the top level beside `status`, and `message`
+            carries the sanitized backend error.
       security:
       - APIKeyHeader: []
       summary: Reset Vectors
