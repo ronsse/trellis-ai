@@ -1321,10 +1321,12 @@ trellis retrieve pack --intent "deploy checklist for staging" --domain platform 
   "advisories": [],
   "retrieval_report": {"strategies_used": ["keyword", "graph"], "candidates_found": 55, "items_selected": 5, "rejected_items": [], "budget_trace": []},
   "budget": {"max_items": 10, "max_tokens": 8000},
-  "withholding": {"total": 5, "by_reason": {"max_items": 5}, "served_count": 5},
+  "withholding": {"total": 5, "by_reason": {"max_items": 5}, "withheld_item_ids": ["01JRKA…"], "non_absence_reasons": [], "section_filtered": 0, "served_count": 5},
   "axes": {"available": ["keyword", "graph"], "ran": ["keyword", "graph"], "failed": [], "semantic": "not_configured"}
 }
 ```
+
+`withholding` is the builder's stamped summary verbatim, so it carries `withheld_item_ids` as well as the counts — #404's counts-and-reasons-only rule scopes the *rendered note* an agent reads, not this payload, whose reader already holds the stores. `retrieval_report` is abbreviated above; it also carries `queries_run`, `duration_ms` and `schema_version`, and its `rejected_items` / `budget_trace` are populated on any pack that hit a budget.
 
 > **This is a CLI contract change.** Before #410 the payload was
 > `{"status", "intent", "domain", "agent_id", "count", "include_chunks", "items"}`

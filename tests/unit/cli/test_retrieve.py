@@ -304,6 +304,15 @@ class TestRetrievePack:
         assert data["budget"]["max_items"] == 2
         assert data["withholding"]["by_reason"].get("max_items")
         assert data["withholding"]["total"] >= 1
+        # The stamped summary goes out verbatim, ids included: #404's
+        # counts-and-reasons-only rule scopes the rendered note an agent
+        # reads, not this payload, whose reader already holds the stores
+        # and needs the ids to go and look. Pinned so the JSON arm and the
+        # comment above it cannot drift apart again.
+        withheld = data["withholding"]["withheld_item_ids"]
+        assert len(withheld) == data["withholding"]["total"]
+        served = {item["item_id"] for item in data["items"]}
+        assert not served & set(withheld)
 
     def test_pack_text_output_states_withholding_above_the_items(self) -> None:
         """Header, not footer — the #404 rule, in this renderer too.
@@ -370,6 +379,167 @@ class TestRetrievePack:
         )[0]
         assert event.payload["domain"] == "platform"
         assert event.payload["agent_id"] == "operator-1"
+
+    def test_pack_reports_a_broken_vector_backend_as_misconfigured(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The fourth axis state, reached through the CLI rather than asserted.
+
+        ``describe_axes`` distinguishes ``misconfigured`` from
+        ``not_configured``, but the CLI supplies the argument that separates
+        them (``embedder_configured=registry.embedding_fn is not None``) —
+        and hard-coding that argument to ``False`` passed every other test
+        in this file. The state was therefore unreachable from the surface
+        that renders it, so an operator with a resolved embedder and a
+        broken vector backend would have been told to configure an
+        embedder: sent to fix something already correct, which is the exact
+        failure this state exists to prevent.
+
+        ``build_strategies`` swallows a ``SemanticSearch`` init failure —
+        it logs at ``warning`` to *stderr* and carries on, so the pack
+        itself says nothing — which makes raising from the constructor the
+        real shape of this state rather than a contrived one.
+        """
+        from trellis.retrieve import strategies as strategies_mod
+
+        msg = "vector backend unavailable"
+
+        def _boom(*args: object, **kwargs: object) -> object:
+            raise RuntimeError(msg)
+
+        monkeypatch.setenv(
+            "TRELLIS_EMBEDDING_FN", "tests.unit.cli.test_retrieve.fake_embed"
+        )
+        monkeypatch.setattr(strategies_mod, "SemanticSearch", _boom)
+        self._seed_two_axes()
+        data = self._json("retrieve", "pack", "--intent", "canary rollout")
+
+        assert data["axes"]["semantic"] == "misconfigured"
+        assert "semantic" not in data["axes"]["available"]
+
+        text = runner.invoke(app, ["retrieve", "pack", "--intent", "canary rollout"])
+        assert text.exit_code == 0
+        out = _unwrap(text.stdout)
+        assert "did not initialise" in out
+        # The wrong advice for this state, and the one a merged
+        # "is semantic missing?" boolean would have printed.
+        assert "no embeddings provider" not in out
+
+    def test_pack_item_ids_are_printed_verbatim_not_emojified(self) -> None:
+        r"""``emoji=False`` is load-bearing, and nothing else pins it.
+
+        A real ``dataset:snowflake://…`` id contains the literal
+        ``:snowflake:``, which Rich rewrites to ❄️ — an id an operator
+        cannot copy and a script cannot match. The PR that added
+        ``emoji=False`` called it a live defect fix; flipping it back to
+        ``emoji=True`` passed every other test here, which is the #456
+        shape: a field that is printed but never asserted.
+        """
+        from trellis_cli.stores import get_document_store
+
+        item_id = "dataset:snowflake://analytics/canary_rollout_audit"
+        get_document_store().put(
+            item_id,
+            "canary rollout audit table: one row per promotion decision"
+            " with the operator, the observed error rate and the verdict",
+        )
+        result = runner.invoke(app, ["retrieve", "pack", "--intent", "canary rollout"])
+        assert result.exit_code == 0
+        out = _unwrap(result.stdout)
+        assert item_id in out, out
+        assert "\N{SNOWFLAKE}" not in out
+
+    def test_pack_max_items_buys_recall_instead_of_capping_at_the_default(
+        self,
+    ) -> None:
+        """``limit_per_strategy`` tracks ``--max-items``; it is not the default.
+
+        ``PackBuilder``'s per-axis fetch defaults to 20, so a builder given
+        ``limit_per_strategy=20`` returns at most 20 keyword candidates no
+        matter what ``--max-items`` says — the item budget would then be a
+        ceiling the deployment can never reach. Constant-folding that
+        argument to ``20`` passed every other test in this file, because
+        the shared fixture holds seven candidates.
+        """
+        from trellis_cli.stores import get_document_store
+
+        docs = get_document_store()
+        subjects = [
+            "postgres",
+            "redis",
+            "kafka",
+            "envoy",
+            "consul",
+            "vault",
+            "etcd",
+            "nginx",
+            "haproxy",
+            "rabbitmq",
+            "clickhouse",
+            "cassandra",
+            "spark",
+            "airflow",
+            "grafana",
+            "loki",
+            "tempo",
+            "vector",
+            "fluentd",
+            "istio",
+            "argo",
+            "flux",
+            "keda",
+            "cilium",
+            "calico",
+            "harbor",
+            "trivy",
+            "cosign",
+            "spire",
+            "teleport",
+        ]
+        for i, subject in enumerate(subjects):
+            docs.put(
+                f"doc-{i}",
+                f"canary rollout for {subject}: promote after"
+                f" {i + 3} minutes of clean {subject} telemetry",
+            )
+
+        data = self._json(
+            "retrieve",
+            "pack",
+            "--intent",
+            "canary rollout",
+            "--max-items",
+            "30",
+            "--max-tokens",
+            "100000",
+        )
+        assert data["count"] > 20, data["count"]
+
+    def test_pack_identifies_itself_to_the_advisory_loader(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The #373 journal discriminator, from the surface that passes it.
+
+        ``build_pack_builder``'s ``surface`` argument answers "which caller
+        saw which advisory file". The factory suite proves each label
+        reaches the loader; nothing proved *this* command sends its own,
+        so passing ``surface="mcp"`` from the CLI was invisible — and a
+        mislabelled reader is how #373's two-files question went
+        unanswerable in the first place.
+        """
+        from trellis.retrieve import builder_factory
+
+        seen: list[str] = []
+        original = builder_factory.load_advisory_store
+
+        def _spy(stores_dir: object, *, surface: str) -> object:
+            seen.append(surface)
+            return original(stores_dir, surface=surface)
+
+        monkeypatch.setattr(builder_factory, "load_advisory_store", _spy)
+        self._seed_two_axes()
+        self._json("retrieve", "pack", "--intent", "canary rollout")
+        assert seen == ["cli.retrieve"]
 
     def test_pack_exit_code_does_not_depend_on_format(self) -> None:
         """The repo-wide rule, checked on this command's own success path."""

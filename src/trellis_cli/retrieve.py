@@ -161,8 +161,14 @@ def pack(
                     mode="json"
                 ),
                 "budget": pack_result.budget.model_dump(mode="json"),
-                # Counts and reasons only — the ids ride PACK_ASSEMBLED,
-                # a different access path with a different audience.
+                # The builder's stamped summary, verbatim — counts,
+                # reasons **and** ``withheld_item_ids``. #404's
+                # counts-and-reasons-only rule scopes the rendered *note*,
+                # whose audience is an agent's context window; it does not
+                # scope this payload, whose audience is an operator who
+                # already holds the stores and needs the ids to go look.
+                # ``POST /api/v1/packs`` hands back the same ids under
+                # ``retrieval_report.rejected_items``.
                 "withholding": withholding_payload,
                 "axes": axes,
             }

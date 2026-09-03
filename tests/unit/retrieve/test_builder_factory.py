@@ -215,11 +215,25 @@ class TestBuildPackBuilder:
 # The structural rule
 # ---------------------------------------------------------------------------
 
-#: Modules allowed to call ``PackBuilder(...)`` in ``src/``. The factory is
-#: the construction; nothing else builds one. Kept as a *set of one* rather
-#: than an "everything except" check so adding a surface is a deliberate
-#: edit to this line with a reviewer looking at it.
-_ALLOWED_CONSTRUCTION_SITES = frozenset({"builder_factory.py"})
+#: Path, relative to ``src/``, allowed to construct a ``PackBuilder``. The
+#: factory is the construction; nothing else builds one. Kept as a *set of
+#: one* rather than an "everything except" check so adding a surface is a
+#: deliberate edit to this line with a reviewer looking at it.
+#:
+#: Matched on the ``src``-relative path, **not** on ``path.name``: a bare
+#: basename exempts *any* file called ``builder_factory.py`` anywhere under
+#: ``src/``, which is a one-``mkdir`` hole in a rule whose whole job is to
+#: stop a fifth wiring appearing somewhere new.
+_ALLOWED_CONSTRUCTION_SITES = frozenset({"trellis/retrieve/builder_factory.py"})
+
+#: Hand-read floor on the module scan, so a narrowed ``rglob`` cannot make
+#: the rule vacuous while every guard below still divides by the scan's own
+#: output — the #464 shape, where two "independent" counters shared one file
+#: discovery and narrowing it took eight real sites to six with everything
+#: green. ``mypy --python-version 3.12 src/`` reports 332 source files;
+#: the floor is deliberately loose enough to survive ordinary churn and
+#: tight enough that dropping a package fails here.
+_MIN_SRC_MODULES = 300
 
 
 def _src_root() -> Path:
@@ -228,24 +242,103 @@ def _src_root() -> Path:
     return root
 
 
+def _bare_name(node: ast.expr) -> str | None:
+    """Bare name of a call target: ``f``, ``mod.f``, ``a.b.f`` all give ``f``.
+
+    The same shape ``tests/unit/test_policy_gate_rule.py::_name_of`` and
+    ``tests/unit/mcp/test_capture_surface_roster.py::_is_call_to`` already
+    use, and for the same reason: ``src/`` writes 563 class-like
+    ``module.Attr(...)`` calls across 33 names against 1,536 bare-name ones
+    (measured 2026-09-03), so a rule that reads only :class:`ast.Name`
+    misses the repo's second-most-common call spelling — and
+    ``from trellis.retrieve import pack_builder`` is idiomatic here.
+
+    Over-collecting costs a spurious flag on a same-named attribute;
+    under-collecting costs the rule.
+    """
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    if isinstance(node, ast.Name):
+        return node.id
+    return None
+
+
+def _construction_names(tree: ast.Module) -> set[str]:
+    """Every local name in this module that constructs a ``PackBuilder``.
+
+    ``PackBuilder`` itself, plus the three rebindings that produce one
+    under another name and would otherwise walk past a literal match:
+
+    * ``from ...pack_builder import PackBuilder as Builder`` → ``Builder``
+    * ``PB = PackBuilder`` → ``PB``
+    * ``class Mine(PackBuilder)`` → ``Mine`` (a subclass constructor runs
+      the same ``__init__`` and takes the same argument list, which is the
+      thing this rule exists to stop being copied)
+
+    Resolved per module and iterated to a fixed point, so a chain
+    (``PB = PackBuilder``; ``PB2 = PB``) is caught too.
+    """
+    names = {"PackBuilder"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            names.update(
+                alias.asname
+                for alias in node.names
+                if alias.name == "PackBuilder" and alias.asname
+            )
+    changed = True
+    while changed:
+        rebound: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign) and _bare_name(node.value) in names:
+                rebound.update(t.id for t in node.targets if isinstance(t, ast.Name))
+            elif isinstance(node, ast.ClassDef) and any(
+                _bare_name(base) in names for base in node.bases
+            ):
+                rebound.add(node.name)
+        changed = not rebound <= names
+        names |= rebound
+    return names
+
+
 def _pack_builder_construction_sites(root: Path) -> list[tuple[Path, int]]:
-    """Every ``PackBuilder(...)`` call under *root*.
+    """Every ``PackBuilder(...)`` construction under *root*.
 
     A call, not a mention: the class is named in a dozen docstrings and in
     type annotations, and neither constructs anything. ``ast`` sees only
     the calls, which is the whole reason this is a parse rather than a grep.
+
+    Both call spellings, and the aliases :func:`_construction_names`
+    resolves — the bare-name-only version of this scan was flagged in
+    review as reproducing *inside the rule* the very defect the rule
+    removes from the code: it was the third place in ``tests/`` to solve
+    "what is this call's target called" and the first to solve it wrongly.
     """
     sites: list[tuple[Path, int]] = []
     for py_file in sorted(root.rglob("*.py")):
         tree = ast.parse(py_file.read_text(encoding="utf-8"))
+        names = _construction_names(tree)
         sites.extend(
             (py_file, node.lineno)
             for node in ast.walk(tree)
-            if isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id == "PackBuilder"
+            if isinstance(node, ast.Call) and _bare_name(node.func) in names
         )
     return sites
+
+
+def _offenders(root: Path) -> list[tuple[str, int]]:
+    """Constructions under *root* that are not the allowed one.
+
+    One function, called by the rule **and** by every test that claims
+    something about the rule — a test that re-writes the comparison it is
+    checking proves a property of its own copy, which is the shape that
+    let a basename allowlist survive an explicit test naming it.
+    """
+    return [
+        (path.relative_to(root).as_posix(), lineno)
+        for path, lineno in _pack_builder_construction_sites(root)
+        if path.relative_to(root).as_posix() not in _ALLOWED_CONSTRUCTION_SITES
+    ]
 
 
 def test_pack_builder_is_constructed_in_exactly_one_place() -> None:
@@ -258,12 +351,7 @@ def test_pack_builder_is_constructed_in_exactly_one_place() -> None:
     #443); the fix is not to correct the copies but to stop there being
     copies.
     """
-    sites = _pack_builder_construction_sites(_src_root())
-    offenders = [
-        (str(path), lineno)
-        for path, lineno in sites
-        if path.name not in _ALLOWED_CONSTRUCTION_SITES
-    ]
+    offenders = _offenders(_src_root())
     assert not offenders, (
         "PackBuilder is constructed outside the factory: "
         f"{offenders}. Call trellis.retrieve.builder_factory.build_pack_builder "
@@ -271,14 +359,102 @@ def test_pack_builder_is_constructed_in_exactly_one_place() -> None:
     )
 
 
+def test_the_construction_scan_sees_the_whole_tree() -> None:
+    """The floor the scan cannot compute for itself.
+
+    Every other guard here divides by this scan's own output, so a scan
+    that merely *shrinks* satisfies all of them (#457, #464, #466 — three
+    shipped rules, one root cause). This asserts a hand-read module count
+    against the discovery instead.
+    """
+    modules = list(_src_root().rglob("*.py"))
+    assert len(modules) >= _MIN_SRC_MODULES, len(modules)
+    # And the discovery reaches every distributed package, not just the
+    # one the factory lives in — narrowing to ``src/trellis/retrieve`` is
+    # the single edit that would make the rule green and meaningless.
+    top_level = {p.relative_to(_src_root()).parts[0] for p in modules}
+    assert {
+        "trellis",
+        "trellis_cli",
+        "trellis_api",
+        "trellis_sdk",
+        "trellis_workers",
+    } <= top_level, sorted(top_level)
+
+
+#: Synthetic modules run through the **shipped** predicate. Each is a real
+#: construction the rule must flag, written in a spelling that was tried
+#: against the first cut of this rule — all four of the middle ones walked
+#: straight past it, and ``module.Attr(...)`` is the repo's own second-most
+#: common call style.
+_EVASIONS: dict[str, str] = {
+    "bare.py": (
+        "from trellis.retrieve.pack_builder import PackBuilder\n"
+        "def go(s):\n"
+        "    return PackBuilder(strategies=s)\n"
+    ),
+    "attr.py": (
+        "from trellis.retrieve import pack_builder\n"
+        "def go(s):\n"
+        "    return pack_builder.PackBuilder(strategies=s)\n"
+    ),
+    "modalias.py": (
+        "import trellis.retrieve.pack_builder as pb\n"
+        "def go(s):\n"
+        "    return pb.PackBuilder(strategies=s)\n"
+    ),
+    "namealias.py": (
+        "from trellis.retrieve.pack_builder import PackBuilder\n"
+        "PB = PackBuilder\n"
+        "def go(s):\n"
+        "    return PB(strategies=s)\n"
+    ),
+    "aliaschain.py": (
+        "from trellis.retrieve.pack_builder import PackBuilder\n"
+        "PB = PackBuilder\n"
+        "PB2 = PB\n"
+        "def go(s):\n"
+        "    return PB2(strategies=s)\n"
+    ),
+    "importas.py": (
+        "from trellis.retrieve.pack_builder import PackBuilder as Builder\n"
+        "def go(s):\n"
+        "    return Builder(strategies=s)\n"
+    ),
+    "subclass.py": (
+        "from trellis.retrieve.pack_builder import PackBuilder\n"
+        "class Mine(PackBuilder):\n"
+        "    pass\n"
+        "def go(s):\n"
+        "    return Mine(strategies=s)\n"
+    ),
+    "inexcept.py": (
+        "from trellis.retrieve.pack_builder import PackBuilder\n"
+        "def go(s):\n"
+        "    try:\n"
+        "        raise ValueError\n"
+        "    except ValueError:\n"
+        "        return PackBuilder(strategies=s)\n"
+    ),
+    "nested.py": (
+        "from trellis.retrieve.pack_builder import PackBuilder\n"
+        "def outer(s):\n"
+        "    def inner():\n"
+        "        return PackBuilder(strategies=s)\n"
+        "    return inner\n"
+    ),
+}
+
+
 def test_the_construction_scan_is_not_vacuous(tmp_path: Path) -> None:
     """A rule that finds nothing passes for the wrong reason.
 
-    Two floors. The scan must still find the real construction in ``src/``
-    — a rename or a moved factory would otherwise make the rule above
-    green and meaningless. And the *shipped* predicate is run against a
-    synthetic tree carrying a construction it must reject, so the rule is
-    proved to fail rather than assumed to.
+    The scan must still find the real construction in ``src/`` — a rename
+    or a moved factory would otherwise make the rule above green and
+    meaningless. And the *shipped* predicate is run against a synthetic
+    tree carrying a construction in every spelling it must reject plus a
+    bare mention it must not, so the rule is proved to fail rather than
+    assumed to.
     """
     real = _pack_builder_construction_sites(_src_root())
     assert len(real) == 1, real
@@ -286,13 +462,10 @@ def test_the_construction_scan_is_not_vacuous(tmp_path: Path) -> None:
 
     fake = tmp_path / "src"
     (fake / "trellis_somewhere").mkdir(parents=True)
-    (fake / "trellis_somewhere" / "surface.py").write_text(
-        "from trellis.retrieve.pack_builder import PackBuilder\n"
-        "def go(strategies):\n"
-        "    return PackBuilder(strategies=strategies)\n"
-    )
-    # A mention that must NOT be flagged, so the predicate is shown to
-    # discriminate calls from names rather than matching the word.
+    for name, body in _EVASIONS.items():
+        (fake / "trellis_somewhere" / name).write_text(body)
+    # Mentions that must NOT be flagged, so the predicate is shown to
+    # discriminate constructions from names rather than matching the word.
     (fake / "trellis_somewhere" / "mentions.py").write_text(
         '"""See PackBuilder for the walk."""\n'
         "from trellis.retrieve.pack_builder import PackBuilder\n"
@@ -300,8 +473,26 @@ def test_the_construction_scan_is_not_vacuous(tmp_path: Path) -> None:
         "    return b\n"
     )
 
-    found = _pack_builder_construction_sites(fake)
-    assert [p.name for p, _ in found] == ["surface.py"], found
+    found = {p.name for p, _ in _pack_builder_construction_sites(fake)}
+    assert found == set(_EVASIONS), sorted(set(_EVASIONS) ^ found)
+
+
+def test_the_allowlist_is_a_path_not_a_basename(tmp_path: Path) -> None:
+    """``builder_factory.py`` *somewhere else* is still an offender.
+
+    Matching on ``path.name`` exempts any file with that basename anywhere
+    under ``src/`` — a rule defeated by ``mkdir``. Asserted through the
+    same relative-path comparison the rule performs, over a tree where the
+    only construction sits at a decoy path.
+    """
+    fake = tmp_path / "src"
+    (fake / "trellis_elsewhere" / "surfaces").mkdir(parents=True)
+    (fake / "trellis_elsewhere" / "surfaces" / "builder_factory.py").write_text(
+        "from trellis.retrieve.pack_builder import PackBuilder\n"
+        "def go(s):\n"
+        "    return PackBuilder(strategies=s)\n"
+    )
+    assert _offenders(fake) == [("trellis_elsewhere/surfaces/builder_factory.py", 3)]
 
 
 @pytest.mark.parametrize("surface", ["mcp", "api.retrieve", "cli.retrieve"])
