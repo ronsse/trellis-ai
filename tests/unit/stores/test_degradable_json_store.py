@@ -39,6 +39,7 @@ from trellis.errors import DegradedStoreWriteError, StaleStoreWriteError
 from trellis.schemas.advisory import Advisory, AdvisoryCategory, AdvisoryEvidence
 from trellis.schemas.enums import Enforcement, PolicyType
 from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
+from trellis.stores import degradable_json_store
 from trellis.stores.advisory_store import AdvisoryStore
 from trellis.stores.degradable_json_store import (
     DegradableJsonStore,
@@ -692,6 +693,109 @@ class TestAnUnreadableFingerprintRefusesOnEveryStore:
         recovery = excinfo.value.recovery
         assert recovery is not None
         assert shlex.split(recovery) == ["ls", "-ld", "--", str(path), str(directory)]
+
+    @pytest.mark.parametrize("case", CASES, ids=CASE_IDS)
+    def test_a_path_component_that_is_not_a_directory_is_unknown_not_absent(
+        self, tmp_path: Path, case: StoreCase
+    ) -> None:
+        """``ENOTDIR`` is the fix's most specific claim, and it needs its own errno.
+
+        ``_fingerprint``'s docstring singles ``NotADirectoryError`` out:
+        it is one of the errnos ``Path.exists`` swallows (#444's door), so
+        a path component that turned into a regular file presents as
+        *absent* — the one freely-writable state — to every ``exists()``
+        gate in the codebase. Reading it as absence here would reproduce
+        that door on the guard side.
+
+        It is also the only **root-independent, mock-free** way to reach a
+        ``stat`` failure whose exception class is not bare ``OSError``, and
+        that is what makes ``detail`` observable at all. Every other test
+        in this class provokes ``ELOOP``, which Python raises as a plain
+        ``OSError`` — so an implementation that hard-coded the string
+        ``"OSError: "`` in place of ``type(exc).__name__``, or dropped the
+        exception from ``detail`` entirely, satisfies them all. The
+        docstring on :meth:`_unreadable_write_message` says ``detail`` is
+        "the part that distinguishes a permissions problem from a symlink
+        cycle from a flaky mount"; without a second errno nothing tests it.
+        """
+        parent = tmp_path / "stores"
+        parent.mkdir()
+        path = parent / "store.json"
+        store = case.cls(path)  # absent: a normal fresh install
+        assert store._loaded_fingerprint is None
+        assert store.is_degraded is False
+
+        # The directory the file lives in becomes a regular file.
+        parent.rmdir()
+        parent.write_text("not a directory")
+
+        assert path.exists() is False, "Path.exists swallows ENOTDIR — #444's door"
+        identity = store._fingerprint()
+        assert isinstance(identity, UnknownFileIdentity), (
+            "ENOTDIR must be unknown, not absence"
+        )
+
+        with pytest.raises(StaleStoreWriteError) as excinfo:
+            store.refuse_if_stale()
+        message = str(excinfo.value)
+        assert "NotADirectoryError" in message, (
+            "the real exception class must reach the operator, not a fixed string"
+        )
+        assert "Not a directory" in message
+
+    @pytest.mark.parametrize("case", CASES, ids=CASE_IDS)
+    def test_a_stat_that_fails_after_the_write_is_not_recorded_as_absence(
+        self, tmp_path: Path, case: StoreCase, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The second instance of the defect: ``_save``'s tail.
+
+        ``_save`` re-records ``_loaded_fingerprint`` after a successful
+        write so a second write from the same store does not trip its own
+        guard. That call can fail too, and there the process *knows* the
+        file exists — it just wrote it — so ``None`` is a definite lie
+        rather than an ambiguous one, and the next write compares it
+        against a real fingerprint or against another ``None``.
+
+        Reaching it needs the ``stat`` to fail *after* the write and not
+        before, which no arrangement of the filesystem alone produces: the
+        write stats the same path. So the write seam is patched — a
+        module-level function, not a ``stat`` call count, so this does not
+        break the next time the write path gains or loses a syscall.
+
+        The path is then **healed**, which is what makes the assertion
+        discriminating: ``current`` is a real fingerprint, so only the
+        ``loaded`` operand can produce a refusal, and only the message
+        separates that refusal from the ordinary stale one.
+        """
+        path = tmp_path / "store.json"
+        store = case.cls(path)
+        real_write = degradable_json_store.atomic_write_text
+        written: list[bytes] = []
+
+        def write_then_break(target: Path, text: str) -> None:
+            real_write(target, text)
+            written.append(target.read_bytes())
+            target.unlink()
+            _symlink_loop(target)
+
+        monkeypatch.setattr(
+            degradable_json_store, "atomic_write_text", write_then_break
+        )
+        case.write(store)
+        assert isinstance(store._loaded_fingerprint, UnknownFileIdentity), (
+            "_save's tail recorded absence for a file it had just written"
+        )
+
+        monkeypatch.setattr(degradable_json_store, "atomic_write_text", real_write)
+        path.unlink()
+        (path.parent / f"{path.name}.loop").unlink()
+        path.write_bytes(written[0])
+        assert isinstance(store._fingerprint(), tuple), "the path must now read cleanly"
+
+        with pytest.raises(StaleStoreWriteError) as excinfo:
+            case.write(store)
+        assert "could not be read" in str(excinfo.value)
+        assert "changed after this process read it" not in str(excinfo.value)
 
     def test_two_records_of_the_same_failure_are_never_equal(self) -> None:
         """``eq=False`` on :class:`UnknownFileIdentity`, pinned.
