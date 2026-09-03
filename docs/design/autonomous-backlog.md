@@ -20,11 +20,23 @@
    `ruff` / `mypy` / `pytest` and a non-activated shell fails with a misleading
    exit 127. (Do **not** use `uv run` casually: it re-resolves and rewrites
    `uv.lock` as a side effect.)
-   **Run `mypy --python-version 3.12 src/`, never bare `mypy src/`** — the pinned
-   `python_version = "3.11"` meets a numpy 3.12 `type` statement, so the run aborts
-   having checked **zero files** and reads as clean. This has produced a false green
-   for several agents; [#398](https://github.com/ronsse/trellis-ai/issues/398) tracks
-   fixing it properly.
+   **Run the gates bare, exactly as CI does: `mypy src/`, `ruff check src/ tests/`.**
+   `typecheck.yml` and `lint.yml` both run **Python 3.11** and pass no
+   `--python-version` override, so neither should you — an override makes the local
+   run check a target CI never checks, and hides genuine 3.11-vs-3.12 divergence.
+   An earlier revision of this file told agents to run
+   `mypy --python-version 3.12 src/`; that was a workaround for a venv provisioned on
+   the wrong Python, and it is withdrawn.
+   **If your environment cannot reproduce bare `mypy src/`, the environment is wrong,
+   not the command** — on 3.12, pip resolves a numpy whose stub carries an unguarded
+   PEP 695 `type` statement that mypy rejects under the pinned
+   `python_version = "3.11"`, aborting with **zero files in `src/` checked**.
+   `make lint` and `make typecheck` now run `scripts/check_tool_pins.py --check-env`
+   first and refuse to proceed when the interpreter or a pinned tool is not CI's
+   ([#398](https://github.com/ronsse/trellis-ai/issues/398)); `make env-check` runs
+   the report on its own. `TRELLIS_ALLOW_ENV_DRIFT=1` downgrades it to a warning for
+   deliberate work in a known-drifted environment — but a gate green under that flag
+   does not predict CI.
 4. Open a PR. **Merge only when all six workflows are green** — `lint`, `typecheck`,
    `tests` (3.11/3.12/3.13), `codeql`, `openapi`. `main` has no required status
    checks configured, so GitHub will *not* enforce this for you; the gate is the
@@ -115,10 +127,18 @@ records.*
 | [#351](https://github.com/ronsse/trellis-ai/issues/351) | **the ArcadeDB graph contract runs in no workflow** — the *blessed* substrate is untested anywhere | highest value in the lane |
 | [#350](https://github.com/ronsse/trellis-ai/issues/350) | `PgVectorStore` cannot create its own extension: `register_vector` is the pool's `on_connect`, so `_init_schema` is never reached | |
 | [#356](https://github.com/ronsse/trellis-ai/issues/356) | `tests/unit/stores/` runs in no workflow, and cannot simply be swept in | blocked on a capability probe |
-| [#398](https://github.com/ronsse/trellis-ai/issues/398) | local typecheck cannot reproduce CI on this box | unblocks every other agent |
+| [#398](https://github.com/ronsse/trellis-ai/issues/398) | nothing notices when the local environment stops being the one CI gates on | unblocks every other agent |
 
-#398 is small and pays for itself immediately: `mypy src/` currently **aborts having
-checked zero files and reads as clean**, which has cost multiple agents a false green.
+#398 was filed as "local typecheck cannot reproduce CI", and that half was
+environmental: the shared venv was provisioned on Python 3.12, which resolves a numpy
+whose stub mypy rejects under the pinned 3.11 target, so `mypy src/` aborted having
+**checked zero files in `src/`** — and the workaround that circulated in response,
+`--python-version 3.12`, made the local run check a target CI never checks. Rebuilding
+the venv on 3.11 fixes that instance. The durable half is that *nothing noticed*: the
+same venv also sat one patch behind the ruff pin, and #378's finding was that the older
+ruff stays green on code the newer one rejects. `scripts/check_tool_pins.py
+--check-env` now compares the running interpreter and the tools on PATH against the
+pins, and `make lint` / `make typecheck` refuse to run a gate that is not CI's.
 
 ### Lane E — keystone, design before code
 
