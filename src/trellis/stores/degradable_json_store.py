@@ -26,11 +26,25 @@ surface reports normal. Three routes reach that state:
    was absent is not degraded, and its first write replaces a file it
    never read. Same fingerprint, same guard: ``None`` is a fingerprint
    value, not the absence of one.
+4. **The fingerprint could not be taken.** ``stat`` failing is not the
+   same fact as the file being absent, and #471 found the two collapsed
+   into one ``None``: a store built while the path was absent, whose
+   later ``stat`` failed, compared ``None`` against ``None``, found them
+   equal, and let the write through — the compare-and-swap degrading to
+   no check at all, in silence. :class:`UnknownFileIdentity` is what the
+   two facts are now told apart by, and the guard refuses on it.
 
-Routes 2 and 3 are **transient** — re-read and redo — and the guard is a
-compare-and-swap, not a lock: two writers can still interleave between the
-check and the ``os.replace``. It closes the wide window and narrows the
-tiny one. Last-writer-wins remains the model.
+Routes 2, 3 and 4 are **transient** — re-read and redo — and the guard is
+a compare-and-swap, not a lock: two writers can still interleave between
+the check and the ``os.replace``. It closes the wide window and narrows
+the tiny one. Last-writer-wins remains the model.
+
+This file has now produced the same shape three times — an error
+condition collapsing into an indistinguishable "nothing here" value, in
+``_load``'s pre-#413 empty set, in ``__init__``'s pre-#444 ``exists()``,
+and in ``_fingerprint``'s pre-#471 ``None``. The rule the third one
+earns: **a guard that cannot see the filesystem refuses; it never
+reports "unchanged".**
 
 Why a base class rather than two copies
 ---------------------------------------
@@ -52,9 +66,14 @@ duplication it removed:
   argue different things — one about reviving suppressions the fitness
   loop made, the other about un-governing every mutation the missing
   policies covered. They are produced by the abstract hooks
-  :meth:`DegradableJsonStore._degraded_write_message` and
-  :meth:`DegradableJsonStore._stale_write_message`, which exist so that
-  every word of both stays in the subclass that means it.
+  :meth:`DegradableJsonStore._degraded_write_message`,
+  :meth:`DegradableJsonStore._stale_write_message` and
+  :meth:`DegradableJsonStore._unreadable_write_message`, which exist so
+  that every word of all three stays in the subclass that means it. The
+  *recovery* for the third is the exception and lives in the base
+  (:meth:`DegradableJsonStore._refuse_unreadable`): "look at the path and
+  its parent" is a fact about a filesystem, not about policies or
+  advisories, and there is nothing store-specific for a subclass to say.
 * **The write methods.** ``add`` / ``remove`` / ``put`` / ``put_many`` /
   ``suppress`` / ``restore`` / ``clear`` keep their own explicit,
   paired ``refuse_if_degraded()`` / ``refuse_if_stale()`` calls. Hoisting
@@ -82,7 +101,7 @@ import shlex
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, ClassVar, Generic, TypeVar
+from typing import Any, ClassVar, Generic, NoReturn, TypeVar
 
 import structlog
 from pydantic import BaseModel
@@ -100,6 +119,54 @@ RowT = TypeVar("RowT", bound=BaseModel)
 #: recognise a pattern (one renamed field shows up identically on every
 #: row), short enough that a cron log line stays readable.
 _MAX_REPORTED_ROWS = 3
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class UnknownFileIdentity:
+    """``stat`` failed, so the file's identity is *unknown* — not absent.
+
+    The distinction is the whole of #471. :meth:`DegradableJsonStore._fingerprint`
+    used to answer ``None`` for both "there is no file" and "I could not
+    look", and :meth:`DegradableJsonStore.refuse_if_stale` compares the
+    fingerprint taken at load against one taken before the write. A store
+    built while the path was absent (a normal fresh deployment) records
+    ``None``; if a later ``stat`` also failed — ``EACCES`` from a parent
+    that lost its execute bit, ``ELOOP`` from a symlink cycle, ``EIO`` or
+    ``ESTALE`` from a network mount — it recorded ``None`` again, the two
+    compared **equal**, and the compare-and-swap passed. The guard that
+    stands between a stale in-memory view and #413's fail-open on access
+    control disarmed itself precisely when it could not see the file.
+
+    Only one of those two facts is safe to write over. An absent file is
+    the ordinary first-write case and must stay writable, or every fresh
+    install refuses. An unreadable one is a state this process cannot
+    reason about, and :meth:`DegradableJsonStore.refuse_if_stale` refuses
+    on it — cheaply, because that refusal is documented as transient and
+    retryable, so the cost of being wrong is one retry against the cost of
+    a silent whole-file rewrite.
+
+    ``eq=False`` is load-bearing, not tidiness. With the generated
+    ``__eq__`` two independently-derived records of the *same* failure —
+    which is exactly what :meth:`DegradableJsonStore.refuse_if_stale` holds
+    when a store's ``stat`` keeps failing the same way — carry equal
+    ``detail`` and compare equal, reproducing the defect verbatim one type
+    later. Identity equality makes "unknown == unknown" impossible to
+    write by accident. The explicit ``isinstance`` branches in the guard
+    are the primary defence and this is the backstop; both are pinned by
+    test, because a backstop nothing exercises is a comment.
+    """
+
+    #: ``"PermissionError: [Errno 13] ..."`` — the exception, for the operator.
+    detail: str
+
+    def __str__(self) -> str:
+        return self.detail
+
+
+#: What :meth:`DegradableJsonStore._fingerprint` answers with. Three
+#: distinct facts, deliberately not two: a tuple is *this* file, ``None``
+#: is *no* file, and :class:`UnknownFileIdentity` is *don't know*.
+FileIdentity = tuple[int, int, int] | None | UnknownFileIdentity
 
 
 @dataclass(frozen=True, slots=True)
@@ -275,6 +342,23 @@ class DegradableJsonStore(ABC, Generic[RowT]):
     def _stale_write_message(self) -> str:
         """What this store loses if it rewrites a file that moved under it."""
 
+    @abstractmethod
+    def _unreadable_write_message(self, detail: str) -> str:
+        """What this store risks if it rewrites a file it cannot ``stat``.
+
+        Separate from :meth:`_stale_write_message` because that one asserts
+        the file *changed*, which here is not known and may be false. The
+        two refusals are the same stakes reached by different facts, and
+        printing the wrong fact to an operator sends them to look for a
+        concurrent writer that does not exist.
+
+        ``detail`` is the ``stat`` failure — ``"PermissionError: [Errno 13]
+        ..."`` — and every implementation must render it: it is the only
+        part of the message that says *why*, and it is the part that
+        distinguishes a permissions problem from a symlink cycle from a
+        flaky mount.
+        """
+
     def _reject_row(self, row: RowT) -> str | None:  # noqa: ARG002
         """Why ``row`` must not be filed, or ``None`` to file it.
 
@@ -317,7 +401,7 @@ class DegradableJsonStore(ABC, Generic[RowT]):
             self._degrade("unreadable_file", f"{type(exc).__name__}: {exc}")
         else:
             self._load()
-        self._loaded_fingerprint = self._fingerprint()
+        self._loaded_fingerprint: FileIdentity = self._fingerprint()
 
     # -- Public API --
 
@@ -383,14 +467,63 @@ class DegradableJsonStore(ABC, Generic[RowT]):
         closes the wide window (a store that loaded minutes ago, which is
         every nightly run) and narrows the tiny one; it does not make the
         write exclusive.
+
+        A fourth way the view stops matching the file is that we cannot
+        tell whether it does (#471), and that is checked **first and on
+        both operands**, before any comparison runs. Either side being
+        :class:`UnknownFileIdentity` means this process never learned what
+        the file is, and the only honest answer to "did it change?" is a
+        refusal. Deliberately not folded into the equality check: an
+        equality that happens to be false for the right reason is one
+        refactor away from being true for the wrong one, which is the
+        defect being fixed.
         """
-        if self._fingerprint() == self._loaded_fingerprint:
+        loaded = self._loaded_fingerprint
+        current = self._fingerprint()
+        # Two branches, not one over a tuple: each has to be independently
+        # removable to be independently observable, which is what the
+        # mutation tests on this guard rest on.
+        if isinstance(loaded, UnknownFileIdentity):
+            self._refuse_unreadable(loaded)
+        if isinstance(current, UnknownFileIdentity):
+            self._refuse_unreadable(current)
+        if current == loaded:
             return
         raise StaleStoreWriteError(
             self._stale_write_message(),
             store=self._store_label,
             path=str(self._path),
             recovery=self._stale_recovery,
+        )
+
+    def _refuse_unreadable(self, identity: UnknownFileIdentity) -> NoReturn:
+        """Refuse a write whose file could not be identified.
+
+        :class:`~trellis.errors.StaleStoreWriteError` rather than a new
+        error class or a bare ``OSError``: every surface that writes these
+        files already catches it (``trellis policy``, ``trellis analyze``,
+        ``POST /api/policies``) and renders its ``recovery``, and the fix
+        is the same shape — look, then retry. A fresh exception type would
+        escape all of them as a traceback, which is how a guard that
+        refuses correctly still ends up looking like a crash.
+
+        The ``recovery`` is **not** ``_stale_recovery``. That one names a
+        command that re-reads the store, which here would meet the same
+        unreadable path and report the same nothing. What an operator
+        needs is the path and its parent: mode, owner and symlink target
+        are between them the answer for ``EACCES``, ``ELOOP`` and
+        ``ENOTDIR`` alike. Both operands are ``shlex.quote``d for #427's
+        reason — a data dir containing a space otherwise word-splits into
+        a command that lists three wrong paths.
+        """
+        raise StaleStoreWriteError(
+            self._unreadable_write_message(identity.detail),
+            store=self._store_label,
+            path=str(self._path),
+            recovery=(
+                f"ls -ld -- {shlex.quote(str(self._path))} "
+                f"{shlex.quote(str(self._path.parent))}"
+            ),
         )
 
     # -- Persistence --
@@ -541,8 +674,15 @@ class DegradableJsonStore(ABC, Generic[RowT]):
             impact=self._degraded_impact,
         )
 
-    def _fingerprint(self) -> tuple[int, int, int] | None:
-        """Identity of the file as this store last saw it, ``None`` if absent.
+    def _fingerprint(self) -> FileIdentity:
+        """Identity of the file as this store last saw it.
+
+        Three answers, never two (#471). A ``(st_ino, st_mtime_ns,
+        st_size)`` tuple is *this* file; ``None`` is *no* file, and only
+        ``FileNotFoundError`` produces it; :class:`UnknownFileIdentity` is
+        every other ``OSError`` — *don't know*. Collapsing the last two
+        into ``None`` is what let ``refuse_if_stale`` compare ``None``
+        against ``None`` and pass.
 
         ``st_ino`` is the load-bearing part: every write here lands through
         ``os.replace`` from a fresh temp file, so a completed write by any
@@ -560,11 +700,20 @@ class DegradableJsonStore(ABC, Generic[RowT]):
         ``None`` is a value, not the absence of one: a store built while the
         path was absent compares ``None`` against the fingerprint of a file
         that has since appeared, and refuses.
+
+        ``FileNotFoundError`` is caught ahead of ``OSError`` and is the
+        **only** shape read as absence. ``NotADirectoryError`` in
+        particular is not: a path component that turned into a regular
+        file is a broken path, not an empty deployment, and it is one of
+        the errnos ``Path.exists`` swallows — the #444 door, which this
+        keeps shut on the guard side too.
         """
         try:
             st = self._path.stat()
-        except OSError:
+        except FileNotFoundError:
             return None
+        except OSError as exc:
+            return UnknownFileIdentity(f"{type(exc).__name__}: {exc}")
         return (st.st_ino, st.st_mtime_ns, st.st_size)
 
     def _save(self) -> None:

@@ -26,6 +26,7 @@ import ast
 import inspect
 import json
 import os
+import shlex
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -39,7 +40,10 @@ from trellis.schemas.advisory import Advisory, AdvisoryCategory, AdvisoryEvidenc
 from trellis.schemas.enums import Enforcement, PolicyType
 from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
 from trellis.stores.advisory_store import AdvisoryStore
-from trellis.stores.degradable_json_store import DegradableJsonStore
+from trellis.stores.degradable_json_store import (
+    DegradableJsonStore,
+    UnknownFileIdentity,
+)
 from trellis.stores.policy_store import PolicyStore
 
 
@@ -461,6 +465,7 @@ class TestAnIncompleteSubclassIsRefusedAtImport:
             "_row_id": staticmethod(lambda row: row.policy_id),
             "_degraded_write_message": lambda self, degradation: "degraded",
             "_stale_write_message": lambda self: "stale",
+            "_unreadable_write_message": lambda self, detail: "unreadable",
             **parameters,
         }
         return type("Probe", (DegradableJsonStore,), namespace)
@@ -499,3 +504,213 @@ class TestAnIncompleteSubclassIsRefusedAtImport:
     def test_the_shipped_stores_declare_every_parameter(self, case: StoreCase) -> None:
         for name in DegradableJsonStore._REQUIRED_PARAMETERS:
             assert getattr(case.cls, name)
+
+
+def _symlink_loop(path: Path) -> None:
+    """Make ``stat(path)`` fail with a real ``ELOOP``, no mocking anywhere.
+
+    Two symlinks pointing at each other. Chosen over the obvious
+    ``chmod 000`` on the parent because that one is a no-op for root and
+    so would skip silently in a container, and over a mocked ``stat``
+    because the claim under test is about a filesystem this code cannot
+    read — a mock proves the branch runs, not that the state exists.
+
+    Note what ``Path.exists()`` says about this path afterwards:
+    ``False``. That is #444's finding, and it is why the constructor
+    stopped using it.
+    """
+    partner = path.parent / f"{path.name}.loop"
+    path.symlink_to(partner)
+    partner.symlink_to(path)
+
+
+class TestAnUnreadableFingerprintRefusesOnEveryStore:
+    """#471: ``None`` meant both "no file" and "could not look", and the
+    compare-and-swap compared them equal.
+
+    The reachable shape is two ordinary states in sequence, neither of
+    which degrades the store: constructed while the path was **absent** (a
+    deployment that has never written a policy — ``_loaded_fingerprint``
+    is ``None``), and a later ``stat`` that **fails** (``EACCES`` from a
+    parent that lost its execute bit, ``ELOOP``, ``EIO`` or ``ESTALE``
+    from a network mount — also ``None``). ``None == None``, the guard
+    returned, and the whole-file rewrite that
+    :class:`~trellis.errors.StaleStoreWriteError` exists to prevent went
+    through.
+
+    Why one *failing* ``stat`` was never enough to catch it, and why the
+    mutant sweeps in #470 did not: a single failure compares a real
+    fingerprint against ``None``, which is unequal, so the guard refuses
+    for the right reason by accident. Only a **double** failure reaches
+    the defect, and nothing modelled one.
+    """
+
+    @pytest.mark.parametrize("case", CASES, ids=CASE_IDS)
+    def test_a_double_stat_failure_refuses_rather_than_passing(
+        self, tmp_path: Path, case: StoreCase
+    ) -> None:
+        """The headline. Both ``_fingerprint`` calls fail; the write refuses."""
+        path = tmp_path / "store.json"
+        store = case.cls(path)  # absent at construction: a normal fresh install
+        assert store.is_degraded is False
+        assert store._loaded_fingerprint is None
+
+        _symlink_loop(path)
+        assert isinstance(store._fingerprint(), UnknownFileIdentity), (
+            "the double failure this test exists for was not constructed"
+        )
+
+        with pytest.raises(StaleStoreWriteError):
+            store.refuse_if_stale()
+
+    @pytest.mark.parametrize("case", CASES, ids=CASE_IDS)
+    def test_the_write_path_surfaces_the_refusal_and_not_a_traceback(
+        self, tmp_path: Path, case: StoreCase
+    ) -> None:
+        """A caller must meet the guard, not the writer's internals.
+
+        Before the fix the guard passed and the call fell through to
+        ``atomic_write_text``, which raised ``RuntimeError`` from
+        ``Path.resolve``. So the *refusal* was silent and what the operator
+        actually got was a crash from three frames below the guard that
+        should have stopped them — with none of the recovery advice every
+        surface renders off :class:`~trellis.errors.StoreWriteRefusedError`.
+        """
+        path = tmp_path / "store.json"
+        store = case.cls(path)
+        _symlink_loop(path)
+
+        with pytest.raises(StaleStoreWriteError):
+            case.write(store)
+
+    @pytest.mark.parametrize("case", CASES, ids=CASE_IDS)
+    def test_an_unreadable_fingerprint_recorded_at_load_also_refuses(
+        self, tmp_path: Path, case: StoreCase
+    ) -> None:
+        """The *loaded* operand, and the message is what makes it observable.
+
+        A store constructed over an unreadable path records
+        :class:`UnknownFileIdentity` as its loaded identity. It is also
+        degraded, so every shipped write path refuses one guard earlier;
+        the stale guard is public and documented as independently callable,
+        so it is asserted directly.
+
+        The path is then cleared **completely**, leaving it absent, which
+        is the arrangement that makes this discriminating in both
+        directions. Before the fix the recorded identity was ``None`` and
+        the current one is ``None``, so the guard passed — a store that
+        never read its file being told it is unchanged. And a build that
+        kept the fix but dropped the ``loaded`` branch would still refuse
+        (``UnknownFileIdentity`` equals nothing) while *saying* the file
+        changed after this process read it, which is a claim nothing here
+        is entitled to make. Only the message separates those two, so the
+        message is the assertion.
+        """
+        path = tmp_path / "store.json"
+        _symlink_loop(path)
+        store = case.cls(path)
+        assert store.is_degraded is True
+        assert isinstance(store._loaded_fingerprint, UnknownFileIdentity)
+
+        path.unlink()
+        (path.parent / f"{path.name}.loop").unlink()
+        assert store._fingerprint() is None, "the path must now read as absent"
+
+        with pytest.raises(StaleStoreWriteError) as excinfo:
+            store.refuse_if_stale()
+        assert "could not be read" in str(excinfo.value)
+        assert "changed after this process read it" not in str(excinfo.value)
+
+    @pytest.mark.parametrize("case", CASES, ids=CASE_IDS)
+    def test_an_absent_file_stays_writable(
+        self, tmp_path: Path, case: StoreCase
+    ) -> None:
+        """The anti-vacuity half, and the reason the fix is not "refuse on ``None``".
+
+        Absence is the ordinary first-write state. A ``_fingerprint`` that
+        answered :class:`UnknownFileIdentity` for it would make every test
+        above pass while refusing every write on every fresh install, which
+        is the failure #444's own fix had to avoid in the constructor.
+        """
+        path = tmp_path / "store.json"
+        store = case.cls(path)
+
+        assert store._fingerprint() is None
+        store.refuse_if_stale()  # must not raise
+        case.write(store)  # and the first write must land
+        assert path.exists()
+
+    @pytest.mark.parametrize("case", CASES, ids=CASE_IDS)
+    def test_the_refusal_names_the_cause_and_a_command_that_shows_the_path(
+        self, tmp_path: Path, case: StoreCase
+    ) -> None:
+        """What the operator reads has to separate this from a stale write.
+
+        The stale message asserts the file *changed*; here nothing knows
+        that, and printing it would send someone hunting a concurrent
+        writer that may not exist. The recovery is neither the stale one (a
+        re-read, which meets the same unreadable path and reports the same
+        nothing) nor the degraded one (an ``mv``, which would move a file
+        this process cannot even see).
+        """
+        path = tmp_path / "store.json"
+        store = case.cls(path)
+        _symlink_loop(path)
+
+        with pytest.raises(StaleStoreWriteError) as excinfo:
+            store.refuse_if_stale()
+
+        message = str(excinfo.value)
+        assert "could not be read" in message
+        assert "OSError" in message, "the stat failure itself must reach the operator"
+        assert "changed after this process read it" not in message
+
+        recovery = excinfo.value.recovery
+        assert recovery is not None
+        assert recovery.startswith("ls -ld -- ")
+        assert str(path) in recovery
+        assert str(path.parent) in recovery
+
+    def test_a_data_dir_containing_a_space_stays_one_command(
+        self, tmp_path: Path
+    ) -> None:
+        """#427's rule, applied to the one recovery string this fix adds.
+
+        An unquoted path with a space word-splits into an ``ls`` over four
+        operands rather than two — an unrunnable command handed to the
+        operator *as* the fix.
+        """
+        directory = tmp_path / "my staging dir"
+        directory.mkdir()
+        path = directory / "store.json"
+        store = PolicyStore(path)
+        _symlink_loop(path)
+
+        with pytest.raises(StaleStoreWriteError) as excinfo:
+            store.refuse_if_stale()
+
+        recovery = excinfo.value.recovery
+        assert recovery is not None
+        assert shlex.split(recovery) == ["ls", "-ld", "--", str(path), str(directory)]
+
+    def test_two_records_of_the_same_failure_are_never_equal(self) -> None:
+        """``eq=False`` on :class:`UnknownFileIdentity`, pinned.
+
+        The explicit ``isinstance`` branches in ``refuse_if_stale`` are the
+        primary defence; this is the backstop, and a backstop nothing
+        exercises is a comment. With the dataclass-generated ``__eq__``,
+        two records of the *same* ``stat`` failure — which is precisely
+        what the guard holds when a path stays unreadable between load and
+        write — compare equal, and the defect returns verbatim one type
+        later.
+        """
+        detail = "PermissionError: [Errno 13] Permission denied: '/x'"
+        assert UnknownFileIdentity(detail) != UnknownFileIdentity(detail)
+        one = UnknownFileIdentity(detail)
+        # Identity equality is retained: the *same* record still compares
+        # equal, which is what keeps ``eq=False`` a narrowing of equality
+        # rather than a type that is simply broken. It is only two
+        # separately-derived records that must not collapse.
+        same_record = one
+        assert same_record == one
+        assert str(one) == detail
