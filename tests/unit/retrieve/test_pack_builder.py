@@ -955,6 +955,50 @@ class TestAdvisoryCap:
         beyond_the_cap = next(i for i in pack.items if i.item_id == "d5")
         assert beyond_the_cap.injected_advisory_ids == []
 
+    def test_sectioned_provenance_is_stamped_only_from_served_advisories(
+        self, tmp_path: Path
+    ) -> None:
+        """The same commitment on the other pack kind, asserted separately.
+
+        The two paths stamp provenance from two different local variables,
+        so the flat test above says nothing about this one: swapping the
+        sectioned call to the *uncapped* match set survives the whole suite
+        without this test. That asymmetry — a rule covered on one twin and
+        not the other — is the shape #447 found, and the sectioned stamp is
+        the one that rides ``PACK_ASSEMBLED.payload["sections"][]
+        ["injected_advisory_ids"]`` into the fitness-loop join.
+        """
+        store = AdvisoryStore(tmp_path / "adv.json")
+        for i in range(6):
+            store.put(
+                _make_advisory(
+                    scope="global",
+                    category=AdvisoryCategory.ENTITY,
+                    confidence=round(0.9 - i * 0.05, 4),
+                    entity_id=f"d{i}",
+                    advisory_id=f"adv-{i}",
+                )
+            )
+        s = _make_strategy("kw", [_item(f"d{i}", 0.9 - i * 0.01) for i in range(6)])
+
+        pack = PackBuilder(strategies=[s], advisory_store=store).build_sectioned(
+            "q", sections=[SectionRequest(name="all")]
+        )
+
+        items = [item for section in pack.sections for item in section.items]
+        assert {item.item_id for item in items} == {f"d{i}" for i in range(6)}, (
+            "fixture must route every item into the section, or the assertion"
+            " below cannot distinguish a capped stamp from a routed-away item"
+        )
+        stamped = {
+            item.item_id: list(item.injected_advisory_ids)
+            for item in items
+            if item.injected_advisory_ids
+        }
+        assert stamped == {f"d{i}": [f"adv-{i}"] for i in range(5)}
+        beyond_the_cap = next(i for i in items if i.item_id == "d5")
+        assert beyond_the_cap.injected_advisory_ids == []
+
 
 class TestAdvisoryCapTelemetry:
     """``advisories_matched`` says whether the cap bound on this pack."""

@@ -466,6 +466,28 @@ class TestAdvisoryEvidenceIsRenderedOnce:
         assert advisories[0].advisory_id in lines[0]
         assert advisories[1].advisory_id in lines[1]
 
+    def test_the_formatter_imposes_no_bound_of_its_own(self) -> None:
+        """The cap lives at assembly; this renders what it is given.
+
+        Stated in the docstring since #392 and load-bearing: a second cut
+        here would let the markdown surface and ``pack.advisories`` disagree
+        about what the pack holds, and the header would then count rows it
+        did not print. Asserted at **seven** — above ``_ADVISORY_MAX_COUNT``
+        — so a render-side slice at the cap value cannot satisfy it.
+        """
+        advisories = [
+            self._generator_shaped(f"Finding {i} (n=5, effect=+60%).") for i in range(7)
+        ]
+
+        result = format_advisories_as_markdown(advisories)
+
+        numbered = [
+            line for line in result.splitlines() if line[:1].isdigit() and ". `" in line
+        ]
+        assert len(numbered) == 7
+        assert "## Advisories (7 suggestions based on past outcomes)" in result
+        assert all(advisory.advisory_id in result for advisory in advisories)
+
 
 # ---------------------------------------------------------------------------
 # Progressive disclosure — index lines, index packs, batch fetch (#305)
