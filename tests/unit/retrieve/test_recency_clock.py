@@ -33,7 +33,20 @@ from trellis.ingest_corpus.conversations import (
     sync_conversations,
 )
 from trellis.retrieve.embed_ingest_hook import EMBED_ON_INGEST_FLAG
-from trellis.retrieve.strategies import KeywordSearch, SemanticSearch
+from trellis.retrieve.observation_strategy import ObservationSearch
+from trellis.retrieve.pack_builder import PackBuilder, _item_attribution
+from trellis.retrieve.strategies import (
+    RECENCY_CLOCK_METADATA_KEY,
+    RECENCY_CLOCK_NONE,
+    RECENCY_CLOCK_ROW,
+    RECENCY_CLOCK_SOURCE,
+    GraphSearch,
+    KeywordSearch,
+    SemanticSearch,
+)
+from trellis.schemas.pack import PackItem
+from trellis.schemas.well_known import OBSERVATION
+from trellis.stores.base.event_log import EventType
 from trellis.stores.sqlite.document import SQLiteDocumentStore
 from trellis.stores.sqlite.event_log import SQLiteEventLog
 from trellis.stores.sqlite.vector import SQLiteVectorStore
@@ -65,6 +78,13 @@ def _embed(text: str) -> list[float]:
         vector[digest[0] % _DIMS] += 1.0
     norm = sum(v * v for v in vector) ** 0.5 or 1.0
     return [v / norm for v in vector]
+
+
+@pytest.fixture
+def event_log(tmp_path: Path) -> Any:
+    log = SQLiteEventLog(tmp_path / "pack_events.db")
+    yield log
+    log.close()
 
 
 @pytest.fixture
@@ -252,7 +272,7 @@ class TestAFutureSourceStampCannotBuyFreshness:
     def _resolved(self, bag: dict[str, Any]) -> Any:
         from trellis.retrieve.strategies import resolve_recency_stamp
 
-        return resolve_recency_stamp(bag)
+        return resolve_recency_stamp(bag).stamp
 
     def test_semantic_axis_gets_the_same_guard(self, ingested: dict[str, Any]) -> None:
         poisoned = {
@@ -277,7 +297,7 @@ class TestResolveRecencyStamp:
             resolve_recency_stamp,
         )
 
-        return resolve_recency_stamp(*args)
+        return resolve_recency_stamp(*args).stamp
 
     def test_metadata_updated_at_wins(self) -> None:
         assert (
@@ -383,3 +403,320 @@ class TestSemanticAxisResidual:
             created_at=datetime.now(UTC).isoformat(),
         )
         assert row["metadata"]["created_at"] == "last tuesday"
+
+
+class TestRecencyClockLabel:
+    """Which of the three branches ran is reported, per item (#465).
+
+    ``resolve_recency_stamp`` picks between the metadata bag's source clock,
+    a store row column, and nothing at all, and the three are not close
+    together: source-vs-row was a median 2.20x (max 3.17x) apart in the
+    resulting multiplier across the 148 rows #417 measured, and *nothing*
+    fails **open** at ``1 / floor`` = 3.3x more than the row's own clock.
+    An item's rank can therefore be dominated by which branch fired.
+
+    Same commitment as ``graph_selection`` (#371): which branch ran is a
+    property of the served record, not an inference about which build was
+    deployed that week.
+    """
+
+    def _resolve(self, *args: Any) -> str:
+        from trellis.retrieve.strategies import resolve_recency_stamp
+
+        return resolve_recency_stamp(*args).clock
+
+    def test_metadata_updated_at_labels_source(self) -> None:
+        assert self._resolve({"updated_at": "2024-01-01"}, "2026-01-01") == (
+            RECENCY_CLOCK_SOURCE
+        )
+
+    def test_metadata_created_at_labels_source(self) -> None:
+        assert self._resolve({"created_at": "2023-01-01"}, "2026-01-01") == (
+            RECENCY_CLOCK_SOURCE
+        )
+
+    def test_a_row_column_labels_row(self) -> None:
+        assert self._resolve({}, "2026-01-01") == RECENCY_CLOCK_ROW
+
+    def test_falling_through_an_unusable_source_clock_labels_row(self) -> None:
+        # The label follows the candidate that *won*, not the one that was
+        # preferred — otherwise a hostile stamp would be reported as the
+        # clock in use while the column was the one actually read.
+        assert self._resolve({"updated_at": "2099-01-01"}, "2026-01-01") == (
+            RECENCY_CLOCK_ROW
+        )
+
+    def test_nothing_usable_labels_none(self) -> None:
+        assert self._resolve({"updated_at": "nope"}, "also nope") == RECENCY_CLOCK_NONE
+
+    def test_no_candidates_at_all_labels_none(self) -> None:
+        assert self._resolve({}) == RECENCY_CLOCK_NONE
+
+    def test_the_label_and_the_stamp_come_from_one_walk(self) -> None:
+        # The pair is resolved once. A second traversal to derive the label
+        # is how two readers of one rule drift apart (#325/#326/#443).
+        from trellis.retrieve.strategies import resolve_recency_stamp
+
+        resolved = resolve_recency_stamp(
+            {"updated_at": "2099-01-01", "created_at": "2023-01-01"}, "2026-01-01"
+        )
+        assert resolved == ("2023-01-01", RECENCY_CLOCK_SOURCE)
+
+
+class TestBothAxesStampTheClock:
+    """A stamp on one axis only would re-open the #417 split it closed."""
+
+    def _keyword_clock(self, doc_row: dict[str, Any]) -> Any:
+        store = MagicMock()
+        store.search.return_value = [{**doc_row, "rank": -0.8}]
+        item = KeywordSearch(store).search("roth")[0]
+        return item.metadata.get(RECENCY_CLOCK_METADATA_KEY)
+
+    def _semantic_clock(self, vector_row: dict[str, Any]) -> Any:
+        store = MagicMock()
+        store.query.return_value = [
+            {"item_id": vector_row["item_id"], "score": 0.8, **vector_row}
+        ]
+        item = SemanticSearch(store, lambda _text: [0.0] * _DIMS).search("roth")[0]
+        return item.metadata.get(RECENCY_CLOCK_METADATA_KEY)
+
+    def test_both_axes_report_source_for_one_ingested_conversation(
+        self, ingested: dict[str, Any]
+    ) -> None:
+        # The document ``TestBothAxesReadTheSameClock`` proves scores
+        # identically on both axes now says *why* on both axes too.
+        assert self._keyword_clock(ingested["document"]) == RECENCY_CLOCK_SOURCE
+        assert self._semantic_clock(ingested["vector_row"]) == RECENCY_CLOCK_SOURCE
+
+    def test_keyword_axis_reports_row_without_a_source_clock(self) -> None:
+        # The overwhelming majority of documents.
+        row = {
+            "doc_id": "d1",
+            "content": "no source clock here",
+            "metadata": {},
+            "updated_at": datetime.now(UTC).isoformat(),
+        }
+        assert self._keyword_clock(row) == RECENCY_CLOCK_ROW
+
+    def test_keyword_axis_reports_row_after_falling_through(self) -> None:
+        row = {
+            "doc_id": "d1",
+            "content": "hostile source clock",
+            "metadata": {"updated_at": "2099-01-01T00:00:00+00:00"},
+            "updated_at": datetime.now(UTC).isoformat(),
+        }
+        assert self._keyword_clock(row) == RECENCY_CLOCK_ROW
+
+    @pytest.mark.parametrize(
+        "stamp",
+        ["2099-01-01T00:00:00+00:00", "last tuesday"],
+        ids=["future", "garbage"],
+    )
+    def test_the_semantic_residual_is_now_a_query_not_a_code_read(
+        self, stamp: str
+    ) -> None:
+        """The finding #465 exists for.
+
+        ``TestSemanticAxisResidual`` pins that a document whose own
+        ``created_at`` is unusable reaches the semantic axis with nothing to
+        fall through to and is served **undecayed** — the maximum multiplier,
+        exactly as with no guard at all. That divergence from the keyword
+        axis (which floors the same row) was invisible in the served record
+        and was found by reading code. It is now a value on the item.
+        """
+        row = {
+            "item_id": "v1",
+            "metadata": {"updated_at": stamp, "created_at": stamp},
+        }
+        assert self._semantic_clock(row) == RECENCY_CLOCK_NONE
+
+    def test_a_stored_key_cannot_forge_the_keyword_label(self) -> None:
+        # Stamped after the metadata splat, for the #433 reason: document
+        # metadata is an open bag, and this is a fact about *this* search.
+        row = {
+            "doc_id": "d1",
+            "content": "a document that lies about its own clock",
+            "metadata": {RECENCY_CLOCK_METADATA_KEY: RECENCY_CLOCK_SOURCE},
+            "updated_at": datetime.now(UTC).isoformat(),
+        }
+        assert self._keyword_clock(row) == RECENCY_CLOCK_ROW
+
+    def test_a_stored_key_cannot_forge_the_semantic_label(self) -> None:
+        # Matters more here: a vector row's metadata is an embed-time
+        # snapshot of the document's own bag (#338), so anything the
+        # document carried is in it.
+        row = {
+            "item_id": "v1",
+            "metadata": {
+                RECENCY_CLOCK_METADATA_KEY: RECENCY_CLOCK_ROW,
+                "created_at": "2024-06-01T10:00:00Z",
+            },
+        }
+        assert self._semantic_clock(row) == RECENCY_CLOCK_SOURCE
+
+
+class TestRecencyClockReachesTheServedRecord:
+    """The emission half, not only the resolution half.
+
+    #447 shipped because the *filtering* half of five gates was well covered
+    and the *emission* half was not. These assert through a real
+    ``PackBuilder.build`` against a real event log: the value is on the item
+    the caller is handed **and** in ``PACK_ASSEMBLED.injected_items[]``.
+    """
+
+    def _build(self, event_log: SQLiteEventLog) -> Any:
+        source_row = {
+            "doc_id": "doc-source",
+            "content": "a custodial roth needs the child to have earned income",
+            "metadata": {"created_at": _SOURCE_CREATED},
+            "rank": -0.9,
+            "updated_at": datetime.now(UTC).isoformat(),
+        }
+        row_row = {
+            "doc_id": "doc-row",
+            "content": "an ordinary memory with no source clock of its own",
+            "metadata": {},
+            "rank": -0.8,
+            "updated_at": datetime.now(UTC).isoformat(),
+        }
+        document_store = MagicMock()
+        document_store.search.return_value = [source_row, row_row]
+
+        vector_store = MagicMock()
+        vector_store.query.return_value = [
+            {
+                "item_id": "vec-none",
+                "score": 0.7,
+                "metadata": {
+                    "content": "a vector row whose own clock cannot be parsed",
+                    "created_at": "last tuesday",
+                },
+            }
+        ]
+        builder = PackBuilder(
+            strategies=[
+                KeywordSearch(document_store),
+                SemanticSearch(vector_store, lambda _text: [0.0] * _DIMS),
+            ],
+            event_log=event_log,
+        )
+        return builder.build("roth")
+
+    def test_every_served_item_carries_its_clock(
+        self, event_log: SQLiteEventLog
+    ) -> None:
+        pack = self._build(event_log)
+        served = {i.item_id: i.metadata[RECENCY_CLOCK_METADATA_KEY] for i in pack.items}
+        assert served == {
+            "doc-source": RECENCY_CLOCK_SOURCE,
+            "doc-row": RECENCY_CLOCK_ROW,
+            "vec-none": RECENCY_CLOCK_NONE,
+        }
+
+    def test_the_emitted_event_carries_it_too(self, event_log: SQLiteEventLog) -> None:
+        self._build(event_log)
+        events = event_log.get_events(event_type=EventType.PACK_ASSEMBLED, limit=10)
+        assert len(events) == 1
+        rows = {r["item_id"]: r for r in events[0].payload["injected_items"]}
+        assert rows["doc-source"][RECENCY_CLOCK_METADATA_KEY] == RECENCY_CLOCK_SOURCE
+        assert rows["doc-row"][RECENCY_CLOCK_METADATA_KEY] == RECENCY_CLOCK_ROW
+        assert rows["vec-none"][RECENCY_CLOCK_METADATA_KEY] == RECENCY_CLOCK_NONE
+
+    def test_an_item_from_another_axis_carries_no_clock(self) -> None:
+        """Absent, not defaulted — the same convention ``node_role`` uses.
+
+        Only the two document-backed axes resolve through
+        ``resolve_recency_stamp``. A graph item labelled ``"row"`` would make
+        the field a statement about the filler rather than about the corpus.
+        """
+        item = PackItem(
+            item_id="n1",
+            item_type="entity",
+            excerpt="a graph node with a real excerpt",
+            relevance_score=1.0,
+            metadata={"source_strategy": "graph"},
+        )
+        assert RECENCY_CLOCK_METADATA_KEY not in _item_attribution(item)
+
+
+class TestOnlyTheTwoResolverAxesStampAClock:
+    """Absence at the *source*, not only in the forwarder (gate on #465).
+
+    ``TestRecencyClockReachesTheServedRecord`` pins that ``_item_attribution``
+    omits the key for an item that does not carry it — the *omission
+    mechanism*. That is not the same claim as **no other axis stamps one**,
+    and it cannot be: it hand-builds a ``PackItem``, so adding a
+    ``recency_clock`` to ``GraphSearch`` or ``ObservationSearch`` leaves it
+    green (verified: both mutants survive the full suite).
+
+    The rule the docstrings state is the stronger one — only the two axes
+    that route through ``resolve_recency_stamp`` have a branch to report, and
+    a graph or observation item labelled ``"row"`` would describe the filler
+    rather than the corpus (#363/#385/#388). Pin it where it is decided, by
+    running the real strategies.
+    """
+
+    def test_graph_axis_stamps_no_clock(self) -> None:
+        store = MagicMock()
+        del store.execute_node_query
+        store.query.return_value = [
+            {
+                "node_id": f"n{i}",
+                "node_type": "concept",
+                "properties": {"name": f"node {i} with a real substantive excerpt"},
+            }
+            for i in range(3)
+        ]
+        items = GraphSearch(store).search("anything")
+        assert items
+        for item in items:
+            assert RECENCY_CLOCK_METADATA_KEY not in item.metadata
+
+    def test_observation_axis_stamps_no_clock(self) -> None:
+        store = MagicMock()
+        del store.get_nodes_bulk
+        store.get_edges.side_effect = lambda node_id, **_kw: (
+            [{"target_id": "obs1"}] if node_id == "dataset:x" else []
+        )
+        store.get_node.side_effect = lambda node_id: (
+            {
+                "node_id": "obs1",
+                "node_type": OBSERVATION,
+                "node_role": "semantic",
+                "properties": {
+                    "subject_entity_id": "dataset:x",
+                    "subject_entity_type": "Dataset",
+                    "observer_agent_id": "test-agent",
+                    "content": "row_count = 41823 on the orders table",
+                    "confidence": 0.9,
+                    "observed_at": datetime.now(UTC).isoformat(),
+                },
+            }
+            if node_id == "obs1"
+            else None
+        )
+        items = ObservationSearch(graph_store=store).search(
+            "anything", filters={"subject_entity_id": "dataset:x"}
+        )
+        assert items
+        for item in items:
+            assert RECENCY_CLOCK_METADATA_KEY not in item.metadata
+
+
+class TestTheWireContractIsPinnedByLiteral:
+    """The field is read back out of ``PACK_ASSEMBLED``, so its *spelling*
+    is the contract — not just the constants the tests import.
+
+    Every other assertion in this file goes through
+    ``RECENCY_CLOCK_METADATA_KEY`` / ``RECENCY_CLOCK_SOURCE`` and friends, so
+    renaming any of their **values** renames the emitted payload key or its
+    enum values with the whole suite green (verified: renaming the key
+    survives 1686 tests). ``graph_selection`` does not have that hole — its
+    key literal is spelled out in ``test_graph_seeding.py``.
+    """
+
+    def test_the_key_and_the_three_values_are_spelled_out(self) -> None:
+        assert RECENCY_CLOCK_METADATA_KEY == "recency_clock"
+        assert RECENCY_CLOCK_SOURCE == "source"
+        assert RECENCY_CLOCK_ROW == "row"
+        assert RECENCY_CLOCK_NONE == "none"
