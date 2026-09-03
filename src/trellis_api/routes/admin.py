@@ -250,8 +250,10 @@ _ADVISORY_REFUSED_STATUS = 409
             "description": (
                 "Nothing was generated and nothing was written: the advisory "
                 "store loaded degraded, the file changed under the request, "
-                "or the deployment has no stores_dir. The body's `code` says "
-                "which."
+                "or the deployment has no stores_dir. A `code` says which — "
+                "`degraded_store` and `stores_dir_unconfigured` at the top "
+                "level beside `status`, `stale_store_write` under `detail`, "
+                "which is the shape that arm has answered since #438."
             )
         }
     },
@@ -268,8 +270,11 @@ def generate_advisories(
     then stores deterministic advisories for delivery alongside packs.
 
     Every arm that wrote nothing answers 409, never 200, and names itself
-    in the body's `code`: `degraded_store`, `stale_store_write` or
-    `stores_dir_unconfigured`.
+    with a `code`. Two of the three carry it at the top level beside
+    `status` — `degraded_store` and `stores_dir_unconfigured`. The third,
+    `stale_store_write`, carries it under `detail`: that arm has answered
+    409 since #438 and its body shape is deliberately unchanged here, so
+    a client reading all three wants `.code // .detail.code`.
     """
     # This docstring is the endpoint's public API description (it is what
     # ``scripts/generate_openapi.py`` puts in ``docs/api/v1.yaml``), so the

@@ -247,12 +247,17 @@ curl -X POST -H "X-API-Key: $TRELLIS_API_KEY" \
 ```
 
 A run that generated and wrote nothing answers **409**, never 200, and
-names which refusal in the body's `code` — `degraded_store` (the file
-could not be read; look at it), `stale_store_write` (another writer got
-there first; retry), or `stores_dir_unconfigured`. Scripting this
-endpoint on `response.ok` alone was safe for neither of the first two
-until #484: the body said `"status": "degraded"` while the status line
-said success.
+names which refusal in a `code`. Two of the three sit at the top level
+of the body beside `status` — `degraded_store` (the file could not be
+read; go and look at it) and `stores_dir_unconfigured`. The third,
+`stale_store_write` (another writer got there first; retry), sits under
+`detail`, the shape that arm has answered since #438 and which #484
+deliberately left alone — so read the code as `.code // .detail.code`,
+not as `.code`.
+
+Only the *first and third* were ever unsafe to script on `response.ok`:
+the stale arm has answered 409 since #438, while those two returned 200
+with `"status": "degraded"` / `"status": "error"` in the body until #484.
 
 ### 2. Noise demote
 
