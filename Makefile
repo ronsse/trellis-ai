@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help setup install install-dev lint format typecheck test check clean build publish-check verify-wheel hooks hooks-run fix openapi openapi-check secrets-check docker-build
+.PHONY: help setup install install-dev lint format typecheck test check clean build publish-check verify-wheel hooks hooks-run fix openapi openapi-check secrets-check docker-build env-check
 
 # Git-derived PEP 440 version for the working tree, e.g. 0.9.0.dev157+gd9939e8ee.
 # The Docker build context excludes .git, so this is the only way an image can
@@ -31,7 +31,24 @@ fix: ## Auto-fix everything pre-commit can fix (ruff format + ruff --fix + white
 	python -m pre_commit run --all-files || true
 	@echo "Any remaining failures above need manual attention."
 
-lint: ## Run linting (matches CI: lint rules + formatting)
+# Both gates below claim to "match CI". Nothing checked that until #398: the
+# shared venv drifted onto a Python version CI never runs the gates on, and
+# onto a ruff one patch behind the pin, so `make lint` and `make typecheck`
+# reported on a different gate from the one that decides the PR — `mypy src/`
+# aborting having checked ZERO files in src/, which several agents read as
+# clean. A target nobody invokes cannot catch that, so `env-check` is a
+# PREREQUISITE of both gates rather than something to remember.
+#
+# Deliberately NOT a prerequisite of `test`: tests.yml runs the full
+# 3.11/3.12/3.13 matrix, so a test run on 3.12 is a legitimate thing to do
+# and demanding the gate version there would be false.
+#
+# TRELLIS_ALLOW_ENV_DRIFT=1 downgrades it to a warning for deliberate work in
+# a known-drifted environment.
+env-check: ## Verify this environment runs the same gates as CI (#398)
+	python scripts/check_tool_pins.py --check-env
+
+lint: env-check ## Run linting (matches CI: lint rules + formatting)
 	ruff check src/ tests/
 	ruff format --check src/ tests/
 
@@ -39,7 +56,7 @@ format: ## Format code
 	ruff format src/ tests/
 	ruff check --fix src/ tests/
 
-typecheck: ## Run type checking
+typecheck: env-check ## Run type checking
 	mypy src/
 
 test: ## Run tests

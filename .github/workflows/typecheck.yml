@@ -15,4 +15,14 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install -e ".[dev]"
+
+      # This job is the reference environment the #398 parity check describes:
+      # `.[dev]` installs BOTH pinned tools, so unlike lint.yml neither arm of
+      # the tool-version comparison degrades to an "absent" note. Running it
+      # here is what stops that arm from being vacuously green everywhere.
+      - run: python scripts/check_tool_pins.py --check-env
+
+      # Bare, with no --python-version override. The override that circulated
+      # in agent instructions made the local run check a target CI never
+      # checks; the step above is what makes bare `mypy src/` reproducible.
       - run: mypy src/

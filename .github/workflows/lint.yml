@@ -47,8 +47,14 @@ jobs:
       # disagree about a tool version. The mirrors that cannot be eliminated
       # (pre-commit's `rev:`) are verified rather than asserted — three
       # comments claimed a sync that had silently stopped holding (#378).
-      - name: Check tool pins agree across the repo
-        run: python scripts/check_tool_pins.py
+      #
+      # `--check-env` additionally compares the *running* environment against
+      # those pins (#398). Here that proves the ruff resolved two steps up is
+      # the pinned one and that this job runs the declared gate Python; mypy
+      # is not installed in this job and is reported as an absent note, never
+      # a failure — see the script's severity rules.
+      - name: Check tool pins agree across the repo, and that this env matches
+        run: python scripts/check_tool_pins.py --check-env
 
       - run: ruff check src/ tests/
       # Formatting drifted to 25 files before this gate existed: `make format`
