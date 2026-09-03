@@ -9,6 +9,7 @@ from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
 
+from trellis.core.path_presence import path_is_present
 from trellis.errors import StoreWriteRefusedError
 from trellis.mutate import resolve_policy_path
 from trellis.schemas.enums import Enforcement, PolicyType
@@ -203,7 +204,14 @@ def list_policies(
     # Distinguish the two ways of getting an empty answer. Enforcement
     # deliberately does not (see trellis.mutate.policy_source); here, where
     # a human is asking once, it is cheap and it is the question they mean.
-    file_present = store.path.exists()
+    # ``path_is_present``, not ``Path.exists()``: a file behind a symlink
+    # loop or a non-directory path component is broken, not absent, and
+    # reporting it as absent to the one surface an operator asks the
+    # question at is the #479 laundering in miniature. Unreadable always
+    # arrives here alongside a ``store_degradation``, so the two fields
+    # together say "there is a file and it will not load" rather than the
+    # contradictory "no file, and it is damaged".
+    file_present = path_is_present(store.path)
 
     if output_format == "json":
         payload: dict[str, Any] = {

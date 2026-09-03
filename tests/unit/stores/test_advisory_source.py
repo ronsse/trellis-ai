@@ -27,6 +27,13 @@ from typing import Any
 import pytest
 from structlog.testing import capture_logs
 
+from tests.unreadable_paths import (
+    UNREADABLE_PATH_IDS,
+    UNREADABLE_PATH_SHAPES,
+    UnreadablePathShape,
+    unreadable,
+)
+from trellis.errors import DegradedStoreWriteError
 from trellis.schemas.advisory import Advisory, AdvisoryCategory, AdvisoryEvidence
 from trellis.stores.advisory_source import (
     ADVISORY_FILENAME,
@@ -459,3 +466,141 @@ class TestDegradedFileIsVisibleAtTheReadSurfaces:
         events = [e["event"] for e in logs]
         assert "advisory_file_absent" in events
         assert "advisory_store_degraded" not in events
+
+
+class TestAnUnreadablePathIsNotAnAbsentOne:
+    """#479's display-side half — the posture stays lenient, the report gets honest.
+
+    ``Path.exists()`` answers ``False`` for ``ELOOP`` and ``ENOTDIR`` as
+    readily as for ``ENOENT``, so an advisory file behind a symlink loop
+    took the ``advisory_file_absent`` branch: the calm ``info`` line that
+    says *this is normal for a deployment that has never run ``trellis
+    analyze generate-advisories``*, and an early ``return`` that skips the
+    degradation check entirely.
+
+    The store was never fooled — it stats rather than ``exists()`` since
+    #444, so it degraded and refused writes correctly — but the surface
+    never asked it. Which is #373's own failure, restated: a broken
+    deployment and an empty one presenting identically, in silence.
+
+    Nothing here raises. That asymmetry with
+    :mod:`trellis.mutate.policy_source` is deliberate and load-bearing
+    (display degrades, enforcement fails closed), so the last test pins it.
+    """
+
+    @pytest.mark.parametrize("shape", UNREADABLE_PATH_SHAPES, ids=UNREADABLE_PATH_IDS)
+    def test_an_unreadable_file_is_reported_as_degraded(
+        self, dirs: tuple[Path, Path], shape: UnreadablePathShape
+    ) -> None:
+        _data_dir, stores_dir = dirs
+        path = stores_dir / ADVISORY_FILENAME
+
+        with unreadable(shape, path), capture_logs() as logs:
+            store = load_advisory_store(stores_dir, surface="mcp")
+
+        assert store is not None
+        assert store.is_degraded is True
+        events = [e["event"] for e in logs]
+        assert "advisory_store_degraded" in events
+        assert "advisory_file_absent" not in events
+
+    @pytest.mark.parametrize("shape", UNREADABLE_PATH_SHAPES, ids=UNREADABLE_PATH_IDS)
+    def test_the_reassuring_absent_line_is_not_emitted(
+        self, dirs: tuple[Path, Path], shape: UnreadablePathShape
+    ) -> None:
+        """The specific wrong sentence, asserted by its own content.
+
+        ``advisory_file_absent`` carries ``This is normal for a deployment
+        that has never run…``. Printing that about a symlink loop is the
+        defect, so the test names the sentence rather than only the level.
+        """
+        _data_dir, stores_dir = dirs
+        path = stores_dir / ADVISORY_FILENAME
+
+        with unreadable(shape, path), capture_logs() as logs:
+            load_advisory_store(stores_dir, surface="mcp")
+
+        absent_lines = [e for e in logs if e["event"] == "advisory_file_absent"]
+        assert absent_lines == []
+
+    @pytest.mark.parametrize("shape", UNREADABLE_PATH_SHAPES, ids=UNREADABLE_PATH_IDS)
+    def test_an_unreadable_store_still_serves_and_still_refuses_writes(
+        self, dirs: tuple[Path, Path], shape: UnreadablePathShape
+    ) -> None:
+        """Lenient read, refused write — #393's rule, unchanged by #479."""
+        _data_dir, stores_dir = dirs
+        path = stores_dir / ADVISORY_FILENAME
+
+        with unreadable(shape, path):
+            store = load_advisory_store(stores_dir, surface="mcp")
+            assert store is not None
+            assert store.list() == []
+            with pytest.raises(DegradedStoreWriteError):
+                store.put(_advisory("adv_new"))
+
+    def test_an_unreadable_canonical_file_does_not_fall_through_to_legacy(
+        self, dirs: tuple[Path, Path]
+    ) -> None:
+        """Otherwise a deployment silently serves the stale legacy advisories.
+
+        The symlink loop explicitly: it is the one shape that damages the
+        canonical file alone, leaving the legacy path genuinely readable,
+        which is what makes the fall-through reachable.
+        """
+        data_dir, stores_dir = dirs
+        _write_advisories(data_dir / ADVISORY_FILENAME, [_advisory("adv_legacy")])
+
+        shape = next(s for s in UNREADABLE_PATH_SHAPES if s.id == "symlink_loop")
+        with unreadable(shape, stores_dir / ADVISORY_FILENAME):
+            assert resolve_advisory_path(stores_dir) == stores_dir / ADVISORY_FILENAME
+            store = load_advisory_store(stores_dir, surface="mcp")
+
+        assert store is not None
+        assert store.is_degraded is True
+        assert [a.advisory_id for a in store.list()] == []
+
+    def test_an_unreadable_legacy_file_is_not_skipped(
+        self, dirs: tuple[Path, Path]
+    ) -> None:
+        """The second resolution site: canonical absent, legacy broken."""
+        data_dir, stores_dir = dirs
+        legacy = data_dir / ADVISORY_FILENAME
+
+        shape = next(s for s in UNREADABLE_PATH_SHAPES if s.id == "symlink_loop")
+        with unreadable(shape, legacy):
+            assert resolve_advisory_path(stores_dir) == legacy
+            store = load_advisory_store(stores_dir, surface="mcp")
+
+        assert store is not None
+        assert store.is_degraded is True
+
+    @pytest.mark.parametrize("shape", UNREADABLE_PATH_SHAPES, ids=UNREADABLE_PATH_IDS)
+    def test_the_display_posture_is_unchanged_it_still_never_raises(
+        self, dirs: tuple[Path, Path], shape: UnreadablePathShape
+    ) -> None:
+        """The axis, pinned: display degrades where enforcement fails closed.
+
+        Same primitive as ``policy_source``, opposite consequence. If this
+        ever starts raising, a corrupt advisory file takes retrieval down
+        with it — which is exactly what #382/#393 decided it must not do.
+        """
+        _data_dir, stores_dir = dirs
+        with unreadable(shape, stores_dir / ADVISORY_FILENAME):
+            assert resolve_advisory_path(stores_dir) is not None
+            assert load_advisory_store(stores_dir, surface="mcp") is not None
+
+    def test_a_genuinely_absent_file_is_still_reported_absent(
+        self, dirs: tuple[Path, Path]
+    ) -> None:
+        """The control. Greenfield must stay quiet and stay writable."""
+        _data_dir, stores_dir = dirs
+
+        with capture_logs() as logs:
+            store = load_advisory_store(stores_dir, surface="mcp")
+
+        assert store is not None
+        assert store.is_degraded is False
+        events = [e["event"] for e in logs]
+        assert "advisory_file_absent" in events
+        assert "advisory_store_degraded" not in events
+        store.put(_advisory("adv_fresh"))

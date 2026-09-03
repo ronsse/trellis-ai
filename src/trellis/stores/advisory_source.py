@@ -81,6 +81,27 @@ This module's job in that is to make the degradation *visible at the read
 surfaces* — MCP pack assembly, the REST retrieve route, the admin routes —
 which is where a corrupt file otherwise looks exactly like a deployment
 that has never generated an advisory.
+
+**A broken path was reported as an absent one** (#479). Presence was
+``Path.exists()``, which answers ``False`` for ``ELOOP``, ``ENOTDIR`` and
+``EBADF`` as readily as for ``ENOENT``, so an advisory file behind a
+symlink loop took the ``advisory_file_absent`` branch — the ``info`` line
+saying *this is normal for a deployment that has never run ``trellis
+analyze generate-advisories``*, and an early return that skips the
+degradation check entirely. The store itself was never fooled: it stats
+rather than ``exists()`` since #444 and refuses writes while degraded. But
+the surface never asked it, so the one fact this module exists to publish
+went unpublished, in the same shape #373 was filed for — a broken
+deployment and an empty one presenting identically.
+
+The postures still differ from :mod:`trellis.mutate.policy_source`, and
+deliberately so (display degrades, enforcement fails closed): nothing here
+raises, and an unreadable file still yields a servable, write-refusing
+store. What changes is that it is reported as *degraded* rather than as
+*absent*, and that an unreadable canonical file no longer falls through to
+the legacy path unannounced. Presence is
+:func:`~trellis.core.path_presence.path_is_present` — absent is
+``FileNotFoundError`` and nothing else.
 """
 
 from __future__ import annotations
@@ -90,6 +111,7 @@ from typing import overload
 
 import structlog
 
+from trellis.core.path_presence import path_is_present
 from trellis.stores.advisory_store import AdvisoryStore
 
 logger = structlog.get_logger(__name__)
@@ -137,11 +159,11 @@ def resolve_advisory_path(stores_dir: Path | None) -> Path | None:
         return None
 
     canonical = Path(stores_dir) / ADVISORY_FILENAME
-    if canonical.exists():
+    if path_is_present(canonical):
         return canonical
 
     legacy = Path(stores_dir).parent / ADVISORY_FILENAME
-    if legacy.exists():
+    if path_is_present(legacy):
         logger.warning(
             "advisory_file_at_legacy_path",
             legacy_path=str(legacy),
@@ -202,7 +224,7 @@ def load_advisory_store(
     # back a ``Path`` rather than ``Path | None`` — no narrowing needed.
     path = resolve_advisory_path(stores_dir)
 
-    if not path.exists():
+    if not path_is_present(path):
         logger.info(
             "advisory_file_absent",
             surface=surface,

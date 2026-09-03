@@ -29,6 +29,12 @@ from typing import Any
 import pytest
 import yaml
 
+from tests.unreadable_paths import (
+    UNREADABLE_PATH_IDS,
+    UNREADABLE_PATH_SHAPES,
+    UnreadablePathShape,
+    unreadable,
+)
 from trellis.errors import BackendNotInstalledError, ConfigError
 from trellis.stores.registry import (
     StoreRegistry,
@@ -364,6 +370,114 @@ def test_load_fingerprint_meta_corrupt_file_raises(tmp_path: Path) -> None:
     with pytest.raises(ConfigError) as exc_info:
         registry._load_fingerprint_meta()
     assert "corrupt" in str(exc_info.value).lower()
+
+
+@pytest.mark.parametrize("shape", UNREADABLE_PATH_SHAPES, ids=UNREADABLE_PATH_IDS)
+def test_load_fingerprint_meta_unreadable_path_raises(
+    tmp_path: Path, shape: UnreadablePathShape
+) -> None:
+    """An unreadable *path* must raise like an unreadable *file* (#479).
+
+    The presence guard was ``Path.exists()``, which reports ``ELOOP`` and
+    ``ENOTDIR`` as ``False`` — so a broken meta path read as *first boot*,
+    the fingerprint map came back empty, and schema-drift detection was
+    silently disabled for every store. That is precisely the regression the
+    function's own docstring says it raises to prevent, and the same
+    laundering ``policy_source`` used to do with access-control policies.
+    """
+    config_dir = tmp_path / "cfg"
+    data_dir = tmp_path / "data"
+    stores_dir = data_dir / "stores"
+    stores_dir.mkdir(parents=True, exist_ok=True)
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.yaml").write_text("knowledge: {}\n")
+
+    registry = StoreRegistry.from_config_dir(config_dir=config_dir, data_dir=data_dir)
+
+    with (
+        unreadable(shape, stores_dir / "_trellis_meta.json"),
+        pytest.raises(ConfigError) as exc_info,
+    ):
+        registry._load_fingerprint_meta()
+
+    assert shape.message_fragment in str(exc_info.value)
+
+
+@pytest.mark.parametrize("shape", UNREADABLE_PATH_SHAPES, ids=UNREADABLE_PATH_IDS)
+def test_unreadable_config_yaml_raises_rather_than_defaulting(
+    tmp_path: Path, shape: UnreadablePathShape
+) -> None:
+    """The eighth site: the *config* presence check, one default further out.
+
+    ``from_config_dir`` gated the whole of ``config.yaml`` on
+    ``Path.exists()``, so an ``ELOOP``/``ENOTDIR`` config read as *absent*
+    and the registry came up on its default local sqlite backends — a
+    deployment that had declared postgres writing to an empty store, with no
+    error anywhere. Same laundering as ``_load_fingerprint_meta`` above; the
+    ``except OSError`` arm that raises this ``ConfigError`` was already
+    written and simply unreachable for the shapes ``exists()`` swallows.
+    """
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.yaml").write_text(
+        "knowledge:\n  graph:\n    backend: postgres\n    dsn: postgresql://x/y\n"
+    )
+
+    with (
+        unreadable(shape, config_dir / "config.yaml"),
+        pytest.raises(ConfigError) as exc_info,
+    ):
+        StoreRegistry.from_config_dir(config_dir=config_dir, data_dir=tmp_path / "data")
+
+    assert shape.message_fragment in str(exc_info.value)
+    assert str(config_dir / "config.yaml") in str(exc_info.value)
+
+
+def test_a_declared_backend_is_what_comes_back_when_the_config_is_readable(
+    tmp_path: Path,
+) -> None:
+    """The control the test above is measured against.
+
+    Without it, "raises on an unreadable config" would be satisfiable by a
+    registry that raised on every config — and the silent-default failure it
+    replaces is only visible because the *readable* case resolves the
+    declared backend rather than the sqlite fallback.
+    """
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.yaml").write_text(
+        "knowledge:\n  graph:\n    backend: postgres\n    dsn: postgresql://x/y\n"
+    )
+
+    registry = StoreRegistry.from_config_dir(
+        config_dir=config_dir, data_dir=tmp_path / "data"
+    )
+    backend, _ = registry._resolve_backend("graph")
+    assert backend == "postgres"
+
+
+def test_an_absent_config_yaml_is_still_the_silent_default(tmp_path: Path) -> None:
+    """The other control: no config at all must stay a normal, quiet boot."""
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+
+    registry = StoreRegistry.from_config_dir(
+        config_dir=config_dir, data_dir=tmp_path / "data"
+    )
+    backend, _ = registry._resolve_backend("graph")
+    assert backend == "sqlite"
+
+
+def test_load_fingerprint_meta_absent_file_is_still_first_boot(tmp_path: Path) -> None:
+    """The control: no meta file is a normal first boot and must not raise."""
+    config_dir = tmp_path / "cfg"
+    data_dir = tmp_path / "data"
+    (data_dir / "stores").mkdir(parents=True, exist_ok=True)
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.yaml").write_text("knowledge: {}\n")
+
+    registry = StoreRegistry.from_config_dir(config_dir=config_dir, data_dir=data_dir)
+    assert registry._load_fingerprint_meta() == {}
 
 
 def test_load_fingerprint_meta_valid_returns_dict(tmp_path: Path) -> None:

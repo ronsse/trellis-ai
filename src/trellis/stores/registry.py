@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 
 import structlog
 
+from trellis.core.path_presence import path_is_present
 from trellis.errors import BackendNotInstalledError, ConfigError, ValidationError
 from trellis.stores.base import (
     ApiKeyStore,
@@ -769,7 +770,16 @@ class StoreRegistry:
         llm_config: dict[str, Any] = {}
         classify_config: dict[str, Any] = {}
         config_path = config_dir / "config.yaml"
-        if config_path.exists():
+        # ``path_is_present``, not ``Path.exists()`` (#479). The same
+        # laundering as ``_load_fingerprint_meta`` below, one benign default
+        # further out: an ``ELOOP``/``ENOTDIR`` ``config.yaml`` read as
+        # *absent*, so a deployment declaring postgres + pgvector came up
+        # silently on the default local sqlite backends — writing to an
+        # empty store while every surface reported normal. The
+        # ``except OSError`` arm six lines down already raises
+        # ``ConfigError`` with the recovery advice; it was simply
+        # unreachable for the shapes ``exists()`` swallows.
+        if path_is_present(config_path):
             import yaml  # noqa: PLC0415
 
             try:
@@ -1493,7 +1503,13 @@ class StoreRegistry:
         the exact regression Logic Gap 4.5 was meant to prevent.
         """
         path = self._fingerprint_meta_path()
-        if path is None or not path.exists():
+        # ``path_is_present``, not ``Path.exists()``: the latter reports an
+        # ``ELOOP``/``ENOTDIR`` path as absent, and absent here means
+        # *first boot*, which silently disables schema-drift detection —
+        # the exact regression the docstring above says this raises to
+        # prevent (#479). Unreadable now falls through to ``read_text``,
+        # whose handler already raises ``ConfigError`` with the advice.
+        if path is None or not path_is_present(path):
             return {}
         import json  # noqa: PLC0415
 

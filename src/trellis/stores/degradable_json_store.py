@@ -107,6 +107,11 @@ import structlog
 from pydantic import BaseModel
 
 from trellis.core.atomic_write import atomic_write_text
+from trellis.core.path_presence import (
+    FileIdentity,
+    UnknownFileIdentity,
+    file_identity,
+)
 from trellis.errors import DegradedStoreWriteError, StaleStoreWriteError
 
 logger = structlog.get_logger(__name__)
@@ -121,52 +126,16 @@ RowT = TypeVar("RowT", bound=BaseModel)
 _MAX_REPORTED_ROWS = 3
 
 
-@dataclass(frozen=True, slots=True, eq=False)
-class UnknownFileIdentity:
-    """``stat`` failed, so the file's identity is *unknown* — not absent.
-
-    The distinction is the whole of #471. :meth:`DegradableJsonStore._fingerprint`
-    used to answer ``None`` for both "there is no file" and "I could not
-    look", and :meth:`DegradableJsonStore.refuse_if_stale` compares the
-    fingerprint taken at load against one taken before the write. A store
-    built while the path was absent (a normal fresh deployment) records
-    ``None``; if a later ``stat`` also failed — ``EACCES`` from a parent
-    that lost its execute bit, ``ELOOP`` from a symlink cycle, ``EIO`` or
-    ``ESTALE`` from a network mount — it recorded ``None`` again, the two
-    compared **equal**, and the compare-and-swap passed. The guard that
-    stands between a stale in-memory view and #413's fail-open on access
-    control disarmed itself precisely when it could not see the file.
-
-    Only one of those two facts is safe to write over. An absent file is
-    the ordinary first-write case and must stay writable, or every fresh
-    install refuses. An unreadable one is a state this process cannot
-    reason about, and :meth:`DegradableJsonStore.refuse_if_stale` refuses
-    on it — cheaply, because that refusal is documented as transient and
-    retryable, so the cost of being wrong is one retry against the cost of
-    a silent whole-file rewrite.
-
-    ``eq=False`` is load-bearing, not tidiness. With the generated
-    ``__eq__`` two independently-derived records of the *same* failure —
-    which is exactly what :meth:`DegradableJsonStore.refuse_if_stale` holds
-    when a store's ``stat`` keeps failing the same way — carry equal
-    ``detail`` and compare equal, reproducing the defect verbatim one type
-    later. Identity equality makes "unknown == unknown" impossible to
-    write by accident. The explicit ``isinstance`` branches in the guard
-    are the primary defence and this is the backstop; both are pinned by
-    test, because a backstop nothing exercises is a comment.
-    """
-
-    #: ``"PermissionError: [Errno 13] ..."`` — the exception, for the operator.
-    detail: str
-
-    def __str__(self) -> str:
-        return self.detail
-
-
-#: What :meth:`DegradableJsonStore._fingerprint` answers with. Three
-#: distinct facts, deliberately not two: a tuple is *this* file, ``None``
-#: is *no* file, and :class:`UnknownFileIdentity` is *don't know*.
-FileIdentity = tuple[int, int, int] | None | UnknownFileIdentity
+#: Re-exported from :mod:`trellis.core.path_presence`, which owns the one
+#: ``stat`` ladder every reader and guard in this repo shares (#479). They
+#: lived here first (#471); they moved when
+#: :func:`~trellis.core.path_presence.path_is_present` turned out to be a
+#: *projection* of the same tri-state rather than a second implementation of
+#: it, and two copies of an errno rule that has been gotten wrong four times
+#: is one copy too many. Named here so ``from
+#: trellis.stores.degradable_json_store import UnknownFileIdentity`` keeps
+#: working for the callers and tests that already say it.
+__all__ = ["FileIdentity", "UnknownFileIdentity"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -677,44 +646,20 @@ class DegradableJsonStore(ABC, Generic[RowT]):
     def _fingerprint(self) -> FileIdentity:
         """Identity of the file as this store last saw it.
 
-        Three answers, never two (#471). A ``(st_ino, st_mtime_ns,
-        st_size)`` tuple is *this* file; ``None`` is *no* file, and only
-        ``FileNotFoundError`` produces it; :class:`UnknownFileIdentity` is
-        every other ``OSError`` — *don't know*. Collapsing the last two
-        into ``None`` is what let ``refuse_if_stale`` compare ``None``
-        against ``None`` and pass.
+        :func:`~trellis.core.path_presence.file_identity` is the whole
+        implementation and carries the reasoning: three answers, never two
+        (#471) — a ``(st_ino, st_mtime_ns, st_size)`` tuple is *this* file,
+        ``None`` is *no* file and only ``FileNotFoundError`` produces it,
+        and :class:`~trellis.core.path_presence.UnknownFileIdentity` is
+        every other ``OSError``. It lives there rather than here because
+        :func:`~trellis.core.path_presence.path_is_present` is a projection
+        of the same tri-state, and this errno rule has been gotten wrong
+        four times across two files (#444, #471, #479 twice).
 
-        ``st_ino`` is the load-bearing part: every write here lands through
-        ``os.replace`` from a fresh temp file, so a completed write by any
-        process changes the inode even if size and mtime happen to collide.
-        Size and mtime are kept because they catch the other shape — an
-        in-place edit that keeps the inode, which is what ``sed -i`` and
-        an editor configured to write through produce.
-
-        Inode *reuse* — a replacement landing on the number this store
-        recorded, with mtime and size colliding too — is unreachable by
-        construction rather than defended against: ``atomic_write_text``
-        creates its temp file while the target still exists, so the
-        target's inode is never free to be handed back.
-
-        ``None`` is a value, not the absence of one: a store built while the
-        path was absent compares ``None`` against the fingerprint of a file
-        that has since appeared, and refuses.
-
-        ``FileNotFoundError`` is caught ahead of ``OSError`` and is the
-        **only** shape read as absence. ``NotADirectoryError`` in
-        particular is not: a path component that turned into a regular
-        file is a broken path, not an empty deployment, and it is one of
-        the errnos ``Path.exists`` swallows — the #444 door, which this
-        keeps shut on the guard side too.
+        What this method adds is only *whose* path is measured. The guard
+        that consumes it is :meth:`refuse_if_stale`.
         """
-        try:
-            st = self._path.stat()
-        except FileNotFoundError:
-            return None
-        except OSError as exc:
-            return UnknownFileIdentity(f"{type(exc).__name__}: {exc}")
-        return (st.st_ino, st.st_mtime_ns, st.st_size)
+        return file_identity(self._path)
 
     def _save(self) -> None:
         """Persist the current rows to the JSON file.

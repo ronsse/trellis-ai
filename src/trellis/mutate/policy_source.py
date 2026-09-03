@@ -62,6 +62,38 @@ error propagates, which is the channel ``trellis analyze health`` already
 reads. Latent on a deployment that has declared zero policies — there is no
 file to damage — and live from the first declared policy onward.
 
+**Strictness only ever guarded the bytes, not the path** (#479). Every
+check above happens once the file has been opened, and the guard deciding
+whether to open it was ``Path.exists()`` — which swallows ``ENOENT``,
+``ENOTDIR``, ``EBADF`` and ``ELOOP`` alike and answers ``False`` to all
+four. So a policy file behind a symlink loop, or under a path component
+that had become a regular file, was read as **absent**: ``load: []``, an
+empty gate, every mutation permitted, and no ``ConfigError``, no log line
+and no event anywhere. Reproduced end to end on ``d177adc`` — a declared
+``entity.create`` deny, an ``ELOOP`` on its path, and the command executes.
+That is the strict reader failing *open*, by the one route that never
+reached the ``read_text`` its ``except (OSError, UnicodeDecodeError)``
+handler was guarding, and it made the enumeration below false the whole
+time it was written down as true.
+
+Presence is now decided by
+:func:`~trellis.core.path_presence.path_is_present`: absent is
+``FileNotFoundError`` and nothing else, so an unreadable path falls through
+to ``read_text`` and raises like every other damaged shape, through the
+error path that already existed. ``EACCES`` improves with it —
+``Path.exists()`` does *not* ignore that one, so it already failed closed,
+but as a bare ``PermissionError`` traceback carrying none of the recovery
+advice this module attaches to every other malformed shape.
+
+The same swap is applied to :func:`resolve_policy_path`, where the hazard
+is quieter and is not zero policies. An unreadable *canonical* file that
+reads as absent falls through to the legacy path, so a deployment with both
+would silently enforce the stale legacy ruleset while the file the operator
+was editing sat broken and unread — the "hazard is *fewer* policies, not
+only zero" note below, by a new route. Unreadable now counts as **present**
+there: resolution keeps its promise never to raise, hands back the file
+that is really in the way, and the reader raises on it.
+
 **Strictness is necessary and was not sufficient** (#413). It reasons about
 the read, and the exposure came from the write: until #413
 :class:`~trellis.stores.policy_store.PolicyStore` degraded an unreadable
@@ -92,7 +124,8 @@ the second class rather than labelling it.** Enumerate what can now reach
 * ``{"policies": []}`` — what ``trellis policy remove`` writes when the
   last policy goes, i.e. an operator *declaring* zero policies;
 * anything else — unreadable file, bad JSON, wrong envelope, missing key,
-  one invalid row — **raises**, and the pipeline fails closed;
+  one invalid row, **or a path that cannot be stat'd** (#479) — **raises**,
+  and the pipeline fails closed;
 * a file rewritten from a degraded load, or from any other **stale** view
   of it — another process's write landing in between, a file appearing
   after the store was constructed, a duplicate id collapsing the view —
@@ -119,6 +152,7 @@ from typing import TYPE_CHECKING, overload
 
 import structlog
 
+from trellis.core.path_presence import path_is_present
 from trellis.errors import ConfigError
 from trellis.mutate.policy_gate import DefaultPolicyGate
 from trellis.schemas.policy import Policy
@@ -176,16 +210,22 @@ def resolve_policy_path(stores_dir: Path | None) -> Path | None:
     Returns ``None`` when ``stores_dir`` is ``None`` — an in-memory or
     programmatically-constructed registry has no directory to read, and
     that is a normal, silent case (it means "no policies"), not an error.
+
+    Presence is :func:`~trellis.core.path_presence.path_is_present`, not
+    ``Path.exists()``: a canonical file that cannot be stat'd is **present**
+    and wins, rather than reading as absent and letting a stale legacy file
+    take over unannounced (#479). This function still never raises — the
+    reader does, on the path handed back.
     """
     if stores_dir is None:
         return None
 
     canonical = Path(stores_dir) / POLICY_FILENAME
-    if canonical.exists():
+    if path_is_present(canonical):
         return canonical
 
     legacy = Path(stores_dir).parent / POLICY_FILENAME
-    if legacy.exists():
+    if path_is_present(legacy):
         logger.warning(
             "policy_file_at_legacy_path",
             legacy_path=str(legacy),
@@ -207,7 +247,9 @@ def load_policies(stores_dir: Path | None) -> list[Policy]:
     """Load a deployment's policies, or ``[]`` when none are declared.
 
     Raises:
-        ConfigError: the policy file exists but is unreadable, is not valid
+        ConfigError: the policy file exists but is unreadable, sits behind a
+            path that cannot be stat'd (a symlink loop, a path component
+            that is a regular file, an unsearchable parent), is not valid
             JSON, is not a JSON object with a ``policies`` list, or contains
             an entry that is not a valid :class:`Policy`. Never degrades to
             an empty list — see the module docstring on failure posture.
@@ -221,7 +263,15 @@ def _load_from_path(path: Path | None) -> list[Policy]:
     Split out so callers that need the path for their own logging resolve
     it once — re-resolving would repeat the legacy-path warning.
     """
-    if path is None or not path.exists():
+    # ``path_is_present``, not ``Path.exists()``. Absence here is
+    # load-bearing and correct — zero policies is the shipped default and a
+    # fresh deployment must not raise — but ``exists()`` answers "absent" for
+    # ``ELOOP``/``ENOTDIR``/``EBADF`` too, which turned a broken path into
+    # the shipped default and silently disabled Stage 2 (#479). Only
+    # ``FileNotFoundError`` means absent now; anything else falls through to
+    # ``read_text`` below, whose handler already produces the ``ConfigError``
+    # with the recovery advice.
+    if path is None or not path_is_present(path):
         return []
 
     try:
@@ -230,11 +280,18 @@ def _load_from_path(path: Path | None) -> list[Policy]:
     # truncated or partially-binary write actually takes. Uncaught it still
     # failed closed, but as a bare traceback with none of the recovery advice
     # every other malformed shape here carries.
+    #
+    # The ``OSError`` arm is also where an unreadable *path* now lands
+    # (#479) — ``ELOOP``, ``ENOTDIR``, ``EACCES`` — since the presence check
+    # above no longer swallows those into "absent". ``exc`` carries the
+    # errno and the OS message, so the reason is named rather than inferred.
     except (OSError, UnicodeDecodeError) as exc:
         msg = (
             f"Could not read the Trellis policy file at {path}: "
-            f"{type(exc).__name__}: {exc}. Fix permissions or the file's "
-            "contents, or remove the file to run with no policies."
+            f"{type(exc).__name__}: {exc}. Fix the path or the file "
+            "(a symlink loop, a path component that is not a directory, or "
+            "permissions all surface here), or remove the file to run with "
+            "no policies."
         )
         raise ConfigError(msg, setting=POLICY_FILENAME) from exc
 
