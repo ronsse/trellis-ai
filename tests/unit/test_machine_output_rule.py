@@ -46,6 +46,12 @@ from pathlib import Path
 import pytest
 from rich.console import Console
 
+from tests.ast_rules import (
+    assert_hand_read_floor,
+    assert_scan_is_not_vacuous,
+    construction_names,
+    name_of,
+)
 from trellis_cli.output import emit_json, emit_machine_text, format_output
 
 #: Callables whose return value is a serialized machine payload. Matched on
@@ -134,44 +140,69 @@ def _is_rich_render(node: ast.Call) -> bool:
     )
 
 
-def _is_serializer_call(node: ast.AST) -> bool:
+def _serializer_names(tree: ast.Module) -> frozenset[str]:
+    """:data:`_SERIALIZERS` plus every local name in *tree* that reaches one.
+
+    ``from json import dumps as _dump``, ``_render = format_output`` and a
+    ``BaseModel`` subclass all produce a serializer under a name a literal
+    match never sees, and each is resolvable within the module — see
+    :func:`tests.ast_rules.construction_names`, lifted from #488's own
+    rule. The set is small and the resolution is per module, so this is
+    cheap; the alternative is a blind spot that no test would have shown,
+    because the corpus below never rendered one.
+    """
+    names: set[str] = set()
+    for serializer in _SERIALIZERS:
+        names |= construction_names(serializer, tree)
+    return frozenset(names)
+
+
+def _is_serializer_call(node: ast.AST, names: frozenset[str] = _SERIALIZERS) -> bool:
     """Is *node* a call to something that returns a serialized payload?
 
     Reads the bare name off either an attribute (``json.dumps``,
     ``result.model_dump_json``) or a plain call (``dumps`` imported
     directly, ``format_output``). Both forms matter — the attribute-only
     version of this predicate is what let ``model_dump_json`` through.
+
+    The reading is :func:`tests.ast_rules.name_of`, shared with every other
+    AST rule here. It used to be a pair of ``getattr`` lookups: correct,
+    but a fourth independent spelling of the same sub-problem, and #488 was
+    the site that needed it and got it wrong.
+    ``test_ast_rules.TestNameOf.test_agrees_with_the_getattr_spelling_across_src``
+    checks the two against every call in ``src/`` rather than reasoning
+    about their equivalence.
+
+    *names* defaults to the literal set so the predicate stays callable on
+    a lone node; :func:`_violations` passes the resolved set.
     """
-    if not isinstance(node, ast.Call):
-        return False
-    return (
-        getattr(node.func, "attr", None) in _SERIALIZERS
-        or getattr(node.func, "id", None) in _SERIALIZERS
-    )
+    return isinstance(node, ast.Call) and name_of(node.func) in names
 
 
-def _serialized_names(tree: ast.Module) -> set[str]:
+def _serialized_names(tree: ast.Module, names: frozenset[str]) -> set[str]:
     """Names bound anywhere in the module from a serializer call.
 
     Covers plain assignment, annotated assignment (``payload: str = ...``)
     and the walrus, because all three produce the ``console.print(payload)``
     shape the rule exists to reject.
     """
-    names: set[str] = set()
+    bound: set[str] = set()
     for node in ast.walk(tree):
-        if isinstance(node, ast.Assign) and _is_serializer_call(node.value):
-            names.update(t.id for t in node.targets if isinstance(t, ast.Name))
+        if isinstance(node, ast.Assign) and _is_serializer_call(node.value, names):
+            bound.update(t.id for t in node.targets if isinstance(t, ast.Name))
         elif (
             isinstance(node, (ast.AnnAssign, ast.NamedExpr))
             and node.value is not None
-            and _is_serializer_call(node.value)
+            and _is_serializer_call(node.value, names)
             and isinstance(node.target, ast.Name)
         ):
-            names.add(node.target.id)
-    return names
+            bound.add(node.target.id)
+    return bound
 
 
-def _carries_payload(arg: ast.expr, serialized: set[str]) -> bool:
+def _carries_payload(
+    arg: ast.expr, serialized: set[str], names: frozenset[str] = _SERIALIZERS
+) -> bool:
     """Is *arg* a serialized payload, directly or by name?
 
     Unwraps two shapes that would otherwise walk straight past the rule:
@@ -187,23 +218,23 @@ def _carries_payload(arg: ast.expr, serialized: set[str]) -> bool:
     # ``_serialized_names``, but the argument node here is the NamedExpr
     # itself, so it has to be unwrapped to be seen at all.
     if isinstance(arg, ast.NamedExpr):
-        return _carries_payload(arg.value, serialized)
+        return _carries_payload(arg.value, serialized, names)
 
     if isinstance(arg, ast.Starred):
         inner = arg.value
         if isinstance(inner, (ast.List, ast.Tuple)):
-            return any(_carries_payload(e, serialized) for e in inner.elts)
-        return _carries_payload(inner, serialized)
+            return any(_carries_payload(e, serialized, names) for e in inner.elts)
+        return _carries_payload(inner, serialized, names)
 
     if isinstance(arg, ast.JoinedStr):
         parts = [
             v for v in arg.values if not (isinstance(v, ast.Constant) and v.value == "")
         ]
         if len(parts) == 1 and isinstance(parts[0], ast.FormattedValue):
-            return _carries_payload(parts[0].value, serialized)
+            return _carries_payload(parts[0].value, serialized, names)
         return False
 
-    return _is_serializer_call(arg) or (
+    return _is_serializer_call(arg, names) or (
         isinstance(arg, ast.Name) and arg.id in serialized
     )
 
@@ -221,12 +252,13 @@ def _violations(root: Path | None = None) -> list[str]:
     found: list[str] = []
     for py_file in sorted(cli_root.rglob("*.py")):
         tree = ast.parse(py_file.read_text(encoding="utf-8"))
-        serialized = _serialized_names(tree)
+        names = _serializer_names(tree)
+        serialized = _serialized_names(tree, names)
         for node in ast.walk(tree):
             if not (isinstance(node, ast.Call) and _is_rich_render(node)):
                 continue
             for arg in node.args:
-                if _carries_payload(arg, serialized):
+                if _carries_payload(arg, serialized, names):
                     found.append(
                         f"{py_file.name}:{node.lineno}: {ast.unparse(node)[:90]}"
                     )
@@ -246,14 +278,7 @@ def test_no_rich_print_carries_a_serialized_payload() -> None:
     )
 
 
-def test_the_scan_finds_the_print_calls_it_is_meant_to_police() -> None:
-    """Guard against the enforcement quietly matching nothing.
-
-    A structural test that stops finding call sites — because ``console``
-    was renamed, the package moved, or Rich was swapped out — would keep
-    passing while enforcing nothing. This asserts the scan still sees a
-    substantial population of Rich ``print`` calls to reason about.
-    """
+def _rich_render_population() -> int:
     total = 0
     for py_file in sorted(_cli_root().rglob("*.py")):
         tree = ast.parse(py_file.read_text(encoding="utf-8"))
@@ -262,9 +287,30 @@ def test_the_scan_finds_the_print_calls_it_is_meant_to_police() -> None:
             for node in ast.walk(tree)
             if isinstance(node, ast.Call) and _is_rich_render(node)
         )
-    assert total > 100, (
-        f"only {total} Rich print calls found in trellis_cli; the scan has "
-        f"probably drifted and is no longer policing anything"
+    return total
+
+
+#: Hand-read off ``src/trellis_cli`` on 2026-09-03: 598 Rich render calls.
+#: Floored well below that because the CLI's prose output is edited
+#: constantly and a floor that tracks the tree is a floor nobody re-reads —
+#: what it has to catch is the scan going to near-zero, not a refactor
+#: trimming a hundred prints.
+_RICH_RENDER_FLOOR = 100
+
+
+def test_the_scan_finds_the_print_calls_it_is_meant_to_police() -> None:
+    """Guard against the enforcement quietly matching nothing.
+
+    A structural test that stops finding call sites — because ``console``
+    was renamed, the package moved, or Rich was swapped out — would keep
+    passing while enforcing nothing. This asserts the scan still sees a
+    substantial population of Rich ``print`` calls to reason about.
+    """
+    assert_hand_read_floor(
+        _rich_render_population(),
+        _RICH_RENDER_FLOOR,
+        subject="Rich render call in trellis_cli",
+        hint="console/err_console .print, .print_json, .out and .log.",
     )
 
 
@@ -320,6 +366,61 @@ def test_the_scan_catches_every_known_evasion(tmp_path: Path) -> None:
         f"scanner reported {reported}, expected {_EXPECTED_EVASION_LINES}; "
         f"missing={sorted(set(_EXPECTED_EVASION_LINES) - set(reported))} "
         f"spurious={sorted(set(reported) - set(_EXPECTED_EVASION_LINES))}"
+    )
+
+
+def test_the_scan_sees_every_shape_in_the_shared_evasion_roster(
+    tmp_path: Path,
+) -> None:
+    """The cross-rule half of the guard, run through ``_violations``.
+
+    The corpus above is this rule's own and stays: it encodes the
+    *judgement* — prose interpolation is allowed, a bare payload is not —
+    against hand-read line numbers, which no shared roster can supply.
+    What it cannot do is know about a spelling nobody thought of here, and
+    that is exactly how #488 shipped: its synthetic tree carried only the
+    shapes its scan already handled.
+
+    ``tests.ast_rules.EVASIONS`` supplies the spelling, binding and
+    placement axes; ``wrap`` supplies this rule's subject, which is a
+    *composite* — a Rich render carrying a serializer call — rather than a
+    bare construction. The serializer call is the part the roster models,
+    and the shapes it adds here are real: two levels of attribute access,
+    a call in an ``except`` block, in a nested closure, in a lambda body,
+    at module and class scope, in an ``async def``, in a decorator, and in
+    a second file. None of those were pinned before.
+
+    The binding axis is what forced :func:`_serializer_names` to exist. An
+    earlier version of this test exempted the alias, rebinding and
+    subclass shapes on the claim that a single-file walk cannot resolve
+    them; that claim was false, and the guard now refuses a non-residue
+    exemption outright. The two that remain are residue and the harness
+    demonstrates them by running every scanner it has.
+    """
+    assert_scan_is_not_vacuous(
+        lambda root: [int(v.split(":")[1]) for v in _violations(root=root)],
+        subject="dumps",
+        kwarg="indent",
+        wrap="console.print({call})",
+        tmp_path=tmp_path,
+        live_population=_rich_render_population(),
+        floor=_RICH_RENDER_FLOOR,
+        exempt={
+            "partial_binding": (
+                "residue: the binding's value is a call, so there is no "
+                "name for construction_names to resolve. The standing "
+                "mitigation is the width of _SERIALIZERS, which is why "
+                "that set says to add to it on sight rather than on "
+                "evidence"
+            ),
+            "cross_module_subclass": (
+                "residue: a model class defined in another module and "
+                "imported here is not in this tree, so its "
+                "model_dump_json is unreachable under its own name. The "
+                "attribute spelling — result.model_dump_json() — is the "
+                "one the CLI actually writes, and that is caught"
+            ),
+        },
     )
 
 

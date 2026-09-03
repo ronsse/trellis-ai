@@ -95,6 +95,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.ast_rules import assert_hand_read_floor, is_call_to, name_of
 from tests.integration._live_server import (
     assert_env_pins_this_checkout,
     assert_subprocess_imports_this_checkout,
@@ -189,21 +190,17 @@ _BOUNDARY_GUARD = "assert_env_pins_this_checkout"
 #: lower this number deliberately, never to make a red test green.
 _KNOWN_LAUNCH_SITES = 8
 
+#: Test modules under ``tests/`` when this floor was last read by hand.
+#: Same role as :data:`_KNOWN_LAUNCH_SITES` one level out: #464's defect was
+#: two counters that shared file discovery, so a narrowing of
+#: :func:`_python_files` shrank both together and nothing noticed.
+_KNOWN_TEST_MODULES = 400
+
 
 def _tests_root() -> Path:
     root = Path(__file__).resolve().parents[1]
     assert root.is_dir(), f"tests/ not found at {root}"
     return root
-
-
-def _callee_name(node: ast.Call) -> str | None:
-    """The bare name being called: ``json.dumps`` and ``dumps`` both give ``dumps``."""
-    func = node.func
-    if isinstance(func, ast.Attribute):
-        return func.attr
-    if isinstance(func, ast.Name):
-        return func.id
-    return None
 
 
 def _is_launch(node: ast.AST) -> bool:
@@ -364,7 +361,7 @@ def _is_pinned(expr: ast.expr, local: set[str], builders: set[str]) -> bool:
         # as a value with a ``None`` key, so iterating values covers both.
         return any(_is_pinned(v, local, builders) for v in expr.values)
     if isinstance(expr, ast.Call):
-        name = _callee_name(expr)
+        name = name_of(expr.func)
         if name in builders:
             return True
         # A helper that decorates a pinned env — ``_server_env(cli_env)`` —
@@ -404,9 +401,7 @@ def _guards_at_the_boundary(
     if fn is None:
         return False
     return any(
-        isinstance(node, ast.Call)
-        and _callee_name(node) == _BOUNDARY_GUARD
-        and node.lineno < launch_lineno
+        is_call_to(node, _BOUNDARY_GUARD) and node.lineno < launch_lineno
         for node in ast.walk(fn)
     )
 
@@ -509,12 +504,15 @@ def test_the_scanned_population_is_not_truncated() -> None:
         ("AST scan", _launch_sites(root)),
         ("token scan", _token_launch_sites(root)),
     ):
-        assert len(sites) >= _KNOWN_LAUNCH_SITES, (
-            f"the {label} found {len(sites)} process launches under {root}, "
-            f"below the {_KNOWN_LAUNCH_SITES} recorded when #431 shipped. "
-            f"Either a launch site was deleted — lower _KNOWN_LAUNCH_SITES "
-            f"deliberately — or the scan has silently stopped reaching part "
-            f"of the tree, in which case the rule above is policing a subset."
+        assert_hand_read_floor(
+            len(sites),
+            _KNOWN_LAUNCH_SITES,
+            subject=f"process launch under tests/ ({label})",
+            hint=(
+                "Either a launch site was deleted — lower _KNOWN_LAUNCH_SITES "
+                "deliberately — or the scan has silently stopped reaching part "
+                "of the tree, in which case the rule above is policing a subset."
+            ),
         )
 
 
@@ -575,7 +573,12 @@ def test_the_scan_reaches_every_test_module() -> None:
     """
     root = _tests_root()
     files = _python_files(root)
-    assert len(files) > 400, f"only {len(files)} test modules found under {root}"
+    assert_hand_read_floor(
+        len(files),
+        _KNOWN_TEST_MODULES,
+        subject="test module reached by the scan",
+        hint="a narrowed _python_files shrinks the population and every count over it.",
+    )
     for path in files:
         try:
             ast.parse(path.read_text(encoding="utf-8"))
