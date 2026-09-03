@@ -18,6 +18,7 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
+from tests.cli_output import assert_coloured, force_colour, plain
 from tests.document_recency import fake_document_clock
 from trellis.core.vector_metadata import vector_metadata_diverges
 from trellis.llm import LLMResponse, Message
@@ -656,8 +657,9 @@ class TestCurateSurvivesADegradedAdvisoryStore:
         )
 
         assert result.exit_code == 2, result.output
-        assert "ADVISORY STORE DEGRADED" in result.output
-        assert f"mv {path}" in result.output.replace("\n", "")
+        rendered = plain(result.output)
+        assert "ADVISORY STORE DEGRADED" in rendered
+        assert f"mv {path}" in rendered.replace("\n", "")
 
     def test_a_clean_cycle_carries_no_degradation(
         self, tmp_path: Path, temp_stores: StoreRegistry
@@ -738,12 +740,28 @@ class TestCurateSurvivesADegradedAdvisoryStore:
         An unescaped path under ``/tmp/d [staging]/`` renders the fix as
         ``mv /tmp/d /data/...`` — a command that does not run, printed to
         an operator as the thing to type. Silently: nothing errors.
+
+        Colour is **forced**, and that is the half this test was missing
+        (#495). Reading raw ``result.output`` made it fail on a coloured
+        build with its own "Rich ate the bracketed path" message, which
+        sends the next reader after a renderer that is not broken. It now
+        asserts three things: colour really happened, the bracketed segment
+        survived it, and the printed command still runs.
+
+        The bracketed segment on its own was **not** enough, and that is
+        measured rather than argued: deleting the ``escape()`` around the
+        recovery command leaves this test green on ``origin/main``, because
+        ``[staging]`` still appears in the separately-escaped ``file:``
+        line printed above it. The shell-parse below is what kills that
+        mutant.
         """
+        import shlex
+
+        force_colour(monkeypatch, worker)
         data_dir = tmp_path / "d [staging]" / "data"
         (data_dir / "stores").mkdir(parents=True)
-        (data_dir / "stores" / ADVISORY_FILENAME).write_text(
-            '{"advisories": [ torn', encoding="utf-8"
-        )
+        advisory_file = data_dir / "stores" / ADVISORY_FILENAME
+        advisory_file.write_text('{"advisories": [ torn', encoding="utf-8")
         monkeypatch.setenv("TRELLIS_CONFIG_DIR", str(tmp_path / "config"))
         monkeypatch.setenv("TRELLIS_DATA_DIR", str(data_dir))
         _reset_registry()
@@ -752,11 +770,25 @@ class TestCurateSurvivesADegradedAdvisoryStore:
             app, ["worker", "curate", "--output-dir", str(tmp_path / "review")]
         )
 
-        assert "ADVISORY STORE DEGRADED" in result.output
-        assert "[staging]" in result.output, (
+        # 1. The coloured branch really ran.
+        rendered = assert_coloured(result.output)
+        assert "ADVISORY STORE DEGRADED" in rendered
+        # 2. The bracketed segment survived rendering.
+        assert "[staging]" in rendered, (
             "Rich ate the bracketed path segment, so the recovery command "
             "printed to the operator does not run"
         )
+        # 3. And the copied line is still one runnable command with exactly
+        #    two operands — brackets intact is necessary, not sufficient.
+        line = next(
+            ln for ln in rendered.splitlines() if ln.strip().startswith("To reset:")
+        )
+        command = line.split("To reset:", 1)[1].strip()
+        assert shlex.split(command) == [
+            "mv",
+            str(advisory_file),
+            f"{advisory_file}.corrupt",
+        ], f"the printed recovery command does not parse as `mv src dst`: {command!r}"
 
 
 class TestWorkerCurateLoop:
@@ -1363,8 +1395,9 @@ class TestWorkerCaptureSessions:
         result = runner.invoke(worker_app, ["capture-sessions"])
 
         assert result.exit_code == 0, result.output
-        assert "worker capture-sessions" in result.output
-        assert "memories written: 1" in result.output
+        rendered = plain(result.output)
+        assert "worker capture-sessions" in rendered
+        assert "memories written: 1" in rendered
 
     def test_unapplied_supersessions_are_surfaced_not_just_counted(
         self, temp_stores: StoreRegistry, monkeypatch: pytest.MonkeyPatch
@@ -1390,8 +1423,9 @@ class TestWorkerCaptureSessions:
         result = runner.invoke(worker_app, ["capture-sessions"])
 
         assert result.exit_code == 0, result.output
-        assert "3 supersede" in result.output
-        assert "1 supersession(s) could not be applied" in result.output
+        rendered = plain(result.output)
+        assert "3 supersede" in rendered
+        assert "1 supersession(s) could not be applied" in rendered
 
     def test_reconcile_tally_is_hidden_when_the_flag_is_off(
         self, temp_stores: StoreRegistry, monkeypatch: pytest.MonkeyPatch

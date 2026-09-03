@@ -6,10 +6,10 @@ import json
 from pathlib import Path
 
 import pytest
-from click.utils import strip_ansi
 from typer.testing import CliRunner
 
 from tests.chunk_corpus import seed_chunk_favouring, seed_chunked
+from tests.cli_output import plain
 from trellis_cli.exit_codes import EXIT_VALIDATION
 from trellis_cli.main import app
 
@@ -36,14 +36,14 @@ def _plain(text: str) -> str:
     ``item_id`` emojified): output that is decorated being read as if it
     were plain. It reappeared in the test asserting the fix.
 
-    Stripping is :func:`click.utils.strip_ansi` rather than a local
-    regex — click owns ``CliRunner``, already strips these sequences in
-    ``click.echo`` (pinned by
-    ``tests/unit/test_machine_output_rule.py::test_emit_machine_text_preserves_what_typer_echo_would_strip``),
-    and a fourth in-repo spelling of a solved problem is the thing this
-    PR's own review was about.
+    Stripping is :func:`tests.cli_output.plain` — i.e.
+    :func:`click.utils.strip_ansi` — rather than a local regex; see that
+    module for why click's own spelling is the one to reach for. The
+    whitespace collapse is this file's addition, not part of it: a
+    surface whose assertions are about wrapped prose needs it, and a
+    surface asserting on a copy-pasteable command must not have it.
     """
-    return " ".join(strip_ansi(text).split())
+    return " ".join(plain(text).split())
 
 
 @pytest.fixture(autouse=True)

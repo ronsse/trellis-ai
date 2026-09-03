@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from tests.cli_output import plain
 from trellis.stores.sqlite.graph import SQLiteGraphStore
 from trellis_cli.admin import admin_app
 from trellis_cli.exit_codes import EXIT_STORE
@@ -72,7 +73,7 @@ def test_migrate_graph_text_output(tmp_path: Path, runner: CliRunner) -> None:
         ],
     )
     assert result.exit_code == 0, result.output
-    assert "nodes=1/1" in result.output
+    assert "nodes=1/1" in plain(result.output)
 
     # Verify the destination actually has the node.
     dst = SQLiteGraphStore(db_path=dst_db)

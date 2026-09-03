@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from tests.cli_output import assert_coloured, force_colour
 from tests.unreadable_paths import (
     UNREADABLE_PATH_IDS,
     UNREADABLE_PATH_SHAPES,
@@ -18,6 +19,7 @@ from trellis.errors import StaleStoreWriteError
 from trellis.schemas.enums import Enforcement, PolicyType
 from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
 from trellis.stores.policy_store import PolicyStore
+from trellis_cli import policy as policy_cli
 from trellis_cli.exit_codes import EXIT_STORE
 from trellis_cli.main import app
 
@@ -380,9 +382,18 @@ class TestPolicyListSurvivesADamagedFile:
         So this asserts the property that actually matters: the printed
         command **parses as a shell command** with exactly the two operands
         it should have. That fails on all three.
+
+        A fourth way, and the one that defeated this test itself (#495):
+        *colour*. Rich styles parts of a token, so ``mv`` arrives as
+        ``\x1b[1mmv`` and ``shlex.split`` sees the escape inside the word.
+        Colour is forced here rather than inherited from the ambient run,
+        because stripping escapes on a build that emitted none pins
+        nothing — the assertion would hold without the coloured renderer
+        ever running.
         """
         import shlex
 
+        force_colour(monkeypatch, policy_cli)
         data_dir = tmp_path / "my [staging] dir" / "data"
         (data_dir / "stores").mkdir(parents=True)
         monkeypatch.setenv("TRELLIS_DATA_DIR", str(data_dir))
@@ -392,17 +403,26 @@ class TestPolicyListSurvivesADamagedFile:
         result = runner.invoke(app, ["policy", "list"])
 
         assert result.exit_code == 5
+        # 1. Colour really happened, so what follows is about the coloured
+        #    renderer and not a plain-path rerun of it.
+        rendered = assert_coloured(result.stdout)
+        # 2. The payload survives stripping: the bracketed, space-bearing
+        #    path is in there whole.
+        assert str(policy_file) in rendered, (
+            "the path did not survive rendering intact — Rich ate the "
+            "bracketed segment, or wrapped the line through the middle of it"
+        )
+        # 3. And the substantive property: it parses as one shell command
+        #    with exactly two operands.
         line = next(
-            ln
-            for ln in result.stdout.splitlines()
-            if ln.strip().startswith("To reset:")
+            ln for ln in rendered.splitlines() if ln.strip().startswith("To reset:")
         )
         command = line.split("To reset:", 1)[1].strip()
         assert shlex.split(command) == [
             "mv",
             str(policy_file),
             f"{policy_file}.corrupt",
-        ]
+        ], f"the printed recovery command does not parse as `mv src dst`: {command!r}"
 
     def test_json_output_is_parseable_with_a_long_path(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

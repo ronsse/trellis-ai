@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 import httpx
 from typer.testing import CliRunner
 
+from tests.cli_output import plain
 from trellis_cli import admin as admin_module
 from trellis_cli.main import app
 
@@ -127,10 +128,11 @@ class TestSmokeTestHappyPath:
         result = runner.invoke(app, ["admin", "smoke-test", "--api-key", "secret"])
 
         assert result.exit_code == 0, result.stdout
-        assert "Trellis API smoke test" in result.stdout
-        assert "PASS" in result.stdout
-        assert "5 checks" in result.stdout
-        assert "0 fail" in result.stdout
+        rendered = plain(result.stdout)
+        assert "Trellis API smoke test" in rendered
+        assert "PASS" in rendered
+        assert "5 checks" in rendered
+        assert "0 fail" in rendered
 
     def test_no_api_key_skips_auth_checks(
         self, monkeypatch: pytest.MonkeyPatch
