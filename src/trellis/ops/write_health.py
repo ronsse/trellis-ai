@@ -173,7 +173,7 @@ _COLLISION_REASONS: dict[str, tuple[str, str]] = {
         (
             "two writers keep racing for the same file — each refusal was "
             "safe and needed nobody, but recurring means their schedules "
-            "overlap, not that a payload is wrong"
+            "overlap; stagger the two writers on that file, not a payload"
         ),
     ),
 }
