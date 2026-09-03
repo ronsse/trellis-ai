@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from trellis.core.write_config import ENV_VAR_BY_FIELD, WriteBehaviourConfig
@@ -21,7 +23,13 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class TestStampShape:
-    def test_carries_build_identity_and_flags(self) -> None:
+    def test_carries_build_identity_and_flags(self, pin_source_tree) -> None:
+        """Pinned fresh: the key set is the *healthy* shape, not ambient.
+
+        Left to the real install, this would assert on the git state of
+        whichever tree the test run happens to be installed from.
+        """
+        pin_source_tree(commit="abc1234", head="abc1234" + "0" * 33)
         stamp = build_write_provenance()
         assert set(stamp) == {
             "version",
@@ -40,8 +48,6 @@ class TestStampShape:
         assert stamp["env_flags"]["embed_on_ingest"] is True
 
     def test_is_json_serializable(self) -> None:
-        import json
-
         json.dumps(build_write_provenance())
 
     def test_stamp_nests_at_most_one_level(self) -> None:
@@ -120,3 +126,81 @@ class TestStampMetadata:
         assert get_write_provenance()["version"] != "tampered"
         assert get_write_provenance()["env_flags"]["classify_on_ingest"] is False
         assert second[WRITE_PROVENANCE_KEY]["env_flags"]["classify_on_ingest"] is False
+
+
+class TestStalenessKeys:
+    """#348 — an editable install whose tree has moved on says so."""
+
+    FRESH_SHA = "abc1234" + "0" * 33
+    LIVE_SHA = "def5678" + "1" * 33
+
+    def test_healthy_stamp_is_byte_identical_across_every_non_stale_state(
+        self, pin_source_tree
+    ) -> None:
+        """The load-bearing property: a healthy deployment pays nothing.
+
+        The stamp rides ``Event.metadata`` on every emitted event. A fresh
+        editable install, an install the probe could not read, and a
+        container image must each produce exactly the bytes they produced
+        before this probe existed.
+        """
+        pin_source_tree(commit="abc1234", head=self.FRESH_SHA)
+        fresh = json.dumps(build_write_provenance())
+        pin_source_tree(commit="abc1234", head=None)
+        unresolved = json.dumps(build_write_provenance())
+        pin_source_tree(commit="abc1234", head=self.LIVE_SHA, tree=None)
+        not_editable = json.dumps(build_write_provenance())
+        pin_source_tree(commit=None, head=self.LIVE_SHA, source="fallback-version")
+        container = json.dumps(build_write_provenance())
+
+        assert fresh == unresolved == not_editable
+        assert "stamp_stale" not in fresh
+        # The container differs only in the build fields it already had.
+        assert "stamp_stale" not in container
+
+    def test_stale_install_adds_exactly_two_keys(self, pin_source_tree) -> None:
+        pin_source_tree(commit="abc1234", head=self.LIVE_SHA)
+        stamp = build_write_provenance()
+        assert set(stamp) == {
+            "version",
+            "version_source",
+            "commit",
+            "dirty",
+            "env_flags",
+            "env_flags_digest",
+            "stamp_stale",
+            "source_tree_commit",
+        }
+        assert stamp["stamp_stale"] is True
+        assert stamp["source_tree_commit"] == self.LIVE_SHA
+
+    def test_the_stamped_commit_is_never_overwritten(self, pin_source_tree) -> None:
+        """The row must still record what the metadata said.
+
+        Silently substituting the live sha would destroy the very fact an
+        analyst bucketing rows by build is reading.
+        """
+        pin_source_tree(commit="abc1234", head=self.LIVE_SHA)
+        stamp = build_write_provenance()
+        assert stamp["commit"] == "abc1234"
+        assert stamp["version"] == "0.9.1.dev1+gabc1234"
+
+    def test_install_time_dirty_is_a_different_field(self, pin_source_tree) -> None:
+        """``dirty`` speaks for install time and must not move with this."""
+        pin_source_tree(commit="abc1234", head=self.LIVE_SHA)
+        assert build_write_provenance()["dirty"] is False
+
+    def test_a_stale_stamp_still_nests_at_most_one_level(self, pin_source_tree) -> None:
+        """``_copy_stamp`` copies one level of dicts; the new keys are flat."""
+        pin_source_tree(commit="abc1234", head=self.LIVE_SHA)
+        for value in build_write_provenance().values():
+            if isinstance(value, dict):
+                assert not any(isinstance(v, (dict, list)) for v in value.values())
+            else:
+                assert not isinstance(value, list)
+
+    def test_a_stale_stamp_reaches_the_event_hot_path(self, pin_source_tree) -> None:
+        pin_source_tree(commit="abc1234", head=self.LIVE_SHA)
+        stamped = stamp_metadata(None)[WRITE_PROVENANCE_KEY]
+        assert stamped["stamp_stale"] is True
+        assert stamped["source_tree_commit"] == self.LIVE_SHA

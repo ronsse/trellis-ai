@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 import pytest
+from click.utils import strip_ansi
 from typer.testing import CliRunner
 
 from trellis.core.write_config import ENV_VAR_BY_FIELD
@@ -66,3 +67,79 @@ class TestTextOutput:
         result = runner.invoke(app, ["admin", "write-config"])
         assert "version_source" in result.stdout
         assert "env_flags_digest" in result.stdout
+
+
+LIVE_SHA = "def5678" + "1" * 33
+
+
+class TestStampStaleness:
+    """#348 — the operator surface says whether ``commit`` still holds."""
+
+    def test_json_names_the_state_even_when_nothing_is_wrong(
+        self, pin_source_tree
+    ) -> None:
+        """The stamp is silent when fresh; this surface must not be.
+
+        "Checked, fine" and "never checked" are different operator facts
+        and a missing key renders as neither.
+        """
+        pin_source_tree(commit="abc1234", head="abc1234" + "0" * 33)
+        result = runner.invoke(app, ["admin", "write-config", "--format", "json"])
+        payload = json.loads(result.stdout)
+        assert payload["stamp_staleness"]["state"] == "fresh"
+        assert "stamp_stale" not in payload["write_provenance"]
+
+    def test_json_distinguishes_never_checked_from_fine(self, pin_source_tree) -> None:
+        pin_source_tree(commit="abc1234", head=LIVE_SHA, tree=None)
+        result = runner.invoke(app, ["admin", "write-config", "--format", "json"])
+        payload = json.loads(result.stdout)
+        assert payload["stamp_staleness"]["state"] == "not-checked"
+        assert payload["stamp_staleness"]["source_tree_commit"] is None
+
+    def test_json_reports_a_stale_install_in_both_places(self, pin_source_tree) -> None:
+        pin_source_tree(commit="abc1234", head=LIVE_SHA)
+        result = runner.invoke(app, ["admin", "write-config", "--format", "json"])
+        assert result.exit_code == 0
+        payload = json.loads(result.stdout)
+        assert payload["stamp_staleness"] == {
+            "state": "stale",
+            "source_tree_commit": LIVE_SHA,
+        }
+        assert payload["write_provenance"]["stamp_stale"] is True
+        assert payload["write_provenance"]["commit"] == "abc1234"
+
+    def test_text_names_the_live_sha_when_stale(
+        self, pin_source_tree, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("COLUMNS", "200")
+        pin_source_tree(commit="abc1234", head=LIVE_SHA)
+        result = runner.invoke(app, ["admin", "write-config"])
+        out = strip_ansi(result.stdout)
+        assert "stamp_stale" in out
+        assert LIVE_SHA in out
+
+    def test_text_says_no_rather_than_nothing_when_fresh(
+        self, pin_source_tree, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("COLUMNS", "200")
+        pin_source_tree(commit="abc1234", head="abc1234" + "0" * 33)
+        out = strip_ansi(runner.invoke(app, ["admin", "write-config"]).stdout)
+        assert "no — source tree HEAD matches" in out
+
+    def test_text_distinguishes_unreadable_from_fresh(
+        self, pin_source_tree, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("COLUMNS", "200")
+        pin_source_tree(commit="abc1234", head=None)
+        out = strip_ansi(runner.invoke(app, ["admin", "write-config"]).stdout)
+        assert "unknown" in out
+        assert "no — source tree HEAD matches" not in out
+
+    def test_text_labels_the_install_time_dirty_flag(
+        self, pin_source_tree, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Two clocks on one table — the older one has to say which it is."""
+        monkeypatch.setenv("COLUMNS", "200")
+        pin_source_tree(commit="abc1234", head=LIVE_SHA)
+        out = strip_ansi(runner.invoke(app, ["admin", "write-config"]).stdout)
+        assert "dirty (at install time)" in out

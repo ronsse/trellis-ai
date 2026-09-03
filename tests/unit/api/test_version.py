@@ -104,3 +104,25 @@ class TestVersionEndpoint:
         monkeypatch.setenv(AUTH_MODE_ENV, AUTH_MODE_REQUIRED)
         monkeypatch.setenv(OPS_DETAIL_ENV, OPS_DETAIL_PUBLIC)
         assert client.get("/api/version").json()["write_provenance"] is not None
+
+
+class TestStampStaleness:
+    """#348 — a server run from a drifted working tree says so."""
+
+    LIVE_SHA = "def5678" + "1" * 33
+
+    def test_stale_keys_reach_the_ops_detail_response(self, client, pin_source_tree):
+        pin_source_tree(commit="abc1234", head=self.LIVE_SHA)
+        provenance = client.get("/api/version").json()["write_provenance"]
+        assert provenance["stamp_stale"] is True
+        assert provenance["source_tree_commit"] == self.LIVE_SHA
+        assert provenance["commit"] == "abc1234"
+
+    def test_a_container_image_reports_no_staleness_keys(self, client, pin_source_tree):
+        """The deployment shape this route was written for cannot drift."""
+        pin_source_tree(
+            commit=None, head=self.LIVE_SHA, tree=None, source="fallback-version"
+        )
+        provenance = client.get("/api/version").json()["write_provenance"]
+        assert "stamp_stale" not in provenance
+        assert "source_tree_commit" not in provenance
