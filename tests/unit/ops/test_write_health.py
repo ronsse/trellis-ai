@@ -11,12 +11,15 @@ import json
 import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import get_args
 from unittest.mock import MagicMock
 
 import pytest
 from pydantic import BaseModel, ValidationError
 
 from trellis.ops.write_health import (
+    _REPEAT_COLLISION_WARN,
+    RejectionKind,
     classify_rejection,
     hints_for_trace_rejections,
     normalize_loc,
@@ -466,6 +469,186 @@ class TestSummarizeWriteHealth:
         )
         future_report = summarize_write_health(event_log, days=0)
         assert future_report.attempts == 0
+
+
+#: The two ``RejectionKind`` values that are conditions of a *file* rather
+#: than of a payload. Listed here, and every kind not listed is asserted to
+#: take the payload sentence — so the partition is exhaustive over
+#: ``get_args(RejectionKind)`` and a kind added later lands in one arm or
+#: fails the suite.
+_FILE_CONDITION_KINDS = frozenset({"config_unreadable", "stale_write"})
+
+#: A distinct ``loc`` per kind, so a reason that hard-codes one cannot pass.
+_LOC_FOR_KIND = {
+    "config_unreadable": "advisories.json",
+    "stale_write": "policies.json",
+    "json_invalid": "",
+}
+
+
+def _seed_collision(event_log: EventLog, kind: str, loc: str, *, count: int) -> None:
+    """``count`` boundary rejections of one ``(kind, loc)`` pair."""
+    for _ in range(count):
+        event_log.emit(
+            EventType.WRITE_REJECTED,
+            "cli:curate-advisories",
+            payload={
+                "tool": "cli:curate-advisories",
+                "stage": "boundary",
+                "rejections": [{"kind": kind, "loc": loc, "msg": ""}],
+            },
+        )
+
+
+def _recurrence_reasons(event_log: EventLog) -> list[str]:
+    """Just the ``repeated …`` lines, in report order."""
+    report = summarize_write_health(event_log, days=1)
+    return [r for r in report.reasons if r.startswith("repeated ")]
+
+
+def _explanation(reason: str) -> str:
+    """The half after the em dash — the part that does the routing."""
+    _, sep, tail = reason.partition(" — ")
+    assert sep, f"no explanation in {reason!r}"
+    return tail
+
+
+class TestRecurrenceExplanationRoutesByKind:
+    """#485. ``repeated_collisions`` tells an operator which fix to reach for.
+
+    A single sentence — *"same mistake recurring means the schema and its
+    docs/skill disagree"* — was appended to every kind. That is sound for a
+    payload-schema rejection (#472/#473) and false for a file condition,
+    where no schema, doc or skill is implicated and no caller can act.
+
+    Every kind is exercised, not only the two file ones: a mutant that
+    returns one sentence for everything is invisible to a fixture that only
+    covers the arm it happens to return.
+    """
+
+    def _reason_for(self, tmp_path: Path, kind: str) -> str:
+        event_log = SQLiteEventLog(tmp_path / f"{kind}.db")
+        _seed_collision(
+            event_log,
+            kind,
+            _LOC_FOR_KIND.get(kind, f"payload.{kind}"),
+            count=_REPEAT_COLLISION_WARN,
+        )
+        reasons = _recurrence_reasons(event_log)
+        assert len(reasons) == 1, reasons
+        return reasons[0]
+
+    def test_every_kind_is_covered_by_the_partition(self) -> None:
+        """The roster below is checked against the enum, not declared.
+
+        Every guard in this class divides the kinds into "file" and
+        "payload"; if the enum grows a third sort, the new value silently
+        joins the payload arm and its sentence goes unexamined. This fails
+        instead.
+        """
+        kinds = set(get_args(RejectionKind))
+        assert kinds > _FILE_CONDITION_KINDS
+        assert kinds - _FILE_CONDITION_KINDS
+
+    def test_every_kind_gets_a_recurrence_reason(self, tmp_path: Path) -> None:
+        """No kind may fall through to no line at all."""
+        for kind in get_args(RejectionKind):
+            reason = self._reason_for(tmp_path, kind)
+            assert kind in reason, reason
+            assert _explanation(reason), reason
+
+    def test_the_shared_format_still_names_kind_loc_and_count(
+        self, tmp_path: Path
+    ) -> None:
+        """Count is read off the row, not off the warn threshold.
+
+        Seeded one above ``_REPEAT_COLLISION_WARN`` so a reason that
+        rendered the constant instead of the count cannot pass.
+        """
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        _seed_collision(
+            event_log,
+            "extra_forbidden",
+            "outcome.artifacts",
+            count=_REPEAT_COLLISION_WARN + 1,
+        )
+        (reason,) = _recurrence_reasons(event_log)
+        assert "extra_forbidden" in reason
+        assert "at outcome.artifacts" in reason
+        assert f"x{_REPEAT_COLLISION_WARN + 1}" in reason
+
+    def test_an_empty_loc_still_reads_as_the_payload(self, tmp_path: Path) -> None:
+        """Unchanged by #485, pinned because the f-string moved."""
+        reason = self._reason_for(tmp_path, "json_invalid")
+        assert "at (payload)" in reason
+
+    def test_payload_kinds_keep_the_schema_sentence(self, tmp_path: Path) -> None:
+        """The original wording, on the kinds it was written for."""
+        for kind in set(get_args(RejectionKind)) - _FILE_CONDITION_KINDS:
+            reason = self._reason_for(tmp_path, kind)
+            assert reason.startswith("repeated schema collision:"), reason
+            assert _explanation(reason) == (
+                "same mistake recurring means the schema and its docs/skill disagree"
+            ), reason
+
+    def test_file_conditions_never_blame_a_schema_doc_or_skill(
+        self, tmp_path: Path
+    ) -> None:
+        """Both halves of the old line were wrong, prefix included."""
+        for kind in sorted(_FILE_CONDITION_KINDS):
+            reason = self._reason_for(tmp_path, kind)
+            lowered = reason.lower()
+            for word in ("schema", "doc", "skill", "mistake"):
+                assert word not in lowered, (kind, word, reason)
+
+    def test_the_two_file_conditions_do_not_share_a_sentence(
+        self, tmp_path: Path
+    ) -> None:
+        """One needs a human with ``mv``; the other needs two writers apart.
+
+        Folding them into a single "this is a file problem" line would fix
+        the wrong-routing complaint while still routing two different
+        repairs to one answer.
+        """
+        explanations = {
+            kind: _explanation(self._reason_for(tmp_path, kind))
+            for kind in sorted(_FILE_CONDITION_KINDS)
+        }
+        assert len(set(explanations.values())) == len(_FILE_CONDITION_KINDS)
+
+    def test_config_unreadable_points_at_the_damaged_file(self, tmp_path: Path) -> None:
+        reason = self._reason_for(tmp_path, "config_unreadable")
+        assert reason.startswith("repeated unreadable config:")
+        assert "advisories.json" in reason
+        explanation = _explanation(reason).lower()
+        assert "file" in explanation
+        # The repair is a human's, and saying so is the whole routing.
+        assert "unrepaired" in explanation
+
+    def test_stale_write_points_at_the_two_writers(self, tmp_path: Path) -> None:
+        """The kind the counter reads *best*, and it was labelled worst.
+
+        ``RejectionKind``'s own comment says a stale write needs nobody at
+        all unless it recurs — and recurrence is exactly when this line
+        fires, so this is the one row carrying real signal.
+        """
+        reason = self._reason_for(tmp_path, "stale_write")
+        assert reason.startswith("repeated writer collision:")
+        explanation = _explanation(reason).lower()
+        assert "writers" in explanation
+        assert "safe" in explanation
+
+    def test_two_kinds_at_one_loc_get_their_own_lines(self, tmp_path: Path) -> None:
+        """The live shape from #485's reproduction: one file, both kinds."""
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        for kind in ("config_unreadable", "stale_write"):
+            _seed_collision(
+                event_log, kind, "advisories.json", count=_REPEAT_COLLISION_WARN
+            )
+        reasons = _recurrence_reasons(event_log)
+        assert len(reasons) == 2
+        assert all("advisories.json" in r for r in reasons)
+        assert len({_explanation(r) for r in reasons}) == 2
 
 
 class TestServeAttribution:

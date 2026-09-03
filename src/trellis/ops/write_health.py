@@ -127,8 +127,57 @@ _MIN_ATTEMPTS_FOR_RATE = 5
 #: Warn when more than this fraction of attempts is rejected.
 _REJECTION_RATE_WARN = 0.10
 #: Warn when one (kind, loc) pair recurs this often — the signature of a
-#: schema/docs collision rather than a one-off agent mistake.
+#: standing conflict rather than a one-off.
 _REPEAT_COLLISION_WARN = 3
+
+#: What a recurrence *means*, per :data:`RejectionKind` — a ``(label,
+#: explanation)`` pair rendered as ``repeated {label}: … — {explanation}``.
+#:
+#: ``repeated_collisions`` is a **routing** signal: it tells an operator
+#: which kind of repair to reach for. One sentence for every kind sent
+#: them to the wrong one (#485). The default below is the payload-schema
+#: reading the counter was written for, and it is sound *there* — an agent
+#: that keeps sending a field the model forbids is evidence the hint or
+#: the skill is wrong rather than the schema (#472/#473).
+#:
+#: It is simply false for the two file conditions, which implicate no
+#: schema, no doc and no agent. They get a sentence **each** rather than
+#: one shared "this is a file problem" line, because their repairs differ
+#: from each other: ``config_unreadable`` needs a human to look at a
+#: damaged file, ``stale_write`` needs two writers separated. Note
+#: ``stale_write`` is the case the counter reads *best* — a single stale
+#: refusal needs nobody at all, and recurrence is exactly the condition
+#: that makes it worth saying — so explaining it as a schema disagreement
+#: mislabelled the one row carrying real signal.
+#:
+#: Kinds absent here take the default; that is the safe direction, since
+#: every kind but these two is a payload problem. The recovery advice the
+#: stores compute (#427, a ``shlex``-quoted ``mv``) rides the rejection
+#: ``msg`` and is dropped by ``collision_counts``, which keys on ``(kind,
+#: loc)`` alone — getting it to the boundaries is #459, not this.
+_DEFAULT_COLLISION_REASON: tuple[str, str] = (
+    "schema collision",
+    "same mistake recurring means the schema and its docs/skill disagree",
+)
+_COLLISION_REASONS: dict[str, tuple[str, str]] = {
+    "config_unreadable": (
+        "unreadable config",
+        (
+            "one damaged file on disk, still unrepaired — nothing a caller "
+            "sent is at fault and no payload change can clear it; repair or "
+            "move the named file aside"
+        ),
+    ),
+    "stale_write": (
+        "writer collision",
+        (
+            "two writers keep racing for the same file — each refusal was "
+            "safe and needed nobody, but recurring means their schedules "
+            "overlap, not that a payload is wrong"
+        ),
+    ),
+}
+
 #: Marker every ``ScanCoverage.note`` opens with. Matched rather than
 #: re-derived so the composed report can recognise — and supersede — the
 #: write section's own truncation line.
@@ -742,10 +791,13 @@ def summarize_write_health(
         )
     for item in repeated:
         loc = str(item["loc"]) or "(payload)"
+        # The explanation is the routing, so it follows the kind (#485).
+        label, explanation = _COLLISION_REASONS.get(
+            str(item["kind"]), _DEFAULT_COLLISION_REASON
+        )
         reasons.append(
-            f"repeated schema collision: {item['kind']} at {loc} "
-            f"x{item['count']} — same mistake recurring means the schema "
-            "and its docs/skill disagree"
+            f"repeated {label}: {item['kind']} at {loc} "
+            f"x{item['count']} — {explanation}"
         )
     if boundary_rejected > 0 and accepted == 0:
         reasons.append(
