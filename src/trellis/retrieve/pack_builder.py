@@ -53,7 +53,10 @@ from trellis.retrieve.noise import (
 )
 from trellis.retrieve.rerankers.base import Reranker
 from trellis.retrieve.servable import strip_non_servable
-from trellis.retrieve.strategies import SearchStrategy
+from trellis.retrieve.strategies import (
+    RECENCY_CLOCK_METADATA_KEY,
+    SearchStrategy,
+)
 from trellis.retrieve.tier_mapping import TierMapper
 from trellis.retrieve.token_counting import DEFAULT_TOKEN_COUNTER, TokenCounter
 from trellis.retrieve.withholding import SECTION_FILTER_REASON, summarize_withheld
@@ -246,6 +249,28 @@ def _item_attribution(item: PackItem) -> dict[str, Any]:
       goes wrong. It reveals nothing about content: two enum values
       describing the *mechanism*, next to a ``title`` that already names
       the thing.
+    * ``recency_clock`` — which clock recency decay actually read for this
+      item: ``"source"`` (the metadata bag's stamp, the content's own clock),
+      ``"row"`` (the store row's write-clock column) or ``"none"`` (no usable
+      candidate, so the item was scored **undecayed** — the maximum
+      multiplier, not a neutral one). Only the two document-backed axes carry
+      it, because only they resolve through
+      :func:`~trellis.retrieve.strategies.resolve_recency_stamp`; **absence
+      means the item came from some other axis**, the same
+      omission-as-a-value convention the fields above use.
+
+      Here for the ``graph_selection`` reason (#371, #465). The three outcomes
+      are up to 3.3x apart in the resulting multiplier — a median 2.20x
+      between ``"source"`` and ``"row"`` on the 148 rows #417 measured, and
+      ``"none"`` fails *open* at ``1 / floor`` — so an item's rank can be
+      dominated by which branch fired, and without this field which one fired
+      is recoverable only by re-reading the code that ran. ``"none"`` is the
+      load-bearing value: it is how the semantic-axis residual #462 left open
+      (a document whose own ``created_at`` is malformed or in the future has
+      nothing to fall through to) becomes a query over served records instead
+      of a code-reading finding. It reveals nothing about content — three enum
+      values naming a mechanism.
+
     * ``node_type`` / ``node_role`` — the graph row's own type and role, as
       stamped by :class:`~trellis.retrieve.strategies.GraphSearch` and
       :class:`~trellis.retrieve.observation_strategy.ObservationSearch`
@@ -296,6 +321,7 @@ def _item_attribution(item: PackItem) -> dict[str, Any]:
         "domain_system": meta.get("source_system"),
         "signal_quality": tags.get("signal_quality"),
         "graph_selection": meta.get("graph_selection"),
+        RECENCY_CLOCK_METADATA_KEY: meta.get(RECENCY_CLOCK_METADATA_KEY),
         "node_type": meta.get("node_type"),
         "node_role": meta.get("node_role"),
     }
