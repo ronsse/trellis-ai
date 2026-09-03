@@ -1557,7 +1557,7 @@ class TestVectorsResetStatusLine:
         assert body["code"] == "vector_store_unconfigured", body
         assert body["message"] == "Vector store not configured", body
 
-    def test_a_failed_reset_answers_500_not_200(self, client, tmp_path):
+    def test_a_failed_reset_answers_500_not_200(self, client):
         """The arm the issue called the worse one, provoked for real.
 
         No mock: the vectors database file is replaced with bytes that are
@@ -1637,9 +1637,7 @@ class TestVectorsResetStatusLine:
         with pytest.raises(sqlite3.OperationalError):
             store.count()
 
-    def test_neither_refusal_is_wrapped_in_a_detail_envelope(
-        self, client, monkeypatch, tmp_path
-    ):
+    def test_neither_refusal_is_wrapped_in_a_detail_envelope(self, client, monkeypatch):
         """Pins the docstring's contract for *every* arm it speaks for.
 
         The endpoint docstring is what ``scripts/generate_openapi.py``
