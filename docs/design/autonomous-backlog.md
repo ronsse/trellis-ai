@@ -7,8 +7,10 @@
 > [`implementation-roadmap.md`](./implementation-roadmap.md) §3.H — **not a second
 > source of truth.** Where they disagree, the roadmap wins.
 >
-> Created 2026-08-26. Item statuses live in the GitHub issues, not here; this file
-> records decomposition, sequencing, and the autonomy class of each item.
+> Created 2026-08-26; the live queue was re-derived 2026-09-03. Item statuses live in
+> the GitHub issues, not here; this file records decomposition, sequencing, and the
+> autonomy class of each item. **Read [Current queue](#current-queue--re-derived-2026-09-03)
+> first** — the Wave sections below it are the accumulated record, not the schedule.
 
 ## How an agent runs an item
 
@@ -18,6 +20,11 @@
    `ruff` / `mypy` / `pytest` and a non-activated shell fails with a misleading
    exit 127. (Do **not** use `uv run` casually: it re-resolves and rewrites
    `uv.lock` as a side effect.)
+   **Run `mypy --python-version 3.12 src/`, never bare `mypy src/`** — the pinned
+   `python_version = "3.11"` meets a numpy 3.12 `type` statement, so the run aborts
+   having checked **zero files** and reads as clean. This has produced a false green
+   for several agents; [#398](https://github.com/ronsse/trellis-ai/issues/398) tracks
+   fixing it properly.
 4. Open a PR. **Merge only when all six workflows are green** — `lint`, `typecheck`,
    `tests` (3.11/3.12/3.13), `codeql`, `openapi`. `main` has no required status
    checks configured, so GitHub will *not* enforce this for you; the gate is the
@@ -33,6 +40,118 @@ Every item is tagged with who decides when a fork appears mid-item.
 | **`panel`** | Reversible. The agent may settle open questions with the `decision-panel` skill (cross-lab model panel) and proceed. A **split panel escalates to the operator** — that is the case where operator input is worth most. |
 | **`human`** | Not eligible for the panel regardless of confidence: publishing, deletion or redaction of production data, credential operations, spend, history rewrite, repo-settings changes. |
 | **`blocked`** | Cannot start; the blocker is named. |
+
+---
+
+## Current queue — re-derived 2026-09-03
+
+> **This section is the live scheduling view.** Waves 0–5 below it are retained as the
+> *record* of what each item decided, measured, or refuted — several of them are the only
+> written home for a measurement that a future agent would otherwise re-derive or
+> re-propose. Status lives in the GitHub issues; where this file and an issue disagree,
+> the issue wins.
+>
+> Re-derived from the 37 open issues on 2026-09-03. Roughly a third are swarm-ready now,
+> a third need a design call first, and a third are operator-gated — that last third
+> inflates the apparent queue and is worth a disposition pass.
+
+### Lane A — the file-store guard family
+
+`DegradableJsonStore` (#426) unified `PolicyStore` and `AdvisoryStore`; these are the
+three residues. Different files, so they parallelize.
+
+| # | item | class |
+|---|---|---|
+| [#471](https://github.com/ronsse/trellis-ai/issues/471) | `_fingerprint` swallows `OSError` → `None == None` → the stale guard **passes** | `panel` |
+| [#448](https://github.com/ronsse/trellis-ai/issues/448) | the nightly advisory writer exits `0` on a refused write; only the ad-hoc paths escalate | `panel` |
+| [#459](https://github.com/ronsse/trellis-ai/issues/459) | a damaged policy file is illegible — CLI exit 1 with empty stdout, REST 500 `internal_error` | `panel` |
+
+#471 is the load-bearing one: `refuse_if_stale` is what stands between a stale view and
+#413's fail-open on access control, and a guard that disarms when it cannot `stat()` is
+that defect one layer down. #448 is the signature shape of this repo — a mechanism
+reporting success while doing nothing — on the one surface that is unattended. #459 is
+the legibility half of #425, whose visibility half shipped in #458.
+
+### Lane B — retrieval correctness
+
+| # | item | class |
+|---|---|---|
+| [#410](https://github.com/ronsse/trellis-ai/issues/410) | `trellis retrieve pack` bypasses `PackBuilder` entirely — the #262 invariant is false for the CLI | `panel` |
+| [#439](https://github.com/ronsse/trellis-ai/issues/439) | SDK/REST cannot report withholding; `hooks.for_intent` reproduces #404 verbatim | `panel` |
+| [#465](https://github.com/ronsse/trellis-ai/issues/465) | the recency resolver picks source/row/nothing and records the choice nowhere | `panel` |
+| [#463](https://github.com/ronsse/trellis-ai/issues/463) | chunk rows decay off the import clock | `panel` — **settle the question in the issue first** |
+| [#298](https://github.com/ronsse/trellis-ai/issues/298) | same-day trace/artifact stubs outrank topical content | `panel` |
+| [#369](https://github.com/ronsse/trellis-ai/issues/369) | alias resolution stops learning past `DEFAULT_NAME_SCAN_LIMIT`, and starts answering wrongly | `panel` |
+| [#392](https://github.com/ronsse/trellis-ai/issues/392) | advisories are never rendered — the flat pack path does not call the formatter | design call |
+
+#439 changes a wire contract (`PackResponse` has no `metadata`), so it trips
+`openapi-check` and is larger than it reads. #465 is mechanical: the house pattern for
+stamping which branch ran is already established three times over (`graph_selection`,
+`content_floor_penalty`, `PACK_ASSEMBLED.payload["withholding"]`).
+
+**[#371](https://github.com/ronsse/trellis-ai/issues/371) is blocked by
+[#375](https://github.com/ronsse/trellis-ai/issues/375)** and must not be dispatched
+alone. The graph axis cannot stop being a recency feed until something produces
+entity-anchored documents on the *memory-ingest* path; wiring the existing
+`SemanticSeedExtractor` was replayed over 37 real production intents and changed **0/37**
+packs.
+
+### Lane C — measurement
+
+Every item here is an instance of *the number that would justify X is the one nobody
+records.*
+
+| # | item | note |
+|---|---|---|
+| [#363](https://github.com/ronsse/trellis-ai/issues/363) | `TOKEN_TRACKED.pack_id` coverage is 0/33 | same seam as #362 — one agent, sequenced |
+| [#362](https://github.com/ronsse/trellis-ai/issues/362) | `get_items` fetch cost is off-book, so index mode cannot be evaluated | ← |
+| [#364](https://github.com/ronsse/trellis-ai/issues/364) | 42% of injected tokens get no verdict, so `useful_token_fraction` describes 58% of itself | |
+| [#348](https://github.com/ronsse/trellis-ai/issues/348) | nothing surfaces the editable-install staleness `write_provenance` was designed to catch | |
+
+### Lane D — CI reaches the backends it claims to support
+
+| # | item | note |
+|---|---|---|
+| [#351](https://github.com/ronsse/trellis-ai/issues/351) | **the ArcadeDB graph contract runs in no workflow** — the *blessed* substrate is untested anywhere | highest value in the lane |
+| [#350](https://github.com/ronsse/trellis-ai/issues/350) | `PgVectorStore` cannot create its own extension: `register_vector` is the pool's `on_connect`, so `_init_schema` is never reached | |
+| [#356](https://github.com/ronsse/trellis-ai/issues/356) | `tests/unit/stores/` runs in no workflow, and cannot simply be swept in | blocked on a capability probe |
+| [#398](https://github.com/ronsse/trellis-ai/issues/398) | local typecheck cannot reproduce CI on this box | unblocks every other agent |
+
+#398 is small and pays for itself immediately: `mypy src/` currently **aborts having
+checked zero files and reads as clean**, which has cost multiple agents a false green.
+
+### Lane E — keystone, design before code
+
+[#360](https://github.com/ronsse/trellis-ai/issues/360) (the governed-pipeline rule does
+not hold for the document and vector planes),
+[#256](https://github.com/ronsse/trellis-ai/issues/256) (extract the Bolt backends to a
+plugin — `ready`, `keystone`), and
+[#264](https://github.com/ronsse/trellis-ai/issues/264) (log every judged memory
+operation — labelled `ready` / `mechanical`, so it is a better swarm candidate than its
+position here suggests).
+
+### Lane F — the OpenAI data-agent evaluation (filed 2026-09-03)
+
+[#478](https://github.com/ronsse/trellis-ai/issues/478) is the umbrella;
+[#474](https://github.com/ronsse/trellis-ai/issues/474) confirm-to-save,
+[#475](https://github.com/ronsse/trellis-ai/issues/475) assumptions header,
+[#476](https://github.com/ronsse/trellis-ai/issues/476) spaces, and
+[#477](https://github.com/ronsse/trellis-ai/issues/477) contradiction + `last_verified`
+are its children. **All five are `blocked:owner-decision` — evaluation, not commitments**,
+and none is swarm-eligible until the owner rules.
+
+Two of the six original proposals were **not** filed, and the reason is reusable: visible
+redaction was byte-identical to the closed #404, and the recurrence premise that ordered
+the whole plan is refuted (there is no `promote_candidates` symbol, and 139 of 306 served
+items recur). A prepared prompt is a snapshot; re-verify every "already exists" and "does
+not exist" claim before acting on one.
+
+### Not swarm-eligible
+
+`#194`, `#200`–`#203`, `#208`, `#250`, `#257`, `#261`, `#275`, `#306`, `#342`, `#405` —
+owner-decision, blocked-on-signal, or umbrella tracking. Eleven of the 37 open issues.
+Several have been in that state long enough that a disposition pass (close, unblock, or
+re-scope) would shrink the queue more than any single fix.
 
 ---
 
