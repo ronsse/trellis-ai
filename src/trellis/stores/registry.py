@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 
 import structlog
 
+from trellis.core.path_presence import path_is_present
 from trellis.errors import BackendNotInstalledError, ConfigError, ValidationError
 from trellis.stores.base import (
     ApiKeyStore,
@@ -1493,7 +1494,13 @@ class StoreRegistry:
         the exact regression Logic Gap 4.5 was meant to prevent.
         """
         path = self._fingerprint_meta_path()
-        if path is None or not path.exists():
+        # ``path_is_present``, not ``Path.exists()``: the latter reports an
+        # ``ELOOP``/``ENOTDIR`` path as absent, and absent here means
+        # *first boot*, which silently disables schema-drift detection —
+        # the exact regression the docstring above says this raises to
+        # prevent (#479). Unreadable now falls through to ``read_text``,
+        # whose handler already raises ``ConfigError`` with the advice.
+        if path is None or not path_is_present(path):
             return {}
         import json  # noqa: PLC0415
 

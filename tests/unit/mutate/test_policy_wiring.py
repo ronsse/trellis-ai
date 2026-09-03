@@ -18,6 +18,12 @@ from structlog.testing import capture_logs
 
 from tests.policy_shapes import DEGENERATE_POLICY_FILES, DEGENERATE_POLICY_IDS
 from tests.structlog_isolation import IsolatedCliRunner
+from tests.unreadable_paths import (
+    UNREADABLE_PATH_IDS,
+    UNREADABLE_PATH_SHAPES,
+    UnreadablePathShape,
+    unreadable,
+)
 from trellis.errors import ConfigError
 from trellis.mutate import build_curate_executor
 from trellis.mutate.commands import Command, CommandStatus, Operation
@@ -98,6 +104,16 @@ def _policy(
         rules=rules or [],
         enforcement=enforcement,
     )
+
+
+def _shape_by_id(shape_id: str) -> UnreadablePathShape:
+    """One named shape, for the tests whose construction is shape-specific.
+
+    Looked up rather than rebuilt locally, so a shape that stops producing
+    its errno fails in ``tests/unit/test_unreadable_path_shapes.py`` — which
+    checks the table — instead of quietly becoming a second copy here.
+    """
+    return next(s for s in UNREADABLE_PATH_SHAPES if s.id == shape_id)
 
 
 def _write_policy_file(stores_dir: Path, policies: list[Policy]) -> Path:
@@ -1069,3 +1085,281 @@ class TestGateLoadFailureIsObservable:
             event_type=EventType.WRITE_REJECTED, limit=10
         )
         assert [e.payload["tool"] for e in events] == [POLICY_GATE_SURFACE]
+
+
+# ---------------------------------------------------------------------------
+# #479 — an unreadable path is not an absent one
+# ---------------------------------------------------------------------------
+
+
+class TestAnUnreadablePathIsNotAnAbsentOne:
+    """The strict reader's guard used to be ``Path.exists()``, which shrugs.
+
+    Every strictness check in this module happens *after* the file is
+    opened. The guard deciding whether to open it swallowed ``ENOENT``,
+    ``ENOTDIR``, ``EBADF`` and ``ELOOP`` alike, so a policy file behind a
+    symlink loop loaded as ``[]`` — an empty gate, every mutation permitted,
+    and no ``ConfigError``, no log line and no event anywhere. That made
+    "every dangerous route to zero policies raises" false while it was
+    written down as true, in the module whose whole premise is failing
+    closed.
+
+    These tests are deliberately **end to end**: the assertion is that a
+    command a declared policy denies does not execute, not that a helper
+    returns a particular value. Pre-fix, every one of them ran the mutation
+    to ``SUCCESS``.
+
+    They parametrise over :data:`tests.unreadable_paths.UNREADABLE_PATH_SHAPES`
+    rather than one hand-picked symlink loop, because three *different*
+    errnos is what stops an assertion on the exception type from being
+    satisfiable by a constant — and ``EACCES`` behaves differently at the
+    standard-library layer (``exists()`` re-raises it), so it exercises a
+    second route into the same refusal.
+    """
+
+    @staticmethod
+    def _registry(stores_dir: Path, event_log: Any = None) -> Any:
+        """``build_policy_gate`` reads exactly two attributes."""
+        return SimpleNamespace(
+            stores_dir=stores_dir,
+            operational=SimpleNamespace(event_log=event_log or _RecordingEventLog()),
+        )
+
+    def _attempt_mutation(self, stores_dir: Path) -> CommandStatus:
+        """Build the gate the way a surface does, then run a command.
+
+        The handler is an ``_EchoHandler``, so reaching Stage 4 at all means
+        Stage 2 let the command through — which with a declared
+        ``entity.create`` deny in the file is precisely the fail-open.
+        """
+        gate = build_policy_gate(self._registry(stores_dir))
+        executor = MutationExecutor(
+            event_log=_RecordingEventLog(),
+            handlers={Operation.ENTITY_CREATE: _EchoHandler()},
+            policy_gate=gate,
+        )
+        return executor.execute(_cmd()).status
+
+    @staticmethod
+    def _deny_entity_create() -> Policy:
+        return _policy(rules=[PolicyRule(operation="entity.create", action="deny")])
+
+    # -- The fail-open itself ------------------------------------------------
+
+    def test_the_healthy_file_denies(self, tmp_path: Path) -> None:
+        """The baseline every other test here is measured against.
+
+        Without this, "the mutation did not succeed" would be satisfiable by
+        a policy file that never denied anything in the first place.
+        """
+        stores_dir = tmp_path / "data" / "stores"
+        _write_policy_file(stores_dir, [self._deny_entity_create()])
+        assert self._attempt_mutation(stores_dir) == CommandStatus.REJECTED
+
+    @pytest.mark.parametrize("shape", UNREADABLE_PATH_SHAPES, ids=UNREADABLE_PATH_IDS)
+    def test_a_declared_deny_is_not_silently_dropped(
+        self, tmp_path: Path, shape: UnreadablePathShape
+    ) -> None:
+        """The regression. Pre-fix this executed the command it forbids."""
+        stores_dir = tmp_path / "data" / "stores"
+        _write_policy_file(stores_dir, [self._deny_entity_create()])
+
+        with (
+            unreadable(shape, stores_dir / POLICY_FILENAME),
+            pytest.raises(ConfigError),
+        ):
+            self._attempt_mutation(stores_dir)
+
+    @pytest.mark.parametrize("shape", UNREADABLE_PATH_SHAPES, ids=UNREADABLE_PATH_IDS)
+    def test_the_refusal_names_the_path_and_the_reason(
+        self, tmp_path: Path, shape: UnreadablePathShape
+    ) -> None:
+        """Per-shape, so no single string satisfies every row.
+
+        ``message_fragment`` is the operating system's own ``strerror`` for
+        that shape's errno — ``Too many levels of symbolic links`` is not
+        ``Not a directory`` — so an error that named the file but lost the
+        cause fails here even though the type is right.
+        """
+        stores_dir = tmp_path / "data" / "stores"
+        _write_policy_file(stores_dir, [self._deny_entity_create()])
+        canonical = stores_dir / POLICY_FILENAME
+
+        with unreadable(shape, canonical), pytest.raises(ConfigError) as exc_info:
+            load_policies(stores_dir)
+
+        message = str(exc_info.value)
+        # ``startswith``, not ``in``: an ``OSError``'s own ``str`` already
+        # carries the filename, so ``str(canonical) in message`` passes even
+        # when the message stops naming the file itself — measured, as a
+        # surviving mutant. The claim is that *Trellis* names the path.
+        assert message.startswith(
+            f"Could not read the Trellis policy file at {canonical}:"
+        )
+        assert shape.message_fragment in message
+        assert "remove the file to run with no policies" in message
+
+    @pytest.mark.parametrize("shape", UNREADABLE_PATH_SHAPES, ids=UNREADABLE_PATH_IDS)
+    def test_the_refusal_is_visible_to_analyze_health(
+        self, tmp_path: Path, shape: UnreadablePathShape
+    ) -> None:
+        """#425's channel, or the outage is invisible everywhere.
+
+        Failing closed is right. Failing closed with no ``MUTATION_REJECTED``
+        (no executor yet), no boundary ``WRITE_REJECTED`` (built outside the
+        try) and no health signal is the availability half of this bug, and
+        an unreadable *path* must reach the same channel an unreadable
+        *file* already does.
+        """
+        stores_dir = tmp_path / "data" / "stores"
+        _write_policy_file(stores_dir, [self._deny_entity_create()])
+        event_log = _RecordingEventLog()
+
+        with (
+            unreadable(shape, stores_dir / POLICY_FILENAME),
+            pytest.raises(ConfigError),
+        ):
+            build_policy_gate(self._registry(stores_dir, event_log))
+
+        assert len(event_log.events) == 1
+        event = event_log.events[0]
+        assert event["event_type"] == EventType.WRITE_REJECTED
+        assert event["payload"]["tool"] == POLICY_GATE_SURFACE
+        assert [r["kind"] for r in event["payload"]["rejections"]] == [
+            "config_unreadable"
+        ]
+        assert shape.message_fragment in event["payload"]["rejections"][0]["msg"]
+
+    @pytest.mark.parametrize("shape", UNREADABLE_PATH_SHAPES, ids=UNREADABLE_PATH_IDS)
+    def test_the_error_line_is_logged_at_error(
+        self, tmp_path: Path, shape: UnreadablePathShape
+    ) -> None:
+        """``TRELLIS_LOG_LEVEL`` defaults to ``WARNING`` on the CLI."""
+        stores_dir = tmp_path / "data" / "stores"
+        _write_policy_file(stores_dir, [self._deny_entity_create()])
+
+        with (
+            unreadable(shape, stores_dir / POLICY_FILENAME),
+            capture_logs() as logs,
+            pytest.raises(ConfigError),
+        ):
+            build_policy_gate(self._registry(stores_dir))
+
+        lines = [e for e in logs if e["event"] == "policy_gate_load_failed"]
+        assert len(lines) == 1
+        assert lines[0]["log_level"] == "error"
+
+    # -- The control: absence must stay absence ------------------------------
+
+    def test_a_genuinely_absent_file_still_gives_a_transparent_gate(
+        self, tmp_path: Path
+    ) -> None:
+        """The anti-vacuity control, and the way this change could break
+        every deployment that has never declared a policy.
+
+        Zero policies is the shipped default. If "cannot stat" and "is not
+        there" were collapsed the *other* way, a fresh install would fail
+        every governed write on first boot.
+        """
+        stores_dir = tmp_path / "data" / "stores"
+        stores_dir.mkdir(parents=True)
+
+        assert load_policies(stores_dir) == []
+        assert self._attempt_mutation(stores_dir) == CommandStatus.SUCCESS
+
+    def test_a_dangling_symlink_reads_as_absent(self, tmp_path: Path) -> None:
+        """``ENOENT`` by another route, and on the absent side of the line.
+
+        Deliberate, and the same answer ``DegradableJsonStore._fingerprint``
+        gives (#482): ``stat`` follows links, a missing target is
+        ``FileNotFoundError``, and one rule covers both readers. Recorded
+        because it sits next to the symlink *loop* and lands opposite it.
+        """
+        stores_dir = tmp_path / "data" / "stores"
+        stores_dir.mkdir(parents=True)
+        (stores_dir / POLICY_FILENAME).symlink_to(stores_dir / "gone.json")
+
+        assert load_policies(stores_dir) == []
+        assert self._attempt_mutation(stores_dir) == CommandStatus.SUCCESS
+
+    def test_a_declared_empty_file_still_gives_a_transparent_gate(
+        self, tmp_path: Path
+    ) -> None:
+        """An operator declaring zero policies is untouched by this."""
+        stores_dir = tmp_path / "data" / "stores"
+        _write_policy_file(stores_dir, [])
+        assert self._attempt_mutation(stores_dir) == CommandStatus.SUCCESS
+
+    # -- Resolution: the other two sites -------------------------------------
+
+    @pytest.mark.parametrize("shape", UNREADABLE_PATH_SHAPES, ids=UNREADABLE_PATH_IDS)
+    def test_resolution_never_raises_on_an_unreadable_canonical_file(
+        self, tmp_path: Path, shape: UnreadablePathShape
+    ) -> None:
+        """Resolution keeps its promise; the reader is what refuses.
+
+        Splitting it this way is what keeps ``trellis policy list`` able to
+        answer on a broken deployment, and keeps ``build_policy_gate``'s
+        ``resolve`` call outside the ``try`` that reports to
+        ``analyze health`` — so the rejection still carries the path.
+        """
+        stores_dir = tmp_path / "data" / "stores"
+        stores_dir.mkdir(parents=True)
+        canonical = stores_dir / POLICY_FILENAME
+
+        with unreadable(shape, canonical):
+            assert resolve_policy_path(stores_dir) == canonical
+
+    def test_an_unreadable_canonical_file_does_not_fall_through_to_legacy(
+        self, tmp_path: Path
+    ) -> None:
+        """The quieter half of the same bug, and it is not zero policies.
+
+        An unreadable canonical file reading as *absent* handed the legacy
+        path back instead — so a deployment carrying both would silently
+        enforce the stale pre-unification ruleset while the file the
+        operator was editing sat broken and unread. Fewer policies, not
+        zero, which is the shape the module docstring's enumeration warns
+        about.
+
+        The symlink loop is used explicitly rather than parametrised: it is
+        the one shape that damages the canonical file *only*, leaving the
+        legacy path genuinely readable, which is what makes the fall-through
+        reachable at all.
+        """
+        data_dir = tmp_path / "data"
+        stores_dir = data_dir / "stores"
+        _write_policy_file(stores_dir, [self._deny_entity_create()])
+        # A legacy file that denies nothing: pre-fix it loaded, and the
+        # mutation the canonical file forbids ran to SUCCESS.
+        _write_policy_file(data_dir, [_policy(rules=[])])
+
+        shape = _shape_by_id("symlink_loop")
+        with unreadable(shape, stores_dir / POLICY_FILENAME):
+            assert resolve_policy_path(stores_dir) == stores_dir / POLICY_FILENAME
+            with pytest.raises(ConfigError) as exc_info:
+                self._attempt_mutation(stores_dir)
+
+        assert str(stores_dir / POLICY_FILENAME) in str(exc_info.value)
+
+    def test_an_unreadable_legacy_file_is_not_skipped(self, tmp_path: Path) -> None:
+        """The second resolution site, which has its own way to fail open.
+
+        Canonical absent, legacy unreadable: pre-fix *both* ``exists()``
+        calls answered ``False``, the canonical path came back, and the
+        reader found nothing there either — zero policies from a deployment
+        whose only policy file is sitting right there, broken.
+        """
+        data_dir = tmp_path / "data"
+        stores_dir = data_dir / "stores"
+        stores_dir.mkdir(parents=True)
+        legacy = data_dir / POLICY_FILENAME
+        _write_policy_file(data_dir, [self._deny_entity_create()])
+
+        shape = _shape_by_id("symlink_loop")
+        with unreadable(shape, legacy):
+            assert resolve_policy_path(stores_dir) == legacy
+            with pytest.raises(ConfigError) as exc_info:
+                self._attempt_mutation(stores_dir)
+
+        assert str(legacy) in str(exc_info.value)

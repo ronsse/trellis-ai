@@ -8,10 +8,17 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from tests.unreadable_paths import (
+    UNREADABLE_PATH_IDS,
+    UNREADABLE_PATH_SHAPES,
+    UnreadablePathShape,
+    unreadable,
+)
 from trellis.errors import StaleStoreWriteError
 from trellis.schemas.enums import Enforcement, PolicyType
 from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
 from trellis.stores.policy_store import PolicyStore
+from trellis_cli.exit_codes import EXIT_STORE
 from trellis_cli.main import app
 
 runner = CliRunner()
@@ -452,6 +459,28 @@ class TestEmptyIsNotAlwaysTheSameEmpty:
         _damage(tmp_path, '{"policies": []}')
         present = runner.invoke(app, ["policy", "list", "--format", "json"])
         assert json.loads(present.stdout.strip())["policy_file_present"] is True
+
+    @pytest.mark.parametrize("shape", UNREADABLE_PATH_SHAPES, ids=UNREADABLE_PATH_IDS)
+    def test_an_unreadable_file_is_present_not_absent(
+        self, tmp_path: Path, shape: UnreadablePathShape
+    ) -> None:
+        """#479 in miniature, at the one surface a human asks this at.
+
+        ``Path.exists()`` reported a symlink loop as ``False``, so the JSON
+        said ``policy_file_present: false`` beside ``status: "degraded"`` —
+        "there is no file, and it is damaged". The two fields now agree:
+        there is a file and it will not load.
+        """
+        path = tmp_path / "data" / "stores" / "policies.json"
+
+        with unreadable(shape, path):
+            result = runner.invoke(app, ["policy", "list", "--format", "json"])
+
+        payload = json.loads(result.stdout.strip())
+        assert payload["policy_file_present"] is True
+        assert payload["status"] == "degraded"
+        assert payload["store_degradation"] is not None
+        assert result.exit_code == EXIT_STORE
 
 
 class TestWritesAreRefusedOnADamagedFile:
