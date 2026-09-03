@@ -246,6 +246,14 @@ curl -X POST -H "X-API-Key: $TRELLIS_API_KEY" \
   "$TRELLIS_API_HOST:$TRELLIS_API_PORT/api/v1/advisories/generate?days=30"
 ```
 
+A run that generated and wrote nothing answers **409**, never 200, and
+names which refusal in the body's `code` — `degraded_store` (the file
+could not be read; look at it), `stale_store_write` (another writer got
+there first; retry), or `stores_dir_unconfigured`. Scripting this
+endpoint on `response.ok` alone was safe for neither of the first two
+until #484: the body said `"status": "degraded"` while the status line
+said success.
+
 ### 2. Noise demote
 
 Tags low-value items with `signal_quality="noise"`, which causes

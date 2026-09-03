@@ -1935,7 +1935,14 @@ paths:
 
         Analyzes PACK_ASSEMBLED and FEEDBACK_RECORDED events to find patterns,
 
-        then stores deterministic advisories for delivery alongside packs.'
+        then stores deterministic advisories for delivery alongside packs.
+
+
+        Every arm that wrote nothing answers 409, never 200, and names itself
+
+        in the body''s `code`: `degraded_store`, `stale_store_write` or
+
+        `stores_dir_unconfigured`.'
       operationId: generate_advisories_api_v1_advisories_generate_post
       parameters:
       - description: Days of history to analyze
@@ -1974,6 +1981,9 @@ paths:
                 title: Response Generate Advisories Api V1 Advisories Generate Post
                 type: object
           description: Successful Response
+        '409':
+          description: 'Nothing was generated and nothing was written: the advisory store loaded degraded, the file changed
+            under the request, or the deployment has no stores_dir. The body''s `code` says which.'
         '422':
           content:
             application/json:

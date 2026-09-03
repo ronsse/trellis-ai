@@ -1217,14 +1217,37 @@ class TestPolicyRoutesOnADegradedStore:
 
 
 class TestAdvisoryGenerateOnADegradedStore:
-    """#393 — the REST admin surface must not headline ``ok`` over a refusal.
+    """#393/#484 — the surface must not headline ``ok`` over a refusal.
 
-    The payload carries ``store_degradation`` either way; a caller that
-    reads only ``status`` would otherwise record a clean nightly generation
-    against a file it could not read.
+    Two headlines, fixed a release apart. #393 fixed the body's: the
+    payload carries ``store_degradation`` either way, so a caller reading
+    only ``status`` would record a clean nightly generation against a file
+    it could not read. #484 fixed the status line's, which #393 pinned at
+    200 and left as the half a plain ``response.ok`` check still read as
+    success.
+
+    Every arm is asserted here — clean, degraded, unconfigured, stale — so
+    a change that answers one status for all of them cannot pass.
     """
 
     def test_status_is_degraded_and_the_file_is_untouched(self, client, tmp_path):
+        """#484 reverses this test's 200 — deliberately, not by oversight.
+
+        #393 wrote it asserting ``resp.status_code == 200`` and it passed
+        for the life of that fix: the claim under test was the *body's*
+        headline, and pinning the status it happened to be served under
+        was how the second headline stayed unexamined. That reasoning no
+        longer holds, because a status line is not incidental packaging —
+        it is the field an HTTP caller branches on, and ``response.ok``
+        cannot see a ``status`` key. A refusal that renders as success to
+        the overwhelmingly common client shape is the #437 class with the
+        status line as the channel.
+
+        Everything #393 actually asserted is unchanged and still asserted
+        here: the body's ``status``, its ``store_degradation`` and its
+        ``advisories_stored`` keep their existing places and values. Only
+        the status line moves.
+        """
         path = tmp_path / "stores" / "advisories.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text('{"advisories": [ torn', encoding="utf-8")
@@ -1232,11 +1255,15 @@ class TestAdvisoryGenerateOnADegradedStore:
 
         resp = client.post("/api/v1/advisories/generate")
 
-        assert resp.status_code == 200, resp.text
+        assert resp.status_code == 409, resp.text
         body = resp.json()
+        # The honest half, unchanged and *not* moved under ``detail``.
         assert body["status"] == "degraded", body
         assert body["store_degradation"]["reason"] == "malformed_json"
         assert body["advisories_stored"] == 0
+        # ``routes/policies.py``'s vocabulary for this exact condition, so
+        # one condition does not get two codes across two surfaces.
+        assert body["code"] == "degraded_store", body
         assert path.read_text(encoding="utf-8") == before
 
     def test_a_clean_store_still_reports_ok(self, client):
@@ -1246,6 +1273,80 @@ class TestAdvisoryGenerateOnADegradedStore:
         body = resp.json()
         assert body["status"] == "ok", body
         assert body["store_degradation"] is None
+        # A success carries no refusal code. Without this a mutant that
+        # answers ``degraded_store`` unconditionally survives, and the
+        # uniformity it would hide is the whole defect.
+        assert "code" not in body, body
+
+    def test_an_unconfigured_stores_dir_is_also_a_refusal(
+        self, client, tmp_path, monkeypatch
+    ):
+        """The third arm of the same asymmetry (#484).
+
+        A deployment with no ``stores_dir`` has nowhere to write, so this
+        request generated nothing and stored nothing — and said so at 200,
+        exactly as the degraded arm did. Included in #484's fix because
+        leaving it is the uniformity failure the fix exists to remove: a
+        route with one honest refusal arm and one lying one is no more
+        trustworthy than one with two.
+
+        409 rather than a status of its own: ``stores_dir`` unset is a
+        ``ConfigError`` in all but name, and #483 set that family's status
+        at this boundary. The ``code`` is what separates it from the
+        degraded and stale refusals, per ``routes/policies.py``.
+
+        Driven through the real ``load_advisory_store``, which returns
+        ``None`` only when ``stores_dir`` itself is ``None`` — so the
+        registry is unconfigured rather than the loader mocked.
+        """
+        monkeypatch.setattr(app_module._registry, "_stores_dir", None)
+
+        resp = client.post("/api/v1/advisories/generate")
+
+        assert resp.status_code == 409, resp.text
+        body = resp.json()
+        assert body["status"] == "error", body
+        assert body["code"] == "stores_dir_unconfigured", body
+        # Distinguishable from the degraded refusal, which shares the
+        # status: a caller told only "409" cannot act, and the two need
+        # different actions (configure a directory vs. repair a file).
+        assert body["message"] == "stores_dir not configured", body
+
+    def test_the_degraded_refusal_keeps_the_report_body(self, client, tmp_path):
+        """The refusal is answered in place, not raised into a handler.
+
+        Two routes to a non-2xx were available and both lose the body.
+        Raising ``DegradedStoreWriteError`` into the global typed handler
+        answers **500**, because that error subclasses ``StoreError`` and
+        ``middleware._error_status`` remaps only ``ConfigError`` — a
+        *differently* wrong status, blaming the server for a file an
+        operator has to go and look at. Raising ``HTTPException`` answers
+        409 but replaces the body with a ``detail`` envelope. The body was
+        the half #393 got right, so neither is acceptable: the status is
+        set on the injected ``Response`` and every report field stays
+        where it was.
+        """
+        path = tmp_path / "stores" / "advisories.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{"advisories": [ torn', encoding="utf-8")
+
+        resp = client.post("/api/v1/advisories/generate")
+
+        assert resp.status_code == 409, resp.text
+        body = resp.json()
+        # Not the ``{"detail": ...}`` an HTTPException produces, and not
+        # the ``{"code", "message", "request_id"}`` the typed handler does.
+        assert "detail" not in body, body
+        # The whole AdvisoryReport is still at the top level.
+        for field in (
+            "advisories_generated",
+            "advisories_stored",
+            "total_packs",
+            "total_feedback",
+            "analysis_window_days",
+            "store_degradation",
+        ):
+            assert field in body, (field, body)
 
     def test_listing_still_works_on_a_degraded_store(self, client, tmp_path):
         """Reads stay lenient — a corrupt file must not 500 the read path."""

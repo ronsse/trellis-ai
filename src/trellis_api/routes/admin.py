@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from trellis.core.error_sanitize import sanitize_error_message
 from trellis.core.vector_metadata import resolve_vector_store
@@ -233,8 +233,31 @@ def metrics_timeseries(
 # -- Advisories --
 
 
-@router.post("/advisories/generate")
+#: The refusal status every advisory-generate arm that wrote nothing
+#: answers with. 409, matching what ``routes/policies.py`` already answers
+#: for a degraded store and what #483 set ``CONFIG_ERROR_STATUS`` to at
+#: this boundary — a third answer would give one condition three statuses
+#: across three surfaces. Not derived from ``middleware._error_status``:
+#: that maps every ``StoreError`` to 500, so leaning on the global typed
+#: handler here would produce a *differently* wrong status.
+_ADVISORY_REFUSED_STATUS = 409
+
+
+@router.post(
+    "/advisories/generate",
+    responses={
+        _ADVISORY_REFUSED_STATUS: {
+            "description": (
+                "Nothing was generated and nothing was written: the advisory "
+                "store loaded degraded, the file changed under the request, "
+                "or the deployment has no stores_dir. The body's `code` says "
+                "which."
+            )
+        }
+    },
+)
 def generate_advisories(
+    response: Response,
     days: int = Query(30, description="Days of history to analyze"),
     min_sample: int = Query(5, description="Min sample size"),
     min_effect: float = Query(0.15, description="Min effect size"),
@@ -243,11 +266,37 @@ def generate_advisories(
 
     Analyzes PACK_ASSEMBLED and FEEDBACK_RECORDED events to find patterns,
     then stores deterministic advisories for delivery alongside packs.
+
+    Every arm that wrote nothing answers 409, never 200, and names itself
+    in the body's `code`: `degraded_store`, `stale_store_write` or
+    `stores_dir_unconfigured`.
     """
+    # This docstring is the endpoint's public API description (it is what
+    # ``scripts/generate_openapi.py`` puts in ``docs/api/v1.yaml``), so the
+    # implementation rationale stays in comments. #484: the refusal status
+    # is set on the *injected* ``Response`` rather than by raising
+    # ``HTTPException``, because an ``HTTPException`` replaces the body
+    # with a ``detail`` envelope — and the body is the half that was
+    # already honest. Setting the status in place keeps ``status``,
+    # ``store_degradation`` and ``advisories_stored`` exactly where #393
+    # put them, so the only thing that changes on the wire is the status
+    # line that was lying.
     registry = get_registry()
     store = load_advisory_store(registry.stores_dir, surface="api.admin.generate")
     if store is None:
-        return {"status": "error", "message": "stores_dir not configured"}
+        # The third asymmetric arm, fixed with the same reasoning as the
+        # degraded one below: a deployment with no ``stores_dir`` generated
+        # nothing and stored nothing, and said so at 200. A ``ConfigError``
+        # in all but name, which is why it takes the status #483 gave that
+        # family. Scoped to this route — the ``GET`` beside it returns the
+        # same sentinel for a *read* that served nothing, which is a
+        # different claim and is left alone.
+        response.status_code = _ADVISORY_REFUSED_STATUS
+        return {
+            "status": "error",
+            "code": "stores_dir_unconfigured",
+            "message": "stores_dir not configured",
+        }
     generator = AdvisoryGenerator(
         registry.operational.event_log,
         store,
@@ -276,8 +325,27 @@ def generate_advisories(
     # ``ok`` over a refused run is the same lie as an unexplained zero: the
     # payload carries ``store_degradation``, but a caller that reads only the
     # headline would record a clean nightly generation (#393).
-    status = "degraded" if report.store_degradation else "ok"
-    return {"status": status, **report.model_dump()}
+    if report.store_degradation is not None:
+        # #484. #393 stopped at the body and pinned the 200 by test; the
+        # status line is a second headline, and it is the one an HTTP
+        # caller reads — ``response.ok`` is the overwhelmingly common
+        # branch and it could not see this refusal at all. ``generate``
+        # returns early on a degraded store rather than raising, so the
+        # ``StaleStoreWriteError`` arm above never fired and the refusal
+        # fell through to the success status: the #437 class with the
+        # status line as the channel.
+        #
+        # ``degraded_store`` rather than ``degraded_store_write``, and 409
+        # rather than 503, are both ``routes/policies.py``'s existing
+        # answers for this exact condition — a degraded file does not
+        # repair itself, so "retry later" is the wrong instruction.
+        response.status_code = _ADVISORY_REFUSED_STATUS
+        return {
+            "status": "degraded",
+            "code": "degraded_store",
+            **report.model_dump(),
+        }
+    return {"status": "ok", **report.model_dump()}
 
 
 @router.get("/advisories")
