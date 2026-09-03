@@ -135,6 +135,16 @@ class TestStampStaleness:
         assert "unknown" in out
         assert "no — source tree HEAD matches" not in out
 
+    def test_text_says_not_applicable_when_there_is_no_source_tree(
+        self, pin_source_tree, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A container's "nothing to check" must not read as "checked, fine"."""
+        monkeypatch.setenv("COLUMNS", "200")
+        pin_source_tree(commit="abc1234", head=LIVE_SHA, tree=None)
+        out = strip_ansi(runner.invoke(app, ["admin", "write-config"]).stdout)
+        assert "n/a" in out
+        assert "no — source tree HEAD matches" not in out
+
     def test_text_labels_the_install_time_dirty_flag(
         self, pin_source_tree, monkeypatch: pytest.MonkeyPatch
     ) -> None:

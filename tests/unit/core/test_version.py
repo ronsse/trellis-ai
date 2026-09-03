@@ -284,6 +284,25 @@ class TestStampStalenessVerdict:
         assert resolve_stamp_staleness().state == STALENESS_NOT_CHECKED
         assert calls["head"] == 0
 
+    def test_not_checked_for_a_generated_module_build(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Scope is the metadata clock; a ``_version`` module is not it.
+
+        That build's sha was written into a file at build time by the same
+        freeze, and nothing here knows which tree — if any — it came from.
+        """
+        calls = self._pin(
+            monkeypatch,
+            version=CodeVersion(
+                version=f"0.9.1.dev1+g{SHA_A[:9]}",
+                source="generated-module",
+                commit=SHA_A[:9],
+            ),
+        )
+        assert resolve_stamp_staleness().state == STALENESS_NOT_CHECKED
+        assert calls == {"tree": 0, "head": 0}
+
     def test_resolved_once_per_process(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """One ``git rev-parse`` per process — this is on the write path."""
         calls = self._pin(monkeypatch, version=_dist_metadata(SHA_A[:9]))
@@ -370,6 +389,16 @@ class TestEditableSourceTree:
         self._record(
             monkeypatch,
             '{"url": "https://example.invalid/t.git", "vcs_info": {"vcs": "git"}}',
+        )
+        assert version_mod._editable_source_tree() is None
+
+    def test_none_for_an_editable_record_with_a_remote_url(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """There is no local directory to read a ``HEAD`` out of."""
+        self._record(
+            monkeypatch,
+            '{"url": "https://example.invalid/t.git", "dir_info": {"editable": true}}',
         )
         assert version_mod._editable_source_tree() is None
 
@@ -465,6 +494,16 @@ class TestGitHead:
         assert seen["check"] is False
         assert seen["capture_output"] is True
         assert seen["text"] is True
+
+    def test_none_when_git_exits_nonzero(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A failed call's stdout is not an answer, whatever it holds."""
+        import subprocess
+
+        def _failed(cmd: list[str], **_k: object) -> object:
+            return subprocess.CompletedProcess(cmd, 128, stdout=SHA_A, stderr="boom")
+
+        monkeypatch.setattr(subprocess, "run", _failed)
+        assert version_mod._git_head("/some/tree") is None
 
     def test_none_when_the_output_is_not_a_sha(
         self, monkeypatch: pytest.MonkeyPatch
