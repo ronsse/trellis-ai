@@ -97,6 +97,21 @@ logger = structlog.get_logger(__name__)
 #: Filename holding a deployment's generated advisories, under ``stores_dir``.
 ADVISORY_FILENAME = "advisories.json"
 
+#: Surface label a refused advisory write is recorded under, in the
+#: ``WRITE_REJECTED`` payload's ``tool`` and as the event ``source`` (#448).
+#:
+#: Deliberately parallel to
+#: :data:`~trellis.mutate.policy_source.POLICY_GATE_SURFACE`, and
+#: deliberately ``config:``-prefixed. That prefix is not decoration: it is
+#: what puts the label in ``capture_health``'s *global* recovery class
+#: (``capture_health._GLOBAL_SURFACE_PREFIX``). Nothing emits an accepted
+#: write under this ``requested_by`` — the advisory store is not the
+#: governed pipeline — so under the ordinary per-surface accept rule a
+#: banner raised here could fire and then never clear, which is #461's
+#: defect exactly. Being global, it clears on the first accepted write from
+#: any surface after the last rejection.
+ADVISORY_WRITER_SURFACE = "config:advisory_file"
+
 
 @overload
 def resolve_advisory_path(stores_dir: Path) -> Path: ...

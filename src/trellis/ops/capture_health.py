@@ -137,7 +137,34 @@ _REPLAY_REASON = "idempotency_replay"
 #: enumerates every ``_record_boundary_rejection`` call site and fails if its
 #: tool is neither named here nor able to demonstrate an accept event, so the
 #: roster is checkable rather than declared (#443's failure shape).
-NON_CAPTURE_SURFACES: frozenset[str] = frozenset({"mcp:record_feedback"})
+#:
+#: ``config:advisory_file`` (#448) is the second entry, and it is here
+#: against the instinct the prefix creates. A ``config:`` label *looks* like
+#: ``config:policy_file``, which belongs in the banner because a policy file
+#: that will not load raises at gate-build time and fails **every governed
+#: write on every surface at once**. A refused *advisory* write blocks
+#: nothing: ``save_memory``, ``save_experience``, ``save_knowledge``, the
+#: session-capture sweep and every ingest path keep working, and the only
+#: thing that did not land is a derived artefact the next curate cycle
+#: regenerates. So the headline — *"New experience from this session is NOT
+#: being saved"* — is false in both halves, exactly as it was for
+#: ``mcp:record_feedback``; without this entry three nights of a degraded
+#: ``advisories.json`` pin that sentence to the top of every pack on a
+#: deployment whose capture is perfectly healthy. Two labels sharing a
+#: prefix is not what earns a banner; stopping experience from being
+#: written is.
+#:
+#: The literal is spelled out rather than imported from
+#: :data:`~trellis.stores.advisory_source.ADVISORY_WRITER_SURFACE`, for the
+#: same reason ``mcp:save_memory`` is below: this module runs on every
+#: retrieval call, and importing ``advisory_source`` would drag
+#: ``AdvisoryStore`` and its schemas onto that path to learn a string. The
+#: duplication is pinned by execution rather than by eye —
+#: ``tests/unit/mcp/test_capture_surface_roster.py`` matches the two
+#: spellings and drives the real surface to prove no banner is raised.
+NON_CAPTURE_SURFACES: frozenset[str] = frozenset(
+    {"mcp:record_feedback", "config:advisory_file"}
+)
 
 #: Accept events that clear a capture surface **in addition to** the
 #: executor's ``MUTATION_EXECUTED``, keyed by surface label (#461).
@@ -175,6 +202,12 @@ _EXTRA_ACCEPT_EVENTS: dict[str, tuple[EventType, ...]] = {
 #: write on any surface could have been attempted. Today that is
 #: ``config:policy_file`` (#425) — a policy file that raises at gate-build
 #: time, before a Command exists.
+#:
+#: The prefix decides the *recovery rule*, not whether a banner is raised at
+#: all: ``config:advisory_file`` (#448) shares it and is nonetheless in
+#: :data:`NON_CAPTURE_SURFACES`, because a refused advisory write stops no
+#: capture path. A label reaches this rule only after
+#: :func:`is_capture_surface` has already let it through.
 #:
 #: It needs its own recovery rule. The per-surface rule asks whether *this*
 #: label landed an accepted write, and no ``MUTATION_EXECUTED`` is ever

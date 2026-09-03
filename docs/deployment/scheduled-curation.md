@@ -23,6 +23,10 @@ For *what* each command does, its autonomy tier, and where the human-in-the-loop
 
 **A note on `--format json`:** every command supports it; schedule with `--format json` and pipe to your log aggregator so you can alert on the structured counts rather than scraping human text. Exit code is `0` on success and non-zero on genuine errors — gate your alerting on both.
 
+**A note on `worker curate`'s exit code:** it is a function of the reported `status` and nothing else. `ok` exits `0`; `degraded` (the advisory file could not be read) and `stale` (another process wrote it mid-cycle) both exit `2`, on the text surface and the JSON surface alike. The other stages still ran and their counts are still in the payload — the non-zero code says a write did not land, not that the cycle did nothing.
+
+Two consequences for your wrapper. If it runs under `set -e`, a `stale` night — which is transient and self-heals on the next cycle — will abort the rest of the script, so put anything that must run regardless *before* the curate call or guard it. And the exit code is only ever a fact about one run: the signal that separates a one-off race from a standing two-writer conflict is `trellis analyze health`, which counts these refusals as `WRITE_REJECTED` under `config:advisory_file` and reports a `(kind, loc)` pair that recurs as a repeated collision.
+
 ---
 
 ## Recipe 1 — crontab

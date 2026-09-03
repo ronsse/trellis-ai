@@ -66,12 +66,17 @@ from trellis.learning.tuners import (
     report_to_dict,
     run_auto_promotion,
 )
+from trellis.ops.write_health import record_write_rejection
 from trellis.retrieve.advisory_generator import AdvisoryGenerator
 from trellis.retrieve.effectiveness import (
     run_advisory_fitness_loop,
     run_effectiveness_feedback,
 )
-from trellis.stores.advisory_source import resolve_advisory_path
+from trellis.stores.advisory_source import (
+    ADVISORY_FILENAME,
+    ADVISORY_WRITER_SURFACE,
+    resolve_advisory_path,
+)
 from trellis.stores.advisory_store import AdvisoryStore
 from trellis_cli._meta_wiring import wrap_cli_meta_analysis
 from trellis_cli.analyze import (
@@ -428,20 +433,25 @@ class CurateCycleResult:
         wrapper reading only ``status`` would record a clean nightly run
         against a file the store could not read (#393).
 
-        The **exit code stays 0** on purpose, and that is a decision rather
-        than an oversight. Unlike ``trellis analyze advisory-effectiveness``
-        — which does nothing at all when it refuses, so exit 2 *is* the
-        result — a curation cycle with a degraded advisory store still ran
-        its noise-tag and learning stages and did real work. Failing the
-        cron job would misreport those. The degradation is carried in
-        ``status``, in ``advisory_store_degraded``, in a red banner on the
-        text surface, and in an ``error``-level log line.
+        The **exit code follows this field**: anything but ``"ok"`` exits
+        :data:`_EXIT_ADVISORY_REFUSED` (#448), on both format surfaces.
+        That reverses an earlier decision here — that a cycle which still
+        ran its noise-tag and learning stages "did real work", so failing
+        the cron job would misreport those. The stages that ran are in the
+        payload either way; what the zero exit reported was that nothing
+        needed looking at, and on the one *unattended* advisory writer that
+        is the only signal a shell ever sees. The refusal is also carried in
+        ``advisory_store_degraded`` / ``advisory_store_stale``, in a red
+        banner on the text surface, in an ``error``-level log line, and —
+        since #448 — in a ``WRITE_REJECTED`` event that ``trellis analyze
+        health`` counts, which is the half that makes recurrence legible.
 
         ``"stale"`` is the third value and reports the other refusal
         (#438): the file was healthy, another process wrote it mid-cycle,
-        and this cycle declined to overwrite that. Not folded into
-        ``"degraded"`` — a wrapper that pages on ``degraded`` should not
-        page on a transient race — and not folded into ``"ok"``, because
+        and this cycle declined to overwrite that. Still distinct from
+        ``"degraded"`` even though the two now share an exit code — the
+        fixes differ, so a wrapper reading the payload can tell a broken
+        file from a transient race — and not folded into ``"ok"``, because
         the advisory counts are then lower than the cycle computed and
         nothing else says why. ``degraded`` wins if both somehow apply: it
         is the one that needs a human.
@@ -626,6 +636,70 @@ def _curate_stage_noise_tags(
     return {"noise_tagged": noise_tagged}
 
 
+#: Bloat guard on the ``msg`` carried into the rejection row. Same value as
+#: ``policy_source._MAX_REJECTION_MSG`` and for the same reason: the store's
+#: refusal messages already name the file and the recovery command, so the
+#: whole point is to carry them verbatim to an operator reading the event
+#: without re-running the job that failed.
+_MAX_REJECTION_MSG = 500
+
+
+def _record_refused_advisory_write(
+    event_log: EventLog, *, kind: str, message: str
+) -> None:
+    """Make a refused advisory write visible to ``trellis analyze health``.
+
+    The nightly cron is the only *unattended* advisory writer, and it is
+    the one that swallowed the refusal: ``trellis analyze``'s two advisory
+    commands exit 2 and ``POST /advisories/generate`` answers 409, but this
+    stage reported the refusal into a ``status`` field and a structlog line
+    and returned. A refusal that recurs every night therefore escalated
+    nowhere at all — verified rather than assumed: the reference
+    deployment's ``curate-nightly.sh`` pipes this command's JSON to a log
+    and reads nothing out of it, and the only consumer downstream
+    (``roadmap-nightly.sh``) greps that log's tail for
+    ``advisories_generated``. Neither reads ``status`` (#448).
+
+    The signal is a ``WRITE_REJECTED`` event, which is the repo's existing
+    channel for "a write died before it became a Command" and is already
+    read by ``trellis analyze health``
+    (:func:`~trellis.ops.write_health.summarize_write_health`). #425 took
+    the same resolution for :func:`build_policy_gate`, and for the same
+    reason: ``analyze health`` is the canonical reader, so building a
+    second one for a signal it already has would be the wrong shape, and
+    ``trellis admin doctor`` does not exist.
+
+    Emitted **here and not on the loud surfaces**. ``analyze`` and the REST
+    route already tell their caller, and their caller retries by hand; if
+    they emitted too, the count in ``analyze health`` would mix a human
+    hitting Ctrl-R with the standing two-writer conflict this exists to
+    surface. What the window should read is *nights the unattended writer
+    was refused*.
+
+    Fail-soft: :func:`record_write_rejection` swallows an event-log
+    failure, and the cycle carries on either way. Telemetry must never
+    escalate a contained refusal into a crashed cron job.
+    """
+    record_write_rejection(
+        event_log,
+        tool=ADVISORY_WRITER_SURFACE,
+        # An explicit row rather than ``classify_rejection``'s fallback:
+        # nothing here is a payload the caller could fix, and ``other@``
+        # would pool it with every unclassified boundary failure in
+        # ``boundary_kinds``. Named, it also reaches ``repeated_collisions``
+        # once it recurs, which is the reading that matters — the same file
+        # refusing the same writer, night after night.
+        rejections=[
+            {
+                "kind": kind,
+                "loc": ADVISORY_FILENAME,
+                "msg": message[:_MAX_REJECTION_MSG],
+            }
+        ],
+        source=ADVISORY_WRITER_SURFACE,
+    )
+
+
 def _curate_stage_advisories(
     event_log: EventLog,
     advisory_store: AdvisoryStore,
@@ -663,6 +737,18 @@ def _curate_stage_advisories(
                 "Advisory generation and the fitness loop were both skipped. "
                 "Suppression decisions in the file are intact and untouched; "
                 "no new advisories were produced."
+            ),
+        )
+        # Emitted on a ``--dry-run`` and a ``--skip-advisories`` too, for
+        # the same reason the log line above is: the file is broken whether
+        # or not this invocation meant to write it, and the run that finds
+        # it is most often the health probe.
+        _record_refused_advisory_write(
+            event_log,
+            kind="config_unreadable",
+            message=(
+                f"{degradation.reason}: {degradation.detail} "
+                f"(recovery: {degradation.recovery})"
             ),
         )
     if skip or dry_run or degradation is not None:
@@ -714,6 +800,9 @@ def _curate_stage_advisories(
             "message": exc.message,
             "recovery": exc.recovery,
         }
+        _record_refused_advisory_write(
+            event_log, kind="stale_write", message=exc.message
+        )
         # ``error``, not ``exception``: this is an expected, transient race
         # between two writers, and a traceback in the nightly log would
         # read as a crash. ``message`` already carries the recovery.
@@ -897,7 +986,7 @@ def _run_curate_loop(
     output_format: str,
     max_cycles: int | None = None,
     shutdown: _ShutdownFlag | None = None,
-) -> None:
+) -> CurateCycleResult | None:
     """Run :func:`run_curation_cycle` on a fixed interval until signalled.
 
     Plain ``while`` + interruptible sleep — no scheduler dependency
@@ -908,6 +997,14 @@ def _run_curate_loop(
     ``max_cycles`` and the injectable ``shutdown`` flag exist for tests so
     the loop can run a bounded number of cycles without real signals or
     long sleeps; production callers leave both at their defaults.
+
+    Returns the **last** cycle's result, or ``None`` when the flag was
+    already set and no cycle ran, so the caller can derive an exit code
+    from it. Last rather than worst: a loop that raced with a second writer
+    at 03:00 and has run clean for the twelve cycles since is not a state
+    anyone should page on, and every cycle's refusal reaches the EventLog
+    regardless (:func:`_record_refused_advisory_write`) — which is where
+    recurrence is legible and an exit code is not.
     """
     flag = shutdown if shutdown is not None else _ShutdownFlag()
     if shutdown is None:
@@ -917,6 +1014,7 @@ def _run_curate_loop(
         signal.signal(signal.SIGTERM, flag.request)
 
     cycle = 0
+    result: CurateCycleResult | None = None
     while not flag.stop:
         cycle += 1
         result = run_curation_cycle(
@@ -949,6 +1047,51 @@ def _run_curate_loop(
             slept += 1
 
     logger.info("worker_curate.loop_stopped", cycles_run=cycle)
+    return result
+
+
+#: Exit code for a curation cycle whose advisory writes did not all land.
+#:
+#: The same ``2`` ``trellis analyze``'s two advisory surfaces already use
+#: (``analyze._exit_on_refused_advisory_write`` /
+#: ``analyze._exit_if_advisory_store_degraded``) rather than the
+#: ``EXIT_STORE`` the policy surface uses or the ``EXIT_INTERNAL`` the two
+#: other non-zero exits in this module use. The rule those helpers state is
+#: that the advisory refusals must agree *with each other*, because a cron
+#: wrapper branches on the code without knowing which of them it hit; a
+#: third surface picking a third value is the failure that rule names.
+#: The value is written out rather than taken from
+#: :mod:`trellis_cli.exit_codes`, for the same reason those two helpers
+#: write it out: the refusal is not a validation failure, so importing it
+#: as ``EXIT_VALIDATION`` would misname it at every call site.
+_EXIT_ADVISORY_REFUSED = 2
+
+
+def _exit_if_advisory_write_refused(result: CurateCycleResult | None) -> None:
+    """Exit non-zero when a cycle's ``status`` is anything but ``ok`` (#448).
+
+    The invariant is deliberately narrow and total: **the exit code is a
+    function of ``status`` and nothing else.** That is what keeps the two
+    surfaces from drifting apart again — a cycle that renders
+    ``"degraded"`` into JSON and exits 0 is the #437 divergence wearing a
+    different hat, and the machine surface is the one a cron reads.
+
+    Called *below* the ``--format`` branch on both paths, never inside an
+    arm of it (``tests/unit/test_format_exit_parity_rule.py``).
+
+    This overturns the previous decision, recorded on
+    :attr:`CurateCycleResult.status`, that the exit stays 0 because the
+    cycle "still ran its noise-tag and learning stages and did real work".
+    That is true and is not the point: ``worker embed-traces`` in this same
+    module already exits non-zero on a pass that did most of its work and
+    left a gap, on exactly the reasoning that a green exit hides the silent
+    gap the worker exists to close. The stages that ran are reported in the
+    payload either way; what a zero exit reported was that nothing needed
+    looking at.
+    """
+    if result is None or result.status == "ok":
+        return
+    raise typer.Exit(code=_EXIT_ADVISORY_REFUSED)
 
 
 @worker_app.command("curate")
@@ -1021,16 +1164,18 @@ def curate_cmd(
         if interval <= 0:
             msg = "--interval must be a positive number of seconds"
             raise typer.BadParameter(msg)
-        _run_curate_loop(
-            interval=interval,
-            output_dir=output_dir,
-            days=days,
-            dry_run=dry_run,
-            skip_noise_tags=skip_noise_tags,
-            skip_advisories=skip_advisories,
-            skip_learning=skip_learning,
-            no_meta_trace=no_meta_trace,
-            output_format=output_format,
+        _exit_if_advisory_write_refused(
+            _run_curate_loop(
+                interval=interval,
+                output_dir=output_dir,
+                days=days,
+                dry_run=dry_run,
+                skip_noise_tags=skip_noise_tags,
+                skip_advisories=skip_advisories,
+                skip_learning=skip_learning,
+                no_meta_trace=no_meta_trace,
+                output_format=output_format,
+            )
         )
         return
 
@@ -1051,8 +1196,11 @@ def curate_cmd(
 
     if output_format == "json":
         emit_json({"status": result.status, **result.to_dict()})
-        return
-    _render_cycle_text(result)
+    else:
+        _render_cycle_text(result)
+    # Below the format branch, never inside an arm of it: #437 shipped the
+    # opposite and the machine surface was the one reporting success.
+    _exit_if_advisory_write_refused(result)
 
 
 def _reconcile_before_cycle() -> None:
