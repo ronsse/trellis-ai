@@ -17,6 +17,12 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from tests.ast_rules import (
+    assert_hand_read_floor,
+    assert_scan_is_not_vacuous,
+    calls_to_any,
+    construction_names,
+)
 from trellis.retrieve.builder_factory import (
     SEMANTIC_AXIS_NOTES,
     build_pack_builder,
@@ -244,63 +250,15 @@ def _src_root() -> Path:
     return root
 
 
-def _bare_name(node: ast.expr) -> str | None:
-    """Bare name of a call target: ``f``, ``mod.f``, ``a.b.f`` all give ``f``.
-
-    The same shape ``tests/unit/test_policy_gate_rule.py::_name_of`` and
-    ``tests/unit/mcp/test_capture_surface_roster.py::_is_call_to`` already
-    use, and for the same reason: ``src/`` writes 563 class-like
-    ``module.Attr(...)`` calls across 33 names against 1,536 bare-name ones
-    (measured 2026-09-03), so a rule that reads only :class:`ast.Name`
-    misses the repo's second-most-common call spelling — and
-    ``from trellis.retrieve import pack_builder`` is idiomatic here.
-
-    Over-collecting costs a spurious flag on a same-named attribute;
-    under-collecting costs the rule.
-    """
-    if isinstance(node, ast.Attribute):
-        return node.attr
-    if isinstance(node, ast.Name):
-        return node.id
-    return None
-
-
-def _construction_names(tree: ast.Module) -> set[str]:
-    """Every local name in this module that constructs a ``PackBuilder``.
-
-    ``PackBuilder`` itself, plus the three rebindings that produce one
-    under another name and would otherwise walk past a literal match:
-
-    * ``from ...pack_builder import PackBuilder as Builder`` → ``Builder``
-    * ``PB = PackBuilder`` → ``PB``
-    * ``class Mine(PackBuilder)`` → ``Mine`` (a subclass constructor runs
-      the same ``__init__`` and takes the same argument list, which is the
-      thing this rule exists to stop being copied)
-
-    Resolved per module and iterated to a fixed point, so a chain
-    (``PB = PackBuilder``; ``PB2 = PB``) is caught too.
-    """
-    names = {"PackBuilder"}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom):
-            names.update(
-                alias.asname
-                for alias in node.names
-                if alias.name == "PackBuilder" and alias.asname
-            )
-    changed = True
-    while changed:
-        rebound: set[str] = set()
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Assign) and _bare_name(node.value) in names:
-                rebound.update(t.id for t in node.targets if isinstance(t, ast.Name))
-            elif isinstance(node, ast.ClassDef) and any(
-                _bare_name(base) in names for base in node.bases
-            ):
-                rebound.add(node.name)
-        changed = not rebound <= names
-        names |= rebound
-    return names
+#: The two predicates that used to live here — ``_bare_name`` and
+#: ``_construction_names`` — are now :func:`tests.ast_rules.name_of` and
+#: :func:`tests.ast_rules.construction_names`. This module was the *third*
+#: place in ``tests/`` to solve "what is this call's target called" and the
+#: first to solve it wrongly; #490 is the issue about that, and leaving a
+#: fourth copy here while arguing against copies would be indefensible.
+#: The resolver is unchanged in behaviour — same fixed point, same three
+#: rebindings — and ``test_ast_rules`` pins it against a corpus that now
+#: also carries the two shapes it genuinely cannot reach.
 
 
 def _pack_builder_construction_sites(root: Path) -> list[tuple[Path, int]]:
@@ -310,8 +268,9 @@ def _pack_builder_construction_sites(root: Path) -> list[tuple[Path, int]]:
     type annotations, and neither constructs anything. ``ast`` sees only
     the calls, which is the whole reason this is a parse rather than a grep.
 
-    Both call spellings, and the aliases :func:`_construction_names`
-    resolves — the bare-name-only version of this scan was flagged in
+    Both call spellings, and the aliases
+    :func:`tests.ast_rules.construction_names` resolves — the
+    bare-name-only version of this scan was flagged in
     review as reproducing *inside the rule* the very defect the rule
     removes from the code: it was the third place in ``tests/`` to solve
     "what is this call's target called" and the first to solve it wrongly.
@@ -319,12 +278,8 @@ def _pack_builder_construction_sites(root: Path) -> list[tuple[Path, int]]:
     sites: list[tuple[Path, int]] = []
     for py_file in sorted(root.rglob("*.py")):
         tree = ast.parse(py_file.read_text(encoding="utf-8"))
-        names = _construction_names(tree)
-        sites.extend(
-            (py_file, node.lineno)
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Call) and _bare_name(node.func) in names
-        )
+        names = construction_names("PackBuilder", tree)
+        sites.extend((py_file, node.lineno) for node in calls_to_any(names, tree))
     return sites
 
 
@@ -361,6 +316,48 @@ def test_pack_builder_is_constructed_in_exactly_one_place() -> None:
     )
 
 
+def test_the_construction_scan_sees_every_shape_in_the_shared_roster(
+    tmp_path: Path,
+) -> None:
+    """The rule that #490 was filed about, run against #490's roster.
+
+    This rule already resolved aliases, rebindings and subclasses — the
+    review of #488 required it — and that resolver is now shared, so what
+    this adds is the rest of the roster: module and class scope, ``async
+    def``, decorators, ``except`` bodies, closures, lambda bodies, and a
+    second file. Every one of those is a way the scan could narrow without
+    any guard here noticing, because every other guard in this module
+    divides by this scan's own output.
+
+    Run through :func:`_offenders` — the same function the rule calls — so
+    a regression in the shipped predicate turns this red rather than
+    leaving it green against a copy.
+    """
+    assert_scan_is_not_vacuous(
+        lambda root: [lineno for _path, lineno in _offenders(root)],
+        subject="PackBuilder",
+        tmp_path=tmp_path,
+        live_population=len(list(_src_root().rglob("*.py"))),
+        floor=_MIN_SRC_MODULES,
+        exempt={
+            "partial_binding": (
+                "residue: the binding's value is a call, so there is no "
+                "name for construction_names to resolve. Nothing in src/ "
+                "builds a PackBuilder through functools.partial, and a "
+                "fifth copy of the argument list would have to go "
+                "somewhere this scan can see it"
+            ),
+            "cross_module_subclass": (
+                "residue: a PackBuilder subclass defined in one module and "
+                "constructed in another is invisible to a per-module fixed "
+                "point. The construction still lands in the offender list "
+                "only if the subclass is defined where it is built, which "
+                "is the common case"
+            ),
+        },
+    )
+
+
 def test_the_construction_scan_sees_the_whole_tree() -> None:
     """The floor the scan cannot compute for itself.
 
@@ -370,7 +367,12 @@ def test_the_construction_scan_sees_the_whole_tree() -> None:
     against the discovery instead.
     """
     modules = list(_src_root().rglob("*.py"))
-    assert len(modules) >= _MIN_SRC_MODULES, len(modules)
+    assert_hand_read_floor(
+        len(modules),
+        _MIN_SRC_MODULES,
+        subject="module under src/",
+        hint="a narrowed discovery shrinks the population and every count over it.",
+    )
     # And the discovery reaches every distributed package, not just the
     # one the factory lives in — narrowing to ``src/trellis/retrieve`` is
     # the single edit that would make the rule green and meaningless.
