@@ -472,11 +472,28 @@ class TestSummarizeWriteHealth:
 
 
 #: The two ``RejectionKind`` values that are conditions of a *file* rather
-#: than of a payload. Listed here, and every kind not listed is asserted to
-#: take the payload sentence — so the partition is exhaustive over
-#: ``get_args(RejectionKind)`` and a kind added later lands in one arm or
-#: fails the suite.
+#: than of a payload.
 _FILE_CONDITION_KINDS = frozenset({"config_unreadable", "stale_write"})
+
+#: Every other kind, spelled out rather than derived as "the enum minus the
+#: file ones". Derived, the two rosters would sum to the enum for *any* enum
+#: and the partition check below would be satisfied by construction — a new
+#: file condition added later would join the payload arm silently, which is
+#: #485 recurring. Spelled out, adding any kind fails until someone puts it
+#: in an arm on purpose.
+_PAYLOAD_KINDS = frozenset(
+    {
+        "extra_forbidden",
+        "enum",
+        "missing",
+        "json_invalid",
+        "type",
+        "value",
+        "empty_required",
+        "dangling_reference",
+        "other",
+    }
+)
 
 #: A distinct ``loc`` per kind, so a reason that hard-codes one cannot pass.
 _LOC_FOR_KIND = {
@@ -539,16 +556,19 @@ class TestRecurrenceExplanationRoutesByKind:
         return reasons[0]
 
     def test_every_kind_is_covered_by_the_partition(self) -> None:
-        """The roster below is checked against the enum, not declared.
+        """Both rosters are checked against the enum, not declared.
 
         Every guard in this class divides the kinds into "file" and
-        "payload"; if the enum grows a third sort, the new value silently
-        joins the payload arm and its sentence goes unexamined. This fails
-        instead.
+        "payload". A superset check would pass for any enum that still
+        contains the two file kinds, so a kind added later would join the
+        payload arm silently and its sentence would go unexamined — the
+        defect this class exists to fix, recurring one release on. Equality
+        is what makes "lands in an arm or fails the suite" true: a new kind
+        fails here until it is classified, and a renamed or removed one
+        fails here too.
         """
-        kinds = set(get_args(RejectionKind))
-        assert kinds > _FILE_CONDITION_KINDS
-        assert kinds - _FILE_CONDITION_KINDS
+        assert set(get_args(RejectionKind)) == _FILE_CONDITION_KINDS | _PAYLOAD_KINDS
+        assert not (_FILE_CONDITION_KINDS & _PAYLOAD_KINDS)
 
     def test_every_kind_gets_a_recurrence_reason(self, tmp_path: Path) -> None:
         """No kind may fall through to no line at all."""
@@ -584,7 +604,7 @@ class TestRecurrenceExplanationRoutesByKind:
 
     def test_payload_kinds_keep_the_schema_sentence(self, tmp_path: Path) -> None:
         """The original wording, on the kinds it was written for."""
-        for kind in set(get_args(RejectionKind)) - _FILE_CONDITION_KINDS:
+        for kind in sorted(_PAYLOAD_KINDS):
             reason = self._reason_for(tmp_path, kind)
             assert reason.startswith("repeated schema collision:"), reason
             assert _explanation(reason) == (
