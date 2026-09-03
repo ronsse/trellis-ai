@@ -290,7 +290,7 @@ def _rich_render_population() -> int:
     return total
 
 
-#: Hand-read off ``src/trellis_cli`` on 2026-09-03: 594 Rich render calls.
+#: Hand-read off ``src/trellis_cli`` on 2026-09-03: 598 Rich render calls.
 #: Floored well below that because the CLI's prose output is edited
 #: constantly and a floor that tracks the tree is a floor nobody re-reads —
 #: what it has to catch is the scan going to near-zero, not a refactor

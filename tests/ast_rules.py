@@ -68,6 +68,20 @@ keep at least one *required* shape. Without those bounds a rule exempting
 all eleven shapes passed the guard while reporting nothing — verified by
 the #497 review gate, not feared.
 
+**And narrowing the roster is exempting, so it is bounded the same way.**
+Every bound above is on ``exempt=``; the #497 *re*-gate walked past all
+four by passing ``evasions=`` instead — ``evasions=[]`` with a predicate
+that reported nothing cleared the guard, and so did ``evasions=[bare_call]``
+against #488's own ``ast.Name``-only scan, the exact predicate this module
+exists to reject. Nothing about either looked like an exemption. Dropping
+a shape and exempting one are the same act with the same consequence, so
+the cheaper spelling must not be the unbounded one:
+:func:`_validate_roster` refuses an empty roster outright and requires a
+written ``roster_reason`` for any other narrowing. It is a *reason* rather
+than the residue rule, because a rule whose subject cannot render a shape
+at all is real — the roster models a call, not every rule's offence — but
+it has to say so in a sentence, in the diff.
+
 **The roster's own claims are checkable.** Each :class:`Evasion` declares
 which of the :data:`NAIVE_SCANNERS` it defeats, and
 ``tests/unit/test_ast_rules.py`` verifies every one of those claims **by
@@ -79,10 +93,13 @@ confidence.
 **What is *not* in the roster, and the rule for adding it.** A shape earns
 its place only when some scanner in :data:`NAIVE_SCANNERS` actually misses
 it; otherwise it inflates the roster without strengthening any guard, and
-``test_ast_rules`` fails it. Measured over the 15,965 calls in ``src/``,
-the uncovered placements are comprehension bodies (633), ``with`` items
-(624), ``match`` cases and the walrus. Adding one means adding the naive
-scanner that misses it — not the shape alone.
+``test_ast_rules`` fails it. Re-measured under the CI interpreter over
+the 15,977 calls in ``src/``, the uncovered placements are comprehension
+bodies (635), ``with`` items (167 — a ``with`` statement's
+``context_expr``, not its body, which is ordinary statement ground),
+``match`` (**0**: nothing in ``src/`` uses it) and the walrus (7).
+Adding one means adding the naive scanner that misses it — not the shape
+alone.
 
 **The class is not confined to AST rules, and #495 is the proof.** Found
 the same night this module was written: 21 CLI tests fail under
@@ -384,6 +401,13 @@ class Decoy:
     every ``ast.Call`` in a roster-only corpus sits on a marked line, so a
     predicate reporting every call line passes. Each decoy names the
     predicate error it catches.
+
+    ``{WRAPPED}`` in :attr:`lines` renders the *wrapper* a composite rule
+    polices, carrying something that is not the subject. That is the same
+    argument one level up: for a rule passing ``wrap=``, every unwrapped
+    decoy is a shape its predicate structurally cannot report, so without
+    a wrapped one the negative control cannot fire at all — literally
+    true and materially misleading, exactly as #497's finding (a) was.
     """
 
     id: str
@@ -600,7 +624,7 @@ EVASIONS: tuple[Evasion, ...] = (
             "at module level, outside any function. A scan that iterates "
             "function bodies — the natural shape when the rule is about "
             "what a function does — never looks here, and module scope "
-            "holds 828 of the 15,965 calls in src/."
+            "holds 842 of the 15,977 calls in src/."
         ),
         call="{SUBJECT}({ARGS})",
         context=("{STMT}",),
@@ -691,7 +715,7 @@ EVASIONS: tuple[Evasion, ...] = (
 EVASION_IDS: tuple[str, ...] = tuple(evasion.id for evasion in EVASIONS)
 
 #: Calls that must never be reported. Each names the predicate error it
-#: catches. A fifth, ``super_init``, is rendered by
+#: catches. One more, ``super_init``, is rendered by
 #: ``subclass_then_construct``'s own preamble rather than here, so that
 #: shape's stated reason is executable rather than decorative.
 DECOYS: tuple[Decoy, ...] = (
@@ -737,6 +761,23 @@ DECOYS: tuple[Decoy, ...] = (
         lines=(
             "def _decoy_annotation(arg: {SUBJECT} = None) -> {SUBJECT}:",
             "    return _helper()  " + DECOY_MARKER + "annotation_only",
+        ),
+    ),
+    Decoy(
+        id="wrapper_without_the_subject",
+        why=(
+            "the wrapper a composite rule polices, carrying something "
+            "that is not the subject — `console.print(_helper())` for a "
+            "rule whose offence is a Rich render of a serialized payload. "
+            "Every other decoy renders unwrapped, so a wrapped rule's "
+            "predicate cannot report one however broken it is, and the "
+            "negative control never fires: found by the #497 re-gate, "
+            "which passed the guard with a predicate reporting every "
+            "console.print and judging its argument not at all"
+        ),
+        lines=(
+            "def _decoy_wrapper():",
+            "    {WRAPPED}  " + DECOY_MARKER + "wrapper_without_the_subject",
         ),
     ),
 )
@@ -841,7 +882,12 @@ def render_evasion_corpus(
     carrying a serialized payload, say — reuse the spelling, binding and
     placement axes without the roster modelling its subject. The roster
     supplies the call; the rule supplies what surrounds it. Decoys render
-    **unwrapped**, so they stay non-offences for every rule.
+    **unwrapped**, so they stay non-offences for every rule — with the one
+    exception that has to exist. ``wrapper_without_the_subject`` renders
+    *through* ``wrap`` carrying ``_helper()``, because otherwise a wrapped
+    rule's predicate can report no decoy at all, however broken it is, and
+    the negative control is structurally dead. It is still a non-offence:
+    the wrapper is there and the subject is not.
 
     Line numbers are computed from the assembled text rather than written
     down beside it, so removing an entry reflows the corpus without
@@ -866,9 +912,19 @@ def render_evasion_corpus(
         )
         primary.append("")
 
+    # ``{WRAPPED}`` is the one placeholder a decoy resolves against *wrap*.
+    # It is substituted first, so the wrapper text a rule supplies goes
+    # through ``_substitute`` exactly like anything else and a wrapper
+    # mentioning ``{SUBJECT}`` would still resolve.
+    wrapped = wrap.format(call="_helper()")
     for decoy in decoys:
         primary.extend(
-            _substitute(line, subject=subject, args=args, kwarg=kwarg)
+            _substitute(
+                line.replace("{WRAPPED}", wrapped),
+                subject=subject,
+                args=args,
+                kwarg=kwarg,
+            )
             for line in decoy.lines
         )
         primary.append("")
@@ -1268,6 +1324,43 @@ def _validate_exemptions(
         )
 
 
+def _validate_roster(evasions: Sequence[Evasion], roster_reason: str | None) -> None:
+    """Narrowing the roster is exempting, and is bounded the same way.
+
+    Every bound in :func:`_validate_exemptions` is on ``exempt=``, and the
+    #497 re-gate walked past all four by narrowing ``evasions=`` instead:
+    ``evasions=[]`` with a predicate returning nothing passed, and so did
+    ``evasions=[bare_call]`` against #488's own ``ast.Name``-only scan —
+    the exact predicate this module exists to reject. A dropped shape and
+    an exempted one are the same act with the same consequence, so the
+    cheaper spelling must not be the unbounded one.
+
+    Deliberately a *reason* rather than the residue rule ``exempt=``
+    applies. A rule whose subject cannot render a shape at all is real —
+    the roster models a call, not every rule's offence — but it has to say
+    so in a sentence, which is what makes the omission legible in a diff
+    and re-askable later. The harness's own leave-one-out proof is such a
+    caller and now says so.
+    """
+    assert evasions, (
+        "assert_scan_is_not_vacuous needs a roster. An empty one makes "
+        "every coverage check vacuously true, which is the whole failure "
+        "this module exists to end — a scan that under-collects satisfies "
+        "every guard computed over its own output."
+    )
+    omitted = sorted(set(EVASION_IDS) - {evasion.id for evasion in evasions})
+    if not omitted:
+        return
+    assert _reason_is_written(roster_reason or ""), (
+        f"this call drops {omitted} from the shared roster. That is an "
+        f"exemption by another name and it bypasses every bound on "
+        f"exempt= — the control, the residue rule, the axis rule and the "
+        f"written reason. Pass the whole of EVASIONS and exempt what you "
+        f"genuinely cannot reach, or pass roster_reason= saying in a "
+        f"sentence why these shapes cannot be rendered for this rule."
+    )
+
+
 def assert_scan_is_not_vacuous(
     shipped_predicate: Callable[[Path], Iterable[int]],
     evasions: Sequence[Evasion] = EVASIONS,
@@ -1282,6 +1375,7 @@ def assert_scan_is_not_vacuous(
     wrap: str = "{call}",
     exempt: Mapping[str, str] | None = None,
     sole_site_reason: str | None = None,
+    roster_reason: str | None = None,
 ) -> None:
     """Run the **shipped** predicate over the roster, and floor its population.
 
@@ -1290,7 +1384,9 @@ def assert_scan_is_not_vacuous(
             function the rule itself calls, not a copy: a guard run against
             a re-implementation leaves the shipped one free to regress with
             the suite green.
-        evasions: The roster. Defaults to all of :data:`EVASIONS`.
+        evasions: The roster. Defaults to all of :data:`EVASIONS`. A
+            narrowed roster is an exemption by another name and is bounded
+            the same way — see *roster_reason* and :func:`_validate_roster`.
         decoys: Calls that must never be reported. Defaults to
             :data:`DECOYS`; an empty sequence is refused, because without a
             negative control "nothing unmarked was reported" is satisfied
@@ -1302,6 +1398,12 @@ def assert_scan_is_not_vacuous(
         exempt: ``{evasion id: why this rule cannot catch it}``. Bounded by
             :func:`_validate_exemptions`. An exemption is an *upper bound*
             on blindness: a rule that catches an exempt shape still passes.
+        roster_reason: Required whenever *evasions* is not the whole of
+            :data:`EVASIONS`, and held to the same prose bar as an
+            exemption's. Dropping a shape and exempting it are the same
+            act; only the exempt path was bounded, and the #497 re-gate
+            passed this guard with ``evasions=[]`` and a predicate that
+            reported nothing.
 
     Three things this asserts that a hand-rolled guard usually does not.
     Every non-exempt shape must be **reported**, named by shape rather than
@@ -1322,6 +1424,8 @@ def assert_scan_is_not_vacuous(
         "sits on a marked line and a predicate reporting every call line "
         "passes the spurious check — true, and materially misleading."
     )
+
+    _validate_roster(evasions, roster_reason)
 
     declared = dict(exempt or {})
     by_id = {evasion.id: evasion for evasion in evasions}

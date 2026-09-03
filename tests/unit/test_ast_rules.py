@@ -455,6 +455,7 @@ class TestTheDecoys:
         "subject_as_argument",
         "attribute_of_subject",
         "annotation_only",
+        "wrapper_without_the_subject",
     }
 
     def test_the_decoy_roster_is_pinned(self) -> None:
@@ -500,6 +501,59 @@ class TestTheDecoys:
                 floor=4,
                 exempt=RESIDUE_EXEMPT,
             )
+
+    def test_a_wrapped_rule_still_has_a_negative_control(self, tmp_path: Path) -> None:
+        """#497's finding (a), one level up: the ``wrap=`` path.
+
+        Every other decoy renders unwrapped, so a rule passing ``wrap=``
+        has a predicate that *cannot* report one however broken it is —
+        the decoy check is structurally dead for it, and every wrapper
+        occurrence in the corpus sits on a marked line. That is the exact
+        condition finding (a) was about.
+
+        The predicate here reports every ``console.print`` and judges its
+        argument not at all. It satisfies coverage perfectly and
+        distinguishes nothing; only ``wrapper_without_the_subject``
+        separates it from a correct scan.
+        """
+
+        def every_wrapper(root: Path) -> Iterable[int]:
+            found: list[int] = []
+            for path in sorted(root.glob("*.py")):
+                tree = ast.parse(path.read_text(encoding="utf-8"))
+                found.extend(
+                    node.lineno
+                    for node in ast.walk(tree)
+                    if isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "print"
+                )
+            return found
+
+        with pytest.raises(AssertionError, match="construct nothing"):
+            assert_scan_is_not_vacuous(
+                every_wrapper,
+                subject=SUBJECT,
+                kwarg=KWARG,
+                wrap="console.print({call})",
+                tmp_path=tmp_path,
+                live_population=9,
+                floor=4,
+                exempt=RESIDUE_EXEMPT,
+            )
+
+    def test_the_wrapped_decoy_is_unwrapped_for_a_plain_rule(self) -> None:
+        """With the default ``wrap`` it is an ordinary non-offence call.
+
+        Otherwise adding it would make the three rules that police a bare
+        construction start reporting a decoy — a negative control that
+        breaks the positive one is worse than none.
+        """
+        corpus = _corpus()
+        line = corpus.decoys["wrapper_without_the_subject"]
+        rendered = corpus.primary.splitlines()[line - 1]
+        assert rendered.strip().startswith("_helper()")
+        assert SUBJECT not in rendered
 
 
 class TestTheRosterIsMeasuredAgainstRealNaiveScanners:
@@ -716,6 +770,10 @@ class TestEveryShapeIsIndividuallyLoadBearing:
             live_population=9,
             floor=4,
             exempt={name: REASON for name in RESIDUE if name != target},
+            roster_reason=(
+                "the leave-one-out proof removes exactly this shape on "
+                "purpose, to show it is what did the catching"
+            ),
         )
 
 
@@ -883,6 +941,10 @@ class TestExemptionsCannotEmptyTheGuard:
                 live_population=9,
                 floor=4,
                 exempt=RESIDUE_EXEMPT,
+                roster_reason=(
+                    "a residue-only subset, narrowed to reach the axis "
+                    "rule the full roster refuses before"
+                ),
             )
 
     def test_the_axis_rule_is_unreachable_on_the_full_roster(self) -> None:
@@ -912,6 +974,142 @@ class TestExemptionsCannotEmptyTheGuard:
                 floor=4,
                 exempt={"typo_shape": REASON},
             )
+
+
+class TestNarrowingTheRosterIsBoundedToo:
+    """The #497 re-gate's finding: every bound above is on ``exempt=``.
+
+    ``evasions=`` is a documented, positional parameter that reduces the
+    same set with none of them — no control rule, no residue rule, no axis
+    rule and no reason. Dropping a shape and exempting it are the same act
+    with the same consequence, so the cheaper spelling must not be the
+    unbounded one.
+    """
+
+    def test_an_empty_roster_is_refused(self, tmp_path: Path) -> None:
+        """Total vacuity, previously reachable by one argument.
+
+        ``evasions=[]`` with a predicate that reports nothing passed every
+        check: there were no shapes to miss, and the decoy and spurious
+        checks are satisfied by reporting nothing at all.
+        """
+        with pytest.raises(AssertionError, match="needs a roster"):
+            assert_scan_is_not_vacuous(
+                lambda root: (),
+                [],
+                subject=SUBJECT,
+                kwarg=KWARG,
+                tmp_path=tmp_path,
+                live_population=9,
+                floor=4,
+            )
+
+    def test_a_narrowed_roster_without_a_reason_is_refused(
+        self, tmp_path: Path
+    ) -> None:
+        """And the message names the shapes that were dropped."""
+        with pytest.raises(AssertionError) as excinfo:
+            assert_scan_is_not_vacuous(
+                _perfect,
+                [e for e in EVASIONS if e.id == "bare_call"],
+                subject=SUBJECT,
+                kwarg=KWARG,
+                tmp_path=tmp_path,
+                live_population=9,
+                floor=4,
+            )
+        message = str(excinfo.value)
+        assert "attribute_call" in message
+        assert "second_file_bare_call" in message
+
+    def test_the_shape_that_motivated_this_is_refused(self, tmp_path: Path) -> None:
+        """#488's own predicate, narrowed to the one shape it handles.
+
+        This is the concrete escape: an ``ast.Name``-only scan — the
+        defect #490 was filed about — cleared the guard by being measured
+        against a roster containing only ``bare_call``. Nothing about it
+        looked like an exemption.
+        """
+
+        def name_only(root: Path) -> Iterable[int]:
+            found: list[int] = []
+            for path in sorted(root.glob("*.py")):
+                tree = ast.parse(path.read_text(encoding="utf-8"))
+                found.extend(
+                    node.lineno
+                    for node in ast.walk(tree)
+                    if isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == SUBJECT
+                )
+            return found
+
+        with pytest.raises(AssertionError, match="drops"):
+            assert_scan_is_not_vacuous(
+                name_only,
+                [e for e in EVASIONS if e.id == "bare_call"],
+                subject=SUBJECT,
+                kwarg=KWARG,
+                tmp_path=tmp_path,
+                live_population=9,
+                floor=4,
+            )
+
+    def test_a_thin_roster_reason_is_refused(self, tmp_path: Path) -> None:
+        """Same prose bar as an exemption's, pinned on both halves and the strip.
+
+        ``"x" * 30`` is long enough and one word; ``"a b c d"`` is four
+        words and seven characters; the third is that same fragment padded
+        to twenty-seven, which clears the length test only if the reason is
+        measured before ``strip``.
+        """
+        for reason in ("x" * 30, "a b c d", "a b c d" + " " * 20):
+            with pytest.raises(AssertionError, match="drops"):
+                assert_scan_is_not_vacuous(
+                    _perfect,
+                    [e for e in EVASIONS if e.id != "decorator"],
+                    subject=SUBJECT,
+                    kwarg=KWARG,
+                    tmp_path=tmp_path,
+                    live_population=9,
+                    floor=4,
+                    exempt=RESIDUE_EXEMPT,
+                    roster_reason=reason,
+                )
+
+    def test_a_narrowed_roster_with_a_written_reason_is_accepted(
+        self, tmp_path: Path
+    ) -> None:
+        """The parameter still works; it just has to say why.
+
+        A rule whose subject cannot render a shape at all is real — the
+        roster models a call, not every rule's offence — so this is a
+        reason requirement rather than a refusal, exactly as
+        ``sole_site_reason`` is for a floor of one.
+        """
+        assert_scan_is_not_vacuous(
+            _perfect,
+            [e for e in EVASIONS if e.id != "decorator"],
+            subject=SUBJECT,
+            kwarg=KWARG,
+            tmp_path=tmp_path,
+            live_population=9,
+            floor=4,
+            exempt=RESIDUE_EXEMPT,
+            roster_reason="this rule's offence cannot appear in a decorator",
+        )
+
+    def test_the_full_roster_needs_no_reason(self, tmp_path: Path) -> None:
+        """The default path is unchanged, which is what keeps the bound cheap."""
+        assert_scan_is_not_vacuous(
+            _perfect,
+            EVASIONS,
+            subject=SUBJECT,
+            kwarg=KWARG,
+            tmp_path=tmp_path,
+            live_population=9,
+            floor=4,
+        )
 
 
 class TestTheFloorStaysHandRead:
