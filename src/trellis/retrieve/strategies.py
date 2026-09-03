@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, Protocol, TypedDict, runtime_checkable
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    NamedTuple,
+    Protocol,
+    TypedDict,
+    runtime_checkable,
+)
 
 import structlog
 
@@ -44,6 +51,48 @@ RECENCY_FLOOR = 0.3
 #: often enough that one timezone's offset must not read as hostile; a day
 #: is generous against a 30-day half-life (0.977 of the multiplier).
 _FUTURE_STAMP_TOLERANCE = timedelta(days=1)
+
+#: Key on ``PackItem.metadata`` naming **which clock** recency decay actually
+#: read for this item, and forwarded into ``PACK_ASSEMBLED.injected_items[]``
+#: by :func:`~trellis.retrieve.pack_builder._build_item_attribution`.
+#:
+#: :func:`resolve_recency_stamp` picks one of three outcomes per item and the
+#: three are not close together: the source clock and the row clock differed
+#: by a median **2.20x** (max 3.17x) in the resulting multiplier across the
+#: 148 rows #417 measured, and resolving to *nothing* fails **open** — up to
+#: ``1 / floor`` (3.3x) more than the row's own clock would have given. An
+#: item's rank can therefore be dominated by which branch fired, and until
+#: #465 that was recoverable only by re-reading the code that ran.
+#:
+#: Same commitment as ``graph_selection`` (#371) and ``content_floor`` (#358):
+#: which branch ran is a property of the **served record**, not an inference
+#: about which build was deployed that week. Stamped after the metadata splat,
+#: for the #433 reason — the bag is open, so a stored key of this name must
+#: not get a vote on a fact about *this* search.
+RECENCY_CLOCK_METADATA_KEY = "recency_clock"
+
+#: :data:`RECENCY_CLOCK_METADATA_KEY` value when the winning stamp came from
+#: the item's **metadata bag** — the *source's* clock, propagated by an ingest
+#: path that knew the content predates its own write (#417).
+RECENCY_CLOCK_SOURCE = "source"
+
+#: :data:`RECENCY_CLOCK_METADATA_KEY` value when the winning stamp came from a
+#: **store row column** — Trellis's own write clock for the row. Only the
+#: keyword axis can produce this: ``VectorStore.query`` returns no columns, so
+#: the semantic axis passes none.
+RECENCY_CLOCK_ROW = "row"
+
+#: :data:`RECENCY_CLOCK_METADATA_KEY` value when **no candidate was usable**
+#: and the item was scored undecayed.
+#:
+#: Not a neutral outcome — undecayed is the *maximum* multiplier, strictly
+#: above what the freshest real timestamp earns. This is the value that makes
+#: the semantic-axis residual ``TestSemanticAxisResidual`` pins a one-query
+#: finding instead of a code-reading one: a document whose own ``created_at``
+#: is malformed or in the future reaches that axis with nothing to fall
+#: through to and is served at maximum freshness. Measured live on 2026-09-02
+#: it fires on zero rows; the field exists so the next surprise is visible.
+RECENCY_CLOCK_NONE = "none"
 
 #: Grace period before importance-score staleness decay starts. Below this
 #: age (measured from ``importance_scored_at``) the legacy multiplier is
@@ -514,9 +563,29 @@ def _decay_importance_if_stale(
     return importance * (floor + (1.0 - floor) * decay)
 
 
+class ResolvedRecency(NamedTuple):
+    """The stamp recency decay should read, **and which clock it came from**.
+
+    Returned as a pair rather than resolved once and labelled again by the
+    caller: a second traversal of the same candidates is how two readers of
+    one rule drift apart, which is the failure class #325/#326/#443 are each
+    an instance of. There is exactly one walk, and the label is what that walk
+    did.
+
+    ``stamp`` is deliberately ``Any`` — a candidate is whatever the store or
+    the metadata bag held (SQLite hands back ISO strings, Postgres hands back
+    ``datetime``), and the resolver returns it *verbatim* rather than
+    normalising, so :func:`_apply_recency_decay` keeps parsing exactly what
+    was stored.
+    """
+
+    stamp: Any
+    clock: str
+
+
 def resolve_recency_stamp(
     metadata: Any, *row_stamps: Any, now: datetime | None = None
-) -> Any:
+) -> ResolvedRecency:
     """Resolve the one timestamp recency decay should read for an item.
 
     **The metadata bag wins over the store row's own columns**, and that
@@ -641,16 +710,28 @@ def resolve_recency_stamp(
         now: Reference clock for the future check. Defaults to wall time.
 
     Returns:
-        The first usable stamp, or ``None`` when none is. ``None`` decays
-        nothing, which is the same maximum multiplier a future stamp would
-        have produced — so rejecting every candidate costs nothing; the
-        guard only ever *prefers* a non-future candidate that exists.
+        A :class:`ResolvedRecency` — the first usable stamp with
+        :data:`RECENCY_CLOCK_SOURCE` or :data:`RECENCY_CLOCK_ROW` naming which
+        of the two clocks it came from, or a ``None`` stamp labelled
+        :data:`RECENCY_CLOCK_NONE` when no candidate was usable.
+        ``None`` decays nothing, which is the same maximum multiplier a future
+        stamp would have produced — so rejecting every candidate costs
+        nothing; the guard only ever *prefers* a non-future candidate that
+        exists. The label is carried onto the served item under
+        :data:`RECENCY_CLOCK_METADATA_KEY` (#465), because those three
+        outcomes are up to 3.3x apart and were otherwise unrecoverable from
+        the record.
     """
     bag = metadata if isinstance(metadata, dict) else {}
     horizon = (now or datetime.now(UTC)) + _FUTURE_STAMP_TOLERANCE
     if horizon.tzinfo is None:
         horizon = horizon.replace(tzinfo=UTC)
-    for candidate in (bag.get("updated_at"), bag.get("created_at"), *row_stamps):
+    candidates = (
+        (bag.get("updated_at"), RECENCY_CLOCK_SOURCE),
+        (bag.get("created_at"), RECENCY_CLOCK_SOURCE),
+        *((stamp, RECENCY_CLOCK_ROW) for stamp in row_stamps),
+    )
+    for candidate, clock in candidates:
         parsed = _parse_stamp(candidate)
         if parsed is None:
             continue
@@ -658,15 +739,20 @@ def resolve_recency_stamp(
             parsed = parsed.replace(tzinfo=UTC)
         if parsed > horizon:
             continue
-        return candidate
-    return None
+        return ResolvedRecency(candidate, clock)
+    return ResolvedRecency(None, RECENCY_CLOCK_NONE)
 
 
 def _apply_recency_decay(
     base_score: float,
     # Not ``str | None``: the document store's columns come back as ``str``
-    # from SQLite and ``datetime`` from Postgres, and always have.
-    timestamp: Any,
+    # from SQLite and ``datetime`` from Postgres, and always have. Not ``Any``
+    # either, since #465 — :func:`resolve_recency_stamp` now returns a
+    # :class:`ResolvedRecency` pair, and ``Any`` would let a caller hand the
+    # whole pair to this function, where ``_parse_stamp`` would shrug it off
+    # as unparseable and fail *open* at maximum freshness. Naming the three
+    # types the stores actually produce makes that a type error instead.
+    timestamp: str | datetime | None,
     *,
     now: datetime | None = None,
     half_life_days: float = DEFAULT_RECENCY_HALF_LIFE_DAYS,
@@ -764,11 +850,12 @@ class KeywordSearch(SearchStrategy):
             # this row's *write* clock; a conversation import's metadata
             # stamps are the content's own, and are what the semantic axis
             # has always read.
+            recency = resolve_recency_stamp(
+                metadata, doc.get("updated_at"), doc.get("created_at")
+            )
             score = _apply_recency_decay(
                 score,
-                resolve_recency_stamp(
-                    metadata, doc.get("updated_at"), doc.get("created_at")
-                ),
+                recency.stamp,
                 half_life_days=half_life,
                 floor=floor,
             )
@@ -778,7 +865,15 @@ class KeywordSearch(SearchStrategy):
                     item_type="document",
                     excerpt=truncate_excerpt(doc.get("content", "")),
                     relevance_score=score,
-                    metadata={"source_strategy": "keyword", **metadata},
+                    metadata={
+                        "source_strategy": "keyword",
+                        **metadata,
+                        # Stamped after the splat, for the #433 reason:
+                        # which clock this search read is a fact about the
+                        # search, and document metadata is an open bag that
+                        # must not get a vote on it.
+                        RECENCY_CLOCK_METADATA_KEY: recency.clock,
+                    },
                 )
             )
         return sorted(items, key=lambda x: x.relevance_score, reverse=True)
@@ -870,9 +965,10 @@ class SemanticSearch(SearchStrategy):
             # from the document) or ``build_vector_row``'s embed-time
             # ``setdefault``. Same resolver as the keyword axis so the two
             # cannot decay off different clocks for one document (#417).
+            recency = resolve_recency_stamp(metadata)
             score = _apply_recency_decay(
                 score,
-                resolve_recency_stamp(metadata),
+                recency.stamp,
                 half_life_days=half_life,
                 floor=floor,
             )
@@ -888,7 +984,15 @@ class SemanticSearch(SearchStrategy):
                         metadata.get("content", metadata.get("excerpt", ""))
                     ),
                     relevance_score=score,
-                    metadata={"source_strategy": "semantic", **metadata},
+                    metadata={
+                        "source_strategy": "semantic",
+                        **metadata,
+                        # After the splat, same reason as the keyword axis —
+                        # and it matters more here: a vector row's metadata is
+                        # an embed-time *snapshot* of the document's bag
+                        # (#338), so anything the document carried is in it.
+                        RECENCY_CLOCK_METADATA_KEY: recency.clock,
+                    },
                 )
             )
         return sorted(items, key=lambda x: x.relevance_score, reverse=True)
