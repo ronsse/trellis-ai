@@ -655,8 +655,10 @@ def _record_refused_advisory_write(
     stage reported the refusal into a ``status`` field and a structlog line
     and returned. A refusal that recurs every night therefore escalated
     nowhere at all — verified rather than assumed: the reference
-    deployment's ``curate-nightly.sh`` greps stdout for
-    ``advisories_generated`` and never reads ``status`` (#448).
+    deployment's ``curate-nightly.sh`` pipes this command's JSON to a log
+    and reads nothing out of it, and the only consumer downstream
+    (``roadmap-nightly.sh``) greps that log's tail for
+    ``advisories_generated``. Neither reads ``status`` (#448).
 
     The signal is a ``WRITE_REJECTED`` event, which is the repo's existing
     channel for "a write died before it became a Command" and is already

@@ -118,10 +118,17 @@ MCP_WRAPPER_MODULE = "trellis/mcp/server.py"
 #: write, so it can have no accept of its own and is cleared instead by any
 #: accepted write after its last rejection
 #: (``capture_health._GLOBAL_SURFACE_PREFIX``).
-#: ``config:advisory_file`` is global for the same reason and a different
-#: one: nothing emits an *accepted* write under it at all — the advisory
-#: store is not the governed pipeline — so a per-surface label there could
-#: fire and never clear (#448, #461).
+#: ``config:advisory_file`` (#448) is classified the other way: it raises no
+#: banner at all, because a refused *advisory* write stops no capture path
+#: — every ``save_*`` tool, the capture sweep and every ingest path keep
+#: working — so the banner's *"New experience … is NOT being saved"* would
+#: be false, which is #461's ``record_feedback`` half. It is therefore in
+#: ``NON_CAPTURE_SURFACES``, still counted by ``trellis analyze health``,
+#: and ``test_declared_non_mcp_surfaces_are_classified`` below proves by
+#: execution that it raises nothing rather than trusting the
+#: declaration. Its ``config:`` prefix would still put it in the *global*
+#: recovery class if it ever did raise one, which is why sharing a prefix
+#: with ``config:policy_file`` is not on its own a reason to headline it.
 NON_MCP_REJECTION_PRODUCERS: dict[str, str] = {
     "trellis/mutate/policy_source.py": POLICY_GATE_SURFACE,
     "trellis_cli/worker.py": ADVISORY_WRITER_SURFACE,
@@ -430,14 +437,37 @@ class TestTheRoster:
         for label in NON_CAPTURE_SURFACES:
             assert accept_events_for(label) == ()
 
+    def test_the_advisory_surface_literal_has_not_drifted(self) -> None:
+        """``capture_health`` spells the advisory label out; pin the copy.
+
+        ``ops`` deliberately does not import ``stores.advisory_source`` to
+        learn the string — that module runs on every retrieval call. A
+        duplicated literal is the cheaper coupling, but only while
+        something fails when the two spellings diverge: silently they would
+        not, and the surface would quietly start headlining the banner
+        again (#448).
+        """
+        assert ADVISORY_WRITER_SURFACE in NON_CAPTURE_SURFACES
+
     def test_non_capture_surfaces_are_all_real_rejection_sites(self) -> None:
         """Nothing is excluded from the banner that could not have raised it.
 
         A stale entry here is a surface silently unwatched — the failure
         direction that costs most — so the deny-list is pinned to the scan
         in both directions.
+
+        The population is the scanned MCP tools **plus** the declared
+        non-MCP producers. Pinning it to the MCP tools alone was correct
+        only while every rejection came from ``server.py``; it would now
+        reject a legitimate non-MCP exclusion and, worse, would push the
+        author of one into leaving a false banner in place to keep this
+        green (#448). Both halves stay derived — neither set is
+        hand-listed here.
         """
-        assert set(NON_CAPTURE_SURFACES).issubset({f"mcp:{tool}" for tool in TOOLS})
+        population = {f"mcp:{tool}" for tool in TOOLS} | set(
+            NON_MCP_REJECTION_PRODUCERS.values()
+        )
+        assert set(NON_CAPTURE_SURFACES).issubset(population)
 
     def test_every_hand_written_recipe_still_matches_a_scanned_site(self) -> None:
         """The one floor a scan cannot compute — a hand count, asserted.
@@ -636,21 +666,43 @@ class TestNoUnwatchedRejectionProducer:
 
         assert _unclassified_producers(root) == {"pkg/rogue.py"}
 
-    def test_declared_non_mcp_surfaces_can_actually_clear(
+    def test_declared_non_mcp_surfaces_are_classified(
         self, temp_registry: StoreRegistry
     ) -> None:
         """Executed, not declared — the same standard as the tool roster.
 
-        Each declared label is driven to the banner and then cleared, so a
-        roster entry naming a surface with no route out of the banner fails
-        here rather than in production.
+        Every declared label is driven to the threshold. A **capture**
+        surface must then raise the banner *and* be able to clear it, so a
+        roster entry naming a surface with no route out fails here rather
+        than in production. A surface declared **non-capture** must raise
+        nothing at all, which is the half this test used to assert away:
+        it required ``is_capture_surface(label)`` of every entry, so the
+        only way to register a non-MCP producer was to let it headline
+        *"New experience … is NOT being saved"*. That is how
+        ``config:advisory_file`` — a refused advisory write, which stops no
+        capture path — came to raise a false banner on every pack (#448),
+        and it is #461's ``record_feedback`` half reached through the guard
+        meant to prevent it. Both classifications are now checked by
+        running them.
         """
         event_log = temp_registry.operational.event_log
         for label in NON_MCP_REJECTION_PRODUCERS.values():
-            assert is_capture_surface(label), (
-                f"{label} is excluded from the banner, so it does not "
-                "belong in a roster of surfaces that raise one"
-            )
+            if not is_capture_surface(label):
+                for _ in range(3):
+                    event_log.emit(
+                        EventType.WRITE_REJECTED,
+                        label,
+                        payload={
+                            "tool": label,
+                            "stage": "boundary",
+                            "rejections": [],
+                        },
+                    )
+                quiet = check_capture_health(event_log, threshold=3)
+                assert quiet is None or label not in quiet.failing_surfaces, (
+                    f"{label} is declared non-capture but headlined the banner anyway"
+                )
+                continue
             for _ in range(3):
                 event_log.emit(
                     EventType.WRITE_REJECTED,

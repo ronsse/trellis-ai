@@ -21,6 +21,7 @@ from typer.testing import CliRunner
 from tests.document_recency import fake_document_clock
 from trellis.core.vector_metadata import vector_metadata_diverges
 from trellis.llm import LLMResponse, Message
+from trellis.ops.capture_health import check_capture_health, is_capture_surface
 from trellis.ops.write_health import WriteHealthReport, summarize_write_health
 from trellis.schemas.advisory import (
     Advisory,
@@ -2047,9 +2048,10 @@ class TestARefusedNightlyWriteEscalates:
     watching shouted, and the one that runs at 03:30 unattended did not.
 
     Verified about the reference deployment rather than assumed: its
-    ``curate-nightly.sh`` greps stdout for ``advisories_generated`` and
-    never reads the ``status`` field, so before this the refusal escalated
-    nowhere at all.
+    ``curate-nightly.sh`` logs this command's JSON and reads nothing out of
+    it, and the one downstream consumer (``roadmap-nightly.sh``) greps that
+    log's tail for ``advisories_generated``. Neither reads ``status``, so
+    before this the refusal escalated nowhere at all.
 
     Two halves, and the event is the load-bearing one. A non-zero exit is
     near-invisible under cron; ``WRITE_REJECTED`` is the repo's existing
@@ -2172,6 +2174,44 @@ class TestARefusedNightlyWriteEscalates:
         ]
         assert report.status == "warn"
         assert any("config_unreadable" in r for r in report.reasons)
+
+    def test_recurrence_does_not_raise_the_capture_banner(
+        self, tmp_path: Path, temp_stores: StoreRegistry
+    ) -> None:
+        """The same three nights must **not** headline lost experience.
+
+        ``analyze health`` is the right reader for this refusal; the
+        capture banner is not. It prepends *"New experience from this
+        session is NOT being saved"* to every served pack, and a refused
+        advisory write stops no capture path at all — ``save_memory``,
+        ``save_experience``, the capture sweep and every ingest path keep
+        writing, and the advisory file is a derived artefact the next cycle
+        regenerates. Left watched, the exact scenario above pinned a false
+        alarm to every retrieval on a healthy deployment, which is #461's
+        ``record_feedback`` half (#448).
+
+        Driven through the real command rather than synthetic events: the
+        roster guard checks the *label*, and this checks that the label the
+        worker actually emits is the one that was classified.
+        """
+        _seed_promote_signal(temp_stores)
+        TestCurateSurvivesADegradedAdvisoryStore._corrupt_advisory_file(tmp_path)
+
+        for _ in range(3):
+            self._run(tmp_path, "--format", "json")
+
+        # The rejections are real and counted — this is not a test of an
+        # absent signal.
+        assert (
+            self._rejections(temp_stores)
+            .by_tool[ADVISORY_WRITER_SURFACE]
+            .boundary_rejected
+            == 3
+        )
+        assert not is_capture_surface(ADVISORY_WRITER_SURFACE)
+        assert (
+            check_capture_health(temp_stores.operational.event_log, threshold=3) is None
+        )
 
     def test_both_format_surfaces_exit_the_same_way(
         self, tmp_path: Path, temp_stores: StoreRegistry
