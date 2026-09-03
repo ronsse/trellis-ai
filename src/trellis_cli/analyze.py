@@ -1696,27 +1696,14 @@ def _assemble_pack_for_scenario(scenario: EvaluationScenario) -> object:
     Imported inline to keep the CLI module light and avoid pulling
     PackBuilder's strategy graph into non-quality commands.
     """
-    from trellis.ops import ParameterRegistry  # noqa: PLC0415
-    from trellis.retrieve.pack_builder import (  # noqa: PLC0415
-        PackBuilder,
-        SemanticDedupConfig,
-    )
-    from trellis.retrieve.rerankers import build_reranker  # noqa: PLC0415
-    from trellis.retrieve.strategies import build_strategies  # noqa: PLC0415
+    from trellis.retrieve.builder_factory import build_pack_builder  # noqa: PLC0415
     from trellis_cli.stores import _get_registry  # noqa: PLC0415
 
-    registry = _get_registry()
-    param_registry = ParameterRegistry(registry.operational.parameter_store)
-    builder = PackBuilder(
-        strategies=build_strategies(registry, parameter_registry=param_registry),
-        event_log=registry.operational.event_log,
-        reranker=build_reranker("rrf", parameter_registry=param_registry),
-        # Mirror the MCP server / API wire-up (F14, #259): pack-quality
-        # evaluation must measure assembly the way production assembles —
-        # without this, a scenario containing a cross-source near-dup pair
-        # scores 2 items in eval but ships 1 in prod.
-        semantic_dedup=SemanticDedupConfig(),
-    )
+    # "Mirror the MCP server / API wire-up" used to be a comment over a
+    # hand-copied argument list, and the copy had drifted: this one passed
+    # no ``advisory_store``, so a scenario was scored against a builder
+    # production does not use. It is the same call now (#410).
+    builder = build_pack_builder(_get_registry(), surface="cli.analyze.pack-quality")
     filters: dict[str, object] | None = (
         {"domain": scenario.domain} if scenario.domain else None
     )

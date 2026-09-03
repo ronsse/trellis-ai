@@ -15,6 +15,17 @@ from trellis_cli.main import app
 runner = CliRunner()
 
 
+def _unwrap(text: str) -> str:
+    """Undo Rich's hard wrap so a sentence can be searched as one string.
+
+    Rich wraps at the console width when stdout is a pipe, so a message
+    that is one logical line arrives with newlines inside it. Collapsing
+    whitespace keeps the assertions about *content* from becoming
+    assertions about terminal width.
+    """
+    return " ".join(text.split())
+
+
 @pytest.fixture(autouse=True)
 def _temp_stores(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Point CLI stores at a temp directory."""
@@ -24,7 +35,103 @@ def _temp_stores(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TRELLIS_DATA_DIR", str(data_dir))
 
 
+def fake_embed(text: str) -> list[float]:
+    """A resolvable embedder for ``TRELLIS_EMBEDDING_FN``.
+
+    Deterministic and content-dependent, so the semantic axis it enables
+    is a real axis rather than one that would rank everything equally.
+    Nothing here asserts on the *values* — what is under test is whether
+    the axis exists and whether the CLI says so.
+    """
+    return [float(len(text) % 7), float(sum(map(ord, text[:8])) % 11), 1.0]
+
+
 class TestRetrievePack:
+    """``retrieve pack`` assembles a real pack (#410).
+
+    Until #410 this command called ``DocumentStore.search`` directly: one
+    keyword axis, no graph axis, no semantic axis, no fusion, no token
+    budget, and — the part that mattered most — no ``PACK_ASSEMBLED``
+    event, so no ``pack_id`` and nothing the learning loop could grade.
+    It was named, documented and reached for as a preview of what an agent
+    is served while returning a different result set from every surface an
+    agent uses.
+
+    The fixture below is deliberately **not uniform**. Documents alone
+    would let ``item_type`` be a constant; one axis alone would let
+    ``strategy_source`` be one; equal-scoring items would let ``rank`` be
+    anything. Each assertion needs a population that can tell a right
+    value from a hard-coded one.
+    """
+
+    @staticmethod
+    def _seed_two_axes() -> tuple[list[str], list[str]]:
+        """Seed documents *and* graph entities matching one intent.
+
+        Returns ``(doc_ids, entity_ids)``. The graph axis is a recency feed
+        (#371), so the entities need no keyword overlap to be retrieved —
+        which is precisely why they are here: they arrive on a different
+        axis with a different ``item_type``, and no single constant can
+        satisfy an assertion over both halves.
+        """
+        from trellis_cli.stores import get_document_store, get_graph_store
+
+        docs = get_document_store()
+        # Bodies must be genuinely different, not templated: the builder
+        # runs MinHash near-duplicate dedup (#259) at 0.85 Jaccard, and an
+        # earlier version of this fixture wrote four sentences differing
+        # by one digit — the pack correctly collapsed them to one and the
+        # rank assertions had nothing left to rank.
+        bodies = [
+            (
+                "canary rollout runbook: shift ten percent of traffic,"
+                " watch p99 latency for fifteen minutes, then promote"
+            ),
+            (
+                "canary rollout abort criteria: any five-hundred rate above"
+                " baseline, or a saturated connection pool on the replica"
+            ),
+            (
+                "canary rollout owner rota: platform holds the pager during"
+                " business hours, the service team overnight"
+            ),
+            (
+                "canary rollout prerequisites: a green migration, a feature"
+                " flag defaulted off, and a tested database rollback"
+            ),
+        ]
+        doc_ids = []
+        for i, body in enumerate(bodies):
+            doc_id = f"corpus:obsidian:doc{i}"
+            docs.put(doc_id, body)
+            doc_ids.append(doc_id)
+
+        graph = get_graph_store()
+        descriptions = [
+            "owns the public edge and terminates every inbound request",
+            "stores order history and replays it onto the event bus",
+            "runs the nightly reconciliation between billing and ledger",
+        ]
+        entity_ids = []
+        for i in range(3):
+            entity_id = f"svc-{i}"
+            graph.upsert_node(
+                entity_id,
+                "service",
+                {
+                    "name": f"service {i}",
+                    "description": descriptions[i],
+                },
+            )
+            entity_ids.append(entity_id)
+        return doc_ids, entity_ids
+
+    @staticmethod
+    def _json(*args: str) -> dict:
+        result = runner.invoke(app, [*args, "--format", "json", "--quiet"])
+        assert result.exit_code == 0, result.output
+        return json.loads(result.stdout.strip())
+
     def test_pack_request(self) -> None:
         result = runner.invoke(
             app,
@@ -51,6 +158,230 @@ class TestRetrievePack:
         assert data["intent"] == "deploy"
         assert data["status"] == "ok"
 
+    def test_pack_emits_pack_assembled_carrying_the_returned_pack_id(self) -> None:
+        """The defect's load-bearing half, read back out of a real store.
+
+        #410's cost was not "the ranking is different" — it was that the
+        command's output could never be graded, because no pack existed to
+        cite. So this reads the *event log* the CLI wrote (a real
+        ``SQLiteEventLog``, not a mock), not just the printed payload:
+        #447 shipped because a gate's filtering half was covered and its
+        emission half was not, and a ``pack_id`` minted in memory and never
+        persisted would satisfy every assertion about the JSON alone.
+        """
+        from trellis.stores.base.event_log import EventType
+        from trellis_cli.stores import get_event_log
+
+        self._seed_two_axes()
+        before = get_event_log().get_events(
+            event_type=EventType.PACK_ASSEMBLED, limit=100
+        )
+        assert before == []
+
+        data = self._json("retrieve", "pack", "--intent", "canary rollout")
+
+        assert data["pack_id"]
+        events = get_event_log().get_events(
+            event_type=EventType.PACK_ASSEMBLED, limit=100
+        )
+        assert len(events) == 1, events
+        event = events[0]
+        assert event.entity_id == data["pack_id"]
+        assert event.entity_type == "pack"
+        # The join key the learning loop needs on the *pack* side.
+        assert event.payload["injected_item_ids"] == [
+            item["item_id"] for item in data["items"]
+        ]
+
+    def test_pack_runs_every_axis_the_deployment_has(self) -> None:
+        """Keyword *and* graph, not the single keyword axis of the bypass.
+
+        Asserted through the served items' ``strategy_source`` as well as
+        the report, because the report is a list the builder appends to
+        and the items are what an operator reads.
+        """
+        self._seed_two_axes()
+        data = self._json("retrieve", "pack", "--intent", "canary rollout")
+
+        report = data["retrieval_report"]
+        assert report["strategies_used"] == ["keyword", "graph"]
+        assert report["queries_run"] == 2
+        sources = {item["strategy_source"] for item in data["items"]}
+        assert sources == {"keyword", "graph"}
+        types = {item["item_type"] for item in data["items"]}
+        assert {"document", "entity"} <= types, types
+
+    def test_pack_items_carry_the_builder_rank_and_score(self) -> None:
+        """Rank and score are the builder's, and they agree with each other.
+
+        A constant would pass "rank is an int"; it cannot pass "ranks are
+        1..n in the order printed **and** the scores are non-increasing
+        across that order **and** at least two distinct scores exist".
+        """
+        self._seed_two_axes()
+        data = self._json("retrieve", "pack", "--intent", "canary rollout")
+
+        items = data["items"]
+        assert len(items) >= 4
+        assert [item["rank"] for item in items] == list(range(1, len(items) + 1))
+        scores = [item["relevance_score"] for item in items]
+        assert scores == sorted(scores, reverse=True)
+        assert len(set(scores)) > 1, scores
+        # RRF fusion ran: the reranker writes its own breakdown keys, which
+        # the pre-#410 raw store search had no way to produce.
+        assert any("rrf_total" in item["score_breakdown"] for item in items)
+
+    def test_pack_says_the_semantic_axis_is_absent(self) -> None:
+        """A missing axis is reported, not silently absorbed.
+
+        ``build_strategies`` drops the semantic axis with a ``logger.info``
+        line, and the CLI pins logging at ``WARNING`` — so on a deployment
+        with no embedder the axis vanishes with no observable trace at all.
+        Degrading to keyword+graph *quietly* would reproduce the defect
+        this command is being fixed for, one layer up.
+        """
+        self._seed_two_axes()
+        data = self._json("retrieve", "pack", "--intent", "canary rollout")
+
+        assert data["axes"]["semantic"] == "not_configured"
+        assert "semantic" not in data["axes"]["available"]
+        assert data["axes"]["failed"] == []
+
+        text = runner.invoke(app, ["retrieve", "pack", "--intent", "canary rollout"])
+        assert text.exit_code == 0
+        assert "Semantic axis unavailable" in _unwrap(text.stdout)
+
+    def test_pack_runs_the_semantic_axis_when_an_embedder_resolves(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The other side of the same fact.
+
+        Without this, ``axes.semantic`` could be the constant
+        ``"not_configured"`` and the warning could be printed
+        unconditionally, and every other assertion in this class would
+        still pass. It is also what proves the note is *conditional* — a
+        caveat that always prints is one that always gets skipped (#365).
+        """
+        monkeypatch.setenv(
+            "TRELLIS_EMBEDDING_FN", "tests.unit.cli.test_retrieve.fake_embed"
+        )
+        self._seed_two_axes()
+        data = self._json("retrieve", "pack", "--intent", "canary rollout")
+
+        assert "semantic" in data["axes"]["available"]
+        assert data["axes"]["semantic"] == "ran"
+        assert "semantic" in data["retrieval_report"]["strategies_used"]
+
+        text = runner.invoke(app, ["retrieve", "pack", "--intent", "canary rollout"])
+        assert text.exit_code == 0
+        assert "Semantic axis unavailable" not in _unwrap(text.stdout)
+
+    def test_pack_enforces_a_token_budget(self) -> None:
+        """``--max-tokens`` is a real ceiling, and the cut is reported.
+
+        The bypass had no token budget at all — ``--max-items`` capped rows
+        and nothing capped tokens — while README documented a
+        ``--max-tokens`` flag that did not exist.
+        """
+        self._seed_two_axes()
+        wide = self._json("retrieve", "pack", "--intent", "canary rollout")
+        narrow = self._json(
+            "retrieve", "pack", "--intent", "canary rollout", "--max-tokens", "40"
+        )
+
+        assert narrow["budget"]["max_tokens"] == 40
+        assert 0 < narrow["count"] < wide["count"]
+        assert narrow["withholding"]["by_reason"].get("token_budget")
+        served = sum(item["estimated_tokens"] for item in narrow["items"])
+        assert served <= 40
+
+    def test_pack_enforces_max_items_and_reports_what_it_dropped(self) -> None:
+        self._seed_two_axes()
+        data = self._json(
+            "retrieve", "pack", "--intent", "canary rollout", "--max-items", "2"
+        )
+        assert data["count"] == 2
+        assert data["budget"]["max_items"] == 2
+        assert data["withholding"]["by_reason"].get("max_items")
+        assert data["withholding"]["total"] >= 1
+
+    def test_pack_text_output_states_withholding_above_the_items(self) -> None:
+        """Header, not footer — the #404 rule, in this renderer too.
+
+        A note appended after the item list is a note the reader of a long
+        list never reaches, which is the "honest in JSON alone" failure
+        one layer down.
+        """
+        self._seed_two_axes()
+        result = runner.invoke(
+            app,
+            ["retrieve", "pack", "--intent", "canary rollout", "--max-items", "2"],
+        )
+        assert result.exit_code == 0
+        out = _unwrap(result.stdout)
+        assert "Withheld:" in out
+        assert out.index("Withheld:") < out.index("corpus:obsidian:doc")
+
+    def test_pack_text_output_names_each_item_type_and_axis(self) -> None:
+        r"""The rendered columns are read off the item, not hard-coded.
+
+        #456's lesson, applied before the fact: a field that is *printed*
+        but never asserted is a field a constant satisfies, and eleven of
+        twelve such mutants survived the full suite last time. The fixture
+        spans two ``item_type``\ s and two axes precisely so neither can
+        be folded to a constant here.
+        """
+        self._seed_two_axes()
+        result = runner.invoke(app, ["retrieve", "pack", "--intent", "canary rollout"])
+        assert result.exit_code == 0
+        out = _unwrap(result.stdout)
+        assert "[document]" in out
+        assert "[entity]" in out
+        assert "(keyword)" in out
+        assert "(graph)" in out
+
+    def test_pack_forwards_domain_and_agent_to_the_builder(self) -> None:
+        """``--agent`` was accepted, printed back, and ignored (#410).
+
+        Both scopes are read back off the *pack*, not off the arguments:
+        the pack's ``domain`` / ``agent_id`` are what the builder was
+        given and what rides the ``PACK_ASSEMBLED`` event, so an echo of
+        the flag would not satisfy this.
+        """
+        from trellis.stores.base.event_log import EventType
+        from trellis_cli.stores import get_event_log
+
+        self._seed_two_axes()
+        data = self._json(
+            "retrieve",
+            "pack",
+            "--intent",
+            "canary rollout",
+            "--domain",
+            "platform",
+            "--agent",
+            "operator-1",
+        )
+        assert data["domain"] == "platform"
+        assert data["agent_id"] == "operator-1"
+
+        event = get_event_log().get_events(
+            event_type=EventType.PACK_ASSEMBLED, limit=10
+        )[0]
+        assert event.payload["domain"] == "platform"
+        assert event.payload["agent_id"] == "operator-1"
+
+    def test_pack_exit_code_does_not_depend_on_format(self) -> None:
+        """The repo-wide rule, checked on this command's own success path."""
+        self._seed_two_axes()
+        codes = {
+            fmt: runner.invoke(
+                app, ["retrieve", "pack", "--intent", "canary rollout", "--format", fmt]
+            ).exit_code
+            for fmt in ("text", "json")
+        }
+        assert set(codes.values()) == {0}, codes
+
 
 class TestRetrieveSearch:
     def test_search(self) -> None:
@@ -74,14 +405,19 @@ class TestRetrieveSearch:
 
 
 class TestRetrieveChunkVisibility:
-    """``retrieve search`` / ``retrieve pack`` hand back whole rows (#396).
+    """``retrieve search`` hands back whole rows (#396).
 
-    Both print a ``doc_id`` per result, so a ``<parent>#chunk-N`` row is a
+    It prints a ``doc_id`` per result, so a ``<parent>#chunk-N`` row is a
     fragment of a document the same output already lists. The REST siblings
     (``GET /api/v1/documents``, ``GET /api/v1/search``) exclude chunks by
-    default; these did not, and an operator running ``trellis retrieve
+    default; this did not, and an operator running ``trellis retrieve
     search`` against the reference deployment (56% chunk rows) saw the same
     noise the REST fix removed.
+
+    ``retrieve pack`` was in this class until #410 routed it through
+    ``PackBuilder``. On a pack surface the chunk *is* the retrievable unit
+    and the excerpt is what the token budget prices, so the last test below
+    pins the opposite rule for it.
     """
 
     #: The production id shape, with a source system Rich does not render
@@ -172,18 +508,31 @@ class TestRetrieveChunkVisibility:
         assert "#chunk-" not in result.stdout
         assert "corpus:obsidian:doc0" in result.stdout
 
-    def test_pack_excludes_chunks_by_default(self) -> None:
+    def test_pack_serves_chunk_rows_and_has_no_flag_to_suppress_them(self) -> None:
+        """``retrieve pack`` stopped being a row surface (#410).
+
+        #396 classified it as one *because* it bypassed ``PackBuilder``,
+        and said in as many words that routing it through the builder
+        would make chunks the retrievable unit — at which point the flag
+        should be removed, not inverted. Both halves are pinned here: the
+        chunk rows are served, and the flag is gone rather than defaulting
+        the other way (a flag that still parses is a flag scripts keep
+        passing and readers keep believing).
+        """
         parent_ids = self._seed()
         data = self._json("retrieve", "pack", "--intent", "distinctive")
-        assert set(data["items"]) == set(parent_ids)
+        served = {item["item_id"] for item in data["items"]}
+        assert any("#chunk-" in item_id for item_id in served), served
+        # The parents are still there — chunks are additive candidates on
+        # the keyword axis, not a replacement for the documents.
+        assert served & set(parent_ids)
 
-    def test_pack_include_chunks_opt_in(self) -> None:
-        self._seed()
-        data = self._json(
-            "retrieve", "pack", "--intent", "distinctive", "--include-chunks"
+        rejected = runner.invoke(
+            app,
+            ["retrieve", "pack", "--intent", "distinctive", "--include-chunks"],
         )
-        assert data["count"] == 12
-        assert any("#chunk-" in item for item in data["items"])
+        assert rejected.exit_code != 0
+        assert "--include-chunks" in rejected.output
 
 
 class TestRetrieveTrace:

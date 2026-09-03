@@ -87,10 +87,10 @@ from trellis.mutate import (
     ensure_evidence_document,
 )
 from trellis.ops import (
-    ParameterRegistry,
     check_capture_health,
     format_capture_warning,
 )
+from trellis.retrieve.builder_factory import build_pack_builder
 from trellis.retrieve.embed_ingest_hook import run_embed_on_ingest
 from trellis.retrieve.file_context import build_file_context
 from trellis.retrieve.formatters import (
@@ -105,9 +105,7 @@ from trellis.retrieve.formatters import (
     format_subgraph_as_markdown,
     index_render_overhead_tokens,
 )
-from trellis.retrieve.pack_builder import PackBuilder, SemanticDedupConfig
-from trellis.retrieve.rerankers import build_reranker
-from trellis.retrieve.strategies import build_strategies
+from trellis.retrieve.pack_builder import PackBuilder
 from trellis.retrieve.token_tracker import estimate_tokens, track_token_usage
 from trellis.retrieve.withholding import (
     format_withholding_note,
@@ -116,7 +114,6 @@ from trellis.retrieve.withholding import (
 from trellis.schemas.memory_op import REF_TYPE_DOCUMENT
 from trellis.schemas.pack import PackBudget, SectionRequest
 from trellis.schemas.trace import Trace
-from trellis.stores.advisory_source import load_advisory_store
 from trellis.stores.base.document import DocumentStore
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
@@ -282,26 +279,12 @@ def _get_registry() -> StoreRegistry:
 def _build_pack_builder(registry: StoreRegistry) -> PackBuilder:
     """Create a PackBuilder wired to this deployment's advisory store.
 
-    The store is resolved through :func:`load_advisory_store` (#373) rather
-    than by joining a filename onto ``stores_dir`` here. That is the seam
-    that keeps this reader on the same file the nightly advisory worker
-    writes, and it is why there is no ``if path.exists()`` guard: a missing
-    file yields an empty store plus a log line, not a silent ``None``.
+    The wiring itself lives in
+    :func:`~trellis.retrieve.builder_factory.build_pack_builder` (#410) —
+    one construction for every pack surface, because four copies of an
+    argument list is four chances to drift, and one of them already had.
     """
-    advisory_store = load_advisory_store(registry.stores_dir, surface="mcp")
-    param_registry = ParameterRegistry(registry.operational.parameter_store)
-    return PackBuilder(
-        strategies=build_strategies(registry, parameter_registry=param_registry),
-        event_log=registry.operational.event_log,
-        advisory_store=advisory_store,
-        reranker=build_reranker("rrf", parameter_registry=param_registry),
-        # F14 (#259): collapse near-duplicate pack items — the same fact stored
-        # via save_memory AND via corpus ingestion surfaced both copies in one
-        # pack. MinHash/LSH over item excerpts, relevance-ordered so the
-        # highest-scoring copy wins. Default 0.85 Jaccard per the config's
-        # guidance table; threshold is a first-class field for future tuning.
-        semantic_dedup=SemanticDedupConfig(),
-    )
+    return build_pack_builder(registry, surface="mcp")
 
 
 _minhash_index: Any = None

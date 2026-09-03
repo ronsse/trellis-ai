@@ -7,13 +7,10 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import ValidationError
 
-from trellis.ops import ParameterRegistry
-from trellis.retrieve.pack_builder import PackBuilder, SemanticDedupConfig
+from trellis.retrieve.builder_factory import build_pack_builder
+from trellis.retrieve.pack_builder import PackBuilder
 from trellis.retrieve.precedents import list_precedents as _list_precedents
-from trellis.retrieve.rerankers import build_reranker
-from trellis.retrieve.strategies import build_strategies
 from trellis.schemas.pack import PackBudget, SectionRequest
-from trellis.stores.advisory_source import load_advisory_store
 from trellis_api.app import get_registry
 from trellis_wire.dtos import (
     PackRequest,
@@ -26,26 +23,13 @@ router = APIRouter()
 
 
 def _build_pack_builder(registry: Any) -> PackBuilder:
-    """Wire a PackBuilder the same way the MCP server does.
+    """Wire a PackBuilder the same way every other pack surface does.
 
-    The advisory store is resolved through :func:`load_advisory_store`
-    (#373), which is the one place that decides where advisories live —
-    so this reader and the nightly writer cannot drift onto two files
-    again. PackBuilder filters by ``_ADVISORY_MIN_CONFIDENCE`` and pack
-    domain scope, so passing the store unconditionally is safe; an empty
-    store behaves exactly as the old ``None`` did.
+    Delegates to :func:`~trellis.retrieve.builder_factory.build_pack_builder`
+    (#410). "The same way the MCP server does" was previously asserted by a
+    docstring over a hand-copied argument list; it is now the same call.
     """
-    param_registry = ParameterRegistry(registry.operational.parameter_store)
-    advisory_store = load_advisory_store(registry.stores_dir, surface="api.retrieve")
-    return PackBuilder(
-        strategies=build_strategies(registry, parameter_registry=param_registry),
-        event_log=registry.operational.event_log,
-        advisory_store=advisory_store,
-        reranker=build_reranker("rrf", parameter_registry=param_registry),
-        # Mirror the MCP server: near-duplicate suppression at pack assembly
-        # (F14, #259) so the HTTP pack path can't re-serve cross-source clones.
-        semantic_dedup=SemanticDedupConfig(),
-    )
+    return build_pack_builder(registry, surface="api.retrieve")
 
 
 # Chunk rows are excluded from this route by default (#396) — the sibling
