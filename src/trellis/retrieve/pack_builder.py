@@ -501,6 +501,20 @@ class PackBuilder:
         """Add a search strategy."""
         self._strategies.append(strategy)
 
+    @property
+    def strategy_names(self) -> list[str]:
+        """Names of the axes this builder *has*, in run order.
+
+        ``RetrievalReport.strategies_used`` names the axes that **ran**.
+        The difference between the two is the only way a caller can tell an
+        axis that failed this build from an axis the deployment never had —
+        :func:`~trellis.retrieve.strategies.build_strategies` drops the
+        semantic axis with a log line when no embedder resolves, and
+        swallows a vector-backend init failure the same way, so absence
+        alone says nothing about which happened (#410).
+        """
+        return [strategy.name for strategy in self._strategies]
+
     def build(  # noqa: PLR0915
         self,
         intent: str,

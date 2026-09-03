@@ -9,8 +9,18 @@ from typing import Any
 import typer
 from rich.console import Console
 
+from trellis.retrieve.builder_factory import (
+    SEMANTIC_AXIS_NOTES,
+    build_pack_builder,
+    describe_axes,
+)
 from trellis.retrieve.file_context import build_file_context
 from trellis.retrieve.precedents import list_precedents as _list_precedents
+from trellis.retrieve.withholding import (
+    format_withholding_note,
+    withholding_from_payload,
+)
+from trellis.schemas.pack import PackBudget
 from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_VALIDATION
 from trellis_cli.output import (
     emit_json,
@@ -20,6 +30,7 @@ from trellis_cli.output import (
 )
 from trellis_cli.stores import (
     LOCAL_SOURCE_SYSTEM,
+    _get_registry,
     get_document_store,
     get_event_log,
     get_graph_store,
@@ -33,14 +44,22 @@ _FMT_HELP = "Output format: text, json, jsonl, tsv"
 _FIELDS_HELP = "Comma-separated fields to include"
 _TRUNC_HELP = "Max characters for text fields"
 _QUIET_HELP = "Suppress Rich formatting"
-#: Both commands below hand back whole document rows, so they exclude
+#: ``retrieve search`` hands back whole document rows, so it excludes
 #: ``<parent>#chunk-N`` fragments by default — see
 #: :data:`trellis.ingest_corpus.models.CHUNK_ID_SEPARATOR` for the rule.
 #: The exclusion is pushed into the store rather than applied to the printed
-#: list, so the row cap (``--limit`` / ``--max-items``) refills with the
-#: documents the fragments were sliced from instead of the list simply
-#: getting shorter. A short list therefore still means "that is all there
-#: is", which is exactly what a post-hoc filter would have destroyed.
+#: list, so the row cap (``--limit``) refills with the documents the
+#: fragments were sliced from instead of the list simply getting shorter. A
+#: short list therefore still means "that is all there is", which is exactly
+#: what a post-hoc filter would have destroyed.
+#:
+#: ``retrieve pack`` used to share this flag and no longer has one. #396
+#: classified it as a row surface *because* it bypassed ``PackBuilder``, and
+#: said the flag should be removed rather than inverted once that was fixed;
+#: #410 fixed it. On a pack surface the chunk is the retrievable unit and
+#: the excerpt is what the token budget prices, so suppressing chunks there
+#: would make the operator preview diverge from the agent-facing path in the
+#: opposite direction.
 _CHUNKS_HELP = (
     "Include <parent>#chunk-N fragment rows. Excluded by default: they are"
     " slices of documents the same search already ranks."
@@ -59,62 +78,137 @@ def pack(
     domain: str = typer.Option(None, help="Domain scope"),
     agent: str = typer.Option(None, "--agent", help="Agent ID scope"),
     max_items: int = typer.Option(50, help="Maximum items in pack"),
+    max_tokens: int = typer.Option(8000, help="Maximum tokens in pack"),
     output_format: str = typer.Option("text", "--format", help="Output format"),
-    include_chunks: bool = typer.Option(False, "--include-chunks", help=_CHUNKS_HELP),
     quiet: bool = typer.Option(False, "--quiet", "-q", help=_QUIET_HELP),
 ) -> None:
-    """Assemble a retrieval pack for a given intent."""
-    # ``pack`` is treated as a row surface (#396) on the strength of what it
-    # does, not what it is called: despite the name, and despite being
-    # documented as "assemble a retrieval pack", it reaches past
-    # ``PackBuilder`` straight to ``DocumentStore.search`` and prints doc ids
-    # to a human. (Not a #262 regression — that ADR's "one retrieval path"
-    # covers the MCP macro tools and never included this command.) Under the
-    # rule that makes it a whole-row surface, and the operator previewing a
-    # 56%-chunk corpus should not be shown fragments.
-    #
-    # This is the one classification in #396 that a later change can
-    # invalidate rather than extend: routing this through ``PackBuilder``
-    # (#410) would make it a *pack* surface, where chunks are the
-    # retrievable unit — and ``--include-chunks`` should then be removed,
-    # not inverted.
-    store = get_document_store()
-    filters = {}
-    if domain:
-        filters["domain"] = domain
-    results = store.search(
-        query=intent, limit=max_items, filters=filters, include_chunks=include_chunks
+    """Assemble a retrieval pack for a given intent.
+
+    A real pack, since #410: this runs the same
+    :class:`~trellis.retrieve.pack_builder.PackBuilder` that MCP
+    ``get_context`` and ``POST /api/v1/packs`` run — keyword + graph +
+    semantic axes, RRF fusion, recency/importance decay, the collect-seam
+    noise and lifecycle gates, advisories, the two-stage budget, graduated
+    disclosure — and emits the ``PACK_ASSEMBLED`` event that carries the
+    ``pack_id``.
+
+    Before #410 it called ``DocumentStore.search`` directly and printed
+    doc ids: one keyword axis, no budget, no event, no ``pack_id``, and
+    therefore nothing the learning loop could ever grade. It was named,
+    documented and reached for as a preview of what an agent gets, while
+    returning a materially different result set from every surface an
+    agent actually uses.
+
+    Two consequences of becoming a pack surface:
+
+    * ``--include-chunks`` is **gone**, not inverted. #396 classified this
+      command as a whole-row surface *because of* the bypass, and said in
+      as many words that routing it through ``PackBuilder`` would make
+      chunks the retrievable unit. They are: the keyword axis serves
+      chunk rows on purpose, the excerpt is what the budget prices, and
+      the flag would now suppress candidates the agent-facing path keeps.
+    * ``--format json`` returns the pack, not a list of ids — same shape
+      as ``POST /api/v1/packs`` plus the axis report, so an operator's
+      preview and an agent's pack are directly comparable.
+    """
+    registry = _get_registry()
+    builder = build_pack_builder(registry, surface="cli.retrieve")
+    pack_result = builder.build(
+        intent=intent,
+        domain=domain or None,
+        agent_id=agent or None,
+        budget=PackBudget(max_items=max_items, max_tokens=max_tokens),
+        # Match the MCP surface: fetch at least as many candidates per axis
+        # as the item budget allows, so raising --max-items buys recall
+        # instead of being silently capped at the 20-per-axis default.
+        limit_per_strategy=max(20, max_items),
     )
+
+    # Which axes this deployment has, which ran, and which did not. A pack
+    # assembled without the semantic axis is a materially different pack,
+    # and ``build_strategies`` drops that axis with a log line the CLI's
+    # WARNING default never prints. Reporting the result without reporting
+    # the gap would reproduce #410 one layer up.
+    axes = describe_axes(
+        builder,
+        pack_result.retrieval_report.strategies_used,
+        embedder_configured=registry.embedding_fn is not None,
+    )
+    axis_note = SEMANTIC_AXIS_NOTES.get(axes["semantic"], "")
+
+    # #404: read the summary the builder stamped, do not re-derive one.
+    # The JSON arm emits the stamped payload verbatim rather than
+    # re-serialising a parsed copy, so the two surfaces cannot disagree.
+    withholding_payload = pack_result.metadata.get("withholding")
+    withholding = withholding_from_payload(withholding_payload)
 
     if output_format == "json":
         payload = json.dumps(
             {
                 "status": "ok",
-                "intent": intent,
-                "domain": domain,
-                "agent_id": agent,
-                "count": len(results),
-                # Echoed for the same reason the REST route echoes it: a
-                # machine consumer of ``--format json`` must be able to tell
-                # which of the two result sets it is holding.
-                "include_chunks": include_chunks,
-                "items": [r["doc_id"] for r in results],
+                # The whole point of the change: this pack is citable.
+                "pack_id": pack_result.pack_id,
+                "intent": pack_result.intent,
+                "domain": pack_result.domain,
+                "agent_id": pack_result.agent_id,
+                "intent_family": pack_result.intent_family,
+                "count": len(pack_result.items),
+                "items": [item.model_dump(mode="json") for item in pack_result.items],
+                "advisories": [
+                    a.model_dump(mode="json") for a in pack_result.advisories
+                ],
+                "retrieval_report": pack_result.retrieval_report.model_dump(
+                    mode="json"
+                ),
+                "budget": pack_result.budget.model_dump(mode="json"),
+                # The builder's stamped summary, verbatim — counts,
+                # reasons **and** ``withheld_item_ids``. #404's
+                # counts-and-reasons-only rule scopes the rendered *note*,
+                # whose audience is an agent's context window; it does not
+                # scope this payload, whose audience is an operator who
+                # already holds the stores and needs the ids to go look.
+                # ``POST /api/v1/packs`` hands back the same ids under
+                # ``retrieval_report.rejected_items``.
+                "withholding": withholding_payload,
+                "axes": axes,
             }
         )
         emit_machine_text(payload)
     elif quiet:
-        for r in results:
-            sys.stdout.write(r["doc_id"] + "\n")
+        for item in pack_result.items:
+            sys.stdout.write(item.item_id + "\n")
     else:
-        console.print(f"[green]Pack assembled[/green] ({len(results)} items)")
+        console.print(f"[green]Pack assembled[/green] ({len(pack_result.items)} items)")
+        console.print(f"  pack_id: {pack_result.pack_id}")
         console.print(f"  Intent: {intent}")
         if domain:
             console.print(f"  Domain: {domain}")
         if agent:
             console.print(f"  Agent: {agent}")
-        for r in results:
-            preview = _doc_preview(r, 80)
-            console.print(f"  - {r['doc_id']}: {preview}")
+        console.print(f"  Axes ran: {', '.join(axes['ran']) or '(none)'}")
+        # Header, above the item blocks — never appended after them. The
+        # same rule the pack formatters follow (#404): a note printed after
+        # a list is a note the reader of a long list never reaches.
+        if axis_note:
+            console.print(f"  [yellow]{axis_note}[/yellow]")
+        note = format_withholding_note(withholding)
+        if note:
+            console.print(f"  [yellow]{note}[/yellow]")
+        for item in pack_result.items:
+            preview = " ".join(item.excerpt.split())[:80]
+            source = item.strategy_source or "?"
+            # ``markup=False, emoji=False`` for the same reason #403 gave
+            # for the JSON arm: Rich reads ``[document]`` as a style tag
+            # and eats it, and rewrites ``:snowflake:`` inside a real
+            # ``dataset:snowflake://…`` item_id as an emoji. Both were
+            # live in this output before the flags were added — an id an
+            # operator cannot copy is worse than no id.
+            console.print(
+                f"  - [{item.item_type}] {item.item_id} ({source}): {preview}",
+                markup=False,
+                emoji=False,
+                highlight=False,
+            )
 
 
 @retrieve_app.command()

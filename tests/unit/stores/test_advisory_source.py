@@ -214,42 +214,46 @@ class TestReaderNeverBindsNoneSilently:
 # ---------------------------------------------------------------------------
 
 
-def _build_mcp_pack_builder(monkeypatch: pytest.MonkeyPatch, stores_dir: Path) -> Any:
-    """Call the real MCP ``_build_pack_builder`` against ``stores_dir``.
+def _stub_live_backend_wiring(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub the strategy/reranker wiring, which needs live backends.
 
-    Stubs only the strategy/reranker wiring, which needs live backends —
-    the advisory branch under test runs unmodified.
+    Patched on :mod:`trellis.retrieve.builder_factory` since #410, which is
+    where every surface's construction now happens. The helpers below still
+    enter through each *surface's* own ``_build_pack_builder``, because what
+    is under test is that the surface reaches the shared advisory
+    resolution — not that the factory does.
     """
-    from trellis.mcp import server as mcp_server
+    from trellis.retrieve import builder_factory
 
-    monkeypatch.setattr(mcp_server, "build_strategies", lambda *a, **k: [])
-    monkeypatch.setattr(mcp_server, "build_reranker", lambda *a, **k: None)
-    monkeypatch.setattr(mcp_server, "ParameterRegistry", lambda *a, **k: None)
+    monkeypatch.setattr(builder_factory, "build_strategies", lambda *a, **k: [])
+    monkeypatch.setattr(builder_factory, "build_reranker", lambda *a, **k: None)
+    monkeypatch.setattr(builder_factory, "ParameterRegistry", lambda *a, **k: None)
 
+
+def _fake_registry(stores_dir: Path) -> Any:
     class _Registry:
         stores_dir = None
         operational = type("_Op", (), {"event_log": None, "parameter_store": None})()
 
     registry = _Registry()
     registry.stores_dir = stores_dir  # type: ignore[assignment]
-    return mcp_server._build_pack_builder(registry)  # type: ignore[arg-type]
+    return registry
+
+
+def _build_mcp_pack_builder(monkeypatch: pytest.MonkeyPatch, stores_dir: Path) -> Any:
+    """Call the real MCP ``_build_pack_builder`` against ``stores_dir``."""
+    from trellis.mcp import server as mcp_server
+
+    _stub_live_backend_wiring(monkeypatch)
+    return mcp_server._build_pack_builder(_fake_registry(stores_dir))
 
 
 def _build_api_pack_builder(monkeypatch: pytest.MonkeyPatch, stores_dir: Path) -> Any:
     """Call the real REST ``_build_pack_builder`` against ``stores_dir``."""
     from trellis_api.routes import retrieve as retrieve_routes
 
-    monkeypatch.setattr(retrieve_routes, "build_strategies", lambda *a, **k: [])
-    monkeypatch.setattr(retrieve_routes, "build_reranker", lambda *a, **k: None)
-    monkeypatch.setattr(retrieve_routes, "ParameterRegistry", lambda *a, **k: None)
-
-    class _Registry:
-        stores_dir = None
-        operational = type("_Op", (), {"event_log": None, "parameter_store": None})()
-
-    registry = _Registry()
-    registry.stores_dir = stores_dir  # type: ignore[assignment]
-    return retrieve_routes._build_pack_builder(registry)
+    _stub_live_backend_wiring(monkeypatch)
+    return retrieve_routes._build_pack_builder(_fake_registry(stores_dir))
 
 
 class TestSurfacesAgreeOnOneFile:

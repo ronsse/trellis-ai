@@ -85,10 +85,11 @@ def _is_document_store_read(node: ast.Call) -> bool:
     keyword-only parameter names (``limit`` / ``filters`` / ``query``).
     That found the same call sites and carried a trap: ``SearchStrategy``
     has the same ``search(query, *, limit, filters)`` signature and no
-    ``include_chunks``, so routing a command through a strategy — the
-    obvious future fix for ``trellis retrieve pack``, which reaches past
-    ``PackBuilder`` today — would have made this test demand a parameter
-    that does not exist, and the repair would have been to weaken it.
+    ``include_chunks``, so routing a command through a strategy would have
+    made this test demand a parameter that does not exist, and the repair
+    would have been to weaken it. That was not hypothetical — #410 did
+    exactly that to ``trellis retrieve pack`` two weeks later, and the
+    narrower rule survived it untouched.
 
     The cost of the narrower rule is that a document store reached through
     a receiver not named ``*store*`` slips the scan.

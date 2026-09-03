@@ -84,7 +84,7 @@ You'll land on the dashboard. Try:
 trellis retrieve search 'user-api'           # keyword + semantic search
 trellis retrieve entity user-api             # entity with neighborhood
 trellis retrieve traces --domain backend     # recent agent work in a domain
-trellis retrieve pack --intent "deploy staging for user-api"   # assembled context pack
+trellis retrieve pack --intent "deploy staging for user-api"   # the pack an agent would be served
 ```
 
 Every CLI command supports `--format json` for machine output.

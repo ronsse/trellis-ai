@@ -1258,24 +1258,35 @@ Batch the paths into one call — the lookup scans the document store once per c
 
 ### `trellis retrieve pack`
 
-Assemble a retrieval pack for a given intent.
+Assemble a retrieval pack for a given intent — the same `PackBuilder` that MCP `get_context` and `POST /api/v1/packs` run, so this is an operator-facing preview of what an agent is actually served.
+
+That was not true until [#410](https://github.com/ronsse/trellis-ai/issues/410). The command called `DocumentStore.search` directly: one keyword axis, no graph or semantic axis, no RRF fusion, no recency/importance decay, no advisories, no token budget, and no `PACK_ASSEMBLED` event — therefore no `pack_id`, so its output could never be graded and never reached the learning loop. It returned a materially different result set from every surface an agent uses, under the same name.
 
 ```bash
-trellis retrieve pack --intent <text> [--domain DOMAIN] [--agent AGENT_ID] [--max-items N] [--include-chunks] [--format text|json]
+trellis retrieve pack --intent <text> [--domain DOMAIN] [--agent AGENT_ID] [--max-items N] [--max-tokens N] [--format text|json]
 ```
 
 | Option | Required | Default | Description |
 |--------|----------|---------|-------------|
 | `--intent` | **Yes** | -- | Intent for context assembly |
-| `--domain` | No | `null` | Domain scope |
-| `--agent` | No | `null` | Agent ID scope |
-| `--max-items` | No | `50` | Maximum items |
-| `--include-chunks` | No | `false` | Include `<parent>#chunk-N` fragment rows (#396). Excluded by default, same rule as `retrieve search` |
+| `--domain` | No | `null` | Domain scope. Default-pass: a memory carrying no domain is never hard-excluded |
+| `--agent` | No | `null` | Agent ID recorded on the pack and its `PACK_ASSEMBLED` event |
+| `--max-items` | No | `50` | Item ceiling (first budget stage) |
+| `--max-tokens` | No | `8000` | Token ceiling (second budget stage) |
 | `--format` | No | `text` | Output format |
 
-> **`--format json` is safe on its own** — the Rich mangling described under
-> `retrieve search` above is fixed ([#403](https://github.com/ronsse/trellis-ai/issues/403)),
-> so `--quiet` is no longer required to parse the output.
+**`--include-chunks` was removed by #410, not inverted.** #396 classified this command as a whole-row surface *because* it bypassed `PackBuilder`; on a pack surface the `<parent>#chunk-N` row is the retrievable unit and its excerpt is what the token budget prices, so suppressing chunks here would make the preview diverge from the agent-facing path in the opposite direction. `retrieve search` keeps the flag and its default.
+
+**The semantic axis is reported, not assumed.** `build_strategies` adds it only when an embedder resolves, and drops it with an `info` log line the CLI's `WARNING` default never prints. The `axes` block says which of four things happened:
+
+| `axes.semantic` | Meaning |
+|---|---|
+| `ran` | The axis exists and ran |
+| `not_configured` | No `embeddings:` provider and no `TRELLIS_EMBEDDING_FN` — this pack is keyword + graph only |
+| `misconfigured` | An embedder resolved but the vector backend failed to initialise |
+| `failed` | The axis exists and raised during *this* build; see `PACK_ASSEMBLED.strategy_failures` |
+
+Text output prints a sentence for every state but `ran`.
 
 **Example:**
 
@@ -1283,18 +1294,51 @@ trellis retrieve pack --intent <text> [--domain DOMAIN] [--agent AGENT_ID] [--ma
 trellis retrieve pack --intent "deploy checklist for staging" --domain platform --max-items 10 --format json
 ```
 
-**JSON output:**
+**JSON output** (same shape as `POST /api/v1/packs`, plus `axes`, `budget` and `withholding`):
 
 ```json
 {
   "status": "ok",
+  "pack_id": "01M1JRS7FABTXV96WKFT76GR0R",
   "intent": "deploy checklist for staging",
   "domain": "platform",
   "agent_id": null,
+  "intent_family": "general_context",
   "count": 5,
-  "items": ["01JRK5N7QF", "01JRK6M3QF", "01JRK7A3QF", "01JRK8B2QF", "01JRK9C1QF"]
+  "items": [
+    {
+      "item_id": "01JRK5N7QF",
+      "item_type": "document",
+      "excerpt": "# Deployment Guide ...",
+      "relevance_score": 0.0164,
+      "rank": 1,
+      "strategy_source": "keyword",
+      "estimated_tokens": 100,
+      "score_breakdown": {"rrf_keyword": 0.0164, "rrf_total": 0.0164},
+      "metadata": {"recency_clock": "row"}
+    }
+  ],
+  "advisories": [],
+  "retrieval_report": {"strategies_used": ["keyword", "graph"], "candidates_found": 55, "items_selected": 5, "rejected_items": [], "budget_trace": []},
+  "budget": {"max_items": 10, "max_tokens": 8000},
+  "withholding": {"total": 5, "by_reason": {"max_items": 5}, "withheld_item_ids": ["01JRKA…"], "non_absence_reasons": [], "section_filtered": 0, "served_count": 5},
+  "axes": {"available": ["keyword", "graph"], "ran": ["keyword", "graph"], "failed": [], "semantic": "not_configured"}
 }
 ```
+
+`withholding` is the builder's stamped summary verbatim, so it carries `withheld_item_ids` as well as the counts — #404's counts-and-reasons-only rule scopes the *rendered note* an agent reads, not this payload, whose reader already holds the stores. `retrieval_report` is abbreviated above; it also carries `queries_run`, `duration_ms` and `schema_version`, and its `rejected_items` / `budget_trace` are populated on any pack that hit a budget.
+
+> **This is a CLI contract change.** Before #410 the payload was
+> `{"status", "intent", "domain", "agent_id", "count", "include_chunks", "items"}`
+> with `items` a flat list of **doc-id strings**. `items` is now a list of
+> **pack-item objects**; scripts reading ids want `[i["item_id"] for i in items]`,
+> or `--quiet` without `--format json`, which still prints one id per line.
+
+> **`--format json` is safe on its own** — the Rich mangling described under
+> `retrieve search` above is fixed ([#403](https://github.com/ronsse/trellis-ai/issues/403)),
+> so `--quiet` is no longer required to parse the output. The text renderer
+> disables Rich markup and emoji substitution for item lines too, so an
+> `item_id` like `dataset:snowflake://…` is printed rather than emojified.
 
 #### `PACK_ASSEMBLED` event payload
 
