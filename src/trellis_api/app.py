@@ -15,11 +15,12 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from trellis.auth import SCOPE_ADMIN, SCOPE_INGEST, SCOPE_MUTATE, SCOPE_READ
 from trellis.core.write_provenance import get_write_provenance
-from trellis.errors import ConfigError
+from trellis.errors import ConfigError, TrellisError
 from trellis.stores.registry import StoreRegistry
 from trellis_api.auth import require_scope, warn_if_unauthenticated
 from trellis_api.middleware import (
     request_id_middleware,
+    trellis_error_handler,
     unhandled_exception_handler,
 )
 from trellis_api.observability import install_observability
@@ -129,6 +130,16 @@ def create_app() -> FastAPI:
     # Translate uncaught exceptions into a structured 500 envelope so
     # responses don't leak internal types or stack frames.
     app.add_exception_handler(Exception, unhandled_exception_handler)
+
+    # In front of it for the typed hierarchy: those exceptions were
+    # written for an operator and the catch-all discarded every word of
+    # them, answering ``500 internal_error`` for a damaged config file
+    # that names its own recovery command (#459). Registered on the base
+    # class — Starlette resolves a handler by walking the exception's
+    # MRO, so one registration covers every subclass and a new one is
+    # covered the day it is added, rather than the day someone remembers
+    # a roster (#443).
+    app.add_exception_handler(TrellisError, trellis_error_handler)
 
     # OpenTelemetry + Prometheus — no-op when the ``observability``
     # extra isn't installed or ``TRELLIS_DISABLE_OBSERVABILITY`` is set.
