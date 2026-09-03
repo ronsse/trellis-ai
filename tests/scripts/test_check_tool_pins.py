@@ -488,6 +488,7 @@ def test_an_absent_tool_is_a_note_never_an_error(
     assert _errors(findings) == []
     assert len(_notes(findings)) == 1
     assert "mypy is not on PATH" in _notes(findings)[0]
+    assert [f.subject for f in findings] == ["mypy"]
 
 
 def test_a_tool_that_will_not_report_its_version_is_an_error(
@@ -534,3 +535,240 @@ def test_main_rejects_an_unknown_argument(
 ) -> None:
     assert pins.main(["--python-version", "3.12"]) == 2
     assert "unknown argument" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# Gate-review additions (#496 review)
+#
+# Each case below was written because a mutant of the shipped source survived
+# the suite above. A checker whose own tests cannot tell it apart from a
+# no-op is the defect it exists to catch, one level up.
+# ---------------------------------------------------------------------------
+
+
+def _naive_gate_workflows(workflows_dir: Path) -> set[Path]:
+    """An independent re-derivation of "which workflows run a gate".
+
+    Deliberately written from scratch rather than by calling the module: a
+    guard that measures its subject using its subject cannot notice the
+    subject shrinking (`docs/design/swarm-handoff.md`, the #457 row). This
+    one strips every YAML/step decoration off a line and asks whether what is
+    left *starts* a tool invocation.
+    """
+    found: set[Path] = set()
+    for path in sorted(workflows_dir.glob("*.yml")):
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if line.startswith("#"):
+                continue
+            line = re.sub(r"^-\s*", "", line)
+            line = re.sub(r"^(name|run):\s*", "", line)
+            if line.split()[0:1] and line.split()[0] in ("ruff", "mypy"):
+                found.add(path)
+    return found
+
+
+def test_gate_workflow_roster_matches_an_independent_scan(pins: ModuleType) -> None:
+    """Pins the roster against a different method, not against itself.
+
+    `workflows_running_gates` is the population the python-version
+    cross-check iterates, so anything it stops seeing is a gate workflow
+    that check silently stops covering. Its only guard was "non-empty",
+    which cannot detect three shrinking to one.
+    """
+    workflows = REPO_ROOT / ".github" / "workflows"
+    assert set(pins.workflows_running_gates(workflows)) == _naive_gate_workflows(
+        workflows
+    )
+
+
+@pytest.mark.parametrize(
+    ("spelling", "step"),
+    [
+        ("bare step", "      - run: mypy src/\n"),
+        ("named step", "      - name: Type check\n        run: mypy src/\n"),
+        ("run block", "      - run: |\n          mypy src/\n"),
+        ("named run block", "      - name: T\n        run: |\n          mypy src/\n"),
+    ],
+)
+def test_every_spelling_of_a_gate_step_is_seen(
+    pins: ModuleType, repo: Path, spelling: str, step: str
+) -> None:
+    """Respelling a step must not switch the python-version check off.
+
+    Requiring a leading dash meant converting `- run: mypy src/` into a
+    named step — an ordinary edit; lint.yml already uses named steps —
+    removed that workflow from the roster entirely, and moving it to 3.13
+    then went unreported.
+    """
+    workflow = repo / ".github" / "workflows" / "gate.yml"
+    workflow.write_text(
+        "name: Gate\njobs:\n  t:\n    steps:\n      - uses: actions/setup-python@v7\n"
+        '        with:\n          python-version: "3.13"\n' + step,
+        encoding="utf-8",
+    )
+    problems = pins.check(repo)
+    assert any("gate.yml" in p and "3.13" in p for p in problems), (spelling, problems)
+
+
+def test_a_commented_out_gate_command_is_not_a_gate_step(
+    pins: ModuleType, repo: Path
+) -> None:
+    """Broadening the scan must not start counting prose as a command."""
+    workflow = repo / ".github" / "workflows" / "prose.yml"
+    workflow.write_text(
+        "name: Prose\njobs:\n  t:\n    steps:\n"
+        "      - run: |\n"
+        "          # mypy src/\n"
+        "          echo hi\n",
+        encoding="utf-8",
+    )
+    assert pins.workflows_running_gates(workflow.parent).get(workflow) is None
+
+
+def test_lint_yml_inline_python_is_not_read_as_a_gate_command(
+    pins: ModuleType,
+) -> None:
+    """The false positive the narrow regex was originally chosen to avoid.
+
+    Selection is on the command's first token, so the `'ruff'` literal inside
+    lint.yml's `run: |` block cannot register — which is what makes reading
+    block bodies safe.
+    """
+    lint = REPO_ROOT / ".github" / "workflows" / "lint.yml"
+    commands = pins._run_commands(lint.read_text(encoding="utf-8"))
+    assert any(c.startswith("ruff check") for c in commands)
+    assert [c for c in commands if "'ruff'" in c], "fixture no longer has the literal"
+    selected = [c for c in commands if c.split()[0] in pins.TOOLS]
+    assert not [c for c in selected if "'ruff'" in c], selected
+
+
+def test_catches_a_tool_exactly_one_patch_behind_the_pin(
+    pins: ModuleType, gate_python: tuple[int, int], matching_env: dict[str, str]
+) -> None:
+    """The live case, at the live distance: 0.16.4 against 0.16.5.
+
+    The existing case injects `0.0.1`, which any comparison coarser than
+    exact equality still rejects — a mutant comparing only `major.minor`
+    survived the whole suite. This PR's entire argument is that a *patch*
+    difference matters (#378: the older ruff stays green on code the newer
+    one rejects), so the test has to be run at that distance.
+    """
+    major, minor, patch = (int(p) for p in matching_env["ruff"].split(".")[:3])
+    behind = f"{major}.{minor}.{patch - 1}"
+    errors = _errors(
+        pins.check_environment(
+            python_version=gate_python, installed={**matching_env, "ruff": behind}
+        )
+    )
+    assert len(errors) == 1
+    assert f"ruff {behind} is on PATH" in errors[0]
+
+
+def _shim(directory: Path, name: str, body: str) -> None:
+    script = directory / name
+    script.write_text(f"#!{sys.executable}\n{body}\n", encoding="utf-8")
+    script.chmod(0o755)
+
+
+def test_installed_tool_versions_actually_resolves_and_parses(
+    pins: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PATH resolution and version parsing, without touching the ambient PATH.
+
+    Replacing `shutil.which(tool)` with `None` made every tool read as
+    *absent*, so the whole tool arm reported "environment matches the CI
+    gates" while comparing nothing — and the suite stayed green, because the
+    only test of this function asserted the shape of its result and
+    explicitly permitted `None`. PATH is pointed at a private directory here,
+    so nothing depends on what the runner happens to have installed.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _shim(bin_dir, "ruff", 'print("ruff 9.9.9")')
+    _shim(bin_dir, "mypy", 'print("mypy 2.3.1 (compiled: yes)")')
+    monkeypatch.setenv("PATH", str(bin_dir))
+
+    resolved = pins.installed_tool_versions(("ruff", "mypy", "definitely-not-a-tool"))
+    assert resolved["ruff"] == "9.9.9"
+    assert resolved["mypy"] == "2.3.1", "mypy's '(compiled: yes)' suffix must parse"
+    assert resolved["definitely-not-a-tool"] is None
+
+
+def test_a_tool_on_path_that_prints_no_version_reads_as_unknown(
+    pins: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unknown, not absent — a broken shim must not buy an all-clear."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _shim(bin_dir, "ruff", "raise SystemExit(1)")
+    monkeypatch.setenv("PATH", str(bin_dir))
+    assert pins.installed_tool_versions(("ruff",)) == {"ruff": pins.UNKNOWN_VERSION}
+
+
+def test_gate_python_follows_requires_python_rather_than_a_constant(
+    pins: ModuleType, repo: Path
+) -> None:
+    """Kills the hardcoded-return mutant the derivation test could not see.
+
+    `test_gate_python_version_is_derived_not_written_down` compares the
+    function against `declared_python_targets`, which agree today at 3.11 —
+    so `return (3, 11)` passed it. Moving the floor is the only way to tell
+    a derivation from a constant.
+    """
+    pyproject = repo / "pyproject.toml"
+    pyproject.write_text(
+        pyproject.read_text()
+        .replace('requires-python = ">=3.11"', 'requires-python = ">=3.12"')
+        .replace('python_version = "3.11"', 'python_version = "3.12"')
+        .replace('target-version = "py311"', 'target-version = "py312"'),
+        encoding="utf-8",
+    )
+    assert pins.gate_python_version(pyproject) == (3, 12)
+    assert pins.declared_python_targets(pyproject) == {
+        "[project] requires-python": (3, 12),
+        "[tool.mypy] python_version": (3, 12),
+        "[tool.ruff] target-version": (3, 12),
+    }
+
+
+def test_the_all_clear_names_a_tool_it_could_not_compare(
+    pins: ModuleType, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`make env-check` certifies an environment, so silence about an absent
+    tool is a false certificate — the shape this whole script exists to
+    remove, committed by the script's own success line."""
+    findings = [
+        pins.EnvFinding("note", "mypy is not on PATH — nothing to diverge.", "mypy")
+    ]
+    assert pins._report_environment(findings, override=False) == 0
+    out = capsys.readouterr().out
+    assert "mypy" in out.splitlines()[-1]
+    assert "not compared" in out
+
+    assert pins._report_environment([], override=False) == 0
+    assert capsys.readouterr().out.strip().endswith("matches the CI gates")
+
+
+def test_a_gate_step_following_a_run_block_is_still_seen(
+    pins: ModuleType, repo: Path
+) -> None:
+    """Block scanning must end at the next sibling, not swallow it.
+
+    An off-by-one in the dedent test (`>=` for `>`) folds the step *after* a
+    `run: |` block into that block's body, where its leading `-` stops it
+    being recognised — so adding an unrelated script block above a gate step
+    would quietly drop the gate step from the roster.
+    """
+    workflow = repo / ".github" / "workflows" / "gate.yml"
+    workflow.write_text(
+        "name: Gate\njobs:\n  t:\n    steps:\n"
+        "      - uses: actions/setup-python@v7\n"
+        '        with:\n          python-version: "3.13"\n'
+        "      - run: |\n"
+        "          echo setting up\n"
+        "      - run: mypy src/\n",
+        encoding="utf-8",
+    )
+    assert pins.workflows_running_gates(workflow.parent)[workflow] == ["mypy src/"]
+    assert any("gate.yml" in p and "3.13" in p for p in pins.check(repo))

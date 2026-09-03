@@ -230,7 +230,9 @@ _ALLOWED_CONSTRUCTION_SITES = frozenset({"trellis/retrieve/builder_factory.py"})
 #: the rule vacuous while every guard below still divides by the scan's own
 #: output — the #464 shape, where two "independent" counters shared one file
 #: discovery and narrowing it took eight real sites to six with everything
-#: green. ``mypy --python-version 3.12 src/`` reports 332 source files;
+#: green. Bare ``mypy src/`` — the command CI runs, and the only one to use
+#: after #398 withdrew the ``--python-version 3.12`` workaround — reports 333
+#: source files;
 #: the floor is deliberately loose enough to survive ordinary churn and
 #: tight enough that dropping a package fails here.
 _MIN_SRC_MODULES = 300

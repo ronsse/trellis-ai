@@ -75,7 +75,10 @@ tool that is simply **not installed** is reported as a note and never fails
 — the invocation is already loud (``make lint`` on a non-activated shell
 dies with ``ruff: No such file or directory``, exit 127), and CI's lint job
 legitimately installs ruff alone. The line is: *silent divergence fails;
-loud divergence is left to the thing that is already loud.*
+loud divergence is left to the thing that is already loud.* The all-clear
+line names the absent tool rather than reading as an unqualified match,
+because ``make env-check`` is run on its own to certify an environment and
+"not compared" is not "compared and equal".
 
 ``TRELLIS_ALLOW_ENV_DRIFT=1`` downgrades the errors in (5)/(6) to warnings
 and exits 0. It exists so a knowingly-drifted environment does not brick
@@ -153,11 +156,20 @@ _REV_RE = re.compile(r"^\s*rev:\s*v?([0-9][0-9A-Za-z.\-]*)\s*(?:#.*)?$")
 #: A hardcoded pin anywhere in a workflow, e.g. ``ruff==0.15.22``.
 _HARDCODED_RE = re.compile(r"\b(ruff|mypy)==([0-9][0-9A-Za-z.\-]*)")
 
-#: A single-line workflow step, e.g. ``      - run: mypy src/``. Only this
-#: shape is treated as "runs a gate" — a ``run: |`` block body and a comment
-#: are both excluded, so lint.yml's inline Python (which contains the string
-#: ``'ruff'``) and its explanatory comments cannot produce a false positive.
-_RUN_STEP_RE = re.compile(r"^\s*-\s*run:\s*(?P<cmd>\S.*?)\s*$")
+#: A workflow ``run:`` line, in either spelling GitHub Actions accepts: the
+#: bare step ``      - run: mypy src/`` and the keyed form ``        run: mypy
+#: src/`` under a ``- name:``. **Both** are matched deliberately. The leading
+#: dash was originally required, which meant respelling a gate step as a named
+#: step silently removed its workflow from :func:`workflows_running_gates` —
+#: and with it the python-version cross-check on that file. lint.yml already
+#: uses named steps for other work, so that is an ordinary edit, not an exotic
+#: one, and a rule that a rename can switch off is the shape this repo keeps
+#: shipping.
+_RUN_STEP_RE = re.compile(r"^\s*(?:-\s*)?run:\s*(?P<cmd>\S.*?)\s*$")
+
+#: The opening line of a ``run: |`` (or ``run: >``) block, whose body is on
+#: the following, more-indented lines.
+_RUN_BLOCK_RE = re.compile(r"^(?P<indent>\s*)(?:-\s*)?run:\s*[|>][+-]?\s*$")
 
 #: A ``python-version:`` value. ``${{ matrix.python-version }}`` is an
 #: indirection, not a literal, and is skipped — the matrix list it points at
@@ -184,10 +196,13 @@ class EnvFinding:
 
     ``severity`` is ``"error"`` (a silent divergence from CI) or ``"note"``
     (a tool that is absent, which cannot diverge and announces itself).
+    ``subject`` names what the finding is about (a tool name, or ``"python"``)
+    so the report can summarise findings without parsing its own prose.
     """
 
     severity: str
     message: str
+    subject: str = ""
 
 
 def pyproject_pins(pyproject: Path) -> dict[str, str]:
@@ -374,23 +389,58 @@ def workflow_python_setups(workflows_dir: Path) -> dict[Path, set[tuple[int, int
 
 
 def workflows_running_gates(workflows_dir: Path) -> dict[Path, list[str]]:
-    """Workflow files with a single-line ``run:`` step invoking a tool.
+    """Workflow files with a ``run:`` step invoking a tool.
+
+    All three spellings a gate step can take are read — the bare ``- run:``
+    step, the keyed ``run:`` under a ``- name:``, and the body of a
+    ``run: |`` block — because this roster is what the python-version
+    cross-check iterates, so anything it fails to see is a workflow that
+    check silently stops covering.
 
     The tool names come from :data:`TOOLS` — verified against
     ``pyproject.toml`` by :func:`unrostered_exact_pins` — so this does not
-    introduce a second roster.
+    introduce a second roster. Selection is on the command's **first token**,
+    which is what keeps block bodies from producing false positives:
+    lint.yml's inline Python mentions ``'ruff'`` inside a ``print(...)`` call
+    and inside comments, and neither line begins with a tool name.
     """
     running: dict[Path, list[str]] = {}
     for path in _workflow_paths(workflows_dir):
         commands = [
-            match.group("cmd")
-            for line in path.read_text(encoding="utf-8").splitlines()
-            if (match := _RUN_STEP_RE.match(line))
-            and match.group("cmd").split()[0] in TOOLS
+            command
+            for command in _run_commands(path.read_text(encoding="utf-8"))
+            if command.split()[0] in TOOLS
         ]
         if commands:
             running[path] = commands
     return running
+
+
+def _run_commands(text: str) -> list[str]:
+    """Every shell command a workflow's ``run:`` steps issue.
+
+    Comment lines are *not* special-cased. They cannot reach the gate roster
+    anyway — selection in :func:`workflows_running_gates` is on the command's
+    first token, and a comment's first token is ``#`` — and a guard no test
+    can kill is the thing this script exists to argue against.
+    """
+    commands: list[str] = []
+    block_indent: int | None = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if block_indent is not None:
+            indent = len(line) - len(line.lstrip())
+            if not stripped:
+                continue
+            if indent > block_indent:
+                commands.append(stripped)
+                continue
+            block_indent = None
+        if block := _RUN_BLOCK_RE.match(line):
+            block_indent = len(block.group("indent"))
+        elif match := _RUN_STEP_RE.match(line):
+            commands.append(match.group("cmd"))
+    return commands
 
 
 def _workflow_paths(workflows_dir: Path) -> list[Path]:
@@ -553,6 +603,7 @@ def check_environment(
                 f"this is how 'mypy src/' came to abort having checked zero "
                 f"files while reading as clean. Rebuild the virtualenv on "
                 f"Python {gate[0]}.{gate[1]}.",
+                "python",
             )
         )
 
@@ -567,6 +618,7 @@ def check_environment(
                     f"{tool} is not on PATH — nothing to diverge. Invoking it "
                     f"fails loudly (exit 127); only a *silent* difference is "
                     f"this check's business.",
+                    tool,
                 )
             )
         elif version == UNKNOWN_VERSION:
@@ -575,6 +627,7 @@ def check_environment(
                     "error",
                     f"{tool} is on PATH but would not report a version, so "
                     f"whether it matches the {tool}=={pinned} pin is unknown.",
+                    tool,
                 )
             )
         elif version != pinned:
@@ -584,6 +637,7 @@ def check_environment(
                     f"{tool} {version} is on PATH, but pyproject.toml [dev] "
                     f"pins {tool}=={pinned}. The local gate is not the gate CI "
                     f"runs. Fix: pip install '{tool}=={pinned}'.",
+                    tool,
                 )
             )
 
@@ -596,7 +650,18 @@ def _report_environment(findings: list[EnvFinding], *, override: bool) -> int:
         print(f"  note: {note.message}")
     errors = [finding for finding in findings if finding.severity == "error"]
     if not errors:
-        print("environment matches the CI gates")
+        # Name what was NOT compared. An all-clear that reads identically
+        # whether both tools matched or neither was present is this repo's
+        # signature defect in miniature: `make env-check` is run precisely to
+        # certify "my environment is CI's", and absence certifies nothing.
+        unchecked = sorted(f.subject for f in findings if f.severity == "note")
+        if unchecked:
+            print(
+                f"environment matches the CI gates, except "
+                f"{', '.join(unchecked)}: not installed, so not compared"
+            )
+        else:
+            print("environment matches the CI gates")
         return 0
     label = "environment drift (ignored)" if override else "environment drift"
     print(f"{label} ({len(errors)} problem(s)):", file=sys.stderr)
