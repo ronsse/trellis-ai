@@ -772,3 +772,100 @@ def test_a_gate_step_following_a_run_block_is_still_seen(
     )
     assert pins.workflows_running_gates(workflow.parent)[workflow] == ["mypy src/"]
     assert any("gate.yml" in p and "3.13" in p for p in pins.check(repo))
+
+
+# ---------------------------------------------------------------------------
+# The escape hatch (#498)
+#
+# `TRELLIS_ALLOW_ENV_DRIFT` was read as `bool(os.environ.get(...))`, so every
+# non-empty value turned the override ON — `=0` included. The test that
+# matters is therefore the *falsey* one: a case asserting only that `=1`
+# overrides is satisfied by the buggy source, and the suite above contained
+# exactly that case and nothing else.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["0", "false", "FALSE", "False", "no", "off", "", "   ", "maybe", "2"],
+)
+def test_a_non_truthy_override_value_leaves_the_gate_enforcing(
+    pins: ModuleType, value: str
+) -> None:
+    """`=0` must mean off.
+
+    This is the whole of #498. An operator who writes
+    `TRELLIS_ALLOW_ENV_DRIFT=0` is trying to *tighten* the gate; under
+    `bool(os.environ.get(...))` they turned it off, and the only evidence
+    was a line in a report that a passing exit code invites you to skip.
+
+    `2` and `maybe` are in here because the rule is an allow-list, not a
+    deny-list of the four falsey spellings: an unanticipated value has to
+    land on the enforcing side.
+    """
+    assert pins.env_drift_override({pins.ENV_DRIFT_OVERRIDE: value}) is False
+
+
+@pytest.mark.parametrize("value", ["1", "true", "TRUE", "True", " yes ", "on", "ON"])
+def test_a_truthy_override_value_still_opts_out(pins: ModuleType, value: str) -> None:
+    """The hatch has to keep working, in the repo's spellings and casings."""
+    assert pins.env_drift_override({pins.ENV_DRIFT_OVERRIDE: value}) is True
+
+
+def test_an_unset_override_is_not_an_override(pins: ModuleType) -> None:
+    assert pins.env_drift_override({}) is False
+
+
+def test_the_truthy_set_mirrors_the_convention_the_package_uses(
+    pins: ModuleType,
+) -> None:
+    """The script is stdlib-only, so this set is a copy — verified, not declared.
+
+    Every boolean environment knob in `src/` parses through
+    `trellis.core.write_config.TRUTHY`. This script cannot import it (it runs
+    in CI's lint job, which installs ruff and nothing else), so it restates
+    it — and a restated invariant in this repo is checked rather than
+    commented, which is the reason `check_tool_pins.py` exists at all.
+    """
+    from trellis.core.write_config import TRUTHY
+
+    assert set(pins.ENV_DRIFT_TRUTHY) == set(TRUTHY)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected_exit"),
+    [("1", 0), ("on", 0), ("0", 1), ("false", 1), ("", 1)],
+)
+def test_main_reads_the_override_through_the_parser(
+    pins: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    value: str,
+    expected_exit: int,
+) -> None:
+    """End-to-end: the exit code, not just the helper.
+
+    `env_drift_override` being correct buys nothing if `main` still calls
+    `bool(os.environ.get(...))` itself, so this drives the real entry point
+    with a forced drift and asserts the exit code the operator's shell sees.
+    """
+    monkeypatch.setattr(
+        pins, "check_environment", lambda: [pins.EnvFinding("error", "boom", "python")]
+    )
+    monkeypatch.setenv(pins.ENV_DRIFT_OVERRIDE, value)
+    assert pins.main(["--check-env"]) == expected_exit
+    assert "boom" in capsys.readouterr().err
+
+
+def test_the_override_notice_names_a_way_to_switch_it_off(
+    pins: ModuleType, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`Unset it` was the only advice offered, and `=0` did not work.
+
+    Now that it does, the line an operator reads while the gate is ignored
+    has to say so — otherwise the fix exists only in a docstring.
+    """
+    drift = [pins.EnvFinding("error", "boom")]
+    assert pins._report_environment(drift, override=True) == 0
+    err = capsys.readouterr().err
+    assert "set it to 0" in err
