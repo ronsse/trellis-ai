@@ -7,6 +7,9 @@ import importlib.util
 
 import trellis_wire.dtos as wire_dtos
 from trellis.retrieve import withholding as core_withholding
+from trellis_sdk import _format as sdk_format
+from trellis_sdk import async_client as async_sdk
+from trellis_sdk import client as sync_sdk
 from trellis_wire.dtos import PackResponse, SectionedPackResponse
 
 
@@ -24,6 +27,28 @@ def test_wire_package_owns_the_canonical_withholding_renderer() -> None:
     )
     assert core_withholding.WithholdingSummary is wire_withholding.WithholdingSummary
     assert core_withholding.WithheldGroup is wire_withholding.WithheldGroup
+
+
+def test_sdk_pack_surfaces_bind_the_canonical_withholding_renderer() -> None:
+    wire_withholding = importlib.import_module("trellis_wire.withholding")
+
+    assert (
+        sdk_format.format_withholding_note is wire_withholding.format_withholding_note
+    )
+    assert (
+        sync_sdk.withholding_from_payload is wire_withholding.withholding_from_payload
+    )
+    assert (
+        async_sdk.withholding_from_payload is wire_withholding.withholding_from_payload
+    )
+    assert (
+        sync_sdk.format_sectioned_pack_as_markdown
+        is sdk_format.format_sectioned_pack_as_markdown
+    )
+    assert (
+        async_sdk.format_sectioned_pack_as_markdown
+        is sdk_format.format_sectioned_pack_as_markdown
+    )
 
 
 def test_both_pack_response_dtos_declare_optional_withholding() -> None:
