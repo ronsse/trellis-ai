@@ -63,7 +63,7 @@ from trellis.stores.base.event_log import DEFAULT_SCAN_LIMIT
 from trellis.stores.base.parameter import ParameterStore
 from trellis_cli._meta_wiring import wrap_cli_meta_analysis
 from trellis_cli.config import get_config_dir
-from trellis_cli.exit_codes import EXIT_INTERNAL
+from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_STORE
 from trellis_cli.output import emit_json
 from trellis_cli.stores import (
     _get_registry,
@@ -1214,10 +1214,18 @@ def _exit_on_refused_advisory_write(
     ran (#438). There is no ``LoadDegradation`` to render in that
     case, so this reads the exception rather than the store.
 
-    Exit code 2, matching :func:`_exit_if_advisory_store_degraded` rather
-    than the ``EXIT_STORE`` the policy surface uses: the two advisory
+    :data:`~trellis_cli.exit_codes.EXIT_STORE`, which is at once what
+    :func:`_exit_if_advisory_store_degraded` uses — the two advisory
     refusals must agree with each other, since a cron wrapper branches on
-    the code without knowing which of them it hit.
+    the code without knowing which of them it hit — and what
+    :func:`~trellis_cli.exit_codes.exit_code_for` already maps a
+    ``StoreWriteRefusedError`` to. It used to write ``2`` out, which
+    *overrode* that canonical map, so one condition had two codes: ``2``
+    here and ``5`` from ``trellis policy list`` meeting the sibling file
+    damaged the same way (#489). ``2`` is the value the two rules actually
+    conflict at — it means "fix your input, retry", and a wrapper that
+    retries with corrected arguments against a file no argument can fix
+    loops forever.
     """
     if output_format == "json":
         emit_json(
@@ -1240,16 +1248,25 @@ def _exit_on_refused_advisory_write(
             "its rows are intact. Re-run to pick them up.",
             soft_wrap=True,
         )
-    raise typer.Exit(code=2)
+    raise typer.Exit(code=EXIT_STORE)
 
 
 def _exit_if_advisory_store_degraded(store: AdvisoryStore, output_format: str) -> None:
     """Stop a command that cannot act on a store which loaded degraded.
 
-    Exit code 2 rather than 0-with-a-warning: the caller asked for work
-    that did not happen, and a cron wrapper that only checks the status
-    code has to be able to see that. Both ``analyze`` advisory commands
-    use it, so the two agree.
+    Non-zero rather than 0-with-a-warning: the caller asked for work that
+    did not happen, and a cron wrapper that only checks the status code has
+    to be able to see that.
+
+    The code is :data:`~trellis_cli.exit_codes.EXIT_STORE` — the
+    deployment's state is wrong and a human has to change it — and it is
+    what ``trellis policy list`` already exits when the *sibling*
+    ``DegradableJsonStore`` file loads degraded the same way. One root
+    cause, one code (#489). Both ``analyze`` advisory commands use this,
+    ``generate-advisories`` reaches the same value inline off
+    ``report.store_degradation`` (its generator returns early rather than
+    raising, so there is no exception to catch), and
+    ``trellis worker curate`` exits it off ``CurateCycleResult.status``.
     """
     degradation = store.degradation
     if degradation is None:
@@ -1259,7 +1276,7 @@ def _exit_if_advisory_store_degraded(store: AdvisoryStore, output_format: str) -
         emit_json({"status": "degraded", "store_degradation": degraded})
     else:
         _render_advisory_degradation(degraded)
-    raise typer.Exit(code=2)
+    raise typer.Exit(code=EXIT_STORE)
 
 
 @analyze_app.command("generate-advisories")
@@ -1319,12 +1336,17 @@ def generate_advisories(
 
     if output_format == "json":
         print(json.dumps(report.model_dump(), indent=2, default=str))
-        # Same rule as ``advisory-effectiveness``: the caller asked for
-        # advisories and got none, so a wrapper reading only the status code
-        # has to see it. The report is emitted first, so the payload stays
-        # parseable either way (#393).
+        # Same rule *and the same code* as ``advisory-effectiveness``: the
+        # caller asked for advisories and got none, so a wrapper reading
+        # only the status code has to see it. The report is emitted first,
+        # so the payload stays parseable either way (#393). These two arms
+        # do not route through ``_exit_if_advisory_store_degraded`` —
+        # ``generate`` returns a report rather than raising, and the
+        # degradation is rendered inside each arm's own layout — so they
+        # were the two sites a helper-only fix would have left on ``2``
+        # (#489).
         if report.store_degradation:
-            raise typer.Exit(code=2)
+            raise typer.Exit(code=EXIT_STORE)
     else:
         console.print(f"[bold]Advisory Generation Report[/bold] (last {days} days)")
         # Before the counts, not after: every number below is zero because
@@ -1382,8 +1404,10 @@ def generate_advisories(
                 " tool to enable advisory generation.[/dim]"
             )
 
+        # The text arm's half of the pair above — same condition, same
+        # code, below the rendering rather than inside it.
         if report.store_degradation:
-            raise typer.Exit(code=2)
+            raise typer.Exit(code=EXIT_STORE)
 
 
 @analyze_app.command("advisory-effectiveness")

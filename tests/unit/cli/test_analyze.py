@@ -20,6 +20,7 @@ from trellis.stores.advisory_store import AdvisoryStore
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 from trellis_cli import analyze
+from trellis_cli.exit_codes import EXIT_STORE
 from trellis_cli.main import app
 from trellis_cli.stores import _reset_registry
 
@@ -479,7 +480,7 @@ class TestAdvisoryCommandsOnADegradedStore:
 
         result = runner.invoke(app, ["analyze", "generate-advisories"])
 
-        assert result.exit_code == 2, result.output
+        assert result.exit_code == EXIT_STORE, result.output
         assert "ADVISORY STORE DEGRADED" in result.stdout
         assert path.read_text(encoding="utf-8") == before
 
@@ -507,13 +508,13 @@ class TestAdvisoryCommandsOnADegradedStore:
             app, ["analyze", "generate-advisories", "--format", "json"]
         )
 
-        assert result.exit_code == 2, result.output
+        assert result.exit_code == EXIT_STORE, result.output
         data = json.loads(result.stdout.strip())
         assert data["store_degradation"]["reason"] == "malformed_json"
         assert data["store_degradation"]["recovery"] == f"mv {path} {path}.corrupt"
         assert data["advisories_stored"] == 0
 
-    def test_effectiveness_exits_two_rather_than_traceback(
+    def test_effectiveness_exits_store_rather_than_traceback(
         self, tmp_path: Path
     ) -> None:
         """A cron wrapper that only reads the status code has to see this."""
@@ -521,7 +522,7 @@ class TestAdvisoryCommandsOnADegradedStore:
 
         result = runner.invoke(app, ["analyze", "advisory-effectiveness"])
 
-        assert result.exit_code == 2, result.output
+        assert result.exit_code == EXIT_STORE, result.output
         assert "ADVISORY STORE DEGRADED" in result.stdout
         assert path.read_text(encoding="utf-8") == '{"advisories": [ torn'
 
@@ -532,7 +533,7 @@ class TestAdvisoryCommandsOnADegradedStore:
             app, ["analyze", "advisory-effectiveness", "--format", "json"]
         )
 
-        assert result.exit_code == 2
+        assert result.exit_code == EXIT_STORE
         assert json.loads(result.stdout.strip())["status"] == "degraded"
 
     def test_effectiveness_dry_run_stops_too(self, tmp_path: Path) -> None:
@@ -550,7 +551,7 @@ class TestAdvisoryCommandsOnADegradedStore:
         degraded = runner.invoke(
             app, ["analyze", "advisory-effectiveness", "--dry-run"]
         )
-        assert degraded.exit_code == 2, degraded.output
+        assert degraded.exit_code == EXIT_STORE, degraded.output
         assert "ADVISORY STORE DEGRADED" in degraded.stdout
 
     def test_a_bracketed_path_still_yields_a_runnable_command(
@@ -1407,7 +1408,7 @@ class TestAdvisoryCommandsOnAStaleStore:
         monkeypatch.setattr(analyze, "AdvisoryStore", _racing_store)
         return theirs.advisory_id  # type: ignore[attr-defined,no-any-return]
 
-    def test_effectiveness_exits_two_rather_than_traceback(
+    def test_effectiveness_exits_store_rather_than_traceback(
         self,
         tmp_path: Path,
         temp_stores: StoreRegistry,
@@ -1420,7 +1421,7 @@ class TestAdvisoryCommandsOnAStaleStore:
 
         result = runner.invoke(app, ["analyze", "advisory-effectiveness"])
 
-        assert result.exit_code == 2, result.output
+        assert result.exit_code == EXIT_STORE, result.output
         assert "ADVISORY WRITE REFUSED" in result.stdout
         # The refusal names the retry, not just the fact of refusing.
         flat = result.stdout.replace("\n", "")
@@ -1443,7 +1444,7 @@ class TestAdvisoryCommandsOnAStaleStore:
             app, ["analyze", "advisory-effectiveness", "--format", "json"]
         )
 
-        assert result.exit_code == 2, result.output
+        assert result.exit_code == EXIT_STORE, result.output
         payload = json.loads(result.stdout.strip())
         assert payload["status"] == "refused"
         assert payload["code"] == "STALE_STORE_WRITE"
@@ -1471,7 +1472,7 @@ class TestAdvisoryCommandsOnAStaleStore:
         advisories, and a seed engineered to clear the effect-size and
         sample floors would pin the generator's statistics rather than this
         command's handling of a refusal from below. The claim under test is
-        the surface's — a refusal arrives rendered, at exit 2, in both
+        the surface's — a refusal arrives rendered, at ``EXIT_STORE``, in both
         formats — and the store's own guard is pinned in
         ``tests/unit/stores/test_advisory_store.py``.
         """
@@ -1492,13 +1493,13 @@ class TestAdvisoryCommandsOnAStaleStore:
         monkeypatch.setattr(analyze, "AdvisoryGenerator", _RefusingGenerator)
 
         text = runner.invoke(app, ["analyze", "generate-advisories"])
-        assert text.exit_code == 2, text.output
+        assert text.exit_code == EXIT_STORE, text.output
         assert "ADVISORY WRITE REFUSED" in text.stdout
 
         json_run = runner.invoke(
             app, ["analyze", "generate-advisories", "--format", "json"]
         )
-        assert json_run.exit_code == 2, json_run.output
+        assert json_run.exit_code == EXIT_STORE, json_run.output
         payload = json.loads(json_run.stdout.strip())
         assert payload["status"] == "refused"
         assert payload["code"] == "STALE_STORE_WRITE"

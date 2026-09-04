@@ -103,6 +103,28 @@ All notable changes to Trellis will be documented in this file.
 
 ### Changed
 
+- **BREAKING: a damaged `advisories.json` now exits `5`, not `2`.** Affects
+  `trellis analyze generate-advisories`, `trellis analyze
+  advisory-effectiveness` and `trellis worker curate`, on both `--format`
+  arms, for both refusals the advisory store raises — the file loaded
+  degraded, and another process wrote it between this command's load and its
+  save. One unusable config file under `stores_dir` was producing two
+  different exit codes depending on which file it was: these three exited `2`
+  while `trellis policy list` exited `5` meeting the sibling `policies.json`
+  damaged the same way (#489). `2` is the one value at which the two rules in
+  play conflict — it means "the input failed a check, fix it and retry", and a
+  wrapper that retries with corrected arguments against a file no argument can
+  fix loops forever, which is the argument `docs/design/adr-cli-exit-codes.md`
+  already made canonical when `ConfigError` was mapped to `EXIT_STORE` (#459).
+  `EXIT_STORE` satisfies both rules: the advisory surfaces still agree with
+  each other, and one root cause now has one code. Note that
+  `StoreWriteRefusedError` is a `StoreError`, so `exit_code_for` answered `5`
+  all along — these call sites were *overriding* the canonical map, and the
+  fix removes the override rather than picking a new number. **If your wrapper
+  branches on `2` for these commands, change it to `5`**; one that only tests
+  for non-zero (`set -e`, `if ! trellis …`) needs no change. A genuine bad
+  argument — `trellis analyze replay --body-items 0` — still exits `2`.
+
 - **BREAKING: `StatsResponse.documents` changed meaning in place** — it was
   the physical document *row* count and is now the *whole-document* count,
   with the old number moved to a new `document_rows` field. Affects

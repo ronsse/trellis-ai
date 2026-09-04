@@ -84,7 +84,7 @@ from trellis_cli.analyze import (
     _render_advisory_degradation,
 )
 from trellis_cli.config import get_config_dir, get_data_dir
-from trellis_cli.exit_codes import EXIT_INTERNAL
+from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_STORE
 from trellis_cli.output import emit_json
 from trellis_cli.stores import (
     _get_registry,
@@ -434,17 +434,17 @@ class CurateCycleResult:
         against a file the store could not read (#393).
 
         The **exit code follows this field**: anything but ``"ok"`` exits
-        :data:`_EXIT_ADVISORY_REFUSED` (#448), on both format surfaces.
-        That reverses an earlier decision here — that a cycle which still
-        ran its noise-tag and learning stages "did real work", so failing
+        :data:`~trellis_cli.exit_codes.EXIT_STORE` (#448, #489), on both format
+        surfaces. That reverses an earlier decision here — that a cycle which
+        still ran its noise-tag and learning stages "did real work", so failing
         the cron job would misreport those. The stages that ran are in the
-        payload either way; what the zero exit reported was that nothing
-        needed looking at, and on the one *unattended* advisory writer that
-        is the only signal a shell ever sees. The refusal is also carried in
-        ``advisory_store_degraded`` / ``advisory_store_stale``, in a red
-        banner on the text surface, in an ``error``-level log line, and —
-        since #448 — in a ``WRITE_REJECTED`` event that ``trellis analyze
-        health`` counts, which is the half that makes recurrence legible.
+        payload either way; what the zero exit reported was that nothing needed
+        looking at, and on the one *unattended* advisory writer that is the
+        only signal a shell ever sees. The refusal is also carried in
+        ``advisory_store_degraded`` / ``advisory_store_stale``, in a red banner
+        on the text surface, in an ``error``-level log line, and — since #448 —
+        in a ``WRITE_REJECTED`` event that ``trellis analyze health`` counts,
+        which is the half that makes recurrence legible.
 
         ``"stale"`` is the third value and reports the other refusal
         (#438): the file was healthy, another process wrote it mid-cycle,
@@ -651,7 +651,8 @@ def _record_refused_advisory_write(
 
     The nightly cron is the only *unattended* advisory writer, and it is
     the one that swallowed the refusal: ``trellis analyze``'s two advisory
-    commands exit 2 and ``POST /advisories/generate`` answers 409, but this
+    commands exit ``EXIT_STORE`` (``2`` until #489) and ``POST
+    /advisories/generate`` answers 409, but this
     stage reported the refusal into a ``status`` field and a structlog line
     and returned. A refusal that recurs every night therefore escalated
     nowhere at all — verified rather than assumed: the reference
@@ -1050,23 +1051,6 @@ def _run_curate_loop(
     return result
 
 
-#: Exit code for a curation cycle whose advisory writes did not all land.
-#:
-#: The same ``2`` ``trellis analyze``'s two advisory surfaces already use
-#: (``analyze._exit_on_refused_advisory_write`` /
-#: ``analyze._exit_if_advisory_store_degraded``) rather than the
-#: ``EXIT_STORE`` the policy surface uses or the ``EXIT_INTERNAL`` the two
-#: other non-zero exits in this module use. The rule those helpers state is
-#: that the advisory refusals must agree *with each other*, because a cron
-#: wrapper branches on the code without knowing which of them it hit; a
-#: third surface picking a third value is the failure that rule names.
-#: The value is written out rather than taken from
-#: :mod:`trellis_cli.exit_codes`, for the same reason those two helpers
-#: write it out: the refusal is not a validation failure, so importing it
-#: as ``EXIT_VALIDATION`` would misname it at every call site.
-_EXIT_ADVISORY_REFUSED = 2
-
-
 def _exit_if_advisory_write_refused(result: CurateCycleResult | None) -> None:
     """Exit non-zero when a cycle's ``status`` is anything but ``ok`` (#448).
 
@@ -1078,6 +1062,23 @@ def _exit_if_advisory_write_refused(result: CurateCycleResult | None) -> None:
 
     Called *below* the ``--format`` branch on both paths, never inside an
     arm of it (``tests/unit/test_format_exit_parity_rule.py``).
+
+    The code is :data:`~trellis_cli.exit_codes.EXIT_STORE`, taken from the
+    canonical map rather than written out. It was a module-private ``2``
+    (#448), on the rule that the advisory refusals must agree *with each
+    other* because a cron wrapper branches on the code without knowing
+    which of them it hit. That rule is kept and the value moved: ``2`` is
+    the one value at which it collides with the map
+    :func:`~trellis_cli.exit_codes.exit_code_for` makes canonical, under
+    which the same damaged-file condition exits ``5`` from ``trellis policy
+    list``. Both rules hold at ``EXIT_STORE`` — the advisory surfaces still
+    agree with each other, and one root cause now has one code (#489). The
+    module's other non-zero exits stay ``EXIT_INTERNAL``; they report a
+    different thing. (Not "the other two": there are eight such sites
+    across four functions — ``_build_auto_promote_policy_or_exit``,
+    ``_require_llm_client_or_exit``, ``capture_sessions_cmd`` and
+    ``embed_traces_cmd`` — and the count #448 wrote out had already gone
+    stale, so this states the rule rather than a number that rots.)
 
     This overturns the previous decision, recorded on
     :attr:`CurateCycleResult.status`, that the exit stays 0 because the
@@ -1091,7 +1092,7 @@ def _exit_if_advisory_write_refused(result: CurateCycleResult | None) -> None:
     """
     if result is None or result.status == "ok":
         return
-    raise typer.Exit(code=_EXIT_ADVISORY_REFUSED)
+    raise typer.Exit(code=EXIT_STORE)
 
 
 @worker_app.command("curate")
