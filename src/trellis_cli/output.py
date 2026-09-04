@@ -6,6 +6,8 @@ import json
 import sys
 from typing import TYPE_CHECKING, Any
 
+from rich.console import Console
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
@@ -153,3 +155,32 @@ def emit_json(
     :func:`emit_machine_text` for what that path does to a payload.
     """
     emit_machine_text(json.dumps(payload, indent=indent, default=default))
+
+
+def build_console(**overrides: Any) -> Console:
+    """The one door every ``trellis_cli`` Rich console is built through.
+
+    ``emoji=False`` is the whole reason this exists (#492). Rich rewrites
+    ``:snowflake:`` inside a real ``dataset:snowflake://…`` item id to the
+    glyph, and the operator's next ``get_items`` fails on an id that never
+    existed. Unlike the markup half of that defect, no value-side fix is
+    available: the characters have to survive *verbatim* — the id is there
+    to be copied — so nothing may be inserted into them to defang a
+    shortcode. Turning the renderer's emoji pass off is the only move, and
+    doing it at construction covers every render path a console has,
+    ``Table`` cells and ``Panel`` bodies included, which a per-``print``
+    ``emoji=False`` does not.
+
+    It is a factory rather than twenty-one repetitions of the keyword for
+    one reason beyond tidiness: ``tests.cli_output.force_colour`` swaps a
+    module's console for a colour-forcing one, and a helper that rebuilt a
+    *default* ``Console`` would have quietly handed the coloured test path
+    an emoji-substituting renderer that production does not have. One
+    factory means the test console and the shipped console cannot drift.
+    ``tests/unit/test_rich_id_markup_rule.py`` enforces that nothing in
+    ``src/`` builds a ``rich.console.Console`` any other way.
+
+    *overrides* are passed to :class:`rich.console.Console` unchanged, for
+    the stderr consoles and for ``force_terminal``.
+    """
+    return Console(emoji=False, **overrides)

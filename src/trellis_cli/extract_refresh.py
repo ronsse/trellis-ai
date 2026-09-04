@@ -31,7 +31,7 @@ from typing import Any
 
 import structlog
 import typer
-from rich.console import Console
+from rich.markup import escape
 
 from trellis.core.base import utc_now
 from trellis.core.error_sanitize import sanitized_error_payload
@@ -49,12 +49,13 @@ from trellis.schemas.extraction import ExtractionResult
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 from trellis_cli.exit_codes import EXIT_INTERNAL
+from trellis_cli.output import build_console
 from trellis_cli.stores import _get_registry
 
 _logger = structlog.get_logger(__name__)
 
 extract_app = typer.Typer(no_args_is_help=True)
-console = Console()
+console = build_console()
 
 
 # Registry of built-in extractor types. Plugin-loaded extractors are
@@ -402,18 +403,22 @@ def refresh(  # noqa: PLR0912, PLR0915 - CLI dispatch with explicit branching by
     if source is not None:
         sources_path = Path(sources_file)
         if not sources_path.exists():
-            console.print(f"[red]sources.yaml not found: {sources_path}[/red]")
+            console.print(
+                f"[red]sources.yaml not found: {escape(str(sources_path))}[/red]"
+            )
             raise typer.Exit(code=EXIT_INTERNAL)
         config = load_sources(sources_path)
         entry = config.find(source)
         if entry is None:
             console.print(
-                f"[red]Source {source!r} not declared in {sources_path}[/red]"
+                f"[red]Source {source!r} not declared in "
+                f"{escape(str(sources_path))}[/red]"
             )
             raise typer.Exit(code=EXIT_INTERNAL)
         if not entry.enabled:
             console.print(
-                f"[yellow]Source {source!r} is disabled in {sources_path} — "
+                f"[yellow]Source {source!r} is disabled in "
+                f"{escape(str(sources_path))} — "
                 f"refusing to refresh. Remove enabled: false to proceed.[/yellow]"
             )
             raise typer.Exit(code=EXIT_INTERNAL)
@@ -432,7 +437,14 @@ def refresh(  # noqa: PLR0912, PLR0915 - CLI dispatch with explicit branching by
         # --type path
         type_path = Path(path)  # type: ignore[arg-type]
         if not type_path.exists():
-            console.print(f"[red]Path not found: {type_path}[/red]")
+            # ``str()`` because ``type_path`` is a ``Path`` and
+            # ``rich.markup.escape`` raises ``TypeError`` on one. mypy does
+            # not catch it here: ``source: str`` can never be ``None``, so
+            # mypy proves ``if source is not None`` always true and skips
+            # this whole ``else`` as unreachable — a blind spot the typer
+            # ``Option(None)``-on-a-non-Optional pattern creates wherever it
+            # is used. ``test_extract_refresh`` covers the branch instead.
+            console.print(f"[red]Path not found: {escape(str(type_path))}[/red]")
             raise typer.Exit(code=EXIT_INTERNAL)
         try:
             extractor = _resolve_extractor(extractor_type)  # type: ignore[arg-type]
@@ -472,7 +484,7 @@ def refresh(  # noqa: PLR0912, PLR0915 - CLI dispatch with explicit branching by
         console.print()
         console.print("  Per-entity diffs:")
         for d in summary["diffs"]:
-            console.print(f"    - {d['entity_id']} ({d['entity_type']})")
+            console.print(f"    - {escape(d['entity_id'])} ({d['entity_type']})")
             diff = d["diff"]
             if diff.get("new_entity"):
                 console.print("      [cyan]new entity[/cyan]")
@@ -585,7 +597,7 @@ def traces(
     for row in per_trace:
         if row["entities"] or row["edges"]:
             console.print(
-                f"    - {row['trace_id']} ({row['domain'] or '-'}): "
+                f"    - {escape(row['trace_id'])} ({row['domain'] or '-'}): "
                 f"{row['entities']} entities, {row['edges']} edges"
             )
 

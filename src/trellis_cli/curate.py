@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Any
 
 import typer
-from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
 
@@ -19,11 +18,11 @@ from trellis.mutate import (
     build_curate_executor,
 )
 from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_STORE, EXIT_VALIDATION
-from trellis_cli.output import emit_json
+from trellis_cli.output import build_console, emit_json
 from trellis_cli.stores import _get_registry
 
 curate_app = typer.Typer(no_args_is_help=True)
-console = Console()
+console = build_console()
 
 
 def _execute_command(cmd: Command, output_format: str) -> None:
@@ -47,7 +46,7 @@ def _execute_command(cmd: Command, output_format: str) -> None:
             console.print(
                 f"[red]\u2717 Command {result.status}[/red]: {result.operation}"
             )
-        console.print(f"  ID: {result.command_id}")
+        console.print(f"  ID: {escape(result.command_id)}")
         console.print(f"  Message: {result.message}")
 
 
@@ -114,8 +113,20 @@ def link(
             }
         )
     else:
-        console.print(f"[green]\u2713 Link created[/green]: {result.created_id}")
-        console.print(f"  {source_id} --[{edge_kind}]--> {target_id}")
+        console.print(
+            f"[green]\u2713 Link created[/green]: {escape(str(result.created_id))}"
+        )
+        # ``markup=False`` rather than two escapes: the arrow's own
+        # ``--[edge_kind]-->`` brackets are the #492 defect in *literal*
+        # text, so Rich ate the edge kind on this line exactly as it ate
+        # ``[document]`` from ``retrieve pack``'s item line. Escaping only
+        # the two ids would have left the middle of the line still wrong,
+        # and nothing here is styled, so there is nothing to lose.
+        console.print(
+            f"  {source_id} --[{edge_kind}]--> {target_id}",
+            markup=False,
+            highlight=False,
+        )
 
 
 @curate_app.command()
@@ -452,7 +463,9 @@ def entity(
             }
         )
     else:
-        console.print(f"[green]\u2713 Entity created[/green]: {result.created_id}")
+        console.print(
+            f"[green]\u2713 Entity created[/green]: {escape(str(result.created_id))}"
+        )
         console.print(f"  Type: {entity_type}")
         console.print(f"  Name: {name}")
         if properties:
@@ -567,7 +580,7 @@ def promote_learning(
             f"{len(ready)} ready to promote"
         )
         for entry in plan["results"]:
-            console.print(f"  - {entry['candidate_id']}: {entry['status']}")
+            console.print(f"  - {escape(entry['candidate_id'])}: {entry['status']}")
         return
 
     if not ready:
@@ -648,9 +661,16 @@ def promote_learning(
         )
         status_style = "green" if entry.get("status") == "promoted" else "red"
         table.add_row(
-            entry["candidate_id"],
+            escape(entry["candidate_id"]),
             f"[{status_style}]{entry['status']}[/{status_style}]",
-            entry.get("node_id", "-"),
+            # ``or`` rather than a ``.get`` default: ``CommandResult.
+            # created_id`` is ``str | None`` and a failed submission writes
+            # the key with ``None``, so the default never fires and
+            # ``escape(None)`` is a ``TypeError``. Rich took ``None`` as an
+            # empty cell before the escape went in, so this is a crash the
+            # sweep itself would have introduced — and mypy is blind to it
+            # because ``entry`` is a ``dict[str, Any]``.
+            escape(entry.get("node_id") or "-"),
             edge_summary,
         )
     console.print(table)

@@ -7,7 +7,7 @@ import sys
 from typing import Any
 
 import typer
-from rich.console import Console
+from rich.markup import escape
 
 from trellis.retrieve.builder_factory import (
     SEMANTIC_AXIS_NOTES,
@@ -23,6 +23,7 @@ from trellis.retrieve.withholding import (
 from trellis.schemas.pack import PackBudget
 from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_VALIDATION
 from trellis_cli.output import (
+    build_console,
     emit_json,
     emit_machine_text,
     format_output,
@@ -38,7 +39,7 @@ from trellis_cli.stores import (
 )
 
 retrieve_app = typer.Typer(no_args_is_help=True)
-console = Console()
+console = build_console()
 
 _FMT_HELP = "Output format: text, json, jsonl, tsv"
 _FIELDS_HELP = "Comma-separated fields to include"
@@ -179,7 +180,7 @@ def pack(
             sys.stdout.write(item.item_id + "\n")
     else:
         console.print(f"[green]Pack assembled[/green] ({len(pack_result.items)} items)")
-        console.print(f"  pack_id: {pack_result.pack_id}")
+        console.print(f"  pack_id: {escape(pack_result.pack_id)}")
         console.print(f"  Intent: {intent}")
         if domain:
             console.print(f"  Domain: {domain}")
@@ -265,7 +266,7 @@ def search(
             if quiet:
                 sys.stdout.write(f"{r['doc_id']}: {preview}\n")
             else:
-                console.print(f"  - {r['doc_id']}: {preview}")
+                console.print(f"  - {escape(r['doc_id'])}: {preview}")
 
 
 @retrieve_app.command()
@@ -281,7 +282,7 @@ def trace(
         if output_format == "json":
             emit_json({"status": "not_found", "trace_id": trace_id})
         else:
-            console.print(f"[yellow]Trace not found[/yellow]: {trace_id}")
+            console.print(f"[yellow]Trace not found[/yellow]: {escape(trace_id)}")
         raise typer.Exit(code=EXIT_INTERNAL)
 
     if output_format == "json":
@@ -293,7 +294,7 @@ def trace(
         # it, which is what stops the third miss.
         emit_machine_text(result.model_dump_json())
     else:
-        console.print(f"[green]Trace[/green]: {result.trace_id}")
+        console.print(f"[green]Trace[/green]: {escape(result.trace_id)}")
         console.print(f"  Source: {result.source}")
         console.print(f"  Intent: {result.intent}")
         if result.outcome:
@@ -319,13 +320,13 @@ def entity(
         if output_format == "json":
             emit_json({"status": "not_found", "entity_id": entity_id})
         else:
-            console.print(f"[yellow]Entity not found[/yellow]: {entity_id}")
+            console.print(f"[yellow]Entity not found[/yellow]: {escape(entity_id)}")
         raise typer.Exit(code=EXIT_INTERNAL)
 
     if output_format == "json":
         emit_json(result)
     else:
-        console.print(f"[green]Entity[/green]: {entity_id}")
+        console.print(f"[green]Entity[/green]: {escape(entity_id)}")
         console.print(f"  Type: {result.get('node_type', 'unknown')}")
         props = result.get("properties", {})
         for k, v in props.items():

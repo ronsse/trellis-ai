@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import NoReturn
 
 import typer
-from rich.console import Console
+from rich.markup import escape
 
 from trellis.core.error_sanitize import (
     sanitize_error_message,
@@ -33,11 +33,11 @@ from trellis.stores.registry import StoreRegistry
 from trellis_cli.exit_codes import EXIT_INTERNAL
 from trellis_cli.ingest_conversations import ingest_conversations
 from trellis_cli.ingest_corpus import ingest_corpus
-from trellis_cli.output import emit_json
+from trellis_cli.output import build_console, emit_json
 from trellis_cli.stores import _get_registry, get_document_store
 
 ingest_app = typer.Typer(no_args_is_help=True)
-console = Console()
+console = build_console()
 
 
 def _fail(
@@ -149,7 +149,7 @@ def ingest_trace(  # noqa: PLR0912 - CLI dispatch with explicit format branching
             payload["extraction"] = extraction
         emit_json(payload)
     else:
-        console.print(f"[green]Trace ingested[/green]: {trace.trace_id}")
+        console.print(f"[green]Trace ingested[/green]: {escape(trace.trace_id)}")
         console.print(f"  Source: {trace.source}")
         console.print(f"  Intent: {trace.intent}")
         if extraction is not None and extraction.get("executed"):
@@ -201,7 +201,9 @@ def ingest_evidence(
             }
         )
     else:
-        console.print(f"[green]Evidence ingested[/green]: {evidence.evidence_id}")
+        console.print(
+            f"[green]Evidence ingested[/green]: {escape(evidence.evidence_id)}"
+        )
         console.print(f"  Type: {evidence.evidence_type}")
 
 

@@ -42,7 +42,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from click.utils import strip_ansi
-from rich.console import Console
+
+from trellis_cli.output import build_console
 
 if TYPE_CHECKING:
     from types import ModuleType
@@ -105,12 +106,21 @@ def force_colour(monkeypatch: pytest.MonkeyPatch, *cli_modules: ModuleType) -> N
     ``TTY_COMPATIBLE`` is checked *before* ``FORCE_COLOR`` and
     ``NO_COLOR`` suppresses styling downstream of both, so neither is
     trusted to be unset.
+
+    The replacement comes from :func:`trellis_cli.output.build_console`,
+    not from a bare ``Console``, and that is load-bearing rather than
+    tidy. The CLI's consoles are built with ``emoji=False`` (#492), so a
+    helper that swapped in a *default* console would hand the coloured
+    test path a renderer that rewrites ``:snowflake:`` inside a real
+    ``dataset:snowflake://…`` id — a failure in the test harness, in a
+    surface property production does not have, and only under colour.
+    One factory means the two cannot drift.
     """
     monkeypatch.delenv("NO_COLOR", raising=False)
     monkeypatch.delenv("TTY_COMPATIBLE", raising=False)
     monkeypatch.setenv("FORCE_COLOR", "1")
     for module in cli_modules:
-        monkeypatch.setattr(module, "console", Console(force_terminal=True))
+        monkeypatch.setattr(module, "console", build_console(force_terminal=True))
 
 
 def assert_coloured(text: str) -> str:

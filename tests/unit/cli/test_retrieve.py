@@ -9,7 +9,7 @@ import pytest
 from typer.testing import CliRunner
 
 from tests.chunk_corpus import seed_chunk_favouring, seed_chunked
-from tests.cli_output import assert_coloured, plain
+from tests.cli_output import assert_coloured, force_colour, plain
 from trellis_cli.exit_codes import EXIT_VALIDATION
 from trellis_cli.main import app
 
@@ -592,6 +592,132 @@ class TestRetrieveSearch:
         data = json.loads(result.stdout.strip())
         assert data["query"] == "kubernetes"
         assert data["status"] == "ok"
+
+
+#: A document id that trips both halves of #492 at once. ``:snowflake:``
+#: is a live Rich emoji shortcode and ``[audit]`` is a well-formed style
+#: tag, so an unprotected renderer substitutes the first and *deletes* the
+#: second. Short enough not to wrap at Rich's default 80-column width,
+#: because ``_plain`` collapses whitespace and a wrapped id would pass
+#: through it with a space in the middle.
+MANGLE_TRAP_ID = "dataset:snowflake://db/[audit]"
+
+
+class TestOperatorCopyableIds:
+    r"""Every id the operator is expected to copy survives the renderer (#492).
+
+    ``retrieve pack``'s item line was fixed by hand in #488 and is covered
+    by ``test_pack_item_ids_are_printed_verbatim_not_emojified``. These are
+    the siblings that were still live: ``search``'s result line — the one
+    #492 was filed against — and ``entity`` / ``trace``, whose whole output
+    is an id the operator just typed or is about to type again.
+
+    Each is asserted twice, plain and coloured. That is not belt-and-braces:
+    ``force_colour`` swaps the module console, and a console rebuilt without
+    ``emoji=False`` renders the ❄ again — so the coloured arm is what pins
+    the *factory* (``trellis_cli.output.build_console``) rather than merely
+    the keyword's presence in ``retrieve.py``. Reverting
+    ``tests.cli_output.force_colour`` to a bare ``Console(force_terminal=
+    True)`` turns exactly the three coloured id assertions below red and
+    nothing else in the suite — measured by running that mutation, not
+    reasoned from the code.
+    """
+
+    def _seed_document(self) -> None:
+        from trellis_cli.stores import get_document_store
+
+        get_document_store().put(MANGLE_TRAP_ID, "canary rollout audit table")
+
+    def _seed_entity(self) -> None:
+        from trellis_cli.stores import get_graph_store
+
+        get_graph_store().upsert_node(MANGLE_TRAP_ID, "dataset", {"name": "audit"})
+
+    @staticmethod
+    def _assert_verbatim(output: str) -> None:
+        rendered = " ".join(plain(output).split())
+        assert MANGLE_TRAP_ID in rendered, rendered
+        assert "\N{SNOWFLAKE}" not in rendered, rendered
+
+    def test_search_prints_the_doc_id_verbatim(self) -> None:
+        """The filed defect: ``dataset:snowflake://…`` came back as ❄."""
+        self._seed_document()
+        result = runner.invoke(app, ["retrieve", "search", "canary"])
+        assert result.exit_code == 0
+        self._assert_verbatim(result.stdout)
+
+    def test_search_prints_the_doc_id_verbatim_under_colour(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import trellis_cli.retrieve as cli_retrieve
+
+        self._seed_document()
+        force_colour(monkeypatch, cli_retrieve)
+        result = runner.invoke(app, ["retrieve", "search", "canary"])
+        assert result.exit_code == 0
+        self._assert_verbatim(assert_coloured(result.stdout))
+
+    def test_entity_prints_the_id_verbatim(self) -> None:
+        self._seed_entity()
+        result = runner.invoke(app, ["retrieve", "entity", MANGLE_TRAP_ID])
+        assert result.exit_code == 0
+        self._assert_verbatim(result.stdout)
+
+    def test_entity_prints_the_id_verbatim_under_colour(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import trellis_cli.retrieve as cli_retrieve
+
+        self._seed_entity()
+        force_colour(monkeypatch, cli_retrieve)
+        result = runner.invoke(app, ["retrieve", "entity", MANGLE_TRAP_ID])
+        assert result.exit_code == 0
+        self._assert_verbatim(assert_coloured(result.stdout))
+
+    def test_not_found_echoes_the_id_the_operator_typed(self) -> None:
+        """The arm where a mangled id is worst.
+
+        "Entity not found: dataset❄//db/" is an operator reading that
+        *their* id is absent, when the id the store was asked for is not
+        the id on screen. Both not-found paths are covered because the two
+        commands render them independently.
+        """
+        for command in ("entity", "trace"):
+            result = runner.invoke(app, ["retrieve", command, MANGLE_TRAP_ID])
+            assert result.exit_code == 1
+            self._assert_verbatim(result.stdout)
+
+    def test_not_found_echoes_the_id_under_colour(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import trellis_cli.retrieve as cli_retrieve
+
+        force_colour(monkeypatch, cli_retrieve)
+        for command in ("entity", "trace"):
+            result = runner.invoke(app, ["retrieve", command, MANGLE_TRAP_ID])
+            assert result.exit_code == 1
+            self._assert_verbatim(assert_coloured(result.stdout))
+
+    def test_the_styling_around_the_id_still_renders(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Escaping the value must not have escaped the markup beside it.
+
+        ``escape`` is chosen over ``markup=False`` precisely so the
+        ``[green]Entity[/green]`` tag keeps working. Without this, the
+        cheapest way to make every assertion above pass is to disable
+        markup on the whole line, which silently drops the CLI's colour —
+        and every other test here would stay green.
+        """
+        import trellis_cli.retrieve as cli_retrieve
+
+        self._seed_entity()
+        force_colour(monkeypatch, cli_retrieve)
+        result = runner.invoke(app, ["retrieve", "entity", MANGLE_TRAP_ID])
+
+        assert result.exit_code == 0
+        assert "[green]" not in result.stdout, "the style tag leaked as literal text"
+        assert "\x1b[" in result.stdout, "the style tag rendered nothing at all"
 
 
 class TestRetrieveChunkVisibility:

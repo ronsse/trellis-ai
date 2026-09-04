@@ -56,7 +56,6 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 import typer
-from rich.console import Console
 
 from trellis.core.error_sanitize import sanitize_error_message
 from trellis.extract.telemetry import emit_extraction_failure
@@ -66,7 +65,7 @@ from trellis.stores.base.edge_provenance import (
     validate_edge_provenance,
 )
 from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_OK, EXIT_STORE
-from trellis_cli.output import emit_json
+from trellis_cli.output import build_console, emit_json
 from trellis_cli.stores import get_event_log, get_graph_store
 
 if TYPE_CHECKING:
@@ -74,7 +73,7 @@ if TYPE_CHECKING:
     from trellis.stores.base.graph import GraphStore
 
 logger = structlog.get_logger(__name__)
-console = Console()
+console = build_console()
 
 
 #: Drift threshold — fraction of edges scanned whose legacy

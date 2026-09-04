@@ -12,13 +12,14 @@ import json
 from pathlib import Path
 
 import typer
-from rich.console import Console
+from rich.markup import escape
 
 from trellis.core.error_sanitize import sanitized_error_payload
 from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_VALIDATION
+from trellis_cli.output import build_console
 from trellis_cli.stores import _get_registry
 
-console = Console()
+console = build_console()
 
 _ACTION_STYLES = {
     "new": "green",
@@ -94,7 +95,7 @@ def ingest_corpus(
                 json.dumps({"status": "error", "message": f"path not found: {path}"})
             )
         else:
-            console.print(f"[red]Path not found: {path}[/red]")
+            console.print(f"[red]Path not found: {escape(path)}[/red]")
         raise typer.Exit(code=EXIT_INTERNAL)
 
     extra_metadata = _parse_tags(tag, domain, output_format)

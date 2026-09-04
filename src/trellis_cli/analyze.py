@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
 import typer
 import yaml
-from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
 
@@ -64,7 +63,7 @@ from trellis.stores.base.parameter import ParameterStore
 from trellis_cli._meta_wiring import wrap_cli_meta_analysis
 from trellis_cli.config import get_config_dir
 from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_STORE
-from trellis_cli.output import emit_json
+from trellis_cli.output import build_console, emit_json
 from trellis_cli.stores import (
     _get_registry,
     get_document_store,
@@ -74,10 +73,13 @@ from trellis_cli.stores import (
     get_trace_store,
 )
 
+if TYPE_CHECKING:
+    from rich.console import Console
+
 logger = structlog.get_logger(__name__)
 
 analyze_app = typer.Typer(no_args_is_help=True)
-console = Console()
+console = build_console()
 
 # Display thresholds for rate coloring
 _RATE_GREEN = 0.7
@@ -275,7 +277,7 @@ def _print_demotion_outcome(report: Any) -> None:
             f" of {proposed} proposed item(s)[/yellow]:"
         )
         for item_id in screen.admitted:
-            console.print(f"    - {item_id}")
+            console.print(f"    - {escape(item_id)}")
     elif proposed:
         console.print(
             f"  [green]Withheld all {proposed} proposed demotion(s)[/green]"
@@ -352,7 +354,7 @@ def context_effectiveness(
                     else "red"
                 )
                 table.add_row(
-                    item["item_id"][:20],
+                    escape(item["item_id"][:20]),
                     str(item["appearances"]),
                     str(item["successes"]),
                     str(item["failures"]),
@@ -367,7 +369,7 @@ def context_effectiveness(
                 " (low success rate, consider removing):"
             )
             for item_id in report.noise_candidates:
-                console.print(f"  - {item_id}")
+                console.print(f"  - {escape(item_id)}")
 
         if report.total_feedback == 0:
             console.print()
@@ -1039,7 +1041,7 @@ def value(
     console.print()
     console.print(
         f"  Response-token attribution: "
-        f"{report.response_events_with_pack_id}/{report.response_events} "
+        f"{escape(str(report.response_events_with_pack_id))}/{report.response_events} "
         f"TOKEN_TRACKED events carry a pack_id "
         f"({report.response_pack_id_coverage:.0%}); "
         f"{report.attributed_packs_with_response_tokens} attributed pack(s) "
@@ -1510,7 +1512,7 @@ def advisory_effectiveness(  # noqa: PLR0912 - CLI rendering branches per report
             for score in report.advisory_scores:
                 lift_style = "green" if score.lift > 0 else "red"
                 table.add_row(
-                    score.advisory_id[:15],
+                    escape(score.advisory_id[:15]),
                     str(score.presentations),
                     f"{score.success_rate:.1%}",
                     f"{score.baseline_rate:.1%}",
@@ -1522,7 +1524,7 @@ def advisory_effectiveness(  # noqa: PLR0912 - CLI rendering branches per report
             console.print()
             console.print(f"[green]Boosted ({len(report.advisories_boosted)}):[/green]")
             for adv_id in report.advisories_boosted:
-                console.print(f"  + {adv_id}")
+                console.print(f"  + {escape(adv_id)}")
 
         if report.advisories_suppressed:
             console.print()
@@ -1530,7 +1532,7 @@ def advisory_effectiveness(  # noqa: PLR0912 - CLI rendering branches per report
                 f"[red]Suppressed ({len(report.advisories_suppressed)}):[/red]"
             )
             for adv_id in report.advisories_suppressed:
-                console.print(f"  - {adv_id}")
+                console.print(f"  - {escape(adv_id)}")
 
         if not dry_run and not report.advisory_scores:
             console.print()
@@ -2435,9 +2437,9 @@ def learning_candidates(
     )
     console.print(f"  Observations scanned: {report['observation_count']}")
     console.print(f"  Candidates generated: {report['candidate_count']}")
-    console.print(f"  Candidates JSON: [cyan]{paths['candidates_path']}[/cyan]")
+    console.print(f"  Candidates JSON: [cyan]{escape(paths['candidates_path'])}[/cyan]")
     console.print(
-        f"  Decisions template: [cyan]{paths['decisions_template_path']}[/cyan]"
+        f"  Decisions template: [cyan]{escape(paths['decisions_template_path'])}[/cyan]"
     )
 
     if not report["candidates"]:
@@ -2465,7 +2467,7 @@ def learning_candidates(
             else "yellow"
         )
         table.add_row(
-            candidate["candidate_id"],
+            escape(candidate["candidate_id"]),
             f"[{rec_style}]{candidate['recommendation_type']}[/{rec_style}]",
             candidate.get("item_type") or "-",
             str(metrics["times_served"]),
@@ -2663,12 +2665,14 @@ def schema_evolution(
                     str(len(c.distinct_extractors)),
                     str(len(c.distinct_domains)),
                     suggested,
-                    c.candidate_id,
+                    escape(c.candidate_id),
                 )
             console.print(table)
             for c in candidates:
                 if c.notes:
-                    console.print(f"[dim]{c.candidate_id}: {'; '.join(c.notes)}[/dim]")
+                    console.print(
+                        f"[dim]{escape(c.candidate_id)}: {'; '.join(c.notes)}[/dim]"
+                    )
 
     if strict and candidates:
         raise typer.Exit(code=EXIT_INTERNAL)

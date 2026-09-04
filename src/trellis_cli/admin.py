@@ -14,7 +14,7 @@ from typing import Any
 import httpx
 import structlog
 import typer
-from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 from trellis.core.version import (
@@ -43,7 +43,7 @@ from trellis_cli.claude_integration import (
 )
 from trellis_cli.config import TrellisConfig, get_config_dir, get_data_dir
 from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_OK, EXIT_STORE, EXIT_VALIDATION
-from trellis_cli.output import emit_json
+from trellis_cli.output import build_console, emit_json
 from trellis_cli.stores import (
     _get_registry,
     get_document_store,
@@ -106,7 +106,7 @@ _CLASSIFY_CONFIG_TEMPLATE = """
 """
 
 admin_app = typer.Typer(no_args_is_help=True)
-console = Console()
+console = build_console()
 logger = structlog.get_logger(__name__)
 
 
@@ -130,7 +130,7 @@ def init(
             print(json.dumps({"status": "exists", "config_dir": str(config_dir)}))
         else:
             console.print(
-                f"[yellow]Config already exists at {config_path}."
+                f"[yellow]Config already exists at {escape(str(config_path))}."
                 " Use --force to overwrite.[/yellow]"
             )
         raise typer.Exit(code=EXIT_OK)
@@ -174,8 +174,8 @@ def init(
         )
     else:
         console.print("[green]Initialized Trellis[/green]")
-        console.print(f"  Config: {config_path}")
-        console.print(f"  Data:   {actual_data_dir}")
+        console.print(f"  Config: {escape(str(config_path))}")
+        console.print(f"  Data:   {escape(str(actual_data_dir))}")
         console.print(
             "\n[dim]Local single-user setup is done. Setting up for a team,"
             " a data platform, or production?[/dim]"
@@ -575,7 +575,7 @@ def reconcile_feedback(
         print(json.dumps(payload))
         return
 
-    console.print(f"[bold]Reconcile Feedback[/bold] ({log_dir})")
+    console.print(f"[bold]Reconcile Feedback[/bold] ({escape(str(log_dir))})")
     console.print(f"  Scanned: {payload['scanned']}")
     console.print(f"  Already present: {payload['already_present']}")
     if dry_run:
@@ -923,7 +923,7 @@ def _print_skills_summary(
     """Print the per-skill install lines for quickstart / install-skills."""
     if skills_dir is None:
         return
-    console.print(f"  [cyan]Skills installed to:[/cyan] {skills_dir}")
+    console.print(f"  [cyan]Skills installed to:[/cyan] {escape(str(skills_dir))}")
     for entry in skills:
         name, status = entry["name"], entry["status"]
         if status == "skipped":
@@ -947,15 +947,19 @@ def _print_quickstart_summary(
     """Print human-readable quickstart summary."""
     console.print("[green]Quickstart complete![/green]\n")
     if "stores_initialized" in steps:
-        console.print(f"  [cyan]Stores initialized:[/cyan] {config_path}")
+        console.print(f"  [cyan]Stores initialized:[/cyan] {escape(str(config_path))}")
     else:
-        console.print(f"  [dim]Stores already initialized:[/dim] {config_path}")
+        console.print(
+            f"  [dim]Stores already initialized:[/dim] {escape(str(config_path))}"
+        )
     if "mcp_registered" in steps:
-        console.print(f"  [cyan]MCP server registered:[/cyan] {settings_path}")
+        console.print(
+            f"  [cyan]MCP server registered:[/cyan] {escape(str(settings_path))}"
+        )
     else:
         console.print(
             f"  [dim]MCP server already registered:[/dim]"
-            f" {settings_path} (use --force to overwrite)"
+            f" {escape(str(settings_path))} (use --force to overwrite)"
         )
     if skills is not None:
         _print_skills_summary(skills, skills_dir)
@@ -1472,19 +1476,20 @@ def _load_graph_store_from_yaml(path: Path) -> Any:
     from trellis.stores.registry import StoreRegistry  # noqa: PLC0415
 
     if not path.exists():
-        console.print(f"[red]Config file not found: {path}[/red]")
+        console.print(f"[red]Config file not found: {escape(str(path))}[/red]")
         raise typer.Exit(code=EXIT_VALIDATION)
 
     try:
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     except yaml.YAMLError as exc:
-        console.print(f"[red]Invalid YAML in {path}: {exc}[/red]")
+        console.print(f"[red]Invalid YAML in {escape(str(path))}: {exc}[/red]")
         raise typer.Exit(code=EXIT_VALIDATION) from exc
 
     graph_block = data.get("graph")
     if not isinstance(graph_block, dict) or "backend" not in graph_block:
         console.print(
-            f"[red]{path} must contain a 'graph:' block with a 'backend' key[/red]"
+            f"[red]{escape(str(path))} must contain a 'graph:' block with a"
+            " 'backend' key[/red]"
         )
         raise typer.Exit(code=EXIT_VALIDATION)
 
@@ -2257,7 +2262,9 @@ def draft_promotion_adr(
             path=str(output_path),
             candidate_id=candidate_id,
         )
-        console.print(f"[yellow]Overwriting existing file at {output_path}.[/yellow]")
+        console.print(
+            f"[yellow]Overwriting existing file at {escape(str(output_path))}.[/yellow]"
+        )
 
     drafted_date = datetime.now(tz=UTC).date().isoformat()
     rendered = _render_promotion_adr(
@@ -2283,8 +2290,8 @@ def draft_promotion_adr(
         )
     else:
         console.print(
-            f"[green]Drafted promotion ADR for candidate {candidate_id} ->"
-            f" {output_path}[/green]"
+            f"[green]Drafted promotion ADR for candidate {escape(candidate_id)} ->"
+            f" {escape(str(output_path))}[/green]"
         )
         console.print(
             "[dim]Fill in the 'Decision' section before requesting review.[/dim]"

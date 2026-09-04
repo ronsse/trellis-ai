@@ -1122,6 +1122,17 @@ trellis retrieve search <query> [--limit N] [--domain DOMAIN] [--include-chunks]
 > fails the build if a serialized payload is handed back to Rich. `--quiet` still
 > does what it says for the **text** branch.
 
+> **The text branch is safe now too** ([#492](https://github.com/ronsse/trellis-ai/issues/492)).
+> It was not: `dataset:snowflake://db/schema/table` printed as `dataset❄//…`
+> and a `[document]` in the same line was read as a style tag and **deleted**.
+> A mangled id is not cosmetic — it is not the id, so copying it into
+> `trellis retrieve get` or `get_items` fails for a reason nothing on screen
+> shows. Every CLI console is now built by `trellis_cli.output.build_console`
+> with `emoji=False`, and every identifier or path reaching a Rich renderer is
+> wrapped in `rich.markup.escape`. `tests/unit/test_rich_id_markup_rule.py`
+> derives both halves from the AST and fails the build on a new bare
+> `Console()` or a new unescaped id.
+
 **Example:**
 
 ```bash
@@ -1336,9 +1347,11 @@ trellis retrieve pack --intent "deploy checklist for staging" --domain platform 
 
 > **`--format json` is safe on its own** — the Rich mangling described under
 > `retrieve search` above is fixed ([#403](https://github.com/ronsse/trellis-ai/issues/403)),
-> so `--quiet` is no longer required to parse the output. The text renderer
-> disables Rich markup and emoji substitution for item lines too, so an
-> `item_id` like `dataset:snowflake://…` is printed rather than emojified.
+> so `--quiet` is no longer required to parse the output. The text renderer is
+> safe too: this command's item line disables Rich markup and emoji outright,
+> and since [#492](https://github.com/ronsse/trellis-ai/issues/492) the same
+> guarantee holds for every id-bearing line in the CLI — an `item_id` like
+> `dataset:snowflake://…` is printed, not emojified.
 
 #### `PACK_ASSEMBLED` event payload
 

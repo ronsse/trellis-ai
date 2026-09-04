@@ -139,6 +139,37 @@ class TestRefreshCliValidation:
         assert result.exit_code == 1
         assert "--path" in result.stdout
 
+    def test_missing_type_path_reports_it_instead_of_crashing(
+        self, tmp_path: Path
+    ) -> None:
+        """The ``--type``/``--path`` arm renders a ``Path`` through Rich (#492).
+
+        ``rich.markup.escape`` takes a ``str`` and raises ``TypeError`` on a
+        ``Path``, and **mypy cannot see this branch**: ``source: str`` can
+        never be ``None``, so ``if source is not None`` is proved always
+        true and the whole ``else`` is skipped as unreachable. A deliberate
+        ``_bad: int = "x"`` planted here was reported by nothing. That makes
+        a behavioural test the only guard on this arm, and the escaping
+        sweep is exactly the kind of mechanical edit that would have landed
+        the crash.
+        """
+        runner.invoke(app, ["admin", "init"])
+        result = runner.invoke(
+            app,
+            [
+                "extract",
+                "refresh",
+                "--type",
+                "dbt-manifest",
+                "--path",
+                str(tmp_path / "nope.json"),
+            ],
+        )
+        assert result.exit_code == 1
+        assert not isinstance(result.exception, TypeError), result.exception
+        assert "Path not found" in result.stdout
+        assert "nope.json" in result.stdout
+
     def test_source_not_in_yaml_errors(self, tmp_path: Path) -> None:
         runner.invoke(app, ["admin", "init"])
         sources_yaml = tmp_path / "sources.yaml"

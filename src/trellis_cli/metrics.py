@@ -23,7 +23,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import typer
-from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 from trellis.learning.tuners import (
@@ -34,7 +34,7 @@ from trellis.learning.tuners import (
     promote_proposal,
 )
 from trellis.schemas.parameters import ParameterScope
-from trellis_cli.output import emit_json
+from trellis_cli.output import build_console, emit_json
 from trellis_cli.stores import (
     get_event_log,
     get_outcome_store,
@@ -43,7 +43,7 @@ from trellis_cli.stores import (
 )
 
 metrics_app = typer.Typer(no_args_is_help=True)
-console = Console()
+console = build_console()
 
 
 # ---------------------------------------------------------------------------
@@ -103,7 +103,7 @@ def outcomes_cmd(
     table.add_column("ref_rate", justify="right")
     for agg in sorted(aggs, key=lambda a: -a.count):
         table.add_row(
-            agg.scope.component_id,
+            escape(agg.scope.component_id),
             agg.scope.domain or "-",
             agg.scope.intent_family or "-",
             agg.scope.tool_name or "-",
@@ -154,10 +154,10 @@ def proposals_cmd(
     table.add_column("sample_size", justify="right")
     for p in proposals:
         table.add_row(
-            p.proposal_id[:18] + "…",
+            escape(p.proposal_id[:18] + "…"),
             p.tuner,
             p.status,
-            p.scope.component_id,
+            escape(p.scope.component_id),
             p.scope.domain or "-",
             json.dumps(p.proposed_values),
             str(p.sample_size),
@@ -269,8 +269,8 @@ def tune_cmd(
     )
     for p in proposals:
         console.print(
-            f"  {p.proposal_id[:18]}…  "
-            f"{p.scope.component_id} domain={p.scope.domain or '-'}  "
+            f"  {escape(p.proposal_id[:18])}…  "
+            f"{escape(p.scope.component_id)} domain={p.scope.domain or '-'}  "
             f"{json.dumps(p.proposed_values)}  (n={p.sample_size})"
         )
 
@@ -351,7 +351,7 @@ def promote_cmd(
         else "yellow"
     )
     console.print(
-        f"[{color}]{result.status.upper()}[/{color}] {result.proposal_id}: "
+        f"[{color}]{result.status.upper()}[/{color}] {escape(result.proposal_id)}: "
         f"{result.reason}"
     )
     if result.params_version:
@@ -419,7 +419,9 @@ def _dry_run_promote(
                 }
             )
         else:
-            console.print(f"[yellow]SKIPPED[/yellow] {proposal_id}: {preview.reason}")
+            console.print(
+                f"[yellow]SKIPPED[/yellow] {escape(proposal_id)}: {preview.reason}"
+            )
         return
 
     if output_format == "json":
@@ -440,7 +442,7 @@ def _dry_run_promote(
     color = "green" if preview.status == "promoted" else "red"
     console.print("[dim](dry run — pass --commit to apply)[/dim]")
     console.print(
-        f"[{color}]WOULD {preview.status.upper()}[/{color}] {proposal_id}: "
+        f"[{color}]WOULD {preview.status.upper()}[/{color}] {escape(proposal_id)}: "
         f"{preview.reason if preview.reason != 'ok' else 'policy gate would pass'}"
     )
     console.print(f"  proposed: {json.dumps(preview.proposed_values)}")

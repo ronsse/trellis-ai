@@ -17,11 +17,21 @@ group. Two things it deliberately does **not** do:
   recovery command; this renders ``exc.message`` verbatim rather than
   coining a second vocabulary for the same facts (the ``content_type`` /
   ``document_form`` drift of #325/#326).
-* It does not catch anything but :class:`~trellis.errors.TrellisError`. An
-  untyped exception reaching here really is unexpected, and the Typer
-  traceback is the right rendering for it — a boundary that folds a
-  ``KeyError`` into a tidy actionable envelope turns a bug into an
-  operator's problem to diagnose.
+* It does not catch broadly. An untyped exception reaching here really is
+  unexpected, and the Typer traceback is the right rendering for it — a
+  boundary that folds a ``KeyError`` into a tidy actionable envelope turns
+  a bug into an operator's problem to diagnose.
+
+The one class caught beside ``TrellisError`` is
+:class:`~trellis.retrieve.pack_builder.PackAssemblyError` (#493), named
+explicitly rather than by widening the clause. It subclasses
+``RuntimeError`` for reasons internal to retrieval, but a pack build whose
+every axis failed is a *deployment condition*, not a bug, and it became
+CLI-reachable when #488 routed ``trellis retrieve pack`` through
+``PackBuilder``. :func:`_render_pack_assembly_failure` carries the
+argument for translating it here instead of reparenting it. A second such
+class gets a second clause, visible in the diff; a roster dressed up as a
+framework would not be.
 """
 
 from __future__ import annotations
@@ -30,7 +40,6 @@ import os
 from typing import TYPE_CHECKING, Any
 
 import typer
-from rich.console import Console
 from rich.markup import escape
 from typer.core import TyperGroup
 
@@ -40,6 +49,7 @@ from trellis.core.error_sanitize import (
 )
 from trellis.errors import TrellisError
 from trellis.logging import configure_stderr_logging
+from trellis.retrieve.pack_builder import PackAssemblyError
 from trellis_cli.admin import admin_app
 from trellis_cli.analyze import analyze_app
 from trellis_cli.classify import classify_app
@@ -49,7 +59,7 @@ from trellis_cli.exit_codes import exit_code_for
 from trellis_cli.extract_refresh import extract_app
 from trellis_cli.ingest import ingest_app
 from trellis_cli.metrics import metrics_app
-from trellis_cli.output import emit_json
+from trellis_cli.output import build_console, emit_json
 from trellis_cli.policy import policy_app
 from trellis_cli.retrieve import retrieve_app
 from trellis_cli.serve import serve_app
@@ -58,7 +68,7 @@ from trellis_cli.worker import worker_app
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-console = Console()
+console = build_console()
 
 #: ``--format`` values whose consumer is a parser rather than a person. A
 #: single JSON object is valid ``jsonl`` too (one record, one line), so both
@@ -167,6 +177,85 @@ def _render_boundary_failure(exc: TrellisError, output_format: str) -> None:
     raise typer.Exit(code=exit_code_for(exc))
 
 
+def _render_pack_assembly_failure(exc: PackAssemblyError, output_format: str) -> None:
+    """Render an all-axes-failed pack build, then exit (#493).
+
+    :class:`~trellis.retrieve.pack_builder.PackAssemblyError` subclasses
+    ``RuntimeError``, not :class:`~trellis.errors.TrellisError`, so the
+    clause above never saw it and an operator whose every retrieval axis
+    was down got a traceback: no exit-code contract, no ``--format json``
+    envelope, none of the boundary's framing. It became reachable when
+    #488 routed ``trellis retrieve pack`` through ``PackBuilder``; a
+    second CLI caller, ``analyze pack-quality``, has the same exposure
+    and is covered by the same clause.
+
+    **Why not reparent it to ``TrellisError``, which #493 asked to be
+    decided deliberately.** Reparenting changes what
+    :class:`~trellis.mutate.executor.MutationExecutor` and every other
+    ``except TrellisError`` in the tree catches, for a class raised deep
+    inside retrieval — the blast radius #483 declined for
+    ``RegistryValidationError``. And it would buy nothing extra:
+    :func:`~trellis_cli.exit_codes.exit_code_for` resolves it to
+    ``EXIT_INTERNAL`` either way, because it is not a Store, Config,
+    Validation, Policy or Idempotency error. Same envelope, same exit
+    code, one file touched instead of the hierarchy.
+
+    **The issue's stated cost of the local fix does not apply.** #493 said
+    a CLI-local catch "leaves the REST and MCP surfaces with the same
+    gap"; neither surface has it. MCP wraps the build in ``except
+    Exception`` and documents ``PackAssemblyError`` → ``INTERNAL_ERROR``,
+    and ``trellis_api`` registers an ``Exception`` handler that answers a
+    structured 500. The CLI was the only affected surface.
+
+    Catching this one class by name rather than widening the clause to
+    ``Exception``: an untyped exception reaching here really is
+    "unexpected; file a bug", and ``exit_code_for``'s docstring says so.
+    Dressing a genuine crash up as an actionable envelope is the lie that
+    function exists to remove. A pack whose every axis failed is not a
+    crash — it is a deployment condition an operator can act on.
+
+    Structured exactly like :func:`_render_boundary_failure`: the exit
+    sits *below* the format branch so both surfaces agree the command
+    failed (the rule ``tests/unit/test_format_exit_parity_rule.py``
+    enforces), and the JSON message goes through
+    :func:`~trellis.core.error_sanitize.sanitized_error_payload` while
+    the text surface prints unsanitized to a terminal.
+
+    ``strategy_failures`` rides the JSON envelope and the text render
+    because the exception's own message does not carry it: the all-failed
+    message says how many strategies failed, not *which*, and "which axis
+    is down" is the whole of what the operator needs next.
+    """
+    failures = [failure.to_event_payload() for failure in exc.strategy_failures]
+    if output_format in MACHINE_FORMATS:
+        emit_json(
+            sanitized_error_payload(
+                exc,
+                error_code=type(exc).__name__,
+                strategy_failures=[
+                    {
+                        "strategy": failure["strategy"],
+                        "error_class": failure["error_class"],
+                        "message": sanitize_error_message(failure["message"]),
+                    }
+                    for failure in failures
+                ],
+            )
+        )
+    else:
+        console.print(
+            f"[bold red]{escape(type(exc).__name__)}[/bold red] — {escape(str(exc))}",
+            soft_wrap=True,
+        )
+        for failure in failures:
+            console.print(
+                f"  [dim]{escape(failure['strategy'])}[/dim]: "
+                f"{escape(failure['error_class'])}: {escape(failure['message'])}",
+                soft_wrap=True,
+            )
+    raise typer.Exit(code=exit_code_for(exc))
+
+
 class _BoundaryGroup(TyperGroup):
     """Root group that renders typed Trellis failures instead of a traceback.
 
@@ -178,6 +267,10 @@ class _BoundaryGroup(TyperGroup):
     Sub-apps registered with ``add_typer`` build their own default
     ``TyperGroup``\\ s and an exception from a leaf command propagates up
     through them to here, so one class covers every command in the tree.
+    That is why #493's translation goes here and not into ``retrieve
+    pack``: ``analyze pack-quality`` builds a pack too, and a per-command
+    ``except`` would have fixed one of the two and left the other to be
+    found again.
     """
 
     def invoke(self, ctx: Any) -> Any:
@@ -191,6 +284,9 @@ class _BoundaryGroup(TyperGroup):
             return super().invoke(ctx)
         except TrellisError as exc:
             _render_boundary_failure(exc, _requested_format(raw_args))
+            raise  # unreachable — the helper exits on every path
+        except PackAssemblyError as exc:
+            _render_pack_assembly_failure(exc, _requested_format(raw_args))
             raise  # unreachable — the helper exits on every path
 
 

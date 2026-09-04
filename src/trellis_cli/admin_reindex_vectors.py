@@ -23,16 +23,16 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 import typer
-from rich.console import Console
 
 from trellis.retrieve.embed_ingest_hook import build_vector_row
 from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_OK
+from trellis_cli.output import build_console
 from trellis_cli.stores import _get_registry
 
 if TYPE_CHECKING:
     from trellis.stores.registry import StoreRegistry
 
-console = Console()
+console = build_console()
 logger = structlog.get_logger(__name__)
 
 #: Documents fetched (and vectors upserted) per round-trip.

@@ -52,12 +52,12 @@ def _get_registry() -> StoreRegistry:
         data_dir = get_data_dir()
         stores_dir = data_dir / "stores"
         if not stores_dir.exists():
-            from rich.console import Console  # noqa: PLC0415
+            from trellis_cli.output import build_console  # noqa: PLC0415
 
             # stderr, not stdout: callers like the meta-trace wiring swallow
             # the Exit and continue, and ``--format json`` consumers parse
             # stdout — an error line there poisons the machine output.
-            Console(stderr=True).print(
+            build_console(stderr=True).print(
                 "[red]Stores not initialized. Run 'trellis admin init' first.[/red]"
             )
             raise typer.Exit(code=EXIT_INTERNAL)
