@@ -3,14 +3,19 @@
 > **What this is.** A dependency-ordered queue of work items each sized for one
 > focused subagent session and one PR. It exists so an orchestrating agent can make
 > continuous progress on the Trellis roadmap without the operator adjudicating every
-> fork. It is a *scheduling* view over work already tracked in GitHub issues and
-> [`implementation-roadmap.md`](./implementation-roadmap.md) §3.H — **not a second
-> source of truth.** Where they disagree, the roadmap wins.
+> fork. It is a *scheduling* view derived from **GitHub issues** (live requirements and
+> status) and [`implementation-roadmap.md`](./implementation-roadmap.md) where it governs
+> a program item — **not a second source of truth** for any individual issue.
 >
-> Created 2026-08-26; the live queue was re-derived 2026-09-03. Item statuses live in
-> the GitHub issues, not here; this file records decomposition, sequencing, and the
-> autonomy class of each item. **Read [Current queue](#current-queue--re-derived-2026-09-03)
-> first** — the Wave sections below it are the accumulated record, not the schedule.
+> Created 2026-08-26; the live queue was reconciled 2026-09-04 using the dated issue
+> corpus ([#527](https://github.com/ronsse/trellis-ai/pull/527)) as *evidence*, not as
+> authority. **Requirements hierarchy:** **GitHub issue body/comments** (live issue
+> requirements and status) → [`implementation-roadmap.md`](./implementation-roadmap.md)
+> (where it governs a program item) → this file (scheduling derived from the first two).
+> The corpus is adversarial review evidence and optional implementation aids only — not
+> requirements authority, and **not every open issue appears in roadmap §3.H.** **Read
+> [Current queue](#current-queue--2026-09-04) first** — the Wave sections below are the
+> accumulated record, not the schedule.
 
 ## How an agent runs an item
 
@@ -60,22 +65,128 @@ Every item is tagged with who decides when a fork appears mid-item.
 
 ---
 
-## Current queue — re-derived 2026-09-03
+## Current queue — 2026-09-04
 
-> **This section is the live scheduling view.** Waves 0–5 below it are retained as the
-> *record* of what each item decided, measured, or refuted — several of them are the only
-> written home for a measurement that a future agent would otherwise re-derive or
-> re-propose. Status lives in the GitHub issues; where this file and an issue disagree,
-> the issue wins.
+> **Derived scheduling view** — read each item's **GitHub issue body/comments** for live
+> requirements and status; consult [`implementation-roadmap.md`](./implementation-roadmap.md)
+> only where it governs that program item (not all open issues are in §3.H).
+> **Evidence and aids** (not authority):
+> [`docs/issues/reviews/2026-09-04/README.md`](../issues/reviews/2026-09-04/README.md),
+> [`manifest.json`](../issues/reviews/2026-09-04/manifest.json), per-issue `#NNN.md`
+> briefs, and optional [`plans/`](../issues/reviews/2026-09-04/plans/) for seven issues
+> (#256, #264, #342, #360, #369, #439, #514). **Do not copy the 40 briefs here;** read
+> the corpus for measured evidence and close criteria, then confirm status on GitHub and
+> the roadmap before dispatching.
 >
-> Re-derived from the 37 open issues on 2026-09-03. Roughly a third are swarm-ready now,
-> a third need a design call first, and a third are operator-gated — that last third
-> inflates the apparent queue and is worth a disposition pass.
+> Reviewed against `main` at `e4e7604` before this doc commit. **Determine live `main` via
+> `git rev-parse origin/main`** — do not treat a SHA embedded here as current.
 >
-> **Lane G was added 2026-09-04** for the cluster filed since — most of it by adversarial
-> gate reviews of the PRs the other lanes produced.
+> Waves 0–5 below are the *historical record* of what each item decided, measured, or
+> refuted. For live state and requirements, **the GitHub issue wins**; the corpus supplies
+> measured evidence only.
 
-### Lane A — the file-store guard family
+**Snapshot:** **40 open** on GitHub as of the 2026-09-04 review. The count stays 40 until
+close/duplicate mutations actually land — the configured automation token currently lacks
+GitHub **Issues write** permission, so corpus disposition actions (e.g. closing
+[#525](https://github.com/ronsse/trellis-ai/issues/525) / [#364](https://github.com/ronsse/trellis-ai/issues/364))
+cannot be applied from agents until that is restored.
+
+| Issue | Corpus verdict | Agent note |
+|---|---|---|
+| [#525](https://github.com/ronsse/trellis-ai/issues/525) | `duplicate` | **Closure-ready** — duplicate of #526; do not dispatch |
+| [#364](https://github.com/ronsse/trellis-ai/issues/364) | `stale-fixed` | **Closure-ready** — PR #389; do not dispatch |
+
+PR [#527](https://github.com/ronsse/trellis-ai/pull/527) **selectively transcribed** the
+seven implementation plans and unique review evidence into `docs/issues/reviews/2026-09-04/`.
+The orchestration briefs and reports on remote branch `handoff/issue-sweep-2026-09-04` were
+**intentionally superseded** and were **not** merged as an ancestral commit — do not retain
+their 37-open count or unsafe closure recommendations. That branch is **eligible for
+owner-approved deletion** after confirming no archival retention is desired.
+
+### First executable batches *(not exhaustive)*
+
+**Batch 1 — early parallel** (disjoint territories; recheck before dispatch):
+
+**Wave D (program plan order): [#360](https://github.com/ronsse/trellis-ai/issues/360) PR1 →
+[#256](https://github.com/ronsse/trellis-ai/issues/256) staged seam.** Also parallel when
+disjoint: **#369**, **#439**, **#342**, **#514**.
+
+**#256 dispatch — operator override (2026-09-04, this program only):** live `keystone`
+label normally means **human authorship only**. Operator instruction on 2026-09-04
+explicitly authorized **this plan's Wave D #256 staged seam** for swarm execution under
+`consensus_authorizes` — **not** a general keystone-label override. Scope limited to
+**reversible in-repo PR1**; excludes publishing, external package release, and credentials.
+Owner review and the adversarial merge gate ([swarm-handoff §4.1](./swarm-handoff.md#41-the-review-gate--every-pr-before-merge)) still apply.
+
+- **#264 PR-A** after or parallel with Batch 1 if no file collision; **#264 PR-B**
+  (derived roster) **after #514** when `generate_call_sites` exists (implementation
+  adjacency, not a manifest dependency).
+- **Serialize #360 PR2 with #264 PR-A** — extraction/MCP overlap on `save_memory`.
+
+**Batch 2 — CI / stores** (hard dependency **#351 → #356** per manifest; no issue
+dependency between #526 and #350):
+
+| Issue | Verdict | Note |
+|---|---|---|
+| [#526](https://github.com/ronsse/trellis-ai/issues/526) | `valid-now` | May parallelize with #350 if territories/workflows disjoint after recheck |
+| [#351](https://github.com/ronsse/trellis-ai/issues/351) | `valid-now` | **Before #356** (manifest dependency) |
+| [#356](https://github.com/ronsse/trellis-ai/issues/356) | `valid-now` | After #351 |
+| [#350](https://github.com/ronsse/trellis-ai/issues/350) | `valid-now` | May parallelize with #526 if disjoint |
+
+**Workflow-collision scheduling (optional):** #526, #351, and #356 share CI workflow
+territory — coordinate merges when touching the same files; this is **not** a serial
+issue dependency.
+
+**Other valid-now / valid-slice items** (dispatch when Batch 1–2 are full or territories
+allow; full roster in manifest + roadmap):
+
+| Issue | Verdict | Note |
+|---|---|---|
+| [#522](https://github.com/ronsse/trellis-ai/issues/522) | `valid-now` | Rich operator-output renders outside #492 handle rule |
+| [#523](https://github.com/ronsse/trellis-ai/issues/523) | `valid-now` | `sanitize_error_message` suppresses boundary test messages on long `--basetemp` |
+| [#494](https://github.com/ronsse/trellis-ai/issues/494) | `valid-now` | Document `retrieve pack --quiet` id population |
+| [#515](https://github.com/ronsse/trellis-ai/issues/515) | `valid-slice` | **Measurement slice only** — map Anthropic cache token fields into `TokenUsage`; defer `cache_control` until benefit measured |
+
+All other open items: verdict and wave in
+[`manifest.json`](../issues/reviews/2026-09-04/manifest.json); live requirements and
+status on each **GitHub issue**; roadmap sections only where they govern that item.
+
+### Owner prerequisites *(not dispatchable)*
+
+| Issue | Gate | Note |
+|---|---|---|
+| [#257](https://github.com/ronsse/trellis-ai/issues/257) | `owner-only` | Ingest-normalization ADR — roadmap and issue label; not swarm-eligible regardless of corpus `valid-now` evidence |
+| [#475](https://github.com/ronsse/trellis-ai/issues/475) | `blocked:owner-decision` | Assumptions header — assumptions line set **not agreed**; live issue blocks dispatch |
+
+### Persistent blockers (do not misread)
+
+| Issue | Status |
+|---|---|
+| [#371](https://github.com/ronsse/trellis-ai/issues/371) | **Behaviorally open, blocked-signal** — graph axis is a recency feed until a real seeding path exists; do not dispatch alone |
+| [#375](https://github.com/ronsse/trellis-ai/issues/375) | **Mechanisms refuted** — `SemanticSeedExtractor` changed 0/37 production packs; premise remains but proposed fixes are dead |
+| [#503](https://github.com/ronsse/trellis-ai/issues/503) | **blocked-signal** — wait for the first item-scoped advisory to reach a pack |
+| [#208](https://github.com/ronsse/trellis-ai/issues/208) | **external** — re-home to consumer-kg or close (`human`) |
+| [#250](https://github.com/ronsse/trellis-ai/issues/250) | **blocked-operator** — Aura console credential purge |
+| [#201](https://github.com/ronsse/trellis-ai/issues/201), [#261](https://github.com/ronsse/trellis-ai/issues/261), [#306](https://github.com/ronsse/trellis-ai/issues/306) | **blocked-signal** — pilot/loop throughput not yet present |
+| [#194](https://github.com/ronsse/trellis-ai/issues/194) | **blocked-decision** — depends practically on **#360** and owner semantics, **not** on #256 (backend extraction is not on the enforcement critical path) |
+
+---
+
+## Historical scheduling snapshot — 2026-09-03
+
+> **HISTORICAL — do not dispatch from this section.** Retained for measurements, refusals,
+> and gate findings only. Lane A file-store guards ([#471](https://github.com/ronsse/trellis-ai/issues/471),
+> [#448](https://github.com/ronsse/trellis-ai/issues/448),
+> [#459](https://github.com/ronsse/trellis-ai/issues/459)) and most Lane G review-gate
+> items landed before the 2026-09-04 corpus — verify issue state on GitHub before acting.
+> For current work, use [Current queue — 2026-09-04](#current-queue--2026-09-04) above.
+
+Re-derived from the **37 open issues** on 2026-09-03 (superseded; the corpus now tracks
+**40**). Roughly a third were swarm-ready, a third needed a design call, and a third were
+operator-gated. **Lane G** was added 2026-09-04 for the cluster filed since — most of it
+by adversarial gate reviews of the PRs the other lanes produced.
+
+### Lane A — the file-store guard family *(historical — landed)*
 
 `DegradableJsonStore` (#426) unified `PolicyStore` and `AdvisoryStore`; these are the
 three residues. Different files, so they parallelize.
@@ -92,7 +203,7 @@ that defect one layer down. #448 is the signature shape of this repo — a mecha
 reporting success while doing nothing — on the one surface that is unattended. #459 is
 the legibility half of #425, whose visibility half shipped in #458.
 
-### Lane B — retrieval correctness
+### Lane B — retrieval correctness *(historical — verify GitHub before dispatch)*
 
 | # | item | class |
 |---|---|---|
@@ -116,7 +227,7 @@ entity-anchored documents on the *memory-ingest* path; wiring the existing
 `SemanticSeedExtractor` was replayed over 37 real production intents and changed **0/37**
 packs.
 
-### Lane C — measurement
+### Lane C — measurement *(historical — verify GitHub before dispatch)*
 
 Every item here is an instance of *the number that would justify X is the one nobody
 records.*
@@ -125,10 +236,10 @@ records.*
 |---|---|---|
 | [#363](https://github.com/ronsse/trellis-ai/issues/363) | `TOKEN_TRACKED.pack_id` coverage is 0/33 | same seam as #362 — one agent, sequenced |
 | [#362](https://github.com/ronsse/trellis-ai/issues/362) | `get_items` fetch cost is off-book, so index mode cannot be evaluated | ← |
-| [#364](https://github.com/ronsse/trellis-ai/issues/364) | 42% of injected tokens get no verdict, so `useful_token_fraction` describes 58% of itself | |
+| [#364](https://github.com/ronsse/trellis-ai/issues/364) | 42% of injected tokens get no verdict, so `useful_token_fraction` describes 58% of itself | **closure-ready** — PR #389 shipped judged coverage; issue still open on GitHub |
 | [#348](https://github.com/ronsse/trellis-ai/issues/348) | nothing surfaces the editable-install staleness `write_provenance` was designed to catch | **done** — `resolve_stamp_staleness`; stamp gains `stamp_stale` / `source_tree_commit` only when stale, state reported in full by `trellis admin write-config` |
 
-### Lane D — CI reaches the backends it claims to support
+### Lane D — CI reaches the backends it claims to support *(historical — see corpus W1-ci)*
 
 | # | item | note |
 |---|---|---|
@@ -149,7 +260,7 @@ ruff stays green on code the newer one rejects. `scripts/check_tool_pins.py
 pins, and `make lint` / `make typecheck` / `make format` refuse to run a gate that is
 not CI's.
 
-### Lane E — keystone, design before code
+### Lane E — keystone, design before code *(historical — see corpus dispatch order)*
 
 [#360](https://github.com/ronsse/trellis-ai/issues/360) (the governed-pipeline rule does
 not hold for the document and vector planes),
@@ -159,7 +270,7 @@ plugin — `ready`, `keystone`), and
 operation — labelled `ready` / `mechanical`, so it is a better swarm candidate than its
 position here suggests).
 
-### Lane F — the OpenAI data-agent evaluation (filed 2026-09-03)
+### Lane F — the OpenAI data-agent evaluation (filed 2026-09-03) *(historical — blocked:owner-decision)*
 
 [#478](https://github.com/ronsse/trellis-ai/issues/478) is the umbrella;
 [#474](https://github.com/ronsse/trellis-ai/issues/474) confirm-to-save,
@@ -175,7 +286,7 @@ the whole plan is refuted (there is no `promote_candidates` symbol, and 139 of 3
 items recur). A prepared prompt is a snapshot; re-verify every "already exists" and "does
 not exist" claim before acting on one.
 
-### Lane G — the review-and-gate cluster (filed 2026-09-03/04)
+### Lane G — the review-and-gate cluster (filed 2026-09-03/04) *(historical — most items landed)*
 
 Filed *after* the re-derivation above, mostly by adversarial gate reviews of the PRs in
 the other lanes. They are small, mechanical, and mostly disjoint — which is why they
@@ -216,16 +327,19 @@ an "advisory, never raises" probe with two escaping exception types, a sanitized
 body whose sanitizer was unpinned. A PR is most confident about exactly the property it
 was written to establish, and that is where the coverage is thinnest.
 
-### Not swarm-eligible
+### Not swarm-eligible *(historical 2026-09-03 roster — use corpus verdicts instead)*
 
 `#194`, `#200`–`#203`, `#208`, `#250`, `#257`, `#261`, `#275`, `#306`, `#342`, `#405` —
-owner-decision, blocked-on-signal, or umbrella tracking. Eleven of the 37 open issues.
-Several have been in that state long enough that a disposition pass (close, unblock, or
-re-scope) would shrink the queue more than any single fix.
+owner-decision, blocked-on-signal, or umbrella tracking. Eleven of the **37** open issues
+at that snapshot (superseded by the 40-issue corpus).
 
 ---
 
-## Wave 0 — housekeeping (do first; hours, not days)
+## Wave 0 — housekeeping *(historical record)*
+
+> **HISTORICAL — do not dispatch Wave items unless the corpus or GitHub issue says they
+> are still open.** These waves record what landed, what was refused, and the measurements
+> behind each decision.
 
 | id | item | class | status | notes |
 |---|---|---|---|---|
