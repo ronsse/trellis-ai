@@ -140,43 +140,6 @@ gh api --method PATCH /repos/ronsse/trellis-ai --field allow_auto_merge=true
   queue serialises. At current volume (7 PRs in a day, one merger) that is free; it
   would not be with ten concurrent agents.
 
-### D-5 · Advisory fitness: ranked exposure, exploration, or match?
-
-**Context.** [#502](https://github.com/ronsse/trellis-ai/issues/502) observes that the
-five-advisory serving cap also limits the fitness loop's input. The event records served
-`advisory_ids`, but only a count for the larger matched set. Independently, the current
-fitness blend converges to the deployment's absolute pack-success rate rather than an
-advisory's lift over an unexposed arm.
-
-**Panel: SPLIT** (2026-09-04). One analysis recommends reserving one deterministic
-exploration slot while retaining four confidence-ranked slots, scoring only actual
-exposures, and suppressing only on adequately sampled negative lift. The adversarial
-analysis agrees that score-on-domain-match is invalid, but rejects any implementation
-until presentation, actuator, exploration cost, and corpus-growth semantics are chosen;
-unbounded rotation can spend tokens without repairing the absolute-rate actuator.
-
-**Recommendation:** preserve `advisory_ids` as the exposure set; reject score-on-domain-
-match. If exploration is authorized, use one bounded deterministic slot plus additive
-selection telemetry, and pair it with lift-based suppression. Keep
-[#503](https://github.com/ronsse/trellis-ai/issues/503) signal-gated until an item-scoped
-advisory is actually served.
-
-**Owner questions:**
-1. Does presentation mean served, matched, or matched-and-subject-present?
-2. Does the actuator use absolute success or `lift_vs_baseline`, and what happens with
-   no comparison arm?
-3. Is the exploration budget zero, one bounded slot, or another finite per-pack policy
-   whose service rate is explicit relative to admitted corpus growth? Unbounded full
-   rotation is not an admissible default.
-4. Are never-served rows sampled, pruned, or handled by operator cleanup?
-
-**Safe default:** keep the current five ranked served advisories and dispatch no #502
-implementation.
-
-**Cost of the recommendation being wrong:** one-fifth of advisory capacity may be spent
-on measurement, and current feedback volume may take months to meet both-arm sample
-floors. The safe default instead leaves the tail unmeasured.
-
 ## Pending — access
 
 ### A-1 · Delete Aura API credentials `985676d4` / `d664924e`
@@ -582,6 +545,28 @@ would have made vector rows honest while the reported symptom continued.
 ---
 
 ## Deferred
+
+### F-5 · Advisory-cap exploration and lift-based fitness ([#502](https://github.com/ronsse/trellis-ai/issues/502))
+
+The 2026-09-04 panel split. One position recommended one bounded exploration slot plus
+lift-based suppression; the adversarial position required the owner to settle
+presentation, actuator, exploration cost, and corpus-growth semantics first. Both
+rejected score-on-domain-match and preserving the absolute-rate actuator while claiming
+lift-based learning.
+
+**Owner decision (2026-09-04): defer.** Keep the current five confidence-ranked served
+advisories. Preserve `advisory_ids` as the exposure set and dispatch no #502
+implementation. [#503](https://github.com/ronsse/trellis-ai/issues/503) remains
+signal-gated.
+
+**Cost of being wrong:** the never-served tail remains unmeasured and cannot participate
+in fitness. This avoids spending one-fifth of the advisory budget on an experiment that
+may take months to reach both-arm sample floors.
+
+**Trigger:** materially higher attributed-feedback volume, a demonstrated advisory
+starvation incident, or an owner request to spend a bounded slot on exploration. Any
+reopened design must still define presentation and the zero-comparison-arm policy, cap
+per-pack cost, and prove sampling service is not silently outpaced by corpus growth.
 
 ### F-4 · The two richer shapes in [#365](https://github.com/ronsse/trellis-ai/issues/365)
 
