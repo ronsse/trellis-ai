@@ -78,6 +78,10 @@ GOVERNED_WRITE_EXEMPTIONS: dict[tuple[str, str], str] = {
         "The standalone vector endpoint remains direct until later issue "
         "#360 work defines its governed operation."
     ),
+    ("trellis_cli/admin_reindex_vectors.py", "vector.upsert_bulk"): (
+        "Admin reindex is an operator repair tool that rebuilds the vector "
+        "plane in bulk; later governance must define its governed operation."
+    ),
     ("trellis_cli/demo.py", "document.put"): (
         "Demo fixture seeding writes synthetic documents directly and must "
         "eventually use the governed batch path."
@@ -126,14 +130,21 @@ UNCLASSIFIED_WRITE_EXEMPTIONS: dict[tuple[str, str], str] = {
 }
 
 # Re-read on origin/main 04deb47 (2026-09-04) with git grep over the
-# document_store/doc_store/vector_store/vstore receiver names and all four
-# write methods, excluding store backends. It finds 23 non-handler sites:
-# 18 document and 5 vector. The AST also resolves the get_document_store()
-# alias in trellis_cli/ingest.py, making the complete non-handler inventory 24.
-_HAND_READ_SITE_COUNT = 24
+# document_store/doc_store/vector_store/vstore receiver names and every write
+# method, excluding store backends. It finds 24 non-handler sites: 18 document
+# and 6 vector. The AST also resolves the get_document_store() alias in
+# trellis_cli/ingest.py, making the complete non-handler inventory 25.
+#
+# The vector method set is the one VectorStore actually declares. upsert_many
+# is no method of any store in src/ -- tracking it policed nothing, while the
+# real bulk API, upsert_bulk, went unwatched and let
+# trellis_cli/admin_reindex_vectors.py write the vector plane outside the
+# ratchet. These counts are hand-derived from that grep, never from len() of
+# the scan they bound.
+_HAND_READ_SITE_COUNT = 25
 _HAND_READ_DOCUMENT_COUNT = 19
-_HAND_READ_VECTOR_COUNT = 5
-_WRITE_METHODS = {"put", "delete", "upsert", "upsert_many"}
+_HAND_READ_VECTOR_COUNT = 6
+_WRITE_METHODS = {"put", "delete", "upsert", "upsert_bulk"}
 
 
 @dataclass(frozen=True)
@@ -306,7 +317,7 @@ def _scan_direct_writes(
             allowed = (
                 {"put", "delete"}
                 if plane == "document"
-                else {"upsert", "upsert_many", "delete"}
+                else {"upsert", "upsert_bulk", "delete"}
             )
             if plane is not None and node.func.attr in allowed:
                 found.append(
