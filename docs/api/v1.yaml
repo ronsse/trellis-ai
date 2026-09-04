@@ -4038,9 +4038,10 @@ paths:
         '409':
           description: 'Nothing was dropped and nothing was recreated, and what has to change is the deployment rather than
             the request. A `code` says which — `vector_store_unconfigured` when the deployment has no vector store, `vector_reset_unsupported_backend`
-            when it has one this route cannot reset — a backend that keeps no `vectors` table to drop (ArcadeDB and Neo4j
-            hold vectors as graph-node state), or an object that does not implement the vector-store interface at all. Both
-            sit at the top level beside `status`, and neither is transient: retrying an unchanged request cannot succeed.'
+            when it has one this route cannot reset — a backend that does not implement `reset_storage()` (ArcadeDB and Neo4j
+            decline because they hold vectors as graph-node state and keep no `vectors` table of their own), or an object
+            that does not implement the vector-store interface at all. Both sit at the top level beside `status`, and neither
+            is transient: retrying an unchanged request cannot succeed.'
         '500':
           description: The reset was attempted and failed. The vectors table may have been dropped and not recreated, so this
             is not a no-op the way the 409 is. `code` is `vector_reset_failed`, at the top level beside `status`, and `message`

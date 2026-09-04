@@ -472,18 +472,27 @@ def _vector_reset_refusal(vector_store: object) -> dict[str, Any] | None:
 
     The two conditions share ``vector_reset_unsupported_backend``: same
     class (nothing touched, fix the deployment), and ``code`` is the
-    machine-readable half. They do **not** share a message. "Keeps no
-    `vectors` table" is something the ABC's declaration entitles us to say
-    about a ``VectorStore`` that declined; it would be a fact invented
-    about an object that never implemented the interface, which is the
-    #512 failure mode in the sentence that fixes #512.
+    machine-readable half. They do **not** share a message, and **neither
+    message states a reason the object did not give.** A backend that
+    declined is told to be exactly that — it does not implement
+    ``reset_storage()`` — and *not* that it "keeps no `vectors` table",
+    which is ArcadeDB's and Neo4j's reason for declining and would be
+    invented about any other backend that simply has not implemented the
+    method yet. ``VectorStore.reset_storage``'s own refusal makes that
+    distinction for the same reason and in the same words; a route that
+    borrowed the reason here while the ABC refused to borrow it one frame
+    down would be #512 committed in the sentence that fixes #512. The
+    OpenAPI description names ArcadeDB and Neo4j, which is a statement
+    about this deployment's known backends and not about the object in
+    hand.
     """
     if isinstance(vector_store, VectorStore):
         if vector_store.supports_reset():
             return None
         detail = (
-            f"{type(vector_store).__name__} keeps no `vectors` table "
-            "for this route to drop and recreate."
+            f"{type(vector_store).__name__} does not implement "
+            "`reset_storage()`, so there is no way to drop and recreate "
+            "its storage through this interface."
         )
     else:
         detail = (
@@ -513,10 +522,11 @@ def _vector_reset_refusal(vector_store: object) -> dict[str, Any] | None:
                 "A `code` says which — `vector_store_unconfigured` when "
                 "the deployment has no vector store, "
                 "`vector_reset_unsupported_backend` when it has one this "
-                "route cannot reset — a backend that keeps no `vectors` "
-                "table to drop (ArcadeDB and Neo4j hold vectors as "
-                "graph-node state), or an object that does not implement "
-                "the vector-store interface at all. "
+                "route cannot reset — a backend that does not implement "
+                "`reset_storage()` (ArcadeDB and Neo4j decline because "
+                "they hold vectors as graph-node state and keep no "
+                "`vectors` table of their own), or an object that does "
+                "not implement the vector-store interface at all. "
                 "Both sit at the top level beside `status`, and neither is "
                 "transient: retrying an unchanged request cannot succeed."
             )

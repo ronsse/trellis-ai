@@ -364,11 +364,24 @@ class TestSupportsResetIsDerivedFromTheOverride:
             _RebindsTheBaseStore().reset_storage()
 
     def test_declining_and_raising_cannot_disagree(self):
-        """The invariant, over every class in this module and the shipped
-        backends: declining is exactly raising the base refusal.
+        """The invariant, over every class in this module: declining is
+        exactly raising the base refusal.
 
         Asserted as a biconditional rather than a table, so a new class
-        cannot be added to one side only.
+        cannot be added to one side only. The right-hand side is the
+        store **called**, not ``cls.reset_storage is
+        VectorStore.reset_storage`` — that spelling is the body of
+        ``supports_reset`` itself, so a biconditional built on it is a
+        tautology that restates the implementation instead of checking
+        it against behaviour.
+
+        The residual, stated because the identity rule cannot see it: an
+        override that *delegates* to the base
+        (``def reset_storage(self): return super().reset_storage()``)
+        declares support and then refuses. That is out of contract and
+        ``VectorStoreContractTests.test_reset_storage_matches_supports_reset``
+        is what catches it — by calling the thing — which is why the
+        contract case exists beside this one rather than instead of it.
         """
         classes: list[type[VectorStore]] = [
             _MemoryVectorStore,
@@ -380,7 +393,12 @@ class TestSupportsResetIsDerivedFromTheOverride:
         ]
         for cls in classes:
             declines = not cls.supports_reset()
-            raises = cls.reset_storage is VectorStore.reset_storage
+            try:
+                cls().reset_storage()
+            except NotImplementedError:
+                raises = True
+            else:
+                raises = False
             assert declines == raises, cls
         # Floor: both sides of the biconditional are actually exercised,
         # so it is not satisfied by every class answering the same way.

@@ -2004,7 +2004,15 @@ class TestVectorsResetUnsupportedBackend:
         # own tooling" survive, and repopulating an index nobody rebuilt
         # is not a recovery.
         assert "_UnresettableVectorStore" in body["message"], body
-        assert "keeps no `vectors` table" in body["message"], body
+        # What the object declined is a fact it gave; *why* it declined is
+        # not. ArcadeDB's and Neo4j's reason — they keep no `vectors`
+        # table — would be invented about any other backend that simply
+        # has not implemented the method, which is #512 one frame up from
+        # where #512 lives. ``VectorStore.reset_storage``'s own refusal
+        # makes the same distinction, so the two are asserted together.
+        assert "does not implement `reset_storage()`" in body["message"], body
+        assert "keeps no `vectors` table" not in body["message"], body
+        assert "`VectorStore` interface" not in body["message"], body
         assert "Nothing was changed" in body["message"], body
         assert "Rebuild the backend's vector index" in body["message"], body
         assert "trellis admin reindex-vectors --force" in body["message"], body
@@ -2041,13 +2049,13 @@ class TestVectorsResetUnsupportedBackend:
         arm whose promise is that nothing was touched, and the store is
         checked, not just the status.
 
-        The message says what is true of *this* object and not what is
-        true of ArcadeDB. "Keeps no `vectors` table" is a fact the ABC's
-        declaration entitles the route to state about a ``VectorStore``
-        that declined; said about an object that never implemented the
-        interface it is invented — which is #512's own failure mode,
-        committed in the sentence that fixes #512. Both halves are
-        asserted: the true one present, the borrowed one absent.
+        The message says what is true of *this* object and nothing more.
+        A ``VectorStore`` that declined gets told it does not implement
+        ``reset_storage()``; this object never implemented the interface
+        that declares the method, so saying so about it would be invented
+        — which is #512's own failure mode, committed in the sentence
+        that fixes #512. Both halves are asserted: the true one present,
+        the borrowed one absent.
         """
         registry = app_module._registry
         store = _NotAVectorStore()
@@ -2061,7 +2069,7 @@ class TestVectorsResetUnsupportedBackend:
         assert "_NotAVectorStore" in body["message"], body
         assert "does not implement" in body["message"], body
         assert "`VectorStore` interface" in body["message"], body
-        assert "keeps no `vectors` table" not in body["message"], body
+        assert "reset_storage()" not in body["message"], body
         # The recovery still rides along: the two conditions differ in
         # what happened, not in what the operator does next.
         assert "Nothing was changed" in body["message"], body
