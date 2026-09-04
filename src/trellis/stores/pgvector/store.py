@@ -158,11 +158,14 @@ class PgVectorStore(PostgresStoreBase, VectorStore):
 
     @property
     def dimensions(self) -> int | None:
-        """The width the ``vectors.embedding`` column was provisioned at.
+        """The width this store was constructed with.
 
-        Never ``None``: a pgvector column carries a fixed dimension, and
-        ``__init__`` refuses to construct a store whose ``dimensions``
-        disagrees with an existing column.
+        Never ``None``: a pgvector column carries a fixed dimension and
+        ``vectors.embedding`` is created at this one. ``_init_schema``
+        also *checks* it against an existing column and refuses on a
+        mismatch — but that check is skipped when the column's type
+        literal will not parse, so this is the constructor's number
+        rather than a reading of the live column.
         """
         return self._dimensions
 
