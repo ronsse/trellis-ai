@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from tests.cli_output import plain
 from trellis_cli.main import app
 
 runner = CliRunner()
@@ -97,4 +98,4 @@ class TestIngestConversations:
     def test_text_output_mentions_counts(self, export: Path) -> None:
         result = runner.invoke(app, ["ingest", "conversations", str(export)])
         assert result.exit_code == 0
-        assert "new=1" in result.stdout
+        assert "new=1" in plain(result.stdout)

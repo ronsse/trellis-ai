@@ -22,6 +22,7 @@ from typer.testing import CliRunner
 if TYPE_CHECKING:
     import pytest
 
+from tests.cli_output import plain
 from trellis.stores.base.event_log import EventType
 from trellis_cli.admin import admin_app
 from trellis_cli.admin_proposals import (
@@ -133,7 +134,7 @@ class TestGenerateProposals:
         _init_stores(tmp_path, monkeypatch)
         result = _invoke(["generate-proposals"])
         assert result.exit_code == EXIT_OK, result.output
-        assert "proposals_returned=0" in result.output
+        assert "proposals_returned=0" in plain(result.output)
 
     def test_empty_json_run_emits_zero_proposals(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
