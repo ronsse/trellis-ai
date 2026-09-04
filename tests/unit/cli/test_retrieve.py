@@ -719,6 +719,62 @@ class TestOperatorCopyableIds:
         assert "[green]" not in result.stdout, "the style tag leaked as literal text"
         assert "\x1b[" in result.stdout, "the style tag rendered nothing at all"
 
+    def test_search_prints_the_whole_trap_line_verbatim(self) -> None:
+        """The line #492 quotes, end to end — id **and** preview.
+
+        The issue's example is::
+
+            in:  '  - dataset:snowflake://db/schema/table: preview [document] tail'
+            out: '  - dataset<snowflake>//db/schema/table: preview  tail'
+
+        and the ``[document]`` it shows being eaten sits in the *preview*,
+        not in the id — the preview is document content, which is where a
+        markdown link or a ``[TODO]`` actually lives. Escaping ``doc_id``
+        alone left that half live: the shipped render still returned
+        ``preview  tail``. Sibling assertions above cover the id, so this
+        one is written around the body text they cannot see.
+        """
+        from trellis_cli.stores import get_document_store
+
+        get_document_store().put(
+            "dataset:snowflake://db/schema/table", "preview [document] tail"
+        )
+        result = runner.invoke(app, ["retrieve", "search", "preview"])
+
+        assert result.exit_code == 0
+        rendered = " ".join(plain(result.stdout).split())
+        assert "dataset:snowflake://db/schema/table: preview [document] tail" in (
+            rendered
+        ), rendered
+
+    def test_traces_keeps_the_source_column_and_the_trace_id(self) -> None:
+        """``retrieve traces`` renders ``[{source}]`` as *literal* brackets.
+
+        Rich read that as a style tag and deleted it, so the source column
+        was absent from every row of the listing — the ``[document]``
+        defect one command over, and invisible because nothing on screen
+        says a column was removed. The trace id is hoisted into a local a
+        line above the render, which is why the id scan did not see it
+        either.
+        """
+        from trellis.schemas.trace import Trace, TraceContext
+        from trellis_cli.stores import get_trace_store
+
+        get_trace_store().append(
+            Trace(
+                trace_id="trace-canary-0001",
+                source="agent",
+                intent="canary rollout",
+                context=TraceContext(agent_id="agent-1"),
+            )
+        )
+        result = runner.invoke(app, ["retrieve", "traces"])
+
+        assert result.exit_code == 0
+        rendered = " ".join(plain(result.stdout).split())
+        assert "[agent]" in rendered, rendered
+        assert "trace-canar" in rendered, rendered
+
 
 class TestRetrieveChunkVisibility:
     """``retrieve search`` hands back whole rows (#396).

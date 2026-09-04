@@ -266,7 +266,19 @@ def search(
             if quiet:
                 sys.stdout.write(f"{r['doc_id']}: {preview}\n")
             else:
-                console.print(f"  - {escape(r['doc_id'])}: {preview}")
+                # ``markup=False`` rather than escaping the id alone, and
+                # this is the line #492 quotes. Escaping ``doc_id`` fixed
+                # the half the *id* carries; ``preview`` is document
+                # content, and the ``[document]`` the issue shows being
+                # eaten sits in *there*, not in the id. The line carries
+                # no styling of its own, so there is nothing to lose —
+                # the same call ``retrieve pack``'s item line already
+                # makes one function up.
+                console.print(
+                    f"  - {r['doc_id']}: {preview}",
+                    markup=False,
+                    highlight=False,
+                )
 
 
 @retrieve_app.command()
@@ -385,7 +397,11 @@ def traces(
             if quiet:
                 sys.stdout.write(line.strip() + "\n")
             else:
-                console.print(line)
+                # ``markup=False``: the trace id is a copyable handle and
+                # the ``[{source}]`` column is *literal* brackets, so Rich
+                # read the source as a style tag and deleted it from every
+                # row of this listing.
+                console.print(line, markup=False, highlight=False)
 
 
 @retrieve_app.command()
@@ -420,7 +436,9 @@ def precedents(
             if quiet:
                 sys.stdout.write(line.strip() + "\n")
             else:
-                console.print(line)
+                # The entity id is the handle for the next ``retrieve
+                # entity``; the title is free text. Neither is styled.
+                console.print(line, markup=False, highlight=False)
 
 
 @retrieve_app.command("file-context")

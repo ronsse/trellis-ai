@@ -1132,6 +1132,14 @@ trellis retrieve search <query> [--limit N] [--domain DOMAIN] [--include-chunks]
 > wrapped in `rich.markup.escape`. `tests/unit/test_rich_id_markup_rule.py`
 > derives both halves from the AST and fails the build on a new bare
 > `Console()` or a new unescaped id.
+>
+> Note **where the two corruptions sat in that one line**, because the fixes
+> differ: the emoji was in the id and the eaten `[document]` was in the
+> *preview* — document content, which is where a markdown link or a `[TODO]`
+> actually lives. Escaping the id does nothing for the body text, so this
+> command's result line passes `markup=False` outright, as `retrieve pack`'s
+> item line already did. The AST rule polices handles; a line whose whole
+> content is untrusted wants the flag.
 
 **Example:**
 

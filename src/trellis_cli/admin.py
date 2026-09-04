@@ -220,7 +220,8 @@ def init_learning_params(
             print(json.dumps({"status": "exists", "path": str(target)}))
         else:
             console.print(
-                f"[yellow]Already exists: {target}. Pass --force to overwrite.[/yellow]"
+                f"[yellow]Already exists: {escape(str(target))}."
+                " Pass --force to overwrite.[/yellow]"
             )
         raise typer.Exit(code=EXIT_OK)
 
@@ -237,7 +238,7 @@ def init_learning_params(
     if output_format == "json":
         print(json.dumps({"status": "written", "path": str(target)}))
     else:
-        console.print(f"[green]Wrote {target}[/green]")
+        console.print(f"[green]Wrote {escape(str(target))}[/green]")
         console.print(
             "[dim]Edit values to tune the promote / noise thresholds, then"
             " rerun 'trellis analyze learning-candidates'.[/dim]"
@@ -1650,7 +1651,9 @@ def migrate_graph(
             console.print()
             console.print("[red]Errors:[/red]")
             for target, msg in report.errors:
-                console.print(f"  [red]{target}[/red]: {msg}")
+                # ``target`` is the legacy graph key the migration choked
+                # on — an identifier the operator re-runs against.
+                console.print(f"  [red]{escape(target)}[/red]: {escape(msg)}")
 
     if failed:
         raise typer.Exit(code=EXIT_STORE)
@@ -1998,7 +2001,7 @@ def _lookup_candidate_payload(event_log: Any, candidate_id: str) -> dict[str, An
         f"No WELL_KNOWN_CANDIDATE event found with candidate_id="
         f"{candidate_id!r}. Run 'trellis analyze schema-evolution' first."
     )
-    console.print(f"[red]{msg}[/red]")
+    console.print(f"[red]{escape(msg)}[/red]")
     # Not-found is a workflow state (operator must run schema-evolution
     # first), not a malformed input — surface as EXIT_INTERNAL rather
     # than EXIT_VALIDATION.
@@ -2249,7 +2252,7 @@ def draft_promotion_adr(
             f"Refusing to overwrite existing ADR at {output_path}. "
             "Pass --force to overwrite (the prior content will be replaced)."
         )
-        console.print(f"[red]{msg}[/red]")
+        console.print(f"[red]{escape(msg)}[/red]")
         # Overwrite-without-force is a destructive-action guard rather
         # than a malformed-input error — surface as EXIT_INTERNAL.
         raise typer.Exit(code=EXIT_INTERNAL)

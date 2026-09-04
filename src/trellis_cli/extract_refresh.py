@@ -443,7 +443,11 @@ def refresh(  # noqa: PLR0912, PLR0915 - CLI dispatch with explicit branching by
             # mypy proves ``if source is not None`` always true and skips
             # this whole ``else`` as unreachable — a blind spot the typer
             # ``Option(None)``-on-a-non-Optional pattern creates wherever it
-            # is used. ``test_extract_refresh`` covers the branch instead.
+            # is used — ``--warn-unreachable`` reports *two* dark
+            # statements in this function, this one and the ``--type
+            # requires --path`` arm above it, so it is a pattern rather
+            # than a one-off. ``test_extract_refresh`` covers the branch
+            # instead.
             console.print(f"[red]Path not found: {escape(str(type_path))}[/red]")
             raise typer.Exit(code=EXIT_INTERNAL)
         try:

@@ -89,15 +89,22 @@ stated here rather than discovered later:
   ``key_id``, ``candidate_id``) are set aside here too — the rule cannot
   tell them apart, escaping them costs nothing, and the day one of them
   stops being a ULID nobody has to notice.
-* **It under-collects on names that do not say what they hold.** An id
-  bound to ``x`` and printed as ``f"{x}"`` walks past. The binding axis is
-  partly closed — :func:`tests.ast_rules.construction_names` follows
-  ``x = doc_id``, an import alias and a subclass to a fixed point, so
-  those spellings are caught — but value flow is not, so
-  ``x = row["doc_id"]`` is invisible. That is residue, not a claim of
-  completeness, and it is the reason the emoji half is enforced
-  structurally instead: the half that *cannot* be fixed at the value is
-  also the half that needs no name shape.
+* **It under-collected on names that do not say what they hold, and that
+  cost was not hypothetical.** An id bound to ``x`` and printed as
+  ``f"{x}"`` walked past: :func:`tests.ast_rules.construction_names`
+  follows ``x = doc_id``, an import alias and a subclass to a fixed point,
+  but not value flow, so ``x = row["doc_id"]`` was invisible. Filed as
+  residue — and **nine live offences were hiding behind it** when the
+  first sweep landed, across five modules, carrying a trace id, an entity
+  id, a corpus ``doc_id``, two ``Path`` objects, a source file and a legacy
+  graph key. The pair that says it best is ``ingest_conversations.py`` and
+  ``ingest_corpus.py``: the *same expression*,
+  ``entry.get("source_path") or entry["doc_id"]``, escaped in the file
+  that wrote it inline and missed in the file that hoisted it into a
+  local one line up. :func:`_hoisted_handle_names` closes it, bounded to
+  values that *build a string* so a dict holding a handle does not taint
+  its own unrelated keys — measured at 9 reports and zero false ones,
+  against 49 and mostly false for the unbounded version.
 
 **Where the rule does not reach.** ``sys.stdout.write`` — what ``retrieve
 search --quiet`` and ``retrieve pack --quiet`` already use — is not a
@@ -159,7 +166,25 @@ _ID_SUFFIXES = (
     "_file",
     "_files",
 )
-_ID_NAMES = frozenset({"id", "ids", "path", "paths", "dir", "dirs", "file", "files"})
+_ID_NAMES = frozenset(
+    {
+        "id",
+        "ids",
+        "path",
+        "paths",
+        "dir",
+        "dirs",
+        "file",
+        "files",
+        # ``relpath`` has no underscore, so neither the suffix list above
+        # nor the whole-name list caught it — and ``ingest corpus`` /
+        # ``ingest conversations`` each printed one raw, from a directory
+        # of *user-named* files, which is the most adversarial input this
+        # CLI takes. A roster of eight is how the ninth gets missed.
+        "relpath",
+        "relpaths",
+    }
+)
 
 #: The escape function the rule accepts. Bare name, so
 #: ``from rich.markup import escape`` and ``markup.escape`` both land — and
@@ -229,6 +254,79 @@ def _names_read(node: ast.AST) -> set[str]:
     return found
 
 
+#: Value shapes that make a local *a rendered string built from a handle*
+#: rather than an object that merely holds one. Taint follows only these.
+#:
+#: The distinction is the whole of why this widening is affordable, and it
+#: is measured rather than argued. Tainting on *any* value that mentions an
+#: id-shaped name reports 49 sites across ``src/trellis_cli`` and the large
+#: majority are false — ``payload = {...,"doc_id":...}`` then
+#: ``payload["scanned"]``, ``summary["tier"]``, ``result.effect_size``,
+#: ``match.enforcement.value`` — because an *object* binding inherits taint
+#: from a key nobody renders. Restricting the value to an f-string, a
+#: ``or``-default, a subscript or a concatenation reports **9**, and every
+#: one of the nine was a live offence.
+_STRING_BUILDING_VALUES = (ast.JoinedStr, ast.BoolOp, ast.Subscript, ast.BinOp)
+
+
+def _hoisted_handle_names(scope: ast.AST, handles: set[str]) -> set[str]:
+    """Locals in *scope* bound to a string built out of a *handles* name.
+
+    The under-collection this rule shipped with, closed. ``_names_read``
+    reads the expression a render *hands to Rich*, so a handle that was
+    interpolated one line earlier is invisible::
+
+        pruned_name = entry.get("source_path") or entry["doc_id"]
+        console.print(f"  [red]prune [/red] {pruned_name}")
+
+    That is ``ingest_corpus.py``, and its twin in
+    ``ingest_conversations.py`` — the identical expression, left inline —
+    *was* escaped by #492's sweep. Same defect, same pair of files, and
+    only the one whose author had not hoisted it into a local was found.
+    Nine such sites were live after that sweep across five modules,
+    carrying a trace id, an entity id, a corpus ``doc_id``, two ``Path``
+    objects, a source file and a legacy graph key.
+
+    Scoped to one function rather than the module, because a module-wide
+    pass makes every ``msg`` and ``result`` in the file mean whatever the
+    unluckiest one means.
+
+    ``construction_names`` is not the tool for this: it resolves a
+    binding whose *value is a name*, and none of these are. The two stay
+    separate — a bare rebinding is a different shape from a string built
+    around a handle, and collapsing them would make the roster's
+    ``partial_binding`` residue look resolved when it is not.
+
+    Still residue, named so the next reader does not have to rediscover
+    it: a **loop target** (``for target, msg in report.errors:``) binds no
+    ``Assign`` node, so a handle arriving by unpacking is invisible. There
+    is one such site — ``admin migrate-graph``'s error list, whose
+    ``target`` is the legacy graph key — and it is escaped by hand. A
+    bound closure was preferred to an unbounded one: the container's own
+    name (``errors``) says nothing about what it holds, so catching the
+    shape means tainting every loop variable in the CLI.
+    """
+    tainted: set[str] = set()
+    for node in ast.walk(scope):
+        if isinstance(node, ast.Assign):
+            targets = [t.id for t in node.targets if isinstance(t, ast.Name)]
+            value: ast.expr | None = node.value
+        elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)) and isinstance(
+            node.target, ast.Name
+        ):
+            targets, value = [node.target.id], node.value
+        else:
+            continue
+        if not targets or value is None:
+            continue
+        if not isinstance(value, _STRING_BUILDING_VALUES):
+            continue
+        if _is_escaped(value) or not (_names_read(value) & handles):
+            continue
+        tainted.update(name for name in targets if not _is_id_shaped(name))
+    return tainted
+
+
 def _id_bearing_names(tree: ast.Module) -> set[str]:
     """Every name in *tree* that holds a copyable handle, aliases included.
 
@@ -239,6 +337,11 @@ def _id_bearing_names(tree: ast.Module) -> set[str]:
     rebinding — and it is here because the shared roster's whole binding
     axis would otherwise be a blind spot, and a blind spot nobody wrote
     down is how the last four AST rules in this repo shipped evadable.
+
+    :func:`_hoisted_handle_names` adds the closure that *does* pay on the
+    real tree: a handle interpolated into a local one line above the
+    render. That one is applied per function, in
+    :func:`_unescaped_id_renders`, so it is not folded in here.
     """
     names: set[str] = set()
     for name in _names_read(tree):
@@ -335,6 +438,30 @@ def _rich_entry_points(tree: ast.Module) -> list[ast.Call]:
     ]
 
 
+def _enclosing_scopes(tree: ast.Module) -> dict[ast.AST, ast.AST]:
+    """``{node: innermost enclosing function, or the module}``.
+
+    Built by descent rather than read off line numbers: a decorator
+    expression sits outside its function's body but inside its line span,
+    and the shared roster ships a ``decorator`` placement shape.
+    """
+    scopes: dict[ast.AST, ast.AST] = {}
+
+    def descend(node: ast.AST, scope: ast.AST) -> None:
+        for child in ast.iter_child_nodes(node):
+            inner = (
+                child
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+                else scope
+            )
+            scopes[child] = inner
+            descend(child, inner)
+
+    scopes[tree] = tree
+    descend(tree, tree)
+    return scopes
+
+
 def _unescaped_id_renders(root: Path | None = None) -> list[str]:
     """Rich renders carrying a copyable handle nothing escaped.
 
@@ -342,18 +469,29 @@ def _unescaped_id_renders(root: Path | None = None) -> list[str]:
     synthetic tree. A guard that re-implements the predicate guards a copy
     of itself and leaves the shipped one free to regress — the failure
     ``test_machine_output_rule`` names in its own docstring.
+
+    Two name sets, not one: the module-wide handles, plus whatever the
+    *enclosing function* hoisted a handle into (:func:`_hoisted_handle_names`).
+    The second is per scope because ``msg`` and ``line`` mean something
+    different in every command body.
     """
     cli_root = root if root is not None else _cli_root()
     found: list[str] = []
     for path, tree in iter_modules(cli_root):
         names = _id_bearing_names(tree)
+        scopes = _enclosing_scopes(tree)
+        hoisted: dict[ast.AST, set[str]] = {}
         for node in _rich_entry_points(tree):
             if _markup_disabled(node):
                 continue
+            scope = scopes.get(node, tree)
+            if scope not in hoisted:
+                hoisted[scope] = _hoisted_handle_names(scope, names)
+            names_here = names | hoisted[scope]
             offending = [
                 value
                 for value in _rendered_values(node)
-                if _names_read(value) & names and not _is_escaped(value)
+                if _names_read(value) & names_here and not _is_escaped(value)
             ]
             if offending:
                 rendered = ", ".join(ast.unparse(value) for value in offending)
@@ -559,17 +697,43 @@ sys.stdout.write(f"{doc_id}\\n")                      # 19 ALLOWED: not a render
 Table(title=f"rows for {doc_id}")                    # 20 a title renders markup too
 Table(title=f"rows for {escape(doc_id)}")            # 21 ALLOWED: escaped title
 console.print("x", style="dim", soft_wrap=True)      # 22 ALLOWED: switches not values
+line = f"  - {doc_id}: preview"                      # 23
+console.print(line)                                  # 24 hoisted one line earlier
+bag = {"doc_id": doc_id}                             # 25
+console.print(bag["count"])                          # 26 ALLOWED: object, not a string
+plain = f"  - {count} items"                         # 27
+console.print(plain)                                 # 28 ALLOWED: no handle in it
+console.print(escape(line))                          # 29 ALLOWED: escaped at the render
+console.print(f"{fmt(escape(msg), doc_id)}")         # 30 escape is not outermost
+console.print(f"  - {outcome.relpath}")              # 31 relpath has no underscore
 """
 
-#: Read off :data:`_JUDGEMENTS` by hand. Line 11 is the one worth naming:
+#: Read off :data:`_JUDGEMENTS` by hand. Line 24 is the newest and the one
+#: #521's gate added: a handle interpolated into a local one line above the
+#: render was invisible to a scan that reads only the rendered expression,
+#: and nine such sites were live in ``src/trellis_cli`` *after* the escaping
+#: sweep. Lines 26 and 28 are its negative controls, and 26 is the one that
+#: bounds the widening: a *dict* built around a handle must not taint its
+#: own unrelated keys, or ``payload["scanned"]`` and forty of its siblings
+#: become offences. Line 11 is the other one worth naming:
 #: ``emoji=False`` closes the shortcode half and leaves ``[document]``
-#: being eaten, so it must not buy an exemption. Line 19 is the other:
+#: being eaten, so it must not buy an exemption. Line 30 pins
+#: ``_is_escaped``'s *outermost* rule, which nothing pinned before: its
+#: docstring cites a ``worker.py`` line where one interpolation was escaped
+#: and its neighbour was not, but ``_rendered_values`` splits an f-string
+#: per ``{...}`` and covers that on its own — so relaxing ``_is_escaped``
+#: to "contains an ``escape`` call anywhere" left the whole module green.
+#: Only a *single* interpolation carrying both an escaped and a raw value
+#: separates the two. Line 31 is the
+#: cheapest of the lot and was a live miss in two files: ``relpath`` has no
+#: underscore, so neither ``_ID_SUFFIXES`` nor the original
+#: ``_ID_NAMES`` saw a path in it. Line 19 is the other:
 #: ``retrieve search --quiet`` writes straight to ``sys.stdout`` and was
 #: already safe — a rule that flagged it would be turned off by the first
 #: author it inconvenienced. Line 22 is the cost of reading keyword values
 #: at all: ``print``'s keywords are switches rather than content, and if
 #: scanning them ever starts flagging one, this is where it shows.
-_EXPECTED_JUDGEMENT_LINES = [4, 5, 6, 7, 8, 9, 10, 11, 12, 20]
+_EXPECTED_JUDGEMENT_LINES = [4, 5, 6, 7, 8, 9, 10, 11, 12, 20, 24, 30, 31]
 
 
 def test_the_scan_makes_the_judgements_this_rule_claims(tmp_path: Path) -> None:

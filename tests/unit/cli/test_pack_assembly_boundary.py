@@ -173,6 +173,12 @@ def _cli_pack_build_sites() -> dict[str, str]:
     ``tests/unit/test_chunk_visibility_rule.py`` documents: ``.build`` is a
     common method name, and over-matching here would demand a boundary case
     for something that assembles no pack.
+
+    The receiver test is **case-insensitive**, and that is not cosmetic:
+    both live sites read ``builder.build(...)``, but
+    ``PackBuilder(strategies=[...]).build(...)`` — the spelling this
+    file's own fixture uses — carries a capital ``B`` and slipped a
+    synthetic third site past the roster with every test green.
     """
     root = Path(__file__).resolve().parents[3] / "src" / "trellis_cli"
     assert root.is_dir(), f"trellis_cli not found at {root}"
@@ -188,7 +194,7 @@ def _cli_pack_build_sites() -> dict[str, str]:
                     isinstance(node, ast.Call)
                     and isinstance(node.func, ast.Attribute)
                     and node.func.attr in ("build", "build_sectioned")
-                    and "builder" in ast.unparse(node.func.value)
+                    and "builder" in ast.unparse(node.func.value).lower()
                 ):
                     found[parent.name] = f"{py_file.name}:{node.lineno}"
     return found

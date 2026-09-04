@@ -100,14 +100,15 @@ def ingest_conversations(
 
     counts = report.counts()
     verb = "Plan for" if dry_run else "Synced"
-    console.print(f"[green]{verb}[/green] {report.root} ({source_system})")
+    console.print(f"[green]{verb}[/green] {escape(str(report.root))} ({source_system})")
     for outcome in report.files:
         if outcome.action == "skip":
             continue
         style = _ACTION_STYLES[outcome.action]
         chunk_note = f" ({outcome.chunk_count} chunks)" if outcome.chunk_count else ""
         console.print(
-            f"  [{style}]{outcome.action:6}[/{style}] {outcome.relpath}{chunk_note}"
+            f"  [{style}]{outcome.action:6}[/{style}] "
+            f"{escape(outcome.relpath)}{chunk_note}"
         )
     for entry in report.pruned:
         console.print(

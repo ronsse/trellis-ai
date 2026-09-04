@@ -220,8 +220,8 @@ def _print_generate_outcome_text(outcome: _GenerateOutcome) -> None:
         source = row["source_file"] or "(unknown source)"
         console.print(
             f"  [green]drafted[/green] {escape(row['proposal_id'][:16])}… "
-            f"signature={row['cluster_signature'][:16]}… "
-            f"source={source} events={row['source_event_count']}"
+            f"signature={escape(row['cluster_signature'][:16])}… "
+            f"source={escape(source)} events={row['source_event_count']}"
         )
 
 
@@ -366,7 +366,7 @@ def list_proposals_command(
                 f"  {escape(row['proposal_id'][:16])}…  "
                 f"{row['generated_at']}  "
                 f"events={row['source_event_count']}  "
-                f"source={source}"
+                f"source={escape(source)}"
             )
     raise typer.Exit(code=EXIT_OK)
 
