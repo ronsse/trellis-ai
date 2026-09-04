@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from tests.cli_output import plain
 from trellis.core.error_sanitize import SUPPRESSED_MARKER
 from trellis.errors import (
     ApprovalRequiredError,
@@ -75,15 +76,16 @@ class TestDamagedPolicyFileIsLegibleOnTheCli:
         result = runner.invoke(app, ["curate", "feedback", "trace_1", "0.9"])
 
         assert result.exit_code == EXIT_STORE
+        rendered = plain(result.output)
         # The file: an operator cannot fix what they cannot find.
-        assert str(damaged_policy_file) in result.output
+        assert str(damaged_policy_file) in rendered
         # The specific problem, in the loader's own words.
-        assert 'no "policies" key' in result.output
+        assert 'no "policies" key' in rendered
         # The recovery, likewise — not a second vocabulary for it.
-        assert "remove the file to run with no policies" in result.output
+        assert "remove the file to run with no policies" in rendered
         # And the exception's own stable code, so the reader can tell a
         # config fault from a validation one without parsing prose.
-        assert "CONFIG_ERROR" in result.output
+        assert "CONFIG_ERROR" in rendered
 
     def test_exit_code_is_not_the_unhandled_traceback_default(
         self, damaged_policy_file: Path

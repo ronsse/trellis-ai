@@ -39,12 +39,29 @@ fix: ## Auto-fix everything pre-commit can fix (ruff format + ruff --fix + white
 # clean. A target nobody invokes cannot catch that, so `env-check` is a
 # PREREQUISITE of both gates rather than something to remember.
 #
+# `format` is gated too, since #498. It was the one ruff invocation outside
+# the gate, and it is the invocation that WRITES: a drifted `ruff format`
+# rewrites every .py file under src/ and tests/ (774 of them at 3f6dd2d) to a
+# formatter version CI will then check them against. The damage is caught
+# rather than shipped -- `ruff format --check` inside the gated `lint` is what
+# catches it -- but "caught" there means an unrelated PR arrives carrying a
+# tree-wide reformat, which is the largest diff a version difference can buy
+# for the least reason.
+#
 # Deliberately NOT a prerequisite of `test`: tests.yml runs the full
 # 3.11/3.12/3.13 matrix, so a test run on 3.12 is a legitimate thing to do
 # and demanding the gate version there would be false.
 #
+# Which targets are gated is not maintained here by hand:
+# tests/unit/test_makefile_gate_rule.py derives it, and fails on any target
+# whose recipe invokes ruff or mypy without reaching `env-check` through its
+# prerequisites. `format` shipped ungated for six weeks under a comment that
+# said "both gates".
+#
 # TRELLIS_ALLOW_ENV_DRIFT=1 downgrades it to a warning for deliberate work in
-# a known-drifted environment.
+# a known-drifted environment. Only 1/true/yes/on turn it on; anything else
+# (0, false, no, unset) leaves the gate enforcing -- see #498, where =0 used
+# to enable it.
 env-check: ## Verify this environment runs the same gates as CI (#398)
 	python scripts/check_tool_pins.py --check-env
 
@@ -52,7 +69,7 @@ lint: env-check ## Run linting (matches CI: lint rules + formatting)
 	ruff check src/ tests/
 	ruff format --check src/ tests/
 
-format: ## Format code
+format: env-check ## Format code
 	ruff format src/ tests/
 	ruff check --fix src/ tests/
 

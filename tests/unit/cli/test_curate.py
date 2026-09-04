@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 import pytest
 from typer.testing import CliRunner
 
+from tests.cli_output import assert_coloured, force_colour
 from trellis.learning import submit_learning_promotion
 from trellis.mutate.commands import (
     Command,
@@ -17,6 +18,7 @@ from trellis.mutate.commands import (
     Operation,
 )
 from trellis.mutate.executor import MutationExecutor
+from trellis_cli import curate as curate_cli
 from trellis_cli.main import app
 
 runner = CliRunner()
@@ -228,15 +230,35 @@ class TestCurateRedact:
         assert data["status"] == "rejected"
         assert data["command_id"]
 
-    def test_redact_markup_in_target_id_is_escaped(self) -> None:
-        # A raw target id containing rich markup must not crash the error
-        # print (MarkupError) or be silently swallowed.
+    def test_redact_markup_in_target_id_is_escaped(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A raw target id containing rich markup must not crash the error
+        print (``MarkupError``) or be silently swallowed.
+
+        Colour is forced (#495): the same ``console.print`` that could eat
+        ``[/x]`` also wraps the message in SGR runs, so reading raw
+        ``stdout`` made this test fail on a coloured build for a reason
+        unrelated to markup. Stripping alone would fix that and leave the
+        test passing on a build where Rich never coloured — hence the
+        explicit "colour happened" assertion first.
+        """
+        force_colour(monkeypatch, curate_cli)
         result = runner.invoke(
             app,
             ["curate", "redact", "ghost[/x]", "--yes", "--reason", "r"],
         )
         assert result.exit_code == 5
-        assert "ghost[/x]" in result.stdout
+        # 1. Colour really happened.
+        rendered = assert_coloured(result.stdout)
+        # 2. The markup token survived rendering byte-for-byte.
+        assert "ghost[/x]" in rendered, (
+            "Rich read the target id as markup and ate it, so the operator "
+            "cannot see which id failed"
+        )
+        # 3. And the error was printed rather than lost to a MarkupError
+        #    somewhere upstream of it.
+        assert "Execution failed" in rendered
 
 
 class TestCurateFeedback:

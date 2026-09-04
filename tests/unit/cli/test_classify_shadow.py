@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
+from tests.cli_output import plain
 from trellis.learning.tag_evolution import (
     PARAM_COMPONENT_ID,
     RECOMMENDED_SEED_VALUES,
@@ -99,7 +100,7 @@ class TestShadowCommand:
 
         result = runner.invoke(classify_app, ["shadow"])
         assert result.exit_code == 0, result.output
-        assert "2 document(s) were written" in result.output
+        assert "2 document(s) were written" in plain(result.output)
 
 
 class TestShadowReportCommand:

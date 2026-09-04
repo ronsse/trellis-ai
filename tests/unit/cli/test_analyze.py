@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from tests.cli_output import assert_coloured, force_colour, plain
 from trellis.errors import StaleStoreWriteError
 from trellis.learning import PROMOTE_RECOMMENDATIONS
 from trellis.schemas.advisory import (
@@ -379,12 +380,13 @@ class TestValue:
         self._seed_attributed_packs(temp_stores, 6)
         result = runner.invoke(app, ["analyze", "value"])
         assert result.exit_code == 0
-        assert "useful-token fraction" in result.stdout
-        assert "n=6" in result.stdout
+        rendered = plain(result.stdout)
+        assert "useful-token fraction" in rendered
+        assert "n=6" in rendered
         # Naming discipline: this is serving precision, not benefit. Rich
         # wraps, so normalise whitespace before reading the phrase — every
         # occurrence of the word must be the disclaimer denying it.
-        flat = " ".join(result.stdout.split())
+        flat = " ".join(rendered.split())
         assert flat.count("benefit") == flat.count("not benefit") >= 1
 
     def test_text_output_refuses_thin_sample_visibly(
@@ -495,7 +497,7 @@ class TestAdvisoryCommandsOnADegradedStore:
         result = runner.invoke(app, ["analyze", "generate-advisories"])
 
         assert "ADVISORY STORE DEGRADED" in result.stdout
-        assert "No feedback recorded yet" not in result.stdout
+        assert "No feedback recorded yet" not in plain(result.stdout)
 
     def test_generate_reports_the_degradation_in_json(self, tmp_path: Path) -> None:
         """Both formats or neither — a JSON-only warning is invisible."""
@@ -552,20 +554,36 @@ class TestAdvisoryCommandsOnADegradedStore:
         assert "ADVISORY STORE DEGRADED" in degraded.stdout
 
     def test_a_bracketed_path_still_yields_a_runnable_command(
-        self, tmp_path: Path
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Rich reads ``[...]`` as markup, and the recovery line is the point.
 
         An unescaped path under ``/tmp/my [staging] dir/`` renders as
         ``mv /tmp/my  dir/advisories.json`` — a command that does not run,
         printed as the fix. Silently: nothing errors, the text is just wrong.
+
+        Colour is **forced**, and that is the load-bearing half (#495). The
+        same renderer that eats brackets also splits a path into several
+        SGR-wrapped runs, so an assertion read off raw ``stdout`` fails on a
+        coloured build for a reason that has nothing to do with markup —
+        and this test's own message then blames a renderer that is fine. It
+        asserts three separate things: colour really happened, the bracketed
+        segment survived it, and the printed command still runs.
+
+        The bracketed segment on its own was **not** enough, and that is
+        measured rather than argued: deleting the ``escape()`` around the
+        recovery command leaves this test green on ``origin/main``, because
+        ``[staging]`` still appears in the separately-escaped ``file:``
+        line printed above it. The shell-parse below is what kills that
+        mutant.
         """
+        force_colour(monkeypatch, analyze)
         data_dir = tmp_path / "d [staging]" / "data"
         (data_dir / "stores").mkdir(parents=True)
-        (data_dir / "stores" / "advisories.json").write_text(
-            '{"advisories": [ torn', encoding="utf-8"
-        )
+        advisory_file = data_dir / "stores" / "advisories.json"
+        advisory_file.write_text('{"advisories": [ torn', encoding="utf-8")
         import os
+        import shlex
 
         os.environ["TRELLIS_DATA_DIR"] = str(data_dir)
         _reset_registry()
@@ -575,17 +593,33 @@ class TestAdvisoryCommandsOnADegradedStore:
             os.environ.pop("TRELLIS_DATA_DIR", None)
             _reset_registry()
 
-        assert "[staging]" in result.stdout, (
+        # 1. The coloured branch really ran — otherwise stripping proves
+        #    nothing about the path CI and a real terminal take.
+        rendered = assert_coloured(result.stdout)
+        # 2. The bracketed segment survived rendering.
+        assert "[staging]" in rendered, (
             "the bracketed path segment was eaten by Rich markup, so the "
             "recovery command printed to the operator does not run"
         )
+        # 3. And the line an operator copies is still one runnable command
+        #    with exactly two operands — brackets intact is necessary, not
+        #    sufficient (wrapping and word-splitting break it too).
+        line = next(
+            ln for ln in rendered.splitlines() if ln.strip().startswith("To reset:")
+        )
+        command = line.split("To reset:", 1)[1].strip()
+        assert shlex.split(command) == [
+            "mv",
+            str(advisory_file),
+            f"{advisory_file}.corrupt",
+        ], f"the printed recovery command does not parse as `mv src dst`: {command!r}"
 
 
 class TestPackSections:
     def test_empty_events(self) -> None:
         result = runner.invoke(app, ["analyze", "pack-sections"])
         assert result.exit_code == 0
-        assert "Sectioned packs analyzed: 0" in result.stdout
+        assert "Sectioned packs analyzed: 0" in plain(result.stdout)
 
     def test_json_format_empty(self) -> None:
         result = runner.invoke(app, ["analyze", "pack-sections", "--format", "json"])
@@ -933,7 +967,7 @@ class TestAnalyzeDomains:
     def test_empty_text(self) -> None:
         result = runner.invoke(app, ["analyze", "domains"])
         assert result.exit_code == 0, result.output
-        assert "Domains observed: 0" in result.stdout
+        assert "Domains observed: 0" in plain(result.stdout)
 
     def test_json_shape_and_counts(self, temp_stores: StoreRegistry) -> None:
         self._seed(temp_stores)
@@ -1053,7 +1087,7 @@ class TestSchemaEvolutionCLI:
         _override_schema_evolution_thresholds(temp_stores)
         result = runner.invoke(app, ["analyze", "schema-evolution"])
         assert result.exit_code == 0, result.output
-        assert "0 surfaced" in result.output
+        assert "0 surfaced" in plain(result.output)
 
     def test_empty_graph_no_candidates_json(self, temp_stores: StoreRegistry) -> None:
         _override_schema_evolution_thresholds(temp_stores)
@@ -1225,9 +1259,10 @@ class TestTruncationReachesTheOperator:
         self._flood(temp_stores, EventType.PACK_ASSEMBLED, 5001)
         result = runner.invoke(app, ["analyze", "pack-telemetry", "--days", "30"])
         assert result.exit_code == 0
-        assert "TRUNCATED" in result.stdout
+        rendered = plain(result.stdout)
+        assert "TRUNCATED" in rendered
         # And the paired negative: an uncapped window makes no such claim.
-        assert "Packs assembled: 5000" in result.stdout
+        assert "Packs assembled: 5000" in rendered
 
     def test_pack_telemetry_makes_no_truncation_claim_when_uncapped(
         self, temp_stores: StoreRegistry
@@ -1235,7 +1270,7 @@ class TestTruncationReachesTheOperator:
         self._flood(temp_stores, EventType.PACK_ASSEMBLED, 3)
         result = runner.invoke(app, ["analyze", "pack-telemetry", "--days", "30"])
         assert result.exit_code == 0
-        assert "TRUNCATED" not in result.stdout
+        assert "TRUNCATED" not in plain(result.stdout)
 
     def test_extractor_fallbacks_prints_the_truncation_note(
         self, temp_stores: StoreRegistry
@@ -1251,7 +1286,7 @@ class TestTruncationReachesTheOperator:
         self._flood(temp_stores, EventType.EXTRACTION_DISPATCHED, 3)
         result = runner.invoke(app, ["analyze", "extractor-fallbacks", "--days", "30"])
         assert result.exit_code == 0
-        assert "TRUNCATED" not in result.stdout
+        assert "TRUNCATED" not in plain(result.stdout)
 
     def test_cost_prints_the_truncation_note_before_the_dollar_figure(
         self, temp_stores: StoreRegistry
@@ -1285,9 +1320,11 @@ class TestTruncationReachesTheOperator:
         raised = runner.invoke(
             app, ["analyze", "pack-telemetry", "--days", "30", "--limit", "6000"]
         )
-        assert "TRUNCATED" in capped.stdout
-        assert "TRUNCATED" not in raised.stdout
-        assert "Packs assembled: 5001" in raised.stdout
+        assert "TRUNCATED" in plain(capped.stdout)
+        # Stripped for the negative too: a highlighted token split across
+        # SGR runs satisfies a raw ``not in`` for the wrong reason.
+        assert "TRUNCATED" not in plain(raised.stdout)
+        assert "Packs assembled: 5001" in plain(raised.stdout)
 
 
 _REFUSAL_MESSAGE = "Refusing to write the Trellis advisory file: it changed."
@@ -1422,7 +1459,7 @@ class TestAdvisoryCommandsOnAStaleStore:
         result = runner.invoke(app, ["analyze", "advisory-effectiveness"])
 
         assert result.exit_code == 0, result.output
-        assert "ADVISORY WRITE REFUSED" not in result.stdout
+        assert "ADVISORY WRITE REFUSED" not in plain(result.stdout)
 
     def test_generate_advisories_renders_the_refusal_too(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

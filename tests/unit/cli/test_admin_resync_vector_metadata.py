@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
+from tests.cli_output import plain
 from trellis_cli.admin import admin_app
 from trellis_cli.stores import _get_registry, _reset_registry
 
@@ -200,4 +201,4 @@ class TestTextOutput:
         )
         result = runner.invoke(admin_app, ["resync-vector-metadata"])
         assert result.exit_code == 0, result.output
-        assert "repaired 1 of 1 scanned" in result.output
+        assert "repaired 1 of 1 scanned" in plain(result.output)
