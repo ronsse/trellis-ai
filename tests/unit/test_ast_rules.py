@@ -54,11 +54,14 @@ import pytest
 
 from tests.ast_rules import (
     AXES,
+    DECOY_MARKER,
+    DECOYS,
     EVASION_IDS,
     EVASIONS,
     NAIVE_SCANNERS,
     PRIMARY_FILE,
     SECOND_FILE,
+    Decoy,
     Evasion,
     RenderedCorpus,
     assert_hand_read_floor,
@@ -289,8 +292,23 @@ class TestConstructionNames:
             ("A = Widget\nB = A", {"Widget", "A", "B"}),
             ("class Mine(Widget):\n    pass", {"Widget", "Mine"}),
             ("class Mine(Widget):\n    pass\nAlso = Mine", {"Widget", "Mine", "Also"}),
+            ("W: type = Widget", {"Widget", "W"}),
+            ("if (W := Widget) is not None:\n    pass", {"Widget", "W"}),
+            (
+                "A: type = Widget\nif (B := A) is not None:\n    C = B",
+                {"Widget", "A", "B", "C"},
+            ),
         ],
-        ids=["alias", "rebind", "chain", "subclass", "subclass_then_rebind"],
+        ids=[
+            "alias",
+            "rebind",
+            "chain",
+            "subclass",
+            "subclass_then_rebind",
+            "annotated_rebind",
+            "walrus_rebind",
+            "chain_through_both",
+        ],
     )
     def test_resolves_the_shapes_the_first_cut_called_unresolvable(
         self, source: str, expected: set[str]
@@ -303,8 +321,16 @@ class TestConstructionNames:
             "import functools\nP = functools.partial(Widget)",
             "from other import Derived",
             "P = getattr(mod, 'Widget')",
+            "P: type = functools.partial(Widget)",
+            "if (P := functools.partial(Widget)) is not None:\n    pass",
         ],
-        ids=["partial", "cross_module", "getattr"],
+        ids=[
+            "partial",
+            "cross_module",
+            "getattr",
+            "annotated_partial",
+            "walrus_partial",
+        ],
     )
     def test_does_not_resolve_a_binding_with_no_name_to_read(self, source: str) -> None:
         """The residue, as a property of the resolver rather than as prose."""
@@ -346,6 +372,8 @@ class TestTheRosterIsPinned:
         "aliased_import",
         "local_rebinding",
         "rebinding_chain",
+        "walrus_rebinding",
+        "annassign_rebinding",
         "subclass_then_construct",
         "partial_binding",
         "cross_module_subclass",
@@ -356,6 +384,10 @@ class TestTheRosterIsPinned:
         "class_body",
         "async_function",
         "decorator",
+        "with_item",
+        "comprehension_clause",
+        "keyword_argument",
+        "default_argument",
         "kwargs_splat",
         "none_keyword",
         "second_file_bare_call",
@@ -608,6 +640,224 @@ class TestTheRosterIsMeasuredAgainstRealNaiveScanners:
         }
         assert unreported == RESIDUE
         assert {e.id for e in EVASIONS if e.residue} == RESIDUE
+
+
+# ---------------------------------------------------------------------------
+# The family the ninth scanner is blind to, derived from src/
+# ---------------------------------------------------------------------------
+
+
+def _parents(tree: ast.AST) -> dict[int, ast.AST]:
+    return {
+        id(child): node
+        for node in ast.walk(tree)
+        for child in ast.iter_child_nodes(node)
+    }
+
+
+def _hiding_node_type(node: ast.AST, parents: dict[int, ast.AST]) -> str | None:
+    """The nearest ancestor of *node* that is neither a statement nor an
+    expression, or ``None`` if a typed descent reaches it.
+
+    Derived by walking *up* a parent map, which shares no code with
+    :func:`~tests.ast_rules._naive_typed_descent`'s downward recursion —
+    the same argument ``marker_lines`` makes for tokenizing: a cross-check
+    that reuses the method under test checks nothing.
+    """
+    current = node
+    while id(current) in parents:
+        current = parents[id(current)]
+        if isinstance(current, ast.mod):
+            return None
+        if not isinstance(current, (ast.stmt, ast.expr)):
+            return type(current).__name__
+    return None
+
+
+def _hiding_node_types_in_src() -> dict[str, int]:
+    """``{node type: calls it hides}`` over the real tree."""
+    found: dict[str, int] = {}
+    for path in sorted(_src_root().rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        parents = _parents(tree)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            gate = _hiding_node_type(node, parents)
+            if gate is not None:
+                found[gate] = found.get(gate, 0) + 1
+    return found
+
+
+def _hiding_node_types_in_corpus(
+    evasions: tuple[Evasion, ...] = EVASIONS,
+    decoys: tuple[Decoy, ...] = DECOYS,
+) -> set[str]:
+    """The same reading, over each shape's own **marked** call.
+
+    Marked, and that is the load-bearing word: an unmarked call — a
+    decoy, a helper inside a shape's own context — that happens to sit
+    behind a gate would keep the gate covered after the shape rendering
+    it was deleted, and the coverage check would pass over a corpus that
+    no longer probes it. Pinned by
+    ``test_an_unmarked_call_does_not_cover_a_gate``.
+    """
+    corpus = render_evasion_corpus(evasions, decoys, subject=SUBJECT, kwarg=KWARG)
+    marked = set(corpus.lines.values())
+    covered: set[str] = set()
+    for source in corpus.files.values():
+        tree = ast.parse(source)
+        parents = _parents(tree)
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call) and node.lineno in marked):
+                continue
+            gate = _hiding_node_type(node, parents)
+            if gate is not None:
+                covered.add(gate)
+    return covered
+
+
+class TestTheNeitherStatementNorExpressionFamilyIsCovered:
+    """The ninth scanner's blind spot, required to be rostered rather than
+    written down.
+
+    :func:`~tests.ast_rules._naive_typed_descent` descends ``ast.stmt`` and
+    ``ast.expr`` — the repair a #457 author reaches for — and is still
+    blind to every call behind a node that is *neither*. #501 was filed
+    because that family was recorded in a docstring, so recording the
+    leftovers in a new docstring would reproduce it exactly. This derives
+    the requirement from ``src/`` instead: whatever node types hide a call
+    in the real tree must each hide one in the corpus.
+
+    It is a subset check in the direction that can fail. A member appearing
+    in ``src/`` that no shape renders turns the suite red; a shape kept for
+    a member ``src/`` happens not to write today does not. That is also
+    what settles ``ast.match_case`` — ``src/`` has no ``match`` statement,
+    so nothing is demanded, and the demand appears with the first one
+    written.
+    """
+
+    #: Hand-read off ``src/`` at ``8ec879c``: ``ast.keyword`` (1,314),
+    #: ``ast.ExceptHandler`` (584), ``ast.arguments`` (437),
+    #: ``ast.comprehension`` (315) and ``ast.withitem`` (167).
+    #: :func:`assert_hand_read_floor`'s whole point is that this number is
+    #: not computed by the scan it floors.
+    FAMILY_FLOOR = 5
+
+    @pytest.mark.parametrize(
+        ("source", "expected"),
+        [
+            ("Widget()", None),
+            ("def f():\n    return Widget()", None),
+            ("x = [Widget() for _ in y]", None),
+            ("f(k=Widget())", "keyword"),
+            ("def f(x=Widget()):\n    pass", "arguments"),
+            ("with Widget() as h:\n    pass", "withitem"),
+            ("x = [a for a in Widget()]", "comprehension"),
+            ("try:\n    pass\nexcept E:\n    Widget()", "ExceptHandler"),
+        ],
+        ids=[
+            "module_scope",
+            "function_body",
+            "comprehension_element",
+            "keyword",
+            "default",
+            "withitem",
+            "comprehension_clause",
+            "except",
+        ],
+    )
+    def test_the_reading_names_the_node_that_hides_the_call(
+        self, source: str, expected: str | None
+    ) -> None:
+        """The reading itself, pinned against reachable calls too.
+
+        ``None`` for a call a typed descent reaches is the half that keeps
+        the family honest: a reading that stopped at the module, or at any
+        ancestor, would report a gate for every call in ``src/`` and the
+        coverage check would still pass — the roster covers module scope.
+        """
+        tree = ast.parse(source)
+        parents = _parents(tree)
+        call = next(
+            n
+            for n in ast.walk(tree)
+            if isinstance(n, ast.Call) and name_of(n.func) == SUBJECT
+        )
+        assert _hiding_node_type(call, parents) == expected
+
+    def test_the_family_is_not_measured_by_its_own_scan(self) -> None:
+        assert_hand_read_floor(
+            len(_hiding_node_types_in_src()),
+            self.FAMILY_FLOOR,
+            subject="node type that is neither a statement nor an expression "
+            "and hides a call in src/",
+            hint="a reading that has collapsed reports one type, or none.",
+        )
+
+    def test_every_hiding_node_type_in_src_has_a_shape(self) -> None:
+        missing = sorted(
+            set(_hiding_node_types_in_src()) - _hiding_node_types_in_corpus()
+        )
+        assert not missing, (
+            f"calls in src/ hide behind {missing}, and no shape in EVASIONS "
+            f"renders one. A typed descent — #457's own repair — reports "
+            f"none of them, so an adopting rule inherits the blind spot "
+            f"with the guard green. Add the shape; a note in a docstring is "
+            f"what #501 was filed about."
+        )
+
+    def test_an_unmarked_call_does_not_cover_a_gate(self) -> None:
+        """The corpus reading counts shapes, not any call it can see.
+
+        Run against a corpus deliberately carrying an unmarked call
+        behind ``ast.withitem`` and watched to keep reporting the gate as
+        uncovered once the shape is gone.
+        """
+        held = Decoy(
+            id="unmarked_with_item",
+            why="an unmarked call inside a with statement, covering nothing",
+            lines=(
+                "def _decoy_unmarked_with():",
+                "    with _helper() as _h:  " + DECOY_MARKER + "unmarked_with_item",
+                "        del _h",
+            ),
+        )
+        widened = (*DECOYS, held)
+        assert "withitem" in _hiding_node_types_in_corpus(EVASIONS, widened)
+        narrowed = tuple(e for e in EVASIONS if e.id != "with_item")
+        assert "withitem" not in _hiding_node_types_in_corpus(narrowed, widened), (
+            "an unmarked call inside a `with` is covering ast.withitem, so "
+            "with_item could be deleted with this check green"
+        )
+
+    @pytest.mark.parametrize(
+        ("dropped", "gate"),
+        [
+            ("with_item", "withitem"),
+            ("comprehension_clause", "comprehension"),
+            ("keyword_argument", "keyword"),
+            ("default_argument", "arguments"),
+            ("inside_except", "ExceptHandler"),
+        ],
+    )
+    def test_the_check_fails_when_the_shape_is_removed(
+        self, dropped: str, gate: str
+    ) -> None:
+        """Run against a deliberately defective roster and watched to fail.
+
+        Without this the check above is satisfiable by a corpus reading
+        that returns every node type it can think of, and by one that reads
+        ``src/`` as empty.
+        """
+        narrowed = tuple(e for e in EVASIONS if e.id != dropped)
+        assert gate in _hiding_node_types_in_src()
+        assert gate in _hiding_node_types_in_corpus()
+        assert gate not in _hiding_node_types_in_corpus(narrowed), (
+            f"{dropped} is the only shape rendering a call behind "
+            f"ast.{gate}; if that is no longer true the parametrisation is "
+            f"stale and the coverage check has a spare it does not need."
+        )
 
 
 # ---------------------------------------------------------------------------
