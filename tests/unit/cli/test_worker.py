@@ -39,6 +39,7 @@ from trellis.stores.advisory_store import AdvisoryStore
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 from trellis_cli import worker
+from trellis_cli.exit_codes import EXIT_STORE
 from trellis_cli.main import app, worker_app
 from trellis_cli.stores import _get_registry, _reset_registry
 from trellis_workers.session_capture import sweep as capture_sweep
@@ -626,10 +627,10 @@ class TestCurateSurvivesADegradedAdvisoryStore:
             ],
         )
 
-        # Non-zero, and the same 2 the ``analyze`` advisory surfaces use
-        # (#448). The JSON headline below and this code have to agree —
-        # #437 is what happens when they do not.
-        assert result.exit_code == 2, result.output
+        # Non-zero, and the same ``EXIT_STORE`` the ``analyze`` advisory
+        # surfaces use (#448, #489). The JSON headline below and this code
+        # have to agree — #437 is what happens when they do not.
+        assert result.exit_code == EXIT_STORE, result.output
         data = json.loads(result.stdout.strip())
         # The headline, not just the body: a wrapper reading only ``status``
         # would otherwise record a clean nightly run (#393).
@@ -656,7 +657,7 @@ class TestCurateSurvivesADegradedAdvisoryStore:
             ["worker", "curate", "--output-dir", str(tmp_path / "review")],
         )
 
-        assert result.exit_code == 2, result.output
+        assert result.exit_code == EXIT_STORE, result.output
         rendered = plain(result.output)
         assert "ADVISORY STORE DEGRADED" in rendered
         assert f"mv {path}" in rendered.replace("\n", "")
@@ -727,7 +728,7 @@ class TestCurateSurvivesADegradedAdvisoryStore:
             ],
         )
 
-        assert result.exit_code == 2, result.output
+        assert result.exit_code == EXIT_STORE, result.output
         data = json.loads(result.stdout.strip())
         assert data["status"] == "degraded"
         assert data["advisory_store_degraded"]["reason"] == "malformed_json"
@@ -2000,7 +2001,7 @@ class TestCurateSurvivesASecondWriter:
             ],
         )
 
-        assert result.exit_code == 2, result.output
+        assert result.exit_code == EXIT_STORE, result.output
         data = json.loads(result.stdout.strip())
         # The refusal is reported, not swallowed — and not as ``degraded``,
         # because nothing is broken and no operator action is required.
@@ -2034,7 +2035,7 @@ class TestCurateSurvivesASecondWriter:
             app, ["worker", "curate", "--output-dir", str(tmp_path / "review")]
         )
 
-        assert result.exit_code == 2, result.output
+        assert result.exit_code == EXIT_STORE, result.output
         assert "ADVISORY WRITE REFUSED" in result.output
         # The refusal's own message rides through, so the operator is told
         # what happened rather than only that something did.
@@ -2123,7 +2124,7 @@ class TestARefusedNightlyWriteEscalates:
         _seed_promote_signal(temp_stores)
         TestCurateSurvivesASecondWriter._second_writer_after_load(monkeypatch, path)
 
-        assert self._run(tmp_path, "--format", "json").exit_code == 2
+        assert self._run(tmp_path, "--format", "json").exit_code == EXIT_STORE
 
         report = self._rejections(temp_stores)
         assert report.by_tool[ADVISORY_WRITER_SURFACE].boundary_rejected == 1
@@ -2138,7 +2139,7 @@ class TestARefusedNightlyWriteEscalates:
         _seed_promote_signal(temp_stores)
         TestCurateSurvivesADegradedAdvisoryStore._corrupt_advisory_file(tmp_path)
 
-        assert self._run(tmp_path, "--format", "json").exit_code == 2
+        assert self._run(tmp_path, "--format", "json").exit_code == EXIT_STORE
 
         report = self._rejections(temp_stores)
         assert report.by_tool[ADVISORY_WRITER_SURFACE].boundary_rejected == 1
@@ -2264,7 +2265,7 @@ class TestARefusedNightlyWriteEscalates:
         text = self._run(tmp_path)
         json_run = self._run(tmp_path, "--format", "json")
 
-        assert text.exit_code == json_run.exit_code == 2
+        assert text.exit_code == json_run.exit_code == EXIT_STORE
 
     def test_the_loop_path_exits_on_its_last_cycle(
         self, tmp_path: Path, temp_stores: StoreRegistry
@@ -2295,7 +2296,7 @@ class TestARefusedNightlyWriteEscalates:
         assert result.status == "degraded"
         with pytest.raises(typer.Exit) as exc:
             worker._exit_if_advisory_write_refused(result)
-        assert exc.value.exit_code == 2
+        assert exc.value.exit_code == EXIT_STORE
 
     def test_a_clean_loop_cycle_does_not_exit(
         self, tmp_path: Path, temp_stores: StoreRegistry
