@@ -141,6 +141,28 @@ def _shadowing_failures(table: dict[str, float], roster: dict[str, float]) -> li
     return failures
 
 
+def _dead_claude_keys(table: dict[str, float], roster: dict[str, float]) -> list[str]:
+    """``claude-`` keys in *table* that no id in *roster* resolves through.
+
+    The other half of the prefix trap, and the one that actually shipped: a
+    key that matches nothing is not merely inert, it is a *claim* that some
+    model prices that way, and it hides the absence of the id it was written
+    for.  ``"claude-haiku-3-5"`` sat in this table doing exactly that — the
+    3.x line names its ids ``claude-3-5-haiku-…``, tier *after* version — so
+    Haiku 3.5 was silently priced at the ``default_fallback`` rate while a
+    test pinned the dead key's string as though it were a model.
+
+    Scoped to ``claude-`` because the roster is a Claude roster; the OpenAI
+    and ``local`` keys have no published-id list here to be checked against.
+    """
+    return [
+        key
+        for key in table
+        if key.startswith("claude-")
+        and not any(_winning_key(model_id, table) == key for model_id in roster)
+    ]
+
+
 class TestPublishedPricesAsOf20260904:
     """Verified against Anthropic's published list prices on 2026-09-04.
 
@@ -199,6 +221,52 @@ class TestPublishedPricesAsOf20260904:
             )
             == []
         )
+
+    def test_every_claude_key_is_earned_by_a_published_id(self):
+        """The module docstring's other claim, which nothing was checking.
+
+        ``_shadowing_failures`` runs roster → key and so can only see a key
+        that mis-serves an id it *wins*; a key that wins nothing is invisible
+        to it.  That is the direction the shipped defect ran in: re-adding
+        ``"claude-haiku-3-5"`` to the table leaves the whole suite green
+        without this.
+        """
+        assert _dead_claude_keys(_INPUT_PRICE_PER_MTOK, PUBLISHED_INPUT_PRICES) == []
+
+    def test_the_dead_key_check_can_actually_fail(self):
+        """Guard the guard, same shape as the shadowing one above."""
+        roster = {"claude-opus-4-5-20251101": 5.0}
+        # The exact key that shipped dead, against a roster naming no 3.x id.
+        assert _dead_claude_keys(
+            {"claude-opus": 5.0, "claude-haiku-3-5": 0.80}, roster
+        ) == ["claude-haiku-3-5"]
+        # A shadowed key is dead too — it wins nothing because a longer key
+        # takes every id it would have matched.
+        assert _dead_claude_keys(
+            {"claude-opus": 5.0, "claude-opus-4-5": 5.0}, roster
+        ) == ["claude-opus"]
+        # Non-Claude keys are out of scope: the roster cannot speak for them.
+        assert _dead_claude_keys({"claude-opus": 5.0, "gpt-4o": 2.5}, roster) == []
+        # And an honest table passes, so the check is not failing on everything.
+        assert _dead_claude_keys({"claude-opus": 5.0}, roster) == []
+
+    def test_the_roster_cannot_be_emptied_without_failing(self):
+        """Both derived checks divide by the roster, so a roster that merely
+        *shrinks* satisfies them vacuously — measured: emptying
+        ``PUBLISHED_INPUT_PRICES`` leaves the suite green, and so does cutting
+        it to one entry.  The dead-key check closes that, because every
+        ``claude-`` key needs an id to earn it; this pins that it does, rather
+        than leaving it as a side effect somebody later optimises away.
+        """
+        claude_keys = {k for k in _INPUT_PRICE_PER_MTOK if k.startswith("claude-")}
+        assert claude_keys, "the table no longer prices any Claude model"
+        for shrunk in ({}, dict(sorted(PUBLISHED_INPUT_PRICES.items())[:1])):
+            assert _dead_claude_keys(_INPUT_PRICE_PER_MTOK, shrunk), (
+                f"a roster of {len(shrunk)} entries passed the derived checks"
+            )
+        # The floor is derived, not a pinned count: a roster smaller than the
+        # key set it has to earn cannot possibly pass.
+        assert len(PUBLISHED_INPUT_PRICES) >= len(claude_keys)
 
 
 class TestUnrecognisedModelIsLabelledNotSilent:

@@ -36,12 +36,14 @@ logger = structlog.get_logger(__name__)
 #: be the looser pointer rather than the more modern one.  The pin is
 #: deliberate — Trellis stores what these passes produce, and a default that
 #: changes model underneath an operator is worse for a durable memory store
-#: than one that requires an explicit bump.  Retirement is committed to be no
-#: sooner than **2026-10-15**, the earliest of any current model, so this
-#: constant has a known expiry; override it with ``model:`` in the ``llm:``
-#: config block.  (Tentative retirement date, verified against the model
-#: deprecations page, 2026-09-04 — it is not the earliest of the current
-#: models: ``claude-sonnet-4-5-20250929`` is listed for 2026-09-29.)
+#: than one that requires an explicit bump.  The model-deprecations page
+#: gives it a **tentative** retirement of "not sooner than 2026-10-15" (read
+#: 2026-09-04), so the pin has a known expiry — but tentative is not a
+#: commitment, and it is **not** the earliest of the current models:
+#: ``claude-sonnet-4-5-20250929`` is listed for 2026-09-29 and
+#: ``claude-opus-4-5-20251101`` for 2026-11-24.  Re-read that page rather
+#: than trusting this comment; override the pin with ``model:`` in the
+#: ``llm:`` config block.
 DEFAULT_MODEL = "claude-haiku-4-5-20251001"
 
 #: Sampling parameters this adapter refuses to forward.  Named so the
