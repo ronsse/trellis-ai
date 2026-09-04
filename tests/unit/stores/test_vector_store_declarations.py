@@ -195,6 +195,24 @@ class _OverdeclaringStore(_MemoryVectorStore):
         return None
 
 
+class _MisdeclaringStore(_MemoryVectorStore):
+    """Declares a width, enforces a *different* one.
+
+    The wrong-positive-value liar. ``_SilentlyPinnedStore`` and
+    ``_OverdeclaringStore`` both get the ``None`` / not-``None`` split
+    wrong; this one gets the split right and the number wrong, which is
+    the only thing ``declared == DIMS`` and ``row["dimensions"] ==
+    declared`` can catch.
+    """
+
+    _declared = DIMS + 2
+
+    def _check_width(self, vector: list[float]) -> None:
+        if len(vector) != DIMS:
+            msg = f"vector has {len(vector)} dimensions but store wants {DIMS}"
+            raise ValueError(msg)
+
+
 class _DriftingStore(_MemoryVectorStore):
     """Answers with a measurement of the last write rather than a declaration."""
 
@@ -217,6 +235,31 @@ class _PretendResetStore(_MemoryVectorStore):
 
     def reset_storage(self) -> None:
         return None
+
+
+class _DropOnlyResetStore(_MemoryVectorStore):
+    """Empties itself and leaves nothing to write into again.
+
+    The realistic half-failure for the two SQL backends: the ``DROP``
+    runs and ``_init_schema`` does not, so the store is empty *and*
+    unusable. ``count() == 0`` alone cannot see it — "recreated, not
+    merely dropped" is the assertion that can.
+    """
+
+    def reset_storage(self) -> None:
+        self._rows = {}
+        self._dropped = True
+
+    def upsert(
+        self,
+        item_id: str,
+        vector: list[float],
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        if getattr(self, "_dropped", False):
+            msg = "no such table: vectors"
+            raise RuntimeError(msg)
+        super().upsert(item_id, vector, metadata)
 
 
 class _RebindsTheBaseStore(_MemoryVectorStore):
@@ -423,6 +466,28 @@ class TestTheContractCasesBind:
         the override prove it emptied the store."""
         assert _run_case(_RESET_CASE, _PretendResetStore()) is False
 
+    def test_a_reset_that_drops_without_recreating_is_caught(self):
+        """The realistic half-failure, which ``count() == 0`` cannot see.
+
+        A backend whose ``DROP`` ran and whose recreate did not is empty
+        and unusable. That is why the case writes into the store *after*
+        resetting instead of stopping at the count — a store can satisfy
+        "there is nothing in it" by being broken.
+        """
+        assert _run_case(_RESET_CASE, _DropOnlyResetStore()) is False
+
+    def test_a_backend_declaring_the_wrong_width_is_caught(self):
+        """The wrong-*value* liar, distinct from the wrong-*kind* ones.
+
+        ``_SilentlyPinnedStore`` and ``_OverdeclaringStore`` get the
+        ``None`` / not-``None`` split wrong and are caught by the branch
+        they land in. This one lands in the right branch with the wrong
+        number, which only the value assertions can catch — and a case
+        that checked only *which* branch to take would pass it.
+        """
+        assert _run_case(_WIDTH_CASE, _MisdeclaringStore()) is False
+        assert _run_case(_SHAPE_CASE, _MisdeclaringStore()) is True
+
     def test_the_cases_are_not_satisfied_by_any_single_constant(self):
         """The property the issue asks for, stated directly.
 
@@ -465,6 +530,57 @@ class TestShippedBackendsDeclare:
         try:
             assert store.dimensions is None
             assert SQLiteVectorStore.supports_reset() is True
+        finally:
+            store.close()
+
+    def test_sqlite_reset_is_durable_inside_an_open_write_transaction(self, tmp_path):
+        """The reset survives the process, even mid-transaction.
+
+        The property, not a mechanism. ``sqlite3`` in legacy transaction
+        mode opens an implicit transaction for DML and **not** for DDL, so
+        a ``DROP`` issued on an idle connection auto-commits; issued while
+        a write transaction is already live it joins that transaction and
+        is invisible to every other connection until something commits.
+        Two things could be that something here, and the test deliberately
+        does not care which: ``reset_storage``'s explicit ``commit()``, or
+        ``_init_schema``'s ``executescript``, which commits any pending
+        transaction before running its script.
+
+        **So the explicit ``commit()`` is currently redundant and deleting
+        it leaves this test green** — measured, not assumed. It is kept
+        because the redundancy is a coincidence of how ``_init_schema``
+        happens to be spelled: rewrite that as ``execute`` calls and the
+        commit becomes load-bearing with nothing else changing. What this
+        test pins is the outcome an operator depends on, which holds
+        either way.
+
+        Provoked with a raw uncommitted ``INSERT`` because no store method
+        leaves that state today. Read back through a *separate* connection
+        — the store's own would see its own uncommitted transaction and
+        report success regardless.
+        """
+        import sqlite3
+
+        from trellis.stores.sqlite.vector import SQLiteVectorStore
+
+        db_path = tmp_path / "vec.db"
+        store = SQLiteVectorStore(db_path)
+        try:
+            store.upsert("a", _vec(1, 0, 0))
+            store._conn.execute(
+                "INSERT INTO vectors (item_id, vector_blob, dimensions) "
+                "VALUES ('b', X'00', 3)"
+            )
+            assert store._conn.in_transaction, "premise: a write tx is live"
+
+            store.reset_storage()
+
+            other = sqlite3.connect(str(db_path), timeout=5)
+            try:
+                rows = other.execute("SELECT count(*) FROM vectors").fetchone()[0]
+            finally:
+                other.close()
+            assert rows == 0
         finally:
             store.close()
 

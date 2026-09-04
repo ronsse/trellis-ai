@@ -189,6 +189,14 @@ jobs:
         # half of the pgvector surface. It is NOT covered by the contracts
         # directory.
         #
+        # tests/unit/stores/test_vector_store_declarations.py (#512) is named
+        # for a narrower reason: it runs everywhere, but its one pgvector case
+        # is `importorskip("psycopg")`-gated and `tests.yml` installs `[dev]`
+        # only, so that case runs in **no** workflow otherwise. It needs no
+        # database — it asserts what `PgVectorStore` declares about itself off
+        # the class — so it costs this job nothing beyond having the driver
+        # installed, which it already does.
+        #
         # Deliberately NOT widened to all of tests/unit/stores/, though 59
         # more Postgres-marked tests there (test_postgres_stores.py,
         # test_api_key_store.py) also run in no workflow: the same sweep picks
@@ -209,4 +217,5 @@ jobs:
             tests/integration/loops/ \
             tests/unit/stores/contracts/ \
             tests/unit/stores/test_pgvector.py \
+            tests/unit/stores/test_vector_store_declarations.py \
             -v
