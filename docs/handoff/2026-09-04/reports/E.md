@@ -1,0 +1,2 @@
+Cluster E (LLM path) — planner DIED (rate limit) after writing both plans; plans are complete (end with Size/Dependencies). No final report was produced — read plans/514.md and plans/264.md directly. #515 and #306 were NOT classified; re-run a planner for those two (guidance in PLANNER dispatch: #515 = measurement-as-deliverable or DEFER if it needs API spend; #306 = review only, likely OWNER).
+Ordering per plans: #514 lands first (adds generate_call_sites); #264 PR-A then PR-B reuse it.

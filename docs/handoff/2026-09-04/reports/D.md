@@ -1,0 +1,8 @@
+Cluster D (retrieval)
+#439 CODE M — plans/439.md. PackResponse/SectionedPackResponse (trellis_wire/dtos.py:119-161) carry no withholding; add `withholding: dict|None` to both DTOs, bump API_MINOR 1→2 + regen v1.yaml; move PURE renderer half of retrieve/withholding.py → trellis_wire/withholding.py (core re-exports; `is` identity test); thread through _format.py, hooks.for_intent, skills, client/async_client. Risk: note must render ABOVE items; sectioned puts withheld_item_ids on wire for first time. Issue's file names (routes/packs.py, trellis/hooks.py) don't exist.
+#369 CODE M — plans/369.md. Mechanism worse than issue: miss → LLM residue → ENTITY_CREATE mints twin ULID with no name dedupe. Fix: bind_name_alias() from EntityCreate/UpdateHandler + bounded `trellis admin backfill-name-aliases` (refuses when truncated/duplicate name). Test population > scan_limit with target OLDEST. #375 depends on this.
+#371 CLOSE — everything shipped (GraphSeedExtractor :294, graph_selection :1518, GRAPH_RECENCY_CLOCK_FIELD :184, opt-in seed :1193). Draft close comment in planner report; names #375 as survivor.
+#375 DEFER — precondition: #369 merged AND owner runs backfill-name-aliases on prod AND intent replay reports seeds>0. Then NameAliasSeedExtractor (~60 lines).
+#365 OWNER — Q: does 2026-08-28 outage (19 traces/0 packs, 10 agents) count as ledger F-4's "second incident"? Recommend yes but smallest shape: `retrieval_attempted/retrieval_error` on the trace the Stop hook ALREADY writes, counted by analyze health. Else DEFER.
+#463 DEFER — CLAUDE.md measured refusal stands; reopen at ≥30 packs serving stamped parent + own chunk with per-item verdicts.
+Dispatch: #439 ∥ #369 (disjoint files).
