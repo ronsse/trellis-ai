@@ -4,7 +4,7 @@ from trellis.stores.base.api_key import ApiKeyRecord, ApiKeyStore
 from trellis.stores.base.blob import BlobStore
 from trellis.stores.base.document import DocumentStore
 from trellis.stores.base.event_log import Event, EventLog, EventType
-from trellis.stores.base.graph import GraphStore
+from trellis.stores.base.graph import AliasBindResult, AliasBindStatus, GraphStore
 from trellis.stores.base.outcome import OutcomeStore
 from trellis.stores.base.parameter import ParameterStore
 from trellis.stores.base.trace import TraceStore
@@ -14,6 +14,8 @@ from trellis.stores.base.vector import VectorStore
 __all__ = [
     "ApiKeyRecord",
     "ApiKeyStore",
+    "AliasBindResult",
+    "AliasBindStatus",
     "BlobStore",
     "DocumentStore",
     "Event",

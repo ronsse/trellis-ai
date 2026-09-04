@@ -28,6 +28,7 @@ class Operation(StrEnum):
     ENTITY_CREATE = "entity.create"
     ENTITY_UPDATE = "entity.update"
     ENTITY_MERGE = "entity.merge"
+    ALIAS_UPSERT = "alias.upsert"
     LINK_CREATE = "link.create"
     LINK_REMOVE = "link.remove"
     LABEL_ADD = "label.add"
@@ -140,6 +141,11 @@ class OperationRegistry:
         self._schemas[Operation.ENTITY_CREATE] = {"entity_type", "name"}
         self._schemas[Operation.ENTITY_UPDATE] = {"entity_id"}
         self._schemas[Operation.ENTITY_MERGE] = {"source_id", "target_id"}
+        self._schemas[Operation.ALIAS_UPSERT] = {
+            "entity_id",
+            "source_system",
+            "raw_id",
+        }
         self._schemas[Operation.LINK_CREATE] = {
             "source_id",
             "target_id",

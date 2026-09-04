@@ -1,4 +1,4 @@
-"""Indexed name → entity resolution for the extraction write paths.
+"""Indexed name → entity resolution.
 
 Both write paths that resolve ``@mention`` tokens against the existing
 graph — the MCP ``save_memory`` tool and the CLI bulk-ingest hook
@@ -40,10 +40,9 @@ full-node scan duplicated in both callers. Three problems:
    seeing the tail and reported "no match", which is indistinguishable
    from a genuine miss.
 
-The resolver here fixes (1), fixes (2) by *minting* an alias whenever a
-scan resolves a name unambiguously (so the next lookup is a single indexed
-row read), and fixes (3) by logging a warning when the scan is truncated
-instead of pretending the tail was empty.
+The resolver fixes (1), uses aliases maintained by governed entity writes and
+the governed backfill for (2), and makes (3) loud. It is deliberately
+read-only: retrieval must never mutate a store as a side effect.
 
 Matching rule and its failure mode
 ----------------------------------
@@ -56,9 +55,8 @@ Consequences, stated plainly because this code decides entity identity:
   the resolver returns both ids, ``AliasMatchExtractor`` treats anything
   other than a single hit as unresolved, and **no alias is minted**. A
   wrong merge is not recoverable; a skipped mention is.
-* An alias is only minted from a **complete** scan. If the scan hit its
-  cap we may not have seen a same-named node in the tail, so the match is
-  used for this call but never cached, and the truncation is logged.
+* A bounded fallback scan never writes. If the scan hit its cap we may not
+  have seen a same-named node in the tail, so truncation is logged.
 * A binding is re-validated on every hit against the node it points at
   (:func:`_binding_is_live`): if that node was deleted, or renamed so it
   no longer normalizes to the key, the binding is dropped and the scan
@@ -75,17 +73,9 @@ Consequences, stated plainly because this code decides entity identity:
   for what got bound; there is no revoke command yet (see the PR's known
   gaps) — ``delete_node`` on the entity is the only unbind today.
 
-Governance note
----------------
-
-The mint is a **direct ``graph_store.upsert_alias`` call**, not a
-``MutationExecutor`` command, because the pipeline has no alias verb —
-:mod:`trellis_api.routes.ingest` says so in as many words ("direct graph
-store; no alias mutation operation exists") and is the only other alias
-writer. Giving aliases a governed operation has to convert both callers
-at once, which is a separate change. The alias row is itself SCD-2 and
-carries ``raw_name`` / ``valid_from``, so what was bound and when is
-recoverable from the store even though no event was emitted.
+Alias writes live in :mod:`trellis.mutate.handlers` and
+:mod:`trellis.mutate.name_aliases`, where they traverse the governed mutation
+pipeline and emit audit events.
 """
 
 from __future__ import annotations
@@ -104,7 +94,8 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 #: ``entity_aliases.source_system`` namespace for display-name bindings
-#: minted by the extraction write paths. Kept separate from the CLI's
+#: maintained by governed entity writes and the governed backfill. Kept
+#: separate from the CLI's
 #: ``"local"`` namespace so an operator-curated alias and an inferred one
 #: are never confused, and so the store's unique-current index on
 #: ``(source_system, raw_id)`` gives us exactly one entity per normalized
@@ -139,30 +130,22 @@ NAME_ALIAS_SOURCE_SYSTEM = "name"
 #:
 #: Raising this number is deliberately **not** the fix: it delays the
 #: cliff, multiplies the per-mention fetch linearly, and leaves the silent
-#: wrong answer intact. The fix is to stop needing the scan — mint a
-#: ``name`` alias when the entity is written, plus a one-off backfill for
-#: existing nodes — which lives on the write path, not here.
+#: wrong answer intact. Governed entity writes maintain the index and
+#: :func:`trellis.mutate.name_aliases.backfill_name_aliases` repairs
+#: existing nodes.
 DEFAULT_NAME_SCAN_LIMIT = 2000
 
 
 class _ScanResult(NamedTuple):
-    """Outcome of the bootstrap scan.
-
-    ``mintable`` is the single predicate the caller needs: a *complete*
-    scan that found *exactly one* name match. Deriving it here rather than
-    re-testing ``truncated``/``len(matches)`` at the call site keeps the
-    mint rule and the truncation warning from drifting apart.
-    """
+    """Outcome of the bounded fallback scan."""
 
     matches: list[str]
-    mintable: bool
 
 
 def build_name_alias_resolver(
     graph_store: GraphStore,
     *,
     scan_limit: int = DEFAULT_NAME_SCAN_LIMIT,
-    mint: bool = True,
 ) -> Callable[[str], list[str]]:
     """Build an :data:`~trellis.extract.alias_match.AliasResolver`.
 
@@ -176,26 +159,19 @@ def build_name_alias_resolver(
        indexed row read on the store's unique-current alias index, then one
        ``get_node`` to confirm the binding still points at a live node that
        still carries the name.
-    2. On a miss, a bounded scan of ``graph_store.query(limit=scan_limit)``
-       comparing normalized ``properties["name"]``. An unambiguous hit from
-       a complete scan is written back to the alias index so step 1 answers
-       it next time.
+    2. On a miss, a bounded read-only scan of
+       ``graph_store.query(limit=scan_limit)`` comparing normalized
+       ``properties["name"]``.
 
     Args:
-        graph_store: The knowledge-plane graph store. Read for both steps
-            and written (aliases only) when *mint* is on.
+        graph_store: The knowledge-plane graph store. Read for both steps.
         scan_limit: Node cap for the step-2 bootstrap scan. See
             :data:`DEFAULT_NAME_SCAN_LIMIT`.
-        mint: Set ``False`` to make the resolver read-only — used by
-            callers that must not write, and by tests asserting the
-            scan/index split.
 
     Returns:
         A ``Callable[[str], list[str]]``. It never raises — not for an
         unresolvable name, not for a store outage (logged, treated as no
-        match, so one bad mention cannot fail the ingest that triggered
-        it), and not from the mint step, where a failed write costs a
-        future scan rather than a resolution.
+        match, so one bad mention cannot fail the ingest that triggered it).
     """
 
     def resolve(mention: str) -> list[str]:
@@ -207,14 +183,9 @@ def build_name_alias_resolver(
         if bound is not None:
             return [bound]
 
-        scan = _scan_for_name(
+        return _scan_for_name(
             graph_store, key=key, mention=mention, scan_limit=scan_limit
-        )
-        if mint and scan.mintable:
-            _mint_alias(
-                graph_store, entity_id=scan.matches[0], key=key, mention=mention
-            )
-        return scan.matches
+        ).matches
 
     return resolve
 
@@ -275,7 +246,7 @@ def _scan_for_name(
         nodes = graph_store.query(limit=scan_limit)
     except Exception:
         logger.exception("entity_resolution_scan_failed", mention=mention)
-        return _ScanResult([], mintable=False)
+        return _ScanResult([])
 
     truncated = len(nodes) >= scan_limit
     matches: list[str] = []
@@ -300,37 +271,4 @@ def _scan_for_name(
             scan_limit=scan_limit,
             matches=len(matches),
         )
-    return _ScanResult(matches, mintable=not truncated and len(matches) == 1)
-
-
-def _mint_alias(
-    graph_store: GraphStore, *, entity_id: str, key: str, mention: str
-) -> None:
-    """Bind *key* to *entity_id* so the next resolution is an index read.
-
-    Written straight to the graph store rather than through the
-    ``MutationExecutor`` — see the module docstring's governance note.
-    ``upsert_alias`` is idempotent via SCD-2 versioning.
-
-    Best-effort — a failed write only costs a future scan.
-    """
-    try:
-        graph_store.upsert_alias(
-            entity_id=entity_id,
-            source_system=NAME_ALIAS_SOURCE_SYSTEM,
-            raw_id=key,
-            raw_name=mention,
-        )
-    except Exception:
-        logger.exception(
-            "entity_resolution_alias_mint_failed",
-            mention=mention,
-            entity_id=entity_id,
-        )
-        return
-    logger.info(
-        "entity_resolution_alias_minted",
-        mention=mention,
-        alias_key=key,
-        entity_id=entity_id,
-    )
+    return _ScanResult(matches)

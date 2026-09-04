@@ -189,8 +189,8 @@ def _graph_alias_resolver(registry: StoreRegistry) -> Callable[[str], list[str]]
 
     Delegates to :func:`trellis.extract.entity_resolution.build_name_alias_resolver`,
     the same builder the MCP ``save_memory`` path uses: indexed
-    ``entity_aliases`` lookup first, bounded scan only to bootstrap, and
-    the unambiguous result minted back into the index.
+    ``entity_aliases`` lookup first, then a bounded read-only fallback scan.
+    Governed entity writes and the governed backfill maintain the index.
 
     A store failure during the scan stays soft here — a bulk ingest must
     not die because one mention could not be resolved.

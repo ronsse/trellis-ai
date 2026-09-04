@@ -8,6 +8,7 @@ from typing import Any, cast
 import structlog
 
 from trellis.errors import NotFoundError, StoreError, ValidationError
+from trellis.extract.entity_resolution import NAME_ALIAS_SOURCE_SYSTEM
 from trellis.feedback.models import SUCCESS_RATING_THRESHOLD
 from trellis.mutate.commands import Command, Operation
 from trellis.mutate.retention import (
@@ -27,12 +28,65 @@ from trellis.schemas.well_known import (
     HAS_OBSERVATION,
     MEASUREMENT,
     OBSERVATION,
+    normalize_entity_name,
 )
 from trellis.stores.base.event_log import EventType
+from trellis.stores.base.graph import AliasBindResult, AliasBindStatus, GraphStore
 from trellis.stores.null.event_log import NullEventLog
 from trellis.stores.registry import StoreRegistry
 
 logger = structlog.get_logger(__name__)
+
+
+def _bind_entity_name_alias(
+    graph_store: GraphStore,
+    *,
+    entity_id: str,
+    name: object,
+) -> AliasBindResult | None:
+    """Best-effort derived write inside an already-governed entity command."""
+    if not isinstance(name, str):
+        return None
+    key = normalize_entity_name(name)
+    if not key:
+        return None
+
+    try:
+        twins = graph_store.query(properties={"name": name}, limit=2)
+    except Exception:
+        logger.exception(
+            "entity_resolution_name_alias_twin_check_failed",
+            entity_id=entity_id,
+        )
+        return None
+    if any(str(node.get("node_id")) != entity_id for node in twins):
+        logger.warning(
+            "entity_resolution_name_alias_contested",
+            entity_id=entity_id,
+        )
+        return None
+
+    try:
+        result = graph_store.bind_alias_if_absent(
+            entity_id,
+            NAME_ALIAS_SOURCE_SYSTEM,
+            key,
+            raw_name=name,
+            stale_owner_name_key=key,
+        )
+    except Exception:
+        logger.exception(
+            "entity_resolution_alias_bind_failed",
+            entity_id=entity_id,
+        )
+        return None
+    if result.status is AliasBindStatus.CONFLICT:
+        logger.warning(
+            "entity_resolution_name_alias_lost_race",
+            entity_id=entity_id,
+            existing_entity_id=result.entity_id,
+        )
+    return result
 
 
 class TraceIngestHandler:
@@ -308,6 +362,11 @@ class EntityCreateHandler:
             generation_spec=generation_spec,
             document_ids=document_ids,
         )
+        _bind_entity_name_alias(
+            self._registry.knowledge.graph_store,
+            entity_id=node_id,
+            name=command.args["name"],
+        )
 
         self._registry.operational.event_log.emit(
             EventType.ENTITY_CREATED,
@@ -418,6 +477,17 @@ class EntityUpdateHandler:
             generation_spec=existing.get("generation_spec"),
             document_ids=document_ids,
         )
+        final_name = props.get("name")
+        supplied_properties = command.args.get("properties") or {}
+        name_was_supplied = "name" in command.args or (
+            isinstance(supplied_properties, dict) and "name" in supplied_properties
+        )
+        if name_was_supplied:
+            _bind_entity_name_alias(
+                store,
+                entity_id=node_id,
+                name=final_name,
+            )
 
         self._registry.operational.event_log.emit(
             EventType.ENTITY_UPDATED,
@@ -431,6 +501,42 @@ class EntityUpdateHandler:
             },
         )
         return node_id, f"Entity updated: {node_id}"
+
+
+class AliasUpsertHandler:
+    """Bind or explicitly rebind an alias through the governed pipeline."""
+
+    def __init__(self, registry: StoreRegistry) -> None:
+        self._registry = registry
+
+    def handle(self, command: Command) -> tuple[str | None, str]:
+        store = self._registry.knowledge.graph_store
+        kwargs = {
+            "raw_name": command.args.get("raw_name"),
+            "match_confidence": command.args.get("match_confidence", 1.0),
+            "is_primary": command.args.get("is_primary", False),
+        }
+        try:
+            if command.args.get("if_absent", False):
+                result = store.bind_alias_if_absent(
+                    command.args["entity_id"],
+                    command.args["source_system"],
+                    command.args["raw_id"],
+                    stale_owner_name_key=command.args.get("stale_owner_name_key"),
+                    **kwargs,
+                )
+                return result.alias_id, f"Alias bind outcome: {result.status.value}"
+
+            alias_id = store.upsert_alias(
+                command.args["entity_id"],
+                command.args["source_system"],
+                command.args["raw_id"],
+                **kwargs,
+            )
+        except Exception as exc:
+            msg = "Alias store operation failed"
+            raise StoreError(msg, store="graph") from exc
+        return alias_id, "Alias upserted"
 
 
 class LinkCreateHandler:
@@ -1426,6 +1532,7 @@ def create_curate_handlers(
         Operation.FEEDBACK_RECORD: FeedbackRecordHandler(registry),
         Operation.ENTITY_CREATE: EntityCreateHandler(registry),
         Operation.ENTITY_UPDATE: EntityUpdateHandler(registry),
+        Operation.ALIAS_UPSERT: AliasUpsertHandler(registry),
         Operation.LINK_CREATE: LinkCreateHandler(registry),
         Operation.OBSERVATION_RECORD: ObservationRecordHandler(registry),
         Operation.MEASUREMENT_RECORD: MeasurementRecordHandler(registry),
