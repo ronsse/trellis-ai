@@ -1,11 +1,11 @@
-"""Learning promote loop — successful packs → reviewed promotion → graph precedent.
+"""Learning promote loop — successful packs → reviewed promotion → served precedent.
 
 Proves the EventLog-authoritative promote half of the dual-loop closes
 end-to-end at the public surface:
 
     seed corpus → run packs with successful feedback (3 rounds) →
     trellis analyze learning-candidates → operator approves a row →
-    trellis curate promote-learning → verify precedent in graph
+    trellis curate promote-learning → verify precedent in graph and a later pack
 
 Like the other loops in this directory, ingest + retrieval flow
 through REST and per-item feedback through the MCP ``record_feedback``
@@ -200,8 +200,8 @@ def _promote_via_cli(
     subprocess_env: dict[str, str],
     candidates_path: Path,
     decisions_path: Path,
-) -> str:
-    """Run ``trellis curate promote-learning`` and return the created node_id."""
+) -> tuple[str, str]:
+    """Promote the candidate and return its graph and precedent-event ids."""
     _, payload = run_cli(
         trellis_bin,
         [
@@ -223,7 +223,9 @@ def _promote_via_cli(
     result = payload["results"][0]
     assert result["status"] == "promoted", result
     assert result["node_id"], result
-    return result["node_id"]
+    assert result["precedent_event_status"] == "success", result
+    assert result["precedent_event_id"], result
+    return result["node_id"], result["precedent_event_id"]
 
 
 def _verify_precedent_in_graph(
@@ -244,8 +246,19 @@ def _verify_precedent_in_graph(
     assert properties.get("intent_family") == helpful_candidate["intent_family"]
 
 
+def _verify_precedent_served(api_url: str, node_id: str) -> None:
+    """Assert an ordinary subsequent pack serves the applied precedent."""
+    with httpx.Client(base_url=api_url, timeout=30.0) as client:
+        pack = _build_pack_or_skip(client)
+    served = {item["item_id"] for item in pack["items"]}
+    assert node_id in served, (
+        f"promoted precedent must be served by a subsequent ordinary pack; "
+        f"got {sorted(served)}"
+    )
+
+
 async def test_learning_promote_loop(loop_env: LoopEnvironment) -> None:
-    """Feedback → CLI score → operator approval → CLI promote → graph precedent."""
+    """Feedback → score → approval → promotion → graph precedent → served pack."""
     if not NEO4J_URI or not PG_DSN:  # paranoia — loop_env already gates this
         pytest.skip("live infra creds missing")
 
@@ -265,7 +278,8 @@ async def test_learning_promote_loop(loop_env: LoopEnvironment) -> None:
         c for c in score_payload["candidates"] if c["item_id"] == _HELPFUL_DOC_ID
     )
     _auto_approve(decisions_path, helpful_candidate["candidate_id"])
-    node_id = _promote_via_cli(
+    node_id, _precedent_event_id = _promote_via_cli(
         trellis_bin, subprocess_env, candidates_path, decisions_path
     )
     _verify_precedent_in_graph(loop_env, node_id, helpful_candidate)
+    _verify_precedent_served(loop_env.api_url, node_id)
