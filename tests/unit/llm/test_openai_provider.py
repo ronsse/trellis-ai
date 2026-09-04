@@ -401,3 +401,34 @@ def test_module_exports_default_model_constants() -> None:
     assert isinstance(openai_provider.DEFAULT_EMBEDDING_MODEL, str)
     assert openai_provider.DEFAULT_CHAT_MODEL.startswith("gpt-")
     assert "embedding" in openai_provider.DEFAULT_EMBEDDING_MODEL
+
+
+# -- Tests: the asymmetry with the Anthropic adapter is deliberate ---------
+
+
+class TestTemperatureStillReachesTheOpenAiApi:
+    """#500 dropped ``temperature`` at the *Anthropic* adapter only.
+
+    The OpenAI-compatible path — which the reference deployment runs against a
+    local Ollama — accepts and honours it, and callers depend on it
+    (``distill`` and ``reconcile`` ask for ``0.0``). This is the live consumer
+    that kept the parameter on ``LLMClient`` instead of removing it from the
+    shared protocol, so a future "strip temperature everywhere" change has to
+    fail here first.
+    """
+
+    @pytest.mark.parametrize("temperature", [0.0, 0.2, 0.3, 0.9])
+    async def test_explicit_temperature_is_forwarded(self, temperature: float) -> None:
+        client_obj, create = _chat_mock(_make_chat_response())
+        await OpenAIClient(client=client_obj).generate(
+            messages=[Message(role="user", content="hi")],
+            temperature=temperature,
+        )
+        assert create.call_args.kwargs["temperature"] == temperature
+
+    async def test_protocol_default_temperature_is_forwarded(self) -> None:
+        client_obj, create = _chat_mock(_make_chat_response())
+        await OpenAIClient(client=client_obj).generate(
+            messages=[Message(role="user", content="hi")],
+        )
+        assert create.call_args.kwargs["temperature"] == 0.3

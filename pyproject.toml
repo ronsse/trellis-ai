@@ -95,7 +95,7 @@ llm-openai = [
     "openai>=1.0",
 ]
 llm-anthropic = [
-    "anthropic>=0.40",
+    "anthropic>=1,<2",
 ]
 neo4j = [
     "neo4j>=5.20",

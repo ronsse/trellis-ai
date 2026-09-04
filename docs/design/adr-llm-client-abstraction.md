@@ -113,6 +113,13 @@ class LLMClient(Protocol):
     ) -> LLMResponse: ...
 ```
 
+*(Amended 2026-09-04, [#500](https://github.com/ronsse/trellis-ai/issues/500): `temperature`
+stays on the protocol but is **advisory**. Anthropic removed `temperature` / `top_p` /
+`top_k` from the Messages API on Claude Opus 4.7 and later, and from the Python SDK's
+signatures in 1.x, so `AnthropicClient` accepts the argument and never forwards it. The
+OpenAI-compatible path — which the reference deployment runs against a local Ollama — still
+honours it, which is why the parameter was not removed from the shared protocol.)*
+
 **`EmbedderClient` protocol** — replaces the bare `Callable[[str], list[float]]`:
 
 ```python
@@ -143,6 +150,11 @@ src/trellis/llm/
 llm-openai = ["openai>=1.0"]
 llm-anthropic = ["anthropic>=0.40"]
 ```
+
+*(Amended 2026-09-04, [#500](https://github.com/ronsse/trellis-ai/issues/500): the Anthropic
+floor is now `anthropic>=1,<2`. `>=0.40` spanned a breaking major — `temperature` is gone
+from 1.x's signatures, so on any resolver that picked 1.x the old adapter raised `TypeError`
+on every call, on every model. The upper bound is the load-bearing half.)*
 
 Each implementation is ~100-150 LOC: constructor (api_key, base_url, default_model), `generate()` mapping to the provider SDK, retry with exponential backoff, and `TokenUsage` extraction from the provider response.
 

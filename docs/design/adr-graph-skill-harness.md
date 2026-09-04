@@ -69,7 +69,7 @@ success_criteria: |
   Either (a) a LINK_CREATE for the appropriate hasObservation edge has
   been proposed and accepted, or (b) the harness emits SKILL_COMPLETED
   with outcome="deferred" naming the missing precondition.
-model: claude-sonnet-4-7  # optional; harness resolves via LLMClient if absent
+model: claude-sonnet-5  # optional; harness resolves via LLMClient if absent
 ---
 
 ## When to act

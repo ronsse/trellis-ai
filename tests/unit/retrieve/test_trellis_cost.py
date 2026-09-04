@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from trellis.retrieve.token_pricing import _INPUT_PRICE_PER_MTOK
 from trellis.retrieve.token_tracker import track_token_usage
 from trellis.retrieve.trellis_cost import TrellisCostReport, summarize_trellis_cost
 from trellis.stores.sqlite.event_log import SQLiteEventLog
@@ -45,9 +46,12 @@ class TestSummarizeTrellisCost:
         report = summarize_trellis_cost(event_log, days=7, model="claude-opus")
         assert report.overhead_events == 28
         assert report.overhead_tokens == 20 * 1500 + 8 * 600  # 34_800
-        assert report.price_per_mtok == 15.0
-        # 34_800 / 1e6 * 15 = 0.522
-        assert report.overhead_dollars == pytest.approx(0.522)
+        # The *price* is pinned in test_token_pricing.py against Anthropic's
+        # published list; this test owns the arithmetic, so it reads the table
+        # rather than re-typing a number that goes stale independently (#500).
+        opus = _INPUT_PRICE_PER_MTOK["claude-opus"]
+        assert report.price_per_mtok == opus
+        assert report.overhead_dollars == pytest.approx(34_800 / 1e6 * opus)
 
     def test_per_operation_dollars(self, event_log, monkeypatch):
         monkeypatch.delenv("TRELLIS_COST_PRICE_PER_MTOK", raising=False)
@@ -56,9 +60,9 @@ class TestSummarizeTrellisCost:
         by_op = {op["operation"]: op for op in report.by_operation}
         assert by_op["get_context"]["tokens"] == 30_000
         assert by_op["get_context"]["calls"] == 20
-        # 30_000 / 1e6 * 3 = 0.09
-        assert by_op["get_context"]["dollars"] == pytest.approx(0.09)
-        assert by_op["get_lessons"]["dollars"] == pytest.approx(0.0144)
+        sonnet = _INPUT_PRICE_PER_MTOK["claude-sonnet"]
+        assert by_op["get_context"]["dollars"] == pytest.approx(30_000 / 1e6 * sonnet)
+        assert by_op["get_lessons"]["dollars"] == pytest.approx(4_800 / 1e6 * sonnet)
 
     def test_price_override_flows_through(self, event_log, monkeypatch):
         monkeypatch.delenv("TRELLIS_COST_PRICE_PER_MTOK", raising=False)

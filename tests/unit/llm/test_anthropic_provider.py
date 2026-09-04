@@ -16,6 +16,7 @@ from trellis.llm.protocol import LLMClient
 from trellis.llm.providers import anthropic as anthropic_provider
 from trellis.llm.providers.anthropic import (
     DEFAULT_MODEL,
+    UNSUPPORTED_SAMPLING_PARAMS,
     AnthropicClient,
     _extract_text,
     _extract_usage,
@@ -32,7 +33,7 @@ def _text_block(text: str) -> SimpleNamespace:
 
 def _make_message_response(
     text: str = "hi",
-    model: str = "claude-haiku-4-5-20251001",
+    model: str = DEFAULT_MODEL,
     *,
     usage: tuple[int, int] | None = (10, 5),
     blocks: list[SimpleNamespace] | None = None,
@@ -102,7 +103,8 @@ class TestAnthropicClient:
         await c.generate(messages=[Message(role="user", content="hi")])
         assert "system" not in create.call_args.kwargs
 
-    async def test_forwards_temperature_and_max_tokens(self) -> None:
+    async def test_forwards_max_tokens_but_not_temperature(self) -> None:
+        """``max_tokens`` rides; ``temperature`` is dropped (#500)."""
         client_obj, create = _messages_mock(_make_message_response())
         c = AnthropicClient(client=client_obj)
         await c.generate(
@@ -111,8 +113,8 @@ class TestAnthropicClient:
             max_tokens=2048,
         )
         call_kwargs = create.call_args.kwargs
-        assert call_kwargs["temperature"] == 0.9
         assert call_kwargs["max_tokens"] == 2048
+        assert "temperature" not in call_kwargs
 
     async def test_uses_default_model(self) -> None:
         client_obj, create = _messages_mock(_make_message_response())
@@ -359,3 +361,163 @@ class TestExtractUsageEdgeCases:
 def test_module_exports_default_model_constant() -> None:
     assert isinstance(anthropic_provider.DEFAULT_MODEL, str)
     assert anthropic_provider.DEFAULT_MODEL.startswith("claude-")
+
+
+# -- Tests: no sampling parameter reaches the Anthropic API ----------------
+#
+# This is the load-bearing claim of #500, so it is pinned *at the boundary*
+# (the kwargs handed to ``messages.create``) rather than one layer in.
+#
+# An ``AsyncMock`` accepts any kwargs, so a test that merely asserts "we
+# called create" cannot see that we passed a parameter the real SDK would
+# reject.  ``_StrictSdkMessages`` closes that gap: its ``create`` declares the
+# keyword-only parameters the *real* ``anthropic`` 1.x signature exposes for
+# the calls this adapter makes, and **no ``**kwargs`` catch-all** — so any
+# extra keyword is a ``TypeError`` raised by Python itself, exactly as the
+# real SDK raises one.  The real SDK is never importable in this suite (it is
+# an optional extra nothing installs), which is precisely why the fake has to
+# model the signature rather than swallow everything.
+#
+# If the adapter ever legitimately grows a new request parameter (``system``
+# is the only optional one today), this fake must be widened deliberately.
+# That friction is the point.
+
+
+class _StrictSdkMessages:
+    """A ``messages`` namespace whose ``create`` rejects unknown kwargs.
+
+    Mirrors the ``anthropic`` 1.x signature for the subset of parameters
+    ``AnthropicClient`` uses.  ``temperature`` / ``top_p`` / ``top_k`` are
+    absent from 1.x, so they are absent here.
+    """
+
+    def __init__(self, response: SimpleNamespace) -> None:
+        self._response = response
+        self.calls: list[dict[str, object]] = []
+
+    async def create(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, str]],
+        max_tokens: int,
+        system: str | None = None,
+    ) -> SimpleNamespace:
+        recorded: dict[str, object] = {
+            "model": model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+        }
+        if system is not None:
+            recorded["system"] = system
+        self.calls.append(recorded)
+        return self._response
+
+
+def _strict_client(
+    response: SimpleNamespace | None = None,
+) -> tuple[SimpleNamespace, _StrictSdkMessages]:
+    msgs = _StrictSdkMessages(response or _make_message_response())
+    return SimpleNamespace(messages=msgs), msgs
+
+
+class TestStrictFakeIsNotVacuous:
+    """The fake must actually be able to fail — otherwise it proves nothing."""
+
+    async def test_unknown_kwarg_raises_typeerror(self) -> None:
+        _, msgs = _strict_client()
+        with pytest.raises(TypeError):
+            await msgs.create(  # type: ignore[call-arg]
+                model="m",
+                messages=[],
+                max_tokens=1,
+                temperature=0.3,
+            )
+
+    async def test_expected_kwargs_are_accepted(self) -> None:
+        _, msgs = _strict_client()
+        await msgs.create(model="m", messages=[], max_tokens=1, system="s")
+        assert msgs.calls == [
+            {"model": "m", "messages": [], "max_tokens": 1, "system": "s"}
+        ]
+
+
+class TestNoSamplingParamsReachTheApi:
+    @pytest.mark.parametrize("temperature", [0.0, 0.2, 0.3, 0.9, 1.0])
+    async def test_generate_survives_a_signature_without_temperature(
+        self, temperature: float
+    ) -> None:
+        """The call itself must not raise against an SDK-shaped signature.
+
+        Every temperature the repo actually passes is covered: ``0.0``
+        (``distill``, ``reconcile``), ``0.2`` (``extract.llm``), ``0.3`` (the
+        protocol default, also ``EnrichmentService``).
+        """
+        client_obj, msgs = _strict_client()
+        resp = await AnthropicClient(client=client_obj).generate(
+            messages=[
+                Message(role="system", content="sys"),
+                Message(role="user", content="hi"),
+            ],
+            temperature=temperature,
+            max_tokens=321,
+        )
+        assert resp.content == "hi"
+        assert msgs.calls[0]["max_tokens"] == 321
+        assert msgs.calls[0]["system"] == "sys"
+
+    async def test_generate_survives_without_a_system_message(self) -> None:
+        client_obj, msgs = _strict_client()
+        await AnthropicClient(client=client_obj).generate(
+            messages=[Message(role="user", content="hi")],
+            temperature=0.0,
+        )
+        assert "system" not in msgs.calls[0]
+
+    @pytest.mark.parametrize("param", UNSUPPORTED_SAMPLING_PARAMS)
+    async def test_named_sampling_param_is_absent_from_the_request(
+        self, param: str
+    ) -> None:
+        """Derived from the module's own roster, so extending it extends this."""
+        client_obj, create = _messages_mock(_make_message_response())
+        await AnthropicClient(client=client_obj).generate(
+            messages=[
+                Message(role="system", content="sys"),
+                Message(role="user", content="hi"),
+            ],
+            temperature=0.9,
+        )
+        assert param not in create.call_args.kwargs
+
+    async def test_default_call_sends_exactly_the_expected_keys(self) -> None:
+        """Pins the whole request shape, so the invariant cannot be satisfied
+        by an adapter that stopped sending everything."""
+        client_obj, create = _messages_mock(_make_message_response())
+        await AnthropicClient(client=client_obj).generate(
+            messages=[
+                Message(role="system", content="sys"),
+                Message(role="user", content="hi"),
+            ],
+        )
+        assert set(create.call_args.kwargs) == {
+            "model",
+            "messages",
+            "max_tokens",
+            "system",
+        }
+
+    def test_roster_names_every_removed_sampling_param(self) -> None:
+        assert set(UNSUPPORTED_SAMPLING_PARAMS) == {
+            "temperature",
+            "top_p",
+            "top_k",
+        }
+
+
+class TestDefaultModelIsThePinnedSnapshot:
+    """#500 correction: the dated form is Haiku 4.5's *Claude API ID*, and
+    ``claude-haiku-4-5`` is the alias that resolves to it — so this is a
+    deliberate pin, not a stale snapshot of a modern alias."""
+
+    def test_default_model_is_the_dated_claude_api_id(self) -> None:
+        assert DEFAULT_MODEL == "claude-haiku-4-5-20251001"
