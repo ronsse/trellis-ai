@@ -100,18 +100,26 @@ anyone has yet said in its favour.
 *Measured over the 16,023 calls in* ``src/`` *at* ``8ec879c``. Run every
 shape through all the scanners before writing a word about it:
 
-* A call in a **comprehension element** (``[Subject() for x in y]``, 321
+* A call in a **comprehension element** (``[Subject() for x in y]``, 320
   calls) is an ordinary ``ast.expr`` child and **every scanner here
   reports it**. Not a shape. The half that does hide is the
   comprehension's ``iter``/``ifs`` *clause* (315 calls), because
   ``ast.comprehension`` is neither a statement nor an expression — so
-  ``comprehension_clause`` is the entry, and the 612 calls with any
+  ``comprehension_clause`` is the entry, and the 636 calls with any
   comprehension ancestor were never one population. (No count of this is
-  worth quoting without its definition: 612 distinct calls under a
-  comprehension, 650 by a walk that double-counts nested ones, 321 in the
-  element and 315 in the clause overlapping through nesting. #501 and an
-  earlier draft of this docstring disagreed at 633 and 635 and neither
-  said which it meant.)
+  worth quoting without its definition, and every one of these is a
+  distinct-call count over ``src/`` unless it says otherwise: **636**
+  calls have a comprehension ancestor — **650** if you walk each
+  comprehension separately and double-count the nested ones — of which
+  **316** sit under an ``ast.comprehension`` clause and the remaining
+  **320** are in the element. Of those 316, **315** are *gated* by the
+  clause, which is the number the shape probes and the one
+  :func:`_naive_typed_descent` loses; the odd one out sits behind a
+  nearer ``ast.keyword``. #501 and two earlier drafts of this docstring
+  quoted 633, 635 and 612 and none said which population it meant — the
+  612 does not reproduce under any definition and is what a global
+  ``{id(node)}`` set across per-file trees returns once CPython starts
+  reusing addresses.)
 * A call **inside a walrus** (``if (x := Subject()):``) is likewise plain
   expression ground that nothing misses. The walrus hides on the
   **binding** axis instead — ``S := Subject`` then ``S(...)`` — which is
@@ -121,8 +129,13 @@ shape through all the scanners before writing a word about it:
   scanners that predate this change already miss them.
 * ``with`` **items** (167) do hide, and needed the ninth scanner —
   :func:`_naive_typed_descent`, the repair a #457 author writes.
-* ``match`` needed **nothing**: ``src/`` holds 0 ``ast.Match`` nodes, so
-  there is nothing for a scanner to miss. That is evidence *for* the rule
+* ``match`` needed **nothing**, and note that this is a *different*
+  disposal from the two above. A call in a ``case`` body really does hide
+  — from ``stmt_descent`` and from ``typed_descent`` both — so the
+  "some scanner misses it" rule would admit it. What refuses it is that
+  ``src/`` holds 0 ``ast.Match`` nodes, so no call in the real tree is
+  behind one and the derived requirement below asks for nothing. It
+  starts asking the day one is written. That is evidence *for* the rule
   and is recorded as such rather than filled.
 
 The one new scanner brought three more placements with it, and the roster
@@ -136,12 +149,22 @@ into the roster is the artefact #501 was filed about.
 neither is a walk narrowed to a subdirectory. :func:`iter_modules` is
 covered, but by the hand-read floors rather than by the roster. A third
 corpus file should therefore live in a **subdirectory**, with a
-discovery-narrowing scanner beside it. That is deliberately not done here:
-every adopter's predicate, and this suite's own :func:`_perfect`
-reference, discovers with ``root.glob("*.py")``, so moving a shape into a
-subdirectory would fail four rules at once for a reason that has nothing
-to do with any of them. It is a change to the corpus contract, not an
-entry in the roster.
+discovery-narrowing scanner beside it. That is deliberately not done
+here, and the reason is narrower than an earlier draft of this paragraph
+claimed. It is **not** the adopters: all three shipped predicates walk
+with ``rglob`` (``_offenders`` and ``ungated_executors`` through
+:func:`iter_modules`, ``_violations`` directly), so a subdirectory shape
+would cost them nothing. What it would break is this suite's own
+reference predicates — :func:`_perfect`, ``_blind_to``,
+``_predicate_from``, ``_every_call_line`` and the two written inline in
+tests, six of them at the last count, every one discovering with
+``root.glob("*.py")`` — and :meth:`RenderedCorpus.write`, which writes
+every file flat into one directory and would raise on a name carrying a
+directory part. Both are ours to change, which is
+the point: it is a change to the corpus contract, not an entry in the
+roster. Do not repeat the earlier claim without re-running the grep;
+getting the adopters' discovery spelling wrong is what turned a cheap
+improvement into an argued-for hole.
 
 **The class is not confined to AST rules, and #495 is the proof.** Found
 the same night this module was written: 21 CLI tests fail under
@@ -818,7 +841,11 @@ EVASIONS: tuple[Evasion, ...] = (
             "constructed inline as another call's keyword argument. "
             "`ast.keyword` is the largest member of the neither-statement-"
             "nor-expression family: 1,314 calls in src/ sit behind one, "
-            "more than the other four put together."
+            "against 584 for the next largest and 2,817 for the family "
+            "as a whole — a little under half of it, not more than the "
+            "other four put together, which an earlier draft claimed and "
+            "the four numbers beside it refute (584 + 437 + 315 + 167 = "
+            "1,503)."
         ),
         call="{SUBJECT}({ARGS})",
         context=(
@@ -836,10 +863,12 @@ EVASIONS: tuple[Evasion, ...] = (
             "a mutable default evaluated once at definition time — the "
             "placement whose whole reputation is for surprising people. "
             "It hangs off `ast.arguments`, neither statement nor "
-            "expression, and covers 437 calls in src/. It is the one "
-            "member of that family a *second* scanner also misses: "
-            "iterating `node.body` never reaches the signature, which is "
-            "the same reason `decorator` hides from that scanner."
+            "expression, and covers 437 calls in src/. It is one of the "
+            "two members of that family a *second* scanner also misses "
+            "(`inside_except` is the other, and its second scanner is "
+            "`stmt_descent`): iterating `node.body` never reaches the "
+            "signature, which is the same reason `decorator` hides from "
+            "that scanner."
         ),
         call="{SUBJECT}({ARGS})",
         context=(
@@ -1273,12 +1302,15 @@ def _naive_typed_descent(corpus: RenderedCorpus, subject: str, kwarg: str) -> se
     ``ast.arguments`` (437), ``ast.comprehension`` (315) and
     ``ast.withitem`` (167).
 
-    The roster carries a shape for each of those five, and
-    ``test_ast_rules`` derives that requirement from ``src/`` rather than
-    from a list here — which is also what disposes of ``ast.match_case``,
-    the sixth member: ``src/`` contains 0 ``ast.Match`` nodes, so the
-    derived requirement asks for nothing, and it starts asking the day one
-    is written.
+    Five in ``src/`` today, and the roster carries a shape for each. It is
+    **not** an enumeration of the family, and deliberately not written as
+    one — ``ast.match_case`` and ``ast.arg`` (a call in a parameter's
+    annotation) both hide from this predicate too, and both hide zero
+    calls in ``src/`` right now. ``test_ast_rules`` therefore derives the
+    requirement from ``src/`` rather than from a list here, so a member
+    nobody thought to name is demanded the day the first call goes behind
+    it, and a list that rots cannot make the guard vacuous. Enumerating
+    this family by hand is what #501 was filed about.
     """
     return {
         call.lineno
