@@ -27,29 +27,39 @@ def _digest() -> SessionDigest:
 
 def test_parse_candidates_happy_path() -> None:
     raw = candidates_json(good_candidate())
-    cands = distill.parse_candidates(raw, "sess-fake-0001")
-    assert len(cands) == 1
-    assert cands[0].session_id == "sess-fake-0001"
-    assert cands[0].non_derivable is True
+    result = distill.parse_candidates(raw, "sess-fake-0001")
+    assert result.outcome is distill.DistillOutcome.CANDIDATES
+    assert len(result.candidates) == 1
+    assert result.candidates[0].session_id == "sess-fake-0001"
+    assert result.candidates[0].non_derivable is True
 
 
 def test_parse_candidates_tolerates_code_fence() -> None:
     raw = "```json\n" + candidates_json(good_candidate()) + "\n```"
-    assert len(distill.parse_candidates(raw, "s")) == 1
+    result = distill.parse_candidates(raw, "s")
+    assert result.outcome is distill.DistillOutcome.CANDIDATES
+    assert len(result.candidates) == 1
 
 
-def test_parse_candidates_malformed_returns_empty() -> None:
-    assert distill.parse_candidates("not json at all", "s") == []
+def test_parse_candidates_malformed_is_distinct_from_empty() -> None:
+    malformed = distill.parse_candidates("not json at all", "s")
+    empty = distill.parse_candidates("[]", "s")
+
+    assert malformed.outcome is distill.DistillOutcome.MALFORMED
+    assert malformed.parse_error
+    assert empty == distill.DistillResult(outcome=distill.DistillOutcome.EMPTY)
 
 
-def test_parse_candidates_non_array_returns_empty() -> None:
-    assert distill.parse_candidates('{"title": "x"}', "s") == []
+def test_parse_candidates_non_array_is_malformed() -> None:
+    result = distill.parse_candidates('{"title": "x"}', "s")
+    assert result.outcome is distill.DistillOutcome.MALFORMED
 
 
 def test_parse_candidates_skips_items_missing_fields() -> None:
     raw = candidates_json({"title": "only a title"}, good_candidate())
-    cands = distill.parse_candidates(raw, "s")
-    assert len(cands) == 1
+    result = distill.parse_candidates(raw, "s")
+    assert result.outcome is distill.DistillOutcome.CANDIDATES
+    assert len(result.candidates) == 1
 
 
 def test_build_messages_mark_an_oversize_cut() -> None:
@@ -73,26 +83,31 @@ def test_build_messages_under_cap_carry_no_elision_marker() -> None:
     assert "<elided" not in user
 
 
-def test_distill_no_client_returns_none() -> None:
-    # None (not []) so the caller leaves the session un-watermarked.
-    assert distill.distill_session(None, _digest()) is None
+def test_distill_no_client_is_unavailable() -> None:
+    result = distill.distill_session(None, _digest())
+    assert result.outcome is distill.DistillOutcome.UNAVAILABLE
+    assert result.unavailable_reason == "no_client"
 
 
-def test_distill_model_down_returns_none() -> None:
-    assert distill.distill_session(BrokenLLMClient(), _digest()) is None
+def test_distill_model_down_is_unavailable() -> None:
+    result = distill.distill_session(BrokenLLMClient(), _digest())
+    assert result.outcome is distill.DistillOutcome.UNAVAILABLE
+    assert result.unavailable_reason == "model_error"
 
 
 def test_distill_success_returns_candidates() -> None:
     client = FakeLLMClient([candidates_json(good_candidate())])
     result = distill.distill_session(client, _digest())
-    assert result is not None
-    assert len(result) == 1
+    assert result.outcome is distill.DistillOutcome.CANDIDATES
+    assert len(result.candidates) == 1
 
 
-def test_distill_empty_judgment_returns_empty_list_not_none() -> None:
+def test_distill_empty_judgment_is_empty_not_unavailable() -> None:
     # Judge responded with an empty array — "nothing worthy", safe to advance.
     client = FakeLLMClient(["[]"])
-    assert distill.distill_session(client, _digest()) == []
+    assert distill.distill_session(client, _digest()) == distill.DistillResult(
+        outcome=distill.DistillOutcome.EMPTY
+    )
 
 
 class TestSkipDisciplineInJudgePrompt:
@@ -157,9 +172,9 @@ class TestPromptWindowPreflight:
         # Window smaller than the reserve alone: nothing can fit.
         monkeypatch.setenv(distill.ENV_JUDGE_CONTEXT_TOKENS, "64")
         client = FakeLLMClient([candidates_json(good_candidate())])
-        # None, not [] -- the session stays un-watermarked and is retried
-        # rather than recorded as "judged, nothing worthy".
-        assert distill.distill_session(client, _digest()) is None
+        result = distill.distill_session(client, _digest())
+        assert result.outcome is distill.DistillOutcome.UNAVAILABLE
+        assert result.unavailable_reason == "prompt_too_large"
         # The model is never consulted: a prompt that cannot fit buys nothing.
         assert client.calls == []
 
@@ -175,8 +190,8 @@ class TestPromptWindowPreflight:
     def test_fitting_prompt_is_sent(self) -> None:
         client = FakeLLMClient([candidates_json(good_candidate())])
         result = distill.distill_session(client, _digest())
-        assert result is not None
-        assert len(result) == 1
+        assert result.outcome is distill.DistillOutcome.CANDIDATES
+        assert len(result.candidates) == 1
         assert len(client.calls) == 1
 
     def test_declared_larger_window_admits_a_larger_prompt(self, monkeypatch) -> None:
@@ -187,10 +202,13 @@ class TestPromptWindowPreflight:
         monkeypatch.setenv(distill.ENV_MAX_SALIENT_CHARS, "60000")
 
         monkeypatch.setenv(distill.ENV_JUDGE_CONTEXT_TOKENS, "4096")
-        assert distill.distill_session(FakeLLMClient(["[]"]), digest) is None
+        result = distill.distill_session(FakeLLMClient(["[]"]), digest)
+        assert result.outcome is distill.DistillOutcome.UNAVAILABLE
 
         monkeypatch.setenv(distill.ENV_JUDGE_CONTEXT_TOKENS, "32768")
-        assert distill.distill_session(FakeLLMClient(["[]"]), digest) == []
+        assert distill.distill_session(
+            FakeLLMClient(["[]"]), digest
+        ) == distill.DistillResult(outcome=distill.DistillOutcome.EMPTY)
 
 
 class TestJudgeContextTokens:

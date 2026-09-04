@@ -319,15 +319,23 @@ def _capture_session(
     still computed and reported — the plan a dry run prints has to be the plan
     the live sweep would execute.
     """
-    candidates = distill.distill_session(llm_client, digest)
-    if candidates is None:
+    distill_result = distill.distill_session(llm_client, digest)
+    if distill_result.outcome is distill.DistillOutcome.UNAVAILABLE:
         report.sessions_judge_unavailable += 1
         report.warnings.append(
             {"kind": "distill_unavailable", "session_id": digest.session_id}
         )
         return None
+    if distill_result.outcome is distill.DistillOutcome.MALFORMED:
+        report.sessions_judge_malformed += 1
+        logger.warning(
+            "distill_response_malformed",
+            session_id=digest.session_id,
+            parse_error=distill_result.parse_error,
+        )
 
     report.sessions_triggered += 1
+    candidates = list(distill_result.candidates)
     input_hash = content_hash(digest.salient_text)
     input_length = len(digest.salient_text)
     for candidate in candidates:

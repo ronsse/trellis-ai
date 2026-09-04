@@ -211,6 +211,7 @@ __all__ = [
     "construction_names",
     "construction_sites",
     "decoy_lines",
+    "generate_call_sites",
     "is_call_to",
     "iter_modules",
     "marker_lines",
@@ -397,6 +398,28 @@ def construction_sites(cls: str, root: Path, *, resolve: bool = True) -> list[Ca
         names = construction_names(cls, tree) if resolve else {cls}
         sites.extend(
             CallSite(path=path, node=node) for node in calls_to_any(names, tree)
+        )
+    return sites
+
+
+def generate_call_sites(root: Path) -> list[CallSite]:
+    """Find LLM-style ``generate(messages=...)`` calls and opaque splats.
+
+    Calls carrying another explicit keyword, such as
+    ``AdvisoryGenerator.generate(days=...)``, are negative controls. A
+    ``**kwargs`` call is retained because a static rule cannot prove that it
+    is not hiding ``messages``.
+    """
+    sites: list[CallSite] = []
+    for path, tree in iter_modules(root):
+        names = construction_names("generate", tree)
+        sites.extend(
+            CallSite(path=path, node=node)
+            for node in calls_to_any(names, tree)
+            if any(
+                keyword.arg == "messages" or keyword.arg is None
+                for keyword in node.keywords
+            )
         )
     return sites
 

@@ -143,6 +143,7 @@ class CaptureFunnel(TrellisModel):
     sessions_sampled_out: int = 0
     sessions_triggered: int = 0
     sessions_judge_unavailable: int = 0
+    sessions_judge_malformed: int = 0
     sessions_with_memory: int = 0
     memories_written: int = 0
     candidates_distilled: int = 0
@@ -337,6 +338,12 @@ def summarize_capture_coverage(
     report.last_sweep_at = max(e.occurred_at for e in events)
     report.eligible_sessions = funnel.sessions_triggered
     report.sessions_with_memory = funnel.sessions_with_memory
+    if funnel.sessions_judge_malformed > 0:
+        report.notes.append(
+            f"{funnel.sessions_judge_malformed} malformed distillation "
+            "response(s) were judged empty and watermarked; inspect "
+            "distill_response_malformed warnings"
+        )
 
     if funnel.sessions_triggered == 0:
         report.state = "degraded"
