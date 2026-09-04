@@ -43,6 +43,7 @@ from trellis.retrieve.effectiveness import (
 from trellis.retrieve.metrics_timeseries import compute_timeseries
 from trellis.stores.advisory_source import load_advisory_store
 from trellis.stores.base.event_log import EventLog, EventType
+from trellis.stores.base.vector import VectorStore
 from trellis_api.app import get_registry
 from trellis_api.auth import AuthContext, authenticate
 from trellis_wire.dtos import (
@@ -430,60 +431,76 @@ _VECTORS_REFUSED_STATUS = 409
 #: catch stays for the *body*, not the status — see the comment on it.
 _VECTORS_RESET_FAILED_STATUS = 500
 
-#: The raw-SQL handles :func:`reset_vectors` knows how to drive, most
-#: specific first, each paired with the branch name the route dispatches
-#: on. ``_pool`` is checked before ``_conn`` because ``PgVectorStore``
-#: has both and only the pooled path is correct for it.
-_VECTOR_RESET_HANDLES: tuple[tuple[str, str], ...] = (
-    ("_pool", "pool"),
-    ("_conn", "conn"),
-)
 
+def _vector_reset_refusal(vector_store: object) -> dict[str, Any] | None:
+    """The refusal body for a store this route must not reset, else ``None``.
 
-def _vector_reset_handle(vector_store: object) -> str | None:
-    """Name the handle this route can reset ``vector_store`` through.
+    Two things have to hold before the route touches anything, and both
+    are questions the :class:`~trellis.stores.base.vector.VectorStore`
+    abstraction answers about itself. The object has to *be* a
+    ``VectorStore`` — the registry instantiates whatever class a config
+    names, and this route depends on the ABC rather than on a shape — and
+    that backend has to implement
+    :meth:`~trellis.stores.base.vector.VectorStore.reset_storage`.
 
-    ``None`` means the backend cannot be reset here at all — the #511
-    condition. Detection is by **capability, not class name**: a roster of
-    backend class names in this module would rot the moment a fifth
-    backend lands, and it would be a *second* place that has to agree with
-    the dispatch below. This asks the one question the dispatch asks.
+    Both are **declarations, not inferences** (#511, #512). Until #512
+    this asked for private attributes: ``_pool`` / ``_conn`` for the reset
+    and ``_dimensions`` for the width. Nothing declared either, so a
+    backend that spelled them differently had an answer published on its
+    behalf — silently, plausibly, and wrongly. ``supports_reset()`` is
+    derived from the ``reset_storage`` override, so the fact this asks
+    about and the code that does the work are one thing and cannot come
+    apart; there is no second check and no dispatch left to disagree with
+    it.
 
-    The probe asks the **type** — :func:`hasattr` against the *class*,
-    which walks the MRO and hands back a property object without ever
-    binding it — and the **instance** ``__dict__``. What it never does is
-    ``hasattr`` against the *instance*. ``SQLiteStoreBase._conn`` is a
-    *property* that opens a connection, so that spelling would do I/O just
-    to answer a question about shape — and on a corrupt database file it
-    raises ``sqlite3.DatabaseError`` straight out of the probe, which is
-    not an ``AttributeError`` and would escape as an unhandled 500
-    ``internal_error`` instead of this route's own ``vector_reset_failed``.
-    Absent and present-but-unhappy are different answers and only the
-    first one is this arm's.
+    Asking costs nothing and touches no instance state: ``isinstance``
+    reads the MRO and ``supports_reset`` is a classmethod. That is load
+    bearing here, above the ``try``. ``SQLiteStoreBase._conn`` — the
+    attribute the pre-#512 probe was hunting for — is a *property that
+    opens a connection*, so the obvious ``hasattr(store, "_conn")``
+    spelling of that probe would have done I/O to answer a question about
+    shape and, on a corrupt database, raised ``sqlite3.DatabaseError`` out
+    of a decision about whether anything should happen at all.
 
-    The type half has to stay an MRO walk and not a read of
-    ``store_type.__dict__``: ``SQLiteVectorStore`` does not define
-    ``_conn`` itself — it inherits the property from ``SQLiteStoreBase`` —
-    so narrowing it that way would refuse the *default* backend.
+    What this deliberately does *not* try to decide is whether
+    ``reset_storage`` will *succeed*. The boundary is "can the reset
+    *begin*": anything failing after the ``DROP`` has run is a reset that
+    was attempted and broke, which is ``_VECTORS_RESET_FAILED_STATUS``'s
+    claim and not this one's. Widening it would move a genuinely
+    destructive failure into an arm whose whole promise is that nothing
+    was touched.
 
-    The route's one caller uses the returned handle to pick its branch, so
-    "supported" and "which branch" are decided **once**. Two independent
-    ``hasattr`` checks — one to refuse, one to dispatch — could disagree.
-
-    What this deliberately does *not* check is whether ``_init_schema``
-    will accept a bare call (``ArcadeDBVectorStore``'s wants keyword
-    arguments). The boundary is "can the reset *begin*": anything that
-    fails after the ``DROP`` has run is a reset that was attempted and
-    broke, which is ``_VECTORS_RESET_FAILED_STATUS``'s claim and not this
-    one's. Widening the probe would move a genuinely destructive failure
-    into an arm whose whole promise is that nothing was touched.
+    The two conditions share ``vector_reset_unsupported_backend``: same
+    class (nothing touched, fix the deployment), and ``code`` is the
+    machine-readable half. They do **not** share a message. "Keeps no
+    `vectors` table" is something the ABC's declaration entitles us to say
+    about a ``VectorStore`` that declined; it would be a fact invented
+    about an object that never implemented the interface, which is the
+    #512 failure mode in the sentence that fixes #512.
     """
-    instance_attrs = getattr(vector_store, "__dict__", {})
-    store_type = type(vector_store)
-    for name, handle in _VECTOR_RESET_HANDLES:
-        if hasattr(store_type, name) or name in instance_attrs:
-            return handle
-    return None
+    if isinstance(vector_store, VectorStore):
+        if vector_store.supports_reset():
+            return None
+        detail = (
+            f"{type(vector_store).__name__} keeps no `vectors` table "
+            "for this route to drop and recreate."
+        )
+    else:
+        detail = (
+            f"{type(vector_store).__name__} does not implement the "
+            "`VectorStore` interface this route resets through."
+        )
+    return {
+        "status": "error",
+        "code": "vector_reset_unsupported_backend",
+        "message": (
+            f"Vector reset is not supported on this backend: {detail} "
+            "Nothing was changed. "
+            "Rebuild the backend's vector index with its own tooling, "
+            "then repopulate with `trellis admin reindex-vectors "
+            "--force`."
+        ),
+    }
 
 
 @router.post(
@@ -495,9 +512,11 @@ def _vector_reset_handle(vector_store: object) -> str | None:
                 "has to change is the deployment rather than the request. "
                 "A `code` says which — `vector_store_unconfigured` when "
                 "the deployment has no vector store, "
-                "`vector_reset_unsupported_backend` when it has one whose "
-                "backend keeps no `vectors` table for this route to drop "
-                "(ArcadeDB and Neo4j hold vectors as graph-node state). "
+                "`vector_reset_unsupported_backend` when it has one this "
+                "route cannot reset — a backend that keeps no `vectors` "
+                "table to drop (ArcadeDB and Neo4j hold vectors as "
+                "graph-node state), or an object that does not implement "
+                "the vector-store interface at all. "
                 "Both sit at the top level beside `status`, and neither is "
                 "transient: retrying an unchanged request cannot succeed."
             )
@@ -559,40 +578,34 @@ def reset_vectors(response: Response) -> dict[str, Any]:
             "message": "Vector store not configured",
         }
 
-    # PgVectorStore exposes the pooled-connection helper ``_conn``
-    # inherited from ``PostgresStoreBase``; SQLite's vector store uses a
-    # plain ``sqlite3.Connection`` at ``_conn`` whose ``execute`` runs SQL
-    # directly. ``ArcadeDBVectorStore`` and ``Neo4jVectorStore`` have
-    # neither, so before #511 this route reached for ``_conn`` on the
-    # **blessed** substrate and died on ``AttributeError`` — answered as a
-    # 500 whose message was the attribute name, which tells an operator
-    # nothing to do and invites a retry that can never succeed. The
-    # capability is resolved once, above the ``try``, and the branch below
-    # is chosen from that same answer.
-    handle = _vector_reset_handle(vector_store)
-    if handle is None:
+    # Before #511 this route reached for ``_conn`` on the **blessed**
+    # substrate — ``ArcadeDBVectorStore`` and ``Neo4jVectorStore`` have no
+    # SQL handle at all — and died on ``AttributeError``, answered as a
+    # 500 whose message was the attribute name: nothing an operator can
+    # act on, and an invitation to retry something that can never succeed.
+    # #511 asked the shape question before assuming the answer; #512
+    # replaced the question. The backend now *declares* whether it can be
+    # reset, and the declaration is derived from the implementation, so
+    # this refusal and the work below read one fact.
+    refusal = _vector_reset_refusal(vector_store)
+    if refusal is not None:
         response.status_code = _VECTORS_REFUSED_STATUS
-        return {
-            "status": "error",
-            "code": "vector_reset_unsupported_backend",
-            "message": (
-                "Vector reset is not supported on this backend: "
-                f"{type(vector_store).__name__} keeps no `vectors` table "
-                "for this route to drop and recreate. Nothing was changed. "
-                "Rebuild the backend's vector index with its own tooling, "
-                "then repopulate with `trellis admin reindex-vectors "
-                "--force`."
-            ),
-        }
+        return refusal
+
+    # Read the width *before* anything is dropped. It is a declaration
+    # rather than a measurement (``VectorStoreContractTests`` pins that it
+    # is stable across writes), so it reads the same on either side — and
+    # reading it after would put a property call between a completed
+    # destructive operation and the 200 that reports it, which is #506's
+    # defect with a new attribute in the hole. Nothing has been dropped
+    # yet here, so a backend whose declaration raises fails a request that
+    # changed nothing. There is no ``getattr`` fallback: a default
+    # answered on the backend's behalf is exactly what #512 removed, and
+    # the ABC makes the property abstract so no backend can be silent.
+    declared_dimensions = vector_store.dimensions
 
     try:
-        if handle == "pool":
-            with vector_store._conn() as conn, conn.cursor() as cur:
-                cur.execute("DROP TABLE IF EXISTS vectors")
-        else:
-            vector_store._conn.execute("DROP TABLE IF EXISTS vectors")
-            vector_store._conn.commit()
-        vector_store._init_schema()
+        vector_store.reset_storage()
     # The catch is kept, and it is now earning its keep on the **body
     # alone**. It used to be annotated GRACEFUL-DEGRADATION — "surfaces
     # failure as a structured JSON response rather than a 5xx" — which
@@ -622,24 +635,21 @@ def reset_vectors(response: Response) -> dict[str, Any]:
         # The third arm of the same defect, found while fixing the two the
         # issue named and included for the reason #505 included its own
         # third: a route with one honest arm beside one lying arm is no
-        # more trustworthy than one with two. ``_dimensions`` is defined
-        # only on ``PgVectorStore``, ``ArcadeDBVectorStore`` and
-        # ``Neo4jVectorStore`` — **not** on ``SQLiteVectorStore``, the
-        # default backend — and it was read in this ``else``, outside the
-        # ``try``, so on a default deployment a reset that dropped and
-        # recreated the table then died on ``AttributeError`` and answered
-        # 500 ``internal_error``. The status line lied in the other
-        # direction, on a destructive route, which invites the operator to
-        # re-run it. Read defensively rather than moving the line inside
-        # the ``try``: a successful reset must not be reported as a failed
-        # one over a missing *cosmetic* attribute. SQLite stores
-        # ``dimensions`` per row and pins no table-level width, so "no
-        # fixed dimensionality" is the honest thing to say about it rather
-        # than a fabricated number.
-        dims = getattr(vector_store, "_dimensions", None)
+        # more trustworthy than one with two. This read used to be
+        # ``getattr(vector_store, "_dimensions", None)`` — a private
+        # attribute of another module, defined on ``PgVectorStore``,
+        # ``ArcadeDBVectorStore`` and ``Neo4jVectorStore`` and **not** on
+        # ``SQLiteVectorStore``, the default backend. #506 fixed the crash
+        # it caused there (a completed reset answering 500) and #512 the
+        # sentence: ``None`` now means the backend *said* it pins no
+        # width, which is true of SQLite (a ``dimensions`` column per
+        # row), rather than meaning nobody found an attribute by that
+        # name. A fabricated number was never the risk; a fabricated
+        # *absence*, published as a fact about a backend that never spoke,
+        # was.
         message = (
-            f"Recreated with {dims}D"
-            if dims is not None
+            f"Recreated with {declared_dimensions}D"
+            if declared_dimensions is not None
             else "Recreated (backend declares no fixed dimensionality)"
         )
         return {"status": "ok", "message": message}

@@ -176,6 +176,21 @@ class ArcadeDBVectorStore(VectorStore):
     # Upsert
     # ------------------------------------------------------------------
 
+    @property
+    def dimensions(self) -> int | None:
+        """The width the ``LSM_VECTOR`` index over ``Node.embedding`` pins.
+
+        Never ``None``: the index metadata carries ``dimensions`` and
+        :meth:`upsert` refuses anything else.
+
+        This store does **not** implement
+        :meth:`~trellis.stores.base.vector.VectorStore.reset_storage`, and
+        the two answers are unrelated — pinning a width says nothing about
+        owning storage to drop. Embeddings are properties on the graph
+        store's ``(:Node)`` rows.
+        """
+        return self._dimensions
+
     def upsert(
         self,
         item_id: str,

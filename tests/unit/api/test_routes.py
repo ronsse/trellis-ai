@@ -5,7 +5,7 @@ from __future__ import annotations
 import importlib
 import json
 import sqlite3
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import pytest
@@ -1501,14 +1501,18 @@ class TestVectorsResetStatusLine:
     def test_a_successful_reset_answers_200(self, client):
         """The default backend is SQLite, and it used to answer 500 here.
 
-        ``_dimensions`` is defined on ``PgVectorStore``,
+        ``_dimensions`` was defined on ``PgVectorStore``,
         ``ArcadeDBVectorStore`` and ``Neo4jVectorStore`` and **not** on
-        ``SQLiteVectorStore``; it was read in the ``else`` block, outside
-        the ``try``, so on a default deployment the table was dropped and
-        recreated and the caller was then told ``500 internal_error`` by
-        the app's catch-all. Asserting the message too, not just the
-        status: a mutant that reports the wrong backend's story is a wrong
-        contract even when the status is right.
+        ``SQLiteVectorStore``; the route read it in the ``else`` block,
+        outside the ``try``, so on a default deployment the table was
+        dropped and recreated and the caller was then told ``500
+        internal_error`` by the app's catch-all. Asserting the message
+        too, not just the status: a mutant that reports the wrong
+        backend's story is a wrong contract even when the status is right.
+
+        The message is SQLite's own answer now rather than the absence of
+        an attribute: it declares ``dimensions`` as ``None`` because it
+        keeps a width per row and pins none (#512).
         """
         resp = client.post("/api/v1/vectors/reset")
 
@@ -1709,26 +1713,31 @@ class TestVectorsResetStatusLine:
     def test_a_backend_that_declares_a_width_reports_it(self, client):
         """The other side of the ``dims`` conditional, which nothing reached.
 
-        ``_dimensions`` is a ``PgVectorStore`` / ``ArcadeDBVectorStore`` /
-        ``Neo4jVectorStore`` attribute and every backend in the default
-        test selection is SQLite, so the branch a pgvector deployment
-        actually takes was unexercised — dropping the ``D`` from the
-        message left the suite green. Patched onto the instance rather
-        than marked ``pgvector``, because what is under test is the
-        route's *reading* of the attribute, not any backend.
+        Every backend in the default test selection is SQLite and SQLite
+        declares ``None``, so the branch a pgvector deployment actually
+        takes was unexercised — dropping the ``D`` from the message left
+        the suite green.
+
+        A subclass declaring 1536 rather than a monkeypatch: before #512
+        the route read ``getattr(store, "_dimensions", None)`` and setting
+        that attribute on a live ``SQLiteVectorStore`` instance was enough
+        to steer it, which is the defect. ``dimensions`` is a property on
+        the *class* now, so the only way to make a backend report a width
+        is for the backend to declare one — which is the fix, restated as
+        a test that could not be written the old way.
         """
-        store = app_module._registry.knowledge.vector_store
-        store._dimensions = 1536  # type: ignore[attr-defined]
-        try:
-            resp = client.post("/api/v1/vectors/reset")
-        finally:
-            del store._dimensions
+        registry = app_module._registry
+        store = _FixedWidthVectorStore()
+        registry._cache["vector"] = store
+
+        resp = client.post("/api/v1/vectors/reset")
 
         assert resp.status_code == 200, resp.text
         body = resp.json()
         assert body["status"] == "ok", body
         assert body["message"] == "Recreated with 1536D", body
         assert "code" not in body, body
+        assert store.reset_calls == 1
 
     def test_no_refusal_is_wrapped_in_a_detail_envelope(self, client, monkeypatch):
         """Pins the docstring's contract for *every* arm it speaks for.
@@ -1751,7 +1760,7 @@ class TestVectorsResetStatusLine:
 
         # Arm three first: it swaps the cached store, and the two arms
         # below need the real one back.
-        registry._cache["vector"] = _HandleFreeVectorStore()
+        registry._cache["vector"] = _UnresettableVectorStore()
         unsupported = client.post("/api/v1/vectors/reset")
         assert unsupported.status_code == 409, unsupported.text
         assert "detail" not in unsupported.json(), unsupported.text
@@ -1819,28 +1828,40 @@ class TestVectorsResetStatusLine:
             assert code in refusal_409, refusal_409
         assert "vector_reset_failed" in route.responses[500]["description"]
 
+        # #512 widened the unsupported arm: it also answers for an object
+        # that is not a vector store at all, which has a different message
+        # and no code of its own. The description is the only place the
+        # spec can carry that, for the same reason the code split is —
+        # this arm shares its status with the unconfigured one.
+        assert "interface" in refusal_409, refusal_409
 
-class _HandleFreeVectorStore(VectorStore):
-    """A ``VectorStore`` shaped like the blessed substrate: no SQL handle.
 
-    ``ArcadeDBVectorStore`` speaks SQL-over-HTTP and ``Neo4jVectorStore``
-    speaks Bolt. Neither owns a ``sqlite3.Connection`` at ``_conn`` nor a
-    ``psycopg_pool.ConnectionPool`` at ``_pool``, and neither keeps a
-    ``vectors`` table at all — vectors are state on ``(:Node)`` rows.
+class _UnresettableVectorStore(VectorStore):
+    """A ``VectorStore`` shaped like the blessed substrate: no reset.
+
+    ``ArcadeDBVectorStore`` and ``Neo4jVectorStore`` keep no storage of
+    their own — vectors are properties on the graph store's ``(:Node)``
+    rows — so neither implements ``reset_storage`` and both decline. It
+    declares ``None`` for its width, which is a *separate* answer: the
+    shipped graph-node backends actually pin one, and this fixture says
+    ``None`` so that a route reading the width of a store it refused
+    would be reading the wrong thing rather than coincidentally the right
+    one.
 
     A real ABC subclass rather than a ``MagicMock`` on purpose: a
-    ``MagicMock`` answers *every* attribute lookup, so it reports both
-    handles as present and would exercise the supported path while
-    claiming to test the unsupported one. Every inherited operation
-    raises, so an arm that reaches past the refusal fails loudly instead
-    of quietly returning a mock.
+    ``MagicMock`` answers *every* attribute lookup, so it would report
+    support and exercise the supported path while claiming to test the
+    unsupported one. Every inherited operation raises, so an arm that
+    reaches past the refusal fails loudly instead of quietly returning a
+    mock.
     """
 
     def __init__(self) -> None:
-        self.init_schema_calls = 0
+        self.reset_calls = 0
 
-    def _init_schema(self) -> None:
-        self.init_schema_calls += 1
+    @property
+    def dimensions(self) -> int | None:
+        return None
 
     def _unreachable(self, *args, **kwargs):
         msg = "the unsupported arm must not touch the store"
@@ -1849,67 +1870,59 @@ class _HandleFreeVectorStore(VectorStore):
     upsert = upsert_bulk = query = get = delete = count = close = _unreachable
 
 
-class _RecordingCursor:
-    def __init__(self, sql: list[str]) -> None:
-        self._sql = sql
+class _ResettableVectorStore(_UnresettableVectorStore):
+    """Declares support by implementing it, and records the call."""
 
-    def execute(self, statement: str) -> None:
-        self._sql.append(statement)
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return False
+    def reset_storage(self) -> None:
+        self.reset_calls += 1
 
 
-class _PooledVectorStore(_HandleFreeVectorStore):
-    """The pgvector shape: a ``_pool``, and ``_conn`` as a *context manager*.
+class _FixedWidthVectorStore(_ResettableVectorStore):
+    """A backend that pins a width, which no default-selection backend does."""
 
-    ``PgVectorStore`` inherits ``_conn`` from ``PostgresStoreBase`` as a
-    ``@contextmanager`` **method**, so the SQLite branch's
-    ``store._conn.execute(...)`` would raise on it. That is what makes the
-    two branches non-interchangeable and this fixture able to tell them
-    apart.
+    @property
+    def dimensions(self) -> int | None:
+        return 1536
+
+
+class _HandleRichButUnresettableStore(_UnresettableVectorStore):
+    """Carries both private handles the pre-#512 probe looked for.
+
+    ``_pool`` and ``_conn`` are present and it still does not implement
+    ``reset_storage``, so the declared answer and the probed answer are
+    **opposites** for this store. Nothing shipped has this shape, and
+    that is the point: the only way to tell a declaration apart from an
+    inference behaviourally is a store the two disagree about.
     """
 
     def __init__(self) -> None:
         super().__init__()
         self._pool = object()
-        self.executed: list[str] = []
-
-    @contextmanager
-    def _conn(self):
-        yield self
-
-    def cursor(self):
-        return _RecordingCursor(self.executed)
+        self._conn = object()
 
 
-class _UnsetSlotPoolStore(_PooledVectorStore):
-    """A store the probe and ``hasattr(store, ...)`` *disagree* about.
+class _NotAVectorStore:
+    """Duck-typed like the old probe's happy path, outside the ABC entirely.
 
-    ``_pool`` is a ``__slots__`` descriptor that is never assigned, so it
-    is present on the **class** (which is what the probe reads) and absent
-    on the **instance** (which is what ``hasattr`` reports, because an
-    unset slot raises ``AttributeError``). Nothing shipped has this shape,
-    and that is the point: "supported?" and "which branch?" being decided
-    once is a *structural* claim, and the only way to make a structural
-    claim fail a behavioural test is a store the two spellings answer
-    differently. Under the single-decision rule this reaches the pooled
-    branch; under a route that re-probes with its own ``hasattr`` it falls
-    into the SQLite branch and dies.
+    The registry instantiates whatever class a config names. Before #512
+    this object would have been reset through its private attributes; the
+    route now depends on the abstraction, so it is refused — and refused
+    with the 409 that says nothing was touched, rather than an
+    ``AttributeError`` escaping as a 500 the moment the ABC is asked
+    something this object cannot answer.
     """
 
-    __slots__ = ("_pool",)
-
     def __init__(self) -> None:
-        _HandleFreeVectorStore.__init__(self)
-        self.executed: list[str] = []
+        self._pool = object()
+        self._conn = object()
+        self.init_schema_calls = 0
+
+    def _init_schema(self) -> None:
+        self.init_schema_calls += 1
 
 
 class TestVectorsResetUnsupportedBackend:
-    """#511 — the route has never worked on the blessed substrate.
+    """#511/#512 — the route has never worked on the blessed substrate.
 
     ``ArcadeDBVectorStore`` and ``Neo4jVectorStore`` have neither ``_conn``
     nor ``_pool``, so ``POST /vectors/reset`` reached for ``_conn`` and
@@ -1920,9 +1933,15 @@ class TestVectorsResetUnsupportedBackend:
     and a 5xx describes a *permanent property of the backend* as a
     transient server failure, which invites a retry that can never
     succeed.
+
+    #511 answered 409 after *probing* for those private attributes. #512
+    replaced the probe: a backend implements
+    ``VectorStore.reset_storage`` or it does not, ``supports_reset()`` is
+    derived from that, and there is no dispatch left for a second check
+    to disagree with.
     """
 
-    def test_a_backend_with_no_sql_handle_is_refused_not_crashed(self, client):
+    def test_a_backend_that_cannot_be_reset_is_refused_not_crashed(self, client):
         """409 with a code of its own, and no leaked attribute name.
 
         The status is the caller-facing half: 4xx says "this request
@@ -1933,7 +1952,7 @@ class TestVectorsResetUnsupportedBackend:
         text is caught by the ``_conn`` assertion, not by the status one.
         """
         registry = app_module._registry
-        store = _HandleFreeVectorStore()
+        store = _UnresettableVectorStore()
         registry._cache["vector"] = store
 
         resp = client.post("/api/v1/vectors/reset")
@@ -1948,7 +1967,8 @@ class TestVectorsResetUnsupportedBackend:
         # let a mutant that deleted "rebuild the index with the backend's
         # own tooling" survive, and repopulating an index nobody rebuilt
         # is not a recovery.
-        assert "_HandleFreeVectorStore" in body["message"], body
+        assert "_UnresettableVectorStore" in body["message"], body
+        assert "keeps no `vectors` table" in body["message"], body
         assert "Nothing was changed" in body["message"], body
         assert "Rebuild the backend's vector index" in body["message"], body
         assert "trellis admin reindex-vectors --force" in body["message"], body
@@ -1958,19 +1978,58 @@ class TestVectorsResetUnsupportedBackend:
     def test_the_unsupported_arm_touches_the_store_not_at_all(self, client):
         """The 409's promise is that nothing happened, so check the store.
 
-        ``_HandleFreeVectorStore`` raises from every ``VectorStore``
-        operation and counts ``_init_schema`` calls, so a mutant that runs
-        the recreate before deciding the backend is unsupported — the
-        ordering that would make the "nothing was changed" sentence a lie
-        — fails here rather than passing on the status line.
+        ``_UnresettableVectorStore`` raises from every ``VectorStore``
+        operation and counts reset calls, so a mutant that runs the
+        recreate before deciding the backend is unsupported — the ordering
+        that would make the "nothing was changed" sentence a lie — fails
+        here rather than passing on the status line.
         """
         registry = app_module._registry
-        store = _HandleFreeVectorStore()
+        store = _UnresettableVectorStore()
         registry._cache["vector"] = store
 
         resp = client.post("/api/v1/vectors/reset")
 
         assert resp.status_code == 409, resp.text
+        assert store.reset_calls == 0
+
+    def test_an_object_that_is_not_a_vector_store_is_refused_not_crashed(self, client):
+        """The route depends on the abstraction, so it checks for it.
+
+        ``StoreRegistry`` instantiates whatever class a config names, and
+        the pre-#512 route drove any object carrying the right private
+        attributes. Asking a non-``VectorStore`` for ``supports_reset()``
+        would raise ``AttributeError`` above the ``try`` and escape as a
+        500 ``internal_error`` — the shape #506 removed from this route,
+        reintroduced by the fix for #511's sibling. It is refused with the
+        arm whose promise is that nothing was touched, and the store is
+        checked, not just the status.
+
+        The message says what is true of *this* object and not what is
+        true of ArcadeDB. "Keeps no `vectors` table" is a fact the ABC's
+        declaration entitles the route to state about a ``VectorStore``
+        that declined; said about an object that never implemented the
+        interface it is invented — which is #512's own failure mode,
+        committed in the sentence that fixes #512. Both halves are
+        asserted: the true one present, the borrowed one absent.
+        """
+        registry = app_module._registry
+        store = _NotAVectorStore()
+        registry._cache["vector"] = store
+
+        resp = client.post("/api/v1/vectors/reset")
+
+        assert resp.status_code == 409, resp.text
+        body = resp.json()
+        assert body["code"] == "vector_reset_unsupported_backend", body
+        assert "_NotAVectorStore" in body["message"], body
+        assert "does not implement" in body["message"], body
+        assert "`VectorStore` interface" in body["message"], body
+        assert "keeps no `vectors` table" not in body["message"], body
+        # The recovery still rides along: the two conditions differ in
+        # what happened, not in what the operator does next.
+        assert "Nothing was changed" in body["message"], body
+        assert "trellis admin reindex-vectors --force" in body["message"], body
         assert store.init_schema_calls == 0
 
     def test_the_refusal_is_decided_by_capability_not_by_class_name(self):
@@ -1980,18 +2039,22 @@ class TestVectorsResetUnsupportedBackend:
         the one that rots: it goes wrong the moment a fifth backend lands,
         and silently. Both fakes below defeat a name-based rule and
         neither defeats a capability check — one is *named*
-        ``SQLiteVectorStore`` and has no handle, the other is *named*
-        ``ArcadeDBVectorStore`` and has one. Asserting only the first
-        would leave a rule of the form "unsupported unless named
-        SQLite/Pg" alive.
+        ``SQLiteVectorStore`` and cannot be reset, the other is *named*
+        ``ArcadeDBVectorStore`` and can. Asserting only the first would
+        leave a rule of the form "unsupported unless named SQLite/Pg"
+        alive.
         """
         from trellis_api.routes import admin as admin_routes
 
-        liar_named_supported = type("SQLiteVectorStore", (_HandleFreeVectorStore,), {})
-        liar_named_unsupported = type("ArcadeDBVectorStore", (_PooledVectorStore,), {})
+        liar_named_supported = type(
+            "SQLiteVectorStore", (_UnresettableVectorStore,), {}
+        )
+        liar_named_unsupported = type(
+            "ArcadeDBVectorStore", (_ResettableVectorStore,), {}
+        )
 
-        assert admin_routes._vector_reset_handle(liar_named_supported()) is None
-        assert admin_routes._vector_reset_handle(liar_named_unsupported()) == "pool"
+        assert admin_routes._vector_reset_refusal(liar_named_supported()) is not None
+        assert admin_routes._vector_reset_refusal(liar_named_unsupported()) is None
 
     def test_every_shipped_vector_backend_is_classified(self):
         """The roster lives in the *test*, derived from the registry.
@@ -2001,16 +2064,13 @@ class TestVectorsResetUnsupportedBackend:
         classified, which is the notification that a new backend needs an
         answer to "can this route reset it?".
 
-        ``object.__new__`` skips ``__init__``, so no driver connects and
-        no socket opens. It under-populates the instance ``__dict__`` —
-        ``PgVectorStore`` sets ``_pool`` in ``__init__`` — so the *handle*
-        reported for pgvector here is not the one production takes. The
-        supported/unsupported verdict, which is all this arm turns on, is
-        decided on the type for every backend, and that is what is
-        asserted.
+        Since #512 the answer is a classmethod on the type, so this needs
+        no instance at all: nothing is constructed, no driver connects and
+        no socket opens. Before, it had to ``object.__new__`` each backend
+        and accept that the *handle* reported for pgvector was not the one
+        production takes, because ``_pool`` is set in ``__init__``.
         """
         from trellis.stores.registry import _BUILTIN_BACKENDS
-        from trellis_api.routes import admin as admin_routes
 
         expected = {
             "sqlite": True,
@@ -2027,8 +2087,7 @@ class TestVectorsResetUnsupportedBackend:
                 cls = getattr(importlib.import_module(module), cls_name)
             except ImportError:
                 continue  # optional driver extra not installed
-            handle = admin_routes._vector_reset_handle(object.__new__(cls))
-            probed[name] = handle is not None
+            probed[name] = cls.supports_reset()
 
         assert probed == {k: v for k, v in expected.items() if k in probed}, probed
         # Floor against a vacuous pass: the whole claim is about these
@@ -2037,89 +2096,117 @@ class TestVectorsResetUnsupportedBackend:
         assert probed.get("neo4j") is False, probed
         assert probed.get("arcadedb") is False, probed
 
-    def test_a_handle_that_exists_but_raises_is_a_failure_not_unsupported(self):
-        """Absent and present-but-unhappy are different answers.
+    def test_a_reset_that_raises_is_a_failure_not_an_unsupported_backend(self, client):
+        """Cannot and would-not-this-time are different answers.
 
-        ``SQLiteStoreBase._conn`` is a *property* that opens a connection,
-        so the obvious ``hasattr(store, "_conn")`` probe does I/O to answer
-        a question about shape — and on a corrupt database file it raises
-        ``sqlite3.DatabaseError``, which ``hasattr`` does **not** swallow
-        (only ``AttributeError``). Sited above the ``try`` as the refusal
-        must be, that escapes as an unhandled 500 ``internal_error`` and
-        the route loses its own ``vector_reset_failed`` body. The probe
-        therefore reads the type and the instance ``__dict__`` instead of
-        invoking the descriptor.
+        The refusal decides "can the reset *begin*", nothing more. A
+        backend that implements ``reset_storage`` and then fails inside it
+        has *attempted* a reset — the table may be gone — which is the
+        500's claim and not the 409's. Widening the refusal to catch that
+        would move a genuinely destructive failure into the arm whose
+        whole promise is that nothing was touched.
 
-        This is the "provoke the specific condition" half: the store below
-        has the handle and cannot produce it, which is a reset that fails,
-        not a backend that cannot be reset.
+        The failure is the driver's own ``sqlite3.DatabaseError``, not a
+        bare ``Exception``, so the arm is provoked by the type it would
+        see in production.
         """
-        from trellis_api.routes import admin as admin_routes
+        message = "file is not a database"
 
-        class _AngryConnStore(_HandleFreeVectorStore):
-            @property
-            def _conn(self):
-                msg = "file is not a database"
-                raise sqlite3.DatabaseError(msg)
+        class _AngryResetStore(_ResettableVectorStore):
+            def reset_storage(self) -> None:
+                raise sqlite3.DatabaseError(message)
 
-        assert admin_routes._vector_reset_handle(_AngryConnStore()) == "conn"
+        registry = app_module._registry
+        registry._cache["vector"] = _AngryResetStore()
 
-    def test_a_pooled_backend_takes_the_pooled_branch(self, client):
-        """The pgvector branch, which nothing exercised before #511.
+        resp = client.post("/api/v1/vectors/reset")
 
-        The route now picks its branch from the same value the refusal is
-        decided by, so "supported" and "which handle" cannot disagree.
-        Nothing pinned the pooled branch at all — every backend in the
-        default selection is SQLite — so on ``8a21d3f`` replacing the
-        whole pooled arm with the SQLite one left the API suite green
-        (316 passed). Note the *negated-condition* form of that mutant is
-        not the one that shows the gap: it also sends SQLite down the
-        pooled arm and fails five tests on the SQLite side. Here the
-        SQLite arm would call ``.execute`` on a ``@contextmanager``
-        method and blow up into the 500 arm.
+        assert resp.status_code == 500, resp.text
+        body = resp.json()
+        assert body["code"] == "vector_reset_failed", body
+        assert body["message"] == message, body
+
+    def test_the_route_runs_the_backends_own_reset_and_no_sql_of_its_own(self, client):
+        """The absorbed half of #512, and the pgvector arm's replacement.
+
+        The route used to hold two SQL bodies — ``store._conn.execute(...)``
+        for SQLite and a pooled ``cursor.execute(...)`` for pgvector —
+        picked by a dispatch on the probe's answer. Nothing in the default
+        selection reached the pooled one, so on ``8a21d3f`` replacing the
+        whole pooled arm with the SQLite one left the API suite green.
+        There is now one call, the backend owns its own SQL, and the SQL
+        is covered where it lives: ``VectorStoreContractTests`` runs the
+        reset case against SQLite by default and against pgvector in
+        ``live-infra``.
+
+        A ``VectorStore`` that raises from every other operation, so a
+        mutant reaching past ``reset_storage`` for a handle of its own
+        fails loudly rather than quietly.
         """
         registry = app_module._registry
-        store = _PooledVectorStore()
+        store = _ResettableVectorStore()
         registry._cache["vector"] = store
 
         resp = client.post("/api/v1/vectors/reset")
 
         assert resp.status_code == 200, resp.text
         assert resp.json()["status"] == "ok", resp.text
-        assert store.executed == ["DROP TABLE IF EXISTS vectors"], store.executed
-        assert store.init_schema_calls == 1
+        assert store.reset_calls == 1
 
-    def test_the_route_dispatches_on_the_probe_and_does_not_re_ask(self, client):
-        """The "decided once" claim, made falsifiable.
+    def test_the_refusal_and_the_work_read_one_fact(self, client):
+        """The "decided once" claim, made falsifiable against the old rule.
 
-        The design's load-bearing sentence is that the refusal and the
-        dispatch read the *same* value, so they cannot disagree. Every
-        shipped backend answers a re-probe identically, which is why a
-        route rewritten to ``if hasattr(vector_store, "_pool")`` at the
-        dispatch survived a 30-mutant battery and the whole 7388-test
-        suite: the two spellings are behaviourally equivalent for
-        SQLite, pgvector, ArcadeDB and Neo4j alike.
+        #520's load-bearing sentence was that the refusal and the dispatch
+        read the same value so they cannot disagree — and a mutant
+        reintroducing a second, independent ``hasattr`` check survived its
+        whole 7,388-test suite, because the two spellings agree for every
+        shipped backend. #512 removes the second value rather than testing
+        around it: ``supports_reset()`` is derived from the
+        ``reset_storage`` override and the route calls that same method,
+        so there is nothing left to re-ask.
 
-        ``_UnsetSlotPoolStore`` is the shape they answer differently — a
-        class-level slot descriptor with no value bound — so a route that
-        re-asks lands in the SQLite branch and 500s here. What this pins
-        is the *rule*, not a backend: no shipped store has an unset slot,
-        and this asserts nothing about one that might.
+        What makes that behaviourally checkable is a store the *old* rule
+        and the new one answer **oppositely**. This one carries both
+        private handles the probe looked for and implements no reset, so a
+        route reverted to the probe accepts it, reaches for ``_conn`` and
+        500s; the declaration refuses it untouched.
         """
         registry = app_module._registry
-        store = _UnsetSlotPoolStore()
+        store = _HandleRichButUnresettableStore()
         registry._cache["vector"] = store
 
-        from trellis_api.routes import admin as admin_routes
-
-        # The premise, asserted rather than assumed: the two spellings
-        # disagree about this store. Without this the test below could
-        # pass for the wrong reason if the fixture ever stopped being a
+        # The premise, asserted rather than assumed: the two rules
+        # disagree about this store. Without this the assertions below
+        # could pass for the wrong reason if the fixture stopped being a
         # disagreement.
-        assert admin_routes._vector_reset_handle(store) == "pool"
-        assert hasattr(store, "_pool") is False
+        assert hasattr(store, "_pool")
+        assert hasattr(store, "_conn")
+        assert type(store).supports_reset() is False
+
+        resp = client.post("/api/v1/vectors/reset")
+
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["code"] == "vector_reset_unsupported_backend", resp.text
+        assert store.reset_calls == 0
+
+    def test_the_declaration_wins_over_the_absence_of_a_handle_too(self, client):
+        """The same disagreement, pointed the other way.
+
+        ``_ResettableVectorStore`` has neither ``_pool`` nor ``_conn`` and
+        implements ``reset_storage``, so the old probe refuses it and the
+        declaration accepts it. Asserting only the direction above would
+        leave a rule of the form "refuse unless it has a handle *and*
+        declares" alive — which is two facts again, and passes every test
+        that only ever removes support.
+        """
+        registry = app_module._registry
+        store = _ResettableVectorStore()
+        registry._cache["vector"] = store
+
+        assert not hasattr(store, "_pool")
+        assert not hasattr(store, "_conn")
 
         resp = client.post("/api/v1/vectors/reset")
 
         assert resp.status_code == 200, resp.text
-        assert store.executed == ["DROP TABLE IF EXISTS vectors"], store.executed
+        assert store.reset_calls == 1

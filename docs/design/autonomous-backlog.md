@@ -194,8 +194,8 @@ premise they do not share.
 | [#492](https://github.com/ronsse/trellis-ai/issues/492) | `retrieve search` mangles ids through Rich (`dataset:snowflake://` → `dataset❄//`) | queued behind #489 |
 | [#493](https://github.com/ronsse/trellis-ai/issues/493) | `PackAssemblyError` is a `RuntimeError`, so it tracebacks past the CLI boundary | queued behind #492 |
 | [#494](https://github.com/ronsse/trellis-ai/issues/494) | `retrieve pack --quiet` id population is undocumented | owner call, then a doc line |
-| [#511](https://github.com/ronsse/trellis-ai/issues/511) | `POST /vectors/reset` has never worked on the blessed substrate | queued |
-| [#512](https://github.com/ronsse/trellis-ai/issues/512) | a backend's embedding width is a private attribute the route guesses at | queued |
+| [#511](https://github.com/ronsse/trellis-ai/issues/511) | `POST /vectors/reset` has never worked on the blessed substrate | **done** — `8071fd4` |
+| [#512](https://github.com/ronsse/trellis-ai/issues/512) | a backend's embedding width is a private attribute the route guesses at | **done** — the width *and* the reset capability are now declared on the `VectorStore` ABC |
 | [#502](https://github.com/ronsse/trellis-ai/issues/502) | the advisory cap caps the fitness loop's input | **owner decision** — three candidate *semantics*, not three implementations |
 | [#503](https://github.com/ronsse/trellis-ai/issues/503) | the advisory cap ranks category-blind | **do not do yet** — recorded hazard; wait for the first item-scoped advisory to reach a pack |
 

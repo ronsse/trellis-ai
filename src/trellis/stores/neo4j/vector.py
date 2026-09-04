@@ -183,6 +183,21 @@ class Neo4jVectorStore(Neo4jSessionRunner, VectorStore):
     # Public API
     # ------------------------------------------------------------------
 
+    @property
+    def dimensions(self) -> int | None:
+        """The width the HNSW index on ``(:Node).embedding`` was created at.
+
+        Never ``None``: it is a literal in the ``CREATE VECTOR INDEX``
+        DDL and :meth:`upsert` refuses anything else.
+
+        This store does **not** implement
+        :meth:`~trellis.stores.base.vector.VectorStore.reset_storage`, and
+        the two answers are unrelated — pinning a width says nothing about
+        owning storage to drop. Embeddings are optional properties on the
+        graph store's ``(:Node)`` rows (shape #2).
+        """
+        return self._dimensions
+
     def upsert(
         self,
         item_id: str,

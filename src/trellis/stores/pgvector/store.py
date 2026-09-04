@@ -139,9 +139,32 @@ class PgVectorStore(PostgresStoreBase, VectorStore):
             )
             raise ValueError(msg)
 
+    def reset_storage(self) -> None:
+        """Drop the ``vectors`` table and recreate it empty.
+
+        The DROP and the recreate are separate pooled transactions: the
+        recreate is ``_init_schema``, which opens its own. This is the
+        body that used to sit inline in
+        ``trellis_api.routes.admin.reset_vectors``, driving ``self._conn``
+        from outside the package (#512).
+        """
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute("DROP TABLE IF EXISTS vectors")
+        self._init_schema()
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    @property
+    def dimensions(self) -> int | None:
+        """The width the ``vectors.embedding`` column was provisioned at.
+
+        Never ``None``: a pgvector column carries a fixed dimension, and
+        ``__init__`` refuses to construct a store whose ``dimensions``
+        disagrees with an existing column.
+        """
+        return self._dimensions
 
     def upsert(
         self,
@@ -149,6 +172,21 @@ class PgVectorStore(PostgresStoreBase, VectorStore):
         vector: list[float],
         metadata: dict[str, Any] | None = None,
     ) -> None:
+        # The column is ``vector(N)`` so the server rejects a mismatch
+        # anyway — as ``psycopg.errors.DataError``, mid-INSERT, naming
+        # neither this store nor the constructor argument that set N.
+        # Checked here so the width this backend *declares* and the width
+        # it *accepts* are one fact, refused the way the two other
+        # dimension-pinning backends refuse it (``Neo4jVectorStore`` and
+        # ``ArcadeDBVectorStore`` both raise ``ValueError`` from their own
+        # upsert) and the way ``VectorStore.upsert_bulk`` has always
+        # documented.
+        if len(vector) != self._dimensions:
+            msg = (
+                f"vector has {len(vector)} dimensions but store was "
+                f"configured for {self._dimensions}"
+            )
+            raise ValueError(msg)
         meta_json = json.dumps(metadata or {})
         with self._conn() as conn, conn.cursor() as cur:
             cur.execute(
