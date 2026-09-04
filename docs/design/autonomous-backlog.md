@@ -3,17 +3,19 @@
 > **What this is.** A dependency-ordered queue of work items each sized for one
 > focused subagent session and one PR. It exists so an orchestrating agent can make
 > continuous progress on the Trellis roadmap without the operator adjudicating every
-> fork. It is a *scheduling* view over work already tracked in GitHub issues and
-> [`implementation-roadmap.md`](./implementation-roadmap.md) §3.H — **not a second
-> source of truth.** Where they disagree, the roadmap wins.
+> fork. It is a *scheduling* view derived from **GitHub issues** (live requirements and
+> status) and [`implementation-roadmap.md`](./implementation-roadmap.md) where it governs
+> a program item — **not a second source of truth** for any individual issue.
 >
 > Created 2026-08-26; the live queue was reconciled 2026-09-04 using the dated issue
 > corpus ([#527](https://github.com/ronsse/trellis-ai/pull/527)) as *evidence*, not as
-> authority. **Authority order:** [`implementation-roadmap.md`](./implementation-roadmap.md)
-> (requirements/status) → **GitHub issue** (live state) → this file (scheduling derived
-> from the first two). The corpus is adversarial review evidence and optional
-> implementation aids only. **Read [Current queue](#current-queue--2026-09-04) first** —
-> the Wave sections below are the accumulated record, not the schedule.
+> authority. **Requirements hierarchy:** **GitHub issue body/comments** (live issue
+> requirements and status) → [`implementation-roadmap.md`](./implementation-roadmap.md)
+> (where it governs a program item) → this file (scheduling derived from the first two).
+> The corpus is adversarial review evidence and optional implementation aids only — not
+> requirements authority, and **not every open issue appears in roadmap §3.H.** **Read
+> [Current queue](#current-queue--2026-09-04) first** — the Wave sections below are the
+> accumulated record, not the schedule.
 
 ## How an agent runs an item
 
@@ -65,8 +67,9 @@ Every item is tagged with who decides when a fork appears mid-item.
 
 ## Current queue — 2026-09-04
 
-> **Derived scheduling view** — constrained by
-> [`implementation-roadmap.md`](./implementation-roadmap.md) and live GitHub issues.
+> **Derived scheduling view** — read each item's **GitHub issue body/comments** for live
+> requirements and status; consult [`implementation-roadmap.md`](./implementation-roadmap.md)
+> only where it governs that program item (not all open issues are in §3.H).
 > **Evidence and aids** (not authority):
 > [`docs/issues/reviews/2026-09-04/README.md`](../issues/reviews/2026-09-04/README.md),
 > [`manifest.json`](../issues/reviews/2026-09-04/manifest.json), per-issue `#NNN.md`
@@ -79,8 +82,8 @@ Every item is tagged with who decides when a fork appears mid-item.
 > `git rev-parse origin/main`** — do not treat a SHA embedded here as current.
 >
 > Waves 0–5 below are the *historical record* of what each item decided, measured, or
-> refuted. Where this file, the corpus, and a GitHub issue disagree, **the issue wins**
-> for live state; where requirements disagree, **the roadmap wins**.
+> refuted. For live state and requirements, **the GitHub issue wins**; the corpus supplies
+> measured evidence only.
 
 **Snapshot:** **40 open** on GitHub as of the 2026-09-04 review. The count stays 40 until
 close/duplicate mutations actually land — the configured automation token currently lacks
@@ -132,14 +135,19 @@ allow; full roster in manifest + roadmap):
 |---|---|---|
 | [#522](https://github.com/ronsse/trellis-ai/issues/522) | `valid-now` | Rich operator-output renders outside #492 handle rule |
 | [#523](https://github.com/ronsse/trellis-ai/issues/523) | `valid-now` | `sanitize_error_message` suppresses boundary test messages on long `--basetemp` |
-| [#257](https://github.com/ronsse/trellis-ai/issues/257) | `valid-now` | ADR: ingest normalization boundary (documentation) |
 | [#494](https://github.com/ronsse/trellis-ai/issues/494) | `valid-now` | Document `retrieve pack --quiet` id population |
 | [#515](https://github.com/ronsse/trellis-ai/issues/515) | `valid-slice` | **Measurement slice only** — map Anthropic cache token fields into `TokenUsage`; defer `cache_control` until benefit measured |
-| [#475](https://github.com/ronsse/trellis-ai/issues/475) | `valid-slice` | **Assumptions-header slice** — owner agrees line set; lines derived from assembled pack telemetry only |
 
 All other open items: verdict and wave in
-[`manifest.json`](../issues/reviews/2026-09-04/manifest.json); requirements in
-[`implementation-roadmap.md`](./implementation-roadmap.md) §3.H.
+[`manifest.json`](../issues/reviews/2026-09-04/manifest.json); live requirements and
+status on each **GitHub issue**; roadmap sections only where they govern that item.
+
+### Owner prerequisites *(not dispatchable)*
+
+| Issue | Gate | Note |
+|---|---|---|
+| [#257](https://github.com/ronsse/trellis-ai/issues/257) | `owner-only` | Ingest-normalization ADR — roadmap and issue label; not swarm-eligible regardless of corpus `valid-now` evidence |
+| [#475](https://github.com/ronsse/trellis-ai/issues/475) | `blocked:owner-decision` | Assumptions header — assumptions line set **not agreed**; live issue blocks dispatch |
 
 ### Persistent blockers (do not misread)
 

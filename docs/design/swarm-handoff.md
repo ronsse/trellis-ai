@@ -5,8 +5,8 @@
 > cost time, and the dependency-ordered queue. Companion files:
 > [`autonomous-backlog.md`](./autonomous-backlog.md) (what the work *is*),
 > [`decision-ledger.md`](./decision-ledger.md) (decisions taken and pending),
-> [`implementation-roadmap.md`](./implementation-roadmap.md) (**authoritative** — when it
-> and the backlog disagree, the roadmap wins).
+> [`implementation-roadmap.md`](./implementation-roadmap.md) (program-level guidance where
+> it governs an item — **not** the live source for every open issue's requirements).
 >
 > Last updated 2026-09-04. Reviewed against `main` at `e4e7604` before this doc commit;
 > **determine live `main` via `git rev-parse origin/main`**. PR
@@ -303,9 +303,10 @@ merge its own work.
 
 ## 6. The queue
 
-**Authority:** [`implementation-roadmap.md`](./implementation-roadmap.md) (requirements/status)
-→ **GitHub issue** (live state) → [`autonomous-backlog.md`](./autonomous-backlog.md)
-(scheduling derived from the first two).
+**Requirements hierarchy:** **GitHub issue body/comments** (live issue requirements and
+status) → [`implementation-roadmap.md`](./implementation-roadmap.md) (where it governs a
+program item) → [`autonomous-backlog.md`](./autonomous-backlog.md) (scheduling derived
+from the first two). Not every open issue appears in roadmap §3.H.
 
 **Evidence and aids** (not authority):
 [`docs/issues/reviews/2026-09-04/README.md`](../issues/reviews/2026-09-04/README.md),
@@ -343,12 +344,18 @@ not a serial chain).
 |---|---|---|
 | [#522](https://github.com/ronsse/trellis-ai/issues/522) | `valid-now` | Rich renders outside #492 handle rule |
 | [#523](https://github.com/ronsse/trellis-ai/issues/523) | `valid-now` | Boundary test message suppression on long `--basetemp` |
-| [#257](https://github.com/ronsse/trellis-ai/issues/257) | `valid-now` | Ingest-normalization ADR |
 | [#494](https://github.com/ronsse/trellis-ai/issues/494) | `valid-now` | Document `retrieve pack --quiet` ids |
 | [#515](https://github.com/ronsse/trellis-ai/issues/515) | `valid-slice` | Measurement slice — cache token fields in `TokenUsage` only |
-| [#475](https://github.com/ronsse/trellis-ai/issues/475) | `valid-slice` | Assumptions-header slice — owner-agreed lines from pack telemetry |
 
-All others: [`manifest.json`](../issues/reviews/2026-09-04/manifest.json) + roadmap §3.H.
+All others: [`manifest.json`](../issues/reviews/2026-09-04/manifest.json); live requirements
+on each **GitHub issue**; roadmap only where it governs that item.
+
+### Owner prerequisites *(not dispatchable)*
+
+| Issue | Gate | Note |
+|---|---|---|
+| [#257](https://github.com/ronsse/trellis-ai/issues/257) | `owner-only` | Ingest-normalization ADR — not dispatchable regardless of corpus `valid-now` |
+| [#475](https://github.com/ronsse/trellis-ai/issues/475) | `blocked:owner-decision` | Assumptions line set not agreed — live issue blocks dispatch |
 
 ### Persistent blockers
 
