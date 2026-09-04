@@ -45,7 +45,7 @@ code:
 
 * **The descent covers ``except`` handlers.** ``ast.ExceptHandler`` is not
   an ``ast.stmt``, so a statement-only walk skips every ``except`` block —
-  25 of the 148 format branches in ``trellis_cli``, and the place a
+  25 of the 149 format branches in ``trellis_cli``, and the place a
   command is most likely to branch on format while deciding *how to fail*.
 * **The sibling of an ``if`` with no ``else`` is the code after it**, not
   nothing — but only when the ``if`` body terminates. That is the #422
@@ -80,12 +80,12 @@ The descent's completeness is itself pinned, by
 :func:`test_the_descent_reaches_every_format_branch_in_the_tree`, which
 counts the same branches with a dumb ``ast.walk`` and requires the two to
 agree. That is how the ``ExceptHandler`` bug above was found — by hand,
-once. None of the vacuity guards would have caught it: 123 clears a
+once. None of the vacuity guards would have caught it: 124 clears a
 floor of 100, and the resolvability ratio is taken over the branches the
-descent found, so it read 123/123.
+descent found, so it read 124/124.
 
-**The sweep found ``migrate-graph`` alone.** 148 format-conditioned
-branches across 18 modules, one divergence. ``policy list`` /
+**The sweep found ``migrate-graph`` alone.** 149 format-conditioned
+branches across 19 modules, one divergence. ``policy list`` /
 ``policy show`` are the counter-example worth naming: they raise
 ``EXIT_STORE`` from *inside* the JSON arm and again from the text path, so
 both surfaces agree — the pattern was already understood in this
@@ -272,7 +272,8 @@ def _statement_call_name(node: ast.AST) -> str | None:
     to the branch, while ``_exit_if_degraded(store, fmt)`` is written for
     its effect. Widening this to value position would pull
     ``stores._get_registry`` — imported by fifteen modules and called for
-    its return value at 34 sites — into almost every arm.
+    its return value at 46 sites, every one of them in value position —
+    into almost every arm.
     """
     if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
         return name_of(node.value.func)
@@ -353,13 +354,18 @@ def _join(prefix: str, tail: str) -> str:
 
 def _package_bindings(
     module: _Module, package: str, modules: Collection[str]
-) -> set[tuple[str, str | None]]:
-    """``(module key, imported name)`` for every in-package import in *module*.
+) -> set[tuple[str, str | None, str]]:
+    """``(module key, imported name, local name)`` for every in-package import.
 
-    ``None`` for the name means the *module* itself was bound, so every
-    helper it defines is reachable as ``module.helper(...)`` — which
+    ``None`` for the imported name means the *module* itself was bound, so
+    every helper it defines is reachable as ``module.helper(...)`` — which
     :func:`name_of` reads as the bare ``helper``, the same spelling a
     direct import produces.
+
+    The **local** name rides beside the imported one because ``as`` makes
+    the two differ, and resolving by the imported name alone bleeds one
+    module's classification onto another module's alias.
+    :func:`_visible_helpers` is where that bites and why.
 
     Import-gating is the whole point (#491). A roster keyed only on the
     helper's bare name would count *any* module's ``_fail`` as
@@ -370,21 +376,38 @@ def _package_bindings(
     main`` must not admit ``trellis_cli/main.py``'s helpers into
     ``serve.py``, and before the *package* half of this check it did.
 
-    One binding form is deliberately unresolved: ``from .shared import *``
-    yields the alias name ``"*"``, which matches no helper, so a
-    star-import admits nothing. ``ruff``'s ``F403`` bans it and ``src/``
-    contains none, so the blind spot is unreachable rather than tolerated
-    — but it is a blind spot, and the safe direction: it under-admits.
+    **Two binding forms are unresolved, and neither is "the safe
+    direction".** Under-admitting is *not* safe here for the same reason
+    :data:`_NO_EXIT` records: an arm whose only exit runs through a helper
+    the roster dropped reads ``_NO_EXIT``, and against a sibling that
+    carries nothing the two agree and the rule is silently green — which
+    is #491's own defect reproduced. Under-admission is loud only when the
+    sibling has a real exit. Both of these are therefore blind spots that
+    happen to be unreachable on this tree, not blind spots that are cheap:
+
+    * ``from .shared import *`` yields the alias name ``"*"``, which
+      matches no helper. ``ruff`` selects the whole ``F`` group (so
+      ``F403``), no ``per-file-ignores`` entry covers ``src/``, and
+      ``src/`` contains no star import; every must-exit helper in
+      ``trellis_cli`` is underscore-prefixed besides, which ``*`` does not
+      export.
+    * A **re-export chain** — ``mid.py`` doing ``from .shared import _fail
+      as _fail`` and a third module importing ``_fail`` from ``mid`` —
+      resolves ``mid`` as the source, and ``mid`` defines no functions, so
+      nothing is admitted. Verified absent from ``src/trellis_cli`` on
+      2026-09-04: no module re-exports a name it does not define.
     """
-    bound: set[tuple[str, str | None]] = set()
+    bound: set[tuple[str, str | None, str]] = set()
 
     def admit(source: str, names: list[ast.alias]) -> None:
         if source in modules:
-            bound.update((source, alias.name) for alias in names)
+            bound.update(
+                (source, alias.name, alias.asname or alias.name) for alias in names
+            )
         for alias in names:
             submodule = _join(source, alias.name)
             if submodule in modules:
-                bound.add((submodule, None))
+                bound.add((submodule, None, alias.asname or alias.name))
 
     for node in ast.walk(module.tree):
         if isinstance(node, ast.ImportFrom):
@@ -404,7 +427,7 @@ def _package_bindings(
                     continue
                 key = alias.name[len(package) :].lstrip(".")
                 if key in modules:
-                    bound.add((key, None))
+                    bound.add((key, None, alias.asname or alias.name))
     return bound
 
 
@@ -416,27 +439,72 @@ def _visible_helpers(
 ) -> tuple[frozenset[str], frozenset[str]]:
     """The helper names *module* can actually call, own and imported.
 
-    Alias resolution is :func:`tests.ast_rules.construction_names`, not a
-    second copy of it: ``from .shared import _fail as _die`` and ``_die =
-    _fail`` both have to reach the roster, and that resolver already
-    follows both to a fixed point. #490's finding was a harness declaring
-    three shapes unresolvable that this function had already solved.
+    Rebinding resolution is :func:`tests.ast_rules.construction_names`,
+    not a second copy of it: ``from .shared import _fail as _die`` and
+    ``_die = _fail`` both have to reach the roster, and that resolver
+    already follows both to a fixed point. #490's finding was a harness
+    declaring three shapes unresolvable that this function had already
+    solved.
+
+    It is seeded from the **local** name, not the imported one, and that
+    is a correctness fix rather than a tidy-up. ``construction_names``
+    resolves two kinds of rebinding — an ``as`` alias and a local
+    assignment — and only the second is wanted here: the alias is already
+    known exactly from the binding, while re-deriving it from the
+    *imported* name unions every alias in the module for that spelling,
+    whichever source it came from. ``admin`` imports ``register as
+    _register_<x>`` from five different modules, so the bare-name union
+    hands all five aliases whichever classification any one of the five
+    sources carries. Today they classify identically and it is invisible;
+    the moment they do not, an arm calling the odd one out reads as
+    exiting when it does not, its sibling agrees, and the divergence is
+    gone — this rule's silent direction, reached through the resolution
+    #491 added. Pinned by the ``alias_collision_*`` shapes, which the
+    bare-name union fails and against which the *pre*-#491 per-module scan
+    was correct.
     """
     own_must, own_may = must[module.key], may[module.key]
     visible_must, visible_may = set(own_must), set(own_may)
-    for source, imported in _package_bindings(module, package, must):
-        if source == module.key:
-            continue
-        names = {imported} if imported is not None else must[source] | may[source]
-        for name in names:
+    bindings = [
+        binding
+        for binding in _package_bindings(module, package, must)
+        if binding[0] != module.key
+    ]
+    # Every name an in-package import binds locally. A local name belongs
+    # to exactly one binding, so no *other* binding's classification may
+    # reach it — that subtraction is the whole of the fix above. Two
+    # imports that genuinely bind the same local name are left ambiguous
+    # (Python's answer is "the later one wins", which needs order the AST
+    # walk does not carry) and both classifications apply.
+    bound_locals: set[str] = set()
+    for source, imported, local in bindings:
+        bound_locals |= {local} if imported is not None else must[source] | may[source]
+
+    for source, imported, local in bindings:
+        pairs = (
+            [(imported, local)]
+            if imported is not None
+            else [(name, name) for name in must[source] | may[source]]
+        )
+        for name, bound_as in pairs:
+            reachable = construction_names(bound_as, module.tree) - (
+                bound_locals - {bound_as}
+            )
             if name in must[source]:
-                visible_must |= construction_names(name, module.tree)
+                visible_must |= reachable
             if name in may[source]:
-                visible_may |= construction_names(name, module.tree)
+                visible_may |= reachable
     # A module's own definition wins over anything it imported under the
     # same name: ``def _fail(...): return None`` beside ``from .shared
     # import _fail`` is not the shared helper, and reading it as one is
-    # the over-count above.
+    # the over-count above. Only a ``def`` shadows here — an *assignment*
+    # over an imported name (``_fail = _noop``) does not, so that name
+    # keeps the classification of the helper it no longer refers to, which
+    # is an over-read. It is unreachable in ``src/`` rather than tolerated,
+    # by the same argument :func:`_package_bindings` makes for ``F403``:
+    # ruff selects the whole ``F`` group, no ``per-file-ignores`` entry
+    # covers ``src/``, and ``F811`` is exactly "redefinition of unused
+    # ``x`` from line N". Verified against the shipped ruff, not assumed.
     shadowed = {func.name for func in _functions(module.tree)} - own_must - own_may
     return frozenset(visible_must - shadowed), frozenset(visible_may - shadowed)
 
@@ -486,15 +554,26 @@ def _build_exit_roster(modules: Sequence[_Module], package: str) -> _ExitRoster:
     classification can depend on one it imports, and that dependency
     crosses files. Say what it is on this tree rather than implying more:
     **no ``trellis_cli`` function is currently classified differently
-    because of a cross-module binding.** The one in-package helper import
-    the machinery reads is ``worker``'s
-    ``analyze._build_learning_registry_or_exit``, and ``worker`` calls it
-    in value position, which :func:`_statement_call_name` deliberately
-    does not read. The global loop is here for the consolidation #491 was
-    filed about, and
-    :func:`test_helpers_resolve_across_module_boundaries` is where it is
-    demonstrated. Growth is monotone in both sets, so the fixed point
-    terminates.
+    because of a cross-module binding.** Measured by rebuilding the roster
+    with :func:`_visible_helpers` narrowed to a module's own definitions
+    and diffing ``must`` and ``may`` — the two rosters are identical, so
+    the *classification* half of this loop converges in one pass today and
+    the global loop is here for the consolidation #491 was filed about.
+
+    That is a narrower claim than "the resolver is barely exercised", and
+    the difference matters. Twenty-three in-package helper bindings do
+    resolve — ``stores._get_registry`` into fifteen modules,
+    ``analyze._build_learning_registry_or_exit`` into ``worker``,
+    ``ingest_corpus._parse_tags`` into ``ingest_conversations``, four
+    ``register`` aliases into ``admin`` — and four of them are read at
+    *statement* position (``admin``'s ``_register_<x>(admin_app)`` calls),
+    which is what :func:`_statement_call_name` does read. What none of
+    them does is change a classification, because every one is a
+    ``may``-exit helper whose caller already had a reachable exit of its
+    own. :func:`test_helpers_resolve_across_module_boundaries` is where
+    the resolution itself is demonstrated. Growth is monotone in both
+    sets, so the fixed point terminates; it is also order-independent,
+    which is what makes it a fixed point rather than a traversal.
     """
     must: dict[str, set[str]] = {module.key: set() for module in modules}
     may: dict[str, set[str]] = {module.key: set() for module in modules}
@@ -692,7 +771,7 @@ def test_the_scan_finds_the_format_branches_it_polices() -> None:
         100,
         subject="format-conditioned branch",
         hint=(
-            "148 by hand at 8ec879c. A drop here means output_format was "
+            "149 by hand at 8ec879c. A drop here means output_format was "
             "renamed, the package moved, or --format became a callback — "
             "each of which leaves this file green and enforcing nothing."
         ),
@@ -709,13 +788,13 @@ def test_the_descent_reaches_every_format_branch_in_the_tree() -> None:
     This is the check that caught the one defect the scan has actually
     had. :func:`_format_branches` walks by hand, and its first version
     descended only ``ast.stmt`` — ``ast.ExceptHandler`` is not one, so it
-    silently skipped every ``except`` block: 25 of the 148 branches, and
+    silently skipped every ``except`` block: 25 of the 149 branches, and
     the place a command is most likely to branch on format while deciding
-    *how* to fail. It reported 123 and looked complete.
+    *how* to fail. It reported 124 and looked complete.
 
-    Nothing shipped would have said so. 123 clears the branch floor, and
+    Nothing shipped would have said so. 124 clears the branch floor, and
     the resolvability ratio is computed over the branches the descent
-    *found*, so it read 123/123 — a metric wired to the population it was
+    *found*, so it read 124/124 — a metric wired to the population it was
     meant to be auditing. The bug was caught by hand, once, by counting
     the same thing a second way; this ships that second count.
 
@@ -749,7 +828,7 @@ def test_the_descent_reaches_every_format_branch_in_the_tree() -> None:
         by_walk,
         100,
         subject="format-conditioned branch, counted by ast.walk",
-        hint="the oracle itself has drifted; 148 by hand at 8ec879c.",
+        hint="the oracle itself has drifted; 149 by hand at 8ec879c.",
     )
     assert not unreached, (
         f"the structural descent never reached {len(unreached)} format "
@@ -866,17 +945,29 @@ def test_the_rule_reasons_over_a_real_population_of_helper_call_sites() -> None:
 
     Counted by hand off ``src/trellis_cli`` on 2026-09-04, at
     ``8ec879c``. **Must-exit call sites: 10.** **Conditional-exit call
-    sites: 18** — six of them the helpers above (``policy._exit_if_degraded``
+    sites: 17** — six of them the helpers above (``policy._exit_if_degraded``
     twice, ``policy._refuse_stale``, ``analyze._exit_if_advisory_store_degraded``,
-    ``worker._exit_if_advisory_write_refused`` twice) and twelve
-    command-layer calls: the five ``admin`` sub-command ``register``
-    hooks, six Typer wrappers delegating to a ``*_command`` body, and one
-    ``store.create(record)`` that bare-name matching reads as
-    ``admin_api_keys``' own ``create`` command — the over-collection
+    ``worker._exit_if_advisory_write_refused`` twice) and eleven
+    command-layer calls: **four** of the five ``admin`` sub-command
+    ``register`` hooks, six Typer wrappers delegating to a ``*_command``
+    body, and one ``store.create(record)`` that bare-name matching reads
+    as ``admin_api_keys``' own ``create`` command — the over-collection
     :func:`~tests.ast_rules.name_of` documents, a same-named method on an
-    unrelated object. All twelve are conditional-exit for a real reason (a
+    unrelated object. All eleven are conditional-exit for a real reason (a
     command body exits) and none sits in a format arm, so none of them
     costs anything.
+
+    **The fifth ``register`` hook is why this count is 17 and not 18.**
+    ``admin_api_keys.register`` is two lines of ``add_typer`` and cannot
+    reach an exit; the other four wrap a Typer command whose body can. A
+    roster that resolved an import by its *imported* spelling gave all
+    five aliases whichever classification any one source carried, so
+    ``_register_api_keys`` counted — and 18 was the number the scan
+    produced. It is recorded here because a hand-read floor reconciled
+    against the scan it is meant to audit is #507's defect, and this is
+    the shape it takes: the number is right about the population and
+    wrong about one member, which is exactly what reading it off the
+    output cannot tell you.
 
     Both floors sit below the counted number so that adding a call site is
     ordinary and *removing the scan's ability to see them* is not. They
@@ -914,7 +1005,7 @@ def test_the_rule_reasons_over_a_real_population_of_helper_call_sites() -> None:
         12,
         subject="conditional-exit helper call",
         hint=(
-            "18 by hand at 8ec879c. A collapse here restores #491's "
+            "17 by hand at 8ec879c. A collapse here restores #491's "
             "third finding: an arm whose only exit runs through a "
             "may-exit helper reading as an arm that cannot exit."
         ),
@@ -932,8 +1023,8 @@ def test_helpers_resolve_across_module_boundaries_in_trellis_cli() -> None:
     this scan would have gone blind to it.
 
     What can be measured is that the resolver actually resolves. Counted
-    by hand off ``src/trellis_cli`` on 2026-09-04: **25 imported helper
-    bindings** — ``stores._get_registry`` into fifteen modules, six
+    by hand off ``src/trellis_cli`` on 2026-09-04: **23 imported helper
+    bindings** — ``stores._get_registry`` into fifteen modules, four
     ``register`` aliases into ``admin``, ``ingest_conversations`` and
     ``ingest_corpus`` into ``ingest``, ``ingest_corpus._parse_tags`` into
     ``ingest_conversations``, and
@@ -942,6 +1033,12 @@ def test_helpers_resolve_across_module_boundaries_in_trellis_cli() -> None:
     package check, the relative-import anchor or the alias resolution has
     silently stopped matching, and the interprocedural half is back to
     per-file with nothing else in this file noticing.
+
+    Four ``register`` aliases and not five, and no bare ``register``:
+    ``admin`` binds each of the five under an ``as`` name and never under
+    the imported spelling, and only four of the five source ``register``
+    functions can reach an exit. Resolving the binding by its imported
+    name instead reported all six — see :func:`_visible_helpers`.
     """
     roster = _real_roster()
     imported = {
@@ -954,7 +1051,7 @@ def test_helpers_resolve_across_module_boundaries_in_trellis_cli() -> None:
         20,
         subject="cross-module helper binding",
         hint=(
-            f"25 by hand at 8ec879c; found {imported}. Zero means "
+            f"23 by hand at 8ec879c; found {imported}. Zero means "
             f"_package_bindings resolves nothing — check that the "
             f"package name is still the root directory's."
         ),
@@ -1127,6 +1224,12 @@ def direct_exit_faces_a_must_exit_helper(output_format, report):
         emit_json(report)
         raise typer.Exit(code=EXIT_STORE)
     _always_exits("failed", output_format)
+
+
+def conditional_helper_with_no_else(output_format, result):
+    if output_format == "json":                  # 146 middle level picks the tail
+        _may_exit(result, output_format)
+    console.print(result)
 """
 
 #: Lines :data:`_SHAPES` must report. 69, 80, 89, 92, 130 and 139 are
@@ -1134,7 +1237,7 @@ def direct_exit_faces_a_must_exit_helper(output_format, report):
 #: agree, at each of the three levels and across the two spellings of a
 #: must-exit one), and 89 is an argument validator whose raising arm no
 #: rendered format can reach.
-_EXPECTED_SHAPE_LINES = [15, 24, 31, 39, 47, 55, 62, 102, 116, 123]
+_EXPECTED_SHAPE_LINES = [15, 24, 31, 39, 47, 55, 62, 102, 116, 123, 146]
 
 
 def test_the_scan_catches_every_known_shape(tmp_path: Path) -> None:
@@ -1146,7 +1249,9 @@ def test_the_scan_catches_every_known_shape(tmp_path: Path) -> None:
     ==================================  ==============================
     weakening                           result
     ==================================  ==============================
-    no fallthrough sibling              loses 24, 31, 47, 55, 123
+    no fallthrough sibling              loses 24, 31, 47, 55, 123, 146
+    fallthrough sibling read as a       loses 146
+    boolean
     ``sys.exit`` not counted            loses 39
     ``!=`` / ``not in`` polarity gone   loses 55
     no must-exit helper set             **gains 139**
@@ -1179,7 +1284,7 @@ def test_the_scan_catches_every_known_shape(tmp_path: Path) -> None:
 
     The ``ast.stmt`` row is the scan's own historical bug, and it is the
     one this list cannot be trusted alone for: on the real tree it drops
-    148 branches to 123 while every assertion in this file still passes.
+    149 branches to 124 while every assertion in this file still passes.
     That is why
     :func:`test_the_descent_reaches_every_format_branch_in_the_tree`
     exists.
@@ -1311,8 +1416,32 @@ def cmd(output_format, result):
     "sub/__init__.py": """
 import typer
 
+from .deep import _deep_always_exits
+
 
 def _sub_always_exits(message, output_format):
+    console.print(message)
+    raise typer.Exit(code=5)
+
+
+def cmd(output_format, report):
+    if output_format == "json":  #!report:package_init_relative
+        emit_json(report)
+    else:
+        _deep_always_exits("failed", output_format)
+""",
+    # The other half of ``is_package``, and the half nothing reached until
+    # a mutant hard-coding ``_Module.is_package`` to ``False`` survived
+    # every shape above. Python anchors a *package's* own ``from .x``
+    # at itself and a *module's* at its parent; with the flag forced
+    # false this re-anchors at the root, finds no top-level ``deep``, and
+    # admits nothing — an under-read, which is silent whenever the
+    # sibling arm carries nothing (see :func:`_package_bindings`).
+    "sub/deep.py": """
+import typer
+
+
+def _deep_always_exits(message, output_format):
     console.print(message)
     raise typer.Exit(code=5)
 """,
@@ -1346,6 +1475,78 @@ def aliased(output_format, report):
         emit_json(report)
     else:
         sh._always_exits("failed", output_format)
+""",
+    # Two modules exporting the *same* helper name, one that exits and one
+    # that does not, imported into one module under two aliases. Resolving
+    # by the *imported* spelling matches the bare name in both import
+    # statements, so both aliases inherit both classifications and the
+    # divergence behind the non-exiting one disappears — an over-read,
+    # this rule's silent direction, reached through the resolution #491
+    # added. It is the one shape here on which the *pre*-#491 per-module
+    # scan was right: it resolved neither alias, so the arms disagreed and
+    # it reported. Live on ``src/trellis_cli``, where ``admin`` imports
+    # ``register as _register_<x>`` from five modules and only four of the
+    # five ``register`` functions can reach an exit.
+    "colliding_exits.py": """
+import typer
+
+
+def helper(message, output_format):
+    console.print(message)
+    raise typer.Exit(code=5)
+""",
+    "colliding_returns.py": """
+def helper(message, output_format):
+    console.print(message)
+    return None
+""",
+    "alias_collision.py": """
+import typer
+
+from clipkg.colliding_exits import helper as _exiting
+from clipkg.colliding_returns import helper as _returning
+
+
+def narrowed(output_format, report):
+    if output_format == "json":  #!report:alias_collision_narrowed
+        emit_json(report)
+        raise typer.Exit(code=5)
+    else:
+        _returning("failed", output_format)
+
+
+def resolved(output_format, report):
+    if output_format == "json":  #!report:alias_collision_resolved
+        emit_json(report)
+    else:
+        _exiting("failed", output_format)
+""",
+    # The same collision with one side imported *unaliased*, which is the
+    # only spelling under which the foreign-alias subtraction is
+    # load-bearing: ``construction_names("helper", ...)`` matches the
+    # ``as`` clause of the *other* import, so the exiting side's
+    # classification reaches ``_returning`` unless the aliases bound by
+    # other in-package imports are taken back out.
+    "alias_collision_bare.py": """
+import typer
+
+from clipkg.colliding_exits import helper
+from clipkg.colliding_returns import helper as _returning
+
+
+def narrowed(output_format, report):
+    if output_format == "json":  #!report:alias_collision_bare_narrowed
+        emit_json(report)
+        raise typer.Exit(code=5)
+    else:
+        _returning("failed", output_format)
+
+
+def resolved(output_format, report):
+    if output_format == "json":  #!report:alias_collision_bare_resolved
+        emit_json(report)
+    else:
+        helper("failed", output_format)
 """,
     "package_init_helper.py": """
 from clipkg.sub import _sub_always_exits
@@ -1448,7 +1649,18 @@ def test_helpers_resolve_across_module_boundaries(tmp_path: Path) -> None:
     under an alias, ``from . import shared`` with a module-qualified
     call, ``import clipkg.shared`` plain and aliased, a local rebinding, a
     submodule one package deep, a helper defined in a package
-    ``__init__``, and a conditional-exit helper.
+    ``__init__``, a *relative* import made *by* that package ``__init__``,
+    a conditional-exit helper, and two modules exporting the same helper
+    name into one importer — once under two aliases, once with one side
+    unaliased.
+
+    **One binding this does not carry, and it predates #491:** a
+    *same-module* rebinding (``_bail = _local_always_exits`` beside the
+    definition). Own names go into the roster verbatim, without
+    :func:`~tests.ast_rules.construction_names`, so only the imported half
+    of a rebinding chain resolves. It is an under-read, latent — no module
+    in ``trellis_cli`` rebinds its own helper — and pre-#491, so it is
+    recorded rather than fixed here.
 
     Asserting today's roster would prove nothing: ``trellis_cli`` has no
     cross-module must-exit helper to find, which is exactly why the
@@ -1456,11 +1668,19 @@ def test_helpers_resolve_across_module_boundaries(tmp_path: Path) -> None:
     defect, and the assertions are equalities over marked lines rather
     than a count.
 
-    The four ``#!silent`` shapes carry the weight. Resolution that is
-    *global by bare name* passes every ``#!report`` assertion here and
-    fails these, and it is the worse defect of the two: an over-read
-    helper roster lets an arm that merely might exit stand in for one that
-    does, and nothing reports that.
+    The ``#!silent`` shapes carry the weight, and so does
+    ``alias_collision_narrowed``, which is a ``#!report`` shape only
+    because the over-read it catches *suppresses* a report. Three of the
+    four negatives leak under a resolver that is global by bare name
+    (measured: ``never_imported``, ``shadowed``, ``foreign_package``;
+    ``both_arms`` is the correct-code companion and cannot leak by
+    construction), and over-reading is the worse defect of the two: an
+    over-read helper roster lets an arm that merely might exit stand in
+    for one that does, and nothing reports that.
+
+    ``alias_collision_narrowed`` is the one shape here the *pre*-#491
+    per-module scan got right, so it is also the regression control on
+    the claim that this rule is a strict superset of that one.
     """
     # The corpus writes its own absolute imports; the directory they have
     # to resolve against comes from _CROSS_PACKAGE. Drift between the two
@@ -1481,7 +1701,7 @@ def test_helpers_resolve_across_module_boundaries(tmp_path: Path) -> None:
     must_stay_silent = _marked_lines(_SILENT_MARKER)
     assert_hand_read_floor(
         len(must_report),
-        10,
+        15,
         subject="cross-module shape the corpus renders",
         hint=(
             "Dropping a shape from _CROSS_MODULE_CORPUS is an exemption "
@@ -1513,9 +1733,11 @@ def test_helpers_resolve_across_module_boundaries(tmp_path: Path) -> None:
         f"the shipped scan reported {leaked}, which no supported "
         f"resolution reaches: a helper that was never imported, one a "
         f"local definition shadows, one imported from outside the scanned "
-        f"package, and a branch whose two arms both call it. Each is a "
-        f"bare-name over-read, and over-reading the helper roster is this "
-        f"rule's silent direction."
+        f"package, and a branch whose two arms both call it. The first "
+        f"three are bare-name over-reads, and over-reading the helper "
+        f"roster is this rule's silent direction; the fourth is the "
+        f"companion control — resolution has to leave correct code alone "
+        f"or the rule becomes a ban on importing a helper."
     )
     known = set(must_report.values()) | set(must_stay_silent.values())
     spurious = sorted(reported - known)
