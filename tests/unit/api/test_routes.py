@@ -10,8 +10,10 @@ from pathlib import Path
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from structlog.testing import capture_logs
 
 import trellis_api.app as app_module
+from trellis.core.error_sanitize import SUPPRESSED_MARKER
 from trellis.errors import StaleStoreWriteError
 from trellis.schemas.enums import PolicyType
 from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
@@ -1636,6 +1638,95 @@ class TestVectorsResetStatusLine:
         del store._init_schema
         with pytest.raises(sqlite3.OperationalError):
             store.count()
+
+    def test_a_backend_error_echoing_a_dsn_is_suppressed(self, client):
+        """The word *sanitized* is now in the published 500 description.
+
+        The ``except`` is kept for the **body**, and the body's only guard
+        is ``sanitize_error_message`` (#206) — a driver that fell over
+        routinely echoes the DSN it could not reach, and an API response
+        body is exactly the artifact that guard was written for. Nothing
+        pinned it: dropping the call left all 311 API tests green, while
+        the two sibling leak guards at this boundary — ``/readyz``'s probe
+        error and ``trellis_error_handler``'s ``path`` — each have a test
+        of this shape. A guard whose removal is invisible is one a
+        refactor removes.
+        """
+        store = app_module._registry.knowledge.vector_store
+
+        def _boom() -> None:
+            msg = (
+                "connection failed: could not connect to "
+                '"postgresql://trellis:s3cretpw@db.internal:5432/prod"'
+            )
+            raise sqlite3.OperationalError(msg)
+
+        store._init_schema = _boom  # type: ignore[method-assign]
+
+        resp = client.post("/api/v1/vectors/reset")
+
+        assert resp.status_code == 500, resp.text
+        body = resp.json()
+        assert body["code"] == "vector_reset_failed", body
+        assert body["message"] == SUPPRESSED_MARKER, body
+        # Not just the field — the credential is nowhere in the response.
+        assert "s3cretpw" not in resp.text
+
+    def test_a_failed_reset_is_logged_on_the_operator_channel(self, client):
+        """The other half of why the ``except`` is kept, also unpinned.
+
+        Catching is justified by two things: the sanitized message in the
+        body, and ``logger.exception`` still recording the traceback for
+        an operator. Downgrading that call to ``logger.debug`` left the
+        API suite green — and this repo has already recorded (#404) that a
+        ``logger.debug`` fires under **no** shipped log configuration, so
+        the mutant silently turns the only operator channel for a
+        half-completed destructive reset into a no-op. Asserted at the
+        level and with ``exc_info``, which is what separates
+        ``logger.exception`` from a bare log line.
+        """
+        store = app_module._registry.knowledge.vector_store
+        message = "disk I/O error"
+
+        def _boom() -> None:
+            raise sqlite3.OperationalError(message)
+
+        store._init_schema = _boom  # type: ignore[method-assign]
+
+        with capture_logs() as logs:
+            resp = client.post("/api/v1/vectors/reset")
+
+        assert resp.status_code == 500, resp.text
+        entry = next(
+            (e for e in logs if e.get("event") == "vectors_reset_failed"), None
+        )
+        assert entry is not None, logs
+        assert entry["log_level"] == "error", entry
+        assert "exc_info" in entry, entry
+
+    def test_a_backend_that_declares_a_width_reports_it(self, client):
+        """The other side of the ``dims`` conditional, which nothing reached.
+
+        ``_dimensions`` is a ``PgVectorStore`` / ``ArcadeDBVectorStore`` /
+        ``Neo4jVectorStore`` attribute and every backend in the default
+        test selection is SQLite, so the branch a pgvector deployment
+        actually takes was unexercised — dropping the ``D`` from the
+        message left the suite green. Patched onto the instance rather
+        than marked ``pgvector``, because what is under test is the
+        route's *reading* of the attribute, not any backend.
+        """
+        store = app_module._registry.knowledge.vector_store
+        store._dimensions = 1536  # type: ignore[attr-defined]
+        try:
+            resp = client.post("/api/v1/vectors/reset")
+        finally:
+            del store._dimensions
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["status"] == "ok", body
+        assert body["message"] == "Recreated with 1536D", body
+        assert "code" not in body, body
 
     def test_neither_refusal_is_wrapped_in_a_detail_envelope(self, client, monkeypatch):
         """Pins the docstring's contract for *every* arm it speaks for.
