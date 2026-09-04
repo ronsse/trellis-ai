@@ -863,8 +863,14 @@ def test_the_rule_reasons_over_a_real_population_of_helper_call_sites() -> None:
     sites: 18** — six of them the helpers above (``policy._exit_if_degraded``
     twice, ``policy._refuse_stale``, ``analyze._exit_if_advisory_store_degraded``,
     ``worker._exit_if_advisory_write_refused`` twice) and twelve
-    sub-command registration calls, which are conditional-exit for a real
-    reason (a Typer command body exits) and cost nothing here.
+    command-layer calls: the five ``admin`` sub-command ``register``
+    hooks, six Typer wrappers delegating to a ``*_command`` body, and one
+    ``store.create(record)`` that bare-name matching reads as
+    ``admin_api_keys``' own ``create`` command — the over-collection
+    :func:`~tests.ast_rules.name_of` documents, a same-named method on an
+    unrelated object. All twelve are conditional-exit for a real reason (a
+    command body exits) and none sits in a format arm, so none of them
+    costs anything.
 
     Both floors sit below the counted number so that adding a call site is
     ordinary and *removing the scan's ability to see them* is not. They
@@ -1431,10 +1437,12 @@ def test_helpers_resolve_across_module_boundaries(tmp_path: Path) -> None:
     The plan review's measurement is the shape of this test: it ran the
     shipped ``_violations`` over two trees carrying the *identical*
     divergence and got ``1`` for the same-module one and ``0`` for the
-    cross-module one. Both are here, alongside the spellings a real
-    consolidation would actually produce — an absolute import, a relative
-    import under an alias, a module-qualified call, a local rebinding, a
-    submodule one package deep, and a conditional-exit helper.
+    cross-module one. Both are here, alongside every spelling a real
+    consolidation would produce: an absolute import, a relative import
+    under an alias, ``from . import shared`` with a module-qualified
+    call, ``import clipkg.shared`` plain and aliased, a local rebinding, a
+    submodule one package deep, a helper defined in a package
+    ``__init__``, and a conditional-exit helper.
 
     Asserting today's roster would prove nothing: ``trellis_cli`` has no
     cross-module must-exit helper to find, which is exactly why the
