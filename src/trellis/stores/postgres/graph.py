@@ -54,6 +54,11 @@ def _pg_text_lit(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
+def _alias_lock_key(source_system: str, raw_id: str) -> str:
+    """Encode an alias tuple as PostgreSQL-safe advisory-lock text."""
+    return json.dumps([source_system, raw_id], separators=(",", ":"))
+
+
 _CREATE_NODES = """\
 CREATE TABLE IF NOT EXISTS nodes (
     version_id TEXT PRIMARY KEY,
@@ -510,7 +515,7 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
             with conn.cursor() as cur:
                 cur.execute(
                     "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
-                    (f"{source_system}\0{raw_id}",),
+                    (_alias_lock_key(source_system, raw_id),),
                 )
             existing = self._resolve_alias_for_update(conn, source_system, raw_id)
             if existing:
@@ -569,7 +574,7 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
         with self._conn() as conn, conn.cursor() as cur:
             cur.execute(
                 "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
-                (f"{source_system}\0{raw_id}",),
+                (_alias_lock_key(source_system, raw_id),),
             )
             cur.execute(
                 """
