@@ -71,6 +71,9 @@ Every item is tagged with who decides when a fork appears mid-item.
 > Re-derived from the 37 open issues on 2026-09-03. Roughly a third are swarm-ready now,
 > a third need a design call first, and a third are operator-gated — that last third
 > inflates the apparent queue and is worth a disposition pass.
+>
+> **Lane G was added 2026-09-04** for the cluster filed since — most of it by adversarial
+> gate reviews of the PRs the other lanes produced.
 
 ### Lane A — the file-store guard family
 
@@ -171,6 +174,47 @@ redaction was byte-identical to the closed #404, and the recurrence premise that
 the whole plan is refuted (there is no `promote_candidates` symbol, and 139 of 306 served
 items recur). A prepared prompt is a snapshot; re-verify every "already exists" and "does
 not exist" claim before acting on one.
+
+### Lane G — the review-and-gate cluster (filed 2026-09-03/04)
+
+Filed *after* the re-derivation above, mostly by adversarial gate reviews of the PRs in
+the other lanes. They are small, mechanical, and mostly disjoint — which is why they
+parallelize well and why they are listed separately rather than folded into a lane whose
+premise they do not share.
+
+| # | item | status |
+|---|---|---|
+| [#495](https://github.com/ronsse/trellis-ai/issues/495) | 21 CLI tests fail under `FORCE_COLOR=1`, four of them written to prove Rich does not mangle output | **done** — `aff76a4` |
+| [#498](https://github.com/ronsse/trellis-ai/issues/498) | `TRELLIS_ALLOW_ENV_DRIFT=0` *enabled* the override; `make format` ungated | **done** — `8ce5614` |
+| [#506](https://github.com/ronsse/trellis-ai/issues/506) | `POST /vectors/reset` answered 200 on an unconfigured store, a failed reset, **and** 500 on success | **done** — `5de062c` |
+| [#489](https://github.com/ronsse/trellis-ai/issues/489) | advisory refusals exit 2 where the canonical ADR says 5 | in flight |
+| [#491](https://github.com/ronsse/trellis-ai/issues/491) | the format/exit parity rule is per-module, so a shared helper disarms it | in flight |
+| [#501](https://github.com/ronsse/trellis-ai/issues/501) | the AST evasion roster has uncovered placements | in flight |
+| [#500](https://github.com/ronsse/trellis-ai/issues/500) | `temperature` is a 400 on current Claude models; the SDK floor makes it reachable | in flight |
+| [#492](https://github.com/ronsse/trellis-ai/issues/492) | `retrieve search` mangles ids through Rich (`dataset:snowflake://` → `dataset❄//`) | queued behind #489 |
+| [#493](https://github.com/ronsse/trellis-ai/issues/493) | `PackAssemblyError` is a `RuntimeError`, so it tracebacks past the CLI boundary | queued behind #492 |
+| [#494](https://github.com/ronsse/trellis-ai/issues/494) | `retrieve pack --quiet` id population is undocumented | owner call, then a doc line |
+| [#511](https://github.com/ronsse/trellis-ai/issues/511) | `POST /vectors/reset` has never worked on the blessed substrate | queued |
+| [#512](https://github.com/ronsse/trellis-ai/issues/512) | a backend's embedding width is a private attribute the route guesses at | queued |
+| [#502](https://github.com/ronsse/trellis-ai/issues/502) | the advisory cap caps the fitness loop's input | **owner decision** — three candidate *semantics*, not three implementations |
+| [#503](https://github.com/ronsse/trellis-ai/issues/503) | the advisory cap ranks category-blind | **do not do yet** — recorded hazard; wait for the first item-scoped advisory to reach a pack |
+
+**Two premises in these issues were wrong, and both would have shipped a green suite.**
+#489's closure list omits `generate-advisories`, which reaches exit 2 through two *inline*
+`raise typer.Exit(code=2)` that route through neither named helper — implement the list
+verbatim and the inconsistency survives. #493 claims a CLI-local fix leaves REST and MCP
+exposed; both already handle it (`mcp/server.py`, `trellis_api/app.py`), so the CLI is the
+only affected surface. #503's load-bearing sentence is wrong too, though it changes no
+work: `ANTI_PATTERN` advisories carry `entity_id` as well as `ENTITY` ones. Each
+correction is a comment on its issue.
+
+**The gates are where the value was.** Every PR in this cluster was reviewed by an
+independent agent trying to break it, and **not one came back clean**. The recurring
+finding is that the defect sits *inside the PR's own load-bearing claim*, not around it —
+a fix for roster rot that left four stale rosters, a colour guard with no test of its own,
+an "advisory, never raises" probe with two escaping exception types, a sanitized error
+body whose sanitizer was unpinned. A PR is most confident about exactly the property it
+was written to establish, and that is where the coverage is thinnest.
 
 ### Not swarm-eligible
 
