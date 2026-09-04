@@ -1921,10 +1921,15 @@ class TestVectorsResetUnsupportedBackend:
         assert body["status"] == "error", body
         assert body["code"] == "vector_reset_unsupported_backend", body
         # Actionable: it names the backend, states that nothing changed,
-        # and gives the operator somewhere to go.
+        # and gives the operator somewhere to go. The recovery is two
+        # clauses and both are pinned — asserting only ``reindex-vectors``
+        # let a mutant that deleted "rebuild the index with the backend's
+        # own tooling" survive, and repopulating an index nobody rebuilt
+        # is not a recovery.
         assert "_HandleFreeVectorStore" in body["message"], body
         assert "Nothing was changed" in body["message"], body
-        assert "reindex-vectors" in body["message"], body
+        assert "Rebuild the backend's vector index" in body["message"], body
+        assert "trellis admin reindex-vectors --force" in body["message"], body
         # The #510 message, which said nothing an operator could act on.
         assert "_conn" not in resp.text, resp.text
 
