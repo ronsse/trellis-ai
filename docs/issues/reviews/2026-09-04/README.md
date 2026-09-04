@@ -1,7 +1,7 @@
 # Open-issue adversarial corpus — 2026-09-04
 
 Dated snapshot of **40 open GitHub issues** reviewed against current `main` at `f9ff32c933020e267f5560493f4739538d2b95f6`.
-**Current disposition:** 39 remain open on GitHub (#525 is duplicate of #526 and may be closed; it stays in this snapshot as originally reviewed).
+**Current disposition:** 40 remain open on GitHub (#525 is duplicate of #526; external close was blocked at review time — count stays 40 until the mutation actually lands).
 
 **Sources of truth:** GitHub issue bodies/comments/labels and [`docs/design/implementation-roadmap.md`](../../../design/implementation-roadmap.md).
 This directory holds **review evidence** (verdicts, measurements, disposition criteria) — not authoritative requirements.
@@ -89,7 +89,6 @@ flowchart TD
   I201[#201] --> I203[#203]
   I255[#255] --> I261[#261]
   I255[#255] --> I306[#306]
-  I289[#289] --> I369[#369]
   I344[#344] --> I365[#365]
   I351[#351] --> I356[#356]
   I359[#359] --> I364[#364]

@@ -298,9 +298,7 @@
     "verdict": "valid-now",
     "plan": "plans/369.md",
     "wave": "W2-mutate",
-    "dependencies": [
-      289
-    ],
+    "dependencies": [],
     "territories": [
       "src/trellis/mutate/",
       "src/trellis_cli/"
@@ -342,7 +340,7 @@
     "review_sha": "f9ff32c933020e267f5560493f4739538d2b95f6",
     "reviewed_at": "2026-09-04",
     "status": "closure-ready",
-    "pr": "none"
+    "pr": "389"
   },
   {
     "issue": 360,
