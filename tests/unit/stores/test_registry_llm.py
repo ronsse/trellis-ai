@@ -130,7 +130,7 @@ def test_build_llm_client_anthropic_literal_key(
         {
             "provider": "anthropic",
             "api_key": "sk-ant-literal-XYZ9",
-            "model": "claude-haiku-4-5-20251001",
+            "model": "claude-sonnet-5",
         },
     )
     registry = StoreRegistry.from_config_dir(
@@ -275,7 +275,7 @@ def test_build_embedder_client_from_sub_block(
         {
             "provider": "anthropic",
             "api_key": "sk-ant-parent-0000",
-            "model": "claude-haiku-4-5-20251001",
+            "model": "claude-sonnet-5",
             "embedding": {
                 "provider": "openai",
                 "api_key_env": "OPENAI_API_KEY",

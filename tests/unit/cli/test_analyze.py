@@ -11,6 +11,7 @@ from typer.testing import CliRunner
 from tests.cli_output import assert_coloured, force_colour, plain
 from trellis.errors import StaleStoreWriteError
 from trellis.learning import PROMOTE_RECOMMENDATIONS
+from trellis.retrieve.token_pricing import _INPUT_PRICE_PER_MTOK
 from trellis.schemas.advisory import (
     Advisory,
     AdvisoryCategory,
@@ -159,8 +160,12 @@ class TestCost:
         assert result.exit_code == 0
         data = json.loads(result.stdout.strip())
         assert data["overhead_tokens"] == 15_000
-        assert data["price_per_mtok"] == 15.0
-        assert data["overhead_dollars"] == pytest.approx(0.225)
+        # The price itself is pinned in tests/unit/retrieve/test_token_pricing.py
+        # against Anthropic's published list; this test owns the CLI plumbing,
+        # so it reads the table rather than re-typing a stale number (#500).
+        opus = _INPUT_PRICE_PER_MTOK["claude-opus"]
+        assert data["price_per_mtok"] == opus
+        assert data["overhead_dollars"] == pytest.approx(15_000 / 1e6 * opus)
 
     def test_text_output_shows_dollars(
         self, temp_stores: StoreRegistry, monkeypatch: pytest.MonkeyPatch

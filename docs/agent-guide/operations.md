@@ -1620,7 +1620,7 @@ trellis analyze cost [--days N] [--model claude-opus] \
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--days` | `7` | Days of history to analyze |
-| `--model` | `claude-sonnet` (or `TRELLIS_COST_MODEL`) | Consuming model for input pricing; resolves by family (`claude-opus-4-8` → `claude-opus`) |
+| `--model` | `claude-sonnet` (or `TRELLIS_COST_MODEL`) | Consuming model for input pricing; resolves to the longest matching key, so `claude-opus-4-8` → the `claude-opus` family while `claude-sonnet-4-6` → its own key (a family is no longer one price) |
 | `--price-per-mtok` | model table (or `TRELLIS_COST_PRICE_PER_MTOK`) | Explicit input price override, USD per 1M tokens |
 
 Prices the `response_tokens` of every `TOKEN_TRACKED` event (emitted by
@@ -1629,7 +1629,11 @@ consuming model's **input** rate — those injected tokens land in the
 agent's next prompt. The **token count is exact**; the **dollar figure is
 an estimate** (the ~4-chars/token counter, and an operator-owned price —
 `price_source` in the output says which input won: explicit / env /
-model-table / default). It reports the *absolute* overhead in tokens and
+model-table / default — an id matching no key prices at the
+`claude-sonnet` default and says so as `default_fallback`, rather than
+implying a match). Table prices were verified against Anthropic's published
+list on **2026-09-04**; they drift, so treat the number as an operator-owned
+assumption and override it when it matters. It reports the *absolute* overhead in tokens and
 dollars, not a ratio: Trellis never sees the agent's own generation, so
 compare `overhead_dollars` against your provider's input-token bill for
 the same window to get the overhead fraction. Local models (Ollama) price
@@ -1638,7 +1642,7 @@ at `--model local` → $0.
 **JSON output (abridged):**
 
 ```json
-{"period_days": 7, "overhead_events": 28, "overhead_tokens": 34800, "model": "claude-opus", "price_per_mtok": 15.0, "price_source": "model_table", "overhead_dollars": 0.522, "by_operation": [{"operation": "get_context", "layer": "mcp", "calls": 20, "tokens": 30000, "dollars": 0.45}], "estimator": "estimate_4_chars_per_token"}
+{"period_days": 7, "overhead_events": 28, "overhead_tokens": 34800, "model": "claude-opus", "price_per_mtok": 5.0, "price_source": "model_table", "overhead_dollars": 0.174, "by_operation": [{"operation": "get_context", "layer": "mcp", "calls": 20, "tokens": 30000, "dollars": 0.15}], "estimator": "estimate_4_chars_per_token"}
 ```
 
 ### `trellis analyze domains`

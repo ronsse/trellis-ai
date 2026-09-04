@@ -21,20 +21,61 @@ from __future__ import annotations
 
 import os
 
-#: USD per 1,000,000 input tokens. Rough list prices — update as pricing
-#: changes or override at the call site. Keyed by model *family*; a
-#: concrete id (``claude-opus-4-8``) resolves by substring to its family.
+#: USD per 1,000,000 **input** tokens. List prices verified against
+#: ``platform.claude.com/docs/en/about-claude/pricing`` on **2026-09-04** —
+#: re-derive rather than trusting this comment, pricing moves.
+#:
+#: Keyed by model *family*, with a concrete id resolving to the longest key
+#: that appears in it (see :func:`_price_for_model`).  **A family is no longer
+#: one price**, which is the trap this table fell into: ``claude-opus`` spans
+#: $5 (Opus 4.5 through Opus 5) and $15 (the retired-but-still-served Opus 4.1
+#: and Opus 4), and ``claude-sonnet`` spans $2 (Sonnet 5) and $3 (Sonnet 4.6
+#: and earlier).  So the bare family key carries the **current generation's**
+#: price — the one an unqualified "claude-opus" most likely means today — and
+#: every still-served member that differs gets its own longer key.
+#:
+#: Keys are chosen so no key is a prefix of a *differently-priced* id: adding
+#: a bare ``"claude-opus-4"`` would silently re-price ``claude-opus-4-5``
+#: through ``4-8`` at the retired tier, because longest-key-wins only helps
+#: for ids that have a key of their own.  That is why Opus 4 and Sonnet 4
+#: carry their **full dated ids** as keys rather than a bare family stem —
+#: the stem is a prefix of the differently-priced 4.5-and-later ids.
+#:
+#: A key only earns its place if some *real* model id resolves through it.
+#: ``tests/unit/retrieve/test_token_pricing.py`` derives that from a roster
+#: of published ids rather than from the key set alone — the key set cannot
+#: express the property, which is how a dead ``"claude-haiku-3-5"`` key
+#: (the 3.x line names its ids ``claude-3-5-haiku-…``, tier *after* version)
+#: sat here matching nothing.
 _INPUT_PRICE_PER_MTOK: dict[str, float] = {
-    "claude-opus": 15.0,
-    "claude-sonnet": 3.0,
+    # Anthropic — current generation prices on the family key.
+    "claude-fable": 10.0,
+    "claude-mythos": 10.0,
+    "claude-opus": 5.0,
+    "claude-sonnet": 2.0,
     "claude-haiku": 1.0,
+    # Still-served members priced off their family.
+    "claude-opus-4-1": 15.0,
+    "claude-opus-4-20250514": 15.0,
+    "claude-sonnet-4-6": 3.0,
+    "claude-sonnet-4-5": 3.0,
+    "claude-sonnet-4-20250514": 3.0,
+    "claude-3-5-haiku": 0.80,
+    # OpenAI.
     "gpt-4o-mini": 0.15,
     "gpt-4o": 2.5,
+    # Self-hosted.
     "local": 0.0,
 }
 
 #: Default consuming model when none is configured — a mid-tier rate, so
-#: the estimate is neither alarmist nor free.
+#: the estimate is neither alarmist nor free.  This is also what an
+#: *unrecognised* model id falls back to, which is a real assumption about a
+#: deployment that may never have configured a Claude model at all.  It is
+#: kept rather than replaced because the fallback is not silent:
+#: :func:`resolve_pricing` returns ``source="default_fallback"``, and both
+#: arms of ``trellis analyze cost`` render it, so the estimate says out loud
+#: that nothing matched.  A local model prices correctly at ``--model local``.
 DEFAULT_MODEL = "claude-sonnet"
 
 _MODEL_ENV = "TRELLIS_COST_MODEL"

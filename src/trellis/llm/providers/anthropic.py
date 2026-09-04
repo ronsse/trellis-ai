@@ -7,6 +7,13 @@ Requires the ``[llm-anthropic]`` optional extra::
 Anthropic does not currently offer first-party text embeddings; use
 :class:`trellis.llm.providers.openai.OpenAIEmbedder` (or another
 ``EmbedderClient`` implementation) for embeddings.
+
+**No sampling parameter is ever sent.** ``temperature`` / ``top_p`` /
+``top_k`` are absent from every request this adapter builds, and that is
+the module's load-bearing invariant — see :meth:`AnthropicClient.generate`
+for why it is unconditional rather than model-gated, and
+``tests/unit/llm/test_anthropic_provider.py`` for the boundary test that
+pins it against a fake whose signature matches the real SDK's.
 """
 
 from __future__ import annotations
@@ -22,7 +29,27 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
+#: Default model when the operator configures none.  This is the *Claude
+#: API ID* for Claude Haiku 4.5, not a snapshot of an alias: for models
+#: before the 4.6 generation the dated form is the ID and ``claude-haiku-4-5``
+#: is the convenience alias that resolves to it, so the dateless form would
+#: be the looser pointer rather than the more modern one.  The pin is
+#: deliberate — Trellis stores what these passes produce, and a default that
+#: changes model underneath an operator is worse for a durable memory store
+#: than one that requires an explicit bump.  The model-deprecations page
+#: gives it a **tentative** retirement of "not sooner than 2026-10-15" (read
+#: 2026-09-04), so the pin has a known expiry — but tentative is not a
+#: commitment, and it is **not** the earliest of the current models:
+#: ``claude-sonnet-4-5-20250929`` is listed for 2026-09-29 and
+#: ``claude-opus-4-5-20251101`` for 2026-11-24.  Re-read that page rather
+#: than trusting this comment; override the pin with ``model:`` in the
+#: ``llm:`` config block.
 DEFAULT_MODEL = "claude-haiku-4-5-20251001"
+
+#: Sampling parameters this adapter refuses to forward.  Named so the
+#: invariant is enumerable by a test rather than implied by the absence of
+#: three assignments.
+UNSUPPORTED_SAMPLING_PARAMS: tuple[str, ...] = ("temperature", "top_p", "top_k")
 
 
 def _build_async_client(
@@ -71,17 +98,49 @@ class AnthropicClient:
         self,
         *,
         messages: list[Message],
-        temperature: float = 0.3,
+        # Accepted for ``LLMClient`` conformance and deliberately unused —
+        # dropping it is the point of this method.  See the docstring.
+        temperature: float = 0.3,  # noqa: ARG002
         max_tokens: int = 500,
         model: str | None = None,
     ) -> LLMResponse:
+        """Generate a completion.  ``temperature`` is accepted and **dropped**.
+
+        The parameter stays in the signature because ``LLMClient`` is
+        provider-agnostic and the OpenAI-compatible path (local Ollama, which
+        is what the reference deployment runs) both accepts and honours it.
+        Translating a provider-agnostic request into one provider's wire shape
+        is this adapter's job — it already does the same for ``system``.
+
+        The drop is **unconditional**, not gated on the chosen model, for two
+        reasons.  Model-gating needs a roster of which models still accept a
+        sampling parameter, and that roster rots on every release while being
+        unfalsifiable here (``base_url`` may point at any gateway).  More
+        decisively, it would not work: the parameter is *absent from the
+        Anthropic Python SDK's 1.x signatures*, so passing it raises
+        ``TypeError`` in the client before any model ever sees it.  A branch
+        that kept it for the models that still accept it would therefore be
+        both dead and broken.  Unconditional is the only shape that is correct
+        across both SDK majors and every model.
+
+        As of 2026-09-04 the API side is: Claude 4.7 and later — Opus 4.7,
+        Opus 4.8, Opus 5, Sonnet 5, Fable/Mythos 5 — return a 400 for any of
+        the three set to a **non-default** value, while the 4.5/4.6 line,
+        including this module's :data:`DEFAULT_MODEL`, still accepts them
+        (Haiku 4.5 takes ``temperature`` or ``top_p``, not both).  So the
+        finding that motivated this is not "the default model is broken"; it
+        is that the SDK floor and any model bump each reach the same failure
+        by a different route.  Note that every value Trellis passes is
+        non-default (``0.0`` / ``0.2`` / ``0.3`` against an API default of
+        ``1.0``), so the API-side rejection is reachable, not theoretical.
+        """
         chosen_model = model or self._default_model
         system_text, conversation = _split_system(messages)
 
+        # ``temperature`` is deliberately not forwarded — see the docstring.
         kwargs: dict[str, Any] = {
             "model": chosen_model,
             "messages": conversation,
-            "temperature": temperature,
             "max_tokens": max_tokens,
         }
         if system_text:
