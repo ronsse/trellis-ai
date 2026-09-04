@@ -1739,6 +1739,42 @@ class TestVectorsResetStatusLine:
         assert "code" not in body, body
         assert store.reset_calls == 1
 
+    def test_a_declaration_that_raises_cannot_follow_a_completed_reset(self, client):
+        """Why the width is read *before* the reset, made falsifiable.
+
+        The width is a cosmetic field in a 200 body, and reading it after
+        the drop-and-recreate would put a property call between a
+        completed destructive operation and the report of it — #506's
+        defect (a successful reset answering 500) with a new attribute in
+        the hole. The contract forbids a declaration that raises, so this
+        store is out of contract; what the ordering buys is that an
+        out-of-contract backend fails a request that **changed nothing**
+        rather than one that emptied the store and then lied about it.
+
+        Moving the read into the ``else`` block is behaviourally identical
+        for every shipped backend, so the **store** assertion is the whole
+        test: the caller sees the same failure either way. The raise
+        escapes this route's own ``except`` (it is outside the ``try``),
+        so the app's catch-all answers it — and ``TestClient`` re-raises
+        server exceptions after the handler runs, which is why this is a
+        ``pytest.raises`` rather than a 500 assertion.
+        """
+
+        class _AngryDeclarationStore(_ResettableVectorStore):
+            @property
+            def dimensions(self) -> int | None:
+                msg = "declaration unavailable"
+                raise RuntimeError(msg)
+
+        registry = app_module._registry
+        store = _AngryDeclarationStore()
+        registry._cache["vector"] = store
+
+        with pytest.raises(RuntimeError, match="declaration unavailable"):
+            client.post("/api/v1/vectors/reset")
+
+        assert store.reset_calls == 0
+
     def test_no_refusal_is_wrapped_in_a_detail_envelope(self, client, monkeypatch):
         """Pins the docstring's contract for *every* arm it speaks for.
 
