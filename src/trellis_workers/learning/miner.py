@@ -15,6 +15,7 @@ from trellis.extract.telemetry import (
     emit_extraction_failure,
 )
 from trellis.llm import Message
+from trellis.llm.json_response import JSONParseOutcome, parse_json_response
 from trellis.schemas.enums import OutcomeStatus
 from trellis.schemas.precedent import Precedent
 from trellis.schemas.trace import Trace
@@ -219,13 +220,11 @@ class PrecedentMiner:
         decides whether to degrade gracefully (POC directive: no silent
         ``return []``).
         """
-        text = response.strip()
-        if text.startswith("```"):
-            lines = text.split("\n")
-            text = "\n".join(lines[1:-1])
-        try:
-            parsed = json.loads(text)
-        except (json.JSONDecodeError, ValueError) as exc:
+        parse_result = parse_json_response(response)
+        if parse_result.outcome is JSONParseOutcome.MALFORMED:
+            exc = json.JSONDecodeError(
+                parse_result.error or "invalid JSON response", response, 0
+            )
             emit_extraction_failure(
                 event_log=self._event_log,
                 extractor_id="PrecedentMiner",
@@ -244,6 +243,7 @@ class PrecedentMiner:
                 failure_kind="parse_error",
                 extractor_id="PrecedentMiner",
             ) from exc
+        parsed = parse_result.value
 
         if not isinstance(parsed, list):
             return []

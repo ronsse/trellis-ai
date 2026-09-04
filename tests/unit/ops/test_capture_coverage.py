@@ -46,6 +46,7 @@ def _sweep_payload(**overrides: Any) -> dict[str, Any]:
         "sessions_skipped_ephemeral": 0,
         "sessions_skipped_empty": 0,
         "sessions_judge_unavailable": 0,
+        "sessions_judge_malformed": 0,
         "sessions_with_memory": 10,
         "malformed_lines": 0,
         "candidates_distilled": 30,
@@ -322,6 +323,23 @@ class TestFunnelAggregation:
         # share no name with a funnel field, but the guard is what stops a
         # future bool-named-like-a-counter from silently incrementing one.
         assert report.funnel.sessions_with_memory == 4
+
+
+class TestMalformedDistillObservability:
+    def test_note_only_appears_when_malformed_responses_occur(
+        self, tmp_path: Path
+    ) -> None:
+        malformed_log = SQLiteEventLog(tmp_path / "malformed.db")
+        _emit_sweep(malformed_log, sessions_judge_malformed=2)
+        malformed = summarize_capture_coverage(malformed_log, days=7)
+
+        clean_log = SQLiteEventLog(tmp_path / "clean.db")
+        _emit_sweep(clean_log, sessions_judge_malformed=0)
+        clean = summarize_capture_coverage(clean_log, days=7)
+
+        assert malformed.funnel.sessions_judge_malformed == 2
+        assert any("2 malformed distillation" in note for note in malformed.notes)
+        assert not any("malformed distillation" in note for note in clean.notes)
 
 
 class TestStoredMemoryCrossCheck:

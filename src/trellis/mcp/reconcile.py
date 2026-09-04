@@ -41,7 +41,6 @@ when off, ``save_memory`` behaves exactly as the deterministic tier does today.
 from __future__ import annotations
 
 import asyncio
-import json
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
@@ -51,6 +50,7 @@ from trellis.core import write_config
 from trellis.core.base import TrellisModel
 from trellis.core.hashing import content_hash
 from trellis.core.write_config import WriteBehaviourConfig
+from trellis.llm.json_response import JSONParseOutcome, parse_json_response
 from trellis.llm.types import Message
 from trellis.schemas.classification import Lifecycle
 from trellis.schemas.memory_op import (
@@ -208,15 +208,10 @@ def parse_verdict(raw: str) -> tuple[ReconcileDecision, float] | None:
     ``None`` return is the malformed-response signal the caller turns into a
     safe fallback ADD.
     """
-    text = raw.strip()
-    if text.startswith("```"):
-        # Tolerate a fenced code block: drop the fence lines.
-        lines = [ln for ln in text.splitlines() if not ln.strip().startswith("```")]
-        text = "\n".join(lines).strip()
-    try:
-        data = json.loads(text)
-    except (json.JSONDecodeError, ValueError):
+    parsed = parse_json_response(raw)
+    if parsed.outcome is JSONParseOutcome.MALFORMED:
         return None
+    data = parsed.value
     if not isinstance(data, dict):
         return None
 

@@ -26,7 +26,6 @@ Design notes
 from __future__ import annotations
 
 import json
-import re
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -39,6 +38,7 @@ from trellis.extract.telemetry import (
     ExtractionFailureError,
     emit_extraction_failure,
 )
+from trellis.llm.json_response import JSONParseOutcome, parse_json_response
 from trellis.schemas.enums import NodeRole
 from trellis.schemas.extraction import (
     EdgeDraft,
@@ -59,10 +59,6 @@ if TYPE_CHECKING:
     from trellis.stores.base.event_log import EventLog
 
 logger = structlog.get_logger(__name__)
-
-
-# Matches a leading ```json or ``` line and a trailing ``` line.
-_CODE_FENCE_RE = re.compile(r"(^\s*```(?:json)?\s*\n)|(\n\s*```\s*$)", re.MULTILINE)
 
 
 class LLMExtractor:
@@ -290,16 +286,15 @@ def _parse_json_with_exception(
     if not content or not content.strip():
         return None, None
 
-    stripped = _CODE_FENCE_RE.sub("", content).strip()
-    if not stripped:
-        return None, None
-
-    data, last_exc = _try_json_loads_with_exc(stripped)
-    if data is None:
-        start = stripped.find("{")
-        end = stripped.rfind("}")
+    parsed = parse_json_response(content)
+    data = parsed.value
+    last_exc: Exception | None = None
+    if parsed.outcome is JSONParseOutcome.MALFORMED:
+        last_exc = json.JSONDecodeError(parsed.error or "invalid JSON", content, 0)
+        start = content.find("{")
+        end = content.rfind("}")
         if start != -1 and end > start:
-            data, last_exc = _try_json_loads_with_exc(stripped[start : end + 1])
+            data, last_exc = _try_json_loads_with_exc(content[start : end + 1])
 
     if isinstance(data, dict):
         return data, None
