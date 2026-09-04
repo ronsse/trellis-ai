@@ -82,6 +82,65 @@ class TestResolvePricing:
         assert price == 0.0
 
 
+#: Every Claude model id an operator could plausibly name, with the input
+#: price Anthropic published on 2026-09-04.  These are the *real* API ids
+#: from the models overview and the model-deprecations page — not paraphrases
+#: of a family name.  The pricing table is checked against this roster
+#: because the property that matters ("no key silently mis-serves an id")
+#: cannot be expressed over the key set alone.
+PUBLISHED_INPUT_PRICES: dict[str, float] = {
+    # Current generation.
+    "claude-fable-5-1": 10.0,
+    "claude-fable-5": 10.0,
+    "claude-mythos-5-1": 10.0,
+    "claude-mythos-5": 10.0,
+    "claude-opus-5": 5.0,
+    "claude-opus-4-8": 5.0,
+    "claude-opus-4-7": 5.0,
+    "claude-opus-4-6": 5.0,
+    "claude-opus-4-5-20251101": 5.0,
+    "claude-opus-4-5": 5.0,
+    "claude-sonnet-5": 2.0,
+    "claude-sonnet-4-6": 3.0,
+    "claude-sonnet-4-5-20250929": 3.0,
+    "claude-sonnet-4-5": 3.0,
+    "claude-haiku-4-5-20251001": 1.0,
+    "claude-haiku-4-5": 1.0,
+    # Retired on the Claude API, still served (and still priced) on the
+    # partner clouds — the population the longer keys exist for.
+    "claude-opus-4-1-20250805": 15.0,
+    "claude-opus-4-1": 15.0,
+    "claude-opus-4-20250514": 15.0,
+    "claude-sonnet-4-20250514": 3.0,
+    "claude-3-5-haiku-20241022": 0.80,
+}
+
+
+def _winning_key(model_id: str, table: dict[str, float]) -> str | None:
+    """The key ``_price_for_model`` would resolve *model_id* through."""
+    matches = [key for key in table if key in model_id]
+    return max(matches, key=len) if matches else None
+
+
+def _shadowing_failures(table: dict[str, float], roster: dict[str, float]) -> list[str]:
+    """Ids in *roster* that *table* resolves to the wrong published price.
+
+    This is the derived form of the prefix trap: a key is only safe if, for
+    every real id it wins, its price is that id's published price.
+    """
+    failures: list[str] = []
+    for model_id, published in roster.items():
+        winner = _winning_key(model_id, table)
+        if winner is None:
+            failures.append(f"{model_id!r}: no key matches (would fall back)")
+        elif table[winner] != pytest.approx(published):
+            failures.append(
+                f"{model_id!r}: key {winner!r} prices it at "
+                f"${table[winner]}, published ${published}"
+            )
+    return failures
+
+
 class TestPublishedPricesAsOf20260904:
     """Verified against Anthropic's published list prices on 2026-09-04.
 
@@ -91,25 +150,7 @@ class TestPublishedPricesAsOf20260904:
     """
 
     @pytest.mark.parametrize(
-        ("model", "expected"),
-        [
-            # Current generation, priced off the bare family key.
-            ("claude-opus-5", 5.0),
-            ("claude-opus-4-8", 5.0),
-            ("claude-opus-4-7", 5.0),
-            ("claude-opus-4-6", 5.0),
-            ("claude-opus-4-5", 5.0),
-            ("claude-sonnet-5", 2.0),
-            ("claude-haiku-4-5", 1.0),
-            ("claude-haiku-4-5-20251001", 1.0),
-            ("claude-fable-5-1", 10.0),
-            ("claude-mythos-5", 10.0),
-            # Still served, priced off their family — each needs its own key.
-            ("claude-sonnet-4-6", 3.0),
-            ("claude-sonnet-4-5", 3.0),
-            ("claude-opus-4-1", 15.0),
-            ("claude-haiku-3-5", 0.80),
-        ],
+        ("model", "expected"), sorted(PUBLISHED_INPUT_PRICES.items())
     )
     def test_model_prices_at_its_published_input_rate(
         self, monkeypatch, model, expected
@@ -119,31 +160,45 @@ class TestPublishedPricesAsOf20260904:
         assert source == "model_table"
         assert price == pytest.approx(expected)
 
-    def test_no_key_mispriced_by_a_prefix_of_a_differently_priced_key(
-        self, monkeypatch
-    ):
+    def test_no_key_mispriced_by_a_prefix_of_a_differently_priced_key(self):
         """The trap that makes this table easy to get wrong.
 
         Longest-key-wins only rescues an id that has a key of its own, so a
         key must never be a prefix of a differently-priced id. Adding a bare
         ``claude-opus-4`` would silently re-price 4.5 through 4.8 at the
-        retired $15 tier while every test above that names an explicit key
-        stayed green.
+        retired $15 tier.
+
+        The derivation has to run over the **published ids**, not over the
+        key set: for two distinct keys ``k`` and ``o``, ``o.startswith(k)``
+        already implies ``len(o) > len(k)``, so a key-set-only rule of that
+        shape is a tautology that cannot fail. (It was one, and it passed
+        against the exact bare-``claude-opus-4`` mutant it names.)
         """
-        monkeypatch.delenv("TRELLIS_COST_PRICE_PER_MTOK", raising=False)
-        for key, key_price in _INPUT_PRICE_PER_MTOK.items():
-            for other, other_price in _INPUT_PRICE_PER_MTOK.items():
-                if other == key or key_price == other_price:
-                    continue
-                assert not other.startswith(key) or len(other) > len(key), (
-                    f"{key!r} shadows differently-priced {other!r}"
-                )
-        # And the concrete regression: the family key must not swallow the
-        # still-served members that price differently.
-        assert resolve_pricing("claude-opus-4-1")[1] == 15.0
-        assert resolve_pricing("claude-opus-4-5")[1] == 5.0
-        assert resolve_pricing("claude-sonnet-4-6")[1] == 3.0
-        assert resolve_pricing("claude-sonnet-5")[1] == 2.0
+        assert _shadowing_failures(_INPUT_PRICE_PER_MTOK, PUBLISHED_INPUT_PRICES) == []
+
+    def test_the_shadowing_check_can_actually_fail(self):
+        """Guard the guard: the predicate must reject a table it should.
+
+        Run the *shipped* helper against synthetic tables carrying each way
+        this has gone wrong, so a future simplification back into a tautology
+        fails here rather than silently.
+        """
+        roster = {"claude-opus-4-5": 5.0, "claude-opus-4-20250514": 15.0}
+        # A bare family stem shadowing the differently-priced newer ids.
+        assert _shadowing_failures({"claude-opus": 5.0, "claude-opus-4": 15.0}, roster)
+        # A key that matches no real id, leaving one to fall back.
+        assert _shadowing_failures({"claude-opus-4-5": 5.0}, roster)
+        # And the honest table passes, so the check is not failing on everything.
+        assert (
+            _shadowing_failures(
+                {
+                    "claude-opus": 5.0,
+                    "claude-opus-4-20250514": 15.0,
+                },
+                roster,
+            )
+            == []
+        )
 
 
 class TestUnrecognisedModelIsLabelledNotSilent:

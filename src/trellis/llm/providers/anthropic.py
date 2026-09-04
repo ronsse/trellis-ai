@@ -39,7 +39,9 @@ logger = structlog.get_logger(__name__)
 #: than one that requires an explicit bump.  Retirement is committed to be no
 #: sooner than **2026-10-15**, the earliest of any current model, so this
 #: constant has a known expiry; override it with ``model:`` in the ``llm:``
-#: config block.  (Verified against the Claude models overview, 2026-09-04.)
+#: config block.  (Tentative retirement date, verified against the model
+#: deprecations page, 2026-09-04 — it is not the earliest of the current
+#: models: ``claude-sonnet-4-5-20250929`` is listed for 2026-09-29.)
 DEFAULT_MODEL = "claude-haiku-4-5-20251001"
 
 #: Sampling parameters this adapter refuses to forward.  Named so the
@@ -119,13 +121,16 @@ class AnthropicClient:
         both dead and broken.  Unconditional is the only shape that is correct
         across both SDK majors and every model.
 
-        As of 2026-09-04 the API side is: Claude Opus 4.7 and later reject any
-        request carrying one (the default value included), Claude Sonnet 5
-        rejects non-default values, and the 4.5/4.6 line — including this
-        module's :data:`DEFAULT_MODEL` — still accepts them.  So the finding
-        that motivated this is not "the default model is broken"; it is that
-        the SDK floor and any model bump each reach the same failure by a
-        different route.
+        As of 2026-09-04 the API side is: Claude 4.7 and later — Opus 4.7,
+        Opus 4.8, Opus 5, Sonnet 5, Fable/Mythos 5 — return a 400 for any of
+        the three set to a **non-default** value, while the 4.5/4.6 line,
+        including this module's :data:`DEFAULT_MODEL`, still accepts them
+        (Haiku 4.5 takes ``temperature`` or ``top_p``, not both).  So the
+        finding that motivated this is not "the default model is broken"; it
+        is that the SDK floor and any model bump each reach the same failure
+        by a different route.  Note that every value Trellis passes is
+        non-default (``0.0`` / ``0.2`` / ``0.3`` against an API default of
+        ``1.0``), so the API-side rejection is reachable, not theoretical.
         """
         chosen_model = model or self._default_model
         system_text, conversation = _split_system(messages)

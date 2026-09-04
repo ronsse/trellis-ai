@@ -37,7 +37,16 @@ import os
 #: Keys are chosen so no key is a prefix of a *differently-priced* id: adding
 #: a bare ``"claude-opus-4"`` would silently re-price ``claude-opus-4-5``
 #: through ``4-8`` at the retired tier, because longest-key-wins only helps
-#: for ids that have a key of their own.
+#: for ids that have a key of their own.  That is why Opus 4 and Sonnet 4
+#: carry their **full dated ids** as keys rather than a bare family stem —
+#: the stem is a prefix of the differently-priced 4.5-and-later ids.
+#:
+#: A key only earns its place if some *real* model id resolves through it.
+#: ``tests/unit/retrieve/test_token_pricing.py`` derives that from a roster
+#: of published ids rather than from the key set alone — the key set cannot
+#: express the property, which is how a dead ``"claude-haiku-3-5"`` key
+#: (the 3.x line names its ids ``claude-3-5-haiku-…``, tier *after* version)
+#: sat here matching nothing.
 _INPUT_PRICE_PER_MTOK: dict[str, float] = {
     # Anthropic — current generation prices on the family key.
     "claude-fable": 10.0,
@@ -47,9 +56,11 @@ _INPUT_PRICE_PER_MTOK: dict[str, float] = {
     "claude-haiku": 1.0,
     # Still-served members priced off their family.
     "claude-opus-4-1": 15.0,
+    "claude-opus-4-20250514": 15.0,
     "claude-sonnet-4-6": 3.0,
     "claude-sonnet-4-5": 3.0,
-    "claude-haiku-3-5": 0.80,
+    "claude-sonnet-4-20250514": 3.0,
+    "claude-3-5-haiku": 0.80,
     # OpenAI.
     "gpt-4o-mini": 0.15,
     "gpt-4o": 2.5,

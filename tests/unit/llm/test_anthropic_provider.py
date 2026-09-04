@@ -6,6 +6,8 @@ Tests inject a mock async client via the ``client=`` kwarg, so the real
 
 from __future__ import annotations
 
+import inspect
+import pathlib
 import sys
 from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock
@@ -521,3 +523,90 @@ class TestDefaultModelIsThePinnedSnapshot:
 
     def test_default_model_is_the_dated_claude_api_id(self) -> None:
         assert DEFAULT_MODEL == "claude-haiku-4-5-20251001"
+
+
+# -- Tests: the declared SDK floor, and the fake measured against the real one
+
+
+class TestDeclaredSdkFloorIsBounded:
+    """#500 raised ``anthropic`` to ``>=1,<2`` and called the upper bound the
+    load-bearing half — an unbounded floor is how a breaking major arrives
+    silently, which is exactly how ``>=0.40`` let 1.x in.  Nothing pinned that
+    claim, so this does.  It asserts an upper bound *exists*, not its value,
+    so a deliberate bump to ``<3`` is not a test failure.
+    """
+
+    @staticmethod
+    def _anthropic_specifiers() -> list[str]:
+        import tomllib
+
+        root = pathlib.Path(__file__).resolve().parents[3]
+        data = tomllib.loads((root / "pyproject.toml").read_text())
+        extras = data["project"]["optional-dependencies"]["llm-anthropic"]
+        return [dep for dep in extras if dep.split()[0].startswith("anthropic")]
+
+    def test_the_extra_declares_anthropic(self) -> None:
+        assert self._anthropic_specifiers(), (
+            "the [llm-anthropic] extra no longer names anthropic"
+        )
+
+    def test_the_floor_admits_1_x_where_the_sdk_enforces_the_invariant(self) -> None:
+        """1.x is the major whose own signature drops the sampling params."""
+        for spec in self._anthropic_specifiers():
+            assert ">=1" in spec, f"{spec!r} does not floor at the 1.x major"
+
+    def test_the_floor_carries_an_upper_bound(self) -> None:
+        for spec in self._anthropic_specifiers():
+            assert "<" in spec, (
+                f"{spec!r} is unbounded above — a breaking major would resolve "
+                "silently, which is how >=0.40 admitted 1.x in the first place"
+            )
+
+
+class TestStrictFakeMatchesTheRealSdk:
+    """The fake is a hand-copy of an SDK that is installed nowhere, so it can
+    drift without anything noticing.  When the real SDK *is* present (a
+    developer with the ``[llm-anthropic]`` extra), measure the fake against
+    it instead of trusting the copy.  Skips honestly when it is absent rather
+    than reporting a constant.
+    """
+
+    @staticmethod
+    def _real_create_params() -> set[str]:
+        anthropic = pytest.importorskip(
+            "anthropic", reason="[llm-anthropic] extra not installed"
+        )
+        sig = inspect.signature(anthropic.resources.messages.AsyncMessages.create)
+        return {
+            name
+            for name, param in sig.parameters.items()
+            if param.kind is inspect.Parameter.KEYWORD_ONLY
+        }
+
+    def test_real_sdk_defines_none_of_the_rejected_sampling_params(self) -> None:
+        """If a future SDK re-adds one, the unconditional drop needs revisiting."""
+        real = self._real_create_params()
+        assert real.isdisjoint(UNSUPPORTED_SAMPLING_PARAMS)
+
+    def test_every_kwarg_the_adapter_sends_exists_on_the_real_signature(self) -> None:
+        """The fake accepts four keywords; all four must be real ones, or the
+        fake proves the adapter works against a signature nobody ships."""
+        real = self._real_create_params()
+        fake = {
+            name
+            for name, param in inspect.signature(
+                _StrictSdkMessages.create
+            ).parameters.items()
+            if param.kind is inspect.Parameter.KEYWORD_ONLY
+        }
+        assert fake <= real, f"fake declares keywords the real SDK lacks: {fake - real}"
+
+    def test_the_real_sdk_also_refuses_unknown_kwargs(self) -> None:
+        """The property the fake stands in for: no ``**kwargs`` catch-all."""
+        anthropic = pytest.importorskip(
+            "anthropic", reason="[llm-anthropic] extra not installed"
+        )
+        sig = inspect.signature(anthropic.resources.messages.AsyncMessages.create)
+        assert not any(
+            p.kind is inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+        )
