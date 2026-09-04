@@ -380,13 +380,85 @@ def list_advisories(
 # -- Vector store management --
 
 
-@router.post("/vectors/reset")
-def reset_vectors() -> dict[str, Any]:
-    """Drop and recreate the vectors table with current configured dimensions."""
+#: The status for a reset this deployment could not even attempt. 409,
+#: matching what #484/#505 settled on for the ``advisories/generate``
+#: refusals and what #483 set ``CONFIG_ERROR_STATUS`` to at this
+#: boundary: "no store is configured" is a ``ConfigError`` in all but
+#: name, and the same condition class answering 409 on one route and 200
+#: on another is the asymmetry those fixes existed to remove.
+_VECTORS_UNCONFIGURED_STATUS = 409
+
+#: The status for a reset that was *attempted* and broke. Deliberately
+#: **not** 409, and not by symmetry with the arm above — the two arms
+#: make different claims and only one of them is the caller's to act on.
+#: 409 says a precondition on the caller's side is unmet; a ``DROP
+#: TABLE`` that raised mid-flight says the server fell over, possibly
+#: with the table already gone, and no request the caller reshapes will
+#: fix it. It is also the answer this boundary already gives for that
+#: condition: ``middleware._error_status`` maps every ``StoreError`` to
+#: 500 and only remaps ``ConfigError``, so a store failure that
+#: propagated instead of being caught here would answer 500 too. The
+#: catch stays for the *body*, not the status — see the comment on it.
+_VECTORS_RESET_FAILED_STATUS = 500
+
+
+@router.post(
+    "/vectors/reset",
+    responses={
+        _VECTORS_UNCONFIGURED_STATUS: {
+            "description": (
+                "Nothing was dropped and nothing was recreated: the "
+                "deployment has no vector store configured. `code` is "
+                "`vector_store_unconfigured`, at the top level beside "
+                "`status`."
+            )
+        },
+        _VECTORS_RESET_FAILED_STATUS: {
+            "description": (
+                "The reset was attempted and failed. The vectors table may "
+                "have been dropped and not recreated, so this is not a "
+                "no-op the way the 409 is. `code` is `vector_reset_failed`, "
+                "at the top level beside `status`, and `message` carries "
+                "the sanitized backend error."
+            )
+        },
+    },
+)
+def reset_vectors(response: Response) -> dict[str, Any]:
+    """Drop and recreate the vectors table with current configured dimensions.
+
+    Neither failure arm answers 200, and they answer differently on
+    purpose. A deployment with **no vector store configured** answers
+    **409**: nothing was dropped, nothing was recreated, and what has to
+    change is the deployment. A reset that was **attempted and failed**
+    answers **500**: the server fell over mid-operation, the vectors
+    table may be gone, and no reshaped request fixes that.
+
+    Both refusals name themselves in a `code` at the **top level** of the
+    body, beside `status` — `vector_store_unconfigured` and
+    `vector_reset_failed`. This route raises no `HTTPException`, so there
+    is no `detail` envelope on any arm and `body["code"]` is always where
+    the code is.
+    """
+    # This docstring is the endpoint's public API description (it is what
+    # ``scripts/generate_openapi.py`` puts in ``docs/api/v1.yaml``), so the
+    # implementation rationale stays in comments. #506, following #484 and
+    # #505 next door: both statuses are set on the *injected* ``Response``
+    # rather than raised as an ``HTTPException``, because an
+    # ``HTTPException`` replaces the body with a ``detail`` envelope and
+    # the structured body is the half of this route that was already
+    # honest. Each assignment sits immediately before its ``return``: an
+    # injected status is discarded outright if anything raises after it is
+    # set, so there is no present or latent status/body mismatch.
     registry = get_registry()
     vector_store = getattr(registry.knowledge, "vector_store", None)
     if vector_store is None:
-        return {"status": "error", "message": "Vector store not configured"}
+        response.status_code = _VECTORS_UNCONFIGURED_STATUS
+        return {
+            "status": "error",
+            "code": "vector_store_unconfigured",
+            "message": "Vector store not configured",
+        }
 
     try:
         # PgVectorStore exposes the pooled-connection helper ``_conn``
@@ -401,16 +473,56 @@ def reset_vectors() -> dict[str, Any]:
             vector_store._conn.execute("DROP TABLE IF EXISTS vectors")
             vector_store._conn.commit()
         vector_store._init_schema()
-    # GRACEFUL-DEGRADATION: admin operator endpoint surfaces failure as
-    # a structured JSON response (rather than a 5xx) so the caller can
-    # display the message in the admin UI. Exception is logged for
-    # operator visibility.
+    # The catch is kept, and it is now earning its keep on the **body
+    # alone**. It used to be annotated GRACEFUL-DEGRADATION — "surfaces
+    # failure as a structured JSON response rather than a 5xx" — which
+    # was the defect, not the rationale: the 2026-05 silent-fallback
+    # audit bucketed this very site as DEFECT and it was annotated rather
+    # than fixed. Degrading the *status* is over; degrading it was the
+    # whole of #506. What letting the exception propagate to
+    # ``app.add_exception_handler(Exception, ...)`` would cost is the
+    # message: that handler answers a deliberately sparse
+    # ``internal_error`` / "internal server error" envelope, because it
+    # fires on every route including ones handling untrusted input. This
+    # one is admin-scoped and its entire job is telling an operator what
+    # broke, so the sanitized backend error is worth catching for — the
+    # same argument #505 used for not raising ``HTTPException``. Nothing
+    # is lost by catching: ``logger.exception`` records the traceback
+    # under the request_id bound by ``request_id_middleware``, which also
+    # echoes that id in ``X-Request-ID`` on this response.
     except Exception as exc:
         logger.exception("vectors_reset_failed")
-        return {"status": "error", "message": sanitize_error_message(str(exc))}
+        response.status_code = _VECTORS_RESET_FAILED_STATUS
+        return {
+            "status": "error",
+            "code": "vector_reset_failed",
+            "message": sanitize_error_message(str(exc)),
+        }
     else:
-        dims = vector_store._dimensions
-        return {"status": "ok", "message": f"Recreated with {dims}D"}
+        # The third arm of the same defect, found while fixing the two the
+        # issue named and included for the reason #505 included its own
+        # third: a route with one honest arm beside one lying arm is no
+        # more trustworthy than one with two. ``_dimensions`` is defined
+        # only on ``PgVectorStore``, ``ArcadeDBVectorStore`` and
+        # ``Neo4jVectorStore`` — **not** on ``SQLiteVectorStore``, the
+        # default backend — and it was read in this ``else``, outside the
+        # ``try``, so on a default deployment a reset that dropped and
+        # recreated the table then died on ``AttributeError`` and answered
+        # 500 ``internal_error``. The status line lied in the other
+        # direction, on a destructive route, which invites the operator to
+        # re-run it. Read defensively rather than moving the line inside
+        # the ``try``: a successful reset must not be reported as a failed
+        # one over a missing *cosmetic* attribute. SQLite stores
+        # ``dimensions`` per row and pins no table-level width, so "no
+        # fixed dimensionality" is the honest thing to say about it rather
+        # than a fabricated number.
+        dims = getattr(vector_store, "_dimensions", None)
+        message = (
+            f"Recreated with {dims}D"
+            if dims is not None
+            else "Recreated (backend declares no fixed dimensionality)"
+        )
+        return {"status": "ok", "message": message}
 
 
 # ===========================================================================

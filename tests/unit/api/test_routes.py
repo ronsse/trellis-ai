@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from structlog.testing import capture_logs
 
 import trellis_api.app as app_module
+from trellis.core.error_sanitize import SUPPRESSED_MARKER
 from trellis.errors import StaleStoreWriteError
 from trellis.schemas.enums import PolicyType
 from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
@@ -1474,3 +1478,313 @@ class TestAdvisoryGenerateOnADegradedStore:
         detail = resp.json()["detail"]
         assert detail["code"] == "stale_store_write"
         assert detail["path"] == str(path)
+
+
+class TestVectorsResetStatusLine:
+    """#506 — ``POST /vectors/reset`` answered 200 whatever happened.
+
+    Three arms, three claims, and until this fix the status line made the
+    same claim for all of them. An unconfigured store did nothing and said
+    200. A reset that was attempted and *crashed* said 200 with
+    ``status: "error"`` in the body — the #437 class with the status line
+    as the channel, on a destructive route. And the success arm, found
+    while fixing the other two, said **500** on the default SQLite backend
+    after a reset that had actually worked.
+
+    Every arm is asserted here, and the two refusals are asserted to be
+    distinguishable from each other, so a change that answers one status
+    for all of them cannot pass.
+    """
+
+    def test_a_successful_reset_answers_200(self, client):
+        """The default backend is SQLite, and it used to answer 500 here.
+
+        ``_dimensions`` is defined on ``PgVectorStore``,
+        ``ArcadeDBVectorStore`` and ``Neo4jVectorStore`` and **not** on
+        ``SQLiteVectorStore``; it was read in the ``else`` block, outside
+        the ``try``, so on a default deployment the table was dropped and
+        recreated and the caller was then told ``500 internal_error`` by
+        the app's catch-all. Asserting the message too, not just the
+        status: a mutant that reports the wrong backend's story is a wrong
+        contract even when the status is right.
+        """
+        resp = client.post("/api/v1/vectors/reset")
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["status"] == "ok", body
+        assert body["message"] == "Recreated (backend declares no fixed dimensionality)"
+        # A success carries no refusal code. Without this a mutant that
+        # emits ``vector_reset_failed`` unconditionally survives, and the
+        # uniformity it would hide is the whole defect.
+        assert "code" not in body, body
+
+    def test_a_successful_reset_really_recreated_the_table(self, client):
+        """The 200 is a claim about the store, so check the store.
+
+        Asserting only the status line would let a mutant that skips the
+        drop-and-recreate entirely and returns the same dict pass — which
+        is the class of defect this route exists to avoid.
+        """
+        store = app_module._registry.knowledge.vector_store
+        store.upsert("doc:1", [0.1, 0.2, 0.3], metadata={})
+        assert store.count() == 1
+
+        resp = client.post("/api/v1/vectors/reset")
+
+        assert resp.status_code == 200, resp.text
+        assert store.count() == 0
+
+    def test_an_unconfigured_vector_store_is_a_refusal_not_a_success(
+        self, client, monkeypatch
+    ):
+        """409, the answer #484/#505 settled on for the sibling route.
+
+        Nothing was dropped and nothing was recreated, so this is the same
+        condition class as ``stores_dir`` unset — a ``ConfigError`` in all
+        but name, which is the family #483 put at 409 for this boundary.
+        The route reaches the arm through ``getattr(..., None)``, so the
+        provocation is removing the attribute from the plane class rather
+        than mocking the route's own lookup.
+        """
+        from trellis.stores.registry import _KnowledgePlane
+
+        monkeypatch.delattr(_KnowledgePlane, "vector_store")
+
+        resp = client.post("/api/v1/vectors/reset")
+
+        assert resp.status_code == 409, resp.text
+        body = resp.json()
+        assert body["status"] == "error", body
+        assert body["code"] == "vector_store_unconfigured", body
+        assert body["message"] == "Vector store not configured", body
+
+    def test_a_failed_reset_answers_500_not_200(self, client):
+        """The arm the issue called the worse one, provoked for real.
+
+        No mock: the vectors database file is replaced with bytes that are
+        not a SQLite database, so the connection the route's worker thread
+        opens raises ``sqlite3.DatabaseError: file is not a database``
+        from inside the ``try``. The fixture is verified below to provoke
+        exactly that, rather than some other exception the same ``except
+        Exception`` would also swallow.
+
+        **500, not the 409 the sibling arm answers, and deliberately not
+        by symmetry.** 409 says a precondition on the caller's side is
+        unmet and a reshaped request can succeed; a store that fell over
+        mid-reset is not the caller's to fix, and it is what
+        ``middleware._error_status`` already answers for a ``StoreError``
+        reaching this boundary. Answering 409 here would give one
+        condition two statuses across two surfaces — the uniformity
+        failure #484 existed to remove, reintroduced in the name of
+        matching the arm next door.
+        """
+        store = app_module._registry.knowledge.vector_store
+        db_path = Path(str(store._db_path))
+        db_path.write_bytes(b"not a sqlite database" * 32)
+        for suffix in ("-wal", "-shm"):
+            sidecar = Path(str(db_path) + suffix)
+            if sidecar.exists():
+                sidecar.unlink()
+
+        # Pin the provocation: a fresh connection — which is what the
+        # route's worker thread opens — fails, and fails as a
+        # ``DatabaseError`` from the sqlite driver.
+        with pytest.raises(sqlite3.DatabaseError):
+            sqlite3.connect(str(db_path)).execute("PRAGMA journal_mode").fetchone()
+
+        resp = client.post("/api/v1/vectors/reset")
+
+        assert resp.status_code == 500, resp.text
+        body = resp.json()
+        assert body["status"] == "error", body
+        assert body["code"] == "vector_reset_failed", body
+        # The backend's own words, which is the half the catch is kept
+        # for: the app's catch-all would answer "internal server error"
+        # and nothing else.
+        assert body["message"] == "file is not a database", body
+
+    def test_a_failure_after_the_drop_is_also_500(self, client):
+        """The half the spec's 500 description promises: the table is gone.
+
+        The arm above fails before the ``DROP`` runs. This one fails
+        after, which is the case that makes 500 rather than 409 matter —
+        the request was not a no-op, the vectors table has been dropped
+        and not recreated, and no retry of the same request by the same
+        caller repairs that. ``_init_schema`` is patched on the instance
+        (the recreate cannot be made to fail for real on a healthy file)
+        and it raises the driver's own ``OperationalError``, not a bare
+        ``Exception``, so the arm is provoked by the type it would see in
+        production.
+        """
+        store = app_module._registry.knowledge.vector_store
+        store.upsert("doc:1", [0.1, 0.2, 0.3], metadata={})
+
+        message = "disk I/O error"
+
+        def _boom() -> None:
+            raise sqlite3.OperationalError(message)
+
+        store._init_schema = _boom  # type: ignore[method-assign]
+
+        resp = client.post("/api/v1/vectors/reset")
+
+        assert resp.status_code == 500, resp.text
+        body = resp.json()
+        assert body["code"] == "vector_reset_failed", body
+        assert body["message"] == "disk I/O error", body
+        # The destructive half really happened — this is why the status is
+        # not a 409 "nothing was done".
+        del store._init_schema
+        with pytest.raises(sqlite3.OperationalError):
+            store.count()
+
+    def test_a_backend_error_echoing_a_dsn_is_suppressed(self, client):
+        """The word *sanitized* is now in the published 500 description.
+
+        The ``except`` is kept for the **body**, and the body's only guard
+        is ``sanitize_error_message`` (#206) — a driver that fell over
+        routinely echoes the DSN it could not reach, and an API response
+        body is exactly the artifact that guard was written for. Nothing
+        pinned it: dropping the call left all 311 API tests green, while
+        the two sibling leak guards at this boundary — ``/readyz``'s probe
+        error and ``trellis_error_handler``'s ``path`` — each have a test
+        of this shape. A guard whose removal is invisible is one a
+        refactor removes.
+        """
+        store = app_module._registry.knowledge.vector_store
+
+        def _boom() -> None:
+            msg = (
+                "connection failed: could not connect to "
+                '"postgresql://trellis:s3cretpw@db.internal:5432/prod"'
+            )
+            raise sqlite3.OperationalError(msg)
+
+        store._init_schema = _boom  # type: ignore[method-assign]
+
+        resp = client.post("/api/v1/vectors/reset")
+
+        assert resp.status_code == 500, resp.text
+        body = resp.json()
+        assert body["code"] == "vector_reset_failed", body
+        assert body["message"] == SUPPRESSED_MARKER, body
+        # Not just the field — the credential is nowhere in the response.
+        assert "s3cretpw" not in resp.text
+
+    def test_a_failed_reset_is_logged_on_the_operator_channel(self, client):
+        """The other half of why the ``except`` is kept, also unpinned.
+
+        Catching is justified by two things: the sanitized message in the
+        body, and ``logger.exception`` still recording the traceback for
+        an operator. Downgrading that call to ``logger.debug`` left the
+        API suite green — and this repo has already recorded (#404) that a
+        ``logger.debug`` fires under **no** shipped log configuration, so
+        the mutant silently turns the only operator channel for a
+        half-completed destructive reset into a no-op. Asserted at the
+        level and with ``exc_info``, which is what separates
+        ``logger.exception`` from a bare log line.
+        """
+        store = app_module._registry.knowledge.vector_store
+        message = "disk I/O error"
+
+        def _boom() -> None:
+            raise sqlite3.OperationalError(message)
+
+        store._init_schema = _boom  # type: ignore[method-assign]
+
+        with capture_logs() as logs:
+            resp = client.post("/api/v1/vectors/reset")
+
+        assert resp.status_code == 500, resp.text
+        entry = next(
+            (e for e in logs if e.get("event") == "vectors_reset_failed"), None
+        )
+        assert entry is not None, logs
+        assert entry["log_level"] == "error", entry
+        assert "exc_info" in entry, entry
+
+    def test_a_backend_that_declares_a_width_reports_it(self, client):
+        """The other side of the ``dims`` conditional, which nothing reached.
+
+        ``_dimensions`` is a ``PgVectorStore`` / ``ArcadeDBVectorStore`` /
+        ``Neo4jVectorStore`` attribute and every backend in the default
+        test selection is SQLite, so the branch a pgvector deployment
+        actually takes was unexercised — dropping the ``D`` from the
+        message left the suite green. Patched onto the instance rather
+        than marked ``pgvector``, because what is under test is the
+        route's *reading* of the attribute, not any backend.
+        """
+        store = app_module._registry.knowledge.vector_store
+        store._dimensions = 1536  # type: ignore[attr-defined]
+        try:
+            resp = client.post("/api/v1/vectors/reset")
+        finally:
+            del store._dimensions
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["status"] == "ok", body
+        assert body["message"] == "Recreated with 1536D", body
+        assert "code" not in body, body
+
+    def test_neither_refusal_is_wrapped_in_a_detail_envelope(self, client, monkeypatch):
+        """Pins the docstring's contract for *every* arm it speaks for.
+
+        The endpoint docstring is what ``scripts/generate_openapi.py``
+        publishes as the OpenAPI description, and it says both refusals
+        name themselves in a ``code`` at the **top level**. #505's review
+        gate caught exactly this claim being false for one of three arms,
+        because that arm raised ``HTTPException`` and so put its code at
+        ``body["detail"]["code"]`` — a generated client would look for a
+        key that is not there. Asserted here per arm, not asserted once
+        and assumed to generalise.
+        """
+        from trellis.stores.registry import _KnowledgePlane
+
+        store = app_module._registry.knowledge.vector_store
+        db_path = Path(str(store._db_path))
+        db_path.write_bytes(b"not a sqlite database" * 32)
+        for suffix in ("-wal", "-shm"):
+            sidecar = Path(str(db_path) + suffix)
+            if sidecar.exists():
+                sidecar.unlink()
+
+        failed = client.post("/api/v1/vectors/reset")
+        assert failed.status_code == 500, failed.text
+        assert "detail" not in failed.json(), failed.text
+        assert "code" in failed.json(), failed.text
+
+        monkeypatch.delattr(_KnowledgePlane, "vector_store")
+        unconfigured = client.post("/api/v1/vectors/reset")
+        assert unconfigured.status_code == 409, unconfigured.text
+        assert "detail" not in unconfigured.json(), unconfigured.text
+        assert "code" in unconfigured.json(), unconfigured.text
+
+        # And the two are told apart by more than the status: a caller
+        # given only "something went wrong" cannot choose between
+        # configuring a store and going to look at one.
+        assert failed.json()["code"] != unconfigured.json()["code"], (
+            failed.text,
+            unconfigured.text,
+        )
+
+    def test_the_spec_declares_both_refusals(self):
+        """``openapi-check`` was green against a spec with only a 200.
+
+        #484 found the same thing next door: a committed spec that never
+        described the behaviour, so regenerating it was part of the fix
+        rather than a follow-up. Read off the app the generator reads, so
+        this fails if the ``responses=`` argument is dropped even when the
+        committed YAML still happens to carry the declaration.
+        """
+        from trellis_api.routes import admin as admin_routes
+
+        route = next(
+            r
+            for r in admin_routes.router.routes
+            if getattr(r, "path", None) == "/vectors/reset"
+        )
+        assert set(route.responses) == {409, 500}, route.responses
+        for status in (409, 500):
+            assert route.responses[status]["description"], route.responses
