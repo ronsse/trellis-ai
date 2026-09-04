@@ -107,7 +107,16 @@ owner-approved deletion** after confirming no archival retention is desired.
 
 **Batch 1 — early parallel** (disjoint territories; recheck before dispatch):
 
-**#360 PR1**, **#256 seam**, **#369**, **#439**, **#342**, **#514**.
+**Wave D (program plan order): [#360](https://github.com/ronsse/trellis-ai/issues/360) PR1 →
+[#256](https://github.com/ronsse/trellis-ai/issues/256) staged seam.** Also parallel when
+disjoint: **#369**, **#439**, **#342**, **#514**.
+
+**#256 dispatch — operator override (2026-09-04, this program only):** live `keystone`
+label normally means **human authorship only**. Operator instruction on 2026-09-04
+explicitly authorized **this plan's Wave D #256 staged seam** for swarm execution under
+`consensus_authorizes` — **not** a general keystone-label override. Scope limited to
+**reversible in-repo PR1**; excludes publishing, external package release, and credentials.
+Owner review and the adversarial merge gate ([swarm-handoff §4.1](./swarm-handoff.md#41-the-review-gate--every-pr-before-merge)) still apply.
 
 - **#264 PR-A** after or parallel with Batch 1 if no file collision; **#264 PR-B**
   (derived roster) **after #514** when `generate_call_sites` exists (implementation
