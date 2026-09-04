@@ -66,9 +66,7 @@
     "title": "Prompt caching is unused on the Anthropic path \u2014 measure the batch passes before building it (deferred from #500)",
     "verdict": "valid-slice",
     "wave": "W3-llm",
-    "dependencies": [
-      514
-    ],
+    "dependencies": [],
     "territories": [
       "src/trellis/llm/providers/anthropic.py"
     ],
@@ -158,9 +156,7 @@
     "title": "PackBuilder contradiction invariant + last_verified",
     "verdict": "valid-slice",
     "wave": "W4-retrieval",
-    "dependencies": [
-      475
-    ],
+    "dependencies": [],
     "territories": [
       "src/trellis/retrieve/",
       "src/trellis/schemas/",
@@ -176,9 +172,7 @@
     "title": "Enforce spaces (personal / work / household) at pack and mutation time",
     "verdict": "blocked-decision",
     "wave": "W4-retrieval",
-    "dependencies": [
-      194
-    ],
+    "dependencies": [],
     "territories": [
       "src/trellis/retrieve/",
       "src/trellis/mutate/"
@@ -274,7 +268,7 @@
   {
     "issue": 375,
     "title": "The graph axis has no query-relevant candidate path: all three seed producers are empty on the write path",
-    "verdict": "refuted",
+    "verdict": "blocked-signal",
     "wave": "W5-retrieval",
     "dependencies": [
       371
@@ -391,9 +385,7 @@
     "title": "ArcadeDB graph contract never runs in CI \u2014 the blessed substrate has no service container in any workflow",
     "verdict": "valid-now",
     "wave": "W1-ci",
-    "dependencies": [
-      256
-    ],
+    "dependencies": [],
     "territories": [
       "tests/unit/stores/contracts/test_arcadedb_graph_contract.py",
       ".github/workflows/live-infra.yml"
@@ -420,7 +412,7 @@
   {
     "issue": 342,
     "title": "Exercise the promote\u2192review\u2192serve chain in evals (decided: no production min_support=1 flag)",
-    "verdict": "refuted",
+    "verdict": "valid-slice",
     "wave": "W5-learning",
     "dependencies": [],
     "territories": [
