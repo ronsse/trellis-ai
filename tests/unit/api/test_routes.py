@@ -1886,6 +1886,28 @@ class _PooledVectorStore(_HandleFreeVectorStore):
         return _RecordingCursor(self.executed)
 
 
+class _UnsetSlotPoolStore(_PooledVectorStore):
+    """A store the probe and ``hasattr(store, ...)`` *disagree* about.
+
+    ``_pool`` is a ``__slots__`` descriptor that is never assigned, so it
+    is present on the **class** (which is what the probe reads) and absent
+    on the **instance** (which is what ``hasattr`` reports, because an
+    unset slot raises ``AttributeError``). Nothing shipped has this shape,
+    and that is the point: "supported?" and "which branch?" being decided
+    once is a *structural* claim, and the only way to make a structural
+    claim fail a behavioural test is a store the two spellings answer
+    differently. Under the single-decision rule this reaches the pooled
+    branch; under a route that re-probes with its own ``hasattr`` it falls
+    into the SQLite branch and dies.
+    """
+
+    __slots__ = ("_pool",)
+
+    def __init__(self) -> None:
+        _HandleFreeVectorStore.__init__(self)
+        self.executed: list[str] = []
+
+
 class TestVectorsResetUnsupportedBackend:
     """#511 — the route has never worked on the blessed substrate.
 
@@ -2048,9 +2070,13 @@ class TestVectorsResetUnsupportedBackend:
         The route now picks its branch from the same value the refusal is
         decided by, so "supported" and "which handle" cannot disagree.
         Nothing pinned the pooled branch at all — every backend in the
-        default selection is SQLite — so swapping the two arms left the
-        suite green. Here the SQLite arm would call ``.execute`` on a
-        ``@contextmanager`` method and blow up into the 500 arm.
+        default selection is SQLite — so on ``8a21d3f`` replacing the
+        whole pooled arm with the SQLite one left the API suite green
+        (316 passed). Note the *negated-condition* form of that mutant is
+        not the one that shows the gap: it also sends SQLite down the
+        pooled arm and fails five tests on the SQLite side. Here the
+        SQLite arm would call ``.execute`` on a ``@contextmanager``
+        method and blow up into the 500 arm.
         """
         registry = app_module._registry
         store = _PooledVectorStore()
@@ -2062,3 +2088,38 @@ class TestVectorsResetUnsupportedBackend:
         assert resp.json()["status"] == "ok", resp.text
         assert store.executed == ["DROP TABLE IF EXISTS vectors"], store.executed
         assert store.init_schema_calls == 1
+
+    def test_the_route_dispatches_on_the_probe_and_does_not_re_ask(self, client):
+        """The "decided once" claim, made falsifiable.
+
+        The design's load-bearing sentence is that the refusal and the
+        dispatch read the *same* value, so they cannot disagree. Every
+        shipped backend answers a re-probe identically, which is why a
+        route rewritten to ``if hasattr(vector_store, "_pool")`` at the
+        dispatch survived a 30-mutant battery and the whole 7388-test
+        suite: the two spellings are behaviourally equivalent for
+        SQLite, pgvector, ArcadeDB and Neo4j alike.
+
+        ``_UnsetSlotPoolStore`` is the shape they answer differently — a
+        class-level slot descriptor with no value bound — so a route that
+        re-asks lands in the SQLite branch and 500s here. What this pins
+        is the *rule*, not a backend: no shipped store has an unset slot,
+        and this asserts nothing about one that might.
+        """
+        registry = app_module._registry
+        store = _UnsetSlotPoolStore()
+        registry._cache["vector"] = store
+
+        from trellis_api.routes import admin as admin_routes
+
+        # The premise, asserted rather than assumed: the two spellings
+        # disagree about this store. Without this the test below could
+        # pass for the wrong reason if the fixture ever stopped being a
+        # disagreement.
+        assert admin_routes._vector_reset_handle(store) == "pool"
+        assert hasattr(store, "_pool") is False
+
+        resp = client.post("/api/v1/vectors/reset")
+
+        assert resp.status_code == 200, resp.text
+        assert store.executed == ["DROP TABLE IF EXISTS vectors"], store.executed

@@ -392,11 +392,14 @@ def list_advisories(
 #: drive. They are one condition class — nothing was dropped, nothing was
 #: recreated, and what has to change is the deployment rather than the
 #: request — and they are told apart by ``code``, the discriminator this
-#: route's docstring already declares canonical. That is exactly how
+#: route's docstring already declares canonical. That is how
 #: ``advisories/generate`` next door tells *three* refusals apart under
-#: one ``_ADVISORY_REFUSED_STATUS``; giving this one its own status would
-#: reintroduce the per-condition-per-surface spread #484 existed to
-#: remove. One name for one number, for the same reason.
+#: one 409 — though only two of the three reach it through
+#: ``_ADVISORY_REFUSED_STATUS`` and the third puts its ``code`` under
+#: ``detail``, which is the half of that precedent this route does **not**
+#: follow: all three codes here sit at the top level. Giving this arm its
+#: own status would reintroduce the per-condition-per-surface spread #484
+#: existed to remove. One name for one number, for the same reason.
 #:
 #: **501 was the other candidate and is refused.** Its dictionary meaning
 #: — "the server does not support the functionality required to fulfill
@@ -446,15 +449,22 @@ def _vector_reset_handle(vector_store: object) -> str | None:
     backend lands, and it would be a *second* place that has to agree with
     the dispatch below. This asks the one question the dispatch asks.
 
-    The probe reads the type and the instance ``__dict__`` rather than
-    calling :func:`hasattr`, for two reasons. ``SQLiteStoreBase._conn`` is
-    a *property* that opens a connection, so ``hasattr`` would do I/O just
+    The probe asks the **type** — :func:`hasattr` against the *class*,
+    which walks the MRO and hands back a property object without ever
+    binding it — and the **instance** ``__dict__``. What it never does is
+    ``hasattr`` against the *instance*. ``SQLiteStoreBase._conn`` is a
+    *property* that opens a connection, so that spelling would do I/O just
     to answer a question about shape — and on a corrupt database file it
-    would raise ``sqlite3.DatabaseError`` straight out of the probe, which
-    is not an ``AttributeError`` and would escape as an unhandled 500
+    raises ``sqlite3.DatabaseError`` straight out of the probe, which is
+    not an ``AttributeError`` and would escape as an unhandled 500
     ``internal_error`` instead of this route's own ``vector_reset_failed``.
     Absent and present-but-unhappy are different answers and only the
     first one is this arm's.
+
+    The type half has to stay an MRO walk and not a read of
+    ``store_type.__dict__``: ``SQLiteVectorStore`` does not define
+    ``_conn`` itself — it inherits the property from ``SQLiteStoreBase`` —
+    so narrowing it that way would refuse the *default* backend.
 
     The route's one caller uses the returned handle to pick its branch, so
     "supported" and "which branch" are decided **once**. Two independent
