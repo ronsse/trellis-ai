@@ -7,13 +7,14 @@ from typing import Any
 
 import structlog
 
+from trellis.errors import ConfigError
 from trellis.stores.base.vector import VectorStore, as_float_list
 from trellis.stores.postgres.base import PostgresStoreBase
 
 logger = structlog.get_logger(__name__)
 
 try:
-    import psycopg  # noqa: F401
+    import psycopg
 
     HAS_PSYCOPG = True
 except ImportError:
@@ -35,6 +36,21 @@ def _format_vector(vec: list[float]) -> str:
     from trellis.stores.base.vector import format_vector_literal  # noqa: PLC0415
 
     return format_vector_literal(vec)
+
+
+def _provision_vector_extension(dsn: str) -> None:
+    """Create pgvector before pooled connections register its type."""
+    try:
+        with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+            cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
+    except psycopg.Error as exc:
+        msg = (
+            "PgVectorStore could not provision the required PostgreSQL "
+            "vector extension before opening its connection pool. Connect "
+            "as the database owner or an administrator and run "
+            "`CREATE EXTENSION vector;`, then retry."
+        )
+        raise ConfigError(msg, setting="stores.vector.dsn") from exc
 
 
 class PgVectorStore(PostgresStoreBase, VectorStore):
@@ -63,6 +79,7 @@ class PgVectorStore(PostgresStoreBase, VectorStore):
             raise ImportError(msg)
 
         self._dimensions = dimensions
+        _provision_vector_extension(dsn)
         # ``register_vector`` adapts the ``vector`` type so psycopg can
         # round-trip Python lists / numpy arrays without our own casts.
         # Each pooled connection needs the adapter registered, hence the
@@ -75,7 +92,6 @@ class PgVectorStore(PostgresStoreBase, VectorStore):
 
     def _init_schema(self) -> None:
         with self._conn() as conn, conn.cursor() as cur:
-            cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
             cur.execute(
                 f"""
                 CREATE TABLE IF NOT EXISTS vectors (
