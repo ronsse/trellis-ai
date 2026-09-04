@@ -265,8 +265,10 @@ time, and the dependency-ordered queue. Decisions taken and pending live in
 deselects 635 tests (`postgres`, `pgvector`, `neo`, `arcadedb`, `live`, `slow`), so
 a green local run says nothing about any cloud backend. What CI actually covers:
 
-- **On pull requests** (`tests.yml`): SQLite backends only. Every `postgres` / `pgvector` /
-  `neo` / `arcadedb` test is deselected — for the *graph* and *vector* contracts alike.
+- **On pull requests** (`tests.yml`): SQLite backends only. One Python 3.13 leg installs
+  `[dev,all]`, so unmarked tests guarded by an optional-package `importorskip` execute
+  instead of silently skipping. Every `postgres` / `pgvector` / `neo` / `arcadedb` test
+  remains deselected — for the *graph* and *vector* contracts alike.
 - **On pull requests *and* push to `main`** (`live-infra.yml`): the Postgres + Neo4j graph
   contracts, the Postgres document / trace / event-log contracts, and — since
   [#345](https://github.com/ronsse/trellis-ai/issues/345) — the **pgvector vector
@@ -281,9 +283,10 @@ a green local run says nothing about any cloud backend. What CI actually covers:
 - **Nowhere at all:** the ArcadeDB graph contract (`test_arcadedb_graph_contract.py`).
   ArcadeDB is the *blessed* graph + vector substrate and its contract has no service
   container in any workflow ([#351](https://github.com/ronsse/trellis-ai/issues/351)).
-  Nor does anything under `tests/unit/stores/` outside `contracts/` — `live-infra.yml` names
-  paths, not markers, so 59 Postgres-marked tests there are simply unwired (they pass; they
-  have just never been run by CI). Sweeping the whole directory in does not work yet:
+  The 59 Postgres-marked tests under `tests/unit/stores/` outside `contracts/` are still
+  deselected: the all-extras leg supplies their imports but no database, while
+  `live-infra.yml` names paths rather than markers. Sweeping that whole directory into the
+  live job does not work yet:
   `test_neo4j_vector.py::TestQuery` issues AuraDB-only Cypher that self-hosted
   `neo4j:2025.12` cannot parse, and unlike the e2e suite it has no capability probe
   ([#356](https://github.com/ronsse/trellis-ai/issues/356)).
