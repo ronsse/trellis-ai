@@ -54,6 +54,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 import typer
+from rich.markup import escape
 
 from trellis.classify.factory import (
     CLASSIFY_CONFIG_KEY,
@@ -840,21 +841,24 @@ def _render_domain_candidates(
     # than `planning` — so the reviewer's eye is the detector and this is the
     # view that arms it.
     for canonical, group in by_canonical.items():
-        console.print(f"  [bold]-> {canonical}[/bold] ({len(group)}):")
+        console.print(f"  [bold]-> {escape(canonical)}[/bold] ({len(group)}):")
         for candidate in group:
             # Literal brackets are escaped: rich reads an unescaped `[...]` as
             # a markup tag and swallows it, which silently dropped exactly the
-            # two warnings a reviewer most needs to see.
+            # two warnings a reviewer most needs to see. Identifier-shaped
+            # values from the LLM vocabulary get the same treatment — they
+            # sit inside `[bold]` / `[yellow]`, so `markup=False` would drop
+            # the styling the comments already protect with `\[`.
             marks = ""
             if candidate.competing_canonicals:
-                marks += (
-                    "  [yellow]\\[cross-cutting: also "
-                    f"{', '.join(candidate.competing_canonicals)}][/yellow]"
+                competing = ", ".join(
+                    escape(name) for name in candidate.competing_canonicals
                 )
+                marks += f"  [yellow]\\[cross-cutting: also {competing}][/yellow]"
             if candidate.is_lexical_only:
                 marks += "  [dim]\\[spelling only][/dim]"
             console.print(
-                f"    [bold]{candidate.alias}[/bold]: "
+                f"    [bold]{escape(candidate.alias)}[/bold]: "
                 f"{candidate.alias_documents} docs, "
                 f"{candidate.documents_gained} newly reachable" + marks
             )

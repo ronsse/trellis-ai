@@ -293,11 +293,18 @@ class TestDomainCandidatesCommand:
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        """LLM vocabulary must reach the config fragment byte-for-byte (#522)."""
+        """LLM vocabulary must reach the review listing *and* the YAML (#522).
+
+        The paste-ready fragment uses ``markup=False``. The grouped review
+        lines above it wrap ``canonical`` / ``alias`` in ``[bold]``, so a
+        YAML-only fix stays green while Rich still eats ``[...]`` in the
+        listing an operator actually reads.
+        """
         import trellis_cli.classify as cli_classify
 
         alias = "budget-[literal-alias]"
         canonical = "hunting-[literal-canonical]"
+        competitor = "estate-[literal-competitor]"
         candidate = DomainAliasCandidate(
             alias=alias,
             canonical=canonical,
@@ -309,7 +316,7 @@ class TestDomainCandidatesCommand:
             neighbor_overlap=0.0,
             shared_tokens=("hunting",),
             signals=(SIGNAL_LEXICAL,),
-            competing_canonicals=(),
+            competing_canonicals=(competitor,),
             documents_gained=1,
             candidate_id="domain_alias:test",
         )
@@ -318,7 +325,11 @@ class TestDomainCandidatesCommand:
         cli_classify._render_domain_candidates([candidate], total=1, emitted=False)
 
         rendered = assert_coloured(capsys.readouterr().out)
-        assert f"{alias}: {canonical}" in plain(rendered)
+        visible = plain(rendered)
+        assert f"{alias}: {canonical}" in visible
+        assert f"-> {canonical}" in visible
+        assert f"{alias}:" in visible
+        assert competitor in visible
 
     def test_an_operator_mapped_alias_is_not_re_proposed(self, cli_env) -> None:
         """Filters its own writes, via ``classify.domain_aliases`` in config."""
