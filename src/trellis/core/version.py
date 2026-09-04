@@ -251,12 +251,18 @@ def _direct_url_record() -> dict[str, Any]:
     Absent for a wheel installed from an index, which is the shape this
     returns ``{}`` for; unparseable is treated the same way, since a
     stamp is not the place to raise about a malformed installer artefact.
+    *Unreadable* is treated the same way too, and by a blanket guard
+    rather than a list of exception types: ``read_text`` decodes as
+    UTF-8, so a corrupt file raises :exc:`UnicodeDecodeError` — a
+    :exc:`ValueError`, not the :exc:`OSError` an enumeration reaches
+    for.  Naming the ways an installer artefact is allowed to fail is
+    how this guarantee gets lost.
     """
-    from importlib.metadata import PackageNotFoundError, distribution  # noqa: PLC0415
+    from importlib.metadata import distribution  # noqa: PLC0415
 
     try:
         raw = distribution(DISTRIBUTION_NAME).read_text("direct_url.json")
-    except (PackageNotFoundError, OSError):
+    except Exception:  # advisory probe; never fail a write
         return {}
     if not raw:
         return {}
@@ -342,11 +348,26 @@ def resolve_stamp_staleness() -> StampStaleness:
     :func:`resolve_code_version` already applies to the version itself.
 
     Advisory throughout: every failure resolves to a state, never to an
-    exception.
+    exception — and that is held *structurally*, by the blanket guard
+    here, not by each step having enumerated what it may raise.  The
+    stamp rides ``EventLog.emit``, so an escape does not cost one probe:
+    it fails **every write for the life of the process**, with a
+    traceback out of a version module.  An enumeration is one unforeseen
+    exception type away from that, which is why this is a seam and not a
+    list.  See :func:`_direct_url_record` for the type that got through
+    a list.
 
     ``resolve_stamp_staleness.cache_clear()`` re-reads — test-facing, and
     the autouse fixture in ``tests/conftest.py`` calls it.
     """
+    try:
+        return _resolve_stamp_staleness()
+    except Exception:  # advisory probe; never fail a write
+        return StampStaleness(state=STALENESS_UNRESOLVED)
+
+
+def _resolve_stamp_staleness() -> StampStaleness:
+    """The verdict itself; :func:`resolve_stamp_staleness` guards it."""
     version = resolve_code_version()
     if version.source != "dist-metadata" or version.commit is None:
         return StampStaleness(state=STALENESS_NOT_CHECKED)

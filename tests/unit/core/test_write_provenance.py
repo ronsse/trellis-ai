@@ -204,3 +204,32 @@ class TestStalenessKeys:
         stamped = stamp_metadata(None)[WRITE_PROVENANCE_KEY]
         assert stamped["stamp_stale"] is True
         assert stamped["source_tree_commit"] == self.LIVE_SHA
+
+    def test_a_raising_probe_cannot_fail_a_write(
+        self, pin_source_tree, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The whole stamp must survive the probe blowing up.
+
+        ``stamp_metadata`` runs inside ``EventLog.emit``, so an exception
+        escaping the probe does not lose one verdict — it fails every
+        write for the life of the process. The bytes must also be the
+        *healthy* ones: a failed probe reports nothing, exactly as a
+        fresh one does.
+        """
+        from trellis.core import version as version_mod
+
+        pin_source_tree(commit="abc1234", head=self.FRESH_SHA)
+        healthy = json.dumps(build_write_provenance())
+
+        encoding = "utf-8"
+        reason = "corrupt direct_url.json"
+
+        def _boom() -> str | None:
+            raise UnicodeDecodeError(encoding, b"\xff", 0, 1, reason)
+
+        monkeypatch.setattr(version_mod, "_editable_source_tree", _boom)
+        version_mod.resolve_stamp_staleness.cache_clear()
+        get_write_provenance.cache_clear()
+
+        assert json.dumps(build_write_provenance()) == healthy
+        assert "stamp_stale" not in stamp_metadata(None)[WRITE_PROVENANCE_KEY]

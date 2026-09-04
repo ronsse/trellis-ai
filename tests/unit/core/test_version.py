@@ -431,6 +431,107 @@ class TestEditableSourceTree:
         tree = version_mod._editable_source_tree()
         assert tree is None or tree.startswith("/")
 
+    def test_none_when_the_record_is_not_valid_utf8(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A corrupt ``direct_url.json`` is unreadable, not fatal.
+
+        ``Distribution.read_text`` decodes as UTF-8 and suppresses only
+        ``FileNotFoundError`` / ``IsADirectoryError`` / ``KeyError`` /
+        ``NotADirectoryError`` / ``PermissionError`` — so a file with a
+        bad byte in it raises ``UnicodeDecodeError``, which is a
+        ``ValueError`` and slips straight through an ``OSError`` guard.
+        This is the real on-disk shape, not a synthesised exception.
+        """
+        import importlib.metadata as md
+
+        (tmp_path / "direct_url.json").write_bytes(
+            b'{"url": "file:///t/\xff\xfe", "dir_info": {"editable": true}}'
+        )
+
+        class _Dist:
+            def read_text(self, name: str) -> str | None:
+                return (tmp_path / name).read_text(encoding="utf-8")
+
+        monkeypatch.setattr(md, "distribution", lambda _n: _Dist())
+        assert version_mod._direct_url_record() == {}
+        assert version_mod._editable_source_tree() is None
+
+    def test_none_when_the_record_is_not_a_json_object(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Valid JSON of the wrong shape has no ``.get`` to call."""
+        self._record(monkeypatch, '["not", "an", "object"]')
+        assert version_mod._direct_url_record() == {}
+        assert version_mod._editable_source_tree() is None
+
+
+class TestStalenessNeverRaises:
+    """The advisory guarantee, asserted at the seam that has to hold it.
+
+    An escape here is not one lost probe: the stamp rides
+    :meth:`EventLog.emit`, so it fails *every write for the life of the
+    process*, with a traceback out of a version module.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _cold(self) -> None:
+        resolve_stamp_staleness.cache_clear()
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"),
+            ValueError("invalid IPv6 URL"),
+            RuntimeError("something nobody enumerated"),
+            AttributeError("importlib internals moved"),
+        ],
+    )
+    def test_a_raising_probe_resolves_to_a_state(
+        self, monkeypatch: pytest.MonkeyPatch, exc: Exception
+    ) -> None:
+        def _boom() -> str | None:
+            raise exc
+
+        monkeypatch.setattr(
+            version_mod, "resolve_code_version", lambda: _dist_metadata(SHA_A[:9])
+        )
+        monkeypatch.setattr(version_mod, "_editable_source_tree", _boom)
+        assert resolve_stamp_staleness().state == STALENESS_UNRESOLVED
+
+    def test_a_url_the_parser_rejects_is_a_state(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``urlparse`` raises ``ValueError`` on an unclosed ``[`` netloc.
+
+        Reached through the real ``_editable_source_tree``, so this pins
+        the whole read path and not just the guard.
+        """
+        monkeypatch.setattr(
+            version_mod,
+            "_direct_url_record",
+            lambda: {"url": "file://[oops", "dir_info": {"editable": True}},
+        )
+        monkeypatch.setattr(
+            version_mod, "resolve_code_version", lambda: _dist_metadata(SHA_A[:9])
+        )
+        assert resolve_stamp_staleness().state == STALENESS_UNRESOLVED
+
+    def test_a_keyboard_interrupt_is_still_an_interrupt(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The guard is ``Exception``; it must not eat a Ctrl-C."""
+
+        def _boom() -> str | None:
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(
+            version_mod, "resolve_code_version", lambda: _dist_metadata(SHA_A[:9])
+        )
+        monkeypatch.setattr(version_mod, "_editable_source_tree", _boom)
+        with pytest.raises(KeyboardInterrupt):
+            resolve_stamp_staleness()
+
 
 class TestGitHead:
     """The probe itself — advisory, bounded, and never an exception."""
