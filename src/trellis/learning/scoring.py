@@ -519,29 +519,10 @@ def submit_learning_promotion(
     primary_domain = str(entity_props.get("primary_domain") or "").strip()
     if not primary_domain and domain_systems:
         primary_domain = str(domain_systems[0]).strip()
-    promote_cmd = Command(
-        operation=Operation.PRECEDENT_PROMOTE,
-        args={
-            "title": entity_payload["name"],
-            "description": str(entity_props.get("description", "")),
-            "domain": primary_domain or None,
-            "entity_type": "precedent",
-            "source_item_id": entity_props.get("source_item_id"),
-        },
-        target_id=entity_payload["entity_id"],
-        target_type="entity",
-        requested_by=requested_by,
-    )
-    promote_result = executor.execute(promote_cmd)
     return {
         "status": "promoted",
         "node_id": entity_result.created_id,
         "edges": edge_outcomes,
-        # Surfaces whether the precedent actually reached the lessons
-        # read-path. A non-SUCCESS here means the entity exists but
-        # get_lessons won't show it — an operator-visible half-state.
-        "precedent_event_status": promote_result.status.value,
-        "precedent_event_id": promote_result.created_id,
     }
 
 
