@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from trellis.core.error_sanitize import (
     SUPPRESSED_MARKER,
     sanitize_error_message,
@@ -27,6 +29,11 @@ class TestCleanPassthrough:
             "No such file: /home/user/projects/trellis-ai/build/artifacts/run.json "
             "(raised in trellis.stores.registry._instantiate)"
         )
+        assert sanitize_error_message(msg) == msg
+
+    @pytest.mark.parametrize("component_len", [39, 40])
+    def test_long_safe_path_component_passes_through(self, component_len: int) -> None:
+        msg = f"cannot read /tmp/{'a' * component_len}/資料/policies.json"
         assert sanitize_error_message(msg) == msg
 
     def test_ulid_passes_through(self) -> None:
@@ -61,6 +68,13 @@ class TestSuppression:
         assert sanitize_error_message(f"request rejected: {token}") == (
             SUPPRESSED_MARKER
         )
+
+    def test_exactly_forty_character_token_is_suppressed(self) -> None:
+        assert sanitize_error_message("A1" * 20) == SUPPRESSED_MARKER
+
+    def test_secret_assignment_inside_path_is_suppressed(self) -> None:
+        msg = "cannot read /srv/deploy/token=hunter2/policies.json"
+        assert sanitize_error_message(msg) == SUPPRESSED_MARKER
 
     def test_raw_sql_suppressed(self) -> None:
         msg = (
