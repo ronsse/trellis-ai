@@ -39,7 +39,7 @@ from tests.structlog_isolation import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
 
 # A short, deterministic-feeling profile for in-tree property tests. Property
 # tests in this repo are invariant checks, not soak/fuzz tests — 50 examples
@@ -130,12 +130,59 @@ def _reset_write_provenance() -> Iterator[None]:
     monkeypatches a flag and then asserts on an emitted event's stamp would
     pass or fail depending on whether some earlier test had already warmed
     the cache — the classic order-dependent flake.
+
+    ``resolve_stamp_staleness`` is the stamp's second memo — one
+    ``git rev-parse`` per process — and is cleared alongside it, so a test
+    that simulates a stale install cannot leave that verdict behind for
+    every later test's stamp.
     """
+    from trellis.core.version import resolve_stamp_staleness
     from trellis.core.write_provenance import get_write_provenance
 
     get_write_provenance.cache_clear()
+    resolve_stamp_staleness.cache_clear()
     yield
     get_write_provenance.cache_clear()
+    resolve_stamp_staleness.cache_clear()
+
+
+@pytest.fixture
+def pin_source_tree(monkeypatch: pytest.MonkeyPatch) -> Callable[..., None]:
+    """Pin what the write-provenance staleness probe sees.
+
+    Patches the three seams :func:`trellis.core.version.resolve_stamp_staleness`
+    reads — the resolved build identity, the editable source tree, and that
+    tree's live ``HEAD`` — and drops both memos, so every surface that reads
+    the stamp (an emitted event, ``trellis admin write-config``,
+    ``GET /api/version``) sees one consistent answer instead of each holding
+    its own bound reference. Never touches the real repository, so the verdict
+    does not depend on the git state of whatever tree the test run is
+    installed from.
+    """
+    from trellis.core import version as version_mod
+    from trellis.core import write_provenance as provenance_mod
+    from trellis.core.version import CodeVersion
+
+    def _pin(
+        *,
+        commit: str | None,
+        head: str | None,
+        tree: str | None = "/src/tree",
+        source: str = "dist-metadata",
+    ) -> None:
+        resolved = CodeVersion(
+            version=f"0.9.1.dev1+g{commit}" if commit else "0.9.1",
+            source=source,
+            commit=commit,
+        )
+        monkeypatch.setattr(version_mod, "resolve_code_version", lambda: resolved)
+        monkeypatch.setattr(provenance_mod, "resolve_code_version", lambda: resolved)
+        monkeypatch.setattr(version_mod, "_editable_source_tree", lambda: tree)
+        monkeypatch.setattr(version_mod, "_git_head", lambda _tree: head)
+        version_mod.resolve_stamp_staleness.cache_clear()
+        provenance_mod.get_write_provenance.cache_clear()
+
+    return _pin
 
 
 @pytest.fixture

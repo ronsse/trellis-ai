@@ -123,7 +123,7 @@ records.*
 | [#363](https://github.com/ronsse/trellis-ai/issues/363) | `TOKEN_TRACKED.pack_id` coverage is 0/33 | same seam as #362 — one agent, sequenced |
 | [#362](https://github.com/ronsse/trellis-ai/issues/362) | `get_items` fetch cost is off-book, so index mode cannot be evaluated | ← |
 | [#364](https://github.com/ronsse/trellis-ai/issues/364) | 42% of injected tokens get no verdict, so `useful_token_fraction` describes 58% of itself | |
-| [#348](https://github.com/ronsse/trellis-ai/issues/348) | nothing surfaces the editable-install staleness `write_provenance` was designed to catch | |
+| [#348](https://github.com/ronsse/trellis-ai/issues/348) | nothing surfaces the editable-install staleness `write_provenance` was designed to catch | **done** — `resolve_stamp_staleness`; stamp gains `stamp_stale` / `source_tree_commit` only when stale, state reported in full by `trellis admin write-config` |
 
 ### Lane D — CI reaches the backends it claims to support
 

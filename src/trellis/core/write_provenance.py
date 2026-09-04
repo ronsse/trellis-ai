@@ -12,6 +12,20 @@ carries a stamp under ``metadata["write_provenance"]``:
      "env_flags": {"classify_on_ingest": true, "...": "..."},
      "env_flags_digest": "1f0a2b3c"}
 
+**Two more keys appear, and only when something is wrong.**  ``commit``
+is frozen at *install* time, so an editable install off a working tree
+that has since moved on attributes every write to code it is no longer
+running.  When :func:`~trellis.core.version.resolve_stamp_staleness`
+catches that, the stamp gains ``"stamp_stale": true`` and
+``"source_tree_commit": "<40-char sha>"`` — the tree's live ``HEAD``.
+``commit`` is never overwritten: the row still records what the metadata
+said, which is the thing an analyst is bucketing by.  A healthy editable
+install, and every container image, emit a stamp byte-identical to the
+one they emitted before the probe existed, so a deployment with nothing
+to report pays nothing and "no staleness keys" stays readable as "fine".
+``trellis admin write-config`` is where "checked and fine" is told apart
+from "never checked".
+
 **What ``env_flags`` is, precisely.**  The write-behaviour environment the
 *process* was launched with — not a per-write record of what actually ran.
 The distinction bites in one place today: ``memory_extraction`` is ANDed
@@ -38,7 +52,8 @@ was launched with.  Each event gets its own copy (~400 bytes, 0.6 µs) so a
 consumer mutating one event's metadata cannot poison the memo or any other
 in-flight event.  Call ``get_write_provenance.cache_clear()`` when a test
 mutates the flag environment and then asserts on a stamp — the autouse
-fixture in ``tests/conftest.py`` already does.
+fixture in ``tests/conftest.py`` already does, along with
+``resolve_stamp_staleness.cache_clear()`` for the git-backed half.
 
 **Where an operator reads it.**  ``trellis admin write-config`` reports the
 stamp for the process the operator is standing in; ``GET /api/version``
@@ -55,7 +70,7 @@ import hashlib
 import json
 from typing import Any
 
-from trellis.core.version import resolve_code_version
+from trellis.core.version import resolve_code_version, resolve_stamp_staleness
 from trellis.core.write_config import WriteBehaviourConfig
 
 #: Metadata key the stamp is written under.  Consumers filtering events by
@@ -87,6 +102,7 @@ def build_write_provenance(
     stamp = resolve_code_version().as_dict()
     stamp["env_flags"] = flags
     stamp["env_flags_digest"] = _env_flags_digest(flags)
+    stamp.update(resolve_stamp_staleness().as_stamp_fields())
     return stamp
 
 

@@ -4058,7 +4058,18 @@ paths:
 
         ``TRELLIS_AUTH_MODE=required`` gets to keep its commit sha and enabled
 
-        ingest behaviours off an anonymous response.'
+        ingest behaviours off an anonymous response.
+
+
+        An image built by ``make docker-build`` cannot drift — code and
+
+        metadata are frozen together — so the stamp''s ``stamp_stale`` /
+
+        ``source_tree_commit`` keys are absent here in the deployment shape
+
+        this route was written for.  They appear when the API is served from
+
+        an editable install whose working tree has moved on.'
       operationId: api_version_api_version_get
       responses:
         '200':

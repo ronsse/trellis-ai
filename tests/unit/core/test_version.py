@@ -13,9 +13,15 @@ from trellis.core.base import get_version
 from trellis.core.version import (
     FALLBACK_SOURCE,
     FALLBACK_VERSION,
+    STALENESS_FRESH,
+    STALENESS_NOT_CHECKED,
+    STALENESS_STALE,
+    STALENESS_UNRESOLVED,
     UNKNOWN_VERSION,
     CodeVersion,
+    StampStaleness,
     resolve_code_version,
+    resolve_stamp_staleness,
 )
 
 
@@ -159,3 +165,455 @@ class TestGetVersionCompatibility:
         monkeypatch.setattr(version_mod, "_version_from_metadata", lambda: None)
         monkeypatch.setattr(version_mod, "_version_from_module", lambda: None)
         assert get_version() == "0.0.0-dev"
+
+
+SHA_A = "a1b2c3d4e5" + "0" * 30
+SHA_B = "f9e8d7c6b5" + "1" * 30
+
+
+def _dist_metadata(commit: str | None) -> CodeVersion:
+    """A ``CodeVersion`` as an editable install off a working tree yields."""
+    return CodeVersion(
+        version=f"0.9.1.dev1+g{commit}" if commit else "0.9.1",
+        source="dist-metadata",
+        commit=commit,
+    )
+
+
+class TestStampStalenessVerdict:
+    """Has the source tree moved on since the metadata was written?"""
+
+    @pytest.fixture(autouse=True)
+    def _cold(self) -> None:
+        resolve_stamp_staleness.cache_clear()
+
+    def _pin(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        version: CodeVersion,
+        tree: str | None = "/src/tree",
+        head: str | None = SHA_A,
+    ) -> dict[str, int]:
+        """Patch the three seams and count how often the probe halves run."""
+        calls = {"tree": 0, "head": 0}
+
+        def _tree() -> str | None:
+            calls["tree"] += 1
+            return tree
+
+        def _head(_tree: str) -> str | None:
+            calls["head"] += 1
+            return head
+
+        monkeypatch.setattr(version_mod, "resolve_code_version", lambda: version)
+        monkeypatch.setattr(version_mod, "_editable_source_tree", _tree)
+        monkeypatch.setattr(version_mod, "_git_head", _head)
+        return calls
+
+    def test_stale_when_the_tree_moved_on(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._pin(monkeypatch, version=_dist_metadata(SHA_B[:9]), head=SHA_A)
+        verdict = resolve_stamp_staleness()
+        assert verdict.state == STALENESS_STALE
+        assert verdict.is_stale is True
+        assert verdict.source_tree_commit == SHA_A
+
+    def test_fresh_when_head_extends_the_abbreviated_stamp(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``hatch-vcs`` abbreviates; ``rev-parse`` does not.
+
+        Comparing the two as equal strings would report every healthy
+        editable install in the world as stale.
+        """
+        self._pin(monkeypatch, version=_dist_metadata(SHA_A[:9]), head=SHA_A)
+        verdict = resolve_stamp_staleness()
+        assert verdict.state == STALENESS_FRESH
+        assert verdict.is_stale is False
+        assert verdict.source_tree_commit == SHA_A
+
+    def test_unresolved_when_git_cannot_answer(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """ "Nothing is wrong" and "I could not look" are different facts."""
+        self._pin(monkeypatch, version=_dist_metadata(SHA_A[:9]), head=None)
+        verdict = resolve_stamp_staleness()
+        assert verdict.state == STALENESS_UNRESOLVED
+        assert verdict.source_tree_commit is None
+
+    def test_not_checked_when_the_install_is_not_editable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls = self._pin(monkeypatch, version=_dist_metadata(SHA_A[:9]), tree=None)
+        assert resolve_stamp_staleness().state == STALENESS_NOT_CHECKED
+        assert calls["head"] == 0, "no git probe without a source tree"
+
+    def test_not_checked_when_the_metadata_carries_no_sha(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A tagged release has no local segment, so there is no sha."""
+        calls = self._pin(monkeypatch, version=_dist_metadata(None))
+        assert resolve_stamp_staleness().state == STALENESS_NOT_CHECKED
+        assert calls == {"tree": 0, "head": 0}
+
+    def test_a_container_image_never_runs_the_probe(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An image has no ``.git`` and cannot drift — do not go looking.
+
+        The fallback build is the shape every image built without
+        ``make docker-build`` reports, and the one most likely to sit in a
+        container with no git binary at all.
+        """
+        calls = self._pin(
+            monkeypatch,
+            version=CodeVersion(version=FALLBACK_VERSION, source=FALLBACK_SOURCE),
+        )
+        assert resolve_stamp_staleness().state == STALENESS_NOT_CHECKED
+        assert calls == {"tree": 0, "head": 0}
+
+    def test_a_stamped_image_never_runs_the_probe(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``make docker-build`` gives an image a real sha and no tree."""
+        calls = self._pin(
+            monkeypatch, version=_dist_metadata(SHA_A[:9]), tree=None, head=SHA_B
+        )
+        assert resolve_stamp_staleness().state == STALENESS_NOT_CHECKED
+        assert calls["head"] == 0
+
+    def test_not_checked_for_a_generated_module_build(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Scope is the metadata clock; a ``_version`` module is not it.
+
+        That build's sha was written into a file at build time by the same
+        freeze, and nothing here knows which tree — if any — it came from.
+        """
+        calls = self._pin(
+            monkeypatch,
+            version=CodeVersion(
+                version=f"0.9.1.dev1+g{SHA_A[:9]}",
+                source="generated-module",
+                commit=SHA_A[:9],
+            ),
+        )
+        assert resolve_stamp_staleness().state == STALENESS_NOT_CHECKED
+        assert calls == {"tree": 0, "head": 0}
+
+    def test_resolved_once_per_process(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """One ``git rev-parse`` per process — this is on the write path."""
+        calls = self._pin(monkeypatch, version=_dist_metadata(SHA_A[:9]))
+        for _ in range(5):
+            resolve_stamp_staleness()
+        assert calls["head"] == 1
+
+    def test_cache_clear_re_reads(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls = self._pin(monkeypatch, version=_dist_metadata(SHA_A[:9]))
+        resolve_stamp_staleness()
+        resolve_stamp_staleness.cache_clear()
+        resolve_stamp_staleness()
+        assert calls["head"] == 2
+
+
+class TestStampFields:
+    """What the verdict contributes to an emitted event's stamp."""
+
+    @pytest.mark.parametrize(
+        "state", [STALENESS_FRESH, STALENESS_UNRESOLVED, STALENESS_NOT_CHECKED]
+    )
+    def test_contributes_nothing_unless_stale(self, state: str) -> None:
+        """Silence is the healthy answer; a healthy stamp pays no bytes."""
+        assert (
+            StampStaleness(state=state, source_tree_commit=SHA_A).as_stamp_fields()
+            == {}
+        )
+
+    def test_stale_names_the_live_sha(self) -> None:
+        fields = StampStaleness(
+            state=STALENESS_STALE, source_tree_commit=SHA_A
+        ).as_stamp_fields()
+        assert fields == {"stamp_stale": True, "source_tree_commit": SHA_A}
+
+    def test_fields_are_flat_primitives(self) -> None:
+        """``_copy_stamp`` copies one level; deeper nesting breaks it."""
+        fields = StampStaleness(
+            state=STALENESS_STALE, source_tree_commit=SHA_A
+        ).as_stamp_fields()
+        assert all(isinstance(v, (str, bool, int, type(None))) for v in fields.values())
+
+
+class TestEditableSourceTree:
+    """PEP 610 ``direct_url.json`` — editable-ness and tree in one read."""
+
+    def _record(self, monkeypatch: pytest.MonkeyPatch, raw: str | None) -> None:
+        import importlib.metadata as md
+
+        class _Dist:
+            def read_text(self, _name: str) -> str | None:
+                return raw
+
+        monkeypatch.setattr(md, "distribution", lambda _name: _Dist())
+
+    def test_reads_the_editable_directory(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._record(
+            monkeypatch,
+            '{"url": "file:///home/dev/trellis-ai", "dir_info": {"editable": true}}',
+        )
+        assert version_mod._editable_source_tree() == "/home/dev/trellis-ai"
+
+    def test_percent_decodes_the_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A ``file://`` URI is not a path — parse it, do not slice it."""
+        self._record(
+            monkeypatch,
+            '{"url": "file:///home/dev/my%20trees/t", "dir_info": {"editable": true}}',
+        )
+        assert version_mod._editable_source_tree() == "/home/dev/my trees/t"
+
+    def test_none_when_the_directory_install_is_not_editable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``pip install ./trellis-ai`` copies the code; it cannot drift."""
+        self._record(
+            monkeypatch,
+            '{"url": "file:///home/dev/trellis-ai", "dir_info": {"editable": false}}',
+        )
+        assert version_mod._editable_source_tree() is None
+
+    def test_none_for_a_vcs_install(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An install straight from a git URL has no local tree to read."""
+        self._record(
+            monkeypatch,
+            '{"url": "https://example.invalid/t.git", "vcs_info": {"vcs": "git"}}',
+        )
+        assert version_mod._editable_source_tree() is None
+
+    def test_none_for_an_editable_record_with_a_remote_url(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """There is no local directory to read a ``HEAD`` out of."""
+        self._record(
+            monkeypatch,
+            '{"url": "https://example.invalid/t.git", "dir_info": {"editable": true}}',
+        )
+        assert version_mod._editable_source_tree() is None
+
+    def test_none_when_the_record_is_absent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``read_text`` returns ``None`` for a wheel — it does not raise."""
+        self._record(monkeypatch, None)
+        assert version_mod._editable_source_tree() is None
+
+    def test_none_when_the_record_is_malformed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._record(monkeypatch, "{not json")
+        assert version_mod._editable_source_tree() is None
+
+    def test_none_when_the_distribution_is_not_installed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import importlib.metadata as md
+
+        def _raise(name: str) -> object:
+            raise PackageNotFoundError(name)
+
+        monkeypatch.setattr(md, "distribution", _raise)
+        assert version_mod._editable_source_tree() is None
+
+    def test_the_live_install_is_read_without_error(self) -> None:
+        """Whatever this test run is installed as, the read must not raise."""
+        tree = version_mod._editable_source_tree()
+        assert tree is None or tree.startswith("/")
+
+    def test_none_when_the_record_is_not_valid_utf8(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A corrupt ``direct_url.json`` is unreadable, not fatal.
+
+        ``Distribution.read_text`` decodes as UTF-8 and suppresses only
+        ``FileNotFoundError`` / ``IsADirectoryError`` / ``KeyError`` /
+        ``NotADirectoryError`` / ``PermissionError`` — so a file with a
+        bad byte in it raises ``UnicodeDecodeError``, which is a
+        ``ValueError`` and slips straight through an ``OSError`` guard.
+        This is the real on-disk shape, not a synthesised exception.
+        """
+        import importlib.metadata as md
+
+        (tmp_path / "direct_url.json").write_bytes(
+            b'{"url": "file:///t/\xff\xfe", "dir_info": {"editable": true}}'
+        )
+
+        class _Dist:
+            def read_text(self, name: str) -> str | None:
+                return (tmp_path / name).read_text(encoding="utf-8")
+
+        monkeypatch.setattr(md, "distribution", lambda _n: _Dist())
+        assert version_mod._direct_url_record() == {}
+        assert version_mod._editable_source_tree() is None
+
+    def test_none_when_the_record_is_not_a_json_object(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Valid JSON of the wrong shape has no ``.get`` to call."""
+        self._record(monkeypatch, '["not", "an", "object"]')
+        assert version_mod._direct_url_record() == {}
+        assert version_mod._editable_source_tree() is None
+
+
+class TestStalenessNeverRaises:
+    """The advisory guarantee, asserted at the seam that has to hold it.
+
+    An escape here is not one lost probe: the stamp rides
+    :meth:`EventLog.emit`, so it fails *every write for the life of the
+    process*, with a traceback out of a version module.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _cold(self) -> None:
+        resolve_stamp_staleness.cache_clear()
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"),
+            ValueError("invalid IPv6 URL"),
+            RuntimeError("something nobody enumerated"),
+            AttributeError("importlib internals moved"),
+        ],
+    )
+    def test_a_raising_probe_resolves_to_a_state(
+        self, monkeypatch: pytest.MonkeyPatch, exc: Exception
+    ) -> None:
+        def _boom() -> str | None:
+            raise exc
+
+        monkeypatch.setattr(
+            version_mod, "resolve_code_version", lambda: _dist_metadata(SHA_A[:9])
+        )
+        monkeypatch.setattr(version_mod, "_editable_source_tree", _boom)
+        assert resolve_stamp_staleness().state == STALENESS_UNRESOLVED
+
+    def test_a_url_the_parser_rejects_is_a_state(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``urlparse`` raises ``ValueError`` on an unclosed ``[`` netloc.
+
+        Reached through the real ``_editable_source_tree``, so this pins
+        the whole read path and not just the guard.
+        """
+        monkeypatch.setattr(
+            version_mod,
+            "_direct_url_record",
+            lambda: {"url": "file://[oops", "dir_info": {"editable": True}},
+        )
+        monkeypatch.setattr(
+            version_mod, "resolve_code_version", lambda: _dist_metadata(SHA_A[:9])
+        )
+        assert resolve_stamp_staleness().state == STALENESS_UNRESOLVED
+
+    def test_a_keyboard_interrupt_is_still_an_interrupt(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The guard is ``Exception``; it must not eat a Ctrl-C."""
+
+        def _boom() -> str | None:
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(
+            version_mod, "resolve_code_version", lambda: _dist_metadata(SHA_A[:9])
+        )
+        monkeypatch.setattr(version_mod, "_editable_source_tree", _boom)
+        with pytest.raises(KeyboardInterrupt):
+            resolve_stamp_staleness()
+
+
+class TestGitHead:
+    """The probe itself — advisory, bounded, and never an exception."""
+
+    def test_reads_this_checkout(self) -> None:
+        """The real command, against the repository the suite lives in.
+
+        Everything else in this class is monkeypatched, so this is the
+        only test that would notice ``capture_output`` or ``text`` going
+        missing — both of which turn ``.strip()`` into an exception on a
+        path that must never raise.
+        """
+        root = Path(__file__).resolve().parents[3]
+        if not (root / ".git").exists():
+            pytest.skip("not a git checkout")
+        head = version_mod._git_head(str(root))
+        assert head is not None
+        assert version_mod._FULL_SHA.match(head)
+
+    def test_none_outside_a_repository(self, tmp_path: Path) -> None:
+        assert version_mod._git_head(str(tmp_path)) is None
+
+    def test_none_when_git_is_not_installed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import subprocess
+
+        def _missing(*_a: object, **_k: object) -> object:
+            msg = "git"
+            raise FileNotFoundError(msg)
+
+        monkeypatch.setattr(subprocess, "run", _missing)
+        assert version_mod._git_head("/anywhere") is None
+
+    def test_none_on_timeout(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import subprocess
+
+        def _slow(*_a: object, **_k: object) -> object:
+            raise subprocess.TimeoutExpired(cmd="git", timeout=1.0)
+
+        monkeypatch.setattr(subprocess, "run", _slow)
+        assert version_mod._git_head("/anywhere") is None
+
+    def test_passes_a_timeout_and_does_not_raise_on_failure(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A bounded, non-raising call — a stamp must never block a write."""
+        import subprocess
+
+        seen: dict[str, object] = {}
+
+        def _spy(cmd: list[str], **kwargs: object) -> object:
+            seen["cmd"] = cmd
+            seen.update(kwargs)
+            return subprocess.CompletedProcess(cmd, 0, stdout=SHA_A + "\n", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", _spy)
+        assert version_mod._git_head("/some/tree") == SHA_A
+        assert seen["cmd"] == ["git", "-C", "/some/tree", "rev-parse", "HEAD"]
+        assert isinstance(seen["timeout"], float)
+        assert seen["check"] is False
+        assert seen["capture_output"] is True
+        assert seen["text"] is True
+
+    def test_none_when_git_exits_nonzero(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A failed call's stdout is not an answer, whatever it holds."""
+        import subprocess
+
+        def _failed(cmd: list[str], **_k: object) -> object:
+            return subprocess.CompletedProcess(cmd, 128, stdout=SHA_A, stderr="boom")
+
+        monkeypatch.setattr(subprocess, "run", _failed)
+        assert version_mod._git_head("/some/tree") is None
+
+    def test_none_when_the_output_is_not_a_sha(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A zero exit with a non-sha body is not an answer."""
+        import subprocess
+
+        def _weird(cmd: list[str], **_k: object) -> object:
+            return subprocess.CompletedProcess(cmd, 0, stdout="HEAD\n", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", _weird)
+        assert version_mod._git_head("/some/tree") is None

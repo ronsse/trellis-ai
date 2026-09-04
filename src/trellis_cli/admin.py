@@ -17,6 +17,14 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from trellis.core.version import (
+    STALENESS_FRESH,
+    STALENESS_NOT_CHECKED,
+    STALENESS_STALE,
+    STALENESS_UNRESOLVED,
+    StampStaleness,
+    resolve_stamp_staleness,
+)
 from trellis.core.write_config import (
     MEMORY_EXTRACTION_FLAG,
     TRUTHY,
@@ -328,6 +336,25 @@ def version(
     console.print(table)
 
 
+#: How each staleness state reads to an operator, given the live sha.
+#: Named states rather than a bare boolean because "no" and "could not
+#: look" call for different actions, and a blank cell reads as the former.
+_STALENESS_TEXT = {
+    STALENESS_FRESH: "no — source tree HEAD matches",
+    STALENESS_STALE: (
+        "[yellow]YES — source tree HEAD is {sha}; re-install to re-stamp[/yellow]"
+    ),
+    STALENESS_UNRESOLVED: "unknown — source tree HEAD unreadable",
+    STALENESS_NOT_CHECKED: "n/a — not an editable install",
+}
+
+
+def _render_staleness(staleness: StampStaleness) -> str:
+    """One cell saying whether ``commit`` still describes the running code."""
+    template = _STALENESS_TEXT.get(staleness.state, staleness.state)
+    return template.format(sha=staleness.source_tree_commit)
+
+
 @admin_app.command("write-config")
 def write_config(
     output_format: str = typer.Option(
@@ -349,15 +376,33 @@ def write_config(
     for the latter. And it reports the *environment*, not per-write
     outcomes: ``memory_extraction`` is additionally gated on a caller's
     ``--extract``, so "true" here means permitted, not performed.
+
+    ``stamp_stale`` answers the third question the other two invite: the
+    build fields are frozen at *install* time, so an editable install off
+    a working tree that has moved on reports the sha it was installed at,
+    confidently and wrongly. That row compares it against the tree's live
+    ``HEAD``.
     """
     config = WriteBehaviourConfig.from_env()
     provenance = build_write_provenance(config)
+    staleness = resolve_stamp_staleness()
 
     if output_format == "json":
         # The stamp verbatim (so it can be diffed against a stored row)
         # plus the per-knob operator view that names each env var and
-        # flags the overrides.
-        payload = {"write_provenance": provenance, "knobs": config.describe()}
+        # flags the overrides, plus the staleness *state*. The stamp
+        # carries staleness keys only when stale, so on its own it cannot
+        # distinguish "checked, fine" from "never checked" — a question
+        # only an operator standing in the process can ask, and this is
+        # where they stand.
+        payload = {
+            "write_provenance": provenance,
+            "knobs": config.describe(),
+            "stamp_staleness": {
+                "state": staleness.state,
+                "source_tree_commit": staleness.source_tree_commit,
+            },
+        }
         typer.echo(json.dumps(payload, indent=2))
         return
 
@@ -367,7 +412,8 @@ def write_config(
     build.add_row("version", str(provenance["version"]))
     build.add_row("version_source", str(provenance["version_source"]))
     build.add_row("commit", str(provenance["commit"] or "unknown"))
-    build.add_row("dirty", str(provenance["dirty"]))
+    build.add_row("dirty (at install time)", str(provenance["dirty"]))
+    build.add_row("stamp_stale", _render_staleness(staleness))
     build.add_row("env_flags_digest", str(provenance["env_flags_digest"]))
     console.print(build)
 

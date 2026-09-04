@@ -55,6 +55,12 @@ def api_version(
     unauthenticated dev/LAN ones; a deployment that has chosen
     ``TRELLIS_AUTH_MODE=required`` gets to keep its commit sha and enabled
     ingest behaviours off an anonymous response.
+
+    An image built by ``make docker-build`` cannot drift — code and
+    metadata are frozen together — so the stamp's ``stamp_stale`` /
+    ``source_tree_commit`` keys are absent here in the deployment shape
+    this route was written for.  They appear when the API is served from
+    an editable install whose working tree has moved on.
     """
     provenance = None
     if ctx is not None or resolve_ops_detail() == OPS_DETAIL_PUBLIC:
