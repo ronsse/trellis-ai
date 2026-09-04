@@ -372,7 +372,7 @@ on each **GitHub issue**; roadmap only where it governs that item.
 |---|---|
 | [#371](https://github.com/ronsse/trellis-ai/issues/371) | Behaviorally open — recency feed until a seeding path exists |
 | [#375](https://github.com/ronsse/trellis-ai/issues/375) | Mechanisms refuted; do not dispatch the obvious seeding fix |
-| [#463](https://github.com/ronsse/trellis-ai/issues/463) | blocked-signal — panels rejected parent-stamp inheritance; use the brief's stronger reopen conditions |
+| [#463](https://github.com/ronsse/trellis-ai/issues/463) | blocked-signal — panels agreed on no behavior change now but split on clock semantics; use the brief's stronger evidence and owner gates |
 | [#502](https://github.com/ronsse/trellis-ai/issues/502) | blocked-decision — panel split; decision-ledger D-5 records the questions and safe default |
 | [#503](https://github.com/ronsse/trellis-ai/issues/503) | blocked-signal — wait for item-scoped advisories |
 | [#208](https://github.com/ronsse/trellis-ai/issues/208) | external — re-home |

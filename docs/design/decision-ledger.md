@@ -165,7 +165,9 @@ advisory is actually served.
 1. Does presentation mean served, matched, or matched-and-subject-present?
 2. Does the actuator use absolute success or `lift_vs_baseline`, and what happens with
    no comparison arm?
-3. Is the exploration budget zero, one bounded slot, or full rotation?
+3. Is the exploration budget zero, one bounded slot, or another finite per-pack policy
+   whose service rate is explicit relative to admitted corpus growth? Unbounded full
+   rotation is not an admissible default.
 4. Are never-served rows sampled, pruned, or handled by operator cleanup?
 
 **Safe default:** keep the current five ranked served advisories and dispatch no #502
