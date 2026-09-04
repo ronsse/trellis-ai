@@ -96,9 +96,7 @@
     "title": "The advisory cap ranks category-blind, so ENTITY rows \u2014 the only ones carrying per-item provenance \u2014 can be starved by APPROACH rows",
     "verdict": "blocked-signal",
     "wave": "W5-retrieval",
-    "dependencies": [
-      502
-    ],
+    "dependencies": [],
     "territories": [
       "src/trellis/retrieve/pack_builder.py"
     ],
@@ -187,9 +185,7 @@
     "title": "Emit an Assumptions header on assembled packs",
     "verdict": "valid-slice",
     "wave": "W4-retrieval",
-    "dependencies": [
-      371
-    ],
+    "dependencies": [],
     "territories": [
       "src/trellis/retrieve/pack_builder.py"
     ],
@@ -270,9 +266,7 @@
     "title": "The graph axis has no query-relevant candidate path: all three seed producers are empty on the write path",
     "verdict": "blocked-signal",
     "wave": "W5-retrieval",
-    "dependencies": [
-      371
-    ],
+    "dependencies": [],
     "territories": [
       "src/trellis/extract/",
       "src/trellis/mutate/"
