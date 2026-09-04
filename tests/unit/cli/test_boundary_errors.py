@@ -57,7 +57,8 @@ DAMAGED_POLICY_FILE = '{"polices": []}'
 @pytest.fixture
 def damaged_policy_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Point the CLI at a store directory whose policy file will not load."""
-    data_dir = tmp_path / "data"
+    # Exercise the sanitizer's exact long-token boundary (#523).
+    data_dir = tmp_path / ("a" * 40) / "data"
     stores = data_dir / "stores"
     stores.mkdir(parents=True)
     path = stores / "policies.json"
