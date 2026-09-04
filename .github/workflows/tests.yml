@@ -11,12 +11,20 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.11", "3.12", "3.13"]
+        include:
+          - python-version: "3.11"
+            extras: dev
+          - python-version: "3.12"
+            extras: dev
+          - python-version: "3.13"
+            extras: dev
+          - python-version: "3.13"
+            extras: dev,all
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-      - run: pip install -e ".[dev]"
+      - run: pip install -e ".[${{ matrix.extras }}]"
       - run: pytest tests/ -v

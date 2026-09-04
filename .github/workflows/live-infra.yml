@@ -189,23 +189,15 @@ jobs:
         # half of the pgvector surface. It is NOT covered by the contracts
         # directory.
         #
-        # tests/unit/stores/test_vector_store_declarations.py (#512) is named
-        # for a narrower reason: it runs everywhere, but its one pgvector case
-        # is `importorskip("psycopg")`-gated and `tests.yml` installs `[dev]`
-        # only, so that case runs in **no** workflow otherwise. It needs no
-        # database — it asserts what `PgVectorStore` declares about itself off
-        # the class — so it costs this job nothing beyond having the driver
-        # installed, which it already does.
-        #
         # Deliberately NOT widened to all of tests/unit/stores/, though 59
-        # more Postgres-marked tests there (test_postgres_stores.py,
-        # test_api_key_store.py) also run in no workflow: the same sweep picks
-        # up tests/unit/stores/test_neo4j_vector.py, whose TestQuery cases
-        # issue the Cypher `SEARCH ... IN (VECTOR INDEX ...)` clause. That is
-        # AuraDB-grade syntax which self-hosted neo4j:2025.12 cannot parse, so
-        # 4 of them fail against this job's own Neo4j container. The e2e
-        # fixture probes for the clause and self-skips; this unit file does
-        # not. Verified locally against the same image. Tracked as issue #356.
+        # more Postgres-marked tests there (test_postgres_stores.py and
+        # test_api_key_store.py) stay deselected in tests.yml's all-extras
+        # leg: the same sweep here picks up test_neo4j_vector.py, whose
+        # TestQuery cases issue the Cypher `SEARCH ... IN (VECTOR INDEX ...)`
+        # clause. That AuraDB-grade syntax cannot be parsed by self-hosted
+        # neo4j:2025.12, so 4 cases fail against this job's container. The e2e
+        # fixture probes for the clause and self-skips; this unit file does not.
+        # Verified locally against the same image. Tracked as issue #356.
         #
         # Still not covered: the ArcadeDB graph contract
         # (tests/unit/stores/contracts/test_arcadedb_graph_contract.py) has
@@ -217,5 +209,4 @@ jobs:
             tests/integration/loops/ \
             tests/unit/stores/contracts/ \
             tests/unit/stores/test_pgvector.py \
-            tests/unit/stores/test_vector_store_declarations.py \
             -v
