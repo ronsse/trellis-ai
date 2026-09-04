@@ -19,13 +19,16 @@ across all Bolt-speaking backends and lives in
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
+from trellis.errors import ConfigError
+from trellis.stores.base.registry import RegistryContext
 from trellis.stores.bolt_opencypher.base import (
     HAS_NEO4J,
     BoltDriverConfig,
     BoltSessionRunner,
     check_driver_installed,
+    registry_driver_cache,
     verify_connectivity,
 )
 
@@ -81,6 +84,54 @@ def build_driver(
         keep_alive=cfg.keep_alive,
         user_agent=cfg.user_agent,
     )
+
+
+def prepare_neo4j_registry_params(
+    ctx: RegistryContext,
+    store_type: str,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """Inject one registry-owned driver shared by Neo4j store types."""
+    if "driver" in params:
+        return params
+    if "uri" not in params:
+        msg = "neo4j backend requires 'uri' in config or env"
+        raise ConfigError(msg, setting=f"stores.{store_type}.uri")
+
+    uri = params["uri"]
+    user = params.get("user", "neo4j")
+    key = (uri, user)
+    drivers = registry_driver_cache(ctx)
+    prepared = {k: v for k, v in params.items() if k != "driver_config"}
+    if key in drivers:
+        prepared.pop("password", None)
+        prepared["driver"] = drivers[key]
+        return prepared
+
+    if "password" not in params:
+        msg = "neo4j backend requires 'password' in config"
+        raise ConfigError(msg, setting=f"stores.{store_type}.password")
+
+    raw_config = params.get("driver_config")
+    if raw_config is None:
+        driver_config: DriverConfig | None = None
+    elif isinstance(raw_config, DriverConfig):
+        driver_config = raw_config
+    elif isinstance(raw_config, dict):
+        driver_config = DriverConfig(**raw_config)
+    else:
+        msg = (
+            "driver_config must be a DriverConfig, a dict, or omitted; "
+            f"got {type(raw_config).__name__}"
+        )
+        raise TypeError(msg)
+
+    driver = build_driver(uri, user, params["password"], config=driver_config)
+    drivers[key] = driver
+    ctx.register_closer(driver.close)
+    prepared.pop("password")
+    prepared["driver"] = driver
+    return prepared
 
 
 # Default poll cadence for :func:`wait_for_vector_index_online`. 0.5s is

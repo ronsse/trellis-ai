@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from pathlib import Path
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
@@ -19,6 +20,7 @@ from trellis.stores.base import (
     GraphStore,
     OutcomeStore,
     ParameterStore,
+    RegistryContext,
     TraceStore,
     TunerStateStore,
     VectorStore,
@@ -35,6 +37,7 @@ _UNSET: Any = object()  # sentinel for lazy embedding_fn init
 # trailing characters. Very short strings are either placeholders or
 # malformed, so we treat them as opaque.
 _MIN_SAFE_KEY_LEN = 4
+_SHARED_DRIVER_KEY_PARTS = 2
 
 
 class RegistryValidationError(Exception):
@@ -650,32 +653,6 @@ def _validate_uri(
     return None
 
 
-def _parse_bolt_driver_config(raw_cfg: Any) -> Any:
-    """Coerce a config-supplied ``driver_config`` into a ``BoltDriverConfig``.
-
-    Accepts an existing :class:`~trellis.stores.bolt_opencypher.base.BoltDriverConfig`
-    instance, a plain mapping of its kwargs (the YAML-config shape), or
-    ``None``. Anything else is a caller error, reported with the actual
-    type name. Import stays local so core keeps its no-hard-dependency
-    posture on the Bolt extra.
-    """
-    if raw_cfg is None:
-        return None
-    from trellis.stores.bolt_opencypher.base import (  # noqa: PLC0415
-        BoltDriverConfig,
-    )
-
-    if isinstance(raw_cfg, BoltDriverConfig):
-        return raw_cfg
-    if isinstance(raw_cfg, dict):
-        return BoltDriverConfig(**raw_cfg)
-    msg = (
-        "driver_config must be a BoltDriverConfig, a dict, or omitted; "
-        f"got {type(raw_cfg).__name__}"
-    )
-    raise TypeError(msg)
-
-
 class StoreRegistry:
     """Lazily instantiates and caches store backends based on configuration."""
 
@@ -709,21 +686,8 @@ class StoreRegistry:
         self._cache: dict[str, Any] = {}
         self._embedding_fn_cache: Callable[[str], list[float]] | None = _UNSET
         self._budget_config_cache: Any = _UNSET
-        # Shared Bolt drivers: one ``Driver`` per ``(uri, user)`` so a
-        # graph + vector pair pointing at the same instance reuses one
-        # connection pool. Used by Neo4j today; future Bolt-speaking
-        # backends share the same cache. Closed by :meth:`close` after
-        # individual stores have closed (a no-op for stores with
-        # injected drivers).
-        self._bolt_drivers: dict[tuple[str, str], Any] = {}
-        # Tracks ``(uri, user)`` keys for which the ArcadeDB edge-
-        # provenance schema migration has been installed in *this*
-        # registry instance. Used by :meth:`_inject_arcadedb_driver` to
-        # skip redundant HTTP DDL on repeat injections (e.g. a second
-        # graph store reusing the cached driver). The DDL itself is
-        # ``CREATE PROPERTY ... IF NOT EXISTS`` so re-running is safe;
-        # this just avoids the round trip.
-        self._arcadedb_provenance_migrated: set[tuple[str, str]] = set()
+        self._registry_shared: dict[Any, Any] = {}
+        self._registry_closers: list[Callable[[], None]] = []
         self._knowledge = _KnowledgePlane(self)
         self._operational = _OperationalPlane(self)
 
@@ -952,22 +916,10 @@ class StoreRegistry:
                 raise ConfigError(msg, setting=plane_env)
             params["dsn"] = dsn
 
-        # For neo4j backend, share one driver per (uri, user) across the
-        # graph + vector store pair. Params can carry a ``driver_config``
-        # mapping (or DriverConfig instance) plus the connection trio;
-        # the resolved driver is injected so individual stores skip their
-        # own build_driver() call. The registry keeps the driver and
-        # closes it in :meth:`close` after stores have finished.
-        if backend == "neo4j" and "driver" not in params:
-            params = self._inject_neo4j_driver(params)
-
-        # ArcadeDB: graph shares the Bolt driver cache with Neo4j;
-        # vector takes HTTP-only params (no Bolt driver) via a
-        # separate resolver.
-        if backend == "arcadedb" and store_type == "graph" and "driver" not in params:
-            params = self._inject_arcadedb_driver(params)
-        elif backend == "arcadedb" and store_type == "vector":
-            params = self._resolve_arcadedb_vector_params(params)
+        prepare = getattr(cls, "prepare_registry_params", None)
+        if callable(prepare):
+            ctx = self._registry_context(store_type, backend)
+            params = prepare(ctx, store_type, params)
 
         # For s3 backend, default bucket from env
         if backend == "s3" and "bucket" not in params:
@@ -985,400 +937,20 @@ class StoreRegistry:
         logger.info("store_instantiated", store_type=store_type, backend=backend)
         return cls(**params)
 
-    def _inject_neo4j_driver(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Resolve a shared Neo4j driver for ``params`` and inject it.
-
-        Returns a new ``params`` dict with ``password`` + ``driver_config``
-        stripped (those go into the driver) and ``driver`` added. The
-        returned driver is cached on the registry under ``(uri, user)``
-        and closed by :meth:`close`.
-
-        Idempotent for the same ``(uri, user)`` — second + later calls
-        return the same driver instance even if the second store passes
-        a different ``driver_config`` (the first config wins; this is
-        expected since both stores share one connection pool).
-        """
-        from trellis.stores.neo4j.base import (  # noqa: PLC0415
-            DriverConfig,
-            build_driver,
-        )
-
-        if "uri" not in params:
-            msg = "neo4j backend requires 'uri' in config or env"
-            raise ConfigError(msg, setting="stores.graph.uri")
-        uri = params["uri"]
-        user = params.get("user", "neo4j")
-        key = (uri, user)
-
-        new_params = {k: v for k, v in params.items() if k != "driver_config"}
-        if key in self._bolt_drivers:
-            new_params.pop("password", None)
-            new_params["driver"] = self._bolt_drivers[key]
-            return new_params
-
-        if "password" not in params:
-            msg = "neo4j backend requires 'password' in config"
-            raise ConfigError(msg, setting="stores.graph.password")
-
-        raw_cfg = params.get("driver_config")
-        if raw_cfg is None:
-            cfg: DriverConfig | None = None
-        elif isinstance(raw_cfg, DriverConfig):
-            cfg = raw_cfg
-        elif isinstance(raw_cfg, dict):
-            cfg = DriverConfig(**raw_cfg)
-        else:
-            msg = (
-                "driver_config must be a DriverConfig, a dict, or omitted; "
-                f"got {type(raw_cfg).__name__}"
-            )
-            raise TypeError(msg)
-
-        driver = build_driver(uri, user, params["password"], config=cfg)
-        self._bolt_drivers[key] = driver
-        new_params.pop("password")
-        new_params["driver"] = driver
-        return new_params
-
-    def _inject_arcadedb_driver(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Resolve a shared ArcadeDB Bolt driver for ``params`` and inject it.
-
-        Mirrors :meth:`_inject_neo4j_driver` — same driver-cache key
-        shape (``(uri, user)``), same shared ``_bolt_drivers`` dict,
-        same closing semantics. Differences from the Neo4j path:
-
-        - Default user is ``"root"`` (ArcadeDB's conventional admin
-          user) rather than ``"neo4j"``.
-        - Honors ``TRELLIS_ARCADEDB_URI`` / ``_USER`` / ``_PASSWORD`` /
-          ``_DATABASE`` env vars as fallbacks before raising.
-        - Triggers the HTTP-based ``ensure_database`` call exactly
-          once per driver (only when the driver is newly built), so the
-          target database is created idempotently at first use.
-        """
+    def _registry_context(self, store_type: str, backend: str) -> RegistryContext:
         import os  # noqa: PLC0415
 
-        from trellis.stores.arcadedb.base import (  # noqa: PLC0415
-            build_arcadedb_driver,
-            derive_http_url_from_bolt,
-            ensure_database,
+        return RegistryContext(
+            env=MappingProxyType(dict(os.environ)),
+            shared=self._registry_shared,
+            register_closer=self._registry_closers.append,
+            emit_warning=lambda message: logger.warning(
+                "store_registry_backend_warning",
+                message=message,
+                store_type=store_type,
+                backend=backend,
+            ),
         )
-
-        uri = params.get("uri") or os.environ.get("TRELLIS_ARCADEDB_URI")
-        if not uri:
-            msg = (
-                "arcadedb backend requires 'uri' in config or "
-                "TRELLIS_ARCADEDB_URI env var (e.g. bolt://host:7687)"
-            )
-            raise ConfigError(msg, setting="stores.graph.uri")
-        user = params.get("user") or os.environ.get("TRELLIS_ARCADEDB_USER") or "root"
-        password = params.get("password") or os.environ.get("TRELLIS_ARCADEDB_PASSWORD")
-        database = (
-            params.get("database")
-            or os.environ.get("TRELLIS_ARCADEDB_DATABASE")
-            or "trellis"
-        )
-        http_url = params.get("http_url") or os.environ.get("TRELLIS_ARCADEDB_HTTP_URL")
-        ensure_db = params.get("ensure_database_exists", True)
-        # Privileged pair for the init/migration phase only (issue #193):
-        # database creation + typed-property DDL. Falls back to the
-        # runtime pair when unset. The Bolt driver below is always built
-        # with the runtime pair.
-        admin_user = (
-            params.get("admin_user")
-            or os.environ.get("TRELLIS_ARCADEDB_ADMIN_USER")
-            or user
-        )
-        admin_password = (
-            params.get("admin_password")
-            or os.environ.get("TRELLIS_ARCADEDB_ADMIN_PASSWORD")
-            or password
-        )
-
-        key = (uri, user)
-        # Strip ``driver_config`` + ``ensure_database_exists`` + the
-        # admin pair from forwarded params — all are consumed here
-        # (driver build / database creation / DDL migration), not by the
-        # store. ``http_url`` is *kept* so the constructor's
-        # injected-driver branch can recognise the registry path (and
-        # suppress its "migration skipped" warning). ``password`` is
-        # stripped below alongside the driver injection to preserve the
-        # constructor's "driver XOR password" mutex.
-        new_params = {
-            k: v
-            for k, v in params.items()
-            if k
-            not in {
-                "driver_config",
-                "ensure_database_exists",
-                "admin_user",
-                "admin_password",
-            }
-        }
-        new_params["uri"] = uri
-        new_params["user"] = user
-        new_params["database"] = database
-
-        if key in self._bolt_drivers:
-            self._ensure_arcadedb_provenance_migrated_on_cached_driver(
-                key=key,
-                http_url=http_url,
-                uri=uri,
-                user=admin_user,
-                password=admin_password,
-                database=database,
-                new_params=new_params,
-            )
-            new_params.pop("password", None)
-            new_params["driver"] = self._bolt_drivers[key]
-            return new_params
-
-        if not password:
-            msg = (
-                "arcadedb backend requires 'password' in config or "
-                "TRELLIS_ARCADEDB_PASSWORD env var"
-            )
-            raise ConfigError(msg, setting="stores.graph.password")
-        # Re-narrow the admin secret now that ``password`` is a real
-        # string — the early binding stays Optional for the cached-driver
-        # branch (whose migration helper tolerates missing credentials).
-        admin_password = admin_password or password
-
-        cfg = _parse_bolt_driver_config(params.get("driver_config"))
-
-        # Ensure the target database exists before the Bolt driver
-        # binds to it. ``ensure_database`` is idempotent — a no-op when
-        # the database already exists.
-        if ensure_db:
-            if not http_url:
-                http_url = derive_http_url_from_bolt(uri)
-            if not http_url:
-                msg = (
-                    "arcadedb backend with ensure_database_exists=True "
-                    "needs an http_url (or a parseable host in the Bolt "
-                    "uri). Set http_url in config, set "
-                    "TRELLIS_ARCADEDB_HTTP_URL, or disable "
-                    "ensure_database_exists."
-                )
-                raise ConfigError(msg, setting="stores.graph.http_url")
-            ensure_database(http_url, admin_user, admin_password, database)
-
-        # Run the typed-property schema migration (Phase 3 of
-        # adr-graph-ontology §6.4) over HTTP SQL while we still hold
-        # ``http_url`` + ``password``. The constructor will receive
-        # only the injected ``driver`` (per the mutual-exclusion
-        # contract) and so cannot run this migration itself. Idempotent.
-        self._run_arcadedb_edge_provenance_migration(
-            http_url=http_url,
-            uri=uri,
-            user=admin_user,
-            password=admin_password,
-            database=database,
-        )
-        self._arcadedb_provenance_migrated.add(key)
-
-        driver = build_arcadedb_driver(uri, user, password, config=cfg)
-        self._bolt_drivers[key] = driver
-        new_params.pop("password")
-        new_params["driver"] = driver
-        # Forward the resolved ``http_url`` so the constructor's
-        # injected-driver branch can tell it ran through the registry
-        # (and skip its no-longer-applicable "migration skipped" warning).
-        if http_url and not new_params.get("http_url"):
-            new_params["http_url"] = http_url
-        return new_params
-
-    @staticmethod
-    def _run_arcadedb_edge_provenance_migration(
-        *,
-        http_url: str | None,
-        uri: str,
-        user: str,
-        password: str,
-        database: str,
-    ) -> None:
-        """Idempotently install ArcadeDB's typed-property edge schema.
-
-        Pulled out of :meth:`_inject_arcadedb_driver` purely for
-        statement-count reasons (PLR0915). Falls back to deriving the
-        HTTP URL from the Bolt ``uri`` when the explicit value is
-        absent. Emits a warning rather than raising when no URL is
-        resolvable — the store still functions without the FLOAT
-        MIN/MAX constraint, just without the defense-in-depth backstop
-        on ``confidence``.
-        """
-        from trellis.stores.arcadedb.base import (  # noqa: PLC0415
-            derive_http_url_from_bolt,
-        )
-
-        resolved = http_url or derive_http_url_from_bolt(uri)
-        if not resolved:
-            logger.warning(
-                "arcadedb_provenance_schema_migration_skipped_no_http_url",
-                reason=(
-                    "could not resolve http_url for ArcadeDB schema "
-                    "migration. The FLOAT MIN/MAX constraint on "
-                    "edge.confidence will not be installed. Set http_url "
-                    "in config, TRELLIS_ARCADEDB_HTTP_URL env var, or "
-                    "use a Bolt URI with a parseable host."
-                ),
-            )
-            return
-        from trellis.stores.arcadedb.graph import (  # noqa: PLC0415
-            ArcadeDBGraphStore,
-        )
-
-        ArcadeDBGraphStore._init_arcadedb_edge_provenance_schema(
-            http_url=resolved,
-            user=user,
-            password=password,
-            database=database,
-        )
-
-    def _ensure_arcadedb_provenance_migrated_on_cached_driver(
-        self,
-        *,
-        key: tuple[str, str],
-        http_url: str | None,
-        uri: str,
-        user: str,
-        password: str | None,
-        database: str,
-        new_params: dict[str, Any],
-    ) -> None:
-        """Re-run the provenance migration on the cached-driver path.
-
-        The cached-driver path used to short-circuit before the
-        migration helper ran. In production a registry typically only
-        builds one graph store per ``(uri, user)`` so the new-driver
-        path covers it — but any caller that reuses a registry across
-        store constructions (test harnesses, future multi-store layouts)
-        would silently bypass the FLOAT MIN/MAX constraint on
-        ``edge.confidence``.
-
-        Idempotent — skips when the registry has already recorded a
-        successful migration for this ``(uri, user)`` in
-        :attr:`_arcadedb_provenance_migrated`. Falls back to deriving
-        the HTTP URL from the Bolt URI when the explicit value is
-        absent. Warns (does not raise) when the credentials needed to
-        run the migration are unavailable on this injection — the
-        cached driver still works, only the defense-in-depth constraint
-        is at risk.
-        """
-        from trellis.stores.arcadedb.base import (  # noqa: PLC0415
-            derive_http_url_from_bolt,
-        )
-
-        if key in self._arcadedb_provenance_migrated:
-            return
-        resolved_http_url = http_url or derive_http_url_from_bolt(uri)
-        if resolved_http_url and password:
-            self._run_arcadedb_edge_provenance_migration(
-                http_url=resolved_http_url,
-                uri=uri,
-                user=user,
-                password=password,
-                database=database,
-            )
-            self._arcadedb_provenance_migrated.add(key)
-            if not new_params.get("http_url"):
-                new_params["http_url"] = resolved_http_url
-        else:
-            logger.warning(
-                "arcadedb_provenance_schema_migration_skipped_cached_driver",
-                reason=(
-                    "ArcadeDB driver was already cached for this "
-                    "(uri, user) and the current injection lacks the "
-                    "http_url+password needed to run the edge "
-                    "provenance migration. The FLOAT MIN/MAX constraint "
-                    "on edge.confidence may not be installed if the "
-                    "cached driver was built without credentials in scope."
-                ),
-                uri=uri,
-                database=database,
-            )
-
-    def _resolve_arcadedb_vector_params(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Resolve HTTP-side config for an ArcadeDB vector store.
-
-        The vector store talks SQL over HTTP, not Cypher over Bolt, so
-        it doesn't share the Bolt driver cache. It needs:
-        ``http_url`` / ``user`` / ``password`` / ``database`` — derived
-        from explicit params first, then env vars
-        (``TRELLIS_ARCADEDB_HTTP_URL`` / ``_USER`` / ``_PASSWORD`` /
-        ``_DATABASE``), with reasonable defaults where possible.
-
-        If ``http_url`` is missing AND a sibling Bolt URI is present
-        (``uri`` param or ``TRELLIS_ARCADEDB_URI``), derive
-        ``http_url`` by swapping the Bolt port for the HTTP port on the
-        same host. Lets a single ``arcadedb:`` config block cover both
-        graph (Bolt) + vector (HTTP) backends without duplicating the
-        host.
-        """
-        import os  # noqa: PLC0415
-
-        from trellis.stores.arcadedb.base import (  # noqa: PLC0415
-            derive_http_url_from_bolt,
-        )
-
-        new_params = dict(params)
-        # http_url priority: explicit param > env var > derived from
-        # sibling Bolt URI.
-        http_url = new_params.get("http_url") or os.environ.get(
-            "TRELLIS_ARCADEDB_HTTP_URL"
-        )
-        if not http_url:
-            bolt_uri = new_params.get("uri") or os.environ.get("TRELLIS_ARCADEDB_URI")
-            if bolt_uri:
-                http_url = derive_http_url_from_bolt(bolt_uri)
-        if not http_url:
-            msg = (
-                "arcadedb vector backend requires 'http_url' in config or "
-                "TRELLIS_ARCADEDB_HTTP_URL env var (or a sibling Bolt 'uri' "
-                "to derive it from)"
-            )
-            raise ConfigError(msg, setting="stores.vector.http_url")
-
-        user = (
-            new_params.get("user") or os.environ.get("TRELLIS_ARCADEDB_USER") or "root"
-        )
-        password = new_params.get("password") or os.environ.get(
-            "TRELLIS_ARCADEDB_PASSWORD"
-        )
-        if not password:
-            msg = (
-                "arcadedb vector backend requires 'password' in config or "
-                "TRELLIS_ARCADEDB_PASSWORD env var"
-            )
-            raise ConfigError(msg, setting="stores.vector.password")
-        database = (
-            new_params.get("database")
-            or os.environ.get("TRELLIS_ARCADEDB_DATABASE")
-            or "trellis"
-        )
-        # Optional privileged pair for the DDL phase (LSM_VECTOR index +
-        # typed properties) — issue #193. The constructor falls back to
-        # the runtime pair when these stay None, so only forward them
-        # when actually configured.
-        admin_user = new_params.get("admin_user") or os.environ.get(
-            "TRELLIS_ARCADEDB_ADMIN_USER"
-        )
-        admin_password = new_params.get("admin_password") or os.environ.get(
-            "TRELLIS_ARCADEDB_ADMIN_PASSWORD"
-        )
-
-        # The vector store doesn't take a Bolt ``uri`` or ``driver`` —
-        # strip them so the constructor doesn't complain.
-        for key in ("uri", "driver", "driver_config", "ensure_database_exists"):
-            new_params.pop(key, None)
-        new_params["http_url"] = http_url
-        new_params["user"] = user
-        new_params["password"] = password
-        new_params["database"] = database
-        if admin_user:
-            new_params["admin_user"] = admin_user
-        if admin_password:
-            new_params["admin_password"] = admin_password
-        return new_params
 
     def _get(self, store_type: str) -> Any:
         if store_type not in self._cache:
@@ -1752,17 +1324,28 @@ class StoreRegistry:
         ``verify_connectivity`` call is the same Bolt-level round-trip
         regardless of which server is at the other end.
         """
-        if not self._bolt_drivers:
+        drivers: dict[tuple[str, str], Any] = {}
+        for shared_value in self._registry_shared.values():
+            if not isinstance(shared_value, dict):
+                continue
+            drivers.update(
+                {
+                    key: value
+                    for key, value in shared_value.items()
+                    if isinstance(key, tuple)
+                    and len(key) == _SHARED_DRIVER_KEY_PARTS
+                    and all(isinstance(part, str) for part in key)
+                    and hasattr(value, "verify_connectivity")
+                }
+            )
+        if not drivers:
             return []
-        from trellis.stores.bolt_opencypher.base import (  # noqa: PLC0415
-            verify_connectivity,
-        )
 
         failures: list[tuple[str, Exception]] = []
-        for (uri, user), driver in self._bolt_drivers.items():
+        for (uri, user), driver in drivers.items():
             label = f"bolt-driver:{uri}"
             try:
-                verify_connectivity(driver)
+                driver.verify_connectivity()
                 logger.debug("bolt_connectivity_ok", uri=uri, user=user)
             except Exception as exc:
                 # AGGREGATE: not a silent fallback. The exception is held
@@ -2218,20 +1801,19 @@ class StoreRegistry:
                     exc_info=True,
                 )
         self._cache.clear()
-        for key, driver in self._bolt_drivers.items():
+        for closer in self._registry_closers:
             try:
-                driver.close()
+                closer()
             except Exception:
                 # GRACEFUL-DEGRADATION: same shutdown-sweep rationale as
                 # the store loop above. We log with traceback so the
                 # operator can diagnose flaky driver shutdowns post-hoc.
                 logger.warning(
-                    "bolt_driver_close_failed",
-                    uri=key[0],
-                    user=key[1],
+                    "registry_resource_close_failed",
                     exc_info=True,
                 )
-        self._bolt_drivers.clear()
+        self._registry_closers.clear()
+        self._registry_shared.clear()
 
     def __enter__(self) -> StoreRegistry:
         """Enable use as a context manager — see :meth:`close`."""

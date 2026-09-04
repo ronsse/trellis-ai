@@ -42,7 +42,9 @@ from typing import Any
 
 import structlog
 
-from trellis.stores.arcadedb.base import execute_sql
+from trellis.errors import ConfigError
+from trellis.stores.arcadedb.base import derive_http_url_from_bolt, execute_sql
+from trellis.stores.base.registry import RegistryContext
 from trellis.stores.base.vector import VectorStore, format_vector_literal
 
 logger = structlog.get_logger(__name__)
@@ -68,6 +70,59 @@ class ArcadeDBVectorStore(VectorStore):
     registry can wire them together via a shared
     ``arcadedb-{http_url}-{user}-{database}`` cache.
     """
+
+    @classmethod
+    def prepare_registry_params(
+        cls,
+        ctx: RegistryContext,
+        store_type: str,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Resolve HTTP constructor parameters from config and environment."""
+        prepared = dict(params)
+        http_url = prepared.get("http_url") or ctx.env.get("TRELLIS_ARCADEDB_HTTP_URL")
+        if not http_url:
+            bolt_uri = prepared.get("uri") or ctx.env.get("TRELLIS_ARCADEDB_URI")
+            if bolt_uri:
+                http_url = derive_http_url_from_bolt(bolt_uri)
+        if not http_url:
+            msg = (
+                "arcadedb vector backend requires 'http_url' in config or "
+                "TRELLIS_ARCADEDB_HTTP_URL env var (or a sibling Bolt 'uri' "
+                "to derive it from)"
+            )
+            raise ConfigError(msg, setting=f"stores.{store_type}.http_url")
+
+        user = prepared.get("user") or ctx.env.get("TRELLIS_ARCADEDB_USER") or "root"
+        password = prepared.get("password") or ctx.env.get("TRELLIS_ARCADEDB_PASSWORD")
+        if not password:
+            msg = (
+                "arcadedb vector backend requires 'password' in config or "
+                "TRELLIS_ARCADEDB_PASSWORD env var"
+            )
+            raise ConfigError(msg, setting=f"stores.{store_type}.password")
+
+        for key in ("uri", "driver", "driver_config", "ensure_database_exists"):
+            prepared.pop(key, None)
+        prepared.update(
+            http_url=http_url,
+            user=user,
+            password=password,
+            database=prepared.get("database")
+            or ctx.env.get("TRELLIS_ARCADEDB_DATABASE")
+            or "trellis",
+        )
+        admin_user = prepared.get("admin_user") or ctx.env.get(
+            "TRELLIS_ARCADEDB_ADMIN_USER"
+        )
+        admin_password = prepared.get("admin_password") or ctx.env.get(
+            "TRELLIS_ARCADEDB_ADMIN_PASSWORD"
+        )
+        if admin_user:
+            prepared["admin_user"] = admin_user
+        if admin_password:
+            prepared["admin_password"] = admin_password
+        return prepared
 
     def __init__(
         self,
