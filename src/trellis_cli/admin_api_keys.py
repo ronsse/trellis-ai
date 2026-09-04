@@ -27,17 +27,18 @@ from typing import Any
 
 import structlog
 import typer
-from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 from trellis.auth import ALL_SCOPES, generate_api_key
 from trellis.core.error_sanitize import sanitize_error_message
 from trellis.stores.base.api_key import ApiKeyRecord
 from trellis_cli.exit_codes import EXIT_OK, EXIT_STORE, EXIT_VALIDATION
+from trellis_cli.output import build_console
 from trellis_cli.stores import get_api_key_store
 
 logger = structlog.get_logger(__name__)
-console = Console()
+console = build_console()
 
 api_keys_app = typer.Typer(
     no_args_is_help=True,
@@ -140,7 +141,9 @@ def create_api_key_command(
             )
         )
     else:
-        console.print(f"[bold]Created API key[/bold] {record.key_id} ({record.name})")
+        console.print(
+            f"[bold]Created API key[/bold] {escape(record.key_id)} ({record.name})"
+        )
         console.print(f"  scopes: {', '.join(record.scopes)}")
         console.print(f"  token:  [bold green]{token}[/bold green]")
         console.print(f"[yellow]{_SHOWN_ONCE_WARNING}[/yellow]")
@@ -173,7 +176,7 @@ def list_api_keys_command(*, output_format: str) -> None:
         table.add_column("revoked")
         for row in rows:
             table.add_row(
-                row["key_id"],
+                escape(row["key_id"]),
                 row["name"],
                 ",".join(row["scopes"]),
                 row["created_at"],
@@ -211,14 +214,15 @@ def revoke_api_key_command(*, key_id: str, output_format: str) -> None:
             )
         else:
             console.print(
-                f"[red]Cannot revoke {key_id!r}: {reason.replace('_', ' ')}.[/red]"
+                f"[red]Cannot revoke {escape(repr(key_id))}: "
+                f"{reason.replace('_', ' ')}.[/red]"
             )
         raise typer.Exit(code=EXIT_VALIDATION)
 
     if output_format == "json":
         print(json.dumps({"status": "revoked", "key_id": key_id}))
     else:
-        console.print(f"[green]Revoked API key {key_id}.[/green]")
+        console.print(f"[green]Revoked API key {escape(key_id)}.[/green]")
     raise typer.Exit(code=EXIT_OK)
 
 

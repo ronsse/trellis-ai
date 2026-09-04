@@ -846,9 +846,9 @@ def test_the_must_exit_helper_set_is_exactly_the_must_exit_helpers() -> None:
     """Vacuity guard, for the interprocedural half of the scan.
 
     ``ingest._fail``, ``policy._exit_on_refused_write``,
-    ``analyze._exit_on_refused_advisory_write`` and
-    ``main._render_boundary_failure`` are the shape: render on the
-    caller's surface, then exit below the branch. If this set silently
+    ``analyze._exit_on_refused_advisory_write`` and ``main``'s two
+    boundary renderers are the shape: render on the caller's surface, then
+    exit below the branch. If this set silently
     emptied, every command that delegates its exit to a helper would stop
     being checked, and nothing else in this file would notice.
 
@@ -860,9 +860,11 @@ def test_the_must_exit_helper_set_is_exactly_the_must_exit_helpers() -> None:
     that does, and nothing reports it. Naming all four also keeps the
     roster *derived*: it is recomputed from the tree here, so a new helper
     has to be admitted deliberately rather than inherited from a
-    hand-maintained list that drifts (the #443 shape). The fourth entry
-    arrived that way: #459's boundary was written, the roster went red,
-    and admitting it was a decision rather than an inheritance.
+    hand-maintained list that drifts (the #443 shape). The last two
+    entries arrived that way: #459's boundary was written, the roster went
+    red, and admitting it was a decision rather than an inheritance; #493
+    added its sibling and the roster went red again, which is the roster
+    working.
 
     Keyed by *defining* module. Since #491 a helper is also visible to
     every module that imports it, which is
@@ -874,12 +876,14 @@ def test_the_must_exit_helper_set_is_exactly_the_must_exit_helpers() -> None:
     assert helpers_by_module == {
         "analyze": {"_exit_on_refused_advisory_write"},
         "ingest": {"_fail"},
-        # The fourth is the shared boundary #459 added: same shape as the
-        # other three (render on the caller's surface, then exit below the
-        # format branch), reached from ``_BoundaryGroup.invoke`` rather
-        # than from a command body. Admitted deliberately, per this
-        # docstring — it exits on every path and defines no ``return``.
-        "main": {"_render_boundary_failure"},
+        # The last two are the shared boundary's renderers — #459's for
+        # ``TrellisError`` and #493's for ``PackAssemblyError``. Same
+        # shape as the other three (render on the caller's surface, then
+        # exit below the format branch), reached from
+        # ``_BoundaryGroup.invoke`` rather than from a command body. Both
+        # admitted deliberately, per this docstring: each exits on every
+        # path and defines no ``return``.
+        "main": {"_render_boundary_failure", "_render_pack_assembly_failure"},
         "policy": {"_exit_on_refused_write"},
     }, (
         f"the must-exit helper roster changed: {helpers_by_module}. An "

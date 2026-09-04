@@ -45,7 +45,6 @@ from typing import TYPE_CHECKING, Any
 import structlog
 import typer
 import yaml
-from rich.console import Console
 from rich.markup import escape
 
 from trellis.core.derived_metadata import apply_derived_metadata
@@ -85,7 +84,7 @@ from trellis_cli.analyze import (
 )
 from trellis_cli.config import get_config_dir, get_data_dir
 from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_STORE
-from trellis_cli.output import emit_json
+from trellis_cli.output import build_console, emit_json
 from trellis_cli.stores import (
     _get_registry,
     get_document_store,
@@ -106,7 +105,7 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 worker_app = typer.Typer(help="Run curation workers", no_args_is_help=True)
-console = Console()
+console = build_console()
 
 #: Auto-promote config lives in the main Trellis config under
 #: ``learning.auto_promote``. We read it from ``config.yaml`` in the config
@@ -351,7 +350,7 @@ def _render_text(report: Any, *, tuner_name: str) -> None:
             suffix += f"  ⟲ rolled back to {outcome.rolled_back_to}"
         console.print(
             f"  [{color}]{outcome.disposition}[/{color}] "
-            f"{outcome.proposal_id[:18]}…  {outcome.reason}{suffix}"
+            f"{escape(outcome.proposal_id[:18])}…  {outcome.reason}{suffix}"
         )
     if report.pending_manual:
         console.print(
@@ -947,8 +946,10 @@ def _render_cycle_text(result: CurateCycleResult) -> None:
     if result.skipped_stages:
         console.print(f"  [dim]skipped: {', '.join(result.skipped_stages)}[/dim]")
     if result.candidates_path:
-        console.print(f"  candidates: [cyan]{result.candidates_path}[/cyan]")
-        console.print(f"  decisions:  [cyan]{result.decisions_path}[/cyan]")
+        console.print(f"  candidates: [cyan]{escape(result.candidates_path)}[/cyan]")
+        console.print(
+            f"  decisions:  [cyan]{escape(str(result.decisions_path))}[/cyan]"
+        )
         console.print(
             "[dim]Promotion stays human-gated — review the decisions "
             "template, then run [bold]trellis curate promote-learning[/bold].[/dim]"
@@ -1327,7 +1328,7 @@ def enrich_cmd(
                 f"{len(candidates)} candidate(s) selected"
             )
             for cand in candidates:
-                console.print(f"  - {cand['doc_id']}")
+                console.print(f"  - {escape(cand['doc_id'])}")
         return
 
     summary = _run_batch_enrichment(
@@ -2007,5 +2008,6 @@ def _render_embed_traces_text(payload: dict[str, Any]) -> None:
         console.print("[yellow]  more traces remain — run again to continue.[/yellow]")
     for failure in payload["failures"]:
         console.print(
-            f"[red]  {failure['trace_id']}: {escape(str(failure['error']))}[/red]"
+            f"[red]  {escape(failure['trace_id'])}: "
+            f"{escape(str(failure['error']))}[/red]"
         )

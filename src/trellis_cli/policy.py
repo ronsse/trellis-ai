@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import Any
 
 import typer
-from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
 
@@ -17,10 +16,10 @@ from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
 from trellis.stores.policy_store import PolicyStore
 from trellis_cli.config import get_data_dir
 from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_STORE
-from trellis_cli.output import emit_json
+from trellis_cli.output import build_console, emit_json
 
 policy_app = typer.Typer(no_args_is_help=True)
-console = Console()
+console = build_console()
 
 
 def _get_policy_store() -> PolicyStore:
@@ -261,7 +260,7 @@ def list_policies(
         if p.scope.value:
             scope_str += f":{p.scope.value}"
         table.add_row(
-            p.policy_id[:12] + "…",
+            escape(p.policy_id[:12] + "…"),
             p.policy_type.value,
             scope_str,
             p.enforcement.value,
@@ -340,7 +339,7 @@ def show_policy(
 
     _render_degradation(degraded)
 
-    console.print(f"[bold]Policy:[/bold] {match.policy_id}")
+    console.print(f"[bold]Policy:[/bold] {escape(match.policy_id)}")
     console.print(f"  Type: {match.policy_type.value}")
     console.print(
         f"  Scope: {match.scope.level}"
@@ -406,7 +405,7 @@ def add_policy(
             {"status": "ok", "policy_id": policy.policy_id, "message": "Policy added"},
         )
     else:
-        console.print(f"[green]✓ Policy added:[/green] {policy.policy_id}")
+        console.print(f"[green]✓ Policy added:[/green] {escape(policy.policy_id)}")
         console.print(
             f"  {action} {operation} (scope: {scope_level}"
             + (f":{scope_value}" if scope_value else "")
@@ -436,7 +435,7 @@ def remove_policy(
         if output_format == "json":
             _print_json(_policy_not_found(policy_id))
         else:
-            console.print(f"[red]Policy not found: {policy_id}[/red]")
+            console.print(f"[red]Policy not found: {escape(policy_id)}[/red]")
         raise typer.Exit(code=EXIT_INTERNAL)
 
     try:
@@ -449,7 +448,7 @@ def remove_policy(
             {"status": "ok", "policy_id": match.policy_id, "message": "Policy removed"},
         )
     else:
-        console.print(f"[green]✓ Policy removed:[/green] {match.policy_id}")
+        console.print(f"[green]✓ Policy removed:[/green] {escape(match.policy_id)}")
 
 
 def _find_policy(store: PolicyStore, policy_id_or_prefix: str) -> Policy | None:

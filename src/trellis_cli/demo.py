@@ -9,7 +9,6 @@ from pathlib import Path
 
 import structlog
 import typer
-from rich.console import Console
 
 from trellis.core.ids import generate_ulid
 from trellis.extract.commands import result_to_batch
@@ -35,6 +34,7 @@ from trellis.schemas.trace import (
     TraceStep,
 )
 from trellis.stores.base.event_log import EventType
+from trellis_cli.output import build_console
 from trellis_cli.stores import (
     LOCAL_SOURCE_SYSTEM,
     _get_registry,
@@ -44,7 +44,7 @@ from trellis_cli.stores import (
 )
 
 demo_app = typer.Typer(no_args_is_help=True)
-console = Console()
+console = build_console()
 
 
 def _ts(days_ago: int, hours: int = 10) -> datetime:

@@ -41,10 +41,11 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 import typer
-from rich.console import Console
+from rich.markup import escape
 
 from trellis.stores.base.event_log import EventType
 from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_OK, EXIT_STORE
+from trellis_cli.output import build_console
 from trellis_cli.stores import _get_registry, get_event_log
 
 if TYPE_CHECKING:
@@ -52,7 +53,7 @@ if TYPE_CHECKING:
     from trellis_workers.code_authoring import Proposal
 
 logger = structlog.get_logger(__name__)
-console = Console()
+console = build_console()
 
 #: Default rolling window (in hours) for ``generate-proposals``. Matches
 #: :data:`trellis_workers.code_authoring.DEFAULT_WINDOW` but expressed in
@@ -218,9 +219,9 @@ def _print_generate_outcome_text(outcome: _GenerateOutcome) -> None:
     for row in outcome.drafted_proposals:
         source = row["source_file"] or "(unknown source)"
         console.print(
-            f"  [green]drafted[/green] {row['proposal_id'][:16]}… "
-            f"signature={row['cluster_signature'][:16]}… "
-            f"source={source} events={row['source_event_count']}"
+            f"  [green]drafted[/green] {escape(row['proposal_id'][:16])}… "
+            f"signature={escape(row['cluster_signature'][:16])}… "
+            f"source={escape(source)} events={row['source_event_count']}"
         )
 
 
@@ -362,10 +363,10 @@ def list_proposals_command(
         for row in rows:
             source = row["source_file"] or "(unknown source)"
             console.print(
-                f"  {row['proposal_id'][:16]}…  "
+                f"  {escape(row['proposal_id'][:16])}…  "
                 f"{row['generated_at']}  "
                 f"events={row['source_event_count']}  "
-                f"source={source}"
+                f"source={escape(source)}"
             )
     raise typer.Exit(code=EXIT_OK)
 
@@ -425,7 +426,8 @@ def show_proposal_command(
             )
         else:
             console.print(
-                f"[red]No PROPOSAL_DRAFTED event for proposal_id={proposal_id!r}.[/red]"
+                "[red]No PROPOSAL_DRAFTED event for proposal_id="
+                f"{escape(repr(proposal_id))}.[/red]"
             )
             console.print(
                 "[dim]Run 'trellis admin list-proposals' to see available IDs.[/dim]"

@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from tests.cli_output import plain
 from trellis_cli.extract_refresh import _property_diff
 from trellis_cli.main import app
 
@@ -138,6 +139,43 @@ class TestRefreshCliValidation:
         result = runner.invoke(app, ["extract", "refresh", "--type", "dbt-manifest"])
         assert result.exit_code == 1
         assert "--path" in result.stdout
+
+    def test_missing_type_path_reports_it_instead_of_crashing(
+        self, tmp_path: Path
+    ) -> None:
+        """The ``--type``/``--path`` arm renders a ``Path`` through Rich (#492).
+
+        ``rich.markup.escape`` takes a ``str`` and raises ``TypeError`` on a
+        ``Path``, and **mypy cannot see this branch**: ``source: str`` can
+        never be ``None``, so ``if source is not None`` is proved always
+        true and the whole ``else`` is skipped as unreachable. A deliberate
+        ``_bad: int = "x"`` planted here was reported by nothing. That makes
+        a behavioural test the only guard on this arm, and the escaping
+        sweep is exactly the kind of mechanical edit that would have landed
+        the crash.
+        """
+        runner.invoke(app, ["admin", "init"])
+        result = runner.invoke(
+            app,
+            [
+                "extract",
+                "refresh",
+                "--type",
+                "dbt-manifest",
+                "--path",
+                str(tmp_path / "nope.json"),
+            ],
+        )
+        assert result.exit_code == 1
+        assert not isinstance(result.exception, TypeError), result.exception
+        # Whitespace-collapsed, and the render is ``soft_wrap``: read raw,
+        # this assertion passes or fails on how long pytest's ``--basetemp``
+        # happens to be. It failed at 7411/7412 under
+        # ``--basetemp=/tmp/.../bt-final-plain`` and passed under the
+        # default, because Rich hard-wrapped the path to ``nope.jso\nn``.
+        rendered = " ".join(plain(result.stdout).split())
+        assert "Path not found" in rendered, rendered
+        assert "nope.json" in rendered, rendered
 
     def test_source_not_in_yaml_errors(self, tmp_path: Path) -> None:
         runner.invoke(app, ["admin", "init"])

@@ -54,7 +54,6 @@ from typing import TYPE_CHECKING
 
 import structlog
 import typer
-from rich.console import Console
 
 from trellis.classify.factory import (
     CLASSIFY_CONFIG_KEY,
@@ -82,7 +81,7 @@ from trellis.ops import ParameterRegistry
 from trellis.schemas.parameters import ParameterScope, ParameterSet
 from trellis_cli.analyze import _InMemoryParameterStore
 from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_OK
-from trellis_cli.output import emit_json
+from trellis_cli.output import build_console, emit_json
 from trellis_cli.stores import _get_registry
 
 if TYPE_CHECKING:
@@ -95,10 +94,10 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 classify_app = typer.Typer(no_args_is_help=True)
-console = Console()
+console = build_console()
 
 #: Warnings go to stderr so ``--format json`` stdout stays parseable.
-err_console = Console(stderr=True)
+err_console = build_console(stderr=True)
 
 
 @classify_app.callback()

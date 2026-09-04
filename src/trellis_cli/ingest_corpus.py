@@ -12,13 +12,14 @@ import json
 from pathlib import Path
 
 import typer
-from rich.console import Console
+from rich.markup import escape
 
 from trellis.core.error_sanitize import sanitized_error_payload
 from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_VALIDATION
+from trellis_cli.output import build_console
 from trellis_cli.stores import _get_registry
 
-console = Console()
+console = build_console()
 
 _ACTION_STYLES = {
     "new": "green",
@@ -94,7 +95,7 @@ def ingest_corpus(
                 json.dumps({"status": "error", "message": f"path not found: {path}"})
             )
         else:
-            console.print(f"[red]Path not found: {path}[/red]")
+            console.print(f"[red]Path not found: {escape(path)}[/red]")
         raise typer.Exit(code=EXIT_INTERNAL)
 
     extra_metadata = _parse_tags(tag, domain, output_format)
@@ -131,18 +132,19 @@ def ingest_corpus(
 
     counts = report.counts()
     verb = "Plan for" if dry_run else "Synced"
-    console.print(f"[green]{verb}[/green] {report.root} ({source_system})")
+    console.print(f"[green]{verb}[/green] {escape(str(report.root))} ({source_system})")
     for outcome in report.files:
         if outcome.action == "skip":
             continue
         style = _ACTION_STYLES[outcome.action]
         chunk_note = f" ({outcome.chunk_count} chunks)" if outcome.chunk_count else ""
         console.print(
-            f"  [{style}]{outcome.action:6}[/{style}] {outcome.relpath}{chunk_note}"
+            f"  [{style}]{outcome.action:6}[/{style}] "
+            f"{escape(outcome.relpath)}{chunk_note}"
         )
     for entry in report.pruned:
         pruned_name = entry.get("source_path") or entry["doc_id"]
-        console.print(f"  [red]prune [/red] {pruned_name}")
+        console.print(f"  [red]prune [/red] {escape(pruned_name)}")
     console.print(
         f"  new={counts['ingested']} updated={counts['updated']} "
         f"moved={counts['moved']} unchanged={counts['skipped_unchanged']} "
