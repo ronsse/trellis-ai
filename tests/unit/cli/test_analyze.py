@@ -1472,7 +1472,7 @@ class TestAdvisoryCommandsOnAStaleStore:
         advisories, and a seed engineered to clear the effect-size and
         sample floors would pin the generator's statistics rather than this
         command's handling of a refusal from below. The claim under test is
-        the surface's — a refusal arrives rendered, at exit 2, in both
+        the surface's — a refusal arrives rendered, at ``EXIT_STORE``, in both
         formats — and the store's own guard is pinned in
         ``tests/unit/stores/test_advisory_store.py``.
         """

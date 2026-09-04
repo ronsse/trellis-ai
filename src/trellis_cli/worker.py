@@ -651,7 +651,8 @@ def _record_refused_advisory_write(
 
     The nightly cron is the only *unattended* advisory writer, and it is
     the one that swallowed the refusal: ``trellis analyze``'s two advisory
-    commands exit 2 and ``POST /advisories/generate`` answers 409, but this
+    commands exit ``EXIT_STORE`` (``2`` until #489) and ``POST
+    /advisories/generate`` answers 409, but this
     stage reported the refusal into a ``status`` field and a structlog line
     and returned. A refusal that recurs every night therefore escalated
     nowhere at all — verified rather than assumed: the reference
@@ -1072,8 +1073,12 @@ def _exit_if_advisory_write_refused(result: CurateCycleResult | None) -> None:
     which the same damaged-file condition exits ``5`` from ``trellis policy
     list``. Both rules hold at ``EXIT_STORE`` — the advisory surfaces still
     agree with each other, and one root cause now has one code (#489). The
-    other two non-zero exits in this module stay ``EXIT_INTERNAL``; they
-    report a different thing.
+    module's other non-zero exits stay ``EXIT_INTERNAL``; they report a
+    different thing. (Not "the other two": there are eight such sites
+    across four functions — ``_build_auto_promote_policy_or_exit``,
+    ``_require_llm_client_or_exit``, ``capture_sessions_cmd`` and
+    ``embed_traces_cmd`` — and the count #448 wrote out had already gone
+    stale, so this states the rule rather than a number that rots.)
 
     This overturns the previous decision, recorded on
     :attr:`CurateCycleResult.status`, that the exit stays 0 because the

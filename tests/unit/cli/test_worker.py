@@ -2076,8 +2076,9 @@ class TestCurateSurvivesASecondWriter:
 class TestARefusedNightlyWriteEscalates:
     """#448 — the only *unattended* advisory writer was the silent one.
 
-    ``trellis analyze``'s two advisory commands exit 2 on a refused write
-    and ``POST /advisories/generate`` answers 409. This cron emitted JSON
+    ``trellis analyze``'s two advisory commands exit non-zero on a refused
+    write — ``EXIT_STORE`` since #489, ``2`` before it — and ``POST
+    /advisories/generate`` answers 409. This cron emitted JSON
     and returned 0, and emitted no event, so ``trellis analyze health``
     could not see it either — the two paths where a human is already
     watching shouted, and the one that runs at 03:30 unattended did not.
