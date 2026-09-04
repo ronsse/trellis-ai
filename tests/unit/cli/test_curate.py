@@ -467,6 +467,45 @@ class TestCuratePromoteLearning:
         assert data["promoted_count"] == 0
         assert data["results"] == []
 
+    def test_edge_summary_survives_markup_under_colour(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The table must not parse edge result text as Rich markup (#522)."""
+        candidates_path, decisions_path = _write_review_pair(
+            tmp_path, target_entity_ids=["doc:target"]
+        )
+        monkeypatch.setattr(
+            curate_cli,
+            "submit_learning_promotion",
+            lambda *_args, **_kwargs: {
+                "status": "promoted",
+                "node_id": "precedent:test",
+                "edges": [
+                    {
+                        "edge_kind": "s-[k]",
+                        "status": "ok-[v]",
+                    }
+                ],
+            },
+        )
+        force_colour(monkeypatch, curate_cli)
+
+        result = runner.invoke(
+            app,
+            [
+                "curate",
+                "promote-learning",
+                "--candidates",
+                str(candidates_path),
+                "--decisions",
+                str(decisions_path),
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        rendered = assert_coloured(result.stdout)
+        assert "s-[k]:ok-[v]" in rendered
+
 
 class TestSubmitPromotion:
     """Direct unit tests for the shared submit_learning_promotion helper.

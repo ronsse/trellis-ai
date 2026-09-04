@@ -181,7 +181,7 @@ def pack(
     else:
         console.print(f"[green]Pack assembled[/green] ({len(pack_result.items)} items)")
         console.print(f"  pack_id: {escape(pack_result.pack_id)}")
-        console.print(f"  Intent: {intent}")
+        console.print(f"  Intent: {intent}", markup=False, highlight=False)
         if domain:
             console.print(f"  Domain: {domain}")
         if agent:
@@ -308,7 +308,7 @@ def trace(
     else:
         console.print(f"[green]Trace[/green]: {escape(result.trace_id)}")
         console.print(f"  Source: {result.source}")
-        console.print(f"  Intent: {result.intent}")
+        console.print(f"  Intent: {result.intent}", markup=False, highlight=False)
         if result.outcome:
             console.print(f"  Outcome: {result.outcome.status}")
 
@@ -342,7 +342,7 @@ def entity(
         console.print(f"  Type: {result.get('node_type', 'unknown')}")
         props = result.get("properties", {})
         for k, v in props.items():
-            console.print(f"  {k}: {v}")
+            console.print(f"  {k}: {v}", markup=False, highlight=False)
 
 
 @retrieve_app.command()

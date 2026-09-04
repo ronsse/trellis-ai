@@ -671,6 +671,6 @@ def promote_learning(
             # sweep itself would have introduced — and mypy is blind to it
             # because ``entry`` is a ``dict[str, Any]``.
             escape(entry.get("node_id") or "-"),
-            edge_summary,
+            escape(edge_summary),
         )
     console.print(table)

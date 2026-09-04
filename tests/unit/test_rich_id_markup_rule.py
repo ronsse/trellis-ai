@@ -297,17 +297,41 @@ def _hoisted_handle_names(scope: ast.AST, handles: set[str]) -> set[str]:
     around a handle, and collapsing them would make the roster's
     ``partial_binding`` residue look resolved when it is not.
 
-    Still residue, named so the next reader does not have to rediscover
-    it: a **loop target** (``for target, msg in report.errors:``) binds no
-    ``Assign`` node, so a handle arriving by unpacking is invisible. There
-    is one such site — ``admin migrate-graph``'s error list, whose
-    ``target`` is the legacy graph key — and it is escaped by hand. A
-    bound closure was preferred to an unbounded one: the container's own
-    name (``errors``) says nothing about what it holds, so catching the
-    shape means tainting every loop variable in the CLI.
+    Loop targets need their own binding rule because they create no
+    :class:`ast.Assign`. All targets inherit taint when the iterable is a
+    bare handle-bearing name (``for line in doc_ids``). Keeping that
+    lexical bound matters: ``report.files`` is a collection of outcome
+    objects, not filesystem paths, and tainting the object would falsely
+    classify every rendered attribute on it as a handle. The live
+    ``migrate-graph`` shape is narrower and otherwise carries no lexical
+    clue: ``MigrationReport.errors`` stores ``(legacy_graph_key, message)``
+    tuples. For an ``*.errors`` iterable only the first unpacked target is
+    tainted; the message beside it remains prose. That bounds the widening
+    to the report contract instead of declaring every loop variable a
+    handle.
     """
     tainted: set[str] = set()
     for node in ast.walk(scope):
+        if isinstance(node, (ast.For, ast.AsyncFor)):
+            target_names = [
+                child.id
+                for child in ast.walk(node.target)
+                if isinstance(child, ast.Name)
+            ]
+            if isinstance(node.iter, ast.Name) and node.iter.id in handles:
+                tainted.update(name for name in target_names if not _is_id_shaped(name))
+            elif (
+                isinstance(node.target, (ast.Tuple, ast.List))
+                and node.target.elts
+                and "errors" in _names_read(node.iter)
+            ):
+                first_names = [
+                    child.id
+                    for child in ast.walk(node.target.elts[0])
+                    if isinstance(child, ast.Name)
+                ]
+                tainted.update(name for name in first_names if not _is_id_shaped(name))
+            continue
         if isinstance(node, ast.Assign):
             targets = [t.id for t in node.targets if isinstance(t, ast.Name)]
             value: ast.expr | None = node.value
@@ -706,6 +730,11 @@ console.print(plain)                                 # 28 ALLOWED: no handle in 
 console.print(escape(line))                          # 29 ALLOWED: escaped at the render
 console.print(f"{fmt(escape(msg), doc_id)}")         # 30 escape is not outermost
 console.print(f"  - {outcome.relpath}")              # 31 relpath has no underscore
+for loop_value in doc_ids:                           # 32 handle-bearing iterable
+    console.print(loop_value)                        # 33 loop target inherits handle
+for target, msg in report.errors:                    # 34 migrate-graph report shape
+    console.print(target)                            # 35 first tuple item is legacy key
+    console.print(msg)                               # 36 ALLOWED: message is prose
 """
 
 #: Read off :data:`_JUDGEMENTS` by hand. Line 24 is the newest and the one
@@ -732,8 +761,26 @@ console.print(f"  - {outcome.relpath}")              # 31 relpath has no undersc
 #: already safe — a rule that flagged it would be turned off by the first
 #: author it inconvenienced. Line 22 is the cost of reading keyword values
 #: at all: ``print``'s keywords are switches rather than content, and if
-#: scanning them ever starts flagging one, this is where it shows.
-_EXPECTED_JUDGEMENT_LINES = [4, 5, 6, 7, 8, 9, 10, 11, 12, 20, 24, 30, 31]
+#: scanning them ever starts flagging one, this is where it shows. Lines 33
+#: and 35 distinguish a handle-bearing iterable and migrate-graph's
+#: ``(legacy_graph_key, message)`` report from the prose target on line 36.
+_EXPECTED_JUDGEMENT_LINES = [
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    20,
+    24,
+    30,
+    31,
+    33,
+    35,
+]
 
 
 def test_the_scan_makes_the_judgements_this_rule_claims(tmp_path: Path) -> None:
