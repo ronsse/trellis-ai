@@ -1,0 +1,626 @@
+[
+  {
+    "issue": 526,
+    "title": "21 importorskip sites (~246 tests) execute in no workflow, and an importorskip reads as coverage while a deselected marker does not",
+    "verdict": "valid-now",
+    "wave": "W1-ci",
+    "dependencies": [],
+    "territories": [
+      "tests/",
+      ".github/workflows/"
+    ],
+    "review_sha": "f9ff32c933020e267f5560493f4739538d2b95f6",
+    "reviewed_at": "2026-09-04",
+    "status": "not-started",
+    "pr": "none"
+  },
+  {
+    "issue": 525,
+    "title": "`pytest.importorskip` is a second, unmarked way for a test to run in no workflow \u2014 ~246 tests, ~103 of them unmarked",
+    "verdict": "duplicate",
+    "wave": "W1-ci",
+    "dependencies": [
+      526
+    ],
+    "territories": [
+      "tests/",
+      ".github/workflows/"
+    ],
+    "review_sha": "f9ff32c933020e267f5560493f4739538d2b95f6",
+    "reviewed_at": "2026-09-04",
+    "status": "not-started",
+    "pr": "none"
+  },
+  {
+    "issue": 523,
+    "title": "Four test_boundary_errors tests fail under a sufficiently long --basetemp, because sanitize_error_message suppresses the message",
+    "verdict": "valid-now",
+    "wave": "W1-ci",
+    "dependencies": [],
+    "territories": [
+      "src/trellis/core/error_sanitize.py",
+      "tests/unit/test_boundary_errors.py"
+    ],
+    "review_sha": "f9ff32c933020e267f5560493f4739538d2b95f6",
+    "reviewed_at": "2026-09-04",
+    "status": "not-started",
+    "pr": "none"
+  },
+  {
+    "issue": 522,
+    "title": "Rich still eats operator output at five renders the #492 handle rule does not claim, and line-wrapping is a third corruption nobody swept",
+    "verdict": "valid-now",
+    "wave": "W1-ci",
+    "dependencies": [],
+    "territories": [
+      "src/trellis_cli/",
+      "tests/unit/test_rich_id_markup_rule.py"
+    ],
+    "review_sha": "f9ff32c933020e267f5560493f4739538d2b95f6",
+    "reviewed_at": "2026-09-04",
+    "status": "not-started",
+    "pr": "none"
+  },
+  {
+    "issue": 515,
+    "title": "Prompt caching is unused on the Anthropic path \u2014 measure the batch passes before building it (deferred from #500)",
+    "verdict": "valid-slice",
+    "wave": "W3-llm",
+    "dependencies": [],
+    "territories": [
+      "src/trellis/llm/providers/anthropic.py"
+    ],
+    "review_sha": "f9ff32c933020e267f5560493f4739538d2b95f6",
+    "reviewed_at": "2026-09-04",
+    "status": "not-started",
+    "pr": "none"
+  },
+  {
+    "issue": 514,
+    "title": "Structured outputs vs. five hand-rolled JSON-forcing prompt sites (deferred from #500)",
+    "verdict": "valid-slice",
+    "plan": "plans/514.md",
+    "wave": "W3-llm",
+    "dependencies": [],
+    "territories": [
+      "src/trellis_workers/",
+      "src/trellis/mcp/reconcile.py",
+      "src/trellis/extract/llm.py"
+    ],
+    "review_sha": "f9ff32c933020e267f5560493f4739538d2b95f6",
+    "reviewed_at": "2026-09-04",
+    "status": "not-started",
+    "pr": "none"
+  },
+  {
+    "issue": 503,
+    "title": "The advisory cap ranks category-blind, so ENTITY rows \u2014 the only ones carrying per-item provenance \u2014 can be starved by APPROACH rows",
+    "verdict": "blocked-signal",
+    "wave": "W5-retrieval",
+    "dependencies": [],
+    "territories": [
+      "src/trellis/retrieve/pack_builder.py"
+    ],
+    "review_sha": "f9ff32c933020e267f5560493f4739538d2b95f6",
+    "reviewed_at": "2026-09-04",
+    "status": "not-started",
+    "pr": "none"
+  },
+  {
+    "issue": 502,
+    "title": "Capping advisory delivery caps the fitness loop's input: an advisory outside the cap can never be scored, so it can never be suppressed",
+    "verdict": "blocked-decision",
+    "wave": "W4-retrieval",
+    "dependencies": [],
+    "territories": [
+      "src/trellis/retrieve/pack_builder.py",
+      "src/trellis/learning/effectiveness.py"
+    ],
+    "review_sha": "f9ff32c933020e267f5560493f4739538d2b95f6",
+    "reviewed_at": "2026-09-04",
+    "status": "not-started",
+    "pr": "none"
+  },
+  {
+    "issue": 494,
+    "title": "retrieve pack --quiet now emits chunk fragment and entity ids, changing what a shell pipeline receives",
+    "verdict": "valid-now",
+    "wave": "W2-docs",
+    "dependencies": [],
+    "territories": [
+      "src/trellis_cli/retrieve.py",
+      "docs/agent-guide/operations.md"
+    ],
+    "review_sha": "f9ff32c933020e267f5560493f4739538d2b95f6",
+    "reviewed_at": "2026-09-04",
+    "status": "not-started",
+    "pr": "none"
+  },
+  {
+    "issue": 478,
+    "title": "Evaluate OpenAI data-agent context contract against Trellis roadmap",
+    "verdict": "meta-board",
+    "wave": "W0-meta",
+    "dependencies": [],
+    "territories": [
+      "docs/design/"
+    ],
+    "review_sha": "f9ff32c933020e267f5560493f4739538d2b95f6",
+    "reviewed_at": "2026-09-04",
+    "status": "not-started",
+    "pr": "none"
+  },
+  {
+    "issue": 477,
+    "title": "PackBuilder contradiction invariant + last_verified",
+    "verdict": "blocked-decision",
+    "wave": "W4-retrieval",
+    "dependencies": [],
+    "territories": [
+      "src/trellis/retrieve/",
+      "src/trellis/schemas/",
+      "src/trellis/learning/pack_observations.py"
+    ],
+    "review_sha": "f9ff32c933020e267f5560493f4739538d2b95f6",
+    "reviewed_at": "2026-09-04",
+    "status": "not-started",
+    "pr": "none"
+  },
+  {
+    "issue": 476,
+    "title": "Enforce spaces (personal / work / household) at pack and mutation time",
+    "verdict": "blocked-decision",
+    "wave": "W4-retrieval",
+    "dependencies": [],
+    "territories": [
+      "src/trellis/retrieve/",
+      "src/trellis/mutate/"
+    ],
+    "review_sha": "f9ff32c933020e267f5560493f4739538d2b95f6",
+    "reviewed_at": "2026-09-04",
+    "status": "not-started",
+    "pr": "none"
+  },
+  {
+    "issue": 475,
+    "title": "Emit an Assumptions header on assembled packs",
+    "verdict": "valid-slice",
+    "wave": "W4-retrieval",
+    "dependencies": [],
+    "territories": [
+      "src/trellis/retrieve/pack_builder.py"
+    ],
+    "review_sha": "f9ff32c933020e267f5560493f4739538d2b95f6",
+    "reviewed_at": "2026-09-04",
+    "status": "not-started",
+    "pr": "none"
+  },
+  {
+    "issue": 474,
+    "title": "Confirm-to-save for global semantic memory (route save_memory through the executor)",
+    "verdict": "blocked-decision",
+    "wave": "W4-mutate",
+    "dependencies": [
+      360
+    ],
+    "territories": [
+      "src/trellis/mcp/server.py",
+      "src/trellis/mutate/"
+    ],
+    "review_sha": "f9ff32c933020e267f5560493f4739538d2b95f6",
+    "reviewed_at": "2026-09-04",
+    "status": "not-started",
+    "pr": "none"
+  },
+  {
+    "issue": 463,
+    "title": "Chunk rows decay off the import clock: CLASSIFY_METADATA_KEYS does not carry the source stamp",
+    "verdict": "blocked-signal",
+    "wave": "W4-retrieval",
+    "dependencies": [
+      417
+    ],
+    "territories": [
+      "src/trellis/classify/",
+      "src/trellis/retrieve/strategies.py"
+    ],
+    "review_sha": "f9ff32c933020e267f5560493f4739538d2b95f6",
+    "reviewed_at": "2026-09-04",
+    "status": "not-started",
+    "pr": "none"
+  },
+  {
+    "issue": 439,
+    "title": "The SDK/REST pack surfaces cannot report withholding, and hooks.for_intent reproduces #404 verbatim",
+    "verdict": "valid-now",
+    "plan": "plans/439.md",
+    "wave": "W2-api",
+    "dependencies": [
+      404
+    ],
+    "territories": [
+      "src/trellis_api/routes/retrieve.py",
+      "src/trellis_sdk/_format.py"
+    ],
+    "review_sha": "f9ff32c933020e267f5560493f4739538d2b95f6",
+    "reviewed_at": "2026-09-04",
+    "status": "not-started",
+    "pr": "none"
+  },
+  {
+    "issue": 405,
+    "title": "\ud83d\udccb Environment and infrastructure debt \u2014 the things that keep costing time",
+    "verdict": "meta-board",
+    "wave": "W0-meta",
+    "dependencies": [],
+    "territories": [
+      "docs/",
+      ".github/",
+      "scripts/"
+    ],
+    "review_sha": "f9ff32c933020e267f5560493f4739538d2b95f6",
+    "reviewed_at": "2026-09-04",
+    "status": "not-started",
+    "pr": "none"
+  },
+  {
+    "issue": 375,
+    "title": "The graph axis has no query-relevant candidate path: all three seed producers are empty on the write path",
+    "verdict": "blocked-signal",
+    "wave": "W5-retrieval",
+    "dependencies": [],
+    "territories": [
+      "src/trellis/extract/",
+      "src/trellis/mutate/"
+    ],
+    "review_sha": "f9ff32c933020e267f5560493f4739538d2b95f6",
+    "reviewed_at": "2026-09-04",
+    "status": "not-started",
+    "pr": "none"
+  },
+  {
+    "issue": 371,
+    "title": "GraphSearch ignores its query in production: the graph axis is a recency feed, not a search",
+    "verdict": "blocked-signal",
+    "wave": "W5-retrieval",
+    "dependencies": [],
+    "territories": [
+      "src/trellis/retrieve/strategies.py"
+    ],
+    "review_sha": "f9ff32c933020e267f5560493f4739538d2b95f6",
+    "reviewed_at": "2026-09-04",
+    "status": "not-started",
+    "pr": "none"
+  },
+  {
+    "issue": 369,
+    "title": "Name-alias resolution stops learning past DEFAULT_NAME_SCAN_LIMIT, and starts answering wrongly",
+    "verdict": "valid-now",
+    "plan": "plans/369.md",
+    "wave": "W2-mutate",
+    "dependencies": [],
+    "territories": [
+      "src/trellis/mutate/",
+      "src/trellis_cli/"
+    ],
+    "review_sha": "f9ff32c933020e267f5560493f4739538d2b95f6",
+    "reviewed_at": "2026-09-04",
+    "status": "not-started",
+    "pr": "none"
+  },
+  {
+    "issue": 365,
+    "title": "A retrieval that fails in transport is invisible to Trellis's own health reporting",
+    "verdict": "blocked-signal",
+    "wave": "W5-ops",
+    "dependencies": [
+      344
+    ],
+    "territories": [
+      "src/trellis/ops/",
+      "src/trellis/mcp/"
+    ],
+    "review_sha": "f9ff32c933020e267f5560493f4739538d2b95f6",
+    "reviewed_at": "2026-09-04",
+    "status": "not-started",
+    "pr": "none"
+  },
+  {
+    "issue": 364,
+    "title": "42% of injected tokens get no verdict, so useful_token_fraction is computed over 58% of what it describes",
+    "verdict": "stale-fixed",
+    "wave": "W5-ops",
+    "dependencies": [
+      359
+    ],
+    "territories": [
+      "src/trellis/feedback/",
+      "src/trellis/mcp/server.py"
+    ],
+    "review_sha": "f9ff32c933020e267f5560493f4739538d2b95f6",
+    "reviewed_at": "2026-09-04",
+    "status": "closure-ready",
+    "pr": "389"
+  },
+  {
+    "issue": 360,
+    "title": "The governed-pipeline hard rule does not hold for the document and vector planes",
+    "verdict": "valid-now",
+    "plan": "plans/360.md",
+    "wave": "W2-mutate",
+    "dependencies": [],
+    "territories": [
+      "src/trellis/mutate/",
+      "src/trellis/mcp/server.py",
+      "src/trellis/core/vector_metadata.py"
+    ],
+    "review_sha": "f9ff32c933020e267f5560493f4739538d2b95f6",
+    "reviewed_at": "2026-09-04",
+    "status": "not-started",
+    "pr": "none"
+  },
+  {
+    "issue": 356,
+    "title": "tests/unit/stores/ runs in no workflow, and cannot simply be swept in: test_neo4j_vector.py needs the e2e suite's SEARCH-capability probe",
+    "verdict": "valid-now",
+    "wave": "W1-ci",
+    "dependencies": [
+      351
+    ],
+    "territories": [
+      "tests/unit/stores/",
+      ".github/workflows/live-infra.yml"
+    ],
+    "review_sha": "f9ff32c933020e267f5560493f4739538d2b95f6",
+    "reviewed_at": "2026-09-04",
+    "status": "not-started",
+    "pr": "none"
+  },
+  {
+    "issue": 351,
+    "title": "ArcadeDB graph contract never runs in CI \u2014 the blessed substrate has no service container in any workflow",
+    "verdict": "valid-now",
+    "wave": "W1-ci",
+    "dependencies": [],
+    "territories": [
+      "tests/unit/stores/contracts/test_arcadedb_graph_contract.py",
+      ".github/workflows/live-infra.yml"
+    ],
+    "review_sha": "f9ff32c933020e267f5560493f4739538d2b95f6",
+    "reviewed_at": "2026-09-04",
+    "status": "not-started",
+    "pr": "none"
+  },
+  {
+    "issue": 350,
+    "title": "PgVectorStore cannot create its own vector extension: register_vector runs as the pool's on_connect, so _init_schema is never reached",
+    "verdict": "valid-now",
+    "wave": "W1-ci",
+    "dependencies": [],
+    "territories": [
+      "src/trellis/stores/pgvector/"
+    ],
+    "review_sha": "f9ff32c933020e267f5560493f4739538d2b95f6",
+    "reviewed_at": "2026-09-04",
+    "status": "not-started",
+    "pr": "none"
+  },
+  {
+    "issue": 342,
+    "title": "Exercise the promote\u2192review\u2192serve chain in evals (decided: no production min_support=1 flag)",
+    "verdict": "valid-slice",
+    "plan": "plans/342.md",
+    "wave": "W5-learning",
+    "dependencies": [],
+    "territories": [
+      "tests/integration/loops/test_learning_promote_loop.py"
+    ],
+    "review_sha": "f9ff32c933020e267f5560493f4739538d2b95f6",
+    "reviewed_at": "2026-09-04",
+    "status": "not-started",
+    "pr": "none"
+  },
+  {
+    "issue": 306,
+    "title": "Observer-agent auto-capture via local model (tool-use granularity)",
+    "verdict": "blocked-signal",
+    "wave": "W5-workers",
+    "dependencies": [
+      255
+    ],
+    "territories": [
+      "src/trellis_workers/",
+      "docs/design/"
+    ],
+    "review_sha": "f9ff32c933020e267f5560493f4739538d2b95f6",
+    "reviewed_at": "2026-09-04",
+    "status": "not-started",
+    "pr": "none"
+  },
+  {
+    "issue": 275,
+    "title": "\ud83d\udcca Productionization status \u2014 deployer-#2 board",
+    "verdict": "meta-board",
+    "wave": "W0-meta",
+    "dependencies": [],
+    "territories": [
+      "docs/design/implementation-roadmap.md",
+      "ronsse/skynet-hub"
+    ],
+    "review_sha": "f9ff32c933020e267f5560493f4739538d2b95f6",
+    "reviewed_at": "2026-09-04",
+    "status": "not-started",
+    "pr": "none"
+  },
+  {
+    "issue": 264,
+    "title": "North star: log every judged memory operation as a training example",
+    "verdict": "valid-now",
+    "plan": "plans/264.md",
+    "wave": "W2-learning",
+    "dependencies": [],
+    "territories": [
+      "src/trellis/stores/base/event_log.py",
+      "src/trellis/extract/",
+      "src/trellis/mcp/reconcile.py"
+    ],
+    "review_sha": "f9ff32c933020e267f5560493f4739538d2b95f6",
+    "reviewed_at": "2026-09-04",
+    "status": "not-started",
+    "pr": "none"
+  },
+  {
+    "issue": 261,
+    "title": "Promote-to-standing advisory: graduate task-invariant items out of retrieval",
+    "verdict": "blocked-signal",
+    "wave": "W5-learning",
+    "dependencies": [
+      255
+    ],
+    "territories": [
+      "src/trellis/retrieve/advisory_generator.py"
+    ],
+    "review_sha": "f9ff32c933020e267f5560493f4739538d2b95f6",
+    "reviewed_at": "2026-09-04",
+    "status": "not-started",
+    "pr": "none"
+  },
+  {
+    "issue": 257,
+    "title": "ADR: ingest normalization boundary \u2014 clients pre-process, core caps format handlers",
+    "verdict": "valid-now",
+    "wave": "W2-docs",
+    "dependencies": [],
+    "territories": [
+      "docs/design/adr-corpus-ingestion.md",
+      "docs/design/implementation-roadmap.md"
+    ],
+    "review_sha": "f9ff32c933020e267f5560493f4739538d2b95f6",
+    "reviewed_at": "2026-09-04",
+    "status": "not-started",
+    "pr": "none"
+  },
+  {
+    "issue": 256,
+    "title": "Extract Bolt backends (ArcadeDB + Neo4j) to a trellis-stores-bolt plugin",
+    "verdict": "valid-now",
+    "plan": "plans/256.md",
+    "wave": "W2-stores",
+    "dependencies": [],
+    "territories": [
+      "src/trellis/stores/arcadedb/",
+      "src/trellis/stores/neo4j/",
+      "src/trellis/stores/bolt_opencypher/"
+    ],
+    "review_sha": "f9ff32c933020e267f5560493f4739538d2b95f6",
+    "reviewed_at": "2026-09-04",
+    "status": "not-started",
+    "pr": "none"
+  },
+  {
+    "issue": 250,
+    "title": "Operator follow-ups: AuraDB live-test credential hygiene + local .env (manual, needs 1Password/Neo4j console)",
+    "verdict": "blocked-operator",
+    "wave": "W0-ops",
+    "dependencies": [],
+    "territories": [
+      "Neo4j Aura console",
+      "1Password"
+    ],
+    "review_sha": "f9ff32c933020e267f5560493f4739538d2b95f6",
+    "reviewed_at": "2026-09-04",
+    "status": "not-started",
+    "pr": "none"
+  },
+  {
+    "issue": 208,
+    "title": "Direct-write BI metadata smoke blocked by missing ArcadeDB secret and expired AWS SSO",
+    "verdict": "external",
+    "wave": "W0-external",
+    "dependencies": [],
+    "territories": [
+      "consumer-kg repo"
+    ],
+    "review_sha": "f9ff32c933020e267f5560493f4739538d2b95f6",
+    "reviewed_at": "2026-09-04",
+    "status": "not-started",
+    "pr": "none"
+  },
+  {
+    "issue": 203,
+    "title": "Add graph-safe query-history scouting before curation",
+    "verdict": "blocked-decision",
+    "wave": "W6-query-history",
+    "dependencies": [
+      201
+    ],
+    "territories": [
+      "src/trellis_workers/",
+      "docs/design/"
+    ],
+    "review_sha": "f9ff32c933020e267f5560493f4739538d2b95f6",
+    "reviewed_at": "2026-09-04",
+    "status": "not-started",
+    "pr": "none"
+  },
+  {
+    "issue": 202,
+    "title": "Guard query-history matching against broad domain keyword false positives",
+    "verdict": "blocked-decision",
+    "wave": "W6-query-history",
+    "dependencies": [],
+    "territories": [
+      "docs/design/"
+    ],
+    "review_sha": "f9ff32c933020e267f5560493f4739538d2b95f6",
+    "reviewed_at": "2026-09-04",
+    "status": "not-started",
+    "pr": "none"
+  },
+  {
+    "issue": 201,
+    "title": "Add BI/dashboard metadata as a graph-safe usage source",
+    "verdict": "blocked-signal",
+    "wave": "W6-query-history",
+    "dependencies": [],
+    "territories": [
+      "src/trellis_workers/extract/"
+    ],
+    "review_sha": "f9ff32c933020e267f5560493f4739538d2b95f6",
+    "reviewed_at": "2026-09-04",
+    "status": "not-started",
+    "pr": "none"
+  },
+  {
+    "issue": 200,
+    "title": "Separate pipeline operational query history from analyst usage curation",
+    "verdict": "blocked-decision",
+    "wave": "W6-query-history",
+    "dependencies": [],
+    "territories": [
+      "docs/design/adr-query-history-promotion.md"
+    ],
+    "review_sha": "f9ff32c933020e267f5560493f4739538d2b95f6",
+    "reviewed_at": "2026-09-04",
+    "status": "not-started",
+    "pr": "none"
+  },
+  {
+    "issue": 194,
+    "title": "[security] Enforce data classification on retrieval and mutation paths",
+    "verdict": "blocked-decision",
+    "wave": "W4-security",
+    "dependencies": [
+      360
+    ],
+    "territories": [
+      "src/trellis/mutate/",
+      "src/trellis/retrieve/",
+      "docs/design/adr-rest-api-security-model.md"
+    ],
+    "review_sha": "f9ff32c933020e267f5560493f4739538d2b95f6",
+    "reviewed_at": "2026-09-04",
+    "status": "not-started",
+    "pr": "none"
+  }
+]
