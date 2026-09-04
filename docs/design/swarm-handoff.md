@@ -8,11 +8,18 @@
 > [`implementation-roadmap.md`](./implementation-roadmap.md) (**authoritative** — when it
 > and the backlog disagree, the roadmap wins).
 >
-> Last updated 2026-08-29 at `9ed98f7`.
+> Last updated 2026-09-04 at `e4e7604` (PR [#527](https://github.com/ronsse/trellis-ai/pull/527) — dated issue corpus).
 
 ## 1. State
 
-`main` = `9ed98f7`. **The prod containers on skynet do _not_ run current `main`** — §1.2.
+`main` = `e4e7604`. **No implementation work in flight** from this program — ask
+`gh pr list --state open` and the [dated corpus](../issues/reviews/2026-09-04/README.md)
+for what is dispatchable. **The prod containers on skynet do _not_ run current `main`** — §1.2.
+
+Landed 2026-09-04: PR [#527](https://github.com/ronsse/trellis-ai/pull/527) — adversarial
+open-issue corpus at [`docs/issues/reviews/2026-09-04/`](../issues/reviews/2026-09-04/)
+(40 briefs, `manifest.json`, seven implementation plans). The branch
+`handoff/issue-sweep-2026-09-04` was absorbed into that PR and is **safe to delete**.
 
 Landed 2026-08-26: #340, #341, #304, **noise exclusion actually holding** (#343), #328,
 **attribution decomposed + join key restored** (#344), #346.
@@ -48,10 +55,13 @@ file that flatters its author.
 
 ### 1.1 In flight
 
-| branch | item |
-|---|---|
-| `swarm/383-advisory-generator` | [#383](https://github.com/ronsse/trellis-ai/issues/383) + [#385](https://github.com/ronsse/trellis-ai/issues/385) — carries a **WIP commit that does not import**; resume, do not restart |
-| `swarm/388-chunk-sync-and-order` | [#388](https://github.com/ronsse/trellis-ai/issues/388) (third #338 site) + the six remaining ascending-default event reads |
+**Nothing.** The table that lived here was removed after going 4/4 stale within 24 hours.
+Do not restart work on `swarm/383-advisory-generator` or `swarm/388-chunk-sync-and-order` —
+those branches predate current `main` and are not active program work.
+
+**Ask `gh pr list --state open` and `git log origin/main` instead.** Those cannot go stale.
+This document carries only what a merge leaves behind that *is* durable — the ledger entry,
+the filed follow-up, the §5 trap. **Mechanism does not rot; status does.**
 
 ### 1.0 What the 2026-08-28 wave actually found
 
@@ -140,10 +150,14 @@ Granted by the operator 2026-08-26. **Do not widen it on your own initiative.**
 
 - **Reversible in git → yours.** Approach, naming, module boundaries, scope splits, test
   strategy, fix-now-vs-file-an-issue.
-- **GitHub state → yours.** Open/close/label issues, comment on PRs, reorganize milestones.
-  One guard: **before closing an issue, grep the linked ADR for its own Status/Decision
-  line.** Closing an issue with an unresolved owner gate is how #312 hid one for three
-  days — gate labels are only read on *open* issues.
+- **GitHub state → yours**, when the token has permission. Open/close/label issues,
+  comment on PRs, reorganize milestones. **Execution blocker:** the configured personal
+  token currently lacks GitHub **Issues write** permission — agents can read issues and
+  open PRs, but cannot apply corpus disposition closes (e.g. #525 duplicate, #364
+  closure-ready) until that is restored. One guard: **before closing an issue, grep the
+  linked ADR for its own Status/Decision line.** Closing an issue with an unresolved
+  owner gate is how #312 hid one for three days — gate labels are only read on *open*
+  issues.
 - **Never yours, at any confidence:** publishing (PyPI, releases), deleting or redacting
   production data, credential operations, spend, force-push or history rewrite, repo
   settings.
@@ -279,13 +293,45 @@ merge its own work.
 
 ## 6. The queue
 
-Dependency-ordered. Items are sized for one subagent and one PR. Full specs in
-[`autonomous-backlog.md`](./autonomous-backlog.md).
+**Authoritative scheduling view:**
+[`docs/issues/reviews/2026-09-04/README.md`](../issues/reviews/2026-09-04/README.md) +
+[`manifest.json`](../issues/reviews/2026-09-04/manifest.json) + per-issue `#NNN.md` briefs.
+Seven issues carry optional plans under [`plans/`](../issues/reviews/2026-09-04/plans/).
+[`autonomous-backlog.md`](./autonomous-backlog.md) holds the historical wave record and
+measurements — **not** a copy of the 40 briefs.
 
-**Waves 1, 1b and 2 are closed**, along with A3 and C1. What remains, roughly in
-dependency order:
+**Snapshot:** 40 open on GitHub (2026-09-04 review). [#525](https://github.com/ronsse/trellis-ai/issues/525)
+is **duplicate/closure-ready** (track inside #526); [#364](https://github.com/ronsse/trellis-ai/issues/364)
+is **stale-fixed/closure-ready** (PR #389) — do not dispatch either until GitHub reflects
+the close.
 
-> **Two items were removed from this list because they were *answered*, not done, and a
+### Dispatch order (from corpus adjudication)
+
+**Early parallel** (disjoint territories): **#360 PR1**, **#256 seam**, **#369**, **#439**,
+**#342**, **#514**.
+
+- **#264 PR-A** after or parallel with the above if no file collision; **#264 PR-B**
+  (derived roster) **after #514** when `generate_call_sites` exists.
+- **Serialize #360 PR2 with #264 PR-A** — `save_memory` overlap.
+
+**CI lane** — serial where workflows collide: **#526 → #351 → #356 → #350**.
+
+### Persistent blockers
+
+| Issue | Note |
+|---|---|
+| [#371](https://github.com/ronsse/trellis-ai/issues/371) | Behaviorally open — recency feed until a seeding path exists |
+| [#375](https://github.com/ronsse/trellis-ai/issues/375) | Mechanisms refuted; do not dispatch the obvious seeding fix |
+| [#503](https://github.com/ronsse/trellis-ai/issues/503) | blocked-signal — wait for item-scoped advisories |
+| [#208](https://github.com/ronsse/trellis-ai/issues/208) | external — re-home |
+| [#250](https://github.com/ronsse/trellis-ai/issues/250) | blocked-operator |
+| [#201](https://github.com/ronsse/trellis-ai/issues/201) / [#261](https://github.com/ronsse/trellis-ai/issues/261) / [#306](https://github.com/ronsse/trellis-ai/issues/306) | blocked-signal |
+| [#194](https://github.com/ronsse/trellis-ai/issues/194) | blocked-decision — practically depends on **#360**, not #256 |
+
+**Waves 1, 1b and 2 are closed**, along with A3 and C1. What follows is **historical
+context** — do not dispatch from it without checking the corpus.
+
+> **Two items were removed from the old list because they were *answered*, not done, and a
 > stale queue is how an agent gets dispatched to build something already rejected.**
 >
 > - **A3 / #336** — closed by [#380](https://github.com/ronsse/trellis-ai/pull/380). The
@@ -301,62 +347,54 @@ dependency order:
 >   `max_items` with 436 candidates unserved). **Do not re-propose it without new evidence.**
 >   The live remainder is #385, the documents *list view*, which is a display defect.
 
+**Historical dependency sketch (superseded by corpus dispatch order):**
+
 1. **[#360](https://github.com/ronsse/trellis-ai/issues/360) — govern the document and
-   vector planes. ← the top unblocked feature item.** Panel-decided (unanimous, option B)
-   and recorded as ledger **T-3**; implementation not started. #357's worker-local handler
-   is the natural seed. ~~Gains most of its point *after* C1, since stage 2 is a no-op until
-   a gate is wired.~~ **That caveat is satisfied:** C1 merged `1e6c66e`, so Stage 2 now runs
-   on every surface and a governed document/vector write would actually be policy-checked.
-   Nothing else in this queue blocks it.
+   vector planes.** Panel-decided (unanimous, option B) and recorded as ledger **T-3**.
+   C1 merged `1e6c66e`, so Stage 2 now runs on every surface.
 2. **C2 → C3 → C4** — [#256](https://github.com/ronsse/trellis-ai/issues/256) Bolt plugin
-   extraction (halves #194's enforcement surface, so it precedes it),
-   [#194](https://github.com/ronsse/trellis-ai/issues/194) classification enforcement,
-   [#264](https://github.com/ronsse/trellis-ai/issues/264) judged-memory logging (measured
-   as 2 of 5 stages missing emitters).
+   extraction, [#194](https://github.com/ronsse/trellis-ai/issues/194) classification
+   enforcement (**practically blocked on #360 + owner decision, not #256**),
+   [#264](https://github.com/ronsse/trellis-ai/issues/264) judged-memory logging.
 3. **D1–D4** query-history curation, then **E1** ([#306](https://github.com/ronsse/trellis-ai/issues/306)) / **E2**.
 
 **There is deliberately no in-flight table here.** One existed for a day and was **4/4
-wrong** within 24 hours — every lane it listed as blocked had merged, and one row still
-instructed an agent not to merge a PR that was already on `main`. An agent reading a stale
-in-flight row does the *opposite* of the right thing, which is strictly worse than reading
-nothing.
-
-**Ask `gh pr list --state open` and `git log origin/main` instead.** Those cannot go stale.
-This section carries only what a merge leaves behind that *is* durable — the ledger entry,
-the filed follow-up, the §5 trap. That is the general rule this document now follows:
-**mechanism does not rot; status does.** Write down why something is true, and link to the
-live source for whether it currently holds.
+wrong** within 24 hours. §1.1 records that rule.
 
 The four lanes dispatched 2026-08-30/31 are all merged; their durable residue is ledger
 **T-4** and **T-5**, issues [#438](https://github.com/ronsse/trellis-ai/issues/438) /
 [#439](https://github.com/ronsse/trellis-ai/issues/439) /
 [#440](https://github.com/ronsse/trellis-ai/issues/440), and the §5 trap rows.
 
-**Measurement-integrity issues filed 2026-08-27, all unstarted.** These are cheap and they
-protect every number above, so they are worth interleaving rather than queueing behind
-feature work:
+**Measurement-integrity issues** — see corpus briefs; [#364](https://github.com/ronsse/trellis-ai/issues/364)
+is closure-ready (PR #389), not dispatchable:
 
 | issue | what is wrong |
 |---|---|
 | [#362](https://github.com/ronsse/trellis-ai/issues/362) | `get_items` fetch cost is off-book, so the number that would justify index mode cannot be measured |
 | [#363](https://github.com/ronsse/trellis-ai/issues/363) | `TOKEN_TRACKED.pack_id` coverage 0/33 — **blocked on a container rebuild, not on code** (§1.2) |
-| [#364](https://github.com/ronsse/trellis-ai/issues/364) | 42% of injected tokens get no verdict, so `useful_token_fraction` is a lower bound over 58% of what it describes |
-| [#365](https://github.com/ronsse/trellis-ai/issues/365) | a retrieval that fails in transport is invisible — `write.rejected` exists for writes, nothing equivalent for a read that never arrives |
+| [#364](https://github.com/ronsse/trellis-ai/issues/364) | **closure-ready** — PR #389 shipped judged coverage beside the ratio |
+| [#365](https://github.com/ronsse/trellis-ai/issues/365) | a retrieval that fails in transport is invisible |
 
-**CI coverage holes**, all filed, none started:
-[#350](https://github.com/ronsse/trellis-ai/issues/350) (pgvector cannot create its own
-extension), [#351](https://github.com/ronsse/trellis-ai/issues/351) (the *blessed* ArcadeDB
-graph contract runs in no workflow), [#356](https://github.com/ronsse/trellis-ai/issues/356)
-(`tests/unit/stores/` runs nowhere and cannot simply be swept in).
+**CI coverage holes** — dispatch via corpus CI lane (#526 → #351 → #356 → #350):
+[#350](https://github.com/ronsse/trellis-ai/issues/350) (pgvector extension bootstrap),
+[#351](https://github.com/ronsse/trellis-ai/issues/351) (ArcadeDB graph contract — still
+unwired in any workflow),
+[#356](https://github.com/ronsse/trellis-ai/issues/356) (`tests/unit/stores/` unwired).
+Note: `live-infra.yml` runs Postgres + Neo4j graph contracts and the pgvector vector
+contract on **pull requests and push to `main`** — not push-to-main only.
 
-**File territories** — dispatch these in parallel, they do not collide:
+**File territories** — from corpus collision map; dispatch parallel only when territories
+do not overlap:
 
-| Lane | Owns |
+| Territory | Issues (sample) |
 |---|---|
-| retrieval | `retrieve/`, `stores/*/vector*`, contract suites |
-| feedback/learning | `feedback/`, `learning/`, `ops/write_health.py` |
-| mutation/policy | `mutate/`, `core/` |
-| extraction/workers | `extract/`, `trellis_workers/` |
+| `tests/`, CI workflows | #526, #356, #351, #350, #523, #522 |
+| `src/trellis/retrieve/` | #439, #503, #371, #375, #463 |
+| `src/trellis/mutate/` | #360, #369, #474, #194 |
+| `src/trellis/llm/` | #514, #515 |
+| `src/trellis/stores/` | #350, #351, #256 |
+| `src/trellis/learning/` | #264, #342, #261 |
 
 ## 7. Dispatch template
 
