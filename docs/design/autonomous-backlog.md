@@ -7,11 +7,13 @@
 > [`implementation-roadmap.md`](./implementation-roadmap.md) §3.H — **not a second
 > source of truth.** Where they disagree, the roadmap wins.
 >
-> Created 2026-08-26; the live queue was reconciled 2026-09-04 against the dated issue
-> corpus ([#527](https://github.com/ronsse/trellis-ai/pull/527)). Item statuses live in
-> the GitHub issues, not here; this file records decomposition, sequencing, and the
-> autonomy class of each item. **Read [Current queue](#current-queue--2026-09-04)
-> first** — the Wave sections below it are the accumulated record, not the schedule.
+> Created 2026-08-26; the live queue was reconciled 2026-09-04 using the dated issue
+> corpus ([#527](https://github.com/ronsse/trellis-ai/pull/527)) as *evidence*, not as
+> authority. **Authority order:** [`implementation-roadmap.md`](./implementation-roadmap.md)
+> (requirements/status) → **GitHub issue** (live state) → this file (scheduling derived
+> from the first two). The corpus is adversarial review evidence and optional
+> implementation aids only. **Read [Current queue](#current-queue--2026-09-04) first** —
+> the Wave sections below are the accumulated record, not the schedule.
 
 ## How an agent runs an item
 
@@ -63,18 +65,22 @@ Every item is tagged with who decides when a fork appears mid-item.
 
 ## Current queue — 2026-09-04
 
-> **Authoritative scheduling view:**
+> **Derived scheduling view** — constrained by
+> [`implementation-roadmap.md`](./implementation-roadmap.md) and live GitHub issues.
+> **Evidence and aids** (not authority):
 > [`docs/issues/reviews/2026-09-04/README.md`](../issues/reviews/2026-09-04/README.md),
-> [`manifest.json`](../issues/reviews/2026-09-04/manifest.json), and per-issue briefs
-> `#NNN.md`. Seven issues carry optional implementation plans under
-> [`plans/`](../issues/reviews/2026-09-04/plans/) (#256, #264, #342, #360, #369, #439,
-> #514) — aids for dispatch, not a second source of truth. **Do not copy the 40 briefs
-> here;** read the corpus for verdict, evidence, and close criteria before dispatching.
+> [`manifest.json`](../issues/reviews/2026-09-04/manifest.json), per-issue `#NNN.md`
+> briefs, and optional [`plans/`](../issues/reviews/2026-09-04/plans/) for seven issues
+> (#256, #264, #342, #360, #369, #439, #514). **Do not copy the 40 briefs here;** read
+> the corpus for measured evidence and close criteria, then confirm status on GitHub and
+> the roadmap before dispatching.
+>
+> Reviewed against `main` at `e4e7604` before this doc commit. **Determine live `main` via
+> `git rev-parse origin/main`** — do not treat a SHA embedded here as current.
 >
 > Waves 0–5 below are the *historical record* of what each item decided, measured, or
-> refuted — several are the only written home for a measurement a future agent would
-> otherwise re-derive. Status lives in GitHub issues; where this file and an issue
-> disagree, the issue wins.
+> refuted. Where this file, the corpus, and a GitHub issue disagree, **the issue wins**
+> for live state; where requirements disagree, **the roadmap wins**.
 
 **Snapshot:** **40 open** on GitHub as of the 2026-09-04 review. The count stays 40 until
 close/duplicate mutations actually land — the configured automation token currently lacks
@@ -84,20 +90,56 @@ cannot be applied from agents until that is restored.
 
 | Issue | Corpus verdict | Agent note |
 |---|---|---|
-| [#525](https://github.com/ronsse/trellis-ai/issues/525) | `duplicate` of #526 | **Closure-ready** — do not dispatch; track the no-marker subset inside #526 |
-| [#364](https://github.com/ronsse/trellis-ai/issues/364) | `stale-fixed` (PR #389) | **Closure-ready** — do not dispatch; mechanism shipped |
+| [#525](https://github.com/ronsse/trellis-ai/issues/525) | `duplicate` | **Closure-ready** — duplicate of #526; do not dispatch |
+| [#364](https://github.com/ronsse/trellis-ai/issues/364) | `stale-fixed` | **Closure-ready** — PR #389; do not dispatch |
 
-### Dispatch order (from corpus adjudication)
+PR [#527](https://github.com/ronsse/trellis-ai/pull/527) **selectively transcribed** the
+seven implementation plans and unique review evidence into `docs/issues/reviews/2026-09-04/`.
+The orchestration briefs and reports on remote branch `handoff/issue-sweep-2026-09-04` were
+**intentionally superseded** and were **not** merged as an ancestral commit — do not retain
+their 37-open count or unsafe closure recommendations. That branch is **eligible for
+owner-approved deletion** after confirming no archival retention is desired.
 
-**Early parallel** (disjoint territories): **#360 PR1**, **#256 seam**, **#369**, **#439**,
-**#342**, **#514**.
+### First executable batches *(not exhaustive)*
 
-- **#264 PR-A** after or parallel with the above if no file collision; **#264 PR-B**
+**Batch 1 — early parallel** (disjoint territories; recheck before dispatch):
+
+**#360 PR1**, **#256 seam**, **#369**, **#439**, **#342**, **#514**.
+
+- **#264 PR-A** after or parallel with Batch 1 if no file collision; **#264 PR-B**
   (derived roster) **after #514** when `generate_call_sites` exists (implementation
   adjacency, not a manifest dependency).
 - **Serialize #360 PR2 with #264 PR-A** — extraction/MCP overlap on `save_memory`.
 
-**CI lane** — serial where workflows collide: **#526 → #351 → #356 → #350**.
+**Batch 2 — CI / stores** (hard dependency **#351 → #356** per manifest; no issue
+dependency between #526 and #350):
+
+| Issue | Verdict | Note |
+|---|---|---|
+| [#526](https://github.com/ronsse/trellis-ai/issues/526) | `valid-now` | May parallelize with #350 if territories/workflows disjoint after recheck |
+| [#351](https://github.com/ronsse/trellis-ai/issues/351) | `valid-now` | **Before #356** (manifest dependency) |
+| [#356](https://github.com/ronsse/trellis-ai/issues/356) | `valid-now` | After #351 |
+| [#350](https://github.com/ronsse/trellis-ai/issues/350) | `valid-now` | May parallelize with #526 if disjoint |
+
+**Workflow-collision scheduling (optional):** #526, #351, and #356 share CI workflow
+territory — coordinate merges when touching the same files; this is **not** a serial
+issue dependency.
+
+**Other valid-now / valid-slice items** (dispatch when Batch 1–2 are full or territories
+allow; full roster in manifest + roadmap):
+
+| Issue | Verdict | Note |
+|---|---|---|
+| [#522](https://github.com/ronsse/trellis-ai/issues/522) | `valid-now` | Rich operator-output renders outside #492 handle rule |
+| [#523](https://github.com/ronsse/trellis-ai/issues/523) | `valid-now` | `sanitize_error_message` suppresses boundary test messages on long `--basetemp` |
+| [#257](https://github.com/ronsse/trellis-ai/issues/257) | `valid-now` | ADR: ingest normalization boundary (documentation) |
+| [#494](https://github.com/ronsse/trellis-ai/issues/494) | `valid-now` | Document `retrieve pack --quiet` id population |
+| [#515](https://github.com/ronsse/trellis-ai/issues/515) | `valid-slice` | **Measurement slice only** — map Anthropic cache token fields into `TokenUsage`; defer `cache_control` until benefit measured |
+| [#475](https://github.com/ronsse/trellis-ai/issues/475) | `valid-slice` | **Assumptions-header slice** — owner agrees line set; lines derived from assembled pack telemetry only |
+
+All other open items: verdict and wave in
+[`manifest.json`](../issues/reviews/2026-09-04/manifest.json); requirements in
+[`implementation-roadmap.md`](./implementation-roadmap.md) §3.H.
 
 ### Persistent blockers (do not misread)
 
@@ -110,9 +152,6 @@ cannot be applied from agents until that is restored.
 | [#250](https://github.com/ronsse/trellis-ai/issues/250) | **blocked-operator** — Aura console credential purge |
 | [#201](https://github.com/ronsse/trellis-ai/issues/201), [#261](https://github.com/ronsse/trellis-ai/issues/261), [#306](https://github.com/ronsse/trellis-ai/issues/306) | **blocked-signal** — pilot/loop throughput not yet present |
 | [#194](https://github.com/ronsse/trellis-ai/issues/194) | **blocked-decision** — depends practically on **#360** and owner semantics, **not** on #256 (backend extraction is not on the enforcement critical path) |
-
-The branch `handoff/issue-sweep-2026-09-04` was absorbed into PR #527 and is **safe to
-delete** — do not retain its 37-open count or its unsafe closure recommendations.
 
 ---
 

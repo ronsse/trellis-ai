@@ -8,18 +8,28 @@
 > [`implementation-roadmap.md`](./implementation-roadmap.md) (**authoritative** — when it
 > and the backlog disagree, the roadmap wins).
 >
-> Last updated 2026-09-04 at `e4e7604` (PR [#527](https://github.com/ronsse/trellis-ai/pull/527) — dated issue corpus).
+> Last updated 2026-09-04. Reviewed against `main` at `e4e7604` before this doc commit;
+> **determine live `main` via `git rev-parse origin/main`**. PR
+> [#527](https://github.com/ronsse/trellis-ai/pull/527) landed the dated issue corpus
+> (evidence + implementation aids, not requirements authority).
 
 ## 1. State
 
-`main` = `e4e7604`. **No implementation work in flight** from this program — ask
-`gh pr list --state open` and the [dated corpus](../issues/reviews/2026-09-04/README.md)
-for what is dispatchable. **The prod containers on skynet do _not_ run current `main`** — §1.2.
+Reviewed against `main` at `e4e7604` before this doc commit — **`git rev-parse origin/main`
+for live state.** **No implementation work in flight** from this program; ask
+`gh pr list --state open`, GitHub issues, and
+[`implementation-roadmap.md`](./implementation-roadmap.md) for what is dispatchable. The
+[dated corpus](../issues/reviews/2026-09-04/README.md) holds adversarial review evidence.
+**The prod containers on skynet do _not_ run current `main`** — §1.2.
 
-Landed 2026-09-04: PR [#527](https://github.com/ronsse/trellis-ai/pull/527) — adversarial
-open-issue corpus at [`docs/issues/reviews/2026-09-04/`](../issues/reviews/2026-09-04/)
-(40 briefs, `manifest.json`, seven implementation plans). The branch
-`handoff/issue-sweep-2026-09-04` was absorbed into that PR and is **safe to delete**.
+Landed 2026-09-04: PR [#527](https://github.com/ronsse/trellis-ai/pull/527) — **selectively
+transcribed** the seven implementation plans and unique review evidence into
+[`docs/issues/reviews/2026-09-04/`](../issues/reviews/2026-09-04/) (40 briefs,
+`manifest.json`, [`plans/`](../issues/reviews/2026-09-04/plans/)). Orchestration briefs
+and reports on remote branch `handoff/issue-sweep-2026-09-04` were **intentionally
+superseded** and were **not** merged as an ancestral commit. That branch is **eligible for
+owner-approved deletion** after confirming no archival retention is desired — do not
+retain its 37-open count or unsafe closure recommendations.
 
 Landed 2026-08-26: #340, #341, #304, **noise exclusion actually holding** (#343), #328,
 **attribution decomposed + join key restored** (#344), #346.
@@ -293,28 +303,52 @@ merge its own work.
 
 ## 6. The queue
 
-**Authoritative scheduling view:**
-[`docs/issues/reviews/2026-09-04/README.md`](../issues/reviews/2026-09-04/README.md) +
-[`manifest.json`](../issues/reviews/2026-09-04/manifest.json) + per-issue `#NNN.md` briefs.
-Seven issues carry optional plans under [`plans/`](../issues/reviews/2026-09-04/plans/).
-[`autonomous-backlog.md`](./autonomous-backlog.md) holds the historical wave record and
-measurements — **not** a copy of the 40 briefs.
+**Authority:** [`implementation-roadmap.md`](./implementation-roadmap.md) (requirements/status)
+→ **GitHub issue** (live state) → [`autonomous-backlog.md`](./autonomous-backlog.md)
+(scheduling derived from the first two).
+
+**Evidence and aids** (not authority):
+[`docs/issues/reviews/2026-09-04/README.md`](../issues/reviews/2026-09-04/README.md),
+[`manifest.json`](../issues/reviews/2026-09-04/manifest.json), per-issue briefs, and seven
+optional [`plans/`](../issues/reviews/2026-09-04/plans/). Waves in
+[`autonomous-backlog.md`](./autonomous-backlog.md) are historical measurements — **not** a
+copy of the 40 briefs.
+
+Reviewed against `main` at `e4e7604` before this doc commit. **Determine live `main` via
+`git rev-parse origin/main`.**
 
 **Snapshot:** 40 open on GitHub (2026-09-04 review). [#525](https://github.com/ronsse/trellis-ai/issues/525)
-is **duplicate/closure-ready** (track inside #526); [#364](https://github.com/ronsse/trellis-ai/issues/364)
+is **duplicate/closure-ready** (`duplicate` of #526); [#364](https://github.com/ronsse/trellis-ai/issues/364)
 is **stale-fixed/closure-ready** (PR #389) — do not dispatch either until GitHub reflects
 the close.
 
-### Dispatch order (from corpus adjudication)
+### First executable batches *(not exhaustive)*
 
-**Early parallel** (disjoint territories): **#360 PR1**, **#256 seam**, **#369**, **#439**,
-**#342**, **#514**.
+**Batch 1 — early parallel** (disjoint territories; recheck before dispatch):
 
-- **#264 PR-A** after or parallel with the above if no file collision; **#264 PR-B**
-  (derived roster) **after #514** when `generate_call_sites` exists.
+**#360 PR1**, **#256 seam**, **#369**, **#439**, **#342**, **#514**.
+
+- **#264 PR-A** after or parallel with Batch 1 if no file collision; **#264 PR-B**
+  **after #514** when `generate_call_sites` exists.
 - **Serialize #360 PR2 with #264 PR-A** — `save_memory` overlap.
 
-**CI lane** — serial where workflows collide: **#526 → #351 → #356 → #350**.
+**Batch 2 — CI / stores:** hard dependency **#351 → #356** (manifest). **#526** and **#350**
+have no issue dependency — may parallelize if files/workflows disjoint after recheck.
+Coordinate #526/#351/#356 when touching the same CI workflows (collision scheduling only,
+not a serial chain).
+
+**Other valid-now / valid-slice items** (see manifest + roadmap for full roster):
+
+| Issue | Verdict | Note |
+|---|---|---|
+| [#522](https://github.com/ronsse/trellis-ai/issues/522) | `valid-now` | Rich renders outside #492 handle rule |
+| [#523](https://github.com/ronsse/trellis-ai/issues/523) | `valid-now` | Boundary test message suppression on long `--basetemp` |
+| [#257](https://github.com/ronsse/trellis-ai/issues/257) | `valid-now` | Ingest-normalization ADR |
+| [#494](https://github.com/ronsse/trellis-ai/issues/494) | `valid-now` | Document `retrieve pack --quiet` ids |
+| [#515](https://github.com/ronsse/trellis-ai/issues/515) | `valid-slice` | Measurement slice — cache token fields in `TokenUsage` only |
+| [#475](https://github.com/ronsse/trellis-ai/issues/475) | `valid-slice` | Assumptions-header slice — owner-agreed lines from pack telemetry |
+
+All others: [`manifest.json`](../issues/reviews/2026-09-04/manifest.json) + roadmap §3.H.
 
 ### Persistent blockers
 
@@ -376,13 +410,15 @@ is closure-ready (PR #389), not dispatchable:
 | [#364](https://github.com/ronsse/trellis-ai/issues/364) | **closure-ready** — PR #389 shipped judged coverage beside the ratio |
 | [#365](https://github.com/ronsse/trellis-ai/issues/365) | a retrieval that fails in transport is invisible |
 
-**CI coverage holes** — dispatch via corpus CI lane (#526 → #351 → #356 → #350):
+**CI coverage holes** — Batch 2 above; hard **#351 → #356** dependency:
 [#350](https://github.com/ronsse/trellis-ai/issues/350) (pgvector extension bootstrap),
 [#351](https://github.com/ronsse/trellis-ai/issues/351) (ArcadeDB graph contract — still
 unwired in any workflow),
 [#356](https://github.com/ronsse/trellis-ai/issues/356) (`tests/unit/stores/` unwired).
-Note: `live-infra.yml` runs Postgres + Neo4j graph contracts and the pgvector vector
-contract on **pull requests and push to `main`** — not push-to-main only.
+[#526](https://github.com/ronsse/trellis-ai/issues/526) shares CI territory — coordinate,
+do not assume serial dependency with #350. Note: `live-infra.yml` runs Postgres + Neo4j
+graph contracts and the pgvector vector contract on **pull requests and push to `main`** —
+not push-to-main only.
 
 **File territories** — from corpus collision map; dispatch parallel only when territories
 do not overlap:
