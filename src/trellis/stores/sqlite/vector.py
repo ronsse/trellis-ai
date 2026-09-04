@@ -58,9 +58,33 @@ class SQLiteVectorStore(SQLiteStoreBase, VectorStore):
             """
         )
 
+    def reset_storage(self) -> None:
+        """Drop the ``vectors`` table and recreate it empty.
+
+        Dropping the table takes ``idx_vectors_created`` with it and
+        ``_init_schema`` recreates both. This is the body that used to sit
+        inline in ``trellis_api.routes.admin.reset_vectors``, driving
+        ``self._conn`` from outside the package (#512).
+        """
+        self._conn.execute("DROP TABLE IF EXISTS vectors")
+        self._conn.commit()
+        self._init_schema()
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    @property
+    def dimensions(self) -> int | None:
+        """``None`` — this backend pins no width.
+
+        Not "unknown" and not a fallback. The ``vectors`` table carries a
+        ``dimensions`` column *per row*, filled from ``len(vector)`` on
+        every :meth:`upsert`, so a 3-wide and a 1536-wide vector coexist
+        happily; nothing in the schema constrains the width. ``None`` is
+        therefore the true answer rather than the absence of one.
+        """
+        return None
 
     def upsert(
         self,

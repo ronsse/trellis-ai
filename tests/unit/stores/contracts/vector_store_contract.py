@@ -365,3 +365,109 @@ class VectorStoreContractTests:
             )
         assert store.count() == before
         assert store.get("dup") is None
+
+    # ------------------------------------------------------------------
+    # Declarations (#512) — a backend answers for itself
+    # ------------------------------------------------------------------
+    #
+    # Both declarations existed as facts before they existed as API, and
+    # a caller outside the package was inferring them from private
+    # attributes: ``getattr(store, "_dimensions", None)`` for the width
+    # and a probe for ``_pool`` / ``_conn`` for the reset. The inference
+    # failed *as a false statement rather than as an error* — a backend
+    # that pinned a width under another spelling had "declares no fixed
+    # dimensionality" published about it — so what these cases check is
+    # not that a value exists but that it **agrees with what the store
+    # does**. A declaration nothing cross-checks is the same defect one
+    # layer down.
+
+    def test_declares_an_embedding_width(self, store: VectorStore) -> None:
+        """``dimensions`` answers, with a positive int or a real ``None``.
+
+        ``None`` is a substantive answer — "this backend pins no width" —
+        and the case below is what stops it being a shrug.
+        """
+        declared = store.dimensions
+        assert declared is None or (isinstance(declared, int) and declared > 0)
+
+    def test_declared_width_matches_the_widths_actually_accepted(
+        self, store: VectorStore
+    ) -> None:
+        """The declaration is checked against the store's own behaviour.
+
+        This is the case that cannot be satisfied by a constant. A
+        backend declaring ``None`` has to *prove* it pins no width by
+        storing two different ones; a backend declaring ``N`` has to
+        agree with ``get()`` and refuse anything but ``N``. Either
+        constant fails against the other kind of backend, and the pinned
+        constant fails against SQLite alone.
+        """
+        declared = store.dimensions
+        wider = [*_vec(1, 0, 0), 0.5]
+
+        if declared is None:
+            store.upsert("narrow", _vec(1, 0, 0))
+            store.upsert("wide", wider)
+            narrow_row = store.get("narrow")
+            wide_row = store.get("wide")
+            assert narrow_row is not None
+            assert wide_row is not None
+            assert narrow_row["dimensions"] == DIMS
+            assert wide_row["dimensions"] == DIMS + 1
+            return
+
+        assert declared == DIMS, (
+            "the store fixture builds a DIMS-wide store, so a different "
+            "declaration means the declaration is not the store's width"
+        )
+        store.upsert("narrow", _vec(1, 0, 0))
+        row = store.get("narrow")
+        assert row is not None
+        assert row["dimensions"] == declared
+        with pytest.raises(ValueError, match="dimensions"):
+            store.upsert("wide", wider)
+        assert store.get("wide") is None
+
+    def test_dimensions_is_a_declaration_not_a_measurement(
+        self, store: VectorStore
+    ) -> None:
+        """It is constant across writes, including the first one.
+
+        Callers report it beside destructive work — ``POST
+        /api/v1/vectors/reset`` prints it in the body of a 200 — so an
+        implementation that derived it from stored rows would answer
+        differently on an empty store than on a populated one and make
+        that report a function of timing. It also must not need the
+        store to be non-empty to have an answer.
+        """
+        before = store.dimensions
+        store.upsert("a", _vec(1, 0, 0))
+        assert store.dimensions == before
+        store.upsert("b", _vec(0, 1, 0))
+        assert store.dimensions == before
+
+    def test_reset_storage_matches_supports_reset(self, store: VectorStore) -> None:
+        """The reset declaration is checked against the store's behaviour.
+
+        ``supports_reset()`` is derived from the ``reset_storage``
+        override, so the two *cannot* disagree by construction — this
+        pins the half construction cannot reach: that an override
+        actually empties the store and leaves it usable, and that a
+        backend which declines really declines rather than half-running.
+        """
+        store.upsert("a", _vec(1, 0, 0))
+        assert store.count() == 1
+
+        if not type(store).supports_reset():
+            with pytest.raises(NotImplementedError, match="reset_storage"):
+                store.reset_storage()
+            assert store.count() == 1
+            return
+
+        store.reset_storage()
+        assert store.count() == 0
+        assert store.get("a") is None
+        # Recreated, not merely dropped: the store is usable immediately.
+        store.upsert("b", _vec(0, 1, 0))
+        assert store.count() == 1
+        assert store.query(_vec(0, 1, 0), top_k=1)[0]["item_id"] == "b"

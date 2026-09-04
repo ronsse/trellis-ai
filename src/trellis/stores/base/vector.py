@@ -51,6 +51,106 @@ class VectorStore(ABC):
     similarity search via cosine distance.
     """
 
+    # ------------------------------------------------------------------
+    # Declarations — what a backend says about itself
+    # ------------------------------------------------------------------
+    #
+    # Both members below exist because a caller outside this package was
+    # deciding these two facts *for* the backend by looking for private
+    # attributes on it (#511, #512). ``POST /api/v1/vectors/reset`` read
+    # ``getattr(store, "_dimensions", None)`` and probed for ``_pool`` /
+    # ``_conn``. Neither fact was declared anywhere, so a backend that
+    # pinned a width under some other spelling had *"backend declares no
+    # fixed dimensionality"* published about it, as a fact, with no error
+    # — and renaming a private attribute on any backend silently changed
+    # an API response. What is asked of a backend here is that it answer,
+    # not that a reader guess.
+
+    @property
+    @abstractmethod
+    def dimensions(self) -> int | None:
+        """The embedding width every vector in this store must have.
+
+        ``None`` is a real answer and not a fallback: it means the
+        backend pins **no** width at storage level. That is the truth for
+        :class:`~trellis.stores.sqlite.vector.SQLiteVectorStore`, which
+        keeps a ``dimensions`` column per row and will store a 3-wide and
+        a 1536-wide vector side by side.
+
+        This is **abstract on purpose**. A concrete default returning
+        ``None`` would relocate #512 rather than fix it: a new backend
+        that pins a width and forgets to override would still have "no
+        fixed dimensionality" said on its behalf, silently and
+        plausibly. Abstract means a backend that has not answered cannot
+        be instantiated at all.
+
+        It is a **declaration, not a measurement**. Implementations
+        return a value fixed for the lifetime of the store: no I/O, no
+        dependence on what has been written, and it does not raise.
+        Callers report it beside destructive work, so a property that
+        could fail would put an avoidable failure next to an operation
+        that cannot be undone. ``VectorStoreContractTests`` pins the
+        stability and pins the declaration against the widths the store
+        actually accepts.
+        """
+
+    @classmethod
+    def supports_reset(cls) -> bool:
+        """Whether this backend implements :meth:`reset_storage`.
+
+        **Derived from the override, never declared separately.** A
+        ``supports_reset`` flag a backend sets by hand is a second fact
+        that can disagree with the first: a backend could claim support
+        and not implement, or implement and be refused. Here the answer
+        *is* the implementation, so the question "can this be reset?" and
+        the code that does the resetting cannot come apart.
+
+        This is a classmethod and reads only the type, so asking it costs
+        nothing and touches no instance state. That matters at its call
+        site: the caller asks before it acts, and
+        ``SQLiteStoreBase._conn`` — what the old probe reached for — is a
+        *property that opens a connection*, so the shape question used to
+        do I/O and could raise ``sqlite3.DatabaseError`` out of a probe
+        whose whole job was to decide whether anything should happen yet.
+        """
+        return cls.reset_storage is not VectorStore.reset_storage
+
+    def reset_storage(self) -> None:
+        """Drop this store's backing storage and recreate it empty.
+
+        **Destructive and total**: every vector in the store is gone
+        afterwards, and the store is usable again immediately (a caller
+        may ``upsert`` into it without reconstructing anything).
+
+        The default implementation refuses, which is the honest answer
+        for a backend that keeps no storage of its own —
+        ``ArcadeDBVectorStore`` and ``Neo4jVectorStore`` hold embeddings
+        as properties on the graph store's ``(:Node)`` rows, so there is
+        nothing here to drop and dropping the nodes is the graph store's
+        business, not this one's. Overriding is how a backend says it can
+        do this; see :meth:`supports_reset`.
+
+        Callers that must not touch a store they cannot reset ask
+        :meth:`supports_reset` **first**. Implementations may still fail
+        part-way — a ``DROP`` that succeeded followed by a recreate that
+        did not leaves the store empty and unusable — so a raise from
+        here is *not* a promise that nothing changed.
+
+        Raises:
+            NotImplementedError: when the backend does not implement it.
+        """
+        # Says only what is true of every non-overriding backend — that
+        # there is no route through this interface — rather than the
+        # ArcadeDB/Neo4j *reason* for it, which would be invented about
+        # any other backend that simply has not implemented it. Stating a
+        # borrowed reason as a fact is #512 one level down.
+        msg = (
+            f"{type(self).__name__} does not implement reset_storage(), so "
+            "there is no way to drop and recreate its storage through this "
+            "interface. Ask supports_reset() before calling."
+        )
+        raise NotImplementedError(msg)
+
     @abstractmethod
     def upsert(
         self,
