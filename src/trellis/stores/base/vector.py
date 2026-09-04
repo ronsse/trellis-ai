@@ -88,9 +88,10 @@ class VectorStore(ABC):
         return a value fixed for the lifetime of the store: no I/O, no
         dependence on what has been written, and it does not raise.
         Callers report it beside destructive work, so a property that
-        could fail would turn a completed operation into a 500.
-        ``VectorStoreContractTests`` pins the stability and pins the
-        declaration against the widths the store actually accepts.
+        could fail would put an avoidable failure next to an operation
+        that cannot be undone. ``VectorStoreContractTests`` pins the
+        stability and pins the declaration against the widths the store
+        actually accepts.
         """
 
     @classmethod
@@ -105,8 +106,8 @@ class VectorStore(ABC):
         the code that does the resetting cannot come apart.
 
         This is a classmethod and reads only the type, so asking it costs
-        nothing and touches no instance state. That matters at the one
-        call site: the route asks before it acts, and
+        nothing and touches no instance state. That matters at its call
+        site: the caller asks before it acts, and
         ``SQLiteStoreBase._conn`` — what the old probe reached for — is a
         *property that opens a connection*, so the shape question used to
         do I/O and could raise ``sqlite3.DatabaseError`` out of a probe
@@ -138,10 +139,15 @@ class VectorStore(ABC):
         Raises:
             NotImplementedError: when the backend does not implement it.
         """
+        # Says only what is true of every non-overriding backend — that
+        # there is no route through this interface — rather than the
+        # ArcadeDB/Neo4j *reason* for it, which would be invented about
+        # any other backend that simply has not implemented it. Stating a
+        # borrowed reason as a fact is #512 one level down.
         msg = (
-            f"{type(self).__name__} does not implement reset_storage(): it "
-            "keeps no backing storage of its own to drop and recreate. Ask "
-            "supports_reset() before calling."
+            f"{type(self).__name__} does not implement reset_storage(), so "
+            "there is no way to drop and recreate its storage through this "
+            "interface. Ask supports_reset() before calling."
         )
         raise NotImplementedError(msg)
 
