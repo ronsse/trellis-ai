@@ -10,9 +10,9 @@ governed creation.  Drafts themselves never touch a store.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Annotated, Any
 
-from pydantic import Field, model_validator
+from pydantic import Field, StringConstraints, model_validator
 
 from trellis.core.base import TrellisModel, utc_now
 from trellis.schemas.entity import GenerationSpec
@@ -137,7 +137,20 @@ class ExtractionProvenance(TrellisModel):
     extractor_version: str = "0.0.0"
     source_hint: str | None = None
     raw_input_hash: str | None = None
+    model_id: str | None = None
     extracted_at: datetime = Field(default_factory=utc_now)
+
+
+class LLMJudgedDraftRecord(TrellisModel):
+    """One LLM-origin fresh-mint entity eligible for judged-op emission."""
+
+    entity_type: str
+    name: str
+    confidence: float = Field(ge=0.0, le=1.0)
+    model_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+    input_hash: str
+    input_length: int = Field(ge=0)
+    entity_id: str | None = None
 
 
 class ExtractionResult(TrellisModel):
@@ -157,3 +170,4 @@ class ExtractionResult(TrellisModel):
     overall_confidence: float = Field(default=1.0, ge=0.0, le=1.0)
     provenance: ExtractionProvenance
     unparsed_residue: Any | None = None
+    judged_drafts: list[LLMJudgedDraftRecord] = Field(default_factory=list)

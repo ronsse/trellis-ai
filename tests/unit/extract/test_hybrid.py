@@ -12,6 +12,7 @@ from trellis.schemas.extraction import (
     EntityDraft,
     ExtractionProvenance,
     ExtractionResult,
+    LLMJudgedDraftRecord,
 )
 
 
@@ -66,6 +67,8 @@ def _result(
     residue: Any | None = None,
     llm_calls: int = 0,
     tokens_used: int = 0,
+    judged_drafts: list[LLMJudgedDraftRecord] | None = None,
+    model_id: str | None = None,
 ) -> ExtractionResult:
     return ExtractionResult(
         entities=entities or [],
@@ -76,10 +79,12 @@ def _result(
         tokens_used=tokens_used,
         overall_confidence=confidence,
         unparsed_residue=residue,
+        judged_drafts=judged_drafts or [],
         provenance=ExtractionProvenance(
             extractor_name=name,
             extractor_version="0.0.0",
             source_hint=None,
+            model_id=model_id,
         ),
     )
 
@@ -381,6 +386,49 @@ class TestDedup:
         )
         assert len(result.entities) == 1
 
+    async def test_deterministic_collision_drops_llm_judged_record(self) -> None:
+        judged = LLMJudgedDraftRecord(
+            entity_type="person",
+            name="Alice",
+            confidence=0.9,
+            model_id="test-model-v1",
+            input_hash="hash",
+            input_length=4,
+        )
+        det = FakeExtractor(
+            name="det",
+            tier=ExtractorTier.DETERMINISTIC,
+            result=_result(
+                entities=[_ent("Alice", entity_type="person")],
+                confidence=0.5,
+                residue="text",
+            ),
+        )
+        llm = FakeExtractor(
+            name="llm",
+            tier=ExtractorTier.LLM,
+            result=_result(
+                tier=ExtractorTier.LLM,
+                entities=[
+                    _ent("Alice", entity_type="person"),
+                    _ent("Bob", entity_type="person"),
+                ],
+                judged_drafts=[
+                    judged,
+                    judged.model_copy(update={"name": "Bob"}),
+                ],
+                confidence=0.9,
+                llm_calls=1,
+            ),
+        )
+
+        result = await HybridJSONExtractor(deterministic=det, llm=llm).extract(
+            "text",
+            context=ExtractionContext(allow_llm_fallback=True),
+        )
+
+        assert [record.name for record in result.judged_drafts] == ["Bob"]
+
     async def test_edge_dedup_by_triple(self) -> None:
         det = FakeExtractor(
             name="det",
@@ -421,6 +469,37 @@ class TestDedup:
 
 
 class TestResultMetadata:
+    async def test_rewrap_preserves_judged_drafts(self) -> None:
+        judged = LLMJudgedDraftRecord(
+            entity_type="Person",
+            name="Bob",
+            confidence=0.8,
+            model_id="test-model-v1",
+            input_hash="hash",
+            input_length=4,
+        )
+        det = FakeExtractor(
+            name="det",
+            tier=ExtractorTier.DETERMINISTIC,
+            result=_result(
+                entities=[_ent("Bob")],
+                confidence=1.0,
+                judged_drafts=[judged],
+            ),
+        )
+        llm = FakeExtractor(
+            name="llm",
+            tier=ExtractorTier.LLM,
+            result=_result(),
+        )
+
+        result = await HybridJSONExtractor(deterministic=det, llm=llm).extract(
+            "text",
+            context=ExtractionContext(allow_llm_fallback=True),
+        )
+
+        assert result.judged_drafts == [judged]
+
     async def test_composite_provenance(self) -> None:
         det = FakeExtractor(
             name="rules",
@@ -430,7 +509,12 @@ class TestResultMetadata:
         llm = FakeExtractor(
             name="gpt",
             tier=ExtractorTier.LLM,
-            result=_result(entities=[_ent("B")], confidence=0.8, llm_calls=1),
+            result=_result(
+                entities=[_ent("B")],
+                confidence=0.8,
+                llm_calls=1,
+                model_id="test-model-v1",
+            ),
         )
         ext = HybridJSONExtractor(deterministic=det, llm=llm, version="9.9")
         result = await ext.extract(
@@ -442,6 +526,7 @@ class TestResultMetadata:
         assert result.provenance.extractor_name == "hybrid(rules+gpt)"
         assert result.provenance.extractor_version == "9.9"
         assert result.provenance.source_hint == "save_memory"
+        assert result.provenance.model_id == "test-model-v1"
         assert result.tier == ExtractorTier.HYBRID.value
 
     async def test_confidence_min_when_both_contribute(self) -> None:

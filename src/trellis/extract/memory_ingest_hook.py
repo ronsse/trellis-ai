@@ -15,9 +15,10 @@ env flag must both be set — at corpus scale this is a per-run LLM-cost
 decision, never a default. When either is off, or no LLM client is
 configured, extraction is silently skipped and ingest is unaffected.
 
-The MCP ``save_memory`` path keeps its own cached wiring in
-``trellis.mcp.server``; this is the non-MCP hook for the CLI ingest paths.
-Both build the *same* extractor, so behaviour cannot drift.
+The MCP ``save_memory`` path and CLI bulk-ingest paths both call
+:func:`run_memory_extraction`; MCP keeps only its cached extractor
+construction in ``trellis.mcp.server``. This shared persistence seam keeps
+draft policy, governed execution, and judged-operation emission aligned.
 
 Mention resolution goes through
 :func:`~trellis.extract.entity_resolution.build_name_alias_resolver`: an
@@ -164,7 +165,103 @@ def run_memory_extraction(
         # its failure must never roll back a successful document write.
         logger.exception("memory_extraction_failed", doc_id=doc_id)
         return (0, 0)
+    try:
+        _emit_judged_extractions(
+            registry,
+            result=result,
+            batch=batch,
+            results=results,
+            doc_id=doc_id,
+        )
+    except Exception:
+        # GRACEFUL-DEGRADATION: graph writes already committed. Correlation
+        # telemetry cannot alter the extraction result reported to the caller.
+        logger.exception("judged_op_emission_failed", doc_id=doc_id)
     return _count_created(results)
+
+
+def _emit_judged_extractions(
+    registry: StoreRegistry,
+    *,
+    result: Any,
+    batch: Any,
+    results: list[Any],
+    doc_id: str,
+) -> None:
+    """Emit only LLM draft records proven to match successful fresh mints."""
+    from collections import Counter  # noqa: PLC0415
+
+    from trellis.core.memory_op_judged import emit_memory_op_judged  # noqa: PLC0415
+    from trellis.extract.telemetry import emit_extraction_failure  # noqa: PLC0415
+    from trellis.mutate.commands import CommandStatus, Operation  # noqa: PLC0415
+    from trellis.schemas.memory_op import (  # noqa: PLC0415
+        InputDigest,
+        JudgedOpType,
+        SubjectRef,
+    )
+
+    event_log = registry.operational.event_log
+    record_counts = Counter(
+        (record.entity_type, record.name) for record in result.judged_drafts
+    )
+    successful_mints: dict[tuple[str, str], list[str]] = {}
+    for command, command_result in zip(batch.commands, results, strict=True):
+        if (
+            command.operation is not Operation.ENTITY_CREATE
+            or command_result.status is not CommandStatus.SUCCESS
+            or "entity_id" in command.args
+            or not command_result.created_id
+        ):
+            continue
+        entity_type = command.args.get("entity_type")
+        name = command.args.get("name")
+        if isinstance(entity_type, str) and isinstance(name, str):
+            successful_mints.setdefault((entity_type, name), []).append(
+                command_result.created_id
+            )
+
+    for record in result.judged_drafts:
+        key = (record.entity_type, record.name)
+        created_ids = successful_mints.get(key, [])
+        if record_counts[key] != 1 or len(created_ids) != 1:
+            logger.error(
+                "judged_op_correlation_failed",
+                doc_id=doc_id,
+                entity_type=record.entity_type,
+                entity_name=record.name,
+                matching_records=record_counts[key],
+                matching_successes=len(created_ids),
+            )
+            emit_extraction_failure(
+                event_log=event_log,
+                extractor_id=result.extractor_used,
+                extractor_tier=result.tier,
+                failure_kind="judged_op_correlation_failed",
+                source_hint="save_memory",
+                source_excerpt_hash=record.input_hash,
+                model=record.model_id,
+                error_class="JudgedOpCorrelationFailed",
+                error_excerpt=(
+                    "LLM-judged draft did not map uniquely to a successful fresh mint"
+                ),
+            )
+            continue
+
+        entity_id = created_ids[0]
+        emit_memory_op_judged(
+            event_log,
+            op_type=JudgedOpType.EXTRACTION,
+            source="save_memory.extract",
+            model_id=record.model_id,
+            input_digest=InputDigest(
+                hash=record.input_hash,
+                length=record.input_length,
+                source_refs=[doc_id],
+            ),
+            decision=record.entity_type,
+            confidence=record.confidence,
+            subject_ref=SubjectRef(ref_type="entity", ref_id=entity_id),
+        )
 
 
 def _count_created(results: list[Any]) -> tuple[int, int]:

@@ -69,6 +69,9 @@ class EnrichmentResult(TrellisModel):
     #: See ``docs/design/adr-extraction-failure-telemetry.md`` for the
     #: closed set of legal slugs.
     failure_kind: ExtractionFailureKind | None = None
+    #: Actual response model when reported, otherwise the configured client
+    #: default. ``None`` on failures where no model identity can be proven.
+    judging_model_id: str | None = None
 
 
 ENRICHMENT_SYSTEM_PROMPT = """\
@@ -142,6 +145,9 @@ class EnrichmentService:
         self.max_content_length = max_content_length
         self.temperature = temperature
         self.model = model
+        self.judging_model_id = _non_empty_model_id(model) or _non_empty_model_id(
+            getattr(llm, "_default_model", None)
+        )
         # Why: enrichment is opt-in, but its failures must still be loud.
         # Two emit paths use this sink:
         # 1. enrich() — JSON-decode and broad-except sites emit
@@ -228,6 +234,37 @@ class EnrichmentService:
             result = self._parse_response(response.content)
             result.raw_response = response.content
             result.usage = response.usage
+            if result.success:
+                model_id = _non_empty_model_id(response.model) or self.judging_model_id
+                if model_id is None:
+                    emit_extraction_failure(
+                        event_log=self._event_log,
+                        extractor_id="EnrichmentService",
+                        extractor_tier="llm",
+                        failure_kind="model_identity_missing",
+                        source_hint="enrichment",
+                        source_excerpt_hash=(
+                            content_hash(content) if content else None
+                        ),
+                        model=None,
+                        error_class="ModelIdentityMissing",
+                        error_excerpt=(
+                            "LLM response and configured client omitted model identity"
+                        ),
+                    )
+                    logger.error(
+                        "memory_op_judged_identity_missing",
+                        operation="classification",
+                        title=title,
+                    )
+                    return EnrichmentResult(
+                        success=False,
+                        error="LLM judging model identity is unavailable",
+                        raw_response=response.content,
+                        usage=response.usage,
+                        failure_kind="model_identity_missing",
+                    )
+                result.judging_model_id = model_id
             # Greenfield writer contract (adr-importance-score-freshness §3.5):
             # any code path that sets auto_importance must also stamp
             # importance_scored_at. Stamp at write time so the
@@ -438,6 +475,14 @@ class EnrichmentService:
             tag_confidence=_confidence("tag_confidence"),
             class_confidence=_confidence("class_confidence"),
         )
+
+
+def _non_empty_model_id(value: Any) -> str | None:
+    """Return a stripped model identifier only when it is a real string."""
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
 
 
 def normalize_tag(tag: str) -> str:

@@ -29,6 +29,7 @@ from trellis.schemas.extraction import (
     EntityDraft,
     ExtractionProvenance,
     ExtractionResult,
+    LLMJudgedDraftRecord,
 )
 from trellis.schemas.graph import Edge
 from trellis.schemas.measurement import Measurement
@@ -108,6 +109,7 @@ __all__ = [
     "JudgedOpType",
     "Lifecycle",
     "LifecycleState",
+    "LLMJudgedDraftRecord",
     "Measurement",
     "MemoryOpJudgedPayload",
     "NodeRole",

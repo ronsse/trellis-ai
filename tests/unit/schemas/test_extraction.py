@@ -10,6 +10,7 @@ from trellis.schemas.extraction import (
     EntityDraft,
     ExtractionProvenance,
     ExtractionResult,
+    LLMJudgedDraftRecord,
 )
 
 
@@ -65,6 +66,7 @@ class TestExtractionProvenance:
         assert p.extractor_version == "0.0.0"
         assert p.source_hint is None
         assert p.raw_input_hash is None
+        assert p.model_id is None
         assert p.extracted_at is not None
 
     def test_explicit_values(self) -> None:
@@ -91,6 +93,7 @@ class TestExtractionResult:
         assert r.tokens_used == 0
         assert r.overall_confidence == 1.0
         assert r.unparsed_residue is None
+        assert r.judged_drafts == []
 
     def test_carries_drafts(self) -> None:
         r = ExtractionResult(
@@ -126,4 +129,48 @@ class TestExtractionResult:
                 tier="deterministic",
                 provenance=ExtractionProvenance(extractor_name="x"),
                 rogue=True,
+            )
+
+
+class TestLLMJudgedDraftRecord:
+    def test_round_trip_through_extraction_result(self) -> None:
+        record = LLMJudgedDraftRecord(
+            entity_type="Organization",
+            name="Acme",
+            confidence=0.8,
+            model_id="test-model-v1",
+            input_hash="abc123",
+            input_length=42,
+        )
+        result = ExtractionResult(
+            extractor_used="llm",
+            tier="llm",
+            provenance=ExtractionProvenance(extractor_name="llm"),
+            judged_drafts=[record],
+        )
+
+        restored = ExtractionResult.model_validate_json(result.model_dump_json())
+        assert restored.judged_drafts == [record]
+
+    def test_extra_fields_forbidden(self) -> None:
+        with pytest.raises(ValueError):
+            LLMJudgedDraftRecord(
+                entity_type="Person",
+                name="Bob",
+                confidence=0.7,
+                model_id="test-model-v1",
+                input_hash="abc123",
+                input_length=42,
+                rogue=True,
+            )
+
+    def test_model_id_must_be_non_empty(self) -> None:
+        with pytest.raises(ValueError):
+            LLMJudgedDraftRecord(
+                entity_type="Person",
+                name="Bob",
+                confidence=0.7,
+                model_id="",
+                input_hash="abc123",
+                input_length=42,
             )

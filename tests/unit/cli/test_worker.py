@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -934,6 +934,95 @@ class TestWorkerEnrich:
         assert "doc-untagged" in data["doc_ids"]
         assert "doc-tagged" not in data["doc_ids"]
 
+    def test_missing_model_identity_emits_failure_not_judged(
+        self, temp_stores: StoreRegistry, monkeypatch
+    ) -> None:
+        doc_store = temp_stores.knowledge.document_store
+        doc_store.put("doc-model-less", "classify me", {"title": "Unknown judge"})
+
+        class ModelLessLLM:
+            async def generate(self, **kwargs: object) -> LLMResponse:
+                return LLMResponse(
+                    content=json.dumps(
+                        {
+                            "tags": ["test"],
+                            "class": "notes",
+                            "summary": "Summary.",
+                            "importance": 0.4,
+                            "class_confidence": 0.8,
+                        }
+                    ),
+                    model=None,
+                )
+
+        monkeypatch.setattr(
+            worker,
+            "_require_llm_client_or_exit",
+            ModelLessLLM,
+        )
+
+        result = runner.invoke(app, ["worker", "enrich", "--format", "json"])
+
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.stdout.strip())["failed"] == 1
+        assert (
+            temp_stores.operational.event_log.get_events(
+                event_type=EventType.MEMORY_OP_JUDGED
+            )
+            == []
+        )
+        failures = temp_stores.operational.event_log.get_events(
+            event_type=EventType.EXTRACTION_FAILED
+        )
+        assert len(failures) == 1
+        assert failures[0].payload["failure_kind"] == "model_identity_missing"
+
+    def test_only_successful_candidate_emits_judged_event(
+        self, temp_stores: StoreRegistry, monkeypatch
+    ) -> None:
+        doc_store = temp_stores.knowledge.document_store
+        doc_store.put("doc-ok", "classify this", {"title": "Good"})
+        doc_store.put("doc-fail", "fail this", {"title": "Bad"})
+
+        class SelectiveLLM:
+            async def generate(self, **kwargs: Any) -> LLMResponse:
+                messages = kwargs["messages"]
+                prompt = messages[1].content
+                if "fail this" in prompt:
+                    message = "judge unavailable"
+                    raise RuntimeError(message)
+                return LLMResponse(
+                    content=json.dumps(
+                        {
+                            "tags": ["architecture"],
+                            "class": "architecture",
+                            "summary": "Summary.",
+                            "importance": 0.7,
+                            "class_confidence": 0.91,
+                        }
+                    ),
+                    model="test-model-v1",
+                )
+
+        monkeypatch.setattr(
+            worker,
+            "_require_llm_client_or_exit",
+            SelectiveLLM,
+        )
+
+        result = runner.invoke(app, ["worker", "enrich", "--format", "json"])
+
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.stdout.strip())["enriched"] == 1
+        events = temp_stores.operational.event_log.get_events(
+            event_type=EventType.MEMORY_OP_JUDGED
+        )
+        assert len(events) == 1
+        assert events[0].entity_id == "doc-ok"
+        assert events[0].payload["decision"] == "architecture"
+        assert events[0].payload["confidence"] == pytest.approx(0.91)
+        assert events[0].payload["model_id"] == "test-model-v1"
+
     def test_selection_predicate_uses_classified_mode(
         self, temp_stores: StoreRegistry
     ) -> None:
@@ -1018,6 +1107,18 @@ class TestWorkerEnrich:
         # Flat keys go where their readers actually look.
         assert metadata["auto_importance"] == pytest.approx(0.6)
         assert metadata["document_form"] == "reference"
+
+        events = temp_stores.operational.event_log.get_events(
+            event_type=EventType.MEMORY_OP_JUDGED
+        )
+        assert len(events) == 1
+        assert events[0].source == "worker:enrich"
+        assert events[0].entity_id == "doc-x"
+        assert events[0].payload["op_type"] == "classification"
+        assert events[0].payload["decision"] == "reference"
+        assert events[0].payload["confidence"] == pytest.approx(0.9)
+        assert events[0].payload["model_id"] == "test-model"
+        assert events[0].payload["input_digest"]["source_refs"] == ["doc-x"]
 
     def test_enrich_mirrors_tags_onto_the_vector_row(
         self, temp_stores: StoreRegistry, monkeypatch
@@ -1706,6 +1807,14 @@ class TestEnrichSurvivesAConcurrentWrite:
         assert doc["metadata"]["written_by"] == "the other process"
         assert doc["metadata"]["content_tags"]["classified_mode"] == "enrichment"
         assert doc["metadata"]["auto_importance"] == pytest.approx(0.6)
+        from trellis.core.hashing import content_hash
+
+        (judged,) = temp_stores.operational.event_log.get_events(
+            event_type=EventType.MEMORY_OP_JUDGED
+        )
+        assert judged.payload["input_digest"]["hash"] == content_hash(
+            "the original body"
+        )
 
     def test_the_race_is_counted(self, temp_stores: StoreRegistry, monkeypatch) -> None:
         """A silent merge would hide a real signal about deployment concurrency."""
