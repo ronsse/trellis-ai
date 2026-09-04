@@ -1319,6 +1319,8 @@ class GraphSearch(SearchStrategy):
             selection = GRAPH_SELECTION_RECENCY_WINDOW
             nodes = self._recency_window_nodes(filters=filters, limit=limit)
 
+        nodes = [node for node in nodes if node.get("node_type") != "precedent"]
+
         # Filter structural nodes client-side unless explicitly requested.
         #
         # This drop happens *before* a ``PackItem`` exists, so it produces no
