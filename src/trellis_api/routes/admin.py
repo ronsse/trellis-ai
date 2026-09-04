@@ -380,13 +380,42 @@ def list_advisories(
 # -- Vector store management --
 
 
-#: The status for a reset this deployment could not even attempt. 409,
-#: matching what #484/#505 settled on for the ``advisories/generate``
+#: The status every arm that could not even attempt the reset answers.
+#: 409, matching what #484/#505 settled on for the ``advisories/generate``
 #: refusals and what #483 set ``CONFIG_ERROR_STATUS`` to at this
 #: boundary: "no store is configured" is a ``ConfigError`` in all but
 #: name, and the same condition class answering 409 on one route and 200
 #: on another is the asymmetry those fixes existed to remove.
-_VECTORS_UNCONFIGURED_STATUS = 409
+#:
+#: **Two conditions share it, deliberately** (#511): no vector store
+#: configured, and a configured store whose backend this route cannot
+#: drive. They are one condition class — nothing was dropped, nothing was
+#: recreated, and what has to change is the deployment rather than the
+#: request — and they are told apart by ``code``, the discriminator this
+#: route's docstring already declares canonical. That is how
+#: ``advisories/generate`` next door tells *three* refusals apart under
+#: one 409 — though only two of the three reach it through
+#: ``_ADVISORY_REFUSED_STATUS`` and the third puts its ``code`` under
+#: ``detail``, which is the half of that precedent this route does **not**
+#: follow: all three codes here sit at the top level. Giving this arm its
+#: own status would reintroduce the per-condition-per-surface spread #484
+#: existed to remove. One name for one number, for the same reason.
+#:
+#: **501 was the other candidate and is refused.** Its dictionary meaning
+#: — "the server does not support the functionality required to fulfill
+#: the request" — is the closest literal match, and a distinct status is
+#: machine-distinguishable without reading the body. Against it: 501 is a
+#: **5xx**, and nothing broke. This boundary treats 5xx as server failure
+#: (``middleware._error_status`` maps every ``StoreError`` to 500), so a
+#: correct, expected refusal would land in the error rate beside real
+#: outages — #506's silent-200 defect pointed the other way. 4xx is the
+#: class that means "this request cannot be satisfied here, do not resend
+#: it as-is", which is the true statement. 501 is also cacheable by
+#: default (RFC 9110 15.6.2) while this condition is a property of *process
+#: configuration*, so an intermediary could keep serving the refusal after
+#: the operator has reconfigured. The machine-distinguishable half rides
+#: ``code``, at the top level, where every other refusal here carries it.
+_VECTORS_REFUSED_STATUS = 409
 
 #: The status for a reset that was *attempted* and broke. Deliberately
 #: **not** 409, and not by symmetry with the arm above — the two arms
@@ -401,16 +430,76 @@ _VECTORS_UNCONFIGURED_STATUS = 409
 #: catch stays for the *body*, not the status — see the comment on it.
 _VECTORS_RESET_FAILED_STATUS = 500
 
+#: The raw-SQL handles :func:`reset_vectors` knows how to drive, most
+#: specific first, each paired with the branch name the route dispatches
+#: on. ``_pool`` is checked before ``_conn`` because ``PgVectorStore``
+#: has both and only the pooled path is correct for it.
+_VECTOR_RESET_HANDLES: tuple[tuple[str, str], ...] = (
+    ("_pool", "pool"),
+    ("_conn", "conn"),
+)
+
+
+def _vector_reset_handle(vector_store: object) -> str | None:
+    """Name the handle this route can reset ``vector_store`` through.
+
+    ``None`` means the backend cannot be reset here at all — the #511
+    condition. Detection is by **capability, not class name**: a roster of
+    backend class names in this module would rot the moment a fifth
+    backend lands, and it would be a *second* place that has to agree with
+    the dispatch below. This asks the one question the dispatch asks.
+
+    The probe asks the **type** — :func:`hasattr` against the *class*,
+    which walks the MRO and hands back a property object without ever
+    binding it — and the **instance** ``__dict__``. What it never does is
+    ``hasattr`` against the *instance*. ``SQLiteStoreBase._conn`` is a
+    *property* that opens a connection, so that spelling would do I/O just
+    to answer a question about shape — and on a corrupt database file it
+    raises ``sqlite3.DatabaseError`` straight out of the probe, which is
+    not an ``AttributeError`` and would escape as an unhandled 500
+    ``internal_error`` instead of this route's own ``vector_reset_failed``.
+    Absent and present-but-unhappy are different answers and only the
+    first one is this arm's.
+
+    The type half has to stay an MRO walk and not a read of
+    ``store_type.__dict__``: ``SQLiteVectorStore`` does not define
+    ``_conn`` itself — it inherits the property from ``SQLiteStoreBase`` —
+    so narrowing it that way would refuse the *default* backend.
+
+    The route's one caller uses the returned handle to pick its branch, so
+    "supported" and "which branch" are decided **once**. Two independent
+    ``hasattr`` checks — one to refuse, one to dispatch — could disagree.
+
+    What this deliberately does *not* check is whether ``_init_schema``
+    will accept a bare call (``ArcadeDBVectorStore``'s wants keyword
+    arguments). The boundary is "can the reset *begin*": anything that
+    fails after the ``DROP`` has run is a reset that was attempted and
+    broke, which is ``_VECTORS_RESET_FAILED_STATUS``'s claim and not this
+    one's. Widening the probe would move a genuinely destructive failure
+    into an arm whose whole promise is that nothing was touched.
+    """
+    instance_attrs = getattr(vector_store, "__dict__", {})
+    store_type = type(vector_store)
+    for name, handle in _VECTOR_RESET_HANDLES:
+        if hasattr(store_type, name) or name in instance_attrs:
+            return handle
+    return None
+
 
 @router.post(
     "/vectors/reset",
     responses={
-        _VECTORS_UNCONFIGURED_STATUS: {
+        _VECTORS_REFUSED_STATUS: {
             "description": (
-                "Nothing was dropped and nothing was recreated: the "
-                "deployment has no vector store configured. `code` is "
-                "`vector_store_unconfigured`, at the top level beside "
-                "`status`."
+                "Nothing was dropped and nothing was recreated, and what "
+                "has to change is the deployment rather than the request. "
+                "A `code` says which — `vector_store_unconfigured` when "
+                "the deployment has no vector store, "
+                "`vector_reset_unsupported_backend` when it has one whose "
+                "backend keeps no `vectors` table for this route to drop "
+                "(ArcadeDB and Neo4j hold vectors as graph-node state). "
+                "Both sit at the top level beside `status`, and neither is "
+                "transient: retrying an unchanged request cannot succeed."
             )
         },
         _VECTORS_RESET_FAILED_STATUS: {
@@ -427,18 +516,28 @@ _VECTORS_RESET_FAILED_STATUS = 500
 def reset_vectors(response: Response) -> dict[str, Any]:
     """Drop and recreate the vectors table with current configured dimensions.
 
-    Neither failure arm answers 200, and they answer differently on
-    purpose. A deployment with **no vector store configured** answers
-    **409**: nothing was dropped, nothing was recreated, and what has to
-    change is the deployment. A reset that was **attempted and failed**
-    answers **500**: the server fell over mid-operation, the vectors
-    table may be gone, and no reshaped request fixes that.
+    No failure arm answers 200, and they do not all answer the same
+    status. **409** is the answer whenever nothing was dropped and
+    nothing was recreated and the fix is to the deployment rather than to
+    the request — either the deployment has **no vector store
+    configured** (`vector_store_unconfigured`), or it has one whose
+    **backend this route cannot reset** (`vector_reset_unsupported_backend`;
+    ArcadeDB and Neo4j keep vectors as graph-node state, so there is no
+    `vectors` table here to drop). A reset that was **attempted and
+    failed** answers **500** (`vector_reset_failed`): the server fell over
+    mid-operation, the vectors table may be gone, and no reshaped request
+    fixes that.
 
-    Both refusals name themselves in a `code` at the **top level** of the
-    body, beside `status` — `vector_store_unconfigured` and
-    `vector_reset_failed`. This route raises no `HTTPException`, so there
-    is no `detail` envelope on any arm and `body["code"]` is always where
-    the code is.
+    A 409 on this route is a *permanent* answer, not "try again later" —
+    same as the `advisories/generate` refusals next door, the condition
+    does not resolve on its own. It is 4xx rather than 501 because nothing
+    broke: the server declined correctly, and a 5xx at this boundary means
+    the server failed.
+
+    All three refusals name themselves in a `code` at the **top level** of
+    the body, beside `status`. This route raises no `HTTPException`, so
+    there is no `detail` envelope on any arm and `body["code"]` is always
+    where the code is.
     """
     # This docstring is the endpoint's public API description (it is what
     # ``scripts/generate_openapi.py`` puts in ``docs/api/v1.yaml``), so the
@@ -453,20 +552,41 @@ def reset_vectors(response: Response) -> dict[str, Any]:
     registry = get_registry()
     vector_store = getattr(registry.knowledge, "vector_store", None)
     if vector_store is None:
-        response.status_code = _VECTORS_UNCONFIGURED_STATUS
+        response.status_code = _VECTORS_REFUSED_STATUS
         return {
             "status": "error",
             "code": "vector_store_unconfigured",
             "message": "Vector store not configured",
         }
 
+    # PgVectorStore exposes the pooled-connection helper ``_conn``
+    # inherited from ``PostgresStoreBase``; SQLite's vector store uses a
+    # plain ``sqlite3.Connection`` at ``_conn`` whose ``execute`` runs SQL
+    # directly. ``ArcadeDBVectorStore`` and ``Neo4jVectorStore`` have
+    # neither, so before #511 this route reached for ``_conn`` on the
+    # **blessed** substrate and died on ``AttributeError`` — answered as a
+    # 500 whose message was the attribute name, which tells an operator
+    # nothing to do and invites a retry that can never succeed. The
+    # capability is resolved once, above the ``try``, and the branch below
+    # is chosen from that same answer.
+    handle = _vector_reset_handle(vector_store)
+    if handle is None:
+        response.status_code = _VECTORS_REFUSED_STATUS
+        return {
+            "status": "error",
+            "code": "vector_reset_unsupported_backend",
+            "message": (
+                "Vector reset is not supported on this backend: "
+                f"{type(vector_store).__name__} keeps no `vectors` table "
+                "for this route to drop and recreate. Nothing was changed. "
+                "Rebuild the backend's vector index with its own tooling, "
+                "then repopulate with `trellis admin reindex-vectors "
+                "--force`."
+            ),
+        }
+
     try:
-        # PgVectorStore exposes the pooled-connection helper ``_conn``
-        # inherited from ``PostgresStoreBase``; SQLite's vector store
-        # uses a plain ``sqlite3.Connection`` at ``_conn`` whose
-        # ``execute`` runs SQL directly. Detect by attribute capability,
-        # not type, so the route stays backend-agnostic.
-        if hasattr(vector_store, "_pool"):
+        if handle == "pool":
             with vector_store._conn() as conn, conn.cursor() as cur:
                 cur.execute("DROP TABLE IF EXISTS vectors")
         else:
