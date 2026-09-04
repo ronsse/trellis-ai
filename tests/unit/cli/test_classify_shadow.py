@@ -15,7 +15,11 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
-from tests.cli_output import plain
+from tests.cli_output import assert_coloured, force_colour, plain
+from trellis.learning.domain_normalization import (
+    SIGNAL_LEXICAL,
+    DomainAliasCandidate,
+)
 from trellis.learning.tag_evolution import (
     PARAM_COMPONENT_ID,
     RECOMMENDED_SEED_VALUES,
@@ -282,6 +286,39 @@ class TestDomainCandidatesCommand:
         assert result.exit_code == 0, result.output
         assert "cross-cutting" in result.output
         assert "spelling only" in result.output
+
+    def test_paste_ready_alias_survives_markup_under_colour(
+        self,
+        cli_env,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """LLM vocabulary must reach the config fragment byte-for-byte (#522)."""
+        import trellis_cli.classify as cli_classify
+
+        alias = "budget-[literal-alias]"
+        canonical = "hunting-[literal-canonical]"
+        candidate = DomainAliasCandidate(
+            alias=alias,
+            canonical=canonical,
+            alias_documents=1,
+            canonical_documents=20,
+            corpus_documents=21,
+            cooccurrence_documents=0,
+            cooccurrence_rate=0.0,
+            neighbor_overlap=0.0,
+            shared_tokens=("hunting",),
+            signals=(SIGNAL_LEXICAL,),
+            competing_canonicals=(),
+            documents_gained=1,
+            candidate_id="domain_alias:test",
+        )
+        force_colour(monkeypatch, cli_classify)
+
+        cli_classify._render_domain_candidates([candidate], total=1, emitted=False)
+
+        rendered = assert_coloured(capsys.readouterr().out)
+        assert f"{alias}: {canonical}" in plain(rendered)
 
     def test_an_operator_mapped_alias_is_not_re_proposed(self, cli_env) -> None:
         """Filters its own writes, via ``classify.domain_aliases`` in config."""

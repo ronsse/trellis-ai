@@ -776,6 +776,71 @@ class TestOperatorCopyableIds:
         assert "trace-canar" in rendered, rendered
 
 
+class TestUntrustedTextRendering:
+    """Caller- and extractor-authored prose survives Rich verbatim (#522)."""
+
+    @staticmethod
+    def _assert_literal(output: str, expected: str) -> None:
+        rendered = " ".join(plain(output).split())
+        assert expected in rendered, rendered
+
+    def test_pack_intent_survives_markup_under_colour(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import trellis_cli.retrieve as cli_retrieve
+
+        force_colour(monkeypatch, cli_retrieve)
+        intent = "deploy [literal-intent] dataset:snowflake://warehouse"
+        result = runner.invoke(app, ["retrieve", "pack", "--intent", intent])
+
+        assert result.exit_code == 0
+        self._assert_literal(assert_coloured(result.stdout), f"Intent: {intent}")
+
+    def test_trace_intent_survives_markup_under_colour(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import trellis_cli.retrieve as cli_retrieve
+        from trellis.schemas.trace import Trace, TraceContext
+        from trellis_cli.stores import get_trace_store
+
+        intent = "inspect [literal-intent] dataset:snowflake://warehouse"
+        get_trace_store().append(
+            Trace(
+                trace_id="trace-untrusted-intent",
+                source="agent",
+                intent=intent,
+                context=TraceContext(agent_id="agent-1"),
+            )
+        )
+        force_colour(monkeypatch, cli_retrieve)
+        result = runner.invoke(app, ["retrieve", "trace", "trace-untrusted-intent"])
+
+        assert result.exit_code == 0
+        self._assert_literal(assert_coloured(result.stdout), f"Intent: {intent}")
+
+    def test_entity_properties_survive_markup_under_colour(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import trellis_cli.retrieve as cli_retrieve
+        from trellis_cli.stores import get_graph_store
+
+        get_graph_store().upsert_node(
+            "entity-untrusted-properties",
+            "dataset",
+            {"[literal-key]": "dataset:snowflake://warehouse [literal-value]"},
+        )
+        force_colour(monkeypatch, cli_retrieve)
+        result = runner.invoke(
+            app, ["retrieve", "entity", "entity-untrusted-properties"]
+        )
+
+        assert result.exit_code == 0
+        self._assert_literal(
+            assert_coloured(result.stdout),
+            "[literal-key]: dataset:snowflake://warehouse [literal-value]",
+        )
+
+
 class TestRetrieveChunkVisibility:
     """``retrieve search`` hands back whole rows (#396).
 

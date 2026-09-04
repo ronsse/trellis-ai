@@ -359,12 +359,12 @@ def _refresh_entry(
 
 @extract_app.command("refresh")
 def refresh(  # noqa: PLR0912, PLR0915 - CLI dispatch with explicit branching by intent
-    source: str = typer.Option(
+    source: str | None = typer.Option(
         None,
         "--source",
         help="Source name from sources.yaml. Mutually exclusive with --type.",
     ),
-    extractor_type: str = typer.Option(
+    extractor_type: str | None = typer.Option(
         None,
         "--type",
         help=(
@@ -372,7 +372,7 @@ def refresh(  # noqa: PLR0912, PLR0915 - CLI dispatch with explicit branching by
             "Requires --path. Mutually exclusive with --source."
         ),
     ),
-    path: str = typer.Option(
+    path: str | None = typer.Option(
         None,
         "--path",
         help="Input file path. Required with --type; ignored with --source.",
@@ -435,19 +435,13 @@ def refresh(  # noqa: PLR0912, PLR0915 - CLI dispatch with explicit branching by
             raise typer.Exit(code=EXIT_INTERNAL) from None
     else:
         # --type path
-        type_path = Path(path)  # type: ignore[arg-type]
+        # Expose the option relationship established by the guards to mypy.
+        assert extractor_type is not None
+        assert path is not None
+        type_path = Path(path)
         if not type_path.exists():
             # ``str()`` because ``type_path`` is a ``Path`` and
-            # ``rich.markup.escape`` raises ``TypeError`` on one. mypy does
-            # not catch it here: ``source: str`` can never be ``None``, so
-            # mypy proves ``if source is not None`` always true and skips
-            # this whole ``else`` as unreachable — a blind spot the typer
-            # ``Option(None)``-on-a-non-Optional pattern creates wherever it
-            # is used — ``--warn-unreachable`` reports *two* dark
-            # statements in this function, this one and the ``--type
-            # requires --path`` arm above it, so it is a pattern rather
-            # than a one-off. ``test_extract_refresh`` covers the branch
-            # instead.
+            # ``rich.markup.escape`` raises ``TypeError`` on one.
             # ``soft_wrap`` for the reason ``policy.py`` gives at its own
             # path renders: Rich hard-wraps at the console width, so a path
             # under a deep temp directory comes out as ``nope.jso\nn`` and
@@ -461,8 +455,8 @@ def refresh(  # noqa: PLR0912, PLR0915 - CLI dispatch with explicit branching by
             )
             raise typer.Exit(code=EXIT_INTERNAL)
         try:
-            extractor = _resolve_extractor(extractor_type)  # type: ignore[arg-type]
-            raw_input = _read_raw_input(type_path, extractor_type)  # type: ignore[arg-type]
+            extractor = _resolve_extractor(extractor_type)
+            raw_input = _read_raw_input(type_path, extractor_type)
             registry = _get_registry()
             summary = _run_refresh(
                 registry,

@@ -867,7 +867,12 @@ def _render_domain_candidates(
     console.print(f"{CLASSIFY_CONFIG_KEY}:")
     console.print(f"  {DOMAIN_ALIASES_KEY}:")
     for alias, canonical in fragment.items():
-        console.print(f"    {alias}: {canonical}")
+        console.print(
+            f"    {alias}: {canonical}",
+            markup=False,
+            highlight=False,
+            soft_wrap=True,
+        )
     console.print(
         "\n[yellow]Review before merging: 'domain' hard-excludes on mismatch, "
         "so a wrong merge hides every document carrying the alias — in bulk, "

@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import get_type_hints
 
 import pytest
 from typer.testing import CliRunner
 
 from tests.cli_output import plain
-from trellis_cli.extract_refresh import _property_diff
+from trellis_cli.extract_refresh import _property_diff, refresh
 from trellis_cli.main import app
 
 runner = CliRunner()
@@ -110,6 +111,13 @@ class TestPropertyDiff:
 
 
 class TestRefreshCliValidation:
+    def test_nullable_options_are_typed_as_nullable(self) -> None:
+        """Mypy must type-check both CLI dispatch branches (#522)."""
+        hints = get_type_hints(refresh)
+        assert hints["source"] == str | None
+        assert hints["extractor_type"] == str | None
+        assert hints["path"] == str | None
+
     def test_neither_source_nor_type_errors(self) -> None:
         runner.invoke(app, ["admin", "init"])
         result = runner.invoke(app, ["extract", "refresh"])
