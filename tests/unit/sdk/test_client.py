@@ -193,3 +193,37 @@ class TestPack:
         body = self._capture_pack_body()
         assert "run_id" not in body
         assert "intent_family" not in body
+
+    @pytest.mark.parametrize(
+        "method_name",
+        ["get_objective_context", "get_task_context"],
+    )
+    def test_sectioned_context_renders_empty_pack_routing(
+        self, method_name: str
+    ) -> None:
+        def handler(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "pack_id": "p1",
+                    "sections": [{"name": "only", "items": []}],
+                    "withholding": {
+                        "total": 0,
+                        "by_reason": {},
+                        "withheld_item_ids": ["sectioned-secret-id"],
+                        "non_absence_reasons": [],
+                        "section_filtered": 2,
+                        "served_count": 0,
+                    },
+                },
+            )
+
+        http = httpx.Client(
+            transport=httpx.MockTransport(handler), base_url="http://testserver"
+        )
+        with TrellisClient(http=http, verify_version=False) as client:
+            rendered = getattr(client, method_name)("deploy checklist")
+
+        assert "**Section routing:** this pack is empty because 2 items" in rendered
+        assert rendered.index("**Section routing:**") < rendered.index("## Section:")
+        assert "sectioned-secret-id" not in rendered

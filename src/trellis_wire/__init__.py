@@ -48,9 +48,12 @@ from trellis_wire.dtos import (
     PackResponse,
     PromoteRequest,
     SearchRequest,
+    SectionedPackRequest,
+    SectionedPackResponse,
     StatsResponse,
     StatusResponse,
     VersionResponse,
+    WithholdingResponse,
 )
 from trellis_wire.enums import BatchStrategy, NodeRole
 from trellis_wire.extract import (
@@ -80,6 +83,9 @@ __all__ = [
     "SearchRequest",
     "PackRequest",
     "PackResponse",
+    "SectionedPackRequest",
+    "SectionedPackResponse",
+    "WithholdingResponse",
     # Curate
     "PromoteRequest",
     "LinkRequest",
