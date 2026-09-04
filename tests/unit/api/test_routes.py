@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import sqlite3
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,7 @@ from trellis.core.error_sanitize import SUPPRESSED_MARKER
 from trellis.errors import StaleStoreWriteError
 from trellis.schemas.enums import PolicyType
 from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
+from trellis.stores.base import VectorStore
 from trellis.stores.registry import StoreRegistry
 from trellis_api.routes import admin, curate, ingest, mutations, policies, retrieve
 
@@ -1728,21 +1730,34 @@ class TestVectorsResetStatusLine:
         assert body["message"] == "Recreated with 1536D", body
         assert "code" not in body, body
 
-    def test_neither_refusal_is_wrapped_in_a_detail_envelope(self, client, monkeypatch):
+    def test_no_refusal_is_wrapped_in_a_detail_envelope(self, client, monkeypatch):
         """Pins the docstring's contract for *every* arm it speaks for.
 
         The endpoint docstring is what ``scripts/generate_openapi.py``
-        publishes as the OpenAPI description, and it says both refusals
-        name themselves in a ``code`` at the **top level**. #505's review
-        gate caught exactly this claim being false for one of three arms,
-        because that arm raised ``HTTPException`` and so put its code at
-        ``body["detail"]["code"]`` — a generated client would look for a
-        key that is not there. Asserted here per arm, not asserted once
-        and assumed to generalise.
+        publishes as the OpenAPI description, and it says **all three**
+        refusals name themselves in a ``code`` at the **top level**.
+        #505's review gate caught exactly this claim being false for one
+        of three arms, because that arm raised ``HTTPException`` and so
+        put its code at ``body["detail"]["code"]`` — a generated client
+        would look for a key that is not there. #511 added a third arm to
+        this route and so a third chance to make the same claim falsely.
+        Asserted here per arm, not asserted once and assumed to
+        generalise.
         """
         from trellis.stores.registry import _KnowledgePlane
 
-        store = app_module._registry.knowledge.vector_store
+        registry = app_module._registry
+        store = registry.knowledge.vector_store
+
+        # Arm three first: it swaps the cached store, and the two arms
+        # below need the real one back.
+        registry._cache["vector"] = _HandleFreeVectorStore()
+        unsupported = client.post("/api/v1/vectors/reset")
+        assert unsupported.status_code == 409, unsupported.text
+        assert "detail" not in unsupported.json(), unsupported.text
+        assert "code" in unsupported.json(), unsupported.text
+        registry._cache["vector"] = store
+
         db_path = Path(str(store._db_path))
         db_path.write_bytes(b"not a sqlite database" * 32)
         for suffix in ("-wal", "-shm"):
@@ -1761,15 +1776,20 @@ class TestVectorsResetStatusLine:
         assert "detail" not in unconfigured.json(), unconfigured.text
         assert "code" in unconfigured.json(), unconfigured.text
 
-        # And the two are told apart by more than the status: a caller
-        # given only "something went wrong" cannot choose between
-        # configuring a store and going to look at one.
-        assert failed.json()["code"] != unconfigured.json()["code"], (
-            failed.text,
-            unconfigured.text,
-        )
+        # And they are told apart by more than the status: a caller given
+        # only "something went wrong" cannot choose between configuring a
+        # store, going to look at one, and reaching for the backend's own
+        # tooling. The two that *share* a status are the pair that most
+        # needs distinguishing, and a mutant that emits one code for both
+        # would otherwise pass every assertion above.
+        codes = [
+            failed.json()["code"],
+            unconfigured.json()["code"],
+            unsupported.json()["code"],
+        ]
+        assert len(set(codes)) == 3, codes
 
-    def test_the_spec_declares_both_refusals(self):
+    def test_the_spec_declares_every_refusal(self):
         """``openapi-check`` was green against a spec with only a 200.
 
         #484 found the same thing next door: a committed spec that never
@@ -1788,3 +1808,252 @@ class TestVectorsResetStatusLine:
         assert set(route.responses) == {409, 500}, route.responses
         for status in (409, 500):
             assert route.responses[status]["description"], route.responses
+
+        # Three refusals under two statuses, so the status set alone no
+        # longer says every arm is declared. #511's arm shares 409 with
+        # the unconfigured one and is distinguished by ``code``, which
+        # means the *description* is the only place the spec can carry it
+        # — and a reader of the generated YAML has nothing else to go on.
+        refusal_409 = route.responses[409]["description"]
+        for code in ("vector_store_unconfigured", "vector_reset_unsupported_backend"):
+            assert code in refusal_409, refusal_409
+        assert "vector_reset_failed" in route.responses[500]["description"]
+
+
+class _HandleFreeVectorStore(VectorStore):
+    """A ``VectorStore`` shaped like the blessed substrate: no SQL handle.
+
+    ``ArcadeDBVectorStore`` speaks SQL-over-HTTP and ``Neo4jVectorStore``
+    speaks Bolt. Neither owns a ``sqlite3.Connection`` at ``_conn`` nor a
+    ``psycopg_pool.ConnectionPool`` at ``_pool``, and neither keeps a
+    ``vectors`` table at all — vectors are state on ``(:Node)`` rows.
+
+    A real ABC subclass rather than a ``MagicMock`` on purpose: a
+    ``MagicMock`` answers *every* attribute lookup, so it reports both
+    handles as present and would exercise the supported path while
+    claiming to test the unsupported one. Every inherited operation
+    raises, so an arm that reaches past the refusal fails loudly instead
+    of quietly returning a mock.
+    """
+
+    def __init__(self) -> None:
+        self.init_schema_calls = 0
+
+    def _init_schema(self) -> None:
+        self.init_schema_calls += 1
+
+    def _unreachable(self, *args, **kwargs):
+        msg = "the unsupported arm must not touch the store"
+        raise AssertionError(msg)
+
+    upsert = upsert_bulk = query = get = delete = count = close = _unreachable
+
+
+class _RecordingCursor:
+    def __init__(self, sql: list[str]) -> None:
+        self._sql = sql
+
+    def execute(self, statement: str) -> None:
+        self._sql.append(statement)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class _PooledVectorStore(_HandleFreeVectorStore):
+    """The pgvector shape: a ``_pool``, and ``_conn`` as a *context manager*.
+
+    ``PgVectorStore`` inherits ``_conn`` from ``PostgresStoreBase`` as a
+    ``@contextmanager`` **method**, so the SQLite branch's
+    ``store._conn.execute(...)`` would raise on it. That is what makes the
+    two branches non-interchangeable and this fixture able to tell them
+    apart.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._pool = object()
+        self.executed: list[str] = []
+
+    @contextmanager
+    def _conn(self):
+        yield self
+
+    def cursor(self):
+        return _RecordingCursor(self.executed)
+
+
+class TestVectorsResetUnsupportedBackend:
+    """#511 — the route has never worked on the blessed substrate.
+
+    ``ArcadeDBVectorStore`` and ``Neo4jVectorStore`` have neither ``_conn``
+    nor ``_pool``, so ``POST /vectors/reset`` reached for ``_conn`` and
+    died on ``AttributeError``. #506 made that honest — ``500
+    vector_reset_failed`` with ``'ArcadeDBVectorStore' object has no
+    attribute '_conn'`` — and honest was the improvement. It is still a
+    poor refusal: a leaked private attribute name is not an instruction,
+    and a 5xx describes a *permanent property of the backend* as a
+    transient server failure, which invites a retry that can never
+    succeed.
+    """
+
+    def test_a_backend_with_no_sql_handle_is_refused_not_crashed(self, client):
+        """409 with a code of its own, and no leaked attribute name.
+
+        The status is the caller-facing half: 4xx says "this request
+        cannot be satisfied here", where the 500 said "the server broke,
+        try again". The body is the operator-facing half, and the
+        regression it guards is specifically the *old* message — a mutant
+        that keeps the new status but re-raises the ``AttributeError``
+        text is caught by the ``_conn`` assertion, not by the status one.
+        """
+        registry = app_module._registry
+        store = _HandleFreeVectorStore()
+        registry._cache["vector"] = store
+
+        resp = client.post("/api/v1/vectors/reset")
+
+        assert resp.status_code == 409, resp.text
+        body = resp.json()
+        assert body["status"] == "error", body
+        assert body["code"] == "vector_reset_unsupported_backend", body
+        # Actionable: it names the backend, states that nothing changed,
+        # and gives the operator somewhere to go.
+        assert "_HandleFreeVectorStore" in body["message"], body
+        assert "Nothing was changed" in body["message"], body
+        assert "reindex-vectors" in body["message"], body
+        # The #510 message, which said nothing an operator could act on.
+        assert "_conn" not in resp.text, resp.text
+
+    def test_the_unsupported_arm_touches_the_store_not_at_all(self, client):
+        """The 409's promise is that nothing happened, so check the store.
+
+        ``_HandleFreeVectorStore`` raises from every ``VectorStore``
+        operation and counts ``_init_schema`` calls, so a mutant that runs
+        the recreate before deciding the backend is unsupported — the
+        ordering that would make the "nothing was changed" sentence a lie
+        — fails here rather than passing on the status line.
+        """
+        registry = app_module._registry
+        store = _HandleFreeVectorStore()
+        registry._cache["vector"] = store
+
+        resp = client.post("/api/v1/vectors/reset")
+
+        assert resp.status_code == 409, resp.text
+        assert store.init_schema_calls == 0
+
+    def test_the_refusal_is_decided_by_capability_not_by_class_name(self):
+        """The detection rule, attacked directly with two liars.
+
+        A roster of backend class names is the obvious implementation and
+        the one that rots: it goes wrong the moment a fifth backend lands,
+        and silently. Both fakes below defeat a name-based rule and
+        neither defeats a capability check — one is *named*
+        ``SQLiteVectorStore`` and has no handle, the other is *named*
+        ``ArcadeDBVectorStore`` and has one. Asserting only the first
+        would leave a rule of the form "unsupported unless named
+        SQLite/Pg" alive.
+        """
+        from trellis_api.routes import admin as admin_routes
+
+        liar_named_supported = type("SQLiteVectorStore", (_HandleFreeVectorStore,), {})
+        liar_named_unsupported = type("ArcadeDBVectorStore", (_PooledVectorStore,), {})
+
+        assert admin_routes._vector_reset_handle(liar_named_supported()) is None
+        assert admin_routes._vector_reset_handle(liar_named_unsupported()) == "pool"
+
+    def test_every_shipped_vector_backend_is_classified(self):
+        """The roster lives in the *test*, derived from the registry.
+
+        A roster in ``admin.py`` would rot unnoticed; a roster here fails
+        the moment ``_BUILTIN_BACKENDS`` grows a vector backend nobody has
+        classified, which is the notification that a new backend needs an
+        answer to "can this route reset it?".
+
+        ``object.__new__`` skips ``__init__``, so no driver connects and
+        no socket opens. It under-populates the instance ``__dict__`` —
+        ``PgVectorStore`` sets ``_pool`` in ``__init__`` — so the *handle*
+        reported for pgvector here is not the one production takes. The
+        supported/unsupported verdict, which is all this arm turns on, is
+        decided on the type for every backend, and that is what is
+        asserted.
+        """
+        from trellis.stores.registry import _BUILTIN_BACKENDS
+        from trellis_api.routes import admin as admin_routes
+
+        expected = {
+            "sqlite": True,
+            "pgvector": True,
+            "neo4j": False,
+            "arcadedb": False,
+        }
+        shipped = _BUILTIN_BACKENDS["knowledge"]["vector"]
+        assert set(shipped) == set(expected), sorted(shipped)
+
+        probed: dict[str, bool] = {}
+        for name, (module, cls_name) in shipped.items():
+            try:
+                cls = getattr(importlib.import_module(module), cls_name)
+            except ImportError:
+                continue  # optional driver extra not installed
+            handle = admin_routes._vector_reset_handle(object.__new__(cls))
+            probed[name] = handle is not None
+
+        assert probed == {k: v for k, v in expected.items() if k in probed}, probed
+        # Floor against a vacuous pass: the whole claim is about these
+        # two, and both import with no optional extra, so a run that
+        # skipped them proves nothing.
+        assert probed.get("neo4j") is False, probed
+        assert probed.get("arcadedb") is False, probed
+
+    def test_a_handle_that_exists_but_raises_is_a_failure_not_unsupported(self):
+        """Absent and present-but-unhappy are different answers.
+
+        ``SQLiteStoreBase._conn`` is a *property* that opens a connection,
+        so the obvious ``hasattr(store, "_conn")`` probe does I/O to answer
+        a question about shape — and on a corrupt database file it raises
+        ``sqlite3.DatabaseError``, which ``hasattr`` does **not** swallow
+        (only ``AttributeError``). Sited above the ``try`` as the refusal
+        must be, that escapes as an unhandled 500 ``internal_error`` and
+        the route loses its own ``vector_reset_failed`` body. The probe
+        therefore reads the type and the instance ``__dict__`` instead of
+        invoking the descriptor.
+
+        This is the "provoke the specific condition" half: the store below
+        has the handle and cannot produce it, which is a reset that fails,
+        not a backend that cannot be reset.
+        """
+        from trellis_api.routes import admin as admin_routes
+
+        class _AngryConnStore(_HandleFreeVectorStore):
+            @property
+            def _conn(self):
+                msg = "file is not a database"
+                raise sqlite3.DatabaseError(msg)
+
+        assert admin_routes._vector_reset_handle(_AngryConnStore()) == "conn"
+
+    def test_a_pooled_backend_takes_the_pooled_branch(self, client):
+        """The pgvector branch, which nothing exercised before #511.
+
+        The route now picks its branch from the same value the refusal is
+        decided by, so "supported" and "which handle" cannot disagree.
+        Nothing pinned the pooled branch at all — every backend in the
+        default selection is SQLite — so swapping the two arms left the
+        suite green. Here the SQLite arm would call ``.execute`` on a
+        ``@contextmanager`` method and blow up into the 500 arm.
+        """
+        registry = app_module._registry
+        store = _PooledVectorStore()
+        registry._cache["vector"] = store
+
+        resp = client.post("/api/v1/vectors/reset")
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["status"] == "ok", resp.text
+        assert store.executed == ["DROP TABLE IF EXISTS vectors"], store.executed
+        assert store.init_schema_calls == 1

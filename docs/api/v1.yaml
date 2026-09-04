@@ -3984,28 +3984,47 @@ paths:
       description: 'Drop and recreate the vectors table with current configured dimensions.
 
 
-        Neither failure arm answers 200, and they answer differently on
+        No failure arm answers 200, and they do not all answer the same
 
-        purpose. A deployment with **no vector store configured** answers
+        status. **409** is the answer whenever nothing was dropped and
 
-        **409**: nothing was dropped, nothing was recreated, and what has to
+        nothing was recreated and the fix is to the deployment rather than to
 
-        change is the deployment. A reset that was **attempted and failed**
+        the request — either the deployment has **no vector store
 
-        answers **500**: the server fell over mid-operation, the vectors
+        configured** (`vector_store_unconfigured`), or it has one whose
 
-        table may be gone, and no reshaped request fixes that.
+        **backend this route cannot reset** (`vector_reset_unsupported_backend`;
+
+        ArcadeDB and Neo4j keep vectors as graph-node state, so there is no
+
+        `vectors` table here to drop). A reset that was **attempted and
+
+        failed** answers **500** (`vector_reset_failed`): the server fell over
+
+        mid-operation, the vectors table may be gone, and no reshaped request
+
+        fixes that.
 
 
-        Both refusals name themselves in a `code` at the **top level** of the
+        A 409 on this route is a *permanent* answer, not "try again later" —
 
-        body, beside `status` — `vector_store_unconfigured` and
+        same as the `advisories/generate` refusals next door, the condition
 
-        `vector_reset_failed`. This route raises no `HTTPException`, so there
+        does not resolve on its own. It is 4xx rather than 501 because nothing
 
-        is no `detail` envelope on any arm and `body["code"]` is always where
+        broke: the server declined correctly, and a 5xx at this boundary means
 
-        the code is.'
+        the server failed.
+
+
+        All three refusals name themselves in a `code` at the **top level** of
+
+        the body, beside `status`. This route raises no `HTTPException`, so
+
+        there is no `detail` envelope on any arm and `body["code"]` is always
+
+        where the code is.'
       operationId: reset_vectors_api_v1_vectors_reset_post
       responses:
         '200':
@@ -4017,8 +4036,11 @@ paths:
                 type: object
           description: Successful Response
         '409':
-          description: 'Nothing was dropped and nothing was recreated: the deployment has no vector store configured. `code`
-            is `vector_store_unconfigured`, at the top level beside `status`.'
+          description: 'Nothing was dropped and nothing was recreated, and what has to change is the deployment rather than
+            the request. A `code` says which — `vector_store_unconfigured` when the deployment has no vector store, `vector_reset_unsupported_backend`
+            when it has one whose backend keeps no `vectors` table for this route to drop (ArcadeDB and Neo4j hold vectors
+            as graph-node state). Both sit at the top level beside `status`, and neither is transient: retrying an unchanged
+            request cannot succeed.'
         '500':
           description: The reset was attempted and failed. The vectors table may have been dropped and not recreated, so this
             is not a no-op the way the 409 is. `code` is `vector_reset_failed`, at the top level beside `status`, and `message`
