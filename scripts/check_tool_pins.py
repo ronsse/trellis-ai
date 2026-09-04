@@ -84,6 +84,11 @@ because ``make env-check`` is run on its own to certify an environment and
 and exits 0. It exists so a knowingly-drifted environment does not brick
 unrelated work, and it is an environment variable rather than a flag so
 that opting out is an explicit, greppable act rather than a default.
+**Only the spellings in** :data:`ENV_DRIFT_TRUTHY` **turn it on** —
+``1``, ``true``, ``yes``, ``on``, case-insensitively and whitespace-
+stripped. Everything else, ``0`` and ``false`` and ``no`` included,
+leaves the gate enforcing; see :func:`env_drift_override` for why that
+is spelled as an allow-list rather than as a truthiness test (#498).
 
 Two further parity axes, measured and deliberately not checked here
 -------------------------------------------------------------------
@@ -138,6 +143,7 @@ import shutil
 import subprocess
 import sys
 import tomllib
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -188,6 +194,47 @@ _TOOL_VERSION_RE = re.compile(r"(\d+\.\d+(?:\.\d+)?[0-9A-Za-z.\-]*)")
 
 #: Set to opt out of the ``--check-env`` errors. See the module docstring.
 ENV_DRIFT_OVERRIDE = "TRELLIS_ALLOW_ENV_DRIFT"
+
+#: Values of :data:`ENV_DRIFT_OVERRIDE` that read as "on". This is the
+#: repo's existing convention, restated rather than imported:
+#: ``trellis.core.write_config.TRUTHY`` holds the identical four spellings
+#: and every boolean knob in ``src/`` parses through it. Restated because
+#: this script is stdlib-only on purpose — it runs in CI's lint job, which
+#: installs ruff and nothing else, so it cannot import the package. The
+#: duplication is a mirror, and like every other mirror in this file it is
+#: *verified* rather than declared: ``tests/scripts/test_check_tool_pins.py``
+#: imports both and asserts they are equal.
+ENV_DRIFT_TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+
+def env_drift_override(env: Mapping[str, str] | None = None) -> bool:
+    """``True`` iff :data:`ENV_DRIFT_OVERRIDE` is set to a truthy spelling.
+
+    An **allow-list** (:data:`ENV_DRIFT_TRUTHY`), matched after stripping
+    surrounding whitespace and lowercasing, so ``1``, ``true``, ``yes`` and
+    ``on`` enable the override and *everything else* — ``0``, ``false``,
+    ``no``, ``off``, unset, empty, or a typo — leaves the gate enforcing.
+
+    This was ``bool(os.environ.get(ENV_DRIFT_OVERRIDE))``, which is true for
+    **any non-empty value**, so ``TRELLIS_ALLOW_ENV_DRIFT=0`` *enabled* the
+    override (#498). That inverts the intent of the one person the escape
+    hatch is dangerous for: an operator who writes ``=0`` is trying to turn
+    it off, and got a gate that reported drift and exited 0 instead. The
+    failure is silent by construction — the run still prints its findings,
+    just under the ``(ignored)`` label and with a zero exit — which is the
+    same shape as the divergences this whole script exists to catch.
+
+    An allow-list is the right shape rather than a deny-list of falsey
+    spellings for the same reason: a value nobody anticipated must fall on
+    the *enforcing* side, because the cost of wrongly enforcing is a legible
+    error message and the cost of wrongly overriding is a gate that is off
+    and says so only in a line the caller has already decided to ignore.
+
+    ``env`` is a parameter so the tests can supply a mapping instead of
+    mutating the process environment.
+    """
+    source = os.environ if env is None else env
+    return source.get(ENV_DRIFT_OVERRIDE, "").strip().lower() in ENV_DRIFT_TRUTHY
 
 
 @dataclass(frozen=True)
@@ -363,11 +410,21 @@ def workflow_python_setups(workflows_dir: Path) -> dict[Path, set[tuple[int, int
 
     Both ``python-version: "3.11"`` and the matrix list form are read;
     ``${{ matrix.python-version }}`` is skipped as an indirection to a list
-    that is itself literal elsewhere in the same file. Granularity is the
-    *file*, not the job — coarse, but every workflow here sets up at most
-    one version set per gate, and a job-level parser would need a YAML
-    dependency this script deliberately does not have (it runs in the lint
-    job, which installs ruff and nothing else).
+    that is itself literal elsewhere in the same file.
+
+    Granularity is the *file*, not the job, and the tidier justification
+    once given here — that every workflow sets up at most one version set
+    per gate — is **false**: ``publish.yml``'s ``test`` job runs
+    ``ruff check`` and ``mypy src/`` under all three of
+    ``["3.11", "3.12", "3.13"]``, which is legitimate for a release gate
+    (#498). So what the cross-check actually asserts is the weaker
+    property that the gate Python *appears* in every workflow that runs a
+    gate — enough to catch a workflow that has moved off it entirely, not
+    enough to catch one that splits its gate across a matrix in which the
+    gate version is merely one leg. Left weak deliberately: a job-level
+    parser would need a YAML dependency this script does not have (it runs
+    in the lint job, which installs ruff and nothing else), and the
+    approximation is documented here rather than rediscovered.
     """
     setups: dict[Path, set[tuple[int, int]]] = {}
     for path in _workflow_paths(workflows_dir):
@@ -670,7 +727,7 @@ def _report_environment(findings: list[EnvFinding], *, override: bool) -> int:
     if override:
         print(
             f"{ENV_DRIFT_OVERRIDE} is set — continuing with a gate that is not "
-            f"CI's. Unset it to make these fail.",
+            f"CI's. Unset it, or set it to 0, to make these fail.",
             file=sys.stderr,
         )
         return 0
@@ -715,7 +772,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     return _report_environment(
         check_environment(),
-        override=bool(os.environ.get(ENV_DRIFT_OVERRIDE)),
+        override=env_drift_override(),
     )
 
 
