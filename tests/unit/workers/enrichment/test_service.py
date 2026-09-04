@@ -76,6 +76,7 @@ class TestEnrichmentResult:
         assert result.error is None
         # B1: new structured failure_kind field defaults to None on success.
         assert result.failure_kind is None
+        assert result.judging_model_id is None
 
     def test_extra_fields_forbidden(self):
         with pytest.raises(ValueError):
@@ -216,7 +217,35 @@ class TestEnrich:
         assert result.auto_tags == ["python", "machine-learning"]
         assert result.auto_class == "research"
         assert result.raw_response == VALID_JSON
+        assert result.judging_model_id == "test-model"
         llm.generate.assert_awaited_once()
+
+    async def test_resolves_judging_model_from_client_default(self):
+        llm = _make_llm(VALID_JSON)
+        llm.generate.return_value = LLMResponse(content=VALID_JSON, model=None)
+        llm._default_model = "configured-default"
+        service = EnrichmentService(llm=llm)
+
+        result = await service.enrich(content="hello")
+
+        assert result.success is True
+        assert result.judging_model_id == "configured-default"
+
+    async def test_missing_model_identity_degrades_loudly(
+        self, event_log: SQLiteEventLog
+    ) -> None:
+        llm = _make_llm(VALID_JSON)
+        llm.generate.return_value = LLMResponse(content=VALID_JSON, model=None)
+        service = EnrichmentService(llm=llm, event_log=event_log)
+
+        result = await service.enrich(content="hello")
+
+        assert result.success is False
+        assert result.failure_kind == "model_identity_missing"
+        assert result.judging_model_id is None
+        events = event_log.get_events(event_type=EventType.EXTRACTION_FAILED)
+        assert len(events) == 1
+        assert events[0].payload["failure_kind"] == "model_identity_missing"
 
     async def test_enrich_surfaces_usage(self):
         usage = TokenUsage(prompt_tokens=120, completion_tokens=40, total_tokens=160)

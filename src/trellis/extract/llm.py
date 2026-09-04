@@ -45,6 +45,7 @@ from trellis.schemas.extraction import (
     EntityDraft,
     ExtractionProvenance,
     ExtractionResult,
+    LLMJudgedDraftRecord,
 )
 from trellis.schemas.well_known import (
     canonicalize_edge_kind,
@@ -223,6 +224,44 @@ class LLMExtractor:
                 extractor_id=self.__class__.__name__,
             ) from exc
 
+        model_id = _non_empty_model_id(response.model) or _non_empty_model_id(
+            self._model
+        )
+        judged_drafts: list[LLMJudgedDraftRecord] = []
+        if model_id is None and any(entity.entity_id is None for entity in entities):
+            emit_extraction_failure(
+                event_log=self._event_log,
+                extractor_id=self.__class__.__name__,
+                extractor_tier="llm",
+                failure_kind="model_identity_missing",
+                source_hint=source_hint,
+                source_excerpt_hash=content_hash(text) if text else None,
+                model=None,
+                error_class="ModelIdentityMissing",
+                error_excerpt=(
+                    "LLM response and configured extractor omitted model identity"
+                ),
+            )
+            logger.error(
+                "memory_op_judged_identity_missing",
+                operation="extraction",
+                extractor=self.name,
+            )
+        elif model_id is not None:
+            input_hash = content_hash(text)
+            judged_drafts = [
+                LLMJudgedDraftRecord(
+                    entity_type=entity.entity_type,
+                    name=entity.name,
+                    confidence=entity.confidence,
+                    model_id=model_id,
+                    input_hash=input_hash,
+                    input_length=len(text),
+                )
+                for entity in entities
+                if entity.entity_id is None
+            ]
+
         return _make_result(
             name=self.name,
             version=self.version,
@@ -234,6 +273,8 @@ class LLMExtractor:
             overall_confidence=confidence,
             unparsed_residue=None if (entities or edges) else (text or None),
             source_hint=source_hint,
+            judged_drafts=judged_drafts,
+            model_id=model_id,
         )
 
 
@@ -450,6 +491,13 @@ def _clamp_confidence(value: Any, default: float = 0.5) -> float:
     return number
 
 
+def _non_empty_model_id(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
 def _make_result(
     *,
     name: str,
@@ -462,6 +510,8 @@ def _make_result(
     overall_confidence: float,
     unparsed_residue: Any | None,
     source_hint: str | None,
+    judged_drafts: list[LLMJudgedDraftRecord] | None = None,
+    model_id: str | None = None,
 ) -> ExtractionResult:
     return ExtractionResult(
         entities=entities,
@@ -472,9 +522,11 @@ def _make_result(
         tokens_used=tokens_used,
         overall_confidence=overall_confidence,
         unparsed_residue=unparsed_residue,
+        judged_drafts=judged_drafts or [],
         provenance=ExtractionProvenance(
             extractor_name=name,
             extractor_version=version,
             source_hint=source_hint,
+            model_id=model_id,
         ),
     )

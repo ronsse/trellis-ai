@@ -33,15 +33,14 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from trellis.core.elision import elide_text
+from trellis.core.memory_op_judged import emit_memory_op_judged
 from trellis.llm import Message
 from trellis.schemas.memory_op import (
     REF_TYPE_DOCUMENT,
     InputDigest,
     JudgedOpType,
-    MemoryOpJudgedPayload,
     SubjectRef,
 )
-from trellis.stores.base.event_log import EventType
 from trellis_workers.session_capture.models import CandidateMemory, SessionDigest
 
 if TYPE_CHECKING:
@@ -350,8 +349,10 @@ def emit_distillation_judged(
     id, and the subject doc ref — never memory content or model prose.
     Best-effort: a telemetry failure never rolls back a committed capture.
     """
-    payload = MemoryOpJudgedPayload(
+    emit_memory_op_judged(
+        event_log,
         op_type=JudgedOpType.DISTILLATION,
+        source="worker:session-capture.distill",
         model_id=model_id,
         input_digest=InputDigest(
             hash=candidate.input_hash,
@@ -361,14 +362,6 @@ def emit_distillation_judged(
         decision=decision,
         confidence=candidate.confidence,
         subject_ref=SubjectRef(ref_type=REF_TYPE_DOCUMENT, ref_id=candidate.doc_id),
+        entity_id=candidate.doc_id or candidate.session_id,
+        entity_type="document",
     )
-    try:
-        event_log.emit(
-            EventType.MEMORY_OP_JUDGED,
-            source="worker:session-capture.distill",
-            entity_id=candidate.doc_id or candidate.session_id,
-            entity_type="document",
-            payload=payload.model_dump(mode="json"),
-        )
-    except Exception:
-        logger.exception("distill_judged_emit_failed", session_id=candidate.session_id)

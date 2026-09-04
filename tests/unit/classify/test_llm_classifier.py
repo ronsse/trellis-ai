@@ -27,7 +27,7 @@ class FakeLLM:
         max_tokens: int = 500,
         model: str | None = None,
     ) -> LLMResponse:
-        return LLMResponse(content=self._response, model=model)
+        return LLMResponse(content=self._response, model=model or "test-model")
 
 
 def _run(coro):

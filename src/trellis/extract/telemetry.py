@@ -80,6 +80,8 @@ ExtractionFailureKind = Literal[
     "low_confidence",
     "tier_fallback",
     "model_error",
+    "model_identity_missing",
+    "judged_op_correlation_failed",
     "budget_exhausted",
     "batch_collector_error",
 ]

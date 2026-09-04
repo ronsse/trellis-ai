@@ -47,6 +47,7 @@ from trellis.core.write_config import (
 )
 from trellis.core.write_provenance import get_write_provenance
 from trellis.extract.entity_resolution import build_name_alias_resolver
+from trellis.extract.memory_ingest_hook import run_memory_extraction
 from trellis.extract.trace_ingest_hook import run_trace_extraction
 from trellis.feedback.attribution import lookup_pack_item_ids
 from trellis.feedback.models import PackFeedback
@@ -472,61 +473,6 @@ def _build_alias_resolver(registry: StoreRegistry) -> Any:
     which is what the resolver module claims.
     """
     return build_name_alias_resolver(registry.knowledge.graph_store)
-
-
-def _run_memory_extraction(
-    registry: StoreRegistry,
-    extractor: Any,
-    doc_id: str,
-    content: str,
-) -> None:
-    """Dispatch extraction and route drafts through the MutationExecutor.
-
-    Fully best-effort: any failure is logged at debug level and the
-    caller continues.  save_memory's success contract is "the document
-    is stored and MEMORY_STORED is emitted" — extraction is a bonus.
-    """
-    try:
-        import asyncio  # noqa: PLC0415
-
-        from trellis.extract.commands import result_to_batch  # noqa: PLC0415
-        from trellis.extract.context import ExtractionContext  # noqa: PLC0415
-        from trellis.extract.draft_policy import (  # noqa: PLC0415
-            apply_memory_draft_policy,
-        )
-
-        context = ExtractionContext(
-            allow_llm_fallback=True,
-            max_llm_calls=1,
-            max_tokens=400,
-        )
-        result = asyncio.run(
-            extractor.extract(
-                {"doc_id": doc_id, "text": content},
-                source_hint="save_memory",
-                context=context,
-            )
-        )
-        # Same draft policy as the CLI ingest hook (#299/#300): drop
-        # participant drafts, stamp fresh mints with document_ids + the
-        # unconfirmed/mentioned claim floor. The two write paths must
-        # not drift.
-        result = apply_memory_draft_policy(result, doc_id=doc_id)
-        if not result.entities and not result.edges:
-            return
-
-        batch = result_to_batch(result, requested_by=SAVE_MEMORY_SURFACE)
-        build_curate_executor(registry).execute_batch(batch)
-    except Exception:
-        # GRACEFUL-DEGRADATION: the save_memory contract is "the document
-        # is stored + MEMORY_STORED emitted". Tiered extraction is a
-        # feature-flagged bonus pass and its failure must never roll back
-        # a successful memory write. Logged at exception level so the
-        # operator can spot persistent extraction breakage in stderr.
-        logger.exception(
-            "memory_extraction_failed",
-            doc_id=doc_id,
-        )
 
 
 #: Rows per ``list_documents`` page while seeding the fuzzy-dedup index.
@@ -1518,7 +1464,13 @@ def _emit_memory_stored_and_enrich(
     # Never blocks save_memory success — failures are logged and swallowed.
     memory_extractor = _get_memory_extractor(registry)
     if memory_extractor is not None:
-        _run_memory_extraction(registry, memory_extractor, stored_id, content)
+        run_memory_extraction(
+            registry,
+            memory_extractor,
+            stored_id,
+            content,
+            requested_by=SAVE_MEMORY_SURFACE,
+        )
 
     # Feature-flagged embedding (TRELLIS_ENABLE_EMBED_ON_INGEST=1) so
     # SemanticSearch can retrieve the memory. Fail-soft inside the hook —

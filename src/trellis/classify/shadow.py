@@ -72,6 +72,7 @@ from trellis.classify.refresh import (
 )
 from trellis.core.derived_metadata import apply_derived_metadata
 from trellis.core.hashing import content_hash
+from trellis.core.memory_op_judged import emit_memory_op_judged
 from trellis.schemas.classification import (
     CONTENT_TYPE_VALUES,
     LIST_FACETS,
@@ -84,10 +85,8 @@ from trellis.schemas.memory_op import (
     REF_TYPE_DOCUMENT,
     InputDigest,
     JudgedOpType,
-    MemoryOpJudgedPayload,
     SubjectRef,
 )
-from trellis.stores.base.event_log import EventType
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -775,8 +774,10 @@ def _emit_judged(
     label, confidence and pointers only — never the document text and never
     the open-vocabulary ``domain`` tags (see the module docstring).
     """
-    payload = MemoryOpJudgedPayload(
+    emit_memory_op_judged(
+        event_log,
         op_type=JudgedOpType.CLASSIFICATION,
+        source="classify.shadow",
         model_id=model_id,
         input_digest=InputDigest(
             hash=content_hash(content),
@@ -786,19 +787,8 @@ def _emit_judged(
         decision=decision,
         confidence=max(0.0, min(1.0, float(confidence))),
         subject_ref=SubjectRef(ref_type=REF_TYPE_DOCUMENT, ref_id=item_id),
+        entity_type="document",
     )
-    try:
-        event_log.emit(
-            EventType.MEMORY_OP_JUDGED,
-            source="classify.shadow",
-            entity_id=item_id,
-            entity_type="document",
-            payload=payload.model_dump(mode="json"),
-        )
-    # GRACEFUL-DEGRADATION: the shadow record is already durable; this event
-    # is post-success telemetry and must not roll the write back.
-    except Exception:
-        logger.exception("memory_op_judged_emit_failed", item_id=item_id)
 
 
 __all__ = [

@@ -131,6 +131,12 @@ def apply_memory_draft_policy(
         for edge in result.edges
         if edge.source_id not in dropped_keys and edge.target_id not in dropped_keys
     ]
+    kept_entity_keys = {(entity.entity_type, entity.name) for entity in kept}
+    judged_drafts = [
+        record
+        for record in result.judged_drafts
+        if (record.entity_type, record.name) in kept_entity_keys
+    ]
 
     if dropped_names:
         logger.info(
@@ -140,7 +146,9 @@ def apply_memory_draft_policy(
             dropped_edges=len(result.edges) - len(edges),
         )
 
-    return result.model_copy(update={"entities": kept, "edges": edges})
+    return result.model_copy(
+        update={"entities": kept, "edges": edges, "judged_drafts": judged_drafts}
+    )
 
 
 def _is_participant_draft(

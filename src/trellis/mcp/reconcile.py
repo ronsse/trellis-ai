@@ -50,16 +50,15 @@ import structlog
 from trellis.core import write_config
 from trellis.core.base import TrellisModel
 from trellis.core.hashing import content_hash
+from trellis.core.memory_op_judged import emit_memory_op_judged
 from trellis.core.write_config import WriteBehaviourConfig
 from trellis.llm.types import Message
 from trellis.schemas.classification import Lifecycle
 from trellis.schemas.memory_op import (
     InputDigest,
     JudgedOpType,
-    MemoryOpJudgedPayload,
     SubjectRef,
 )
-from trellis.stores.base.event_log import EventType
 
 if TYPE_CHECKING:
     from trellis.llm.protocol import LLMClient
@@ -421,8 +420,10 @@ def emit_reconcile_verdict(
     never the memory content or the model's prose. Best-effort: a telemetry
     failure must never roll back a committed verdict.
     """
-    payload = MemoryOpJudgedPayload(
+    emit_memory_op_judged(
+        event_log,
         op_type=JudgedOpType.RECONCILIATION,
+        source="save_memory.reconcile",
         model_id=outcome.model_id,
         input_digest=InputDigest(
             hash=content_hash(new_content),
@@ -433,15 +434,3 @@ def emit_reconcile_verdict(
         confidence=outcome.confidence,
         subject_ref=SubjectRef(ref_type=subject_ref_type, ref_id=subject_ref_id),
     )
-    try:
-        event_log.emit(
-            EventType.MEMORY_OP_JUDGED,
-            source="save_memory.reconcile",
-            entity_id=subject_ref_id,
-            entity_type=subject_ref_type,
-            payload=payload.model_dump(mode="json"),
-        )
-    except Exception:
-        # GRACEFUL-DEGRADATION: the verdict is already committed to the doc
-        # store; a failed training-pair emit must not undo a good write.
-        logger.exception("reconcile_verdict_emit_failed", decision=outcome.decision)

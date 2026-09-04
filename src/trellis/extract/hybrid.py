@@ -260,6 +260,16 @@ def _merge(
     else:
         confidence = 0.0
 
+    deterministic_entity_keys = {
+        (entity.entity_type, entity.name) for entity in det_result.entities
+    }
+    judged_drafts = list(det_result.judged_drafts)
+    judged_drafts.extend(
+        record
+        for record in llm_result.judged_drafts
+        if (record.entity_type, record.name) not in deterministic_entity_keys
+    )
+
     return ExtractionResult(
         entities=entities,
         edges=edges,
@@ -269,10 +279,12 @@ def _merge(
         tokens_used=det_result.tokens_used + llm_result.tokens_used,
         overall_confidence=confidence,
         unparsed_residue=llm_result.unparsed_residue,
+        judged_drafts=judged_drafts,
         provenance=ExtractionProvenance(
             extractor_name=composite_name,
             extractor_version=version,
             source_hint=source_hint,
+            model_id=(llm_result.provenance.model_id or det_result.provenance.model_id),
         ),
     )
 
@@ -293,9 +305,11 @@ def _rewrap(
         tokens_used=result.tokens_used,
         overall_confidence=result.overall_confidence,
         unparsed_residue=result.unparsed_residue,
+        judged_drafts=list(result.judged_drafts),
         provenance=ExtractionProvenance(
             extractor_name=composite_name,
             extractor_version=version,
             source_hint=result.provenance.source_hint,
+            model_id=result.provenance.model_id,
         ),
     )

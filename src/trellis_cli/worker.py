@@ -48,6 +48,8 @@ import yaml
 from rich.markup import escape
 
 from trellis.core.derived_metadata import apply_derived_metadata
+from trellis.core.hashing import content_hash
+from trellis.core.memory_op_judged import emit_memory_op_judged
 from trellis.core.vector_metadata import (
     resolve_vector_store,
     sync_vector_metadata,
@@ -70,6 +72,12 @@ from trellis.retrieve.advisory_generator import AdvisoryGenerator
 from trellis.retrieve.effectiveness import (
     run_advisory_fitness_loop,
     run_effectiveness_feedback,
+)
+from trellis.schemas.memory_op import (
+    REF_TYPE_DOCUMENT,
+    InputDigest,
+    JudgedOpType,
+    SubjectRef,
 )
 from trellis.stores.advisory_source import (
     ADVISORY_FILENAME,
@@ -1637,6 +1645,36 @@ def _run_batch_enrichment(
             continue
         assert write.metadata is not None  # `written` implies the merged bag
         summary.enriched += 1
+        if result.judging_model_id:
+            judged_content = doc.get("content", "")
+            emit_memory_op_judged(
+                event_log,
+                op_type=JudgedOpType.CLASSIFICATION,
+                source="worker:enrich",
+                model_id=result.judging_model_id,
+                input_digest=InputDigest(
+                    hash=content_hash(judged_content),
+                    length=len(judged_content),
+                    source_refs=[doc["doc_id"]],
+                ),
+                decision=result.auto_class or "unclassified",
+                confidence=(
+                    result.class_confidence
+                    if result.class_confidence is not None
+                    else 0.0
+                ),
+                subject_ref=SubjectRef(
+                    ref_type=REF_TYPE_DOCUMENT,
+                    ref_id=doc["doc_id"],
+                ),
+                entity_type="document",
+            )
+        else:
+            logger.error(
+                "memory_op_judged_identity_missing",
+                operation="classification",
+                doc_id=doc["doc_id"],
+            )
         # After the authoritative write, never before — the document row is
         # what a re-run repairs from, so it has to land first. Fail-soft: a
         # mirror failure must not lose the tag that was already written.

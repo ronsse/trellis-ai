@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -10,6 +11,7 @@ import pytest
 
 from trellis.extract.memory_ingest_hook import (
     MEMORY_EXTRACTION_FLAG,
+    _emit_judged_extractions,
     build_memory_extractor,
     memory_extraction_env_enabled,
     run_memory_extraction,
@@ -19,7 +21,10 @@ from trellis.schemas.extraction import (
     EntityDraft,
     ExtractionProvenance,
     ExtractionResult,
+    LLMJudgedDraftRecord,
 )
+from trellis.schemas.memory_op import JudgedOpType, MemoryOpJudgedPayload
+from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 
 
@@ -27,6 +32,7 @@ class _FakeExtractor:
     """Async extractor double returning a preset result (or raising)."""
 
     def __init__(self, result: ExtractionResult | None = None, *, boom: bool = False):
+        self.name = "fake"
         self._result = result
         self._boom = boom
 
@@ -173,6 +179,134 @@ class TestRunMemoryExtraction:
         )
         assert (entities, edges) == (0, 0)
         assert registry.knowledge.graph_store.query(limit=50) == []
+
+    def test_emits_only_proven_llm_fresh_mints(self, registry) -> None:
+        from trellis.extract.base import ExtractorTier
+        from trellis.extract.hybrid import HybridJSONExtractor
+        from trellis.extract.llm import LLMExtractor
+
+        content = "Alice introduced Acme to Bob."
+        deterministic = _FakeExtractor(
+            ExtractionResult(
+                entities=[EntityDraft(entity_type="Person", name="Alice")],
+                extractor_used="alias",
+                tier="deterministic",
+                overall_confidence=0.5,
+                unparsed_residue=content,
+                provenance=ExtractionProvenance(extractor_name="alias"),
+            )
+        )
+        deterministic.name = "alias"
+        deterministic.tier = ExtractorTier.DETERMINISTIC
+
+        class MixedLLM:
+            async def generate(self, **kwargs: Any) -> LLMResponse:
+                return LLMResponse(
+                    content=json.dumps(
+                        {
+                            "entities": [
+                                {
+                                    "entity_type": "Organization",
+                                    "name": "Acme",
+                                    "confidence": 0.9,
+                                },
+                                {
+                                    "entity_type": "Person",
+                                    "name": "Bob",
+                                    "confidence": 0.8,
+                                },
+                            ],
+                            "edges": [],
+                        }
+                    ),
+                    model="test-model-v1",
+                )
+
+        llm = LLMExtractor(name="llm", llm_client=MixedLLM())
+        extractor = HybridJSONExtractor(
+            deterministic=deterministic,
+            llm=llm,
+            confidence_threshold=0.7,
+        )
+
+        assert run_memory_extraction(
+            registry,
+            extractor,
+            "doc-264",
+            content,
+            requested_by="test",
+        ) == (3, 0)
+
+        events = registry.operational.event_log.get_events(
+            event_type=EventType.MEMORY_OP_JUDGED
+        )
+        payloads = [
+            MemoryOpJudgedPayload.model_validate(event.payload) for event in events
+        ]
+        assert len(payloads) == 2
+        assert {payload.op_type for payload in payloads} == {JudgedOpType.EXTRACTION}
+        assert {payload.decision for payload in payloads} == {
+            "Organization",
+            "Person",
+        }
+        assert {payload.model_id for payload in payloads} == {"test-model-v1"}
+        assert {event.source for event in events} == {"save_memory.extract"}
+        assert all(payload.subject_ref.ref_id for payload in payloads)
+
+    def test_failed_mint_emits_correlation_failure_not_judged(self, registry) -> None:
+        from trellis.mutate.commands import (
+            Command,
+            CommandBatch,
+            CommandResult,
+            CommandStatus,
+            Operation,
+        )
+
+        record = LLMJudgedDraftRecord(
+            entity_type="Person",
+            name="Bob",
+            confidence=0.8,
+            model_id="test-model-v1",
+            input_hash="input-hash",
+            input_length=10,
+        )
+        result = ExtractionResult(
+            entities=[EntityDraft(entity_type="Person", name="Bob")],
+            extractor_used="llm",
+            tier="llm",
+            judged_drafts=[record],
+            provenance=ExtractionProvenance(extractor_name="llm"),
+        )
+        command = Command(
+            operation=Operation.ENTITY_CREATE,
+            args={"entity_type": "Person", "name": "Bob"},
+        )
+        batch = CommandBatch(commands=[command])
+        command_result = CommandResult(
+            command_id=command.command_id,
+            operation=Operation.ENTITY_CREATE,
+            status=CommandStatus.FAILED,
+        )
+
+        _emit_judged_extractions(
+            registry,
+            result=result,
+            batch=batch,
+            results=[command_result],
+            doc_id="doc-264",
+        )
+
+        assert (
+            registry.operational.event_log.get_events(
+                event_type=EventType.MEMORY_OP_JUDGED
+            )
+            == []
+        )
+        failures = registry.operational.event_log.get_events(
+            event_type=EventType.EXTRACTION_FAILED
+        )
+        assert len(failures) == 1
+        assert failures[0].payload["failure_kind"] == "judged_op_correlation_failed"
 
 
 class TestSkipDisciplineOnTheWire:

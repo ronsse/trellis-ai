@@ -150,6 +150,62 @@ class TestHappyPath:
         assert result.tokens_used == 150
         assert 0.7 <= result.overall_confidence <= 0.9
         assert result.unparsed_residue is None
+        assert len(result.judged_drafts) == 1
+        judged = result.judged_drafts[0]
+        assert judged.entity_type == "pipeline"
+        assert judged.name == "orders"
+        assert judged.confidence == 0.7
+        assert judged.model_id == "fake-model"
+        assert judged.input_hash
+        assert judged.input_length == len("Alice deployed orders pipeline")
+
+    async def test_prebound_entities_are_not_judged_drafts(self) -> None:
+        payload = {
+            "entities": [
+                {
+                    "entity_id": "person:alice",
+                    "entity_type": "Person",
+                    "name": "Alice",
+                    "confidence": 0.9,
+                }
+            ],
+            "edges": [],
+        }
+        result = await LLMExtractor(
+            llm_client=FakeLLMClient(response_text=json.dumps(payload))
+        ).extract("Alice")
+
+        assert result.judged_drafts == []
+
+    async def test_missing_model_identity_emits_failure_without_judged_rows(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        from trellis.stores.base.event_log import EventType
+        from trellis.stores.sqlite.event_log import SQLiteEventLog
+
+        class ModelLessLLM(FakeLLMClient):
+            async def generate(self, **kwargs) -> LLMResponse:
+                return LLMResponse(
+                    content=(
+                        '{"entities": [{"entity_type": "Person", "name": "Bob", '
+                        '"confidence": 0.8}], "edges": []}'
+                    ),
+                    model=None,
+                )
+
+        monkeypatch.setenv("EXTRACTION_FAILURE_NO_SAMPLE", "1")
+        log = SQLiteEventLog(tmp_path / "events.db")
+        result = await LLMExtractor(
+            llm_client=ModelLessLLM(),
+            event_log=log,
+        ).extract("Bob")
+
+        assert result.entities[0].name == "Bob"
+        assert result.judged_drafts == []
+        events = log.get_events(event_type=EventType.EXTRACTION_FAILED)
+        assert len(events) == 1
+        assert events[0].payload["failure_kind"] == "model_identity_missing"
+        log.close()
 
     async def test_usage_absent_tokens_zero(self) -> None:
         fake = FakeLLMClient(
@@ -434,6 +490,7 @@ class TestResultMetadata:
         assert result.provenance.extractor_name == "custom-llm"
         assert result.provenance.extractor_version == "2.3.4"
         assert result.provenance.source_hint == "free-text"
+        assert result.provenance.model_id == "fake-model"
 
 
 # ---------------------------------------------------------------------------
