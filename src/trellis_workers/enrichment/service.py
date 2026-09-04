@@ -16,6 +16,11 @@ from trellis.core.elision import elide_text
 from trellis.core.hashing import content_hash
 from trellis.extract.telemetry import ExtractionFailureKind, emit_extraction_failure
 from trellis.llm import LLMClient, LLMResponse, Message, TokenUsage
+from trellis.llm.json_response import (
+    JSONParseOutcome,
+    parse_json_response,
+    strip_code_fence,
+)
 
 if TYPE_CHECKING:
     from trellis.stores.base.event_log import EventLog
@@ -342,18 +347,13 @@ class EnrichmentService:
 
     def _parse_response(self, response: str) -> EnrichmentResult:
         """Parse LLM JSON response."""
-        text = response.strip()
-
-        # Strip markdown code fences
-        if text.startswith("```"):
-            first_nl = text.find("\n")
-            if first_nl > 0:
-                text = text[first_nl + 1 :]
-            text = text.removesuffix("```").strip()
-
-        try:
-            data = json.loads(text)
-        except json.JSONDecodeError as e:
+        parse_result = parse_json_response(response)
+        data: Any = parse_result.value
+        if parse_result.outcome is JSONParseOutcome.MALFORMED:
+            text = strip_code_fence(response)
+            e = json.JSONDecodeError(
+                parse_result.error or "invalid JSON response", text, 0
+            )
             match = re.search(r"\{.*\}", text, re.DOTALL)
             if match:
                 try:

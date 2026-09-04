@@ -317,6 +317,37 @@ class TestGenerateCandidatesHappy:
         assert len(p.source_trace_ids) == 4
 
     @pytest.mark.asyncio
+    async def test_fenced_response_without_closing_fence_keeps_last_item(
+        self, trace_store: SQLiteTraceStore
+    ) -> None:
+        self._seed_failures(trace_store)
+        response = "```json\n" + json.dumps(
+            [
+                {
+                    "title": "First pattern",
+                    "description": "First distinct description",
+                    "pattern": "first",
+                    "confidence": 0.4,
+                },
+                {
+                    "title": "Second pattern",
+                    "description": "Second distinct description",
+                    "pattern": "second",
+                    "confidence": 0.9,
+                },
+            ]
+        )
+
+        result = await PrecedentMiner(
+            trace_store, llm=_StubLLM(response)
+        ).generate_precedent_candidates()
+
+        assert [(item.title, item.confidence) for item in result] == [
+            ("First pattern", 0.4),
+            ("Second pattern", 0.9),
+        ]
+
+    @pytest.mark.asyncio
     async def test_domain_filtering(self, trace_store: SQLiteTraceStore) -> None:
         self._seed_failures(trace_store, domain="backend")
         # Also seed some in a different domain

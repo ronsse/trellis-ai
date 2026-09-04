@@ -208,6 +208,10 @@ class CaptureReport:
     #: :func:`~trellis_workers.session_capture.sweep.judge_unavailable_sessions`,
     #: which reads the same outcome off ``warnings``.
     sessions_judge_unavailable: int = 0
+    #: Sessions whose judge responded but did not return a candidate array.
+    #: They remain judged and are watermarked, preserving the retry posture,
+    #: but are distinct from a valid empty judgment.
+    sessions_judge_malformed: int = 0
     #: Distinct sessions that yielded at least one memory surviving every
     #: gate — the coverage numerator. Counted per **session**, not per
     #: document: one session commonly distils to several memories, and
@@ -263,6 +267,7 @@ class CaptureReport:
             "sessions_skipped_ephemeral": self.sessions_skipped_ephemeral,
             "sessions_skipped_empty": self.sessions_skipped_empty,
             "sessions_judge_unavailable": self.sessions_judge_unavailable,
+            "sessions_judge_malformed": self.sessions_judge_malformed,
             "sessions_with_memory": self.sessions_with_memory,
             "malformed_lines": self.malformed_lines,
             "candidates_distilled": self.candidates_distilled,

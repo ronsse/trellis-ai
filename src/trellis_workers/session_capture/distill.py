@@ -26,14 +26,16 @@ future local memory model's dataset accrues from the first run (#264).
 from __future__ import annotations
 
 import asyncio
-import json
 import os
+from dataclasses import dataclass
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 import structlog
 
 from trellis.core.elision import elide_text
 from trellis.llm import Message
+from trellis.llm.json_response import JSONParseOutcome, parse_json_response
 from trellis.schemas.memory_op import (
     REF_TYPE_DOCUMENT,
     InputDigest,
@@ -139,6 +141,26 @@ def judge_context_tokens(env: Mapping[str, str] | None = None) -> int:
 #: Per-session distillation timeout (seconds).
 DEFAULT_TIMEOUT_S = 60.0
 
+
+class DistillOutcome(StrEnum):
+    """Session-level outcomes from the distillation judge."""
+
+    CANDIDATES = "candidates"
+    EMPTY = "empty"
+    MALFORMED = "malformed"
+    UNAVAILABLE = "unavailable"
+
+
+@dataclass(frozen=True)
+class DistillResult:
+    """Concrete judge outcome; no sentinel values or union return."""
+
+    outcome: DistillOutcome
+    candidates: tuple[CandidateMemory, ...] = ()
+    parse_error: str | None = None
+    unavailable_reason: str | None = None
+
+
 _SYSTEM_PROMPT = (
     "You distill durable operator memories from an AI coding session. "
     "Return ONLY memories that pass ALL FOUR tests:\n"
@@ -223,28 +245,30 @@ def _coerce_candidate(item: Any, session_id: str) -> CandidateMemory | None:
     )
 
 
-def parse_candidates(raw: str, session_id: str) -> list[CandidateMemory]:
-    """Parse the model's JSON array into candidates; ``[]`` if malformed.
-
-    Tolerant of a fenced code block; a non-array or non-JSON response yields
-    an empty list (fail-closed), never an exception.
-    """
-    text = raw.strip()
-    if text.startswith("```"):
-        lines = [ln for ln in text.splitlines() if not ln.strip().startswith("```")]
-        text = "\n".join(lines).strip()
-    try:
-        parsed = json.loads(text)
-    except (json.JSONDecodeError, ValueError):
-        return []
-    if not isinstance(parsed, list):
-        return []
+def parse_candidates(raw: str, session_id: str) -> DistillResult:
+    """Parse the model's response into a concrete distillation outcome."""
+    parsed = parse_json_response(raw)
+    if parsed.outcome is JSONParseOutcome.MALFORMED:
+        return DistillResult(
+            outcome=DistillOutcome.MALFORMED,
+            parse_error=parsed.error,
+        )
+    if parsed.outcome is JSONParseOutcome.EMPTY:
+        return DistillResult(outcome=DistillOutcome.EMPTY)
+    if not isinstance(parsed.value, list):
+        return DistillResult(
+            outcome=DistillOutcome.MALFORMED,
+            parse_error="expected a JSON array of candidate memories",
+        )
     candidates: list[CandidateMemory] = []
-    for item in parsed:
+    for item in parsed.value:
         candidate = _coerce_candidate(item, session_id)
         if candidate is not None:
             candidates.append(candidate)
-    return candidates
+    return DistillResult(
+        outcome=DistillOutcome.CANDIDATES,
+        candidates=tuple(candidates),
+    )
 
 
 def distill_session(
@@ -252,26 +276,24 @@ def distill_session(
     digest: SessionDigest,
     *,
     timeout: float = DEFAULT_TIMEOUT_S,
-) -> list[CandidateMemory] | None:
-    """Distil candidate memories from a session. Fail-closed on any problem.
-
-    Returns:
-        * ``None`` — the judge could not be reached (missing client, transport
-          error, timeout). The caller writes nothing **and** leaves the
-          session un-watermarked so a later run retries it: a model outage
-          must never silently lose a session's memories.
-        * ``list`` (possibly empty) — the judge responded. An empty list means
-          "judged, nothing worthy"; the caller safely advances the watermark.
+) -> DistillResult:
+    """Distil candidate memories from a session into a concrete outcome.
 
     The autonomous sweep never writes raw or guessed content when the judge is
     down — the opposite of #263's reconcile fail-open.
     """
     if client is None:
         logger.info("distill_skipped_no_client", session_id=digest.session_id)
-        return None
+        return DistillResult(
+            outcome=DistillOutcome.UNAVAILABLE,
+            unavailable_reason="no_client",
+        )
     messages = build_distill_messages(digest)
     if _prompt_exceeds_window(messages, session_id=digest.session_id):
-        return None
+        return DistillResult(
+            outcome=DistillOutcome.UNAVAILABLE,
+            unavailable_reason="prompt_too_large",
+        )
     try:
         response = asyncio.run(
             asyncio.wait_for(
@@ -281,10 +303,16 @@ def distill_session(
         )
     except TimeoutError:
         logger.warning("distill_timeout", session_id=digest.session_id)
-        return None
+        return DistillResult(
+            outcome=DistillOutcome.UNAVAILABLE,
+            unavailable_reason="timeout",
+        )
     except Exception:
         logger.warning("distill_model_error", session_id=digest.session_id)
-        return None
+        return DistillResult(
+            outcome=DistillOutcome.UNAVAILABLE,
+            unavailable_reason="model_error",
+        )
     return parse_candidates(response.content, digest.session_id)
 
 

@@ -115,6 +115,37 @@ def test_model_down_writes_nothing_and_leaves_watermark(tmp_path: Path) -> None:
     assert not wm.exists()
 
 
+def test_malformed_and_empty_judgments_are_counted_and_watermarked(
+    tmp_path: Path,
+) -> None:
+    registry = _registry(tmp_path)
+    root = tmp_path / "projects"
+    _error_session(root / "proj" / "sess-fake-0001.jsonl", "sess-fake-0001")
+    _error_session(root / "proj" / "sess-fake-0002.jsonl", "sess-fake-0002")
+    wm = tmp_path / "wm.json"
+
+    report = run_capture(
+        registry,
+        transcripts_root=root,
+        watermark_path=wm,
+        llm_client=FakeLLMClient(["not json", "[]"]),
+    )
+
+    assert report.sessions_triggered == 2
+    assert report.sessions_judge_malformed == 1
+    assert report.sessions_judge_unavailable == 0
+    assert report.to_payload()["sessions_judge_malformed"] == 1
+    assert wm.exists()
+
+    rerun = run_capture(
+        registry,
+        transcripts_root=root,
+        watermark_path=wm,
+        llm_client=FakeLLMClient([candidates_json(good_candidate())]),
+    )
+    assert rerun.sessions_skipped_watermark == 2
+
+
 def test_rerun_is_idempotent_via_watermark(tmp_path: Path) -> None:
     registry = _registry(tmp_path)
     root = tmp_path / "projects"
