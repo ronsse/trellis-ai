@@ -15,6 +15,7 @@ import structlog
 from trellis.core.base import utc_now
 from trellis.core.ids import generate_ulid
 from trellis.schemas.graph import CompactionReport
+from trellis.schemas.well_known import normalize_entity_name
 from trellis.stores.base.edge_provenance import (
     EDGE_PROVENANCE_FIELDS,
     EDGE_TOP_LEVEL_COLUMNS,
@@ -666,8 +667,9 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
         raw_name: str | None = None,
         match_confidence: float = 1.0,
         is_primary: bool = False,
+        stale_owner_name_key: str | None = None,
     ) -> AliasBindResult:
-        """Atomically claim the partial-unique current-alias key."""
+        """Atomically claim the current-alias key or replace a stale owner."""
         now_iso = utc_now().isoformat()
         alias_id = generate_ulid()
         conn = self._conn
@@ -704,7 +706,7 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
                 )
             row = conn.execute(
                 """
-                SELECT alias_id, entity_id
+                SELECT version_id, alias_id, entity_id, created_at
                 FROM entity_aliases
                 WHERE source_system = ? AND raw_id = ? AND valid_to IS NULL
                 """,
@@ -714,6 +716,60 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
                 msg = "Alias claim conflicted but no current winner was readable"
                 raise RuntimeError(msg)
             winner = str(row["entity_id"])
+            if winner != entity_id and stale_owner_name_key is not None:
+                owner = conn.execute(
+                    """
+                    SELECT properties_json
+                    FROM nodes
+                    WHERE node_id = ? AND valid_to IS NULL
+                    """,
+                    (winner,),
+                ).fetchone()
+                owner_name = None
+                if owner is not None:
+                    properties = json.loads(owner["properties_json"] or "{}")
+                    owner_name = properties.get("name")
+                owner_key = (
+                    normalize_entity_name(owner_name)
+                    if isinstance(owner_name, str)
+                    else ""
+                )
+                if owner_key != stale_owner_name_key:
+                    conn.execute(
+                        """
+                        UPDATE entity_aliases
+                        SET valid_to = ?
+                        WHERE version_id = ? AND valid_to IS NULL
+                        """,
+                        (now_iso, row["version_id"]),
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO entity_aliases
+                            (version_id, alias_id, entity_id, source_system,
+                             raw_id, raw_name, match_confidence, is_primary,
+                             created_at, updated_at, valid_from, valid_to)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                        """,
+                        (
+                            generate_ulid(),
+                            row["alias_id"],
+                            entity_id,
+                            source_system,
+                            raw_id,
+                            raw_name,
+                            match_confidence,
+                            1 if is_primary else 0,
+                            row["created_at"],
+                            now_iso,
+                            now_iso,
+                        ),
+                    )
+                    return AliasBindResult(
+                        status=AliasBindStatus.REBOUND,
+                        alias_id=str(row["alias_id"]),
+                        entity_id=entity_id,
+                    )
             return AliasBindResult(
                 status=(
                     AliasBindStatus.ALREADY_BOUND

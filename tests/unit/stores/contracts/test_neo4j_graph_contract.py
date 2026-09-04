@@ -35,6 +35,8 @@ class TestNeo4jGraphContract(GraphStoreContractTests):
         s = Neo4jGraphStore(URI, user=USER, password=PASSWORD, database=DATABASE)
         # Wipe everything the graph store knows about between tests.
         with s._driver.session(database=s._database) as session:
-            session.run("MATCH (n) WHERE n:Node OR n:Alias DETACH DELETE n")
+            session.run(
+                "MATCH (n) WHERE n:Node OR n:Alias OR n:AliasClaim DETACH DELETE n"
+            )
         yield s
         s.close()

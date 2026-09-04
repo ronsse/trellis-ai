@@ -15,6 +15,7 @@ if TYPE_CHECKING:
 from trellis.core.base import utc_now
 from trellis.core.ids import generate_ulid
 from trellis.schemas.graph import CompactionReport
+from trellis.schemas.well_known import normalize_entity_name
 from trellis.stores.base.edge_provenance import (
     EDGE_PROVENANCE_FIELDS,
     EDGE_TOP_LEVEL_COLUMNS,
@@ -506,6 +507,11 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
         # Hold one connection across the resolve+update+insert so the
         # SCD-2 close-and-reinsert is transactionally consistent.
         with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                    (f"{source_system}\0{raw_id}",),
+                )
             existing = self._resolve_alias_for_update(conn, source_system, raw_id)
             if existing:
                 alias_id = existing["alias_id"]
@@ -555,11 +561,16 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
         raw_name: str | None = None,
         match_confidence: float = 1.0,
         is_primary: bool = False,
+        stale_owner_name_key: str | None = None,
     ) -> AliasBindResult:
-        """Atomically claim the partial-unique current-alias key."""
+        """Atomically claim the current-alias key or replace a stale owner."""
         now = utc_now()
         alias_id = generate_ulid()
         with self._conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                (f"{source_system}\0{raw_id}",),
+            )
             cur.execute(
                 """
                 INSERT INTO entity_aliases
@@ -594,9 +605,10 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
                 )
             cur.execute(
                 """
-                SELECT alias_id, entity_id
+                SELECT version_id, alias_id, entity_id, created_at
                 FROM entity_aliases
                 WHERE source_system = %s AND raw_id = %s AND valid_to IS NULL
+                FOR UPDATE
                 """,
                 (source_system, raw_id),
             )
@@ -604,14 +616,74 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
             if winner_row is None:
                 msg = "Alias claim conflicted but no current winner was readable"
                 raise RuntimeError(msg)
-            winner = str(winner_row[1])
+            winner = str(winner_row[2])
+            if winner != entity_id and stale_owner_name_key is not None:
+                cur.execute(
+                    """
+                    SELECT properties
+                    FROM nodes
+                    WHERE node_id = %s AND valid_to IS NULL
+                    FOR SHARE
+                    """,
+                    (winner,),
+                )
+                owner_row = cur.fetchone()
+                owner_name = None
+                if owner_row is not None:
+                    properties = owner_row[0]
+                    if isinstance(properties, str):
+                        properties = json.loads(properties)
+                    if isinstance(properties, dict):
+                        owner_name = properties.get("name")
+                owner_key = (
+                    normalize_entity_name(owner_name)
+                    if isinstance(owner_name, str)
+                    else ""
+                )
+                if owner_key != stale_owner_name_key:
+                    cur.execute(
+                        """
+                        UPDATE entity_aliases
+                        SET valid_to = %s
+                        WHERE version_id = %s AND valid_to IS NULL
+                        """,
+                        (now, winner_row[0]),
+                    )
+                    cur.execute(
+                        """
+                        INSERT INTO entity_aliases
+                            (version_id, alias_id, entity_id, source_system,
+                             raw_id, raw_name, match_confidence, is_primary,
+                             created_at, updated_at, valid_from, valid_to)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s,
+                                %s, %s, %s, NULL)
+                        """,
+                        (
+                            generate_ulid(),
+                            winner_row[1],
+                            entity_id,
+                            source_system,
+                            raw_id,
+                            raw_name,
+                            match_confidence,
+                            is_primary,
+                            winner_row[3],
+                            now,
+                            now,
+                        ),
+                    )
+                    return AliasBindResult(
+                        status=AliasBindStatus.REBOUND,
+                        alias_id=str(winner_row[1]),
+                        entity_id=entity_id,
+                    )
             return AliasBindResult(
                 status=(
                     AliasBindStatus.ALREADY_BOUND
                     if winner == entity_id
                     else AliasBindStatus.CONFLICT
                 ),
-                alias_id=str(winner_row[0]),
+                alias_id=str(winner_row[1]),
                 entity_id=winner,
             )
 

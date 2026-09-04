@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
 FailureStage = Literal["snapshot", "bind", "verify"]
 FailureReason = Literal["store", "policy", "validation", "protocol"]
-BackfillOutcome = Literal["bound", "already_bound", "contested"]
+BackfillOutcome = Literal["bound", "rebound", "already_bound", "contested"]
 
 
 @dataclass(frozen=True)
@@ -40,6 +40,7 @@ class BackfillReport:
     """Outcome of one bounded governed backfill pass."""
 
     bound: int = 0
+    rebound: int = 0
     already_bound: int = 0
     contested: int = 0
     skipped: int = 0
@@ -65,6 +66,7 @@ def _command(entity_id: str, name: str, key: str, requested_by: str) -> Command:
             "raw_id": key,
             "raw_name": name,
             "if_absent": True,
+            "stale_owner_name_key": key,
         },
         target_id=entity_id,
         target_type="alias",
@@ -128,12 +130,14 @@ def _classify_result(
 ) -> BackfillOutcome | BackfillFailure:
     entity_id = str(command.args["entity_id"])
     if result.status is CommandStatus.SUCCESS:
-        if result.message == "Alias bind outcome: bound":
-            return "bound"
-        if result.message == "Alias bind outcome: already_bound":
-            return "already_bound"
-        if result.message == "Alias bind outcome: conflict":
-            return "contested"
+        outcome_by_message: dict[str, BackfillOutcome] = {
+            "Alias bind outcome: bound": "bound",
+            "Alias bind outcome: rebound": "rebound",
+            "Alias bind outcome: already_bound": "already_bound",
+            "Alias bind outcome: conflict": "contested",
+        }
+        if outcome := outcome_by_message.get(result.message):
+            return outcome
         return BackfillFailure(stage="bind", reason="protocol", entity_id=entity_id)
     if result.status is CommandStatus.DUPLICATE:
         return _verify_duplicate(graph_store, command)
@@ -185,7 +189,12 @@ def backfill_name_aliases(
         )
     )
 
-    counts = {"bound": 0, "already_bound": 0, "contested": contested}
+    counts = {
+        "bound": 0,
+        "rebound": 0,
+        "already_bound": 0,
+        "contested": contested,
+    }
     failures: list[BackfillFailure] = []
     for command, result in zip(commands, results, strict=True):
         outcome = _classify_result(graph_store, command, result)
@@ -196,6 +205,7 @@ def backfill_name_aliases(
 
     return BackfillReport(
         bound=counts["bound"],
+        rebound=counts["rebound"],
         already_bound=counts["already_bound"],
         contested=counts["contested"],
         skipped=skipped,

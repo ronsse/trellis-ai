@@ -63,6 +63,7 @@ class TestBackfillNameAliasesCommand:
             "status": "ok",
             "max_nodes": 6,
             "bound": 2,
+            "rebound": 0,
             "already_bound": 0,
             "contested": 1,
             "skipped": 1,

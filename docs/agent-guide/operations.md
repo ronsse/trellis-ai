@@ -324,14 +324,18 @@ contested, and blank names are skipped.
 Every binding is an `alias.upsert` command with `if_absent=true`, so validation,
 policy, idempotency, execution, and audit emission run for each bounded batch.
 Concurrent contenders are serialized by `GraphStore.bind_alias_if_absent`;
-losers report the existing winner and never replace it. Policy denials exit `3`;
-lookup, query, or alias-store failures are reported separately from genuine
-skips and exit `5`. JSON failure details identify only the stage, reason, and
-entity id — they never echo entity names.
+losers report a live existing winner and never replace it. If that winner's
+current node no longer has the normalized name, the same atomic operation closes
+the stale alias version and rebinds it; the report counts this as `rebound`.
+Policy denials exit `3`; lookup, query, or alias-store failures are reported
+separately from genuine skips and exit `5`. JSON failure details identify only
+the stage, reason, and entity id — they never echo entity names.
 
 Entity create/update binds the final merged name inside its already-governed
-command. Alias maintenance remains fail-soft for that primary entity write; the
-backfill is strict and never reports `status: ok` when alias maintenance fails.
+command. An explicitly supplied name is checked even when it equals the stored
+value, so retrying after a transient alias failure repairs the index. Alias
+maintenance remains fail-soft for that primary entity write; the backfill is
+strict and never reports `status: ok` when alias maintenance fails.
 
 #### Document → content tags (opt-in)
 

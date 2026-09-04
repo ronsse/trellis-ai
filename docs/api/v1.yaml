@@ -2739,9 +2739,8 @@ paths:
       - admin
   /api/v1/ingest/bulk:
     post:
-      description: "Bulk ingest entities, edges, and aliases in one request.\n\nEntities and edges flow through the governed\
-        \ mutation pipeline\n(audit events, per-item idempotency). Aliases route directly to the\ngraph store -- there is\
-        \ no alias mutation operation yet; the graph\nstore handles alias versioning (SCD Type 2) natively.\n\nStrategies:\n\
+      description: "Bulk ingest entities, edges, and aliases in one request.\n\nEntities, edges, and aliases flow through\
+        \ the governed mutation pipeline\n(validation, policy, idempotency, execution, and audit emission).\n\nStrategies:\n\
         \n- ``continue_on_error`` *(default)* -- run every item, report per-item\n  status. Suited for backfill where partial\
         \ success is acceptable.\n- ``stop_on_error`` -- halt at the first FAILED/REJECTED result and\n  skip remaining items,\
         \ including later groups.\n- ``sequential`` -- behaves like ``continue_on_error`` (errors don't\n  halt); kept for\

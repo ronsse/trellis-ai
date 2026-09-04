@@ -135,28 +135,83 @@ class TestGovernedNameAliasWrites:
         assert winner["entity_id"] == "target"
         assert graph.resolve_alias(NAME_ALIAS_SOURCE_SYSTEM, "nested name") is None
 
-    def test_same_value_properties_retry_does_not_rebind(
-        self, registry: StoreRegistry, monkeypatch
+    @pytest.mark.parametrize(
+        "supplied_name",
+        [
+            {"name": "Stable Name"},
+            {"properties": {"name": "Stable Name"}},
+        ],
+    )
+    def test_same_value_retry_repairs_failed_alias_bind(
+        self,
+        registry: StoreRegistry,
+        monkeypatch,
+        supplied_name: dict[str, Any],
     ) -> None:
-        _execute(registry, entity_id="target", name="Stable Name")
         graph = registry.knowledge.graph_store
+        graph.upsert_node("target", "Concept", {"name": "Stable Name"})
         calls = 0
         original = graph.bind_alias_if_absent
 
-        def _counted(*args: Any, **kwargs: Any):
+        def _fail_once(*args: Any, **kwargs: Any):
             nonlocal calls
             calls += 1
+            if calls == 1:
+                msg = "transient alias outage"
+                raise RuntimeError(msg)
             return original(*args, **kwargs)
 
-        monkeypatch.setattr(graph, "bind_alias_if_absent", _counted)
+        monkeypatch.setattr(graph, "bind_alias_if_absent", _fail_once)
         _execute(
             registry,
             operation=Operation.ENTITY_UPDATE,
             entity_id="target",
-            properties={"name": "Stable Name"},
+            **supplied_name,
+        )
+        assert graph.resolve_alias(NAME_ALIAS_SOURCE_SYSTEM, "stable name") is None
+
+        _execute(
+            registry,
+            operation=Operation.ENTITY_UPDATE,
+            entity_id="target",
+            **supplied_name,
         )
 
-        assert calls == 0
+        assert calls == 2
+        winner = graph.resolve_alias(NAME_ALIAS_SOURCE_SYSTEM, "stable name")
+        assert winner is not None
+        assert winner["entity_id"] == "target"
+        assert len(graph.get_aliases("target", source_system="name")) == 1
+        assert len(graph.get_node_history("target")) == 3
+        updates = registry.operational.event_log.get_events(
+            event_type=EventType.ENTITY_UPDATED,
+            entity_id="target",
+        )
+        assert len(updates) == 2
+
+    def test_renamed_away_alias_rebinds_beyond_scan_cap(
+        self, registry: StoreRegistry, monkeypatch
+    ) -> None:
+        _execute(registry, entity_id="former", name="Old Name")
+        _execute(
+            registry,
+            operation=Operation.ENTITY_UPDATE,
+            entity_id="former",
+            name="New Name",
+        )
+        for index in range(4):
+            _execute(registry, entity_id=f"filler-{index}", name=f"Filler {index}")
+        _execute(registry, entity_id="successor", name="Old Name")
+        graph = registry.knowledge.graph_store
+
+        def _scan_must_not_run(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+            msg = "repaired alias must avoid the bounded scan"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr(graph, "query", _scan_must_not_run)
+        resolve = build_name_alias_resolver(graph, scan_limit=1)
+
+        assert resolve("old name") == ["successor"]
 
     def test_same_named_creates_keep_the_first_binding(
         self, registry: StoreRegistry
@@ -190,7 +245,6 @@ class TestGovernedNameAliasWrites:
     @pytest.mark.parametrize(
         ("method", "event"),
         [
-            ("resolve_alias", "entity_resolution_name_alias_lookup_failed"),
             ("query", "entity_resolution_name_alias_twin_check_failed"),
             ("bind_alias_if_absent", "entity_resolution_alias_bind_failed"),
         ],

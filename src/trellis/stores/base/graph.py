@@ -27,9 +27,10 @@ VALID_NODE_ROLES = frozenset({"structural", "semantic", "curated"})
 
 
 class AliasBindStatus(StrEnum):
-    """Outcome of an atomic bind-if-absent alias write."""
+    """Outcome of an atomic alias claim."""
 
     BOUND = "bound"
+    REBOUND = "rebound"
     ALREADY_BOUND = "already_bound"
     CONFLICT = "conflict"
 
@@ -428,13 +429,22 @@ class GraphStore(ABC):
         raw_name: str | None = None,
         match_confidence: float = 1.0,
         is_primary: bool = False,
+        stale_owner_name_key: str | None = None,
     ) -> AliasBindResult:
-        """Atomically bind an unclaimed alias without replacing its winner.
+        """Atomically bind an unclaimed alias or replace a stale name owner.
 
         Concurrent contenders for the same ``(source_system, raw_id)`` must
         produce exactly one :attr:`AliasBindStatus.BOUND`; every loser returns
         :attr:`AliasBindStatus.CONFLICT` naming that winner. A retry by the
         winner returns :attr:`AliasBindStatus.ALREADY_BOUND`.
+
+        When ``stale_owner_name_key`` is supplied, a different winner remains
+        authoritative only while its current node's normalized ``name`` equals
+        that key. A missing, deleted, or renamed owner is atomically replaced
+        with an SCD-2 alias version and returns
+        :attr:`AliasBindStatus.REBOUND`. The stale check and replacement must
+        serialize on the alias claim so they cannot overwrite a winner that
+        became live first.
 
         Backend failures raise rather than being folded into a status.
         """

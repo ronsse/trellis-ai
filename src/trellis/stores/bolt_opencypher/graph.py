@@ -45,6 +45,7 @@ import structlog
 from trellis.core.base import utc_now
 from trellis.core.ids import generate_ulid
 from trellis.schemas.graph import CompactionReport
+from trellis.schemas.well_known import normalize_entity_name
 from trellis.stores.base.edge_provenance import (
     EDGE_PROVENANCE_FIELDS,
     EDGE_TOP_LEVEL_COLUMNS,
@@ -696,8 +697,9 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         raw_name: str | None = None,
         match_confidence: float = 1.0,
         is_primary: bool = False,
+        stale_owner_name_key: str | None = None,
     ) -> AliasBindResult:
-        """Atomically claim an alias through a unique ``AliasClaim`` node."""
+        """Atomically claim or repair an alias through ``AliasClaim``."""
         now = _iso(utc_now())
         candidate_alias_id = generate_ulid()
         claim_key = _alias_claim_key(source_system, raw_id)
@@ -728,6 +730,7 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
                 MERGE (c:AliasClaim {claim_key: $claim_key})
                 ON CREATE SET c.entity_id = $initial_entity_id,
                               c.alias_id = $initial_alias_id
+                SET c.claim_key = c.claim_key
                 RETURN c.entity_id AS entity_id, c.alias_id AS alias_id
                 """,
                 claim_key=claim_key,
@@ -740,10 +743,80 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             winner = str(claim["entity_id"])
             winner_alias_id = str(claim["alias_id"])
             if winner != entity_id:
+                if stale_owner_name_key is None:
+                    return AliasBindResult(
+                        status=AliasBindStatus.CONFLICT,
+                        alias_id=winner_alias_id,
+                        entity_id=winner,
+                    )
+                owner_record = tx.run(
+                    """
+                    MATCH (n:Node {node_id: $winner})
+                    WHERE n.valid_to IS NULL
+                    SET n.node_id = n.node_id
+                    RETURN n
+                    """,
+                    winner=winner,
+                ).single()
+                owner_name = None
+                if owner_record is not None:
+                    owner = _node_props_to_dict(dict(owner_record["n"]))
+                    owner_name = (owner.get("properties") or {}).get("name")
+                owner_key = (
+                    normalize_entity_name(owner_name)
+                    if isinstance(owner_name, str)
+                    else ""
+                )
+                if owner_key == stale_owner_name_key:
+                    return AliasBindResult(
+                        status=AliasBindStatus.CONFLICT,
+                        alias_id=winner_alias_id,
+                        entity_id=winner,
+                    )
+
+                created_at = current["created_at"] if current is not None else now
+                tx.run(
+                    """
+                    MATCH (a:Alias {source_system: $src, raw_id: $rid})
+                    WHERE a.valid_to IS NULL
+                    SET a.valid_to = $now
+                    """,
+                    src=source_system,
+                    rid=raw_id,
+                    now=now,
+                ).consume()
+                tx.run(
+                    """
+                    MATCH (c:AliasClaim {claim_key: $claim_key})
+                    SET c.entity_id = $entity_id
+                    """,
+                    claim_key=claim_key,
+                    entity_id=entity_id,
+                ).consume()
+                tx.run(
+                    """
+                    CREATE (a:Alias)
+                    SET a = $new_props
+                    """,
+                    new_props={
+                        "alias_id": winner_alias_id,
+                        "version_id": generate_ulid(),
+                        "entity_id": entity_id,
+                        "source_system": source_system,
+                        "raw_id": raw_id,
+                        "raw_name": raw_name,
+                        "match_confidence": match_confidence,
+                        "is_primary": is_primary,
+                        "created_at": created_at,
+                        "updated_at": now,
+                        "valid_from": now,
+                        "valid_to": None,
+                    },
+                ).consume()
                 return AliasBindResult(
-                    status=AliasBindStatus.CONFLICT,
+                    status=AliasBindStatus.REBOUND,
                     alias_id=winner_alias_id,
-                    entity_id=winner,
+                    entity_id=entity_id,
                 )
 
             # Re-read after MERGE: a same-entity concurrent contender may have

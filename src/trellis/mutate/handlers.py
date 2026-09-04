@@ -38,7 +38,7 @@ from trellis.stores.registry import StoreRegistry
 logger = structlog.get_logger(__name__)
 
 
-def _bind_entity_name_alias(  # noqa: PLR0911 - each return is a fail-soft boundary
+def _bind_entity_name_alias(
     graph_store: GraphStore,
     *,
     entity_id: str,
@@ -50,32 +50,6 @@ def _bind_entity_name_alias(  # noqa: PLR0911 - each return is a fail-soft bound
     key = normalize_entity_name(name)
     if not key:
         return None
-
-    try:
-        existing = graph_store.resolve_alias(NAME_ALIAS_SOURCE_SYSTEM, key)
-    except Exception:
-        logger.exception(
-            "entity_resolution_name_alias_lookup_failed",
-            entity_id=entity_id,
-        )
-        return None
-    if existing is not None:
-        winner = str(existing["entity_id"])
-        if winner != entity_id:
-            logger.warning(
-                "entity_resolution_name_alias_kept_existing",
-                entity_id=entity_id,
-                existing_entity_id=winner,
-            )
-        return AliasBindResult(
-            status=(
-                AliasBindStatus.ALREADY_BOUND
-                if winner == entity_id
-                else AliasBindStatus.CONFLICT
-            ),
-            alias_id=str(existing["alias_id"]),
-            entity_id=winner,
-        )
 
     try:
         twins = graph_store.query(properties={"name": name}, limit=2)
@@ -98,6 +72,7 @@ def _bind_entity_name_alias(  # noqa: PLR0911 - each return is a fail-soft bound
             NAME_ALIAS_SOURCE_SYSTEM,
             key,
             raw_name=name,
+            stale_owner_name_key=key,
         )
     except Exception:
         logger.exception(
@@ -502,9 +477,12 @@ class EntityUpdateHandler:
             generation_spec=existing.get("generation_spec"),
             document_ids=document_ids,
         )
-        old_name = (existing.get("properties") or {}).get("name")
         final_name = props.get("name")
-        if final_name != old_name:
+        supplied_properties = command.args.get("properties") or {}
+        name_was_supplied = "name" in command.args or (
+            isinstance(supplied_properties, dict) and "name" in supplied_properties
+        )
+        if name_was_supplied:
             _bind_entity_name_alias(
                 store,
                 entity_id=node_id,
@@ -544,6 +522,7 @@ class AliasUpsertHandler:
                     command.args["entity_id"],
                     command.args["source_system"],
                     command.args["raw_id"],
+                    stale_owner_name_key=command.args.get("stale_owner_name_key"),
                     **kwargs,
                 )
                 return result.alias_id, f"Alias bind outcome: {result.status.value}"

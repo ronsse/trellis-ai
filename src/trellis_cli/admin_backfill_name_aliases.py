@@ -62,6 +62,7 @@ def register(app: Typer) -> None:
         has_progress = any(
             (
                 report.bound,
+                report.rebound,
                 report.already_bound,
                 report.contested,
                 report.skipped,
@@ -77,6 +78,7 @@ def register(app: Typer) -> None:
             ),
             "max_nodes": effective_max,
             "bound": report.bound,
+            "rebound": report.rebound,
             "already_bound": report.already_bound,
             "contested": report.contested,
             "skipped": report.skipped,
@@ -121,6 +123,7 @@ def _render_report(payload: Mapping[str, object], *, console: Console) -> None:
     else:
         console.print("[green]Name-alias backfill complete.[/green]")
     console.print(f"  Bound: {payload['bound']}")
+    console.print(f"  Rebound stale owners: {payload['rebound']}")
     console.print(f"  Already bound: {payload['already_bound']}")
     console.print(f"  Contested names: {payload['contested']}")
     console.print(f"  Skipped: {payload['skipped']}")

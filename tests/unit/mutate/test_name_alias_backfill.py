@@ -168,6 +168,24 @@ class TestGovernedNameAliasBackfill:
         for key in ("alpha", "beta name", "gamma"):
             assert graph.resolve_alias(NAME_ALIAS_SOURCE_SYSTEM, key) is None
 
+    def test_repairs_alias_whose_owner_renamed_away(
+        self, registry: StoreRegistry
+    ) -> None:
+        graph = registry.knowledge.graph_store
+        _add(registry, "former", "Old Name")
+        graph.bind_alias_if_absent("former", NAME_ALIAS_SOURCE_SYSTEM, "old name")
+        _add(registry, "former", "New Name")
+        _add(registry, "successor", "Old Name")
+
+        report = backfill_name_aliases(graph, _executor(registry), max_nodes=2)
+
+        assert report.rebound == 1
+        assert report.contested == 0
+        assert report.failed == 0
+        winner = graph.resolve_alias(NAME_ALIAS_SOURCE_SYSTEM, "old name")
+        assert winner is not None
+        assert winner["entity_id"] == "successor"
+
     def test_alias_write_outage_is_failed_not_skipped(
         self, registry: StoreRegistry, monkeypatch
     ) -> None:
