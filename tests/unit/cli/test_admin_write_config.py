@@ -5,9 +5,9 @@ from __future__ import annotations
 import json
 
 import pytest
-from click.utils import strip_ansi
 from typer.testing import CliRunner
 
+from tests.cli_output import plain
 from trellis.core.write_config import ENV_VAR_BY_FIELD
 from trellis_cli.main import app
 
@@ -114,7 +114,7 @@ class TestStampStaleness:
         monkeypatch.setenv("COLUMNS", "200")
         pin_source_tree(commit="abc1234", head=LIVE_SHA)
         result = runner.invoke(app, ["admin", "write-config"])
-        out = strip_ansi(result.stdout)
+        out = plain(result.stdout)
         assert "stamp_stale" in out
         assert LIVE_SHA in out
 
@@ -123,7 +123,7 @@ class TestStampStaleness:
     ) -> None:
         monkeypatch.setenv("COLUMNS", "200")
         pin_source_tree(commit="abc1234", head="abc1234" + "0" * 33)
-        out = strip_ansi(runner.invoke(app, ["admin", "write-config"]).stdout)
+        out = plain(runner.invoke(app, ["admin", "write-config"]).stdout)
         assert "no — source tree HEAD matches" in out
 
     def test_text_distinguishes_unreadable_from_fresh(
@@ -131,7 +131,7 @@ class TestStampStaleness:
     ) -> None:
         monkeypatch.setenv("COLUMNS", "200")
         pin_source_tree(commit="abc1234", head=None)
-        out = strip_ansi(runner.invoke(app, ["admin", "write-config"]).stdout)
+        out = plain(runner.invoke(app, ["admin", "write-config"]).stdout)
         assert "unknown" in out
         assert "no — source tree HEAD matches" not in out
 
@@ -141,7 +141,7 @@ class TestStampStaleness:
         """A container's "nothing to check" must not read as "checked, fine"."""
         monkeypatch.setenv("COLUMNS", "200")
         pin_source_tree(commit="abc1234", head=LIVE_SHA, tree=None)
-        out = strip_ansi(runner.invoke(app, ["admin", "write-config"]).stdout)
+        out = plain(runner.invoke(app, ["admin", "write-config"]).stdout)
         assert "n/a" in out
         assert "no — source tree HEAD matches" not in out
 
@@ -151,5 +151,5 @@ class TestStampStaleness:
         """Two clocks on one table — the older one has to say which it is."""
         monkeypatch.setenv("COLUMNS", "200")
         pin_source_tree(commit="abc1234", head=LIVE_SHA)
-        out = strip_ansi(runner.invoke(app, ["admin", "write-config"]).stdout)
+        out = plain(runner.invoke(app, ["admin", "write-config"]).stdout)
         assert "dirty (at install time)" in out
