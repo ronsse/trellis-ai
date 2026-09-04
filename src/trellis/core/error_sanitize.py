@@ -52,9 +52,13 @@ _LEAK_PATTERNS: tuple[re.Pattern[str], ...] = (
         r"\s*[=:]\s*\S+"
     ),
     # Long unbroken token-shaped run (API keys, JWTs, hex digests).
-    # 40+ chars clears ULIDs (26) and short ids; dots and slashes break
-    # runs, so file paths and dotted module paths stay clean.
-    re.compile(r"[A-Za-z0-9+_-]{40,}"),
+    # 40+ chars clears ULIDs (26) and short ids. Path separators at either
+    # boundary identify a component; explicit secret assignments and URL
+    # credentials remain covered by the preceding patterns.
+    re.compile(
+        r"(?<![A-Za-z0-9+_/\\-])[A-Za-z0-9+_-]{40,}"
+        r"(?![A-Za-z0-9+_/\\-])"
+    ),
     # Raw SQL statement shape. Curator/scout errors quoting warehouse
     # SQL must not put statement text into artifacts.
     re.compile(
